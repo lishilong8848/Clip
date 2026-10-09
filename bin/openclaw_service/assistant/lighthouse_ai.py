@@ -52,7 +52,7 @@ def explicit_general_question(question):
 
 
 def is_business_query(question):
-    return bool(BUSINESS_QUERY.search(question)) and not explicit_general_question(question)
+    return bool(BUSINESS_QUERY.search(question) or re.search(r'多维表|在职|在岗|员工|人事|人员表|采购|库存|质量评估|月度告警', question)) and not explicit_general_question(question)
 
 
 def private_identifier(value):
@@ -447,7 +447,9 @@ class LighthouseAssistant:
 
     @staticmethod
     def _key(actor):
-        return "conversation:" + actor["id"]
+        channel = actor.get("channel")
+        suffix = ":" + hashlib.sha256(channel.encode()).hexdigest()[:24] if channel else ""
+        return "conversation:" + actor["id"] + suffix
 
     @staticmethod
     def _allowed(turn, actor):

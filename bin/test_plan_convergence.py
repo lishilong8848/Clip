@@ -41,6 +41,10 @@ class MemoryStore:
     def put_document(self, namespace, key, payload):
         self.documents[(namespace, key)] = copy.deepcopy(payload)
 
+    def put_documents(self, namespace, payloads):
+        for key, payload in payloads.items():
+            self.documents[(namespace, key)] = copy.deepcopy(payload)
+
 
 def fixture_token(owner='test-user', expiry=None):
     meta = {'UserName': owner, 'jti': 'test-session', 'exp': expiry if expiry is not None else int(time.time()) + 3600}
@@ -526,27 +530,27 @@ class PlanConvergenceTests(unittest.TestCase):
 
     def test_local_maintenance_fields_and_single_check(self):
         self.controller.ongoing = [{
-            'active_item_id': 'qt-D', 'work_type': 'repair', 'status': '开始',
+            'active_item_id': 'qt-B', 'work_type': 'repair', 'status': '开始',
             'title': '当前标题', 'display_fields': {
-                '名称（标题）': '旧标题', '位置': 'D-346', '维修设备': 'D-346-CRAC-02',
-                '维修故障': '压力传感器失效', '楼栋': 'D楼', '专业': '暖通',
+                '名称（标题）': '旧标题', '位置': 'B-346', '维修设备': 'B-346-CRAC-02',
+                '维修故障': '压力传感器失效', '楼栋': 'B楼', '专业': '暖通',
                 '发生故障时间': '2026-09-12 17:19', '实际开始时间': 1790334000000,
             },
         }]
         service = PlanConvergenceService(self.runtime.state_store, self.controller._get_ongoing)
-        records = service.maintenance_records('qt-D')
+        records = service.maintenance_records('qt-B')
         self.assertEqual(records[0]['name'], '当前标题')
         self.assertEqual(records[0]['major'], '暖通')
         self.assertEqual(records[0]['fault_time'], '2026-09-12 17:19')
         with patch.object(PlanConvergenceService, 'blocks', return_value={
-            'items': [{'blockId': '1', 'status': 1, 'blockName': 'D楼 D-346空调屏蔽'}],
+            'items': [{'blockId': '1', 'status': 1, 'blockName': 'B楼 B-346空调屏蔽'}],
         }), patch.object(PlanConvergenceService, 'block', return_value={'alarmBlockDetailResultList': []}):
-            result = self.client.post('/api/plan-convergence/maintenance/check', json={'record_id': 'qt-D'})
+            result = self.client.post('/api/plan-convergence/maintenance/check', json={'record_id': 'qt-B'})
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.json()['data']['records'][0]['hits'][0]['blockId'], '1')
         self.controller.ongoing = []
         with patch.object(PlanConvergenceService, 'blocks') as remote:
-            missing = self.client.post('/api/plan-convergence/maintenance/check', json={'record_id': 'qt-D'})
+            missing = self.client.post('/api/plan-convergence/maintenance/check', json={'record_id': 'qt-B'})
             self.assertEqual(missing.status_code, 404)
             remote.assert_not_called()
 
@@ -582,12 +586,40 @@ class PlanConvergenceTests(unittest.TestCase):
 
     def test_missing_remote_detail_stops_maintenance_audit(self):
         service = PlanConvergenceService(self.runtime.state_store, self.controller._get_ongoing)
+        rows = [{'record_id': '1', 'name': 'B楼空调检修', 'building': 'B楼', 'location': 'B-101',
+                 'device': 'B-101-CRAC-01', 'fault': '传感器失效', 'rooms': ['B-101'],
+                 'major': '暖通', 'status': '开始'}]
         with patch.object(service, 'blocks', return_value={'items': [{'blockId': '1', 'status': 1}]}), patch.object(
             service, 'block', side_effect=ValueError('明细不完整')
-        ), patch.object(service, 'maintenance_records') as read:
+        ), patch.object(service, 'maintenance_records', return_value=rows) as read:
             with self.assertRaisesRegex(ValueError, '明细不完整'):
                 service.maintenance_check()
             read.assert_called_once_with(None)
+
+    def test_room_only_de_step_is_skipped_as_excluded_building(self):
+        # D/E buildings are intentionally excluded from plan-convergence matching:
+        # even a direct D room/device match must surface as skipped, never ready.
+        self.controller.ongoing = [{
+            'active_item_id': 'qt-D', 'work_type': 'repair', 'status': '开始',
+            'title': '当前标题', 'display_fields': {
+                '名称（标题）': '旧标题', '位置': 'D-346', '维修设备': 'D-346-CRAC-02',
+                '维修故障': '压力传感器失效', '楼栋': 'D楼', '专业': '暖通',
+                '发生故障时间': '2026-09-12 17:19', '实际开始时间': 1790334000000,
+            },
+        }]
+        service = PlanConvergenceService(self.runtime.state_store, self.controller._get_ongoing)
+        with patch.object(PlanConvergenceService, 'blocks', return_value={
+            'items': [{'blockId': '1', 'status': 1, 'blockName': 'D楼 D-346空调屏蔽'}],
+        }), patch.object(PlanConvergenceService, 'block', return_value={'alarmBlockDetailResultList': []}):
+            result = self.client.post('/api/plan-convergence/maintenance/check', json={'record_id': 'qt-D'})
+            self.assertEqual(result.status_code, 200)
+            row = result.json()['data']['records'][0]
+            self.assertEqual(row['check_status'], 'skipped')
+            self.assertEqual(row['hits'], [])
+            self.assertIn('D/E楼', row['check_error'])
+        # Matching remote D-only blocks are filtered out too, so no orphan/block stats.
+        self.assertEqual(result.json()['data']['stats']['blocks'], 0)
+        self.assertEqual(result.json()['data']['orphan_block_ids'], [])
 
     def test_remote_uses_httpx_and_sends_headers_cookies_json(self):
         service = PlanConvergenceService(self.runtime.state_store)

@@ -37,6 +37,7 @@ ROUTES = {
     "papers/{id}/reveal": {"POST": "paper.reveal"},
     "papers/{id}/notes": {"POST": "paper.notes"},
     "history": {"GET": "history"},
+    "attempts": {"GET": "attempts"},
     "review": {"GET": "review"},
     "profile": {"GET": "profile"},
     "issues": {"GET": "issues.list", "POST": "issue.create"},
@@ -105,15 +106,20 @@ def install_learning_routes(app, controller, runtime):
             raise LearningError("游客无法使用画像学练，请先登录。", 403)
         admin = bool(runtime.auth_manager.is_admin(session))
         scope = next((s for s in SCOPES if open_id == BUILDING_OPEN_ID_MAP.get(s)), "")
+        name = str(user.get("name") or session.get("name") or "")
+        base = {"id": open_id, "name": name, "is_admin": admin, "scope": scope}
         if not admin and not scope:
-            raise LearningError("仅 A、B、C、D、E、H 楼值班账号和管理员可使用画像学练。", 403)
-        return session, {
-            "id": open_id,
-            "name": str(user.get("name") or session.get("name") or ""),
-            "is_admin": admin,
-            "scope": scope,
-            "can_answer": True,
-        }
+            # Formal ordinary personal account: self-only, never shared/duty.
+            info = get_service().resolve_self(open_id)
+            return session, {**base, "shared_account": False, "person_id": info["person_id"],
+                             "can_answer": bool(info["person_id"]), "identity_issue": info["identity_issue"]}
+        if scope and not admin:
+            # Building duty account is shared and read-only for its own building.
+            return session, {**base, "shared_account": True, "person_id": "", "can_answer": False, "identity_issue": ""}
+        # Admin: viewing allowed everywhere; answering requires a resolved self person.
+        info = get_service().resolve_self(open_id)
+        return session, {**base, "shared_account": False, "person_id": info["person_id"],
+                         "can_answer": bool(info["person_id"]), "identity_issue": info["identity_issue"]}
 
     def check_scope(values, actor):
         if "scope" not in values:

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.resolve(root, '../../../output/playwright/repair-ledger');
+const output = path.join(os.tmpdir(), 'clipflow-repair-ledger-check');
 await mkdir(output, { recursive: true });
 const html = `<html><head><meta charset="utf-8"></head><body><div id="app"></div><script type="module">
 import {createApp,h} from 'vue';
@@ -58,10 +59,16 @@ try{
     await route.fulfill({contentType:'application/json',body:JSON.stringify({ok:true,data})});
   });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__ledger`);
+  await page.locator('[data-field-name="维修进展描述"]').getByRole('textbox').fill('现场检查完成');
+  await page.locator('.followup-action-bar button.primary').click();
+  await page.getByText('请选择至少一台台账设备。', {exact:true}).waitFor();
+  assert.equal(writes.length,0,'missing required equipment never submits a followup');
+  await page.screenshot({path:path.join(output,'required-equipment.png')});
   await page.getByRole('button',{name:'选择台账设备',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'选择台账设备'});
   await dialog.getByText('正在初始化设备台账，完成后自动显示。',{exact:true}).waitFor();
   await dialog.getByText('A-TRB-001',{exact:true}).waitFor();
+  assert(await dialog.getByRole('button',{name:'确认',exact:true}).isDisabled(),'empty selection cannot be confirmed');
   assert.equal(await dialog.locator('tbody tr').count(),50);
   await dialog.getByRole('checkbox',{name:'选择A-TRB-001',exact:true}).check();
   await dialog.getByRole('button',{name:'下一页',exact:true}).click();
@@ -79,6 +86,8 @@ try{
   assert(bounds.width>1300&&footer.y+footer.height<=960,'large modal keeps confirmation visible');
   await page.screenshot({path:path.join(output,'equipment-picker.png')});
   await dialog.getByRole('button',{name:'确认',exact:true}).click();await dialog.waitFor({state:'detached'});
+  assert.equal(await page.locator('.ledger-selection-error').count(),0,'valid selection clears inline error');
+  assert.equal(await page.getByText('请选择至少一台台账设备后保存跟进记录。',{exact:true}).count(),0);
   assert.equal(writes.length,0,'selecting is not saving');
   const save=page.locator('.followup-action-bar button.primary');
   await save.click();await page.waitForTimeout(40);assert(await save.isDisabled(),'save cannot double submit');

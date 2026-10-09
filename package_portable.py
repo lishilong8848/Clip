@@ -1729,7 +1729,7 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_learning", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud",
+         "bin.test_learning", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
@@ -1752,6 +1752,10 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_dynamic_endpoints",
          "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
+         "bin.test_planned_notices", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
+                "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
+                "bin.test_feishu_assistant", "bin.test_lighthouse_unlimited",
+                "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
          "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
         cwd=PROJECT_ROOT,
         check=True,
@@ -1769,7 +1773,7 @@ def _run_packaging_preflight_tests() -> None:
     log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
 
     _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_stability", "bin.test_plan_convergence_points_adapter"],
+        [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_stability", "bin.test_plan_convergence_points_adapter", "bin.test_plan_convergence_notice_results", "bin.test_plan_convergence_send", "bin.test_plan_convergence_expiry", "bin.test_convergence_confirmation_flows"],
         cwd=PROJECT_ROOT,
         check=True,
     )

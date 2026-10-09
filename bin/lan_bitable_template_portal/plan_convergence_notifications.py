@@ -6,7 +6,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from .plan_convergence_maintenance import ongoing_records
+from .plan_convergence_maintenance import ongoing_records, excluded_buildings
 
 CHANNEL = 'notice_plan_checks'
 LOG = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ class NoticePlanChecks:
         scopes = notice.get('building_codes') or self.service._building_codes_from_value(notice.get('building') or (request or {}).get('scope'))
         _, recipients, warning = self.service._recipients_for_building_codes(scopes, fallback_building=notice.get('building', ''))
         snapshot = ongoing_records([{**notice, 'title': notice.get('title') or notice.get('name', ''), 'work_type': 'repair', 'target_record_id': target_record_id}])[0]
+        if excluded_buildings(snapshot):
+            return
         identity = hashlib.sha256(f'{target_record_id}:{operation_id}'.encode()).hexdigest()
         if self.store.get_document(CHANNEL, identity):
             return
@@ -91,11 +93,17 @@ def install_notice_plan_checks(app, runtime, get_service):
     checks = NoticePlanChecks(runtime.service, runtime.state_store,
         lambda record: get_service().maintenance_check(records=[record]), _send_text_to_open_ids_guarded)
     runtime.notice_plan_checks = checks
+    from .plan_convergence_send import NoticeConvergenceGuard
+    from .plan_convergence_expiry import ConvergenceExpiryReminders
+    guard = NoticeConvergenceGuard(runtime.service, runtime.state_store, get_service)
+    runtime.service._notice_plan_guard = guard.check
+    reminders = ConvergenceExpiryReminders(runtime.service, runtime.state_store, get_service, _send_text_to_open_ids_guarded)
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='NoticePlanCheck', initializer=lower_current_thread_priority)
     task = None
 
     async def run():
         loop = asyncio.get_running_loop()
+        last_reminder = time.monotonic()
         try:
             await loop.run_in_executor(pool, lambda: runtime.state_store.release_outbox_leases(CHANNEL))
         except Exception as exc:
@@ -106,6 +114,9 @@ def install_notice_plan_checks(app, runtime, get_service):
                 rows = await loop.run_in_executor(pool, lambda: runtime.state_store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300))
                 for row in rows:
                     await loop.run_in_executor(pool, checks.process, row)
+                if time.monotonic() - last_reminder >= 60:
+                    last_reminder = time.monotonic()
+                    await loop.run_in_executor(pool, reminders.tick)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

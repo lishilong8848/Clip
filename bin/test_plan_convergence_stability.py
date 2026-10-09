@@ -157,28 +157,28 @@ class NoticeCheckTests(unittest.TestCase):
         from lan_bitable_template_portal.state_store import LanPortalStateStore
         with tempfile.TemporaryDirectory() as folder:
             store = LanPortalStateStore(Path(folder) / 'state.sqlite3')
-            service = SimpleNamespace(_recipients_for_building_codes=lambda scopes, **_: ('E', ['E-duty', 'Li'], ''))
+            service = SimpleNamespace(_recipients_for_building_codes=lambda scopes, **_: ('B', ['B-duty', 'Li'], ''))
             check = Mock(return_value={'records': [{'hits': []}]})
             send = Mock(side_effect=[(True, '', []), (False, '', []), (True, '', [])])
             worker = NoticePlanChecks(service, store, check, send)
-            notice = {'notice_type': '设备检修', 'action': 'start', 'name': 'E楼设备检修', 'building_codes': ['E']}
-            for _ in range(2): worker.enqueue(notice, operation_id='one', target_record_id='recE')
+            notice = {'notice_type': '设备检修', 'action': 'start', 'name': 'B楼设备检修', 'building_codes': ['B']}
+            for _ in range(2): worker.enqueue(notice, operation_id='one', target_record_id='recB')
             row = store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300)[0]
             worker.process(row)
             worker.process(row)
             self.assertEqual(check.call_count, 1)
             self.assertEqual(send.call_count, 3)
             self.assertEqual(send.call_args_list[1].kwargs, send.call_args_list[2].kwargs)
-            self.assertIn('E楼设备检修', send.call_args_list[0].args[0])
+            self.assertIn('B楼设备检修', send.call_args_list[0].args[0])
             self.assertNotIn('核对通过', send.call_args_list[0].args[0])
             check.side_effect = TimeoutError('VPN offline')
-            worker.enqueue({**notice, 'action': 'update'}, operation_id='two', target_record_id='recE')
+            worker.enqueue({**notice, 'action': 'update'}, operation_id='two', target_record_id='recB')
             send.side_effect = None; send.return_value = (True, '', [])
             row = store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300)[0]
             worker.process(row)
             self.assertIn('通告已正常发送', send.call_args.args[0])
             self.assertEqual(check.call_count, 2)
-            worker.enqueue({**notice, 'action': 'end'}, operation_id='end', target_record_id='recE')
+            worker.enqueue({**notice, 'action': 'end'}, operation_id='end', target_record_id='recB')
             worker.enqueue({**notice, 'notice_type': '维保通告'}, operation_id='maintenance', target_record_id='recM')
             self.assertEqual(store.lease_outbox_events(CHANNEL, limit=1, lease_seconds=300), [])
 
@@ -186,6 +186,21 @@ class NoticeCheckTests(unittest.TestCase):
         from lan_bitable_template_portal.plan_convergence_maintenance import _device_keywords, _longest_common_substring
         self.assertEqual(_device_keywords('EA118 C01 BMS I3 E-201-UPS-01'), ['E-201-UPS-01'])
         self.assertEqual(_longest_common_substring('EA118_C01机房E楼水泵检修', 'EA118_C01机房E楼烟感故障'), '')
+
+    def test_de_steps_are_not_auto_enqueued_for_post_send_checks(self):
+        from lan_bitable_template_portal.plan_convergence_notifications import NoticePlanChecks, CHANNEL
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+        with tempfile.TemporaryDirectory() as folder:
+            store = LanPortalStateStore(Path(folder) / 'state.sqlite3')
+            service = SimpleNamespace(_recipients_for_building_codes=lambda scopes, **_: (scopes[0], [], ''))
+            worker = NoticePlanChecks(service, store, Mock(), Mock())
+            # Both D and E building notices are excluded from the plan-convergence
+            # auto post-send flow and must never be queued.
+            for code in ('D', 'E'):
+                notice = {'notice_type': '设备检修', 'action': 'start', 'name': f'{code}楼设备检修',
+                          'building_codes': [code]}
+                worker.enqueue(notice, operation_id='one-' + code, target_record_id='rec' + code)
+            self.assertEqual(store.lease_outbox_events(CHANNEL, limit=10, lease_seconds=300), [])
 
 
 if __name__ == '__main__':

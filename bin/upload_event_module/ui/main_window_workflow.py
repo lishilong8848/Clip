@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListView,
+    QMessageBox,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -757,6 +758,21 @@ class MainWindowWorkflowMixin:
                 "本机后端返回格式异常。",
                 str((data_snapshot or {}).get("record_id") or ""),
             )
+            return True
+        if result.get('confirmation_required') and (result.get('details') or {}).get('kind') == 'plan_convergence_unmatched':
+            def confirm_convergence():
+                answer = QMessageBox.question(self, '计划收敛未匹配', str(result.get('message') or '') + '\n\n' +
+                    str(result['details'].get('notice_name') or ''), QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if answer != QMessageBox.StandardButton.Yes:
+                    _finish(self._backend_upload_action_name(action_type), False, '已取消发送，通告尚未上传。', str(data_snapshot.get('record_id') or ''))
+                    return
+                selected = {**data_snapshot, 'plan_convergence_confirmation': result['details']['confirmation']}
+                self._dispatch_backend_notice_upload(str(data_snapshot.get('record_id') or ''), lambda:
+                    self._delegate_qt_notice_upload_to_backend(data_snapshot=selected, screenshot_bytes=screenshot_bytes,
+                        extra_images=encoded_extra_images, action_type=action_type, response_time=response_time,
+                        recover_selected=recover_selected, robot_group_choice=robot_group_choice), operation_id=operation_id)
+            self._enqueue_ui_mutation('plan_convergence_confirmation', confirm_convergence)
             return True
         name = str(result.get("name") or "").strip()
         success = bool(result.get("ok"))

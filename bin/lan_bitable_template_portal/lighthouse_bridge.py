@@ -32,8 +32,16 @@ async def actor_for(controller, runtime, request):
         allowed.update('ABCDE')
     actor = {'id': identity, 'is_admin': runtime.auth_manager.is_admin(session),
         'scopes': sorted(allowed & SCOPES), 'can_manage_settings': True}
+    actor['name'] = str(user.get('name') or user.get('en_name') or session.get('name') or '').strip()
+    actor['employee_no'] = str(user.get('employee_no') or user.get('employee_number') or '').strip()
+    actor['role_label'] = '管理员' if actor['is_admin'] else '楼栋值班账号' if identity in BUILDING_OPEN_ID_MAP.values() else '普通账号'
+    actor['home_scope'] = next((code for code, open_id in BUILDING_OPEN_ID_MAP.items()
+                                if open_id == identity and code in actor['scopes']), '')
     actor['learning_scopes'] = sorted(set('ABCDEH') & set(actor['scopes'])) if actor['is_admin'] else [
         code for code in 'ABCDEH' if BUILDING_OPEN_ID_MAP.get(code) == identity and code in actor['scopes']]
+    channel = getattr(request.state, 'lighthouse_channel', '')
+    if isinstance(channel, str) and re.fullmatch(r'feishu:oc_[A-Za-z0-9]+', channel):
+        actor['channel'] = channel
     return actor
 
 
@@ -43,6 +51,9 @@ class PortalAuthority:
         self.contexts, self.writes = {}, {}
         self.catalog = None
         self.catalog_lock = threading.Lock()
+        from .assistant_read_consent import ReadConsent
+        self.read_consent = ReadConsent(runtime.state_store)
+        self.tables = None
 
     def get_catalog(self):
         with self.catalog_lock:
@@ -114,6 +125,12 @@ class PortalAuthority:
         if not isinstance(operation, dict):
             raise AssistantError('业务操作参数无效。')
         descriptor = catalog.get(operation.get('api_id', ''))
+        if descriptor['read_only'] and re.search(r'people|signature|personnel|recipients|customer|contract|/plan-convergence/|/files|download|export', operation.get('api_id', ''), re.I):
+            consent = await asyncio.to_thread(self.read_consent.require, actor, 'invoke', operation,
+                descriptor.get('group', '') + '：' + descriptor.get('name', '读取受保护业务资料'),
+                getattr(context['request'].state, 'feishu_question', ''))
+            if consent:
+                raise AssistantError(consent['message'], 409)
         provider = await asyncio.to_thread(self.files, actor, operation, payload.get('uploads') or [])
         if descriptor['read_only']:
             return await catalog.invoke(operation, context['request'], file_provider=provider.get)
@@ -144,6 +161,34 @@ class PortalAuthority:
         context, actor = await self.authorize(message.get('context_id'))
         if action == 'authorize':
             return actor
+        if action in {'table_catalog', 'table_records', 'staff_count'}:
+            if self.tables is None:
+                from .assistant_tables import AssistantTables
+                self.tables = AssistantTables(self.runtime.service, self.runtime.state_store)
+            scoped = self.narrowed(actor, payload.get('scopes', actor['scopes']))
+            if action == 'table_catalog':
+                return await asyncio.to_thread(self.tables.catalog, payload.get('keyword', ''), payload.get('page', 1))
+            query = payload.get('query') or {}
+            if not isinstance(query, dict):
+                raise AssistantError('查询参数无效。')
+            label = '在岗人员数量统计（仅返回汇总，不提供个人明细）' if action == 'staff_count' else (
+                await asyncio.to_thread(self.tables.table, query.get('table_id')))['name'] + '的多维表记录'
+            label += '；楼栋范围：' + '、'.join(scoped['scopes'])
+            if query.get('filters'):
+                from openclaw_service.assistant.lighthouse_ai import safe_data
+                label += '；筛选：' + json.dumps(safe_data(query['filters']), ensure_ascii=False)
+            if action == 'staff_count' or not query.get('metadata_only'):
+                consent = await asyncio.to_thread(self.read_consent.require, scoped, action, payload, label,
+                    getattr(context['request'].state, 'feishu_question', ''))
+                if consent:
+                    return consent
+            result = await asyncio.to_thread(self.tables.staff_count, scoped) if action == 'staff_count' else await asyncio.to_thread(self.tables.read, scoped, query)
+            # Trace source and scope without logging values, questions or personal data.
+            import logging
+            logging.info('Assistant read action=%s actor=%s channel=%s table=%s scopes=%s', action,
+                hashlib.sha256(actor['id'].encode()).hexdigest()[:12], 'feishu' if actor.get('channel') else 'web',
+                query.get('table_id', 'personnel'), ','.join(scoped['scopes']))
+            return result
         catalog = await asyncio.to_thread(self.get_catalog)
         if action == 'validate':
             operation, missing = await asyncio.to_thread(catalog.validate_operation, payload.get('operation'))
@@ -159,6 +204,11 @@ class PortalAuthority:
         if action == 'search':
             from openclaw_service.assistant.lighthouse_sources import LocalAssistantSources
             scoped = self.narrowed(actor, payload.get('scopes'))
+            consent = await asyncio.to_thread(self.read_consent.require, scoped, action, payload,
+                '检索本地业务资料（可能包含人员信息）；范围：' + '、'.join(scoped['scopes']),
+                getattr(context['request'].state, 'feishu_question', ''))
+            if consent:
+                raise AssistantError(consent['message'], 409)
             hits, warnings = await asyncio.to_thread(LocalAssistantSources(self.runtime.state_store), payload.get('question', ''), scoped)
             return {'hits': hits, 'warnings': warnings}
         if action == 'cached':
@@ -172,6 +222,10 @@ class PortalAuthority:
         if action == 'question_bank':
             return await asyncio.to_thread(question_bank, getattr(self.runtime, 'learning_service', None), actor, query)
         if action == 'question_material':
+            consent = await asyncio.to_thread(self.read_consent.require, actor, action, payload,
+                '读取原权限内的题库附件资料', getattr(context['request'].state, 'feishu_question', ''))
+            if consent:
+                raise AssistantError(consent['message'], 409)
             return await asyncio.to_thread(question_material_file, getattr(self.runtime, 'learning_service', None), actor, query)
         if action == 'work_orders':
             return await asyncio.to_thread(work_order_records, self.runtime.state_store, actor, query)

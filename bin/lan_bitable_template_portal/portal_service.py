@@ -5070,6 +5070,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         limit: int | None = 200,
         filter_payload: dict[str, Any] | None = None,
         http_client: FeishuHttpClient | None = None,
+        page_interval: float = 0.0,
     ) -> list[dict[str, Any]]:
         max_records = max(1, int(limit or 200)) if limit is not None else None
         url = (
@@ -5133,6 +5134,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         page_token = ""
         seen_tokens: set[str] = set()
         while max_records is None or len(records) < max_records:
+            if page_token and page_interval > 0:
+                time.sleep(page_interval)
             page_size = 500 if max_records is None else min(500, max_records - len(records))
             payload: dict[str, Any] = {}
             for attempt, retry_delay in enumerate(
@@ -9300,7 +9303,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
-        repair_ledger.validate_selection(self, summary_id, ledger_device_ids, scope)
+        ledger_device_ids = repair_ledger.validate_selection(self, summary_id, ledger_device_ids, scope)
         _metas, _meta_by_name, existing_followups = self._load_repair_followups_for_summary(
             summary_id, limit=1,
         )
@@ -9511,7 +9514,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         if summary_id not in self._repair_followup_parent_ids(existing):
             raise PortalError("该维修跟进记录不属于当前检修单。")
         summary = self._ensure_repair_management_record_in_scope(summary_id, scope)
-        repair_ledger.validate_selection(self, summary_id, ledger_device_ids, scope)
+        ledger_device_ids = repair_ledger.validate_selection(
+            self, summary_id, ledger_device_ids, scope, followup_id=record_id,
+        )
         source_fields = dict(fields or {})
         emergency_submitted = (
             REPAIR_FOLLOWUP_EVENT_EMERGENCY_FIELD_NAME in source_fields
@@ -28635,6 +28640,9 @@ class MaintenancePortalService(RepairOperationsMixin):
                 self._repair_record_building_codes(record)
             )
             memory_name = self._repair_title(record)
+        elif work_type in {WORK_TYPE_POWER, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
+            building = str(fields.get("楼栋") or "").strip()
+            memory_name = str(record.get("title") or fields.get("名称") or fields.get("标题") or fields.get("维护总项") or "").strip()
         else:
             building = str(fields.get("楼栋") or "").strip()
             memory_name = str(fields.get("维护总项") or "").strip()
@@ -28711,6 +28719,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "progress": str(item.get("progress") or ""),
             "maintenance_cycle": str(item.get("maintenance_cycle") or ""),
             "specialty": str(item.get("specialty") or ""),
+            "execution_party": str(item.get("execution_party") or ""),
             "level": str(item.get("level") or ""),
             "repair_device": str(item.get("repair_device") or ""),
             "repair_fault": str(item.get("repair_fault") or ""),
@@ -28760,7 +28769,14 @@ class MaintenancePortalService(RepairOperationsMixin):
         maintenance_cycle: str = "",
         extra_fields: dict[str, Any] | None = None,
         key_override: str = "",
+        success_order: float = 0,
     ) -> None:
+        from .planned_notices import deferred_memory
+        pending = deferred_memory.get()
+        if pending is not None:
+            pending.append({key: value for key, value in locals().copy().items()
+                            if key not in {"self", "pending", "deferred_memory"}})
+            return
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip() or WORK_TYPE_MAINTENANCE
         building = str(building or "").strip()
         memory_name = str(item_name or maintenance_total or "").strip()
@@ -28792,6 +28808,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             payload["building"] = building
             payload["updated_at"] = now
             items = payload.setdefault("items", {})
+            if success_order and float((items.get(key) or {}).get("success_order") or 0) > success_order:
+                return
+            remembered["success_order"] = success_order or time.time()
             items[key] = remembered
             self._save_building_memory_locked(building, payload)
 
@@ -29873,6 +29892,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             if work_type == WORK_TYPE_CHANGE
             else self._repair_title(record)
             if work_type == WORK_TYPE_REPAIR
+            else str(record.get("title") or (record.get("display_fields") or {}).get("名称") or (record.get("display_fields") or {}).get("标题") or (record.get("display_fields") or {}).get("维护总项") or "")
+            if work_type in {WORK_TYPE_POWER, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
             else ""
         )
         return {
@@ -35764,7 +35785,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         month: str = "",
         search: str = "",
         ongoing_items: list[dict[str, Any]] | None = None,
-        limit: int = 200,
+        limit: int | None = 200,
+        include_linked: bool = False,
+        strict_month: bool = False,
     ) -> list[dict[str, Any]]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
@@ -35788,16 +35811,22 @@ class MaintenancePortalService(RepairOperationsMixin):
         }
         query = str(search or "").strip()
         items: list[dict[str, Any]] = []
+        building_memory_cache: dict[str, dict[str, Any]] = {}
         for record in records:
+            if strict_month:
+                from .planned_notices import matches_month
+                if not matches_month(self, record, month or self._current_month_label()):
+                    continue
             source_record_id = str(record.get("record_id") or "").strip()
             if not source_record_id or source_record_id in ongoing_source_ids:
                 continue
             if (
                 work_type == WORK_TYPE_REPAIR
                 and self._repair_target_record_id(record)
+                and not include_linked
             ):
                 continue
-            serialized = self._serialize_record(record, summary_by_record)
+            serialized = self._serialize_record(record, summary_by_record, building_memory_cache)
             progress = str(serialized.get("source_progress") or "").strip()
             if not self._source_progress_allows_start(progress):
                 continue
@@ -35825,6 +35854,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "building": self._building_label_from_codes(building_codes),
                     "specialty": specialty,
                     "progress": progress or DEFAULT_MAINTENANCE_STATUS,
+                    "maintenance_cycle": str(fields.get("维护周期") or record.get("maintenance_cycle") or ""),
+                    "requires_verification": bool(work_type == WORK_TYPE_REPAIR and self._repair_target_record_id(record)),
                 }
             )
         items.sort(
@@ -35834,7 +35865,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 str(item.get("source_record_id") or ""),
             )
         )
-        return items[: max(1, min(int(limit or 200), 500))]
+        return items if limit is None else items[: max(1, min(int(limit or 200), 500))]
 
     def validate_manual_source_binding(
         self,
@@ -42813,6 +42844,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             "repair_management_record_id",
             "operation_id",
             "draft_version",
+            "planned_notice_version",
+            "plan_convergence_confirmation",
+            "source_month",
             "_auth_open_id",
             "_auth_user_name",
         ):
@@ -42862,6 +42896,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         expanded["scope"] = str(expanded.get("scope") or scope or "ALL")
         expanded["action"] = action
         expanded["work_type"] = str(expanded.get("work_type") or work_type or WORK_TYPE_MAINTENANCE)
+        if expanded.get("planned_notice_version") and action == "start" and not manual:
+            expanded["record_id"] = source_record_id
         return normalize_notice_identity_payload(expanded, action=action)
 
     def create_action_job(self, request_payload: dict[str, Any]) -> tuple[str, bool]:
@@ -42921,6 +42957,14 @@ class MaintenancePortalService(RepairOperationsMixin):
         ):
             raise PortalError("更新/结束通告缺少主界面条目ID、源记录ID或目标多维record_id。")
         operation_id = str(request_payload.get("operation_id") or "").strip()
+        from .planned_notices import validate_source_scope
+        validate_source_scope(self, request_payload)
+        guard = getattr(self, '_notice_plan_guard', None)
+        with self._jobs_lock:
+            existing_submission = any(operation_id and job.get('operation_id') == operation_id
+                and job.get('phase') not in {'failed', 'cancelled'} for job in self._jobs.values())
+        if callable(guard) and not existing_submission:
+            guard(request_payload)
         with self._jobs_lock:
             if operation_id:
                 for existing in self._jobs.values():
@@ -43038,6 +43082,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if action == "start" and request_work_type == WORK_TYPE_EVENT and phase == "failed" and existing.get("error_category") == "network_timeout" and not existing.get("remote_written"):
                         raise PortalError("该通告上次飞书写入结果尚未确认，请核验或重试原任务，不能作为新通告再次新增。")
                     if phase == "failed" and request_work_type != WORK_TYPE_EVENT and not existing.get("superseded_by_job_id"):
+                        if request_payload.get("planned_notice_version"):
+                            return str(existing.get("job_id") or ""), False
                         replacements.append(existing)
                         continue
                     if action == "start" and phase in duplicate_start_phases:
@@ -43065,6 +43111,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 original = previous.get("retry_request") or previous.get("request") or {}
                 if original.get("manual_id"):
                     request_payload["manual_id"] = original["manual_id"]
+            from .planned_notices import validate_submission
+            validate_submission(self, request_payload)
             job = self._base_job(request_payload)
             if blocking_job_id:
                 job["depends_on_job_id"] = blocking_job_id
@@ -43530,6 +43578,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         persist = bool(patch.pop("_persist", True))
         skip_audit_finish = bool(patch.pop("_skip_audit_finish", False))
         failed_audit_job: dict[str, Any] | None = None
+        successful_memory_job = None
         with self._jobs_lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -43581,6 +43630,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not changed:
                 return
             job.update(patch)
+            if phase == "success" and prior_phase != "success" and "planned_memory" in (job.get("prepared") or {}):
+                successful_memory_job = copy.deepcopy(job)
             job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
             if (
                 str(job.get("phase") or "") == "failed"
@@ -43591,6 +43642,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                 self._persist_action_job_locked(job)
                 if str(job.get("phase") or "") == "failed":
                     self._compact_failed_job_locked(job_id)
+        if successful_memory_job:
+            try:
+                from .planned_notices import save_success_memory
+                save_success_memory(self, successful_memory_job)
+            except Exception:
+                logging.exception("通告已发送成功，历史记忆保存失败")
+                self.mark_job(job_id, memory_warning="通告已发送成功，历史记忆未保存。")
         if failed_audit_job:
             audit_id = str(
                 failed_audit_job.get("business_audit_id") or ""
@@ -43654,7 +43712,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not job:
             raise PortalError("任务不存在。")
         request_payload = job.get("request") or {}
-        prepared = self.prepare_workbench_action(request_payload, job_id=job_id)
+        if request_payload.get("planned_notice_version") or request_payload.get("_notice_card_submission"):
+            from .planned_notices import deferred_memory
+            pending = []
+            token = deferred_memory.set(pending)
+            try:
+                prepared = self.prepare_workbench_action(request_payload, job_id=job_id)
+            finally:
+                deferred_memory.reset(token)
+            prepared["planned_memory"] = pending
+        else:
+            prepared = self.prepare_workbench_action(request_payload, job_id=job_id)
         message_signature = self._action_message_signature(prepared)
         prepared["message_signature"] = message_signature
         prepared["message_sent"] = bool(job.get("message_sent")) and (
@@ -43944,7 +44012,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             or ""
         ).strip()
         target_record_id = self._target_record_id_from_request_payload(request_payload)
-        if not manual and action == "start":
+        if not manual and action == "start" and not request_payload.get("planned_notice_version"):
             raise PortalError(f"{self._history_work_type_label(work_type)}通告目前仅支持前端纯手填或解析发送。")
         if not manual and action != "start" and not target_record_id:
             raise PortalError(f"{self._history_work_type_label(work_type)}通告缺少目标多维 record_id，不能更新/结束。")
@@ -44021,7 +44089,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "job_id": job_id,
             "work_type": work_type,
             "notice_type": notice_type,
-            "manual": True,
+            "manual": manual if request_payload.get("planned_notice_version") else True,
+            "source_record_id": str(request_payload.get("source_record_id") or ""),
             "action": action,
             "status": status,
             "scope": scope,

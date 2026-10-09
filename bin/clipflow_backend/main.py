@@ -736,12 +736,20 @@ class FastAPIPortalController:
         install_learning_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
+        install_link_directory_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes
         recommend_notice_tags = install_lighthouse_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.notice_alert_tags import install_notice_alert_tag_routes
         install_notice_alert_tag_routes(app, self, PortalRuntime, recommend_notice_tags)
         from lan_bitable_template_portal.message_delivery_routes import install_message_delivery_routes
         install_message_delivery_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.notice_panel_routes import install_notice_panel_routes
+        install_notice_panel_routes(app, self, PortalRuntime)
+
+        @app.api_route("/api/notice-cards/{legacy_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+        async def retired_notice_cards(legacy_path: str):
+            return JSONResponse({"ok": False, "error": "飞书卡片已停用，请在灯塔助手的通告待办中办理。"}, status_code=410)
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
@@ -826,9 +834,10 @@ class FastAPIPortalController:
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/life-guide")
+        @app.get("/link-directory")
         async def life_guide_page(request: Request):
             if self._current_session(request) is None:
-                return Response(status_code=302, headers={"Location": "/api/auth/login?next=%2Flife-guide"})
+                return Response(status_code=302, headers={"Location": "/api/auth/login?" + urlencode({"next": request.url.path})})
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/workbench-lite")
@@ -6641,116 +6650,8 @@ class FastAPIPortalController:
                         reject_large_inline_images=True,
                     )
                 ).to_payload()
-                payload = normalize_notice_identity_payload(payload)
-                scope = self._authorized_scope_or_error(
-                    session, payload.get("scope") or "ALL"
-                )
-                user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                payload["scope"] = scope
-                payload["_auth_open_id"] = str(user.get("open_id") or "")
-                payload["_auth_user_name"] = str(
-                    user.get("name") or user.get("en_name") or ""
-                )
-                payload["_web_action_request"] = True
-                if str(payload.get("command_format") or "") == "notice_command":
-                    standalone_start = (
-                        payload.get("action") == "start"
-                        and payload.get("manual_binding_choice") == "unbound"
-                        and not payload.get("active_item_id")
-                        and not payload.get("target_record_id")
-                    )
-                    ongoing = [] if standalone_start else await asyncio.to_thread(self._get_ongoing, scope)
-                    payload = await asyncio.to_thread(
-                        PortalRuntime.service.expand_workbench_action_command,
-                        payload,
-                        scope=scope,
-                        ongoing_items=ongoing,
-                    )
-                    payload["scope"] = scope
-                    payload["_auth_open_id"] = str(user.get("open_id") or "")
-                    payload["_auth_user_name"] = str(
-                        user.get("name") or user.get("en_name") or ""
-                    )
-                    payload["_web_action_request"] = True
-                job_id, should_start = await asyncio.to_thread(PortalRuntime.service.create_action_job, payload)
-                job = await asyncio.to_thread(PortalRuntime.service.get_job, job_id) or {}
-                audit_id = str(job.get("business_audit_id") or "").strip()
-                if should_start or not audit_id:
-                    audit_id = await asyncio.to_thread(
-                        begin_business_audit,
-                        PortalRuntime.state_store,
-                        domain="notice",
-                        action=str(payload.get("action") or "submit"),
-                        operation_id=job_id,
-                        scope=scope,
-                        actor_open_id=str(user.get("open_id") or ""),
-                        actor_name=str(user.get("name") or user.get("en_name") or ""),
-                        active_item_id=str(payload.get("active_item_id") or ""),
-                        source_record_id=str(payload.get("source_record_id") or ""),
-                        target_record_id=str(payload.get("target_record_id") or ""),
-                        metadata={
-                            "work_type": payload.get("work_type"),
-                            "notice_type": payload.get("notice_type"),
-                            "phase": "accepted",
-                        },
-                    )
-                    mark_job = getattr(PortalRuntime.service, "mark_job", None)
-                    if callable(mark_job):
-                        await asyncio.to_thread(
-                            mark_job,
-                            job_id,
-                            business_audit_id=audit_id,
-                            _persist=True,
-                        )
-                    if (
-                        not should_start
-                        and str(job.get("phase") or "") == "success"
-                    ):
-                        await asyncio.to_thread(
-                            finish_business_audit,
-                            PortalRuntime.state_store,
-                            audit_id,
-                            success=True,
-                            result={
-                                "active_item_id": str(
-                                    job.get("active_item_id") or ""
-                                ),
-                                "target_record_id": str(
-                                    job.get("target_record_id")
-                                    or job.get("record_id")
-                                    or ""
-                                ),
-                                "message_sent": bool(job.get("message_sent")),
-                                "message_warning": str(
-                                    job.get("message_warning") or ""
-                                ),
-                                "work_type": payload.get("work_type"),
-                                "notice_type": payload.get("notice_type"),
-                                "phase": "success",
-                            },
-                            remote_written=bool(
-                                job.get("target_record_id")
-                                or job.get("record_id")
-                            ),
-                            message_sent=bool(job.get("message_sent")),
-                        )
-                if should_start:
-                    PortalRuntime.clear_payload_cache()
-                    self._clear_read_cache()
-                    PortalRuntime.enqueue_initial_message_or_upload_job(job_id)
-                job = await asyncio.to_thread(PortalRuntime.service.get_job, job_id) or job
-                return JSONResponse(
-                    {
-                        "ok": True,
-                        "data": {
-                            "job_id": job_id,
-                            "accepted_at": job.get("accepted_at") or 0,
-                            "initial_phase": job.get("phase") or "accepted",
-                            "supersedes_job_ids": job.get("supersedes_job_ids") or [],
-                        },
-                    },
-                    status_code=202,
-                )
+                from lan_bitable_template_portal.notice_actions import submit_notice_action
+                return await submit_notice_action(self, PortalRuntime, session, payload)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -6772,6 +6673,13 @@ class FastAPIPortalController:
                     or _current_month_label()
                 ).strip()
                 ongoing = await asyncio.to_thread(self._get_ongoing, scope)
+                if request.query_params.get("planned_match") == "1":
+                    from lan_bitable_template_portal.planned_notices import candidate_page
+                    data = await asyncio.to_thread(candidate_page, PortalRuntime.service,
+                        scope=scope, month=month, work_type=str(request.query_params.get("work_type") or ""),
+                        ongoing_items=ongoing, page=int(request.query_params.get("page") or 1),
+                        page_size=int(request.query_params.get("page_size") or 200))
+                    return self._json_ok(request, session, data)
                 items = await asyncio.to_thread(
                     PortalRuntime.service.list_bindable_source_items,
                     scope=scope,
@@ -6784,6 +6692,24 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/workbench/planned-notice-prefill")
+        async def planned_notice_prefill(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(session, request.query_params.get("scope") or "ALL")
+                from lan_bitable_template_portal.planned_notices import prefill
+                ongoing = await asyncio.to_thread(self._get_ongoing, scope)
+                data = await asyncio.to_thread(prefill, PortalRuntime.service, scope=scope,
+                    month=request.query_params.get("month") or _current_month_label(),
+                    work_type=request.query_params.get("work_type") or "maintenance",
+                    source_record_id=request.query_params.get("source_record_id") or "",
+                    ongoing_items=ongoing)
+                return self._json_ok(request, session, data)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=409)
 
         @app.post("/api/notice-attachments")
         async def notice_attachments(request: Request):
@@ -8626,6 +8552,14 @@ class FastAPIPortalController:
                         or command_payload.get("notice_type")
                         or ""
                     ).strip()
+                    guard = getattr(PortalRuntime.service, '_notice_plan_guard', None)
+                    if callable(guard):
+                        from lan_bitable_template_portal.portal_service import PortalConfirmationRequiredError
+                        try:
+                            await asyncio.to_thread(guard, {**data_dict, 'action': action_map[command]})
+                        except PortalConfirmationRequiredError as exc:
+                            return {'ok': True, 'data': {'ok': False, 'message': str(exc), 'details': exc.details,
+                                'confirmation_required': True, 'record_id': data_dict.get('record_id', '')}}
                     audit_id = begin_business_audit(
                         PortalRuntime.state_store,
                         domain=(
@@ -13206,6 +13140,16 @@ class FastAPIPortalController:
                 PortalRuntime.service.start_repair_maintenance_async()
             except Exception as exc:
                 log_warning(f"启动检修后台维护失败: {exc}")
+    def _run_notice_panel(self) -> None:
+        if _mock_external_enabled() or self._stopping_event.is_set():
+            return
+        panel = getattr(self, "_notice_panel", None)
+        if panel is None:
+            factory = getattr(self, "_get_notice_panel", None)
+            panel = factory() if factory else None
+        if panel is not None:
+            panel.tick()
+
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
             return
@@ -13222,6 +13166,8 @@ class FastAPIPortalController:
                 max_workers=1, pool_kwargs={"initializer": lower_current_thread_priority,
                                            "thread_name_prefix": "ClipFlowMaintenance"})},
         )
+        scheduler.add_job(self._run_notice_panel, "interval", seconds=10,
+                          id="notice_panel", max_instances=1, coalesce=True)
         scheduler.add_job(
             self._write_runtime_heartbeat,
             "interval",
@@ -13886,6 +13832,9 @@ class FastAPIPortalController:
 
     def stop(self) -> None:
         self._stopping_event.set()
+        panel = getattr(self, "_notice_panel", None)
+        if panel is not None:
+            panel.close()
         self._notify_qt_active_streams()
         self._stop_polling_relay_worker()
         self._stop_scheduler()

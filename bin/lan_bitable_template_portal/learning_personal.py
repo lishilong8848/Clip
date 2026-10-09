@@ -9,6 +9,41 @@ from . import learning as core
 from .learning import BANKS, QUOTAS, SCOPES, LearningError, digest, stamp
 
 
+def _directory_open_ids(directory):
+    """Real Feishu open_id per staff/external record id (nothing fabricated)."""
+    staff, external = {}, {}
+    for source, bucket in (('staff', staff), ('external', external)):
+        for row in directory.get(source) or []:
+            rid = str(row.get('record_id') or '').strip()
+            open_id = str(row.get('open_id') or '').strip()
+            if rid and open_id:
+                bucket.setdefault(rid, open_id)
+    return staff, external
+
+
+def _person_login_ids(row, staff_open_ids, external_open_ids):
+    """Only real nonblank Feishu open ids may be private login login ids.
+
+    The resolved person itself may be an external signature row without the
+    original staff open id, so the explicit staff:record alias is followed
+    back to the matching original staff row. Record ids are never login ids.
+    """
+    login_ids = set()
+    own = str(row.get('open_id') or '').strip()
+    if own:
+        login_ids.add(own)
+    for alias in row.get('record_aliases') or []:
+        alias = str(alias or '').strip()
+        source, _, rid = alias.partition(':')
+        if not source or not rid:
+            continue
+        open_id = (staff_open_ids if source == 'staff' else
+                   external_open_ids if source == 'external' else {}).get(rid)
+        if open_id:
+            login_ids.add(open_id)
+    return sorted(login_ids)
+
+
 def refresh_people(service):
     if service._people_reader is None:
         return
@@ -17,6 +52,7 @@ def refresh_people(service):
             not source.get('ok') for source in directory.get('sources', {}).values()):
         raise LearningError('人员目录未完整读取，已保留上次名单。', 503)
     from .lighthouse_sources import codes
+    staff_open_ids, external_open_ids = _directory_open_ids(directory)
     with service.transaction() as conn:
         previous = service._all('person', conn)
         aliases = defaultdict(set)
@@ -27,6 +63,7 @@ def refresh_people(service):
         for row in directory['people']:
             keys = sorted(set([row.get('person_key', ''), *row.get('record_aliases', [])]) - {''})
             staff = [key for key in keys if key.startswith('staff:')]
+            login_ids = _person_login_ids(row, staff_open_ids, external_open_ids)
             matches = set().union(*(aliases[key] for key in keys))
             scopes = sorted(codes(row.get('building')) & set(SCOPES))
             if not keys or len(staff) > 1 or len(matches) > 1 or row.get('identity_warning') or not scopes:
@@ -35,7 +72,8 @@ def refresh_people(service):
                 continue
             identity = next(iter(matches)) if matches else 'person_' + digest(staff[0] if staff else keys[0])[:32]
             person = {'id': identity, 'person_id': identity, 'name': row.get('name', ''),
-                      'employee_no': row.get('employee_no', ''), 'scopes': scopes, 'aliases': keys, 'active': True}
+                      'employee_no': row.get('employee_no', ''), 'scopes': scopes, 'aliases': keys,
+                      'login_ids': login_ids, 'active': True}
             old = service._get('person', identity, conn)
             if not old or any(old.get(k) != v for k, v in person.items()):
                 service._put('person', identity, person, conn)
@@ -55,11 +93,58 @@ def person(service, identity, *, scope='', active=False, conn=None):
     return {k: value.get(k) for k in ('id', 'name', 'employee_no', 'scopes', 'active')}
 
 
+def _request_login_refresh(service):
+    """Cold-upgrade: existing people lack login_ids. Wake the existing worker
+    (never start a new one) but throttle locally so each page read is cheap and
+    never triggers a synchronous full directory fetch."""
+    now = time.time()
+    last = float(getattr(service, '_people_login_refresh_at', 0.0) or 0.0)
+    if now - last < 300:
+        return
+    service._people_login_refresh_at = now
+    request = getattr(service, 'request_refresh', None)
+    if callable(request):
+        try:
+            request()
+        except Exception:
+            pass
+
+
+def resolve_self(service, open_id):
+    """Stable mapping from the session login to exactly one active local person.
+
+    Matching uses only private real-Feishu-open-id login_ids persisted by
+    refresh_people; it never falls back to name/employee-number joins. Reads are
+    strictly local: a cold upgrade (people already present, login_ids missing)
+    only wakes the existing background worker, which is throttled here.
+    """
+    people_rows = service._all('person')
+    login_sets = [p.get('login_ids') or [] for p in people_rows]
+    matches = [p for p, login_ids in zip(people_rows, login_sets)
+               if p.get('active') and open_id in set(login_ids)]
+    empty = {'person_id': '', 'person': None, 'identity_issue': ''}
+    if not matches:
+        if people_rows and any(not login_ids for login_ids in login_sets):
+            _request_login_refresh(service)
+        return {**empty, 'identity_issue': '登录账号与人员名单尚未关联，请管理员先同步人员目录。'}
+    if len(matches) > 1:
+        return {**empty, 'identity_issue': '登录账号关联到多个人员，请管理员核对后重试。'}
+    person_row = matches[0]
+    return {'person_id': person_row['id'], 'person': person(service, person_row['id']), 'identity_issue': ''}
+
+
 def people(service, actor, query):
     scope = service._scope(actor, query.get('scope'))
     words = str(query.get('q') or '').casefold().split()
-    rows = [{k: row.get(k) for k in ('id', 'name', 'employee_no', 'scopes', 'active')} for row in service._all('person') if row.get('active')
-            and (not scope or scope in row['scopes']) and all(word in (row['name'] + ' ' + row['employee_no']).casefold() for word in words)]
+    self_pid = actor.get('person_id') or ''
+    if not actor.get('is_admin') and not actor.get('shared_account'):
+        # Ordinary personal accounts see only themselves; never enumerate peers.
+        rows = [row for row in service._all('person') if row.get('active') and row['id'] == self_pid]
+    else:
+        rows = [row for row in service._all('person') if row.get('active')
+                and (not scope or scope in row['scopes'])]
+    rows = [{k: row.get(k) for k in ('id', 'name', 'employee_no', 'scopes', 'active')} for row in rows
+            if all(word in (row['name'] + ' ' + row['employee_no']).casefold() for word in words)]
     rows.sort(key=lambda row: (row['name'], row['employee_no'], row['id']))
     synced = service._get('local', 'people_sync') or {}
     return {**service._page(rows, query), 'updated_at': synced.get('at', ''),
@@ -127,7 +212,7 @@ def publish(service, day):
 
 
 def claim(service, actor, payload):
-    scope = service._scope(actor, payload.get('scope'), write=True)
+    scope, self_person = service._claim_context(actor, payload)
     day = core.now().date()
     date = day.isoformat()
     if payload.get('date', date) != date:
@@ -137,7 +222,7 @@ def claim(service, actor, payload):
         service._wake.set()
         raise LearningError('学习记录正在恢复，完成后即可领取；不会重复分配。', 503)
     with service.transaction() as conn:
-        learner = person(service, payload.get('person_id'), scope=scope, active=True, conn=conn)
+        learner = person(service, self_person['id'], scope=scope, active=True, conn=conn)
         identity = 'personal:' + date + ':' + learner['id']
         existing = service._get('paper', identity, conn)
         if existing:
@@ -169,10 +254,11 @@ def claim(service, actor, payload):
 
 
 def profile(service, actor, query):
-    scope = service._scope(actor, query.get('scope'))
-    identity = str(query.get('person_id') or '')
+    access = service._access(actor, scope=query.get('scope'), person_id=str(query.get('person_id') or ''))
+    scope, identity = access['scope'], access['person_id']
+    ordinary = not actor.get('is_admin') and not actor.get('shared_account')
     learner = person(service, identity) if identity else None
-    if identity:
+    if identity and not actor.get('shared_account'):
         scope = ''  # Personal history follows the person, not a later building transfer.
     if not query.get('from') and not query.get('to') and not query.get('period'):
         query = {**query, 'from': (core.now().date() - dt.timedelta(days=6)).isoformat(), 'to': core.now().date().isoformat()}
@@ -196,13 +282,15 @@ def profile(service, actor, query):
         completed = sum(service._completed(p, records[p['id']]) for p in assigned)
         task_answered = sum(bool(records[p['id']].get('entries', {}).get(q['id'], {}).get('attempt')) and not records[p['id']].get('entries', {}).get(q['id'], {}).get('needs_review') for p in assigned for q in p['questions'] if not q.get('invalid'))
         total = sum(sum(not q.get('invalid') for q in p['questions']) for p in assigned)
+        practice_count = sum((not pid or r['person_id'] == pid) and (not building or r['scope'] == building) for r in practices)
         return {'answered': sum(not r['needs_review'] for r in rows), 'wrong': sum(r['correct'] == 0 for r in choices), 'correct': sum(r['correct'] == 1 for r in choices),
             'hinted': sum(bool(r['assisted']) for r in rows if not r['needs_review']),
             'independent_correct': sum(r['correct'] == 1 for r in independent), 'independent_answered': len(independent),
             'choice_answered': len(choices), 'accuracy': ratio(sum(r['correct'] == 1 for r in choices), len(choices)),
             'independent_accuracy': ratio(sum(r['correct'] == 1 for r in independent), len(independent)),
             'hint_rate': ratio(sum(bool(r['assisted']) for r in rows), len(rows)), 'learning_days': len({r['day'] for r in rows}),
-            'interview_total': sum(r['type'] == 'interview' for r in rows), 'practice_count': sum((not pid or r['person_id'] == pid) and (not building or r['scope'] == building) for r in practices),
+            'interview_total': sum(r['type'] == 'interview' for r in rows), 'practice_count': practice_count,
+            'attempt_count': len(rows) + practice_count,
             'interview_ratings': dict(Counter(r['self_rating'] for r in rows if r['type'] == 'interview')),
             'review_total': sum(r['correct'] == 0 or r['type'] == 'interview' or r['needs_review'] for r in rows),
             'assigned': total, 'task_answered': task_answered, 'papers': len(assigned), 'completed': completed,
@@ -220,7 +308,7 @@ def profile(service, actor, query):
         p = service._get('person', pid) or latest.get('person') or {'id': pid, 'name': '历史人员', 'employee_no': ''}
         rows = [r for r in results if r['person_id'] == pid]
         today_paper = service._get('paper', 'personal:' + today + ':' + pid)
-        progress = service.public_paper(today_paper, actor)['stats'] if today_paper and not today_paper.get('deleted_at') else None
+        progress = service.public_paper(today_paper, actor)['stats'] if today_paper and not today_paper.get('deleted_at') and (not scope or today_paper['scope'] == scope) else None
         people_rows.append({'person_id': pid, 'name': p['name'], 'employee_no': p.get('employee_no', ''),
             'scope': latest.get('scope', ''), 'summary': summarize(rows, own, pid=pid), 'today': progress,
             'last_answered_at': max((r['submitted_at'] for r in rows), default='')})
@@ -257,7 +345,9 @@ def profile(service, actor, query):
     today_papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=today, end=today) if not p.get('deleted_at')]
     for p in today_papers:
         records.setdefault(p['id'], service._get('record', p['id']) or {})
-    return {'person': learner, 'summary': summary, 'today_summary': summarize(today_rows, today_papers), 'buildings': buildings, 'people': people_rows, 'trend': trend,
-            'topics': topics, 'banks': bank_rows, 'distribution': distribution, 'questions': questions, 'inventory': inventory if actor.get('is_admin') else {},
+    return {'person': learner, 'summary': summary, 'today_summary': summarize(today_rows, today_papers),
+            'buildings': [] if ordinary else buildings, 'people': people_rows, 'trend': trend,
+            'topics': topics, 'banks': bank_rows, 'distribution': [] if ordinary else distribution,
+            'questions': questions, 'inventory': {} if ordinary else (inventory if actor.get('is_admin') else {}),
             'without_choice_answers': sum(p['summary']['accuracy'] is None for p in people_rows), 'from': first.isoformat(), 'to': end,
             'published': bool(service._get('publication', service._publication_key(today)))}

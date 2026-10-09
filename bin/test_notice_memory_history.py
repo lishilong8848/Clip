@@ -367,7 +367,7 @@ class PlannedMaintenanceDefaultsTests(unittest.TestCase):
         from unittest.mock import patch
         from lan_bitable_template_portal import workbench_lite as lite
         self.assertEqual(lite._planned_maintenance_times(dt.datetime(2026, 10, 8, 15, 28)), ('2026-10-08T15:30', '2026-10-08T18:30'))
-        self.assertEqual(lite._planned_maintenance_times(dt.datetime(2026, 10, 8, 18, 31)), ('2026-10-08T19:00', '2026-10-09T18:30'))
+        self.assertEqual(lite._planned_maintenance_times(dt.datetime(2026, 10, 8, 18, 31)), ('2026-10-08T19:00', '2026-10-09T09:00'))
         record = {'record_id': 'recPlan', 'work_type': 'maintenance', 'start_time': '2020-01-01T08:00', 'end_time': '2020-01-01T17:00', 'memory': {'execution_party': '厂维', 'content': '历史维保内容'}}
         with patch.object(lite, '_planned_maintenance_times', return_value=('2026-10-08T15:30', '2026-10-08T18:30')):
             result = lite._draft_from_record(record)

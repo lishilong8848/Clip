@@ -47,6 +47,7 @@ _DIRECT_TABLE_PREFIXES = ("/api/bitable", "/api/feishu/bitable", "/api/tables", 
 # ---------------------------------------------------------------------------
 
 _EXCLUDED_PREFIXES = (
+    "/api/notice-cards/",
     "/api/assistant/",
     "/api/assistant",
     "/api/auth/",
@@ -182,6 +183,7 @@ _ACTION_LABELS = {
     "question-bank": "题库资料",
     "monthly": "月度事件", "transfer-repair": "事件转检修",
     "workbench": "通告工作台", "draft": "通告草稿", "source-options": "通告来源选项",
+    "planned-notice-prefill": "计划通告预填",
     "notice-target-candidates": "通告目标候选", "change-target-candidates": "变更目标候选",
     "notice-image-drafts": "通告图片草稿", "available": "可撤销通告",
     "change-confirmations": "变更确认", "screenshot": "变更截图",

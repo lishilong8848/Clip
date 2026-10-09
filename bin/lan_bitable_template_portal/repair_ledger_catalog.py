@@ -131,6 +131,21 @@ def _payload_dict(record: Mapping[str, Any], *, required_fields: tuple[str, ...]
     return out
 
 
+def _json_same(a: Any, b: Any) -> int:
+    """SQLite helper: 1 if two JSON payload strings describe equal content.
+
+    ``json.loads`` dict equality is key-order independent while still comparing
+    list order (e.g. ``scope_codes``) with order sensitivity, so reordered incoming
+    dicts never count as changed but genuine scope/content edits do.
+    """
+    if a == b:
+        return 1
+    try:
+        return 1 if json.loads(a) == json.loads(b) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 class LedgerCatalog:
     """Durable equipment cache backed by one small SQLite file.
 
@@ -149,6 +164,7 @@ class LedgerCatalog:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=10.0)
         conn.row_factory = sqlite3.Row
+        conn.create_function("ledger_payload_same", 2, _json_same, deterministic=True)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=FULL")
         if not self._schema_ready:
@@ -173,7 +189,6 @@ class LedgerCatalog:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DROP TABLE IF EXISTS ledger_stage")
             conn.execute(_STAGE_DDL)
-            seen: set[str] = set()
             insert_sql = (
                 "INSERT INTO ledger_stage(record_id,payload,scope_csv,building,"
                 "system_name,big_device_type,device_name,device_num,building_norm,"
@@ -190,9 +205,6 @@ class LedgerCatalog:
                 record_id = str(record_id).strip()
                 if not record_id:
                     raise ValueError("记录缺少有效的 record_id")
-                if record_id in seen:
-                    raise ValueError(f"设备记录 record_id 重复: {record_id}")
-                seen.add(record_id)
 
                 payload = _payload_dict(raw, required_fields=TEXT_FIELDS)
                 normalized_scopes = [_norm(s) for s in payload["scope_codes"]]
@@ -217,37 +229,71 @@ class LedgerCatalog:
                 pieces = [p for p in pieces if p]
                 search_norm = " ".join(pieces)
 
-                conn.execute(
-                    insert_sql,
-                    (
-                        record_id,
-                        json.dumps(payload, ensure_ascii=False),
-                        scope_csv,
-                        building,
-                        system_name,
-                        big_device_type,
-                        device_name,
-                        device_num,
-                        building_norm,
-                        system_name_norm,
-                        big_device_type_norm,
-                        device_name_norm,
-                        device_num_norm,
-                        search_norm,
-                    ),
-                )
+                try:
+                    conn.execute(
+                        insert_sql,
+                        (
+                            record_id,
+                            json.dumps(payload, ensure_ascii=False),
+                            scope_csv,
+                            building,
+                            system_name,
+                            big_device_type,
+                            device_name,
+                            device_num,
+                            building_norm,
+                            system_name_norm,
+                            big_device_type_norm,
+                            device_name_norm,
+                            device_num_norm,
+                            search_norm,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    raise ValueError(f"设备记录 record_id 重复: {record_id}") from None
 
-            # Swap staged rows into the live table inside the same transaction.
-            conn.execute("DELETE FROM records")
+            # Reconcile only after the complete source has validated; preserve rowids.
+            conn.execute(
+                """
+                DELETE FROM records
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM ledger_stage s WHERE s.record_id = records.record_id
+                )
+                """
+            )
             conn.execute(
                 """
                 INSERT INTO records(record_id,payload,scope_csv,building,system_name,
                     big_device_type,device_name,device_num,building_norm,system_name_norm,
                     big_device_type_norm,device_name_norm,device_num_norm,search_norm)
-                SELECT record_id,payload,scope_csv,building,system_name,
-                    big_device_type,device_name,device_num,building_norm,system_name_norm,
-                    big_device_type_norm,device_name_norm,device_num_norm,search_norm
-                FROM ledger_stage
+                SELECT s.record_id,s.payload,s.scope_csv,s.building,s.system_name,
+                    s.big_device_type,s.device_name,s.device_num,s.building_norm,s.system_name_norm,
+                    s.big_device_type_norm,s.device_name_norm,s.device_num_norm,s.search_norm
+                FROM ledger_stage s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM records r WHERE r.record_id = s.record_id
+                )
+                """
+            )
+            conn.execute(
+                """
+                UPDATE records
+                SET payload = s.payload,
+                    scope_csv = s.scope_csv,
+                    building = s.building,
+                    system_name = s.system_name,
+                    big_device_type = s.big_device_type,
+                    device_name = s.device_name,
+                    device_num = s.device_num,
+                    building_norm = s.building_norm,
+                    system_name_norm = s.system_name_norm,
+                    big_device_type_norm = s.big_device_type_norm,
+                    device_name_norm = s.device_name_norm,
+                    device_num_norm = s.device_num_norm,
+                    search_norm = s.search_norm
+                FROM ledger_stage s
+                WHERE s.record_id = records.record_id
+                  AND NOT ledger_payload_same(records.payload, s.payload)
                 """
             )
             now = time.strftime("%Y-%m-%dT%H:%M:%S%z")

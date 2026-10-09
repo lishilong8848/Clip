@@ -1459,9 +1459,12 @@ def _planned_maintenance_times(current=None):
     if not minutes and (current.second or current.microsecond):
         minutes = 30
     start += dt.timedelta(minutes=minutes)
-    end = start.replace(hour=18, minute=30)
-    if end <= start:
-        end += dt.timedelta(days=1)
+    if current.hour > 18 or (current.hour == 18 and (current.minute or current.second or current.microsecond)):
+        end = current.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1, hours=9)
+    else:
+        end = start.replace(hour=18, minute=30)
+        if end <= start:
+            end += dt.timedelta(days=1)
     return start.strftime("%Y-%m-%dT%H:%M"), end.strftime("%Y-%m-%dT%H:%M")
 
 
@@ -7482,9 +7485,16 @@ def render_workbench_lite(
       const linkedOngoing = isOngoing || link.getAttribute('data-linked-ongoing') === '1';
       const action = linkedOngoing && link.getAttribute('data-target-record-id') ? 'update' : (link.getAttribute('data-action') || 'start');
       if (workType === 'maintenance' && !linkedOngoing && action === 'start' && draft._auto_plan_times === '1') {{
-        const start = new Date(Math.ceil(Date.now() / 1800000) * 1800000 + 8 * 3600000);
-        const end = new Date(start); end.setUTCHours(18, 30, 0, 0);
-        if (end <= start) end.setUTCDate(end.getUTCDate() + 1);
+        const base = Date.now() + 8 * 3600000;
+        const now = new Date(base);
+        const start = new Date(Math.ceil(base / 1800000) * 1800000);
+        let end;
+        if (now.getUTCHours() > 18 || (now.getUTCHours() === 18 && (now.getUTCMinutes() || now.getUTCSeconds() || now.getUTCMilliseconds()))) {{
+          end = new Date(now); end.setUTCHours(0, 0, 0, 0); end.setUTCDate(end.getUTCDate() + 1); end.setUTCHours(9, 0, 0, 0);
+        }} else {{
+          end = new Date(start); end.setUTCHours(18, 30, 0, 0);
+          if (end <= start) end.setUTCDate(end.getUTCDate() + 1);
+        }}
         draft.start_time = start.toISOString().slice(0, 16);
         draft.end_time = end.toISOString().slice(0, 16);
       }}
@@ -9508,12 +9518,20 @@ def render_workbench_lite(
         setLiteFormDirty(false);
         clearLiteHtmlCache();
         await nextBrowserTurn();
-        const response = await fetch('/api/workbench-actions', {{
+        let response = await fetch('/api/workbench-actions', {{
           method: 'POST',
           headers: {{ 'Content-Type': 'application/json' }},
           body: JSON.stringify(payload),
         }});
-        const data = await response.json().catch(() => ({{}}));
+        let data = await response.json().catch(() => ({{}}));
+        if (data.error_code === 'confirmation_required' && data.details?.kind === 'plan_convergence_unmatched') {{
+          if (!window.confirm(data.error + '\\n\\n通告：' + (data.details.notice_name || '当前通告'))) {{
+            setLiteFormDirty(true); setLiteStatus('已取消发送，填写已保留'); return;
+          }}
+          payload.plan_convergence_confirmation = data.details.confirmation;
+          response = await fetch('/api/workbench-actions', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(payload)}});
+          data = await response.json().catch(() => ({{}}));
+        }}
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '提交失败');
         const jobId = (data && data.job_id) || (data && data.data && data.data.job_id) || '';

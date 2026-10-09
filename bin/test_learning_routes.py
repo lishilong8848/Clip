@@ -56,6 +56,8 @@ class LearningRouteTests(unittest.TestCase):
                 record("attachments", files, query, actor) or {"names": [name for name, _ in files], "query": query}
             ),
             export=lambda kind, query, actor: (record("export", kind, query, actor) or (b"export content", "export.csv", "text/csv")),
+            resolve_self=lambda open_id: (record("resolve_self", open_id) or
+                                          {"person_id": "", "person": None, "identity_issue": ""}),
         )
         self.factory = Mock(side_effect=lambda **kwargs: (record("init", kwargs) or self.service))
         modules = {
@@ -97,12 +99,10 @@ class LearningRouteTests(unittest.TestCase):
         self.client = TestClient(self.app)
         self.addCleanup(self.client.close)
 
-    def test_every_api_rejects_anonymous_and_non_building_accounts(self):
+    def test_every_api_rejects_anonymous_and_guest_sessions(self):
         for session, status in (
             (None, 401),
             ({"user": {"open_id": ""}, "role": "admin"}, 401),
-            ({"user": {"open_id": "outsider"}, "allowed_scopes": list("ABCDEH")}, 403),
-            ({"user": {"open_id": "building-110"}}, 403),
             ({"user": {"open_id": "building-H"}, "role": "guest"}, 403),
         ):
             self.session = session
@@ -130,7 +130,13 @@ class LearningRouteTests(unittest.TestCase):
         for scope in "ABCDEH":
             response = self.client.get("/api/learning/bootstrap", params={"scope": scope})
             actor = response.json()["data"]["actor"]
-            self.assertEqual(actor, {"id": "administrator", "name": "Admin", "is_admin": True, "scope": "", "can_answer": True})
+            self.assertEqual(actor["id"], "administrator")
+            self.assertEqual(actor["name"], "Admin")
+            self.assertEqual(actor["is_admin"], True)
+            self.assertEqual(actor["scope"], "")
+            self.assertEqual(actor["shared_account"], False)
+            self.assertEqual(actor["can_answer"], False)
+            self.assertEqual(actor["person_id"], "")
         self.assertEqual(self.client.get("/api/learning/bootstrap?scope=ALL").status_code, 400)
         self.assertEqual(self.client.post("/api/learning/papers/p/answer", json={}).status_code, 200)
         self.auth.scope_allowed.assert_not_called()
@@ -356,8 +362,10 @@ class LearningSourceContractTests(unittest.TestCase):
     def test_real_core_dispatch_and_binary_return_contracts_offline(self):
         core = importlib.import_module("lan_bitable_template_portal.learning")
         self.assertEqual(Path(core.__file__).resolve(), BIN / "lan_bitable_template_portal/learning.py")
-        admin = {"id": "administrator", "name": "Admin", "is_admin": True, "scope": ""}
-        actor = {"id": "building-H", "name": "H", "is_admin": False, "scope": "H"}
+        admin = {"id": "administrator", "name": "Admin", "is_admin": True, "scope": "",
+                 "shared_account": False, "person_id": "", "can_answer": False, "identity_issue": ""}
+        actor = {"id": "oid-person-H", "name": "H", "is_admin": False, "scope": "",
+                 "shared_account": False, "person_id": "person-H", "can_answer": True, "identity_issue": ""}
         actions = set()
         with tempfile.TemporaryDirectory(prefix="learning_contract_") as folder, patch("socket.socket.connect", side_effect=AssertionError("Network forbidden")):
             cloud = Mock()
@@ -373,7 +381,6 @@ class LearningSourceContractTests(unittest.TestCase):
 
             self.assertIs(service.settings()["enabled"], False)
             self.assertEqual(service.bootstrap("", admin)["scope"], "")
-            self.assertEqual(service.bootstrap("", actor)["scope"], "H")
             dispatch("settings.get")
             dispatch("settings.save", {"enabled": True})
             payload = {"bank": "written", "stem": "Contract question", "type": "single", "status": "published",
@@ -387,10 +394,13 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("import", {"questions": [payload]})
             with service.transaction() as connection:
                 for scope in ("A", "H"):
-                    service._put("person", "person-" + scope, {"id": "person-" + scope, "name": scope, "employee_no": scope, "active": True, "scopes": [scope]}, connection)
+                    login = ["oid-person-" + scope] if scope == "H" else []
+                    service._put("person", "person-" + scope, {"id": "person-" + scope, "name": scope, "employee_no": scope, "active": True, "scopes": [scope],
+                                                               "aliases": ["staff:person-" + scope], "login_ids": ["staff:person-" + scope] + login}, connection)
                     paper = {"id": "paper-" + scope, "person_id": "person-" + scope, "person": {"id": "person-" + scope, "name": scope}, "scope": scope, "date": "2026-09-29", "created_at": "2026-09-29T08:00:00+08:00",
                              "shortage": {"written": 7, "duty": 1, "professional": 1}, "questions": [question]}
                     service._put("paper", paper["id"], paper, connection)
+            self.assertEqual(service.bootstrap("", actor)["self_scope"], "H")
             self.assertEqual(dispatch("papers.list", query={"scope": ""})["total"], 2)
             self.assertEqual(dispatch("papers.list", who=actor, query={"scope": ""})["total"], 1)
             dispatch("history", query={"scope": ""})
@@ -400,6 +410,7 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("paper.answer", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "version": paper["version"], "operation_id": "contract-answer", "option_ids": ["o2"]}, actor)
             dispatch("review", who=actor, query={"scope": "", "person_id": "person-H"})
             dispatch("profile", query={"scope": ""})
+            dispatch("attempts", who=actor, query={})
             issue = dispatch("issue.create", {"paper_id": "paper-H", "person_id": "person-H", "question_id": question["id"], "description": "Check this question"}, actor)
             issue = dispatch("issue.update", {"id": issue["id"], "version": issue["version"], "remark": "More detail"}, actor)
             dispatch("issues.list", who=actor, query={"scope": ""})
@@ -416,7 +427,7 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("people")
             service._restored = True
             service.publish()
-            dispatch("paper.claim", {"person_id": "person-H", "scope": "H"})
+            dispatch("paper.claim", {"person_id": "person-H"}, who=actor)
             dispatch("refresh")
             dispatch("publish")
             dispatch("paper.delete", {"id": "paper-H"})
@@ -454,7 +465,7 @@ class LearningWireTests(unittest.TestCase):
         core = importlib.import_module("lan_bitable_template_portal.learning")
         cloud, sender = FakeCloud(enabled=False), FakeSender()
         sessions = {
-            "floor": {"user": {"open_id": "building-A", "name": "A operator"}},
+            "floor": {"user": {"open_id": "oid-learner-A", "name": "A learner"}},
             "admin": {"user": {"open_id": "administrator", "name": "Admin"}, "role": "admin"},
         }
         controller = SimpleNamespace(
@@ -479,10 +490,13 @@ class LearningWireTests(unittest.TestCase):
                     })
                     service._put("question", question["id"], question, connection, False)
             with service.transaction() as connection:
-                service._put("person", "learner-A", {"id": "learner-A", "name": "人员A", "scopes": ["A"], "active": True}, connection, False)
+                service._put("person", "learner-A", {"id": "learner-A", "name": "人员A", "scopes": ["A"], "active": True,
+                                                     "aliases": ["staff:learner-A"], "login_ids": ["staff:learner-A", "oid-learner-A"]}, connection, False)
             service._restored = True
             service.publish(DAY)
-            service.dispatch("paper.claim", {"scope": "A", "person_id": "learner-A"}, {"id": "a", "scope": "A"}, {})
+            self_actor = {"id": "oid-learner-A", "scope": "", "is_admin": False, "person_id": "learner-A",
+                          "shared_account": False, "can_answer": True, "identity_issue": ""}
+            service.dispatch("paper.claim", {"person_id": "learner-A"}, self_actor, {})
             with patch.object(core, "LearningService", return_value=service) as factory, \
                     patch.dict(sys.modules, {"lan_bitable_template_portal.portal_service": constants}):
                 app = FastAPI()

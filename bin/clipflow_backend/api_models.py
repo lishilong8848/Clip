@@ -24,6 +24,9 @@ class APIModel(BaseModel):
 
 
 class WorkbenchActionRequest(APIModel):
+    plan_convergence_confirmation: str = Field(default="", max_length=48)
+    planned_notice_version: str = Field(default="", max_length=64)
+    source_month: str = Field(default="", max_length=20)
     scope: str = "ALL"
     action: str = ""
     work_type: str = "maintenance"

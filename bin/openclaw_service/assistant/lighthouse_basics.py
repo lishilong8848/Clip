@@ -9,6 +9,15 @@ class CalculationError(ValueError):
     pass
 
 
+def current_user_request(question):
+    return bool(re.fullmatch(
+        r'(?:请问|请告诉我|帮我查一下|查询|查看)?\s*'
+        r'(?:(?:当前|现在|本次)(?:的)?\s*(?:登录|登陆)(?:的)?(?:用户|账号|账户|人员|人)'
+        r'(?:是谁|是什么|是哪位|信息)?|我(?:当前|现在)?(?:登录|登陆)(?:的)?(?:是谁|是什么账号|哪个账号)'
+        r'|我是谁|我的(?:姓名|工号|账号|账户|登录信息)(?:是什么|是多少)?)'
+        r'[?？。!！\s]*', question.strip()))
+
+
 def calculate(expression):
     if not isinstance(expression, str) or not expression.strip() or len(expression) > 400:
         raise CalculationError('请填写不超过400字的算式。')

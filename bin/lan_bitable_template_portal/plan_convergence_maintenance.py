@@ -2,6 +2,7 @@
 """当前程序未结束检修通告与智航屏蔽中记录核对，不读取飞书。"""
 import re
 import time
+import datetime as dt
 from difflib import SequenceMatcher
 from upload_event_module.core.parser import is_notice_confirmed_ended
 
@@ -35,16 +36,24 @@ def _as_time(v):
     try:
         n = float(v)
         sec = n / 1000.0 if n > 10 ** 12 else n
-        return time.strftime("%Y-%m-%d %H:%M", time.localtime(sec))
+        return dt.datetime.fromtimestamp(sec, dt.timezone(dt.timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
     except Exception:
         return str(v)
 
 
-def ongoing_records(items):
-    """Normalize the portal's shared local projection without querying remote records."""
+def ongoing_records(items, work_type='repair'):
+    """Normalize the portal's shared local projection without querying remote records.
+
+    ``work_type='repair'`` keeps the original 检修 normalization.
+    ``work_type='change'`` projects 变更通告 with the same output shape and only
+    includes the shared local ongoing list (no remote reads, no Feishu).
+    """
     out = []
     for item in items:
-        if item.get('work_type') != 'repair' and item.get('notice_type') not in {'设备检修', '检修通告'}:
+        if work_type == 'change':
+            if item.get('work_type') != 'change' and item.get('notice_type') not in {'变更通告'}:
+                continue
+        elif item.get('work_type') != 'repair' and item.get('notice_type') not in {'设备检修', '检修通告'}:
             continue
         if is_notice_confirmed_ended(item):
             continue
@@ -59,26 +68,72 @@ def ongoing_records(items):
 
         record_id = value('target_record_id') or value('record_id') or value('active_item_id') or value('source_record_id')
         if not record_id:
-            raise ValueError('本地检修通告缺少记录标识，请刷新当前程序的通告列表')
-        rec = {
-            'record_id': record_id,
-            'name': value('title', '名称（标题）', '名称', '标题'),
-            'status': value('status', '检修状态'),
-            'location': value('location', '位置', '地点'),
-            'device': value('repair_device', '维修设备'),
-            'fault': value('repair_fault', '维修故障') or value('symptom', '故障现象'),
-            'building': value('building', '楼栋') or '、'.join(
-                f'{code}楼' if code in {'A', 'B', 'C', 'D', 'E', 'H'} else str(code)
-                for code in item.get('building_codes') or []),
-            'major': value('specialty', '专业'),
-            'fault_time': _as_time(value('fault_time', '发生故障时间', '发现故障时间')),
-            'start_time': _as_time(value('started_at', '实际开始时间') or value('actual_start_time')),
-            'end_time': _as_time(value('actual_end_time', '实际结束时间')),
-        }
+            label = '变更通告' if work_type == 'change' else '检修通告'
+            raise ValueError('本地%s缺少记录标识，请刷新当前程序的通告列表' % label)
+        if work_type == 'change':
+            rec = {
+                'record_id': record_id,
+                'name': value('title', '名称（标题）', '名称', '标题'),
+                'status': value('status', '当前状态', '变更状态'),
+                'location': value('location', '位置', '地点'),
+                'device': value('device') or value('change_device', '变更设备', '设备'),
+                'fault': value('content') or value('change_content', '变更内容', '内容', '变更范围'),
+                'building': value('building', '楼栋') or '、'.join(
+                    f'{code}楼' if code in {'A', 'B', 'C', 'D', 'E', 'H'} else str(code)
+                    for code in item.get('building_codes') or []),
+                'major': value('specialty', '专业'),
+                'fault_time': _as_time(value('change_time', '变更时间', '变更发生时间')),
+                'start_time': _as_time(value('started_at', '实际开始时间') or value('actual_start_time')),
+                'end_time': _as_time(value('actual_end_time', '实际结束时间')),
+            }
+        else:
+            rec = {
+                'record_id': record_id,
+                'name': value('title', '名称（标题）', '名称', '标题'),
+                'status': value('status', '检修状态'),
+                'location': value('location', '位置', '地点'),
+                'device': value('repair_device', '维修设备'),
+                'fault': value('repair_fault', '维修故障') or value('symptom', '故障现象'),
+                'building': value('building', '楼栋') or '、'.join(
+                    f'{code}楼' if code in {'A', 'B', 'C', 'D', 'E', 'H'} else str(code)
+                    for code in item.get('building_codes') or []),
+                'major': value('specialty', '专业'),
+                'fault_time': _as_time(value('fault_time', '发生故障时间', '发现故障时间')),
+                'start_time': _as_time(value('started_at', '实际开始时间') or value('actual_start_time')),
+                'end_time': _as_time(value('actual_end_time', '实际结束时间')),
+            }
         hay = " ".join([rec["location"], rec["name"], rec["device"]])
         rec["rooms"] = sorted(set(x.upper() for x in ROOM_RE.findall(hay)))
         out.append(rec)
     return out
+
+
+# Normalized business fields that identify a record's source state. Hits and
+# auto/manual metadata intentionally excluded so a cache overlay can detect
+# title/device/location/content/status changes without speculating on matches.
+BUSINESS_FIELDS = ('record_id', 'name', 'status', 'location', 'device', 'fault',
+                   'building', 'major', 'fault_time', 'start_time', 'end_time', 'rooms')
+
+
+def business_fingerprint(record):
+    """Stable snapshot of the normalized business fields used as a cache key."""
+    return {key: list(record[key]) if isinstance(record.get(key), list) else record.get(key)
+            for key in BUSINESS_FIELDS}
+
+
+def excluded_buildings(record):
+    buildings = _extract_building_letters(record.get('building', ''), record.get('name', ''), record.get('location', ''))
+    return bool(buildings and buildings <= {'D', 'E'})
+
+
+def configured_points(detail):
+    """Keep the actual configured ranges; never invent individual points for 'all'."""
+    return [{'device': _as_text(row.get('instances') or row.get('instanceNames')),
+             'space': _as_text(row.get('spaceModel') or row.get('spaceModelName')),
+             'point': _as_text(row.get('pointName') or row.get('alarmName') or row.get('relateConfig')) or '全部规则（未提供逐点清单）',
+             'config_id': _as_text(row.get('pointId') or row.get('alarmConfigId')),
+             'device_type': _as_text(row.get('classifyModel'))}
+            for row in detail.get('alarmBlockDetailResultList', []) if isinstance(row, dict)]
 
 
 def _device_keywords(text):
@@ -149,6 +204,8 @@ def match_records(records, blocks, detail_of):
         if not bid:
             continue
         name = str(b.get("blockName") or "")
+        if excluded_buildings({'name': name}):
+            continue
         detail = detail_of.get(bid) or {}
         spaces, insts = [], []
         for d in detail.get("alarmBlockDetailResultList") or []:
@@ -184,10 +241,13 @@ def match_records(records, blocks, detail_of):
 
     results, hit_ids = [], set()
     for rec in records:
-        rec_rooms = set(rec["rooms"])
+        if excluded_buildings(rec):
+            results.append(dict(rec, hits=[], check_status='skipped', check_error='D/E楼不参与计划收敛匹配'))
+            continue
+        rec_rooms = {room for room in rec['rooms'] if room[0] not in {'D', 'E'}}
         dev_words = _device_keywords(rec["device"] + " " + rec["name"])
         # 0) 楼栋预筛: 检修端楼栋字母
-        rec_bld = _extract_building_letters(rec.get("building", ""))
+        rec_bld = _extract_building_letters(rec.get("building", "")) - {'D', 'E'}
         hits = []
         for bid, bi in block_info.items():
             if rec_bld and bi["building"] and not (rec_bld & bi["building"]):
@@ -232,6 +292,8 @@ def match_records(records, blocks, detail_of):
                     "blockId": bid,
                     "blockName": bi["name"],
                     "startTime": _block_time(bi["block"]),
+                    "endTime": bi['block'].get('endTime') or bi['block'].get('end_time') or (detail_of.get(bid) or {}).get('endTime'),
+                    "point_rows": configured_points(detail_of.get(bid) or {}),
                     "spaces": bi["spaces"][:8],
                     "instances": bi["insts"][:8],
                     "reason": "；".join(name_reason),
@@ -246,6 +308,8 @@ def match_records(records, blocks, detail_of):
                     "blockId": bid,
                     "blockName": bi["name"],
                     "startTime": _block_time(bi["block"]),
+                    "endTime": bi['block'].get('endTime') or bi['block'].get('end_time') or (detail_of.get(bid) or {}).get('endTime'),
+                    "point_rows": configured_points(detail_of.get(bid) or {}),
                     "spaces": bi["spaces"][:8],
                     "instances": bi["insts"][:8],
                     "reason": "空间位置 " + "、".join(space_common),

@@ -1,8 +1,10 @@
 <template>
-  <div class="lhs" :class="{ disabled }">
+  <div class="lhs" :class="{ disabled }" :aria-busy="!!field.directory_loading">
     <label class="lhs-exempt"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>
     <p v-if="!local.exempt && !validScope" class="lhs-error" role="alert">请在上方通告中仅选择一栋楼</p>
     <template v-if="!local.exempt && validScope">
+      <p v-if="field.directory_loading" class="lhs-loading" role="status"><Loader2 :size="15" class="lhs-spin" />正在读取工单和人员…</p>
+      <p v-else-if="field.directory_error" class="lhs-error" role="alert">{{ field.directory_error }}</p>
       <section v-if="directoryReady" class="lhs-grid">
         <section class="lhs-block lhs-sop" aria-label="工单SOP">
           <div class="lhs-h">
@@ -13,8 +15,12 @@
             <option value="">请选择SOP</option>
             <option v-for="o in sopOptions" :key="o.value" :value="o.value" :disabled="!!o.sop.blocked_reason">{{ o.label }}</option>
           </select>
+          <p v-if="!sopOptions.length" class="lhs-empty">当前楼栋暂无此类工单 SOP</p>
+          <p v-if="staleVersion" class="lhs-blocked" role="alert">所选 SOP 已更新，请核对步骤后<button type="button" class="lhs-quick" :disabled="disabled" @click="acceptVersion">采用当前版本</button></p>
           <span v-if="selectedSop && selectedSop.blocked_reason" class="lhs-blocked"><Info :size="14" aria-hidden="true" /><span>{{ selectedSop.blocked_reason }}</span></span>
           <div v-if="selectedSop" class="lhs-sop-detail">
+            <button type="button" class="lhs-detail-toggle" :aria-expanded="showSteps" :aria-controls="id + '-steps'" @click="showSteps = !showSteps"><span>{{ sopSteps.length }} 个步骤<span v-if="sopAttachments.length"> · {{ sopAttachments.length }} 份附件</span></span><ChevronUp v-if="showSteps" :size="14" /><ChevronDown v-else :size="14" /></button>
+            <UiTransition name="lhs-detail"><div v-if="showSteps" :id="id + '-steps'" class="lhs-detail-wrap"><div>
             <ol v-if="sopSteps.length" class="lhs-steps">
               <li v-for="(step, si) in sopSteps" :key="si" class="lhs-step">
                 <span class="lhs-step-txt">{{ si + 1 }}. {{ stepText(step) }}<small v-for="(rule, ri) in step.repeat_rules || []" :key="ri" class="lhs-loop">{{ repeatLabel(rule) }}</small></span>
@@ -23,6 +29,7 @@
             </ol>
             <p v-else class="lhs-empty">该SOP暂无步骤</p>
             <div v-if="sopAttachments.length" class="lhs-attach"><span class="lhs-label">附件</span><ul class="lhs-attach-list"><li v-for="(at, ai) in sopAttachments" :key="ai">{{ at.name }}</li></ul></div>
+            </div></div></UiTransition>
           </div>
         </section>
 
@@ -69,14 +76,14 @@
           </template>
         </section>
       </section>
-      <section v-else class="lhs-block lhs-ready" aria-label="读取目录"><p class="lhs-error" role="status">该楼栋目录尚未就绪</p><button type="button" class="lhs-load-btn" :disabled="disabled" @click="refreshOptions">读取目录</button></section>
+      <section v-else-if="!field.directory_loading" class="lhs-block lhs-ready" aria-label="读取目录"><button type="button" class="lhs-load-btn" :disabled="disabled" @click="refreshOptions"><RefreshCw :size="14" />{{ field.directory_error ? '重试读取工单' : '读取工单和人员' }}</button></section>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { Clock3, Info, RefreshCw, Search } from "lucide-vue-next";
+import { ChevronDown, ChevronUp, Clock3, Info, Loader2, RefreshCw, Search } from "lucide-vue-next";
 import VnetSelect from "./VnetSelect.vue";
 
 const props = defineProps<{ field: Record<string, any>; modelValue?: any; disabled?: boolean; id: string }>();
@@ -143,6 +150,9 @@ function searchPeople(): void {
 const sops = computed(() => (directoryReady.value ? (Array.isArray(props.field?.sops) ? props.field.sops : []) : []));
 const sopOptions = computed(() => { const used = new Set<string>(); const out: Array<{ value: string; label: string; sop: any }> = []; for (const s of sops.value) { const name = String(s?.name || "").trim() || "未命名SOP"; const reason = String(s?.blocked_reason || "").trim(); const suffix = reason ? `（已锁定：${reason}）` : ""; let label = `${name}${suffix}`; let n = 1; while (used.has(label)) { n += 1; label = `${name} ${n}${suffix}`; } used.add(label); out.push({ value: String(s.sop_id || ""), label, sop: s }); } return out; });
 const selectedSop = computed(() => sopOptions.value.find((o) => o.value === String(local.value.sop_id || ""))?.sop || null);
+const showSteps = ref(false);
+const staleVersion = computed(() => selectedSop.value && 'sop_version' in local.value && Number(local.value.sop_version) !== Number(selectedSop.value.version));
+function acceptVersion(): void { if (selectedSop.value) update({ sop_version: Number(selectedSop.value.version) }); }
 const sopSteps = computed(() => (Array.isArray(selectedSop.value?.steps) ? [...selectedSop.value.steps] : []).sort((a: any, b: any) => (Number(a?.order) || 0) - (Number(b?.order) || 0)));
 const sopAttachments = computed(() => (Array.isArray(selectedSop.value?.documents) ? selectedSop.value.documents : []));
 function repeatLabel(rule: Record<string, any>): string {
@@ -177,6 +187,7 @@ function selectSop(event: Event): void {
   const oldMode = effectiveMode.value;
   const newMode = modeOfSop(id);
   const patch: Record<string, any> = { sop_id: id };
+  if ('sop_version' in local.value) patch.sop_version = Number(sops.value.find((s: any) => s.sop_id === id)?.version || 0);
   if (newMode !== oldMode) patch.runs = defaultRunsFor(newMode);
   update(patch);
   void nextTick(syncSopValidity);
@@ -263,13 +274,13 @@ const onCoolTo = (event: Event): void => setCoolRun({ to_unit: (event.target as 
 watch(effectiveScope, (ns) => {
   if (!ns) return;
   if (String(local.value.scope || "") !== ns) {
-    update({ scope: ns, sop_id: "", runs: [] });
+    update({ scope: ns, sop_id: "", ...('sop_version' in local.value ? { sop_version: 0 } : {}), runs: [] });
   }
   maybeEmitLoad();
 });
 
 onMounted(() => {
-  if (effectiveScope.value && local.value.scope !== effectiveScope.value) update({ scope: effectiveScope.value, sop_id: '', runs: [] });
+  if (effectiveScope.value && local.value.scope !== effectiveScope.value) update({ scope: effectiveScope.value, sop_id: '', ...('sop_version' in local.value ? { sop_version: 0 } : {}), runs: [] });
   maybeEmitLoad();
   void nextTick(syncCoolValidity);
 });
@@ -278,6 +289,8 @@ onMounted(() => {
 <style scoped>
 .lhs { display: flex; flex-direction: column; gap: 8px; min-width: 0; max-width: 100%; font-size: 13px; color: var(--lh-charcoal, #183353); }
 .lhs.disabled { opacity: 0.85; }
+.lhs-loading { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 12px; color: var(--lh-muted); }
+.lhs-spin { animation: lhs-spin .9s linear infinite; } @keyframes lhs-spin { to { transform: rotate(360deg); } }
 .lhs-exempt { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; font-size: 13px; cursor: pointer; min-width: 0; }
 .lhs-exempt input { width: 16px; height: 16px; flex: 0 0 auto; accent-color: var(--lh-accent, #2f6fed); }
 .lhs-exempt:has(input:disabled) { cursor: not-allowed; color: var(--lh-faint-muted, #8a99ac); }
@@ -301,7 +314,14 @@ onMounted(() => {
 .lhs-blocked { display: flex; align-items: flex-start; gap: 6px; margin: 0; padding: 6px 8px; border-radius: 8px; font-size: 12px; line-height: 1.4; color: var(--lh-warn, #9a4c10); background: var(--lh-warn-soft, #fff7ed); min-width: 0; overflow-wrap: anywhere; }
 .lhs-blocked svg { flex: 0 0 auto; margin-top: 1px; }
 .lhs-blocked span { min-width: 0; overflow-wrap: anywhere; }
-.lhs-sop-detail { display: flex; flex-direction: column; gap: 6px; min-width: 0; border: 1px solid var(--lh-border, #dbe5f1); border-radius: 8px; background: var(--lh-surface-subtle, #fafcff); padding: 7px 8px; }
+.lhs-sop-detail { display: flex; flex-direction: column; gap: 6px; min-width: 0; border-block: 1px solid var(--lh-border, #dbe5f1); padding: 5px 0; }
+.lhs-detail-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; border: 0; background: transparent; color: var(--lh-muted); cursor: pointer; font: inherit; font-size: 12px; padding: 5px 0; }
+.lhs-detail-wrap { display: grid; grid-template-rows: 1fr; }
+.lhs-detail-wrap > div { min-height: 0; overflow: hidden; }
+.lhs-detail-enter-active, .lhs-detail-leave-active { transition: grid-template-rows 180ms ease, opacity 180ms ease; }
+.lhs-detail-enter-from, .lhs-detail-leave-to { grid-template-rows: 0fr; opacity: 0; }
+.lhs :is(button, select, input):focus-visible { outline: 2px solid var(--lh-accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .lhs-detail-enter-active, .lhs-detail-leave-active { transition: none; } }
 .lhs-steps { list-style: none; margin: 0; padding: 0; max-height: 150px; overflow: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 5px; }
 .lhs-step { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; font-size: 12px; line-height: 1.4; color: var(--lh-charcoal, #183353); min-width: 0; }
 .lhs-step-txt { min-width: 0; overflow-wrap: anywhere; }

@@ -18,9 +18,12 @@ if str(BIN) not in sys.path:
 from lan_bitable_template_portal import learning
 
 
-ACTOR = {"id": "a", "scope": "A", "is_admin": False}
-ADMIN = {"id": "admin", "is_admin": True, "scope": ""}
-H_ACTOR = {"id": "h", "scope": "H", "is_admin": False}
+ACTOR = {"id": "oid-a", "scope": "A", "is_admin": False, "person_id": "person_A",
+         "shared_account": False, "can_answer": True}
+ADMIN = {"id": "admin", "is_admin": True, "scope": "", "person_id": "person_A",
+         "shared_account": False, "can_answer": True}
+H_ACTOR = {"id": "h", "scope": "H", "is_admin": False, "person_id": "",
+           "shared_account": True, "can_answer": False}
 DAY = dt.date(2026, 9, 28)
 CURRENT = dt.datetime(2026, 9, 28, 9, tzinfo=learning.TZ)
 SINGLE = "\u5355\u9009"
@@ -185,17 +188,29 @@ class LearningTests(unittest.TestCase):
         self.seed(self.question(i, bank) for bank, size in
                   (("written", written), ("duty", duty), ("professional", professional), ("supplemental", supplemental)) for i in range(size))
 
+    def self_actor(self, scope="A", **changes):
+        """Build a self-service actor for a given building's own person."""
+        actor = {"id": "oid-" + scope.lower(), "scope": scope, "is_admin": False,
+                 "person_id": "person_" + scope, "shared_account": False, "can_answer": True}
+        actor.update(changes)
+        return actor
+
     def publish_people(self, day=DAY):
         with self.service.transaction() as conn:
             for scope in learning.SCOPES:
                 identity = "person_" + scope
-                self.service._put("person", identity, {"id": identity, "person_id": identity, "name": scope + "测试人员",
-                    "employee_no": scope, "scopes": [scope], "active": True}, conn, False)
+                row = {"id": identity, "person_id": identity, "name": scope + "测试人员",
+                       "employee_no": scope, "scopes": [scope], "active": True}
+                self.service._put("person", identity, row, conn, False)
+                # Persist people to the fake cloud so restore flows can resolve the
+                # self-person row even when sync ordering leaves it beyond the limit.
+                self.cloud.entities["person", identity] = copy.deepcopy(row)
         self.service._restored = True
         publication = self.service.publish(day)
         with patch.object(learning, "now", return_value=dt.datetime.combine(day, dt.time(9), learning.TZ)):
             for scope in learning.SCOPES:
-                self.dispatch("paper.claim", {"person_id": "person_" + scope, "scope": scope})
+                self.dispatch("paper.claim", {"person_id": "person_" + scope, "scope": scope},
+                              self.self_actor(scope))
         return publication
 
     def fixture(self, kind="single", bank="written", per_scope=1, attachments=False):
@@ -424,11 +439,13 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(saved["year"], "")
         self.assertEqual(saved["analysis"], "")
 
-    def test_duty_accounts_can_select_other_building_people_without_admin_access(self):
+    def test_duty_accounts_cannot_proxy_as_other_building_people(self):
         paper, question = self.fixture(attachments=True)
-        self.assertEqual(self.service.bootstrap("A", H_ACTOR)["scope"], "A")
-        answered = self.dispatch("paper.answer", self.answer_payload(paper, question), H_ACTOR)
-        self.assertEqual(answered["questions"][0]["attempt"]["operator_id"], H_ACTOR["id"])
+        # H duty cannot bootstrap/answer an A-building paper: own-building read-only.
+        self.assert_status(403, self.service.bootstrap, "A", H_ACTOR)
+        self.assert_status(403, self.dispatch, "paper.answer", self.answer_payload(paper, question), H_ACTOR)
+        # Answer attachments for A are outside H duty's building.
+        self.assert_status(403, self.service.attachment, question["attachments"][2]["id"], H_ACTOR)
         self.assert_status(403, self.dispatch, "questions.list", actor=H_ACTOR)
         self.assert_status(403, self.dispatch, "paper.delete", {"id": paper["id"]}, H_ACTOR)
 
@@ -486,7 +503,7 @@ class LearningTests(unittest.TestCase):
         self.assertTrue(path.is_relative_to(self.root / "files"))
         self.assertEqual(path.read_bytes(), b"test content")
         self.assertEqual((name, mime), ("answer.txt", "text/plain"))
-        self.service.attachment(answer_id, H_ACTOR)
+        self.assert_status(403, self.service.attachment, answer_id, H_ACTOR)
 
     def test_mastered_marker_is_no_longer_editable_or_returned(self):
         paper, question = self.fixture()
@@ -811,7 +828,7 @@ class LearningTests(unittest.TestCase):
         self.restart()
         path, _, _ = self.service.attachment(attachment_id, ACTOR)
         self.assertEqual(path.read_bytes(), b"test content")
-        self.service.attachment(attachment_id, H_ACTOR)
+        self.assert_status(403, self.service.attachment, attachment_id, H_ACTOR)
 
     def test_uploaded_attachment_token_survives_entity_failure_without_uploading_twice(self):
         self.enable()
@@ -1198,6 +1215,8 @@ class LearningTests(unittest.TestCase):
         self.service.refresh()
         self.assertEqual(self.service._all("question"), [])
         self.assertIsNotNone(self.service._get("attachment", attachment_id))
+        # The same material question was published to every building, so H duty may
+        # legitimately read the attachment from its own building paper.
         self.service.attachment(attachment_id, H_ACTOR)
         path, name, mime = self.service.attachment(attachment_id, ACTOR)
         self.assertTrue(path.is_relative_to(self.root / "attachment_restore" / "files"))

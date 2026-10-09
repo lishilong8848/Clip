@@ -1095,6 +1095,9 @@ class PortalAuthManager:
         open_id = str(user.get("open_id") or "").strip()
         if not open_id:
             raise PortalError("飞书登录未返回 open_id。")
+        if user.get("union_id"):
+            self._state_store.put_document("feishu_assistant_identity", user["union_id"], {
+                key: user.get(key, "") for key in ("open_id", "union_id", "name", "employee_no")})
         allowed_scopes = self.scopes_for_open_id(open_id)
         role = self.role_for_open_id(open_id)
         session_id = secrets.token_urlsafe(32)

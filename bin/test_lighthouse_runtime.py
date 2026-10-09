@@ -442,7 +442,7 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_twenty_accounts_one_process_port_and_twenty_private_agents(self):
         items = await asyncio.gather(*(self.acquire('owner-' + str(i), {**_profile(), 'model': 'model-' + str(i)}) for i in range(20)))
         self.popen.assert_called_once()
-        self.assertEqual(self.runtime.maximum, 20)
+        self.assertEqual(self.runtime.maximum, 0)
         self.assertIn('--v8-pool-size=2', self.popen.call_args.args[0])
         self.assertEqual(Path(self.popen.call_args.args[0][-2]).name, 'gateway-start.mjs')
         self.assertEqual(int(self.popen.call_args.args[0][-1]), items[0]['port'])
@@ -450,9 +450,6 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len({item[field] for item in items}), 1)
         for field in ('key', 'agent_id', 'root', 'fingerprint'):
             self.assertEqual(len({item[field] for item in items}), 20)
-        with self.assertRaises(AssistantError):
-            await self.acquire('twenty-one')
-        items[0]['busy'] = False
         await self.acquire('twenty-one')
         with self.assertRaises(AssistantError):
             await self.acquire('owner-0', {**_profile(), 'model': 'model-0'})
@@ -524,7 +521,7 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(_profile()['key_cipher'], serialized)
         self.assertNotIn('provider.example', serialized)
         self.assertNotIn(item['model_key'], json.dumps(self.popen.call_args.kwargs['env']))
-        self.assertEqual(config['agents']['defaults']['maxConcurrent'], 20)
+        self.assertEqual(config['agents']['defaults']['maxConcurrent'], lrt.OPENCLAW_MAX_CONCURRENT)
         self.assertEqual(config['skills']['allowBundled'], ['lighthouse-tools'])
         self.assertFalse(config['skills']['load']['watch'])
         self.assertFalse(config['browser']['enabled'])

@@ -1,17 +1,22 @@
 <template>
   <section class="learning-page" :aria-busy="loading || busy">
     <header class="page-head">
-      <div class="heading"><VnetBackButton :to="learner ? `/learning?scope=${scope}` : '/?entry=tools'" :disabled="busy" /><BookOpen :size="22" /><h1>画像学练</h1><span v-if="isAdmin" class="badge">管理员</span></div>
+      <div class="heading"><VnetBackButton :to="undefined" :disabled="busy" @click="handleBack" /><BookOpen :size="22" /><h1>画像学练</h1><span v-if="isAdmin" class="badge">管理员</span></div>
       <div class="actions">
         <strong v-if="scopeLabel">{{ scopeLabel }}</strong>
+        <span v-if="ready && (canViewBuildings || boot.can_answer)" class="view-switch" role="group" aria-label="答题/画像视图">
+          <button v-if="boot.can_answer" :class="{ active: viewMode === 'practice' }" :aria-pressed="viewMode === 'practice'" :disabled="busy" @click="goPractice"><BookOpen :size="14" />我的答题</button>
+          <button v-if="canViewBuildings" :class="{ active: viewMode === 'overview' }" :aria-pressed="viewMode === 'overview'" :disabled="busy" @click="goOverview"><ChartNoAxesCombined :size="14" />楼栋画像</button>
+        </span>
         <span v-if="ready && isAdmin" class="sync-label" :class="{ danger: boot.sync?.status === 'error' }"><Loader2 v-if="syncActive" :size="15" class="spin" />{{ syncLabel }}<template v-if="boot.sync?.pending"> · {{ boot.sync.pending }} 项待同步</template></span>
         <button class="icon-button" title="刷新当前页面" aria-label="刷新当前页面" :disabled="busy || loading" @click="refreshView"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       </div>
     </header>
 
-    <div v-if="ready && !learner" class="building-tabs" aria-label="学练楼栋"><button v-for="building in scopes.filter(s => s.value)" :key="building.value" :class="{ active: scope === building.value }" :disabled="busy" @click="changeScope(building.label)">{{ building.label }}<span>人员学练</span></button></div>
-    <div v-if="ready" class="learner-strip"><div><strong>{{ learner ? learner.name : scopeLabel + '学习汇总' }}</strong><span v-if="learner">工号 {{ learner.employee_no || '未填写' }} · 当前答题人</span></div><div class="actions"><button :disabled="busy" @click="openPeople"><Search :size="16" />{{ learner ? '切换人员' : '选择答题人员' }}</button></div></div>
-    <nav v-if="ready" class="tabs" aria-label="学练页面">
+    <div v-if="ready && viewMode === 'overview' && !learner && canViewBuildings" class="building-tabs" aria-label="学练楼栋"><button v-for="building in scopes.filter(s => s.value)" :key="building.value" :class="{ active: scope === building.value }" :disabled="busy" @click="changeScope(building.label)">{{ building.label }}<span>人员学练</span></button></div>
+    <div v-if="ready && viewMode === 'practice' && !learner && identityIssue" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ identityIssue }}</span></div>
+    <div v-if="ready" class="learner-strip"><div><strong>{{ learner ? learner.name : scopeLabel + '学习汇总' }}</strong><span v-if="learner">工号 {{ learner.employee_no || '未填写' }}<template v-if="viewMode === 'practice'"> · 当前答题人</template></span></div><div class="actions"><button v-if="viewMode === 'overview' && canViewBuildings" :disabled="busy" @click="openPeople"><Search :size="16" />{{ learner ? '切换人员' : '选择人员' }}</button></div></div>
+    <nav v-if="ready && (viewMode === 'overview' || learner)" class="tabs" aria-label="学练页面">
       <button v-for="item in tabs" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="17" />{{ item.label }}</button>
     </nav>
     <div v-if="error && !modalKind" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ error }}</span><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><X :size="16" /></button></div>
@@ -20,6 +25,7 @@
     <div v-if="boot.sync?.error && isAdmin" class="alert warning"><AlertCircle :size="18" /><span>{{ boot.sync.error }}</span><button v-if="isAdmin" :disabled="busy || jobRunning" @click="switchTab('settings')"><Settings :size="15" />前往设置</button></div>
     <div v-if="ready && !boot.settings?.enabled && isAdmin" class="alert warning"><AlertCircle :size="18" /><span>自动发布未启用。{{ isAdmin ? '仍可手动发布今日题单，且不发送通知。' : '请等待管理员发布题单。' }}</span><button v-if="isAdmin" @click="switchTab('settings')"><Settings :size="15" />发布设置</button></div>
     <div v-if="!ready" class="empty"><Loader2 v-if="loading" :size="24" class="spin" /><span>{{ loading ? '正在加载学练数据…' : '学练数据加载失败' }}</span><button v-if="!loading" @click="bootstrap()"><RefreshCw :size="16" />重试</button></div>
+    <div v-else-if="viewMode === 'practice' && !learner && identityIssue" class="empty"><AlertCircle :size="30" /><strong>尚未关联个人身份</strong><span>{{ identityIssue || '无法进行个人答题，请与管理员核对人员目录。' }}</span></div>
 
     <template v-else>
       <template v-if="tab === 'today' || (reading && ['review', 'history'].includes(tab))">
@@ -32,7 +38,6 @@
             <span v-if="paper?.status" class="badge">{{ paper.status === 'completed' ? '已完成' : paper.status === 'published' ? '已发布' : paper.status === 'pending' ? '待完成' : paper.status }}</span>
           </div>
         </div>
-        <div v-if="isAdmin && tab === 'today' && paper" class="actions"><button class="danger" :disabled="busy || loading" @click="deletePaper(paper.id)"><Trash2 :size="16" />删除个人题单</button></div>
         <div v-if="paper?.legacy" class="muted read-only"><Eye :size="16" />旧楼栋题单 · 只读历史，不计入个人画像</div>
         <div v-if="shortageText(paper?.shortage)" class="alert warning"><AlertCircle :size="18" />{{ shortageText(paper?.shortage) }}</div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取题单…</div>
@@ -58,6 +63,7 @@
             <div class="answer-actions actions"><button v-if="!locked" class="primary" :disabled="busy || loading" @click="submitAnswer"><Loader2 v-if="busy" :size="16" class="spin" /><Check v-else :size="16" />{{ practice ? '提交本次复习' : '确认作答' }}</button><span v-if="current.attempt && !practice" role="status" :class="['result', current.attempt.correct === false ? 'danger' : 'success-text']"><AlertCircle v-if="current.attempt.correct === false" :size="18" /><CheckCircle2 v-else :size="18" />{{ resultText(current) }}<small>{{ timeLabel(current.attempt.submitted_at) }}</small></span><button v-if="current.attempt && canAnswer && !current.invalid && !practice" :disabled="busy" @click="startPractice"><RotateCcw :size="16" />{{ current.type === 'interview' ? '重新练习与自评' : '再次练习' }}</button><span v-if="current.hinted || current.attempt?.assisted" class="badge warning-badge">已查看提示或答案</span></div>
             <div class="answer-tools actions"><button v-if="canAnswer" :disabled="busy" @click="reveal('answer')"><Eye :size="16" />查看答案与解析</button><button v-if="canAnswer && current.has_hint !== false" :disabled="busy" @click="reveal('hint')"><Lightbulb :size="16" />思路提示</button><button v-if="canAnswer" :disabled="busy" @click="openIssue()"><MessageSquare :size="16" />题目有疑问</button></div>
             <p v-if="current.attempt?.missed?.length || current.attempt?.wrong?.length" class="answer-feedback"><span v-if="current.attempt.missed?.length">漏选：{{ answerLabels(current.attempt.missed) }}</span><span v-if="current.attempt.wrong?.length">错选：{{ answerLabels(current.attempt.wrong) }}</span></p>
+            <details v-if="current.attempt" class="attempt-records"><summary>作答记录<template v-if="attemptRecords(current).length">· {{ attemptRecords(current).length }} 次</template></summary><ol><li v-for="(rec, n) in attemptRecords(current)" :key="n"><strong>{{ rec.label }}</strong><time>{{ timeLabel(rec.submitted_at) }}</time><span :class="rec.correct === false ? 'danger' : 'success-text'">{{ rec.resultText }}</span><span v-if="rec.selectedText" class="record-answer">{{ rec.selectedText }}</span></li></ol></details>
             <section v-if="current.answer" class="answer-reference" aria-label="参考答案">
               <h3>参考答案</h3><p v-if="current.answer.correct_option_ids?.length"><strong>{{ answerLabels(current.answer.correct_option_ids) }}</strong></p><p v-if="current.answer.answer_text" class="prewrap">{{ current.answer.answer_text }}</p>
               <template v-if="current.answer.analysis"><h3>解析</h3><p class="prewrap">{{ current.answer.analysis }}</p></template><template v-if="current.answer.hint"><h3>提示</h3><p class="prewrap">{{ current.answer.hint }}</p></template>
@@ -74,7 +80,7 @@
         <form class="toolbar" @submit.prevent="filterChanged">
           <div class="filters">
             <VnetSelect input-id="learning-select-3" v-if="tab === 'review'" :model-value="reviewLabels[filters.review]" :options="Object.values(reviewLabels)" label="复习类别" @update:model-value="filters.review = keyFor(reviewLabels, $event); filterChanged()" /><VnetSelect input-id="learning-select-3b" v-if="tab === 'review'" :model-value="bankLabels[filters.reviewBank] || '全部题库'" :options="['全部题库', ...Object.values(bankLabels)]" label="题库检索" @update:model-value="filters.reviewBank = keyFor(bankLabels, $event); filterChanged()" />
-            <template v-if="tab === 'history'"><label class="checkbox-label"><input v-model="legacyHistory" type="checkbox" @change="filterChanged" />旧楼栋只读历史</label><label class="inline-field">开始<input v-model="filters.from" aria-label="开始日期" type="date" /></label><label class="inline-field">结束<input v-model="filters.to" aria-label="结束日期" type="date" /></label></template>
+            <template v-if="tab === 'history'"><label v-if="viewMode === 'overview'" class="checkbox-label"><input v-model="legacyHistory" type="checkbox" @change="filterChanged" />旧楼栋只读历史</label><label class="inline-field">开始<input v-model="filters.from" aria-label="开始日期" type="date" /></label><label class="inline-field">结束<input v-model="filters.to" aria-label="结束日期" type="date" /></label></template>
             <template v-if="tab === 'questions'"><VnetSelect input-id="learning-select-4" :model-value="bankLabels[filters.bank] || '全部题库'" :options="['全部题库', ...Object.values(bankLabels)]" label="题库筛选" @update:model-value="filters.bank = keyFor(bankLabels, $event); filterChanged()" /><VnetSelect input-id="learning-select-5" :model-value="statusLabels[filters.status] || '全部状态'" :options="['全部状态', ...Object.values(statusLabels)]" label="题目状态筛选" @update:model-value="filters.status = keyFor(statusLabels, $event); filterChanged()" /><label class="checkbox-label"><input v-model="filters.problems" type="checkbox" @change="filterChanged" />仅问题题目</label></template>
             <VnetSelect input-id="learning-select-6" v-if="tab === 'issues'" :model-value="issueLabels[filters.issue] || '全部状态'" :options="['全部状态', ...Object.values(issueLabels)]" label="质疑状态筛选" @update:model-value="filters.issue = keyFor(issueLabels, $event); filterChanged()" />
             <label v-if="tab !== 'history'" class="search-field"><Search :size="16" /><input v-model="filters.search" aria-label="搜索题目或质疑" placeholder="搜索题目或质疑" type="search" /></label>
@@ -96,9 +102,9 @@
       </template>
 
       <template v-else-if="tab === 'profile'">
-        <form class="toolbar" @submit.prevent="loadView"><div class="filters"><VnetSelect input-id="learning-select-7" :model-value="({ '7': '近7天', '30': '近30天' } as Dict)[filters.period] || '自定义'" :options="['近7天', '近30天', '自定义']" label="统计周期" @update:model-value="setPeriod(keyFor({ '7': '近7天', '30': '近30天' }, $event)); loadView()" /><label class="inline-field">开始<input v-model="filters.from" aria-label="统计开始日期" type="date" /></label><label class="inline-field">结束<input v-model="filters.to" aria-label="统计结束日期" type="date" /></label><button :disabled="loading || busy"><Search :size="16" />查询</button></div><button v-if="isAdmin" type="button" :disabled="busy || loading" @click="exportData('results')"><Download :size="16" />导出报表</button></form>
+        <form class="toolbar profile-toolbar" :class="{ 'custom-period': !filters.period }" @submit.prevent="loadView"><div class="filters"><VnetSelect input-id="learning-select-7" :model-value="({ '7': '近7天', '30': '近30天' } as Dict)[filters.period] || '自定义'" :options="['近7天', '近30天', '自定义']" label="统计周期" @update:model-value="setPeriod(keyFor({ '7': '近7天', '30': '近30天' }, $event)); loadView()" /><label class="inline-field">开始<input v-model="filters.from" aria-label="统计开始日期" type="date" /></label><label class="inline-field">结束<input v-model="filters.to" aria-label="统计结束日期" type="date" /></label><button :disabled="loading || busy"><Search :size="16" />查询</button></div><button v-if="isAdmin" type="button" :disabled="busy || loading" @click="exportData('results')"><Download :size="16" />导出报表</button></form>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取统计…</div>
-        <LearningDashboard :data="profile" :person="learner" :disabled="busy || loading" @select="selectLearner" @continue="continueLearning" />
+        <LearningDashboard :data="profile" :person="learner" :show-continue="viewMode === 'practice' && boot.can_answer" :disabled="busy || loading" @select="selectLearner" @continue="continueLearning" />
       </template>
 
       <form v-else-if="tab === 'settings'" class="settings-form" @submit.prevent="saveSettings">
@@ -115,7 +121,7 @@
       <UiTransition name="ui-overlay" appear>
       <div v-if="modalKind" class="learning-overlay" @click.self="closeModal">
         <section ref="modalElement" class="learning-modal" :class="{ 'preview-modal': modalKind === 'attachment' }" role="dialog" aria-modal="true" aria-labelledby="learning-modal-title" tabindex="-1" @paste="['question', 'issue'].includes(modalKind) && pasteFiles($event)">
-          <header><h2 id="learning-modal-title">{{ modalKind === 'question' ? (editor.id ? '编辑题目' : '新增题目') : modalKind === 'issue' ? (issue.id ? '质疑处理记录' : '题目有疑问') : modalKind === 'import' ? '导入题库' : modalKind === 'people' ? '选择答题人员' : preview.name }}</h2><button class="icon-button" aria-label="关闭窗口" title="关闭窗口" :disabled="busy" @click="closeModal"><X :size="20" /></button></header>
+          <header><h2 id="learning-modal-title">{{ modalKind === 'question' ? (editor.id ? '编辑题目' : '新增题目') : modalKind === 'issue' ? (issue.id ? '质疑处理记录' : '题目有疑问') : modalKind === 'import' ? '导入题库' : modalKind === 'people' ? '选择人员' : preview.name }}</h2><button class="icon-button" aria-label="关闭窗口" title="关闭窗口" :disabled="busy" @click="closeModal"><X :size="20" /></button></header>
           <div class="modal-scroll" :inert="busy || undefined">
             <div v-if="error" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ error }}</span><button v-if="conflicted && ['question', 'issue'].includes(modalKind)" :disabled="busy" @click="reloadConflict"><RefreshCw :size="16" />读取最新版本</button></div>
             <template v-if="modalKind === 'people'"><form class="toolbar" @submit.prevent="peoplePage = 1; loadPeople()"><label class="search-field"><Search :size="16" /><input v-model="peopleSearch" aria-label="按姓名或工号搜索人员" placeholder="姓名 / 工号" type="search" /></label><button type="submit" :disabled="peopleLoading"><Search :size="16" />搜索</button><span>{{ scopeLabel }}</span></form><div v-if="peopleLoading" class="loading-line"><Loader2 :size="16" class="spin" />正在读取人员…</div><div class="people-list"><button v-for="person in peopleRows" :key="person.id" :disabled="peopleLoading || busy" @click="selectLearner(person)"><strong>{{ person.name }}</strong><span>工号 {{ person.employee_no || '未填写' }}</span><small>{{ (person.scopes || []).map((s: string) => s + '楼').join('、') }}</small><ChevronRight :size="16" /></button></div><div v-if="!peopleLoading && !peopleRows.length" class="empty">{{ peopleReady ? '没有匹配人员' : '人员目录尚未准备好，请等待后台同步' }}</div><div v-if="peopleIssues.length && isAdmin" class="alert warning"><AlertCircle :size="16" /><span>{{ peopleIssues.length }} 位人员楼栋或身份待核对：{{ peopleIssues.slice(0, 10).map((p: Dict) => p.name).join('、') }}</span></div><div class="pagination"><span>共 {{ peopleTotal }} 人</span><div class="actions"><button class="icon-button" aria-label="人员选择上一页" :disabled="peopleLoading || peoplePage <= 1" @click="peoplePage--; loadPeople()"><ChevronLeft :size="16" /></button><span>{{ peoplePage }} / {{ Math.max(1, Math.ceil(peopleTotal / 20)) }}</span><button class="icon-button" aria-label="人员选择下一页" :disabled="peopleLoading || peoplePage * 20 >= peopleTotal" @click="peoplePage++; loadPeople()"><ChevronRight :size="16" /></button></div></div></template>
@@ -365,8 +371,11 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
   .people-list button { min-height: 52px; }.people-list button:hover:not(:disabled) { box-shadow: inset 3px 0 #4481db; }
 }
 @keyframes learning-question-enter { from { opacity: .35; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+.view-switch { display: inline-flex; align-items: center; gap: 6px; padding: 3px; background: #eef2f7; border-radius: 8px; }.view-switch button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: 6px; border-color: transparent; background: transparent; color: #4b6484; font-size: 13px; font-weight: 600; }.view-switch button.active { background: #fff; color: #174fab; box-shadow: 0 1px 3px #0d3f8f22; }
+.attempt-records { margin: 12px 0; border: 1px solid #dce5ef; border-radius: 8px; padding: 10px 12px; background: #fbfcfe; }.attempt-records summary { cursor: pointer; font-weight: 600; color: #25425f; }.attempt-records ol { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 6px; }.attempt-records li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; line-height: 1.6; }.attempt-records li strong { min-width: 64px; }.attempt-records li time { color: #64758b; font-size: 12px; }.attempt-records .record-answer { color: #25425f; }.attempt-records .danger { color: #ad3a53; font-weight: 600; }.attempt-records .success-text { color: #247651; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .spin, .question-body, .answer-reference, .result { animation: none; }button, .file-button, a[download], input, textarea, .options label { transition: none; } }
 </style>
+<style scoped src="../learningMobile.css"></style>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -391,23 +400,42 @@ const categoryLabels: Dict = Object.fromEntries(["题目", "题干", "选项", "
 const attachmentLabels: Dict = { question: "题面附件", answer: "答案附件", material: "学习资料" };
 const ratingLabels: Dict = Object.fromEntries(["需复习", "部分掌握"].map(v => [v, v]));
 const reviewLabels: Dict = { wrong: "错题", favorites: "收藏", notes: "笔记", all: "全部复习" };
-const tabs = computed(() => [
-  { id: "profile", label: learner.value ? "个人画像" : "楼栋汇总", icon: ChartNoAxesCombined },
-  ...(learner.value ? [{ id: "today", label: "今日学练", icon: BookOpen }, { id: "review", label: "错题与复习", icon: Star }] : []),
-  { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
-  ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
-]);
+const tabs = computed(() => {
+    if (viewMode.value === "overview") {
+      return [
+        { id: "profile", label: learner.value ? "个人画像" : "楼栋汇总", icon: ChartNoAxesCombined },
+        { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
+        ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
+      ];
+    }
+    return [
+      { id: "profile", label: learner.value ? "个人画像" : "楼栋汇总", icon: ChartNoAxesCombined },
+      ...(learner.value ? [{ id: "today", label: "今日学练", icon: BookOpen }, { id: "review", label: "错题与复习", icon: Star }] : []),
+      { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
+      ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
+    ];
+  });
 const boot = ref<Dict>({});
 const ready = ref(false), loading = ref(true), busy = ref(false);
 const error = ref(""), notice = ref(""), storageWarning = ref("");
 const scope = ref(props.scope || ""), date = ref(""), tab = ref<Tab>("profile");
+const viewParam = ref(new URLSearchParams(window.location.search).get("view") || "");
 const learner = ref<Dict | null>(null), legacyHistory = ref(false);
 const peopleRows = ref<Dict[]>([]), peopleIssues = ref<Dict[]>([]), peopleSearch = ref(""), peoplePage = ref(1), peopleTotal = ref(0), peopleReady = ref(false), peopleLoading = ref(false);
 let readRequest: AbortController | undefined, peopleRequest: AbortController | undefined;
 const isAdmin = computed(() => boot.value.is_admin === true);
 const scopes = computed<Array<{ value: string; label: string }>>(() => (boot.value.scopes || []).filter((s: Dict) => s.value));
-const scopeLabel = computed(() => scopes.value.find(s => s.value === scope.value)?.label || scope.value);
-const canAnswer = computed(() => boot.value.can_answer === true && !!learner.value && !paper.value?.legacy && paper.value?.person_id === learner.value.id);
+const scopeLabel = computed(() => scopes.value.find(s => s.value === scope.value)?.label || (scope.value ? `${scope.value}楼` : ''));
+const canAnswer = computed(() => viewMode.value === "practice" && boot.value.can_answer === true && !!learner.value && !paper.value?.legacy && paper.value?.person_id === boot.value.self_person?.id && learner.value.id === boot.value.self_person?.id);
+const canViewBuildings = computed(() => boot.value.can_view_buildings === true);
+const identityIssue = computed(() => String(boot.value.identity_issue || ""));
+const viewMode = computed<"practice" | "overview">(() => {
+  if (boot.value.can_view_buildings === false) return "practice";
+  if (boot.value.can_answer === false && boot.value.can_view_buildings === true) return "overview";
+  if (viewParam.value === "overview") return "overview";
+  if (viewParam.value === "practice") return "practice";
+  return boot.value.can_answer === false ? "overview" : "practice";
+});
 const paper = ref<Dict | null>(null), reading = ref(false), index = ref(0), practice = ref(false);
 const current = computed<Dict | null>(() => paper.value?.questions?.[index.value] || null);
 const answered = computed(() => (paper.value?.questions || []).filter((q: Dict) => q.attempt && !q.invalid && !q.needs_review).length);
@@ -434,6 +462,7 @@ const syncActive = computed(() => ["syncing", "publishing"].includes(boot.value.
 const jobRunning = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status));
 const syncLabel = computed(() => ({ idle: "未初始化", syncing: "同步中", publishing: "发布中", ready: "已同步", error: "同步失败" }[String(boot.value.sync?.status)] || "等待同步"));
 let epoch = 0, disposed = false, pollTimer: number | undefined, todayTimer: number | undefined, pollFailures = 0;
+let onPopstate: (() => void) | undefined;
 const lifetime = new AbortController();
 const modalKind = ref<"" | "question" | "issue" | "import" | "attachment" | "people">("");
 const modalElement = ref<HTMLElement | null>(null), editor = ref<Dict>({}), issue = ref<Dict>({});
@@ -476,6 +505,33 @@ function resultText(q: Dict): string {
   if (!q.attempt) return "未作答";
   if (q.type === "interview") return ratingLabels[q.attempt.self_rating] || "已提交";
   return q.attempt.correct === true ? "回答正确" : "回答错误";
+}
+function attemptRecords(q: Dict): Array<{ label: string; submitted_at: unknown; correct: boolean | null | undefined; resultText: string; selectedText: string }> {
+  const records: Array<{ label: string; submitted_at: unknown; correct: boolean | null | undefined; resultText: string; selectedText: string }> = [];
+  const selectedText = (a: Dict): string => {
+    if (q.type === "interview") return String(a.answer_text || "");
+    return answerLabels(a.option_ids || [], q);
+  };
+  if (q.attempt) {
+    records.push({
+      label: "首次作答",
+      submitted_at: q.attempt.submitted_at,
+      correct: q.attempt.correct,
+      resultText: resultText(q),
+      selectedText: selectedText(q.attempt),
+    });
+  }
+  const practice = Array.isArray(q.practice) ? q.practice : [];
+  practice.forEach((a: Dict, n: number) => {
+    records.push({
+      label: `复习 ${n + 1}`,
+      submitted_at: a.submitted_at,
+      correct: a.correct,
+      resultText: q.type === "interview" ? ratingLabels[a.self_rating] || "已提交" : (a.correct === true ? "回答正确" : "回答错误"),
+      selectedText: selectedText(a),
+    });
+  });
+  return records;
 }
 function shortageText(value: unknown): string {
   if (!value) return "";
@@ -540,6 +596,14 @@ watch([() => [...draft.option_ids], () => draft.answer_text, () => draft.self_ra
 function selectQuestion(position: number): void {
   if (busy.value || position < 0 || position >= (paper.value?.questions.length || 0)) return;
   saveDraft(); index.value = position; hydrateQuestion();
+  void nextTick(() => {
+    const rail = document.querySelector<HTMLElement>('.learning-page:not([inert]) .question-numbers');
+    const button = rail?.querySelector<HTMLElement>('[aria-current="step"]');
+    if (!rail || !button || rail.scrollWidth <= rail.clientWidth) return;
+    const area = rail.getBoundingClientRect(), target = button.getBoundingClientRect();
+    const left = target.right > area.right ? target.right - area.right + 4 : target.left < area.left ? target.left - area.left - 4 : 0;
+    rail.scrollBy({ left, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  });
 }
 function chooseOption(id: string): void {
   if (locked.value || busy.value) return;
@@ -644,14 +708,17 @@ async function switchTab(value: Tab): Promise<void> {
   if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("离开发布设置", "尚有未保存的设置，确认放弃？")) return;
   saveDraft(); rows.value = []; total.value = 0; tab.value = value; reading.value = false; notice.value = "";
   if (value === "today" && !scope.value) scope.value = boot.value.scopes?.find((s: Dict) => s.value)?.value || "";
-  await loadView();
+  if (value === 'today' && viewMode.value === 'practice') await loadTodayPaper();
+  else await loadView();
 }
 async function changeScope(label: string): Promise<void> {
   const next = scopes.value.find(s => s.label === label)?.value;
   if (next === undefined || busy.value) return;
   saveDraft(); scope.value = next; reading.value = false; paper.value = null; learner.value = null; tab.value = "profile"; profile.value = {};
   for (const key of Object.keys(pages)) pages[key] = 1;
-  navigate("/learning?" + new URLSearchParams({ scope: next }));
+  const params = new URLSearchParams({ scope: next });
+  if (viewMode.value === "overview") params.set("view", "overview");
+  navigate("/learning?" + params);
 }
 async function openPeople(): Promise<void> {
   if (busy.value) return;
@@ -668,15 +735,52 @@ async function loadPeople(): Promise<void> {
 async function selectLearner(person: Dict): Promise<void> {
   if (busy.value) return;
   saveDraft(); modalKind.value = "";
-  navigate("/learning?" + new URLSearchParams({ scope: scope.value, person_id: person.id }));
+  const params = new URLSearchParams({ scope: scope.value, person_id: person.id });
+  if (viewMode.value === "overview") params.set("view", "overview");
+  navigate(`/learning?${params}`);
+}
+// Profile back returns to its building, not the previous person's browser-history entry.
+function handleBack(): void {
+  saveDraft();
+  if (viewMode.value === "overview" && learner.value?.id) {
+    navigate(`/learning?view=overview&scope=${encodeURIComponent(scope.value)}`);
+  } else {
+    navigate("/?entry=tools");
+  }
+}
+function goPractice(): void {
+  if (busy.value || viewMode.value === "practice") return;
+  navigate("/learning?view=practice");
+}
+function goOverview(): void {
+  if (busy.value || viewMode.value === "overview") return;
+  navigate(`/learning?view=overview${scope.value ? `&scope=${encodeURIComponent(scope.value)}` : ""}`);
 }
 async function continueLearning(): Promise<void> {
-  if (!learner.value || busy.value) return;
-  await perform(async () => {
-    const data = await requestLearning(learningOptions, "/papers?" + query({ today: 1 }));
-    paper.value = data.items?.[0] || await requestLearning(learningOptions, "/papers/claim", "POST", { scope: scope.value, person_id: learner.value!.id });
-    tab.value = "today"; reading.value = true; index.value = 0; hydrateQuestion();
-  });
+  if (!learner.value || busy.value || viewMode.value !== "practice") return;
+  await loadTodayPaper();
+}
+async function enterPracticeToday(): Promise<void> {
+  if (viewMode.value !== "practice" || !boot.value.self_person || boot.value.can_answer !== true) return;
+  await loadTodayPaper();
+}
+async function loadTodayPaper(): Promise<void> {
+  if (!learner.value || viewMode.value !== "practice" || busy.value) return;
+  const token = ++epoch;
+  loading.value = true; error.value = "";
+  try {
+    const data = await requestLearning(learningOptions, `/papers?` + query({ today: 1 }));
+    if (token !== epoch) return;
+    let p = data.items?.[0] || null;
+    if (!p && boot.value.can_answer === true) {
+      p = await requestLearning(learningOptions, "/papers/claim", "POST", { scope: scope.value, person_id: learner.value.id });
+    }
+    if (token !== epoch) return;
+    if (!p?.questions) p = await requestLearning(learningOptions, `/papers/${encodeURIComponent(p.id)}`);
+    if (token !== epoch) return;
+    paper.value = p; tab.value = "today"; reading.value = true; index.value = 0; hydrateQuestion();
+  } catch (e) { if (token === epoch && !disposed) error.value = String((e as Error).message); }
+  finally { if (token === epoch) loading.value = false; }
 }
 function filterChanged(): void { pages[tab.value] = 1; void loadView(); }
 function clearFilters(): void {
@@ -689,7 +793,8 @@ function clearFilters(): void {
 async function refreshView(): Promise<void> {
   if (!ready.value) { await bootstrap(); return; }
   if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("刷新设置", "尚有未保存的设置，确认放弃并重新读取？")) return;
-  if (reading.value && paper.value && current.value) await loadPaper(paper.value.id, questionId(current.value));
+  if (tab.value === 'today' && viewMode.value === 'practice' && !paper.value) await loadTodayPaper();
+  else if (reading.value && paper.value && current.value) await loadPaper(paper.value.id, questionId(current.value));
   else await loadView();
   void refreshSync();
 }
@@ -713,23 +818,28 @@ function gotoPage(target: number): void {
   void loadView();
 }
 async function bootstrap(): Promise<void> {
-  loading.value = true; error.value = "";
-  try {
-    boot.value = await requestLearning(learningOptions,`/bootstrap${scope.value ? `?scope=${encodeURIComponent(scope.value)}` : ""}`);
-    scope.value = scopes.value.some(s => s.value === scope.value) ? scope.value : boot.value.scope || scopes.value[0]?.value || "";
-    if (props.personId) learner.value = { id: props.personId };
-    date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
-    Object.assign(settingsForm, boot.value.settings || {}); settingsSnapshot = JSON.stringify(settingsForm);
-    ready.value = true; await loadView();
-    if (learner.value?.active && learner.value.scopes?.includes(scope.value) && profile.value.published) {
-      busy.value = true;
-      try { await requestLearning(learningOptions, "/papers/claim", "POST", { scope: scope.value, person_id: learner.value.id }); await loadView(); }
-      finally { busy.value = false; }
-    }
-    schedulePoll();
-  } catch (e) { error.value = String((e as Error).message); }
-  finally { loading.value = false; }
-}
+    loading.value = true; error.value = "";
+    try {
+      boot.value = await requestLearning(learningOptions,`/bootstrap${scope.value ? `?scope=${encodeURIComponent(scope.value)}` : ""}`);
+      viewParam.value = new URLSearchParams(window.location.search).get("view") || viewParam.value;
+      if (viewMode.value === "practice") {
+        learner.value = boot.value.self_person || null;
+        scope.value = boot.value.self_scope || scope.value || "";
+      } else {
+        scope.value = scopes.value.some(s => s.value === scope.value) ? scope.value : boot.value.scope || scopes.value[0]?.value || "";
+        learner.value = props.personId ? { id: props.personId } : null;
+        if (learner.value && boot.value.self_person?.id === learner.value.id) learner.value = boot.value.self_person;
+      }
+      date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
+      Object.assign(settingsForm, boot.value.settings || {}); settingsSnapshot = JSON.stringify(settingsForm);
+      ready.value = true;
+      if (viewMode.value === "practice" && boot.value.can_answer === true && learner.value?.id && boot.value.self_scope) {
+        await enterPracticeToday();
+      } else if (viewMode.value === 'overview') await loadView();
+      schedulePoll();
+    } catch (e) { error.value = String((e as Error).message); }
+    finally { loading.value = false; }
+  }
 function schedulePoll(): void {
   window.clearTimeout(pollTimer);
   if (disposed || !syncActive.value || pollFailures >= 3) return;
@@ -981,7 +1091,13 @@ onMounted(() => {
   window.addEventListener("beforeunload", beforeUnload);
   document.addEventListener("visibilitychange", checkToday);
   todayTimer = window.setInterval(checkToday, 60_000);
+  onPopstate = () => {
+    const next = new URLSearchParams(window.location.search);
+    const v = next.get("view") || "";
+    if (v !== viewParam.value) { viewParam.value = v; epoch++; void bootstrap(); }
+  };
+  window.addEventListener("popstate", onPopstate);
   void bootstrap();
 });
-onBeforeUnmount(() => { saveDraft(); disposed = true; epoch++; lifetime.abort(); readRequest?.abort(); peopleRequest?.abort(); window.clearTimeout(pollTimer); window.clearInterval(todayTimer); releaseGuard?.(); modalOwner?.release(); window.removeEventListener("keydown", modalKeydown, true); window.removeEventListener("beforeunload", beforeUnload); document.removeEventListener("visibilitychange", checkToday); resolveConfirm?.(false); });
+onBeforeUnmount(() => { saveDraft(); disposed = true; epoch++; lifetime.abort(); readRequest?.abort(); peopleRequest?.abort(); window.clearTimeout(pollTimer); window.clearInterval(todayTimer); releaseGuard?.(); modalOwner?.release(); window.removeEventListener("keydown", modalKeydown, true); window.removeEventListener("beforeunload", beforeUnload); document.removeEventListener("visibilitychange", checkToday); if (onPopstate) window.removeEventListener("popstate", onPopstate); resolveConfirm?.(false); });
 </script>

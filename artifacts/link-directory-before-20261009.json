@@ -1,0 +1,50 @@
+{
+  "fields": {
+    "has_more": false,
+    "items": [
+      {
+        "field_id": "fldKUdaFMA",
+        "field_name": "文本",
+        "is_extend": false,
+        "is_primary": true,
+        "is_synced": false,
+        "property": null,
+        "type": 1,
+        "ui_type": "Text"
+      }
+    ],
+    "page_token": "fldKUdaFMA",
+    "total": 1
+  },
+  "records": {
+    "has_more": false,
+    "items": [
+      {
+        "fields": {},
+        "id": "recvxx4c4ZsZbI",
+        "record_id": "recvxx4c4ZsZbI"
+      },
+      {
+        "fields": {},
+        "id": "recvxx4c4ZXR8Q",
+        "record_id": "recvxx4c4ZXR8Q"
+      },
+      {
+        "fields": {},
+        "id": "recvxx4c4Z98QL",
+        "record_id": "recvxx4c4Z98QL"
+      },
+      {
+        "fields": {},
+        "id": "recvxx4c4ZETet",
+        "record_id": "recvxx4c4ZETet"
+      },
+      {
+        "fields": {},
+        "id": "recvxx4c4ZZ0CE",
+        "record_id": "recvxx4c4ZZ0CE"
+      }
+    ],
+    "total": 5
+  }
+}

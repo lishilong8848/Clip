@@ -14,6 +14,7 @@
     <VnetBackButton v-if="showBack" @click="$emit('back')" />
     <strong>{{ title || "当前账号暂无门户权限" }}</strong>
     <p class="user-line" :title="userOpenId ? `飞书身份：${userOpenId}` : ''">{{ userLineText }}</p>
+    <a v-if="!showBack && userOpenId.startsWith('ou_')" class="btn blue" href="/learning?view=practice">进入我的答题</a>
     <div class="request-steps" aria-label="权限申请流程">
       <span class="active">
         <b>1</b>

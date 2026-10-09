@@ -9791,6 +9791,25 @@ class LanPortalStateStore:
                 )
         return self._notice_identity_from_row(row) if row else None
 
+    def notice_sources_with_targets(self, work_type: str, source_ids: list[str]) -> set[str]:
+        """Read only the indexed links needed by a planned-notice candidate page."""
+        if not source_ids or not self.db_path.exists():
+            return set()
+        source_ids = list(dict.fromkeys(source_ids))
+        found = set()
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                for start in range(0, len(source_ids), 400):
+                    batch = source_ids[start:start + 400]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = conn.execute(
+                        "SELECT source_record_id FROM notice_identity_map WHERE deleted_at IS NULL "
+                        "AND (work_type = ? OR work_type = '') AND target_record_id <> '' "
+                        f"AND source_record_id IN ({placeholders})", (work_type, *batch))
+                    found.update(row[0] for row in rows)
+        return found
+
     def list_notice_identities(
         self,
         *,

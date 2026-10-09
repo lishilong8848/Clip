@@ -35,10 +35,6 @@ def h_actor():
             "scopes": list("ABCDEH"), "learning_scopes": ["H"], "scope": "H"}
 
 
-def a_actor():
-    return {"id": "a-duty", "is_admin": False, "scopes": ["A"], "learning_scopes": ["A"]}
-
-
 class QuestionMaterialTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -187,10 +183,11 @@ class QuestionMaterialTests(unittest.TestCase):
             self.assertEqual(first["text"], "cached extraction")
             self.assertEqual(second["text"], "cached extraction")
             self.assertEqual(extract.call_count, 1, "second read must reuse cached extraction")
-            # Even with a warm cache the native permission check must still run:
-            # a non-H building account is refused although digest is already cached.
+            # Six-building duty accounts can now access personal learning across
+            # buildings, but deleting the source paper must revoke cached access.
+            self.paper("h1", "H", [self.qh], deleted=True)
             with self.assertRaises(AssistantError) as caught:
-                self.read(actor=a_actor(), material_id="mat_h")
+                self.read(material_id="mat_h")
             self.assertEqual(caught.exception.status, 403)
             self.assertEqual(extract.call_count, 1)
         self.assertEqual(self.cloud.calls, [])

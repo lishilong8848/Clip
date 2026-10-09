@@ -3,7 +3,7 @@
     <div class="metrics" aria-label="学习统计">
       <div v-for="(item, n) in metrics" :key="item.label" :class="{ 'metric-warning': n === (person ? 1 : 2), 'metric-success': n === 3 }"><span>{{ item.label }}</span><strong>{{ item.value }}</strong><component :is="[person ? BookOpen : UsersRound, person ? CircleAlert : BookOpen, person ? Target : CircleAlert, Target][n]" :size="21" class="metric-icon" aria-hidden="true" /></div>
     </div>
-    <div v-if="person" class="today-strip"><span>今日进度 <strong>{{ data.today_summary?.task_answered ?? 0 }} / {{ data.today_summary?.assigned ?? 0 }}</strong></span><span>学习 {{ data.summary?.learning_days ?? 0 }} 天</span><span>复习 {{ data.summary?.practice_count ?? 0 }} 次</span><span>问答 {{ data.summary?.interview_total ?? 0 }} 题</span><button :disabled="disabled || !data.published" @click="$emit('continue')"><BookOpen :size="16" />{{ data.today_summary?.papers ? '继续今日学练' : '领取今日题单' }}</button><small v-if="!data.published">今日尚未发布</small></div>
+    <div v-if="person" class="today-strip"><span>今日进度 <strong>{{ data.today_summary?.task_answered ?? 0 }} / {{ data.today_summary?.assigned ?? 0 }}</strong></span><span>学习 {{ data.summary?.learning_days ?? 0 }} 天</span><span>复习 {{ data.summary?.practice_count ?? 0 }} 次</span><span>问答 {{ data.summary?.interview_total ?? 0 }} 题</span><button v-if="showContinue" :disabled="disabled || !data.published" @click="$emit('continue')"><BookOpen :size="16" />{{ data.today_summary?.papers ? '继续今日学练' : '领取今日题单' }}</button><small v-if="!data.published">今日尚未发布</small></div>
     <div v-else class="today-strip"><span>今日已答 <strong>{{ data.today_summary?.answered_people ?? 0 }}</strong> 人</span><span>已完成 {{ data.today_summary?.completed_people ?? 0 }} 人</span><span>已领取未开始 {{ data.today_summary?.not_started_people ?? 0 }} 人</span><span>选择题正确率 {{ percent(data.today_summary?.accuracy) }}</span><small>{{ data.published ? '今日已发布' : '今日尚未发布' }}</small></div>
     <div class="dashboard-panels" aria-label="学练仪表盘">
       <section class="completion-panel" aria-label="题目完成进度">
@@ -60,7 +60,7 @@
 import { computed, ref, watch } from 'vue';
 import { BookOpen, ChartNoAxesCombined, Search, ChevronLeft, ChevronRight, UsersRound, Target, CircleAlert } from 'lucide-vue-next';
 import type { Dict } from '../api/client';
-const props = defineProps<{ data: Dict; person?: Dict | null; disabled?: boolean }>();
+const props = defineProps<{ data: Dict; person?: Dict | null; disabled?: boolean; showContinue?: boolean }>();
 defineEmits<{ continue: []; select: [person: Dict] }>();
 const metric = ref('answered'), classification = ref('banks'), search = ref(''), sort = ref('recent'), page = ref(1), includeUnanswered = ref(false);
 const progressPeriod = ref('period');
@@ -138,5 +138,38 @@ tbody tr:hover { background: #f7faff; }.table-head, .table-head > div { flex-wra
 @keyframes learning-ring { from { stroke-dashoffset: 100; } }
 @keyframes learning-bar { from { transform: scaleX(0); } }
 @keyframes learning-line { from { stroke-dashoffset: 1000; } }
+@media (max-width: 700px) {
+  .learning-dashboard { min-width: 0; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metrics > div { padding: 16px 12px; border-bottom: 1px solid #e4ebf2; }
+  .metrics > div:nth-child(2n) { border-right: 0; }
+  .metrics strong { font-size: 23px; }
+  .metrics span { padding-right: 24px; min-height: 32px; line-height: 1.5; }
+  .metric-icon { right: 10px; top: 16px; width: 17px; height: 17px; }
+  .today-strip { gap: 10px 16px; font-size: 14px; }
+  .today-strip button { width: 100%; margin: 0; justify-content: center; }
+  .dashboard-panels, .charts, .charts.building-charts { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .dashboard-panels > section + section { border-left: 0; padding: 20px 0 0; border-top: 1px solid #e0e7ef; }
+  .completion-body { gap: 16px; }
+  .completion-ring { flex-basis: 140px; width: 140px; }
+  .charts > section + section { padding-top: 20px; border-top: 1px solid #e0e7ef; }
+  .trend-plot { height: auto; min-height: 150px; }
+  .trend-plot text { font-size: 13px; }
+  .bar-row { grid-template-columns: minmax(80px, 1fr) minmax(60px, 1fr) 30px; gap: 8px; }
+  .bar-row > span { white-space: normal; overflow-wrap: anywhere; }
+  button, select, input[type=search] { min-height: 44px; touch-action: manipulation; }
+  input[type=search], select { font-size: 16px; min-width: 0; max-width: 100%; }
+  .segments button { min-height: 44px; padding: 8px 12px; }
+  .table-head { gap: 12px; }
+  .table-head > div { width: 100%; gap: 10px; }
+  .table-head label:first-child { width: 100%; min-width: 0; }
+  .table-head input[type=search] { width: 100%; }
+  .table-head label { min-height: 44px; }
+  .table-wrap { max-width: 100%; overscroll-behavior-x: contain; }
+  .table-wrap table { min-width: 680px; }
+  th:first-child, td:first-child { position: sticky; left: 0; background: #f6f9fd; z-index: 1; min-width: 100px; }
+  th, td { padding: 12px; }
+  footer { flex-wrap: wrap; }
+}
 @media (prefers-reduced-motion: reduce) { .ring-fill, .trend-line, .method-track > i, .bar-row i { animation: none; transition: none; }button, select, input, .trend-point { transition: none; } }
 </style>

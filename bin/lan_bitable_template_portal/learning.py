@@ -726,34 +726,154 @@ class LearningService:
             raise LearningError("仅管理员可执行此操作", 403)
 
     @staticmethod
-    def _scope(actor, scope=None, write=False):
-        requested = str(scope or ("" if actor.get("is_admin") else actor.get("scope")) or "").upper()
-        if requested not in SCOPES:
-            if not requested and actor.get("is_admin") and not write:
-                return ""
-            raise LearningError("请选择 A、B、C、D、E 或 H 楼", 400)
-        if not actor.get("is_admin") and actor.get("scope") not in SCOPES:
-            raise LearningError("仅六楼值班账号及管理员可使用学练", 403)
-        return requested
+    def _self_person(actor):
+        person_id = actor.get("person_id") or ""
+        return person_id
+
+    def _access(self, actor, *, scope=None, person_id=None, write=False, target_person=None):
+        """Resolve the effective scope/person for a request under the new self-service model.
+
+        Writes are only allowed for the actor's own person; building duty accounts are
+        read-only. Reads limit ordinary personal accounts to themselves and duty
+        accounts to their own building.
+        """
+        admin = bool(actor.get("is_admin"))
+        # Duty is decided solely by the explicit shared_account flag set by the
+        # routes layer; never infer it from scope + missing person_id.
+        duty = bool(actor.get("shared_account"))
+        self_pid = actor.get("person_id") or ""
+        if write:
+            if duty:
+                raise LearningError("楼栋值班账号仅可查看本楼人员与画像，不能提交或代答。", 403)
+            if not self_pid:
+                raise LearningError("当前账号未关联本人人员，暂时不能提交答题或质疑。", 403)
+            target = target_person if target_person is not None else (person_id or "")
+            if target and target != self_pid:
+                raise LearningError("当前账号只能操作自己的题单与质疑。", 403)
+            return {"scope": "", "person_id": self_pid}
+        if duty:
+            own = actor.get("scope", "")
+            if own not in SCOPES:
+                raise LearningError("楼栋值班账号缺少楼栋范围。", 403)
+            if scope is not None and scope and scope != own:
+                raise LearningError("楼栋值班账号仅可查看本楼人员与画像。", 403)
+            if person_id:
+                prow = self._get("person", person_id)
+                if not prow or own not in set(prow.get("scopes") or []):
+                    raise LearningError("楼栋值班账号仅可查看本楼人员与画像。", 403)
+            return {"scope": own, "person_id": person_id or ""}
+        if admin:
+            return {"scope": scope or "", "person_id": person_id or ""}
+        # Ordinary personal account read: self-only and MUST be mapped. Without a
+        # resolved person an empty scope/person would otherwise expose all records.
+        if not self_pid:
+            raise LearningError("登录账号与人员名单尚未关联，请管理员先同步人员目录。", 403)
+        if person_id not in (None, "", self_pid):
+            raise LearningError("普通账号只能查看自己的画像与题单。", 403)
+        return {"scope": "", "person_id": self_pid}
+
+    def _claim_context(self, actor, payload):
+        """Resolve (scope, self_person) for paper.claim with self-service auto-self.
+
+        Claim is always self-service: the paper is created for the actor's own
+        resolved person. An explicit scalar that contradicts the mapped self
+        building or person is rejected instead of silently ignored.
+        """
+        self_pid = actor.get("person_id") or ""
+        self._access(actor, scope=payload.get('scope'), person_id=payload.get('person_id'), write=True)
+        requested_pid = payload.get("person_id")
+        if requested_pid and requested_pid != self_pid:
+            raise LearningError("当前账号只能领取自己的题单。", 403)
+        person_row = self._get("person", self_pid) if self_pid else None
+        if not person_row or not person_row.get("active"):
+            raise LearningError("登录账号与人员名单尚未关联，请管理员先同步人员目录。", 403)
+        scopes = [s for s in person_row.get("scopes", [])]
+        if len(set(scopes) & set(SCOPES)) != 1:
+            raise LearningError("当前人员未关联唯一楼栋，请管理员核对人员名单。", 409)
+        scope = next(s for s in scopes if s in SCOPES)
+        explicit = payload.get("scope")
+        if explicit and explicit != scope:
+            raise LearningError("楼栋与当前人员所属楼栋不一致，请核对后重试。", 403)
+        return scope, person_row
+
+    def _scope(self, actor, scope=None, write=False):
+        return self._access(actor, scope=scope, write=write)["scope"]
 
     def bootstrap(self, scope, actor):
-        scope = self._scope(actor, scope)
+        admin = bool(actor.get("is_admin"))
+        duty = bool(actor.get("shared_account"))
+        self_pid = actor.get("person_id") or ""
+        if admin:
+            access = self._access(actor, scope=scope)
+        elif duty:
+            access = self._access(actor, scope=(scope or actor.get("scope")))
+        elif self_pid:
+            access = self._access(actor, scope="", person_id=self_pid)
+        else:
+            # Unmatched ordinary accounts may still load bootstrap so the frontend
+            # can surface the identity issue; all content endpoints stay closed.
+            access = {"scope": "", "person_id": ""}
+        scope = access["scope"]
         if not self._restored:
             self._restore_requested = True
             self._wake.set()
         if not self._get("local", "refresh") and self._refresh_state == "idle":
             self.request_refresh()
-        return {"is_admin": bool(actor.get("is_admin")), "can_answer": bool(actor.get("is_admin") or actor.get("scope") in SCOPES),
-                "scopes": [{"value": s, "label": f"{s}楼"} for s in SCOPES],
-                "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(), "today": now().date().isoformat(), "silent_manual_publish": True,
-                "question_problem_count": sum(bool(q.get("problems")) and q.get("status") != "deleted" for q in self._all("question")) if actor.get("is_admin") else 0,
-                "summary": self.profile(actor, {"scope": scope})["summary"]}
+        self_pid = self._self_person(actor)
+        self_person = self._get("person", self_pid) if self_pid else None
+        self_public = None
+        if self_person:
+            self_public = {k: self_person.get(k) for k in ("id", "name", "employee_no", "scopes")}
+        self_scopes = [s for s in (self_person or {}).get("scopes", []) if s in SCOPES]
+        self_scope = self_scopes[0] if len(self_scopes) == 1 else (self_scopes[0] if self_scopes else "")
+        admin = bool(actor.get("is_admin"))
+        duty = bool(actor.get("shared_account"))
+        can_answer = bool(actor.get("can_answer"))
+        can_view_buildings = bool(admin or duty)
+        if duty:
+            scopes = [{"value": scope, "label": f"{scope}楼"} for scope in [actor.get("scope", "")] if scope in SCOPES]
+        elif admin:
+            scopes = [{"value": s, "label": f"{s}楼"} for s in SCOPES]
+        else:
+            scopes = []
+        if admin:
+            # Unmatched admin can still view, just not answer.
+            can_view_buildings = True
+        if not self_pid and not admin and not duty:
+            summary = {}  # Unmatched ordinary account: surface identity_issue, no stats yet.
+        else:
+            summary = self.profile(actor, {"scope": scope})["summary"]
+        return {"is_admin": admin, "can_answer": can_answer, "can_view_buildings": can_view_buildings,
+                "self_person": self_public, "self_scope": self_scope, "identity_issue": actor.get("identity_issue", ""),
+                "scopes": scopes, "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(),
+                "today": now().date().isoformat(), "silent_manual_publish": True,
+                "question_problem_count": sum(bool(q.get("problems")) and q.get("status") != "deleted" for q in self._all("question")) if admin else 0,
+                "summary": summary}
 
     def _paper(self, paper_id, actor, conn=None, write=False):
         paper = self._get("paper", paper_id, conn)
         if not paper:
             raise LearningError("今日题单尚未发布或题单不存在", 404)
-        self._scope(actor, paper["scope"], write)
+        admin = bool(actor.get("is_admin"))
+        duty = bool(actor.get("shared_account"))
+        self_pid = actor.get("person_id") or ""
+        if write:
+            self._access(actor, scope=paper.get("scope"), person_id=paper.get("person_id"),
+                         write=True, target_person=paper.get("person_id"))
+        elif admin:
+            pass
+        elif duty:
+            # Duty legacy papers only belong to the duty building historically, and
+            # person access is still enforced by _access on read.
+            if paper.get("scope") not in SCOPES or paper.get("scope") != actor.get("scope"):
+                raise LearningError("楼栋值班账号仅可查看本楼人员与画像。", 403)
+            self._access(actor, scope=paper.get("scope"), person_id=paper.get("person_id"))
+        else:
+            # Ordinary personal accounts may only open their own paper. Legacy
+            # building-history papers (empty person_id) are excluded entirely.
+            if not paper.get("person_id") or paper.get("person_id") != self_pid:
+                raise LearningError("普通账号只能查看自己的画像与题单。", 403)
+            self._access(actor, scope=paper.get("scope"), person_id=paper.get("person_id"))
         if paper.get("deleted_at"):
             raise LearningError("题单已删除", 404)
         if write and not paper.get("person_id"):
@@ -893,13 +1013,19 @@ class LearningService:
         return self.public_paper(paper, actor, record)
 
     def list_papers(self, actor, query):
-        scope = self._scope(actor, query.get("scope"))
-        person_id = str(query.get("person_id") or "")
+        access = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))
+        scope = access["scope"]
+        person_id = access["person_id"]
         legacy = query.get("legacy") == "1"
         if person_id:
-            from .learning_personal import person
-            person(self, person_id)
-            scope = ""
+            # Admin/duty may query any person and must be validated; an ordinary
+            # self-only read already constrains to the actor's own person, so a
+            # temporarily absent person row cannot be used to widen the filter.
+            if actor.get("is_admin") or actor.get("shared_account"):
+                from .learning_personal import person
+                person(self, person_id)
+            if not actor.get('shared_account'):
+                scope = ""
         if query.get("today") == "1":
             query = {**query, "date": now().date().isoformat()}
         query = self._date_filters(query)
@@ -924,11 +1050,14 @@ class LearningService:
         return {"items": items[(page - 1) * size:page * size], "total": len(items), "page": page, "page_size": size}
 
     def review(self, actor, query):
-        scope = self._scope(actor, query.get("scope"))
+        access = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))
         from .learning_personal import person
-        learner = person(self, query.get("person_id"))
+        learner_pid = access["person_id"]
+        if not learner_pid:
+            raise LearningError("请选择人员。", 400)
+        learner = person(self, learner_pid)
         result = []
-        for paper in reversed(self._documents("paper", person_id=learner["id"])):
+        for paper in reversed(self._documents("paper", scope=access['scope'], person_id=learner["id"])):
             if paper.get("deleted_at"):
                 continue
             public = self.public_paper(paper, actor)
@@ -949,6 +1078,55 @@ class LearningService:
                 if include:
                     result.append({"paper_id": paper["id"], "date": paper["date"], "scope": paper["scope"], "question": q})
         return self._page(result, query)
+
+    def attempt_history(self, actor, query):
+        """Flat, paginated actual submission history for the authorized person.
+
+        Includes both the retained first attempt and every practice submission,
+        deduplicated by operation id so retried/lost responses never repeat rows.
+        """
+        access = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))
+        person_id = access["person_id"]
+        if not person_id:
+            raise LearningError("请选择人员。", 400)
+        rows = []
+        seen = set()
+        dates = self._date_filters(query)
+        for paper in self._documents("paper", scope=access['scope'], person_id=person_id,
+                                    start=dates.get('from', ''), end=dates.get('to', '')):
+            if paper.get("deleted_at"):
+                continue
+            record = self._get("record", paper["id"]) or {}
+            for q in paper.get("questions", []):
+                entry = record.get("entries", {}).get(q["id"], {})
+                for index, attempt in enumerate([entry.get('attempt'), *entry.get('practice', [])]):
+                    if not attempt:
+                        continue
+                    key = (paper['id'], q['id'], attempt.get('operation_id') or f'legacy:{index}')
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append(self._attempt_row(paper, q, attempt, kind='first' if index == 0 else 'practice'))
+        rows.sort(key=lambda row: (row["submitted_at"], row["operation_id"]), reverse=True)
+        return self._page(rows, query)
+
+    @staticmethod
+    def _attempt_row(paper, q, attempt, *, kind):
+        return {
+            "operation_id": attempt.get("operation_id", ""),
+            "submitted_at": attempt.get("submitted_at", ""),
+            "date": paper.get("date", ""),
+            "scope": paper.get("scope", ""),
+            "paper_id": paper["id"],
+            "person_id": paper.get("person_id", ""),
+            "question_id": q["id"],
+            "question": q.get("stem", ""),
+            "kind": kind,
+            "option_ids": sorted(attempt.get("option_ids") or []),
+            "answer_text": attempt.get("answer_text", ""),
+            "correct": attempt.get("correct"),
+            "self_rating": attempt.get("self_rating", ""),
+        }
 
     @staticmethod
     def _date_filters(query):
@@ -972,6 +1150,11 @@ class LearningService:
     def profile(self, actor, query):
         from .learning_personal import profile
         return profile(self, actor, query)
+
+    def resolve_self(self, open_id):
+        """Resolve a session open id to a stable local person via persised login_ids."""
+        from .learning_personal import resolve_self
+        return resolve_self(self, open_id)
 
     def _question(self, qid, conn=None):
         q = self._get("question", qid, conn)
@@ -1133,11 +1316,25 @@ class LearningService:
                                           "target_fingerprint": digest([self._question_content(q), bool(q.get("invalid")), q.get("correction")]),
                                           "status": "pending", "message": f"【画像学练·答案更正】{paper['scope']}楼\n题目：{q['stem'][:150]}\n{q['correction']}"}, conn)
 
-    def issue(self, issue_id, actor, conn=None):
+    def issue(self, issue_id, actor, conn=None, write=False):
         item = self._get("issue", issue_id, conn)
         if not item:
             raise LearningError("质疑记录不存在", 404)
-        self._scope(actor, item["scope"])
+        if actor.get('is_admin'):
+            return item
+        admin = bool(actor.get("is_admin"))
+        duty = bool(actor.get("shared_account"))
+        self_pid = actor.get("person_id") or ""
+        if not admin and not duty:
+            # Ordinary personal accounts: own issues only; legacy person-less
+            # issues are excluded.
+            if not item.get("person_id") or item.get("person_id") != self_pid:
+                raise LearningError("普通账号只能查看自己的画像与题单。", 403)
+            self._access(actor, scope=item.get("scope"), person_id=item.get("person_id"),
+                         write=write, target_person=item.get("person_id"))
+            return item
+        self._access(actor, scope=item.get("scope"), person_id=item.get("person_id"),
+                     write=write, target_person=item.get("person_id"))
         return item
 
     def public_issue(self, item, actor):
@@ -1178,7 +1375,7 @@ class LearningService:
 
     def update_issue(self, payload, actor):
         with self.transaction() as conn:
-            item = self.issue(payload.get("id"), actor, conn)
+            item = self.issue(payload.get("id"), actor, conn, write=True)
             if payload.get("version") != item["version"]:
                 raise LearningError("质疑内容已更新，请重新读取", 409)
             status = payload.get("status", item["status"])
@@ -1209,9 +1406,10 @@ class LearningService:
         return self.public_issue(item, actor)
 
     def list_issues(self, actor, query):
-        scope = self._scope(actor, query.get("scope"))
-        identity = str(query.get("person_id") or "")
-        items = self._documents("issue", scope="" if identity else scope, person_id=identity)
+        access = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))
+        scope = access["scope"]
+        identity = access["person_id"]
+        items = self._documents("issue", scope=scope, person_id=identity)
         if query.get("status"):
             items = [i for i in items if i["status"] == query["status"]]
         if query.get("search"):
@@ -1225,12 +1423,18 @@ class LearningService:
     def _attachment_allowed(self, attachment, actor):
         if actor.get("is_admin"):
             return
-        scope = self._scope(actor)
+        access = self._access(actor)
+        scope = access["scope"]
+        self_pid = access["person_id"]
         if attachment.get("issue_id"):
             self.issue(attachment["issue_id"], actor)
             return
         for paper in self._all("paper"):
-            if paper.get("deleted_at") or paper["scope"] not in SCOPES:
+            if paper.get("deleted_at"):
+                continue
+            if scope and paper.get("scope") != scope:
+                continue
+            if self_pid and paper.get("person_id") != self_pid:
                 continue
             for q in paper["questions"]:
                 if not any(a["id"] == attachment["id"] for a in q.get("attachments", [])):
@@ -1313,7 +1517,7 @@ class LearningService:
                 entity = self._question(qid, conn)
                 entity_kind = "question"
             else:
-                entity = self.issue(issue_id, actor, conn)
+                entity = self.issue(issue_id, actor, conn, write=True)
                 entity_kind = "issue"
             if str(query.get("version")) != str(entity["version"]):
                 raise LearningError("题目或质疑已更新，请读取最新版本后上传附件；当前填写请保留", 409)
@@ -1356,7 +1560,7 @@ class LearningService:
                 entity = self._question(value["question_id"], conn)
             else:
                 entity_kind = "issue"
-                entity = self.issue(value["issue_id"], actor, conn)
+                entity = self.issue(value["issue_id"], actor, conn, write=True)
             if str(version) != str(entity["version"]):
                 raise LearningError("题目或质疑已更新，请读取最新版本后删除附件；当前填写请保留", 409)
             entity["attachments"] = [a for a in entity["attachments"] if a["id"] != identity]
@@ -1378,7 +1582,7 @@ class LearningService:
         if kind == "questions":
             values = [{k: v for k, v in q.items() if not k.startswith("_") and k not in {"record_id", "attachments", "id", "create_fingerprint"}} for q in self._filtered_questions(query)]
             return json.dumps({"format": "clipflow-learning-v1", "questions": values}, ensure_ascii=False, indent=2).encode(), "学练题库.json", "application/json"
-        scope = self._scope(actor, query.get("scope"))
+        scope = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))["scope"]
         query = self._date_filters(query)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
@@ -1398,8 +1602,10 @@ class LearningService:
         return output.getvalue().encode("utf-8-sig"), "学练记录.csv", "text/csv; charset=utf-8"
 
     def dispatch(self, action, payload, actor, query):
-        if not actor.get("id") or not actor.get("is_admin") and actor.get("scope") not in SCOPES:
-            raise LearningError("仅六楼值班账号和管理员可使用画像学练", 403)
+        if not actor.get("id"):
+            raise LearningError("登录身份不完整。", 401)
+        if not actor.get("is_admin") and not actor.get("person_id") and actor.get("scope") not in SCOPES:
+            raise LearningError("楼栋值班账号、管理员及已关联人员名单的普通账号可使用画像学练。", 403)
         identity = payload.get("id")
         if action in {"papers.list", "history"}:
             return self.list_papers(actor, query)
@@ -1419,6 +1625,8 @@ class LearningService:
             return self.review(actor, query)
         if action == "profile":
             return self.profile(actor, query)
+        if action == "attempts":
+            return self.attempt_history(actor, query)
         if action == "issues.list":
             return self.list_issues(actor, query)
         if action == "issue.create":

@@ -851,6 +851,9 @@ class PortalAgent:
         result = {k: safe_data(plan.get(k), _field=k) for k in ("id", "title", "explanation", "status", "risk", "version", "fields", "results", "error")}
         result["fields"] = safe_data(plan.get("fields"), list_limit=None)
         for original, public in zip(plan.get("results") or [], result["results"] or []):
+            task = (original.get("job_result") or {}).get("_raw", (original.get("job_result") or {}).get("data")) or {}
+            if task.get("memory_warning"):
+                public["query_reply"] = safe_text(task["memory_warning"])
             url = original.get("download_url", "")
             if original.get("ok") and original.get("api_id") == _MORNING_GENERATE and isinstance(url, str) and re.fullmatch(r"/api/daily-tasks/morning-meeting/download\?date=\d{4}-\d{2}-\d{2}", url):
                 public["download_url"] = url
@@ -934,8 +937,13 @@ class PortalAgent:
                 return [preview(item) for item in value]
             return value
         expanded = preview(plan.get("operations", []))
+        if plan.get("_planned"):
+            from .lighthouse_planned import preview_metadata
+            result["planned_notice"] = preview_metadata(plan, expanded)
         result["operations"] = safe_data(expanded)
         for index, operation in enumerate(result["operations"]):
+            if isinstance(operation.get('body'), dict):
+                operation['body'].pop('plan_convergence_confirmation', None)
             operation["selected_files"] = [describe_file(identity) for identities in (expanded[index].get("files") or {}).values() for identity in identities]
             if operation.get("api_id") in _WATER_WRITES:
                 operation["selected_files"].extend(describe_file(identity) for identity in plan.get("_water_files", {}).get(str(index), []))
@@ -3824,6 +3832,12 @@ class PortalAgent:
                         result["query_reply"] = f"日报已发送 {sent} 人，{failed} 人未发送。"
                         if failed:
                             result.update(ok=False, error=result["query_reply"] + "请核对未发送收件人，未自动重发。")
+                if not result.get('ok') and op['api_id'] == 'POST /api/workbench-actions' and isinstance(raw, dict) and raw.get('error_code') == 'confirmation_required' and raw.get('details', {}).get('kind') == 'plan_convergence_unmatched':
+                    plan['operations'][index].setdefault('body', {})['plan_convergence_confirmation'] = raw['details']['confirmation']
+                    plan.update(status='awaiting_second_confirmation' if plan.get('risk') == 'high' else 'awaiting_confirmation',
+                        version=plan['version'] + 1, error='', explanation=safe_text(result.get('error') or '未匹配到计划收敛，请再次确认是否发送。'))
+                    await self._durable_save(actor, plan)
+                    return
                 if not result.get("ok") and op["api_id"] in {"POST /api/capacity/water/records", "PATCH /api/capacity/water/records/{record_id}"} and isinstance(raw, dict) and raw.get("error_code") == "confirmation_required" and isinstance(raw.get("details"), dict) and raw["details"].get("kind") == "water_large_change":
                     # Native validation stops before upload/write; resume this step with the same operation ID.
                     plan.update(status="needs_input", version=plan["version"] + 1, error="", explanation=safe_text(result.get("error") or "水表数值变化较大，请核对并填写异常原因。"),

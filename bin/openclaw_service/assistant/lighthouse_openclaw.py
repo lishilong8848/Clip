@@ -432,6 +432,10 @@ class LighthouseOpenClaw(LighthouseModel):
     manages_context = True
     manages_runtime = True
     max_parallel = MAX_CONCURRENT_ACCOUNTS
+    # Preparatory warmup/start config stays bounded independently of unlimited
+    # account admission so a login burst never synchronously loads/launches
+    # gateways in bulk. This is a small concurrency slot cap, not an account cap.
+    WARMUP_CONCURRENCY = 2
 
     def __init__(self, portal, *, bridge_url, state_root=None, cached_reader=None, runtime_root=None, manager=None):
         from .lighthouse_public import PublicSources
@@ -441,7 +445,7 @@ class LighthouseOpenClaw(LighthouseModel):
         self.manager = manager if manager is not None else OpenClawRuntime(root, runtime_root=runtime_root)
         self.bridge, self.tokens = BusinessBridge(), {}
         self.warming, self.warm_attempts, self.warm_errors = {}, {}, {}
-        self.warm_slots = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
+        self.warm_slots = asyncio.Semaphore(self.WARMUP_CONCURRENCY)
         self.session_prepare_lock = asyncio.Lock()
         self.closing = False
         self.gateways = {}
@@ -512,7 +516,12 @@ class LighthouseOpenClaw(LighthouseModel):
         existing = self.manager.accounts.get(key)
         if self.closing or key in self.warming or (existing and existing.get('process') and existing['process'].poll() is None):
             return
-        if len(self.warming) >= self.manager.maximum or time.monotonic() - self.warm_attempts.get(key, -60) < 60:
+        # Keep the queued warmup burst bounded independently: an explicit
+        # positive manager.maximum is honored (existing injected-cap tests), and
+        # the unlimited sentinel (0) falls back to the small WARMUP_CONCURRENCY.
+        maximum = getattr(self.manager, 'maximum', 0) or 0
+        cap = maximum if maximum > 0 else self.WARMUP_CONCURRENCY
+        if len(self.warming) >= cap or time.monotonic() - self.warm_attempts.get(key, -60) < 60:
             return
         self.warm_attempts[key] = time.monotonic()
         self.warm_errors.pop(key, None)

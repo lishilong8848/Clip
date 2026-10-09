@@ -1,0 +1,149 @@
+[
+  {
+    "name": "南通基地运营平台 · 平台门户",
+    "url": "https://www.sm.sjhl.online:3001/nantong-base",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台平台门户入口",
+    "sort": 69
+  },
+  {
+    "name": "南通基地运营平台 · 今日航图",
+    "url": "https://www.sm.sjhl.online:3001/today-operations-panorama",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台今日航图入口",
+    "sort": 70
+  },
+  {
+    "name": "南通基地运营平台 · 智舱月览",
+    "url": "https://www.sm.sjhl.online:3001/monthly-operations",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台智舱月览入口",
+    "sort": 71
+  },
+  {
+    "name": "南通基地运营平台 · 主变运行",
+    "url": "https://www.sm.sjhl.online:3001/campus-operations-dashboard",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台主变运行入口",
+    "sort": 72
+  },
+  {
+    "name": "南通基地运营平台 · 排班中心",
+    "url": "https://www.sm.sjhl.online:3001/monthly-schedule",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台排班中心入口",
+    "sort": 73
+  },
+  {
+    "name": "南通基地运营平台 · 组织架构",
+    "url": "https://www.sm.sjhl.online:3001/organization",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台组织架构入口",
+    "sort": 74
+  },
+  {
+    "name": "南通基地运营平台 · 培训持证",
+    "url": "https://www.sm.sjhl.online:3001/training-certification-management?module=certificate",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台培训持证入口",
+    "sort": 75
+  },
+  {
+    "name": "南通基地运营平台 · 施工管理",
+    "url": "https://www.sm.sjhl.online:3001/construction-management",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台施工管理入口",
+    "sort": 76
+  },
+  {
+    "name": "南通基地运营平台 · 风险排查",
+    "url": "https://www.sm.sjhl.online:3001/risk-inspection-dashboard",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台风险排查入口",
+    "sort": 77
+  },
+  {
+    "name": "南通基地运营平台 · 质量评估",
+    "url": "https://www.sm.sjhl.online:3001/quality-assessment",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台质量评估入口",
+    "sort": 78
+  },
+  {
+    "name": "南通基地运营平台 · 月度告警总览",
+    "url": "https://www.sm.sjhl.online:3001/monthly-alarm-overview",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台月度告警总览入口",
+    "sort": 79
+  },
+  {
+    "name": "南通基地运营平台 · 孪生图谱",
+    "url": "https://www.sm.sjhl.online:8787/",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台孪生图谱入口",
+    "sort": 80
+  },
+  {
+    "name": "南通基地运营平台 · 设备台账管理",
+    "url": "https://www.sm.sjhl.online:3001/equipment-ledger-management",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台设备台账管理入口",
+    "sort": 81
+  },
+  {
+    "name": "南通基地运营平台 · 设备轮巡",
+    "url": "https://www.sm.sjhl.online:3001/equipment-patrol-dashboard",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台设备轮巡入口",
+    "sort": 82
+  },
+  {
+    "name": "南通基地运营平台 · 设备定位",
+    "url": "https://www.sm.sjhl.online:3001/exhaust-valve-map",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台设备定位入口",
+    "sort": 83
+  },
+  {
+    "name": "南通基地运营平台 · 采购管理",
+    "url": "https://www.sm.sjhl.online:3001/purchase-inventory-management",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台采购管理入口",
+    "sort": 84
+  },
+  {
+    "name": "南通基地运营平台 · 库存管理",
+    "url": "https://www.sm.sjhl.online:3001/inventory-management",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台库存管理入口",
+    "sort": 85
+  },
+  {
+    "name": "南通基地运营平台 · 运维工具管理",
+    "url": "https://www.sm.sjhl.online:3001/operations-tools-management",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台运维工具管理入口",
+    "sort": 86
+  },
+  {
+    "name": "南通基地运营平台 · 运维知识库",
+    "url": "https://www.sm.sjhl.online:3001/operations-kb",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台运维知识库入口",
+    "sort": 87
+  },
+  {
+    "name": "南通基地运营平台 · 体系月报",
+    "url": "https://www.sm.sjhl.online:3001/system-monthly-report",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台体系月报入口",
+    "sort": 88
+  },
+  {
+    "name": "南通基地运营平台 · 月度报告",
+    "url": "https://www.sm.sjhl.online:3001/ali-monthly-report",
+    "category": "网页导航 · 南通基地运营平台",
+    "purpose": "南通基地运营平台月度报告入口",
+    "sort": 89
+  }
+]

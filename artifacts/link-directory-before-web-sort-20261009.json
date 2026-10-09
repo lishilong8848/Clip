@@ -1,0 +1,4994 @@
+[
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "13",
+      "用途": "维保计划列表与年度计划来源",
+      "目录标识": "table:tblzk7WrXxNWQy6V",
+      "表名": "【配置】年度维护计划",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblzk7WrXxNWQy6V",
+        "text": "【配置】年度维护计划"
+      }
+    },
+    "id": "recvxx4c4ZsZbI",
+    "record_id": "recvxx4c4ZsZbI"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "22",
+      "用途": "在岗人员、统一签名与消息接收目录；值班关注点员工签名来源",
+      "目录标识": "table:tbluozblhRAjbljX",
+      "表名": "【配置】人员信息",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbluozblhRAjbljX",
+        "text": "【配置】人员信息"
+      }
+    },
+    "id": "recvxx4c4ZXR8Q",
+    "record_id": "recvxx4c4ZXR8Q"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "23",
+      "用途": "公司外人员与临时签名；值班关注点外部人员签名来源",
+      "目录标识": "table:tblC77nllNrprHBY",
+      "表名": "【配置】公司外人员信息",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblC77nllNrprHBY",
+        "text": "【配置】公司外人员信息"
+      }
+    },
+    "id": "recvxx4c4Z98QL",
+    "record_id": "recvxx4c4Z98QL"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "18",
+      "用途": "轮巡/SOP 工单步骤配置",
+      "目录标识": "table:tbl5KlqJAhpqWbK4",
+      "表名": "【配置】现场配置灯塔步骤表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl5KlqJAhpqWbK4",
+        "text": "【配置】现场配置灯塔步骤表"
+      }
+    },
+    "id": "recvxx4c4ZETet",
+    "record_id": "recvxx4c4ZETet"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "14",
+      "用途": "变更计划来源",
+      "目录标识": "table:tblBvg6wCYSX3hcg",
+      "表名": "01-园区变更底表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tblBvg6wCYSX3hcg",
+        "text": "01-园区变更底表"
+      }
+    },
+    "id": "recvxx4c4ZZ0CE",
+    "record_id": "recvxx4c4ZZ0CE"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "24",
+      "用途": "智航变更数据核对来源",
+      "目录标识": "table:tblqMJvYW5dxFFfU",
+      "表名": "智航变更数据-定时删除刷新",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblqMJvYW5dxFFfU",
+        "text": "智航变更数据-定时删除刷新"
+      }
+    },
+    "id": "recvxx747pSWTW",
+    "record_id": "recvxx747pSWTW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "8",
+      "用途": "维修单、进度、关联事件/检修及设备台账关系",
+      "目录标识": "table:tblschT48zXwigUG",
+      "表名": "📋维修项目汇总表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblschT48zXwigUG",
+        "text": "📋维修项目汇总表"
+      }
+    },
+    "id": "recvxx747pMVy0",
+    "record_id": "recvxx747pMVy0"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "9",
+      "用途": "维修跟进记录",
+      "目录标识": "table:tblkJByibuNWWGJh",
+      "表名": "📋维修项目跟进记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblkJByibuNWWGJh",
+        "text": "📋维修项目跟进记录"
+      }
+    },
+    "id": "recvxx747pHwzo",
+    "record_id": "recvxx747pHwzo"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "16",
+      "用途": "维修跟进 CMDB 设备选择来源",
+      "目录标识": "table:tblJTRguSUij2RUM",
+      "表名": "✅️智航唯一ID",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblJTRguSUij2RUM",
+        "text": "✅️智航唯一ID"
+      }
+    },
+    "id": "recvxx747pYCMD",
+    "record_id": "recvxx747pYCMD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "25",
+      "用途": "维修设备型号、品牌等选项来源",
+      "目录标识": "table:tblkKnYwajfRmquQ",
+      "表名": "设备型号&品牌配置（南通）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblkKnYwajfRmquQ",
+        "text": "设备型号&品牌配置（南通）"
+      }
+    },
+    "id": "recvxx747pezdu",
+    "record_id": "recvxx747pezdu"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "21",
+      "用途": "水耗数据登记",
+      "目录标识": "table:tbl6Py6PQzqKGMzO",
+      "表名": "01-机楼水耗录入",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl6Py6PQzqKGMzO",
+        "text": "01-机楼水耗录入"
+      }
+    },
+    "id": "recvxx747pJunk",
+    "record_id": "recvxx747pJunk"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "10",
+      "用途": "机柜上下电操作台账",
+      "目录标识": "table:tblPuXz8ONJQVrDe",
+      "表名": "机柜上下电汇总表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblPuXz8ONJQVrDe",
+        "text": "机柜上下电汇总表"
+      }
+    },
+    "id": "recvxx747plRdH",
+    "record_id": "recvxx747plRdH"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "11",
+      "用途": "机柜基线、基础资料",
+      "目录标识": "table:tblb0MaDE09vGQmM",
+      "表名": "机柜基础资料",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblb0MaDE09vGQmM",
+        "text": "机柜基础资料"
+      }
+    },
+    "id": "recvxx747pHGry",
+    "record_id": "recvxx747pHGry"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "327",
+      "用途": "灯塔业务删除审计记录",
+      "目录标识": "table:tblN2nwmjGhngcOE",
+      "表名": "灯塔删除记录日志",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tblN2nwmjGhngcOE",
+        "text": "灯塔删除记录日志"
+      }
+    },
+    "id": "recvxx747pDSca",
+    "record_id": "recvxx747pDSca"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "329",
+      "用途": "OpenClaw 离线依赖/安装包分发",
+      "目录标识": "table:tblUECEItaUpOWvd",
+      "表名": "openclaw安装包",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tblUECEItaUpOWvd",
+        "text": "openclaw安装包"
+      }
+    },
+    "id": "recvxx747pdgee",
+    "record_id": "recvxx747pdgee"
+  },
+  {
+    "fields": {
+      "所属分类": "南通天气预警",
+      "排序": "20",
+      "用途": "重保检查表归档",
+      "目录标识": "table:tblVFWuUbjo4GHOY",
+      "表名": "重保检查表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/Tmn8bjGnpasbLTskafbcRijvnKe?table=tblVFWuUbjo4GHOY",
+        "text": "重保检查表"
+      }
+    },
+    "id": "recvxx747pInR1",
+    "record_id": "recvxx747pInR1"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "4",
+      "用途": "事件通告目标表；审核页事件分类、历史事件跟进来源",
+      "目录标识": "table:tblj9XJLq5QzTAqX",
+      "表名": "📝事件统计表（New）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblj9XJLq5QzTAqX",
+        "text": "📝事件统计表（New）"
+      }
+    },
+    "id": "recvxx747p9H6k",
+    "record_id": "recvxx747p9H6k"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "19",
+      "用途": "演练文件归档",
+      "目录标识": "table:tbl4FVVllYjfheJ3",
+      "表名": "演练统计表（灯塔程序用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl4FVVllYjfheJ3",
+        "text": "演练统计表（灯塔程序用）"
+      }
+    },
+    "id": "recvxx747pAqOS",
+    "record_id": "recvxx747pAqOS"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "2",
+      "用途": "变更通告发送、更新、结束的目标表；审核页变更分类来源",
+      "目录标识": "table:tblYodlEKeWzqogu",
+      "表名": "📝变更统计表（New）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblYodlEKeWzqogu",
+        "text": "📝变更统计表（New）"
+      }
+    },
+    "id": "recvxx747pLe8U",
+    "record_id": "recvxx747pLe8U"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "1",
+      "用途": "维保通告发送、更新、结束的目标表；审核页维护分类来源",
+      "目录标识": "table:tblk7QuEsiE4p3nZ",
+      "表名": "📝维保统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblk7QuEsiE4p3nZ",
+        "text": "📝维保统计表"
+      }
+    },
+    "id": "recvxx747pWj0s",
+    "record_id": "recvxx747pWj0s"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "7",
+      "用途": "上下电通告目标表（飞书表名仍为上电通告）；交接班其他重要工作来源",
+      "目录标识": "table:tblf2uQrzCWw5eIV",
+      "表名": "📝上电通告",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblf2uQrzCWw5eIV",
+        "text": "📝上电通告"
+      }
+    },
+    "id": "recvxx747phmJw",
+    "record_id": "recvxx747phmJw"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "5",
+      "用途": "设备轮巡通告目标表；设备轮巡工作来源",
+      "目录标识": "table:tbl0XK1iQ1P6VY5Y",
+      "表名": "📝设备轮巡",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl0XK1iQ1P6VY5Y",
+        "text": "📝设备轮巡"
+      }
+    },
+    "id": "recvxx747pGqx7",
+    "record_id": "recvxx747pGqx7"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "3",
+      "用途": "检修通告目标表；设备检修工作来源",
+      "目录标识": "table:tblpaHktT0mn0hwg",
+      "表名": "📝设备检修",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblpaHktT0mn0hwg",
+        "text": "📝设备检修"
+      }
+    },
+    "id": "recvxx747pd8jB",
+    "record_id": "recvxx747pd8jB"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "6",
+      "用途": "设备调整通告目标表；设备调整工作来源",
+      "目录标识": "table:tbleqBZdQu1n8qqK",
+      "表名": "📝设备调整",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbleqBZdQu1n8qqK",
+        "text": "📝设备调整"
+      }
+    },
+    "id": "recvxx747pJST8",
+    "record_id": "recvxx747pJST8"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "26",
+      "用途": "登录权限人员目录",
+      "目录标识": "table:tblOu75UtJTDNHIM",
+      "表名": "01-1 员工信息池（全量）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblOu75UtJTDNHIM",
+        "text": "01-1 员工信息池（全量）"
+      }
+    },
+    "id": "recvxx747pB7Rf",
+    "record_id": "recvxx747pB7Rf"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "17",
+      "用途": "维护保养单模板/资料来源",
+      "目录标识": "table:tblpqwu1kQ0bmi0i",
+      "表名": "MOPJL（维护保养单）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblpqwu1kQ0bmi0i",
+        "text": "MOPJL（维护保养单）"
+      }
+    },
+    "id": "recvxx747pmpyR",
+    "record_id": "recvxx747pmpyR"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "12",
+      "用途": "五楼机柜表格月度导出归档",
+      "目录标识": "table:tblghte5RCmMy24n",
+      "表名": "【月报】南通机房机柜上下电管理",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblghte5RCmMy24n",
+        "text": "【月报】南通机房机柜上下电管理"
+      }
+    },
+    "id": "recvxx747pkv4C",
+    "record_id": "recvxx747pkv4C"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "15",
+      "用途": "维修跟进台账设备选择与关联来源",
+      "目录标识": "table:tblPIgIZ5fyEeQnY",
+      "表名": "南通各机楼设备台账",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblPIgIZ5fyEeQnY",
+        "text": "南通各机楼设备台账"
+      }
+    },
+    "id": "recvxx747p4eR1",
+    "record_id": "recvxx747p4eR1"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "27",
+      "用途": "画像学练新增的每日5题来源",
+      "目录标识": "table:tbl1x3DulQ3nFluq",
+      "表名": "应知应会",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl1x3DulQ3nFluq",
+        "text": "应知应会"
+      }
+    },
+    "id": "recvxx747paPam",
+    "record_id": "recvxx747paPam"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "28",
+      "用途": "画像学练笔试题库",
+      "目录标识": "table:tbldEn2ODX9CbZ1n",
+      "表名": "【笔试】阿里线上考试题目",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbldEn2ODX9CbZ1n",
+        "text": "【笔试】阿里线上考试题目"
+      }
+    },
+    "id": "recvxx747pskr5",
+    "record_id": "recvxx747pskr5"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "29",
+      "用途": "画像学练专业工程师面试题库",
+      "目录标识": "table:tblnyQverizwaQcT",
+      "表名": "【面试】专业工程师问题",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblnyQverizwaQcT",
+        "text": "【面试】专业工程师问题"
+      }
+    },
+    "id": "recvxx747pi0gn",
+    "record_id": "recvxx747pi0gn"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "30",
+      "用途": "画像学练值班工程师面试题库",
+      "目录标识": "table:tblpM9nCRs4UJ8io",
+      "表名": "【面试】值班工程师问题",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblpM9nCRs4UJ8io",
+        "text": "【面试】值班工程师问题"
+      }
+    },
+    "id": "recvxx747pbwqh",
+    "record_id": "recvxx747pbwqh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "31",
+      "用途": "画像学练题单、作答、质疑及学习数据同步",
+      "目录标识": "table:tblxY7vD01aYqJOL",
+      "表名": "画像学练数据",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblxY7vD01aYqJOL",
+        "text": "画像学练数据"
+      }
+    },
+    "id": "recvxx747pZQCc",
+    "record_id": "recvxx747pZQCc"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "69",
+      "目录标识": "table:tbl9XN8Z0kt9mIbF",
+      "表名": "维护管理注意事项",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl9XN8Z0kt9mIbF",
+        "text": "维护管理注意事项"
+      }
+    },
+    "id": "recvxx747pz767",
+    "record_id": "recvxx747pz767"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "250",
+      "目录标识": "table:tbl4Yh8Uye8bjLls",
+      "表名": "【配置】非计划性维护",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl4Yh8Uye8bjLls",
+        "text": "【配置】非计划性维护"
+      }
+    },
+    "id": "recvxx747p6LGH",
+    "record_id": "recvxx747p6LGH"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "70",
+      "目录标识": "table:tblvDOEPogYjyv8E",
+      "表名": "【统计】机楼计划性维护进度",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblvDOEPogYjyv8E",
+        "text": "【统计】机楼计划性维护进度"
+      }
+    },
+    "id": "recvxx747pqOwz",
+    "record_id": "recvxx747pqOwz"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "251",
+      "目录标识": "table:tblkfC543BEzjGC9",
+      "表名": "单选引用",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblkfC543BEzjGC9",
+        "text": "单选引用"
+      }
+    },
+    "id": "recvxx747pBF8d",
+    "record_id": "recvxx747pBF8d"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "252",
+      "目录标识": "table:tbl4j68veR2Bjrdu",
+      "表名": "【引用】组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl4j68veR2Bjrdu",
+        "text": "【引用】组织架构"
+      }
+    },
+    "id": "recvxx747pQ2I5",
+    "record_id": "recvxx747pQ2I5"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "253",
+      "目录标识": "table:tbl1nb4VWXXjcJrJ",
+      "表名": "【引用】维护通报表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl1nb4VWXXjcJrJ",
+        "text": "【引用】维护通报表"
+      }
+    },
+    "id": "recvxx747paxFt",
+    "record_id": "recvxx747paxFt"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "71",
+      "目录标识": "table:tblrUkDdB4ooqMbV",
+      "表名": "底表-维护通报表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblrUkDdB4ooqMbV",
+        "text": "底表-维护通报表"
+      }
+    },
+    "id": "recvxx747pniVa",
+    "record_id": "recvxx747pniVa"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "254",
+      "目录标识": "table:tblHb5AThActa7Yb",
+      "表名": "【引用】当日值班信息（天）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblHb5AThActa7Yb",
+        "text": "【引用】当日值班信息（天）"
+      }
+    },
+    "id": "recvxx747pTvor",
+    "record_id": "recvxx747pTvor"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "255",
+      "目录标识": "table:tblBwlbGZ4J2oaqr",
+      "表名": "【配置】机房排班底表（月度）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblBwlbGZ4J2oaqr",
+        "text": "【配置】机房排班底表（月度）"
+      }
+    },
+    "id": "recvxx747pLyhF",
+    "record_id": "recvxx747pLyhF"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "256",
+      "目录标识": "table:tbl60w0n6VgZrJEP",
+      "表名": "机楼配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl60w0n6VgZrJEP",
+        "text": "机楼配置"
+      }
+    },
+    "id": "recvxx747p7o3Q",
+    "record_id": "recvxx747p7o3Q"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "257",
+      "目录标识": "table:tbl3P82Z1a7NYRck",
+      "表名": "组织架构（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbl3P82Z1a7NYRck",
+        "text": "组织架构（引用）"
+      }
+    },
+    "id": "recvxx747piC6G",
+    "record_id": "recvxx747piC6G"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "258",
+      "目录标识": "table:tblvmtYtodW5xsfV",
+      "表名": "单选配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblvmtYtodW5xsfV",
+        "text": "单选配置"
+      }
+    },
+    "id": "recvxx747pJydD",
+    "record_id": "recvxx747pJydD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "259",
+      "目录标识": "table:tblvbhB6Z3C70CCw",
+      "表名": "班组配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblvbhB6Z3C70CCw",
+        "text": "班组配置"
+      }
+    },
+    "id": "recvxx747ppL7r",
+    "record_id": "recvxx747ppL7r"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "260",
+      "目录标识": "table:tblrnKGyuw5wXirb",
+      "表名": "专业配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblrnKGyuw5wXirb",
+        "text": "专业配置"
+      }
+    },
+    "id": "recvxx747pitSU",
+    "record_id": "recvxx747pitSU"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "261",
+      "目录标识": "table:tblZUTRzItysCAwm",
+      "表名": "数据表 2",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblZUTRzItysCAwm",
+        "text": "数据表 2"
+      }
+    },
+    "id": "recvxx747p8lCv",
+    "record_id": "recvxx747p8lCv"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "304",
+      "目录标识": "table:tblH0WylHHbkCmDT",
+      "表名": "数据表 2 副本",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tblH0WylHHbkCmDT",
+        "text": "数据表 2 副本"
+      }
+    },
+    "id": "recvxx747pQGVx",
+    "record_id": "recvxx747pQGVx"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-维护管理",
+      "排序": "72",
+      "目录标识": "table:tbljwanrvumuyS0m",
+      "表名": "收集表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HU38bc1vnamMK9sCeOgclUvXnFc?table=tbljwanrvumuyS0m",
+        "text": "收集表"
+      }
+    },
+    "id": "recvxx747pFbvt",
+    "record_id": "recvxx747pFbvt"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "305",
+      "目录标识": "table:tblNY9N4UduGh9Db",
+      "表名": "01-园区变更底表旧（2026-05-07）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tblNY9N4UduGh9Db",
+        "text": "01-园区变更底表旧（2026-05-07）"
+      }
+    },
+    "id": "recvxx747piUxn",
+    "record_id": "recvxx747piUxn"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "73",
+      "目录标识": "table:tblp3zGZHMEDsirH",
+      "表名": "02-变更延期记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tblp3zGZHMEDsirH",
+        "text": "02-变更延期记录"
+      }
+    },
+    "id": "recvxx747prITH",
+    "record_id": "recvxx747prITH"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "74",
+      "目录标识": "table:tblLDB2ccjfd32xg",
+      "表名": "03-变更热力图数据源",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tblLDB2ccjfd32xg",
+        "text": "03-变更热力图数据源"
+      }
+    },
+    "id": "recvxx747phZC1",
+    "record_id": "recvxx747phZC1"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "75",
+      "目录标识": "table:tble2rRfETxwZFiA",
+      "表名": "📝变更统计表（New）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tble2rRfETxwZFiA",
+        "text": "📝变更统计表（New）"
+      }
+    },
+    "id": "recvxx747pquga",
+    "record_id": "recvxx747pquga"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "76",
+      "目录标识": "table:tbl2cJuTBqRdIm8Z",
+      "表名": "智航变更数据-底表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tbl2cJuTBqRdIm8Z",
+        "text": "智航变更数据-底表"
+      }
+    },
+    "id": "recvxx747peL0l",
+    "record_id": "recvxx747peL0l"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "262",
+      "目录标识": "table:tbloEeMYWJDEDvxy",
+      "表名": "组织架构（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tbloEeMYWJDEDvxy",
+        "text": "组织架构（引用）"
+      }
+    },
+    "id": "recvxx747puoYL",
+    "record_id": "recvxx747puoYL"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "263",
+      "目录标识": "table:tblxtWGEzkwVWLk2",
+      "表名": "会议群组配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tblxtWGEzkwVWLk2",
+        "text": "会议群组配置"
+      }
+    },
+    "id": "recvxx747p2kLb",
+    "record_id": "recvxx747p2kLb"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "264",
+      "目录标识": "table:tbl3DzBNfJr4Y8wT",
+      "表名": "当日值班信息（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tbl3DzBNfJr4Y8wT",
+        "text": "当日值班信息（引用）"
+      }
+    },
+    "id": "recvxx747pp00s",
+    "record_id": "recvxx747pp00s"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "265",
+      "目录标识": "table:tbloknV1dhHpzR94",
+      "表名": "单选配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tbloknV1dhHpzR94",
+        "text": "单选配置"
+      }
+    },
+    "id": "recvxx747pMqmm",
+    "record_id": "recvxx747pMqmm"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-变更管理",
+      "排序": "77",
+      "目录标识": "table:tblZZHIJCY3f551K",
+      "表名": "变更关单需提交附件",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/HElCby1PDaP5rPsLhzscGBrZnmf?table=tblZZHIJCY3f551K",
+        "text": "变更关单需提交附件"
+      }
+    },
+    "id": "recvxx747pDUUa",
+    "record_id": "recvxx747pDUUa"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "78",
+      "目录标识": "table:tblviRG8ZDfY7AnF",
+      "表名": "Open风险项",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblviRG8ZDfY7AnF",
+        "text": "Open风险项"
+      }
+    },
+    "id": "recvxx747p35hz",
+    "record_id": "recvxx747p35hz"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "79",
+      "目录标识": "table:tblNddknaoXp2ASG",
+      "表名": "智航风险排查数据",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblNddknaoXp2ASG",
+        "text": "智航风险排查数据"
+      }
+    },
+    "id": "recvxx747pmEOW",
+    "record_id": "recvxx747pmEOW"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "80",
+      "目录标识": "table:tblkSEwsxqGKQDIw",
+      "表名": "智航风险排查数据统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblkSEwsxqGKQDIw",
+        "text": "智航风险排查数据统计"
+      }
+    },
+    "id": "recvxx747pbmxh",
+    "record_id": "recvxx747pbmxh"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "81",
+      "目录标识": "table:tblWQRQKaiaZFZpW",
+      "表名": "智航变更数据-底表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblWQRQKaiaZFZpW",
+        "text": "智航变更数据-底表"
+      }
+    },
+    "id": "recvxx747pHF9W",
+    "record_id": "recvxx747pHF9W"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "82",
+      "目录标识": "table:tbleCzxRd2yF7lT7",
+      "表名": "智航演练数据-定时删除刷新",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tbleCzxRd2yF7lT7",
+        "text": "智航演练数据-定时删除刷新"
+      }
+    },
+    "id": "recvxx747pvnGL",
+    "record_id": "recvxx747pvnGL"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "83",
+      "目录标识": "table:tbl06hMoUMdGVEvn",
+      "表名": "智航事件数据",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tbl06hMoUMdGVEvn",
+        "text": "智航事件数据"
+      }
+    },
+    "id": "recvxx747pOStb",
+    "record_id": "recvxx747pOStb"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "84",
+      "目录标识": "table:tblQtelM7R2BEfKB",
+      "表名": "智航事件数据统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblQtelM7R2BEfKB",
+        "text": "智航事件数据统计"
+      }
+    },
+    "id": "recvxx747pbal4",
+    "record_id": "recvxx747pbal4"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "85",
+      "目录标识": "table:tblTXHrDH4Mv0971",
+      "表名": "智航巡检数据",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblTXHrDH4Mv0971",
+        "text": "智航巡检数据"
+      }
+    },
+    "id": "recvxx747pmmem",
+    "record_id": "recvxx747pmmem"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "86",
+      "目录标识": "table:tbl3X5q9vsOSkpL8",
+      "表名": "智航巡检数据异常统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tbl3X5q9vsOSkpL8",
+        "text": "智航巡检数据异常统计"
+      }
+    },
+    "id": "recvxx747pQ0Id",
+    "record_id": "recvxx747pQ0Id"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "87",
+      "目录标识": "table:tblGnxE90xKbQFxl",
+      "表名": "01-3 组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblGnxE90xKbQFxl",
+        "text": "01-3 组织架构"
+      }
+    },
+    "id": "recvxx747pAArX",
+    "record_id": "recvxx747pAArX"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "88",
+      "目录标识": "table:tblLdp2InAWypyNt",
+      "表名": "智航变更数据（回收）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblLdp2InAWypyNt",
+        "text": "智航变更数据（回收）"
+      }
+    },
+    "id": "recvxx747p56vJ",
+    "record_id": "recvxx747p56vJ"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "266",
+      "目录标识": "table:tblHVSCAjXUr0cOE",
+      "表名": "数据表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblHVSCAjXUr0cOE",
+        "text": "数据表"
+      }
+    },
+    "id": "recvxx747pxveB",
+    "record_id": "recvxx747pxveB"
+  },
+  {
+    "fields": {
+      "所属分类": "智航数据获取及验证",
+      "排序": "306",
+      "目录标识": "table:tblAM5dDxQ76DuwB",
+      "表名": "智航变更数据 副本",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/IrIibPkUOa6udGsMhu2cbOqhnWg?table=tblAM5dDxQ76DuwB",
+        "text": "智航变更数据 副本"
+      }
+    },
+    "id": "recvxx747pf6gF",
+    "record_id": "recvxx747pf6gF"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "89",
+      "目录标识": "table:tblPXxIxz4TTmSAU",
+      "表名": "📝事件统计表（New）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblPXxIxz4TTmSAU",
+        "text": "📝事件统计表（New）"
+      }
+    },
+    "id": "recvxx747pXl2Z",
+    "record_id": "recvxx747pXl2Z"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "90",
+      "目录标识": "table:tblSA9euoote8aCA",
+      "表名": "📝设备检修",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblSA9euoote8aCA",
+        "text": "📝设备检修"
+      }
+    },
+    "id": "recvxx747pcaMX",
+    "record_id": "recvxx747pcaMX"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "307",
+      "目录标识": "table:tblrHaapNI5Awp0t",
+      "表名": "📋维修项目汇总表 （2026年前）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblrHaapNI5Awp0t",
+        "text": "📋维修项目汇总表 （2026年前）"
+      }
+    },
+    "id": "recvxx747pgiR6",
+    "record_id": "recvxx747pgiR6"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "308",
+      "目录标识": "table:tblLO1LEnWN5AhjC",
+      "表名": "📋维修项目跟进记录（2026年前）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblLO1LEnWN5AhjC",
+        "text": "📋维修项目跟进记录（2026年前）"
+      }
+    },
+    "id": "recvxx747pzAxi",
+    "record_id": "recvxx747pzAxi"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "267",
+      "目录标识": "table:tblWfnhqLlrtkIIg",
+      "表名": "人员角色配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblWfnhqLlrtkIIg",
+        "text": "人员角色配置"
+      }
+    },
+    "id": "recvxx747pis1o",
+    "record_id": "recvxx747pis1o"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "268",
+      "目录标识": "table:tblPVVEEwZQX45td",
+      "表名": "现场组架配置（引用体系内容）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblPVVEEwZQX45td",
+        "text": "现场组架配置（引用体系内容）"
+      }
+    },
+    "id": "recvxx747paxVx",
+    "record_id": "recvxx747paxVx"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "91",
+      "目录标识": "table:tblIn1lYAMYxwbPD",
+      "表名": "南通现场组织架构（南通）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblIn1lYAMYxwbPD",
+        "text": "南通现场组织架构（南通）"
+      }
+    },
+    "id": "recvxx747pBnLL",
+    "record_id": "recvxx747pBnLL"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "309",
+      "目录标识": "table:tblG4UpMdgYHykUY",
+      "表名": "📋维修项目跟进记录 副本",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblG4UpMdgYHykUY",
+        "text": "📋维修项目跟进记录 副本"
+      }
+    },
+    "id": "recvxx747pkUQX",
+    "record_id": "recvxx747pkUQX"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "310",
+      "目录标识": "table:tblcws1gwaFQnU6H",
+      "表名": "📋维修项目汇总表 副本",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblcws1gwaFQnU6H",
+        "text": "📋维修项目汇总表 副本"
+      }
+    },
+    "id": "recvxx747p7grX",
+    "record_id": "recvxx747p7grX"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-维修管理",
+      "排序": "269",
+      "目录标识": "table:tblbPsnZWe1LIBL5",
+      "表名": "设备型号&品牌配置-体系",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/RR4Sbm81xaII07sW0kacCb9xnih?table=tblbPsnZWe1LIBL5",
+        "text": "设备型号&品牌配置-体系"
+      }
+    },
+    "id": "recvxx747pRJno",
+    "record_id": "recvxx747pRJno"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "270",
+      "目录标识": "table:tbl4VaL8e3048XAK",
+      "表名": "组织架构（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl4VaL8e3048XAK",
+        "text": "组织架构（引用）"
+      }
+    },
+    "id": "recvxx747pyl1W",
+    "record_id": "recvxx747pyl1W"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "271",
+      "目录标识": "table:tblFbeQnv7YRdONi",
+      "表名": "单选配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblFbeQnv7YRdONi",
+        "text": "单选配置"
+      }
+    },
+    "id": "recvxx747pEQuO",
+    "record_id": "recvxx747pEQuO"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "272",
+      "目录标识": "table:tbl7i2sCBKpt5cxN",
+      "表名": "数据表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl7i2sCBKpt5cxN",
+        "text": "数据表"
+      }
+    },
+    "id": "recvxx747pTCdd",
+    "record_id": "recvxx747pTCdd"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "92",
+      "目录标识": "table:tbld62g0GkhzbNWR",
+      "表名": "月度数据汇总-机楼",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbld62g0GkhzbNWR",
+        "text": "月度数据汇总-机楼"
+      }
+    },
+    "id": "recvxx747pbx3o",
+    "record_id": "recvxx747pbx3o"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "93",
+      "目录标识": "table:tblAQ2HvvHuG3i1D",
+      "表名": "月度数据汇总-园区",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblAQ2HvvHuG3i1D",
+        "text": "月度数据汇总-园区"
+      }
+    },
+    "id": "recvxx747pmXVl",
+    "record_id": "recvxx747pmXVl"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "32",
+      "用途": "容量表耗水量来源",
+      "目录标识": "table:tblz4TkZqrUJB90y",
+      "表名": "00-机楼水耗汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblz4TkZqrUJB90y",
+        "text": "00-机楼水耗汇总"
+      }
+    },
+    "id": "recvxx747p8FYq",
+    "record_id": "recvxx747p8FYq"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "94",
+      "目录标识": "table:tblmfe4NVMPThGuI",
+      "表名": "01-机楼水耗标准清单",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblmfe4NVMPThGuI",
+        "text": "01-机楼水耗标准清单"
+      }
+    },
+    "id": "recvxx747p6rbL",
+    "record_id": "recvxx747p6rbL"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "95",
+      "目录标识": "table:tbl4EJU95OEDhCst",
+      "表名": "02-园区水耗登记",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl4EJU95OEDhCst",
+        "text": "02-园区水耗登记"
+      }
+    },
+    "id": "recvxx747p03DY",
+    "record_id": "recvxx747p03DY"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "96",
+      "目录标识": "table:tblDYQYihJ0CgepE",
+      "表名": "机柜数量月度数据汇总-机楼",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblDYQYihJ0CgepE",
+        "text": "机柜数量月度数据汇总-机楼"
+      }
+    },
+    "id": "recvxx747pQIUp",
+    "record_id": "recvxx747pQIUp"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "97",
+      "目录标识": "table:tbl6ZzTdehdKYMQZ",
+      "表名": "机柜数量月度数据汇总-园区",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl6ZzTdehdKYMQZ",
+        "text": "机柜数量月度数据汇总-园区"
+      }
+    },
+    "id": "recvxx747pQsJt",
+    "record_id": "recvxx747pQsJt"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "273",
+      "目录标识": "table:tblz8rjxdtRRlYmS",
+      "表名": "交接班机柜数量引用",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblz8rjxdtRRlYmS",
+        "text": "交接班机柜数量引用"
+      }
+    },
+    "id": "recvxx747pcayF",
+    "record_id": "recvxx747pcayF"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "98",
+      "目录标识": "table:tblrMSULFczsEkwE",
+      "表名": "月度机柜上电数量",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblrMSULFczsEkwE",
+        "text": "月度机柜上电数量"
+      }
+    },
+    "id": "recvxx747pemym",
+    "record_id": "recvxx747pemym"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "33",
+      "用途": "每日、多日用电明细计算结果",
+      "目录标识": "table:tblf1YG2l2BDqcjV",
+      "表名": "01-机楼每日用电明细(26年9月16日始)",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblf1YG2l2BDqcjV",
+        "text": "01-机楼每日用电明细(26年9月16日始)"
+      }
+    },
+    "id": "recvxx747pggT5",
+    "record_id": "recvxx747pggT5"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "99",
+      "目录标识": "table:tbl7Eirg7V6jMoLh",
+      "表名": "机楼每日用电明细26年1月1日-9月15日",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl7Eirg7V6jMoLh",
+        "text": "机楼每日用电明细26年1月1日-9月15日"
+      }
+    },
+    "id": "recvxx747pjacO",
+    "record_id": "recvxx747pjacO"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "34",
+      "用途": "容量表每日、每月用电量来源",
+      "目录标识": "table:tblqSskJvBnx9UJj",
+      "表名": "02-机楼每日用电汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblqSskJvBnx9UJj",
+        "text": "02-机楼每日用电汇总"
+      }
+    },
+    "id": "recvxx747ptcfW",
+    "record_id": "recvxx747ptcfW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "35",
+      "用途": "月报用电源文件附件",
+      "目录标识": "table:tblA9tahsVnfvO31",
+      "表名": "03-机楼每日用电附件",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblA9tahsVnfvO31",
+        "text": "03-机楼每日用电附件"
+      }
+    },
+    "id": "recvxx747pymFN",
+    "record_id": "recvxx747pymFN"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "100",
+      "目录标识": "table:tbl3o50otzjrqLee",
+      "表名": "04-用电分析区域使用",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl3o50otzjrqLee",
+        "text": "04-用电分析区域使用"
+      }
+    },
+    "id": "recvxx747pMMki",
+    "record_id": "recvxx747pMMki"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "36",
+      "用途": "四台主变电流、负载、油温、档位等数据",
+      "目录标识": "table:tbl8Ni54taYGeWAa",
+      "表名": "05-110站数据汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbl8Ni54taYGeWAa",
+        "text": "05-110站数据汇总"
+      }
+    },
+    "id": "recvxx747pd1dn",
+    "record_id": "recvxx747pd1dn"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "101",
+      "目录标识": "table:tblmD3jt7QxvbBiE",
+      "表名": "每日用电汇总模板",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblmD3jt7QxvbBiE",
+        "text": "每日用电汇总模板"
+      }
+    },
+    "id": "recvxx747pklW9",
+    "record_id": "recvxx747pklW9"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "102",
+      "目录标识": "table:tblImedY606HJUfP",
+      "表名": "26年全年日期",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblImedY606HJUfP",
+        "text": "26年全年日期"
+      }
+    },
+    "id": "recvxx747pAuBb",
+    "record_id": "recvxx747pAuBb"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "37",
+      "用途": "12项独立上传的容量指标",
+      "目录标识": "table:tblAHGF8mV6U9jid",
+      "表名": "01-机楼每日容量汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblAHGF8mV6U9jid",
+        "text": "01-机楼每日容量汇总"
+      }
+    },
+    "id": "recvxx747pahUQ",
+    "record_id": "recvxx747pahUQ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "103",
+      "目录标识": "table:tblBgaPzuVj7V9Q6",
+      "表名": "01-机楼每日容量分析",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblBgaPzuVj7V9Q6",
+        "text": "01-机楼每日容量分析"
+      }
+    },
+    "id": "recvxx747pWShK",
+    "record_id": "recvxx747pWShK"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "38",
+      "用途": "交接班、容量相关源文件附件",
+      "目录标识": "table:tblF13MQ10PslIdI",
+      "表名": "02-机楼每日容量附件",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblF13MQ10PslIdI",
+        "text": "02-机楼每日容量附件"
+      }
+    },
+    "id": "recvxx74NkIGLm",
+    "record_id": "recvxx74NkIGLm"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "104",
+      "目录标识": "table:tblQQuSpwATcyjzY",
+      "表名": "03-机楼每日容量汇总模板",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblQQuSpwATcyjzY",
+        "text": "03-机楼每日容量汇总模板"
+      }
+    },
+    "id": "recvxx74NkDWf7",
+    "record_id": "recvxx74NkDWf7"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "105",
+      "目录标识": "table:tblFr7m5DITKWukp",
+      "表名": "04-湿球温度采集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblFr7m5DITKWukp",
+        "text": "04-湿球温度采集"
+      }
+    },
+    "id": "recvxx74Nk8AEn",
+    "record_id": "recvxx74Nk8AEn"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "39",
+      "用途": "支路功率、电流、开关状态主表",
+      "目录标识": "table:tblT5KbsxGCK1SwA",
+      "表名": "01-机柜功率每日明细",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblT5KbsxGCK1SwA",
+        "text": "01-机柜功率每日明细"
+      }
+    },
+    "id": "recvxx74NkqUUq",
+    "record_id": "recvxx74NkqUUq"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "40",
+      "用途": "机列超限日统计",
+      "目录标识": "table:tblCcFzmKKz50tYT",
+      "表名": "02-机列超215功率统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblCcFzmKKz50tYT&view=vew3F3KIqS",
+        "text": "02-机列超215功率统计"
+      }
+    },
+    "id": "recvxx74NkkP0J",
+    "record_id": "recvxx74NkkP0J"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "41",
+      "用途": "列头柜超限日统计",
+      "目录标识": "table:tblqxn3BajmZHxb6",
+      "表名": "03-列头柜超107.5功率统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblqxn3BajmZHxb6&view=vewkVrqxiG",
+        "text": "03-列头柜超107.5功率统计"
+      }
+    },
+    "id": "recvxx74Nk5jJK",
+    "record_id": "recvxx74Nk5jJK"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "42",
+      "用途": "机柜超限、PDU及电流统计",
+      "目录标识": "table:tbloY4JDihNu0aJ7",
+      "表名": "04-机柜超18KW统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbloY4JDihNu0aJ7&view=vewnybKvrN",
+        "text": "04-机柜超18KW统计"
+      }
+    },
+    "id": "recvxx74Nko4h9",
+    "record_id": "recvxx74Nko4h9"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "43",
+      "用途": "单支路超限日统计",
+      "目录标识": "table:tblvyOhLPCIH52gB",
+      "表名": "05-单支路超6.25KW功率",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblvyOhLPCIH52gB&view=vewjUPAvZP",
+        "text": "05-单支路超6.25KW功率"
+      }
+    },
+    "id": "recvxx74Nkq3s2",
+    "record_id": "recvxx74Nkq3s2"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "106",
+      "目录标识": "table:tblQdaNOZ70GAVVq",
+      "表名": "06-超功率统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblQdaNOZ70GAVVq",
+        "text": "06-超功率统计"
+      }
+    },
+    "id": "recvxx74NkXM1j",
+    "record_id": "recvxx74NkXM1j"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "44",
+      "用途": "制冷模式参数上传、制冷单元状态来源",
+      "目录标识": "table:tblkvVCNRbtMmjQg",
+      "表名": "暖通运行数据采集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblkvVCNRbtMmjQg",
+        "text": "暖通运行数据采集"
+      }
+    },
+    "id": "recvxx74Nk4gTo",
+    "record_id": "recvxx74Nk4gTo"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "45",
+      "用途": "暖通运行数据整理及模式切换关联结果",
+      "目录标识": "table:tblxOyKdyyiMTdhR",
+      "表名": "模式切换关联数据",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblxOyKdyyiMTdhR",
+        "text": "模式切换关联数据"
+      }
+    },
+    "id": "recvxx74NkpDrv",
+    "record_id": "recvxx74NkpDrv"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "107",
+      "目录标识": "table:tblg644nwNEAz5L0",
+      "表名": "00-设备台账底表-C楼",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblg644nwNEAz5L0",
+        "text": "00-设备台账底表-C楼"
+      }
+    },
+    "id": "recvxx74NkJg6D",
+    "record_id": "recvxx74NkJg6D"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "108",
+      "目录标识": "table:tblJcKUG78zAyOjL",
+      "表名": "00-设备台账底表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblJcKUG78zAyOjL",
+        "text": "00-设备台账底表"
+      }
+    },
+    "id": "recvxx74Nkhp5w",
+    "record_id": "recvxx74Nkhp5w"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "46",
+      "用途": "各楼每月告警规则导出附件",
+      "目录标识": "table:tblNyGBGSCnWhWyL",
+      "表名": "阈值数据汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblNyGBGSCnWhWyL",
+        "text": "阈值数据汇总"
+      }
+    },
+    "id": "recvxx74Nkkema",
+    "record_id": "recvxx74Nkkema"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "47",
+      "用途": "各楼供配电系统截图",
+      "目录标识": "table:tblGIz3IElh6T8vm",
+      "表名": "01-供配电系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblGIz3IElh6T8vm",
+        "text": "01-供配电系统"
+      }
+    },
+    "id": "recvxx74NkogQL",
+    "record_id": "recvxx74NkogQL"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "48",
+      "用途": "各楼暖通A区、B区截图",
+      "目录标识": "table:tblnnbx0tw3sFJoH",
+      "表名": "02-暖通系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblnnbx0tw3sFJoH",
+        "text": "02-暖通系统"
+      }
+    },
+    "id": "recvxx74Nkut4P",
+    "record_id": "recvxx74Nkut4P"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "49",
+      "用途": "各楼燃油系统截图",
+      "目录标识": "table:tblvKzr7a7SuzYMZ",
+      "表名": "03-燃油系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblvKzr7a7SuzYMZ",
+        "text": "03-燃油系统"
+      }
+    },
+    "id": "recvxx74NkMnTS",
+    "record_id": "recvxx74NkMnTS"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "50",
+      "用途": "各楼柴发系统截图",
+      "目录标识": "table:tblPzH8miDHPnjAl",
+      "表名": "04-柴发系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblPzH8miDHPnjAl",
+        "text": "04-柴发系统"
+      }
+    },
+    "id": "recvxx74NklQnf",
+    "record_id": "recvxx74NklQnf"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "51",
+      "用途": "各楼动环自监控系统截图",
+      "目录标识": "table:tbly9D29sw0eT6FQ",
+      "表名": "05-弱电系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbly9D29sw0eT6FQ",
+        "text": "05-弱电系统"
+      }
+    },
+    "id": "recvxx74NkK8Ks",
+    "record_id": "recvxx74NkK8Ks"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "109",
+      "目录标识": "table:tbllYnpmNG2KODSo",
+      "表名": "06-房间概览",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tbllYnpmNG2KODSo",
+        "text": "06-房间概览"
+      }
+    },
+    "id": "recvxx74NkwOT6",
+    "record_id": "recvxx74NkwOT6"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "52",
+      "用途": "“同步需求／上传完成”截图触发指令",
+      "目录标识": "table:tblQlmBM3vgoN7fq",
+      "表名": "00-手动同步指令",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblQlmBM3vgoN7fq",
+        "text": "00-手动同步指令"
+      }
+    },
+    "id": "recvxx74NkoqQl",
+    "record_id": "recvxx74NkoqQl"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-设备&容量管理",
+      "排序": "53",
+      "用途": "空调温湿度专项上传结果",
+      "目录标识": "table:tblfnTbEWK9607zV",
+      "表名": "07-温湿度汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/ASLxbfESPahdTKs0A9NccgbrnXc?table=tblfnTbEWK9607zV",
+        "text": "07-温湿度汇总"
+      }
+    },
+    "id": "recvxx74Nkyzs1",
+    "record_id": "recvxx74Nkyzs1"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "328",
+      "用途": "程序异常、失败日志及创建者电脑信息",
+      "目录标识": "table:tblGy6Z1GTxbY1EQ",
+      "表名": "数据表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tblGy6Z1GTxbY1EQ",
+        "text": "数据表"
+      }
+    },
+    "id": "recvxx74NkzYCI",
+    "record_id": "recvxx74NkzYCI"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "323",
+      "目录标识": "table:tblNgaHbbZd5sOXa",
+      "表名": "交接班问题收集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tblNgaHbbZd5sOXa",
+        "text": "交接班问题收集"
+      }
+    },
+    "id": "recvxx74NkpmIV",
+    "record_id": "recvxx74NkpmIV"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "324",
+      "目录标识": "table:tblIPF4JYQHDJzmD",
+      "表名": "数据表 2",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tblIPF4JYQHDJzmD",
+        "text": "数据表 2"
+      }
+    },
+    "id": "recvxx74NkcxLe",
+    "record_id": "recvxx74NkcxLe"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "325",
+      "目录标识": "table:tbldOWHTO3YppLAn",
+      "表名": "H楼巡检表记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tbldOWHTO3YppLAn",
+        "text": "H楼巡检表记录"
+      }
+    },
+    "id": "recvxx74NkZNrw",
+    "record_id": "recvxx74NkZNrw"
+  },
+  {
+    "fields": {
+      "所属分类": "程序日志记录多维表",
+      "排序": "326",
+      "目录标识": "table:tblBrdppHjm2KvR7",
+      "表名": "H楼巡检表版本控制表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/H7DLbpdQiaIw4ssg5sCcSoGMn5M?table=tblBrdppHjm2KvR7",
+        "text": "H楼巡检表版本控制表"
+      }
+    },
+    "id": "recvxx74NkXyuH",
+    "record_id": "recvxx74NkXyuH"
+  },
+  {
+    "fields": {
+      "所属分类": "南通天气预警",
+      "排序": "110",
+      "目录标识": "table:tblESvQF7BW4sIQm",
+      "表名": "群组推送天气",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/Tmn8bjGnpasbLTskafbcRijvnKe?table=tblESvQF7BW4sIQm",
+        "text": "群组推送天气"
+      }
+    },
+    "id": "recvxx74NksF9Q",
+    "record_id": "recvxx74NksF9Q"
+  },
+  {
+    "fields": {
+      "所属分类": "南通天气预警",
+      "排序": "111",
+      "目录标识": "table:tblfIhzQiESFKBsf",
+      "表名": "天气地区表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/Tmn8bjGnpasbLTskafbcRijvnKe?table=tblfIhzQiESFKBsf",
+        "text": "天气地区表"
+      }
+    },
+    "id": "recvxx74NkRSor",
+    "record_id": "recvxx74NkRSor"
+  },
+  {
+    "fields": {
+      "所属分类": "南通天气预警",
+      "排序": "112",
+      "目录标识": "table:tbldeLoJJe6cPiHy",
+      "表名": "重保天气预警类型",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/Tmn8bjGnpasbLTskafbcRijvnKe?table=tbldeLoJJe6cPiHy",
+        "text": "重保天气预警类型"
+      }
+    },
+    "id": "recvxx74NkMQKU",
+    "record_id": "recvxx74NkMQKU"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "113",
+      "目录标识": "table:tblDM3ZpHHC3wqVq",
+      "表名": "事件通报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblDM3ZpHHC3wqVq",
+        "text": "事件通报"
+      }
+    },
+    "id": "recvxx74NkuG9R",
+    "record_id": "recvxx74NkuG9R"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "114",
+      "目录标识": "table:tblU02Tt1SbUSu1o",
+      "表名": "📝事件统计表（New）-进展更新时间",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblU02Tt1SbUSu1o",
+        "text": "📝事件统计表（New）-进展更新时间"
+      }
+    },
+    "id": "recvxx74NkEhUG",
+    "record_id": "recvxx74NkEhUG"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "115",
+      "目录标识": "table:tbl1buWZxR1Emamx",
+      "表名": "演练通报（New）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl1buWZxR1Emamx",
+        "text": "演练通报（New）"
+      }
+    },
+    "id": "recvxx74NkbRt8",
+    "record_id": "recvxx74NkbRt8"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "54",
+      "用途": "交接班演练信息来源",
+      "目录标识": "table:tblBrALE11XCicNN",
+      "表名": "📝演练统计表（New）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblBrALE11XCicNN",
+        "text": "📝演练统计表（New）"
+      }
+    },
+    "id": "recvxx74Nkr3vW",
+    "record_id": "recvxx74Nkr3vW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "116",
+      "目录标识": "table:tblpLoSqewl0h9S7",
+      "表名": "演练统计表（New）-进展更新时间",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblpLoSqewl0h9S7",
+        "text": "演练统计表（New）-进展更新时间"
+      }
+    },
+    "id": "recvxx74Nkw5w2",
+    "record_id": "recvxx74Nkw5w2"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "117",
+      "目录标识": "table:tbluaZMLBtk5tEAl",
+      "表名": "变更通报（New)",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbluaZMLBtk5tEAl",
+        "text": "变更通报（New)"
+      }
+    },
+    "id": "recvxx74NkNOs0",
+    "record_id": "recvxx74NkNOs0"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "118",
+      "目录标识": "table:tbl467hM55otM11n",
+      "表名": "📝紧急抢修",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl467hM55otM11n",
+        "text": "📝紧急抢修"
+      }
+    },
+    "id": "recvxx74NkX18Z",
+    "record_id": "recvxx74NkX18Z"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "119",
+      "目录标识": "table:tblBZDciufyEGhAT",
+      "表名": "当日园区工作统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblBZDciufyEGhAT",
+        "text": "当日园区工作统计"
+      }
+    },
+    "id": "recvxx74NkYTVv",
+    "record_id": "recvxx74NkYTVv"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "120",
+      "目录标识": "table:tblzsRO2fe5RiOzL",
+      "表名": "演练汇总",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblzsRO2fe5RiOzL",
+        "text": "演练汇总"
+      }
+    },
+    "id": "recvxx74NkuZad",
+    "record_id": "recvxx74NkuZad"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "121",
+      "目录标识": "table:tbl3FvyyPYDRXdeF",
+      "表名": "6、设备操作通报（自选）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl3FvyyPYDRXdeF",
+        "text": "6、设备操作通报（自选）"
+      }
+    },
+    "id": "recvxx74NkuGWV",
+    "record_id": "recvxx74NkuGWV"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "122",
+      "目录标识": "table:tblRiJ3bDLCwlxVs",
+      "表名": "📝重保戒备统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblRiJ3bDLCwlxVs",
+        "text": "📝重保戒备统计表"
+      }
+    },
+    "id": "recvxx74NkdIOw",
+    "record_id": "recvxx74NkdIOw"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "123",
+      "目录标识": "table:tblAqy0gz8sNDpJp",
+      "表名": "4、重保戒备通报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblAqy0gz8sNDpJp",
+        "text": "4、重保戒备通报"
+      }
+    },
+    "id": "recvxx74NkQXQW",
+    "record_id": "recvxx74NkQXQW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "124",
+      "目录标识": "table:tbloCE9vSjMFE1Vx",
+      "表名": "📝计划性维护统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbloCE9vSjMFE1Vx",
+        "text": "📝计划性维护统计表"
+      }
+    },
+    "id": "recvxx74NkGVvB",
+    "record_id": "recvxx74NkGVvB"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "125",
+      "目录标识": "table:tblVlzioEvYFqxjI",
+      "表名": "3、计划性维护通报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblVlzioEvYFqxjI",
+        "text": "3、计划性维护通报"
+      }
+    },
+    "id": "recvxx74Nk0SWu",
+    "record_id": "recvxx74Nk0SWu"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "126",
+      "目录标识": "table:tbl8Hd81WST6hlAb",
+      "表名": "📝事件统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl8Hd81WST6hlAb",
+        "text": "📝事件统计表"
+      }
+    },
+    "id": "recvxx74NkTfUo",
+    "record_id": "recvxx74NkTfUo"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "127",
+      "目录标识": "table:tblnLKz5QWICVsNZ",
+      "表名": "2、变更通报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblnLKz5QWICVsNZ",
+        "text": "2、变更通报"
+      }
+    },
+    "id": "recvxx74Nk7ve6",
+    "record_id": "recvxx74Nk7ve6"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "128",
+      "目录标识": "table:tblZmnYhkIDfXpl3",
+      "表名": "📝变更统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblZmnYhkIDfXpl3",
+        "text": "📝变更统计表"
+      }
+    },
+    "id": "recvxx74Nk4xHV",
+    "record_id": "recvxx74Nk4xHV"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "129",
+      "目录标识": "table:tbla7cFQdzLJ2NLU",
+      "表名": "5、演练通报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbla7cFQdzLJ2NLU",
+        "text": "5、演练通报"
+      }
+    },
+    "id": "recvxx74NkHtlI",
+    "record_id": "recvxx74NkHtlI"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "311",
+      "目录标识": "table:tbl7u5LBL5dTNLbI",
+      "表名": "📝演练统计表（原始）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl7u5LBL5dTNLbI",
+        "text": "📝演练统计表（原始）"
+      }
+    },
+    "id": "recvxx74Nk8hZ0",
+    "record_id": "recvxx74Nk8hZ0"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "130",
+      "目录标识": "table:tblQ1KsbVCfQpi4A",
+      "表名": "7、培训通报（自选）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblQ1KsbVCfQpi4A",
+        "text": "7、培训通报（自选）"
+      }
+    },
+    "id": "recvxx74NkMzHA",
+    "record_id": "recvxx74NkMzHA"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "131",
+      "目录标识": "table:tblI2EgYPLektRGw",
+      "表名": "8、交接班通报（自选）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblI2EgYPLektRGw",
+        "text": "8、交接班通报（自选）"
+      }
+    },
+    "id": "recvxx74Nk8onI",
+    "record_id": "recvxx74Nk8onI"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "132",
+      "目录标识": "table:tblbkB742PpOMqcq",
+      "表名": "9、运行通报（自选）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblbkB742PpOMqcq",
+        "text": "9、运行通报（自选）"
+      }
+    },
+    "id": "recvxx74Nkz2DU",
+    "record_id": "recvxx74Nkz2DU"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "274",
+      "目录标识": "table:tblbiVner1tslt4G",
+      "表名": "单选",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblbiVner1tslt4G",
+        "text": "单选"
+      }
+    },
+    "id": "recvxx74NkDXHN",
+    "record_id": "recvxx74NkDXHN"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "275",
+      "目录标识": "table:tblncIQ4jOryi58m",
+      "表名": "【引用维修管理】人员角色配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblncIQ4jOryi58m",
+        "text": "【引用维修管理】人员角色配置"
+      }
+    },
+    "id": "recvxx74NkHpCv",
+    "record_id": "recvxx74NkHpCv"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "276",
+      "目录标识": "table:tbl5YNCvVH6sSf51",
+      "表名": "🧑通报矩阵配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl5YNCvVH6sSf51",
+        "text": "🧑通报矩阵配置"
+      }
+    },
+    "id": "recvxx74NkWoBD",
+    "record_id": "recvxx74NkWoBD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "277",
+      "目录标识": "table:tblqhZOtdlkgP62m",
+      "表名": "【引用演练管理】年度演练计划",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblqhZOtdlkgP62m",
+        "text": "【引用演练管理】年度演练计划"
+      }
+    },
+    "id": "recvxx74NkDlc0",
+    "record_id": "recvxx74NkDlc0"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "278",
+      "目录标识": "table:tblwxgWIh9dfM8TE",
+      "表名": "【引用人员管理】南通机房组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblwxgWIh9dfM8TE",
+        "text": "【引用人员管理】南通机房组织架构"
+      }
+    },
+    "id": "recvxx74NkABId",
+    "record_id": "recvxx74NkABId"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "279",
+      "目录标识": "table:tblBKiXlnweVdzky",
+      "表名": "【引用资料助手】资料库EOP",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblBKiXlnweVdzky",
+        "text": "【引用资料助手】资料库EOP"
+      }
+    },
+    "id": "recvxx74Nk1VRD",
+    "record_id": "recvxx74Nk1VRD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "280",
+      "目录标识": "table:tblOJSUWUSRHSZUc",
+      "表名": "【引用运行大盘】当日值班信息（天）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblOJSUWUSRHSZUc",
+        "text": "【引用运行大盘】当日值班信息（天）"
+      }
+    },
+    "id": "recvxx74Nky1KE",
+    "record_id": "recvxx74Nky1KE"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "281",
+      "目录标识": "table:tblik9rkLdyVqduz",
+      "表名": "【引用维修管理】维修项目汇总表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tblik9rkLdyVqduz",
+        "text": "【引用维修管理】维修项目汇总表"
+      }
+    },
+    "id": "recvxx74NkzErY",
+    "record_id": "recvxx74NkzErY"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "282",
+      "目录标识": "table:tbl9f1T9YkQM0ZGJ",
+      "表名": "【引用人员管理】组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbl9f1T9YkQM0ZGJ",
+        "text": "【引用人员管理】组织架构"
+      }
+    },
+    "id": "recvxx74NkXhQ2",
+    "record_id": "recvxx74NkXhQ2"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "133",
+      "目录标识": "table:tbla7ugoTY75oVVn",
+      "表名": "01-园区变更底表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbla7ugoTY75oVVn",
+        "text": "01-园区变更底表"
+      }
+    },
+    "id": "recvxx74Nk74Sc",
+    "record_id": "recvxx74Nk74Sc"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-通报管理",
+      "排序": "283",
+      "目录标识": "table:tbls1MbDGh7YlQNp",
+      "表名": "数据表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/M4rgb1cGSacHyusJ9wrcfIOwndb?table=tbls1MbDGh7YlQNp",
+        "text": "数据表"
+      }
+    },
+    "id": "recvxx74NklYIH",
+    "record_id": "recvxx74NklYIH"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "284",
+      "目录标识": "table:tblZmie0GjFzgywc",
+      "表名": "01-2 园区人员配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblZmie0GjFzgywc",
+        "text": "01-2 园区人员配置"
+      }
+    },
+    "id": "recvxx74NkqF4G",
+    "record_id": "recvxx74NkqF4G"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "134",
+      "目录标识": "table:tblZipVFGY4D65tw",
+      "表名": "01-3 组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblZipVFGY4D65tw",
+        "text": "01-3 组织架构"
+      }
+    },
+    "id": "recvxx74NkIxy6",
+    "record_id": "recvxx74NkIxy6"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "135",
+      "目录标识": "table:tblGPAs6IWNtdAsp",
+      "表名": "02-1 区域代码（户籍关联）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblGPAs6IWNtdAsp",
+        "text": "02-1 区域代码（户籍关联）"
+      }
+    },
+    "id": "recvxx74NkD3Sp",
+    "record_id": "recvxx74NkD3Sp"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "136",
+      "目录标识": "table:tblAkZcj5XHO000m",
+      "表名": "02-2 RACI职责矩阵（修改）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblAkZcj5XHO000m",
+        "text": "02-2 RACI职责矩阵（修改）"
+      }
+    },
+    "id": "recvxx74Nkkz70",
+    "record_id": "recvxx74Nkkz70"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "137",
+      "目录标识": "table:tbllnusk1TBSFKNe",
+      "表名": "00-XX（勿动）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tbllnusk1TBSFKNe",
+        "text": "00-XX（勿动）"
+      }
+    },
+    "id": "recvxx74Nk6msR",
+    "record_id": "recvxx74Nk6msR"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "285",
+      "目录标识": "table:tblwZsa7yh6oFBCL",
+      "表名": "00-员工持证信息【引用持证管理】",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblwZsa7yh6oFBCL",
+        "text": "00-员工持证信息【引用持证管理】"
+      }
+    },
+    "id": "recvxx74Nk0XFx",
+    "record_id": "recvxx74Nk0XFx"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "138",
+      "目录标识": "table:tblTJHRj2aSP1XvW",
+      "表名": "1. 全国在职运维人员信息（每日刷新）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblTJHRj2aSP1XvW",
+        "text": "1. 全国在职运维人员信息（每日刷新）"
+      }
+    },
+    "id": "recvxx74NkZQ5Y",
+    "record_id": "recvxx74NkZQ5Y"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "286",
+      "目录标识": "table:tblAmSeM7l0TLoo6",
+      "表名": "【配置】值班机房排班底表（月度）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblAmSeM7l0TLoo6",
+        "text": "【配置】值班机房排班底表（月度）"
+      }
+    },
+    "id": "recvxx74Nkj2hY",
+    "record_id": "recvxx74Nkj2hY"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "139",
+      "目录标识": "table:tblq1HQN1hCtKXLR",
+      "表名": "蓝底一寸照收集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblq1HQN1hCtKXLR",
+        "text": "蓝底一寸照收集"
+      }
+    },
+    "id": "recvxx74NkTamf",
+    "record_id": "recvxx74NkTamf"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景驾驶舱-人员管理",
+      "排序": "140",
+      "目录标识": "table:tblFwwCJeKjpCpWB",
+      "表名": "国庆值守收集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/F9lDbA5XKaLmyasoARRcZFpKnZd?table=tblFwwCJeKjpCpWB",
+        "text": "国庆值守收集"
+      }
+    },
+    "id": "recvxx74NkYEvh",
+    "record_id": "recvxx74NkYEvh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "141",
+      "目录标识": "table:tbltIrNE6bMVltql",
+      "表名": "查询检索",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbltIrNE6bMVltql",
+        "text": "查询检索"
+      }
+    },
+    "id": "recvxx74Nk2PVh",
+    "record_id": "recvxx74Nk2PVh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "142",
+      "目录标识": "table:tblOtTJ4BEucdZZT",
+      "表名": "AI Agent 查询记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblOtTJ4BEucdZZT",
+        "text": "AI Agent 查询记录"
+      }
+    },
+    "id": "recvxx74NkI06U",
+    "record_id": "recvxx74NkI06U"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "287",
+      "目录标识": "table:tblLqlb6z0HqEFmQ",
+      "表名": "组织架构（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblLqlb6z0HqEFmQ",
+        "text": "组织架构（引用）"
+      }
+    },
+    "id": "recvxx74Nkv9IQ",
+    "record_id": "recvxx74Nkv9IQ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "288",
+      "目录标识": "table:tblxEW6FNkI037J4",
+      "表名": "设备型号&品牌配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblxEW6FNkI037J4",
+        "text": "设备型号&品牌配置"
+      }
+    },
+    "id": "recvxx74NkyxE3",
+    "record_id": "recvxx74NkyxE3"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "289",
+      "目录标识": "table:tbljUfWzkO29jEiD",
+      "表名": "接维资料单选配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbljUfWzkO29jEiD",
+        "text": "接维资料单选配置"
+      }
+    },
+    "id": "recvxx74NkbSfg",
+    "record_id": "recvxx74NkbSfg"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "290",
+      "目录标识": "table:tblLn9KnmvWKY6p1",
+      "表名": "培训记录单项配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblLn9KnmvWKY6p1",
+        "text": "培训记录单项配置"
+      }
+    },
+    "id": "recvxx74NkKHXf",
+    "record_id": "recvxx74NkKHXf"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "143",
+      "目录标识": "table:tblBV1YfQouZHNc6",
+      "表名": "文件内部发布流程",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblBV1YfQouZHNc6",
+        "text": "文件内部发布流程"
+      }
+    },
+    "id": "recvxx74Nk8NGe",
+    "record_id": "recvxx74Nk8NGe"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "144",
+      "目录标识": "table:tblma2tfLvFLHHkb",
+      "表名": "一阶文件",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblma2tfLvFLHHkb",
+        "text": "一阶文件"
+      }
+    },
+    "id": "recvxx74Nk2Pkz",
+    "record_id": "recvxx74Nk2Pkz"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "145",
+      "目录标识": "table:tblzKmM9oQrtJwIw",
+      "表名": "二阶文件",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblzKmM9oQrtJwIw",
+        "text": "二阶文件"
+      }
+    },
+    "id": "recvxx74Nk5BiD",
+    "record_id": "recvxx74Nk5BiD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "146",
+      "目录标识": "table:tblPGbazZiD8vxcd",
+      "表名": "四阶文件",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblPGbazZiD8vxcd",
+        "text": "四阶文件"
+      }
+    },
+    "id": "recvxx74NkSF0z",
+    "record_id": "recvxx74NkSF0z"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "147",
+      "目录标识": "table:tblNpw5kmWkHnpmc",
+      "表名": "EOP",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblNpw5kmWkHnpmc",
+        "text": "EOP"
+      }
+    },
+    "id": "recvxx74NklQS6",
+    "record_id": "recvxx74NklQS6"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "148",
+      "目录标识": "table:tbliLdpas4mQ6Cq5",
+      "表名": "SOP",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbliLdpas4mQ6Cq5",
+        "text": "SOP"
+      }
+    },
+    "id": "recvxx74NksG53",
+    "record_id": "recvxx74NksG53"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "149",
+      "目录标识": "table:tblueinSHA6IdSG9",
+      "表名": "MOP",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblueinSHA6IdSG9",
+        "text": "MOP"
+      }
+    },
+    "id": "recvxx74Nk8eUg",
+    "record_id": "recvxx74Nk8eUg"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "150",
+      "目录标识": "table:tblrUQAVYYh31EEL",
+      "表名": "操作票",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblrUQAVYYh31EEL",
+        "text": "操作票"
+      }
+    },
+    "id": "recvxx74Nk6eF2",
+    "record_id": "recvxx74Nk6eF2"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "151",
+      "目录标识": "table:tbldAHLzu1qeAChg",
+      "表名": "设备厂家资料",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbldAHLzu1qeAChg",
+        "text": "设备厂家资料"
+      }
+    },
+    "id": "recvxx74Nk5zTr",
+    "record_id": "recvxx74Nk5zTr"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "152",
+      "目录标识": "table:tblA5mfGt2NlPw73",
+      "表名": "现场培训（含厂家培训）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblA5mfGt2NlPw73",
+        "text": "现场培训（含厂家培训）"
+      }
+    },
+    "id": "recvxx74Nkxozi",
+    "record_id": "recvxx74Nkxozi"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "153",
+      "目录标识": "table:tblsWOglzcniGFwu",
+      "表名": "南通经验分享会",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblsWOglzcniGFwu",
+        "text": "南通经验分享会"
+      }
+    },
+    "id": "recvxx74NkWcNi",
+    "record_id": "recvxx74NkWcNi"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "154",
+      "目录标识": "table:tbl2bezdQUZfPmbu",
+      "表名": "运维故障案例分享",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl2bezdQUZfPmbu",
+        "text": "运维故障案例分享"
+      }
+    },
+    "id": "recvxx74Nk5AAo",
+    "record_id": "recvxx74Nk5AAo"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "155",
+      "目录标识": "table:tblI7YJqoNMxtm1K",
+      "表名": "事件经验沉淀",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblI7YJqoNMxtm1K",
+        "text": "事件经验沉淀"
+      }
+    },
+    "id": "recvxx74Nkc2Dn",
+    "record_id": "recvxx74Nkc2Dn"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "156",
+      "目录标识": "table:tblMtrqBzjcseQix",
+      "表名": "客户服务",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblMtrqBzjcseQix",
+        "text": "客户服务"
+      }
+    },
+    "id": "recvxx74NkUtXG",
+    "record_id": "recvxx74NkUtXG"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "157",
+      "目录标识": "table:tblGYV12t2sOrGtO",
+      "表名": "其他",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblGYV12t2sOrGtO",
+        "text": "其他"
+      }
+    },
+    "id": "recvxx74Nka62a",
+    "record_id": "recvxx74Nka62a"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "158",
+      "目录标识": "table:tblssaUZfDuqW5PQ",
+      "表名": "运维会议记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblssaUZfDuqW5PQ",
+        "text": "运维会议记录"
+      }
+    },
+    "id": "recvxx74NkwTDa",
+    "record_id": "recvxx74NkwTDa"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "159",
+      "目录标识": "table:tblLdvQaLXxSihGt",
+      "表名": "内审情况",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblLdvQaLXxSihGt",
+        "text": "内审情况"
+      }
+    },
+    "id": "recvxx74NkmMPT",
+    "record_id": "recvxx74NkmMPT"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "160",
+      "目录标识": "table:tbl2m379MKo4h4uF",
+      "表名": "年度述职报告",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl2m379MKo4h4uF",
+        "text": "年度述职报告"
+      }
+    },
+    "id": "recvxx74NkGY2N",
+    "record_id": "recvxx74NkGY2N"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "161",
+      "目录标识": "table:tbl89Zq7JOdPGPIt",
+      "表名": "智航建议收集（2026年1月12日建）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl89Zq7JOdPGPIt",
+        "text": "智航建议收集（2026年1月12日建）"
+      }
+    },
+    "id": "recvxx74NkOts8",
+    "record_id": "recvxx74NkOts8"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "162",
+      "目录标识": "table:tblMW7VhbDUjpkkS",
+      "表名": "文体活动",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblMW7VhbDUjpkkS",
+        "text": "文体活动"
+      }
+    },
+    "id": "recvxx74NkMuEO",
+    "record_id": "recvxx74NkMuEO"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "163",
+      "目录标识": "table:tblzEFhaUvM7Lc5L",
+      "表名": "通讯录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblzEFhaUvM7Lc5L",
+        "text": "通讯录"
+      }
+    },
+    "id": "recvxx74NkxZp8",
+    "record_id": "recvxx74NkxZp8"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "164",
+      "目录标识": "table:tblxGUIsqpHmsI4W",
+      "表名": "极端天气-重保设备检查表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblxGUIsqpHmsI4W",
+        "text": "极端天气-重保设备检查表"
+      }
+    },
+    "id": "recvxx75urIXeB",
+    "record_id": "recvxx75urIXeB"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "165",
+      "目录标识": "table:tblzHLdm1Qh36Z1y",
+      "表名": "年度运维计划",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblzHLdm1Qh36Z1y",
+        "text": "年度运维计划"
+      }
+    },
+    "id": "recvxx75urJxkk",
+    "record_id": "recvxx75urJxkk"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "312",
+      "目录标识": "table:tblVbt0SSIy1zEVs",
+      "表名": "暖通设备参数 副本",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblVbt0SSIy1zEVs",
+        "text": "暖通设备参数 副本"
+      }
+    },
+    "id": "recvxx75urngdX",
+    "record_id": "recvxx75urngdX"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "166",
+      "目录标识": "table:tblVN18QRckUQuie",
+      "表名": "检测报告",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblVN18QRckUQuie",
+        "text": "检测报告"
+      }
+    },
+    "id": "recvxx75urKvYq",
+    "record_id": "recvxx75urKvYq"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "167",
+      "目录标识": "table:tbliVviDtzPswaaI",
+      "表名": "防雷检测",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbliVviDtzPswaaI",
+        "text": "防雷检测"
+      }
+    },
+    "id": "recvxx75urGpvG",
+    "record_id": "recvxx75urGpvG"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "168",
+      "目录标识": "table:tblU87NYOI0SIoYB",
+      "表名": "重保戒备检查记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblU87NYOI0SIoYB",
+        "text": "重保戒备检查记录"
+      }
+    },
+    "id": "recvxx75urx6zh",
+    "record_id": "recvxx75urx6zh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "169",
+      "目录标识": "table:tblLWBFOrGUuvLDG",
+      "表名": "电气设备参数",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblLWBFOrGUuvLDG",
+        "text": "电气设备参数"
+      }
+    },
+    "id": "recvxx75ur3FfX",
+    "record_id": "recvxx75ur3FfX"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "170",
+      "目录标识": "table:tblgZf1thm7zSkDR",
+      "表名": "暖通设备参数",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblgZf1thm7zSkDR",
+        "text": "暖通设备参数"
+      }
+    },
+    "id": "recvxx75urkFFN",
+    "record_id": "recvxx75urkFFN"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "171",
+      "目录标识": "table:tblyBuVivkAW5yxS",
+      "表名": "【月报】南通机房水电报表数据",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblyBuVivkAW5yxS",
+        "text": "【月报】南通机房水电报表数据"
+      }
+    },
+    "id": "recvxx75urwL4B",
+    "record_id": "recvxx75urwL4B"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "172",
+      "目录标识": "table:tblibNbVN1TskI5a",
+      "表名": "【月报】南通机房PUE数据管理",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblibNbVN1TskI5a",
+        "text": "【月报】南通机房PUE数据管理"
+      }
+    },
+    "id": "recvxx75urY3n4",
+    "record_id": "recvxx75urY3n4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "55",
+      "用途": "TOP5、月度超功耗统计文件归档及附件获取",
+      "目录标识": "table:tblkh6YCMYtS8nHa",
+      "表名": "【月报】南通机房功耗管理",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblkh6YCMYtS8nHa",
+        "text": "【月报】南通机房功耗管理"
+      }
+    },
+    "id": "recvxx75urJUMD",
+    "record_id": "recvxx75urJUMD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "173",
+      "目录标识": "table:tblAGQeQ7tpV8tWt",
+      "表名": "【月报】南通机房告警分析",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblAGQeQ7tpV8tWt",
+        "text": "【月报】南通机房告警分析"
+      }
+    },
+    "id": "recvxx75urRyDJ",
+    "record_id": "recvxx75urRyDJ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "174",
+      "目录标识": "table:tbl3KED5CdvNSCwT",
+      "表名": "【月报】南通机房人员变动",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl3KED5CdvNSCwT",
+        "text": "【月报】南通机房人员变动"
+      }
+    },
+    "id": "recvxx75urj6g4",
+    "record_id": "recvxx75urj6g4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "56",
+      "用途": "按日期、班次汇总交接班日报",
+      "目录标识": "table:tblxfd0HA9kDZQ3w",
+      "表名": "【日报】南通机房交接班日报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblxfd0HA9kDZQ3w",
+        "text": "【日报】南通机房交接班日报"
+      }
+    },
+    "id": "recvxx75urhieV",
+    "record_id": "recvxx75urhieV"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "175",
+      "目录标识": "table:tbl2EwYxl31oUwaK",
+      "表名": "【日报】南通机房运营日报",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl2EwYxl31oUwaK",
+        "text": "【日报】南通机房运营日报"
+      }
+    },
+    "id": "recvxx75urJ4fp",
+    "record_id": "recvxx75urJ4fp"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "176",
+      "目录标识": "table:tblGqXieqLFafr0L",
+      "表名": "电气日常云文档索引",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblGqXieqLFafr0L",
+        "text": "电气日常云文档索引"
+      }
+    },
+    "id": "recvxx75urE5fC",
+    "record_id": "recvxx75urE5fC"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "177",
+      "目录标识": "table:tbl0ncMj3pC5aELd",
+      "表名": "PDU异常排查",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl0ncMj3pC5aELd",
+        "text": "PDU异常排查"
+      }
+    },
+    "id": "recvxx75urha9F",
+    "record_id": "recvxx75urha9F"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "178",
+      "目录标识": "table:tblxgcvonX4ach2T",
+      "表名": "园区低压配电柜备用空开统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblxgcvonX4ach2T",
+        "text": "园区低压配电柜备用空开统计表"
+      }
+    },
+    "id": "recvxx75urZPaL",
+    "record_id": "recvxx75urZPaL"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "179",
+      "目录标识": "table:tbl0W39O2eBom2fP",
+      "表名": "园区列头柜故障统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl0W39O2eBom2fP",
+        "text": "园区列头柜故障统计表"
+      }
+    },
+    "id": "recvxx75urW8FZ",
+    "record_id": "recvxx75urW8FZ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "180",
+      "目录标识": "table:tbljThbd55JfeuRg",
+      "表名": "继电器排查统计表-电气",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbljThbd55JfeuRg",
+        "text": "继电器排查统计表-电气"
+      }
+    },
+    "id": "recvxx75urgDQu",
+    "record_id": "recvxx75urgDQu"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "181",
+      "目录标识": "table:tbl6604sdUSK2eYL",
+      "表名": "暖通日常云文档索引",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl6604sdUSK2eYL",
+        "text": "暖通日常云文档索引"
+      }
+    },
+    "id": "recvxx75urG1bC",
+    "record_id": "recvxx75urG1bC"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "182",
+      "目录标识": "table:tblfuM2JAHhnzHVp",
+      "表名": "精耕风险排查-管道传感器压力表短管锈蚀排查",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblfuM2JAHhnzHVp",
+        "text": "精耕风险排查-管道传感器压力表短管锈蚀排查"
+      }
+    },
+    "id": "recvxx75ur8szd",
+    "record_id": "recvxx75ur8szd"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "183",
+      "目录标识": "table:tblwhyyYFGgxsNV9",
+      "表名": "赛莱默水泵维修统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblwhyyYFGgxsNV9",
+        "text": "赛莱默水泵维修统计表"
+      }
+    },
+    "id": "recvxx75urHRn2",
+    "record_id": "recvxx75urHRn2"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "184",
+      "目录标识": "table:tblWr1rQrlemk7HV",
+      "表名": "继电器排查统计表-暖通",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblWr1rQrlemk7HV",
+        "text": "继电器排查统计表-暖通"
+      }
+    },
+    "id": "recvxx75urOAtl",
+    "record_id": "recvxx75urOAtl"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "185",
+      "目录标识": "table:tblLTi1OH59JkjGU",
+      "表名": "空调止回阀&风阀故障排查",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblLTi1OH59JkjGU",
+        "text": "空调止回阀&风阀故障排查"
+      }
+    },
+    "id": "recvxx75urlaF4",
+    "record_id": "recvxx75urlaF4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "186",
+      "目录标识": "table:tblL4uAQFvJjXgr0",
+      "表名": "空调系统主要故障统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblL4uAQFvJjXgr0",
+        "text": "空调系统主要故障统计"
+      }
+    },
+    "id": "recvxx75urQkr4",
+    "record_id": "recvxx75urQkr4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "187",
+      "目录标识": "table:tbl6c57MXXOaMZGi",
+      "表名": "弱电日常云文档索引",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl6c57MXXOaMZGi",
+        "text": "弱电日常云文档索引"
+      }
+    },
+    "id": "recvxx75urXXZd",
+    "record_id": "recvxx75urXXZd"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "188",
+      "目录标识": "table:tbliPHDru5jfAu3n",
+      "表名": "01",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbliPHDru5jfAu3n",
+        "text": "01"
+      }
+    },
+    "id": "recvxx75urh1Tr",
+    "record_id": "recvxx75urh1Tr"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "291",
+      "目录标识": "table:tblBihTkZmPhixWY",
+      "表名": "数据表 2",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblBihTkZmPhixWY",
+        "text": "数据表 2"
+      }
+    },
+    "id": "recvxx75urCxMm",
+    "record_id": "recvxx75urCxMm"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "313",
+      "目录标识": "table:tblsjbeDXxDzs8D5",
+      "表名": "数据表 2 副本",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblsjbeDXxDzs8D5",
+        "text": "数据表 2 副本"
+      }
+    },
+    "id": "recvxx75ur30dJ",
+    "record_id": "recvxx75ur30dJ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "189",
+      "目录标识": "table:tblth6AwwCEmG6qr",
+      "表名": "消防日常云文档索引",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblth6AwwCEmG6qr",
+        "text": "消防日常云文档索引"
+      }
+    },
+    "id": "recvxx75ur9aCS",
+    "record_id": "recvxx75ur9aCS"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "292",
+      "目录标识": "table:tblKviRx6wWYFIXl",
+      "表名": "数据表 3",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblKviRx6wWYFIXl",
+        "text": "数据表 3"
+      }
+    },
+    "id": "recvxx75urJBuR",
+    "record_id": "recvxx75urJBuR"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "293",
+      "目录标识": "table:tbldYJj47wavi7xb",
+      "表名": "数据表 4",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbldYJj47wavi7xb",
+        "text": "数据表 4"
+      }
+    },
+    "id": "recvxx75url1JK",
+    "record_id": "recvxx75url1JK"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "190",
+      "目录标识": "table:tblLkyKbs27d7MNe",
+      "表名": "建设文件（二期施工物资资料部分文件太大没上传成功）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblLkyKbs27d7MNe",
+        "text": "建设文件（二期施工物资资料部分文件太大没上传成功）"
+      }
+    },
+    "id": "recvxx75uryJl6",
+    "record_id": "recvxx75uryJl6"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "191",
+      "目录标识": "table:tblVeqO0LZtQ43Jp",
+      "表名": "01 甲供邮件发生及回复",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblVeqO0LZtQ43Jp",
+        "text": "01 甲供邮件发生及回复"
+      }
+    },
+    "id": "recvxx75urINQz",
+    "record_id": "recvxx75urINQz"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "192",
+      "目录标识": "table:tblajPNRaezjFzn1",
+      "表名": "02 挖潜机房资料",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblajPNRaezjFzn1",
+        "text": "02 挖潜机房资料"
+      }
+    },
+    "id": "recvxx75urfsn5",
+    "record_id": "recvxx75urfsn5"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "193",
+      "目录标识": "table:tblOJ2KUefDML08C",
+      "表名": "职业健康检测公示台账",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblOJ2KUefDML08C",
+        "text": "职业健康检测公示台账"
+      }
+    },
+    "id": "recvxx75urfAbM",
+    "record_id": "recvxx75urfAbM"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "194",
+      "目录标识": "table:tblV43oTaAW6SwGu",
+      "表名": "安全制度规程台账-公司",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblV43oTaAW6SwGu",
+        "text": "安全制度规程台账-公司"
+      }
+    },
+    "id": "recvxx75urimc3",
+    "record_id": "recvxx75urimc3"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "195",
+      "目录标识": "table:tblpmhL5tzEAbSB8",
+      "表名": "法律法规台账",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblpmhL5tzEAbSB8",
+        "text": "法律法规台账"
+      }
+    },
+    "id": "recvxx75urkqNu",
+    "record_id": "recvxx75urkqNu"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "196",
+      "目录标识": "table:tblxLXOlnY7RBzIZ",
+      "表名": "安全责任书",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblxLXOlnY7RBzIZ",
+        "text": "安全责任书"
+      }
+    },
+    "id": "recvxx75urVBT4",
+    "record_id": "recvxx75urVBT4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "197",
+      "目录标识": "table:tblMW7TmzAB1Mneh",
+      "表名": "危废管理",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblMW7TmzAB1Mneh",
+        "text": "危废管理"
+      }
+    },
+    "id": "recvxx75ur7Rl4",
+    "record_id": "recvxx75ur7Rl4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "198",
+      "目录标识": "table:tbl1AF7mZyNsrgJH",
+      "表名": "01-3 组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tbl1AF7mZyNsrgJH",
+        "text": "01-3 组织架构"
+      }
+    },
+    "id": "recvxx75urnKTl",
+    "record_id": "recvxx75urnKTl"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "294",
+      "目录标识": "table:tblCbenQ2nUkUOAm",
+      "表名": "事件统计（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblCbenQ2nUkUOAm",
+        "text": "事件统计（引用）"
+      }
+    },
+    "id": "recvxx75urlOIM",
+    "record_id": "recvxx75urlOIM"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "295",
+      "目录标识": "table:tblk7nWc316ygNhd",
+      "表名": "封网信息（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblk7nWc316ygNhd",
+        "text": "封网信息（引用）"
+      }
+    },
+    "id": "recvxx75urfJBS",
+    "record_id": "recvxx75urfJBS"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "199",
+      "目录标识": "table:tblMebs7ZXu218zW",
+      "表名": "【勿动】交接班check-白班",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblMebs7ZXu218zW",
+        "text": "【勿动】交接班check-白班"
+      }
+    },
+    "id": "recvxx75urqfiQ",
+    "record_id": "recvxx75urqfiQ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "200",
+      "目录标识": "table:tblCeEgJJIqvcKmh",
+      "表名": "【勿动】交接班check-夜班",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblCeEgJJIqvcKmh",
+        "text": "【勿动】交接班check-夜班"
+      }
+    },
+    "id": "recvxx75urln8p",
+    "record_id": "recvxx75urln8p"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "201",
+      "目录标识": "table:tblrk0R7MNWump8m",
+      "表名": "【勿动】天气预警-重保检查表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblrk0R7MNWump8m",
+        "text": "【勿动】天气预警-重保检查表"
+      }
+    },
+    "id": "recvxx75urauc1",
+    "record_id": "recvxx75urauc1"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "202",
+      "目录标识": "table:tblUlnd7CKdh7vdZ",
+      "表名": "费用统计",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblUlnd7CKdh7vdZ",
+        "text": "费用统计"
+      }
+    },
+    "id": "recvxx75urj70C",
+    "record_id": "recvxx75urj70C"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "203",
+      "目录标识": "table:tblyD19AJz8u51pi",
+      "表名": "水电单",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblyD19AJz8u51pi",
+        "text": "水电单"
+      }
+    },
+    "id": "recvxx75urF6CE",
+    "record_id": "recvxx75urF6CE"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-资料助手",
+      "排序": "204",
+      "目录标识": "table:tblqJJ5J7PZ8Wh0e",
+      "表名": "合同",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/MliKbC3fXa8PXrsndKscmxjdn1g?table=tblqJJ5J7PZ8Wh0e",
+        "text": "合同"
+      }
+    },
+    "id": "recvxx75urPfOX",
+    "record_id": "recvxx75urPfOX"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "205",
+      "目录标识": "table:tbldSamGnjnLY9Wp",
+      "表名": "设备信息台账",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tbldSamGnjnLY9Wp",
+        "text": "设备信息台账"
+      }
+    },
+    "id": "recvxx75ur2jGB",
+    "record_id": "recvxx75ur2jGB"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "206",
+      "目录标识": "table:tbl4DmqYk6oslPyW",
+      "表名": "维护计划",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tbl4DmqYk6oslPyW",
+        "text": "维护计划"
+      }
+    },
+    "id": "recvxx75urw8qI",
+    "record_id": "recvxx75urw8qI"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "207",
+      "目录标识": "table:tblBDXe7LWFupiLC",
+      "表名": "设备生命周期",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblBDXe7LWFupiLC",
+        "text": "设备生命周期"
+      }
+    },
+    "id": "recvxx75urjrnP",
+    "record_id": "recvxx75urjrnP"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "208",
+      "目录标识": "table:tblYFHtEWe4E4Qjw",
+      "表名": "设备计划执行情况",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblYFHtEWe4E4Qjw",
+        "text": "设备计划执行情况"
+      }
+    },
+    "id": "recvxx75ur17R4",
+    "record_id": "recvxx75ur17R4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "209",
+      "目录标识": "table:tblBQLGNUa2qFu3O",
+      "表名": "供应商管理",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblBQLGNUa2qFu3O",
+        "text": "供应商管理"
+      }
+    },
+    "id": "recvxx75ur3AnH",
+    "record_id": "recvxx75ur3AnH"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "296",
+      "目录标识": "table:tblPOAV9MJSHoWkk",
+      "表名": "机房人员配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblPOAV9MJSHoWkk",
+        "text": "机房人员配置"
+      }
+    },
+    "id": "recvxx75urlVKW",
+    "record_id": "recvxx75urlVKW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "210",
+      "目录标识": "table:tblOnpjrcp5xR6gn",
+      "表名": "长周期维护项",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblOnpjrcp5xR6gn",
+        "text": "长周期维护项"
+      }
+    },
+    "id": "recvxx75urNtTc",
+    "record_id": "recvxx75urNtTc"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "211",
+      "目录标识": "table:tblGFIJl9QQokCm0",
+      "表名": "设备生命周期管理表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblGFIJl9QQokCm0",
+        "text": "设备生命周期管理表"
+      }
+    },
+    "id": "recvxx75urd7n7",
+    "record_id": "recvxx75urd7n7"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "212",
+      "目录标识": "table:tblDNgWg26vJlxHB",
+      "表名": "关键器件更换预警",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblDNgWg26vJlxHB",
+        "text": "关键器件更换预警"
+      }
+    },
+    "id": "recvxx75uryB74",
+    "record_id": "recvxx75uryB74"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "213",
+      "目录标识": "table:tblOZ1iBgdEH4GDB",
+      "表名": "维护合同",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblOZ1iBgdEH4GDB",
+        "text": "维护合同"
+      }
+    },
+    "id": "recvxx75urU9co",
+    "record_id": "recvxx75urU9co"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "214",
+      "目录标识": "table:tblbrkMIZwd4GBEp",
+      "表名": "南通组织架构",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tblbrkMIZwd4GBEp",
+        "text": "南通组织架构"
+      }
+    },
+    "id": "recvxx75urTXHM",
+    "record_id": "recvxx75urTXHM"
+  },
+  {
+    "fields": {
+      "所属分类": "南通运维全景平台-设备生命周期管理",
+      "排序": "297",
+      "目录标识": "table:tbleNzkmxrsp0A3d",
+      "表名": "人员配置表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/WMcQbPn71aXwoGsNv0vcnzz2n6c?table=tbleNzkmxrsp0A3d",
+        "text": "人员配置表"
+      }
+    },
+    "id": "recvxx75urZPPa",
+    "record_id": "recvxx75urZPPa"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "215",
+      "目录标识": "table:tblACdnEXt1FVcPV",
+      "表名": "🌟在岗员工-培训情况统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblACdnEXt1FVcPV",
+        "text": "🌟在岗员工-培训情况统计表"
+      }
+    },
+    "id": "recvxx75urBJso",
+    "record_id": "recvxx75urBJso"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "216",
+      "目录标识": "table:tblvFrkTTUvyRaYT",
+      "表名": "📃在岗员工成绩表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblvFrkTTUvyRaYT",
+        "text": "📃在岗员工成绩表"
+      }
+    },
+    "id": "recvxx75urIKle",
+    "record_id": "recvxx75urIKle"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "217",
+      "目录标识": "table:tbla7aC5nOPj883v",
+      "表名": "🔔在岗员工-培训考核计划⚙",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbla7aC5nOPj883v",
+        "text": "🔔在岗员工-培训考核计划⚙"
+      }
+    },
+    "id": "recvxx75urqcCD",
+    "record_id": "recvxx75urqcCD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "218",
+      "目录标识": "table:tblRY4ltGUfJCvk2",
+      "表名": "😊😊 新员工培训情况汇总表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblRY4ltGUfJCvk2",
+        "text": "😊😊 新员工培训情况汇总表"
+      }
+    },
+    "id": "recvxx75urHA0K",
+    "record_id": "recvxx75urHA0K"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "298",
+      "目录标识": "table:tbluLOjtntNXxNvI",
+      "表名": "🙋‍♀️ 新员工课程配置表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbluLOjtntNXxNvI",
+        "text": "🙋‍♀️ 新员工课程配置表"
+      }
+    },
+    "id": "recvxx75urpLsh",
+    "record_id": "recvxx75urpLsh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "219",
+      "目录标识": "table:tbl4gx4y0Z29qj2H",
+      "表名": "🔔 新员工-培训考核计划表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl4gx4y0Z29qj2H",
+        "text": "🔔 新员工-培训考核计划表"
+      }
+    },
+    "id": "recvxx75ur2a3g",
+    "record_id": "recvxx75ur2a3g"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "220",
+      "目录标识": "table:tbllNXrLu7cNnjnC",
+      "表名": "📘考题题库",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbllNXrLu7cNnjnC",
+        "text": "📘考题题库"
+      }
+    },
+    "id": "recvxx75ur023t",
+    "record_id": "recvxx75ur023t"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "221",
+      "目录标识": "table:tbl7OjLR9A7aeBFR",
+      "表名": "应知应会-考试",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl7OjLR9A7aeBFR",
+        "text": "应知应会-考试"
+      }
+    },
+    "id": "recvxx75urmFMy",
+    "record_id": "recvxx75urmFMy"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "222",
+      "目录标识": "table:tbl8gyVqSD0WLd8F",
+      "表名": "应知应会-随机数发放记录",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl8gyVqSD0WLd8F",
+        "text": "应知应会-随机数发放记录"
+      }
+    },
+    "id": "recvxx75urLKs4",
+    "record_id": "recvxx75urLKs4"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "223",
+      "目录标识": "table:tblXZ7YNmy1AxvTA",
+      "表名": "4.0-分享表详情",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblXZ7YNmy1AxvTA",
+        "text": "4.0-分享表详情"
+      }
+    },
+    "id": "recvxx75urL4u3",
+    "record_id": "recvxx75urL4u3"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "224",
+      "目录标识": "table:tblrqnf99IJCBUEa",
+      "表名": "4-1分享会评分详情",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblrqnf99IJCBUEa",
+        "text": "4-1分享会评分详情"
+      }
+    },
+    "id": "recvxx75ur4UeZ",
+    "record_id": "recvxx75ur4UeZ"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "225",
+      "目录标识": "table:tblLjd2SlzsxmQIt",
+      "表名": "4-2 分享会评分详情（人员）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblLjd2SlzsxmQIt",
+        "text": "4-2 分享会评分详情（人员）"
+      }
+    },
+    "id": "recvxx75urBKhn",
+    "record_id": "recvxx75urBKhn"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "226",
+      "目录标识": "table:tblr2WJWFccRdZIm",
+      "表名": "分享会兴趣盘",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblr2WJWFccRdZIm",
+        "text": "分享会兴趣盘"
+      }
+    },
+    "id": "recvxx75ursI0l",
+    "record_id": "recvxx75ursI0l"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "314",
+      "目录标识": "table:tblFRJg3qT2RIhQs",
+      "表名": "历史考试链接",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblFRJg3qT2RIhQs",
+        "text": "历史考试链接"
+      }
+    },
+    "id": "recvxx75urbxJN",
+    "record_id": "recvxx75urbxJN"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "299",
+      "目录标识": "table:tblk3wFQwvkyBLiD",
+      "表名": "成绩总表（引用组织培训平台）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblk3wFQwvkyBLiD",
+        "text": "成绩总表（引用组织培训平台）"
+      }
+    },
+    "id": "recvxx75urXxWf",
+    "record_id": "recvxx75urXxWf"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "315",
+      "目录标识": "table:tbl3wrqqcjyRKvoR",
+      "表名": "南通历史考试成绩",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl3wrqqcjyRKvoR",
+        "text": "南通历史考试成绩"
+      }
+    },
+    "id": "recvxx75urCKsD",
+    "record_id": "recvxx75urCKsD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "227",
+      "目录标识": "table:tblYu9PTH3CLMXU6",
+      "表名": "🔔专项-培训考核计划",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblYu9PTH3CLMXU6",
+        "text": "🔔专项-培训考核计划"
+      }
+    },
+    "id": "recvxx75ur3uFT",
+    "record_id": "recvxx75ur3uFT"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "228",
+      "目录标识": "table:tblizOHeT6CiE5G3",
+      "表名": "😒😒专项培训成绩表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblizOHeT6CiE5G3",
+        "text": "😒😒专项培训成绩表"
+      }
+    },
+    "id": "recvxx75ur2YLW",
+    "record_id": "recvxx75ur2YLW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "229",
+      "目录标识": "table:tblc784MiMXVEqmM",
+      "表名": "🌟专项培训情况统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblc784MiMXVEqmM",
+        "text": "🌟专项培训情况统计表"
+      }
+    },
+    "id": "recvxx75urx1vb",
+    "record_id": "recvxx75urx1vb"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "300",
+      "目录标识": "table:tblQ9xTlQIu9ijvY",
+      "表名": "数据表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblQ9xTlQIu9ijvY",
+        "text": "数据表"
+      }
+    },
+    "id": "recvxx75urjtqd",
+    "record_id": "recvxx75urjtqd"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "230",
+      "目录标识": "table:tblUJEzEAlnSSgtx",
+      "表名": "南通人员全量信息",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblUJEzEAlnSSgtx",
+        "text": "南通人员全量信息"
+      }
+    },
+    "id": "recvxx75urq4SW",
+    "record_id": "recvxx75urq4SW"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "301",
+      "目录标识": "table:tblgNQEk9ls5CXcI",
+      "表名": "南通现场组织架构（引用）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblgNQEk9ls5CXcI",
+        "text": "南通现场组织架构（引用）"
+      }
+    },
+    "id": "recvxx75ur4jSh",
+    "record_id": "recvxx75ur4jSh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "231",
+      "目录标识": "table:tblU8iBUcSDHtNWB",
+      "表名": "南通在职人员全量信息",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblU8iBUcSDHtNWB",
+        "text": "南通在职人员全量信息"
+      }
+    },
+    "id": "recvxx75ursaad",
+    "record_id": "recvxx75ursaad"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "232",
+      "目录标识": "table:tblZReLs8JzAwhui",
+      "表名": "3.0-专项培训情况统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblZReLs8JzAwhui",
+        "text": "3.0-专项培训情况统计表"
+      }
+    },
+    "id": "recvxx75uraBBO",
+    "record_id": "recvxx75uraBBO"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "233",
+      "目录标识": "table:tblMBHGWPLtQEQwX",
+      "表名": "3.1专项培训计划⚙",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblMBHGWPLtQEQwX",
+        "text": "3.1专项培训计划⚙"
+      }
+    },
+    "id": "recvxx75urmy9M",
+    "record_id": "recvxx75urmy9M"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "234",
+      "目录标识": "table:tbl3xZnqtoNF4466",
+      "表名": "3.2-专项培训-理论考核系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl3xZnqtoNF4466",
+        "text": "3.2-专项培训-理论考核系统"
+      }
+    },
+    "id": "recvxx75urBAhM",
+    "record_id": "recvxx75urBAhM"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "235",
+      "目录标识": "table:tbl0wkstfZyjUzRA",
+      "表名": "3.3-专项培训-实操考核系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl0wkstfZyjUzRA",
+        "text": "3.3-专项培训-实操考核系统"
+      }
+    },
+    "id": "recvxx75ur2Mn9",
+    "record_id": "recvxx75ur2Mn9"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "236",
+      "目录标识": "table:tblZ3Cszl8CnZYzD",
+      "表名": "3.4-专项培训-问答测评系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblZ3Cszl8CnZYzD",
+        "text": "3.4-专项培训-问答测评系统"
+      }
+    },
+    "id": "recvxx75urBXaC",
+    "record_id": "recvxx75urBXaC"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "237",
+      "目录标识": "table:tblF2oczSSzkTe2u",
+      "表名": "3.5-专项培训-培训考核记录💯",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblF2oczSSzkTe2u",
+        "text": "3.5-专项培训-培训考核记录💯"
+      }
+    },
+    "id": "recvxx75uraGK7",
+    "record_id": "recvxx75uraGK7"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "238",
+      "目录标识": "table:tblpU1CQbsF4T2X4",
+      "表名": "3.6-错题集❎",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblpU1CQbsF4T2X4",
+        "text": "3.6-错题集❎"
+      }
+    },
+    "id": "recvxx75urikuh",
+    "record_id": "recvxx75urikuh"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "239",
+      "目录标识": "table:tblXs8hDGT5ibAVD",
+      "表名": "年度培训计划",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblXs8hDGT5ibAVD",
+        "text": "年度培训计划"
+      }
+    },
+    "id": "recvxx75ur3KG7",
+    "record_id": "recvxx75ur3KG7"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "240",
+      "目录标识": "table:tblRfwbLBf6OAN7n",
+      "表名": "1.3-在岗员工-理论考核系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblRfwbLBf6OAN7n",
+        "text": "1.3-在岗员工-理论考核系统"
+      }
+    },
+    "id": "recvxx75urBK3l",
+    "record_id": "recvxx75urBK3l"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "241",
+      "目录标识": "table:tbllOjckCINK06X2",
+      "表名": "1.4-在岗员工-实操考核系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbllOjckCINK06X2",
+        "text": "1.4-在岗员工-实操考核系统"
+      }
+    },
+    "id": "recvxx75urz1Y0",
+    "record_id": "recvxx75urz1Y0"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "242",
+      "目录标识": "table:tblsGdfbWvVFRPSz",
+      "表名": "1.5-在岗员工-问答测评系统",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblsGdfbWvVFRPSz",
+        "text": "1.5-在岗员工-问答测评系统"
+      }
+    },
+    "id": "recvxx75urIY7T",
+    "record_id": "recvxx75urIY7T"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "243",
+      "目录标识": "table:tblg1CM5L83NZUze",
+      "表名": "1.6-在岗员工-培训考核记录💯",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblg1CM5L83NZUze",
+        "text": "1.6-在岗员工-培训考核记录💯"
+      }
+    },
+    "id": "recvxx75urWwGR",
+    "record_id": "recvxx75urWwGR"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "244",
+      "目录标识": "table:tblyHcl8JPiZcitR",
+      "表名": "1.7-错题集❎",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblyHcl8JPiZcitR",
+        "text": "1.7-错题集❎"
+      }
+    },
+    "id": "recvxx75urfn8f",
+    "record_id": "recvxx75urfn8f"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "245",
+      "目录标识": "table:tblx3fDgDRkyd41N",
+      "表名": "新员工-培训情况统计表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblx3fDgDRkyd41N",
+        "text": "新员工-培训情况统计表"
+      }
+    },
+    "id": "recvxx75urZDXE",
+    "record_id": "recvxx75urZDXE"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "316",
+      "目录标识": "table:tblEQJCfcSSzfhvj",
+      "表名": "新员工-培训情况统计表（草稿）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblEQJCfcSSzfhvj",
+        "text": "新员工-培训情况统计表（草稿）"
+      }
+    },
+    "id": "recvxx75urGIFp",
+    "record_id": "recvxx75urGIFp"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "317",
+      "目录标识": "table:tbltb0GfknWm4Zoj",
+      "表名": "新员工-培训考核计划⚙(草稿)",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbltb0GfknWm4Zoj",
+        "text": "新员工-培训考核计划⚙(草稿)"
+      }
+    },
+    "id": "recvxx761mxZn9",
+    "record_id": "recvxx761mxZn9"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "318",
+      "目录标识": "table:tblbd8eqzwWBev1m",
+      "表名": "2.3-新员工-理论考核系统 (草稿）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblbd8eqzwWBev1m",
+        "text": "2.3-新员工-理论考核系统 (草稿）"
+      }
+    },
+    "id": "recvxx761mrklw",
+    "record_id": "recvxx761mrklw"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "319",
+      "目录标识": "table:tblvypABDG6FYVPp",
+      "表名": "2.4-新员工-实操考核系统 （草稿）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblvypABDG6FYVPp",
+        "text": "2.4-新员工-实操考核系统 （草稿）"
+      }
+    },
+    "id": "recvxx761mo1f8",
+    "record_id": "recvxx761mo1f8"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "320",
+      "目录标识": "table:tblYkdHeQiirJU1B",
+      "表名": "2.5-新员工-问答测评系统  （草稿）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblYkdHeQiirJU1B",
+        "text": "2.5-新员工-问答测评系统  （草稿）"
+      }
+    },
+    "id": "recvxx761m1hQg",
+    "record_id": "recvxx761m1hQg"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "321",
+      "目录标识": "table:tblM0OKIkH53e6cx",
+      "表名": "2.6-新员工-培训考核记录💯 （草稿）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblM0OKIkH53e6cx",
+        "text": "2.6-新员工-培训考核记录💯 （草稿）"
+      }
+    },
+    "id": "recvxx761mhA6R",
+    "record_id": "recvxx761mhA6R"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "322",
+      "目录标识": "table:tblDAuB0M6wfHmKC",
+      "表名": "2.7-错题集❎  （草稿）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblDAuB0M6wfHmKC",
+        "text": "2.7-错题集❎  （草稿）"
+      }
+    },
+    "id": "recvxx761m1pA5",
+    "record_id": "recvxx761m1pA5"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "302",
+      "目录标识": "table:tblpQOqt3JnhEJ07",
+      "表名": "机房配置表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblpQOqt3JnhEJ07",
+        "text": "机房配置表"
+      }
+    },
+    "id": "recvxx761mayqx",
+    "record_id": "recvxx761mayqx"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "303",
+      "目录标识": "table:tblQqDAEaq51DTPd",
+      "表名": "讲师配置",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblQqDAEaq51DTPd",
+        "text": "讲师配置"
+      }
+    },
+    "id": "recvxx761mp65c",
+    "record_id": "recvxx761mp65c"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "246",
+      "目录标识": "table:tblkfInm8uAe2DCr",
+      "表名": "机房人员信息表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblkfInm8uAe2DCr",
+        "text": "机房人员信息表"
+      }
+    },
+    "id": "recvxx761mbelM",
+    "record_id": "recvxx761mbelM"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "247",
+      "目录标识": "table:tbl6f3Uss1o3swbf",
+      "表名": "01-题库生成器",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbl6f3Uss1o3swbf",
+        "text": "01-题库生成器"
+      }
+    },
+    "id": "recvxx761mpgwD",
+    "record_id": "recvxx761mpgwD"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "248",
+      "目录标识": "table:tbloWYnJXLr2HdU4",
+      "表名": "02-线下试题AI协助导入",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tbloWYnJXLr2HdU4",
+        "text": "02-线下试题AI协助导入"
+      }
+    },
+    "id": "recvxx761mhTHV",
+    "record_id": "recvxx761mhTHV"
+  },
+  {
+    "fields": {
+      "所属分类": "南通全景驾驶舱-培训管理系统",
+      "排序": "249",
+      "目录标识": "table:tblEPcCovXAIbdpl",
+      "表名": "题库收集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/GKyVb2Az6auMwvs7VzVc3GO0nob?table=tblEPcCovXAIbdpl",
+        "text": "题库收集"
+      }
+    },
+    "id": "recvxx761mfyfq",
+    "record_id": "recvxx761mfyfq"
+  },
+  {
+    "fields": {
+      "所属分类": "交接班与排班",
+      "排序": "57",
+      "用途": "各楼交接班班次记录回溯",
+      "目录标识": "table:tblObkKSs8C3o33B",
+      "表名": "【勿动】园区交接班记录回溯",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/G7oUwGdwaiTmimk8i2ecGTWOn4d?table=tblObkKSs8C3o33B",
+        "text": "【勿动】园区交接班记录回溯"
+      }
+    },
+    "id": "recvxx761mzwht",
+    "record_id": "recvxx761mzwht"
+  },
+  {
+    "fields": {
+      "所属分类": "交接班与排班",
+      "排序": "58",
+      "用途": "当班、接班人员及H楼排班来源",
+      "目录标识": "table:tblRV9KeWFh9xCkm",
+      "表名": "【配置】值班机房排班底表（月度）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/G7oUwGdwaiTmimk8i2ecGTWOn4d?table=tblRV9KeWFh9xCkm",
+        "text": "【配置】值班机房排班底表（月度）"
+      }
+    },
+    "id": "recvxx761muv64",
+    "record_id": "recvxx761muv64"
+  },
+  {
+    "fields": {
+      "所属分类": "交接班与排班",
+      "排序": "59",
+      "用途": "长白岗排班来源",
+      "目录标识": "table:tblyyU7BbO4vB1oO",
+      "表名": "【配置】长白班机房排班底表（月度）",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/G7oUwGdwaiTmimk8i2ecGTWOn4d?table=tblyyU7BbO4vB1oO",
+        "text": "【配置】长白班机房排班底表（月度）"
+      }
+    },
+    "id": "recvxx761mUoGD",
+    "record_id": "recvxx761mUoGD"
+  },
+  {
+    "fields": {
+      "所属分类": "交接班与排班",
+      "排序": "60",
+      "用途": "主管、专业负责人及人员身份来源",
+      "目录标识": "table:tblZsQ6UmLdg9a2m",
+      "表名": "组织架构【引用人员管理】",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/G7oUwGdwaiTmimk8i2ecGTWOn4d?table=tblZsQ6UmLdg9a2m",
+        "text": "组织架构【引用人员管理】"
+      }
+    },
+    "id": "recvxx761mrsjK",
+    "record_id": "recvxx761mrsjK"
+  },
+  {
+    "fields": {
+      "所属分类": "交接班与排班",
+      "排序": "61",
+      "用途": "交接班人员联系方式来源",
+      "目录标识": "table:tblATnYxuleJpyVl",
+      "表名": "机房员工信息池【引用人员管理】",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/G7oUwGdwaiTmimk8i2ecGTWOn4d?table=tblATnYxuleJpyVl",
+        "text": "机房员工信息池【引用人员管理】"
+      }
+    },
+    "id": "recvxx761mb47Y",
+    "record_id": "recvxx761mb47Y"
+  },
+  {
+    "fields": {
+      "所属分类": "湿球温度采集",
+      "排序": "62",
+      "用途": "湿球温度定时采集结果",
+      "目录标识": "table:tblm3MOOxKCW3ZPd",
+      "表名": "湿球温度采集",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/JbZywYBfgiltYpksj2bc1HvCnPd?table=tblm3MOOxKCW3ZPd",
+        "text": "湿球温度采集"
+      }
+    },
+    "id": "recvxx761m0RIN",
+    "record_id": "recvxx761m0RIN"
+  },
+  {
+    "fields": {
+      "所属分类": "月度告警信息",
+      "排序": "63",
+      "用途": "60天告警信息上传结果",
+      "目录标识": "table:tblD7hi70s6U6rlU",
+      "表名": "月度告警信息细项",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/SOwsw315aiBJjgkl48ccoxIPntc?table=tblD7hi70s6U6rlU",
+        "text": "月度告警信息细项"
+      }
+    },
+    "id": "recvxx761mWneY",
+    "record_id": "recvxx761mWneY"
+  },
+  {
+    "fields": {
+      "所属分类": "专项问题跟踪",
+      "排序": "64",
+      "用途": "五Sheet文件导入目标",
+      "目录标识": "table:tblpQHfmC556F0rV",
+      "表名": "0.重点推动",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/OoOIbWNNaailfssUlnccUQAWnf0?table=tblpQHfmC556F0rV",
+        "text": "0.重点推动"
+      }
+    },
+    "id": "recvxx761mK7np",
+    "record_id": "recvxx761mK7np"
+  },
+  {
+    "fields": {
+      "所属分类": "专项问题跟踪",
+      "排序": "65",
+      "用途": "五Sheet文件导入目标",
+      "目录标识": "table:tblicZe8NNfMRyTC",
+      "表名": "1.楼内闭环",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/OoOIbWNNaailfssUlnccUQAWnf0?table=tblicZe8NNfMRyTC",
+        "text": "1.楼内闭环"
+      }
+    },
+    "id": "recvxx761mCdMW",
+    "record_id": "recvxx761mCdMW"
+  },
+  {
+    "fields": {
+      "所属分类": "专项问题跟踪",
+      "排序": "66",
+      "用途": "五Sheet文件导入目标",
+      "目录标识": "table:tblwBDFn8Mhgc1EA",
+      "表名": "2.飞检问题",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/OoOIbWNNaailfssUlnccUQAWnf0?table=tblwBDFn8Mhgc1EA",
+        "text": "2.飞检问题"
+      }
+    },
+    "id": "recvxx761mFVHi",
+    "record_id": "recvxx761mFVHi"
+  },
+  {
+    "fields": {
+      "所属分类": "专项问题跟踪",
+      "排序": "67",
+      "用途": "五Sheet文件导入目标",
+      "目录标识": "table:tblbLn76fJoqWVq6",
+      "表名": "3.消防专项排查问题表",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/OoOIbWNNaailfssUlnccUQAWnf0?table=tblbLn76fJoqWVq6",
+        "text": "3.消防专项排查问题表"
+      }
+    },
+    "id": "recvxx761m0bOH",
+    "record_id": "recvxx761m0bOH"
+  },
+  {
+    "fields": {
+      "所属分类": "专项问题跟踪",
+      "排序": "68",
+      "用途": "五Sheet文件导入目标",
+      "目录标识": "table:tbl9ZOfsYNVHFRno",
+      "表名": "4.DE楼待维修项",
+      "链接": {
+        "link": "https://vnet.feishu.cn/base/OoOIbWNNaailfssUlnccUQAWnf0?table=tbl9ZOfsYNVHFRno",
+        "text": "4.DE楼待维修项"
+      }
+    },
+    "id": "recvxx761mYokp",
+    "record_id": "recvxx761mYokp"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "69",
+      "用途": "南通基地运营平台平台门户入口",
+      "目录标识": "web:25bc477f432230ebeb8105a0f23ba4628af92cc71275fb0d674d050f68a05cf9",
+      "表名": "南通基地运营平台 · 平台门户",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/nantong-base",
+        "text": "南通基地运营平台 · 平台门户"
+      }
+    },
+    "id": "recvxxjv0PwWZ8",
+    "record_id": "recvxxjv0PwWZ8"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "70",
+      "用途": "南通基地运营平台今日航图入口",
+      "目录标识": "web:6feb9b7a28accf01784a8693ce5a4787bb22bcc560a693b1548234be0d0f5a7e",
+      "表名": "南通基地运营平台 · 今日航图",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/today-operations-panorama",
+        "text": "南通基地运营平台 · 今日航图"
+      }
+    },
+    "id": "recvxxjv0PNWvB",
+    "record_id": "recvxxjv0PNWvB"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "71",
+      "用途": "南通基地运营平台智舱月览入口",
+      "目录标识": "web:07213a39c0a09e2cf6584d7156724573288b86afb945a8700658d874bc6c572c",
+      "表名": "南通基地运营平台 · 智舱月览",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/monthly-operations",
+        "text": "南通基地运营平台 · 智舱月览"
+      }
+    },
+    "id": "recvxxjv0P3f2k",
+    "record_id": "recvxxjv0P3f2k"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "72",
+      "用途": "南通基地运营平台主变运行入口",
+      "目录标识": "web:6f82aa81eebd9a17220af960fc29af339b0a3124eff71d65c5c6e3a2e942a489",
+      "表名": "南通基地运营平台 · 主变运行",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/campus-operations-dashboard",
+        "text": "南通基地运营平台 · 主变运行"
+      }
+    },
+    "id": "recvxxjv0POPmA",
+    "record_id": "recvxxjv0POPmA"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "73",
+      "用途": "南通基地运营平台排班中心入口",
+      "目录标识": "web:911b240dc36bc7e24e07b7c27a032835e6e21a83737564d3c3e19903ff9094da",
+      "表名": "南通基地运营平台 · 排班中心",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/monthly-schedule",
+        "text": "南通基地运营平台 · 排班中心"
+      }
+    },
+    "id": "recvxxjv0P2SEz",
+    "record_id": "recvxxjv0P2SEz"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "74",
+      "用途": "南通基地运营平台组织架构入口",
+      "目录标识": "web:d293c4f9d28692d87ecf633bb78c3ba2f1e1dba73081fa6372e44ea3e93bf03b",
+      "表名": "南通基地运营平台 · 组织架构",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/organization",
+        "text": "南通基地运营平台 · 组织架构"
+      }
+    },
+    "id": "recvxxjv0PbcTK",
+    "record_id": "recvxxjv0PbcTK"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "75",
+      "用途": "南通基地运营平台培训持证入口",
+      "目录标识": "web:00f522fa734e45b0620ec8d739ca01f4d9d90fd0b77724866129bb1466e14d44",
+      "表名": "南通基地运营平台 · 培训持证",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/training-certification-management?module=certificate",
+        "text": "南通基地运营平台 · 培训持证"
+      }
+    },
+    "id": "recvxxjv0PKUWn",
+    "record_id": "recvxxjv0PKUWn"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "76",
+      "用途": "南通基地运营平台施工管理入口",
+      "目录标识": "web:d1de4dba5ba907cc791176ef389104e6c4b686d0644ecde51decad4858b367cf",
+      "表名": "南通基地运营平台 · 施工管理",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/construction-management",
+        "text": "南通基地运营平台 · 施工管理"
+      }
+    },
+    "id": "recvxxjv0PzB6q",
+    "record_id": "recvxxjv0PzB6q"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "77",
+      "用途": "南通基地运营平台风险排查入口",
+      "目录标识": "web:c41ded5314766dee2b91d4c331a7204eabd45a51032879971cc8c3fe1bdafcfc",
+      "表名": "南通基地运营平台 · 风险排查",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/risk-inspection-dashboard",
+        "text": "南通基地运营平台 · 风险排查"
+      }
+    },
+    "id": "recvxxjv0PplEW",
+    "record_id": "recvxxjv0PplEW"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "78",
+      "用途": "南通基地运营平台质量评估入口",
+      "目录标识": "web:023bee4cf5c1822cdba85087293b85089e673ae1dc25a8c03a439ea56441206e",
+      "表名": "南通基地运营平台 · 质量评估",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/quality-assessment",
+        "text": "南通基地运营平台 · 质量评估"
+      }
+    },
+    "id": "recvxxjv0P6ZTX",
+    "record_id": "recvxxjv0P6ZTX"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "79",
+      "用途": "南通基地运营平台月度告警总览入口",
+      "目录标识": "web:db573b8ac2dccbc01c7d4267ceed7a54efc8a3c733d1724679459b7324d5a4c2",
+      "表名": "南通基地运营平台 · 月度告警总览",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/monthly-alarm-overview",
+        "text": "南通基地运营平台 · 月度告警总览"
+      }
+    },
+    "id": "recvxxjv0Ppkhf",
+    "record_id": "recvxxjv0Ppkhf"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "80",
+      "用途": "南通基地运营平台孪生图谱入口",
+      "目录标识": "web:49107881ce84e5fd4f2e9daade31b2c9adfbae6b013b75643013a6b76036c2ae",
+      "表名": "南通基地运营平台 · 孪生图谱",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:8787/",
+        "text": "南通基地运营平台 · 孪生图谱"
+      }
+    },
+    "id": "recvxxjv0PJ3kE",
+    "record_id": "recvxxjv0PJ3kE"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "81",
+      "用途": "南通基地运营平台设备台账管理入口",
+      "目录标识": "web:26002c95f9f701aa904863442263f969f4da89fd3d4556e94b711cce8ce350a7",
+      "表名": "南通基地运营平台 · 设备台账管理",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/equipment-ledger-management",
+        "text": "南通基地运营平台 · 设备台账管理"
+      }
+    },
+    "id": "recvxxjv0P5av6",
+    "record_id": "recvxxjv0P5av6"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "82",
+      "用途": "南通基地运营平台设备轮巡入口",
+      "目录标识": "web:f2e7def9ae0a217a17bbe44805463d841c5ec09439389576c868005615b40591",
+      "表名": "南通基地运营平台 · 设备轮巡",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/equipment-patrol-dashboard",
+        "text": "南通基地运营平台 · 设备轮巡"
+      }
+    },
+    "id": "recvxxjv0P8jt6",
+    "record_id": "recvxxjv0P8jt6"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "83",
+      "用途": "南通基地运营平台设备定位入口",
+      "目录标识": "web:904801bbb566e6736b517d10fbab886b35b032d292c9024c2cd4f0db3b661cd1",
+      "表名": "南通基地运营平台 · 设备定位",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/exhaust-valve-map",
+        "text": "南通基地运营平台 · 设备定位"
+      }
+    },
+    "id": "recvxxjv0Pw6Ho",
+    "record_id": "recvxxjv0Pw6Ho"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "84",
+      "用途": "南通基地运营平台采购管理入口",
+      "目录标识": "web:617d4898a5b424e85964181957041840eab4d9638803bfcf82371963941bd90a",
+      "表名": "南通基地运营平台 · 采购管理",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/purchase-inventory-management",
+        "text": "南通基地运营平台 · 采购管理"
+      }
+    },
+    "id": "recvxxjv0PCAGq",
+    "record_id": "recvxxjv0PCAGq"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "85",
+      "用途": "南通基地运营平台库存管理入口",
+      "目录标识": "web:c9e4ca2576fc70b59373407777e75ae80fad191e6bf5582190e3585af45b9063",
+      "表名": "南通基地运营平台 · 库存管理",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/inventory-management",
+        "text": "南通基地运营平台 · 库存管理"
+      }
+    },
+    "id": "recvxxjv0PRIRN",
+    "record_id": "recvxxjv0PRIRN"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "86",
+      "用途": "南通基地运营平台运维工具管理入口",
+      "目录标识": "web:58d293b326a85e061f693d7ef95b0143813a24dd35837b7125f125a6bc311f33",
+      "表名": "南通基地运营平台 · 运维工具管理",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/operations-tools-management",
+        "text": "南通基地运营平台 · 运维工具管理"
+      }
+    },
+    "id": "recvxxjv0PYHK9",
+    "record_id": "recvxxjv0PYHK9"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "87",
+      "用途": "南通基地运营平台运维知识库入口",
+      "目录标识": "web:ff6dd76a3f9b0a8b71a75596478ee3aa2e8488f6867642e5f5f9a5c777f773d0",
+      "表名": "南通基地运营平台 · 运维知识库",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/operations-kb",
+        "text": "南通基地运营平台 · 运维知识库"
+      }
+    },
+    "id": "recvxxjv0PvEMV",
+    "record_id": "recvxxjv0PvEMV"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "88",
+      "用途": "南通基地运营平台体系月报入口",
+      "目录标识": "web:583f9bacf52a51e58569f2f9a0d31ea8a6b5f8514c70248bde3cf46c5932c659",
+      "表名": "南通基地运营平台 · 体系月报",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/system-monthly-report",
+        "text": "南通基地运营平台 · 体系月报"
+      }
+    },
+    "id": "recvxxjv0PKN1A",
+    "record_id": "recvxxjv0PKN1A"
+  },
+  {
+    "fields": {
+      "所属分类": "网页导航 · 南通基地运营平台",
+      "排序": "89",
+      "用途": "南通基地运营平台月度报告入口",
+      "目录标识": "web:579182b43c81f386e79144c155754fe7d6153c3da69d5de2e7499b8dc178ca9f",
+      "表名": "南通基地运营平台 · 月度报告",
+      "链接": {
+        "link": "https://www.sm.sjhl.online:3001/ali-monthly-report",
+        "text": "南通基地运营平台 · 月度报告"
+      }
+    },
+    "id": "recvxxjv0P4dLV",
+    "record_id": "recvxxjv0P4dLV"
+  }
+]

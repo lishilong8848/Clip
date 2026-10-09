@@ -48,7 +48,7 @@
     </fieldset>
 
     <div v-else class="lh-sf-scalar">
-      <RepairFieldControl v-if="isRepairField" :input-id="props.id" :field="repairFieldMeta" :label="field.label"
+      <RepairFieldControl v-if="isRepairField || nativeType === 'datetime-local'" :input-id="props.id" :field="repairFieldMeta" :label="field.label"
         :required="!!field.required" :disabled="disabled" :compact="true" :percentage="isRepairPercentage"
         :placeholder="field.placeholder || ''"
         :select-options="field.select_options ?? null" :allow-custom-select="!!field.allow_custom_select" :menu-z-index="10010"
@@ -172,9 +172,9 @@ const nativeType = computed(() => {
 });
 const scalarBind = computed(() => (props.modelValue == null ? "" : String(props.modelValue)));
 const isRepairField = computed(() => Boolean(field.value?.repair_field));
-const repairFieldMeta = computed<Record<string, any>>(() => field.value?.repair_field || {});
+const repairFieldMeta = computed<Record<string, any>>(() => field.value?.repair_field || (nativeType.value === 'datetime-local' ? { ui_type: 'datetime' } : {}));
 const isRepairPercentage = computed(() => field.value?.percentage === true);
-const repairDraftValue = computed(() => repairDraftInputValue(field.value?.repair_field || {}, props.modelValue));
+const repairDraftValue = computed(() => repairDraftInputValue(repairFieldMeta.value, props.modelValue));
 const arrayValue = computed(() => (Array.isArray(props.modelValue) ? props.modelValue : []));
 const repairPeople = computed(() => {
   const value = props.modelValue;

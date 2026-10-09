@@ -43,6 +43,7 @@ from .portal_service import (
     NOTICE_TYPE_POLLING,
     NOTICE_TYPE_ADJUST,
     PortalConflictError,
+    PortalConfirmationRequiredError,
     PortalError,
     PortalExternalError,
     PortalNotFoundError,
@@ -5149,6 +5150,9 @@ class PortalRuntime:
                         },
                     },
                 )
+            except PortalConfirmationRequiredError as exc:
+                return self._send_json(exc.status_code, {"ok": False, "error": str(exc),
+                    "error_code": exc.error_code, "details": exc.details})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path in {"/api/change-target-candidates", "/api/notice-target-candidates"}:

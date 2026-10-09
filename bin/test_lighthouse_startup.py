@@ -757,7 +757,7 @@ class AppLifespanStartupTests(unittest.IsolatedAsyncioTestCase):
                 self.engine.queue_warmup.assert_not_called()
         self.engine.close.assert_awaited_once()
 
-    async def test_framework_preparation_remembers_twenty_logins_and_latest_permissions(self):
+    async def test_framework_preparation_limits_warmups_not_login_accounts(self):
         entered, release = asyncio.Event(), asyncio.Event()
         original = asyncio.to_thread
         async def delayed(function, *args, **kwargs):
@@ -782,7 +782,7 @@ class AppLifespanStartupTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await self._wait_for_prepare()
                 actors = [call.args[0] for call in self.engine.queue_warmup.call_args_list]
-                self.assertEqual({actor['id'] for actor in actors}, {'queued-' + str(i) for i in range(20)})
+                self.assertEqual({actor['id'] for actor in actors}, {'queued-0', 'queued-1'})
                 self.assertEqual(next(actor['scopes'] for actor in actors if actor['id'] == 'queued-0'), ['A'])
 
     async def test_lifespan_enters_immediately_and_routes_respond_while_prepare_blocked(self):

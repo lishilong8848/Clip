@@ -136,6 +136,12 @@ def _free_tcp_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _test_ledger_device_ids(service):
+    from lan_bitable_template_portal import repair_ledger
+    repair_ledger.catalog(service).replace([{'record_id': 'rec_test_device', '机楼': '', 'scope_codes': []}])
+    return ['rec_test_device']
+
+
 class _TestMaintenancePortalService(MaintenancePortalService):
     def refresh(self) -> None:
         return
@@ -30956,8 +30962,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
                 lambda *_args, **_kwargs: summary
             )
-            service.get_repair_followup_records = (  # type: ignore[method-assign]
-                lambda **_kwargs: {"total": 0}
+            service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+                lambda *_args, **_kwargs: ([], {}, [])
             )
             service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
                 lambda: ([meta], {meta.field_name: meta})
@@ -30989,12 +30995,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             first = service.create_repair_followup_record(
                 summary_record_id="rec_summary",
+                ledger_device_ids=_test_ledger_device_ids(service),
                 fields={"维修进展描述": "处理中"},
                 operation_id="followup-op-1",
                 scope="E",
             )
             second = service.create_repair_followup_record(
                 summary_record_id="rec_summary",
+                ledger_device_ids=_test_ledger_device_ids(service),
                 fields={"维修进展描述": "处理中"},
                 operation_id="followup-op-1",
                 scope="E",
@@ -31030,8 +31038,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: summary
         )
-        service.get_repair_followup_records = (  # type: ignore[method-assign]
-            lambda **_kwargs: {"total": 0}
+        service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
+            lambda *_args, **_kwargs: ([], {}, [])
         )
         service._ensure_repair_followup_parent_id_field = (  # type: ignore[method-assign]
             lambda: ([progress_meta], {progress_meta.field_name: progress_meta})
@@ -31071,6 +31079,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         result = service.create_repair_followup_record(
             summary_record_id="rec-runtime-summary",
+            ledger_device_ids=_test_ledger_device_ids(service),
             fields={
                 "维修进展描述": "处理中",
                 "事件应急措施": "切换备用设备",
@@ -37163,6 +37172,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "rec_followup",
             summary_record_id="rec_summary",
             fields={},
+            ledger_device_ids=_test_ledger_device_ids(service),
             cmdb_record_ids=["rec_cmdb_1", "rec_cmdb_2"],
             scope="A",
         )
@@ -37255,6 +37265,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         result = service.update_repair_followup_record(
             "rec-runtime-followup",
             summary_record_id="rec-runtime-summary",
+            ledger_device_ids=_test_ledger_device_ids(service),
             fields={"维修进展描述": "已完成检查", "事件应急措施": "启用备用设备"},
             scope="A",
         )
@@ -37339,6 +37350,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "rec_followup",
             summary_record_id="rec_summary",
             fields={"事件应急措施": "隔离故障设备"},
+            ledger_device_ids=_test_ledger_device_ids(service),
             scope="A",
         )
 
@@ -37420,6 +37432,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "rec_followup",
             summary_record_id="rec_summary",
             fields={"事件应急措施": "隔离故障设备"},
+            ledger_device_ids=_test_ledger_device_ids(service),
             scope="A",
         )
 

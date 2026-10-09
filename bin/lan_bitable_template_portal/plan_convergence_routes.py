@@ -19,6 +19,8 @@ ROUTES = {
     'rulesets': ['GET', 'POST'], 'rulesets/{id}': ['GET', 'PUT', 'DELETE'],
     'rulesets/{id}/expand': ['GET'], 'rulesets/{id}/match': ['POST'],
     'maintenance/records': ['GET'], 'maintenance/check': ['POST'],
+    'change/records': ['GET'], 'change/check': ['POST'],
+    'maintenance/points': ['GET'], 'change/points': ['GET'],
     'settings': ['GET', 'PUT'], 'settings/test': ['POST'],
     'settings/browser-login': ['GET', 'POST'], 'settings/browser-login/cancel': ['POST'],
 }
@@ -126,8 +128,14 @@ def install_plan_convergence_routes(app, controller, runtime):
             return rules.save_set(set_id, payload.get('name', saved['name']), payload.get('remark', saved['remark']), payload['items'], expected_version=payload['expected_version'])
         if action == 'maintenance/records':
             return current.maintenance_records()
+        if action in {'maintenance/points', 'change/points'}:
+            return current.notice_points('repair' if action.startswith('maintenance') else 'change', query.get('record_id'), query.get('block_id'))
         if action == 'maintenance/check':
             return current.maintenance_check(payload.get('record_id') or None)
+        if action == 'change/records':
+            return current.change_records()
+        if action == 'change/check':
+            return current.change_check(payload.get('record_id') or None)
         if action == 'settings':
             if method == 'PUT':
                 auth.save_config(payload)
@@ -177,7 +185,7 @@ def install_plan_convergence_routes(app, controller, runtime):
                 payload = json.loads(await body(request, 2 * 1024 * 1024) or b'{}')
                 if not isinstance(payload, dict):
                     raise ValueError('提交内容须为对象')
-            remote_read = (action == 'blocks' and query.get('refresh') == '1') or action in {'blocks/{id}', 'snapshots', 'rule-view', 'compare', 'maintenance/check', 'rulesets/{id}/expand'} or action.endswith('/match')
+            remote_read = (action == 'blocks' and query.get('refresh') == '1') or action in {'blocks/{id}', 'snapshots', 'rule-view', 'compare', 'maintenance/check', 'change/check', 'maintenance/points', 'change/points', 'rulesets/{id}/expand'} or action.endswith('/match')
             if remote_read:
                 data = await run_query(action, request.method, query, payload, admin)
             else:

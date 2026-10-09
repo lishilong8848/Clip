@@ -34,6 +34,7 @@ class PlanConvergenceService:
         self.store = store
         self._ongoing_provider = ongoing_provider
         self._blocks_lock = threading.Lock()
+        self._persist_lock = threading.Lock()
         self._details_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='PlanDetail', initializer=lower_current_thread_priority)
         self.browser_login = BrowserLogin(store)
         auth.bind_store(store)
@@ -239,27 +240,31 @@ class PlanConvergenceService:
         result = compare_scenarios_to_details(scenarios, data['alarmBlockDetailResultList'], data['blockId'])
         return {**result, 'source_detail': data}
 
-    def maintenance_records(self, record_id=None):
-        if self._ongoing_provider is None:
-            raise ValueError('本地未结束通告读取入口未接入')
-        records = maintenance.ongoing_records(self._ongoing_provider('ALL'))
-        for record in records:
-            ref = self.store.get_document('notice_plan_checks', 'latest:' + record['record_id']) or {}
-            job = self.store.get_document('notice_plan_checks', ref['job_id']) if ref else None
-            if job:
-                record.update(auto_check_status=job['status'], auto_checked_at=job.get('checked_at'))
-                if job['status'] == 'ready':
-                    record['hits'] = (job.get('result', {}).get('records') or [{}])[0].get('hits', [])
-        if record_id is not None:
-            records = [row for row in records if row['record_id'] == str(record_id)]
-            if not records:
-                raise FileNotFoundError('该检修通告已结束、删除或不在当前未结束列表中，请刷新列表')
-        return records
+    def _manual_check(self, kind, record_id=None, *, records=None, list_method):
+        """Explicit user-triggered check; persists a local manual result only for
+        user-invoked calls (``records`` is ``None``). The automatic notice flow
+        passes ``records=[record]`` and therefore never writes a manual snapshot."""
+        internal = records is None
+        if internal:
+            records = list_method(record_id)
+        checked_at = time.time()
+        result = self._check_records(records, stat_key='maintenance' if kind == 'repair' else kind)
+        if internal:
+            self._persist_manual_checks(kind, result['records'], checked_at)
+            for row in result['records']:
+                row['check_status'] = 'skipped' if maintenance.excluded_buildings(row) else 'ready'
+                row['check_source'] = 'manual'
+                row['checked_at'] = checked_at
+        return result
 
-    def maintenance_check(self, record_id=None, *, records=None):
-        deadline = time.monotonic() + QUERY_SECONDS
-        records = self.maintenance_records(record_id) if records is None else records
-        blocks = [row for row in self.blocks(refresh=True, deadline=deadline)['items'] if str(row.get('status')) == '1']
+    def _check_records(self, records, stat_key, *, seconds=QUERY_SECONDS, refresh=True):
+        if records and all(maintenance.excluded_buildings(row) for row in records):
+            return {'records': [dict(r, hits=[], check_status='skipped', check_error='D/E楼不参与计划收敛匹配') for r in records],
+                    'orphan_block_ids': [], 'stats': {stat_key: len(records), 'blocks': 0, 'matched_records': 0, 'orphan_blocks': 0}}
+        deadline = time.monotonic() + seconds
+        cached = self.blocks()
+        blocks = [row for row in self.blocks(refresh=refresh or time.time() - cached.get('loaded_at', 0) > 120, deadline=deadline)['items']
+                  if str(row.get('status')) == '1' and not maintenance.excluded_buildings({'name': row.get('blockName', '')})]
         details = {}
         pending, rows = {}, iter(blocks)
         def submit_next():
@@ -267,14 +272,22 @@ class PlanConvergenceService:
             if row is not None:
                 remaining(deadline)
                 ident = str(row.get('blockId') or row.get('id'))
-                pending[self._details_pool.submit(self.block, ident, deadline=deadline)] = ident
+                def read_detail():
+                    fingerprint = hashlib.sha256(json.dumps(row, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                    old = self.store.get_document('plan_convergence_details', ident)
+                    if not refresh and old and old.get('fingerprint') == fingerprint and time.time() - old['at'] < 120:
+                        return old['detail']
+                    detail = self.block(ident, deadline=deadline)
+                    self.store.put_document('plan_convergence_details', ident, {'fingerprint': fingerprint, 'at': time.time(), 'detail': detail})
+                    return detail
+                pending[self._details_pool.submit(read_detail)] = ident
         try:
             for _ in range(4):
                 submit_next()
             while pending:
                 completed, _ = wait(pending, timeout=remaining(deadline), return_when=FIRST_COMPLETED)
                 if not completed:
-                    raise TimeoutError('检修核对读取超时，未把不完整数据作为核对结论。')
+                    raise TimeoutError('核对读取超时，未把不完整数据作为核对结论。')
                 for future in completed:
                     details[pending.pop(future)] = future.result()
                 for _ in completed:
@@ -284,5 +297,147 @@ class PlanConvergenceService:
                 future.cancel()
         result, orphans = maintenance.match_records(records, blocks, details)
         return {'records': result, 'orphan_block_ids': orphans,
-                'stats': {'maintenance': len(records), 'blocks': len(blocks),
+                'stats': {stat_key: len(records), 'blocks': len(blocks),
                           'matched_records': sum(bool(row['hits']) for row in result), 'orphan_blocks': len(orphans)}}
+
+    def _persist_manual_checks(self, kind, result_rows, checked_at):
+        if not result_rows:
+            return
+        payloads = {}
+        with self._persist_lock:
+            for row in result_rows:
+                key = '{0}:{1}'.format(kind, row['record_id'])
+                existing = self.store.get_document('plan_convergence_checks', key)
+                # A concurrent newer manual check (larger checked_at) must never be
+                # overwritten by this slower, older result.
+                if existing and (existing.get('checked_at') or 0) >= checked_at:
+                    continue
+                payloads[key] = {
+                    'work_type': kind,
+                    'source': 'manual',
+                    'check_source': 'manual',
+                    'check_status': 'ready',
+                    'checked_at': checked_at,
+                    'hits': row.get('hits', []),
+                    'fingerprint': maintenance.business_fingerprint(row),
+                }
+            if payloads:
+                # One atomic commit for the whole result batch: no partial write
+                # even when the batch contains multiple records.
+                self.store.put_documents('plan_convergence_checks', payloads)
+
+    def _overlay_check_results(self, record, kind):
+        """Overlay persisted check results without any Zhihang/Feishu request.
+
+        Generic ``json_documents`` lookups per visible ongoing row keep this
+        free of history scans or blanket migrations.
+        """
+        if maintenance.excluded_buildings(record):
+            record.update(hits=[], check_status='skipped', check_error='D/E楼不参与计划收敛匹配')
+            return
+        candidates = []
+        cached = self.store.get_document('plan_convergence_checks', '{0}:{1}'.format(kind, record['record_id']))
+        if cached:
+            fingerprint_ok = cached.get('fingerprint') is not None and \
+                cached['fingerprint'] == maintenance.business_fingerprint(record)
+            hits = cached.get('hits')
+            if fingerprint_ok:
+                # A valid empty hits list is still a complete ready result; a
+                # missing/malformed hits list marks the payload failed/incomplete.
+                status = 'ready' if isinstance(hits, list) else 'failed'
+            else:
+                status = 'stale'
+            candidates.append({
+                'source': 'manual',
+                'check_source': cached.get('check_source') or 'manual',
+                'check_status': status,
+                'checked_at': cached.get('checked_at'),
+                'hits': hits if status == 'ready' else None,
+            })
+        if kind == 'repair':
+            ref = self.store.get_document('notice_plan_checks', 'latest:' + record['record_id']) or {}
+            job = self.store.get_document('notice_plan_checks', ref['job_id']) if ref else None
+            if job:
+                record['auto_check_status'] = job['status']
+                record['auto_checked_at'] = job.get('checked_at')
+                if job['status'] == 'ready':
+                    fingerprint_ok = maintenance.business_fingerprint(job.get('record') or {}) == \
+                        maintenance.business_fingerprint(record)
+                    job_hits = None
+                    job_result = job.get('result')
+                    job_records = job_result.get('records') if isinstance(job_result, dict) else None
+                    if isinstance(job_records, list) and len(job_records) == 1 and isinstance(job_records[0], dict):
+                        maybe_hits = job_records[0].get('hits')
+                        if isinstance(maybe_hits, list):
+                            job_hits = maybe_hits
+                    if fingerprint_ok:
+                        status = 'ready' if job_hits is not None else 'failed'
+                    else:
+                        status = 'stale'
+                    candidates.append({
+                        'source': 'auto',
+                        'check_source': 'auto',
+                        'check_status': status,
+                        'checked_at': job.get('checked_at'),
+                        'hits': job_hits if status == 'ready' else None,
+                    })
+        if not candidates:
+            return
+        ready = [c for c in candidates if c['check_status'] == 'ready']
+        selected = max(ready, key=lambda c: (c['checked_at'] or 0)) if ready else None
+        if selected is None and candidates:
+            # No ready result: surface the most recent stale/failed candidate so
+            # the UI can tell the source changed or the payload is incomplete.
+            # Incomplete/pending/failed results never attach a fabricated hits list.
+            selected = max(candidates, key=lambda c: (c['checked_at'] or 0))
+        if selected is None:
+            return
+        record['check_status'] = selected['check_status']
+        record['check_source'] = selected['check_source']
+        record['checked_at'] = selected['checked_at']
+        if selected['check_status'] == 'ready':
+            record['hits'] = selected['hits']
+
+    def maintenance_records(self, record_id=None):
+        if self._ongoing_provider is None:
+            raise ValueError('本地未结束通告读取入口未接入')
+        records = maintenance.ongoing_records(self._ongoing_provider('ALL'), work_type='repair')
+        for record in records:
+            self._overlay_check_results(record, 'repair')
+        if record_id is not None:
+            records = [row for row in records if row['record_id'] == str(record_id)]
+            if not records:
+                raise FileNotFoundError('该检修通告已结束、删除或不在当前未结束列表中，请刷新列表')
+        return records
+
+    def change_records(self, record_id=None):
+        if self._ongoing_provider is None:
+            raise ValueError('本地未结束通告读取入口未接入')
+        records = maintenance.ongoing_records(self._ongoing_provider('ALL'), work_type='change')
+        for record in records:
+            self._overlay_check_results(record, 'change')
+        if record_id is not None:
+            records = [row for row in records if row['record_id'] == str(record_id)]
+            if not records:
+                raise FileNotFoundError('该变更通告已结束、删除或不在当前未结束列表中，请刷新列表')
+        return records
+
+    def maintenance_check(self, record_id=None, *, records=None):
+        return self._manual_check('repair', record_id, records=records, list_method=self.maintenance_records)
+
+    def change_check(self, record_id=None, *, records=None):
+        return self._manual_check('change', record_id, records=records, list_method=self.change_records)
+
+    def notice_points(self, kind, record_id, block_id):
+        rows = self.change_records(record_id) if kind == 'change' else self.maintenance_records(record_id)
+        row = rows[0]
+        hit = next((h for h in row.get('hits', []) if str(h['blockId']) == str(block_id)), None)
+        if row.get('check_status') != 'ready' or not hit:
+            raise ValueError('核对结果已变化，请重新核对后查看点位。')
+        points_rows = hit.get('point_rows')
+        if points_rows is None:
+            points_rows = maintenance.configured_points(self.block(str(block_id)))
+            hit['point_rows'] = points_rows
+            self._persist_manual_checks(kind, rows, time.time())
+        return {'items': points_rows, 'block_name': hit.get('blockName'), 'notice_name': row['name'],
+                'checked_at': row.get('checked_at'), 'note': '显示该候选计划实际配置的设备及点位/告警规则；范围为全部时不虚构逐点明细。'}

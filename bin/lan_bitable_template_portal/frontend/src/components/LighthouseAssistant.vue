@@ -11,14 +11,18 @@
     <aside
       ref="root"
       class="lighthouse"
-      :style="{ '--bot-color': botColor, '--lh-panel-max-width': panelWidthLimit ? panelWidthLimit + 'px' : undefined }"
-      :class="{ resizing: panelResizing, 'drag-active': dragActive, 'is-open': open }"
+      :style="{ '--bot-color': botColor, '--lh-panel-max-width': conversationWidthLimit ? conversationWidthLimit + 'px' : undefined, '--notice-panel-width': noticeWidth + 'px', '--notice-panel-height': (panelExpanded ? 820 : 700) + 'px' }"
+      :class="{ resizing: panelResizing, 'drag-active': dragActive, 'is-open': open, 'notice-visible': noticeVisible }"
       @keydown.esc.stop="requestPanelClose"
       @dragover="onFileDragOver"
       @drop="onFileDrop"
     >
       <UiTransition name="ui-popover" @before-leave="pinClosingPanel" @before-enter="unpinPanel" @leave-cancelled="unpinPanel">
-      <section v-if="open" class="assistant-panel" :class="{ expanded: panelExpanded }" aria-label="灯塔助手" role="dialog" aria-labelledby="assistant-title">
+      <section v-if="open" class="assistant-shell" aria-label="灯塔助手" role="dialog" aria-labelledby="assistant-title">
+      <div v-if="desktopNotices" id="assistant-notice-sidebar" class="assistant-sidebar" :class="{ expanded: noticeVisible }" :inert="!noticeVisible || undefined" :aria-hidden="!noticeVisible">
+        <LighthouseNoticePanel :key="userId" :user-id="userId" :active="noticeDockOpen" @availability="noticeAvailable = $event" @edition="onNoticeEdition" />
+      </div>
+      <section class="assistant-panel" :class="{ expanded: panelExpanded }" aria-label="助手会话">
         <header
           class="assistant-header"
           tabindex="0"
@@ -29,8 +33,9 @@
           @lostpointercapture="onDragCaptureLost"
         >
           <div class="panel-title">
-            <Bot :size="21" /><h2 id="assistant-title">灯塔助手</h2>
-            <span class="header-status" :class="{ active: loading || busy, warning: !loading && !!error }" role="status">{{ headerStatus }}</span>
+            <button v-if="desktopNotices" class="icon sidebar-toggle" :title="noticeVisible ? '收起通告待办' : '展开通告待办'" aria-label="通告待办" :aria-expanded="noticeVisible" aria-controls="assistant-notice-sidebar" @click="noticeDockOpen = !noticeVisible; noticeUserOpened = true"><PanelLeftClose v-if="noticeVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
+            <span class="assistant-mark"><Bot :size="20" /></span><div class="panel-heading"><h2 id="assistant-title">灯塔助手</h2>
+            <span class="header-status" :class="{ active: loading || busy, warning: !loading && !!error }" role="status">{{ headerStatus }}</span></div>
           </div>
           <div class="tools">
             <button class="icon" :title="panelExpanded ? '还原会话' : '展开会话'" :aria-label="panelExpanded ? '还原会话' : '展开会话'" :aria-expanded="panelExpanded" @click="panelExpanded = !panelExpanded"><Minimize2 v-if="panelExpanded" :size="17" /><Maximize2 v-else :size="17" /></button>
@@ -152,6 +157,14 @@
                     <div class="plan-title"><ListChecks :size="16" /><strong>{{ turn.plan.title }}</strong><span>{{ planStatusText(turn.plan) }}</span><button v-if="planIsFinished(turn.plan)" class="icon" type="button" :aria-expanded="!!expandedPlans[turn.plan.id]" :title="expandedPlans[turn.plan.id] ? '收起办理详情' : '展开办理详情'" :aria-label="expandedPlans[turn.plan.id] ? '收起办理详情' : '展开办理详情'" @click="expandedPlans[turn.plan.id] = !expandedPlans[turn.plan.id]"><ChevronRight :size="16" :class="{ 'rotate-chevron': expandedPlans[turn.plan.id] }" /></button></div>
                     <div v-if="!planIsFinished(turn.plan) || expandedPlans[turn.plan.id]" class="plan-body">
                     <p v-if="turn.plan.explanation" class="plan-description">{{ turn.plan.explanation }}</p>
+                    <div v-if="turn.plan.planned_notice?.selected" class="planned-notice-selected">
+                      <strong>{{ turn.plan.planned_notice.selected.title }}</strong>
+                      <span>{{ turn.plan.planned_notice.selected.building }} · {{ turn.plan.planned_notice.month }}</span>
+                      <template v-if="['needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status)">
+                        <button v-if="!plannedReset[turn.plan.id]" type="button" :disabled="isPlanBusy(turn.plan)" @click="plannedReset[turn.plan.id] = true"><RotateCcw :size="14" />重新选择计划</button>
+                        <div v-else role="alert"><p>更换计划将清除当前填写，是否继续？</p><button type="button" @click="plannedReset[turn.plan.id] = false">保留填写</button><button type="button" :disabled="isPlanBusy(turn.plan)" @click="resetPlannedNotice(turn)">清除并重新选择</button></div>
+                      </template>
+                    </div>
                     <ol class="plan-steps"><li v-for="(op, i) in turn.plan.operations || []" :key="i"><strong>{{ op.name || '业务操作' }}</strong><dl><template v-for="item in operationPreview(op, turn.plan.status === 'needs_input' && (turn.plan.fields || []).some((field: Dict) => (field.operation_index || 0) === i))" :key="item.label"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></template></dl></li></ol>
                     <form v-if="turn.plan.status === 'needs_input'" class="plan-form" @submit.prevent="amendPlan(turn)">
                       <div v-for="field in visiblePlanFields(turn.plan)" :key="turn.plan.id + ':' + field.name" class="plan-field" :class="{ 'checkbox-field': field.type === 'checkbox', 'wide-field': ['object', 'array', 'textarea', 'multiselect', 'file'].includes(field.type) }"><component :is="planFieldIsGroup(field) ? 'span' : 'label'" :for="planFieldIsGroup(field) ? undefined : planFieldId(turn.plan, field)">{{ field.label }}<b v-if="field.required" aria-hidden="true"> *</b></component>
@@ -165,6 +178,7 @@
                           <span v-else-if="repairPrefills[turn.plan.id + ':' + field.name].warning">{{ repairPrefills[turn.plan.id + ':' + field.name].warning }}</span>
                         </div>
                         <LighthouseStructuredField v-if="['object', 'array'].includes(field.type)" :field="planControl(turn.plan, field)" :id="planFieldId(turn.plan, field)" :plan-id="turn.plan.id" :plan-version="turn.plan.version" v-model="planValues[turn.plan.id + ':' + field.name]" :disabled="isPlanBusy(turn.plan)" @load-options="loadPlanOptions(turn, field, $event.scope, $event.q)" />
+                        <LighthousePlannedChoices v-else-if="field.native_planned_choice && field.type === 'select'" :field="field" :id="planFieldId(turn.plan, field)" v-model="planValues[turn.plan.id + ':' + field.name]" :disabled="isPlanBusy(turn.plan)" />
                         <textarea v-else-if="field.type === 'textarea'" :id="planFieldId(turn.plan, field)" :aria-label="field.label" v-model="planValues[turn.plan.id + ':' + field.name]" :disabled="isPlanBusy(turn.plan)" :required="field.required" :maxlength="field.maxlength" rows="3" />
                         <fieldset v-else-if="field.type === 'select' && !field.options_source && smallSingleChoice(field.options)" :id="planFieldId(turn.plan, field)" class="plan-single-choices" :disabled="isPlanBusy(turn.plan)" :aria-label="field.label"><label v-for="option in field.options" :key="String(option.value)" :class="{ selected: planValues[turn.plan.id + ':' + field.name] === option.value }"><input type="radio" :name="planFieldId(turn.plan, field)" :value="option.value" :checked="planValues[turn.plan.id + ':' + field.name] === option.value" @change="choosePlanOption(turn.plan, field, option.value)" /><span>{{ option.label }}</span></label></fieldset>
                         <VnetSelect v-else-if="field.type === 'select'" :input-id="planFieldId(turn.plan, field)" :label="field.label" :model-value="selectedLabel(field.options || [], planValues[turn.plan.id + ':' + field.name])" :options="labelledOptions(field.options || []).filter(option => !option.disabled).map(option => option.label)" :disabled="isPlanBusy(turn.plan)" :required="!!field.required" :menu-z-index="10010" @update:model-value="choosePlanOption(turn.plan, field, selectedValue(field.options || [], $event))" />
@@ -187,6 +201,7 @@
                       </div>
                       <footer class="plan-form-footer"><p v-if="planErrors[turn.plan.id]" class="failure" role="alert">{{ planErrors[turn.plan.id] }}</p><button type="button" :disabled="isPlanBusy(turn.plan)" @click="cancelPlan(turn)">取消操作</button><button class="primary" :disabled="isPlanBusy(turn.plan) || planInputIncomplete(turn.plan)"><Loader2 v-if="isPlanBusy(turn.plan)" :size="15" class="spin" />补充并继续</button></footer>
                     </form>
+                    <section v-if="turn.plan.planned_notice?.text && turn.plan.status !== 'needs_input'" class="planned-notice-text"><h4>通告全文</h4><pre>{{ turn.plan.planned_notice.text }}</pre></section>
                     <p v-if="turn.plan.status === 'awaiting_second_confirmation'" class="plan-risk">此操作涉及正式提交、删除或覆盖。请再次确认操作清单和目标。</p>
                     <p v-if="turn.plan.error && !turn.plan.results?.some((result: Dict) => !result.ok && result.error === turn.plan.error)" class="failure">{{ turn.plan.error }}</p>
                     <p v-if="turn.plan.status !== 'needs_input' && planErrors[turn.plan.id]" class="failure" role="alert">{{ planErrors[turn.plan.id] }}</p>
@@ -229,6 +244,7 @@
               <div v-if="modelNames.length" class="model-select-small">
                 <label class="sr-only" for="assistant-model">选择模型</label>
                 <select id="assistant-model" class="native-model-select" :value="state.model_name || ''" :title="state.model_name || '选择模型'" :disabled="sending || selecting" @change="switchModel(($event.target as HTMLSelectElement).value)"><option v-for="name in modelNames" :key="name" :value="name">{{ name }}</option></select>
+                <ChevronDown class="model-chevron" :size="14" aria-hidden="true" />
               </div>
               </div>
               <button v-if="state.active_run_id && state.busy" type="button" class="stop" :disabled="stopping" title="停止生成" aria-label="停止生成" @click="stopAnswer"><Loader2 v-if="stopping" :size="16" class="spin" /><Square v-else :size="16" /><span>{{ stopping ? '正在停止' : '停止回答' }}</span></button>
@@ -238,6 +254,7 @@
             </div>
           </form>
         </template>
+      </section>
       </section>
       </UiTransition>
 
@@ -256,7 +273,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import type { Chat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronRight, Clock3, Copy, Download, FileText, ListChecks, Loader2, Maximize2, Minimize2, Palette, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Wrench, X } from 'lucide-vue-next';
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, ListChecks, Loader2, Maximize2, Minimize2, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Wrench, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { repairDeviceDependentPatch, repairDraftInputValue } from '../repairManagementUtils';
 import { navigate } from '../navigation';
@@ -268,10 +285,12 @@ import AsyncPageState from './AsyncPageState.vue';
 import LighthouseBot from './LighthouseBot.vue';
 import LighthouseBotSettings from './LighthouseBotSettings.vue';
 import LighthouseCommands from './LighthouseCommands.vue';
+import LighthousePlannedChoices from './LighthousePlannedChoices.vue';
 import VnetSelect from './VnetSelect.vue';
 import { labelledOptions, selectedLabel, selectedValue, smallSingleChoice } from '../lighthouseSelect';
 import { readAssistantDraft, writeAssistantDraft, planDraftValues } from '../lighthouseDrafts';
 const LighthouseSkills = defineAsyncComponent({ loader: () => import('./LighthouseSkills.vue'), loadingComponent: LoadingIndicator, delay: 0 });
+const LighthouseNoticePanel = defineAsyncComponent(() => import('./LighthouseNoticePanel.vue'));
 import { BOT_COLORS, normalizeBot, type BotAppearance, type BotMood } from '../botAppearance';
 const structuredFieldsReady = ref(false);
 const LighthouseStructuredField = defineAsyncComponent({
@@ -328,12 +347,14 @@ const draft = ref(''), error = ref(''), settingsError = ref('');
 const skillsOpen = ref(false), selectedCommands = ref<Dict[]>([]), commandsMenu = ref<InstanceType<typeof LighthouseCommands> | null>(null);
 const draftFiles = ref<DraftFile[]>([]), attachmentInput = ref<HTMLInputElement | null>(null);
 const planBusy = reactive<Record<string, boolean>>({}), planErrors = reactive<Record<string, string>>({});
+const planOptionStates = reactive<Record<string, { loading: boolean; error: string }>>({});
 function isPlanBusy(plan: Dict): boolean { return !!planBusy[plan.id]; }
 const uploading = computed(() => draftFiles.value.some(file => file.uploading));
 const stopping = ref(false), hasNewContent = ref(false), historyLoading = ref(false), hasOlder = ref(true);
 const streamChat = shallowRef<Chat<UIMessage> | null>(null);
 let streamRun = '', streamSerial = 0, renderTimer = 0, lastStreamUpdateAt = 0;
 const planValues = reactive<Dict>({});
+const plannedReset = reactive<Record<string, boolean>>({});
 const expandedPlans = reactive<Record<string, boolean>>({});
 const activePlans = computed<Dict[]>(() => (state.value.turns || []).map((turn: Dict) => turn.plan).filter((plan: Dict) => plan && ['running', 'submitted'].includes(plan.status)));
 function planIsFinished(plan: Dict): boolean { return ['completed', 'cancelled', 'superseded'].includes(plan.status); }
@@ -482,16 +503,25 @@ let shapeEpoch = 0; // bumps on every open/close so stale async positional callb
 const PANEL_W = 620, PANEL_H = 700, MARGIN = 12, STORAGE_PREFIX = 'lighthouse_pos:';
 const panelExpanded = ref(false);
 const panelWidthLimit = ref<number | null>(null);
+const noticeAvailable = ref(false), noticeDockOpen = ref(true), noticeUserOpened = ref(false);
+const desktopNotices = ref(window.innerWidth >= 1000);
+let noticeEdition = '';
+const noticeVisible = computed(() => desktopNotices.value && noticeDockOpen.value && (noticeAvailable.value || noticeUserOpened.value));
+const noticeWidth = computed(() => Math.min(360, Math.max(240, Math.floor((panelWidthLimit.value || window.innerWidth - 48) * .4))));
+const conversationWidthLimit = computed(() => panelWidthLimit.value ? Math.max(1, panelWidthLimit.value - (noticeVisible.value ? noticeWidth.value : 0) - 2) : null);
+function onNoticeEdition(id: string): void { if (noticeEdition && id !== noticeEdition) noticeDockOpen.value = true; noticeEdition = id; }
 const panelResizing = ref(false), dragActive = ref(false);
 let panelResizeTimer = 0, panelResizeSerial = 0;
 function expectedPanelSize(): { w: number; h: number } {
-  return { w: Math.min(panelExpanded.value ? 760 : PANEL_W, panelWidthLimit.value || Infinity, window.innerWidth - 48), h: Math.min(panelExpanded.value ? 820 : PANEL_H, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
+  return { w: Math.min(panelExpanded.value ? 760 : PANEL_W, conversationWidthLimit.value || Infinity, window.innerWidth - 50) + (noticeVisible.value ? noticeWidth.value : 0) + 2, h: Math.min(panelExpanded.value ? 820 : PANEL_H, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
 }
-watch(panelExpanded, async () => {
+watch([panelExpanded, noticeVisible], async () => {
   if (!open.value || disposed || !root.value) return;
   const epoch = shapeEpoch, serial = ++panelResizeSerial, rect = root.value.getBoundingClientRect();
   const { w, h } = expectedPanelSize();
-  panelPos = clampPosForSize(rect.left, rect.top, w, h);
+  const botRect = launcher.value?.getBoundingClientRect();
+  const x = botRect && rect.right <= botRect.left ? rect.right - w : rect.left;
+  panelPos = clampPosForSize(x, rect.top, w, h);
   panelResizing.value = true;
   window.clearTimeout(panelResizeTimer);
   await nextTick();
@@ -702,7 +732,7 @@ function unpinPanel(element: Element): void {
 function close(): void {
   closedThreadAtBottom = isNearBottom();
   closedThreadTop = thread.value?.scrollTop || 0;
-  closingPanelRect = root.value?.querySelector('.assistant-panel')?.getBoundingClientRect();
+  closingPanelRect = root.value?.querySelector('.assistant-shell')?.getBoundingClientRect();
   const epoch = ++shapeEpoch;
   stopGesture(); // 先结束手势：仍在面板/启动器形态时保存末帧坐标，再切换形状。保留 epoch 守卫。
   window.clearTimeout(panelResizeTimer); panelResizing.value = false; ++panelResizeSerial;
@@ -719,6 +749,17 @@ async function send(retry?: Dict, regenerate = false): Promise<void> {
   if (sending.value || loading.value || uploading.value || (!retry && !draft.value.trim() && !draftFiles.value.some(f => f.id))) return;
   if (!retry && commandsMenu.value?.visible) return;
   const question = retry?.question || draft.value.trim();
+  if (!retry && /^(?:请)?确认发送[。！!\s]*$/.test(question) && !draftFiles.value.length) {
+    const pending = state.value.turns.filter((turn: Dict) => ['needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan?.status));
+    if (pending.some((turn: Dict) => turn.plan.planned_notice)) {
+      if (pending.length !== 1) { error.value = '有多个待处理操作，请在要发送的那条通告下确认。'; return; }
+      const turn = pending[0];
+      if (turn.plan.status === 'needs_input') { error.value = '请先补齐下方表单并核对通告全文，再确认发送。'; return; }
+      draft.value = ''; saveDrafts();
+      await confirmPlan(turn);
+      return;
+    }
+  }
   const commands = retry?.commands || selectedCommands.value;
   const submittedCommands = retry?.submitted_commands || commands.map((item: Dict) => ({ kind: item.kind, id: item.id }));
   const attachments = retry?.attachments || draftFiles.value.filter(f => f.id).map(({ preview, localId, uploading, error, ...file }) => file);
@@ -991,7 +1032,7 @@ function resultStatusText(result: Dict, plan: Dict): string {
   return result.status === 202 ? '已提交后台处理' : '接口已完成';
 }
 function planFieldId(plan: Dict, field: Dict): string { return 'plan-' + plan.id + '-' + encodeURIComponent(field.name); }
-function planFieldIsGroup(field: Dict): boolean { return ['object', 'array', 'multiselect'].includes(field.type) || (field.type === 'select' && !field.options_source && smallSingleChoice(field.options)); }
+function planFieldIsGroup(field: Dict): boolean { return ['object', 'array', 'multiselect'].includes(field.type) || (field.type === 'select' && (field.native_planned_choice || !field.options_source && smallSingleChoice(field.options))); }
 function planInputIncomplete(plan: Dict): boolean {
   if (!structuredFieldsReady.value && visiblePlanFields(plan).some((field: Dict) => ['object', 'array'].includes(field.type))) return true;
   if (visiblePlanFields(plan).some((field: Dict) => (field.native_repair_prefill || field.native_notice_prefill) && repairPrefills[plan.id + ':' + field.name]?.error)) return true;
@@ -1020,7 +1061,8 @@ function planControl(plan: Dict, field: Dict): Dict {
   if (field.native_notice_sop) {
     const notice = plan.fields.find((item: Dict) => item.operation_index === field.operation_index && item.native_notice);
     const buildings = notice ? planValues[plan.id + ':' + notice.name]?.building_codes : [];
-    return { ...field, notice_scope: Array.isArray(buildings) && buildings.length === 1 && field.scopes.includes(buildings[0]) ? buildings[0] : '' };
+    const options = planOptionStates[plan.id + ':' + field.name];
+    return { ...field, notice_scope: Array.isArray(buildings) && buildings.length === 1 && field.scopes.includes(buildings[0]) ? buildings[0] : '', directory_loading: !!options?.loading, directory_error: options?.error || '' };
   }
   if (!field.native_repair || !field.unlinked_children) return field;
   const relation = plan.fields.find((item: Dict) => item.operation_index === field.operation_index && item.path === 'source_repair_ids');
@@ -1212,6 +1254,8 @@ function replacePlan(plan: Dict): void {
 }
 async function loadPlanOptions(turn: Dict, field: Dict, selectedScope = '', selectedKeyword?: string): Promise<void> {
   if (isPlanBusy(turn.plan)) return;
+  const optionState = reactive({ loading: true, error: '' });
+  if (field.native_notice_sop) planOptionStates[turn.plan.id + ':' + field.name] = optionState;
   planBusy[turn.plan.id] = true;
   delete planErrors[turn.plan.id];
   const scopeField = (turn.plan.fields || []).find((f: Dict) => f.path === 'scope' && f.operation_index === field.operation_index);
@@ -1237,8 +1281,8 @@ async function loadPlanOptions(turn: Dict, field: Dict, selectedScope = '', sele
     filters.source_event_id = typeof selected === 'string' ? selected : '';
   }
   try { replacePlan(await call('plans/' + turn.plan.id + '/options?' + new URLSearchParams({ field: field.name, q: selectedKeyword ?? planValues[turn.plan.id + ':search:' + field.name] ?? '', ...(scope ? { scope } : {}), ...filters }).toString())); }
-  catch (e) { if (!disposed) planErrors[turn.plan.id] = e instanceof Error ? e.message : '读取未完成'; }
-  finally { delete planBusy[turn.plan.id]; if (!disposed) scheduleRead(); }
+  catch (e) { if (!disposed) { optionState.error = e instanceof Error ? e.message : '读取未完成'; planErrors[turn.plan.id] = optionState.error; } }
+  finally { optionState.loading = false; delete planBusy[turn.plan.id]; if (!disposed) scheduleRead(); }
 }
 function operationPreview(op: Dict, editing = false): { label: string; value: string }[] {
   if (op.api_id === 'POST /api/message-delivery/send') return editing ? [] : [
@@ -1366,6 +1410,9 @@ async function planCall(turn: Dict, suffix: string, method: string, payload: Dic
   try {
     const plan = await call('plans/' + turn.plan.id + suffix, method, payload, 180000);
     if (disposed) return;
+    if (payload.action === 'planned-reset' || turn.plan.planned_notice?.stage !== 'preview' && plan.planned_notice?.stage === 'preview') {
+      for (const key of Object.keys(planValues)) if (key.startsWith(plan.id + ':')) delete planValues[key];
+    }
     if (payload.action === 'edit') for (const field of plan.fields || []) planValues[plan.id + ':' + field.name] = field.value === undefined ? '' : JSON.parse(JSON.stringify(field.value));
     replacePlan(plan);
   }
@@ -1373,6 +1420,10 @@ async function planCall(turn: Dict, suffix: string, method: string, payload: Dic
   finally { delete planBusy[turn.plan.id]; if (!disposed) scheduleRead(); }
 }
 function amendPlan(turn: Dict): Promise<void> { const values: Dict = {}; for (const field of turn.plan.fields || []) values[field.name] = planValues[turn.plan.id + ':' + field.name]; return planCall(turn, '', 'PATCH', { version: turn.plan.version, values }); }
+async function resetPlannedNotice(turn: Dict): Promise<void> {
+  await planCall(turn, '', 'PATCH', { version: turn.plan.version, action: 'planned-reset', reset_confirmed: true });
+  plannedReset[turn.plan.id] = false;
+}
 function editPlan(turn: Dict): Promise<void> { return planCall(turn, '', 'PATCH', { version: turn.plan.version, action: 'edit' }); }
 function confirmPlan(turn: Dict): Promise<void> { return planCall(turn, '/confirm', 'POST', { version: turn.plan.version, stage: turn.plan.status === 'awaiting_second_confirmation' ? 'execute' : 'review' }); }
 function cancelPlan(turn: Dict): Promise<void> { return planCall(turn, '/cancel', 'POST', {}); }
@@ -1580,6 +1631,7 @@ async function clearConversation(yes: boolean): Promise<void> {
     replaceState(result); draft.value = ''; selectedCommands.value = []; error.value = '';
     for (const file of [...draftFiles.value]) removeDraftFile(file.localId);
     for (const key of Object.keys(planValues)) delete planValues[key];
+    for (const key of Object.keys(planOptionStates)) delete planOptionStates[key];
     for (const key of Object.keys(repairPrefills)) delete repairPrefills[key];
     for (const key of Object.keys(planFiles)) delete planFiles[key];
     saveDrafts();
@@ -1749,6 +1801,7 @@ function ensureInBounds(): void {
 }
 watch(() => [appearance.value.size, appearanceOpen.value], () => { if (open.value) void nextTick(applyPanelPosition); });
 function onWindowResize(): void {
+  desktopNotices.value = window.innerWidth >= 1000;
   if (dragging) stopGesture();
   if (open.value) applyPanelPosition();
 }
@@ -2003,6 +2056,15 @@ onBeforeUnmount(() => {
 }
 .lighthouse *, .lighthouse *::before, .lighthouse *::after { box-sizing: border-box; }
 .lighthouse { pointer-events: auto; }
+.lighthouse { display: flex; align-items: stretch; }
+.assistant-shell { display: flex; min-width: 0; height: min(var(--notice-panel-height, 700px), calc(100dvh - 48px)); overflow: hidden; border: 1px solid var(--lh-border); border-radius: var(--lh-panel-radius, 12px); background: var(--lh-surface); box-shadow: var(--lh-shadow, 0 14px 40px #181e2633); transition: height 320ms cubic-bezier(.22, 1, .36, 1); }
+.assistant-shell > .assistant-panel { flex: none; height: 100%; max-width: calc(100vw - 50px); border: 0; border-radius: 0; box-shadow: none; }
+.assistant-sidebar { flex: none; width: 0; min-width: 0; overflow: hidden; visibility: hidden; transition: width 320ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 320ms; }
+.assistant-sidebar.expanded { width: var(--notice-panel-width, 360px); visibility: visible; transition-delay: 0s; }
+.assistant-sidebar :deep(.notice-panel) { height: 100%; max-height: none; border: 0; border-right: 1px solid var(--lh-border); border-radius: 0; box-shadow: none; opacity: 0; transform: translateX(-8px); transition: opacity 180ms ease, transform 320ms cubic-bezier(.22, 1, .36, 1); }
+.assistant-sidebar.expanded :deep(.notice-panel) { opacity: 1; transform: translateX(0); }
+@media (max-width: 700px) { .assistant-shell { height: min(var(--notice-panel-height, 700px), calc(100dvh - max(112px, env(safe-area-inset-bottom) + 88px))); } }
+@media (prefers-reduced-motion: reduce) { .assistant-shell, .assistant-sidebar, .assistant-sidebar :deep(.notice-panel) { transition: none; } }
 .lighthouse :deep(.confirm-backdrop) { background: rgba(12, 18, 14, .5); backdrop-filter: blur(4px); }
 .lighthouse :deep(.confirm-modal) { background: var(--lh-surface); border-color: var(--lh-border-strong); border-radius: 12px; color: var(--lh-charcoal); box-shadow: 0 20px 70px rgba(0, 0, 0, .3); }
 .lighthouse :deep(.confirm-content header strong) { color: var(--lh-charcoal-strong); }
@@ -2082,9 +2144,13 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 @media (min-width: 800px) { .assistant-panel.expanded .plan-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .assistant-panel.expanded .wide-field, .assistant-panel.expanded .plan-form > button { grid-column: 1 / -1; } }
 .assistant-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--lh-border); background: var(--lh-surface-subtle); cursor: grab; touch-action: none; user-select: none; }
 .assistant-header:active { cursor: grabbing; }
+.notice-visible .assistant-header { flex-wrap: wrap; }
+.notice-visible .tools { flex-wrap: wrap; margin-left: auto; }
 .assistant-header:focus-visible { outline: 2px solid var(--lh-accent); outline-offset: -2px; border-radius: 10px 10px 0 0; }
 .panel-title, .tools { display: flex; align-items: center; gap: 6px; }
 .panel-title { color: var(--lh-charcoal-strong); }
+.assistant-mark, .panel-heading { display: contents; }
+.model-chevron { display: none; }
 .panel-title svg { color: var(--lh-accent); }
 .panel-title h2 { font-size: 16px; margin: 0; }
 .header-status { display: inline-flex; align-items: center; gap: 5px; color: var(--lh-muted); font-size: 11px; margin-left: 4px; }
@@ -2149,6 +2215,12 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .plan-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .plan-title span { color: var(--lh-accent); font-size: 12px; }
 .turn .plan-description { color: var(--lh-muted); margin-top: 8px; }
+.planned-notice-selected { display: grid; gap: 7px; padding: 10px 0; border-bottom: 1px solid var(--lh-border); }
+.planned-notice-selected > span { color: var(--lh-muted); font-size: 12px; }
+.planned-notice-selected button { justify-self: start; display: inline-flex; align-items: center; gap: 5px; }
+.planned-notice-text { margin: 12px 0; }
+.planned-notice-text h4 { margin: 0 0 8px; font-size: 13px; }
+.planned-notice-text pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; margin: 0; }
 .plan-steps { padding-left: 20px; margin: 12px 0; }
 .plan-steps li + li { margin-top: 12px; }
 .plan-steps dl { display: grid; grid-template-columns: minmax(60px, 100px) minmax(0, 1fr); gap: 5px 8px; margin: 8px 0; }
@@ -2226,25 +2298,75 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .process-rows li.current .process-dot { background: var(--lh-accent); box-shadow: 0 0 0 3px var(--lh-accent-ring); }
 .process-label { overflow-wrap: anywhere; }
 @media (min-width: 701px) {
-  .assistant-panel { box-shadow: 0 10px 32px rgba(0, 0, 0, .25); }
-  .assistant-header { padding: 12px 16px; background: var(--lh-surface); }
-  .thread { padding: 20px 22px 8px; }
+  .lighthouse {
+    --lh-panel-radius: 18px;
+    --lh-control-radius: 8px;
+    --lh-surface: color-mix(in srgb, var(--bot-color) 10%, #24282e);
+    --lh-surface-subtle: color-mix(in srgb, var(--bot-color) 10%, #2c3138);
+    --lh-surface-hover: color-mix(in srgb, var(--bot-color) 10%, #353d46);
+    --lh-border: color-mix(in srgb, var(--bot-color) 12%, #46505a);
+    --lh-border-strong: color-mix(in srgb, var(--bot-color) 14%, #65717d);
+    --lh-charcoal: #e7edf2;
+    --lh-charcoal-strong: #f6f8fa;
+    --lh-muted: #b8c2cd;
+    --lh-faint-muted: #a8b4c0;
+    --lh-action: color-mix(in srgb, var(--bot-color) 10%, #087367);
+    --lh-action-hover: color-mix(in srgb, var(--bot-color) 10%, #086659);
+    --lh-shadow: 0 18px 48px #10182038, 0 3px 10px #10182024;
+  }
+  .assistant-panel { border-radius: var(--lh-panel-radius); border-color: var(--lh-border); box-shadow: var(--lh-shadow); }
+  .assistant-header { min-height: 68px; padding: 12px 16px; background: var(--lh-surface); gap: 10px; }
+  .panel-title { gap: 10px; flex: 0 0 auto; }
+  .assistant-mark { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--lh-border); border-radius: 10px; background: var(--lh-surface-subtle); }
+  .panel-heading { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+  .panel-title h2 { font-size: 15px; line-height: 1.35; font-weight: 650; }
+  .header-status { margin-left: 0; font-size: 11px; line-height: 1.35; }
+  .tools { gap: 3px; }
+  .tools .icon { border-radius: var(--lh-control-radius); color: var(--lh-muted); transition: background 160ms ease, color 160ms ease; }
+  .tools .icon:hover:not(:disabled), .tools .icon[aria-pressed="true"] { color: var(--lh-charcoal-strong); background: var(--lh-surface-hover); }
+  .tools .icon[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--lh-border); }
+  .thread { padding: 22px 22px 8px; scrollbar-width: thin; scrollbar-color: var(--lh-border-strong) transparent; }
   .turn { padding-bottom: 10px; margin-bottom: 22px; }
-  .user-bubble { max-width: 88%; padding: 11px 15px; border-radius: 8px; background: var(--lh-surface-hover); border: 1px solid var(--lh-border); }
+  .user-bubble { max-width: 88%; padding: 11px 15px; border-radius: 14px 14px 4px 14px; background: var(--lh-surface-subtle); border: 1px solid var(--lh-border); }
   .user-bubble p { font-size: 14px; }
   .message-row.assistant { margin-top: 18px; }
   .answer-heading { display: flex; align-items: center; gap: 7px; color: var(--lh-charcoal-strong); font-size: 12px; font-weight: 600; margin-bottom: 10px; }
   .answer-heading > svg { color: var(--lh-accent); }
   .answer-state { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--lh-muted); font-weight: 400; }
-  .message-actions { margin-top: 10px; }
-  .composer { margin: 4px 14px 14px; padding: 10px; border: 1px solid var(--lh-input-border); border-radius: 8px; background: var(--lh-surface-subtle); transition: border-color 160ms ease; }
-  .composer:focus-within { border-color: var(--lh-accent); }
-  .composer textarea { border: 0; padding: 5px 4px; background: transparent; }
+  .message-actions { margin-top: 12px; gap: 5px; }
+  .message-actions .icon { border-radius: 7px; }
+  .answer :deep(.assistant-rich-reply th), .answer :deep(.assistant-rich-reply td) { border: 0; border-bottom: 1px solid var(--lh-border); padding: 8px 10px; }
+  .answer :deep(.assistant-rich-reply th) { background: var(--lh-surface-subtle); font-size: 12px; }
+  .sources { padding-top: 9px; border-top: 1px solid var(--lh-border); }
+  .sources summary { min-height: 26px; line-height: 26px; }
+  .process summary { min-height: 28px; }
+  .composer { margin: 6px 16px 16px; padding: 12px; gap: 10px; border: 1px solid var(--lh-input-border); border-radius: 14px; background: var(--lh-surface-subtle); transition: border-color 160ms ease, box-shadow 160ms ease; }
+  .composer:focus-within { border-color: var(--lh-accent); box-shadow: 0 0 0 2px var(--lh-accent-ring); }
+  .composer textarea { border: 0; padding: 5px 2px; min-height: 66px; font-size: 14px; background: transparent; }
   .composer textarea:focus-visible { outline: none; }
-  .native-model-select { background: var(--lh-surface); border-color: transparent; font-size: 12px; }
+  .composer textarea::placeholder { color: var(--lh-faint-muted); }
+  .composer-footer { gap: 8px; }
+  .composer-model { flex: 1; gap: 4px; }
+  .model-select-small { position: relative; flex: 0 1 auto; }
+  .native-model-select { appearance: none; min-height: 32px; padding: 0 28px 0 10px; background: var(--lh-surface); border-color: transparent; border-radius: var(--lh-control-radius); font-size: 12px; cursor: pointer; }
+  .native-model-select:hover:not(:disabled) { border-color: var(--lh-border); }
+  .model-chevron { display: block; position: absolute; right: 9px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--lh-muted); }
   .send { width: 36px; height: 36px; }
+  .composer-footer .stop { min-height: 36px; }
+  .operation-plan { border-color: var(--lh-border); padding: 14px; }
+  .plan-title { gap: 8px; line-height: 1.6; }
+  .plan-form { gap: 13px; }
+  .plan-field > label, .plan-field > span { color: var(--lh-muted); font-size: 12px; }
+  .plan-form input, .plan-form textarea, .plan-form select, .operation-plan :deep(.vnet-select-trigger) { border-radius: var(--lh-control-radius); min-height: 34px; }
+  .plan-form input[type=checkbox], .plan-form input[type=radio] { min-height: 0; }
+  .plan-form textarea { line-height: 1.6; }
+  .plan-form :is(input, textarea, select):focus-visible { outline-offset: -2px; }
+  .plan-actions > .primary, .plan-form-footer > .primary { min-height: 36px; padding-inline: 16px; font-weight: 600; }
+  .primary { transition: background 160ms ease, border-color 160ms ease; }
+  .assistant-error, .config-warning { margin: 4px 16px; padding: 8px 10px; border-radius: 8px; }
   .lighthouse.drag-active { will-change: transform; }
 }
+@media (prefers-reduced-motion: reduce) { .composer, .tools .icon, .primary { transition: none; } }
 @media (max-width: 700px) { .answer-heading { display: none; } }
 @media (max-width: 600px) {
   .assistant-header { padding: 10px 12px; }

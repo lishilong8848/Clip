@@ -7,6 +7,7 @@ import re
 import time
 import traceback
 import uuid
+from contextlib import nullcontext
 
 from .lighthouse_ai import AssistantError, NAMESPACE, private_identifier, safe_text
 from .lighthouse_model import LighthouseModel
@@ -56,7 +57,10 @@ class LighthouseStream:
         self.engine = engine or LighthouseModel(portal_agent, cached_reader=cached_reader)
         # ponytail: one resident process owns runs; shared coordination is needed before enabling multiple workers.
         self.workers, self.live, self.locks = {}, {}, {}
-        self.slots = asyncio.Semaphore(getattr(self.engine, 'max_parallel', 3))
+        # 0 / negative max_parallel means unlimited task admission (our sentinel);
+        # a bare Semaphore(0) would deadlock, so skip the global cap in that case.
+        max_parallel = getattr(self.engine, 'max_parallel', 3)
+        self.slots = asyncio.Semaphore(max_parallel) if max_parallel and max_parallel > 0 else None
         self.closing = False
 
     def _lock(self, actor):
@@ -254,9 +258,9 @@ class LighthouseStream:
                 await asyncio.gather(previous, return_exceptions=True)
             chunk(StartChunk(message_id="reply_" + run["id"], message_metadata={"run_id": run["id"], "operation_id": run["operation_id"]}))
             chunk(TextStartChunk(id=text_id))
-            if self.slots.locked():
+            if self.slots is not None and self.slots.locked():
                 await emit('status', {'label': '正在等待助手可用，原问题已保留'})
-            async with self.slots:
+            async with (self.slots if self.slots is not None else nullcontext()):
                 run["status"] = "running"
                 context = run["_context"]
                 if set(context.get("scopes", [])) - set(run["scopes"]) or not self.assistant._allowed(context, actor):

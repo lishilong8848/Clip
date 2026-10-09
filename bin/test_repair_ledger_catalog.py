@@ -55,6 +55,189 @@ class LedgerCatalogBase(unittest.TestCase):
     def _rebuild(self):
         self.cat = LedgerCatalog(self.db)
 
+    def _direct_conn(self):
+        """Raw sqlite3 connection for inspecting internals without cache helpers."""
+        import sqlite3
+
+        return sqlite3.connect(str(self.db))
+
+
+class BoundedReconcileTests(LedgerCatalogBase):
+    """Bounded reconcile keeps unchanged rows untouched while only reconciling
+    the added/changed/deleted source records."""
+
+    def _install_write_audit(self):
+        """Create BEFORE-row triggers on ``records`` storing every attempted live-row
+        mutation. Any live-row write (insert/update/delete) is recorded."""
+        conn = self._direct_conn()
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS write_audit(mut TEXT NOT NULL)")
+            conn.execute("DROP TRIGGER IF EXISTS trg_ledger_insert")
+            conn.execute("DROP TRIGGER IF EXISTS trg_ledger_update")
+            conn.execute("DROP TRIGGER IF EXISTS trg_ledger_delete")
+            conn.execute(
+                "CREATE TRIGGER trg_ledger_insert BEFORE INSERT ON records "
+                "BEGIN INSERT INTO write_audit VALUES('insert'); END;"
+            )
+            conn.execute(
+                "CREATE TRIGGER trg_ledger_update BEFORE UPDATE ON records "
+                "BEGIN INSERT INTO write_audit VALUES('update'); END;"
+            )
+            conn.execute(
+                "CREATE TRIGGER trg_ledger_delete BEFORE DELETE ON records "
+                "BEGIN INSERT INTO write_audit VALUES('delete'); END;"
+            )
+            conn.execute("DELETE FROM write_audit")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _audit_count(self):
+        conn = self._direct_conn()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM write_audit").fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_unchanged_snapshot_does_not_write_live_records(self):
+        self.cat.replace([_record("r1", building="A", device="主机", scopes=["A"])])
+        self._install_write_audit()
+
+        self.cat.replace([_record("r1", building="A", device="主机", scopes=["A"])])
+
+        self.assertEqual(self._audit_count(), 0)
+        status = self.cat.status()
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["record_count"], 1)
+        result = self.cat.query()
+        self.assertEqual(result["records"][0]["设备名称"], "主机")
+
+    def test_unchanged_rowid_preserved_across_change_plus_add_del(self):
+        self.cat.replace([
+            _record("keep", building="A", device="主机", scopes=["A"]),
+            _record("change", building="B", device="旧名", scopes=["B"]),
+            _record("gone", building="C", device="删除", scopes=["C"]),
+        ])
+
+        def _rowid(record_id):
+            conn = self._direct_conn()
+            try:
+                return conn.execute(
+                    "SELECT rowid FROM records WHERE record_id=?", (record_id,)
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+        keep_rowid = _rowid("keep")
+        change_rowid = _rowid("change")
+
+        self.cat.replace([
+            _record("keep", building="A", device="主机", scopes=["A"]),
+            _record("change", building="B", device="新名", scopes=["B"]),
+            _record("brand_new", building="D", device="插入", scopes=["D"]),
+        ])
+
+        result = self.cat.query()
+        by_id = {r["record_id"]: r for r in result["records"]}
+        self.assertEqual(set(by_id), {"keep", "change", "brand_new"})
+        self.assertEqual(by_id["change"]["设备名称"], "新名")
+        self.assertEqual(by_id["brand_new"]["设备名称"], "插入")
+        # Unchanged and changed rows keep their original rowids (no delete+reinsert).
+        self.assertEqual(_rowid("keep"), keep_rowid)
+        self.assertEqual(_rowid("change"), change_rowid)
+
+    def test_reordered_incoming_keys_do_not_trigger_update(self):
+        first = {
+            "record_id": "r1",
+            "scope_codes": ["A"],
+            "设备编号": "D001",
+            "机楼": "A",
+            "系统名称": "安防",
+            "大设备类型": "消防",
+            "设备名称": "主机",
+            "产品其它参数": "参数X",
+            "品牌": "品牌1",
+            "安装位置": "1层",
+            "型号": "M-100",
+            "设备类型标识": "T-1",
+            "容量": "10",
+        }
+        reordered = {k: v for k, v in list(first.items())[::-1]}
+        self.cat.replace([dict(first)])
+        self._install_write_audit()
+
+        self.cat.replace([reordered])
+
+        self.assertEqual(self._audit_count(), 0)
+        result = self.cat.query()
+        self.assertEqual(len(result["records"]), 1)
+        self.assertEqual(result["records"][0]["设备名称"], "主机")
+
+    def test_rollback_keeps_previous_when_change_mixed_with_bad_tail(self):
+        self.cat.replace([_record("keep", building="A", device="原", scopes=["A"])])
+        self._install_write_audit()
+
+        bad = [
+            _record("touched", building="B", device="本应回滚", scopes=["B"]),
+            {"机楼": "C"},  # malformed: no record_id -> failure after staging first
+        ]
+        with self.assertRaises(ValueError):
+            self.cat.replace(bad)
+
+        status = self.cat.status()
+        self.assertEqual(status["record_count"], 1)
+        result = self.cat.query()
+        self.assertEqual(self._list_records(result), ["keep"])
+        self.assertEqual(result["records"][0]["设备名称"], "原")
+
+
+class VariableLimitReconcileTests(LedgerCatalogBase):
+    """Prove reconciliation never builds an unbounded SQL ``IN (...)`` list.
+
+    Lowering ``SQLITE_LIMIT_VARIABLE_NUMBER`` to 64 on the catalog's connections
+    makes any parameter-heavy statement (e.g. ``WHERE record_id IN (?, ? , ...)``
+    with >64 ids) fail. The set-based reconcile against ``ledger_stage`` must
+    still handle a large initial load plus many adds/deletes.
+    """
+
+    def _low_limit_cat(self):
+        import sqlite3
+
+        cat = LedgerCatalog(self.db)
+        original_connect = LedgerCatalog._connect
+
+        def _low_limit_connect(catalog):
+            conn = original_connect(catalog)
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 64)
+            return conn
+
+        import types
+
+        cat._connect = types.MethodType(_low_limit_connect, cat)
+        return cat
+
+    def test_large_initial_sync_and_many_adds_deletes_under_low_variable_limit(self):
+        cat = self._low_limit_cat()
+
+        # Initial load larger than the reduced variable limit (64).
+        first = [_record(f"r{i:04d}", scopes=["A"]) for i in range(100)]
+        status = cat.replace(first)
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["record_count"], 100)
+
+        # Replace with a disjoint larger set (delete all 100, add 130) which would
+        # overflow a >64 item ``IN (... )`` list if such a list were emitted.
+        second = [_record(f"n{i:04d}", scopes=["B"]) for i in range(130)]
+        status = cat.replace(second)
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["record_count"], 130)
+
+        result = cat.query(page_size=100)
+        self.assertEqual(result["total"], 130)
+        second_ids = {f"n{i:04d}" for i in range(130)}
+        # First page holds up to the clamped page size, all from the new set.
+        self.assertTrue({r["record_id"] for r in result["records"]} <= second_ids)
+
 
 class EmptySuccessAndStatusTests(LedgerCatalogBase):
     def test_empty_successful_source_is_valid_ready_cache(self):

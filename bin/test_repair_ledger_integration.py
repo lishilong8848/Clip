@@ -3,6 +3,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import httpx
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -73,12 +74,21 @@ class RepairLedgerIntegrationTests(unittest.TestCase):
         self.assertEqual(rows[1]["ledger_devices"][0]["record_id"], "rec_blank")
 
     def test_scope_and_invalid_selection_rejected_before_write(self):
-        for ids in (["rec_devB"], ["rec_unknown"], ["bad"], "rec_devA"):
+        for ids in (None, [], (), ["rec_devB"], ["rec_unknown"], ["bad"], "rec_devA"):
             with self.assertRaises(PortalError):
                 self.create(ids)
         self.assertEqual(self.created, 0)
         self.create(["rec_blank"])
         self.assertEqual(self.created, 1)
+
+    def test_edit_preserves_existing_selection_but_cannot_clear_it(self):
+        self.create(['rec_devA'])
+        self.assertEqual(ledger.validate_selection(self.service, 'rec_parent', None, 'A', followup_id='rec_followup1'), ['rec_devA'])
+        for value in ([], ()):
+            with self.assertRaisesRegex(PortalError, '至少一台'):
+                ledger.validate_selection(self.service, 'rec_parent', value, 'A', followup_id='rec_followup1')
+        with self.assertRaisesRegex(PortalError, '至少一台'):
+            ledger.validate_selection(self.service, 'rec_parent', None, 'A', followup_id='rec_missing')
 
     def test_existing_followup_edit_keeps_cumulative_devices(self):
         self.create(["rec_devA"])
@@ -92,6 +102,12 @@ class RepairLedgerIntegrationTests(unittest.TestCase):
         self.assertEqual(saved["record_ids"], ["rec_devA", "rec_blank"])
         self.assertEqual(saved["followups"]["rec_followup1"], ["rec_blank"])
         self.assertEqual(self.service._patch_record_fields.call_args.kwargs["record_id"], "rec_followup1")
+        self.service.update_repair_followup_record('rec_followup1', summary_record_id='rec_parent', scope='A', fields={'维修进展描述': '再次编辑'})
+        self.assertEqual(ledger.associations(self.service, 'rec_parent')['followups']['rec_followup1'], ['rec_blank'])
+        calls = self.service._patch_record_fields.call_count
+        with self.assertRaisesRegex(PortalError, '至少一台'):
+            self.service.update_repair_followup_record('rec_followup1', summary_record_id='rec_parent', scope='A', fields={}, ledger_device_ids=[])
+        self.assertEqual(self.service._patch_record_fields.call_count, calls)
 
     def test_remote_written_local_failure_can_recover_selection(self):
         with patch.object(ledger, "remember_selection", side_effect=OSError("disk busy")):
@@ -154,6 +170,7 @@ class RepairLedgerIntegrationTests(unittest.TestCase):
             s._equipment_ledger_worker.join(3)
             self.assertFalse(s._equipment_ledger_worker.is_alive())
             self.assertEqual(s._search_table_records.call_args.kwargs['limit'], None)
+            self.assertEqual(s._search_table_records.call_args.kwargs['page_interval'], 0.2)
             self.assertEqual(s._search_table_records.call_args.kwargs['table_id'], ledger.TABLE_ID)
             self.assertEqual(ledger.candidates(s, scope="D")["total"], 1)
             self.assertEqual(ledger.candidates(s, scope="A")["total"], 0)
@@ -163,6 +180,45 @@ class RepairLedgerIntegrationTests(unittest.TestCase):
             self.assertEqual(ledger.candidates(s, scope="D")["total"], 1)
             self.assertIn("partial page failure", ledger.cache_status(s)["error"])
             self.assertEqual(client.return_value.close.call_count, 2)
+
+    def test_automatic_initialization_does_not_repeat_completed_or_failed_sync(self):
+        with patch.object(self.service, '_search_table_records') as search:
+            self.assertTrue(ledger.start_refresh(self.service, force=False)['ready'])
+            search.assert_not_called()
+        ledger.catalog(self.service).mark_error('offline')
+        for _ in range(3):
+            self.assertEqual(ledger.candidates(self.service, scope='A')['total'], 2)
+        self.service._request_payload.assert_not_called()
+
+    def test_paginated_initial_sync_retries_same_page_and_then_reads_only_local(self):
+        from upload_event_module.services.http_client import FeishuHttpClient
+        s = self.service
+        s._load_table_fields = Mock(return_value=([], {'设备编号': object(), '机楼': object()}))
+        s._auth_headers = Mock(return_value={})
+        s._request_payload = MaintenancePortalService._request_payload.__get__(s)
+        s._normalize_record = Mock(side_effect=lambda row, **_: {'record_id': row['record_id'], 'display_fields': row['fields']})
+        pages = []
+        def handle(request):
+            pages.append(request.url.params.get('page_token', ''))
+            if len(pages) == 2:
+                return httpx.Response(400, json={'code': 99991400}, headers={'x-ogw-ratelimit-reset': '1'})
+            more = len(pages) == 1
+            return httpx.Response(200, json={'code': 0, 'data': {'items': [{
+                'record_id': 'rec_first' if more else 'rec_last',
+                'fields': {'机楼': '南通A楼', '设备编号': 'A-TRB-01' if more else 'A-TRB-02'},
+            }], 'has_more': more, 'page_token': 'second' if more else ''}})
+        client = FeishuHttpClient(transport=httpx.MockTransport(handle), retries=3)
+        with patch('upload_event_module.services.http_client.FeishuHttpClient', return_value=client), \
+             patch('upload_event_module.services.http_client.time.sleep') as sleep:
+            ledger.start_refresh(s)
+            s._equipment_ledger_worker.join(5)
+            self.assertFalse(s._equipment_ledger_worker.is_alive())
+            self.assertEqual(pages, ['', 'second', 'second'])
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [0.2, 1.0])
+        self.assertEqual(ledger.catalog(s).status()['record_count'], 2)
+        for _ in range(3):
+            self.assertEqual(ledger.candidates(s, scope='A', query='A-TRB')['total'], 2)
+        self.assertEqual(len(pages), 3)
 
     def test_restricted_read_does_not_return_other_building_ids(self):
         ledger.remember_selection(self.service, "rec_parent", "rec_followup1", ["rec_devA", "rec_devB"])

@@ -34,11 +34,13 @@ def cache_status(service):
     return value
 
 
-def start_refresh(service):
+def start_refresh(service, *, force=True):
     from upload_event_module.services.http_client import FeishuHttpClient
+    from upload_event_module.services.process_lifetime import lower_current_thread_priority
 
     def run():
-        client = FeishuHttpClient(retries=1)
+        lower_current_thread_priority()
+        client = FeishuHttpClient(retries=3)
         try:
             _metas, metadata = service._load_table_fields(app_token=APP_TOKEN, table_id=TABLE_ID)
             if "设备编号" not in metadata or "机楼" not in metadata:
@@ -46,7 +48,7 @@ def start_refresh(service):
             records = service._search_table_records(
                 app_token=APP_TOKEN, table_id=TABLE_ID, meta_by_name=metadata,
                 work_type="repair", notice_type="检修通告",
-                field_names=[*TEXT_FIELDS, "楼栋标识"], limit=None, http_client=client,
+                field_names=[*TEXT_FIELDS, "楼栋标识"], limit=None, http_client=client, page_interval=0.2,
             )
             def rows():
                 for record in records:
@@ -60,11 +62,18 @@ def start_refresh(service):
                     yield row
             catalog(service).replace(rows())
         except Exception as exc:
-            catalog(service).mark_error(str(exc))
+            message = str(exc)
+            if "99991400" in message:
+                message = "飞书暂时限制请求频率（99991400），本次同步未完成，已有本地台账保持不变，请稍后刷新重试。"
+            catalog(service).mark_error(message)
         finally:
             client.close()
 
     with service._repair_management_record_lock("equipment-ledger-cache"):
+        if not force:
+            current = cache_status(service)
+            if current["ready"] or current["error"]:
+                return current
         worker = getattr(service, "_equipment_ledger_worker", None)
         if not worker or not worker.is_alive():
             worker = threading.Thread(target=run, name="repair-equipment-cache", daemon=True)
@@ -76,7 +85,7 @@ def start_refresh(service):
 def candidates(service, *, scope="ALL", query="", filters=None, page=1):
     status = cache_status(service)
     if not status["ready"] and not status["error"] and not status["refreshing"]:
-        start_refresh(service)
+        start_refresh(service, force=False)
     result = catalog(service).query(query=query[:500], filters=filters, allowed_scopes=allowed_scopes(service, scope), page=page)
     result["cache"] = cache_status(service)
     return result
@@ -86,20 +95,21 @@ def associations(service, summary_id):
     return service._state_store.get_document(NAMESPACE, summary_id) or {}
 
 
-def validate_selection(service, summary_id, ids, scope):
+def validate_selection(service, summary_id, ids, scope, *, followup_id=""):
     from .portal_service import PortalError
-    if ids is None:
-        return
+    if ids is None and followup_id:
+        ids = (associations(service, summary_id).get("followups") or {}).get(followup_id)
+    if ids is None or ids == [] or ids == ():
+        raise PortalError("请选择至少一台台账设备后保存跟进记录。")
     if not isinstance(ids, (list, tuple)) or len(ids) > 500 or any(
         not isinstance(item, str) or not re.fullmatch(r"rec[A-Za-z0-9_]+", item) for item in ids
     ):
         raise PortalError("台账设备选择无效，一次最多选择 500 台。")
     selected = set(ids)
-    if not selected:
-        return
     records = catalog(service).get_records(selected, allowed_scopes=allowed_scopes(service, scope))
     if selected != {row["record_id"] for row in records}:
         raise PortalError("所选台账设备不在当前权限范围或本地缓存中，请刷新设备台账后重新选择。")
+    return list(dict.fromkeys(ids))
 
 
 def remember_selection(service, summary_id, followup_id, ids):

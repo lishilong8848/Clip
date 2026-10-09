@@ -4,6 +4,7 @@
       <span v-for="index in 30" :key="index">{{ watermarkText }}</span>
     </div>
     <AppTopbar
+      :class="{ 'learning-topbar': isLearningPage }"
       v-if="!isWorkbenchLitePage && !signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
       :brand-logo-src="brandLogoSrc"
       :header-subtitle="headerSubtitle"
@@ -87,7 +88,7 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length)"
+      v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage)"
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :user="auth.user"
@@ -117,7 +118,7 @@
 
     <LearningPage
       v-else-if="isLearningPage"
-      :key="`${auth.user?.open_id || ''}:${routeParams.get('scope') || ''}:${routeParams.get('person_id') || ''}`"
+      :key="`${auth.user?.open_id || ''}:${routeParams.get('scope') || ''}:${routeParams.get('person_id') || ''}:${routeParams.get('view') || ''}`"
       :scope="routeParams.get('scope') || ''"
       :person-id="routeParams.get('person_id') || ''"
       :user-id="String(auth.user?.open_id || '')"
@@ -126,6 +127,8 @@
     <PlanConvergencePage v-else-if="isPlanConvergencePage" />
 
     <LifeGuidePage v-else-if="isLifeGuidePage" />
+
+    <LinkDirectoryPage v-else-if="isLinkDirectoryPage" />
 
     <DailyTaskChecklistPage
       v-else-if="isDailyTaskPage"
@@ -213,6 +216,10 @@
     </UiTransition>
     </div>
 
+    <button v-if="isScopeHomeDashboard && !isGuest" type="button" class="home-link-directory" @click="navigate('/link-directory')">
+      <Library :size="18" aria-hidden="true" />多维表导航
+    </button>
+
     <LighthouseAssistant
       v-if="auth.loggedIn && auth.user?.role !== 'guest'"
       :key="String(auth.user?.open_id || '')"
@@ -225,6 +232,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { Library } from "lucide-vue-next";
 import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
 import { LighthouseAssistant } from './lighthouseEntry';
@@ -253,6 +261,7 @@ const DailyTaskChecklistPage = asyncPage(() => import("./components/DailyTaskChe
 const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
 const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergencePage.vue"));
 const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
+const LinkDirectoryPage = asyncPage(() => import("./components/LinkDirectoryPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
@@ -354,6 +363,7 @@ const isDailyTaskPage = computed(() => routePath.value === "/daily-tasks" || rou
 const isLearningPage = computed(() => routePath.value === "/learning");
 const isPlanConvergencePage = computed(() => routePath.value === "/plan-convergence");
 const isLifeGuidePage = computed(() => routePath.value === "/life-guide");
+const isLinkDirectoryPage = computed(() => routePath.value === "/link-directory");
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCabinetPowerPage = computed(() => routePath.value === "/cabinet-power");
@@ -443,6 +453,7 @@ const headerSubtitle = computed(() => {
   if (isLearningPage.value) return "画像学练";
   if (isPlanConvergencePage.value) return "计划收敛审查";
   if (isLifeGuidePage.value) return "参考人生指南";
+  if (isLinkDirectoryPage.value) return "多维表导航";
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (isCabinetPowerPage.value || isCabinetPowerBatchPage.value) return "机柜上下电";
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";
@@ -1632,4 +1643,10 @@ select {
   border-radius: 22px 22px 0 0;
 }
 
+</style>
+
+<style scoped>
+.home-link-directory{position:fixed;left:22px;bottom:18px;z-index:30;display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid #cad9ed;border-radius:8px;background:#fff;color:#185cb4;font:inherit;font-size:14px;cursor:pointer;box-shadow:0 3px 12px #244c7c14;transition:background .18s,box-shadow .18s}
+.home-link-directory:hover{background:#edf4ff;box-shadow:0 4px 16px #244c7c24}
+.home-link-directory:focus-visible{outline:3px solid #94bff4;outline-offset:3px}
 </style>

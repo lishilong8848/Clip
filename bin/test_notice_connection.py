@@ -124,7 +124,8 @@ class NoticeConnectionTests(unittest.TestCase):
                     ("from requests import Session\n", False),
                     ("import requests as net\n", False),
                     ("from requests import Session as Client\n", False),
-                    ("requests.get('https://example.invalid')\n", False),
+                    # Bare names are not proof of an imported network client.
+                    ("requests.get('https://example.invalid')\n", True),
                     ("example = 'import requests'\n", True),
                     ("from requests.exceptions import ReadTimeout\nimport requests\n", False),
                 ):

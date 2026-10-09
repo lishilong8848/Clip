@@ -12,7 +12,16 @@ import time
 import uuid
 
 PROTOCOL = 1
-MAX_CONCURRENT_ACCOUNTS = 20
+# 0 is the unlimited sentinel for our gateway's own active-account admission:
+# no hard "busy account" rejection across the shared process. Explicit positive
+# values are still honored by OpenClawRuntime/LighthouseStream.
+MAX_CONCURRENT_ACCOUNTS = 0
+# OpenClaw's config schema requires a *positive* integer for
+# agents.defaults.maxConcurrent (number().int().positive()), so the unlimited
+# sentinel (0) is never written directly. This large schema-valid value lets an
+# unlimited account-admission policy avoid the previous arbitrary 20-cap while
+# still satisfying the native validator.
+OPENCLAW_MAX_CONCURRENT = 1024
 PROJECT = Path(__file__).resolve().parents[2]
 STATE = PROJECT / 'bin/data/lighthouse_openclaw'
 BAT = '\u542f\u52a8\u7a0b\u5e8f.bat'

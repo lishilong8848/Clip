@@ -81,7 +81,7 @@ class PortalBridge:
 
     async def acall(self, action, payload=None, context=None):
         lease, url, body = self._request(action, payload, context)
-        timeout = 135 if action == 'invoke' else 12
+        timeout = 135 if action == 'invoke' else 35 if action in {'table_records', 'staff_count'} else 12
         try:
             client = await self.async_client()
             async with client.stream('POST', url, json=body, headers={'Authorization': 'Bearer ' + self.host.key}, timeout=timeout) as response:

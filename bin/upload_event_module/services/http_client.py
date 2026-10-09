@@ -52,7 +52,7 @@ def classify_feishu_error(status_code: int = 0, code: int | None = None) -> str:
         return "token"
     if status_code == 403 or code in {99991671, 99991672, 1254002}:
         return "permission"
-    if status_code == 429:
+    if status_code == 429 or code == 99991400:
         return "rate_limit"
     if status_code >= 500:
         return "remote"
@@ -109,16 +109,23 @@ class FeishuHttpClient:
 
     @staticmethod
     def _retry_delay(response: Any, attempt: int) -> float:
-        value = str(response.headers.get("retry-after") or "").strip() if response else ""
-        if value:
+        delays = []
+        headers = response.headers if response is not None else {}
+        for name in ("retry-after", "x-ogw-ratelimit-reset"):
+            value = str(headers.get(name) or "").strip()
+            if not value:
+                continue
             try:
-                return max(0.0, min(float(value), 30.0))
+                delays.append(max(0.0, min(float(value), 60.0)))
             except ValueError:
-                try:
-                    target = email.utils.parsedate_to_datetime(value).timestamp()
-                    return max(0.0, min(target - time.time(), 30.0))
-                except Exception:
-                    pass
+                if name == "retry-after":
+                    try:
+                        target = email.utils.parsedate_to_datetime(value).timestamp()
+                        delays.append(max(0.0, min(target - time.time(), 60.0)))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+        if delays:
+            return max(delays)
         return 0.35 * (2**attempt) + random.random() * 0.2
 
     def close(self) -> None:
@@ -166,6 +173,10 @@ class FeishuHttpClient:
                     response.raise_for_status()
                     raise FeishuHTTPError("接口返回不是 JSON 对象", category="business")
                 if isinstance(payload, dict):
+                    # Some Feishu endpoints report throttling as HTTP 200/400.
+                    if str(payload.get("code")) == "99991400" and attempt < retry_count:
+                        time.sleep(self._retry_delay(response, attempt))
+                        continue
                     if response.status_code >= 400 and int(payload.get("code") or 0) == 0:
                         response.raise_for_status()
                     return payload

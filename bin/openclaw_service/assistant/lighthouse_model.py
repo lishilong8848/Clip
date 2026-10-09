@@ -14,7 +14,7 @@ from .lighthouse_sources import MODULE_HELP, SCOPES, codes, record_codes
 from .lighthouse_queries import COUNT, DETAIL, PENDING, EventQuery, PortalOperation, all_pending_modules, business_domains, collect_events, current_pending_query, date_window, effective_question, event_reply, read_only_question, semantic_context
 from .lighthouse_queries import collect_notice_sends, notice_sends_reply, sent_notice_question
 from .lighthouse_queries import past_action_question, query_result_state
-from .lighthouse_basics import calculate as calculate_value, CalculationError, calculation_request, date_time as time_value, time_request, public_capability_request
+from .lighthouse_basics import calculate as calculate_value, CalculationError, calculation_request, date_time as time_value, time_request, public_capability_request, current_user_request
 from .lighthouse_message_delivery import MESSAGE_INTENT
 
 
@@ -439,7 +439,35 @@ class LighthouseModel:
         from .lighthouse_pending import collect_pending, collect_repair_overview, pending_reply
 
         question = effective_question(turn)
+        async def current_actor():
+            current = await authorize()
+            if current["id"] != actor["id"] or set(actor.get("allowed_scopes", actor["scopes"])) - set(current["scopes"]):
+                raise AssistantError("登录权限已变化，本轮已停止，请重新提问。", 403)
+            return {**current, "scopes": actor["scopes"], "allowed_scopes": current["scopes"]}
+
+        if not warm_only and current_user_request(question):
+            current = await current_actor()
+            name = safe_text(str(current.get('name') or '')).strip() or '姓名暂未提供'
+            role = '管理员' if current.get('is_admin') else current.get('role_label') or '普通账号'
+            employee_no = safe_text(str(current.get('employee_no') or '')).strip()
+            answer = f"当前登录人：**{name}**（{role}）。"
+            answer += f"\n\n工号：{employee_no}。" if employee_no else "\n\n当前登录信息未提供工号，不作推测。"
+            await emit('text', {'delta': answer})
+            return {'answer': answer, 'sources': []}
+
         selected_context = turn.get('_command_context', [])
+        if not warm_only and not turn.get('file_ids'):
+            from .lighthouse_planned import begin, name_request, continue_selection
+            continued = await continue_selection(self.portal, await current_actor(), question, request)
+            if continued:
+                await emit('text', {'delta': continued})
+                return {'answer': continued, 'sources': []}
+            if name_request(question):
+                await emit('status', {'label': '正在匹配本月计划通告'})
+                planned = await begin(self.portal, await current_actor(), turn, question, request, turn.get('_profile'))
+                answer = planned['explanation']
+                await emit('text', {'delta': answer})
+                return {'answer': answer, 'sources': [], 'plan': planned}
         selected_tools = {item.get('name') for item in selected_context if item.get('kind') == 'tool'}
         domains = business_domains(question)
         current_pending = current_pending_query(question)
@@ -515,12 +543,6 @@ class LighthouseModel:
                         queries.update(previous_plan.get("_queries") or {})
                     except AssistantError:
                         pass
-        async def current_actor():
-            current = await authorize()
-            if current["id"] != actor["id"] or set(actor.get("allowed_scopes", actor["scopes"])) - set(current["scopes"]):
-                raise AssistantError("登录权限已变化，本轮已停止，请重新提问。", 403)
-            return {**current, "scopes": actor["scopes"], "allowed_scopes": current["scopes"]}
-
         def require_business_intent(api_id=""):
             if general_only and not (knowledge_question and api_id in {
                     "GET /api/assistant/question-bank", "GET /api/assistant/question-material"}):
@@ -644,6 +666,45 @@ class LighthouseModel:
         async def direct(answer):
             await emit("text", {"delta": answer})
             return {"answer": answer, "sources": sources, "_references": references}
+
+        async def table_read(action, query=None, **options):
+            current = await current_actor()
+            bridge = getattr(self.portal.catalog, 'bridge', None)
+            if bridge is None:
+                return {'ok': False, 'error': '多维表只读通道尚未就绪，数量未知。'}
+            try:
+                result = await bridge.acall(action, {'scopes': current['scopes'], **options,
+                    **({'query': query} if query is not None else {})}, getattr(request.state, 'portal_context', None))
+                if result.get('confirmation_required'):
+                    return result
+                await current_actor()
+                if action == 'table_catalog':
+                    return result
+                add_source(result.get('name') or '在岗人员统计', result,
+                    result.get('source_url') or result.get('source') or '/link-directory')
+                return {'ok': True, **result}
+            except AssistantError as exc:
+                query_failures.append(safe_text(str(exc)))
+                return {'ok': False, 'error': safe_text(str(exc)), 'total': None}
+
+        from .lighthouse_people_stats import personnel_count_request
+        if not warm_only and not turn.get('file_ids') and personnel_count_request(question):
+            await emit('status', {'label': '正在统计在岗人员'})
+            result = await table_read('staff_count')
+            if result.get('confirmation_required'):
+                return await direct(result['message'])
+            if not result.get('ok'):
+                return await direct('在职人数暂无法确认：' + result['error'])
+            scope_text = '南通基地' if set(actor['scopes']) == set(SCOPES) else '、'.join('110站' if x == '110' else x + '楼' for x in actor['scopes'])
+            stamp = dt.datetime.fromtimestamp(result['observed_at'], dt.timezone(dt.timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
+            answer = f"{scope_text}在职人员共 **{result['unique_people']} 人**。\n\n"
+            answer += f"按人员表中“离职/异动情况”未勾选的记录统计，数据时间：{stamp}。"
+            if result.get('duplicate_record_count'):
+                answer += f"\n存在 {result['duplicate_record_count']} 条同一人员重复记录，已按同一飞书人员身份去重，未按同名或工号合并。"
+            if result.get('unknown_status_count'):
+                answer += f"\n另有 {result['unknown_status_count']} 条任职状态不明确，未计入。"
+            answer += '\n来源：[人员表](' + (result.get('source_url') or '/signature-management') + ')。'
+            return await direct(answer)
 
         from .lighthouse_message_delivery import full_notice_self_request
         if not warm_only and not permitted_files and full_notice_self_request(question):
@@ -809,17 +870,41 @@ class LighthouseModel:
                         include_zero = include_zero or len(groups) == 2
                     return await direct(pending_reply(await pending_data(groups, kinds[0] if len(kinds) == 1 else ""), details=wants_details, include_zero=include_zero))
 
+        login_actor = await current_actor()
+        login_identity = {key: safe_text(str(login_actor.get(key) or '')) for key in ('name', 'employee_no')}
+        login_identity['role'] = '管理员' if login_actor.get('is_admin') else login_actor.get('role_label') or '普通账号'
         async with self.model_factory(self.assistant.model, profile) as model:
             factory = self.agent_factory or Agent
             agent = factory(model, **({"actor": actor, "turn": turn, "emit": emit} if self.agent_factory else {}),
                           instructions=instructions_for_question(question, knowledge_access=knowledge_access) + "\n本轮楼栋：" + "、".join(actor["scopes"])
+                          + "\n当前登录身份（仅以本次登录会话为准；空字段为未知，不使用业务记录的current_user、收件人、用户ID或历史回答推测；回答身份时不输出open_id/union_id/user_id）：" + json.dumps(login_identity, ensure_ascii=False)
                           + "\n本轮配置模型（仅配置标识，不推测自动路由后的厂商或底层版本）：" + json.dumps({"name": profile["name"], "model": profile["model"]}, ensure_ascii=False)
+                          + "\n用户仅提供通告名称或简称准备发起时，调用prepare_planned_notice匹配本月计划，不直接创建独立手填通告。该工具负责楼栋询问、候选和历史预填，仍需用户确认。事件通告不发送。"
+                          + "\n导航中的全部多维表已提供只读工具：查在职人数用staff_headcount；其他数据先用table_catalog按名称/用途找表，再table_records(metadata_only=true)读可用字段，最后按真实字段筛选查询。不要未调用工具就声称未接入人事或其他内部数据。网页链接不是表格数据源。不能直接改表；禁止读取身份证、住址、私密联系方式、密钥或签名图片。"
+                          + "\n表格结果带来源、读取时间和分页；total为空时不能用本页数量作为总数。权限不足按原权限说明，不扩大范围。飞书通道返回confirmation_required时只转述确认提示并停止读取，不得替用户确认、改参数绕过或声称已查询。"
                           + ("\n本轮业务口径：\n" + semantic_context(question) if business_question else
                              "\n本轮是设备知识，仅可读取原权限内题库资料，不查询无关业务状态。" if knowledge_question else
                              "\n本轮可以按通用对话直接回答，无需调用业务目录。")
                           + "\n当前北京时间：" + dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds"),
                           name="lighthouse", retries=1, tool_timeout=45,
                           model_settings={"max_tokens": 5000, "parallel_tool_calls": False})
+
+            @agent.tool_plain
+            async def table_catalog(keyword: str = '', page: int = 1) -> dict:
+                """Find registered Bitable sources by title/category/purpose. Metadata only; does not read rows. Website links are excluded. 20 sources per page."""
+                return await table_read('table_catalog', keyword=keyword, page=page)
+
+            @agent.tool_plain(timeout=40)
+            async def table_records(table_id: str, fields: list[str] = [], filters: list[dict] = [],
+                                    cursor: str = '', metadata_only: bool = False) -> dict:
+                """Read one registered Bitable page (max40) or permitted field names. Filters are field_name/operator/value objects; operators is/isNot/contains/doesNotContain/isEmpty/isNotEmpty/isGreater/isLess; value is a string list. Never writes. Keep original filters when following cursor. Stop on confirmation_required; no data was read."""
+                return await table_read('table_records', {'table_id': table_id, 'fields': fields,
+                    'filters': filters, 'cursor': cursor, 'metadata_only': metadata_only})
+
+            @agent.tool_plain(timeout=40)
+            async def staff_headcount() -> dict:
+                """Count in-service personnel from complete authoritative personnel table, using unchecked departure/transfer status. Aggregate only within current scopes, with source time and duplicate disclosure. Stop on confirmation_required."""
+                return await table_read('staff_count')
 
             @agent.tool_plain
             async def calculate(expression: str) -> dict:
@@ -1237,6 +1322,24 @@ class LighthouseModel:
                 return {'query_ref': reference, **safe_data(value)}
 
             @agent.tool_plain
+            async def prepare_planned_notice() -> dict:
+                """Match the user's short planned-notice name, choose scope/candidate and preview only. Never sends."""
+                nonlocal plan
+                require_business_intent()
+                if plan is not None:
+                    return {"error": "本轮已有待确认操作。"}
+                from .lighthouse_planned import begin
+                try:
+                    current = await current_actor()
+                    public = await begin(self.portal, current, turn, question, request, profile, allow_plain=True)
+                    if public is None:
+                        return {"error": "请明确要发起的非事件计划名称，不办理结束、更新或查询。"}
+                    plan = await asyncio.to_thread(self.portal.get_plan, {**current, "scopes": current["allowed_scopes"]}, public["id"])
+                    return {"ok": True, "business_written": False, **plan_context(public)}
+                except AssistantError as exc:
+                    return {"ok": False, "error": str(exc), "business_written": False}
+
+            @agent.tool_plain
             async def prepare_business(title: str, operations: list[PortalOperation], explanation: str = "", fields: list[dict] | None = None) -> dict:
                 """Prepare a local proposal only. Ask the user for missing choices; no business write is executed."""
                 nonlocal plan, unsupported_preparation
@@ -1346,7 +1449,7 @@ class LighthouseModel:
             await emit("status", {"label": "正在思考回答"})
             async with agent.run_stream_events(prompt, message_history=prior, usage_limits=UsageLimits(request_limit=12, total_tokens_limit=50000)) as events:
                 async for event in events:
-                    if event.event_kind == "function_tool_result" and event.part.tool_name == "prepare_business" and plan is not None:
+                    if event.event_kind == "function_tool_result" and event.part.tool_name in {"prepare_business", "prepare_planned_notice"} and plan is not None:
                         # The native form is the next step. Another model round
                         # can only delay it or turn it into a prose questionnaire.
                         final_answer = "请核对下方填写项，确认后执行。" if plan["status"] == "needs_input" else "操作清单已准备，请核对后确认。"

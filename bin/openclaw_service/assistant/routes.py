@@ -126,7 +126,7 @@ def install_assistant_routes(app, host):
         if streams is not None:
             warm_current(streams, actor)
         elif not closing and preparation is not None and not preparation.done() and (
-                actor['id'] in pending_warmups or len(pending_warmups) < MAX_CONCURRENT_ACCOUNTS):
+                actor['id'] in pending_warmups or len(pending_warmups) < (MAX_CONCURRENT_ACCOUNTS or 2)):
             pending_warmups[actor['id']] = actor
 
     async def actor_for(request):
@@ -364,7 +364,12 @@ def install_assistant_routes(app, host):
                 identity = action.split("/")[1]
                 current_agent = await ready_agent()
                 if request.method == "PATCH":
-                    data = await asyncio.to_thread(current_agent.amend, actor, identity, payload)
+                    existing = await asyncio.to_thread(current_agent.get_plan, actor, identity)
+                    if existing.get('_planned'):
+                        from .lighthouse_planned import amend_selection
+                        data = await amend_selection(current_agent, actor, identity, payload, request)
+                    else:
+                        data = await asyncio.to_thread(current_agent.amend, actor, identity, payload)
                 elif action.endswith("/confirm"):
                     data = await current_agent.confirm(actor, identity, payload, request)
                 elif action.endswith("/retry"):

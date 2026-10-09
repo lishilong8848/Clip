@@ -1,17 +1,23 @@
-"""Personal learning contracts, with temporary SQLite and no external writes."""
+"""Personal learning contracts, with temporary SQLite and no external writes.
+
+These fixtures are aligned to the new self-service authorization: personal
+accounts act as themselves (single building each), building duty accounts are
+read-only, and admin may read but not answer for others.  No old proxy
+(duty-claims-for-others) guard has been weakened.
+"""
 import concurrent.futures
 import copy
 import datetime as dt
 import json
-import sqlite3
 import unittest
-from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from bin import test_learning as support
-from bin.test_learning import ADMIN, ACTOR, H_ACTOR, DAY, CURRENT
+from bin.test_learning import ADMIN, DAY, CURRENT
 from lan_bitable_template_portal import learning, learning_personal as personal
+
+BUILDING = {"p1": "A", "p2": "A", "p3": "A", "p4": "A", "p5": "A", "p6": "B"}
 
 
 class PersonalLearningTests(unittest.TestCase):
@@ -26,18 +32,29 @@ class PersonalLearningTests(unittest.TestCase):
                   for bank in learning.BANKS for i in range(count))
         with self.service.transaction() as conn:
             for n in range(1, 7):
-                self.service._put('person', f'p{n}', {'id': f'p{n}', 'person_id': f'p{n}', 'name': f'人员{n}',
-                    'employee_no': str(n), 'scopes': list('ABCDEH'), 'active': True, 'aliases': [f'staff:rec{n}']}, conn)
+                pid = f'p{n}'
+                building = BUILDING[pid]
+                self.service._put('person', pid, {'id': pid, 'person_id': pid, 'name': f'人员{n}',
+                    'employee_no': str(n), 'scopes': [building], 'active': True,
+                    'aliases': [f'staff:rec{n}'], 'login_ids': [f'staff:rec{n}', f'oid-{pid}']}, conn)
         self.service._restored = True
         self.service.publish(DAY)
 
+    def self_actor(self, who='p1'):
+        return {'id': 'oid-' + who, 'scope': '', 'is_admin': False, 'person_id': who,
+                'shared_account': False, 'can_answer': True, 'identity_issue': ''}
+
+    def duty(self, scope):
+        return {'id': f'duty-{scope}', 'scope': scope, 'is_admin': False, 'person_id': '',
+                'shared_account': True, 'can_answer': False, 'identity_issue': ''}
+
     def claim(self, who='p1', scope='A'):
-        return self.dispatch('paper.claim', {'person_id': who, 'scope': scope})
+        return self.dispatch('paper.claim', {'person_id': who}, self.self_actor(who))
 
     def answer(self, paper, wrong=False):
         q = next(q for q in paper['questions'] if q['type'] != 'interview')
         return self.dispatch('paper.answer', {'id': paper['id'], 'person_id': paper['person_id'], 'question_id': q['id'],
-            'option_ids': ['o1' if wrong else 'o0'], 'operation_id': 'test-' + paper['id'], 'version': paper['version']})
+            'option_ids': ['o1' if wrong else 'o0'], 'operation_id': 'test-' + paper['id']}, self.self_actor(paper['person_id']))
 
     def test_reserves_four_then_four_and_resume_without_consuming(self):
         self.prepare()
@@ -92,20 +109,28 @@ class PersonalLearningTests(unittest.TestCase):
         wrong = self.answer(first, wrong=True)
         second = self.claim('p2')
         self.answer(second)
-        self.assertEqual(self.service.profile(ACTOR, {'person_id': 'p1'})['summary']['accuracy'], 0)
-        self.assertEqual(self.service.profile(ACTOR, {'person_id': 'p2'})['summary']['accuracy'], 100)
-        self.assertEqual(self.service.profile(ACTOR, {'scope': 'A'})['summary']['accuracy'], 50)
-        self.assert_status(409, self.dispatch, 'paper.notes', {'id': first['id'], 'person_id': 'p2', 'question_id': first['questions'][0]['id']})
-        self.assertEqual(self.service.bootstrap('A', H_ACTOR)['scope'], 'A')
-        self.assert_status(403, self.dispatch, 'people', actor={'id': 'guest', 'scope': ''})
+        # Personal self-accounts see only their own accuracy.
+        self.assertEqual(self.service.profile(self.self_actor('p1'), {})['summary']['accuracy'], 0)
+        self.assertEqual(self.service.profile(self.self_actor('p2'), {})['summary']['accuracy'], 100)
+        # Building duty sees only its own building aggregate.
+        self.assertEqual(self.service.profile(self.duty('A'), {'scope': 'A'})['summary']['accuracy'], 50)
+        # Stale-version write still conflicts for the owner (guard not weakened).
+        self.assert_status(409, self.dispatch, 'paper.notes',
+                           {'id': first['id'], 'person_id': first['person_id'],
+                            'question_id': first['questions'][0]['id'], 'version': first['version']},
+                           self.self_actor('p1'))
+        self.assertEqual(self.service.bootstrap('A', self.duty('A'))['scope'], 'A')
+        self.assert_status(403, self.dispatch, 'people', actor={'id': 'guest', 'scope': '', 'is_admin': False, 'person_id': ''})
         legacy = copy.deepcopy(self.service._get('paper', first['id']))
         legacy.pop('person_id'); legacy.pop('person'); legacy['id'] = 'legacy'
         with self.service.transaction() as conn:
             self.service._put('paper', 'legacy', legacy, conn, False)
-        self.assertTrue(self.service.list_papers(ACTOR, {'legacy': '1'})['items'][0]['legacy'])
-        self.assertEqual(self.service.profile(ACTOR, {'scope': 'A'})['summary']['answered'], 2)
-        self.assert_status(409, self.dispatch, 'paper.answer', {'id': 'legacy'})
-        self.assertEqual(wrong['questions'][0]['attempt']['operator_id'], ACTOR['id'])
+        # Duty/admin retain legacy (anonymous-era) paper visibility; duty stays read-only.
+        legacy_list = self.service.list_papers(self.duty('A'), {'legacy': '1'})
+        self.assertEqual(legacy_list['items'][0]['legacy'], True)
+        self.assertEqual(self.service.profile(self.duty('A'), {'scope': 'A'})['summary']['answered'], 2)
+        self.assert_status(403, self.dispatch, 'paper.answer', {'id': 'legacy'}, self.duty('A'))
+        self.assertEqual(wrong['questions'][0]['attempt']['operator_id'], 'oid-p1')
 
     def test_roster_aliases_and_conflicts_do_not_merge_names_or_read_signatures(self):
         self.service._people_reader = lambda: {'sources': {'staff': {'ok': True}}, 'people': [
@@ -150,7 +175,7 @@ class PersonalLearningTests(unittest.TestCase):
         self.answer(first)
         self.dispatch('paper.delete', {'id': first['id']}, ADMIN)
         self.assert_status(409, self.claim)
-        self.assertEqual(self.service.profile(ACTOR, {})['summary']['assigned'], 0)
+        self.assertEqual(self.service.profile(self.self_actor('p1'), {})['summary']['assigned'], 0)
         self.assertIsNotNone(self.service._get('record', first['id']))
         with patch.object(learning, 'now', return_value=CURRENT + dt.timedelta(days=1)):
             self.service.publish(DAY + dt.timedelta(days=1))

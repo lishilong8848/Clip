@@ -329,8 +329,11 @@ class RepairSnapshotCacheTests(unittest.TestCase):
             service._upsert_repair_snapshot_fields = lambda **_kwargs: None  # type: ignore[method-assign]
             service._schedule_repair_sync_task = lambda *_args, **_kwargs: "sync"  # type: ignore[method-assign]
 
+            from lan_bitable_template_portal import repair_ledger
+            repair_ledger.catalog(service).replace([{'record_id': 'rec_device', 'scope_codes': [], '机楼': ''}])
             result = service.update_repair_followup_record(
                 "rec_followup_stale",
+                ledger_device_ids=['rec_device'],
                 summary_record_id="rec_project_stale",
                 fields={"维修进展描述": "浏览器填写"},
                 expected_version="stale-version",

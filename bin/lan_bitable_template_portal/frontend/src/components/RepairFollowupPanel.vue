@@ -114,8 +114,12 @@
         </div>
 
         <div v-show="!readOnly || Boolean(editingRecordId)" class="cmdb-line">
-          <div><b>台账设备（可多选）</b><span>{{ selectedLedgerLabel }}</span></div>
-          <button v-if="!readOnly" type="button" class="followup-button quiet" :disabled="saving" @click="ledgerPickerOpen = true">
+          <div><b>台账设备（必选，可多选）</b><span>{{ selectedLedgerLabel }}</span>
+            <small v-if="ledgerSelectionError" id="followup-ledger-error" class="ledger-selection-error" role="alert">请选择至少一台台账设备。</small>
+          </div>
+          <button v-if="!readOnly" type="button" class="followup-button quiet" :disabled="saving"
+            :aria-describedby="ledgerSelectionError ? 'followup-ledger-error' : undefined"
+            :aria-invalid="ledgerSelectionError || undefined" @click="ledgerPickerOpen = true">
             {{ ledgerDeviceIds.length ? '重新选择台账设备' : '选择台账设备' }}
           </button>
         </div>
@@ -457,6 +461,11 @@ const cmdbCanForceRefresh = ref(false);
 const cmdbCacheRefreshing = ref(false);
 const cmdbRecordIds = ref<string[]>([]);
 const ledgerPickerOpen = ref(false), ledgerDeviceIds = ref<string[]>([]), ledgerDevices = ref<LooseDict[]>([]);
+const ledgerSelectionError = ref(false);
+watch(ledgerDeviceIds, () => {
+  ledgerSelectionError.value = false;
+  if (ledgerDeviceIds.value.length && message.value === '请选择至少一台台账设备后保存跟进记录。') message.value = '';
+});
 const selectedLedgerLabel = computed(() => {
   if (!ledgerDeviceIds.value.length) return '未选择';
   const labels = ledgerDeviceIds.value.slice(0, 3).map(id => {
@@ -1389,6 +1398,11 @@ function handlePrimaryAction(): void {
 async function saveRecord(): Promise<void> {
   if (props.readOnly) return;
   if (saving.value || !props.summaryRecordId) return;
+  if (!ledgerDeviceIds.value.length) {
+    ledgerSelectionError.value = true;
+    showMessage("请选择至少一台台账设备后保存跟进记录。", "warning");
+    return;
+  }
   const wasEditing = Boolean(editingRecordId.value);
   if (wasEditing && !followupDirty.value) {
     showMessage("当前跟进没有需要保存的修改。", "warning");
@@ -2131,6 +2145,8 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 2px;
 }
+
+.ledger-selection-error { color: #b42318; font-size: 12px; }
 
 .followup-sections {
   display: grid;

@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""有界审计:27 个静态 unresolved 前端/页面动态端点 vs 实际调用者与 native 目录。
+"""有界审计:静态 unresolved 前端/页面动态端点 vs 实际调用者与 native 目录。
 
 策略
 ----
 ``test_lighthouse_frontend_coverage.run_audit`` 会把无法被其启发式静态解析的
-路径标为 ``unresolved``(当前恰为 27 条)。本模块不改动该审计(其他文件由其他
+路径标为 ``unresolved``。本模块不改动该审计(其他文件由其他
 agent 负责),只新增一份**独立的、有边界的人工复核目录** ``KNOWN_DYNAMIC_BINDINGS``:
 
 - ``covered`` : 从源码片段可确证该调用实际命中 native 目录中的已知方法与路径,
@@ -143,7 +143,22 @@ KNOWN_DYNAMIC_BINDINGS = [
         ),
     ),
 
+    dict(
+        source="lan_bitable_template_portal/frontend/src/components/LearningPage.vue",
+        line=676, kind="covered",
+        method_paths=[("GET", "/api/learning/papers")],
+        window=4, needles=['"/papers?" + query({ today: 1 })'],
+        note="个人今日题单只读查询:requestLearning 添加 /api/learning 前缀,命中已开放的 GET 目录",
+    ),
+
     # --- excluded:已知端点属 native 有意排除能力,必须保持 excluded ---
+    dict(
+        source="lan_bitable_template_portal/frontend/src/components/LearningPage.vue",
+        line=662, kind="excluded",
+        method_paths=[("GET", "/api/learning/people")],
+        window=4, needles=['"/people?" + new URLSearchParams'],
+        note="学练人员查询:requestLearning 添加 /api/learning 前缀,保持原生目录排除",
+    ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningPage.vue",
         line=666, kind="excluded",
@@ -573,14 +588,14 @@ class DynamicEndpointAuditTests(unittest.TestCase):
         idx = self.bindings.index(b)
         return self.binding_record[idx]
 
-    def test_all_27_unresolved_are_accounted_by_ground_truth(self):
-        """run_audit 的 27 个 unresolved 必须全部被本目录覆盖,不丢不减不臆断。
+    def test_all_unresolved_are_accounted_by_ground_truth(self):
+        """run_audit 的 unresolved 必须全部被本目录覆盖,不丢不减不臆断。
 
         改用源码标记(needles)定位:每条 binding 必须被源码标记唯一定位到一条
         unresolved 记录,且全体 unresolved 记录被恰好认领一次(双射),不再依赖绝对行号。
         """
         unresolved = [r for r in self.audit_records if r["status"] == "unresolved"]
-        self.assertEqual(len(unresolved), 27)
+        self.assertEqual(len(unresolved), len(self.bindings))
         unresolved_keys = {(r["source"], r["line"]) for r in unresolved}
         claimed = set()
         for b in self.bindings:
@@ -641,7 +656,7 @@ class DynamicEndpointAuditTests(unittest.TestCase):
         """排除前缀守卫:任何已知排除路径不得标 covered。
 
         这是对“native 排除约定”的显式护栏,防止将来把被排除端点误报为 covered:
-          - learning 学练工作流
+          - learning 学练写操作及未开放查询
           - plan-convergence/settings 受保护设置
           - signatures 原始签名/临时凭据/使用确认
           - polling-work-orders 工单执行轮巡(SOP execution:session/photo/confirm/
@@ -655,7 +670,10 @@ class DynamicEndpointAuditTests(unittest.TestCase):
             "/api/update", "/api/runtime",
         )
         for b in self.bindings:
-            for _, p in b.get("method_paths") or []:
+            for method, p in b.get("method_paths") or []:
+                if (method, p) == ("GET", "/api/learning/papers"):
+                    self.assertEqual(b["kind"], "covered")
+                    continue
                 for pref in excluded_prefixes:
                     if p.startswith(pref):
                         self.assertEqual(
@@ -825,7 +843,7 @@ def main():
     excluded = [b for b in KNOWN_DYNAMIC_BINDINGS if b["kind"] == "excluded"]
     unresolved = [b for b in KNOWN_DYNAMIC_BINDINGS if b["kind"] == "unresolved"]
     lines = []
-    lines.append("=== 动态端点审计(有界人工复核):27 个 static-unresolved vs native 目录 ===")
+    lines.append(f"=== 动态端点审计(有界人工复核):{len(KNOWN_DYNAMIC_BINDINGS)} 个 static-unresolved vs native 目录 ===")
     lines.append(f"run_audit unresolved 总数: {res['summary']['unresolved']}")
     lines.append(f"已确证 covered(命中 native 目录并可给源码证据)   : {len(covered)} 条")
     lines.append(f"已确证 excluded(learning/SOP执行等原生排除能力)  : {len(excluded)} 条")

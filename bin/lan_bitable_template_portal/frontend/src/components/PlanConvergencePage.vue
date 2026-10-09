@@ -37,17 +37,30 @@
       </main>
     </div>
     <PlanConvergenceRules v-if="visitedRules" v-show="tab === 'rules'" ref="rulesRef" :is-admin="Boolean(boot.is_admin)" />
-    <section v-if="visitedMaintenance" v-show="tab === 'maintenance'" class="pc-maintenance">
-      <div class="pc-toolbar"><div class="pc-actions"><input v-model="maintenanceSearch" type="search" placeholder="搜索检修名称、设备或位置" aria-label="搜索检修记录" /></div><div class="pc-actions"><button :disabled="maintenanceLoading || checking" @click="loadMaintenance"><RefreshCw :size="16" />刷新检修记录</button><button class="primary" :disabled="checking || maintenanceLoading" @click="checkMaintenance()"><Loader2 v-if="checking" :size="16" class="spin" /><ClipboardCheck v-else :size="16" />{{ checking ? '正在核对…' : '核对进行中检修' }}</button></div></div>
-      <div v-if="maintenanceStats" class="pc-statline"><span>检修 {{ maintenanceStats.maintenance }}</span><span>屏蔽 {{ maintenanceStats.blocks }}</span><span class="good">已匹配 {{ maintenanceStats.matched_records }}</span><span class="bad">未匹配屏蔽 {{ maintenanceStats.orphan_blocks }}</span></div>
-      <div v-if="maintenanceLoading" class="pc-empty"><Loader2 :size="22" class="spin" />正在读取检修记录…</div><div v-else-if="!maintenanceFiltered.length" class="pc-empty">暂无匹配的检修记录</div>
-      <div v-else class="pc-table-wrap"><table><thead><tr><th>检修记录</th><th>楼栋 / 状态</th><th>设备 / 位置</th><th>核对结果</th><th>操作</th></tr></thead><tbody><tr v-for="row in maintenancePageRows" :key="row.record_id"><td><strong>{{ row.name }}</strong><small>{{ row.fault || '—' }}</small></td><td>{{ row.building }}<span class="pc-badge">{{ row.status }}</span></td><td>{{ row.device || '—' }}<small>{{ row.location }} · {{ row.start_time || row.fault_time || '—' }}</small></td><td><span v-if="!('hits' in row)" :class="row.auto_check_status === 'failed' ? 'bad' : 'muted'"><Loader2 v-if="row.auto_check_status === 'pending'" :size="14" class="spin" />{{ row.auto_check_status === 'pending' ? '正在自动核对…' : row.auto_check_status === 'failed' ? '自动核对未完成，请检查VPN后重试' : '尚未核对' }}</span><small v-if="row.auto_checked_at">自动核对 {{ new Date(row.auto_checked_at * 1000).toLocaleString('zh-CN', { hour12: false }) }}</small><span v-else-if="!row.hits?.length" class="bad">未找到匹配屏蔽</span><button v-for="hit in row.hits || []" :key="hit.blockId" class="pc-hit" @click="chooseFromMaintenance(hit.blockId)"><CheckCircle2 :size="15" /><span>{{ hit.blockName || hit.blockId }}<small>{{ hit.reason }}</small></span><ChevronRight :size="15" /></button></td><td><button :disabled="checking" @click="checkMaintenance(row.record_id)"><ClipboardCheck :size="15" />核对</button></td></tr></tbody></table></div>
-      <div class="pc-pager"><span>共 {{ maintenanceFiltered.length }} 条</span><button class="pc-icon" aria-label="上一页检修" :disabled="maintenancePage <= 1" @click="maintenancePage--"><ChevronLeft :size="17" /></button><span>{{ maintenancePage }} / {{ maintenancePages }}</span><button class="pc-icon" aria-label="下一页检修" :disabled="maintenancePage >= maintenancePages" @click="maintenancePage++"><ChevronRight :size="17" /></button></div>
+    <section v-if="tab === 'maintenance' || tab === 'change'" class="pc-maintenance" :aria-label="currentAudit.label + '核对'" :aria-busy="currentAudit.loading || currentAudit.checking">
+      <div class="pc-toolbar"><div class="pc-actions"><input v-model="currentAudit.search" type="search" :placeholder="'搜索' + currentAudit.label + '名称、设备或位置'" :aria-label="'搜索' + currentAudit.label + '记录'" /></div><div class="pc-actions"><button :disabled="currentAudit.loading || currentAudit.checking" @click="loadNoticeAudit()"><RefreshCw :size="16" :class="{ spin: currentAudit.loading }" />刷新{{ currentAudit.label }}记录</button><button class="primary" :disabled="currentAudit.checking || currentAudit.loading" @click="checkNoticeAudit()"><Loader2 v-if="currentAudit.checking && !currentAudit.checkingId" :size="16" class="spin" /><ClipboardCheck v-else :size="16" />{{ currentAudit.checking && !currentAudit.checkingId ? '正在核对…' : '核对进行中' + currentAudit.label }}</button></div></div>
+      <div v-if="currentAudit.error" class="pc-alert error" role="alert"><AlertCircle :size="18" /><span>{{ currentAudit.error }}</span></div>
+      <div v-if="currentAudit.stats" class="pc-statline"><span>{{ currentAudit.label }} {{ currentAudit.rows.length }}</span><span>屏蔽 {{ currentAudit.stats.blocks }}</span><span class="good">已匹配 {{ currentAudit.stats.matched_records }}</span><span class="bad">未匹配屏蔽 {{ currentAudit.stats.orphan_blocks }}</span></div>
+      <div v-if="currentAudit.loading" class="pc-empty"><Loader2 :size="22" class="spin" />正在读取{{ currentAudit.label }}记录…</div><div v-else-if="!auditFiltered.length" class="pc-empty">{{ currentAudit.error && !currentAudit.rows.length ? '记录读取未完成，请刷新重试' : '暂无匹配的' + currentAudit.label + '记录' }}</div>
+      <div v-else class="pc-table-wrap"><table><thead><tr><th>{{ currentAudit.label }}记录</th><th>楼栋 / 状态</th><th>设备 / 位置</th><th>核对结果</th><th>操作</th></tr></thead><tbody>
+        <tr v-for="row in auditPageRows" :key="auditKind + ':' + row.record_id"><td><strong>{{ row.name }}</strong><small>{{ row.fault || '—' }}</small></td><td>{{ row.building }}<span class="pc-badge">{{ row.status }}</span></td><td>{{ row.device || '—' }}<small>{{ row.location }} · {{ row.start_time || row.fault_time || '—' }}</small></td>
+          <td class="pc-check-result">
+            <span v-if="row.check_status === 'skipped'" class="muted">D/E楼不参与匹配</span>
+            <span v-else-if="row.check_status === 'stale'" class="bad">通告内容已变化，请重新核对</span>
+            <template v-else-if="Array.isArray(row.hits)">
+              <span v-if="!row.hits.length" class="bad">未找到匹配屏蔽</span>
+              <template v-else><span class="good">找到 {{ row.hits.length }} 条候选屏蔽</span><button v-for="hit in row.hits" :key="hit.blockId" class="pc-hit" @click="showNoticePoints(row, hit)"><CheckCircle2 :size="15" /><span>{{ hit.blockName || hit.blockId }}<small>{{ hit.reason }} · 查看对应点位</small></span><ChevronRight :size="15" /></button></template>
+            </template>
+            <span v-else :class="['failed', 'ready'].includes(row.check_status || row.auto_check_status) ? 'bad' : 'muted'"><Loader2 v-if="(row.check_status || row.auto_check_status) === 'pending'" :size="14" class="spin" />{{ auditResultText(row) }}</span>
+            <small v-if="row.checked_at || row.auto_checked_at">{{ row.check_source === 'manual' ? '手动核对' : '自动核对' }} {{ timeText(row.checked_at || row.auto_checked_at) }}</small>
+          </td><td><button :disabled="currentAudit.checking || currentAudit.loading || row.check_status === 'skipped'" @click="checkNoticeAudit(row.record_id)"><Loader2 v-if="currentAudit.checking && currentAudit.checkingId === row.record_id" :size="15" class="spin" /><ClipboardCheck v-else :size="15" />{{ currentAudit.checking && currentAudit.checkingId === row.record_id ? '核对中…' : '核对' }}</button></td></tr>
+      </tbody></table></div>
+      <div class="pc-pager"><span>共 {{ auditFiltered.length }} 条</span><button class="pc-icon" :aria-label="'上一页' + currentAudit.label" :disabled="currentAudit.page <= 1" @click="currentAudit.page--"><ChevronLeft :size="17" /></button><span>{{ currentAudit.page }} / {{ auditPages }}</span><button class="pc-icon" :aria-label="'下一页' + currentAudit.label" :disabled="currentAudit.page >= auditPages" @click="currentAudit.page++"><ChevronRight :size="17" /></button></div>
     </section>
 
     <Teleport to="body"><UiTransition name="ui-overlay" appear>
     <div v-if="dialog.open" class="pc-overlay" @click.self="closeDialog"><section ref="dialogElement" class="pc-dialog" role="dialog" aria-modal="true" aria-labelledby="pc-dialog-title" tabindex="-1"><header><h3 id="pc-dialog-title">{{ dialog.title }}</h3><button class="pc-icon" aria-label="关闭弹窗" @click="closeDialog"><X :size="19" /></button></header><div class="pc-dialog-body"><div v-if="dialog.error" class="pc-alert error" role="alert">{{ dialog.error }}</div><div v-if="dialog.loading" class="pc-empty"><Loader2 :size="22" class="spin" />正在读取…</div>
-      <form v-else-if="dialog.kind === 'settings'" id="pc-settings-form" class="pc-settings" @submit.prevent="saveSettings"><div class="pc-setting-status"><span class="muted">检修通告 · 当前程序全部楼栋未结束记录</span><span>目录 {{ boot.counts?.devices || 0 }} 台设备 · {{ boot.counts?.rules || 0 }} 条规则</span><span :class="boot.points_ready ? 'good' : 'bad'">本地测点 {{ boot.points_ready ? '可用' : '未放置 points.sqlite3' }}</span><span :class="settings.has_token && !settings.expired ? 'good' : 'bad'">智航 {{ settings.has_token ? (settings.expired ? '登录已过期' : (authAccount || '已连接')) : '未连接' }}</span></div><div class="pc-actions"><button type="button" :disabled="settingsBusy || loginBusy || loginActive" @click="startBrowserLogin"><Loader2 v-if="loginBusy || loginActive" :size="16" class="spin" /><LogIn v-else :size="16" />{{ loginBusy ? '正在启动…' : (loginActive ? loginStatusLabel : '登录智航') }}</button><button v-if="loginJob.job_id && loginActive" type="button" :disabled="settingsBusy || loginBusy" @click="cancelBrowserLogin"><X :size="16" />取消登录</button><button type="button" :disabled="settingsBusy || loginBusy || loginActive" @click="testSettings"><Activity :size="16" />测试连接</button></div><p v-if="loginJob.message" class="pc-alert" :class="loginAlertClass"><Loader2 v-if="loginActive" :size="16" class="spin" /><span>{{ loginStatusLabel }}{{ loginJob.message ? '：' + loginJob.message : '' }}</span></p><details class="pc-advanced"><summary>高级设置</summary><label>Token<textarea v-model="settings.token" rows="3" autocomplete="off" :placeholder="settings.has_token ? '已保存，留空保持不变' : '粘贴智航 Token（可选，留空则使用浏览器登录）'" :disabled="settingsBusy || loginActive || loginBusy" maxlength="12000" /></label><p v-if="settings.has_token" class="muted">当前 Token 属于 {{ settings.token_owner || '未知' }}，过期 {{ expiresText(settings.expires_at) }}</p></details></form>
+      <form v-else-if="dialog.kind === 'settings'" id="pc-settings-form" class="pc-settings" @submit.prevent="saveSettings"><div class="pc-setting-status"><span class="muted">检修 / 变更通告 · 当前程序全部楼栋未结束记录</span><span>目录 {{ boot.counts?.devices || 0 }} 台设备 · {{ boot.counts?.rules || 0 }} 条规则</span><span :class="boot.points_ready ? 'good' : 'bad'">本地测点 {{ boot.points_ready ? '可用' : '未放置 points.sqlite3' }}</span><span :class="settings.has_token && !settings.expired ? 'good' : 'bad'">智航 {{ settings.has_token ? (settings.expired ? '登录已过期' : (authAccount || '已连接')) : '未连接' }}</span></div><div class="pc-actions"><button type="button" :disabled="settingsBusy || loginBusy || loginActive" @click="startBrowserLogin"><Loader2 v-if="loginBusy || loginActive" :size="16" class="spin" /><LogIn v-else :size="16" />{{ loginBusy ? '正在启动…' : (loginActive ? loginStatusLabel : '登录智航') }}</button><button v-if="loginJob.job_id && loginActive" type="button" :disabled="settingsBusy || loginBusy" @click="cancelBrowserLogin"><X :size="16" />取消登录</button><button type="button" :disabled="settingsBusy || loginBusy || loginActive" @click="testSettings"><Activity :size="16" />测试连接</button></div><p v-if="loginJob.message" class="pc-alert" :class="loginAlertClass"><Loader2 v-if="loginActive" :size="16" class="spin" /><span>{{ loginStatusLabel }}{{ loginJob.message ? '：' + loginJob.message : '' }}</span></p><details class="pc-advanced"><summary>高级设置</summary><label>Token<textarea v-model="settings.token" rows="3" autocomplete="off" :placeholder="settings.has_token ? '已保存，留空保持不变' : '粘贴智航 Token（可选，留空则使用浏览器登录）'" :disabled="settingsBusy || loginActive || loginBusy" maxlength="12000" /></label><p v-if="settings.has_token" class="muted">当前 Token 属于 {{ settings.token_owner || '未知' }}，过期 {{ expiresText(settings.expires_at) }}</p></details></form>
       <template v-else><div class="pc-table-wrap"><table><thead><tr><th v-for="column in dialog.columns" :key="column.key">{{ column.label }}</th><th v-if="dialog.kind !== 'table'">操作</th></tr></thead><tbody><tr v-for="(row,n) in dialogPageRows" :key="row.inst_id || row.point_id || n"><td v-for="column in dialog.columns" :key="column.key">{{ valueText(row[column.key]) }}</td><td v-if="dialog.kind === 'instances'"><button @click="showInstancePoints(row)"><Activity :size="15" />查看测点</button></td><td v-else-if="dialog.kind === 'snapshots' || dialog.kind === 'rule-view'"><div class="pc-actions"><button class="pc-icon" title="查看全部信息" aria-label="查看全部信息" @click="showDialogRow(row)"><Info :size="16" /></button><button v-if="dialog.kind === 'snapshots'" class="pc-icon" title="本地测点" aria-label="查看本地测点" :disabled="!boot.points_ready" @click="showPoints({instances: row.insName})"><Activity :size="16" /></button></div></td></tr><tr v-if="!dialog.rows.length"><td :colspan="dialog.columns.length + 1" class="muted">暂无数据</td></tr></tbody></table></div></template>
       </div><footer><div v-if="dialog.kind !== 'settings'" class="pc-actions"><button v-if="dialog.previous" class="pc-icon" title="返回设备列表" aria-label="返回设备列表" @click="restoreDialog"><ArrowLeft :size="17" /></button><span class="muted">共 {{ dialog.rows.length }} 条</span><button class="pc-icon" aria-label="上一页弹窗记录" :disabled="dialogPage <= 1" @click="dialogPage--"><ChevronLeft :size="17" /></button><span>{{ dialogPage }} / {{ dialogPages }}</span><button class="pc-icon" aria-label="下一页弹窗记录" :disabled="dialogPage >= dialogPages" @click="dialogPage++"><ChevronRight :size="17" /></button></div><span v-else class="muted">{{ settingsBusy ? '正在处理…' : '' }}</span><div class="pc-actions"><button :disabled="settingsBusy" @click="closeDialog">关闭</button><button v-if="dialog.kind === 'settings'" class="primary" type="submit" form="pc-settings-form" :disabled="settingsBusy || dialog.loading || loginActive || loginBusy"><Save :size="16" />保存设置</button></div></footer></section></div>
     </UiTransition></Teleport>
@@ -57,7 +70,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { Activity, AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Download, Eye, FileUp, Info, Layers, ListFilter, Loader2, LogIn, RefreshCw, Save, Settings, Wrench, X } from 'lucide-vue-next';
+import { Activity, AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Download, Eye, FilePenLine, FileUp, Info, Layers, ListFilter, Loader2, LogIn, RefreshCw, Save, Settings, Wrench, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { acquireModal } from '../modalState';
 import { navigate, registerNavigationGuard } from '../navigation';
@@ -66,10 +79,10 @@ import VnetSelect from './VnetSelect.vue';
 import ConfirmDialog from './ConfirmDialog.vue';
 import PlanConvergenceRules from './PlanConvergenceRules.vue';
 
-type Tab = 'review' | 'rules' | 'maintenance';
+type Tab = 'review' | 'rules' | 'maintenance' | 'change';
 type Column = { key: string; label: string };
-const tabs: {id: Tab; label: string; icon: any}[] = [{id:'review',label:'核对台',icon:ClipboardCheck},{id:'rules',label:'规则配置',icon:Layers},{id:'maintenance',label:'检修核对',icon:Wrench}];
-const tab = ref<Tab>('review'), visitedRules = ref(false), visitedMaintenance = ref(false);
+const tabs: {id: Tab; label: string; icon: any}[] = [{id:'review',label:'核对台',icon:ClipboardCheck},{id:'rules',label:'规则配置',icon:Layers},{id:'maintenance',label:'检修核对',icon:Wrench},{id:'change',label:'变更核对',icon:FilePenLine}];
+const tab = ref<Tab>('review'), visitedRules = ref(false);
 const boot = ref<Dict>({}), loading = ref(true), error = ref(''), notice = ref('');
 const rulesRef = ref<InstanceType<typeof PlanConvergenceRules> | null>(null);
 const base = '/api/plan-convergence';
@@ -138,13 +151,50 @@ async function openSettings(){showDialog('计划收敛平台设置','settings');
 function settingsPayload(){return Object.fromEntries(['token'].map(key=>[key,settings[key]]));}
 async function saveSettings(){settingsBusy.value=true;dialog.error='';const seq=dialogRequest;try{const data=await requestJson(base+'/settings',{...requestOptions,method:'PUT',body:JSON.stringify(settingsPayload())});if(disposed||seq!==dialogRequest||!dialog.open||dialog.kind!=='settings')return;Object.assign(settings,data,{token:''});boot.value.zh_ready=!!data.has_token&&!data.expired;notice.value='平台设置已保存';}catch(e){if(!disposed&&seq===dialogRequest&&dialog.open&&dialog.kind==='settings')dialog.error=e instanceof Error?e.message:String(e);}finally{settingsBusy.value=false;}}
 async function testSettings(){settingsBusy.value=true;dialog.error='';const seq=dialogRequest;try{if(settings.token.trim())await requestJson(base+'/settings',{...requestOptions,method:'PUT',body:JSON.stringify({token:settings.token.trim()})});const res=await requestJson(base+'/settings/test',{...requestOptions,method:'POST'});const data=await requestJson(base+'/settings',requestOptions);if(disposed||seq!==dialogRequest||!dialog.open||dialog.kind!=='settings')return;Object.assign(settings,data,{token:''});boot.value.zh_ready=!!data.has_token&&!data.expired;notice.value=res?.message||(data.has_token?(data.expired?'登录已过期':'连接正常'):'尚未连接智航');}catch(e){if(!disposed&&seq===dialogRequest&&dialog.open&&dialog.kind==='settings')dialog.error=e instanceof Error?e.message:String(e);}finally{settingsBusy.value=false;}}
-const maintenance=ref<Dict[]>([]),maintenanceLoading=ref(false),checking=ref(false),maintenanceSearch=ref(''),maintenancePage=ref(1),maintenanceStats=ref<Dict|null>(null);
-const maintenanceFiltered=computed(()=>maintenance.value.filter(row=>[row.name,row.device,row.location,row.building].join(' ').toLowerCase().includes(maintenanceSearch.value.trim().toLowerCase()))),maintenancePages=computed(()=>Math.max(1,Math.ceil(maintenanceFiltered.value.length/25))),maintenancePageRows=computed(()=>maintenanceFiltered.value.slice((maintenancePage.value-1)*25,maintenancePage.value*25));
-watch(maintenanceSearch,()=>maintenancePage.value=1);
-async function loadMaintenance(){maintenanceLoading.value=true;error.value='';try{const rows=await requestJson(base+'/maintenance/records',{...requestOptions,timeoutMs:180_000});if(!disposed){maintenance.value=rows as unknown as Dict[];maintenancePage.value=1;maintenanceStats.value=null;}}catch(e){report(e);}finally{maintenanceLoading.value=false;}}
-async function checkMaintenance(id?:string){if(checking.value)return;checking.value=true;error.value='';try{const result=await post('/maintenance/check',id?{record_id:id}:{},240_000);if(disposed)return;if(id){const index=maintenance.value.findIndex(row=>row.record_id===id);if(index>=0&&result.records[0])maintenance.value[index]=result.records[0];}else{maintenance.value=result.records;maintenancePage.value=1;maintenanceStats.value=result.stats;}}catch(e){report(e);}finally{checking.value=false;}}
-function chooseFromMaintenance(id:string){switchTab('review');void chooseBlock(String(id));}
-function switchTab(value:Tab){tab.value=value;if(value==='rules'){visitedRules.value=true;void loadRuleSets();}if(value==='maintenance'&&!visitedMaintenance.value){visitedMaintenance.value=true;void loadMaintenance();}const url=new URL(location.href);url.searchParams.set('tab',value);navigate(url,{replace:true});}
+type AuditKind = 'maintenance' | 'change';
+function newAudit(label:string) { return { label, rows: [] as Dict[], loading: false, checking: false, checkingId: '', visited: false, search: '', page: 1, stats: null as Dict|null, error: '' }; }
+const noticeAudits = reactive({ maintenance: newAudit('检修'), change: newAudit('变更') });
+const auditKind = computed<AuditKind>(()=>tab.value==='change'?'change':'maintenance');
+const currentAudit = computed(()=>noticeAudits[auditKind.value]);
+const auditFiltered = computed(()=>currentAudit.value.rows.filter(row=>[row.name,row.device,row.fault,row.location,row.building].join(' ').toLowerCase().includes(currentAudit.value.search.trim().toLowerCase())));
+const auditPages = computed(()=>Math.max(1,Math.ceil(auditFiltered.value.length/25)));
+const auditPageRows = computed(()=>auditFiltered.value.slice((currentAudit.value.page-1)*25,currentAudit.value.page*25));
+for (const kind of ['maintenance','change'] as const) watch(()=>noticeAudits[kind].search,()=>noticeAudits[kind].page=1);
+function auditResultText(row:Dict):string {
+  const status=row.check_status||row.auto_check_status;
+  return status==='pending'?'正在自动核对…':status==='failed'?(row.check_error||'核对未完成，请重新核对'):status==='ready'?'核对结果不完整，请重新核对':'尚未核对';
+}
+async function loadNoticeAudit(kind:AuditKind=auditKind.value){
+  const audit=noticeAudits[kind];if(audit.loading||audit.checking)return;
+  audit.visited=true;audit.loading=true;audit.error='';
+  try { const rows=await requestJson(base+'/'+kind+'/records',requestOptions);if(disposed)return;
+    if(!Array.isArray(rows))throw new Error('通告列表读取不完整，请重试');
+    audit.rows=rows;audit.page=1;audit.stats=null;
+  } catch(e) { if(!disposed)audit.error=e instanceof Error?e.message:String(e); }
+  finally { audit.loading=false; }
+}
+async function checkNoticeAudit(id?:string){
+  const kind=auditKind.value,audit=noticeAudits[kind];if(audit.checking||audit.loading)return;
+  audit.checking=true;audit.checkingId=id||'';audit.error='';
+  try { const result=await post('/'+kind+'/check',id?{record_id:id}:{},90_000);if(disposed)return;
+    if(!Array.isArray(result.records)||id&&(result.records.length!==1||result.records[0].record_id!==id))throw new Error('核对结果不完整，已保留上次结果，请重试');
+    if(id){const index=audit.rows.findIndex(row=>row.record_id===id);if(index>=0)audit.rows[index]=result.records[0];audit.stats=null;}
+    else{audit.rows=result.records;audit.page=1;audit.stats=result.stats;}
+  } catch(e) { if(!disposed)audit.error=e instanceof Error?e.message:String(e); }
+  finally { audit.checking=false;audit.checkingId=''; }
+}
+async function showNoticePoints(row:Dict,hit:Dict){
+  const kind=auditKind.value;
+  showDialog('对应点位 · '+(hit.blockName||row.name),'table',[],[
+    {key:'device',label:'设备'},{key:'space',label:'空间'},{key:'point',label:'点位 / 告警规则'},
+    {key:'config_id',label:'配置 ID'},{key:'device_type',label:'设备类型'}]);
+  const seq=dialogRequest;dialog.loading=true;
+  try{const data=await requestJson(base+'/'+kind+'/points?'+new URLSearchParams({record_id:row.record_id,block_id:String(hit.blockId)}),requestOptions);
+    if(seq===dialogRequest&&!disposed)dialog.rows=data.items||[];
+  }catch(e){if(seq===dialogRequest)dialog.error=e instanceof Error?e.message:String(e);}
+  finally{if(seq===dialogRequest)dialog.loading=false;}
+}
+function switchTab(value:Tab){tab.value=value;if(value==='rules'){visitedRules.value=true;void loadRuleSets();}if((value==='maintenance'||value==='change')&&!noticeAudits[value].visited)void loadNoticeAudit(value);const url=new URL(location.href);url.searchParams.set('tab',value);navigate(url,{replace:true});}
 const confirmOpen=ref(false);let confirmProceed:(()=>void)|null=null;
 function resolveConfirm(ok:boolean){confirmOpen.value=false;const proceed=confirmProceed;confirmProceed=null;if(ok)proceed?.();}
 const hasUnsaved=()=>Boolean(rulesRef.value?.hasUnsavedChanges());

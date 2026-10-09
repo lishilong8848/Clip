@@ -5,11 +5,12 @@ import copy
 import json
 import unittest
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from bin import test_lighthouse_stream as fixtures
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
-from openclaw_service.assistant.lighthouse_basics import calculate, CalculationError, date_time, calculation_request, time_request, public_capability_request
+from openclaw_service.assistant.lighthouse_basics import calculate, CalculationError, date_time, calculation_request, time_request, public_capability_request, current_user_request
 from openclaw_service.assistant.lighthouse_model import LighthouseModel, equipment_knowledge_question, instructions_for_question
 from openclaw_service.assistant.lighthouse_ai import is_business_query
 from openclaw_service.assistant.lighthouse_ai import AssistantError, CustomModel
@@ -18,6 +19,12 @@ from openclaw_service.assistant.lighthouse_queries import business_domains
 
 
 class CalculationTests(unittest.TestCase):
+    def test_identity_question_matching_does_not_capture_other_people_or_actions(self):
+        for question in ('当前登陆人是谁?', '当前登录人是谁？', '现在登录的用户是谁', '我是谁', '我的工号是多少？'):
+            self.assertTrue(current_user_request(question), question)
+        for question in ('李鹏的工号是多少', '当前登录人是谁，并发通告', '查询今天登录的人员列表'):
+            self.assertFalse(current_user_request(question), question)
+
     def test_precise_common_operations(self):
         for expression, answer in [('0.1+0.2', '0.3'), ('(4000*12)/1000', '48'), ('1200*15%', '180'),
             ('-3//2', '-2'), ('-3%2', '1'), ('3%-2', '-1'), ('3%(-2)', '-1'), ('-3%-2', '-1'),
@@ -57,6 +64,64 @@ class CalculationTests(unittest.TestCase):
 
 
 class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_identity_uses_fresh_session_not_model_or_poisoned_history(self):
+        @asynccontextmanager
+        async def forbidden(*_):
+            raise AssertionError('Identity must not call a model')
+            yield
+        engine = LighthouseModel(self.portal, model_factory=forbidden)
+        self.portal.catalog.get = Mock(side_effect=AssertionError('Identity must not query business APIs'))
+        self.portal.get_plan = Mock(side_effect=AssertionError('Identity must not read old plans'))
+        history = [{'question': '当前登陆人是谁', 'answer': '李鹏 32842771 ou_wrong', 'scopes': self.actor['scopes'], 'plan': {'id': 'old'}}]
+        for name, number in (('李世龙', '92998'), ('马进宇', '18871')):
+            current = {**self.actor, 'name': name, 'employee_no': number, 'is_admin': True}
+            result = await engine.answer(self.actor, {'question': '当前登陆人是谁?'}, history,
+                self.request, AsyncMock(), AsyncMock(return_value=current), {})
+            self.assertIn(name, result['answer'])
+            self.assertIn(number, result['answer'])
+            self.assertIn('管理员', result['answer'])
+            for wrong in ('李鹏', '32842771', 'ou_wrong', 'union_id'):
+                self.assertNotIn(wrong, result['answer'])
+            self.assertEqual(result['sources'], [])
+        self.assertEqual(self.reads, [])
+        with self.assertRaises(AssistantError):
+            await engine.answer(self.actor, {'question': '我是谁'}, [], self.request,
+                AsyncMock(), AsyncMock(return_value={**self.actor, 'id': 'another-account'}), {})
+
+    async def test_identity_omits_unavailable_employee_number_and_private_ids(self):
+        engine = LighthouseModel(self.portal)
+        actor = {**self.actor, 'name': '110站值班', 'role_label': '楼栋值班账号', 'is_admin': False,
+                 'user_id': '32842771', 'union_id': 'on_private', 'open_id': 'ou_private'}
+        result = await engine.answer(actor, {'question': '当前登录人是谁'}, [], self.request,
+            AsyncMock(), AsyncMock(return_value=actor), {})
+        self.assertIn('110站值班', result['answer'])
+        self.assertIn('未提供工号', result['answer'])
+        for value in ('32842771', 'on_private', 'ou_private'):
+            self.assertNotIn(value, result['answer'])
+
+    async def test_parallel_identity_queries_keep_accounts_separate(self):
+        engine = LighthouseModel(self.portal)
+        async def ask(identity, name):
+            actor = {**self.actor, 'id': identity, 'name': name, 'is_admin': False}
+            return await engine.answer(actor, {'question': '当前登陆人是谁'}, [], self.request,
+                AsyncMock(), AsyncMock(return_value=actor), {})
+        first, second = await asyncio.gather(ask('account-a', 'A楼值班'), ask('account-b', 'B楼值班'))
+        self.assertIn('A楼值班', first['answer'])
+        self.assertNotIn('B楼值班', first['answer'])
+        self.assertIn('B楼值班', second['answer'])
+        self.assertNotIn('A楼值班', second['answer'])
+
+    async def test_portal_actor_name_comes_from_session_not_client_or_user_id(self):
+        from lan_bitable_template_portal.lighthouse_bridge import actor_for
+        controller = SimpleNamespace(_current_session=Mock(return_value={'open_id': 'ou_session', 'user': {
+            'name': '李世龙', 'user_id': 'not-an-employee-number', 'union_id': 'private-union'}}))
+        runtime = SimpleNamespace(auth_manager=SimpleNamespace(session_scopes=Mock(return_value=['A']), is_admin=Mock(return_value=True)))
+        actor = await actor_for(controller, runtime, self.request)
+        self.assertEqual(actor['name'], '李世龙')
+        self.assertEqual(actor['employee_no'], '')
+        self.assertEqual(actor['role_label'], '管理员')
+        self.assertNotIn('union_id', actor)
+
     async def asyncSetUp(self):
         await fixtures.StreamTests.asyncSetUp(self)
 

@@ -14,7 +14,7 @@ from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 
 from ..gateway_log import GatewayLog
-from ..protocol import MAX_CONCURRENT_ACCOUNTS
+from ..protocol import MAX_CONCURRENT_ACCOUNTS, OPENCLAW_MAX_CONCURRENT
 from ..protocol import atomic_json
 from .lighthouse_ai import AssistantError
 from .lighthouse_startup_log import emit as startup_log
@@ -105,8 +105,13 @@ def model_provider_error(status, body=b''):
     return {'code': code, 'message': message}
 
 
-def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=()):
-    """Only the private loopback broker credential reaches the Node process."""
+def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(), max_concurrent=OPENCLAW_MAX_CONCURRENT):
+    """Only the private loopback broker credential reaches the Node process.
+
+    ``max_concurrent`` is written to OpenClaw's schema-valid positive integer
+    ``agents.defaults.maxConcurrent`` (zod: number().int().positive()). The
+    unlimited sentinel 0 is never used here; pass a positive runtime value.
+    """
     entries, models = {}, []
     provider = 'lighthouse'
     for key, item in accounts.items():
@@ -134,7 +139,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
         "models": {"mode": "replace", "catalogRefresh": {"enabled": False}, "providers": {provider: {
             'baseUrl': model_url, 'api': 'openai-completions', 'apiKey': '${LIGHTHOUSE_GATEWAY_TOKEN}', 'models': models}}},
         "agents": {"entries": entries,
-                   "defaults": {"maxConcurrent": MAX_CONCURRENT_ACCOUNTS, "heartbeat": {"every": "0m"},
+                   "defaults": {"maxConcurrent": max_concurrent, "heartbeat": {"every": "0m"},
                                 "compaction": {"mode": "safeguard"}, "skipBootstrap": True, "timeoutSeconds": 180}},
         "commands": {"text": False, "native": False, "nativeSkills": False, "restart": False, "config": False},
         "tools": {"allow": list(tool_names), "loopDetection": {"enabled": True},
@@ -166,11 +171,18 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
 
 
 class OpenClawRuntime:
-    """Twenty concurrent private agents share one process; never share an agent."""
+    """Unlimited private agents share one process when ``max_accounts`` is the
+    unlimited sentinel (0); never share an agent. An explicit positive
+    ``max_accounts`` is still honored as the active-account admission cap."""
     def __init__(self, state_root, *, runtime_root=None, max_accounts=MAX_CONCURRENT_ACCOUNTS, startup_timeout=180):
         self.root = Path(state_root).resolve()
         self.runtime_root = runtime_root
         self.maximum = max_accounts
+        # OpenClaw's config schema requires a positive integer for
+        # agents.defaults.maxConcurrent. When admission is unlimited (<=0),
+        # build the schema-valid large value so the native gateway does not
+        # impose an arbitrary account cap; explicit positive caps are preserved.
+        self._openclaw_max_concurrent = int(max_accounts) if int(max_accounts) > 0 else OPENCLAW_MAX_CONCURRENT
         self.accounts, self.locks = {}, {}
         self.lock = asyncio.Lock()
         self.closing = False
@@ -254,7 +266,7 @@ class OpenClawRuntime:
             if existing and existing.get('busy') and existing.get('process') and existing['process'].poll() is None:
                 raise AssistantError('当前账号已有处理中的会话，请先停止或等待完成。', 409)
             if existing and existing.get('process') and existing["process"].poll() is None and existing.get('configured') and not existing.get('stopped') and existing["fingerprint"] == fingerprint:
-                if sum(bool(item.get('busy')) for item in self.accounts.values()) >= self.maximum:
+                if 0 < self.maximum <= sum(bool(item.get('busy')) for item in self.accounts.values()):
                     raise AssistantError('助手正在处理其他会话，请稍后继续。', 503)
                 existing["used_at"], existing["busy"] = time.monotonic(), True
                 self.starting[asyncio.current_task()] = existing
@@ -269,7 +281,7 @@ class OpenClawRuntime:
                         old_item['stopped'] = True
                     self.accounts.clear()
                     self.startup = None
-                if sum(bool(item.get('busy')) for item in self.accounts.values()) >= self.maximum:
+                if 0 < self.maximum <= sum(bool(item.get('busy')) for item in self.accounts.values()):
                     raise AssistantError("助手正在处理其他会话，请稍后继续。", 503)
                 if self.plugin_hash is not None and self.plugin_hash != plugin_hash:
                     raise AssistantError('助手工具契约已变化，请重启程序加载更新；未停止其他账号。', 409)
@@ -318,7 +330,7 @@ class OpenClawRuntime:
     async def _write_configuration(self, tool_names, accounts=None):
         gateway = self.gateway
         config = build_configuration(gateway['root'], self.accounts if accounts is None else accounts, gateway['port'], model_url=self.model_url(),
-                                     plugin=gateway['plugin'], tool_names=tool_names)
+                                     plugin=gateway['plugin'], tool_names=tool_names, max_concurrent=self._openclaw_max_concurrent)
         digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         if gateway.get('config_digest') == digest:
             return

@@ -1,7 +1,7 @@
 <template>
   <RecordPickerDialog
     :open="open" title="选择台账设备" kicker="设备台账 · 多选"
-    :records="records" :columns="columns" :selected-ids="selectedIds" multiple allow-empty
+    :records="records" :columns="columns" :selected-ids="selectedIds" multiple
     :loading="loading" :query="query" :result-note="`共 ${total} 台 · 每页 50 台`"
     :status-message="statusMessage" :status-tone="error ? 'error' : 'info'"
     :server-page="page" :server-page-count="Math.max(1, Math.ceil(total / 50))"

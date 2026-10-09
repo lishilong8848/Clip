@@ -41,6 +41,43 @@ class _FakeFeishuClient:
 
 
 class QueryRecordHttpClientTests(unittest.TestCase):
+    def test_feishu_frequency_code_retries_without_changing_search_page(self):
+        for status in (200, 400, 429):
+            with self.subTest(status=status):
+                calls = []
+                def handle(request):
+                    calls.append(request)
+                    return httpx.Response(status, headers={'x-ogw-ratelimit-reset': '2'}, json={'code': 99991400}) if len(calls) == 1 else httpx.Response(200, json={'code': 0, 'data': {'items': []}})
+                client = FeishuHttpClient(transport=httpx.MockTransport(handle), retries=1)
+                try:
+                    with patch.object(client_module.time, 'sleep') as sleep:
+                        result = client.request_json('POST', 'https://open.feishu.cn/records/search', params={'page_token': 'page-2'}, json_payload={'field_names': ['device']})
+                    self.assertEqual(result['code'], 0)
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(calls[0].url, calls[1].url)
+                    self.assertEqual(calls[0].content, calls[1].content)
+                    sleep.assert_called_once_with(2.0)
+                finally:
+                    client.close()
+
+    def test_frequency_retries_are_bounded_and_do_not_retry_business_errors(self):
+        for code, retries, expected in ((99991400, 2, 3), (99991400, 0, 1), (1254002, 2, 1)):
+            with self.subTest(code=code, retries=retries):
+                calls = []
+                client = FeishuHttpClient(transport=httpx.MockTransport(lambda request: (calls.append(request) or httpx.Response(400, json={'code': code}))), retries=retries)
+                try:
+                    with patch.object(client_module.time, 'sleep') as sleep:
+                        self.assertEqual(client.request_json('POST', 'https://open.feishu.cn/records/search')['code'], code)
+                    self.assertEqual(len(calls), expected)
+                    self.assertEqual(sleep.call_count, expected - 1)
+                finally:
+                    client.close()
+
+    def test_retry_delay_uses_longer_server_cooldown_and_classifies_code(self):
+        response = httpx.Response(400, headers={'Retry-After': '1', 'x-ogw-ratelimit-reset': '52'})
+        self.assertEqual(FeishuHttpClient._retry_delay(response, 0), 52)
+        self.assertEqual(client_module.classify_feishu_error(400, 99991400), 'rate_limit')
+
     def test_business_and_public_clients_reuse_the_same_verified_ca_policy(self):
         import ssl
         from openclaw_service.assistant.lighthouse_public import _verified_tls_context

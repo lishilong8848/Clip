@@ -4,6 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { preview } from 'vite';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const result = spawnSync(path.join(root, 'bin/.venv/Scripts/python.exe'), ['-c', `
@@ -21,24 +22,30 @@ async def main():
 asyncio.run(main())
 `], { cwd: root, encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONWARNINGS: 'ignore' } });
 assert.equal(result.status, 0, result.stderr);
-const plans = JSON.parse(result.stdout), base = 'http://127.0.0.1:19003';
+const plans = JSON.parse(result.stdout);
+const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const server = await preview({ root: frontend, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false } });
+const base = `http://127.0.0.1:${server.httpServer.address().port}/assistant.html`;
 const output = path.join(root, 'output/playwright/assistant-notice-sop');
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ headless: true });
 try {
-  for (const width of [1440, 390]) {
+  for (const width of [1440, 1024]) {
     const context = await browser.newContext({ viewport: { width, height: 1000 } });
-    assert.equal((await (await context.request.get(base + '/api/health')).json()).instance_id, 'isolated-lighthouse-stream');
     const page = await context.newPage(), errors = [], saves = [];
     page.on('pageerror', err => errors.push(err.message));
-    let display, loaded, requests = 0;
+    let display, loaded, requests = 0, failFirst = false;
+    await page.route('**/assistant.html*', async route => { const response = await route.fetch(); await route.fulfill({ response, body: (await response.text()).replace('id="clipflow-lighthouse-widget"', 'id="clipflow-lighthouse-widget" data-user-id="sop-fixture" data-user-name="隔离测试"') }); });
+    await page.route('**/api/**', route => route.fulfill({ json: { ok: true, data: {} } }));
     await page.route('**/api/assistant/conversation', route => route.fulfill({ json: { ok: true, data: {
       conversation_id: 'sop-form', configured: true, enabled: true, busy: false,
       turns: [{ operation_id: 'sop-form', question: '填写通告及SOP', answer: '请核对。', status: 'completed', plan: display }],
     } } }));
-    await page.route('**/api/assistant/plans/*/options?*', route => {
+    await page.route('**/api/assistant/plans/*/options?*', async route => {
       assert.equal(new URL(route.request().url()).searchParams.get('scope'), 'A');
       requests++;
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (failFirst) { failFirst = false; return route.fulfill({ status: 503, json: { ok: false, error: '工单目录暂不可用' } }); }
       loaded.version = display.version + 1;
       display = structuredClone(loaded);
       return route.fulfill({ json: { ok: true, data: display } });
@@ -50,15 +57,25 @@ try {
       return route.fulfill({ json: { ok: true, data: display } });
     });
     for (const [work, data] of Object.entries(plans)) {
-      display = structuredClone(data.initial); loaded = structuredClone(data.loaded); requests = 0;
+      display = structuredClone(data.initial); loaded = structuredClone(data.loaded); requests = 0; failFirst = work === 'maintenance';
       await page.goto(base);
-      await page.locator('.assistant-launcher, .assistant-panel').waitFor();
+      await page.locator('.assistant-launcher').waitFor();
       const launcher = page.getByRole('button', { name: '打开灯塔助手', exact: true });
       if (await launcher.isVisible()) await launcher.click();
+      if (work === 'maintenance') {
+        await page.getByRole('button', { name: '重试读取工单', exact: true }).click();
+        await page.getByText('正在读取工单和人员…', { exact: true }).waitFor();
+      }
       const sop = page.locator('select[aria-label="工单SOP"]');
       await sop.waitFor();
+      const dates = page.locator('.plan-form input[type="datetime-local"]');
+      assert.equal(await dates.count(), 2, 'notice start/end use datetime controls');
+      for (const input of await dates.all()) assert.ok(await input.inputValue(), 'prefilled time remains visible');
+      assert.equal(await page.locator('.plan-form .date-picker-button').count(), 2, 'calendar actions remain visible in conversation');
       const control = loaded.fields.find(field => field.native_notice_sop);
       await sop.selectOption(control.sops[0].sop_id);
+      assert.equal(await page.locator('.lhs-steps').count(), 0);
+      await page.locator('.lhs-detail-toggle').click();
       assert.equal(await page.locator('.lhs-attach-list').innerText(), 'fixture.txt');
       const operator = page.locator('[id$="-operator"][role="combobox"]');
       await operator.click();
@@ -88,7 +105,7 @@ try {
       await sop.waitFor({ state: 'visible' });
       await page.waitForFunction(() => !document.querySelector('.lhs-exempt input')?.disabled);
       assert.match(await operator.innerText(), /测试操作人/);
-      assert.equal(requests, 2, 'mount and one explicit reload only');
+      assert.equal(requests, work === 'maintenance' ? 3 : 2, 'mount, optional retry and one explicit reload only');
       const text = await page.locator('.plan-form').innerText();
       assert.ok(!text.includes('person-one') && !text.includes('query_form_') && !text.includes('private-one'));
       for (const element of [page.locator('html'), page.locator('.plan-form'), page.locator('.lhs')]) {
@@ -109,4 +126,4 @@ try {
     await context.close();
     console.log(`Notice SOP browser: three modes, payloads, people, reload, ${width}px OK`);
   }
-} finally { await browser.close(); }
+} finally { await browser.close(); await new Promise(resolve => server.httpServer.close(resolve)); }

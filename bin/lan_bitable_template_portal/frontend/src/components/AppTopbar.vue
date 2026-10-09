@@ -562,4 +562,16 @@ header.app-topbar .life-guide-entry {white-space:nowrap;padding-inline:11px}
     box-shadow: 0 6px 16px rgba(4, 46, 145, 0.1);
   }
 }
+@media (max-width: 700px) {
+  header.app-topbar.learning-topbar { min-height: 62px; padding: 9px 12px; display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 8px; }
+  .learning-topbar .brand { width: auto; flex: 1; gap: 7px; }
+  .learning-topbar .brand-logo { width: 32px; height: 26px; padding: 0; border: 0; }
+  .learning-topbar .brand h1 { max-width: none; white-space: normal; font-size: 14px; line-height: 1.4; font-weight: 700; }
+  .learning-topbar .brand p { display: none; }
+  .learning-topbar .topbar-actions { width: auto; max-width: none; flex: 0 0 auto; flex-wrap: nowrap; gap: 5px; }
+  header.learning-topbar .user-chip { display: block; flex: 0 1 auto; min-width: 0; max-width: 60px; min-height: 0; padding: 4px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; border: 0; background: transparent; box-shadow: none; }
+  header.learning-topbar .btn { min-height: 34px; padding: 5px 8px; font-size: 12px; border-radius: 6px; }
+  header.app-topbar.learning-topbar.learning-topbar .btn { min-height: 34px !important; }
+  header.learning-topbar .settings-entry { width: 32px; height: 34px; min-width: 0; padding: 5px; }
+}
 </style>
