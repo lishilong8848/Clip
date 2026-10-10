@@ -456,11 +456,12 @@ class LighthouseAssistant:
         return set(turn.get("access_scopes", turn.get("scopes", []))) <= set(actor.get("allowed_scopes", actor["scopes"]))
 
     def _state(self, actor):
-        data = self.store.get_document(NAMESPACE, self._key(actor))
-        if data is None:
-            data = {"id": uuid.uuid4().hex, "turns": []}
-            self.store.put_document(NAMESPACE, self._key(actor), data)
-        return data
+        with self._lock:
+            data = self.store.get_document(NAMESPACE, self._key(actor))
+            if data is None:
+                data = {"id": uuid.uuid4().hex, "turns": []}
+                self.store.put_document(NAMESPACE, self._key(actor), data)
+            return data
 
     @staticmethod
     def _selected(data, settings):

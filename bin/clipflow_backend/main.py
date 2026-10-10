@@ -835,9 +835,10 @@ class FastAPIPortalController:
 
         @app.get("/life-guide")
         @app.get("/link-directory")
+        @app.get("/knowledge-base")
         async def life_guide_page(request: Request):
             if self._current_session(request) is None:
-                return Response(status_code=302, headers={"Location": "/api/auth/login?" + urlencode({"next": request.url.path})})
+                return Response(status_code=302, headers={"Location": "/api/auth/login?" + urlencode({"next": str(request.url.path) + ('?' + str(request.url.query) if request.url.query else '')})})
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/workbench-lite")

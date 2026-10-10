@@ -93,11 +93,12 @@ class ModuleGuideTests(unittest.TestCase):
         from lan_bitable_template_portal import cabinet_power_routes, lighthouse_routes, plan_convergence_routes
         app = FastAPI()
         controller = SimpleNamespace()
-        runtime = SimpleNamespace(service=object(), state_store=object())
+        runtime = SimpleNamespace(service=SimpleNamespace(), state_store=object())
         with patch.object(cabinet_power_routes, 'CabinetPowerService', return_value=SimpleNamespace()):
             cabinet_power_routes.install_cabinet_power_routes(app, controller, runtime)
         lighthouse_routes.install_lighthouse_routes(app, controller, runtime)
         plan_convergence_routes.install_plan_convergence_routes(app, controller, runtime)
+        self.assertTrue(callable(runtime.service._notice_plan_guard))
         for route in app.routes:
             for method in getattr(route, 'methods', ()):
                 known.add((method, route.path))

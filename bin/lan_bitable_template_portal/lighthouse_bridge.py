@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import threading
 import time
 
@@ -39,6 +40,17 @@ async def actor_for(controller, runtime, request):
                                 if open_id == identity and code in actor['scopes']), '')
     actor['learning_scopes'] = sorted(set('ABCDEH') & set(actor['scopes'])) if actor['is_admin'] else [
         code for code in 'ABCDEH' if BUILDING_OPEN_ID_MAP.get(code) == identity and code in actor['scopes']]
+    if not actor['is_admin'] and identity not in BUILDING_OPEN_ID_MAP.values():
+        resolve = getattr(getattr(runtime, 'learning_service', None), 'resolve_self', None)
+        if callable(resolve):
+            from .learning import LearningError
+            try:
+                person = await asyncio.to_thread(resolve, identity)
+            except (LearningError, OSError, sqlite3.Error):
+                person = {}
+            if person.get('person_id'):
+                actor['learning_person_id'] = person['person_id']
+                actor['learning_scopes'] = sorted(set((person.get('person') or {}).get('scopes') or []) & set(actor['scopes']) & set('ABCDEH'))
     channel = getattr(request.state, 'lighthouse_channel', '')
     if isinstance(channel, str) and re.fullmatch(r'feishu:oc_[A-Za-z0-9]+', channel):
         actor['channel'] = channel
@@ -82,6 +94,9 @@ class PortalAuthority:
         prior = context['actor']
         if current['id'] != prior['id'] or set(prior['scopes']) - set(current['scopes']) or prior['is_admin'] and not current['is_admin']:
             raise AssistantError('登录身份或权限已变化，请重新操作。', 403)
+        if (prior.get('learning_person_id') and current.get('learning_person_id')
+                and prior['learning_person_id'] != current['learning_person_id']):
+            raise AssistantError('学练人员身份已变化，请重新操作。', 403)
         # A long-running turn cannot gain new scopes without a fresh user request.
         current['scopes'] = list(prior['scopes'])
         current['learning_scopes'] = sorted(set(current['learning_scopes']) & set(prior['learning_scopes']))

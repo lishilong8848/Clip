@@ -799,6 +799,79 @@ class LearningTests(unittest.TestCase):
         self.assertFalse(entry["needs_review"])
         self.assertEqual(entry["practice"][0]["self_rating"], PARTIAL)
 
+    def test_answer_image_replacement_corrects_issued_paper_and_survives_restore(self):
+        from io import BytesIO
+        from PIL import Image
+
+        self.enable()
+        paper, question = self.fixture(kind="interview", bank="duty", attachments=True)
+        question["answer_text"] = ""
+        with self.service.transaction() as conn:
+            self.service._put("question", question["id"], question, conn)
+            self.service._put("paper", paper["id"], paper, conn)
+        self.dispatch("paper.answer", self.answer_payload(paper, question, answer_text="My response", self_rating=PARTIAL))
+        first = copy.deepcopy(self.entry(paper, question)["attempt"])
+        content = BytesIO()
+        Image.new("RGB", (4, 4), "black").save(content, format="PNG")
+        added = self.service.add_attachments([("corrected.png", content.getvalue())],
+            {"question_id": question["id"], "kind": "answer", "version": question["version"]}, ADMIN)
+        deleted = self.service.delete_attachment(question["attachments"][2]["id"], ADMIN, added["version"])
+        updated = self.service._get("paper", paper["id"])["questions"][0]
+        entry = self.entry(paper, question)
+        self.assertEqual(entry["attempt"], first)
+        self.assertTrue(entry["needs_review"])
+        self.assertFalse(updated.get("invalid"))
+        self.assertEqual(updated["version"], deleted["version"])
+        self.assertEqual([a["id"] for a in updated["attachments"] if a["kind"] == "answer"], [added["items"][0]["id"]])
+        self.assertEqual(updated["correction_history"][0]["original"]["attachments"], question["attachments"])
+        notice_id = f"correction:{paper['id']}:{deleted['version']}"
+        self.assertTrue(self.service._correction_matches(self.service._get("notification", notice_id), self.service._get("paper", paper["id"])))
+        before_record = copy.deepcopy(self.service._get("record", paper["id"]))
+        duplicate = self.service.add_attachments([("same-image.png", content.getvalue())],
+            {"question_id": question["id"], "kind": "answer", "version": deleted["version"]}, ADMIN)
+        self.assertEqual(duplicate["items"], [])
+        self.assertEqual(self.service._get("record", paper["id"]), before_record)
+        for _ in range(4):
+            self.assertEqual(self.service.sync_pending(), {"pending_errors": 0})
+        self.service.send_notifications(CURRENT)
+        self.assertEqual(sum(identity == notice_id for _, _, identity in self.sender.calls), 1)
+        self.service = learning.LearningService(self.root / "image_restore", self.cloud, self.sender)
+        self.service.restore()
+        public = self.dispatch("paper.get", {"id": paper["id"]})
+        self.assertTrue(public["questions"][0]["needs_review"])
+        self.assertEqual([a["name"] for a in public["questions"][0]["answer"]["attachments"]], ["corrected.png"])
+        self.assert_no_secrets(public)
+        path, _, _ = self.service.attachment(added["items"][0]["id"], ACTOR)
+        self.assertEqual(path.read_bytes(), content.getvalue())
+
+    def test_missing_image_answer_waits_for_replacement_without_losing_first_attempt(self):
+        from io import BytesIO
+        from PIL import Image
+
+        self.enable()
+        paper, question = self.fixture(kind="interview", bank="duty", attachments=True)
+        question["answer_text"] = ""
+        with self.service.transaction() as conn:
+            self.service._put("question", question["id"], question, conn)
+            self.service._put("paper", paper["id"], paper, conn)
+        self.dispatch("paper.answer", self.answer_payload(paper, question, answer_text="Original response", self_rating=REVIEW))
+        first = copy.deepcopy(self.entry(paper, question)["attempt"])
+        deleted = self.service.delete_attachment(question["attachments"][2]["id"], ADMIN, question["version"])
+        self.assertTrue(self.entry(paper, question)["needs_review"])
+        self.assert_status(400, self.dispatch, "paper.answer",
+            self.answer_payload(paper, question, practice=True, answer_text="Premature review", self_rating=PARTIAL))
+        self.assertEqual(self.entry(paper, question)["attempt"], first)
+        content = BytesIO()
+        Image.new("RGB", (4, 4), "white").save(content, format="PNG")
+        self.service.add_attachments([("replacement.png", content.getvalue())],
+            {"question_id": question["id"], "kind": "answer", "version": deleted["version"]}, ADMIN)
+        updated = self.service._get("paper", paper["id"])["questions"][0]
+        self.assertFalse(updated.get("invalid"))
+        self.dispatch("paper.answer", self.answer_payload(paper, updated, practice=True, answer_text="Reviewed response", self_rating=PARTIAL))
+        self.assertEqual(self.entry(paper, question)["attempt"], first)
+        self.assertFalse(self.entry(paper, question)["needs_review"])
+        self.assertEqual(len(self.entry(paper, question)["practice"]), 1)
+
     def test_deletion_preserves_historical_paper_answer_and_attachments(self):
         self.enable()
         paper, question = self.fixture(attachments=True)

@@ -55,6 +55,7 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "PIL": "Pillow",
     "openpyxl": "openpyxl",
     "pypdf": "pypdf",
+    "sqlite_vec": "sqlite-vec==0.1.9",
     "yaml": "PyYAML",
     "anyio": "anyio",
     "pydantic": "pydantic",

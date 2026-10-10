@@ -11,18 +11,33 @@
     <aside
       ref="root"
       class="lighthouse"
-      :style="{ '--bot-color': botColor, '--lh-panel-max-width': conversationWidthLimit ? conversationWidthLimit + 'px' : undefined, '--notice-panel-width': noticeWidth + 'px', '--notice-panel-height': (panelExpanded ? 820 : 700) + 'px' }"
-      :class="{ resizing: panelResizing, 'drag-active': dragActive, 'is-open': open, 'notice-visible': noticeVisible }"
+      :style="{
+        '--bot-color': botColor,
+        '--lh-panel-max-width': conversationWidthLimit ? conversationWidthLimit + 'px' : undefined,
+        '--lh-panel-width': conversationWidth + 'px',
+        '--notice-panel-width': noticeWidth + 'px',
+        '--notice-panel-height': conversationHeight + 'px'
+      }"
+      :class="{ resizing: panelResizing, 'size-active': resizeActive, 'drag-active': dragActive, 'is-open': open, 'sidebar-visible': sidebarVisible }"
       @keydown.esc.stop="requestPanelClose"
       @dragover="onFileDragOver"
       @drop="onFileDrop"
     >
       <UiTransition name="ui-popover" @before-leave="pinClosingPanel" @before-enter="unpinPanel" @leave-cancelled="unpinPanel">
       <section v-if="open" class="assistant-shell" aria-label="灯塔助手" role="dialog" aria-labelledby="assistant-title">
-      <div v-if="desktopNotices" id="assistant-notice-sidebar" class="assistant-sidebar" :class="{ expanded: noticeVisible }" :inert="!noticeVisible || undefined" :aria-hidden="!noticeVisible">
-        <LighthouseNoticePanel :key="userId" :user-id="userId" :active="noticeDockOpen" @availability="noticeAvailable = $event" @edition="onNoticeEdition" />
+      <div v-if="desktopNotices" id="assistant-notice-sidebar" class="assistant-sidebar" :class="{ expanded: sidebarVisible }" :inert="!sidebarVisible || undefined" :aria-hidden="!sidebarVisible">
+        <div class="sidebar-tabs" role="tablist" aria-label="侧边栏内容">
+          <button type="button" role="tab" :aria-selected="sidebarTab === 'notices'" :class="{ active: sidebarTab === 'notices' }" @click="selectSidebarTab('notices')">通告待办</button>
+          <button type="button" role="tab" :aria-selected="sidebarTab === 'knowledge'" :class="{ active: sidebarTab === 'knowledge' }" @click="selectSidebarTab('knowledge')">知识库</button>
+        </div>
+        <div v-if="sidebarTab === 'notices'" class="sidebar-body">
+          <LighthouseNoticePanel :key="userId" :user-id="userId" :active="sidebarVisible" @availability="noticeAvailable = $event" @edition="onNoticeEdition" />
+        </div>
+        <div v-else class="sidebar-body">
+          <LighthouseKnowledge :active="sidebarVisible" />
+        </div>
       </div>
-      <section class="assistant-panel" :class="{ expanded: panelExpanded }" aria-label="助手会话">
+      <section class="assistant-panel" aria-label="助手会话">
         <header
           class="assistant-header"
           tabindex="0"
@@ -33,12 +48,11 @@
           @lostpointercapture="onDragCaptureLost"
         >
           <div class="panel-title">
-            <button v-if="desktopNotices" class="icon sidebar-toggle" :title="noticeVisible ? '收起通告待办' : '展开通告待办'" aria-label="通告待办" :aria-expanded="noticeVisible" aria-controls="assistant-notice-sidebar" @click="noticeDockOpen = !noticeVisible; noticeUserOpened = true"><PanelLeftClose v-if="noticeVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
+            <button v-if="desktopNotices" class="icon sidebar-toggle" :title="sidebarVisible ? '收起侧边栏' : '展开侧边栏'" aria-label="侧边栏（通告待办 / 知识库）" :aria-expanded="sidebarVisible" aria-controls="assistant-notice-sidebar" @click="toggleSidebar"><PanelLeftClose v-if="sidebarVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
             <span class="assistant-mark"><Bot :size="20" /></span><div class="panel-heading"><h2 id="assistant-title">灯塔助手</h2>
             <span class="header-status" :class="{ active: loading || busy, warning: !loading && !!error }" role="status">{{ headerStatus }}</span></div>
           </div>
           <div class="tools">
-            <button class="icon" :title="panelExpanded ? '还原会话' : '展开会话'" :aria-label="panelExpanded ? '还原会话' : '展开会话'" :aria-expanded="panelExpanded" @click="panelExpanded = !panelExpanded"><Minimize2 v-if="panelExpanded" :size="17" /><Maximize2 v-else :size="17" /></button>
             <button class="icon" :disabled="appearanceLoading" title="图标设置" aria-label="图标设置" :aria-pressed="appearanceOpen" @click="showAppearanceSettings"><Palette :size="17" /></button>
             <button class="icon" :disabled="settingsOpen" title="技能与工具" aria-label="技能与工具" :aria-pressed="skillsOpen" @click="skillsOpen = !skillsOpen"><BookOpen :size="17" /></button>
             <button v-if="state.can_manage_settings" class="icon" :disabled="busy || settingsLoading" :aria-pressed="settingsOpen" title="模型设置" aria-label="模型设置" @click="showSettings">
@@ -254,6 +268,17 @@
             </div>
           </form>
         </template>
+        <div
+          class="panel-resize"
+          :class="{ 'resize-left': resizeFromLeft }"
+          role="separator"
+          tabindex="0"
+          :aria-label="'调整会话面板大小，当前 ' + conversationWidth + ' × ' + conversationHeight"
+          :title="'拖动调整大小（方向键微调）'"
+          @pointerdown="onResizeStart"
+          @keydown="onResizeKeydown"
+          @lostpointercapture="onResizeCaptureLost"
+        ></div>
       </section>
       </section>
       </UiTransition>
@@ -273,7 +298,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import type { Chat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, ListChecks, Loader2, Maximize2, Minimize2, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Wrench, X } from 'lucide-vue-next';
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, ListChecks, Loader2, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Wrench, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { repairDeviceDependentPatch, repairDraftInputValue } from '../repairManagementUtils';
 import { navigate } from '../navigation';
@@ -291,6 +316,7 @@ import { labelledOptions, selectedLabel, selectedValue, smallSingleChoice } from
 import { readAssistantDraft, writeAssistantDraft, planDraftValues } from '../lighthouseDrafts';
 const LighthouseSkills = defineAsyncComponent({ loader: () => import('./LighthouseSkills.vue'), loadingComponent: LoadingIndicator, delay: 0 });
 const LighthouseNoticePanel = defineAsyncComponent(() => import('./LighthouseNoticePanel.vue'));
+const LighthouseKnowledge = defineAsyncComponent({ loader: () => import('./LighthouseKnowledge.vue'), loadingComponent: LoadingIndicator, delay: 0 });
 import { BOT_COLORS, normalizeBot, type BotAppearance, type BotMood } from '../botAppearance';
 const structuredFieldsReady = ref(false);
 const LighthouseStructuredField = defineAsyncComponent({
@@ -500,22 +526,56 @@ let settingsController: AbortController | null = null;
 let settingsCallSerial = 0;
 let shapeEpoch = 0; // bumps on every open/close so stale async positional callbacks (delayed GET tail, close nextTick) are invalidated
 
-const PANEL_W = 620, PANEL_H = 700, MARGIN = 12, STORAGE_PREFIX = 'lighthouse_pos:';
-const panelExpanded = ref(false);
+const MARGIN = 12, STORAGE_PREFIX = 'lighthouse_pos:';
+const CONV_DEFAULT_W = 820, CONV_DEFAULT_H = 780, CONV_MIN_W = 360, CONV_MIN_H = 480;
 const panelWidthLimit = ref<number | null>(null);
-const noticeAvailable = ref(false), noticeDockOpen = ref(true), noticeUserOpened = ref(false);
+const noticeAvailable = ref(false), sidebarDockOpen = ref(true), sidebarUserOpened = ref(false);
+const sidebarTab = ref<'notices' | 'knowledge'>('notices');
 const desktopNotices = ref(window.innerWidth >= 1000);
 let noticeEdition = '';
-const noticeVisible = computed(() => desktopNotices.value && noticeDockOpen.value && (noticeAvailable.value || noticeUserOpened.value));
+const sidebarVisible = computed(() => desktopNotices.value && sidebarDockOpen.value && (noticeAvailable.value || sidebarUserOpened.value || sidebarTab.value === 'knowledge'));
 const noticeWidth = computed(() => Math.min(360, Math.max(240, Math.floor((panelWidthLimit.value || window.innerWidth - 48) * .4))));
-const conversationWidthLimit = computed(() => panelWidthLimit.value ? Math.max(1, panelWidthLimit.value - (noticeVisible.value ? noticeWidth.value : 0) - 2) : null);
-function onNoticeEdition(id: string): void { if (noticeEdition && id !== noticeEdition) noticeDockOpen.value = true; noticeEdition = id; }
-const panelResizing = ref(false), dragActive = ref(false);
+const conversationWidthLimit = computed(() => panelWidthLimit.value ? Math.max(1, panelWidthLimit.value - (sidebarVisible.value ? noticeWidth.value : 0) - 2) : null);
+function onNoticeEdition(id: string): void { if (noticeEdition && id !== noticeEdition) sidebarDockOpen.value = true; noticeEdition = id; }
+const panelResizing = ref(false), dragActive = ref(false), resizeActive = ref(false);
 let panelResizeTimer = 0, panelResizeSerial = 0;
-function expectedPanelSize(): { w: number; h: number } {
-  return { w: Math.min(panelExpanded.value ? 760 : PANEL_W, conversationWidthLimit.value || Infinity, window.innerWidth - 50) + (noticeVisible.value ? noticeWidth.value : 0) + 2, h: Math.min(panelExpanded.value ? 820 : PANEL_H, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
+const conversationSize = ref({ w: CONV_DEFAULT_W, h: CONV_DEFAULT_H });
+const conversationWidth = computed(() => clampConversationSize(conversationSize.value).w);
+const conversationHeight = computed(() => clampConversationSize(conversationSize.value).h);
+const resizeFromLeft = ref(true);
+function clampConversationSize(target: { w: number; h: number }): { w: number; h: number } {
+  const maxW = Math.max(1, Math.floor(conversationWidthLimit.value ?? window.innerWidth - 50));
+  const maxH = Math.max(1, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48));
+  return {
+    w: Math.min(Math.max(target.w, CONV_MIN_W), maxW),
+    h: Math.min(Math.max(target.h, CONV_MIN_H), maxH),
+  };
 }
-watch([panelExpanded, noticeVisible], async () => {
+function applyConversationSize(target: { w: number; h: number }): void {
+  conversationSize.value = clampConversationSize(target);
+}
+function sizeKey(): string { return storageKey() + ':size'; }
+function readStoredConversationSize(): { w: number; h: number } {
+  let w = CONV_DEFAULT_W, h = CONV_DEFAULT_H;
+  try {
+    const raw = window.localStorage.getItem(sizeKey());
+    if (raw) {
+      const parsed = JSON.parse(raw) as { w?: unknown; h?: unknown };
+      if (Number.isFinite(Number(parsed.w))) w = Math.max(CONV_MIN_W, Number(parsed.w));
+      if (Number.isFinite(Number(parsed.h))) h = Math.max(CONV_MIN_H, Number(parsed.h));
+    }
+  } catch { /* ignore */ }
+  return { w, h };
+}
+function saveConversationSize(): void {
+  try { window.localStorage.setItem(sizeKey(), JSON.stringify(conversationSize.value)); } catch { /* ignore */ }
+}
+function expectedPanelSize(): { w: number; h: number } {
+  const w = conversationSize.value.w;
+  const h = conversationSize.value.h;
+  return { w: Math.min(w, conversationWidthLimit.value || Infinity, window.innerWidth - 50) + (sidebarVisible.value ? noticeWidth.value : 0) + 2, h: Math.min(h, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
+}
+watch([sidebarVisible], async () => {
   if (!open.value || disposed || !root.value) return;
   const epoch = shapeEpoch, serial = ++panelResizeSerial, rect = root.value.getBoundingClientRect();
   const { w, h } = expectedPanelSize();
@@ -538,7 +598,7 @@ let dragStartClientX = 0, dragStartClientY = 0, dragOriginX = 0, dragOriginY = 0
 let dragRaf = 0;
 let dragLatestX = 0, dragLatestY = 0;
 let dragCaptureTarget: HTMLElement | null = null;
-let dragSize = { w: PANEL_W, h: PANEL_H };
+let dragSize = { w: CONV_DEFAULT_W, h: CONV_DEFAULT_H };
 
 let press: { target: HTMLElement; id: number; x: number; y: number } | null = null;
 let pressTimer = 0;
@@ -587,7 +647,7 @@ function resizeComposer(): void {
   element.style.overflowY = element.scrollHeight > 138 ? 'auto' : 'hidden';
   if (follow) scrollBottom();
 }
-watch([draft, open, settingsOpen, panelExpanded], () => { void nextTick(resizeComposer); });
+watch([draft, open, settingsOpen], () => { void nextTick(resizeComposer); });
 function scrollBottom(): void {
   hasNewContent.value = false;
   void nextTick(() => {
@@ -1738,7 +1798,7 @@ function clampPosForSize(x: number, y: number, w: number, h: number): { x: numbe
 function panelSize(): { w: number; h: number } {
   const el = root.value;
   if (panelResizing.value) return expectedPanelSize();
-  return open.value && el ? { w: el.offsetWidth || PANEL_W, h: el.offsetHeight || PANEL_H } : expectedPanelSize();
+  return open.value && el ? { w: el.offsetWidth || CONV_DEFAULT_W, h: el.offsetHeight || CONV_DEFAULT_H } : expectedPanelSize();
 }
 function applyRootPos(): void {
   const el = root.value;
@@ -1786,6 +1846,7 @@ function placeBesideLauncher(): void {
   // Keep manually placed panels only when they are still wholly beside the bot.
   if (posAppliedPanel && (retained.x + w <= left - gap || retained.x >= right + gap)) panelPos = retained;
   else panelPos = clampPosForSize(leftSpace >= rightSpace ? left - gap - w : right + gap, top + size / 2 - h / 2, w, h);
+  resizeFromLeft.value = panelPos.x + w <= left;
   applyRootPos();
 }
 function ensureInBounds(): void {
@@ -1803,6 +1864,7 @@ watch(() => [appearance.value.size, appearanceOpen.value], () => { if (open.valu
 function onWindowResize(): void {
   desktopNotices.value = window.innerWidth >= 1000;
   if (dragging) stopGesture();
+  if (resizeActive.value) cancelResize();
   if (open.value) applyPanelPosition();
 }
 function currentOrigin(): { x: number; y: number } {
@@ -1875,6 +1937,7 @@ function onDragEnd(event: PointerEvent): void {
   }
 }
 function stopGesture(): void {
+  cancelResize();
   if (dragging && dragPointerId !== null) {
     onDragEnd(new PointerEvent('pointercancel', { pointerId: dragPointerId }));
   }
@@ -1949,6 +2012,106 @@ function nudgeByArrow(event: KeyboardEvent): void {
   saveStoredPos('panel', p.x, p.y);
 }
 
+let resizePointerId: number | null = null;
+let resizeStartClientX = 0, resizeStartClientY = 0, resizeOriginSize = { w: CONV_DEFAULT_W, h: CONV_DEFAULT_H };
+let resizeRaf = 0, resizeLatestSize = { ...resizeOriginSize };
+let resizeCaptureTarget: HTMLElement | null = null;
+let resizeOriginPosition = { x: 0, y: 0, right: 0 };
+
+function beginResize(target: HTMLElement, pointerId: number, clientX: number, clientY: number): void {
+  if (resizeActive.value || !open.value) return;
+  resizeActive.value = true; panelResizing.value = true;
+  window.clearTimeout(panelResizeTimer); ++panelResizeSerial;
+  resizePointerId = pointerId;
+  resizeStartClientX = clientX;
+  resizeStartClientY = clientY;
+  resizeOriginSize = { w: conversationWidth.value, h: conversationHeight.value };
+  resizeOriginPosition = { ...panelPos, right: panelPos.x + expectedPanelSize().w };
+  resizeLatestSize = { ...resizeOriginSize };
+  resizeCaptureTarget = target;
+  try { target.setPointerCapture(pointerId); } catch { /* unsupported */ }
+  window.addEventListener('pointermove', onResizeMove, { passive: true });
+  window.addEventListener('pointerup', onResizeEnd, true);
+  window.addEventListener('pointercancel', onResizeEnd, true);
+}
+function onResizeMove(event: PointerEvent): void {
+  if (!resizeActive.value || event.pointerId !== resizePointerId) return;
+  const dw = (event.clientX - resizeStartClientX) * (resizeFromLeft.value ? -1 : 1);
+  const dh = event.clientY - resizeStartClientY;
+  resizeLatestSize = clampConversationSize({ w: resizeOriginSize.w + dw, h: resizeOriginSize.h + dh });
+  if (!resizeRaf) {
+    resizeRaf = window.requestAnimationFrame(() => {
+      resizeRaf = 0;
+      if (!resizeActive.value || !open.value) return;
+      applyConversationSize(resizeLatestSize);
+      const { w, h } = expectedPanelSize();
+      panelPos = clampPosForSize(resizeFromLeft.value ? resizeOriginPosition.right - w : resizeOriginPosition.x, resizeOriginPosition.y, w, h);
+      applyRootPos();
+    });
+  }
+}
+function onResizeEnd(event: PointerEvent): void {
+  if (!resizeActive.value || event.pointerId !== resizePointerId) return;
+  if (resizeRaf) { window.cancelAnimationFrame(resizeRaf); resizeRaf = 0; }
+  if (open.value) {
+    const dw = event.type === 'pointerup' ? (event.clientX - resizeStartClientX) * (resizeFromLeft.value ? -1 : 1) : resizeLatestSize.w - resizeOriginSize.w;
+    const dh = event.type === 'pointerup' ? event.clientY - resizeStartClientY : resizeLatestSize.h - resizeOriginSize.h;
+    applyConversationSize({ w: resizeOriginSize.w + dw, h: resizeOriginSize.h + dh });
+    const { w, h } = expectedPanelSize();
+    panelPos = clampPosForSize(resizeFromLeft.value ? resizeOriginPosition.right - w : resizeOriginPosition.x, resizeOriginPosition.y, w, h);
+    saveConversationSize();
+    applyPanelPosition();
+  }
+  resizeActive.value = false;
+  panelResizing.value = false;
+  resizePointerId = null;
+  window.removeEventListener('pointermove', onResizeMove);
+  window.removeEventListener('pointerup', onResizeEnd, true);
+  window.removeEventListener('pointercancel', onResizeEnd, true);
+  if (resizeCaptureTarget) {
+    try { resizeCaptureTarget.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+    resizeCaptureTarget = null;
+  }
+}
+function cancelResize(): void {
+  if (resizeActive.value && resizePointerId !== null) {
+    onResizeEnd(new PointerEvent('pointercancel', { pointerId: resizePointerId }));
+  }
+}
+function onResizeStart(event: PointerEvent): void {
+  if (event.button != null && event.button !== 0) return;
+  event.preventDefault();
+  beginResize(event.currentTarget as HTMLElement, event.pointerId, event.clientX, event.clientY);
+}
+function onResizeKeydown(event: KeyboardEvent): void {
+  const step = event.shiftKey ? 40 : 16;
+  let dw = 0, dh = 0;
+  if (event.key === 'ArrowRight') dw = step;
+  else if (event.key === 'ArrowLeft') dw = -step;
+  else if (event.key === 'ArrowDown') dh = step;
+  else if (event.key === 'ArrowUp') dh = -step;
+  else return;
+  event.preventDefault();
+  applyConversationSize({ w: conversationSize.value.w + dw, h: conversationSize.value.h + dh });
+  const { w, h } = expectedPanelSize();
+  panelPos = clampPosForSize(panelPos.x, panelPos.y, w, h);
+  applyRootPos();
+  saveConversationSize();
+}
+function onResizeCaptureLost(event: PointerEvent): void {
+  if (resizeActive.value && event.pointerId === resizePointerId) onResizeEnd(event);
+}
+
+function toggleSidebar(): void {
+  sidebarDockOpen.value = !sidebarVisible.value;
+  sidebarUserOpened.value = true;
+}
+function selectSidebarTab(tab: 'notices' | 'knowledge'): void {
+  sidebarTab.value = tab;
+  sidebarDockOpen.value = true;
+  sidebarUserOpened.value = true;
+}
+
 onMounted(async () => {
   window.addEventListener('pagehide', saveDrafts);
   document.addEventListener('visibilitychange', resumeStreamRendering);
@@ -1956,6 +2119,7 @@ onMounted(async () => {
   try { restoreOpen = window.sessionStorage.getItem(storageKey() + ':open') === 'true'; } catch { /* private mode */ }
   await nextTick();
   migrateLegacyPos();
+  conversationSize.value = readStoredConversationSize();
   botPosition.value = loadStoredPos('launcher');
   void loadAppearance();
   const pp = loadStoredPos('panel');
@@ -2009,16 +2173,26 @@ onBeforeUnmount(() => {
   window.clearTimeout(timer);
   window.clearTimeout(panelResizeTimer);
   if (dragRaf) { window.cancelAnimationFrame(dragRaf); dragRaf = 0; }
+  if (resizeRaf) { window.cancelAnimationFrame(resizeRaf); resizeRaf = 0; }
   window.removeEventListener('resize', onWindowResize);
   window.removeEventListener('blur', stopGesture);
   window.removeEventListener('pointermove', onDragMove, false);
   window.removeEventListener('pointerup', onDragEnd, true);
   window.removeEventListener('pointercancel', onDragEnd, true);
+  window.removeEventListener('pointermove', onResizeMove);
+  window.removeEventListener('pointerup', onResizeEnd, true);
+  window.removeEventListener('pointercancel', onResizeEnd, true);
   if (dragCaptureTarget && dragPointerId !== null) {
     try { dragCaptureTarget.releasePointerCapture(dragPointerId); } catch { /* noop */ }
     dragCaptureTarget = null;
   }
+  if (resizeCaptureTarget && resizePointerId !== null) {
+    try { resizeCaptureTarget.releasePointerCapture(resizePointerId); } catch { /* noop */ }
+    resizeCaptureTarget = null;
+  }
   dragging = false;
+  resizeActive.value = false;
+  resizePointerId = null;
 });
 </script>
 
@@ -2059,12 +2233,31 @@ onBeforeUnmount(() => {
 .lighthouse { display: flex; align-items: stretch; }
 .assistant-shell { display: flex; min-width: 0; height: min(var(--notice-panel-height, 700px), calc(100dvh - 48px)); overflow: hidden; border: 1px solid var(--lh-border); border-radius: var(--lh-panel-radius, 12px); background: var(--lh-surface); box-shadow: var(--lh-shadow, 0 14px 40px #181e2633); transition: height 320ms cubic-bezier(.22, 1, .36, 1); }
 .assistant-shell > .assistant-panel { flex: none; height: 100%; max-width: calc(100vw - 50px); border: 0; border-radius: 0; box-shadow: none; }
-.assistant-sidebar { flex: none; width: 0; min-width: 0; overflow: hidden; visibility: hidden; transition: width 320ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 320ms; }
+.assistant-sidebar { flex: none; display: flex; flex-direction: column; width: 0; min-width: 0; overflow: hidden; visibility: hidden; transition: width 320ms cubic-bezier(.22, 1, .36, 1), visibility 0s linear 320ms; }
 .assistant-sidebar.expanded { width: var(--notice-panel-width, 360px); visibility: visible; transition-delay: 0s; }
+.sidebar-tabs { flex: none; display: flex; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--lh-border); background: var(--lh-surface-subtle); }
+.sidebar-tabs button {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--lh-muted);
+  white-space: nowrap;
+}
+.sidebar-tabs button:hover:not(:disabled) { background: var(--lh-surface-hover); color: var(--lh-charcoal-strong); }
+.sidebar-tabs button.active { background: var(--lh-accent-soft); color: var(--lh-accent-strong); box-shadow: inset 0 0 0 1px var(--lh-border); }
+.sidebar-body { flex: 1; min-width: 0; min-height: 0; display: flex; }
 .assistant-sidebar :deep(.notice-panel) { height: 100%; max-height: none; border: 0; border-right: 1px solid var(--lh-border); border-radius: 0; box-shadow: none; opacity: 0; transform: translateX(-8px); transition: opacity 180ms ease, transform 320ms cubic-bezier(.22, 1, .36, 1); }
 .assistant-sidebar.expanded :deep(.notice-panel) { opacity: 1; transform: translateX(0); }
+.assistant-sidebar :deep(.lighthouse-knowledge) { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; opacity: 0; transform: translateX(-8px); transition: opacity 180ms ease, transform 320ms cubic-bezier(.22, 1, .36, 1); }
+.assistant-sidebar.expanded :deep(.lighthouse-knowledge) { opacity: 1; transform: translateX(0); }
 @media (max-width: 700px) { .assistant-shell { height: min(var(--notice-panel-height, 700px), calc(100dvh - max(112px, env(safe-area-inset-bottom) + 88px))); } }
-@media (prefers-reduced-motion: reduce) { .assistant-shell, .assistant-sidebar, .assistant-sidebar :deep(.notice-panel) { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .assistant-shell, .assistant-sidebar, .assistant-sidebar :deep(.notice-panel), .assistant-sidebar :deep(.lighthouse-knowledge) { transition: none; } }
 .lighthouse :deep(.confirm-backdrop) { background: rgba(12, 18, 14, .5); backdrop-filter: blur(4px); }
 .lighthouse :deep(.confirm-modal) { background: var(--lh-surface); border-color: var(--lh-border-strong); border-radius: 12px; color: var(--lh-charcoal); box-shadow: 0 20px 70px rgba(0, 0, 0, .3); }
 .lighthouse :deep(.confirm-content header strong) { color: var(--lh-charcoal-strong); }
@@ -2135,17 +2328,43 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .assistant-launcher:focus-visible { outline: 2px solid #397554; outline-offset: 0; }
 .assistant-launcher:active { cursor: grabbing; }
 @media (max-width: 700px) { .lighthouse { right: 24px; } }
-.assistant-panel { --lh-panel-height: 700px; width: min(620px, var(--lh-panel-max-width, 620px), calc(100vw - 48px)); height: min(var(--lh-panel-height), calc(100dvh - max(48px, env(safe-area-inset-bottom) + 24px))); transition: width 320ms cubic-bezier(.22, 1, .36, 1), height 320ms cubic-bezier(.22, 1, .36, 1); display: flex; flex-direction: column; border: 1px solid var(--lh-border-strong); border-radius: 12px; background: var(--lh-surface); box-shadow: 0 14px 40px rgba(24, 30, 38, 0.2); overflow: hidden; }
-.assistant-panel.expanded { --lh-panel-height: 820px; width: min(760px, var(--lh-panel-max-width, 760px), calc(100vw - 48px)); }
-@media (max-width: 700px) { .lighthouse { bottom: max(100px, calc(env(safe-area-inset-bottom) + 76px)); } .assistant-panel, .assistant-panel.expanded { height: min(var(--lh-panel-height), calc(100dvh - max(112px, env(safe-area-inset-bottom) + 88px))); } }
+.assistant-panel { width: min(var(--lh-panel-width, 820px), var(--lh-panel-max-width, 820px), calc(100vw - 48px)); height: 100%; transition: width 320ms cubic-bezier(.22, 1, .36, 1), height 320ms cubic-bezier(.22, 1, .36, 1); display: flex; flex-direction: column; border: 1px solid var(--lh-border-strong); border-radius: 12px; background: var(--lh-surface); box-shadow: 0 14px 40px rgba(24, 30, 38, 0.2); overflow: hidden; position: relative; }
+@media (max-width: 700px) { .lighthouse { bottom: max(100px, calc(env(safe-area-inset-bottom) + 76px)); } .assistant-panel { height: min(var(--notice-panel-height, 780px), calc(100dvh - max(112px, env(safe-area-inset-bottom) + 88px))); } }
 .lighthouse.resizing { transition: left 320ms cubic-bezier(.22, 1, .36, 1), top 320ms cubic-bezier(.22, 1, .36, 1); }
 .lighthouse.drag-active, .lighthouse.drag-active .assistant-panel { transition: none; }
+.lighthouse.size-active, .lighthouse.size-active .assistant-panel, .lighthouse.size-active .assistant-shell { transition: none; }
+.assistant-panel:not(:last-child) + .panel-resize, .panel-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 3;
+  border-radius: 0 0 12px 0;
+}
+.panel-resize::before {
+  content: '';
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--lh-accent-strong);
+  border-bottom: 2px solid var(--lh-accent-strong);
+  border-radius: 0 0 3px 0;
+  opacity: .7;
+}
+.panel-resize:hover::before, .panel-resize:focus-visible::before { opacity: 1; }
+.panel-resize:focus-visible { outline: 2px solid var(--lh-accent); outline-offset: -2px; }
+.panel-resize.resize-left { left: 0; right: auto; cursor: nesw-resize; transform: scaleX(-1); }
 @media (prefers-reduced-motion: reduce) { .assistant-panel, .lighthouse.resizing { transition: none; } }
-@media (min-width: 800px) { .assistant-panel.expanded .plan-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .assistant-panel.expanded .wide-field, .assistant-panel.expanded .plan-form > button { grid-column: 1 / -1; } }
+@media (min-width: 800px) { .assistant-panel .plan-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .assistant-panel .wide-field, .assistant-panel .plan-form > button { grid-column: 1 / -1; } }
 .assistant-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--lh-border); background: var(--lh-surface-subtle); cursor: grab; touch-action: none; user-select: none; }
 .assistant-header:active { cursor: grabbing; }
-.notice-visible .assistant-header { flex-wrap: wrap; }
-.notice-visible .tools { flex-wrap: wrap; margin-left: auto; }
+.sidebar-visible .assistant-header { flex-wrap: wrap; }
+.sidebar-visible .tools { flex-wrap: wrap; margin-left: auto; }
 .assistant-header:focus-visible { outline: 2px solid var(--lh-accent); outline-offset: -2px; border-radius: 10px 10px 0 0; }
 .panel-title, .tools { display: flex; align-items: center; gap: 6px; }
 .panel-title { color: var(--lh-charcoal-strong); }

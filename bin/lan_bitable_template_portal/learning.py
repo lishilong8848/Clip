@@ -958,6 +958,8 @@ class LearningService:
                     return self.public_paper(paper, actor, record)
                 if payload.get("version") != record["version"]:
                     raise LearningError("该账号的学练记录已更新，请读取最新记录；当前填写请保留", 409)
+                if q["type"] == "interview" and problems(q):
+                    raise LearningError("参考答案正在调整，请等待管理员补充后再练习自评。")
                 practice = bool(payload.get("practice"))
                 if entry.get("attempt") and not practice and not entry.get("needs_review"):
                     raise LearningError("本题已提交，可在复习中重做，首次记录不会覆盖", 409)
@@ -1092,8 +1094,8 @@ class LearningService:
         rows = []
         seen = set()
         dates = self._date_filters(query)
-        for paper in self._documents("paper", scope=access['scope'], person_id=person_id,
-                                    start=dates.get('from', ''), end=dates.get('to', '')):
+        # A later practice belongs to its submission day, not the paper's issue day.
+        for paper in self._documents("paper", scope=access['scope'], person_id=person_id):
             if paper.get("deleted_at"):
                 continue
             record = self._get("record", paper["id"]) or {}
@@ -1101,6 +1103,9 @@ class LearningService:
                 entry = record.get("entries", {}).get(q["id"], {})
                 for index, attempt in enumerate([entry.get('attempt'), *entry.get('practice', [])]):
                     if not attempt:
+                        continue
+                    day = attempt.get('submitted_at', '')[:10]
+                    if dates.get('from') and day < dates['from'] or dates.get('to') and day > dates['to']:
                         continue
                     key = (paper['id'], q['id'], attempt.get('operation_id') or f'legacy:{index}')
                     if key in seen:
@@ -1275,8 +1280,12 @@ class LearningService:
         new_options = {o["id"]: o["text"] for o in updated["options"]}
         structure_changed = old["stem"] != updated["stem"] or old["type"] != updated["type"] or original_options != new_options
         answer_changed = old.get("answer_text") != updated.get("answer_text") if old["type"] == "interview" else set(old["correct_option_ids"]) != set(updated["correct_option_ids"])
+        reference_changed = {a["id"] for a in old.get("attachments", []) if a.get("kind") == "answer"} != {a["id"] for a in updated.get("attachments", []) if a.get("kind") == "answer"}
+        answer_changed = answer_changed or reference_changed
         if not structure_changed and not answer_changed:
             return
+        updated_problems = problems(updated)
+        missing_reference = updated_problems == ["缺少参考答案"]
         def grading_basis(question):
             return (question["stem"], question["type"], {o["id"]: o["text"] for o in question["options"]},
                     set(question["correct_option_ids"]), question.get("answer_text") if question["type"] == "interview" else None)
@@ -1288,15 +1297,17 @@ class LearningService:
                 continue
             record = self._get("record", paper["id"], conn)
             entry = (record or {}).get("entries", {}).get(q["id"])
-            q.setdefault("correction_history", []).append({"at": stamp(), "reason": reason, "original": copy.deepcopy({k: q.get(k) for k in ("stem", "options", "correct_option_ids", "answer_text", "version")})})
-            if structure_changed or problems(updated):
+            q.setdefault("correction_history", []).append({"at": stamp(), "reason": reason, "original": copy.deepcopy({k: q.get(k) for k in ("stem", "options", "correct_option_ids", "answer_text", "attachments", "version")})})
+            if structure_changed or (updated_problems and not missing_reference):
                 q["invalid"] = True
                 q["correction"] = "题干或选项已更正，原题不再参与评价：" + reason
             else:
                 q["correct_option_ids"] = updated["correct_option_ids"]
                 q["answer_text"] = updated["answer_text"]
+                if reference_changed:
+                    q["attachments"] = [a for a in q.get("attachments", []) if a.get("kind") != "answer"] + copy.deepcopy([a for a in updated.get("attachments", []) if a.get("kind") == "answer"])
                 q["version"] = updated["version"]
-                q["correction"] = "参考答案已更正：" + reason
+                q["correction"] = ("参考答案暂不可用，等待补充：" if missing_reference else "参考答案已更正：") + reason
                 if entry:
                     if q["type"] == "interview":
                         entry["needs_review"] = True
@@ -1521,6 +1532,7 @@ class LearningService:
                 entity_kind = "issue"
             if str(query.get("version")) != str(entity["version"]):
                 raise LearningError("题目或质疑已更新，请读取最新版本后上传附件；当前填写请保留", 409)
+            original = copy.deepcopy(entity) if qid else None
             attachments = entity.setdefault("attachments", [])
             seen = {(a.get("sha256"), a.get("kind")) for a in attachments}
             unique = []
@@ -1544,6 +1556,7 @@ class LearningService:
             if entity_kind == "question":
                 entity["version"] = uuid.uuid4().hex
                 entity["problems"] = problems(entity)
+                self._correct_papers(original, entity, "参考答案附件已更新", conn)
             else:
                 entity["version"] += 1
             self._put(entity_kind, entity["id"], entity, conn)
@@ -1563,6 +1576,7 @@ class LearningService:
                 entity = self.issue(value["issue_id"], actor, conn, write=True)
             if str(version) != str(entity["version"]):
                 raise LearningError("题目或质疑已更新，请读取最新版本后删除附件；当前填写请保留", 409)
+            original = copy.deepcopy(entity) if entity_kind == "question" else None
             entity["attachments"] = [a for a in entity["attachments"] if a["id"] != identity]
             if entity_kind == "question":
                 if value.get("file_token"):
@@ -1571,6 +1585,7 @@ class LearningService:
                 if entity["problems"] and entity["status"] == "published":
                     entity["status"] = "draft"
                 entity["version"] = uuid.uuid4().hex
+                self._correct_papers(original, entity, "参考答案附件已移除", conn)
             else:
                 entity["version"] += 1
             self._put(entity_kind, entity["id"], entity, conn)

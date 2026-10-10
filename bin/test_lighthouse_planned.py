@@ -169,6 +169,18 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(next(child for child in field["children"] if child["path"] == "progress")["required"])
         self.assertIsNone(await self.begin("发送事件通告"))
 
+    async def test_document_read_and_admin_requests_do_not_start_notice_matching(self):
+        for question in ('生成A楼维护单', '读取A楼维护单的附件，预览后准备填写',
+                         '下载A楼演练文件，并准备作为本地维护单上传', '上传已签名的维护单',
+                         '在维护单中使用我的签名', '维护单MOP配置', '导入通告记忆',
+                         '扫描通告记忆', '管理通告历史记忆', '读取A楼维保通告'):
+            with self.subTest(question=question):
+                self.assertEqual(workflow.name_request(question), '')
+                self.assertEqual(workflow.name_request(question, allow_plain=True), '')
+                self.assertIsNone(await self.begin(question))
+        self.assertEqual(self.reads, [])
+        self.assertEqual(self.writes, [])
+
     async def test_edits_survive_review_and_cancel_invalidates_preview(self):
         plan = await self.begin()
         values = self.fill(plan)

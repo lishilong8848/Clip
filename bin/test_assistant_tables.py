@@ -147,6 +147,12 @@ class ConsentTests(unittest.TestCase):
         self.assertIsNone(self.require(ADMIN))
         self.assertEqual(self.store.docs, {})
 
+    def test_consent_discloses_reply_in_current_conversation(self):
+        message = self.require()['message']
+        self.assertIn('当前会话回复', message)
+        self.assertIn('群成员可见', message)
+        self.assertNotIn('私信返回', message)
+
     def test_only_owner_same_chat_exact_request_can_approve(self):
         code = self.require()['confirmation_code']
         for actor in ({**self.actor, 'id': 'someone'}, {**self.actor, 'channel': 'feishu:oc_other'}):

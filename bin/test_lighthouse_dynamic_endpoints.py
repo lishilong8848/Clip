@@ -42,6 +42,13 @@ from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: 
 # 命名占位符统一用 {param}(与 run_audit 归一一致);匹配目录时按 _shape_equal 形态比较。
 # 每个 covered/excluded 条目用 method_paths 逐条列(方法, 归一路径),避免方法×路径叉乘。
 KNOWN_DYNAMIC_BINDINGS = [
+    dict(
+        source="lan_bitable_template_portal/frontend/src/components/KnowledgeBasePage.vue",
+        line=508, kind="excluded",
+        method_paths=[("POST", "/api/assistant/knowledge/files")],
+        window=20, needles=['requestJson(url, { method: "POST", body: form', 'let url = `${BASE}/files`;'],
+        note="Shared knowledge upload uses the authenticated assistant service, not the native business-operation catalog.",
+    ),
     # --- covered:可确证命中 native 目录的已知业务端点 ---
     dict(
         source="lan_bitable_template_portal/frontend/src/components/CriticalGuardPage.vue",
@@ -145,10 +152,11 @@ KNOWN_DYNAMIC_BINDINGS = [
 
     dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningPage.vue",
-        line=676, kind="covered",
+        line=772, kind="covered",
         method_paths=[("GET", "/api/learning/papers")],
-        window=4, needles=['"/papers?" + query({ today: 1 })'],
-        note="个人今日题单只读查询:requestLearning 添加 /api/learning 前缀,命中已开放的 GET 目录",
+        window=4, needles=['`/papers?` + query({ today: 1 })'],
+        note="个人今日题单只读查询(loadTodayPaper):requestLearning 添加 /api/learning 前缀,"
+             "命中已开放的 GET 目录;源码现已用模板字面量/反引号 ` + query(today)",
     ),
 
     # --- excluded:已知端点属 native 有意排除能力,必须保持 excluded ---
@@ -192,7 +200,7 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergencePage.vue",
-        line=76, kind="unresolved",
+        line=92, kind="unresolved",
         method_paths=[], window=6,
         needles=["requestJson(base+path", "const post = (path"],
         note="post(path, data) 帮助函数;base+path 的参数在别处由调用方给定",
@@ -311,26 +319,31 @@ WRAPPER_REVIEW = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergencePage.vue",
-        line=76, label="post(local) 帮助函数(base=/api/plan-convergence, 一律 POST)",
+        line=92, label="post(local) 帮助函数(base=/api/plan-convergence, 一律 POST)",
         anchor="const post = (path",
         callers=[
-            dict(method="POST", path="/api/plan-convergence/rulesets/{param}/match", caller_line=96,
+            dict(method="POST", path="/api/plan-convergence/rulesets/{param}/match", caller_line=114,
                  marker="post('/rulesets/'+setId.value+'/match'"),
-            dict(method="POST", path="/api/plan-convergence/compare", caller_line=101,
+            dict(method="POST", path="/api/plan-convergence/compare", caller_line=120,
                  marker="post('/compare'"),
-            dict(method="POST", path="/api/plan-convergence/rule-view", caller_line=111,
+            dict(method="POST", path="/api/plan-convergence/rule-view", caller_line=130,
                  marker="kind:'snapshots'|'rule-view'"),
-            dict(method="POST", path="/api/plan-convergence/snapshots", caller_line=111,
+            dict(method="POST", path="/api/plan-convergence/snapshots", caller_line=130,
                  marker="kind:'snapshots'|'rule-view'"),
-            dict(method="POST", path="/api/plan-convergence/settings/browser-login", caller_line=129,
+            dict(method="POST", path="/api/plan-convergence/settings/browser-login", caller_line=148,
                  marker="post('/settings/browser-login'"),
-            dict(method="POST", path="/api/plan-convergence/settings/browser-login/cancel", caller_line=130,
+            dict(method="POST", path="/api/plan-convergence/settings/browser-login/cancel", caller_line=149,
                  marker="post('/settings/browser-login/cancel'"),
-            dict(method="POST", path="/api/plan-convergence/maintenance/check", caller_line=139,
-                 marker="post('/maintenance/check'"),
+            dict(method="POST", path="/api/plan-convergence/maintenance/check", caller_line=179,
+                 marker="post('/'+kind+'/check'"),
+            dict(method="POST", path="/api/plan-convergence/change/check", caller_line=179,
+                 marker="post('/'+kind+'/check'"),
         ],
         note="base+path 业务端点均在目录;settings 前缀被排除,无 gap。rule-view/snapshots 由 "
-             "drill 的 kind 类型联合('snapshots'|'rule-view')在 111 行同一动态调用处确证",
+             "drill 的 kind 类型联合('snapshots'|'rule-view')在 130 行同一动态调用处确证。"
+             "auditKind/currentAudit computed(157/158 行)在 179 行经 '/'+kind+'/check' 生成 "
+             "maintenance/check 与 change/check 两个真实调用端点,均已覆盖目录。"
+             "records/points 由 requestJson 直接命中目录(covered),非 post 包装调用,故不在此列。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergenceRules.vue",

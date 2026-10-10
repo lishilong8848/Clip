@@ -51,6 +51,17 @@ class SelfServiceTests(unittest.TestCase):
         base.update(changes)
         return base
 
+    def _answer_cross_day(self, actor, paper, q, first_op, practice_op, person_id='p1'):
+        """First submission on 09-28 (wrong) then a correct practice on 09-29."""
+        self.dispatch('paper.answer', {
+            'id': paper['id'], 'person_id': person_id, 'question_id': q['id'],
+            'option_ids': ['o1'], 'operation_id': first_op}, actor)
+        with patch('lan_bitable_template_portal.learning.now',
+                   return_value=CURRENT + dt.timedelta(days=1)):
+            self.dispatch('paper.answer', {
+                'id': paper['id'], 'person_id': person_id, 'question_id': q['id'],
+                'option_ids': ['o0'], 'operation_id': practice_op, 'practice': True}, actor)
+
     # ---- identity mapping -------------------------------------------------
     def test_missing_login_maps_to_clear_identity_issue(self):
         self.seed_service()
@@ -419,6 +430,106 @@ class SelfServiceTests(unittest.TestCase):
         data2 = self.service.bootstrap('', unmatched)
         self.assertIsNone(data2['self_person'])
         self.assertIn('尚未关联', data2['identity_issue'])
+
+    # ---- cross-day attempt history / practice portrait ---------------------
+    def test_cross_day_attempt_history_filters_by_submission_date_with_dedup_and_building_scope(self):
+        self.seed_service()
+        me = self.actor(id='oid-p1', person_id='p1', can_answer=True)
+        paper = self.dispatch('paper.claim', {'person_id': 'p1'}, me)
+        q = paper['questions'][0]
+        first_op, practice_op = 'x-first', 'x-practice'
+        self._answer_cross_day(me, paper, q, first_op, practice_op)
+        # Re-send the exact same practice submission: operation id must never re-count.
+        with patch('lan_bitable_template_portal.learning.now',
+                   return_value=CURRENT + dt.timedelta(days=1)):
+            self.dispatch('paper.answer', {
+                'id': paper['id'], 'person_id': 'p1', 'question_id': q['id'],
+                'option_ids': ['o0'], 'operation_id': practice_op, 'practice': True}, me)
+
+        def kinds(rows):
+            return {r['operation_id']: r['kind'] for r in rows}
+
+        day28 = (DAY + dt.timedelta(days=0)).isoformat()
+        day29 = (DAY + dt.timedelta(days=1)).isoformat()
+        self.assertEqual(self.service.attempt_history(me, {'from': day28, 'to': day28})['total'], 1)
+        self.assertEqual(kinds(self.service.attempt_history(me, {'from': day28, 'to': day28})['items']),
+                         {first_op: 'first'})
+        self.assertEqual(self.service.attempt_history(me, {'from': day29, 'to': day29})['total'], 1)
+        self.assertEqual(kinds(self.service.attempt_history(me, {'from': day29, 'to': day29})['items']),
+                         {practice_op: 'practice'})
+        self.assertEqual(self.service.attempt_history(me, {})['total'], 2)
+        # Building duty for the own building sees the same filtered history.
+        duty_a = self.actor(id='a', scope='A', shared_account=True)
+        duty_view = self.service.attempt_history(duty_a, {
+            'from': day29, 'to': day29, 'scope': 'A', 'person_id': 'p1'})
+        self.assertEqual(duty_view['total'], 1)
+        self.assertEqual(kinds(duty_view['items']), {practice_op: 'practice'})
+        # Ordinary other-person and other-building duty stay denied.
+        other = self.actor(id='oid-p2', person_id='p2', can_answer=True)
+        with self.assertRaises(learning.LearningError) as c1:
+            self.service.attempt_history(other, {'person_id': 'p1'})
+        self.assertEqual(c1.exception.status, 403)
+        duty_b = self.actor(id='b', scope='B', shared_account=True)
+        with self.assertRaises(learning.LearningError) as c2:
+            self.service.attempt_history(duty_b, {'scope': 'A', 'person_id': 'p1'})
+        self.assertEqual(c2.exception.status, 403)
+
+    def test_profile_day_counts_practice_without_mutating_first_attempt_accuracy(self):
+        self.seed_service()
+        me = self.actor(id='oid-p1', person_id='p1', can_answer=True)
+        paper = self.dispatch('paper.claim', {'person_id': 'p1'}, me)
+        q = paper['questions'][0]
+        self._answer_cross_day(me, paper, q, 'd-first', 'd-practice')
+
+        day28 = DAY.isoformat()
+        day29 = (DAY + dt.timedelta(days=1)).isoformat()
+        prof = self.service.profile(me, {'from': day29, 'to': day29})
+        summary = prof['summary']
+        self.assertEqual(summary['practice_count'], 1)
+        self.assertEqual(summary['learning_days'], 1)
+        self.assertEqual(summary['answered_people'], 1)
+        people = {r['person_id']: r for r in prof['people']}
+        self.assertEqual(set(people), {'p1'})
+        self.assertTrue(people['p1']['last_answered_at'].startswith(day29))
+        trend_day = next(t for t in prof['trend'] if t['date'] == day29)
+        self.assertEqual(trend_day['practice_count'], 1)
+        self.assertEqual(trend_day['people'], 1)
+        # The correct practice must not rewrite the preserved first (wrong) result.
+        full = self.service.profile(me, {'from': day28, 'to': day29})
+        self.assertEqual(full['summary']['answered'], 1)
+        self.assertEqual(full['summary']['wrong'], 1)
+        self.assertEqual(full['summary']['correct'], 0)
+        self.assertEqual(full['summary']['accuracy'], 0.0)
+        self.assertEqual(full['summary']['practice_count'], 1)
+
+    def test_building_profile_day_people_include_cross_day_reviewer_without_leak(self):
+        self.seed_service()  # p1 in building A, p2 in building B
+        me = self.actor(id='oid-p1', person_id='p1', can_answer=True)
+        other = self.actor(id='oid-p2', person_id='p2', can_answer=True)
+        paper_a = self.dispatch('paper.claim', {'person_id': 'p1'}, me)
+        paper_b = self.dispatch('paper.claim', {'person_id': 'p2'}, other)
+        self._answer_cross_day(me, paper_a, paper_a['questions'][0], 'a-first', 'a-practice', 'p1')
+        self._answer_cross_day(other, paper_b, paper_b['questions'][0], 'b-first', 'b-practice', 'p2')
+
+        day28 = DAY.isoformat()
+        day29 = (DAY + dt.timedelta(days=1)).isoformat()
+        duty_a = self.actor(id='a-duty', scope='A', shared_account=True)
+        prof = self.service.profile(duty_a, {'from': day29, 'to': day29, 'scope': 'A'})
+        self.assertEqual({p['person_id'] for p in prof['people']}, {'p1'})
+        reviewer = next(p for p in prof['people'] if p['person_id'] == 'p1')
+        self.assertTrue(reviewer['last_answered_at'].startswith(day29))
+        self.assertEqual(reviewer['summary']['practice_count'], 1)
+        building_a = next(b for b in prof['buildings'] if b['scope'] == 'A')
+        self.assertEqual(building_a['practice_count'], 1)
+        self.assertEqual(building_a['answered_people'], 1)
+        # First-attempt metrics on the wider window still reflect the wrong first
+        # answer; the correct practice and p2's building-B work never leak into A.
+        full_a = self.service.profile(duty_a, {'from': day28, 'to': day29, 'scope': 'A'})
+        self.assertEqual({p['person_id'] for p in full_a['people']}, {'p1'})
+        self.assertEqual(next(b for b in full_a['buildings'] if b['scope'] == 'A')['answered'], 1)
+        self.assertEqual(next(b for b in full_a['buildings'] if b['scope'] == 'A')['wrong'], 1)
+        self.assertEqual(next(b for b in full_a['buildings'] if b['scope'] == 'A')['accuracy'], 0.0)
+        self.assertEqual(next(b for b in full_a['buildings'] if b['scope'] == 'A')['practice_count'], 1)
 
     def run(self, *args, **kwargs):
         import threading

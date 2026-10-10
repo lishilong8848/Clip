@@ -88,7 +88,7 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage)"
+      v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage)"
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :user="auth.user"
@@ -129,6 +129,7 @@
     <LifeGuidePage v-else-if="isLifeGuidePage" />
 
     <LinkDirectoryPage v-else-if="isLinkDirectoryPage" />
+    <KnowledgeBasePage v-else-if="isKnowledgeBasePage" />
 
     <DailyTaskChecklistPage
       v-else-if="isDailyTaskPage"
@@ -262,6 +263,7 @@ const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
 const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergencePage.vue"));
 const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
 const LinkDirectoryPage = asyncPage(() => import("./components/LinkDirectoryPage.vue"));
+const KnowledgeBasePage = asyncPage(() => import("./components/KnowledgeBasePage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
@@ -364,6 +366,7 @@ const isLearningPage = computed(() => routePath.value === "/learning");
 const isPlanConvergencePage = computed(() => routePath.value === "/plan-convergence");
 const isLifeGuidePage = computed(() => routePath.value === "/life-guide");
 const isLinkDirectoryPage = computed(() => routePath.value === "/link-directory");
+const isKnowledgeBasePage = computed(() => routePath.value === "/knowledge-base");
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCabinetPowerPage = computed(() => routePath.value === "/cabinet-power");
@@ -454,6 +457,7 @@ const headerSubtitle = computed(() => {
   if (isPlanConvergencePage.value) return "计划收敛审查";
   if (isLifeGuidePage.value) return "参考人生指南";
   if (isLinkDirectoryPage.value) return "多维表导航";
+  if (isKnowledgeBasePage.value) return "公司知识库";
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (isCabinetPowerPage.value || isCabinetPowerBatchPage.value) return "机柜上下电";
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";

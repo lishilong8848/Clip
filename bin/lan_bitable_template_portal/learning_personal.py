@@ -275,43 +275,63 @@ def profile(service, actor, query):
         practices = [dict(row) for row in conn.execute('SELECT * FROM learning_practice WHERE ' + ' AND '.join(c for c in clauses if c != 'invalid=0'), args)]
     papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=start, end=end) if not p.get('deleted_at')]
     records = {p['id']: service._get('record', p['id']) or {} for p in papers}
+    # Older papers can have practice submissions inside the requested period.
+    for paper_id in {r['paper_id'] for r in practices}:
+        if paper_id not in records:
+            records[paper_id] = service._get('record', paper_id) or {}
+    practice_times = {}
+    practices_by_person, practices_by_day = defaultdict(list), defaultdict(list)
+    for row in practices:
+        key = (row['paper_id'], row['question_id'])
+        if key not in practice_times:
+            entry = records[row['paper_id']].get('entries', {}).get(row['question_id'], {})
+            practice_times[key] = {a.get('operation_id') or str(n): a['submitted_at'] for n, a in enumerate(entry.get('practice', []))}
+        row['submitted_at'] = practice_times[key].get(row['operation_id'], row['day'])
+        practices_by_person[row['person_id']].append(row)
+        practices_by_day[row['day']].append(row)
     ratio = lambda a, b: round(a * 100 / b, 1) if b else None
-    def summarize(rows, assigned, *, pid='', building=''):
+    def summarize(rows, assigned, *, pid='', building='', practice_rows=None):
         choices = [r for r in rows if r['type'] != 'interview']
         independent = [r for r in choices if not r['assisted']]
         completed = sum(service._completed(p, records[p['id']]) for p in assigned)
         task_answered = sum(bool(records[p['id']].get('entries', {}).get(q['id'], {}).get('attempt')) and not records[p['id']].get('entries', {}).get(q['id'], {}).get('needs_review') for p in assigned for q in p['questions'] if not q.get('invalid'))
         total = sum(sum(not q.get('invalid') for q in p['questions']) for p in assigned)
-        practice_count = sum((not pid or r['person_id'] == pid) and (not building or r['scope'] == building) for r in practices)
+        if practice_rows is None:
+            practice_rows = practices_by_person.get(pid, []) if pid else practices
+        own_practices = [r for r in practice_rows if (not pid or r['person_id'] == pid) and (not building or r['scope'] == building)]
+        activity = rows + own_practices
+        practice_count = len(own_practices)
         return {'answered': sum(not r['needs_review'] for r in rows), 'wrong': sum(r['correct'] == 0 for r in choices), 'correct': sum(r['correct'] == 1 for r in choices),
             'hinted': sum(bool(r['assisted']) for r in rows if not r['needs_review']),
             'independent_correct': sum(r['correct'] == 1 for r in independent), 'independent_answered': len(independent),
             'choice_answered': len(choices), 'accuracy': ratio(sum(r['correct'] == 1 for r in choices), len(choices)),
             'independent_accuracy': ratio(sum(r['correct'] == 1 for r in independent), len(independent)),
-            'hint_rate': ratio(sum(bool(r['assisted']) for r in rows), len(rows)), 'learning_days': len({r['day'] for r in rows}),
+            'hint_rate': ratio(sum(bool(r['assisted']) for r in rows), len(rows)), 'learning_days': len({r['day'] for r in activity}),
             'interview_total': sum(r['type'] == 'interview' for r in rows), 'practice_count': practice_count,
             'attempt_count': len(rows) + practice_count,
             'interview_ratings': dict(Counter(r['self_rating'] for r in rows if r['type'] == 'interview')),
             'review_total': sum(r['correct'] == 0 or r['type'] == 'interview' or r['needs_review'] for r in rows),
             'assigned': total, 'task_answered': task_answered, 'papers': len(assigned), 'completed': completed,
             'completion_rate': ratio(task_answered, total), 'received_people': len({p['person_id'] for p in assigned}),
-            'answered_people': len({r['person_id'] for r in rows}),
+            'answered_people': len({r['person_id'] for r in activity}),
             'completed_people': len({p['person_id'] for p in assigned if service._completed(p, records[p['id']])}),
             'not_started_people': len({p['person_id'] for p in assigned if not records[p['id']].get('entries') or not any(e.get('attempt') for e in records[p['id']]['entries'].values())})}
     summary = summarize(results, papers)
     people_rows, buildings = [], []
-    ids = {r['person_id'] for r in results} | {p['person_id'] for p in papers}
+    ids = {r['person_id'] for r in results + practices} | {p['person_id'] for p in papers}
     today = core.now().date().isoformat()
     for pid in sorted(ids):
         own = [p for p in papers if p['person_id'] == pid]
         latest = own[-1] if own else {}
         p = service._get('person', pid) or latest.get('person') or {'id': pid, 'name': '历史人员', 'employee_no': ''}
         rows = [r for r in results if r['person_id'] == pid]
+        activity = rows + practices_by_person.get(pid, [])
+        latest_activity = max(activity, key=lambda r: r['submitted_at'], default={})
         today_paper = service._get('paper', 'personal:' + today + ':' + pid)
         progress = service.public_paper(today_paper, actor)['stats'] if today_paper and not today_paper.get('deleted_at') and (not scope or today_paper['scope'] == scope) else None
         people_rows.append({'person_id': pid, 'name': p['name'], 'employee_no': p.get('employee_no', ''),
-            'scope': latest.get('scope', ''), 'summary': summarize(rows, own, pid=pid), 'today': progress,
-            'last_answered_at': max((r['submitted_at'] for r in rows), default='')})
+            'scope': latest.get('scope') or latest_activity.get('scope', ''), 'summary': summarize(rows, own, pid=pid), 'today': progress,
+            'last_answered_at': latest_activity.get('submitted_at', '')})
     for code in SCOPES:
         if not scope or scope == code:
             buildings.append({'scope': code, **summarize([r for r in results if r['scope'] == code], [p for p in papers if p['scope'] == code], building=code)})
@@ -329,8 +349,10 @@ def profile(service, actor, query):
     for offset in range(min(367, max(0, (last - first).days + 1))):
         day = (first + dt.timedelta(days=offset)).isoformat()
         rows = [r for r in results if r['day'] == day]
+        practice_rows = practices_by_day.get(day, [])
         choices = [r for r in rows if r['type'] != 'interview']
-        trend.append({'date': day, 'answered': len(rows), 'people': len({r['person_id'] for r in rows}), 'accuracy': ratio(sum(r['correct'] == 1 for r in choices), len(choices))})
+        trend.append({'date': day, 'answered': len(rows), 'practice_count': len(practice_rows), 'attempt_count': len(rows) + len(practice_rows),
+                      'people': len({r['person_id'] for r in rows + practice_rows}), 'accuracy': ratio(sum(r['correct'] == 1 for r in choices), len(choices))})
     distribution = [{'label': label, 'count': sum(low <= p['summary']['accuracy'] <= high for p in people_rows if p['summary']['accuracy'] is not None)}
                     for label, low, high in [('0-59%', 0, 59.9), ('60-79%', 60, 79.9), ('80-99%', 80, 99.9), ('100%', 100, 100)]]
     questions = []
@@ -345,7 +367,7 @@ def profile(service, actor, query):
     today_papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=today, end=today) if not p.get('deleted_at')]
     for p in today_papers:
         records.setdefault(p['id'], service._get('record', p['id']) or {})
-    return {'person': learner, 'summary': summary, 'today_summary': summarize(today_rows, today_papers),
+    return {'person': learner, 'summary': summary, 'today_summary': summarize(today_rows, today_papers, practice_rows=practices_by_day.get(today, [])),
             'buildings': [] if ordinary else buildings, 'people': people_rows, 'trend': trend,
             'topics': topics, 'banks': bank_rows, 'distribution': [] if ordinary else distribution,
             'questions': questions, 'inventory': {} if ordinary else (inventory if actor.get('is_admin') else {}),

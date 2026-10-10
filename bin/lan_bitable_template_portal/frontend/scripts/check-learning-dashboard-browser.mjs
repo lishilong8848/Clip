@@ -11,12 +11,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(os.tmpdir(), 'clipflow-learning-dashboard-qa');
 const summary = { assigned: 90, task_answered: 60, answered: 60, choice_answered: 48, correct: 36, wrong: 12,
   independent_answered: 32, independent_correct: 26, accuracy: 75, independent_accuracy: 81.25,
-  learning_days: 5, practice_count: 8, interview_total: 12, interview_ratings: { '需复习': 8, '部分掌握': 4 },
+  learning_days: 5, practice_count: 8, attempt_count: 68, interview_total: 12, interview_ratings: { '需复习': 8, '部分掌握': 4 },
   answered_people: 6, received_people: 8, completed_people: 2, not_started_people: 2, papers: 6 };
 const person = { id: 'fixture-person', name: '示例人员', employee_no: '1001' };
 const data = { summary, today_summary: { assigned: 15, task_answered: 5, papers: 1, accuracy: 80, answered_people: 2, completed_people: 1, not_started_people: 2 },
   published: true, without_choice_answers: 2,
-  trend: [0, 10, 0, 15, 10, 15, 10].map((answered, i) => ({ date: `2026-10-0${i + 1}`, answered, people: [0, 2, 0, 3, 1, 3, 2][i], accuracy: [null, 87.5, null, 75, 75, 66.7, 75][i] })),
+  trend: [0, 10, 0, 15, 10, 15, 10].map((answered, i) => ({ date: `2026-10-0${i + 1}`, answered, attempt_count: answered + [0, 2, 0, 2, 1, 2, 1][i], people: [0, 2, 0, 3, 1, 3, 2][i], accuracy: [null, 87.5, null, 75, 75, 66.7, 75][i] })),
   distribution: [{ label: '低于60%', count: 1 }, { label: '60–79%', count: 2 }, { label: '80–99%', count: 2 }, { label: '100%', count: 1 }],
   banks: [{ label: '笔试题库', wrong: 7 }, { label: '专项题库', wrong: 5 }],
   topics: [{ label: '电气系统与设备运行安全条件核对及异常处置', wrong: 8 }, { label: '暖通', wrong: 3 }, { label: '消防', wrong: 1 }],
@@ -96,6 +96,17 @@ if (process.argv.includes('--preview')) {
       await page.evaluate(([d, p]) => window.setDashboard(d, p), [d, person]);
       assert.match(await page.locator('.method-row').nth(1).innerText(), correct ? /100.0%/ : /0.0%/);
     }
+    const practiceSummary = { assigned: 0, answered: 0, practice_count: 1, attempt_count: 1, learning_days: 1, answered_people: 1, choice_answered: 0, correct: 0, accuracy: null };
+    const practiceOnly = { ...data, summary: practiceSummary, today_summary: practiceSummary,
+      trend: [{ date: '2026-10-09', answered: 0, practice_count: 1, attempt_count: 1, people: 1, accuracy: null }],
+      people: [{ ...data.people[0], summary: practiceSummary, last_answered_at: '2026-10-09T09:00:00' }] };
+    await page.evaluate(([d, p]) => window.setDashboard(d, p), [practiceOnly, person]);
+    await page.getByRole('group', { name: '趋势指标' }).getByRole('button', { name: '作答次数', exact: true }).click();
+    assert.equal(await page.locator('.trend-point').count(), 1);
+    assert.match(await page.locator('.trend-point').getAttribute('aria-label'), /1次/);
+    await page.evaluate(d => window.setDashboard(d, null), practiceOnly);
+    assert.equal(await page.locator('tbody tr').count(), 1, 'a practice-only learner must remain in the building table');
+    assert.match(await page.locator('tbody tr').innerText(), /复习 1 次/);
     assert.deepEqual(errors, []);
     console.log('[LearningDashboardBrowser] OK', { output });
   } finally { await browser?.close(); await server.close(); }

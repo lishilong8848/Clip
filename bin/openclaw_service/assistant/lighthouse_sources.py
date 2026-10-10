@@ -124,18 +124,45 @@ def query_terms(query):
     return list(dict.fromkeys(result))[:12]
 
 
+def _native_learning_context(service, actor):
+    """Trusted learning identity/scope for the assistant (server-owned only)."""
+    admin = bool(actor.get("is_admin"))
+    if admin:
+        return set("ABCDEH"), {**actor, "scope": "", "person_id": actor.get("person_id") or "",
+                               "shared_account": False}
+    identity = str(actor.get("id") or "")
+    actor_scopes = set(actor.get("scopes") or [])
+    learning_scopes = set(actor.get("learning_scopes") or [])
+    from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP
+    # Duty is a real building shared account, decided solely by the mapped open id;
+    # a revoked account or a 110 shared account raises 403 and never falls through
+    # to a local person row. The home must be a learning building in both scopes.
+    home = next((code for code, open_id in BUILDING_OPEN_ID_MAP.items() if open_id == identity), "")
+    if home:
+        if home not in "ABCDEH" or home not in actor_scopes or home not in learning_scopes:
+            raise AssistantError("当前楼栋值班账号已无权查询题库。", 403)
+        return {home}, {**actor, "scope": home, "person_id": "", "shared_account": True}
+    # Ordinary self: reads stay limited to the resolved person; the filter keeps all
+    # six learning buildings so own history remains reachable regardless of current building.
+    if service is None:
+        raise AssistantError("题库本地缓存尚未就绪，请在画像学练原页面完成初始化。", 503)
+    info = service.resolve_self(identity)
+    pid = info.get("person_id") or ""
+    if not pid:
+        raise AssistantError("登录账号与人员名单尚未关联，请使用原有学练授权账号。", 403)
+    return set("ABCDEH"), {**actor, "scope": "", "person_id": pid, "shared_account": False}
+
+
 def question_bank(service, actor, query):
     """Read native question visibility without revealing answers or changing study state."""
     from lan_bitable_template_portal.learning import LearningError
 
-    allowed = set(actor.get("scopes") or []) & set(actor.get("learning_scopes") or [])
-    if not actor.get("is_admin") and not allowed:
-        raise AssistantError("当前账号没有题库查询权限，请使用原有学练授权账号。", 403)
+    allowed, native = _native_learning_context(service, actor)
     requested = str(query.get("scope") or "ALL").upper()
     selected = codes(requested)
     if not selected or (requested not in {"ALL", "CAMPUS"} and selected - allowed):
         raise AssistantError("无权查询所选楼栋的题目。", 403)
-    if not actor.get("is_admin") and not selected & allowed:
+    if not native.get("is_admin") and not selected & allowed:
         raise AssistantError("所选楼栋不在题目查询权限内。", 403)
     if service is None:
         raise AssistantError("题库本地缓存尚未就绪，请在画像学练原页面完成初始化。", 503)
@@ -146,7 +173,7 @@ def question_bank(service, actor, query):
     except (TypeError, ValueError):
         raise AssistantError("题库分页参数无效，每页须为1至40条。") from None
     filters = {key: str(query.get(key) or "").strip() for key in ("search", "bank")}
-    if len(filters["search"]) > 200 or filters["bank"] not in {"", "written", "duty", "professional"}:
+    if len(filters["search"]) > 200 or filters["bank"] not in {"", "written", "duty", "professional", "supplemental"}:
         raise AssistantError("题库筛选参数无效。")
     terms = list(dict.fromkeys(unicodedata.normalize("NFKC", term).casefold()
                               for term in re.split(r"[\s,，;；、]+", filters["search"]) if len(term) > 1))
@@ -161,8 +188,8 @@ def question_bank(service, actor, query):
         with closing(sqlite3.connect(Path(service.db).resolve().as_uri() + "?mode=ro", uri=True, timeout=.1)) as conn:
             conn.set_progress_handler(lambda: time.monotonic() >= deadline, 2000)
             conn.execute("BEGIN")
-            if actor.get("is_admin"):
-                service._admin(actor)
+            if native.get("is_admin"):
+                service._admin(native)
                 fields += ("status", "correct_option_ids", "answer_text", "analysis", "hint")
                 rows = conn.execute("SELECT payload FROM documents WHERE kind='question' "
                                     "AND COALESCE(json_extract(payload,'$.status'),'')!='deleted' ORDER BY updated DESC,key")
@@ -173,18 +200,27 @@ def question_bank(service, actor, query):
                     unique[q["id"], q["version"]] = {key: q[key] for key in fields if key in q}
             else:
                 scopes = sorted(selected & allowed)
-                for scope in scopes:
-                    service._scope({**actor, "scope": scope}, scope)
+                # Refuse to weaken the native self-service guards: duty accounts may
+                # only read their own building; ordinary self only their own person.
+                if native.get("shared_account"):
+                    service._access(native, scope=next(iter(scopes)))
+                    person_where = ""
+                    params = scopes
+                else:
+                    service._access(native, person_id=native["person_id"])
+                    person_where = " AND json_extract(p.payload,'$.person_id')=?"
+                    params = scopes + [native["person_id"]]
                 rows = conn.execute("SELECT p.payload,r.payload FROM documents p LEFT JOIN documents r "
                     "ON r.kind='record' AND r.key=p.key WHERE p.kind='paper' "
                     "AND COALESCE(json_extract(p.payload,'$.deleted_at'),'')='' "
                     "AND json_extract(p.payload,'$.scope') IN (" + ",".join("?" for _ in scopes) + ") "
-                    "ORDER BY json_extract(p.payload,'$.date') DESC,p.key", scopes)
+                    + person_where +
+                    " ORDER BY json_extract(p.payload,'$.date') DESC,p.key", params)
                 for row in rows:
                     if time.monotonic() >= deadline:
                         raise sqlite3.OperationalError("query budget exceeded")
                     paper = json.loads(row[0])
-                    public = service.public_paper(paper, {**actor, "scope": paper["scope"]}, record=json.loads(row[1] or "{}"))
+                    public = service.public_paper(paper, native, record=json.loads(row[1] or "{}"))
                     for q in public["questions"]:
                         item = unique.setdefault((q["id"], q["version"]), {key: q[key] for key in fields if key in q})
                         # A previously opened answer stays visible for that same assigned version.
@@ -228,8 +264,9 @@ def question_bank(service, actor, query):
         raise AssistantError("题库缓存尚未完成初始化，不能确认题目数量。", 503)
     result.update(source="题库本地缓存", updated_at=sync.get("updated_at", ""),
                   match_note="按关键词及近似措辞召回候选，须结合原题核对语义，不代表完全相同的题目。" if terms else "",
-                  scope_note="题库为通用资料，不按楼栋划分。" if actor.get("is_admin") else "只读取当前值班账号原本可见的题目。",
-                  visibility="管理员完整题库" if actor.get("is_admin") else "原本可见的题目及已开放答案，不含未开放答案",
+                  scope_note="题库为通用资料，不按楼栋划分。" if native.get("is_admin") else
+                             ("只读取当前值班账号原本可见的题目。" if native.get("shared_account") else "只读取本人原本可见的题目。"),
+                  visibility="管理员完整题库" if native.get("is_admin") else "原本可见的题目及已开放答案，不含未开放答案",
                   warning="题库正在同步或尚未完成同步，以下是已有缓存。" if sync.get("status") in {"syncing", "error"} or not sync.get("updated_at") else "")
     return result
 
@@ -239,14 +276,12 @@ def question_material_file(service, actor, query):
     from lan_bitable_template_portal.learning import LearningError
     from .lighthouse_files import ALLOWED_EXTENSIONS, MAX_FILE_BYTES
 
-    allowed = set(actor.get("scopes") or []) & set(actor.get("learning_scopes") or [])
-    if not actor.get("is_admin") and not allowed:
-        raise AssistantError("当前账号没有题目资料查询权限。", 403)
+    allowed, native = _native_learning_context(service, actor)
     scope = str(query.get("scope") or "ALL").upper()
     if not codes(scope):
         raise AssistantError("题目资料查询范围无效。")
     chosen = codes(scope) & allowed if scope in {"ALL", "CAMPUS"} else codes(scope)
-    if not actor.get("is_admin") and (not chosen or chosen - allowed):
+    if not native.get("is_admin") and (not chosen or chosen - allowed):
         raise AssistantError("无权读取所选楼栋的题目资料。", 403)
     identity = str(query.get("material_id") or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", identity):
@@ -259,16 +294,19 @@ def question_material_file(service, actor, query):
         raise AssistantError("资料读取范围无效，每次最多6000字。") from None
     if service is None:
         raise AssistantError("题库本地缓存尚未就绪。", 503)
-    native_actor = {**actor, "scope": "" if actor.get("is_admin") else next(iter(sorted(chosen)))}
+    # Ordinary self reads are person-scoped by the native guard; keep scope blank
+    # so _attachment_allowed cannot be widened by a client-chosen building.
+    if not native.get("is_admin") and not native.get("shared_account"):
+        native["scope"] = ""
     try:
         meta = service._get("attachment", identity)
         if not meta or not meta.get("question_id") or meta.get("issue_id"):
             raise AssistantError("题目资料不存在。", 404)
-        service._attachment_allowed(meta, native_actor)
+        service._attachment_allowed(meta, native)
         suffix = Path(str(meta.get("name") or "")).suffix.lower()
         if suffix not in ALLOWED_EXTENSIONS:
             raise AssistantError("该格式暂不能提取文字，请在原学练页面查看。", 422)
-        path, name, mime = service.attachment(identity, native_actor)
+        path, name, mime = service.attachment(identity, native)
         if path.stat().st_size > MAX_FILE_BYTES:
             raise AssistantError("题目资料超过20MiB读取上限。", 413)
         content = path.read_bytes()

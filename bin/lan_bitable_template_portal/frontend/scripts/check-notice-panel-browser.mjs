@@ -116,17 +116,17 @@ try {
   const openRequests = requests.filter(([method, url]) => method === 'POST' && url === base + '/open').length;
   const combinedWidth = (await page.locator('.assistant-shell').boundingBox()).width;
   const chatBeforeCollapse = await page.locator('.assistant-panel').boundingBox();
-  await page.getByRole('button', { name: '通告待办', exact: true }).click();
+  await page.getByRole('button', { name: '侧边栏（通告待办 / 知识库）', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.assistant-sidebar').getBoundingClientRect().width === 0);
   assert.notEqual(await page.locator('.assistant-sidebar').getAttribute('inert'), null);
-  assert.equal(await page.getByRole('button', { name: '通告待办', exact: true }).getAttribute('aria-expanded'), 'false');
+  assert.equal(await page.getByRole('button', { name: '侧边栏（通告待办 / 知识库）', exact: true }).getAttribute('aria-expanded'), 'false');
   assert.equal(await page.evaluate(() => document.activeElement.classList.contains('sidebar-toggle')), true);
   assert.ok((await page.locator('.assistant-shell').boundingBox()).width < combinedWidth - 200);
   const chatAfterCollapse = await page.locator('.assistant-panel').boundingBox();
   assert.ok(Math.abs(chatBeforeCollapse.x + chatBeforeCollapse.width - chatAfterCollapse.x - chatAfterCollapse.width) < 2, 'chat edge stays anchored beside launcher');
   assert.equal(await page.locator('.notice-panel').count(), 1, 'collapse keeps the draft component mounted');
   await page.screenshot({ path: path.join(output, 'chat-collapsed.png') });
-  await page.getByRole('button', { name: '通告待办', exact: true }).press('Enter');
+  await page.getByRole('button', { name: '侧边栏（通告待办 / 知识库）', exact: true }).press('Enter');
   await page.getByLabel('本次进度', { exact: false }).waitFor();
   assert.equal(await page.getByLabel('本次进度', { exact: false }).inputValue(), '工程师已到场，准备维保');
   assert.equal(await page.getByLabel(/^内容/).inputValue(), '检查冷水机组电气及机械部件');
@@ -218,7 +218,7 @@ try {
       return { radii: [shell, chat, panel].map(e => getComputedStyle(e).borderTopLeftRadius),
         innerShadows: [chat, panel].map(e => getComputedStyle(e).boxShadow),
         parentsUnified: shell.contains(chat) && shell.contains(panel),
-        heightDifference: Math.abs(chat.getBoundingClientRect().height - panel.getBoundingClientRect().height),
+        heightDifference: Math.abs(chat.getBoundingClientRect().height - panel.getBoundingClientRect().height - document.querySelector('.sidebar-tabs').getBoundingClientRect().height),
         headerHeights: [header, noticeHeader].map(e => e.getBoundingClientRect().height),
         overflows: [...document.querySelectorAll('.notice-filters,.notice-footer,.composer-footer,.tools')].filter(e => e.scrollWidth > e.clientWidth + 1).length,
         inputHeight: panel.querySelector('textarea')?.getBoundingClientRect().height,

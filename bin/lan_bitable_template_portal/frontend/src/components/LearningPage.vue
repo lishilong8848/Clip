@@ -58,11 +58,12 @@
             <div v-if="current.needs_review" class="alert warning"><AlertCircle :size="17" />参考内容已更正，请重新核对并练习自评。</div>
             <div v-if="draftRestored && !current.attempt" class="muted draft-status">已恢复本机草稿，尚未正式提交。</div>
             <div v-if="current.attachments?.length" class="attachments"><button v-for="a in current.attachments.filter((a: Dict) => a.kind !== 'answer')" :key="a.id" @click="showAttachment(a)"><Eye :size="15" />{{ a.name }}<small>{{ attachmentLabels[a.kind] }}</small></button></div>
-            <fieldset v-if="current.type !== 'interview'" class="options" :disabled="locked || busy"><legend class="sr-only">选择答案</legend><label v-for="(option, n) in current.options" :key="option.id" :class="{ checked: draft.option_ids.includes(option.id), correct: current.answer?.correct_option_ids?.includes(option.id), incorrect: current.attempt?.wrong?.includes(option.id) }"><input :type="current.type === 'single' ? 'radio' : 'checkbox'" :name="`answer-${questionId(current)}`" :checked="draft.option_ids.includes(option.id)" :value="option.id" @change="chooseOption(option.id)" /><b>{{ String.fromCharCode(65 + Number(n)) }}</b><span>{{ option.text }}</span><span class="option-result"><template v-if="current.answer?.correct_option_ids?.includes(option.id)"><Check :size="17" aria-hidden="true" /><span class="sr-only">正确选项</span></template><template v-else-if="current.attempt?.wrong?.includes(option.id)"><X :size="17" aria-hidden="true" /><span class="sr-only">错选</span></template></span></label></fieldset>
+            <fieldset v-if="current.type !== 'interview'" class="options" :disabled="locked || busy"><legend class="sr-only">选择答案</legend><label v-for="(option, n) in current.options" :key="option.id" :class="{ checked: draft.option_ids.includes(option.id), correct: current.answer?.correct_option_ids?.includes(option.id), incorrect: !practice && displayedAttempt?.wrong?.includes(option.id) }"><input :type="current.type === 'single' ? 'radio' : 'checkbox'" :name="`answer-${questionId(current)}`" :checked="draft.option_ids.includes(option.id)" :value="option.id" @change="chooseOption(option.id)" /><b>{{ String.fromCharCode(65 + Number(n)) }}</b><span>{{ option.text }}</span><span class="option-result"><template v-if="current.answer?.correct_option_ids?.includes(option.id)"><Check :size="17" aria-hidden="true" /><span class="sr-only">正确选项</span></template><template v-else-if="!practice && displayedAttempt?.wrong?.includes(option.id)"><X :size="17" aria-hidden="true" /><span class="sr-only">错选</span></template></span></label></fieldset>
             <div v-else class="interview-answer"><label>我的回答<textarea v-model="draft.answer_text" rows="6" maxlength="12000" :disabled="locked || busy" @input="draft.operation_id = uid()" /></label><label class="rating">掌握程度<VnetSelect input-id="learning-select-2" :model-value="ratingLabels[draft.self_rating] || ''" :options="Object.values(ratingLabels)" label="掌握程度" placeholder="请选择自评" :disabled="locked || busy" @update:model-value="draft.self_rating = keyFor(ratingLabels, $event); draft.operation_id = uid()" /></label></div>
-            <div class="answer-actions actions"><button v-if="!locked" class="primary" :disabled="busy || loading" @click="submitAnswer"><Loader2 v-if="busy" :size="16" class="spin" /><Check v-else :size="16" />{{ practice ? '提交本次复习' : '确认作答' }}</button><span v-if="current.attempt && !practice" role="status" :class="['result', current.attempt.correct === false ? 'danger' : 'success-text']"><AlertCircle v-if="current.attempt.correct === false" :size="18" /><CheckCircle2 v-else :size="18" />{{ resultText(current) }}<small>{{ timeLabel(current.attempt.submitted_at) }}</small></span><button v-if="current.attempt && canAnswer && !current.invalid && !practice" :disabled="busy" @click="startPractice"><RotateCcw :size="16" />{{ current.type === 'interview' ? '重新练习与自评' : '再次练习' }}</button><span v-if="current.hinted || current.attempt?.assisted" class="badge warning-badge">已查看提示或答案</span></div>
+            <div class="answer-actions actions"><button v-if="!locked" class="primary" :disabled="busy || loading" @click="submitAnswer"><Loader2 v-if="busy" :size="16" class="spin" /><Check v-else :size="16" />{{ practice ? '提交本次复习' : '确认作答' }}</button><span v-if="displayedAttempt && !practice" role="status" :class="['result', displayedAttempt.correct === false ? 'danger' : 'success-text']"><AlertCircle v-if="displayedAttempt.correct === false" :size="18" /><CheckCircle2 v-else :size="18" />{{ current.practice?.length ? '最近复习' : '首次作答' }}：{{ resultText(current, displayedAttempt) }}<small>{{ timeLabel(displayedAttempt.submitted_at) }}</small></span><button v-if="current.attempt && canAnswer && !current.invalid && !practice" :disabled="busy" @click="startPractice"><RotateCcw :size="16" />{{ current.type === 'interview' ? '重新练习与自评' : '再次练习' }}</button><span v-if="current.hinted || current.attempt?.assisted" class="badge warning-badge">已查看提示或答案</span></div>
+            <p v-if="current.practice?.length && !practice" class="first-result">首次作答：{{ resultText(current) }} · {{ timeLabel(current.attempt?.submitted_at) }}</p>
             <div class="answer-tools actions"><button v-if="canAnswer" :disabled="busy" @click="reveal('answer')"><Eye :size="16" />查看答案与解析</button><button v-if="canAnswer && current.has_hint !== false" :disabled="busy" @click="reveal('hint')"><Lightbulb :size="16" />思路提示</button><button v-if="canAnswer" :disabled="busy" @click="openIssue()"><MessageSquare :size="16" />题目有疑问</button></div>
-            <p v-if="current.attempt?.missed?.length || current.attempt?.wrong?.length" class="answer-feedback"><span v-if="current.attempt.missed?.length">漏选：{{ answerLabels(current.attempt.missed) }}</span><span v-if="current.attempt.wrong?.length">错选：{{ answerLabels(current.attempt.wrong) }}</span></p>
+            <p v-if="!practice && (displayedAttempt?.missed?.length || displayedAttempt?.wrong?.length)" class="answer-feedback"><span v-if="displayedAttempt?.missed?.length">漏选：{{ answerLabels(displayedAttempt.missed) }}</span><span v-if="displayedAttempt?.wrong?.length">错选：{{ answerLabels(displayedAttempt.wrong) }}</span></p>
             <details v-if="current.attempt" class="attempt-records"><summary>作答记录<template v-if="attemptRecords(current).length">· {{ attemptRecords(current).length }} 次</template></summary><ol><li v-for="(rec, n) in attemptRecords(current)" :key="n"><strong>{{ rec.label }}</strong><time>{{ timeLabel(rec.submitted_at) }}</time><span :class="rec.correct === false ? 'danger' : 'success-text'">{{ rec.resultText }}</span><span v-if="rec.selectedText" class="record-answer">{{ rec.selectedText }}</span></li></ol></details>
             <section v-if="current.answer" class="answer-reference" aria-label="参考答案">
               <h3>参考答案</h3><p v-if="current.answer.correct_option_ids?.length"><strong>{{ answerLabels(current.answer.correct_option_ids) }}</strong></p><p v-if="current.answer.answer_text" class="prewrap">{{ current.answer.answer_text }}</p>
@@ -311,6 +312,7 @@ textarea { resize: vertical; }
 .answer-reference h3 { color: #226748; margin: 8px 0; }.answer-reference p { line-height: 1.8; }
 .prewrap { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }.draft-status { margin: 10px 0; }
 .answer-feedback { display: flex; gap: 20px; margin: 10px 0; color: #b62946; }
+.first-result { margin: 8px 0; color: #64758b; font-size: 12px; line-height: 1.6; }
 .result { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 9px 12px; border-radius: 6px; background: #f0faf5; animation: learning-question-enter .22s ease-out; }.result.danger { background: #fff2f3; }.result small { font-weight: 400; }
 .notes { border-top: 1px solid #e5ecf5; padding-top: 14px; }.note-editor { display: grid; gap: 10px; padding: 8px 0 14px; }.question-footer { padding-top: 22px; margin-top: 22px; border-top: 1px solid #e5ecf5; font-size: 12px; color: #667b95; }
 .starred { color: #aa730b; background: #fff9e9; }
@@ -438,6 +440,7 @@ const viewMode = computed<"practice" | "overview">(() => {
 });
 const paper = ref<Dict | null>(null), reading = ref(false), index = ref(0), practice = ref(false);
 const current = computed<Dict | null>(() => paper.value?.questions?.[index.value] || null);
+const displayedAttempt = computed<Dict | null>(() => current.value?.practice?.at(-1) || current.value?.attempt || null);
 const answered = computed(() => (paper.value?.questions || []).filter((q: Dict) => q.attempt && !q.invalid && !q.needs_review).length);
 const validCount = computed(() => (paper.value?.questions || []).filter((q: Dict) => !q.invalid).length);
 const locked = computed(() => !canAnswer.value || !!current.value?.invalid || (!!current.value?.attempt && !practice.value));
@@ -500,11 +503,11 @@ function questionId(q: Dict): string { return String(q.question_id || q.id); }
 function answerLabels(ids: string[] = [], q: Dict = current.value || {}): string {
   return ids.map(id => { const position = (q.options || []).findIndex((o: Dict) => o.id === id); return position < 0 ? id : String.fromCharCode(65 + position); }).join("、");
 }
-function resultText(q: Dict): string {
+function resultText(q: Dict, attempt: Dict | null = q.attempt): string {
   if (q.invalid) return "已失效，不计入评价";
-  if (!q.attempt) return "未作答";
-  if (q.type === "interview") return ratingLabels[q.attempt.self_rating] || "已提交";
-  return q.attempt.correct === true ? "回答正确" : "回答错误";
+  if (!attempt) return "未作答";
+  if (q.type === "interview") return ratingLabels[attempt.self_rating] || "已提交";
+  return attempt.correct === true ? "回答正确" : "回答错误";
 }
 function attemptRecords(q: Dict): Array<{ label: string; submitted_at: unknown; correct: boolean | null | undefined; resultText: string; selectedText: string }> {
   const records: Array<{ label: string; submitted_at: unknown; correct: boolean | null | undefined; resultText: string; selectedText: string }> = [];
@@ -577,7 +580,8 @@ function saveDraft(): void {
 function hydrateQuestion(): void {
   draftLoading = true; practice.value = false; draftRestored.value = false;
   const q = current.value;
-  Object.assign(draft, { option_ids: [...(q?.attempt?.option_ids || [])], answer_text: q?.attempt?.answer_text || "", self_rating: q?.attempt?.self_rating || "", operation_id: uid() });
+  const attempt = displayedAttempt.value;
+  Object.assign(draft, { option_ids: [...(attempt?.option_ids || [])], answer_text: attempt?.answer_text || "", self_rating: attempt?.self_rating || "", operation_id: uid() });
   note.value = typeof q?.note === "string" ? q.note : q?.notes?.note || ""; noteSaved.value = note.value;
   const saved = localDraft("read", draftKey());
   if (saved && q && !q.invalid && String(saved.version) === String(q.version)) {

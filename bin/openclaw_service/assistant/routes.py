@@ -23,6 +23,16 @@ def install_assistant_routes(app, host):
     closing = False
     pending_warmups = {}
     tagging_pool = None
+    knowledge = None
+    knowledge_lock = threading.Lock()
+
+    def get_knowledge():
+        nonlocal knowledge
+        with knowledge_lock:
+            if knowledge is None:
+                from .lighthouse_knowledge import KnowledgeBase
+                knowledge = KnowledgeBase(host.state / 'knowledge_base')
+            return knowledge
 
     async def recommend_notice_tags(payload):
         nonlocal tagging_pool
@@ -57,6 +67,7 @@ def install_assistant_routes(app, host):
                 from .lighthouse_agent import PortalAgent
                 from .lighthouse_files import LighthouseFiles
                 agent = PortalAgent(current, host.catalog, LighthouseFiles(host.store, root=host.state / 'files'))
+                agent.get_knowledge = get_knowledge
             return agent
 
     async def ready_agent():
@@ -150,7 +161,11 @@ def install_assistant_routes(app, host):
                 await asyncio.gather(*tuple(agent.tasks), return_exceptions=True)
         if service is not None:
             await asyncio.to_thread(service.model.close)
+        if knowledge is not None:
+            await asyncio.to_thread(knowledge.close)
     # Host starts preparation only after migration and portal registration.
+    from .lighthouse_knowledge_routes import install_knowledge_routes
+    install_knowledge_routes(app, actor_for, get_knowledge)
 
     async def openclaw_tools(request: Request):
         try:

@@ -218,12 +218,13 @@ try {
   assert.equal(page.url(), urlBefore, "back must not navigate during real answer save");
   release();
   answerGate = null;
+  await page.getByRole('button', { name: '再次练习', exact: true }).waitFor();
   await page.screenshot({ path: path.join(output, "busy-answer-block.png"), fullPage: true });
 
   // ---- S7 repeated practice history shown (first attempt + practice attempts) ----
   const histPaper = paperFor("admin-self");
   const q0 = histPaper.questions[0];
-  q0.attempt = { correct: true, option_ids: ["admin-self-a"], submitted_at: today + "T08:00:00" };
+  q0.attempt = { correct: false, option_ids: ["admin-self-b"], wrong: ["admin-self-b"], missed: ["admin-self-a"], submitted_at: today + "T08:00:00" };
   q0.practice = [
     { correct: false, option_ids: ["admin-self-b"], submitted_at: today + "T08:30:00" },
     { correct: true, option_ids: ["admin-self-a"], submitted_at: today + "T09:00:00" },
@@ -237,7 +238,22 @@ try {
   assert.match(text, /复习 1/, "attempt records include practice #1");
   assert.match(text, /复习 2/, "attempt records include practice #2");
   assert.match(text, /082?0|08:00/, "attempt records include first timestamp");
+  assert.match(await page.locator('.answer-actions .result').textContent(), /最近复习：回答正确/);
+  assert.match(await page.locator('.first-result').textContent(), /首次作答：回答错误/);
+  assert.equal(await page.locator('.options input:checked').inputValue(), 'admin-self-a');
   await page.screenshot({ path: path.join(output, "attempt-records.png"), fullPage: true });
+
+  // A new practice result is visible immediately, while the first score stays wrong.
+  for (const [option, result] of [[1, '回答错误'], [0, '回答正确']]) {
+    await page.getByRole('button', { name: '再次练习', exact: true }).click();
+    await page.locator('.options label').nth(option).click();
+    await page.getByRole('button', { name: '提交本次复习', exact: true }).click();
+    await page.getByRole('button', { name: '再次练习', exact: true }).waitFor();
+    assert.ok((await page.locator('.answer-actions .result').textContent()).includes(`最近复习：${result}`));
+    assert.match(await page.locator('.first-result').textContent(), /首次作答：回答错误/);
+    assert.equal(paperFor('admin-self').questions[0].attempt.correct, false);
+  }
+  await page.screenshot({ path: path.join(output, 'practice-latest-result.png'), fullPage: true, animations: 'disabled' });
 
   if (width < 700) {
     const fits = async name => {
@@ -255,8 +271,8 @@ try {
     await page.locator('.options label').last().click();
     await page.getByRole('button', { name: '提交本次复习', exact: true }).click();
     await page.getByRole('button', { name: '再次练习', exact: true }).waitFor();
-    assert.equal(paperFor('admin-self').questions[0].practice.length, 3);
-    assert.equal(paperFor('admin-self').questions[0].attempt.correct, true, 'practice never overwrites first score');
+    assert.equal(paperFor('admin-self').questions[0].practice.length, 5);
+    assert.equal(paperFor('admin-self').questions[0].attempt.correct, false, 'practice never overwrites first score');
     await page.getByRole('button', {name:'下一题', exact:true}).click();
     for (const index of [3, 2, 1, 0]) await page.locator('.options label').nth(index).click();
     await page.getByRole('button', {name:'确认作答', exact:true}).click();
@@ -285,6 +301,10 @@ try {
     await page.getByRole('dialog').getByRole('button', { name: /测试人员乙/ }).click();
     await page.locator('.learning-page:not([inert]) .tabs').getByRole('button', { name: '个人画像', exact: true }).waitFor();
     await fits('mobile-profile');
+    const axisSizes = await page.locator('.trend-plot text').evaluateAll(els => els.map(el => parseFloat(getComputedStyle(el).fontSize) * el.getScreenCTM().a));
+    assert.ok(axisSizes.every(size => size >= 12), `mobile chart text must stay legible: ${axisSizes}`);
+    const dateLabels = await page.locator('.trend-plot text[y="179"]').evaluateAll(els => els.map(el => { const box = el.getBoundingClientRect(); return { left: box.left, right: box.right }; }));
+    assert.ok(dateLabels.every((label, i) => i === 0 || label.left >= dateLabels[i - 1].right), 'mobile chart date labels must not overlap');
     await backButton().click();
     await page.waitForFunction(() => document.querySelectorAll('.learning-page').length === 1);
     await page.getByRole('button', { name: '发布设置', exact: true }).click();

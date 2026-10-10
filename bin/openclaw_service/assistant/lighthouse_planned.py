@@ -16,6 +16,9 @@ LABELS = {"maintenance": "维保", "change": "变更", "repair": "检修", "poll
 
 
 def name_request(question, *, allow_plain=False):
+    # These name business documents or read/admin actions, not a notice to start.
+    if re.search(r"维护单|工单|\bMOP\b|签名|签署|评估人|历史记忆|通告记忆|导入|导出|下载|查找|读取|扫描|检索", question, re.I):
+        return ""
     if len(question) > 200 or re.search(r"【|事件通告|多少|几条|哪些|查询|查看|看看|为什么|怎么|如何|删除|撤销|结束|更新|发给|发送给|进行中|未开始|待发|列表|是否|介绍|[吗么？?]", question):
         return ""
     if not allow_plain and not re.search(r"通告|维保|维护|检修|变更|轮巡|设备调整|上电|下电|内阻刷新", question):

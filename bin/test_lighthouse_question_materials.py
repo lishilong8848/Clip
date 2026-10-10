@@ -112,6 +112,56 @@ class QuestionMaterialTests(unittest.TestCase):
             self.assertNotIn(private, blob)
         self.assertNotIn(str(self.root), blob)
 
+    def add_person(self, pid, building, login):
+        with self.service.transaction() as conn:
+            self.service._put("person", pid, {
+                "id": pid, "person_id": pid, "name": pid, "employee_no": pid,
+                "scopes": [building], "active": True, "login_ids": [login]}, conn, False)
+
+    def self_actor(self, login, building, **changes):
+        return {"id": login, "is_admin": False, "scopes": [building],
+                "learning_scopes": [building], "scope": building, **changes}
+
+    # --- identity permission gating ---
+
+    def test_mapped_self_ordinary_reads_own_material(self):
+        self.add_person("sp_h", "H", "ou_self_h")
+        actor = self.self_actor("ou_self_h", "H")
+        self.paper("self_h", "H", [self.qh], entries={self.qh["id"]: {"revealed": "yes"}})
+        with self.service.transaction() as conn:
+            paper = self.service._get("paper", "self_h", conn)
+            paper["person_id"] = "sp_h"
+            self.service._put("paper", "self_h", paper, conn, False)
+        self.assertIn("answer secret", self.read(actor, material_id="ans_h")["text"])
+
+    def test_unrelated_owner_revealed_answer_material_does_not_leak(self):
+        # sp_h has no own paper containing the question; another_h owns the paper
+        # with a revealed answer. A self account must still be denied the material.
+        self.add_person("sp_h", "H", "ou_self_h")
+        self.add_person("other_h", "H", "ou_other")
+        self.paper("other_h", "H", [self.qh], entries={self.qh["id"]: {"revealed": "yes"}})
+        with self.service.transaction() as conn:
+            paper = self.service._get("paper", "other_h", conn)
+            paper["person_id"] = "other_h"
+            self.service._put("paper", "other_h", paper, conn, False)
+        with self.assertRaises(AssistantError) as caught:
+            self.read(self.self_actor("ou_self_h", "H"), material_id="ans_h", scope="H")
+        self.assertEqual(caught.exception.status, 403)
+
+    def test_unmapped_ordinary_material_denied_body_and_scope(self):
+        actor = self.self_actor("ou_nobody", "H")
+        with self.assertRaises(AssistantError) as caught:
+            self.read(actor, material_id="mat_h")
+        self.assertEqual(caught.exception.status, 403)
+        self.assertEqual(self.cloud.calls, [])
+
+    def test_duty_broad_scopes_material_still_own_building_only(self):
+        duty_a = {"id": BUILDING_OPEN_ID_MAP["A"], "is_admin": False,
+                  "scopes": list("ABCDEH"), "learning_scopes": ["A"], "scope": "A"}
+        with self.assertRaises(AssistantError) as caught:
+            self.read(duty_a, material_id="mat_h", scope="H")
+        self.assertEqual(caught.exception.status, 403)
+
     # --- permission gating ---
 
     def test_hidden_answer_blocked_before_file_retrieval_or_ocr(self):
@@ -183,8 +233,7 @@ class QuestionMaterialTests(unittest.TestCase):
             self.assertEqual(first["text"], "cached extraction")
             self.assertEqual(second["text"], "cached extraction")
             self.assertEqual(extract.call_count, 1, "second read must reuse cached extraction")
-            # Six-building duty accounts can now access personal learning across
-            # buildings, but deleting the source paper must revoke cached access.
+            # Deleting the source paper must revoke cached access.
             self.paper("h1", "H", [self.qh], deleted=True)
             with self.assertRaises(AssistantError) as caught:
                 self.read(material_id="mat_h")

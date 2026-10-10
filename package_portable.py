@@ -237,6 +237,7 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "openpyxl": "openpyxl",
 
     "pypdf": "pypdf",
+    "sqlite_vec": "sqlite-vec==0.1.9",
     "yaml": "PyYAML",
 
     "anyio": "anyio",
@@ -304,6 +305,7 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "openpyxl",
 
     "pypdf",
+    "sqlite_vec",
     "yaml",
 
     "anyio",
@@ -389,6 +391,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.cabinet_power_evidence",
     "lan_bitable_template_portal.cabinet_power_text",
     "pypdf",
+    "sqlite_vec",
     "lark_oapi",
 ]
 
@@ -408,6 +411,7 @@ PACKAGING_PREFLIGHT_MODULES = [
     "uvicorn",
     "lark_oapi",
     "pypdf",
+    "sqlite_vec",
 ]
 
 
@@ -1747,14 +1751,15 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_creation_fields", "bin.test_lighthouse_creation_workflows", "bin.test_lighthouse_drill_upload",
          "bin.test_lighthouse_water_fields", "bin.test_lighthouse_water_workflows",
          "bin.test_lighthouse_download_links", "bin.test_lighthouse_download_workflows", "bin.test_lighthouse_query_pages", "bin.test_lighthouse_question_bank",
-         "bin.test_lighthouse_question_materials", "bin.test_lighthouse_work_order_queries",
+         "bin.test_lighthouse_question_materials", "bin.test_lighthouse_learning_identity", "bin.test_lighthouse_learning_bridge", "bin.test_lighthouse_work_order_queries",
          "bin.test_lighthouse_business_addresses", "bin.test_lighthouse_interactive_coverage",
          "bin.test_lighthouse_dynamic_endpoints",
          "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
          "bin.test_planned_notices", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
-                "bin.test_feishu_assistant", "bin.test_lighthouse_unlimited",
+                "bin.test_feishu_assistant", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited",
+                "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer",
                 "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
          "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
         cwd=PROJECT_ROOT,

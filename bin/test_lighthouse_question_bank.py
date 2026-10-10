@@ -27,7 +27,9 @@ import test_learning as learning_fixture
 from test_lighthouse_stream import Store
 
 ADMIN = {"id": "admin", "is_admin": True, "scopes": ["A"], "learning_scopes": ["A"]}
-DUTY = {"id": "duty", "is_admin": False, "scopes": list("ABCDEH"), "learning_scopes": ["H"]}
+DUTY_H = BUILDING_OPEN_ID_MAP["H"]
+DUTY = {"id": DUTY_H, "is_admin": False, "scopes": list("ABCDEH"),
+        "learning_scopes": ["H"], "scope": "H"}
 
 
 class QuestionBankTests(unittest.IsolatedAsyncioTestCase):
@@ -56,6 +58,64 @@ class QuestionBankTests(unittest.IsolatedAsyncioTestCase):
         result = question_bank(self.service, actor or DUTY, params)
         self.assertEqual(self.cloud.calls, [], "question lookup must not access cloud or publish")
         return result
+
+    def add_person(self, pid, building, login):
+        with self.service.transaction() as conn:
+            self.service._put("person", pid, {
+                "id": pid, "person_id": pid, "name": pid, "employee_no": pid,
+                "scopes": [building], "active": True, "login_ids": [login]}, conn, False)
+
+    def self_actor(self, login, building, **changes):
+        return {"id": login, "is_admin": False, "scopes": [building],
+                "learning_scopes": [building], "scope": building, **changes}
+
+    def test_supplemental_bank_filter_accepted(self):
+        q = learning_fixture.LearningTests.question(self, 999, bank="supplemental")
+        with self.service.transaction() as conn:
+            self.service._put("question", q["id"], q, conn, False)
+        self.paper("h_sup", "H", [q])
+        self.assertEqual(self.query(bank="supplemental")["total"], 1)
+        self.assertEqual(self.query(bank="written")["total"], 2)
+
+    def test_mapped_self_ordinary_reads_only_own_assigned_papers(self):
+        self.add_person("sp_h", "H", "ou_self_h")
+        self.paper("self_h", "H", self.questions[3:], entries={
+            self.questions[3]["id"]: {"revealed": "yes"}})
+        with self.service.transaction() as conn:
+            paper = self.service._get("paper", "self_h", conn)
+            paper["person_id"] = "sp_h"
+            self.service._put("paper", "self_h", paper, conn, False)
+        # A different owner in the same building with a revealed answer must not leak.
+        self.paper("other_h", "H", self.questions[0:1], entries={
+            self.questions[0]["id"]: {"revealed": "yes"}})
+        with self.service.transaction() as conn:
+            paper = self.service._get("paper", "other_h", conn)
+            paper["person_id"] = "other_h"
+            self.service._put("paper", "other_h", paper, conn, False)
+        actor = self.self_actor("ou_self_h", "H")
+        result = self.query(actor)
+        self.assertEqual({q["id"] for q in result["items"]}, {self.questions[3]["id"]})
+        # Director answer shown only for own revealed paper.
+        self.assertIn("answer-3", json.dumps(result))
+        self.assertNotIn("answer-0", json.dumps(result))
+
+    def test_unmapped_ordinary_forbidden_closed(self):
+        actor = self.self_actor("ou_no_mapping", "H")
+        with self.assertRaises(AssistantError) as caught:
+            self.query(actor)
+        self.assertEqual(caught.exception.status, 403)
+
+    def test_duty_broad_scopes_still_cannot_cross_to_other_learning_building(self):
+        # DUTY H has broad abcdeh scopes but may only read its own home building.
+        duty_a = {"id": BUILDING_OPEN_ID_MAP["A"], "is_admin": False,
+                  "scopes": list("ABCDEH"), "learning_scopes": ["A"], "scope": "A"}
+        with self.assertRaises(AssistantError) as caught:
+            self.query(duty_a, scope="H")
+        self.assertEqual(caught.exception.status, 403)
+        # And H duty cannot read A building either.
+        with self.assertRaises(AssistantError) as caught:
+            self.query(scope="A")
+        self.assertEqual(caught.exception.status, 403)
 
     def test_admin_reads_full_bank_answers_but_no_storage_metadata(self):
         result = self.query(ADMIN)
@@ -141,8 +201,15 @@ class QuestionBankTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError) as err:
             question_bank(None, DUTY, {})
         self.assertEqual(err.exception.status, 503)
+        # A revoked duty (learning_scopes emptied by authorize intersection) and an
+        # unmapped ordinary account must both fail closed.
         with self.assertRaises(AssistantError) as err:
             self.query({**DUTY, "learning_scopes": []})
+        self.assertEqual(err.exception.status, 403)
+        unmapped = {"id": "ou_nobody", "is_admin": False, "scopes": ["H"],
+                    "learning_scopes": ["H"]}
+        with self.assertRaises(AssistantError) as err:
+            self.query(unmapped)
         self.assertEqual(err.exception.status, 403)
 
     def test_query_budget_expiry_raises_503_not_zero(self):

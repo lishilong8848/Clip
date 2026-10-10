@@ -466,6 +466,16 @@ class LighthouseOpenClaw(LighthouseModel):
 
     async def gateway_client(self, actor, item):
         key = account_key(actor['id'])
+        idle = sorted(((old_key, entry) for old_key, entry in self.gateways.items()
+            if old_key != key and not entry[0].get('busy')),
+            key=lambda pair: pair[1][0].get('used_at', 0))
+        # Release only idle sockets; agents, summaries and sessions stay on disk.
+        for index, (old_key, entry) in enumerate(idle):
+            if time.monotonic() - entry[0].get('used_at', time.monotonic()) <= 1200 and len(idle) - index <= 32:
+                break
+            if self.gateways.get(old_key) is entry:
+                self.gateways.pop(old_key, None)
+                await entry[1].close()
         for old_key, cached_entry in tuple(self.gateways.items()):
             old_item, client = cached_entry
             if old_item.get('stopped') or not client.connected:

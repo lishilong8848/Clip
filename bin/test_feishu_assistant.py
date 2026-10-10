@@ -58,6 +58,14 @@ class ParsingTests(unittest.TestCase):
         question = parse_message(event(content="请查询身份证号"), "cliTest", "ouBot")["question"]
         self.assertIn("敏感查询", question)
 
+    def test_resource_message_reaches_shared_file_flow_without_raw_post_text(self):
+        payload = event()
+        payload['event']['message'].update(message_type='file', content=json.dumps({'file_key': 'file_v3_abc-def', 'file_name': '公司手册.txt'}))
+        result = parse_message(payload, 'cliTest', 'ouBot')
+        self.assertFalse(result['problem'])
+        self.assertEqual(result['content']['file_key'], 'file_v3_abc-def')
+        self.assertNotIn('text', result['content'])
+
     def test_conversation_separates_people_rooms_and_web(self):
         keys = [LighthouseAssistant._key(actor) for actor in [
             {"id": "a"}, {"id": "b"}, {"id": "a", "channel": "feishu:oc_1"},
@@ -172,6 +180,26 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         text = self.channel.plan_text({"title": "更新通告", "status": "awaiting_confirmation", "operations": [{"body": {"name": "设备维护", "progress": "已检查"}}]})
         self.assertIn("已检查", text)
         self.assertIn("尚未执行", text)
+
+    async def test_cancel_incomplete_form_reuses_original_plan_api(self):
+        message = parse_message(event(content="取消操作"), "cliTest", "ouBot")
+        self.channel._request_context = AsyncMock(return_value=(None, {"id": "ou_A"}))
+        plan = {"id": "pending_form", "status": "needs_input"}
+        self.channel._call = AsyncMock(side_effect=[{"turns": [{"plan": plan}]}, {}])
+        result = await self.channel.answer(message)
+        self.assertIn("已取消", result["text"])
+        self.assertEqual(self.channel._call.await_args.args[2:], ("plans/pending_form/cancel", {}))
+
+    async def test_cancel_does_not_guess_or_withdraw_submitted_business(self):
+        message = parse_message(event(content="取消操作"), "cliTest", "ouBot")
+        self.channel._request_context = AsyncMock(return_value=(None, {"id": "ou_A"}))
+        for plans in ([{"id": "a", "status": "needs_input"}, {"id": "b", "status": "awaiting_confirmation"}],
+                      [{"id": "a", "status": "submitted"}]):
+            with self.subTest(plans=plans):
+                self.channel._call = AsyncMock(return_value={"turns": [{"plan": p} for p in plans]})
+                result = await self.channel.answer(message)
+                self.assertIn("没有唯一", result["text"])
+                self.channel._call.assert_awaited_once()
 
     async def test_group_result_replies_to_original_message_without_private_copy(self):
         messenger = FeishuMessenger({})

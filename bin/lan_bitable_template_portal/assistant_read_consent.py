@@ -36,7 +36,7 @@ class ReadConsent:
                     'code': secrets.token_hex(4), 'expires': time.time() + 300, 'approved': False}
                 self.store.put_document(NAMESPACE, key, current)
         return {'confirmation_required': True, 'confirmation_code': current['code'],
-            'message': f"需要你确认：{summary}。仅查询本人权限内数据，结果私信返回，不向群内展开。\n"
+            'message': f"需要你确认：{summary}。仅查询本人权限内数据，结果将在当前会话回复；群聊中的回复对群成员可见。\n"
                        f"继续请回复“确认查询 {current['code']}”，5分钟内有效；也可回复“取消查询”。不确认则不读取。"}
 
     def approve(self, actor, code):

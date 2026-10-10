@@ -527,6 +527,22 @@ class OpenClawLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(client.closed)
         await client.close()
 
+    async def test_200_idle_connections_are_bounded_without_stopping_active_people(self):
+        import time
+        engine = _fake_engine()
+        active_client = FakeGatewayClient('ws://127.0.0.1:19999', 'busy')
+        await active_client.__aenter__()
+        engine.gateways['busy'] = ({'busy': True, 'used_at': 0}, active_client)
+        with patch('lan_bitable_template_portal.lighthouse_openclaw.GatewayClient', FakeGatewayClient):
+            for index in range(200):
+                await engine.gateway_client({'id': 'person' + str(index)},
+                    {'port': 19999, 'token': 'fixture', 'used_at': time.monotonic()})
+        self.assertLessEqual(len(engine.gateways), 34)
+        self.assertFalse(active_client.closed)
+        self.assertIn('busy', engine.gateways)
+        for _, client in engine.gateways.values():
+            await client.close()
+
     async def test_run_stream_events_finally_removes_stale_callback(self):
         engine = _fake_engine()
         engine.bridge_url = lambda: "http://bridge"
