@@ -123,6 +123,312 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         replay = ''.join([chunk async for chunk in self.runtime.stream(self.actor, ack['run_id'], self.authorize)])
         self.assertIn('0123456789', replay)
 
+    async def test_long_answer_is_a_durable_file_on_web_and_feishu(self):
+        text = '二分查找需要有序序列，每次将查找范围减半。\n' * 250
+        async def answer(*args): return {'answer': text, 'sources': []}
+        self.engine.answer = answer
+        for channel in ('', 'feishu:oc_fixture'):
+            with self.subTest(channel=channel):
+                self.actor['channel'] = channel
+                input_file = self.portal.files.upload(self.actor, '问题.txt', b'question', extract=False)
+                await self.submit('请写一份完整说明', file_ids=[input_file['id']])
+                await self.finish()
+                conversation = await self.runtime.conversation(self.actor)
+                turn = conversation['turns'][-1]
+                self.assertEqual(turn['status'], 'completed', turn.get('error'))
+                self.assertLess(len(turn['answer']), 200)
+                output = turn['output_files'][0]
+                self.assertEqual(Path(self.portal.files.get(self.actor, output['id'])['path']).read_text(encoding='utf-8'), text)
+                saved = self.assistant._state(self.actor)['turns'][-1]
+                self.assertIn(input_file['id'], saved['file_ids'])
+                self.assertIn(output['id'], saved['file_ids'])
+                self.assertEqual((await self.runtime.conversation(self.actor))['turns'][-1]['output_files'], turn['output_files'])
+
+    async def test_generated_file_is_checkpointed_before_later_model_failure_or_stop(self):
+        for outcome in ('failure', 'stop'):
+            with self.subTest(outcome=outcome):
+                ready, release = asyncio.Event(), asyncio.Event()
+                created = []
+                async def answer(actor, turn, history, request, emit, authorize, context):
+                    file = self.portal.files.upload(actor, '已生成.py', b'print("example")', extract=False,
+                                                   source_scopes=actor['scopes'])
+                    created.append(file)
+                    turn.setdefault('file_ids', []).append(file['id'])
+                    turn.setdefault('output_files', []).append(file)
+                    await emit('artifact', {'file': file})
+                    ready.set()
+                    await release.wait()
+                    raise RuntimeError('synthetic model interruption')
+                self.engine.answer = answer
+                ack = await self.submit('生成一个示例文件')
+                await asyncio.wait_for(ready.wait(), 5)
+                pending = (await self.runtime.conversation(self.actor))['turns'][-1]
+                self.assertEqual(pending['status'], 'pending')
+                self.assertEqual(pending.get('output_files'), created)
+                state = self.assistant._state(self.actor)
+                saved = self.store.get_document('lighthouse_messages', state['id'] + ':' + pending['operation_id'])
+                self.assertEqual(saved['output_files'], created)
+                if outcome == 'stop':
+                    await self.runtime.stop(self.actor, ack['run_id'])
+                else:
+                    release.set()
+                await self.finish()
+                final = (await self.runtime.conversation(self.actor))['turns'][-1]
+                self.assertEqual(final['status'], 'failed' if outcome == 'failure' else 'stopped')
+                self.assertEqual(final['output_files'], created)
+                self.assertIn(created[0]['id'], self.assistant._state(self.actor)['turns'][-1]['file_ids'])
+                replay = ''.join([chunk async for chunk in self.runtime.stream(self.actor, ack['run_id'], self.authorize)])
+                self.assertIn(created[0]['id'], replay)
+                self.assertNotIn(str(self.portal.files.root), replay)
+                recovered = LighthouseStream(self.portal, engine=self.engine)
+                self.assertEqual((await recovered.conversation(self.actor))['turns'][-1]['output_files'], created)
+
+    async def test_duplicate_and_retry_cannot_expose_an_old_turn_after_permission_reduction(self):
+        self.actor['scopes'] = ['A', 'D']
+        payload = self.payload('你好')
+        first = await self.runtime.submit(self.actor, payload, self.request, self.authorize)
+        await self.finish()
+        self.actor['scopes'] = ['D']
+        for attempt in (payload, {**payload, 'attempt_id': 'new_attempt_00001'}):
+            with self.subTest(attempt=attempt['attempt_id'] if 'attempt_id' in attempt else 'duplicate'):
+                with self.assertRaises(AssistantError) as error:
+                    await self.runtime.submit(self.actor, attempt, self.request, self.authorize)
+                self.assertEqual(error.exception.status, 403)
+        self.actor['scopes'] = ['A', 'D']
+        again = await self.runtime.submit(self.actor, payload, self.request, self.authorize)
+        self.assertEqual(again['run_id'], first['run_id'])
+
+    async def test_followup_can_find_a_generated_file_from_an_interrupted_reply(self):
+        histories = []
+        async def answer(actor, turn, history, request, emit, authorize, context):
+            if turn['question'] == '生成示例文件':
+                file = self.portal.files.upload(actor, 'example.py', b'print("example")', extract=False, source_scopes=actor['scopes'])
+                turn.setdefault('file_ids', []).append(file['id'])
+                turn.setdefault('output_files', []).append(file)
+                await emit('artifact', {'file': file})
+                raise RuntimeError('synthetic interrupted explanation')
+            histories.append(copy.deepcopy(history))
+            return {'answer': '查看此前已生成的文件。', 'sources': []}
+        self.engine.answer = answer
+        for channel in ('', 'feishu:oc_fixture'):
+            with self.subTest(channel=channel):
+                self.actor['channel'] = channel
+                await self.submit('生成示例文件')
+                await self.finish()
+                original = (await self.runtime.conversation(self.actor))['turns'][-1]
+                self.assertEqual(original['status'], 'failed')
+                await self.submit('刚才生成的文件在哪里')
+                await self.finish()
+                self.assertEqual(histories[-1][-1]['status'], 'failed')
+                self.assertEqual(histories[-1][-1]['output_files'], original['output_files'])
+
+    async def test_cancelling_slow_office_render_does_not_create_a_late_file(self):
+        import threading
+        from openclaw_service.assistant import lighthouse_artifacts as artifacts
+        started, release = threading.Event(), threading.Event()
+        original = artifacts.document_bytes
+        jobs = []
+        def slow_bytes(*args):
+            started.set()
+            if not release.wait(5): raise TimeoutError('test render not released')
+            return original(*args)
+        async def tracked_task(function, *args, **kwargs):
+            from functools import partial
+            job = asyncio.get_running_loop().run_in_executor(None, partial(function, *args, **kwargs))
+            jobs.append(job)
+            return await asyncio.shield(job)
+        async def stream(messages, info):
+            yield {0: DeltaToolCall(name='create_document_file', json_args=json.dumps({
+                'name': 'slow.docx', 'data': {'paragraphs': ['示例内容']}
+            }))}
+        @asynccontextmanager
+        async def factory(*_): yield FunctionModel(stream_function=stream)
+        self.runtime.engine = LighthouseModel(self.portal, model_factory=factory)
+        with patch.object(artifacts, 'document_bytes', side_effect=slow_bytes), patch.object(artifacts, 'document_task', side_effect=tracked_task), patch.object(self.portal.files, 'upload', wraps=self.portal.files.upload) as upload:
+            try:
+                ack = await self.submit('生成Word示例文件')
+                self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                await asyncio.wait_for(self.runtime.stop(self.actor, ack['run_id']), 5)
+            finally:
+                release.set()
+            await asyncio.wait_for(asyncio.gather(*jobs), 5)
+            self.assertEqual(upload.call_count, 0)
+        self.assertEqual((await self.runtime.conversation(self.actor))['turns'][-1]['status'], 'stopped')
+
+    async def test_office_generation_tool_delivers_real_file_without_business_calls(self):
+        async def stream(messages, info):
+            results = [part for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            if not results:
+                yield {0: DeltaToolCall(name='create_document_file', json_args=json.dumps({
+                    'name': '二分查找.docx', 'data': {'title': '二分查找', 'paragraphs': ['每次将查找范围减半。']}
+                }))}
+            else:
+                yield '已生成Word文件。'
+        @asynccontextmanager
+        async def factory(*_): yield FunctionModel(stream_function=stream)
+        self.runtime.engine = LighthouseModel(self.portal, model_factory=factory)
+        await self.submit('生成一份介绍二分查找的Word文件')
+        await self.finish()
+        turn = (await self.runtime.conversation(self.actor))['turns'][-1]
+        self.assertEqual(turn['status'], 'completed', turn.get('error'))
+        self.assertEqual(turn['output_files'][0]['name'], '二分查找.docx')
+        self.assertIsNone(turn.get('plan'))
+        self.assertEqual(self.reads, [])
+
+    async def test_spreadsheet_worksheet_is_not_a_live_business_work_query(self):
+        async def stream(messages, info):
+            results = [part for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            if not results:
+                yield {0: DeltaToolCall(name='create_document_file', json_args=json.dumps({
+                    'name': 'sample.xlsx', 'data': {'sheets': [{'name': '示例', 'headers': ['字母', '值'], 'rows': [['a', 23], ['b', 19]]}]}
+                }))}
+            else:
+                yield '已生成示例表格。'
+        @asynccontextmanager
+        async def factory(*_): yield FunctionModel(stream_function=stream)
+        self.runtime.engine = LighthouseModel(self.portal, model_factory=factory)
+        await self.submit('生成 sample.xlsx，工作表名示例，列名为字母和值，两行分别是 a,23 与 b,19，仅使用这些示例数据。')
+        await self.finish()
+        turn = (await self.runtime.conversation(self.actor))['turns'][-1]
+        self.assertEqual(turn['status'], 'completed', turn.get('error'))
+        self.assertEqual(turn['output_files'][0]['name'], 'sample.xlsx')
+        self.assertIsNone(turn.get('plan'))
+        self.assertEqual(self.reads, [])
+
+    async def test_preview_reference_is_owned_and_part_of_message_identity(self):
+        file = self.portal.files.upload(self.actor, '当前文档.md', '原有内容'.encode(), extract=False)
+        other = self.portal.files.upload({'id': 'other', 'scopes': ['D']}, '其他人的文档.md', b'private', extract=False)
+        with self.assertRaises(AssistantError):
+            await self.submit('修改这个文档', preview_file_id=other['id'])
+        self.assertEqual(self.engine.calls, [])
+        payload = self.payload('修改这个文档', preview_file_id=file['id'])
+        await self.runtime.submit(self.actor, payload, self.request, self.authorize)
+        await self.finish()
+        self.assertEqual(self.engine.calls[0]['turn']['preview_file']['id'], file['id'])
+        with self.assertRaises(AssistantError):
+            await self.runtime.submit(self.actor, {**payload, 'preview_file_id': ''}, self.request, self.authorize)
+
+    async def test_preview_followup_reads_selected_file_and_inherits_its_scope(self):
+        self.actor['scopes'] = ['A', 'D']
+        file = self.portal.files.upload(self.actor, 'A楼原文.md', '设备检查记录'.encode(), extract=False, source_scopes=['A'])
+        async def stream(messages, info):
+            results = [part.content for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            if not results:
+                prompts = [str(part.content) for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'user-prompt']
+                self.assertTrue(any('用户当前正在预览的文件' in p and file['id'] in p for p in prompts))
+                yield {0: DeltaToolCall(name='read_file', json_args=json.dumps({'file_id': file['id']}))}
+            elif len(results) == 1:
+                yield {0: DeltaToolCall(name='create_document_file', json_args=json.dumps({
+                    'name': '修改后的文档.docx', 'data': {'title': '检查记录', 'paragraphs': [results[0]['text']]}
+                }))}
+            else: yield '已生成修改后的文档。'
+        @asynccontextmanager
+        async def factory(*_): yield FunctionModel(stream_function=stream)
+        engine = LighthouseModel(self.portal, model_factory=factory)
+        async def emit(*_): pass
+        turn = {'question': '将这个文档整理为Word', 'preview_file': file, 'file_ids': [],
+                'operation_id': 'preview_followup_0001', '_profile': {'name': 'fixture', 'model': 'fixture'}}
+        result = await engine.answer({**self.actor, 'scopes': ['D'], 'allowed_scopes': ['A', 'D']},
+                                    turn, [], self.request, emit, self.authorize, {})
+        output = result['output_files'][0]
+        self.assertEqual(self.portal.files.get(self.actor, output['id'])['source_scopes'], ['A', 'D'])
+        with self.assertRaises(AssistantError):
+            self.portal.files.get({**self.actor, 'scopes': ['D']}, output['id'])
+
+    async def test_preview_metadata_alone_preserves_source_scope(self):
+        self.actor['scopes'] = ['A', 'D']
+        file = self.portal.files.upload(self.actor, 'A楼记录.md', b'original', extract=False, source_scopes=['A'])
+        async def stream(messages, info):
+            results = [part for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            if not results:
+                yield {0: DeltaToolCall(name='create_text_file', json_args=json.dumps({
+                    'name': '文件目录.md', 'content': '文件名称：' + file['name']
+                }))}
+            else: yield '已生成目录文件。'
+        @asynccontextmanager
+        async def factory(*_): yield FunctionModel(stream_function=stream)
+        engine = LighthouseModel(self.portal, model_factory=factory)
+        async def emit(*_): pass
+        for source in ('preview', 'history'):
+            with self.subTest(source=source):
+                history = [{'question': '上次生成的文件', 'answer': '', 'file_ids': [file['id']],
+                            'output_files': [file], 'status': 'failed', 'scopes': ['D']}] if source == 'history' else []
+                result = await engine.answer({**self.actor, 'scopes': ['D'], 'allowed_scopes': ['A', 'D']},
+                    {'question': '将当前文件的名称整理成目录文件', 'preview_file': file if source == 'preview' else None, 'file_ids': [],
+                     'operation_id': 'preview_metadata_0001', '_profile': {'name': 'fixture', 'model': 'fixture'}},
+                    history, self.request, emit, self.authorize, {})
+                output = result['output_files'][0]
+                self.assertEqual(self.portal.files.get(self.actor, output['id'])['source_scopes'], ['A', 'D'])
+                with self.assertRaises(AssistantError):
+                    self.portal.files.get({**self.actor, 'scopes': ['D']}, output['id'])
+
+    async def test_image_preview_is_sent_once_only_for_image_questions_and_enabled_models(self):
+        import io
+        from PIL import Image
+        from pydantic_ai.messages import BinaryContent
+        image = io.BytesIO()
+        Image.new('RGB', (16, 16), 'green').save(image, format='PNG')
+        file = self.portal.files.upload(self.actor, '当前图片.png', image.getvalue(), extract=False)
+        for enabled, question, attached, expected in (
+            (True, '看看这张图片里有什么', [], 1),
+            (True, '看看这张图片里有什么', [file['id']], 1),
+            (False, '看看这张图片里有什么', [], 0),
+            (True, '解释冒泡排序的原理', [], 0),
+        ):
+            with self.subTest(enabled=enabled, question=question, attached=bool(attached)):
+                async def stream(messages, info):
+                    content = [part.content for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'user-prompt']
+                    images = [item for value in content if isinstance(value, list) for item in value if isinstance(item, BinaryContent)]
+                    self.assertEqual(len(images), expected)
+                    if not enabled:
+                        self.assertIn('未启用图片输入', str(content))
+                    yield '测试回答。'
+                @asynccontextmanager
+                async def factory(*_): yield FunctionModel(stream_function=stream)
+                engine = LighthouseModel(self.portal, model_factory=factory)
+                async def emit(*_): pass
+                with patch.object(self.portal.files, 'text', return_value={'text': '', 'error': ''}):
+                    result = await engine.answer(self.actor,
+                        {'question': question, 'preview_file': file, 'file_ids': attached,
+                         'operation_id': 'preview_image_0001', '_profile': {'name': 'fixture', 'model': 'fixture', 'image_input': enabled}},
+                        [], self.request, emit, self.authorize, {})
+                self.assertEqual(result['answer'], '测试回答。')
+        self.assertEqual(self.reads, [])
+
+    async def test_archived_search_preserves_answer_and_file_source_scopes(self):
+        from openclaw_service.assistant.lighthouse_stream import MESSAGES
+        self.actor['scopes'] = ['A', 'D']
+        file = self.portal.files.upload(self.actor, 'A楼旧记录.md', b'archived content', extract=False, source_scopes=['A'])
+        state = self.assistant._state(self.actor)
+        for include_file in (False, True):
+            with self.subTest(include_file=include_file):
+                old = {'operation_id': 'archived_source_0001', 'question': '旧资料归档', 'answer': 'A楼历史检查记录',
+                       'scopes': ['D'] if include_file else ['A'], 'access_scopes': ['A', 'D'], 'status': 'completed',
+                       'file_ids': [file['id']] if include_file else [], 'output_files': [file] if include_file else []}
+                self.store.put_document(MESSAGES, state['id'] + ':' + old['operation_id'], old)
+                async def stream(messages, info):
+                    results = [part.content for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+                    if not results:
+                        yield {0: DeltaToolCall(name='search_history', json_args=json.dumps({'keyword': '旧资料归档'}))}
+                    elif len(results) == 1:
+                        saved = results[0]['items'][0]
+                        content = saved['output_files'][0]['name'] if include_file else saved['answer']
+                        yield {0: DeltaToolCall(name='create_text_file', json_args=json.dumps({'name': '目录.md', 'content': content}))}
+                    else:
+                        yield '目录文件已生成。'
+                @asynccontextmanager
+                async def factory(*_): yield FunctionModel(stream_function=stream)
+                engine = LighthouseModel(self.portal, model_factory=factory)
+                async def emit(*_): pass
+                result = await engine.answer({**self.actor, 'scopes': ['D'], 'allowed_scopes': ['A', 'D']},
+                    {'question': '将此前旧资料归档整理成目录文件', 'file_ids': [],
+                     'operation_id': 'archive_metadata_0001', '_profile': {'name': 'fixture', 'model': 'fixture'}},
+                    [], self.request, emit, self.authorize, {})
+                identity = result['output_files'][0]['id']
+                self.assertEqual(self.portal.files.get(self.actor, identity)['source_scopes'], ['A', 'D'])
+                with self.assertRaises(AssistantError):
+                    self.portal.files.get({**self.actor, 'scopes': ['D']}, identity)
+
     async def test_supplement_narrows_all_to_d_and_old_reply_cannot_win(self):
         self.actor["scopes"] = sorted(SCOPES)
         first = await self.submit("等待查询多少未发检修")
@@ -166,6 +472,45 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         await self.finish()
         self.assertEqual(self.engine.calls[-1]["actor"]["scopes"], sorted(SCOPES))
 
+    async def test_clarification_reply_keeps_intent_when_narrowing_scope_but_not_a_new_topic(self):
+        from openclaw_service.assistant.lighthouse_queries import effective_question
+        self.actor.update(scopes=['A', 'D'], is_admin=True)
+        calls = []
+
+        async def answer(actor, turn, history, request, emit, authorize, context):
+            calls.append((copy.deepcopy(actor), copy.deepcopy(turn)))
+            if turn['question'] == '删除维修单':
+                return {'answer': '需要删除哪个楼栋的维修单？', 'sources': [],
+                        'clarification': {'options': ['A楼', 'D楼']}}
+            return {'answer': '测试回复，未提交业务。', 'sources': []}
+
+        self.engine.answer = answer
+        for channel in ('', 'feishu:oc_fixture'):
+            self.actor['channel'] = channel
+            await self.submit('删除维修单')
+            await self.finish()
+            await self.submit('D楼')
+            await self.finish()
+            actor, turn = calls[-1]
+            self.assertEqual(actor['scopes'], ['D'])
+            self.assertTrue(turn['_clarification_reply'])
+            self.assertIn('删除维修单', effective_question(turn))
+            self.assertTrue(effective_question(turn).endswith('D楼'))
+            await self.submit('解释一下冒泡排序')
+            await self.finish()
+            actor, turn = calls[-1]
+            self.assertFalse(turn['_clarification_reply'])
+            self.assertEqual(effective_question(turn), '解释一下冒泡排序')
+            self.assertEqual(actor['scopes'], ['A', 'D'])
+            for new_topic in ('改为查询D楼水耗', '还是问明天的天气'):
+                await self.submit('删除维修单')
+                await self.finish()
+                await self.submit(new_topic)
+                await self.finish()
+                self.assertFalse(calls[-1][1]['_clarification_reply'])
+                self.assertEqual(effective_question(calls[-1][1]), new_topic)
+        self.assertEqual(self.store.list_documents('lighthouse_agent_plans'), [])
+
     async def test_explicit_followup_keeps_scope_but_new_subject_resets_it(self):
         self.actor.update(scopes=sorted(SCOPES), is_admin=True)
         await self.submit("查询D楼未结束通告")
@@ -176,6 +521,36 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         await self.submit("今天发生了多少事件")
         await self.finish()
         self.assertEqual(self.engine.calls[-1]["actor"]["scopes"], sorted(SCOPES))
+
+    async def test_named_target_answer_continues_clarified_intent_without_executing(self):
+        from openclaw_service.assistant.lighthouse_queries import effective_question
+        name = 'D楼空调测试维修'
+        async def answer(actor, turn, history, request, emit, authorize, context):
+            self.engine.calls.append(copy.deepcopy(turn))
+            if turn['question'] == '帮我删除D楼的维修单':
+                return {'answer': '请提供要删除的维修单名称。', 'clarification': {'options': []},
+                        'sources': [{'available': True, 'data': {'records': [
+                            {'record_id': 'fixture_one', 'title': name},
+                            {'record_id': 'fixture_two', 'title': 'D楼电源测试维修'}]}}]}
+            return {'answer': '待核对，未执行业务。', 'sources': []}
+        self.engine.answer = answer
+        for channel in ('', 'feishu:oc_fixture'):
+            self.actor['channel'] = channel
+            for text, expected in ((name, True), ('“' + name + '”', True),
+                                   ('这个维修单有几个跟进？', False), ('改为查询D楼水耗', False),
+                                   ('不要删除' + name, False), ('一个未查询过的维修单名称', False)):
+                with self.subTest(channel=channel, text=text):
+                    await self.submit('帮我删除D楼的维修单')
+                    await self.finish()
+                    await self.submit(text)
+                    await self.finish()
+                    turn = self.engine.calls[-1]
+                    self.assertEqual(turn['_clarification_reply'], expected)
+                    if expected:
+                        self.assertIn('帮我删除D楼的维修单', effective_question(turn))
+                    else:
+                        self.assertEqual(effective_question(turn), turn['question'])
+        self.assertEqual(self.store.list_documents('lighthouse_agent_plans'), [])
 
     async def test_private_question_is_refused_without_model_or_business_read(self):
         @asynccontextmanager
@@ -251,6 +626,20 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again['run_id'], first['run_id'])
         with self.assertRaises(AssistantError):
             await self.runtime.submit(self.actor, {**payload, 'commands': [{'kind': 'tool', 'id': 'weather'}]}, self.request, self.authorize)
+
+    async def test_company_skill_is_not_inherited_by_next_turn(self):
+        for question in ('公司报销规定', '等待查询公司报销规定'):
+            await self.submit(question, commands=[{'kind': 'skill', 'id': 'company-knowledge'}])
+            if '等待' in question:
+                await asyncio.wait_for(self.engine.started.wait(), 1)
+            else:
+                await self.finish()
+            await self.submit('详细点')
+            await self.finish()
+            turn = self.engine.calls[-1]['turn']
+            self.assertEqual(turn['submitted_commands'], [])
+            self.assertEqual(turn['commands'], [])
+            self.assertEqual(turn['_command_context'], [])
 
     async def test_refinement_inherits_command_but_scope_uses_plain_question(self):
         self.actor['scopes'] = sorted(SCOPES)

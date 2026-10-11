@@ -45,11 +45,28 @@ def local_connect_ex(self, address):
 socket.socket.connect, socket.socket.connect_ex = local_connect, local_connect_ex
 def main():
     group = sys.argv[1] if len(sys.argv) > 1 else 'all'
+    if group == 'preflight':
+        import package_portable
+        original = package_portable._run_preflight_test_shards
+        def guarded(args, **kwargs):
+            return original([args[0], str(Path(__file__).resolve()), 'test-modules', *args[3:]], **kwargs)
+        package_portable.PREFLIGHT_WORKERS = 2
+        package_portable._run_preflight_test_shards = guarded
+        package_portable._run_packaging_preflight_tests()
+        return 0
     paths = sorted((ROOT / 'bin').glob('test_*.py'))
-    if group == 'business-isolated':
+    if group in {'business-isolated', 'remaining-isolated'}:
         import subprocess
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        paths = [path for path in paths if not path.stem.startswith(('test_lighthouse_', 'test_openclaw_', 'test_learning'))]
+        if group == 'remaining-isolated':
+            import ast
+            tree = ast.parse((ROOT / 'package_portable.py').read_text(encoding='utf-8-sig'))
+            preflight = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_run_packaging_preflight_tests')
+            covered = {node.value for node in ast.walk(preflight) if isinstance(node, ast.Constant)
+                       and isinstance(node.value, str) and node.value.startswith('bin.test_')}
+            paths = [path for path in paths if 'bin.' + path.stem not in covered]
+        else:
+            paths = [path for path in paths if not path.stem.startswith(('test_lighthouse_', 'test_openclaw_', 'test_learning'))]
         def check(path):
             target = ROOT / '.codex-audit' / ('stability-' + path.stem + '.json')
             target.unlink(missing_ok=True)
@@ -65,10 +82,13 @@ def main():
             for task in as_completed(futures):
                 report = task.result()
                 reports.append(report)
-                (ROOT / '.codex-audit/stability-business-isolated.json').write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding='utf-8')
+                (ROOT / '.codex-audit' / ('stability-' + group + '.json')).write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding='utf-8')
                 print('[IsolatedModule]', report['group'], report.get('tests', 0), report['exit_code'], flush=True)
         return 0 if all(report['exit_code'] == 0 for report in reports) else 1
-    if group.startswith('test_'):
+    if group == 'test-modules':
+        names = sys.argv[2:]
+        paths = [ROOT / 'bin' / (name.removeprefix('bin.') + '.py') for name in names]
+    elif group.startswith('test_'):
         paths = [path for path in paths if path.stem == group]
     elif group != 'all':
         paths = [path for path in paths if ('assistant' if path.stem.startswith(('test_lighthouse_', 'test_openclaw_', 'test_learning')) else 'business') == group]
@@ -86,11 +106,12 @@ def main():
                 setattr(config, 'table_id_' + name, 'tbl' + hashlib.sha256(name.encode()).hexdigest()[:13])
         if group == 'smoke':
             from bin.tools.frontend_runtime_smoke import run_smoke
-            report = run_smoke(port=0, desktop_only=True)
+            report = run_smoke(port=0)
             (ROOT / '.codex-audit/stability-smoke.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
             print('[StabilitySmoke]', json.dumps(report, ensure_ascii=False), flush=True)
             return 0
-        names = ['bin.' + group + '.' + name for name in sys.argv[2:]] if len(sys.argv) > 2 else ['bin.' + path.stem for path in paths]
+        if group != 'test-modules':
+            names = ['bin.' + group + '.' + name for name in sys.argv[2:]] if len(sys.argv) > 2 else ['bin.' + path.stem for path in paths]
         suite = unittest.defaultTestLoader.loadTestsFromNames(names)
         result = unittest.TextTestRunner(stream=sys.__stderr__, verbosity=1).run(suite)
         report = {'group': group, 'modules': len(paths), 'tests': result.testsRun,
@@ -99,6 +120,9 @@ def main():
                   'skipped': len(result.skipped), 'seconds': round(time.monotonic() - started, 1),
                   'external_connections_blocked': len(blocked)}
         label = group + ('-selected' if len(sys.argv) > 2 else '')
+        if group == 'test-modules':
+            import hashlib
+            label = 'preflight-' + hashlib.sha256('\n'.join(names).encode()).hexdigest()[:12]
         (ROOT / '.codex-audit' / ('stability-' + label + '.json')).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         print('[StabilityAudit]', json.dumps(report, ensure_ascii=False), flush=True)
         return 0 if result.wasSuccessful() else 1

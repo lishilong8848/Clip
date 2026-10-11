@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import unittest
 import io
+import os
+import sys
 from contextlib import redirect_stdout
 import tempfile
 import subprocess
@@ -15,6 +17,30 @@ import package_portable
 
 
 class ReleaseReadinessTests(unittest.TestCase):
+    def test_patch_includes_model_manifest_but_not_model_cache_or_bundle(self):
+        from bin.openclaw_service.assistant import lighthouse_distribution as distribution
+        from bin.openclaw_service.assistant.lighthouse_knowledge_model import SPEC
+        import json
+        distribution.validate_spec(json.loads(SPEC.read_text(encoding='utf-8')), component='knowledge_model')
+        files = {path.relative_to(package_portable.PROJECT_ROOT).as_posix()
+                 for path in package_portable._iter_project_files(package_portable.PROJECT_ROOT, exclude_venv=True)}
+        self.assertIn('bin/openclaw_service/assistant/openclaw/knowledge-model.json', files)
+        self.assertFalse(any(path.endswith('.onnx') for path in files))
+        self.assertTrue(package_portable._is_runtime_data_path(
+            package_portable.PROJECT_ROOT / 'bin/resources/knowledge_model/bge-small-zh-v1.5/model_optimized.onnx'))
+
+    def test_planned_match_suite_runs_without_prior_test_imports(self):
+        env = {key: value for key, value in os.environ.items() if key != 'PYTHONPATH'}
+        env['PYTHONNOUSERSITE'] = '1'
+        with tempfile.TemporaryDirectory() as directory:
+            env['CLIPFLOW_DATA_DIR'] = directory
+            result = subprocess.run(
+                [sys.executable, '-s', '-m', 'unittest', 'bin.test_lighthouse_planned_match'],
+                cwd=package_portable.PROJECT_ROOT, env=env, capture_output=True,
+                text=True, encoding='utf-8', errors='replace', timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_production_frontend_uses_shared_api_client(self):
         ok, offenders = readiness.check_frontend_api_client()
         self.assertTrue(ok, '\n'.join(offenders))

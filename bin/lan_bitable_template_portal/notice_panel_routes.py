@@ -37,12 +37,14 @@ def install_notice_panel_routes(app, controller, runtime):
     controller._get_notice_panel = manager_factory
 
     def fail(exc, default_status=400):
+        if isinstance(exc, PermissionError):
+            return controller._auth_required_response()
         return controller._portal_error_response(exc, default_status=default_status)
 
     def current_session(request):
         session = controller._current_session(request)
         if not session:
-            raise PortalError("请先登录。")
+            raise PermissionError("请先登录。")
         return session
 
     def same_origin(request):

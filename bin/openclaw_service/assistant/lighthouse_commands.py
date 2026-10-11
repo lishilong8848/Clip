@@ -25,7 +25,7 @@ def skills(store, actor):
     labels = {value: key for key, value in reversed(list(MODULE_GUIDES.items()))}
     labels.update({'lighthouse-business': '灯塔业务操作', 'public-research': '公开资料与天气',
                    'assistant-general': '通用问答与写作', 'assistant-calculation': '计算与时间',
-                   'lighthouse-extension': '扩展工具边界'})
+                   'lighthouse-extension': '扩展工具边界', 'company-knowledge': '公司知识库'})
     return [{**item, 'display_name': item.get('display_name') or labels.get(item['name'], item['name']),
              'source': 'builtin', 'removable': False} for item in catalog()] + SharedSkills(store).catalog(actor)
 

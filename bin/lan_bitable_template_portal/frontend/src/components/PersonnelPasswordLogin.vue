@@ -519,7 +519,7 @@ async function fetchPeople(): Promise<void> {
       cache: "no-store",
       signal: peopleController.signal,
     });
-    if (disposed.current) return;
+    if (disposed.current || busy.value) return;
     people.value = Array.isArray(data.items) ? (data.items as Person[]).slice() : [];
     peopleLoaded.value = true;
     if (selectedId.value) {

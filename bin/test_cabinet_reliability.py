@@ -353,7 +353,7 @@ class CabinetReliabilityTests(unittest.TestCase):
         self.assertEqual(self.service.pending_writes('D'),[])
         self.assertEqual(next(o['power'] for o in self.service.snapshot('D')['operations'] if o['record_id']==old['record_id']),9876)
 
-    def test_summary_formulas_baseline_increment_and_new_date_style(self):
+    def test_summary_values_baseline_increment_and_new_date_style(self):
         snap=self.service.snapshot('D'); old=next(o for o in snap['operations'] if o['room']=='201' and o['rack']=='A01')
         group={'id':'summary_new_event','action':'上正式电','actual':'2026-09-09 12:00:00','expected':'','result':'成功'}
         self.service.save_operation('D',self.payload(old,groups=[group,*old['groups']]),'owner',old['record_id'])
@@ -361,8 +361,9 @@ class CabinetReliabilityTests(unittest.TestCase):
         after=Workbook(export_workbook(original,snap['config'],snap['operations'])); source_name='机柜上电汇总表'; name='机柜上电汇总表'; cells=after.cells(name)
         self.assertEqual(after.value(cells['C10']),674)
         self.assertEqual(after.value(cells['C10']),sum(after.value(cells['C'+str(i)]) for i in range(4,10)))
-        self.assertIsNotNone(cells['C10'].find(T('f')))
-        self.assertEqual(cells['C10'].find(T('f')).attrib,before.cells(source_name)['C10'].find(T('f')).attrib)
+        self.assertIsNone(cells['C10'].find(T('f')))
+        self.assertEqual(after.value(cells['B10']), self.service.overview('D')['counts']['total'])
+        self.assertEqual(after.value(cells['D10']), after.value(cells['B10']) - after.value(cells['C10']))
         self.assertEqual(after.value(after.cells('201-M2机柜平面图 ')['F39']),145)
         day=next(row for _,row in after.rows(name) if row.get(2)=='2026.9.9')
         self.assertEqual(day[3],1)

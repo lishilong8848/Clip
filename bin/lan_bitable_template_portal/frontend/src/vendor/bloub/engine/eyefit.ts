@@ -415,7 +415,7 @@ function batir(): Map<number[], Map<string, { x: number; y: number }>> {
   return new Map(
   SHAPES.map((forme) => {
     const par = new Map<string, { x: number; y: number }>()
-    // The stacked shape has a separately scaled face anchored on its bottom tier.
+    // The stacked shape anchors the face near its body center without resizing the eyes.
     if (forme.id === 'swirl-pile') return [forme.radii, par]
     for (const def of STATES) {
       if (!def.baseBody) continue

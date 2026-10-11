@@ -188,36 +188,45 @@ async def begin(portal, actor, turn, question, request, profile=None, *, allow_p
     return portal.public_plan(plan, actor)
 
 
-async def continue_selection(portal, actor, question, request):
+def selection_reply(question):
     scope_reply = re.fullmatch(r"(?:就|选|选择|只看|本次)?\s*(?:[ABCDEH]楼|110站)[。！!\s]*", question, re.I)
-    number_reply = re.fullmatch(r"(?:选|选择)?第?([1-9]|[一二三四五六七八九])(?:条|个)?[。！!\s]*", question)
-    if not scope_reply and not number_reply:
+    if scope_reply:
+        return "scope", next(iter(codes(question)), "")
+    number_reply = re.fullmatch(r"(?:选|选择)?第?([1-9]\d?|[一二三四五六七八九])(?:条|个)?[。！!\s]*", question)
+    if number_reply:
+        number = number_reply[1]
+        return "candidate", int(number) if number.isdigit() else "一二三四五六七八九".index(number) + 1
+    return None
+
+
+async def continue_selection(portal, actor, question, request):
+    reply = selection_reply(question)
+    if not reply:
         return None
     actor = {**actor, "scopes": actor.get("allowed_scopes", actor["scopes"])}
     state = await asyncio.to_thread(portal.assistant._state, actor)
-    identities = {turn["plan"]["id"] for turn in state.get("turns", [])
-                  if turn.get("plan", {}).get("planned_notice", {}).get("stage") in {"scope", "candidate"}
-                  and turn["plan"].get("status") == "needs_input"}
+    identities = {plan["id"] for turn in state.get("turns", []) if (plan := turn.get("plan"))
+                  and plan.get("planned_notice", {}).get("stage") in {"scope", "candidate"}
+                  and plan.get("status") == "needs_input"}
     if not identities:
         return None
     if len(identities) != 1:
-        return "有多个待选择的计划，请在对应通告下选择，避免选错。"
+        return {"answer": "有多个待选择的计划，请在对应通告下选择，避免选错。"}
     identity = next(iter(identities))
     plan = await asyncio.to_thread(portal.get_plan, actor, identity)
     stage = plan["_planned"]["stage"]
-    if scope_reply and stage == "scope":
-        values = {"planned.scope": next(iter(codes(question)), "")}
-    elif number_reply and stage == "candidate":
-        number = number_reply[1]
-        number = int(number) if number.isdigit() else "一二三四五六七八九".index(number) + 1
+    if reply[0] == "scope" and stage == "scope":
+        values = {"planned.scope": reply[1]}
+    elif reply[0] == "candidate" and stage == "candidate":
+        number = reply[1]
         candidates = plan["_planned"]["candidates"]
         if number > len(candidates):
-            return "没有这个候选，请在当前列表中选择。"
+            return {"answer": "没有这个候选，请在当前列表中选择。", "plan": portal.public_plan(plan, actor)}
         values = {"planned.source": candidates[number - 1]["source_record_id"]}
     else:
         return None
     result = await amend_selection(portal, actor, identity, {"version": plan["version"], "values": values}, request)
-    return "上方计划已更新。" + result["explanation"]
+    return {"answer": "计划已更新。" + result["explanation"], "plan": result}
 
 
 async def amend_selection(portal, actor, identity, payload, request):

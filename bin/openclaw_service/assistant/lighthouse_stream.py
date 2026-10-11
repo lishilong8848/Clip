@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from .lighthouse_ai import AssistantError, NAMESPACE, private_identifier, safe_text
 from .lighthouse_model import LighthouseModel
 from .lighthouse_scope import resolve_scopes
-from .lighthouse_queries import query_refinement
+from .lighthouse_queries import DATE_TOKEN, query_refinement, named_clarification_reply
 
 RUNS = "lighthouse_runs"
 MESSAGES = "lighthouse_messages"
@@ -111,22 +111,36 @@ class LighthouseStream:
         if not isinstance(files, list) or len(files) > 10 or any(not isinstance(file, str) for file in files):
             raise AssistantError("附件列表格式无效。")
         attachments = [self.portal.files.public(self.portal.files.get(actor, file)) for file in files]
+        preview_id = payload.get('preview_file_id') or ''
+        preview_file = self.portal.files.public(self.portal.files.get(actor, preview_id)) if preview_id else None
         selections = payload.get('commands', [])
         with self.assistant._lock:
             state = self.assistant._state(actor)
             if state["id"] != payload.get("conversation_id"):
                 raise AssistantError("会话已变化，请重新读取，原输入未提交。", 409)
             old = next((item for item in state["turns"] if item["operation_id"] == operation), None)
+            if old and not self.assistant._allowed(old, actor):
+                raise AssistantError("当前权限已无法读取此消息，请重新提问。", 403)
             if old and old.get("attempt_id", operation) == attempt:
                 if (old["question"] != clean_question or old.get("submitted_file_ids", old.get("file_ids", [])) != files
-                        or old.get('submitted_commands', []) != selections):
+                        or old.get('submitted_commands', []) != selections
+                        or (old.get('preview_file') or {}).get('id', '') != preview_id):
                     raise AssistantError("消息编号不能用于不同内容。", 409)
                 return None, {"conversation_id": state["id"], "run_id": old.get("run_id", ""), "turn": public_turn(old)}
             if old and (old.get("plan") or {}).get("status") in PROTECTED_PLANS:
                 raise AssistantError("此消息的业务操作已执行或已提交，请查询原任务，不重新执行。", 409)
             from .lighthouse_commands import resolve
             selected_commands, command_context = resolve(self.store, actor, getattr(self.portal, 'catalog', None), selections)
-            scopes = resolve_scopes(actor, question, state.get("query_scopes") if query_refinement(clean_question) else None)
+            from .lighthouse_planned import selection_reply
+            previous = next((item for item in reversed(state['turns']) if item is not old and item.get('question')), None)
+            awaiting_clarification = bool(previous and previous.get('status') == 'completed' and previous.get('clarification')
+                and self.assistant._allowed(previous, actor))
+            clarification_reply = bool(awaiting_clarification and not files and not selections
+                and (DATE_TOKEN.fullmatch(clean_question.rstrip('呢？?。！! ')) or selection_reply(clean_question)
+                     or clean_question in previous['clarification'].get('options', [])
+                     or named_clarification_reply(clean_question, previous)))
+            refining = clarification_reply or query_refinement(clean_question) and not awaiting_clarification
+            scopes = resolve_scopes(actor, question, state.get("query_scopes") if refining else None)
             from .lighthouse_ai import is_business_query
             from .lighthouse_knowledge import company_question
             if not scopes and (actor['scopes'] or is_business_query(question)) and not company_question(question):
@@ -136,6 +150,10 @@ class LighthouseStream:
             profile = model.profile(selected["id"] if selected else "")
             prior = next((item for item in state["turns"] if item.get("run_id") == state.get("active_run_id") and item.get("status") == "pending"), None)
             prompt = (old.get("prompt") if old and old["question"] == clean_question else "") or clean_question
+            if clarification_reply:
+                prompt = (previous.get('prompt') or previous['question']) + '\n待补充问题：' + previous['answer'] + '\n用户补充：' + clean_question
+                if len(prompt) > 18000:
+                    raise AssistantError("补充内容较多，请重新说明本次要办理的事项。")
             if prior and prior is not old:
                 active_run = self.live.get(prior.get("run_id")) or {}
                 prior["answer"] = active_run.get("answer", prior.get("answer", ""))
@@ -152,16 +170,23 @@ class LighthouseStream:
                     raise AssistantError("本轮补充后附件超过10个，请分步处理。")
                 prior.update(status="superseded", error="已结合后续补充继续处理。", superseded_by=operation)
                 self.store.put_document(MESSAGES, state["id"] + ":" + prior["operation_id"], prior)
-            elif query_refinement(clean_question):
+            elif refining and not clarification_reply:
                 previous = next((item for item in reversed(state["turns"]) if item is not old and item.get("question")), None)
                 if previous:
                     prompt = "之前的问题：" + (previous.get("prompt") or previous["question"]) + "\n本次补充（采用最新条件）：" + prompt
                     if not selections:
                         selected_commands = copy.deepcopy(previous.get('commands', []))
                         command_context = copy.deepcopy(previous.get('_command_context', []))
+            if not any(item.get('kind') == 'skill' and item.get('id') == 'company-knowledge' for item in selections):
+                selected_commands = [item for item in selected_commands if item.get('id') != 'company-knowledge']
+                command_context = [item for item in command_context if item.get('name') != 'company-knowledge']
             # New input invalidates only unsubmitted proposals, never submitted jobs.
+            answering_selection = selection_reply(clean_question) is not None
             for item in state["turns"]:
                 plan = item.get("plan") or {}
+                if (answering_selection and plan.get("status") == "needs_input"
+                        and plan.get("planned_notice", {}).get("stage") in {"scope", "candidate"}):
+                    continue
                 if plan.get("status") in {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}:
                     raw = self.store.get_document("lighthouse_agent_plans", plan["id"])
                     if raw:
@@ -174,9 +199,10 @@ class LighthouseStream:
                 turn.setdefault("attempts", []).append({key: copy.deepcopy(old.get(key)) for key in ("run_id", "answer", "status", "error", "at")})
             turn.update(question=clean_question, prompt=prompt, file_ids=files, submitted_file_ids=payload.get("file_ids") or [], _private_request=private_request or bool(old and old.get("_private_request")),
                         commands=selected_commands, submitted_commands=copy.deepcopy(selections), _command_context=command_context,
-                        attachments=attachments, output_files=[], downloads=[], status="pending", answer="", error="", error_code="", process=[], sources=[], scopes=scopes,
+                        attachments=attachments, preview_file=preview_file, output_files=[], downloads=[], status="pending", answer="", error="", error_code="", process=[], sources=[], scopes=scopes,
                         access_scopes=actor["scopes"],
-                        run_id=run_id, attempt_id=attempt, model_name=profile["name"], plan=None)
+                        run_id=run_id, attempt_id=attempt, model_name=profile["name"], plan=None, clarification=None,
+                        _clarification_reply=clarification_reply or bool(old and old['question'] == clean_question and old.get('_clarification_reply')))
             if not old:
                 state["turns"].append(turn)
             # Migrate the previous generation once, then only save changed turns.
@@ -193,7 +219,10 @@ class LighthouseStream:
             run = {"id": run_id, "owner": actor["id"], "conversation_id": state["id"], "operation_id": operation,
                    "scopes": scopes, "access_scopes": actor["scopes"], "status": "queued", "label": "等待处理", "events": [], "revision": 1,
                    "answer": "", "process": [], "created_at": time.time(), "_turn": {**copy.deepcopy(turn), "_profile": profile},
-                   "_history": copy.deepcopy([t for t in state["turns"] if t is not turn and t.get("answer") and t.get("status") == "completed" and self.assistant._allowed(t, actor)]),
+                   "_history": copy.deepcopy([t for t in state["turns"] if t is not turn
+                       and (t.get("answer") and t.get("status") == "completed"
+                            or t.get("output_files") and t.get("status") in {"completed", "failed", "stopped", "superseded"})
+                       and self.assistant._allowed(t, actor)]),
                    "_context": copy.deepcopy(state.get("context") or {})}
             self._save_run(run)
             return run, {"conversation_id": state["id"], "run_id": run_id, "turn": public_turn(turn)}
@@ -237,6 +266,23 @@ class LighthouseStream:
             nonlocal last_flush
             if self.workers.get(actor["id"]) is not owner_task:
                 raise asyncio.CancelledError()
+            if kind == 'artifact':
+                current = await authorize()
+                if current['id'] != actor['id'] or set(actor['scopes']) - set(current['scopes']):
+                    raise AssistantError('登录权限已变化，本次文件未返回。', 403)
+                item = await asyncio.to_thread(self.portal.files.get, current, data['file']['id'])
+                file = self.portal.files.public(item)
+                outputs = run.setdefault('output_files', [])
+                if not any(saved['id'] == file['id'] for saved in outputs):
+                    outputs.append(file)
+                changes = {'output_files': copy.deepcopy(outputs),
+                           'file_ids': list(dict.fromkeys([*run['_turn'].get('file_ids', []), *[saved['id'] for saved in outputs]]))}
+                if not await asyncio.to_thread(self._patch_turn, actor, run, changes):
+                    raise asyncio.CancelledError()
+                chunk(DataChunk(type='data-turn', data={'operation_id': run['operation_id'], 'run_id': run['id'],
+                                                       **public_turn(changes)}, transient=True))
+                await asyncio.to_thread(self._save_run, run)
+                return
             if kind == "text":
                 delta = data["delta"][:max(0, 16000 - len(run["answer"]))]
                 run["answer"] += delta
@@ -283,6 +329,9 @@ class LighthouseStream:
                 current = await authorize()
                 if current["id"] != actor["id"] or set(actor["scopes"]) - set(current["scopes"]):
                     raise AssistantError("登录权限已变化，请重新提问。", 403)
+                from .lighthouse_artifacts import package_long_reply
+                result['file_ids'] = list(dict.fromkeys([*run['_turn'].get('file_ids', []), *result.get('file_ids', [])]))
+                result = await asyncio.to_thread(package_long_reply, self.portal.files, public_actor, result)
                 run.update(status="completed", answer=result.get("answer") or run["answer"], label="回答完成")
                 changes = {**result, "status": "completed", "error": "", "error_code": "", "answer": run["answer"], "process": run["process"]}
                 await asyncio.to_thread(self._patch_turn, actor, run, changes, finish=True)

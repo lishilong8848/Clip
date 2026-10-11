@@ -5,7 +5,7 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock, AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -119,6 +119,66 @@ class QueryContractTests(unittest.TestCase):
 
 
 class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plain_language_clarification_also_retains_followup_state(self):
+        inquiry = '请问需要删除哪一条维修单?'
+        async def stream(messages, info):
+            yield inquiry
+        for channel in ('', 'feishu:oc_fixture'):
+            with self.subTest(channel=channel):
+                result, calls, _ = await self.run_question('帮我删除维修单', stream, channel=channel)
+                self.assertEqual(result['answer'], inquiry)
+                self.assertEqual(result.get('clarification'), {'options': []})
+                self.assertEqual(calls, [])
+                self.assertNotIn('plan', result)
+
+    async def test_business_clarification_is_a_reply_not_an_evidence_failure(self):
+        for channel in ('', 'feishu:oc_fixture'):
+            for question in ('删除维修单', '帮我处理未结束通告', '修改水耗数据'):
+                with self.subTest(channel=channel, question=question):
+                    calls_to_model = []
+
+                    async def stream(messages, info):
+                        calls_to_model.append(1)
+                        self.assertIn('ask_business_question', info.instructions)
+                        yield {0: DeltaToolCall(name='ask_business_question', json_args=json.dumps({
+                            'question': '请说明要处理哪一条记录，以及希望怎样处理？',
+                        }))}
+
+                    result, calls, events = await self.run_question(question, stream, channel=channel)
+                    self.assertEqual(result['answer'], '请说明要处理哪一条记录,以及希望怎样处理?')
+                    self.assertEqual(len(calls_to_model), 1)
+                    self.assertEqual(calls, [])
+                    self.assertNotIn('plan', result)
+                    self.assertEqual([data['delta'] for kind, data in events if kind == 'text'], [result['answer']])
+
+    async def test_clarification_candidates_and_reply_stay_in_conversation(self):
+        inquiry = '请问需要结束哪一条维保通告?'
+        options = ['D楼冷水机组维护', 'D楼冷却塔维护']
+
+        async def ask(messages, info):
+            yield {0: DeltaToolCall(name='ask_business_question', json_args=json.dumps({
+                'question': inquiry, 'options': options,
+            }))}
+
+        result, calls, _ = await self.run_question('结束维保通告', ask)
+        self.assertEqual(calls, [])
+        self.assertIn('1. ' + options[0], result['answer'])
+        self.assertIn('2. ' + options[1], result['answer'])
+
+        async def followup(messages, info):
+            content = str(messages)
+            self.assertIn(inquiry, content)
+            self.assertIn(options[1], content)
+            self.assertIn('第二条', content)
+            yield '已明确第二条，仍需核对当前记录后准备结束预览。'
+
+        for channel in ('', 'feishu:oc_fixture'):
+            final, calls, _ = await self.run_question('第二条', followup, channel=channel,
+                history=[{'question': '结束维保通告', 'answer': result['answer'], 'scopes': ['D']}])
+            self.assertIn('准备结束预览', final['answer'])
+            self.assertEqual(calls, [])
+            self.assertNotIn('plan', final)
+
     async def test_usage_guidance_does_not_require_current_business_records(self):
         async def stream(messages, info):
             yield "在通告管理页面选择对应楼栋和类型，查看进行中列表即可。"
@@ -128,9 +188,9 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("plan", result)
 
-    async def run_question(self, question, stream, *, history=None, public_sources=None):
+    async def run_question(self, question, stream, *, history=None, public_sources=None, channel=''):
         portal = SimpleNamespace(
-            assistant=SimpleNamespace(model=Mock()), catalog=catalog(),
+            assistant=SimpleNamespace(model=Mock(), _state=lambda _: {'turns': []}), catalog=catalog(),
             files=SimpleNamespace(context=lambda *_: [], image_parts=lambda *_: []),
             _public_references=lambda result, _: result,
             _source_url=lambda *_: "/workbench-lite",
@@ -148,7 +208,7 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
             yield FunctionModel(stream_function=stream)
 
         engine = LighthouseModel(portal, model_factory=factory, public_sources=public_sources)
-        actor = {"id": "test-user", "scopes": ["D"], "is_admin": False}
+        actor = {"id": "test-user", "scopes": ["D"], "is_admin": False, "channel": channel}
 
         async def auth():
             return actor
@@ -160,6 +220,24 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         result = await engine.answer(actor, {"question": question, "_profile": {"name": "独立测试模型", "model": "fixture/auto"}}, history or [], None, emit, auth, {})
         return result, calls, events
+
+    async def test_general_question_after_company_answer_does_not_query_knowledge(self):
+        history = [{'question': '公司报销规定是什么', 'answer': '原公司资料回答。[1]',
+                    'sources': [{'kind': 'company_knowledge'}]}]
+
+        async def stream(messages, info):
+            yield '这是普通问答，不需要公司文件。'
+
+        for channel in ('', 'feishu:oc_fixture'):
+            for question in ('那你是什么模型？', '那帮我写个冒泡排序', '那谢谢你'):
+                with self.subTest(channel=channel, question=question), patch(
+                    'openclaw_service.assistant.lighthouse_knowledge_answer.answer_company', new_callable=AsyncMock
+                ) as company:
+                    result, calls, events = await self.run_question(question, stream, history=history, channel=channel)
+                    company.assert_not_awaited()
+                    self.assertIn('普通问答', result['answer'])
+                    self.assertEqual(calls, [])
+                    self.assertFalse(any('知识库' in str(data) for kind, data in events if kind == 'status'))
 
     async def test_rejected_weather_argument_returns_public_failure_not_business_retry(self):
         sources = SimpleNamespace(weather=AsyncMock(side_effect=ValueError('fixture city mismatch')))

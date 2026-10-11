@@ -2598,16 +2598,21 @@ def _detail_form(
         {_change_confirmation_uploader(work, target_record_id=target_record_id, existing_count=ali_confirmation_count, confirmed=h_building_confirmed, fresh_for_today=ali_confirmation_fresh_for_today, existing_images=ali_confirmation_images)}
         <section class="notice-preview" aria-live="polite">
           <div class="preview-head">
-            <span>发送预览</span>
-            <b id="lite-completion-hint">{_e(_completion_hint(work))}</b>
+            <div class="preview-heading"><span>发送预览</span><span id="lite-preview-action" class="preview-action"></span></div>
+            <button class="preview-toggle" type="button" data-preview-toggle aria-expanded="false" aria-controls="lite-notice-preview">展开全文</button>
           </div>
-          <pre id="lite-notice-preview"></pre>
+          <pre id="lite-notice-preview" tabindex="0" aria-label="待发送的通告全文"></pre>
+          <p id="lite-completion-hint" class="preview-note">{_e(_completion_hint(work))}</p>
         </section>
-        <div class="form-actions">
-          <label class="actual-action-time"><span>实际发送时间</span><input type="datetime-local" name="actual_action_time" data-auto-actual-time="1"></label>
-          <span id="lite-job-status" class="job-status" aria-live="polite">等待操作</span>
-          <span id="lite-action-reason" class="action-reason">请先确认标题和进度。</span>
-          {action_buttons}
+        <div class="form-actions notice-submit-bar">
+          <div class="notice-submit-context">
+            <label class="actual-action-time"><span>实际发送时间</span><input type="datetime-local" name="actual_action_time" data-auto-actual-time="1"></label>
+            <span id="lite-action-reason" class="action-reason" aria-live="polite">请先确认标题和进度。</span>
+          </div>
+          <div class="notice-submit-toolbar">
+            <span id="lite-job-status" class="job-status" aria-live="polite">等待操作</span>
+            <div class="form-action-buttons">{action_buttons}</div>
+          </div>
         </div>
       </form>
     """
@@ -3209,12 +3214,23 @@ def render_workbench_lite(
     .repair-event-link-panel strong {{ color:#4338ca; font-size:11px; line-height:1.2; white-space:nowrap; }}
     .repair-event-link-panel span {{ max-width:360px; overflow:hidden; color:#64748b; font-size:11px; font-weight:900; line-height:1.2; text-overflow:ellipsis; white-space:nowrap; }}
     .repair-event-link-panel .btn {{ flex:0 0 auto; min-height:28px; padding:5px 9px; border-radius:999px; }}
-    .notice-preview {{ border:1px solid #d8e5f7; border-radius:14px; background:#fbfdff; overflow:hidden; }}
-    .preview-head {{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid #e5edf8; background:linear-gradient(180deg,#f8fbff,#eef6ff); }}
-    .preview-head span {{ color:#0a57d8; font-size:13px; font-weight:900; }}
-    .preview-head b {{ color:#7c5a00; border-radius:999px; padding:5px 9px; background:#fff8db; font-size:12px; line-height:1.25; text-align:right; }}
-    .notice-preview pre {{ margin:0; max-height:88px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding:9px 10px; color:#0c244d; background:#fff; font:12px/1.5 "Microsoft YaHei", Arial, sans-serif; }}
-    .notice-preview:focus-within pre,.notice-preview:hover pre {{ max-height:160px; }}
+    .notice-preview {{ border:1px solid #d8e5f7; border-radius:8px; background:#fff; overflow:hidden; margin:8px 0; }}
+    .preview-head {{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; padding:10px 16px; border-bottom:1px solid #e5edf8; background:#f5f9ff; }}
+    .preview-heading {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; color:#17365d; font-size:14px; font-weight:700; }}
+    .preview-action {{ border-radius:4px; padding:2px 7px; color:#1d5dc0; background:#e8f0ff; font-size:11px; font-weight:600; }}
+    .preview-action[data-action="end"] {{ color:#086c43; background:#e4f3eb; }}
+    .preview-action:empty {{ display:none; }}
+    .preview-toggle {{ flex:0 0 auto; display:inline-flex; align-items:center; gap:8px; min-height:36px; border:1px solid transparent; border-radius:6px; padding:6px 9px; color:#155bd6; background:transparent; font:600 12px/1.4 "Microsoft YaHei",Arial,sans-serif; cursor:pointer; transition:background .16s,border-color .16s; }}
+    .preview-toggle::after {{ content:""; width:6px; height:6px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(45deg) translateY(-2px); transition:transform .16s; }}
+    .preview-toggle[aria-expanded="true"]::after {{ transform:rotate(225deg) translateY(-2px); }}
+    .preview-toggle:hover {{ background:#e8f0ff; border-color:#c9dcf5; }}
+    .preview-toggle:focus-visible,.notice-preview pre:focus-visible {{ outline:2px solid #2563eb; outline-offset:-2px; }}
+    .notice-preview pre {{ margin:0; min-height:110px; max-height:248px; overflow:auto; scrollbar-gutter:stable; white-space:pre-wrap; overflow-wrap:anywhere; padding:14px 16px; color:#334b63; background:#fff; font:14px/1.85 "Microsoft YaHei", Arial, sans-serif; }}
+    .preview-line:first-child,.preview-line.preview-title {{ color:#17365d; font-weight:700; }}
+    .preview-label {{ color:#233c56; font-weight:600; }}
+    .preview-note {{ margin:0; border-top:1px solid #edf1f6; padding:9px 16px; color:#65768b; background:#fafcff; font-size:11px; line-height:1.6; overflow-wrap:anywhere; }}
+    .preview-note:empty {{ display:none; }}
+    .notice-preview.expanded pre {{ max-height:none; }}
     .form-actions {{ position:sticky; bottom:8px; z-index:8; display:flex; justify-content:flex-end; gap:7px; align-items:center; margin-top:0; border:1px solid #d8e5f7; border-radius:15px; padding:7px; background:linear-gradient(135deg,rgba(255,255,255,.98),rgba(247,251,255,.96)); box-shadow:0 12px 26px rgba(15,73,153,.12); backdrop-filter:blur(8px); }}
     .actual-action-time {{ flex:0 1 190px; min-width:168px; display:grid; gap:2px; border:1px solid #d8e5f7; border-radius:12px; padding:4px 7px; background:#fff; }}
     .actual-action-time span {{ margin:0; color:#0a57d8; font-size:10px; font-weight:950; line-height:1.1; }}
@@ -3229,6 +3245,31 @@ def render_workbench_lite(
     .action-reason.ready {{ color:#087443; background:#e8fff3; }}
     .action-reason.blocked {{ color:#b42318; background:#fff1f0; }}
     .form-actions .btn.primary,.form-actions .btn.danger,.form-actions .btn.danger-ghost {{ min-width:104px; box-shadow:0 12px 24px rgba(21,99,255,.14); }}
+    .notice-submit-bar {{ display:grid; grid-template-columns:minmax(0,1fr); justify-content:stretch; gap:10px; bottom:0; padding:12px; border-radius:8px; background:#fff; box-shadow:0 -3px 12px rgba(26,64,111,.07); backdrop-filter:none; }}
+    .notice-submit-context,.notice-submit-toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:10px 16px; min-width:0; }}
+    .notice-submit-context {{ padding-bottom:9px; border-bottom:1px solid #e7edf5; }}
+    .notice-submit-bar .actual-action-time {{ flex:0 1 auto; min-width:0; display:flex; align-items:center; gap:8px; padding:0; border:0; border-radius:0; }}
+    .notice-submit-bar .actual-action-time span {{ color:#52677f; font-size:11px; font-weight:600; white-space:nowrap; }}
+    .notice-submit-bar .actual-action-time input {{ width:184px; min-height:34px; border:1px solid #d2dfee; border-radius:6px; padding:4px 7px; color:#17365d; font-size:12px; font-weight:500; }}
+    .notice-submit-bar .action-reason {{ flex:0 1 auto; max-width:52%; border-radius:6px; padding:5px 8px; font-weight:500; line-height:1.5; overflow-wrap:anywhere; }}
+    .notice-submit-bar .job-status {{ flex:1 1 150px; min-width:0; margin:0; font-size:11px; font-weight:500; line-height:1.5; overflow-wrap:anywhere; }}
+    .form-action-buttons {{ display:flex; flex:0 0 auto; align-items:center; gap:10px; }}
+    .form-action-buttons .btn.primary,.form-action-buttons .btn.danger,.form-action-buttons .btn.danger-ghost {{ min-width:96px; min-height:40px; padding:8px 14px; border:1px solid transparent; border-radius:7px; box-shadow:none; font-size:13px; font-weight:650; white-space:nowrap; }}
+    .form-action-buttons .btn.primary {{ background:#1d63e9; border-color:#1d63e9; color:#fff; }}
+    .form-action-buttons .btn.danger {{ background:#edf8f2; border-color:#a4cfb9; color:#086c43; }}
+    .form-action-buttons .btn.danger-ghost {{ background:transparent; border-color:transparent; color:#b42335; margin-left:12px; }}
+    .form-action-buttons .btn.primary:hover:not(:disabled) {{ background:#1752c4; }}
+    .form-action-buttons .btn.danger:hover:not(:disabled) {{ background:#def3e7; }}
+    .form-action-buttons .btn.danger-ghost:hover:not(:disabled) {{ background:#fff1f2; }}
+    .form-action-buttons .btn.danger.is-busy::after,.form-action-buttons .btn.danger[aria-busy="true"]::after {{ border-color:rgba(8,108,67,.22); border-top-color:#086c43; }}
+    @media(max-width:620px) {{
+      .preview-toggle {{ min-height:44px; }}
+      .notice-submit-context,.notice-submit-toolbar {{ flex-wrap:wrap; }}
+      .notice-submit-bar .action-reason {{ max-width:100%; }}
+      .form-action-buttons {{ flex:1 1 100%; flex-wrap:wrap; }}
+      .form-action-buttons .btn.danger-ghost {{ margin-left:0; }}
+      .notice-submit-bar .form-action-buttons .btn {{ flex:1 1 92px; }}
+    }}
     .end-check-backdrop {{ position:fixed; inset:0; z-index:240; display:grid; place-items:center; padding:24px; background:rgba(8,32,74,.36); backdrop-filter:blur(8px); }}
     .end-check-backdrop[hidden] {{ display:none; }}
     @view-transition {{ navigation:auto; }}
@@ -3778,6 +3819,30 @@ def render_workbench_lite(
     function pollingSopWorkType() {{const editing=String(litePollingEditingSop?.work_type||'');return litePollingSopMode==='manage'&&['maintenance','adjust','polling'].includes(editing)?editing:pollingCurrentSopWorkType();}}
     function pollingSopLabel() {{ return ({{maintenance:'维保',adjust:'设备调整',polling:'轮巡'}})[pollingSopWorkType()]; }}
     function pollingSopRunLabel() {{ return pollingSopLabel()+'作业'; }}
+    async function copyPollingWorkOrderLink(button) {{
+      const link=String(button.getAttribute('data-polling-copy-link')||'').trim();
+      if(!link)throw new Error('工单链接尚未生成，请刷新后重试');
+      let copied=false;
+      try{{if(navigator.clipboard?.writeText){{await navigator.clipboard.writeText(link);copied=true}}}}catch{{}}
+      if(!copied){{
+        const active=document.activeElement,input=document.createElement('textarea');
+        input.value=link;input.readOnly=true;input.setAttribute('aria-label','待复制工单链接');
+        input.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none';
+        document.body.append(input);
+        try{{input.focus({{preventScroll:true}});input.select();copied=document.execCommand('copy')}}catch{{}}
+        finally{{input.remove();active?.focus?.({{preventScroll:true}})}}
+      }}
+      const container=button.closest('.polling-work-order-status')||button.parentElement;
+      let manual=container.querySelector('[data-polling-manual-copy]');
+      if(copied){{manual?.remove();setLiteStatus('工单链接已复制');return}}
+      if(!manual){{
+        manual=document.createElement('input');manual.type='text';manual.readOnly=true;
+        manual.setAttribute('data-polling-manual-copy','');manual.setAttribute('aria-label','工单链接，按 Ctrl+C 复制');
+        manual.style.cssText='display:block;width:100%;margin-top:8px';container.append(manual);
+      }}
+      manual.value=link;manual.focus({{preventScroll:true}});manual.select();
+      setLiteStatus('链接已选中，请按 Ctrl+C 复制');
+    }}
     async function pollingApi(url, options = {{}}) {{
       const response = await fetch(url, {{ credentials:'same-origin', ...options }});
       const data = await response.json().catch(() => ({{}}));
@@ -6154,7 +6219,21 @@ def render_workbench_lite(
       for (const [label, key] of template.fields) {{
         lines.push(buildPreviewLine(targetForm, label, key));
       }}
-      preview.textContent = lines.join('\\n');
+      const fragments = document.createDocumentFragment();
+      lines.forEach((line, index) => {{
+        if (index) fragments.append(document.createTextNode('\\n'));
+        const row = document.createElement('span');
+        row.className = 'preview-line' + (index === 1 ? ' preview-title' : '');
+        const labelEnd = line.indexOf('】') + 1;
+        const label = document.createElement('span');
+        label.className = 'preview-label';
+        label.textContent = line.slice(0, labelEnd);
+        row.append(label, document.createTextNode(line.slice(labelEnd)));
+        fragments.append(row);
+      }});
+      preview.replaceChildren(fragments);
+      const actionBadge = document.getElementById('lite-preview-action');
+      if (actionBadge) {{ actionBadge.textContent = previewActionLabel(action); actionBadge.dataset.action = action; }}
       updateActionAvailability(targetForm);
     }}
     function setActionReason(text, tone) {{
@@ -6218,7 +6297,7 @@ def render_workbench_lite(
         refreshPollingDelayStatus(groupId,targetForm);
         const status=litePollingDelayCache.get(groupId),delay=status?.data;
         if(!delay){{buttons.forEach(button=>button.disabled=true);setActionReason(status?.error?`工单状态读取失败：${{status.error}}`:'正在核验工单与延时提醒','blocked');return}}
-        if(delay.state!=='completed'){{buttons.forEach(button=>button.disabled=true);setActionReason('工单尚未全部完成或附件尚未上传','blocked');return}}
+        if(!['upload_pending','completed'].includes(delay.state)){{buttons.forEach(button=>button.disabled=true);setActionReason('工单尚未全部完成','blocked');return}}
         const remaining=Math.max(0,Math.ceil(Number(delay.due_at_ts||0)-Date.now()/1000));
         if(delay.missing_completion||remaining>0){{buttons.forEach(button=>button.disabled=true);const hours=Math.floor(remaining/3600),minutes=String(Math.floor(remaining%3600/60)).padStart(2,'0'),seconds=String(remaining%60).padStart(2,'0');setActionReason(delay.missing_completion?'延时提醒步骤尚未完成':`延时提醒剩余 ${{hours}}:${{minutes}}:${{seconds}}`,'blocked');return}}
       }}
@@ -7412,7 +7491,7 @@ def render_workbench_lite(
       }}
     }}
     function setSubmitButtons(form, action) {{
-      const actions = form.querySelector('.form-actions');
+      const actions = form.querySelector('.form-action-buttons') || form.querySelector('.form-actions');
       if (!actions) return;
       actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       const button = document.createElement('button');
@@ -7426,7 +7505,7 @@ def render_workbench_lite(
       updateNoticePreview(form);
     }}
     function setOngoingSubmitButtons(form) {{
-      const actions = form.querySelector('.form-actions');
+      const actions = form.querySelector('.form-action-buttons') || form.querySelector('.form-actions');
       if (!actions) return;
       actions.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(node => node.remove());
       if (form.dataset.localOnly === '1') {{
@@ -7465,7 +7544,7 @@ def render_workbench_lite(
     function setUnuploadedSubmitButtons(form) {{
       form.dataset.action = 'start';
       setSubmitButtons(form, 'start');
-      const actions = form.querySelector('.form-actions');
+      const actions = form.querySelector('.form-action-buttons') || form.querySelector('.form-actions');
       if (!actions) return;
       const deleteButton = document.createElement('button');
       deleteButton.className = 'btn danger-ghost';
@@ -8128,10 +8207,18 @@ def render_workbench_lite(
       const changeScreenshotPreviewBackdrop=target.closest('#lite-change-screenshot-preview');
       if(changeScreenshotPreviewBackdrop&&target===changeScreenshotPreviewBackdrop){{event.preventDefault();closeChangeScreenshotPreview();return}}
       const pollingCopyLink = target.closest('[data-polling-copy-link]');
+      const previewToggle = target.closest('[data-preview-toggle]');
+      if (previewToggle) {{
+        event.preventDefault();
+        const expanded=previewToggle.closest('.notice-preview').classList.toggle('expanded');
+        previewToggle.setAttribute('aria-expanded',String(expanded));
+        previewToggle.textContent=expanded?'收起全文':'展开全文';
+        return;
+      }}
       if (pollingCopyLink) {{
         event.preventDefault();
-        try {{ await navigator.clipboard.writeText(String(pollingCopyLink.getAttribute('data-polling-copy-link') || '')); setLiteStatus('工单链接已复制'); }}
-        catch {{ showLiteError('复制失败，请检查浏览器剪贴板权限'); }}
+        try {{ await copyPollingWorkOrderLink(pollingCopyLink); }}
+        catch(error) {{ showLiteError(error.message || '工单链接复制失败'); }}
         return;
       }}
       const pollingRetryUpload = target.closest('[data-polling-retry-upload]');
@@ -9633,11 +9720,11 @@ def render_polling_work_order_page() -> str:
 <script>
 const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false,loading=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const stepsUrl=run=>`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`;
 function workOrderCard(order){const button=document.createElement('button'),strong=document.createElement('strong'),label=document.createElement('small'),progress=document.createElement('span');button.type='button';button.className=`work-order ${order.state}`;button.disabled=!order.selectable||busy;strong.textContent=`工单 ${order.run_index}`;label.textContent=order.label;progress.textContent=`已完成 ${order.completed_steps}/${order.step_count} 步 · ${order.state==='completed'?'已完成':order.state==='active'?'已选择，进入步骤':order.state==='available'?'可选择':'另一工单执行中'}`;button.append(strong,label,progress);button.onclick=()=>openWorkOrder(order);return button}
-function render(data){current=data;const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;q('overview').replaceChildren(...(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?'步骤已全部完成，正在上传工单表格...':data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
+function render(data){current=data;const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;q('overview').replaceChildren(...(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?(data.last_error?`全部工单已完成，表格上传待重试：${data.last_error}`:'全部工单已完成，表格正在后台上传。'):data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
 async function openWorkOrder(order){if(!current||busy||!order.selectable)return;busy=true;let message='',refresh=false;render(current);status(`正在进入工单 ${order.run_index}...`);try{const r=await fetch('/api/polling-work-orders/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(order.run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false){refresh=r.status===409;throw new Error(body.error||'工单进入失败')}location.assign(stepsUrl(body.data.current_run_index||order.run_index));return}catch(error){message=error.message||'工单进入失败'}finally{busy=false;if(refresh)await load();else if(current)render(current);if(message)status(message,'error')}}
 async function cancelSelection(){if(!current||busy||!current.can_release_selection)return;busy=true;let message='',tone='';render(current);status('正在取消当前选择...');try{const r=await fetch('/api/polling-work-orders/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(current.current_run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'取消选择失败');current=body.data;message='已取消，未完成工单可以重新选择';tone='success'}catch(error){message=error.message||'取消选择失败';tone='error'}finally{busy=false;if(current)render(current);status(message,tone)}}
 async function load(){if(busy||loading)return;loading=true;try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(busy)return;if(!r.ok||body.ok===false){const error=new Error(body.error||'工单读取失败');error.terminal=[403,404].includes(r.status);throw error}render(body.data)}catch(error){status(error.message||'工单读取失败','error');if(error.terminal)clearInterval(timer)}finally{loading=false}}
-async function retryUpload(){if(!current||busy)return;busy=true;q('retry').disabled=true;try{const r=await fetch(`/api/polling-work-orders/${encodeURIComponent(current.group_id)}/retry-upload?token=${encodeURIComponent(token)}`,{method:'POST'}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'附件上传失败');if(body.data?.ok){status('工单附件已上传，可以结束通告。','success');q('retry').hidden=true;clearInterval(timer)}else status(body.data?.error||'附件仍在等待上传','error')}catch(error){status(error.message||'附件上传失败','error')}finally{busy=false;q('retry').disabled=false}}
+async function retryUpload(){if(!current||busy)return;busy=true;q('retry').disabled=true;try{const r=await fetch(`/api/polling-work-orders/${encodeURIComponent(current.group_id)}/retry-upload?token=${encodeURIComponent(token)}`,{method:'POST'}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'附件上传失败');if(body.data?.ok){status('全部工单已完成，工单表格已上传。','success');q('retry').hidden=true;clearInterval(timer)}else status(body.data?.error||'附件仍在等待上传','error')}catch(error){status(error.message||'附件上传失败','error')}finally{busy=false;q('retry').disabled=false}}
 q('retry').onclick=retryUpload;q('cancel-selection').onclick=cancelSelection;if(!token)status('工单链接缺少令牌。','error');else{load();timer=setInterval(load,3000)}
 </script></body></html>"""
 

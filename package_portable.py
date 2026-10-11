@@ -157,6 +157,7 @@ EXCLUDE_DIR_NAMES = {
 RUNTIME_DATA_DIR_PARTS = (
     ("bin", "data"),
     ("bin", "runtime"),
+    ("bin", "resources", "knowledge_model"),
     ("data",),
 )
 
@@ -197,6 +198,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/openclaw_service/assistant/openclaw/native-paths.mjs"),
     Path("bin/openclaw_service/assistant/openclaw/gateway-start.mjs"),
     Path("bin/openclaw_service/assistant/openclaw/distribution.json"),
+    Path("bin/openclaw_service/assistant/openclaw/knowledge-model.json"),
     Path("bin/openclaw_service/assistant/openclaw/plugin/index.mjs"),
     Path("bin/openclaw_service/assistant/openclaw/plugin/package.json"),
     Path("bin/openclaw_service/assistant/openclaw/plugin/openclaw.plugin.json"),
@@ -235,6 +237,9 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "PIL": "Pillow",
 
     "openpyxl": "openpyxl",
+    "docx": "python-docx==1.2.0",
+    "pptx": "python-pptx==1.0.2",
+    "reportlab": "reportlab==4.4.10",
 
     "pypdf": "pypdf",
     "fastembed": "fastembed==0.9.0",
@@ -286,6 +291,7 @@ WINDOWS_RUNTIME_MODULE_TO_PACKAGE = {
 
 
 RUNTIME_PACKAGE_INSTALL_ORDER = [
+    "docx", "pptx", "reportlab",
 
     "PyQt6",
 
@@ -399,6 +405,7 @@ SMOKE_IMPORT_MODULES = [
 ]
 
 PACKAGING_PREFLIGHT_MODULES = [
+    "docx", "pptx", "reportlab",
     "yaml",
     "openpyxl",
     "pydantic_ai",
@@ -1756,9 +1763,9 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_learning", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_portal_auth_persistence",
+         "bin.test_learning", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_portal_auth_persistence", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
-         "bin.test_lighthouse_stream", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
+         "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
          "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls",
          "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes",
@@ -2682,20 +2689,11 @@ def copy_project(dist_dir: Path) -> None:
             shutil.copy2(item, target)
 
     _include_assistant_skills(PROJECT_ROOT, dist_dir)
-    _include_knowledge_model(PROJECT_ROOT, dist_dir)
     _assert_no_runtime_data_in_output(dist_dir, "完整构建产物")
     _assert_no_development_files_in_output(dist_dir, "完整构建产物")
 
 
 
-
-
-def _include_knowledge_model(project: Path, destination: Path) -> list[Path]:
-    from bin.openclaw_service.assistant.lighthouse_knowledge_model import bundle_model
-    files = bundle_model(project, destination)
-    if files:
-        log('已校验并内置知识库 BGE 模型，用户端无需首次联网下载。')
-    return files
 
 
 def find_latest_full_dist(exclude: Path | None = None) -> Path | None:
@@ -2921,8 +2919,6 @@ def build_patch(
         log(f"已补齐当前前端资源: {bundled_frontend_assets} 个。")
 
     _include_assistant_skills(PROJECT_ROOT, patch_dir)
-    bundled_model_files = _include_knowledge_model(PROJECT_ROOT, patch_dir)
-    added += sum(rel not in baseline_files and not (PROJECT_ROOT / rel).is_file() for rel in bundled_model_files)
 
     deleted = 0
 
@@ -2937,7 +2933,6 @@ def build_patch(
             for p in current_files
 
         }
-        current_set.update(bundled_model_files)
 
         for rel in baseline_files.keys():
 
@@ -3065,6 +3060,10 @@ def build_patch(
 
 
 def _ensure_lighthouse_distribution(python_exe):
+    subprocess.run([str(python_exe), '-c',
+        "import json,sys;sys.path.insert(0,'bin');from openclaw_service.assistant.lighthouse_distribution import validate_spec;from openclaw_service.assistant.lighthouse_knowledge_model import SPEC;validate_spec(json.loads(SPEC.read_text(encoding='utf-8')),component='knowledge_model')"],
+        cwd=PROJECT_ROOT, check=True)
+    log('知识库模型飞书下载清单校验通过（模型文件不进入补丁）。')
     spec = BIN_DIR / 'openclaw_service/assistant/openclaw/distribution.json'
     if spec.is_file():
         subprocess.run([str(python_exe), '-c',

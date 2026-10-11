@@ -509,7 +509,7 @@ export class BotEngine {
 
     const eyes: RenderedEye[] = []
     const bottomFace = pose.bottomFace ?? 0
-    const faceScale = 1 - .4 * bottomFace
+    const faceVerticalScale = 1 - .4 * bottomFace
     if (pose.eyeAlpha > 0.01) {
       const poses = eyePoses(gaze, R, pose.split)
       for (let i = 0; i < 2; i++) {
@@ -531,8 +531,8 @@ export class BotEngine {
         // a l'ecran, pas le long de l'axe de la gelule.
         const k = blinkScale(Math.min(lid, cfg.open))
         eyes.push({
-          d: capsulePath(cfg.w * R * faceScale, cfg.h * R * faceScale),
-          matrix: `matrix(${r2(ax)},${r2(ay * k)},${r2(cx2)},${r2(cy2 * k)},${r2(e.x * fit * faceScale + (offX + decalage.x * (1-bottomFace)) * R)},${r2(e.y * fit * faceScale + (offY + decalage.y * (1-bottomFace) + .38 * bottomFace) * R)})`,
+          d: capsulePath(cfg.w * R, cfg.h * R),
+          matrix: `matrix(${r2(ax)},${r2(ay * k)},${r2(cx2)},${r2(cy2 * k)},${r2(e.x * fit + (offX + decalage.x * (1-bottomFace)) * R)},${r2(e.y * fit * faceVerticalScale + (offY + decalage.y * (1-bottomFace) + .22 * bottomFace) * R)})`,
           alpha: pose.eyeAlpha * clamp(e.depth / 0.12)
         })
       }

@@ -43,6 +43,13 @@ from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: 
 # 每个 covered/excluded 条目用 method_paths 逐条列(方法, 归一路径),避免方法×路径叉乘。
 KNOWN_DYNAMIC_BINDINGS = [
     dict(
+        source="lan_bitable_template_portal/frontend/src/components/LighthouseArtifactPreview.vue",
+        line=58, kind="excluded",
+        method_paths=[("GET", "/api/assistant/files/{param}")],
+        window=20, needles=["requestJson(url.value + '?preview=1'", "'/api/assistant/files/' + props.file.id"],
+        note="Private file preview reuses the authenticated assistant file endpoint, not a native business operation.",
+    ),
+    dict(
         source="lan_bitable_template_portal/frontend/src/components/KnowledgeBasePage.vue",
         line=591, kind="excluded",
         method_paths=[("POST", "/api/assistant/knowledge/files")],

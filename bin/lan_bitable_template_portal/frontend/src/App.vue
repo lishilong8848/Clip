@@ -51,9 +51,12 @@
       @close="closeAdminTools"
     />
 
-    <div class="page-content">
+    <div ref="pageContent" class="page-content">
+    <UiTransition name="ui-page" :appear="false">
     <WorkbenchLitePage v-if="workbenchVisited && auth.loggedIn" v-show="isWorkbenchLitePage" :key="currentOverviewKey" :search="lastWorkbenchSearch" :active="isWorkbenchLitePage" />
-    <UiTransition v-if="!isWorkbenchLitePage" name="ui-page" :css="!isDrillPrintPage && !isMorningMeetingPrintPage">
+    </UiTransition>
+    <UiTransition name="ui-page" :css="!isDrillPrintPage && !isMorningMeetingPrintPage">
+    <template v-if="!isWorkbenchLitePage">
 
     <HistoryMemoryPage
       v-if="isHistoryMemoryPage"
@@ -216,6 +219,7 @@
       @dashboard-visible="scopeHomeDashboardVisible = $event"
     />
 
+    </template>
     </UiTransition>
     </div>
 
@@ -299,6 +303,18 @@ const requestableScopes: ScopeOption[] = [
 const routePath = ref(normalizedPath());
 const routeParams = ref(new URLSearchParams(window.location.search));
 const windowLocationSearch = computed(() => routeParams.value.toString());
+const pageContent = ref<HTMLElement | null>(null);
+let pageAnimation: Animation | undefined;
+// Same-component route changes need motion without remounting cached editors.
+watch([routePath, windowLocationSearch], ([path, search], [previousPath, previousSearch]) => {
+  const content = pageContent.value;
+  const opacity = pageAnimation?.playState === 'running' && content ? getComputedStyle(content).opacity : '0.65';
+  pageAnimation?.cancel();
+  pageAnimation = undefined;
+  if (path !== previousPath || search === previousSearch || !content || path.endsWith('/print')
+      || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  pageAnimation = content.animate([{ opacity }, { opacity: '1' }], { duration: 180, easing: 'ease-out' });
+}, { flush: 'post' });
 const currentScope = ref(normalizeScopeValue(routeParams.value.get("scope") || ""));
 const authChecking = ref(true);
 const loading = ref(false);
@@ -958,6 +974,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   appDisposed = true;
+  pageAnimation?.cancel();
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   window.removeEventListener('clipflow-business-changed', refreshHomeAfterWrite);
   window.removeEventListener("popstate", updateLocationRefs);

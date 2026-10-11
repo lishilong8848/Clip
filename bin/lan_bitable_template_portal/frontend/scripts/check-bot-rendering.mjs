@@ -78,7 +78,13 @@ for (const shape of ['swirl-pile', 'heart', 'star', 'flower', 'diamond', 'shield
   const idle = shaped.engineInstance.sample(2);
   if (shape === 'swirl-pile') {
     assert.equal(idle.eyes.length, 2);
-    for (const eye of idle.eyes) assert(Number(eye.matrix.match(/matrix\((.*)\)/)[1].split(',')[5]) > 20, 'eyes stay on bottom tier');
+    const circle = new BloubBot(new SvgNode('span'), { size: 200, shape: 'cercle', cycle: ['idle'] });
+    const regularEyes = circle.engineInstance.sample(2).eyes;
+    assert.deepEqual(idle.eyes.map(eye => eye.d), regularEyes.map(eye => eye.d), 'stacked shape uses the same eye dimensions as the circle');
+    circle.destroy();
+    const centers = idle.eyes.map(eye => eye.matrix.match(/matrix\((.*)\)/)[1].split(',').map(Number));
+    for (const center of centers) assert(center[5] > 5 && center[5] < 35, 'eyes sit near the middle of the stacked body');
+    assert(centers[1][4] - centers[0][4] > 30, 'normal-sized eyes keep a visible gap');
   }
   shaped.setState('orbit');
   assert(shaped.engineInstance.sample(shaped.clock + 2).arcs.length);

@@ -152,23 +152,56 @@ class FeishuMessenger:
         if data.get('code') != 0:
             raise AssistantError('敲键盘表情未发送，飞书返回码：' + str(data.get('code')), 503)
 
-    async def send(self, message, reply):
+    async def upload_file(self, name, content):
+        from .portal_service import external_real_write_guard
+        if not external_real_write_guard()["real_write_allowed"]:
+            raise AssistantError("当前运行模式不允许发送真实飞书文件。", 403)
+        if not content or len(content) > 20 * 1024 * 1024:
+            raise AssistantError('发送文件须非空且不超过20MiB。', 413)
+        client = await self.client()
+        response = await client.post('https://open.feishu.cn/open-apis/im/v1/files', headers=await self.headers(),
+            data={'file_type': 'stream', 'file_name': name}, files={'file': (name, content, 'application/octet-stream')}, timeout=90)
+        data = response.json()
+        key = (data.get('data') or {}).get('file_key')
+        if data.get('code') != 0 or not key:
+            from upload_event_module.services.http_client import classify_feishu_error
+            if classify_feishu_error(getattr(response, 'status_code', 0), data.get('code')) == 'permission':
+                raise AssistantError('飞书应用缺少文件上传权限，请联系管理员配置；未发送附件，原内容已保留。',
+                                     403, category='feishu_file_upload_permission')
+            if data.get('code') in {99991663, 99991664, 99991665}: self.expires = 0
+            raise AssistantError('飞书文件上传未完成，将保留文件重试。', 503)
+        return key
+
+    async def send(self, message, reply, *, checkpoint=None):
         from .portal_service import external_real_write_guard
         if not external_real_write_guard()["real_write_allowed"]:
             raise AssistantError("当前运行模式不允许发送真实飞书消息。", 403)
         client = await self.client()
         # Reply to the originating message; identity and conversation remain per sender.
-        text = safe_text(reply.get("text") or '', limit=30000) or "本轮未取得回答，请稍后重新提问。"
-        for number, start in enumerate(range(0, len(text), 5000)):
-            card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": text[start:start + 5000]}]}}
-            body = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False),
-                "uuid": hashlib.sha256((message["message_id"] + ":answer:" + str(number)).encode()).hexdigest()[:32]}
+        text = safe_text(reply.get("text") or '', limit=120000) or "本轮未取得回答，请稍后重新提问。"
+        if len(text) > 3500:
+            if not reply.get('long_text_file_key'):
+                reply['long_text_file_key'] = await self.upload_file('完整回复.md', text.encode('utf-8'))
+                if checkpoint: await checkpoint()
+            text = '完整回复已整理为Markdown文件，请查看附件。涉及业务操作时，请先核对文件中的操作与字段，再回复确认。'
+        card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": text}]}}
+        parts = [('attachment-stopped' if reply.get('attachment_stopped') else 'answer:0', 'interactive', card)]
+        if reply.get('long_text_file_key'):
+            parts.append(('long-text', 'file', {'file_key': reply['long_text_file_key']}))
+        parts.extend(('file:' + file['id'], 'file', {'file_key': file['file_key']}) for file in reply.get('files', []) if file.get('file_key'))
+        for part, kind, content in parts:
+            if part in reply.get('sent_parts', []):
+                continue
+            body = {"msg_type": kind, "content": json.dumps(content, ensure_ascii=False),
+                "uuid": hashlib.sha256((message["message_id"] + ":" + part).encode()).hexdigest()[:32]}
             url = "https://open.feishu.cn/open-apis/im/v1/messages/" + message["message_id"] + "/reply"
             response = await client.post(url, headers=await self.headers(), json=body)
             data = response.json()
             if data.get("code") != 0:
                 if data["code"] in {99991663, 99991664, 99991665}: self.expires = 0
                 raise AssistantError("飞书回复发送未完成，已保留回答稍后重试。", 503)
+            reply.setdefault('sent_parts', []).append(part)
+            if checkpoint: await checkpoint()
 
     async def close(self):
         if self.http is not None: await self.http.aclose()
@@ -370,7 +403,38 @@ class FeishuAssistant:
         company_sources = [source for source in turn.get('sources', []) if source.get('kind') == 'company_knowledge']
         if company_sources:
             text += '\n\n公司资料来源：\n' + '\n'.join(f"[{source['number']}] {source['title']}" for source in company_sources)
-        return {"text": safe_text(text, limit=30000)}
+        return {"text": safe_text(text, limit=120000), 'actor_id': actor['id'],
+                'conversation_id': conversation['conversation_id'],
+                'files': [{'id': file['id'], 'name': file['name']} for file in ([] if pending_reads else turn.get('output_files', []))
+                          if isinstance(file, dict) and re.fullmatch('[a-f0-9]{32}', str(file.get('id', '')))]}
+
+    async def _reply_file_context(self, message, reply):
+        request, actor = await self._request_context(message)
+        if actor['id'] != reply.get('actor_id'):
+            raise AssistantError('登录身份已变化，附件未发送。', 403)
+        conversation = await self._call(request, actor, 'conversation')
+        if conversation['conversation_id'] != reply.get('conversation_id'):
+            raise AssistantError('原会话已清空，附件未发送。', 410)
+        return request, actor
+
+    async def _prepare_reply_files(self, message, reply):
+        if not reply.get('files'):
+            return
+        request, actor = await self._reply_file_context(message, reply)
+        from .feishu_assistant_files import _assistant_download
+        uploaded = False
+        for file in reply['files']:
+            metadata = await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
+            if not file.get('file_key'):
+                content = await _assistant_download(self, request, actor, file['id'])
+                file['file_key'] = await self.messenger.upload_file(metadata['name'], content)
+                await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
+                uploaded = True
+        if uploaded:
+            # A slow cloud upload can outlive the original conversation or authorization.
+            request, actor = await self._reply_file_context(message, reply)
+            for file in reply['files']:
+                await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
 
     async def _feishu_plan_command(self, message, request, actor, plans):
         """Deterministic Feishu text commands for the existing plan edit APIs.
@@ -652,9 +716,18 @@ class FeishuAssistant:
                     reply = {"text": safe_text(str(exc)) if isinstance(exc, AssistantError) else "助手暂时无法处理本条消息，请稍后重新提问；未自动重发业务。"}
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "reply", reply)
             try:
-                await self.messenger.send(message, reply)
+                await self._prepare_reply_files(message, reply)
+                async def checkpoint():
+                    await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
+                await self.messenger.send(message, reply, checkpoint=checkpoint)
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "done")
             except Exception as exc:
+                upload_denied = isinstance(exc, AssistantError) and exc.category == 'feishu_file_upload_permission'
+                if isinstance(exc, AssistantError) and (upload_denied or exc.status in {401, 403, 404, 410} and reply.get('files')):
+                    stopped = {'text': str(exc) if upload_denied else '原会话或文件访问权限已变化，本次文件发送已停止。请在当前会话重新提出需要。',
+                               'attachment_stopped': True}
+                    await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', stopped, delay=5)
+                    return
                 logging.warning("Feishu assistant reply deferred: %s", type(exc).__name__)
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "reply", delay=60)
 

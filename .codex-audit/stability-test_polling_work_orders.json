@@ -1,10 +1,10 @@
 {
   "group": "test_polling_work_orders",
   "modules": 1,
-  "tests": 74,
+  "tests": 85,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 58.8,
+  "seconds": 26.7,
   "external_connections_blocked": 5
 }

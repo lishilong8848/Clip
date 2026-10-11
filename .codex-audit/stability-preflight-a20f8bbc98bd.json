@@ -1,0 +1,10 @@
+{
+  "group": "test-modules",
+  "modules": 4,
+  "tests": 53,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 7.7,
+  "external_connections_blocked": 0
+}

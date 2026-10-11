@@ -326,7 +326,7 @@ def install_learning_routes(app, controller, runtime):
             session, actor = await asyncio.to_thread(identity, request)
             if session is None:
                 target = request.url.path + ("?" + request.url.query if request.url.query else "")
-                return Response(status_code=302, headers={"Location": "/api/auth/login?" + urlencode({"next": target})})
+                return Response(status_code=302, headers={"Location": "/?" + urlencode({"login": "password", "next": target})})
             for scope in request.query_params.getlist("scope"):
                 check_scope({"scope": scope}, actor)
 

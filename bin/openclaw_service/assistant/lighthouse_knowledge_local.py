@@ -34,6 +34,7 @@ _DEFAULT_LRU_SIZE = 256
 _DEFAULT_BATCH_SIZE = 8
 _DEFAULT_QUERY_TIMEOUT = 10.0
 _DEFAULT_DOC_TIMEOUT = 120.0
+_MODEL_PREPARE_ALLOWANCE = 600.0
 _DEFAULT_RETRY_COOLDOWN = 60.0
 _WAKE_INTERVAL = 0.25
 _MODEL_SEARCH_ADMISSION = 8
@@ -656,24 +657,25 @@ class LocalEmbeddings:
             raise AssistantError('本地嵌入依赖未就绪，请更新程序并查看依赖安装日志。', 503) from exc
         options = dict(model_name=MODEL_NAME, cache_dir=str(self.model_dir), threads=1,
                        providers=['CPUExecutionProvider'], lazy_load=False, enable_cpu_mem_arena=False)
-        from .lighthouse_knowledge_model import BUNDLE, verify_model
-        bundled = Path(__file__).resolve().parents[3] / BUNDLE
+        from .lighthouse_knowledge_model import BUNDLE, REVISION, verify_model, install_model
+        candidates = [self.model_dir / 'bge-small-zh-v1.5', Path(__file__).resolve().parents[3] / BUNDLE,
+                      self.model_dir / 'models--Qdrant--bge-small-zh-v1.5/snapshots' / REVISION]
         try:
-            if bundled.is_dir():
-                verify_model(bundled)
-                return TextEmbedding(**options, specific_model_path=str(bundled), local_files_only=True)
-            try:
-                return TextEmbedding(**options, local_files_only=True)
-            except (ValueError, FileNotFoundError):
-                logging.info('知识库本地模型未缓存，正在下载 BGE 模型；新版完整补丁内置此模型。')
-                return TextEmbedding(**options)
+            model_path = None
+            for path in candidates:
+                try:
+                    model_path = verify_model(path)
+                    break
+                except (OSError, ValueError):
+                    continue
+            if model_path is None:
+                model_path = install_model(self.model_dir)
+            return TextEmbedding(**options, specific_model_path=str(model_path), local_files_only=True)
         except AssistantError:
             raise
         except Exception as exc:
-            logging.error('知识库模型加载失败: type=%s bundled=%s model_dir=%s', type(exc).__name__, bundled.is_dir(), self.model_dir)
-            message = ('内置知识库模型加载失败，请重新更新完整补丁并核对运行依赖。' if bundled.is_dir()
-                       else '本机知识库模型未就绪，自动下载或加载失败；请更新包含本地模型的完整补丁后重新索引。')
-            raise AssistantError(message, 503) from exc
+            logging.error('知识库模型加载失败: type=%s model_dir=%s', type(exc).__name__, self.model_dir)
+            raise AssistantError('本地知识库模型加载失败，请检查运行依赖后重新索引；模型由飞书依赖表自动下载。', 503) from exc
 
     # ------------------------------------------------------------- helpers
 
@@ -681,6 +683,9 @@ class LocalEmbeddings:
         timed_out = False
         try:
             deadline = time.monotonic() + timeout
+            last_check = time.monotonic()
+            # First-time download has its own bounded allowance; chat queries still time out normally.
+            prepare_allowance = _MODEL_PREPARE_ALLOWANCE if job.kind == 'doc' else 0.0
             while True:
                 if self._closed or job.is_cancelled():
                     raise AssistantError("本地嵌入服务已关闭，请稍后重试。", 503)
@@ -689,7 +694,13 @@ class LocalEmbeddings:
                     if error is not None:
                         raise error
                     return [list(vector) for vector in job.result_values()]
-                remaining = deadline - time.monotonic()
+                current = time.monotonic()
+                if self._loading and prepare_allowance > 0:
+                    extra = min(current - last_check, prepare_allowance)
+                    deadline += extra
+                    prepare_allowance -= extra
+                last_check = current
+                remaining = deadline - current
                 if remaining <= 0:
                     timed_out = True
                     raise AssistantError("本地嵌入服务繁忙，本次任务已超时，请稍后重试。", 503)

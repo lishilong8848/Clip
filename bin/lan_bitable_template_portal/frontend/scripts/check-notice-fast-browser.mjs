@@ -75,6 +75,8 @@ try {
   let details = 0;
   let detailGate = null;
   let reviewKind = 'maintenance';
+  let conversationTurns = null, confirmationCalls = 0, previewMessage = null;
+  let artifactRun = '', artifactStream = '';
   let checkTagRecovery = false, tagReads = 0;
   const planReads = [];
   await context.route(base + '/api/**', async route => {
@@ -84,8 +86,31 @@ try {
         buildings: [...'ABCDE'].map(scope => ({ scope, status: 'succeeded' })) } } });
     }
     if (url.pathname === '/api/workbench/draft' && route.request().method() === 'PUT') return route.fulfill({ json: { ok: true, data: { draft: { version: 1 } } } });
-    assert.equal(route.request().method(), 'GET', 'Browser test must never submit business');
+    assert.equal(route.request().method(), ['/api/assistant/plans/continued-plan/confirm', '/api/assistant/messages'].includes(url.pathname) ? 'POST' : 'GET', 'Only isolated assistant fixtures may receive a POST');
     let data = {};
+    if (url.pathname === '/api/assistant/runs/' + artifactRun + '/stream' && artifactStream) {
+      const body = artifactStream;
+      artifactRun = ''; artifactStream = '';
+      conversationTurns[0] = { ...conversationTurns[0], status: 'failed', error: '模型后续说明中断，文件已保存。',
+        output_files: [conversationTurns[0].fixture_file] };
+      return route.fulfill({ contentType: 'text/event-stream', headers: { 'x-vercel-ai-ui-message-stream': 'v1' }, body });
+    }
+    if (url.pathname === '/api/assistant/messages') {
+      previewMessage = route.request().postDataJSON();
+      const turn = { operation_id: previewMessage.operation_id, attempt_id: previewMessage.attempt_id,
+        question: previewMessage.question, preview_file: conversationTurns[0].output_files[3],
+        answer: '已取得你正在查看的文件引用。', status: 'completed' };
+      conversationTurns.push(turn);
+      return route.fulfill({ json: { ok: true, data: { conversation_id: 'notice-fast', run_id: '', turn } } });
+    }
+    if (url.pathname.startsWith('/api/assistant/files/')) {
+      const id = url.pathname.split('/').pop();
+      if (id === '1'.repeat(32)) data = { kind: 'markdown', text: '# 运行检查报告\n\n**检查结果**：本次检查已完成。\n\n| 项目 | 状态 |\n|---|---|\n| 设备 | 正常 |' };
+      else if (id === '2'.repeat(32)) data = { kind: 'html', text: '<html><head><style>body{font-family:Arial;padding:24px}h1{color:#2364aa}</style></head><body><h1>设备检查报告</h1><p>设备运行正常</p><img src="https://example.com/forbidden-image"><script>parent.document.body.dataset.unsafe="yes"</script><a href="https://example.com/leak">外部链接</a></body></html>' };
+      else if (id === '3'.repeat(32)) data = { kind: 'text', text: 'def bubble_sort(values):\n    result = list(values)\n    for end in range(len(result) - 1, 0, -1):\n        for i in range(end):\n            if result[i] > result[i + 1]:\n                result[i], result[i + 1] = result[i + 1], result[i]\n    return result\n' };
+      else data = { kind: 'spreadsheet', sheets: [{ name: '检查表', rows: [['项目', '数量'], ['空调', '3']] }] };
+      return route.fulfill({ json: { ok: true, data } });
+    }
     if (url.pathname === '/api/notice-alert-tags' && checkTagRecovery) {
       tagReads++;
       data = { status: tagReads === 1 ? 'failed' : tagReads === 2 ? 'pending' : 'ready', action: 'update',
@@ -123,8 +148,15 @@ try {
     else if (url.pathname === '/api/scope-overview') data = { scopes: {} };
     else if (url.pathname === '/api/handover-links') data = { links: {} };
     else if (url.pathname === '/api/assistant/appearance') data = { color: 'encre', size: 56, shape: 'cercle', snap_back: true };
-    else if (url.pathname === '/api/assistant/conversation') data = { configured: true, enabled: true, conversation_id: 'notice-fast', busy: false,
-      turns: [{ operation_id: 'notice-fast', question: '发送通告', answer: '请核对通告后确认。', status: 'completed', plan: fixture.plans[reviewKind] }] };
+    else if (url.pathname === '/api/assistant/plans/continued-plan/confirm') {
+      confirmationCalls++;
+      assert.equal(route.request().postDataJSON().version, 3);
+      assert.equal(route.request().postDataJSON().stage, 'review');
+      data = { ...conversationTurns[1].plan, status: 'completed', fields: [] };
+      for (const turn of conversationTurns) turn.plan = data;
+    }
+    else if (url.pathname === '/api/assistant/conversation') data = { configured: true, enabled: true, conversation_id: 'notice-fast', busy: !!artifactRun, active_run_id: artifactRun,
+      turns: conversationTurns || [{ operation_id: 'notice-fast', question: '发送通告', answer: '请核对通告后确认。', status: 'completed', plan: fixture.plans[reviewKind] }] };
     return route.fulfill({ json: { ok: true, data } });
   });
   const page = await context.newPage();
@@ -175,6 +207,87 @@ try {
     } else { detailGate = null; releaseDetail(); await page.waitForTimeout(450); }
     assert(Math.abs(await page.locator('#detail-panel').evaluate(el => el.getBoundingClientRect().width) - before) < 1);
     assert(await page.evaluate(() => window.fixtureDrawer === document.getElementById('lite-notice-detail-overlay')), 'detail must not recreate the drawer shell');
+    const preview = page.locator('#lite-notice-preview');
+    const originalPreview = await preview.textContent();
+    assert.equal(await page.locator('#lite-preview-action').innerText(), '更新');
+    assert.equal(await preview.locator('.preview-label').first().innerText(), originalPreview.split('】')[0] + '】');
+    assert.equal(await preview.locator('.preview-title').innerText(), originalPreview.split('\n')[1]);
+    assert.equal(await page.locator('.preview-head #lite-completion-hint').count(), 0);
+    assert.equal(await page.locator('.preview-note#lite-completion-hint').count(), 1);
+    const originalAction = await page.locator('#lite-notice-form').getAttribute('data-action');
+    await page.locator('.notice-drawer-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    const previewHeight = (await preview.boundingBox()).height;
+    await preview.hover();
+    assert(Math.abs((await preview.boundingBox()).height - previewHeight) < 1, 'hover must not resize the preview');
+    await page.getByRole('button', { name: '展开全文', exact: true }).click();
+    assert.equal(await page.locator('[data-preview-toggle]').getAttribute('aria-expanded'), 'true');
+    assert.equal(await preview.textContent(), originalPreview, 'preview expansion cannot change notice text');
+    assert.equal(await page.locator('#lite-notice-form').getAttribute('data-action'), originalAction);
+    await page.getByRole('button', { name: '收起全文', exact: true }).click();
+    assert.equal(await page.locator('.form-action-buttons button[name=submit_action]').count(), 2);
+    assert.equal(await page.locator('.form-action-buttons button[data-ongoing-delete-mode]').count(), 1);
+    await page.evaluate(() => setButtonBusy(document.querySelector('.form-action-buttons button[value=end]'), true));
+    assert.equal(await page.locator('.form-action-buttons button[value=end]').evaluate(button =>
+      getComputedStyle(button, '::after').borderTopColor), 'rgb(8, 108, 67)', 'end action needs a visible loading spinner');
+    await page.evaluate(() => setButtonBusy(document.querySelector('.form-action-buttons button[value=end]'), false));
+    await page.locator('.notice-drawer-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+    for (const { width, height } of [{ width: 1280, height: 800 }, { width: 1366, height: 768 }, { width: 1920, height: 1080 }, { width: 1440, height: 1000 }]) {
+      await page.setViewportSize({ width, height });
+      await page.locator('.notice-drawer-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+      const sizing = await page.locator('.notice-submit-bar').evaluate(node => ({
+        width: node.clientWidth, content: node.scrollWidth,
+        contextWidth: node.querySelector('.notice-submit-context').getBoundingClientRect().width,
+        buttons: [...node.querySelectorAll('button')].map(button => {
+          const box = button.getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+        }),
+      }));
+      assert(sizing.content <= sizing.width + 1, `${kind} footer overflows at ${width}`);
+      assert(sizing.contextWidth >= sizing.width - 28, 'footer rows should use the available width');
+      for (const box of sizing.buttons) {
+        assert(box.left >= 0 && box.right <= width && box.top >= 0 && box.bottom <= height,
+          `${kind} footer action is clipped at ${width}x${height}`);
+      }
+      for (let i = 1; i < sizing.buttons.length; i++) {
+        assert(sizing.buttons[i].left >= sizing.buttons[i - 1].right || sizing.buttons[i].top >= sizing.buttons[i - 1].bottom);
+      }
+    }
+    await page.locator('#detail-panel').screenshot({ path: path.join(output, `footer-${kind}.png`), animations: 'disabled' });
+    if (kind === 'maintenance') {
+      const longText = Array.from({ length: 40 }, (_, index) => `第${index + 1}项：核对设备运行状态，确认本次操作内容。`).join('\n');
+      await preview.evaluate((node, text) => { node.textContent = text; }, longText);
+      const toggle = page.locator('[data-preview-toggle]');
+      await toggle.focus();
+      await toggle.press('Enter');
+      assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+      assert((await preview.boundingBox()).height > 248, 'long notice should expand beyond the compact preview');
+      assert.equal(await preview.textContent(), longText);
+      await toggle.press('Space');
+      assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+      assert((await preview.boundingBox()).height <= 248, 'keyboard collapse should restore the compact height');
+      await page.evaluate(() => {
+        const form = document.getElementById('lite-notice-form');
+        setUnuploadedSubmitButtons(form);
+      });
+      assert.equal(await page.locator('.form-action-buttons button[value=start]').count(), 1);
+      assert.equal(await page.locator('.notice-submit-toolbar #lite-job-status').count(), 1);
+      assert.equal(await page.locator('.notice-submit-context [name=actual_action_time]').count(), 1);
+      assert.equal(await page.locator('#lite-preview-action').innerText(), '开始');
+      await page.evaluate(() => {
+        const form = document.getElementById('lite-notice-form');
+        setOngoingSubmitButtons(form);
+        document.getElementById('lite-job-status').textContent = '上传未完成，填写内容已保留。'.repeat(12);
+      });
+      assert.equal(await page.locator('.form-action-buttons button[name=submit_action]').count(), 2);
+      assert.equal(await page.locator('.form-actions > button[name=submit_action]').count(), 0);
+      const fits = await page.locator('.notice-submit-bar').evaluate(node => node.scrollWidth <= node.clientWidth + 1);
+      assert(fits, 'long submission status must wrap without pushing actions outside the footer');
+      const content = '<img src=x onerror="window.previewInjected=true"> & 字段原文';
+      await page.locator('[name=content]').fill(content);
+      assert((await preview.textContent()).includes(content), 'formatted preview must preserve literal user content');
+      assert.equal(await preview.locator('img,script').count(), 0, 'preview may not render input as HTML');
+      assert.equal(await page.evaluate(() => window.previewInjected), undefined);
+    }
   }
   assert.equal(details, 6);
   await page.goto(base + '/native?kind=maintenance&source=1');
@@ -216,6 +329,12 @@ try {
     const opener = page.getByRole('button', { name: '打开灯塔助手', exact: true });
     if (await opener.count()) await opener.click();
     await page.locator('.operation-plan').waitFor();
+    try {
+      await page.waitForFunction(() => document.querySelector('.operation-plan')?.innerText.includes('作为独立通告'));
+    } catch (error) {
+      await page.screenshot({ path: path.join(output, `assistant-${kind}-review-failed.png`) });
+      throw error;
+    }
     const text = await page.locator('.operation-plan').innerText();
     for (const internal of ['building', 'location', 'notice_type', 'building_codes', 'polling_run_count', 'polling_runs']) assert(!text.includes(internal), 'raw field visible: ' + internal);
     assert(text.includes('作为独立通告'));
@@ -238,6 +357,104 @@ try {
   assert.equal(runningText, '正在上传多维');
   assert.equal(await page.locator('.plan-results > div > span').innerText(), '正在上传多维');
 
+  const continuedPlan = { id: 'continued-plan', title: '冷水机组月度维护', status: 'needs_input', version: 3,
+    fields: [{ name: 'note', label: '本次进度', type: 'text', value: '', required: true }],
+    planned_notice: { stage: 'preview', month: '10月' }, operations: [], results: [] };
+  conversationTurns = [1, 3, 2].map((version, index) => ({ operation_id: 'continued-' + index, at: index + 1,
+    question: ['发送冷水机组月度维护', 'A楼', '第二条'][index], answer: '已保留这项操作，请补充现场进度。', status: 'completed',
+    plan: { ...structuredClone(continuedPlan), version } }));
+  await page.goto(base);
+  const continuedOpener = page.getByRole('button', { name: '打开灯塔助手', exact: true });
+  if (await continuedOpener.count()) await continuedOpener.click();
+  await page.locator('.operation-plan').waitFor();
+  assert.equal(await page.locator('.operation-plan').count(), 1, 'one plan must have only one editable form');
+  assert.equal(await page.locator('.plan-reference').count(), 2);
+  assert.equal(await page.locator('.header-status').innerText(), '待你补充');
+  assert.equal(await page.getByRole('textbox', { name: '本次进度', exact: true }).count(), 1);
+  await page.getByRole('textbox', { name: '本次进度', exact: true }).fill('工程师已到场核对');
+  await page.screenshot({ path: path.join(output, 'assistant-continued-plan.png') });
+  for (const turn of conversationTurns) turn.plan.status = 'awaiting_confirmation';
+  await page.goto(base);
+  const confirmOpener = page.getByRole('button', { name: '打开灯塔助手', exact: true });
+  if (await confirmOpener.count()) await confirmOpener.click();
+  await page.getByRole('button', { name: '确认操作清单', exact: true }).waitFor();
+  assert.equal(await page.locator('.header-status').innerText(), '待你确认');
+  await page.getByRole('textbox', { name: '询问灯塔助手', exact: true }).fill('确认发送');
+  await page.getByRole('button', { name: '发送问题', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.operation-plan')?.getAttribute('data-plan-status') === 'completed');
+  assert.equal(confirmationCalls, 1, 'same-plan history must not be mistaken for multiple operations');
+  assert.equal(await page.locator('.operation-plan').count(), 1);
+  assert.equal(await page.locator('.assistant-error').count(), 0);
+  const outputs = ['检查报告.md', '检查报告.html', 'bubble_sort.py', '检查表.xlsx'].map((name, i) => {
+    const id = String(i + 1).repeat(32);
+    return { id, name, url: '/api/assistant/files/' + id, size: 512 };
+  });
+  conversationTurns = [{ operation_id: 'artifacts', question: '整理检查报告并生成文件', status: 'completed',
+    answer: '已生成文件，可查看或下载。', output_files: outputs }];
+  let externalRequests = 0;
+  await context.route('https://example.com/**', route => { externalRequests++; return route.abort(); });
+  await page.goto(base);
+  const artifactOpener = page.getByRole('button', { name: '打开灯塔助手', exact: true });
+  if (await artifactOpener.count()) await artifactOpener.click();
+  await page.getByRole('button', { name: '预览 检查报告.md', exact: true }).click();
+  await page.locator('.artifact-preview h1').waitFor();
+  await page.waitForFunction(() => !document.querySelector('.lighthouse')?.classList.contains('resizing'));
+  assert.equal(await page.locator('.artifact-preview strong').last().innerText(), '检查结果');
+  const bounds = await page.locator('.assistant-shell').evaluate(node => {
+    const chat = node.querySelector('.assistant-panel').getBoundingClientRect();
+    const preview = node.querySelector('.artifact-preview').getBoundingClientRect();
+    return { chatRight: chat.right, previewLeft: preview.left, right: preview.right, width: innerWidth };
+  });
+  assert(bounds.previewLeft >= bounds.chatRight - 1, 'file preview must be to the right of the conversation');
+  await page.screenshot({ path: path.join(output, 'assistant-artifact-markdown.png') });
+  assert(bounds.right <= bounds.width + 1, 'preview must stay inside the desktop viewport: ' + JSON.stringify(bounds));
+  await page.screenshot({ path: path.join(output, 'assistant-artifact-markdown.png') });
+  await page.getByRole('button', { name: '预览 检查报告.html', exact: true }).click();
+  const webPreview = page.frameLocator('.artifact-preview iframe');
+  await webPreview.getByRole('heading', { name: '设备检查报告' }).waitFor();
+  assert.equal(await page.getAttribute('body', 'data-unsafe'), null);
+  assert.equal(await webPreview.locator('script,a[href],meta[http-equiv=refresh]').count(), 0);
+  assert.equal(externalRequests, 0, 'generated webpage preview may not access external resources');
+  await page.getByRole('button', { name: '源码', exact: true }).click();
+  assert((await page.locator('.artifact-preview .source-text').innerText()).includes('<html>'));
+  await page.getByRole('button', { name: '预览 bubble_sort.py', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.artifact-preview .source-text')?.textContent.includes('def bubble_sort'));
+  await page.getByRole('button', { name: '预览 检查表.xlsx', exact: true }).click();
+  await page.locator('.artifact-preview table').waitFor();
+  assert.equal(await page.locator('.artifact-preview td').last().innerText(), '3');
+  await page.screenshot({ path: path.join(output, 'assistant-artifact-spreadsheet.png') });
+  await page.getByRole('textbox', { name: '询问灯塔助手', exact: true }).fill('将这个表格中的数量更正为4');
+  await page.getByRole('button', { name: '发送问题', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.assistant-rich-reply:last-of-type')?.textContent.includes('文件引用')
+    || document.querySelector('.thread')?.textContent.includes('文件引用'));
+  assert.equal(previewMessage.preview_file_id, '4'.repeat(32), 'file followup must reference the current preview');
+  assert.equal(previewMessage.file_ids.length, 0, 'preview does not silently upload a second attachment');
+  await page.getByRole('button', { name: '关闭文件预览', exact: true }).click();
+  assert.equal(await page.locator('.artifact-preview').count(), 0);
+  artifactRun = 'a'.repeat(32);
+  conversationTurns = [{ operation_id: 'artifact-interrupted', run_id: artifactRun, question: '生成代码示例',
+    status: 'pending', answer: '', output_files: [], fixture_file: outputs[2] }];
+  artifactStream = [
+    { type: 'start', messageId: 'reply_' + artifactRun },
+    { type: 'text-start', id: 'artifact-text' },
+    { type: 'data-turn', data: { operation_id: 'artifact-interrupted', run_id: artifactRun, output_files: [outputs[2]] }, transient: true },
+    { type: 'data-turn', data: { operation_id: 'artifact-interrupted', run_id: artifactRun, status: 'failed', error: '模型后续说明中断，文件已保存。' }, transient: true },
+    { type: 'text-end', id: 'artifact-text' },
+    { type: 'finish', finishReason: 'error' },
+  ].map(value => 'data: ' + JSON.stringify(value) + '\n\n').join('') + 'data: [DONE]\n\n';
+  await page.reload();
+  if (await artifactOpener.count()) await artifactOpener.click();
+  await page.getByText('模型后续说明中断，文件已保存。', { exact: true }).waitFor();
+  assert.equal(await page.locator('.output-file').count(), 1, 'a failed explanation must retain the completed file');
+  await page.getByRole('button', { name: '预览 bubble_sort.py', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.artifact-preview .source-text')?.textContent.includes('def bubble_sort'));
+  await page.screenshot({ path: path.join(output, 'assistant-artifact-interrupted.png') });
+  await page.reload();
+  if (await artifactOpener.count()) await artifactOpener.click();
+  await page.getByRole('button', { name: '预览 bubble_sort.py', exact: true }).waitFor();
+  assert.equal(await page.locator('.output-file').count(), 1, 'reloading must keep the same completed file');
+  conversationTurns = null;
+
   const shell = await context.newPage();
   shell.on('pageerror', error => errors.push(error.message));
   await shell.goto(base + '/workbench-lite?scope=A&work_type=maintenance');
@@ -247,9 +464,23 @@ try {
   await shell.locator('iframe').evaluate(el => { el.contentWindow.setLiteLocation('/workbench-lite?work_type=maintenance&scope=A&month=' + (new Date().getMonth()+1) + '%E6%9C%88&pending_page=1&ongoing_page=1', true); });
   await shell.locator('iframe').evaluate(el => { el.contentWindow.fixtureDocument = 'preserve-me'; });
   // Use the application's existing history navigation rather than reloading the document.
-  await shell.evaluate(() => { history.pushState({}, '', '/home-test'); dispatchEvent(new PopStateEvent('popstate')); });
+  const noticeExit = await shell.evaluate(async () => {
+    history.pushState({}, '', '/home-test'); dispatchEvent(new PopStateEvent('popstate'));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const frame = document.querySelector('.workbench-frame-page');
+    return { inert: frame.inert, displayed: getComputedStyle(frame).display !== 'none',
+      transitioning: frame.classList.contains('ui-page-leave-active'), duration: getComputedStyle(frame).transitionDuration };
+  });
+  assert(noticeExit.inert && noticeExit.displayed && noticeExit.transitioning, 'retained notices must fade out without accepting actions: ' + JSON.stringify(noticeExit));
+  assert(noticeExit.duration.includes('0.18s'));
   await shell.waitForFunction(() => document.querySelector('iframe')?.closest('section')?.style.display === 'none');
-  await shell.evaluate(() => { history.pushState({}, '', '/workbench-lite?scope=A&work_type=maintenance'); dispatchEvent(new PopStateEvent('popstate')); });
+  const noticeEntry = await shell.evaluate(async () => {
+    history.pushState({}, '', '/workbench-lite?scope=A&work_type=maintenance'); dispatchEvent(new PopStateEvent('popstate'));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const frame = document.querySelector('.workbench-frame-page');
+    return { inert: frame.inert, entering: frame.classList.contains('ui-page-enter-active') };
+  });
+  assert(noticeEntry.entering && !noticeEntry.inert, 'reopened cached notices must fade in and restore interaction');
   await native.locator('.ongoing-row').first().waitFor();
   assert.equal(frameLoads, 1, 'returning to notices must reuse the native document');
   assert.equal(await shell.locator('iframe').evaluate(el => el.contentWindow.fixtureDocument), 'preserve-me');
@@ -267,6 +498,24 @@ try {
   assert.equal(fragments, 1, 'the same source version never repeatedly refreshes');
   await shell.evaluate(() => { history.pushState({}, '', '/cabinet-power'); dispatchEvent(new PopStateEvent('popstate')); });
   await shell.locator('.buildings .building').nth(4).waitFor();
+  await shell.waitForTimeout(230);
+  const queryMotion = await shell.evaluate(async () => {
+    window.fixtureCabinetPage = document.querySelector('.cabinet-page');
+    history.pushState({}, '', '/cabinet-power?motion-check=1'); dispatchEvent(new PopStateEvent('popstate'));
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const animations = document.querySelector('.page-content').getAnimations();
+    return { samePage: window.fixtureCabinetPage === document.querySelector('.cabinet-page'),
+      duration: animations[0]?.effect.getTiming().duration, count: animations.length };
+  });
+  assert.deepEqual(queryMotion, { samePage: true, duration: 180, count: 1 }, 'query navigation fades without remounting a cached component');
+  await shell.emulateMedia({ reducedMotion: 'reduce' });
+  const reducedMotionCount = await shell.evaluate(async () => {
+    history.pushState({}, '', '/cabinet-power?motion-check=2'); dispatchEvent(new PopStateEvent('popstate'));
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    return document.querySelector('.page-content').getAnimations().length;
+  });
+  assert.equal(reducedMotionCount, 0, 'reduced motion cancels the active route animation');
+  await shell.emulateMedia({ reducedMotion: 'no-preference' });
   for (const width of [1366, 1440, 1920]) {
     await shell.setViewportSize({ width, height: 1000 });
     const boxes = await shell.locator('.buildings .building').evaluateAll(elements => elements.map(el => {
@@ -309,7 +558,7 @@ try {
   await offline.screenshot({ path: path.join(output, 'vpn-offline-other-page.png'), fullPage: true });
   await offline.close();
   assert.deepEqual(errors, []);
-  console.log('[NoticeFastBrowser] OK: stable local drawers, retained navigation, wide PC buildings and isolated VPN failures. No business writes.');
+  console.log('[NoticeFastBrowser] OK: stable local drawers, cached page transitions, reduced motion, wide PC buildings and isolated VPN failures. No business writes.');
 } finally {
   await browser.close();
   await new Promise(resolve => server.close(resolve));

@@ -33,7 +33,7 @@ export function rememberLoginMethod(method: 'feishu' | 'password'): void {
 }
 
 export function preferredLoginUrl(fallback = ''): string {
-  if (loginMethod === 'password') {
+  if (loginMethod === 'password' || /^\/learning\/?$/.test(window.location.pathname)) {
     const next = window.location.pathname + window.location.search;
     return `/?login=password&next=${encodeURIComponent(next)}`;
   }

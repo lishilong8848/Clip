@@ -703,6 +703,7 @@ class OpenClawRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_model_failures_are_actionable_without_exposing_provider_details(self):
         from lan_bitable_template_portal.lighthouse_stream import failure_detail
         cases = (('Model provider authentication failed', 'model_auth'),
+                 ('Inline API key for provider "lighthouse" is temporarily disabled after a provider auth/billing failure. Retry after about 1 minute', 'model_auth'),
                  ('Model provider rate limit exceeded', 'model_busy'),
                  ('Model provider model not found', 'model_request'),
                  ('Model provider timed out', 'timeout'),
@@ -1161,6 +1162,32 @@ class AgentFactoryHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def emit(self, kind, value):
         self.emit_log.append((kind, value))
+
+    async def test_asking_blocks_preparation_and_does_not_waive_confirmation(self):
+        fake_agent = FakeAgent(None)
+        await self._run_answer(lambda *_args, **_kwargs: fake_agent, '删除维修单', [])
+        for name in ('ask_business_question', 'prepare_business', 'prepare_planned_notice'):
+            self.assertTrue(fake_agent.tool_kwargs[name]['sequential'])
+        ask = fake_agent.tools['ask_business_question']
+        with self.assertRaises(ModelRetry):
+            await ask('请选择', ['候选'] * 6)
+        with self.assertRaises(ModelRetry):
+            await ask('请提供身份证号码？')
+        with self.assertRaises(ModelRetry):
+            await fake_agent.validators[0]('已删除记录。')
+        asked = await ask('请问要删除哪条维修单？')
+        self.assertEqual(asked['status'], 'needs_clarification')
+        self.assertFalse(asked['business_written'])
+        prepared = await fake_agent.tools['prepare_business']('删除维修单', [PortalOperation(api_id='POST /api/fixture-write')])
+        self.assertIn('待回答问题', prepared['error'])
+        planned = await fake_agent.tools['prepare_planned_notice']()
+        self.assertIn('待回答问题', planned['error'])
+        self.assertEqual(await fake_agent.validators[0]('已处理。'), asked['question'])
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.store.list_documents('lighthouse_agent_plans'), [])
+        self.actor = {**self.actor, 'id': 'another-account'}
+        with self.assertRaises(AssistantError):
+            await ask('请问要处理哪个楼栋？')
 
     async def test_agent_factory_preserves_scope_readonly_confirm_with_real_catalog(self):
         fake_agent = FakeAgent(None)

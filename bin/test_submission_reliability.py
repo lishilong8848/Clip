@@ -394,9 +394,16 @@ class SubmissionReliabilityTests(unittest.TestCase):
     def test_fresh_projection_uses_accepted_fields_without_remote_query(self):
         payload = {"_accepted_target_fields": {"status": "ended"}, "_accepted_target_at": time.time()}
         with patch.object(server, "query_record_by_id", side_effect=AssertionError("extra GET")):
-            ok, result = PortalRuntime._projection_record(payload, "record", "维保通告")
+            ok, result = PortalRuntime._projection_record(payload, "record", "维保通告", allow_accepted=True)
         self.assertTrue(ok)
         self.assertEqual(result["fields"], {"status": "ended"})
+
+    def test_replayed_projection_does_not_trust_persisted_write_snapshot(self):
+        payload = {"_accepted_target_fields": {"status": "ended"}, "_accepted_target_at": time.time()}
+        for response in ((True, {"fields": {"status": "active"}}), (False, "RecordIdNotFound"), (False, "offline")):
+            with self.subTest(response=response), patch.object(server, "query_record_by_id", return_value=response) as query:
+                self.assertEqual(PortalRuntime._projection_record(payload, "record", "维保通告"), response)
+                query.assert_called_once_with("record", "维保通告")
 
     def test_source_sync_failure_is_durable_secondary_work(self):
         payload = {"source_record_id": "recSource", "target_record_id": "recTarget", "work_type": "maintenance", "notice_type": "维保通告"}
@@ -407,12 +414,30 @@ class SubmissionReliabilityTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["attempts"], 1)
 
+    def test_confirmed_end_updates_both_local_sources_without_a_remote_write(self):
+        for work_type, field, records_name in (
+            ('maintenance', '维护实施状态', '_records'), ('change', '变更进度', '_change_records'),
+        ):
+            with self.subTest(work_type=work_type):
+                row = {'record_id': 'recSource', 'work_type': work_type, 'building_codes': ['A'], 'display_fields': {field: '进行中'}}
+                setattr(self.service, records_name, [row])
+                self.store.replace_source_table_snapshot(work_type, {'ALL': [row], 'A': [row]})
+                self.assertTrue(self.service.mark_notice_source_ended_locally({
+                    'source_record_id': 'recSource', 'target_record_id': 'recTarget', 'work_type': work_type,
+                }))
+                self.assertEqual(row['display_fields'][field], '已结束')
+                cached = self.store.get_source_scope_snapshot('A')['records']
+                self.assertTrue(any(item['record_id'] == 'recSource' and item['display_fields'][field] == '已结束'
+                                    for item in cached if item.get('work_type') == work_type))
+        self.assertFalse(self.service.mark_notice_source_ended_locally({'source_record_id': 'recRepair', 'work_type': 'repair'}))
+        self.service._request_payload.assert_not_called()
+
     def test_superseded_projection_reads_latest_state(self):
         payload = {"_accepted_target_fields": {"status": "ended"}, "_accepted_target_at": time.time() - 5}
         with patch.object(self.store, "list_notice_remote_operations_for_target", return_value=[
             {"operation_id": "newer", "updated_at": time.time(), "status": "completed"}
         ]), patch.object(server, "query_record_by_id", return_value=(True, {"fields": {"status": "active"}})) as query:
-            self.assertEqual(PortalRuntime._projection_record(payload, "record", "维保通告")[1]["fields"]["status"], "active")
+            self.assertEqual(PortalRuntime._projection_record(payload, "record", "维保通告", allow_accepted=True)[1]["fields"]["status"], "active")
             query.assert_called_once()
 
     def test_old_source_end_task_does_not_end_reopened_notice(self):

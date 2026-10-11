@@ -1337,6 +1337,12 @@ class FastAPIPortalController:
                     },
                     headers={"Cache-Control": "no-store"},
                 )
+            if not self._is_local_client(request):
+                session = self._current_session(request)
+                if session is None:
+                    return self._auth_required_response()
+                if not PortalRuntime.auth_manager.is_admin(session):
+                    return JSONResponse({"ok": False, "error": "只有管理员可以查看详细后端状态。"}, status_code=403)
             cached = self._read_cache_get(("health",), ttl=1.5, stale_ttl=5.0)
             if cached is not None:
                 request.state.cache_hit = True
@@ -1882,13 +1888,7 @@ class FastAPIPortalController:
             next_path = str(
                 request.query_params.get("next") or self._request_target(request)
             )
-            session_id = str(request.cookies.get(AUTH_COOKIE_NAME) or "")
-            cache_key = ("auth_status", session_id, next_path)
-            cached = self._read_cache_get(cache_key, ttl=2.0, stale_ttl=0.0)
-            if cached is not None:
-                request.state.cache_hit = True
-                return cached
-            request.state.cache_miss = True
+            # This is cheap session metadata; caching can revive a revoked identity.
             payload = {
                 "ok": True,
                 "data": PortalRuntime.auth_manager.public_status(
@@ -1897,8 +1897,9 @@ class FastAPIPortalController:
                     redirect_uri=f"{self._request_base_url(request)}/api/auth/feishu/callback",
                 ),
             }
-            self._read_cache_put(cache_key, payload, ttl=2.0, stale_ttl=0.0)
-            return self._json_response(request, session, payload)
+            response = self._json_response(request, session, payload)
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
         @app.get("/api/jobs/recent")
         async def recent_jobs(
@@ -9685,7 +9686,7 @@ class FastAPIPortalController:
         return JSONResponse(
             {
                 "ok": False,
-                "error": "请先使用飞书扫码登录。",
+                "error": "请先使用飞书或姓名密码登录。机柜只读查看也可选择访客入口。",
                 "auth_required": True,
             },
             status_code=401,
@@ -9840,15 +9841,11 @@ class FastAPIPortalController:
         path = str(request.url.path or "")
         if str(request.method or "GET").upper() not in {"GET", "HEAD"}:
             return None
-        if path == "/api/health":
-            payload = self._read_cache_get_stale(("health",))
-        elif path == "/api/auth/status":
-            next_path = str(request.query_params.get("next") or self._request_target(request))
-            payload = self._read_cache_get_stale(
-                ("auth_status", self._request_session_id(request), next_path)
-            )
-        else:
-            payload = None
+        if path != "/api/health" or request.query_params.get("probe") == "1":
+            return None
+        if not self._is_local_client(request) and not PortalRuntime.auth_manager.is_admin(self._current_session(request)):
+            return None
+        payload = self._read_cache_get_stale(("health",))
         if payload is None:
             return None
         return JSONResponse(
@@ -10548,7 +10545,8 @@ class FastAPIPortalController:
   </style>
 </head>
 <body><main><h1>飞书登录未完成</h1><p>{safe_message}</p>
-<a href="/api/auth/login?next=%2F">重新登录</a></main></body></html>"""
+<a href="/api/auth/login?next=%2F">重新登录</a>
+<a href="/?login=password" style="margin-left:8px;background:#e8f0ff;color:#155fff">返回登录页</a></main></body></html>"""
         response = Response(
             content=body.encode("utf-8"),
             status_code=400,
@@ -10678,10 +10676,15 @@ class FastAPIPortalController:
         max_bytes: int | None = None,
         reject_large_inline_images: bool = False,
     ) -> APIModel:
-        payload = await cls._read_json_request(request, max_bytes=max_bytes)
-        if reject_large_inline_images:
-            cls._reject_large_inline_images(payload)
-        return parse_api_model(model_cls, payload)
+        try:
+            payload = await cls._read_json_request(request, max_bytes=max_bytes)
+            if reject_large_inline_images:
+                cls._reject_large_inline_images(payload)
+            return parse_api_model(model_cls, payload)
+        except ValueError as exc:
+            error = PortalError(str(exc))
+            error.status_code = 400
+            raise error from exc
 
     @staticmethod
     def _reject_large_inline_images(payload: Any) -> None:

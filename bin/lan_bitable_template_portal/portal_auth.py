@@ -130,20 +130,27 @@ class PortalAuthManager:
     @staticmethod
     def _normalize_next_path(next_path: str) -> str:
         text = str(next_path or "/").strip()
-        if not text.startswith("/") or text.startswith("//"):
-            return "/"
-        parts = urlsplit(text)
-        path = parts.path or "/"
-        if path.startswith("/api/"):
-            return "/"
-        query = urlencode(
-            [
-                (key, value)
-                for key, value in parse_qsl(parts.query, keep_blank_values=True)
-                if key not in {"code", "state"}
-            ]
-        )
-        return urlunsplit(("", "", path, query, parts.fragment)) or "/"
+        for _ in range(5):
+            if (not text.startswith("/") or text.startswith("//") or "\\" in text
+                    or any(ord(char) < 32 or ord(char) == 127 for char in text)):
+                return "/"
+            try:
+                parts = urlsplit(text)
+            except ValueError:
+                return "/"
+            path = parts.path or "/"
+            if parts.netloc or parts.scheme or path.startswith("/api/"):
+                return "/"
+            pairs = parse_qsl(parts.query, keep_blank_values=True)
+            query = dict(pairs)
+            # OAuth selected from the password entry should return to the original page.
+            if path == "/" and query.get("login") == "password" and query.get("next"):
+                text = query["next"].strip()
+                continue
+            query_text = urlencode([(key, value) for key, value in pairs if key not in {"code", "state"}
+                                    and not (path == "/" and key == "login" and value == "password")])
+            return urlunsplit(("", "", path, query_text, parts.fragment)) or "/"
+        return "/"
 
     @staticmethod
     def normalize_scope(scope: Any) -> str:

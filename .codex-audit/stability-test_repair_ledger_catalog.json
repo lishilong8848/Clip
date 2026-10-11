@@ -1,10 +1,10 @@
 {
   "group": "test_repair_ledger_catalog",
   "modules": 1,
-  "tests": 27,
+  "tests": 32,
   "failures": [],
   "errors": [],
   "skipped": 0,
-  "seconds": 4.6,
+  "seconds": 1.7,
   "external_connections_blocked": 0
 }

@@ -358,6 +358,55 @@ class PollingWorkOrderTests(unittest.TestCase):
         authorize.assert_called_once_with({"user": {"open_id": "ou_test"}}, "A")
         manager.get_group.assert_called_once_with("rec-delay")
 
+    def test_finished_execution_does_not_wait_for_attachment_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            for work_type in ("maintenance", "polling", "adjust"):
+                for state in ("upload_pending", "completed"):
+                    for attachments in ([], [{"file_token": "old-token"}]):
+                        with self.subTest(work_type=work_type, state=state, attachments=attachments):
+                            store.put_document("polling_work_order", "rec-finished", {
+                                "work_type": work_type, "state": state,
+                                "uploaded_file_tokens": ["new-token"],
+                                "last_error": "工单1第31步缺少操作照片。",
+                            })
+                            with patch.object(PortalRuntime, "polling_work_orders", return_value=service):
+                                self.assertEqual(PortalRuntime._work_order_end_error(
+                                    target_record_id="rec-finished", work_type=work_type,
+                                    fields={"是否涉及重要操作": True, "工单附件": attachments},
+                                ), "")
+
+    def test_end_guard_rejects_unfinished_missing_and_wrong_type_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            groups = [None, {"work_type": "polling", "state": "completed"}]
+            groups.extend({"work_type": "maintenance", "state": state}
+                          for state in ("active", "cancelled", "stopped"))
+            for index, group in enumerate(groups):
+                with self.subTest(group=group):
+                    target = f"rec-blocked-{index}"
+                    if group:
+                        store.put_document("polling_work_order", target, group)
+                    with patch.object(PortalRuntime, "polling_work_orders", return_value=service):
+                        self.assertTrue(PortalRuntime._work_order_end_error(
+                            target_record_id=target, work_type="maintenance",
+                            fields={"是否涉及重要操作": True},
+                        ))
+
+    def test_pending_workbook_survives_notice_end_but_not_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            target = "rec-pending-file"
+            store.put_document("polling_work_order", target, {"state": "upload_pending"})
+            service.cancel_group(target, reason="target_terminal")
+            self.assertEqual(service.get_group(target)["state"], "upload_pending")
+            self.assertEqual(len(service.pending_upload_groups()), 1)
+            service.cancel_group(target, reason="target_deleted")
+            self.assertEqual(service.get_group(target)["state"], "cancelled")
+
     def test_reminder_retry_reuses_message_uuid_per_recipient(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = LanPortalStateStore(Path(temp) / "state.sqlite3")
@@ -907,6 +956,28 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(session["steps"][1]["photo_required"], True)
             with self.assertRaisesRegex(Exception, "请先拍摄并上传"):
                 service.confirm(token, step_key="1:2", expected_version=session["version"])
+            session = service.add_step_photo(
+                token, step_key="1:2", expected_version=session["version"],
+                file_name="step.png", mime_type="image/png", content=_png_bytes(),
+            )
+            session = service.confirm(token, step_key="1:2", expected_version=session["version"])
+            self.assertEqual(session["state"], "upload_pending")
+            from openpyxl import load_workbook
+
+            workbook_info = service.build_execution_workbook("recPhotoRule")
+            workbook = load_workbook(workbook_info["path"])
+            try:
+                self.assertEqual(workbook.active["D9"].value, "无需拍照步骤")
+                self.assertEqual(len(workbook.active._images), 2)  # Logo and required-step photo.
+            finally:
+                workbook.close()
+
+            stored = service.get_group("recPhotoRule")
+            stored["steps"][1]["photos"] = []
+            service.state_store.put_document("polling_work_order", "recPhotoRule", stored)
+            Path(workbook_info["path"]).unlink()
+            with self.assertRaisesRegex(Exception, "第2步缺少操作照片"):
+                service.build_execution_workbook("recPhotoRule")
 
     def test_maintenance_and_polling_isolate_sops_and_build_generic_work_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1160,7 +1231,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(fields["操作人"], "操作员")
         self.assertEqual(fields["现场复核人"], "审核员")
 
-    def test_maintenance_end_uses_same_exact_attachment_guard(self) -> None:
+    def test_maintenance_end_allows_completed_work_order_with_pending_attachment(self) -> None:
         prepared = {
             "action": "end",
             "work_type": "maintenance",
@@ -1173,9 +1244,10 @@ class PollingWorkOrderTests(unittest.TestCase):
         manager = MagicMock()
         manager.get_group.return_value = {
             "work_type": "maintenance",
-            "state": "completed",
+            "state": "upload_pending",
             "uploaded_file_tokens": ["expected-token"],
         }
+        manager.end_delay_status.return_value = {"ready": True}
         with patch.object(
             portal_server,
             "external_real_write_guard",
@@ -1194,12 +1266,24 @@ class PollingWorkOrderTests(unittest.TestCase):
                     }
                 },
             ),
-        ), patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+        ), patch.object(PortalRuntime, "polling_work_orders", return_value=manager), patch.object(
+            PortalRuntime, "_create_backend_undo_checkpoint", return_value=""
+        ), patch.object(
+            PortalRuntime, "_upload_extra_images_for_notice", return_value=(True, "", [], [])
+        ), patch.object(
+            PortalRuntime, "_upload_change_confirmation_images", return_value=(True, "", [], [])
+        ), patch.object(
+            PortalRuntime, "_stage_notice_robot_delivery"
+        ), patch.object(
+            PortalRuntime, "_mark_local_notice_images_target_written"
+        ), patch.object(
+            portal_server, "update_bitable_record_by_payload", return_value=(True, "recMaintenanceEnd")
+        ) as update:
             ok, message, _record_id = PortalRuntime._execute_backend_prepared_upload(
                 prepared
             )
-        self.assertFalse(ok)
-        self.assertIn("维保工单附件与本次完成记录不一致", message)
+        self.assertTrue(ok, message)
+        update.assert_called_once()
 
     def test_qt_maintenance_end_is_blocked_by_shared_work_order_guard(self) -> None:
         manager = MagicMock()
@@ -1255,7 +1339,9 @@ class PollingWorkOrderTests(unittest.TestCase):
             service, "_load_raw_table_fields", side_effect=[before, after]
         ), patch.object(
             service, "_request_payload", return_value={"code": 0, "msg": "ok"}
-        ) as create, patch.object(service, "_auth_headers", return_value={}):
+        ) as create, patch.object(service, "_auth_headers", return_value={}), patch.object(
+            portal_server.config, "app_token", "fixture-app"
+        ), patch.object(portal_server.config, "table_id_weibao", "fixture-table"):
             first = service.ensure_maintenance_work_order_schema()
             second = service.ensure_maintenance_work_order_schema()
         self.assertEqual(first["created_fields"], ["工单附件"])
@@ -1362,6 +1448,8 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("取消当前选择", overview)
         self.assertIn("/api/polling-work-orders/release", overview)
         self.assertIn("全部工单已完成，工单表格已上传。", overview)
+        self.assertIn("全部工单已完成，表格正在后台上传。", overview)
+        self.assertIn("全部工单已完成，表格上传待重试：", overview)
 
         self.assertIn('id="steps"', steps)
         self.assertNotIn('id="overview"', steps)
@@ -1402,6 +1490,80 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(overview_response.status_code, 200)
         self.assertEqual(steps_response.status_code, 200)
         self.assertNotEqual(overview_response.text, steps_response.text)
+
+    def test_frontend_completion_gate_and_upload_status(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        overview = render_polling_work_order_page()
+        workbench = render_workbench_lite(
+            payload={"records": [], "ongoing": []}, session={"role": "admin"},
+            scope="A", work_type="maintenance",
+        )
+        scripts = [script for page in (overview, workbench, render_polling_work_order_steps_page())
+                   for script in re.findall(r"<script[^>]*>(.*?)</script>", page, re.S)]
+        gate_start = "const groupId=targetForm.querySelector('[data-polling-group-id]')"
+        gate = gate_start + workbench.split(gate_start, 1)[1].split(
+            "buttons.forEach(button => button.disabled = false);", 1
+        )[0]
+        render = re.search(r"function render\(data\).*", overview).group(0)
+        script = "\n".join([
+            "const assert=require('node:assert/strict');",
+            f"for(const source of {json.dumps(scripts)}) new Function(source);",
+            "function evaluate(state,details={}){const buttons=[{disabled:false}];",
+            "const action='end',workType='maintenance',targetForm={querySelector:()=>({getAttribute:()=>'rec-test'})};",
+            "const litePollingDelayCache=new Map([['rec-test',{data:{state,...details}}]]);",
+            "const refreshPollingDelayStatus=()=>{},setActionReason=()=>{};",
+            "function run(){", gate, "}run();return buttons[0].disabled;}",
+            "for(const state of ['completed','upload_pending'])assert.equal(evaluate(state),false);",
+            "for(const state of ['active','cancelled','stopped'])assert.equal(evaluate(state),true);",
+            "assert.equal(evaluate('upload_pending',{due_at_ts:Date.now()/1000+60}),true);",
+            "assert.equal(evaluate('upload_pending',{missing_completion:true}),true);",
+            "let current=null,timer=0,message='';const document={},nodes=new Map();",
+            "const q=id=>{if(!nodes.has(id))nodes.set(id,{replaceChildren(){}});return nodes.get(id)};",
+            "const workOrderCard=()=>{},status=text=>message=text;",
+            render,
+            "render({state:'upload_pending'});assert.match(message,/全部工单已完成/);assert.equal(q('retry').hidden,false);",
+            "render({state:'upload_pending',last_error:'fixture timeout'});assert.match(message,/待重试：fixture timeout/);",
+            "render({state:'completed'});assert.match(message,/工单表格已上传/);assert.equal(q('retry').hidden,true);",
+        ])
+        result = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_work_order_link_copy_supports_http_and_manual_fallback(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        html = render_workbench_lite(payload={"records": [], "ongoing": []}, session={"role": "admin"}, scope="A", work_type="maintenance")
+        helper = "async function copyPollingWorkOrderLink" + html.split(
+            "async function copyPollingWorkOrderLink", 1
+        )[1].split("async function pollingApi", 1)[0]
+        script = r'''
+const assert=require('node:assert/strict');
+let temporary=[],manual=null,message='',copiedText='',allow=true,focused=0;
+const link='http://intranet/polling-work-order?token=fixture&role=reviewer';
+const container={querySelector:()=>manual,append:node=>manual=node};
+const button={getAttribute:()=>link,closest:()=>container};
+const document={activeElement:{focus(){focused++}},body:{append:node=>temporary.push(node)},
+  createElement(tag){return {style:{},value:'',setAttribute(){},focus(){},select(){this.selected=true},
+    remove(){if(this===manual)manual=null;temporary=temporary.filter(node=>node!==this)}}},
+  execCommand(name){assert.equal(name,'copy');copiedText=temporary[0].value;return allow}};
+const navigator={},setLiteStatus=text=>message=text;
+''' + helper + r'''
+(async()=>{
+ await copyPollingWorkOrderLink(button);
+ assert.equal(copiedText,link);assert.equal(temporary.length,0);assert.equal(focused,1);assert.match(message,/已复制/);
+ navigator.clipboard={writeText:async()=>{throw Error('denied')}};
+ await copyPollingWorkOrderLink(button);assert.equal(temporary.length,0);assert.match(message,/已复制/);
+ allow=false;await copyPollingWorkOrderLink(button);
+ assert.equal(manual.value,link);assert.equal(manual.selected,true);assert.equal(temporary.length,0);assert.match(message,/Ctrl\+C/);
+ navigator.clipboard={writeText:async text=>{copiedText=text}};
+ await copyPollingWorkOrderLink(button);assert.equal(manual,null);assert.match(message,/已复制/);
+ await assert.rejects(()=>copyPollingWorkOrderLink({getAttribute:()=>''}),/尚未生成/);
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run([node, "-"], input=script, capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_polling_step_photo_api_accepts_image_and_serves_preview(self) -> None:
         manager = MagicMock()
@@ -1710,7 +1872,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("const peopleError=await peoplePromise", open_source)
         self.assertIn("Date.now()-cached.loadedAt<60000", html)
 
-    def test_polling_end_is_blocked_before_write_until_work_order_attachment_exists(self) -> None:
+    def test_polling_end_is_blocked_when_local_work_order_is_missing(self) -> None:
         prepared = {
             "action": "end",
             "work_type": "polling",
@@ -1719,7 +1881,9 @@ class PollingWorkOrderTests(unittest.TestCase):
             "target_record_id": "recTarget1",
             "text": "【设备轮巡】状态：结束\n【标题】轮巡测试",
         }
-        with patch.object(
+        manager = MagicMock()
+        manager.get_group.return_value = None
+        with patch.object(PortalRuntime, "polling_work_orders", return_value=manager), patch.object(
             portal_server,
             "external_real_write_guard",
             return_value={"mock_external": False, "real_write_allowed": True, "reason": ""},
@@ -1742,9 +1906,9 @@ class PollingWorkOrderTests(unittest.TestCase):
                 prepared
             )
         self.assertFalse(ok)
-        self.assertIn("尚未全部完成", message)
+        self.assertIn("无法核验轮巡工单完成状态", message)
 
-    def test_polling_end_requires_completed_local_group_and_exact_attachment(self) -> None:
+    def test_polling_end_requires_completed_execution_even_with_remote_attachment(self) -> None:
         prepared = {
             "action": "end",
             "work_type": "polling",
@@ -1755,7 +1919,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         }
         manager = MagicMock()
         manager.get_group.return_value = {
-            "state": "completed",
+            "state": "active",
             "uploaded_file_tokens": ["expected-workbook-token"],
         }
         with patch.object(
@@ -1785,7 +1949,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                 prepared
             )
         self.assertFalse(ok)
-        self.assertIn("与本次完成记录不一致", message)
+        self.assertIn("尚未全部完成", message)
 
     def test_exempt_polling_start_preserves_target_identity(self) -> None:
         for target, update_ok in (("", True), ("recTarget1", True), ("recTarget1", False)):
@@ -3289,6 +3453,64 @@ class PollingWorkOrderTests(unittest.TestCase):
                 ],
             )
             self.assertNotIn("操作照片", patches[0])
+
+    def test_finalize_pending_workbook_after_notice_end_and_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            manager = PollingWorkOrderService(store)
+            target = "rec-ended-upload"
+            store.put_document("polling_work_order", target, {
+                "work_type": "polling", "state": "upload_pending",
+            })
+            fields = {"轮巡状态": "结束", "工单附件": [{"file_token": "old-file"}]}
+
+            def patch_fields(_record_id, _notice_type, values):
+                fields.update(values)
+                return True, target
+
+            with patch.object(PortalRuntime, "polling_work_orders", return_value=manager), patch.object(
+                PortalRuntime, "_acquire_event_operation_lock", return_value=("key", "owner", "")
+            ), patch.object(PortalRuntime, "_release_event_operation_lock"), patch.object(
+                portal_server, "query_record_by_id", side_effect=lambda *a: (True, {"fields": dict(fields)})
+            ), patch.object(
+                manager, "build_execution_workbook",
+                return_value={"path": "unused.xlsx", "name": "工单.xlsx", "sha256": "test-digest"},
+            ), patch.object(
+                PortalRuntime.service, "_upload_bitable_file", side_effect=[RuntimeError("fixture timeout"), "new-file"]
+            ) as upload, patch.object(
+                portal_server, "update_bitable_record_fields", side_effect=patch_fields
+            ) as update:
+                first = PortalRuntime.finalize_polling_work_order_group(target)
+                self.assertFalse(first["ok"])
+                self.assertEqual(manager.get_group(target)["state"], "upload_pending")
+                update.assert_not_called()
+                retry = PortalRuntime.finalize_polling_work_order_group(target)
+                self.assertTrue(retry["ok"], retry)
+                self.assertEqual(manager.get_group(target)["state"], "completed")
+                self.assertTrue(PortalRuntime.finalize_polling_work_order_group(target)["ok"])
+                self.assertEqual(upload.call_count, 2)
+                update.assert_called_once()
+                self.assertEqual(fields["轮巡状态"], "结束")
+                self.assertEqual(fields["工单附件"], [{"file_token": "old-file"}, {"file_token": "new-file"}])
+
+    def test_finalize_does_not_upload_for_invalidated_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            manager = PollingWorkOrderService(LanPortalStateStore(Path(temp) / "state.sqlite3"))
+            target = "rec-invalidated-upload"
+            manager.state_store.put_document("polling_work_order", target, {
+                "work_type": "polling", "state": "upload_pending",
+            })
+            with patch.object(PortalRuntime, "polling_work_orders", return_value=manager), patch.object(
+                PortalRuntime, "_acquire_event_operation_lock", return_value=("key", "owner", "")
+            ), patch.object(PortalRuntime, "_release_event_operation_lock"), patch.object(
+                portal_server, "query_record_by_id", return_value=(True, {"fields": {}})
+            ), patch.object(
+                PortalRuntime.service, "_target_record_lifecycle", return_value={"active": False, "finished": False}
+            ), patch.object(manager, "build_execution_workbook") as build:
+                result = PortalRuntime.finalize_polling_work_order_group(target)
+            self.assertEqual(result["state"], "cancelled")
+            self.assertEqual(manager.get_group(target)["state"], "cancelled")
+            build.assert_not_called()
 
     def test_local_notice_image_survives_store_reload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -1,3 +1,8 @@
+@view-transition { navigation: auto; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 180ms; }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 0.01ms !important; }
+}
 #page-navigation.topbar { position: relative; z-index: var(--cf-z-topbar, 40); }
 #page-navigation:is(.app-topbar, .topbar) { border-bottom-color: transparent; box-shadow: none; }
 #page-navigation.topbar { --cf-header-surface: #eaf3ff; }

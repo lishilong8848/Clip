@@ -62,6 +62,15 @@ class CommandsTests(unittest.TestCase):
         self.assertFalse(found['items'][0]['read_only'])
         self.assertEqual(self.catalog.rows[1]['name'], '更新维修单')
 
+    def test_company_knowledge_is_an_explicit_searchable_builtin_skill(self):
+        found = commands.commands(self.store, ACTOR, self.catalog, keyword='公司知识库')
+        self.assertEqual(found['items'][0]['id'], 'company-knowledge')
+        selected, context = commands.resolve(self.store, ACTOR, self.catalog,
+            [{'kind': 'skill', 'id': 'company-knowledge'}])
+        self.assertEqual(selected[0]['label'], '公司知识库')
+        self.assertIn('本轮', context[0]['content'])
+        self.assertFalse(found['items'][0]['removable'])
+
     def test_guide_snapshot_survives_delete_but_cannot_reselect(self):
         item = SharedSkills(self.store).install(ACTOR, 'SKILL.md', GUIDE)
         selected, context = commands.resolve(self.store, ACTOR, self.catalog, [{'kind': 'skill', 'id': item['name']}])

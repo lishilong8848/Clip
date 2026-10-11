@@ -46,7 +46,8 @@ const emit = defineEmits<{ 'update:modelValue': [Dict[]]; 'update:draft': [strin
 const kind = ref('skills'), group = ref(''), page = ref(1), total = ref(0), active = ref(0);
 const items = ref<Dict[]>([]), groups = ref<string[]>([]), loading = ref(false), error = ref(''), selectionError = ref('');
 const list = ref<HTMLElement | null>(null), dismissed = ref<string | null>(null);
-const match = computed(() => /(?:^|\n)\/([^\n]*)$/.exec(props.draft));
+const match = computed(() => /^\s*\/公司知识库[\s:：,，]+\S/.test(props.draft)
+  ? null : /(?:^|\n)\/([^\n]*)$/.exec(props.draft));
 const query = computed(() => match.value?.[1].trim() || '');
 const visible = computed(() => !!match.value && dismissed.value !== props.draft);
 const pages = computed(() => Math.max(1, Math.ceil(total.value / 20)));

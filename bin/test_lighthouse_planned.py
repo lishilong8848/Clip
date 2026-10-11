@@ -15,6 +15,7 @@ from openclaw_service.assistant.lighthouse_ai import LighthouseAssistant, Assist
 from openclaw_service.assistant.lighthouse_agent import PortalAgent
 from openclaw_service.assistant.lighthouse_api import PortalAPICatalog
 from openclaw_service.assistant.lighthouse_files import LighthouseFiles
+from openclaw_service.assistant.lighthouse_stream import LighthouseStream
 from openclaw_service.assistant import lighthouse_planned as workflow
 from test_lighthouse_notice_workflows import VALID_STARTS
 from test_lighthouse_notice_binding import make_request
@@ -216,9 +217,63 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
         state["turns"] = [{"operation_id": self.turn["operation_id"], "question": "发送冷水机组月度维护", "status": "completed", "plan": plan}]
         self.store.put_document("lighthouse_ai", self.assistant._key(admin), state)
         result = await workflow.continue_selection(self.agent, admin, "A楼", self.request)
-        self.assertIn("已更新", result)
+        self.assertIn("已更新", result['answer'])
         saved = self.agent.get_plan(admin, plan["id"])
         self.assertEqual(saved["_planned"]["stage"], "preview")
+        self.assertEqual(self.writes, [])
+
+    async def test_stream_scope_and_candidate_replies_preserve_preview_in_both_channels(self):
+        self.rows.append(self.row("source-2"))
+        runtime = LighthouseStream(self.agent)
+        self.addAsyncCleanup(runtime.close)
+        for channel in ('', 'feishu:oc_fixture'):
+            actor = {**self.actor, 'is_admin': True, 'channel': channel}
+
+            async def authorize():
+                return copy.deepcopy(actor)
+
+            async def submit(question, index):
+                state = self.assistant._state(actor)
+                await runtime.submit(actor, {'question': question, 'conversation_id': state['id'],
+                    'operation_id': f'planned-stream-{index:016d}'}, self.request, authorize)
+                await asyncio.wait_for(asyncio.gather(*runtime.workers.values()), 8)
+                latest = (await runtime.conversation(actor))['turns'][-1]
+                self.assertEqual(latest['status'], 'completed', latest.get('error'))
+                return latest
+
+            with self.subTest(channel=channel):
+                first = await submit('发送冷水机组月度维护', 1)
+                self.assertEqual(first['plan']['planned_notice']['stage'], 'scope')
+                second = await submit('A楼', 2)
+                self.assertEqual(second['plan']['planned_notice']['stage'], 'candidate')
+                invalid = await submit('第9条', 3)
+                self.assertIn('没有这个候选', invalid['answer'])
+                self.assertEqual(invalid['plan']['id'], first['plan']['id'])
+                third = await submit('第二条', 4)
+                self.assertEqual(third['plan']['id'], first['plan']['id'])
+                self.assertEqual(third['plan']['planned_notice']['stage'], 'preview')
+                saved = self.agent.get_plan(actor, third['plan']['id'])
+                self.assertEqual(saved['operations'][0]['body']['source_record_id'], 'source-2')
+                self.assertEqual(saved['status'], 'needs_input')
+                self.assertEqual(self.writes, [])
+
+    async def test_scope_reply_without_pending_plan_does_not_crash(self):
+        state = self.assistant._state(self.actor)
+        state['turns'] = [{'question': '你好', 'plan': None}, {'question': 'A楼', 'plan': None}]
+        self.store.put_document('lighthouse_ai', self.assistant._key(self.actor), state)
+        self.assertIsNone(await workflow.continue_selection(self.agent, self.actor, 'A楼', self.request))
+
+    async def test_new_unrelated_message_still_invalidates_unsubmitted_selection(self):
+        admin = {**self.actor, 'is_admin': True}
+        plan = await self.begin(actor=admin)
+        state = self.assistant._state(admin)
+        state['turns'] = [{'operation_id': self.turn['operation_id'], 'question': '发送冷水机组月度维护',
+                          'status': 'completed', 'plan': plan}]
+        self.store.put_document('lighthouse_ai', self.assistant._key(admin), state)
+        runtime = LighthouseStream(self.agent)
+        self.addAsyncCleanup(runtime.close)
+        runtime._accept(admin, {'conversation_id': state['id'], 'operation_id': 'different-request-0001', 'question': '先不发了，查看维修单'})
+        self.assertEqual(self.agent.get_plan(admin, plan['id'])['status'], 'cancelled')
         self.assertEqual(self.writes, [])
 
     async def test_clear_conversation_invalidates_unsubmitted_selection(self):

@@ -2719,7 +2719,7 @@ class PollingWorkOrderService:
                         for item in step.get("photos") or []
                         if isinstance(item, dict)
                     ]
-                    if not photos:
+                    if not photos and self._step_photo_required(step):
                         raise PortalError(
                             f"工单{run_index}第{step_offset + 1}步缺少操作照片。"
                         )
@@ -2951,6 +2951,9 @@ class PollingWorkOrderService:
             except PortalNotFoundError:
                 return
             if str(group.get("state") or "") in {"cancelled", "stopped"}:
+                return
+            # Ending the notice must not discard an already completed work order's pending file.
+            if reason == "target_terminal" and group.get("state") == "upload_pending":
                 return
             group.update(
                 {

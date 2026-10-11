@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from urllib.parse import urlencode
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,30 @@ def auth_test_directory():
 
 
 class PortalAuthPersistenceTests(unittest.TestCase):
+    def test_login_return_path_rejects_external_and_browser_normalized_paths(self):
+        for value in ('https://outside.test', '//outside.test', '/\\outside.test', '/\t/outside.test',
+                      '/\n/outside.test', '/api/auth/logout', '/api/auth/login'):
+            with self.subTest(value=value):
+                self.assertEqual(PortalAuthManager._normalize_next_path(value), '/')
+                self.assertEqual(PortalAuthManager._normalize_next_path(
+                    '/?' + urlencode({'login': 'password', 'next': value})), '/')
+
+    def test_login_entry_unwraps_original_page_for_password_and_oauth(self):
+        target = '/workbench-lite?scope=E&work_type=maintenance'
+        for _ in range(3):
+            target = '/?' + urlencode({'login': 'password', 'next': target})
+        self.assertEqual(PortalAuthManager._normalize_next_path(target), '/workbench-lite?scope=E&work_type=maintenance')
+        self.assertEqual(PortalAuthManager._normalize_next_path('/?login=password'), '/')
+        self.assertEqual(PortalAuthManager._normalize_next_path('/learning?code=fixture&state=fixture&scope=A#today'), '/learning?scope=A#today')
+
+    def test_oauth_failure_offers_password_entry_and_escapes_error(self):
+        from clipflow_backend.main import FastAPIPortalController
+        body = FastAPIPortalController._auth_failure_page('<script>fixture</script>').body.decode('utf-8')
+        self.assertIn('href="/?login=password"', body)
+        self.assertIn('返回登录页', body)
+        self.assertIn('&lt;script&gt;fixture&lt;/script&gt;', body)
+        self.assertNotIn('<script>fixture</script>', body)
+
     def test_oauth_state_survives_restart_and_is_consumed_once(self):
         with auth_test_directory() as tmp:
             root = Path(tmp)

@@ -346,6 +346,15 @@ async def run(account_count=20, *, compaction=False, replay=False, faults=False,
                 finally:
                     fault_phase['enabled'] = False
                 assert len(tool_calls) == callback_count, 'Failed model unexpectedly called a business tool'
+                failed_request_count = len(requests)
+                agents[0].turn = {'operation_id': 'retry-during-provider-auth-cooldown'}
+                try:
+                    await asyncio.wait_for(answer(agents[0]), 65)
+                    raise AssertionError('Native provider-auth cooldown was not enforced')
+                except AssistantError as exc:
+                    assert exc.category == 'model_auth' and '冷却' in str(exc), 'Cooldown remained an undiagnosed error'
+                assert len(requests) == failed_request_count and len(tool_calls) == callback_count, 'Cooldown retried a provider or business tool'
+                print('[SharedGateway] provider-auth cooldown is actionable without repeated provider/tool calls PASS', flush=True)
                 agents[1].turn = {'operation_id': 'after-other-account-auth-failure'}
                 await answer(agents[1])
                 assert manager.gateway['process'].pid == pid
@@ -356,8 +365,22 @@ async def run(account_count=20, *, compaction=False, replay=False, faults=False,
             await asyncio.to_thread(manager._terminate_startup_process, manager.gateway['process'])
             agents[0].turn = {'operation_id': 'after-gateway-restart'}
             await agents[0].warmup()
-            await answer(agents[0], 'MEMORY-PROBE Call query_owner and recall the original memory.'
-                         if compaction else 'Call query_owner and answer briefly.')
+            recovery_deadline = time.monotonic() + 90
+            recovery_attempt = 0
+            while True:
+                try:
+                    await answer(agents[0], 'MEMORY-PROBE Call query_owner and recall the original memory.'
+                                 if compaction else 'Call query_owner and answer briefly.')
+                    break
+                except AssistantError as exc:
+                    # The prior fault deliberately injected HTTP 401; its native cooldown survives restart.
+                    if not faults or exc.category != 'model_auth' or '冷却' not in str(exc) or time.monotonic() >= recovery_deadline:
+                        raise
+                    if not recovery_attempt:
+                        print('[SharedGateway] expected provider-auth cooldown is actionable; waiting before same-account recovery', flush=True)
+                    await asyncio.sleep(10)
+                    recovery_attempt += 1
+                    agents[0].turn = {'operation_id': f'after-auth-cooldown-{recovery_attempt}'}
             assert manager.gateway['process'].pid != pid
             if legacy_state:
                 assert native_launches == [str(manager.root / 'shared-gateway'), str(manager.root)]

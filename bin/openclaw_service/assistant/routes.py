@@ -338,8 +338,16 @@ def install_assistant_routes(app, host):
                     media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "x-vercel-ai-ui-message-stream": "v1"})
             if action.startswith("files/"):
                 current_agent = await ready_agent()
-                item = await asyncio.to_thread(current_agent.files.get, actor, action.split("/")[1])
-                return FileResponse(item["path"], media_type=item["mime"], filename=item["name"], content_disposition_type="inline" if item["mime"].startswith("image/") else "attachment", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+                identity = action.split("/")[1]
+                if request.query_params.get('preview') == '1':
+                    from .lighthouse_artifacts import preview_file, document_task
+                    data = await document_task(preview_file, current_agent.files, actor, identity)
+                    return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
+                item = await asyncio.to_thread(current_agent.files.get, actor, identity)
+                if request.query_params.get('metadata') == '1':
+                    return JSONResponse({'ok': True, 'data': current_agent.files.public(item)}, headers={'Cache-Control': 'private, no-store'})
+                inline = item['mime'].startswith('image/') or item['mime'] == 'application/pdf' and request.query_params.get('inline') == '1'
+                return FileResponse(item["path"], media_type=item["mime"], filename=item["name"], content_disposition_type="inline" if inline else "attachment", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
             if action == "capabilities":
                 current_agent = await ready_agent()
                 data = current_agent.catalog.discover(keyword=str(request.query_params.get("keyword", "")), group=str(request.query_params.get("group", "")), page=request.query_params.get("page", 1), page_size=request.query_params.get("page_size", 30))

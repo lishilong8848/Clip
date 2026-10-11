@@ -317,6 +317,21 @@ class SnapshotFallbackTests(unittest.TestCase):
         with self.kb.connect() as db:
             return self.kb._vector_revision(db)
 
+    def test_vector_query_failure_preserves_keyword_search(self):
+        doc = self.kb.upload(self.admin, *_text("公司报销流程", "报销.txt"))["id"]
+        self.assertTrue(self.kb.process_one())
+        for failure in (RuntimeError('fixture runtime'), ValueError('fixture vector'), OSError('fixture engine')):
+            with self.subTest(failure=type(failure).__name__), patch.object(
+                self.kb._snapshot, 'search', side_effect=failure
+            ), self.assertLogs(level='ERROR'):
+                result = self.kb.search(actor(), '公司报销流程')
+            self.assertEqual(result['mode'], 'keyword')
+            self.assertFalse(result['indexready'])
+            self.assertIn('关键词结果', result['warning'])
+            self.assertEqual(result['items'][0]['document_id'], doc)
+            self.assertEqual(result['items'][0]['matches'], ['keyword'])
+        self.assertEqual(self.kb.search(actor(), '公司报销流程')['mode'], MODE)
+
     def test_snapshot_rebuild_failure_falls_back_to_keyword_without_crash(self):
         doc = self.kb.upload(self.admin, *_text("公司报销流程", "报销.txt"))["id"]
         self.assertTrue(self.kb.process_one())

@@ -144,6 +144,45 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.answer.await_count, 1)
         self.assertEqual(self.channel.inbox.owners(), [])
 
+    async def test_stopped_attachment_reply_retains_distinct_notice_until_delivery(self):
+        message = parse_message(event(message_id='filestopped'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        reply = {'text': '文件已经生成', 'actor_id': 'fixture', 'conversation_id': 'same',
+                 'sent_parts': ['answer:0'], 'files': [{'id': 'a' * 32, 'file_key': 'old_key'}]}
+        self.channel.inbox.set(message['message_id'], 'reply', reply)
+        self.channel.answer = AsyncMock()
+        self.channel._prepare_reply_files = AsyncMock(side_effect=AssistantError('文件权限失效', 403))
+        self.channel.messenger = SimpleNamespace(send=AsyncMock())
+        await self.channel._drain(message['union_id'])
+        with self.channel.inbox.connect() as db:
+            saved = json.loads(db.execute('SELECT reply FROM messages WHERE id=?', (message['message_id'],)).fetchone()[0])
+        self.assertTrue(saved['attachment_stopped'])
+        self.assertNotIn('files', saved)
+        self.channel.inbox.set(message['message_id'], 'reply', saved, delay=0)
+        self.channel._prepare_reply_files = AsyncMock()
+        await self.channel._drain(message['union_id'])
+        self.channel.answer.assert_not_awaited()
+        self.assertTrue(self.channel.messenger.send.call_args.args[1]['attachment_stopped'])
+        self.assertEqual(self.channel.inbox.owners(), [])
+
+    async def test_missing_file_upload_scope_sends_a_short_notice_without_reasking_model(self):
+        message = parse_message(event(message_id='uploadscope'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        self.channel.answer = AsyncMock(return_value={'text': '完整说明。' * 900})
+        denied = AssistantError('飞书应用缺少文件上传权限，请联系管理员。', 403, category='feishu_file_upload_permission')
+        self.channel.messenger = SimpleNamespace(send=AsyncMock(side_effect=denied), react=AsyncMock())
+        await self.channel._drain(message['union_id'])
+        with self.channel.inbox.connect() as db:
+            saved = json.loads(db.execute('SELECT reply FROM messages WHERE id=?', (message['message_id'],)).fetchone()[0])
+        self.assertTrue(saved.get('attachment_stopped'))
+        self.assertLess(len(saved['text']), 400)
+        self.assertIn('文件上传权限', saved['text'])
+        self.channel.inbox.set(message['message_id'], 'reply', saved, delay=0)
+        self.channel.messenger.send = AsyncMock()
+        await self.channel._drain(message['union_id'])
+        self.assertEqual(self.channel.answer.await_count, 1)
+        self.assertEqual(self.channel.inbox.owners(), [])
+
     async def test_untrusted_callback_cannot_submit(self):
         self.channel.secret = "private"
         for host, headers in [("192.168.1.2", [(b"authorization", b"Bearer private")]), ("127.0.0.1", []),

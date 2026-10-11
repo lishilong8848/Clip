@@ -26,6 +26,7 @@ const base = 'http://127.0.0.1:' + server.address().port;
 const browser = await chromium.launch({ headless: true });
 const errors = [], requests = [];
 const builtin = { name: 'lighthouse-repairs', id: 'lighthouse-repairs', kind: 'skill', label: '维修单与跟进', display_name: '维修单与跟进', description: '查询维修单进度和跟进记录，沿用原业务确认流程', source: 'builtin' };
+const knowledge = { name: 'company-knowledge', id: 'company-knowledge', kind: 'skill', label: '公司知识库', description: '仅本轮显式选择时检索公司文档', source: 'builtin' };
 const shared = { name: 'shared-example-12345678', id: 'shared-example-12345678', kind: 'skill', label: '共享示例技能', display_name: '共享示例技能', description: '所有账号共用的查询说明', source: 'shared', removable: true };
 let installed = false, failedFirst = true, turns = [], appearance = { color: 'encre', shape: 'cercle', size: 56, snap_back: true };
 
@@ -38,7 +39,7 @@ try {
     if (pathname.endsWith('/conversation')) return fulfill({ turns, conversation_id: 'command-conversation', configured: true, enabled: true, can_manage_settings: true, model_name: '测试模型', models: [{ name: '测试模型' }], busy: false });
     if (pathname.endsWith('/commands')) {
       await new Promise(resolve => setTimeout(resolve, 180));
-      const rows = url.searchParams.get('kind') === 'tools' ? [{ id: 'weather', kind: 'tool', label: '天气查询', description: '实时和历史天气', read_only: true, group: '常用工具' }, { id: 'PUT /api/repair-management/records/{record_id}', kind: 'tool', label: '维修单与跟进 · 更新维修单', description: 'PUT /api/repair-management/records/{record_id}', read_only: false, group: '维修单与跟进' }] : [builtin, ...(installed ? [shared] : [])];
+      const rows = url.searchParams.get('kind') === 'tools' ? [{ id: 'weather', kind: 'tool', label: '天气查询', description: '实时和历史天气', read_only: true, group: '常用工具' }, { id: 'PUT /api/repair-management/records/{record_id}', kind: 'tool', label: '维修单与跟进 · 更新维修单', description: 'PUT /api/repair-management/records/{record_id}', read_only: false, group: '维修单与跟进' }] : [builtin, knowledge, ...(installed ? [shared] : [])];
       const keyword = url.searchParams.get('keyword') || '', group = url.searchParams.get('group') || '';
       const items = rows.filter(item => (!group || item.group === group) && (item.label + item.description).includes(keyword));
       return fulfill({ items, total: items.length, page: 1, groups: ['常用工具', '维修单与跟进'] });
@@ -52,7 +53,7 @@ try {
     if (pathname.endsWith('/messages')) {
       const payload = route.request().postDataJSON(); requests.push(payload);
       if (failedFirst) { failedFirst = false; return fulfill('测试响应失败，原消息保留', 503); }
-      const commands = payload.commands.map(item => ({ ...item, label: item.id === builtin.id ? builtin.label : item.id === 'weather' ? '天气查询' : shared.label }));
+      const commands = payload.commands.map(item => ({ ...item, label: item.id === builtin.id ? builtin.label : item.id === knowledge.id ? knowledge.label : item.id === 'weather' ? '天气查询' : shared.label }));
       const turn = { ...payload, commands, submitted_commands: payload.commands, at: Date.now() / 1000, status: 'completed', answer: '测试查询完成，没有执行业务修改。', model_name: '测试模型' };
       turns = [turn]; return fulfill({ run_id: '', turn });
     }
@@ -79,6 +80,23 @@ try {
   assert.deepEqual(requests[0].commands, [{ kind: 'skill', id: builtin.id }]);
   assert.deepEqual(requests[1].commands, requests[0].commands, 'retry keeps exact command selections');
   assert.equal(requests[1].operation_id, requests[0].operation_id);
+  await input.fill('/公司知识库');
+  await page.getByRole('option', { name: /公司知识库/ }).waitFor();
+  await input.press('Enter');
+  assert.equal(await page.locator('.command-chips').innerText(), '公司知识库');
+  await input.fill('变压器故障怎么应急');
+  await Promise.all([page.waitForResponse(response => response.url().endsWith('/messages')),
+    page.getByRole('button', { name: '发送问题', exact: true }).click()]);
+  assert.deepEqual(requests.at(-1).commands, [{ kind: 'skill', id: 'company-knowledge' }]);
+  assert.equal(await page.locator('.command-chips').count(), 0, 'knowledge selection only applies to one message');
+  for (const question of ['还有哪些注意事项？', '/公司知识库 变压器故障怎么应急']) {
+    await input.fill(question);
+    await page.locator('.command-menu').waitFor({ state: 'hidden' });
+    await Promise.all([page.waitForResponse(response => response.url().endsWith('/messages')),
+      page.getByRole('button', { name: '发送问题', exact: true }).click()]);
+    assert.equal(requests.at(-1).question, question);
+    assert.deepEqual(requests.at(-1).commands, [], 'ordinary followup must not inherit skill; typed prefix travels intact');
+  }
   await page.getByRole('button', { name: '选择技能或工具', exact: true }).click();
   await page.getByRole('tab', { name: '工具', exact: true }).click();
   await page.getByRole('option', { name: /天气查询/ }).waitFor();

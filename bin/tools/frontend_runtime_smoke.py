@@ -14,8 +14,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 BIN_DIR = Path(__file__).resolve().parents[1]
 if str(BIN_DIR) not in sys.path:
@@ -74,6 +75,10 @@ class _SmokePortalService:
         self._jobs: dict[str, dict] = {}
         self._created_repair_followups: dict[str, list[dict]] = {}
         self.signature_management = _SmokeSignatureManagement()
+        self._ledger_lock = threading.RLock()
+
+    def _repair_management_record_lock(self, _key):
+        return self._ledger_lock
 
     def _normalize_scope(self, scope: str) -> str:
         text = str(scope or "").strip().upper()
@@ -1405,9 +1410,12 @@ class _SmokePortalService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         scope: str = "ALL",
     ) -> dict:
+        from lan_bitable_template_portal.repair_ledger import validate_selection
+        ledger_device_ids = validate_selection(self, summary_record_id, ledger_device_ids, scope)
         created_records = self._created_repair_followups.setdefault(summary_record_id, [])
         record_id = f"rec-smoke-followup-created-{len(created_records) + 1}"
         display_fields = dict(fields or {})
@@ -1418,6 +1426,8 @@ class _SmokePortalService:
                 "created_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "progress": str(display_fields.get("维修进度") or "0"),
                 "cmdb_record_ids": list(cmdb_record_ids or []),
+                "ledger_device_ids": ledger_device_ids,
+                "ledger_devices": self._equipment_ledger_catalog.get_records(ledger_device_ids),
                 "display_fields": display_fields,
                 "raw_fields": {},
             }
@@ -1431,10 +1441,13 @@ class _SmokePortalService:
         summary_record_id: str,
         fields: dict,
         cmdb_record_ids: list[str] | None = None,
+        ledger_device_ids: list[str] | None = None,
         operation_id: str = "",
         expected_version: str = "",
         scope: str = "ALL",
     ) -> dict:
+        from lan_bitable_template_portal.repair_ledger import validate_selection
+        ledger_device_ids = validate_selection(self, summary_record_id, ledger_device_ids, scope)
         for item in self._created_repair_followups.get(summary_record_id, []):
             if str(item.get("record_id") or "") != record_id:
                 continue
@@ -1446,6 +1459,8 @@ class _SmokePortalService:
                 item["progress"] = str((fields or {}).get("维修进度") or "0")
             if cmdb_record_ids is not None:
                 item["cmdb_record_ids"] = list(cmdb_record_ids)
+            item["ledger_device_ids"] = ledger_device_ids
+            item["ledger_devices"] = self._equipment_ledger_catalog.get_records(ledger_device_ids)
             break
         return {"record_id": record_id, "warnings": []}
 
@@ -1646,6 +1661,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           async function inspectMobileFloatingSurfaces(targetPage, stage) {{
             await targetPage.setViewportSize({{ width: 390, height: 844 }});
             await targetPage.waitForTimeout(120);
+            await targetPage.waitForFunction(() => !document.querySelector(
+              '.ui-page-enter-active,.ui-page-leave-active,.ui-overlay-enter-active,.ui-overlay-leave-active,.ui-drawer-enter-active,.ui-drawer-leave-active,.ui-popover-enter-active,.ui-popover-leave-active'
+            ), {{timeout:5000}});
             const probe = () => targetPage.evaluate(() => {{
               const visible = node => {{
                 const style = getComputedStyle(node);
@@ -1654,7 +1672,8 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               }};
               const surfaces = Array.from(document.querySelectorAll(
                 '[role="dialog"],dialog[open],[role="listbox"],[role="menu"],.vnet-select-menu,.repair-people-popover,.floating-cell-popover,.refresh-menu-panel,#refresh-menu,#manual-menu,.admin-card,.event-drawer'
-              )).filter(visible);
+              )).filter(visible).filter(node => !node.matches('[role="listbox"],[role="menu"]')
+                || ['absolute', 'fixed'].includes(getComputedStyle(node).position));
               const issues = [];
               for (const surface of surfaces) {{
                 const rect = surface.getBoundingClientRect();
@@ -1686,6 +1705,9 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             const report = await probe();
             await targetPage.setViewportSize({{ width: 360, height: 800 }});
             await targetPage.waitForTimeout(120);
+            await targetPage.waitForFunction(() => !document.querySelector(
+              '.ui-page-enter-active,.ui-page-leave-active,.ui-overlay-enter-active,.ui-overlay-leave-active,.ui-drawer-enter-active,.ui-drawer-leave-active,.ui-popover-enter-active,.ui-popover-leave-active'
+            ), {{timeout:5000}});
             const compactReport = await probe();
             await targetPage.setViewportSize({{ width: 390, height: 844 }});
             await targetPage.waitForTimeout(120);
@@ -1730,6 +1752,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             const reports = [];
             for (const [stage, route, selector] of routes) {{
               await targetPage.goto(new URL(route, cfg.url).toString(), {{ waitUntil: 'domcontentloaded', timeout: 20000 }});
+              if (stage === 'workbench-lite') await openNativeWorkbench(targetPage, '计划通告列表');
               await targetPage.waitForSelector(selector, {{ state: 'visible', timeout: 15000 }});
               reports.push([`${{stage}}-phone`, await inspectMobileSurface(targetPage, stage)]);
               reports.push([`${{stage}}-compact-phone`, await inspectMobileSurface(targetPage, stage, 360, 800)]);
@@ -1908,6 +1931,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             }}
           }}
 
+          async function openNativeWorkbench(targetPage, marker) {{
+            const embedded = targetPage.locator('iframe[title="通告管理"]');
+            await embedded.waitFor({{ state: 'visible' }});
+            await embedded.contentFrame().getByText(marker, {{ exact: false }}).first().waitFor({{ state: 'visible' }});
+            const url = new URL(await embedded.getAttribute('src'), cfg.url);
+            if (url.origin !== new URL(cfg.url).origin || url.pathname !== '/workbench-lite' || url.searchParams.get('_assistant_frame') !== '1') throw new Error('unexpected native workbench URL');
+            // The shell entry was checked above; inspect the same native document's detailed controls.
+            await targetPage.goto(url.toString(), {{ waitUntil: 'domcontentloaded' }});
+          }}
+
           const unauthContext = await browser.newContext();
           const unauthPage = await unauthContext.newPage();
           attachDiagnostics(unauthPage, 'unauth');
@@ -1919,9 +1952,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             throw new Error(`unauth page load failed: ${{unauthResponse && unauthResponse.status()}}`);
           }}
           await unauthPage.waitForSelector('text=南通基地-运维灯塔工作台', {{ timeout: 10000 }});
-          await unauthPage.waitForSelector('text=飞书扫码登录', {{ timeout: 10000 }});
+          await unauthPage.getByRole('link', {{ name: '飞书登录', exact: true }}).waitFor({{ timeout: 10000 }});
+          await unauthPage.getByRole('button', {{ name: '姓名密码登录', exact: true }}).waitFor({{ timeout: 10000 }});
           const unauthText = await unauthPage.locator('body').innerText({{ timeout: 10000 }});
-          if (!unauthText.includes('请先使用飞书登录')) throw new Error('missing unauth login prompt');
+          if (!unauthText.includes('登录灯塔') || !unauthText.includes('姓名密码登录') || !unauthText.includes('访客查看机柜')) throw new Error('missing unauth login entries');
           await assertHeaderSubtitle(unauthPage, '功能选择 · 请先登录', 'unauth');
           await assertLayout(unauthPage, 'unauth');
           await assertVnetSkin(unauthPage, 'unauth');
@@ -2017,6 +2051,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=南通基地-运维灯塔工作台', {{ timeout: 10000 }});
           await page.waitForSelector('text=功能选择', {{ timeout: 10000 }});
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home');
+          await page.locator('.home-shell.dashboard-mode .module-card').first().waitFor({{ state: 'visible' }});
           await assertVnetSkin(page, 'home');
           const bodyText = await page.locator('body').innerText({{ timeout: 10000 }});
           const required = ['功能选择', '事件管理', '维护管理', '检修管理', '变更管理', '其他工具'];
@@ -2232,13 +2267,24 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await assertLayout(page, 'handover-feature');
           await page.getByRole('button', {{ name: /^返回$/ }}).first().click();
           try {{
-            await page.waitForSelector('text=业务模块', {{ timeout: 2500 }});
+            await page.locator('.home-shell.dashboard-mode .home-dashboard').waitFor({{ state: 'visible', timeout: 2500 }});
           }} catch (err) {{
             await page.getByRole('button', {{ name: /^返回$/ }}).first().click();
-            await page.waitForSelector('text=业务模块', {{ timeout: 10000 }});
+            await page.locator('.home-shell.dashboard-mode .home-dashboard').waitFor({{ state: 'visible', timeout: 10000 }});
           }}
           await assertHeaderSubtitle(page, '功能选择 · 请选择功能', 'home-after-handover');
-          await page.locator('.module-repair_management .module-card__main').click();
+          try {{
+            await page.locator('.module-repair_management .module-card__main').click();
+          }} catch (error) {{
+            const snapshot = await page.evaluate(() => ({{
+              url: location.href, body: document.body.innerText.slice(0, 1800),
+              shell: document.querySelector('.home-shell')?.className,
+              buttons: [...document.querySelectorAll('.vnet-back-button')].map(node => ({{
+                text: node.textContent, inert: Boolean(node.closest('[inert]')),
+              }})),
+            }}));
+            throw new Error(`home-after-handover ${{JSON.stringify(snapshot)}}: ${{error}}`);
+          }}
           await page.waitForSelector('text=选择楼栋进入检修单管理', {{ timeout: 10000 }});
           const repairScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await repairScopeCard.getByRole('button', {{ name: '进入检修单管理' }}).click();
@@ -2406,7 +2452,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await cmdbCheckboxes.nth(0).click();
           await cmdbCheckboxes.nth(1).click();
           await cmdbDialog.getByRole('button', {{ name: '确认', exact: true }}).click();
-          const selectedCmdbText = String(await followupPanel.locator('.cmdb-line').textContent() || '');
+          const selectedCmdbText = String(await followupPanel.locator('.cmdb-line').filter({{ hasText: 'CMDB 设备' }}).textContent() || '');
           if (!selectedCmdbText.includes('A-219-CRAH-01') || !selectedCmdbText.includes('A-220-CRAH-02')) {{
             throw new Error(`CMDB multi-selection summary is incomplete: ${{selectedCmdbText}}`);
           }}
@@ -2421,7 +2467,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-219-CRAH-01' }}).click();
           await clearCmdbDialog.locator('tbody tr').filter({{ hasText: 'A-220-CRAH-02' }}).click();
           await clearCmdbDialog.getByRole('button', {{ name: '清空关联', exact: true }}).click();
-          const clearedCmdbText = String(await followupPanel.locator('.cmdb-line').textContent() || '');
+          const clearedCmdbText = String(await followupPanel.locator('.cmdb-line').filter({{ hasText: 'CMDB 设备' }}).textContent() || '');
           if (!clearedCmdbText.includes('未选择')) {{
             throw new Error(`CMDB relation was not cleared: ${{clearedCmdbText}}`);
           }}
@@ -2467,12 +2513,16 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           if (await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).count() !== 1) {{
             throw new Error('followup create mode must show one submit action');
           }}
+          await followupPanel.getByRole('button', {{ name: '选择台账设备', exact: true }}).click();
+          const ledgerDialog = page.getByRole('dialog', {{ name: '选择台账设备', exact: true }});
+          await ledgerDialog.getByText('A-219-CRAH-01', {{ exact: true }}).click();
+          await ledgerDialog.getByRole('button', {{ name: '确认', exact: true }}).click();
           await followupPanel.getByRole('button', {{ name: '新增跟进记录', exact: true }}).click();
           await followupPanel.getByText('维修跟进记录已新增。', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: /^跟进记录 2$/ }}).first().waitFor({{ state: 'visible' }});
           const followupOptions = followupPanel.locator('.followup-timeline-list [role="option"]');
           await followupOptions.first().waitFor({{ state: 'visible' }});
-          await followupOptions.last().click();
+          await followupOptions.filter({{ hasText: '烟测新增跟进' }}).click();
           const progressInput = followupPanel.locator('[data-field-name="维修进度"] [data-progress-number]');
           await progressInput.fill('60');
           const progressControl = followupPanel.locator('[data-field-name="维修进度"] .repair-percentage-control');
@@ -2501,6 +2551,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.getByRole('button', {{ name: '检修通告', exact: true }}).click();
           await page.getByText('保存后填写检修通告？', {{ exact: true }}).waitFor({{ state: 'visible' }});
           await page.getByRole('button', {{ name: '保存并继续', exact: true }}).click();
+          await openNativeWorkbench(page, '维修单生成检修通告');
           await waitForTextOrDump(page, '维修单生成检修通告', 'repair-notice-prefill');
           if (!page.url().includes('repair_management_record_id=repair-mgmt-a-001')) {{
             throw new Error(`repair management prefill id missing: ${{page.url()}}`);
@@ -2524,6 +2575,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=选择楼栋进入检修通告管理', {{ timeout: 10000 }});
           const repairNoticeScopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await repairNoticeScopeCard.getByRole('button', {{ name: '进入检修通告管理' }}).click();
+          await openNativeWorkbench(page, '计划通告列表');
           await waitForTextOrDump(page, '计划通告列表', 'repair-notice-entry');
           if (!page.url().includes('work_type=repair')) {{
             throw new Error(`repair notice entry work_type mismatch: ${{page.url()}}`);
@@ -2534,6 +2586,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           await page.waitForSelector('text=选择楼栋进入维护管理', {{ timeout: 10000 }});
           const scopeCard = page.locator('article.scope-card').filter({{ hasText: 'A楼' }}).first();
           await scopeCard.getByRole('button', {{ name: '进入维护管理' }}).click();
+          await openNativeWorkbench(page, '计划通告列表');
           await waitForTextOrDump(page, '计划通告列表', 'maintenance-entry');
           await waitForTextOrDump(page, '冷机月度巡检', 'maintenance-entry');
           await waitForTextOrDump(page, '未结束通告', 'maintenance-entry');
@@ -2578,11 +2631,11 @@ def _build_playwright_script(url: str, session_id: str) -> str:
               const end = source.indexOf('function schedulePostSubmitRefresh', start);
               if (start < 0 || end < 0) throw new Error('notice polling implementation missing');
               const run = new Function('env',
-                'const {{Date,sleep,fetch,setLiteStatus,handleLiteAuthRequired,deleteSubmittedLiteDraft,applyJobPatch,successfulNoticeActionText,showLiteError,friendlyLiteMessage,jobPhaseText}}=env;'
+                'const {{Date,sleep,fetch,setLiteStatus,handleLiteAuthRequired,deleteSubmittedLiteDraft,applyJobPatch,successfulNoticeActionText,showLiteError,friendlyLiteMessage,jobPhaseText,currentNoticeMatchesDraft}}=env;'
                 + source.slice(start, end)
                 + ';latestSubmittedJobId=env.latest;return pollSubmittedJob("job", "", {{action:"start"}});');
               const results = [];
-              for (const scenario of [{{phase:'success', latest:'job'}}, {{phase:'failed', latest:'job'}}, {{phase:'success', latest:'newer-job'}}]) {{
+              for (const scenario of [{{phase:'success', latest:'job'}}, {{phase:'failed', latest:'job'}}, {{phase:'success', latest:'newer-job'}}, {{phase:'success', latest:'job', matches:false}}]) {{
                 let clock = 0, reads = 0;
                 const statuses = [];
                 const result = await run({{
@@ -2591,6 +2644,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                   sleep: async () => {{clock += 100000;}},
                   fetch: async () => {{reads += 1; return {{ok:true,status:200,json:async()=>({{ok:true,data:{{phase:scenario.phase,error:'明确失败'}}}})}};}},
                   setLiteStatus: text => statuses.push(text),
+                  currentNoticeMatchesDraft: () => scenario.matches !== false,
                   handleLiteAuthRequired: () => false,
                   deleteSubmittedLiteDraft: async () => {{}},
                   applyJobPatch: () => {{throw new Error('render failed');}},
@@ -2606,7 +2660,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (pollingTerminalProbe.some(item => !item.result || item.reads !== 1)
                 || !pollingTerminalProbe[0].statuses[0]?.includes('已发送成功')
                 || !pollingTerminalProbe[1].statuses[0]?.includes('明确失败')
-                || pollingTerminalProbe[2].statuses.length) {{
+                || pollingTerminalProbe[2].statuses.length || pollingTerminalProbe[3].statuses.length) {{
               throw new Error('notice terminal rendering/parallel status regression: ' + JSON.stringify(pollingTerminalProbe));
             }}
             const liteSubmitScriptProbe = await page.evaluate(() => {{
@@ -2773,7 +2827,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.getByRole('button',{{name:'转换适用类型',exact:true}}).click();
             await page.locator('#lite-polling-sop-type-confirm').waitFor();
             await page.locator('#lite-polling-sop-type-cancel').click();
-            if(!(await page.locator('#lite-polling-sop-type-confirm').isHidden()))throw new Error('SOP conversion confirm stayed open after cancel');
+            await page.locator('#lite-polling-sop-type-confirm').waitFor({{state:'hidden',timeout:5000}});
             const sopCancelState=await page.evaluate(()=>({{parentInert:document.querySelector('#lite-polling-sop-modal')?.inert,confirmInert:document.querySelector('#lite-polling-sop-type-confirm')?.inert,focusInside:document.querySelector('#lite-polling-sop-type-confirm')?.contains(document.activeElement)}}));
             if(sopCancelState.parentInert||!sopCancelState.confirmInert||sopCancelState.focusInside)throw new Error(`SOP conversion cancel left stale modal state: ${{JSON.stringify(sopCancelState)}}`);
             await page.getByLabel('转换目标类型').selectOption('adjust');
@@ -2788,7 +2842,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await page.locator('#lite-polling-sop-type-apply').click();
             await page.getByText(/已将.*同步示例 SOP.*从维保转换为轮巡/).waitFor();
             if(!sopConversionPayload||sopConversionPayload.sop_id!=='manual_refresh_sop'||sopConversionPayload.work_type!=='polling'||sopConversionPayload.expected_version!==2)throw new Error(`SOP conversion payload invalid: ${{JSON.stringify(sopConversionPayload)}}`);
-            if(!(await page.locator('#lite-polling-sop-type-confirm').isHidden()))throw new Error('SOP conversion confirm stayed open after success');
+            await page.locator('#lite-polling-sop-type-confirm').waitFor({{state:'hidden',timeout:5000}});
             if(await page.locator('#lite-polling-sop-editor .polling-sop-type-option[aria-pressed="true"]').textContent()!=='轮巡')throw new Error('SOP conversion did not activate polling type');
             await inspectMobileFloatingSurfaces(page, 'workbench-sop-manage');
             await page.locator('#lite-polling-sop-close').click();
@@ -2987,7 +3041,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             if (mobileIssues.length) throw new Error(`mobile layout issues: ${{JSON.stringify(mobileIssues)}}`);
             await assertConnectionGuard();
             const bindingPage = await context.newPage();
-            await bindingPage.goto(new URL('/workbench-lite?scope=A&work_type=maintenance&manual=1', cfg.url).toString());
+            await bindingPage.goto(new URL('/workbench-lite?scope=A&work_type=maintenance&manual=1&_assistant_frame=1', cfg.url).toString());
             await bindingPage.waitForSelector('#lite-notice-detail-overlay.open');
             await bindingPage.getByText('计划通告关联（必须选择一种）', {{ exact: true }}).waitFor();
             if (await bindingPage.locator('[data-manual-quick-source]').count() < 1) throw new Error('manual notice inline source recommendations missing');
@@ -3008,9 +3062,10 @@ def _build_playwright_script(url: str, session_id: str) -> str:
                 || await bindingPage.locator('#lite-notice-form [name="location"]').inputValue() !== '解析前填写的位置') {{
               throw new Error('pasted notice lost existing planned-source binding or manually filled fields');
             }}
-            await bindingPage.locator('[data-manual-binding-mode="unbound"]').first().click();
-            await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'unbound');
-            await bindingPage.locator('[data-manual-quick-source]').first().click();
+            if (await bindingPage.locator('[data-manual-binding-mode="unbound"]').first().isVisible()) throw new Error('bound notice exposed independent-notice choice');
+            await bindingPage.getByRole('button', {{ name: '重新绑定', exact: true }}).click();
+            await bindingPage.locator('#lite-manual-source-candidates [data-manual-source-index]').first().click();
+            await bindingPage.locator('#lite-manual-source-confirm').click();
             await bindingPage.waitForFunction(() => document.querySelector('[name="manual_binding_choice"]')?.value === 'bind');
             if (await bindingPage.locator('#lite-notice-form [name="title"]').inputValue() !== 'A楼解析后绑定检查') {{
               throw new Error('binding a planned notice erased parsed notice fields');
@@ -3018,7 +3073,7 @@ def _build_playwright_script(url: str, session_id: str) -> str:
             await bindingPage.locator('#lite-notice-drawer-close').click();
             await bindingPage.waitForFunction(() => !document.querySelector('#lite-notice-detail-overlay')?.classList.contains('open'));
             if (await bindingPage.locator('[data-bind-current-manual]:visible').count()) throw new Error('manual source bind actions remained visible after closing drawer');
-            await bindingPage.goto(new URL('/workbench-lite?scope=A&work_type=change&manual=1', cfg.url).toString());
+            await bindingPage.goto(new URL('/workbench-lite?scope=A&work_type=change&manual=1&_assistant_frame=1', cfg.url).toString());
             await bindingPage.waitForSelector('#lite-notice-detail-overlay.open');
             let manualActionRequests = 0;
             let manualSourceRequests = 0;
@@ -3314,21 +3369,23 @@ def _build_playwright_script(url: str, session_id: str) -> str:
           guardHealthy = false;
           await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
           await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
-          await guardPage.getByRole('heading', {{ name: '页面连接已中断' }}).waitFor();
-          const connectionMobile = await inspectMobileSurface(guardPage, 'connection-lost');
-          if (connectionMobile.horizontalOverflow || connectionMobile.overflow.length || connectionMobile.smallTargets.length) throw new Error(`connection guard mobile layout issues: ${{JSON.stringify(connectionMobile)}}`);
-          if (await guardPage.locator('#app').isVisible()) throw new Error('disconnected business page still visible');
+          await guardPage.locator('#clipflow-connection-warning').waitFor();
+          if (!(await guardPage.locator('#app').isVisible())) throw new Error('temporary disconnection hid the current page');
+          if (await guardPage.locator('#clipflow-connection-guard').count()) throw new Error('temporary disconnection blocked the current page');
           guardHealthy = true;
-          await guardPage.getByRole('button', {{ name: '重新检测连接' }}).click();
-          await guardPage.getByText('连接已恢复，请点击“刷新页面”重新加载。', {{ exact: true }}).waitFor();
-          if (await guardPage.locator('#app').isVisible()) throw new Error('stale business page restored without refresh');
-          await guardPage.getByRole('button', {{ name: '刷新页面', exact: true }}).click();
-          await guardPage.waitForLoadState('networkidle');
-          if (!(await guardPage.locator('#app').isVisible())) throw new Error('refresh did not restore healthy page');
+          await guardPage.locator('#clipflow-connection-warning').getByRole('button', {{ name: '重新检测' }}).click();
+          await guardPage.locator('#clipflow-connection-warning').waitFor({{ state: 'hidden' }});
+          if (!(await guardPage.locator('#app').isVisible())) throw new Error('recovered page did not retain its state');
           guardInstance = 'smoke-instance-2';
           await guardPage.evaluate(() => window.ClipFlowConnectionGuard.check());
           await guardPage.getByText('当前程序已重启，原页面状态可能已失效，请刷新后继续。', {{ exact: true }}).waitFor();
+          const connectionMobile = await inspectMobileSurface(guardPage, 'connection-lost');
+          if (connectionMobile.horizontalOverflow || connectionMobile.overflow.length || connectionMobile.smallTargets.length) throw new Error(`connection guard mobile layout issues: ${{JSON.stringify(connectionMobile)}}`);
+          if (await guardPage.locator('#app').isVisible()) throw new Error('restarted backend left stale page visible');
           await guardPage.screenshot({{ path: 'output/playwright/connection-lost-desktop.png', fullPage: true }});
+          await guardPage.getByRole('button', {{ name: '刷新页面', exact: true }}).click();
+          await guardPage.waitForLoadState('networkidle');
+          if (!(await guardPage.locator('#app').isVisible())) throw new Error('refresh did not restore healthy page');
           await guardPage.close();
           }}
           await browser.close();
@@ -3410,6 +3467,13 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
             }
 
         PortalRuntime.service = _SmokePortalService()
+        PortalRuntime.service._state_store = state_store
+        from lan_bitable_template_portal.repair_ledger_catalog import LedgerCatalog
+        PortalRuntime.service._equipment_ledger_catalog = LedgerCatalog(Path(temp_dir.name) / "ledger.sqlite3")
+        PortalRuntime.service._equipment_ledger_catalog.replace([{
+            "record_id": "recSmokeLedger", "scope_codes": ["A"], "机楼": "A楼",
+            "设备编号": "A-219-CRAH-01", "设备名称": "精密空调", "系统名称": "暖通",
+        }])
         PortalRuntime.state_store = state_store
         PortalRuntime.auth_manager = auth_manager
         PortalRuntime.notice_callback = None
@@ -3418,7 +3482,13 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
         PortalRuntime.maintenance_action_callback = None
 
         controller = FastAPIPortalController(host="127.0.0.1", port=port)
-        app = controller._build_app()
+        def assistant_fixture(app, *_):
+            async def respond(path: str):
+                return {"ok": True, "data": {}}
+            app.add_api_route("/api/assistant/{path:path}", respond, methods=["GET", "POST"])
+        # Business UI smoke must not install models or start a resident gateway.
+        with patch("lan_bitable_template_portal.lighthouse_routes.install_lighthouse_routes", assistant_fixture):
+            app = controller._build_app()
         from lan_bitable_template_portal.cabinet_power import from_feishu, to_fields
         from lan_bitable_template_portal.cabinet_power_excel import parse_template, Workbook
         cabinet_record = {"record_id": "recCabinetSmoke", "fields": to_fields({
@@ -3482,6 +3552,8 @@ def run_smoke(*, port: int = 18976, keep_server_seconds: float = 0.0) -> dict:
 
         @app.middleware("http")
         async def _frontend_smoke_login(request, call_next):
+            if request.url.path == "/api/auth/password/people":
+                return JSONResponse({"ok": True, "data": {"people": []}})
             if request.url.path != "/__frontend_smoke_login":
                 return await call_next(request)
             response = RedirectResponse(

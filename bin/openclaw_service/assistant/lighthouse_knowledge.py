@@ -15,6 +15,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -28,6 +29,7 @@ import uuid
 
 from .lighthouse_ai import (AssistantError, ADDRESS, API_KEY, CONTACT, ID_NUMBER,
                             protect_key, safe_text)
+from .lighthouse_message_delivery import MESSAGE_INTENT
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_BATCH_BYTES = 300 * 1024 * 1024
@@ -48,8 +50,16 @@ _MAX_BACKUP_SECONDS = 20.0
 
 _CREDENTIAL = re.compile(r'(?:api[_ -]?key|password|authorization|access[_ -]?token|密钥|口令|密码)\s*[:：=]\s*\S{6,}', re.I)
 _COMPANY = re.compile(r'知识库|公司(?:的)?(?:内部|资料|文件|文档|制度|规定|规范|流程|政策|要求|标准|报销|请假|假期|福利|考勤|出差|差旅|休假|年假|规章|审批|培训)|(?:本公司|我们公司|咱们公司|公司里|公司内|本单位|单位内部)|员工手册|内部(?:制度|规定|资料|流程|文档)', re.I)
-_BUSINESS = re.compile(r'(?:发送|发起|结束|删除|修改|更新|撤销|新建|创建|填写|保存|上传|绑定|导出|审批|签名|签字).{0,20}(?:通告|维修|跟进|机柜|工单|演练|水耗|重保)|(?:今天|今日|现在|当前|未结束|进行中|待发|未完成).{0,25}(?:通告|维修|事件|任务|水耗|机柜)|(?:通告|维修|事件|任务|水耗|机柜).{0,15}(?:几条|多少|数量|进度|状态)|(?:在职|在岗|员工|人员).{0,10}(?:人数|多少人)|灯塔.{0,15}(?:怎么|如何|操作|使用|设置|界面)', re.I)
+_BUSINESS = re.compile(
+    r'(?:发送|发起|结束|删除|修改|更新|撤销|新建|创建|填写|保存|上传|绑定|导出|审批|签名|签字).{0,20}(?:通告|维修|跟进|机柜|工单|演练|水耗|重保)'
+    r'|(?:今天|今日|现在|当前|未结束|进行中|待发|未完成).{0,25}(?:通告|维修|事件|任务|工单|水耗|机柜|学练|答题|检修|演练|重保|收敛)'
+    r'|(?:通告|维修|事件|任务|工单|水耗|机柜|学练|答题|检修|演练|重保|收敛).{0,15}(?:几条|多少|数量|进度|状态|数据|记录|列表)'
+    r'|(?:在职|在岗|员工|人员).{0,10}(?:人数|多少人|名单|列表)'
+    r'|(?:多少|几名|几位|几个).{0,6}(?:在职|在岗|员工|人员)|(?:公司|基地|楼).{0,6}(?:总人数|在职人数)'
+    r'|(?:当前|现在).{0,8}(?:登录|登陆)|灯塔.{0,15}(?:怎么|如何|操作|使用|设置|界面)'
+    r'|(?:上传|下载|删除|替换|更新).{0,8}(?:知识库|文件|文档)', re.I)
 _EXTERNAL = re.compile(r'天气|天气预报|新闻|联网|外部网站|股价|汇率|股票|翻译|写代码|编程|(?:微软|苹果|谷歌|特斯拉|OpenAI|字节跳动|阿里巴巴)公司', re.I)
+_KNOWLEDGE_META = re.compile(r'(?:什么是知识库|知识库是什么)[?？。！!\s]*$|知识库有什么(?:作用|功能|用途|原理)|知识库.{0,12}(?:怎么|如何|为何|为什么).{0,12}(?:上传|下载|删除|使用|配置|设置|加载|卡)|(?:不要|不用|不需要|无需|别).{0,8}(?:知识库|公司资料)', re.I)
 
 
 def _load_local():
@@ -63,7 +73,9 @@ def _load_local():
 
 def company_question(question):
     text = str(question or '').strip()
-    return bool(_COMPANY.search(text) and not _BUSINESS.search(text) and not _EXTERNAL.search(text))
+    return bool(_COMPANY.search(text) and not _BUSINESS.search(text)
+                and not _EXTERNAL.search(text) and not _KNOWLEDGE_META.search(text)
+                and not MESSAGE_INTENT.search(text))
 
 
 def sensitive_document(text):
@@ -895,6 +907,10 @@ class KnowledgeBase:
             except AssistantError as exc:
                 warning = str(exc) + '本次仅使用关键词结果。'
                 snapshot = None
+                indexready = False
+            except (RuntimeError, ValueError, OSError):
+                logging.exception('Company knowledge vector search failed; falling back to local full text')
+                mode, warning, snapshot, hits = 'keyword', '向量检索暂不可用，本次仅使用关键词结果。', None, []
                 indexready = False
 
         keywords = re.sub(r'我们公司|咱们公司|本公司|公司内部|公司|请问|请告诉我|我想知道|怎么|如何|是什么|有哪些|什么|是否|可以|需要', ' ', query)

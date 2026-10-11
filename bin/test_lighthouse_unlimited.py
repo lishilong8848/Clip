@@ -173,7 +173,7 @@ class StreamUnlimitedExecutionTests(unittest.IsolatedAsyncioTestCase):
         assistant._key = Mock(return_value="state-" + actor["id"])
         assistant._active = set()
         assistant._allowed = Mock(return_value=True)
-        return SimpleNamespace(assistant=assistant)
+        return SimpleNamespace(assistant=assistant, files=Mock())
 
     async def test_unlimited_execute_completes_without_semaphore(self):
         actor = {"id": "fixture-u", "scopes": ["D"]}
@@ -214,6 +214,7 @@ class StreamUnlimitedExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(stream.slots)
         self.assertEqual(run["status"], "completed")
         self.assertEqual(engine.calls, [actor["id"]])
+        portal.files.upload.assert_not_called()
 
 
 class WarmupBoundedTests(unittest.IsolatedAsyncioTestCase):

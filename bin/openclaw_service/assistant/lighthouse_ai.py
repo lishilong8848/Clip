@@ -52,7 +52,8 @@ def explicit_general_question(question):
 
 
 def is_business_query(question):
-    return bool(BUSINESS_QUERY.search(question) or re.search(r'多维表|在职|在岗|员工|人事|人员表|采购|库存|质量评估|月度告警', question)) and not explicit_general_question(question)
+    # A worksheet is a document term, not an outstanding-work query.
+    return bool(BUSINESS_QUERY.search(question.replace('工作表', '')) or re.search(r'多维表|在职|在岗|员工|人事|人员表|采购|库存|质量评估|月度告警', question)) and not explicit_general_question(question)
 
 
 def private_identifier(value):

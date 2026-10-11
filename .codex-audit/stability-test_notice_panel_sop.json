@@ -1,0 +1,10 @@
+{
+  "group": "test_notice_panel_sop",
+  "modules": 1,
+  "tests": 28,
+  "failures": [],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 7.8,
+  "external_connections_blocked": 0
+}

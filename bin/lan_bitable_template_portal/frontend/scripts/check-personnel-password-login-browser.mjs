@@ -25,6 +25,7 @@ let failFirstLogin = false;
 let gateLogin = null;
 let gateReset = null;
 let gateChange = null;
+let gatePeople = null;
 let unsafeRedirectNext = false;
 let authStatusLoggedInAsPassword = false;
 let authStatusCallCount = 0;
@@ -92,6 +93,7 @@ await page.route('**/api/**', async route => {
   }
   if (url.pathname === '/api/auth/password/people') {
     peoplePosts.push({ method: req.method(), path: url.pathname });
+    if (gatePeople) await gatePeople;
     return ok({ items: peopleDb, loaded_at: 1791510000 });
   }
   if (url.pathname === '/api/auth/password/login') {
@@ -429,6 +431,39 @@ try {
   assert.match(page.url(), /(^|[?&])login=password/);
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(output, '09-login-link-autopen.png'), fullPage: true, animations: 'disabled' });
+
+  for (const preference of ['feishu', 'password']) {
+    await page.evaluate(method => sessionStorage.setItem('clipflow-login-method', method), preference);
+    const target = '/learning?view=practice&scope=H';
+    await page.goto(origin + target);
+    await page.waitForURL(url => url.pathname === '/' && url.searchParams.get('login') === 'password');
+    await page.locator('#personnel-name-select').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('next'), target, 'learning login must preserve the requested page');
+    assert.equal(await page.getByRole('button', { name: '姓名密码登录', exact: true }).count(), 1);
+    assert.equal(await page.getByRole('button', { name: '访客查看机柜', exact: true }).count(), 1);
+    const feishuLink = page.getByRole('link', { name: '飞书登录', exact: true });
+    assert.match(await feishuLink.getAttribute('href'), /^\/api\/auth\/login/, 'OAuth remains an explicit login choice');
+    assert.equal(await page.locator('.learning-page').count(), 0, 'unauthenticated visitors cannot receive learning data');
+  }
+  await page.waitForFunction(() => {
+    const panel = document.querySelector('#personnel-name-select')?.closest('.center-state');
+    return panel && getComputedStyle(panel).opacity === '1' && !panel.classList.contains('ui-page-enter-active');
+  });
+  const loginButton = page.getByRole('button', { name: '姓名密码登录', exact: true });
+  for (const hovered of [false, true]) {
+    if (hovered) await loginButton.hover();
+    else await page.locator('.app-link').hover();
+    await page.waitForTimeout(200);
+    const colors = await loginButton.evaluate(button => {
+      const style = getComputedStyle(button);
+      return { color: style.color, background: style.backgroundColor, image: style.backgroundImage };
+    });
+    assert(colors.image !== 'none' || colors.color !== colors.background,
+      'login text must remain visible: ' + JSON.stringify(colors));
+  }
+  await page.locator('.app-link').hover();
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: path.join(output, '09-learning-login-choices.png'), fullPage: true, animations: 'disabled' });
 
   // --- Block B: password account session expiry returns password entry, not /api/auth/login ---
   await page.goto(origin + '/');
@@ -975,6 +1010,37 @@ try {
   await page.clock.runFor(61000);
   await select().fill('新增外部');
   await page.getByRole('option', { name: /新增外部/ }).waitFor();
+
+  // A slow background directory refresh must not clear credentials mid-submit.
+  await openForm();
+  await select().selectOption('recZhangsanB');
+  await page.locator('#personnel-password').fill('fixture-password');
+  let releasePeople, finishLogin;
+  const selected = peopleDb.find(person => person.id === 'recZhangsanB');
+  gatePeople = new Promise(resolve => { releasePeople = resolve; });
+  gateLogin = new Promise(resolve => { finishLogin = resolve; });
+  failFirstLogin = true;
+  try {
+    const refreshRequest = page.waitForRequest(request => request.url().endsWith('/api/auth/password/people'));
+    await page.clock.runFor(61000);
+    await refreshRequest;
+    const submitRequest = page.waitForRequest(request => request.url().endsWith('/api/auth/password/login'));
+    await page.getByRole('button', { name: '姓名密码登录', exact: true }).click();
+    await submitRequest;
+    selected.selectable = false;
+    const refreshResponse = page.waitForResponse(response => response.url().endsWith('/api/auth/password/people'));
+    releasePeople(); gatePeople = null;
+    await refreshResponse;
+    await page.waitForTimeout(100);
+    assert.equal(await select().inputValue(), labelFor('recZhangsanB'));
+    assert.equal(await page.locator('#personnel-password').inputValue(), 'fixture-password');
+  } finally {
+    selected.selectable = true;
+    releasePeople?.(); gatePeople = null;
+    finishLogin?.(); gateLogin = null;
+  }
+  await page.getByText('密码错误，请重试。', { exact: true }).waitFor();
+  failFirstLogin = false;
   const fatalErrors = errors.filter(message => message !== 'Transition was skipped');
   assert.deepEqual(fatalErrors, []);
   console.log(JSON.stringify({

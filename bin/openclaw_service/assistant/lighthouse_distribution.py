@@ -25,13 +25,21 @@ FIELDS = {'组件名称': 1, '版本': 1, '平台': 1, '安装包': 17, '分片�
 OMITTED = {'node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe'}
 
 
-def validate_spec(spec, *, published=True):
+def validate_spec(spec, *, published=True, component='runtime'):
     from .lighthouse_runtime import PIN
+    if component == 'knowledge_model':
+        from .lighthouse_knowledge_model import REVISION
+        version_ok = isinstance(spec, dict) and spec.get('component') == component and spec.get('version') == REVISION
+        max_size = 128 * 1024 ** 2
+    else:
+        version_ok = component == 'runtime' and isinstance(spec, dict) and spec.get('component', 'runtime') == 'runtime' \
+            and spec.get('version') == PIN['openclaw_version'] and spec.get('node_version') == PIN['node_version']
+        max_size = 1024 ** 3
     integer = lambda value: type(value) is int
     digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
     if not isinstance(spec, dict) or spec.get('format') != 1 or spec.get('base') != BASE or spec.get('table') != TABLE \
-            or spec.get('version') != PIN['openclaw_version'] or spec.get('node_version') != PIN['node_version'] \
-            or not digest(spec.get('sha256')) or not integer(spec.get('size')) or not 0 < spec['size'] <= 1024 ** 3 \
+            or not version_ok \
+            or not digest(spec.get('sha256')) or not integer(spec.get('size')) or not 0 < spec['size'] <= max_size \
             or not isinstance(spec.get('parts'), list) or not 1 <= len(spec['parts']) <= 74:
         raise AssistantError('助手依赖分发清单无效。', 503)
     for index, part in enumerate(spec['parts'], 1):
@@ -130,8 +138,9 @@ class FeishuRuntimeMirror:
             if name not in listed:
                 self.request('POST', '/fields', json_payload={'field_name': name, 'type': kind})
 
-    def publish(self, spec, folder, journal):
-        validate_spec(spec, published=False)
+    def publish(self, spec, folder, journal, *, component='runtime'):
+        validate_spec(spec, published=False, component=component)
+        model = component == 'knowledge_model'
         self.ensure_fields()
         journal = Path(journal)
         state = json.loads(journal.read_text(encoding='utf-8')) if journal.is_file() else {}
@@ -155,10 +164,11 @@ class FeishuRuntimeMirror:
                 entry['file_token'] = response['data']['file_token']
                 save()
             fields = {'文本': 'Lighthouse-' + spec['version'] + '-' + str(part['index']),
-                '组件名称': '灯塔助手运行环境', '版本': spec['version'], '平台': 'Windows x64',
+                '组件名称': '知识库模型 bge-small-zh-v1.5' if model else '灯塔助手运行环境', '版本': spec['version'], '平台': 'ONNX CPU' if model else 'Windows x64',
                 '安装包': [{'file_token': entry['file_token']}], '分片序号': part['index'], '分片总数': len(spec['parts']),
                 '分片SHA256': part['sha256'], '整包SHA256': spec['sha256'], '文件大小': part['size'], '启用': True,
-                '更新说明': '仅含固定 Node/OpenClaw 依赖，不含账号、凭证、会话或业务数据。'}
+                '更新说明': ('仅含 BGE 中文嵌入模型及分词器，不含公司文档、账号或凭证。' if model
+                             else '仅含固定 Node/OpenClaw 依赖，不含账号、凭证、会话或业务数据。')}
             if not entry.get('record_id'):
                 result = self.request('POST', '/records', params={'client_token': entry['client_token']}, json_payload={'fields': fields})
                 entry['record_id'] = result['record']['record_id']

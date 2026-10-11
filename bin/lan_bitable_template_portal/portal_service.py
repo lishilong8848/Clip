@@ -12140,6 +12140,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                 warnings.append(
                     "原关联检修通告已不存在，已保留维修单现有字段并继续同步跟进内容。"
                 )
+            if requested_repair_ids and not selected_repairs:
+                warnings.append(
+                    "原关联检修通告已不存在，已保留维修单现有字段并继续同步跟进内容。"
+                )
             for record in selected_repairs:
                 if not self._repair_management_target_record_in_scope(record, scope):
                     raise PortalError("当前账号无权关联该楼栋设备检修记录。")
@@ -12705,6 +12709,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         repair_record_ids: list[str] | tuple[str, ...] | None = None,
         month: str | None = None,
     ) -> dict[str, Any]:
+        repair_ids = self._repair_management_record_ids(repair_record_ids)
+        if len(repair_ids) > 1:
+            raise PortalError("设备检修关联只能选择一条记录。")
+        if repair_ids and not str(event_record_id or "").strip():
+            raise PortalError("请先选择关联事件单，再选择设备检修关联。")
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
@@ -15041,7 +15050,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             self._repair_management_relation_projection_fields(
                 target_record=authoritative_target_record,
                 event_record=authoritative_event_record,
-                followups=authoritative_followups,
+                followups=authoritative_followups if followup_state_verified else None,
             )
         )
         followup_ids = self._repair_management_record_ids(
@@ -15050,7 +15059,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         verified_followups = (
             [item for item in authoritative_followups if isinstance(item, dict)]
-            if authoritative_followups is not None
+            if authoritative_followups is not None and followup_state_verified
             else None
         )
         latest_followup: dict[str, Any] = {}
@@ -15119,8 +15128,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         is_completed = workflow == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
         if is_completed and not has_followup:
+            summary_progress = raw_fields.get("当前维修进度")
+            if summary_progress in (None, "", [], {}):
+                summary_progress = (item.get("display_fields") or {}).get("当前维修进度")
             normalized_progress_percent = round(self._repair_followup_progress_percent(
-                raw_fields.get("当前维修进度")
+                summary_progress
             ) or 0)
             display_fields["当前维修进度"] = f"{normalized_progress_percent}%"
         payload = {
@@ -22139,18 +22151,20 @@ class MaintenancePortalService(RepairOperationsMixin):
             return False
         return any(token in status for token in ("已完成", "已结束", "正常结束", "延期结束", "延迟结束", "闭环"))
 
-    def mark_maintenance_source_ended_locally(
+    def mark_notice_source_ended_locally(
         self, payload: dict[str, Any]
     ) -> bool:
         payload = normalize_notice_identity_payload(payload or {})
-        if self._item_work_type(payload) != WORK_TYPE_MAINTENANCE:
+        work_type = str(payload.get("source_work_type") or payload.get("converted_from_work_type") or self._item_work_type(payload))
+        if work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
             return False
         source_record_id = canonical_source_record_id(payload)
         if not source_record_id or is_local_record_id(source_record_id):
             return False
-        local_fields = {"维护实施状态": "已结束"}
+        local_fields = {"维护实施状态": "已结束"} if work_type == WORK_TYPE_MAINTENANCE else {"变更进度": CHANGE_PROGRESS_ENDED}
+        records = self._records if work_type == WORK_TYPE_MAINTENANCE else self._change_records
         with self._refresh_lock:
-            for record in self._records:
+            for record in records:
                 if str(record.get("record_id") or "").strip() != source_record_id:
                     continue
                 fields = record.get("display_fields")
@@ -22161,7 +22175,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 break
             self._state_store.patch_active_source_record_fields(
                 source_record_id=source_record_id,
-                work_type=WORK_TYPE_MAINTENANCE,
+                work_type=work_type,
                 fields=local_fields,
             )
         self._touch_state_cache_version()

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .lighthouse_ai import AssistantError, BUSINESS_QUERY, MODEL_QUESTION, explicit_general_question, safe_data, safe_text
 from .lighthouse_pending import NOTICE_TYPES, pending_status, visible
-from .lighthouse_sources import SCOPES, record_codes
+from .lighthouse_sources import SCOPES, record_codes, record_title
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 COUNT = re.compile(r"多少|几(?:条|个|项|份|单|件|道|台|柜|起|宗|次)|数量|总数")
@@ -65,11 +65,33 @@ def semantic_context(text):
     return "\n".join(f"{label}：{meaning}" for _, _, label, meaning in entries)
 
 
+def named_clarification_reply(question, previous):
+    """A full name from the last authorized result is a choice, not a new task."""
+    name = question.strip(' \t\r\n"\'“”‘’')
+    if not 2 <= len(name) <= 300:
+        return False
+    pending = [source.get('data') for source in previous.get('sources', []) if source.get('available', True)]
+    for _ in range(2000):
+        if not pending:
+            break
+        item = pending.pop()
+        if isinstance(item, dict):
+            fields = item.get('display_fields') or item.get('fields') or {}
+            if isinstance(fields, dict) and safe_text(record_title(item, '')).strip() == name:
+                return True
+            pending.extend(value for value in item.values() if isinstance(value, (dict, list)))
+        elif isinstance(item, list):
+            pending.extend(item[:100])
+    return False
+
+
 def effective_question(turn):
     latest = turn["question"]
     prompt = turn.get("prompt") or latest
     if prompt == latest:
         return latest
+    if turn.get('_clarification_reply'):
+        return prompt
     if not query_refinement(latest):
         return latest
     latest_domains, prior_domains = business_domains(latest), business_domains(prompt[:-len(latest)] if prompt.endswith(latest) else prompt)

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import copy
 import math
+import sys
 import unittest
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from openclaw_service.assistant.lighthouse_planned_match import match_candidates
 
 

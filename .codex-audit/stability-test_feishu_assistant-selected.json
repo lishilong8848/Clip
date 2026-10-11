@@ -1,0 +1,12 @@
+{
+  "group": "test_feishu_assistant",
+  "modules": 1,
+  "tests": 1,
+  "failures": [
+    "bin.test_feishu_assistant.ChannelTests.test_missing_file_upload_scope_sends_a_short_notice_without_reasking_model"
+  ],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 1.1,
+  "external_connections_blocked": 0
+}

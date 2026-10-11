@@ -6240,7 +6240,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(ended["real_record_id"], "rec-event-1")
         self.assertEqual([call[0] for call in update_calls], ["rec-event-1", "rec-event-1"])
         create_record.assert_called_once()
-        self.assertGreaterEqual(query_record.call_count, 2)
+        self.assertEqual(query_record.call_count, 1)
 
     def test_local_event_end_requires_screenshot_before_remote_update(self):
         request_payload = {
@@ -11494,6 +11494,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     result = PortalRuntime._finalize_local_delete_after_remote(
                         operation_id=operation_id,
                         work_type="maintenance",
+                        notice_type="维保通告",
                         active_item_id=item["active_item_id"],
                         source_record_id="",
                         target_record_id=item["target_record_id"],
@@ -12029,17 +12030,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
             serialized = service._serialize_record(next_month)
             memory = serialized["memory"]
-            draft = workbench_lite_module._draft_from_record(
-                serialized,
-                work_type="maintenance",
-            )
+            with patch.object(workbench_lite_module, '_planned_maintenance_times', return_value=("2026-10-11T15:30", "2026-10-11T18:30")):
+                draft = workbench_lite_module._draft_from_record(serialized, work_type="maintenance")
 
             self.assertEqual(memory["location"], "C楼检测区域")
             self.assertEqual(memory["content"], "按月度计划开展空气质量检测")
             self.assertEqual(memory["specialty"], "暖通")
             self.assertEqual(draft["progress"], "准备工作已完成，人员已就位")
-            self.assertEqual(draft["start_time"], f"{dt.date.today().isoformat()}T09:30")
-            self.assertEqual(draft["end_time"], f"{dt.date.today().isoformat()}T18:30")
+            self.assertEqual(draft["start_time"], "2026-10-11T15:30")
+            self.assertEqual(draft["end_time"], "2026-10-11T18:30")
 
             different_cycle = _build_record(
                 "maintenance-next-quarter",
@@ -13264,6 +13263,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         {
                             "fields": {
                                 MAINTENANCE_NOTICE_FIELDS["status"]: "已结束",
+                                MAINTENANCE_NOTICE_FIELDS["actual_end"]: "2026-08-17 09:14:00",
                             },
                             "record_version": "v-ended",
                         },
@@ -13273,7 +13273,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ):
                 PortalRuntime._process_maintenance_action_job(job_id)
                 self.assertFalse(
-                    service.mark_maintenance_source_ended_locally(
+                    service.mark_notice_source_ended_locally(
                         {
                             "work_type": WORK_TYPE_REPAIR,
                             "source_record_id": "repair-source-must-stay-unchanged",
@@ -13281,6 +13281,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         }
                     )
                 )
+
+                source_write.assert_not_called()
+                self.assertEqual(len(store.list_outbox_events("notice_source_finalize", status="pending")), 1)
+                PortalRuntime.process_source_end_sync()
 
             upload.assert_not_called()
             source_write.assert_called_once()
@@ -13940,14 +13944,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         (
                             True,
                             {
-                                "fields": {"名称": "A楼Qt并发测试"},
+                                "fields": {"名称": "A楼Qt并发测试", MAINTENANCE_NOTICE_FIELDS["status"]: "开始"},
                                 "record_version": "version-current",
                             },
                         ),
                         (
                             True,
                             {
-                                "fields": {"名称": "A楼Qt并发测试"},
+                                "fields": {"名称": "A楼Qt并发测试", MAINTENANCE_NOTICE_FIELDS["status"]: "更新"},
                                 "record_version": "version-after-write",
                             },
                         ),
@@ -13976,18 +13980,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     )
 
                 self.assertTrue(result["ok"])
-                self.assertEqual(result["record_version"], "version-after-write")
+                self.assertFalse(result["record_version"])
                 upload_media.assert_called_once()
                 update_record.assert_called_once()
                 active_payload = store.list_qt_active_items()[0]["payload"]
-                self.assertEqual(
-                    active_payload["record_version"],
-                    "version-after-write",
-                )
-                self.assertEqual(
-                    active_payload["expected_record_version"],
-                    "version-after-write",
-                )
+                self.assertFalse(active_payload.get("record_version"))
+                self.assertFalse(active_payload.get("expected_record_version"))
             finally:
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
@@ -14105,7 +14103,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 PortalRuntime.local_upload_locks = old_locks
                 PortalRuntime.local_upload_created_targets = old_created_targets
 
-    def test_qt_first_upload_returns_and_persists_created_record_version(self):
+    def test_qt_first_upload_clears_version_after_accepted_create(self):
         old_store = PortalRuntime.state_store
         old_locks = PortalRuntime.local_upload_locks
         old_created_targets = PortalRuntime.local_upload_created_targets
@@ -14183,22 +14181,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     result["real_record_id"],
                     "target-event-first-version",
                 )
-                self.assertEqual(
-                    result["record_version"],
-                    "version-created-final",
-                )
+                self.assertFalse(result["record_version"])
                 create_record.assert_called_once()
                 rows = store.list_qt_active_items()
                 self.assertEqual(len(rows), 1)
                 active_payload = rows[0]["payload"]
-                self.assertEqual(
-                    active_payload["record_version"],
-                    "version-created-final",
-                )
-                self.assertEqual(
-                    active_payload["expected_record_version"],
-                    "version-created-final",
-                )
+                self.assertFalse(active_payload.get("record_version"))
+                self.assertFalse(active_payload.get("expected_record_version"))
             finally:
                 store.shutdown_write_worker(timeout=2.0)
                 PortalRuntime.state_store = old_store
@@ -16215,7 +16204,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(rebound, (True, "更新成功", "undo-restored-target"))
             self.assertEqual(stale_after_undo["target_record_id"], "undo-restored-target")
             self.assertEqual(stale_after_undo["record_id"], "undo-restored-target")
-            self.assertEqual(stale_after_undo["record_version"], "updated-version")
+            self.assertFalse(stale_after_undo.get("record_version"))
+            self.assertFalse(stale_after_undo.get("expected_record_version"))
             self.assertEqual(fake_service.lookup_calls, [])
         finally:
             PortalRuntime.service = previous_service
@@ -18643,7 +18633,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn("function ongoingDisplayTitle(draft)", html)
         self.assertIn("const title = ongoingDisplayTitle(draft);", html)
         self.assertIn("setOngoingRowStatus(row, '进行中', 'working');", html)
-        self.assertIn("updateStatus(successfulNoticeActionText(", html)
+        self.assertIn("setLiteStatus(successfulNoticeActionText(", html)
         self.assertNotIn("setMetaChip(meta, status, 'ready');", html)
         self.assertNotIn("setMetaChip(meta, String(message).slice", html)
         self.assertNotIn("setMetaChip(meta, String(message || patch.message", html)
@@ -27360,10 +27350,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         source = (
             BIN_DIR / "lan_bitable_template_portal" / "workbench_lite.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("const unuploaded = !localOnly && !targetId;", source)
-        self.assertIn("const sourceOnly = Boolean(sourceId) && unuploaded;", source)
-        self.assertIn("if (unuploaded) setUnuploadedSubmitButtons(form);", source)
-        self.assertGreaterEqual(source.count("resetSourceTypeFields(form);"), 2)
+        self.assertIn("setFormValue(form, 'target_record_id', targetRecordId);", source)
+        self.assertIn("if (isOngoing && !targetRecordId) setUnuploadedSubmitButtons(form);", source)
+        self.assertIn("resetSourceTypeFields(form);", source)
         self.assertIn("'source_work_type', 'converted_from_work_type'", source)
         self.assertNotIn("/api/notice-work-type-override", source)
         self.assertNotIn("data-convert-to-change", source)
@@ -27813,6 +27802,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "notice_type": "维保通告",
                     "record_id": "manual-maintenance-codex-api",
                     "source_record_id": "manual-maintenance-codex-api",
+                    "manual_binding_choice": "unbound",
                     "operation_id": "manual-maintenance-command-start",
                     "patch": {
                         "action": "start",
@@ -27915,6 +27905,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "work_type": "maintenance",
                     "notice_type": "维保通告",
                     "record_id": "manual:lite",
+                    "manual_binding_choice": "unbound",
                     "operation_id": operation,
                     "patch": {
                         "action": "start",
@@ -27951,11 +27942,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(second_job, first_job)
             self.assertFalse(second_should_start)
 
-            changed_content_job, changed_content_should_start = service.create_action_job(
-                payload(content="测试内容已变化", operation="op-3")
-            )
-            self.assertNotEqual(changed_content_job, first_job)
-            self.assertTrue(changed_content_should_start)
+            with self.assertRaisesRegex(PortalError, "同一通告仍在上传"):
+                service.create_action_job(payload(content="测试内容已变化", operation="op-3"))
 
     def test_manual_change_and_repair_do_not_require_source_records(self):
         service = _TestMaintenancePortalService()
@@ -28177,6 +28165,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "notice_type": notice_type,
                             "manual": "1",
                             "manual_id": manual_id,
+                            "manual_binding_choice": "unbound",
                             "record_id": manual_id,
                             "source_record_id": manual_id,
                             "operation_id": f"{manual_id}:start",
@@ -29017,7 +29006,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )[1].split("let liteRepairEventCandidates", 1)[0]
 
         self.assertIn("/api/workbench/repair-event-prefill", handler)
-        self.assertIn("applyRepairNoticeDraft(form, draft)", handler)
+        self.assertIn("applyRepairNoticeDraft(form, draft, Boolean(form.dataset.parsedKeys))", handler)
         self.assertIn("'repair_management_record_id',", handler)
         self.assertIn("await confirmManualSourceCandidate()", source)
         self.assertIn("async function bindExistingOngoingSource", source)
@@ -29495,8 +29484,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
         }
 
-        draft = _draft_from_record(record, work_type="maintenance")
-        today = dt.date.today().isoformat()
+        with patch.object(workbench_lite_module, '_planned_maintenance_times', return_value=("2026-10-11T15:30", "2026-10-11T18:30")):
+            draft = _draft_from_record(record, work_type="maintenance")
 
         self.assertEqual(draft["location"], "A-245配电室")
         self.assertEqual(draft["content"], "工程师按历史记忆执行UPS巡检")
@@ -29504,8 +29493,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(draft["impact"], "对IT设备无影响")
         self.assertEqual(draft["progress"], "准备工作已完成，人员已就位")
         self.assertEqual(draft["specialty"], "电气")
-        self.assertEqual(draft["start_time"], f"{today}T09:30")
-        self.assertEqual(draft["end_time"], f"{today}T18:30")
+        self.assertEqual(draft["start_time"], "2026-10-11T15:30")
+        self.assertEqual(draft["end_time"], "2026-10-11T18:30")
         self.assertIn("已用历史记忆", _memory_status_chip(record))
 
         ongoing_record = {
@@ -30234,7 +30223,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(payload["records"][0]["followup_count"], 0)
 
-    def test_repair_management_records_fail_closed_when_followups_cannot_be_verified(self):
+    def test_repair_management_records_preserve_cloud_completion_when_followups_unavailable(self):
         service = _TestMaintenancePortalService()
         title_meta = FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False)
         service._load_table_fields = (  # type: ignore[method-assign]
@@ -30263,18 +30252,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         payload = service.get_repair_management_records(limit=20)
 
         record = payload["records"][0]
-        self.assertFalse(record["is_completed"])
+        self.assertTrue(record["is_completed"])
         self.assertTrue(record["read_only"])
         self.assertTrue(record["state_locked"])
         self.assertFalse(record["followup_state_verified"])
-        self.assertEqual(record["workflow"], "维修中")
+        self.assertEqual(record["workflow"], "维修完成")
         self.assertEqual(record["followup_count"], 0)
-        self.assertEqual(record["progress_percent"], 0)
+        self.assertEqual(record["progress_percent"], 100)
         self.assertTrue(
             any("维修跟进状态暂未确认" in item for item in payload["schema_warnings"])
         )
 
-    def test_repair_management_record_detail_fails_closed_when_followups_cannot_be_verified(self):
+    def test_repair_management_record_detail_preserves_cloud_completion_when_followups_unavailable(self):
         service = _TestMaintenancePortalService()
         title_meta = FieldMeta("fld_title", "维修名称", "Text", 1, True, {}, [], False)
         project = {
@@ -30303,13 +30292,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         payload = service.get_repair_management_record(project["record_id"])
 
         record = payload["record"]
-        self.assertFalse(record["is_completed"])
+        self.assertTrue(record["is_completed"])
         self.assertTrue(record["read_only"])
         self.assertTrue(record["state_locked"])
         self.assertFalse(record["followup_state_verified"])
-        self.assertEqual(record["workflow"], "维修中")
+        self.assertEqual(record["workflow"], "维修完成")
         self.assertEqual(record["followup_count"], 0)
-        self.assertEqual(record["progress_percent"], 0)
+        self.assertEqual(record["progress_percent"], 100)
         self.assertTrue(
             any("维修跟进状态暂未确认" in item for item in payload["schema_warnings"])
         )
@@ -33132,6 +33121,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "display_fields": {},
             }
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [
+            {"record_id": "rec_repair_summary", "raw_fields": {"设备检修关联": "rec_old_target"},
+             "display_fields": {"所属数据中心/楼栋-使用": "南通E楼"}}
+        ]
         service._sync_repair_target_summary_id = (  # type: ignore[method-assign]
             lambda **_kwargs: {
                 "synced": False,
@@ -33969,6 +33962,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: existing
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [existing]
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])
         )
@@ -34334,6 +34328,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             return {"data": {"record": {"record_id": "rec_repair_created"}}}
 
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
+        service._load_table_records = lambda **_kwargs: []
         service._create_record_fields = fake_create_record_fields  # type: ignore[method-assign]
 
         with patch.object(service, "_save_source_scope_snapshots") as publish_source:
@@ -34346,7 +34341,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["app_token"], REPAIR_SOURCE_APP_TOKEN)
-        self.assertEqual(captured["table_id"], REPAIR_SOURCE_TABLE_ID)
+        self.assertEqual(captured["table_id"], REPAIR_MANAGEMENT_TABLE_ID)
         self.assertEqual(captured["fields"], {"故障维修原因": "测试原因", "台账关联状态": "待确认", "台账关联说明": "", "关联台账记录ID": ""})
         self.assertEqual(result["record_id"], "rec_repair_created")
         self.assertEqual(result["field_count"], 4)
@@ -34436,6 +34431,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             }
 
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
+        service._load_table_records = lambda **_kwargs: []
 
         with self.assertRaisesRegex(PortalError, "专业"):
             service.create_repair_management_record({"故障维修原因": "测试原因"})
@@ -34457,6 +34453,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             return {"data": {"record": {"record_id": "rec_repair_created"}}}
 
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
+        service._load_table_records = lambda **_kwargs: []
         service._create_record_fields = fake_create_record_fields  # type: ignore[method-assign]
         service._build_repair_management_prefill = (  # type: ignore[method-assign]
             lambda **_kwargs: {"fields": {}, "warnings": []}
@@ -34469,7 +34466,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         self.assertEqual(
             captured["fields"],
-            {"关联事件单": "rec_event_1"},
+            {"关联事件单": "rec_event_1", "台账关联状态": "待确认", "台账关联说明": "", "关联台账记录ID": ""},
         )
 
     def test_repair_management_event_candidates_filter_scope(self):
@@ -36313,6 +36310,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: existing
         )
+        service._load_table_records_by_ids = lambda **_kwargs: [existing]
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [linked_followup])
         )
@@ -36565,6 +36563,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._load_table_fields = (  # type: ignore[method-assign]
             lambda **_kwargs: (metas, meta_by_name)
         )
+        service._load_repair_management_project_records = lambda **_kwargs: (metas, meta_by_name, [])
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, followups)
         )
@@ -38422,6 +38421,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._state_store = LanPortalStateStore(  # type: ignore[assignment]
             Path(temp_dir.name) / "lan_portal_state.sqlite3"
         )
+        self.addCleanup(service._state_store.shutdown_write_worker, timeout=2.0)
+        service._process_repair_sync_tasks_async = lambda: None
+        remaining = [{"record_id": "rec_followup_1"}, {"record_id": "rec_followup_2"}]
         service._load_repair_management_project_records = (  # type: ignore[method-assign]
             lambda **_kwargs: ([], {}, [])
         )
@@ -38432,19 +38434,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             lambda *_args, **_kwargs: (
                 [],
                 {},
-                [
-                    {"record_id": "rec_followup_1"},
-                    {"record_id": "rec_followup_2"},
-                ],
+                list(remaining),
             )
         )
         deleted = []
         snapshot_deleted = []
-        service._delete_record_fields = (  # type: ignore[method-assign]
-            lambda **kwargs: deleted.append(
-                (kwargs["table_id"], kwargs["record_id"])
-            ) or {"code": 0}
-        )
+        def delete_record(**kwargs):
+            deleted.append((kwargs["table_id"], kwargs["record_id"]))
+            remaining[:] = [row for row in remaining if row["record_id"] != kwargs["record_id"]]
+            return {"code": 0}
+        service._delete_record_fields = delete_record
         service._delete_repair_snapshot_item = (  # type: ignore[method-assign]
             lambda source_key, record_id: snapshot_deleted.append(
                 (source_key, record_id)
@@ -38516,6 +38515,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         service._state_store = LanPortalStateStore(  # type: ignore[assignment]
             Path(temp_dir.name) / "lan_portal_state.sqlite3"
         )
+        self.addCleanup(service._state_store.shutdown_write_worker, timeout=2.0)
+        remaining = [{"record_id": "rec_followup_1"}, {"record_id": "rec_followup_2"}]
         service._process_repair_sync_tasks_async = (  # type: ignore[method-assign]
             lambda: None
         )
@@ -38529,7 +38530,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             lambda *_args, **_kwargs: (
                 [],
                 {},
-                [{"record_id": "rec_followup_1"}, {"record_id": "rec_followup_2"}],
+                list(remaining),
             )
         )
         deleted: list[tuple[str, str]] = []
@@ -38541,6 +38542,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             if kwargs["record_id"] == "rec_followup_2" and fail_second["value"]:
                 fail_second["value"] = False
                 raise PortalError("模拟一次性删除失败")
+            remaining[:] = [row for row in remaining if row["record_id"] != kwargs["record_id"]]
             return {"code": 0}
 
         service._delete_record_fields = fake_delete  # type: ignore[method-assign]
@@ -38603,6 +38605,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             return {"data": {"record": {"record_id": "rec_repair_created"}}}
 
         service._load_table_fields = fake_load_fields  # type: ignore[method-assign]
+        service._load_table_records = lambda **_kwargs: []
         service._create_record_fields = fake_create_record_fields  # type: ignore[method-assign]
 
         result = service.create_repair_management_record(
@@ -38614,8 +38617,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(captured["fields"], {"所属数据中心/楼栋-使用": "E楼"})
-        self.assertEqual(result["field_count"], 1)
+        self.assertEqual(captured["fields"], {"所属数据中心/楼栋-使用": "E楼", "台账关联状态": "待确认", "台账关联说明": "", "关联台账记录ID": ""})
+        self.assertEqual(result["field_count"], 4)
 
     def test_repair_management_delete_uses_repair_source_table(self):
         service = _TestMaintenancePortalService()
@@ -41077,6 +41080,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "action": "end",
                     "status": "结束",
                     "progress": "目标已结束",
+                    "_accepted_target_at": time.time(),
+                    "_accepted_target_fields": {CHANGE_NOTICE_FIELDS["status"]: "开始"},
                     "text": f"【变更通告】状态：结束\n【名称】{title}",
                     "skip_personal_message": True,
                     "message_sent": True,
@@ -41365,6 +41370,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "fields": {
                                 CHANGE_NOTICE_FIELDS["status"]: "已结束",
                                 CHANGE_NOTICE_FIELDS["progress"]: "已结束",
+                                CHANGE_NOTICE_FIELDS["end_time"]: "2026-08-14 18:00:00",
                             }
                         },
                     ),
@@ -43102,7 +43108,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         portal_server_module,
                         "query_record_by_id",
                         side_effect=[
-                            (True, active_remote),
                             (True, finished_remote),
                         ],
                     ) as query_record,
@@ -43134,7 +43139,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(replay_rows, [])
         self.assertEqual(operation.get("status"), "completed")
         create_record.assert_called_once()
-        self.assertEqual(query_record.call_count, 2)
+        self.assertEqual(query_record.call_count, 1)
 
     def test_web_end_source_field_sync_failure_retries_without_remote_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -43239,6 +43244,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     CHANGE_NOTICE_FIELDS["status"]: "已结束",
                     CHANGE_NOTICE_FIELDS["progress"]: "已结束",
                     CHANGE_NOTICE_FIELDS["start_time"]: "2026-08-14 09:00",
+                    CHANGE_NOTICE_FIELDS["end_time"]: "2026-08-14 18:00:00",
                     CHANGE_NOTICE_FIELDS["building"]: "B楼",
                 },
                 "record_version": "v-web-end-reconcile-finished",
@@ -43263,20 +43269,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     ) as remote_upload,
                 ):
                     PortalRuntime._process_maintenance_action_job(job_id)
+                    PortalRuntime.process_source_end_sync()
                     pending = service.get_job(job_id)
-                    pending_queue = store.list_runtime_queue_items(
-                        "qt_action",
-                        statuses=("queued", "processing"),
-                        due_only=False,
-                    )
+                    pending_queue = store.list_outbox_events("notice_source_finalize", status="pending")
 
-                    PortalRuntime._process_maintenance_action_job(job_id)
+                    with patch("lan_bitable_template_portal.state_store.time.time", return_value=time.time() + 3600):
+                        PortalRuntime.process_source_end_sync()
                     completed = service.get_job(job_id)
-                    completed_queue = store.list_runtime_queue_items(
-                        "qt_action",
-                        statuses=("queued", "processing"),
-                        due_only=False,
-                    )
+                    completed_queue = store.list_outbox_events("notice_source_finalize", status="pending")
                     sqlite_rows = store.list_visible_qt_active_items()
                     with patch.object(
                         PortalRuntime,
@@ -43288,14 +43288,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 store.shutdown_write_worker(timeout=2.0)
 
         remote_upload.assert_not_called()
-        self.assertEqual(pending.get("phase"), "remote_written", pending)
-        self.assertTrue(pending.get("projection_pending"), pending)
+        self.assertEqual(pending.get("phase"), "success", pending)
+        self.assertFalse(pending.get("projection_pending"), pending)
         self.assertEqual(len(pending_queue), 1)
         self.assertEqual(completed.get("phase"), "success", completed)
         self.assertFalse(completed.get("projection_pending"), completed)
         self.assertEqual(completed_queue, [])
         self.assertEqual(source_sync_calls, 2)
-        self.assertEqual(query_record.call_count, 2)
+        self.assertEqual(query_record.call_count, 3)
         self.assertEqual([len(sqlite_rows), len(web_rows)], [0, 0])
 
     def test_paired_target_failure_retries_without_rewriting_main_target(self):
@@ -43520,7 +43520,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     ) as source_sync,
                     patch.object(
                         service,
-                        "mark_maintenance_source_ended_locally",
+                        "mark_notice_source_ended_locally",
                     ) as local_source_sync,
                     patch.object(
                         PortalRuntime,

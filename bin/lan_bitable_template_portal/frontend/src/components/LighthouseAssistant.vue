@@ -16,6 +16,7 @@
         '--lh-panel-max-width': conversationWidthLimit ? conversationWidthLimit + 'px' : undefined,
         '--lh-panel-width': conversationWidth + 'px',
         '--notice-panel-width': noticeWidth + 'px',
+        '--artifact-panel-width': artifactWidth + 'px',
         '--notice-panel-height': conversationHeight + 'px'
       }"
       :class="{ resizing: panelResizing, 'size-active': resizeActive, 'drag-active': dragActive, 'is-open': open, 'sidebar-visible': sidebarVisible }"
@@ -50,7 +51,7 @@
           <div class="panel-title">
             <button v-if="desktopNotices" class="icon sidebar-toggle" :title="sidebarVisible ? '收起侧边栏' : '展开侧边栏'" aria-label="侧边栏（通告待办 / 知识库）" :aria-expanded="sidebarVisible" aria-controls="assistant-notice-sidebar" @click="toggleSidebar"><PanelLeftClose v-if="sidebarVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
             <span class="assistant-mark"><Bot :size="20" /></span><div class="panel-heading"><h2 id="assistant-title">灯塔助手</h2>
-            <span class="header-status" :class="{ active: loading || busy, warning: !loading && !!error }" role="status">{{ headerStatus }}</span></div>
+            <span class="header-status" :class="{ active: loading || busy || activePlans.length, warning: !loading && !!error, awaiting: headerStatus.startsWith('待你') }" role="status">{{ headerStatus }}</span></div>
           </div>
           <div class="tools">
             <button class="icon" :disabled="appearanceLoading" title="图标设置" aria-label="图标设置" :aria-pressed="appearanceOpen" @click="showAppearanceSettings"><Palette :size="17" /></button>
@@ -191,9 +192,10 @@
                   <p v-else-if="turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
                   <p v-if="turn.status === 'pending' && turn.answer && !(turn.process || []).length" class="pending"><Loader2 :size="14" class="spin" />{{ pendingText(turn) }}</p>
                   <p v-if="turn.answer && ['stopped', 'failed'].includes(turn.status)" class="muted">{{ turn.error || '回答未完成' }}</p>
-                  <div v-if="turn.output_files?.length" class="message-files output-files"><a v-for="file in turn.output_files" :key="file.id" :href="safeAttachmentUrl(file.url)" target="_blank" rel="noopener"><FileText :size="18" /><span>{{ file.name }}</span><Download :size="15" /></a></div>
+                  <div v-if="turn.output_files?.length" class="message-files output-files"><div v-for="file in turn.output_files" :key="file.id" class="output-file"><button type="button" :aria-label="'预览 ' + file.name" @click="openArtifact(file)"><FileText :size="18" /><span>{{ file.name }}</span></button><a :href="safeAttachmentUrl(file.url)" download :aria-label="'下载 ' + file.name" title="下载文件"><Download :size="16" /></a></div></div>
                   <LighthouseDownloads :items="turn.downloads" />
-                  <section v-if="turn.plan" class="operation-plan" :data-plan-id="turn.plan.id" :data-plan-status="turn.plan.status">
+                  <button v-if="turn.plan && planTurns.get(turn.plan.id) !== turn" type="button" class="plan-reference" @click="locatePlan(turn.plan.id)"><ListChecks :size="14" />查看这项操作的最新状态</button>
+                  <section v-if="turn.plan && planTurns.get(turn.plan.id) === turn" class="operation-plan" :data-plan-id="turn.plan.id" :data-plan-status="turn.plan.status">
                     <div class="plan-title"><ListChecks :size="16" /><strong>{{ turn.plan.title }}</strong><span>{{ planStatusText(turn.plan) }}</span><button v-if="planIsFinished(turn.plan)" class="icon" type="button" :aria-expanded="!!expandedPlans[turn.plan.id]" :title="expandedPlans[turn.plan.id] ? '收起办理详情' : '展开办理详情'" :aria-label="expandedPlans[turn.plan.id] ? '收起办理详情' : '展开办理详情'" @click="expandedPlans[turn.plan.id] = !expandedPlans[turn.plan.id]"><ChevronRight :size="16" :class="{ 'rotate-chevron': expandedPlans[turn.plan.id] }" /></button></div>
                     <div v-if="!planIsFinished(turn.plan) || expandedPlans[turn.plan.id]" class="plan-body">
                     <p v-if="turn.plan.explanation" class="plan-description">{{ turn.plan.explanation }}</p>
@@ -279,7 +281,7 @@
             <div v-if="draftFiles.length" class="draft-files"><div v-for="file in draftFiles" :key="file.localId" class="draft-file"><img v-if="file.preview" :src="file.preview" :alt="file.name" /><FileText v-else :size="22" /><span>{{ file.name }}<small>{{ file.uploading ? '读取中…' : file.error || '已就绪' }}</small></span><button type="button" class="icon" :disabled="file.uploading" :aria-label="'移除附件 ' + file.name" @click="removeDraftFile(file.localId)"><X :size="14" /></button></div></div>
             <textarea id="assistant-question" ref="input" v-model="draft" :disabled="loading || !state.configured || !state.enabled" rows="2" maxlength="12000" :placeholder="state.busy ? '可以继续补充信息…' : '询问信息，或描述要办理的事项'" @paste="onComposerPaste" @keydown="composerKeydown" :aria-expanded="!!commandsMenu?.visible" aria-controls="assistant-commands" :aria-activedescendant="commandsMenu?.visible ? 'assistant-command-' + commandsMenu.active : undefined" />
             <div class="composer-footer">
-              <div class="composer-model"><button type="button" class="icon" title="添加图片或文件" aria-label="添加图片或文件" :disabled="sending || uploading" @click="attachmentInput?.click()"><Paperclip :size="18" /></button><input ref="attachmentInput" class="sr-only" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.pdf,.txt,.md,.csv,.log,.json,.xml,.docx,.xlsx,.xlsm" @change="onAttachmentChange" />
+              <div class="composer-model"><button type="button" class="icon" title="添加图片或文件" aria-label="添加图片或文件" :disabled="sending || uploading" @click="attachmentInput?.click()"><Paperclip :size="18" /></button><input ref="attachmentInput" class="sr-only" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.pdf,.txt,.md,.csv,.log,.json,.xml,.docx,.xlsx,.xlsm,.pptx,.py,.js,.ts,.jsx,.tsx,.html,.css,.sql,.sh,.ps1,.bat,.yaml,.yml,.toml,.ini,.c,.cpp,.h,.java,.go,.rs,.rb" @change="onAttachmentChange" />
               <button type="button" class="icon" title="选择技能或工具" aria-label="选择技能或工具" :disabled="sending || loading" @click="insertCommand"><Slash :size="17" /></button>
               <div v-if="modelNames.length" class="model-select-small">
                 <label class="sr-only" for="assistant-model">选择模型</label>
@@ -306,6 +308,7 @@
           @lostpointercapture="onResizeCaptureLost"
         ></div>
       </section>
+      <LighthouseArtifactPreview v-if="artifactFile" :key="userId" :file="artifactFile" @close="artifactFile = null" />
       </section>
       </UiTransition>
 
@@ -330,6 +333,7 @@ import { repairDeviceDependentPatch, repairDraftInputValue } from '../repairMana
 import { navigate } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
 import LighthouseReply from './LighthouseReply.vue';
+import LighthouseArtifactPreview from './LighthouseArtifactPreview.vue';
 import LighthouseDownloads from './LighthouseDownloads.vue';
 import LoadingIndicator from './LoadingIndicator.vue';
 import AsyncPageState from './AsyncPageState.vue';
@@ -458,7 +462,15 @@ let streamRun = '', streamSerial = 0, renderTimer = 0, lastStreamUpdateAt = 0;
 const planValues = reactive<Dict>({});
 const plannedReset = reactive<Record<string, boolean>>({});
 const expandedPlans = reactive<Record<string, boolean>>({});
-const activePlans = computed<Dict[]>(() => (state.value.turns || []).map((turn: Dict) => turn.plan).filter((plan: Dict) => plan && ['running', 'submitted'].includes(plan.status)));
+const planTurns = computed(() => {
+  const turns = new Map<string, Dict>();
+  for (const turn of state.value.turns || []) {
+    const previous = turns.get(turn.plan?.id);
+    if (turn.plan?.id && (!previous || Number(turn.plan.version || 0) >= Number(previous.plan.version || 0))) turns.set(turn.plan.id, turn);
+  }
+  return turns;
+});
+const activePlans = computed<Dict[]>(() => [...planTurns.value.values()].map(turn => turn.plan).filter(plan => ['running', 'submitted'].includes(plan.status)));
 function planIsFinished(plan: Dict): boolean { return ['completed', 'cancelled', 'superseded'].includes(plan.status); }
 function locatePlan(id: string): void {
   const element = Array.from(thread.value?.querySelectorAll<HTMLElement>('[data-plan-id]') || []).find(item => item.dataset.planId === id);
@@ -481,7 +493,7 @@ function restoreDrafts(): void {
     selectedCommands.value = saved.commands;
     draftFiles.value = saved.files.filter((file: Dict) => file.id && file.name).map((file: Dict) => ({ ...file, localId: file.id, uploading: false, error: '' } as DraftFile));
   }
-  for (const turn of state.value.turns || []) {
+  for (const turn of planTurns.value.values()) {
     if (!turn.plan) continue;
     const values = planDraftValues(saved, turn.plan);
     if (!values) continue;
@@ -494,7 +506,7 @@ function saveDrafts(): void {
   if (!draftConversation || draftConversation !== state.value.conversation_id) return;
   const plans: Dict = {};
   const fileReference = (file: Dict) => ({ id: file.id, name: file.name, mime: file.mime, size: file.size, url: file.url, is_image: file.is_image });
-  for (const turn of state.value.turns || []) {
+  for (const turn of planTurns.value.values()) {
     const plan = turn.plan;
     if (plan?.status !== 'needs_input') continue;
     const values = Object.fromEntries((plan.fields || []).filter((field: Dict) => Object.prototype.hasOwnProperty.call(planValues, plan.id + ':' + field.name)).map((field: Dict) => [field.name, planValues[plan.id + ':' + field.name]]));
@@ -509,7 +521,7 @@ function saveDrafts(): void {
 }
 function scheduleDraftSave(): void { window.clearTimeout(draftTimer); draftTimer = window.setTimeout(saveDrafts, 500); }
 watch([draft, selectedCommands, draftFiles, planValues], scheduleDraftSave, { deep: true });
-watch(() => state.value.turns?.map((turn: Dict) => turn.plan), plans => {
+watch(() => [...planTurns.value.values()].map(turn => turn.plan), plans => {
   for (const plan of plans || []) for (const field of plan?.fields || []) {
     const key = plan.id + ':' + field.name;
     if (!(key in planValues) && field.value !== undefined) planValues[key] = JSON.parse(JSON.stringify(field.value));
@@ -528,7 +540,9 @@ const composerElement = ref<HTMLElement | null>(null);
 
 const busy = computed(() => sending.value || !!state.value.busy || selecting.value || settingBusy.value || settingsLoading.value || Object.values(planBusy).some(Boolean));
 const headerStatus = computed(() => loading.value ? '读取中' : error.value ? '待恢复' : state.value.enabled === false ? '已关闭'
-  : !state.value.configured ? '待配置' : busy.value ? '处理中' : '就绪');
+  : !state.value.configured ? '待配置' : busy.value ? '处理中' : activePlans.value.length ? '业务处理中'
+  : state.value.turns?.at(-1)?.clarification || [...planTurns.value.values()].some(turn => turn.plan.status === 'needs_input') ? '待你补充'
+  : [...planTurns.value.values()].some(turn => ['awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status)) ? '待你确认' : '就绪');
 const nativeOverlays = shallowRef<Element[]>([]), engaged = ref(false), feedback = ref<BotMood>('idle');
 let modalOrder: HTMLDialogElement[] = [];
 const nativeModal = shallowRef<HTMLDialogElement | null>(null), launcherLayer = ref<HTMLElement | null>(null), assistantLayer = ref<HTMLElement | null>(null);
@@ -650,12 +664,17 @@ const MARGIN = 12, STORAGE_PREFIX = 'lighthouse_pos:';
 const CONV_DEFAULT_W = 820, CONV_DEFAULT_H = 780, CONV_MIN_W = 360, CONV_MIN_H = 480;
 const panelWidthLimit = ref<number | null>(null);
 const noticeAvailable = ref(false), sidebarDockOpen = ref(true), sidebarUserOpened = ref(false);
+const artifactFile = ref<Dict | null>(null);
+const artifactWidth = computed(() => Math.min(520, Math.max(280, (panelWidthLimit.value || window.innerWidth - 50) * .46)));
+function openArtifact(file: Dict): void { if (safeAttachmentUrl(file.url)) artifactFile.value = file; }
+watch(() => [props.userId, state.value.conversation_id], () => { artifactFile.value = null; });
 const sidebarTab = ref<'notices' | 'knowledge'>('notices');
 const desktopNotices = ref(window.innerWidth >= 1000);
 let noticeEdition = '';
-const sidebarVisible = computed(() => desktopNotices.value && sidebarDockOpen.value && (noticeAvailable.value || sidebarUserOpened.value || sidebarTab.value === 'knowledge'));
+const sidebarVisible = computed(() => !artifactFile.value && desktopNotices.value && sidebarDockOpen.value && (noticeAvailable.value || sidebarUserOpened.value || sidebarTab.value === 'knowledge'));
 const noticeWidth = computed(() => Math.min(360, Math.max(240, Math.floor((panelWidthLimit.value || window.innerWidth - 48) * .4))));
-const conversationWidthLimit = computed(() => panelWidthLimit.value ? Math.max(1, panelWidthLimit.value - (sidebarVisible.value ? noticeWidth.value : 0) - 2) : null);
+const sideWidth = computed(() => artifactFile.value ? artifactWidth.value : sidebarVisible.value ? noticeWidth.value : 0);
+const conversationWidthLimit = computed(() => Math.max(1, (panelWidthLimit.value || window.innerWidth - 50) - sideWidth.value - 2));
 function onNoticeEdition(id: string): void { if (noticeEdition && id !== noticeEdition) sidebarDockOpen.value = true; noticeEdition = id; }
 const panelResizing = ref(false), dragActive = ref(false), resizeActive = ref(false);
 let panelResizeTimer = 0, panelResizeSerial = 0;
@@ -693,9 +712,9 @@ function saveConversationSize(): void {
 function expectedPanelSize(): { w: number; h: number } {
   const w = conversationSize.value.w;
   const h = conversationSize.value.h;
-  return { w: Math.min(w, conversationWidthLimit.value || Infinity, window.innerWidth - 50) + (sidebarVisible.value ? noticeWidth.value : 0) + 2, h: Math.min(h, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
+  return { w: Math.min(w, conversationWidthLimit.value || Infinity, window.innerWidth - 50) + sideWidth.value + 2, h: Math.min(h, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
 }
-watch([sidebarVisible], async () => {
+watch([sideWidth], async () => {
   if (!open.value || disposed || !root.value) return;
   const epoch = shapeEpoch, serial = ++panelResizeSerial, rect = root.value.getBoundingClientRect();
   const { w, h } = expectedPanelSize();
@@ -930,7 +949,7 @@ async function send(retry?: Dict, regenerate = false): Promise<void> {
   if (!retry && commandsMenu.value?.visible) return;
   const question = retry?.question || draft.value.trim();
   if (!retry && /^(?:请)?确认发送[。！!\s]*$/.test(question) && !draftFiles.value.length) {
-    const pending = state.value.turns.filter((turn: Dict) => ['needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan?.status));
+    const pending = [...planTurns.value.values()].filter(turn => ['needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status));
     if (pending.some((turn: Dict) => turn.plan.planned_notice)) {
       if (pending.length !== 1) { error.value = '有多个待处理操作，请在要发送的那条通告下确认。'; return; }
       const turn = pending[0];
@@ -943,14 +962,15 @@ async function send(retry?: Dict, regenerate = false): Promise<void> {
   const commands = retry?.commands || selectedCommands.value;
   const submittedCommands = retry?.submitted_commands || commands.map((item: Dict) => ({ kind: item.kind, id: item.id }));
   const attachments = retry?.attachments || draftFiles.value.filter(f => f.id).map(({ preview, localId, uploading, error, ...file }) => file);
+  const previewFile = retry ? retry.preview_file || null : artifactFile.value;
   const operation = retry?.operation_id || (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_assistant`);
   const attempt = retry?.client_pending && !regenerate ? (retry.attempt_id || operation) : (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_attempt`);
   const at = retry?.at || Date.now() / 1000;
   sending.value = true; error.value = '';
   abortRead();
-  rememberOutgoing({ conversation_id: state.value.conversation_id, operation_id: operation, attempt_id: attempt, question: question || '请处理附件', attachments, commands, submitted_commands: submittedCommands, at });
+  rememberOutgoing({ conversation_id: state.value.conversation_id, operation_id: operation, attempt_id: attempt, question: question || '请处理附件', attachments, preview_file: previewFile, commands, submitted_commands: submittedCommands, at });
   if (!retry) {
-    state.value.turns.push({ question: question || '请处理附件', attachments, commands: [...commands], submitted_commands: submittedCommands, operation_id: operation, attempt_id: attempt, status: 'pending', client_pending: true, at });
+    state.value.turns.push({ question: question || '请处理附件', attachments, preview_file: previewFile, commands: [...commands], submitted_commands: submittedCommands, operation_id: operation, attempt_id: attempt, status: 'pending', client_pending: true, at });
     draft.value = '';
     selectedCommands.value = [];
     for (const file of [...draftFiles.value]) if (attachments.some((sent: Dict) => sent.id === file.id)) removeDraftFile(file.localId);
@@ -959,7 +979,7 @@ async function send(retry?: Dict, regenerate = false): Promise<void> {
   scrollBottom();
   scheduleRead();
   try {
-    const result = await call('messages', 'POST', { question, commands: submittedCommands, file_ids: attachments.map((file: Dict) => file.id), operation_id: operation, attempt_id: attempt, conversation_id: state.value.conversation_id }, 20000);
+    const result = await call('messages', 'POST', { question, commands: submittedCommands, file_ids: attachments.map((file: Dict) => file.id), preview_file_id: previewFile?.id || '', operation_id: operation, attempt_id: attempt, conversation_id: state.value.conversation_id }, 20000);
     if (disposed) return;
     abortRead();
     forgetOutgoing(operation, attempt);
@@ -1056,7 +1076,10 @@ async function attachStream(runId: string): Promise<void> {
         state.value.phase = value.label || '';
         if (turn && Array.isArray(value.process)) turn.process = value.process;
       } else if (part.type === 'data-turn' && turn) {
+        const follow = isNearBottom();
+        const newFiles = (value.output_files?.length || 0) > (turn.output_files?.length || 0);
         Object.assign(turn, value);
+        if (newFiles) { if (follow) scrollBottom(); else hasNewContent.value = true; }
       }
     },
     onFinish: () => { if (!disposed && serial === streamSerial) { renderStream(); void readState(false, true); } },
@@ -1424,10 +1447,10 @@ function visiblePlanFields(plan: Dict): Dict[] {
 function replacePlan(plan: Dict): void {
   if (disposed) return;
   abortRead();
-  const turn = state.value.turns.find((item: Dict) => item.plan?.id === plan.id);
+  const turn = planTurns.value.get(plan.id);
     if (turn) {
       if (plan.status === 'completed' && turn.plan?.status !== 'completed') window.dispatchEvent(new Event('clipflow-business-changed'));
-    turn.plan = plan;
+    for (const item of state.value.turns || []) if (item.plan?.id === plan.id) item.plan = plan;
     const answer: Dict = { completed: '操作已完成。', failed: '操作未完成：' + (plan.error || ''), cancelled: '操作已取消。', submitted: '操作已提交，后台仍在处理。', superseded: '已由最新提交替代，旧任务不再重试。' };
     if (answer[plan.status]) turn.answer = answer[plan.status];
   }
@@ -2257,10 +2280,13 @@ function onResizeCaptureLost(event: PointerEvent): void {
 }
 
 function toggleSidebar(): void {
-  sidebarDockOpen.value = !sidebarVisible.value;
+  const wasOpen = sidebarVisible.value;
+  artifactFile.value = null;
+  sidebarDockOpen.value = !wasOpen;
   sidebarUserOpened.value = true;
 }
 function selectSidebarTab(tab: 'notices' | 'knowledge'): void {
+  artifactFile.value = null;
   sidebarTab.value = tab;
   sidebarDockOpen.value = true;
   sidebarUserOpened.value = true;
@@ -2531,6 +2557,7 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .header-status.active::before { animation: status-pulse 1.4s ease-in-out infinite; }
 .header-status.warning { color: var(--lh-warn); }
 .header-status.warning::before { background: var(--lh-warn); }
+.header-status.awaiting { color: var(--lh-accent-strong); background: var(--lh-accent-soft); border: 1px solid var(--lh-border); border-radius: 4px; padding: 1px 6px; font-weight: 600; }
 @keyframes status-pulse { 50% { opacity: .35; } }
 .icon { padding: 6px; width: 32px; height: 32px; min-height: 32px; border-color: transparent; background: transparent; touch-action: manipulation; }
 .tools button { border-color: transparent; }
@@ -2596,11 +2623,17 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .message-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .message-files a { color: inherit; display: flex; gap: 6px; align-items: center; font-size: 12px; text-decoration: none; max-width: 100%; overflow-wrap: anywhere; }
 .message-files img { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; }
+.output-file { display:flex; max-width:100%; align-items:center; border:1px solid var(--lh-border-strong); border-radius:6px; background:var(--lh-surface-subtle); }
+.output-file button { display:flex; align-items:center; gap:8px; min-width:0; min-height:38px; padding:8px 10px; color:inherit; background:transparent; border:0; border-radius:6px; cursor:pointer; }
+.output-file button span { overflow-wrap:anywhere; text-align:left; }
+.output-file a { flex:none; padding:8px; min-height:38px; border-left:1px solid var(--lh-border); }
+.output-file button:hover,.output-file a:hover { background:var(--lh-surface-hover); }
 .operation-plan { border: 1px solid var(--lh-border-strong); border-radius: 8px; padding: 12px; margin-top: 12px; background: var(--lh-surface-subtle); font-size: 13px; }
 .plan-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .plan-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .plan-title span { color: var(--lh-accent); font-size: 12px; }
 .turn .plan-description { color: var(--lh-muted); margin-top: 8px; }
+.plan-reference { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; margin-top: 8px; padding: 4px 0; border: 0; background: transparent; color: var(--lh-accent); font-size: 12px; text-align: left; }
 .planned-notice-selected { display: grid; gap: 7px; padding: 10px 0; border-bottom: 1px solid var(--lh-border); }
 .planned-notice-selected > span { color: var(--lh-muted); font-size: 12px; }
 .planned-notice-selected button { justify-self: start; display: inline-flex; align-items: center; gap: 5px; }

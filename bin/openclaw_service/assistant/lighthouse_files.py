@@ -15,6 +15,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from .lighthouse_ai import AssistantError, safe_data, safe_text
+from .lighthouse_artifacts import CODE_EXTENSIONS
 
 FILE_NAMESPACE = "lighthouse_files"
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -23,8 +24,8 @@ DRILL_TEMPLATE_BYTES = 64 * 1024 * 1024
 WATER_PHOTO_BYTES = 8 * 1024 * 1024
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml"}
-ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | TEXT_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".xlsm"}
-GENERATED_EXTENSIONS = {".zip", ".doc", ".xls", ".bin", ".py"}
+ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | TEXT_EXTENSIONS | CODE_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".xlsm", ".pptx"}
+GENERATED_EXTENSIONS = {".zip", ".doc", ".xls", ".bin", ".pptx"} | CODE_EXTENSIONS
 
 
 def upload_limit(actor, purpose=None):
@@ -117,7 +118,7 @@ def document_data(value, depth=0):
 
 
 def extract_text(content, suffix):
-    if suffix in TEXT_EXTENSIONS:
+    if suffix in TEXT_EXTENSIONS | CODE_EXTENSIONS:
         for encoding in ("utf-8-sig", "gb18030"):
             try:
                 text = content.decode(encoding)
@@ -138,6 +139,13 @@ def extract_text(content, suffix):
             raise AssistantError("PDF最多100页，请拆分文件。", 413)
         return safe_document("\n".join(page.extract_text() or "" for page in reader.pages))
     _check_archive(content)
+    if suffix == '.pptx':
+        from pptx import Presentation
+        slides = Presentation(io.BytesIO(content)).slides
+        if len(slides) > 100:
+            raise AssistantError('PPT最多读取100页，请拆分文件。', 413)
+        return safe_document('\n'.join(f'第{i + 1}页\n' + '\n'.join(shape.text for shape in slide.shapes if shape.has_text_frame)
+                                       for i, slide in enumerate(slides)))
     if suffix == ".docx":
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             xml = archive.read("word/document.xml")
@@ -175,7 +183,7 @@ class LighthouseFiles:
                 raise AssistantError("演练模板仅支持 .xlsx 文件。")
             if purpose == "water_photo":
                 raise AssistantError("水表照片仅支持图片。")
-            raise AssistantError("支持图片、文本、PDF、Word和Excel文件。")
+            raise AssistantError("支持图片、文本、代码、PDF、Word、Excel和PPT文件。")
         if not content or len(content) > limits["max_bytes"]:
             if purpose == "drill_template":
                 raise AssistantError("演练模板须为1字节至64MiB。", 413)
@@ -242,10 +250,11 @@ class LighthouseFiles:
     def text(self, actor, identity, offset=0, length=4000):
         item = self.get(actor, identity)
         if not item.get("extracted", True):
-            if Path(item["name"]).suffix.lower() in GENERATED_EXTENSIONS:
+            if Path(item["name"]).suffix.lower() in GENERATED_EXTENSIONS - ALLOWED_EXTENSIONS:
                 raise AssistantError("该文件可下载，但不支持直接提取文字，请另存为PDF或Excel新格式。")
             try:
-                item["text"] = extract_text(Path(item["path"]).read_bytes(), Path(item["name"]).suffix.lower())
+                suffix = Path(item["name"]).suffix.lower()
+                item["text"] = extract_text(Path(item["path"]).read_bytes(), '.txt' if suffix in CODE_EXTENSIONS else suffix)
             except Exception:
                 item["error"] = "文件文字提取未完成，可下载原文件核对。"
             item["extracted"] = True

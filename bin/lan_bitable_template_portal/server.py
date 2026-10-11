@@ -1812,11 +1812,11 @@ class PortalRuntime:
                 notice_type=notice_type,
                 target_record={"record_id": target_record_id, "display_fields": fields},
             )
-            if lifecycle.get("finished") or not lifecycle.get("active"):
+            if not lifecycle.get("finished") and not lifecycle.get("active"):
                 manager.cancel_group(
-                    target_record_id, reason="target_terminal"
+                    target_record_id, reason="target_inactive"
                 )
-                return {"ok": False, "state": "cancelled", "error": f"{label}通告已结束，工单已停止。"}
+                return {"ok": False, "state": "cancelled", "error": f"{label}通告已失效，工单附件上传已停止。"}
             if work_type == WORK_TYPE_MAINTENANCE:
                 cls.service.ensure_maintenance_work_order_schema()
             elif work_type == WORK_TYPE_ADJUST:
@@ -3195,10 +3195,11 @@ class PortalRuntime:
         return result
 
     @classmethod
-    def _projection_record(cls, payload, record_id, notice_type, operation_id=""):
+    def _projection_record(cls, payload, record_id, notice_type, operation_id="", *, allow_accepted=False):
         fields = payload.get("_accepted_target_fields") or {}
         accepted_at = float(payload.get("_accepted_target_at") or 0)
-        if fields and accepted_at:
+        # Persisted write results describe that attempt, not the current cloud lifecycle.
+        if allow_accepted and fields and accepted_at:
             newer = any(
                 item.get("operation_id") != operation_id
                 and float(item.get("updated_at") or 0) > accepted_at
@@ -7940,32 +7941,13 @@ class PortalRuntime:
         )
         if not (remote_required or local_required):
             return ""
-        operator_name = str(
-            (fields or {}).get(field_config["work_order_operator"]) or ""
-        ).strip()
-        reviewer_name = str(
-            (fields or {}).get(field_config["work_order_reviewer"]) or ""
-        ).strip()
-        if not operator_name or not reviewer_name:
-            return f"{label}工单缺少操作人或现场审核人，不能发送结束。"
-        remote_tokens = set(
-            cls._change_confirmation_attachment_tokens(
-                (fields or {}).get(field_config["work_order_attachments"])
-            )
-        )
-        if not remote_tokens:
-            return f"{label}工单尚未全部完成或附件尚未上传，不能发送结束。"
-        if not isinstance(group, dict):
+        if not isinstance(group, dict) or str(
+            group.get("work_type") or WORK_TYPE_POLLING
+        ).strip() != context["work_type"]:
             return f"无法核验{label}工单完成状态，不能发送结束。"
-        if str(group.get("state") or "") != "completed":
-            return f"{label}工单尚未完成，不能发送结束。"
-        expected_tokens = {
-            str(token or "").strip()
-            for token in group.get("uploaded_file_tokens") or []
-            if str(token or "").strip()
-        }
-        if not expected_tokens or not expected_tokens.issubset(remote_tokens):
-            return f"{label}工单附件与本次完成记录不一致，不能发送结束。"
+        # upload_pending is entered only after execution finishes; attachment sync is separate.
+        if str(group.get("state") or "") not in {"upload_pending", "completed"}:
+            return f"{label}工单尚未全部完成，不能发送结束。"
         delay = cls.polling_work_orders().end_delay_status(group)
         if not delay["ready"]:
             if delay["due_at_ts"] <= 0:
@@ -12464,6 +12446,8 @@ class PortalRuntime:
         data = dict(data) if isinstance(data, dict) else {}
         if not data:
             raise PortalError("Qt 上传请求缺少 data_dict。")
+        data.pop("_accepted_target_fields", None)
+        data.pop("_accepted_target_at", None)
         action_type = str(payload.get("action_type") or "").strip().lower()
         if action_type not in {"upload", "update", "end", "upload_replace"}:
             raise PortalError("Qt 上传请求 action_type 不支持。")
@@ -13919,7 +13903,8 @@ class PortalRuntime:
                         ok_latest, latest_result = True, verified_event_query
                     else:
                         try:
-                            ok_latest, latest_result = cls._projection_record(data, target_record_id, notice_type, operation_id)
+                            ok_latest, latest_result = cls._projection_record(data, target_record_id, notice_type, operation_id,
+                                allow_accepted=True)
                         except Exception as exc:
                             ok_latest, latest_result = False, str(exc)
                     latest_fields = (
@@ -13973,7 +13958,7 @@ class PortalRuntime:
                                         latest_fields
                                     )
                             active_projection_warning = cls._queue_source_end_sync(data, target_record_id, notice_type)
-                            cls.service.mark_maintenance_source_ended_locally(data)
+                            cls.service.mark_notice_source_ended_locally(data)
                             cls._enqueue_active_delete_for_ended_notice(
                                 data,
                                 remote_record_id=target_record_id,
@@ -15065,6 +15050,8 @@ class PortalRuntime:
                 ok = True
             else:
                 prepared = cls.service.prepare_action_job(job_id)
+                prepared.pop("_accepted_target_fields", None)
+                prepared.pop("_accepted_target_at", None)
                 stored_prepared = (
                     current_job.get("prepared")
                     if isinstance(current_job.get("prepared"), dict)
@@ -15849,7 +15836,8 @@ class PortalRuntime:
                         )
                     else:
                         ok_latest, latest_result = cls._projection_record(prepared, resolved_remote_record_id,
-                            str(prepared.get("notice_type") or ""), remote_operation_id)
+                            str(prepared.get("notice_type") or ""), remote_operation_id,
+                            allow_accepted=not remote_already_written)
                         latest_fields = (
                             latest_result.get("fields")
                             if ok_latest and isinstance(latest_result, dict)
@@ -15883,7 +15871,7 @@ class PortalRuntime:
                             sync_warning = cls._queue_source_end_sync(prepared, resolved_remote_record_id, str(prepared.get("notice_type") or ""))
                             if sync_warning:
                                 result_warnings.append(sync_warning)
-                            cls.service.mark_maintenance_source_ended_locally(
+                            cls.service.mark_notice_source_ended_locally(
                                 prepared
                             )
                             try:

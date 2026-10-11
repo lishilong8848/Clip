@@ -1,0 +1,13 @@
+{
+  "group": "test_lighthouse_stream",
+  "modules": 1,
+  "tests": 1,
+  "failures": [
+    "bin.test_lighthouse_stream.StreamTests.test_archived_search_preserves_answer_and_file_source_scopes (include_file=False)",
+    "bin.test_lighthouse_stream.StreamTests.test_archived_search_preserves_answer_and_file_source_scopes (include_file=True)"
+  ],
+  "errors": [],
+  "skipped": 0,
+  "seconds": 2.5,
+  "external_connections_blocked": 0
+}

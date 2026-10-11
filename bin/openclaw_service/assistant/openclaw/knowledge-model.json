@@ -1,0 +1,43 @@
+{
+  "format": 1,
+  "component": "knowledge_model",
+  "version": "46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59",
+  "base": "H7DLbpdQiaIw4ssg5sCcSoGMn5M",
+  "table": "tblUECEItaUpOWvd",
+  "size": 55370288,
+  "sha256": "5bd383d5271a7017b807b457673eb708cf2b6af2a971af7ddc8b2edb5529a38e",
+  "parts": [
+    {
+      "index": 1,
+      "size": 14680064,
+      "sha256": "3145ff68898a3910a5e16763fae7b6d46b6cd3674279f4dec773465c12532456",
+      "name": "bge-small-zh-v1.5.zip.001",
+      "record_id": "recvxHuxonZ8bK",
+      "file_token": "WgdvbQCwYo9AsTxWHUFcMJ5Snwb"
+    },
+    {
+      "index": 2,
+      "size": 14680064,
+      "sha256": "553b001910b734d2980e349abb8065ef2a546273619c76d7f66d9deb5c0764ce",
+      "name": "bge-small-zh-v1.5.zip.002",
+      "record_id": "recvxHuyLMGQox",
+      "file_token": "M1Bvb4Jr3oIqR5xnPQQcqCzAn9g"
+    },
+    {
+      "index": 3,
+      "size": 14680064,
+      "sha256": "19e6980e25e1e4ceeac06f7c6f82208d3b285f974f3a64b0db1d70116ed2fa2e",
+      "name": "bge-small-zh-v1.5.zip.003",
+      "record_id": "recvxHuzTswDHO",
+      "file_token": "UNdmb1mySoEeZKxsPYqcjWltnSg"
+    },
+    {
+      "index": 4,
+      "size": 11330096,
+      "sha256": "7eea05510b676f38c610e5f50c363d04b405bf84f3d2414c36350f1ea6f780bd",
+      "name": "bge-small-zh-v1.5.zip.004",
+      "record_id": "recvxHuB3cprbK",
+      "file_token": "M3PNbaFZuoQHqEx0Cu2cS1k1n8b"
+    }
+  ]
+}

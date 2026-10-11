@@ -2,6 +2,7 @@
   {"name": "alert-tagging", "description": "通告告警推荐标签、分类依据、注意事项与示例；通告成功后由独立后台任务自动调用，不影响原发送流程。", "references": ["alert-tagging/references/rules.md"]},
   {"name": "lighthouse-business", "description": "灯塔业务查询口径、权限和办理确认规则。"},
   {"name": "public-research", "description": "公开搜索和天气查询，保留来源和时间，不外传内部数据。"},
+  {"name": "company-knowledge", "description": "仅本轮选择或输入 /公司知识库 时，优先检索公司文件并引用出处；无合适资料时查询安全的公开来源。"},
   {"name": "assistant-general", "description": "日常问答、写作、翻译、代码解释和本会话附件阅读。"},
   {"name": "assistant-calculation", "description": "安全的本地算式、百分比、北京时间与日期差计算。"},
   {"name": "lighthouse-extension", "description": "灯塔助手后续新增已审核插件、技能和受控工具的接入方法。"},

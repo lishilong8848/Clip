@@ -404,6 +404,21 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(client.get("/learning?scope=A").status_code, 200)
         self.assertEqual(self.events[-1][0], "stop")
 
+    def test_anonymous_learning_links_show_login_choices_without_starting_oauth(self):
+        self.session = None
+        for target in ("/learning", "/learning/", "/learning?view=practice&scope=H"):
+            for preference in ("", "feishu", "password"):
+                with self.subTest(target=target, preference=preference):
+                    response = self.client.get(target, follow_redirects=False, headers={
+                        "Cookie": "clipflow-login-method=" + preference,
+                    })
+                    self.assertEqual(response.status_code, 302)
+                    location = urlsplit(response.headers["location"])
+                    self.assertEqual(location.path, "/")
+                    self.assertEqual(parse_qs(location.query), {"login": ["password"], "next": [target]})
+        self.factory.assert_not_called()
+        self.assertEqual(self.client.get("/api/learning/bootstrap").status_code, 401)
+
 
 class LearningSourceContractTests(unittest.TestCase):
     def test_real_core_dispatch_and_binary_return_contracts_offline(self):

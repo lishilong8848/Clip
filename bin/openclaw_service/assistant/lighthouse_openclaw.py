@@ -29,6 +29,8 @@ def native_model_error(error, *, timeout=False):
     text = error.get('message') if isinstance(error, dict) else error
     text = text.lower() if isinstance(text, str) else ''
     for marker, category, status, message in (
+        ('temporarily disabled after a provider auth/billing failure', 'model_auth', 503,
+         '当前模型在认证或额度失败后进入短暂冷却，请核对模型密钥及额度，稍后重试原消息；本次冷却不会锁住其他账号的会话。'),
         ('model provider authentication failed', 'model_auth', 502, '模型认证未通过，请核对本人模型设置。'),
         ('model provider rate limit exceeded', 'model_busy', 429, '模型服务繁忙或额度不足，请稍后重试原消息。'),
         ('model provider model not found', 'model_request', 502, '模型名称或接口地址无效，请核对本人模型设置。'),
