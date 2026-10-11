@@ -158,6 +158,9 @@ class FakeService:
     def external_signature_image_bytes(self, *, record_id):
         return signature_bytes(), "image/png"
 
+    def signature_image_bytes(self, *, record_id):
+        return signature_bytes(), "image/png"
+
 
 def signature_bytes(blank=False):
     image = Image.new("RGBA", (120, 60), (255, 255, 255, 0))
@@ -463,7 +466,79 @@ class SignatureManagementTests(unittest.TestCase):
             self.assertEqual(error.exception.status, 403)
         with self.assertRaises(SignatureManagementError) as error:
             dispatch(self.m, "GET", "preview", {}, actor="ou-person")
-        self.assertEqual(error.exception.status, 404)
+        self.assertEqual(error.exception.status, 403)
+
+    def test_preview_requires_logged_in_admin_before_reading_signature(self):
+        with patch.object(self.m, "preview") as reader:
+            for actor, admin, status in (("", True, 401), ("ou-person", False, 403)):
+                with self.subTest(actor=actor), self.assertRaises(SignatureManagementError) as error:
+                    dispatch(self.m, "GET", "preview", {"source": "staff", "record_id": "recStaff"},
+                             actor=actor, is_admin=admin)
+                self.assertEqual(error.exception.status, status)
+            reader.assert_not_called()
+
+    def test_admin_preview_reads_only_selected_person_and_keeps_directory_metadata_only(self):
+        self.s.add("recStaff", signature=True)
+        self.s.add("recTemp", source="external", signature=True)
+        content = signature_bytes()
+        with (patch.object(self.s, "signature_image_bytes", return_value=(content, "image/png")) as staff,
+              patch.object(self.s, "external_signature_image_bytes", return_value=(content, "image/png")) as external,
+              patch.object(self.s, "_request_json", side_effect=AssertionError("unexpected cloud read"))):
+            directory = self.m.people({})
+            staff.assert_not_called()
+            external.assert_not_called()
+            for source, record_id, reader, other in (("staff", "recStaff", staff, external),
+                                                       ("external", "recTemp", external, staff)):
+                staff.reset_mock()
+                external.reset_mock()
+                result = dispatch(self.m, "GET", "preview", {"source": source, "record_id": record_id},
+                                  actor="ou-admin", is_admin=True)
+                self.assertEqual(result, (content, "image/png"))
+                reader.assert_called_once_with(record_id=record_id)
+                other.assert_not_called()
+        for person in directory["people"]:
+            self.assertNotIn("signature_preview_url", person)
+            self.assertNotIn("raw_fields", person)
+            self.assertNotIn("signature_file_token", person)
+        self.assertEqual(self.s.uploads, 0)
+
+    def test_preview_rejects_unsigned_missing_and_invalid_person_without_image_read(self):
+        with (patch.object(self.s, "signature_image_bytes") as staff,
+              patch.object(self.s, "external_signature_image_bytes") as external):
+            for payload, status in (({"source": "staff", "record_id": "recStaff"}, 404),
+                                    ({"source": "staff", "record_id": "recMissing"}, 404),
+                                    ({"source": "other", "record_id": "recStaff"}, 400),
+                                    ({"source": "staff", "record_id": "../recStaff"}, 400)):
+                with self.subTest(payload=payload), self.assertRaises(SignatureManagementError) as error:
+                    dispatch(self.m, "GET", "preview", payload, actor="ou-admin", is_admin=True)
+                self.assertEqual(error.exception.status, status)
+            staff.assert_not_called()
+            external.assert_not_called()
+
+    def test_preview_http_admin_response_is_private_and_not_cached(self):
+        from fastapi.testclient import TestClient
+        from clipflow_backend.main import FastAPIPortalController, PortalRuntime
+
+        self.s.add("recStaff", signature=True)
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        content = signature_bytes()
+        with (patch.object(PortalRuntime.service, "_signature_management", self.m, create=True),
+              patch.object(controller, "_current_session") as session,
+              patch.object(self.s, "signature_image_bytes", return_value=(content, "image/png")) as reader):
+            client = TestClient(controller._build_app())
+            url = "/api/signatures/management/preview?source=staff&record_id=recStaff"
+            session.return_value = None
+            self.assertEqual(client.get(url).status_code, 401)
+            session.return_value = {"user": {"open_id": "ou-person"}, "role": "engineer"}
+            self.assertEqual(client.get(url).status_code, 403)
+            reader.assert_not_called()
+            session.return_value = {"user": {"open_id": "ou-admin"}, "role": "admin"}
+            response = client.get(url)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.content, content)
+            self.assertEqual(response.headers["content-type"], "image/png")
+            self.assertEqual(response.headers["cache-control"], "private, no-store")
+            reader.assert_called_once_with(record_id="recStaff")
 
     def test_merge_requires_review_backs_up_and_is_idempotent(self):
         self.s.add("recOne", source="external", signature=True)

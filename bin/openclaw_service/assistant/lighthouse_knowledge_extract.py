@@ -31,12 +31,12 @@ from xml.etree import ElementTree
 from .lighthouse_ai import AssistantError
 from .lighthouse_files import _check_archive, recognize_text
 
-MAX_BYTES = 20 * 1024 * 1024
+MAX_BYTES = 100 * 1024 * 1024
 MAX_CHARS = 2_000_000
 MAX_PAGES = 300
 MAX_ROWS = 20_000
 MAX_COLS = 100
-MAX_CHUNKS = 4_000
+MAX_CHUNKS = 8_000
 BATCH_ROWS = 200
 SUPPORTED_EXTENSIONS = frozenset({
     ".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".xlsm",
@@ -128,6 +128,8 @@ def _split_text(text, size, overlap):
 
 def _text_sections(content, filename):
     text = _decode_text(content)
+    if len(text) > MAX_CHARS:
+        raise AssistantError("文档提取文字超过200万字符上限，请拆分文件后上传。")
     blocks = _paragraphs(text)
     if not blocks:
         raise AssistantError("文本文件未包含可读内容，请确认不是空文件。")
@@ -260,11 +262,15 @@ def _docx_sections(content, filename):
     root = ElementTree.fromstring(xml)
     sections = []
     counter = 0
+    total_chars = 0
     for paragraph, table_idx, row_idx in _iter_docx_paragraphs(root):
         counter += 1
         block = _paragraph_text(paragraph)
         if not block:
             continue
+        total_chars += len(block)
+        if total_chars > MAX_CHARS:
+            raise AssistantError("文档提取文字超过200万字符上限，请拆分文件后上传。")
         if table_idx is None:
             location = f"{filename}:段落{counter}"
         else:
@@ -292,10 +298,14 @@ def _pdf_sections(content, filename):
     if len(reader.pages) > MAX_PAGES:
         raise AssistantError(f"PDF超过{MAX_PAGES}页，请拆分文件后上传。")
     sections = []
+    total_chars = 0
     for index, page in enumerate(reader.pages, 1):
         block = (page.extract_text() or "").strip()
         if not block:
             _pdf_page_need_ocr(index)
+        total_chars += len(block)
+        if total_chars > MAX_CHARS:
+            raise AssistantError("文档提取文字超过200万字符上限，请拆分文件后上传。")
         sections.append({"text": block, "location": f"{filename}:第{index}页"})
     return sections
 
@@ -410,7 +420,7 @@ def extract_sections(content, filename, *, ocr=None):
     if not content:
         raise AssistantError("文件内容为空，请上传有效的文件。")
     if len(content) > MAX_BYTES:
-        raise AssistantError("单文件不得超过20MiB。")
+        raise AssistantError("单文件不得超过100MiB。")
 
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -437,7 +447,7 @@ def extract_sections(content, filename, *, ocr=None):
     return sections
 
 
-def split_sections(sections, size=900, overlap=100):
+def split_sections(sections, size=420, overlap=60):
     """Split extracted sections into bounded, readable, overlapping parts.
 
     Each returned item keeps the source location on every part (anchored with

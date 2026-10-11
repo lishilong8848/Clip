@@ -63,6 +63,9 @@ class BusinessBridge:
         active = self.active.get(token)
         if not active or not active.running or payload.get('session_key') != active.session_key:
             raise AssistantError('工具调用已失效。', 403)
+        from .lighthouse_ai import model_capabilities
+        if not model_capabilities(getattr(active, 'profile', {}))['tool_calls']:
+            raise AssistantError('当前模型未启用工具调用，未执行业务。', 403)
         if getattr(active, 'run_id', None) and payload.get('run_id') != active.run_id:
             raise AssistantError('工具运行编号已失效，未执行业务。', 403)
         name, identity = payload.get('tool'), payload.get('call_id')
@@ -261,13 +264,16 @@ class OpenClawToolAgent:
                     message = '此前已授权会话（历史而非当前事实，不能重执行业务）：\n' + json.dumps(legacy, ensure_ascii=False) + '\n本轮问题：\n' + message
         images = [{'type': 'image', 'mimeType': part.media_type, 'content': __import__('base64').b64encode(part.data).decode('ascii')}
                   for part in prompt if hasattr(part, 'media_type')]
-        if images and not self.profile.get('vision_verified'):
+        from .lighthouse_ai import model_capabilities
+        capabilities = model_capabilities(self.profile)
+        if images and not capabilities['image_input']:
             images = []
-            message += '\n当前模型尚未验证图片能力，仅使用附件中已提取的OCR文字；无可靠文字时请用户补充，不推断图像内容。'
+            message += '\n当前模型设置未启用图片输入，只能使用附件中提取的文字；没有可靠文字时提示开启图片输入或切换模型，不推断图像内容。'
         for attempt in range(2):
             native_run = 'lh-' + account_key(self.actor['id']) + ':' + (self.turn.get('run_id') or self.turn['operation_id'])
             params = {'message': message, 'sessionKey': self.session_key, 'idempotencyKey': native_run,
-                      'deliver': False, 'thinking': 'off', 'extraSystemPrompt': self.instructions, 'timeout': 180}
+                      'deliver': False, 'thinking': capabilities['reasoning_effort'] if capabilities['reasoning'] else 'off',
+                      'extraSystemPrompt': self.instructions, 'timeout': 180}
             if attempt:
                 params['idempotencyKey'] += ':validation'
             if images:

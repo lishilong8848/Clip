@@ -6,8 +6,20 @@
 
   <section v-else-if="!loggedIn" class="center-state">
     <strong>登录灯塔</strong>
-    <a class="btn blue" :href="loginUrl || '/api/auth/login'">飞书扫码登录</a>
+    <a class="btn blue" :href="loginUrl || '/api/auth/login'" @click="rememberLoginMethod('feishu')">飞书登录</a>
+    <PersonnelPasswordLogin />
     <form action="/api/auth/guest" method="post"><button class="btn" type="submit">访客查看机柜</button></form>
+  </section>
+
+  <section v-else-if="loggedIn && passwordSettings" class="center-state request-panel">
+    <VnetBackButton title="返回首页" @click="$emit('back')" />
+    <strong>修改密码</strong>
+    <PersonnelPasswordLogin
+      :key="changePersonId"
+      initialMode="change"
+      :personId="changePersonId"
+      :userName="changeUserName"
+    />
   </section>
 
   <section v-else class="center-state request-panel">
@@ -74,6 +86,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import VnetBackButton from "./VnetBackButton.vue";
+import PersonnelPasswordLogin from "./PersonnelPasswordLogin.vue";
+import { rememberLoginMethod } from "../api/client";
 
 type Dict = Record<string, any>;
 
@@ -96,6 +110,7 @@ const props = defineProps<{
   title?: string;
   emptyText?: string;
   showBack?: boolean;
+  passwordSettings?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -137,6 +152,10 @@ const canSubmit = computed(() => {
 });
 
 const userOpenId = computed(() => String(props.user?.open_id || "").trim());
+
+const changePersonId = computed(() => String(props.user?.personnel_record_id ?? "").trim());
+
+const changeUserName = computed(() => String(props.user?.name || "").trim());
 
 const userLineText = computed(() => {
   const name = String(props.user?.name || "").trim();

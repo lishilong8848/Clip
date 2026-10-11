@@ -21,6 +21,7 @@ from lan_bitable_template_portal import workbench_lite  # noqa: E402
 from upload_event_module.config import (  # noqa: E402
     EVENT_NOTICE_FIELDS,
     MAINTENANCE_NOTICE_FIELDS,
+    get_field_config,
 )
 from upload_event_module.building_normalizer import extract_building_codes  # noqa: E402
 from upload_event_module.core.parser import extract_event_info  # noqa: E402
@@ -32,6 +33,82 @@ from upload_event_module.services import feishu_service  # noqa: E402
 class NoticeIdentityBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = object.__new__(MaintenancePortalService)
+
+    def test_start_never_reuses_missing_ended_or_unrelated_target(self):
+        prepared = {"action": "start", "work_type": "maintenance", "notice_type": "维保通告",
+                    "source_record_id": "rec-source", "target_record_id": "rec-old",
+                    "title": "EA118机房C栋BA系统软件维护", "building_codes": ["C"]}
+        cases = [
+            (False, "RecordIdNotFound"),
+            (False, "timeout"),
+            (True, {"fields": {"名称": "EA118机房C楼电池内阻刷新维护", "楼栋": "C楼", "维保状态": "结束"}}),
+            (True, {"fields": {"名称": "EA118机房C楼电池内阻刷新维护", "楼栋": "C楼", "维保状态": "开始"}}),
+            (True, {"fields": {"名称": "EA118机房D楼BA系统软件维护", "楼栋": "D楼", "维保状态": "开始"}}),
+            (True, {"fields": {"名称": "EA118机房C楼BA系统软件维护", "楼栋": "C楼", "维保状态": "未开始"}}),
+        ]
+        with mock.patch.object(PortalRuntime, "service", self.service), \
+                mock.patch("lan_bitable_template_portal.server.external_real_write_guard", return_value={
+                    "mock_external": False, "real_write_allowed": True}), \
+                mock.patch("lan_bitable_template_portal.server.create_bitable_record_by_payload") as create, \
+                mock.patch("lan_bitable_template_portal.server.update_bitable_record_fields") as update:
+            for response in cases:
+                with self.subTest(response=response), mock.patch(
+                        "lan_bitable_template_portal.server.query_record_by_id", return_value=response) as query:
+                    with self.assertRaises(PortalError):
+                        PortalRuntime._execute_backend_prepared_upload(dict(prepared))
+                    query.assert_called_once_with("rec-old", "维保通告")
+            create.assert_not_called()
+            update.assert_not_called()
+
+    def test_start_reuses_live_matching_target_for_each_non_event_type(self):
+        for notice_type in ("维保通告", "变更通告", "设备检修", "设备轮巡", "设备调整", "上电通告", "下电通告"):
+            work_type = PortalRuntime._notice_work_type_from_notice_type(notice_type)
+            config = get_field_config(notice_type)
+            fields = {config.get("title") or config.get("name") or "名称": [{"text": "EA118机房C楼同一操作"}],
+                      config.get("building") or config.get("building_codes") or "楼栋": ["C楼"],
+                      config["status"]: "开始"}
+            prepared = {"work_type": work_type, "target_record_id": "rec-live", "title": "EA118机房C栋同一操作",
+                        "building_codes": ["C"], "action": "start"}
+            with self.subTest(type=notice_type), mock.patch.object(PortalRuntime, "service", self.service), \
+                    mock.patch("lan_bitable_template_portal.server.external_real_write_guard", return_value={"mock_external": False}), \
+                    mock.patch("lan_bitable_template_portal.server.query_record_by_id", return_value=(True, {"fields": fields})) as query:
+                self.assertEqual(PortalRuntime._existing_target_for_prepared_start(prepared, notice_type), "rec-live")
+                query.assert_called_once()
+
+    def test_source_binding_reads_only_live_target_without_stale_snapshot_fallback(self):
+        service = self.service
+        service._state_store = mock.Mock()
+        service._state_store.get_repair_snapshot_meta.return_value = {}
+        service._state_store.list_visible_qt_active_items.return_value = []
+        service._state_store.resolve_notice_identity.return_value = None
+        service._source_record_in_scope_snapshot = mock.Mock(return_value={"record_id": "rec-source"})
+        service._load_table_fields = mock.Mock(return_value=([], {}))
+        service._target_snapshot_active_payload = mock.Mock(return_value={"active_item_id": "active-live"})
+        stale = {"record_id": "rec-target", "display_fields": {"名称": "旧缓存", "维保状态": "开始", "楼栋": "C楼"}}
+        service._target_records_for_notice_type = mock.Mock(return_value=[stale])
+        service._load_table_records_by_ids = mock.Mock()
+        with mock.patch("lan_bitable_template_portal.portal_service.config") as config:
+            config.app_token = "app-test"
+            config.get_table_id.return_value = "table-test"
+            for records in ([], [{**stale, "display_fields": {"维保状态": "开始", "楼栋": "D楼"}}]):
+                with self.subTest(records=records):
+                    service._load_table_records_by_ids.return_value = records
+                    with self.assertRaises(PortalError):
+                        service.validate_notice_identity_binding(scope="C", work_type="maintenance",
+                            source_record_id="rec-source", target_record_id="rec-target", fresh_target=True)
+            service._load_table_records_by_ids.side_effect = OSError("offline")
+            with self.assertRaisesRegex(PortalError, "关联未修改"):
+                service.validate_notice_identity_binding(scope="C", work_type="maintenance",
+                    source_record_id="rec-source", target_record_id="rec-target", fresh_target=True)
+            service._load_table_records_by_ids.side_effect = None
+            service._load_table_records_by_ids.return_value = [stale]
+            result = service.validate_notice_identity_binding(scope="C", work_type="maintenance",
+                source_record_id="rec-source", target_record_id="rec-target", fresh_target=True)
+        self.assertTrue(result["target_active"])
+        self.assertEqual(result["target_record_id"], "rec-target")
+        self.assertEqual(service._load_table_records_by_ids.call_args.kwargs["record_ids"], ["rec-target"])
+        service._target_records_for_notice_type.assert_not_called()
+        service._state_store.upsert_notice_identity.assert_not_called()
 
     def test_delete_never_replaces_explicit_target_after_identity_rebind(self):
         for work in ('maintenance', 'change', 'repair', 'power', 'polling', 'adjust'):

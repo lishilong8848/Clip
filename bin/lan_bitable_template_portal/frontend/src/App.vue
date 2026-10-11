@@ -26,6 +26,7 @@
       @open-admin="showAdminTools = true"
       @open-signatures="navigate('/signature-management')"
       @open-life-guide="navigate('/life-guide')"
+      @open-password="navigate('/?account=password')"
       @logout="logout"
     />
 
@@ -88,10 +89,11 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage)"
+      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage)"
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :user="auth.user"
+      :password-settings="isPasswordSettingsPage && auth.loggedIn && auth.user.login_method === 'password'"
       :login-url="auth.loginUrl"
       :busy="permissionBusy"
       :request="permissionRequest"
@@ -102,7 +104,7 @@
       @update-request="updatePermissionRequest"
       @submit="submitPermissionRequest"
       @confirm="confirmPermissionRequest"
-      @back="closePermissionRequestPanel"
+      @back="isPasswordSettingsPage ? navigate('/') : closePermissionRequestPanel()"
     />
 
     <EventManagementPage
@@ -238,7 +240,7 @@ import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
 import { LighthouseAssistant } from './lighthouseEntry';
 import AsyncPageState from "./components/AsyncPageState.vue";
-import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity } from "./api/client";
+import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, preferredLoginUrl, rememberLoginMethod } from "./api/client";
 import { navigate, navigateHard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
 import { usePageReadRefresh } from './api/usePageReadRefresh';
@@ -303,7 +305,7 @@ const loading = ref(false);
 const showAdminTools = ref(false);
 const adminToolsLoaded = ref(false);
 watch(showAdminTools, visible => { if (visible) adminToolsLoaded.value = true; });
-const adminInitialTab = ref<"status" | "permissions" | "handover">();
+const adminInitialTab = ref<"status" | "permissions" | "handover" | "feishu">();
 const showPermissionRequestPanel = ref(false);
 const refreshMenuOpen = ref(false);
 const eventRefreshing = ref(false);
@@ -367,6 +369,7 @@ const isPlanConvergencePage = computed(() => routePath.value === "/plan-converge
 const isLifeGuidePage = computed(() => routePath.value === "/life-guide");
 const isLinkDirectoryPage = computed(() => routePath.value === "/link-directory");
 const isKnowledgeBasePage = computed(() => routePath.value === "/knowledge-base");
+const isPasswordSettingsPage = computed(() => routePath.value === "/" && routeParams.value.get("account") === "password" && auth.user.login_method === 'password');
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
 const isCabinetPowerPage = computed(() => routePath.value === "/cabinet-power");
@@ -391,7 +394,7 @@ const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeP
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const isGuest = computed(() => auth.user?.role === 'guest');
 watch([isAdmin, () => routeParams.value.get("admin")], ([admin, tab]) => {
-  if (admin && (tab === "status" || tab === "permissions" || tab === "handover")) {
+  if (admin && (tab === "status" || tab === "permissions" || tab === "handover" || tab === "feishu")) {
     adminInitialTab.value = tab;
     showAdminTools.value = true;
   }
@@ -531,7 +534,7 @@ function currentRouteNeedsAuth(): boolean {
 function redirectToLogin(loginUrl = ""): void {
   if (authRedirectInProgress || shouldSuppressAuthRedirect()) return;
   authRedirectInProgress = true;
-  window.location.assign(String(loginUrl || auth.loginUrl || currentLoginUrl()).trim() || currentLoginUrl());
+  window.location.assign(preferredLoginUrl(String(loginUrl || auth.loginUrl || currentLoginUrl()).trim()));
 }
 
 function clearAuthKeepalive(): void {
@@ -614,6 +617,7 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     const nextLoggedIn = Boolean(data.logged_in);
     auth.loggedIn = nextLoggedIn;
     auth.user = data.user || {};
+    if (nextLoggedIn) rememberLoginMethod(auth.user.login_method === 'password' ? 'password' : 'feishu');
     auth.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
     auth.loginUrl = data.login_url || "/api/auth/login";
     if (isGuest.value && routePath.value !== '/cabinet-power') {

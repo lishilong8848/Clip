@@ -66,6 +66,25 @@ bot.tick(160); bot.tick(200);
 assert.equal(writes, 0, 'hidden page must not keep rendering');
 bot.destroy();
 
+for (const shape of ['swirl-pile', 'heart', 'star', 'flower', 'diamond', 'shield']) {
+  const shaped = new BloubBot(new SvgNode('span'), { size: 200, shape, follow: true, cycle: ['idle'] });
+  shaped.tick(0);
+  const start = shaped.frame;
+  assert(!start.bodyPath.includes('NaN') && start.bodyPath.length > 20);
+  shaped.followPointer(100, 450);
+  for (let t = 40; t <= 1000; t += 40) shaped.tick(t);
+  assert.notDeepEqual(shaped.frame.eyes, start.eyes, `${shape}: eyes must remain animated`);
+  shaped.engineInstance.setLook({ yaw: 0, pitch: 0, mix: 1, spin: 0, wander: 0 }, 1);
+  const idle = shaped.engineInstance.sample(2);
+  if (shape === 'swirl-pile') {
+    assert.equal(idle.eyes.length, 2);
+    for (const eye of idle.eyes) assert(Number(eye.matrix.match(/matrix\((.*)\)/)[1].split(',')[5]) > 20, 'eyes stay on bottom tier');
+  }
+  shaped.setState('orbit');
+  assert(shaped.engineInstance.sample(shaped.clock + 2).arcs.length);
+  shaped.destroy();
+}
+
 const states = ['idle', 'wink', 'wide', 'play', 'orbit', 'swirl', 'burst', 'comet', 'egg', 'hexagon'];
 const idleBot = new BloubBot(new SvgNode('span'), { size: 64, cycle: states });
 let ms = 0;

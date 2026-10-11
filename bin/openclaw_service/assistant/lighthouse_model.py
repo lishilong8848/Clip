@@ -7,7 +7,7 @@ import json
 import os
 import re
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 from .lighthouse_ai import AssistantError, BUSINESS_QUERY, CONTACT, MODEL_QUESTION, PRIVATE_REPLY, explicit_general_question, is_business_query, private_identifier, safe_data, safe_text
 from .lighthouse_sources import MODULE_HELP, SCOPES, codes, record_codes
@@ -15,10 +15,11 @@ from .lighthouse_queries import COUNT, DETAIL, PENDING, EventQuery, PortalOperat
 from .lighthouse_queries import collect_notice_sends, notice_sends_reply, sent_notice_question
 from .lighthouse_queries import past_action_question, query_result_state
 from .lighthouse_basics import calculate as calculate_value, CalculationError, calculation_request, date_time as time_value, time_request, public_capability_request, current_user_request
-from .lighthouse_message_delivery import MESSAGE_INTENT
+from .lighthouse_message_delivery import MESSAGE_INTENT, feishu_delivery_requested
 
 
 GENERAL_INSTRUCTIONS = """你是灯塔助手，一个使用当前配置模型、并可调用已接入工具的AI智能体，不仅是业务问答入口。使用中文和简洁Markdown。
+“发给我”默认在当前对话中提供文字或下载文件，不是发送飞书。只有本轮明确要求/确认通过飞书发送，才准备飞书发送操作，收件人“我/本人”始终使用当前登录人。用户要求文本或Python文件时调用create_text_file提供实际文件，不执行代码，不只给代码块或声称不存在的文件已生成。
 可以正常聊天、解释知识、写作、翻译、分析问题和提供代码，不要因为问题不属于灯塔业务而拒绝回答。普通问题直接回答，不查无关的业务接口，不附带功能推销。
 通用建议不要把特定条件下的经验当作普遍要求。涉及现行安全规范、医疗、法律、金融等高风险建议，优先核对当前权威来源；未核实时只给一般原则并说明限制，不编造或强推数字阈值、强制周期和标准版本。
 用户未说明操作系统及版本时，先给通用方法；提及具体菜单或操作入口须说明适用的系统或前提，不把某一版本的路径当成所有设备共有的入口。
@@ -76,7 +77,7 @@ source_freshness 标记 local_cache 时只表示本机已知记录，须保留 l
 query返回的query_ref可用read_query读取本轮已查询列表的后续片段（path为字段名/下标数组，每次最多40条）。接口本身有分页时仍须用query传真实页码；read_query的loaded_count只是这次已读取列表长度，不是全库总数。没有业务数据刷新、没有额外查询结果时不能声称取得最新状态。
 用来源编号[1]等引用本轮资料，并说明必要的时间/范围/不完整提示。用户追问某条记录时使用上下文的稳定ID。
 修改、发送、删除等只可用prepare_business准备；绝不能直接写入。目标不明确时先追问，必要确认由原业务流程处理。
-会话内容或生成文件发给人员用POST /api/message-delivery/send（不是通告上传）。先查GET /api/message-delivery/recipients，按姓名及工号核对可接收人员，recipient_ids用查询返回record_id；“发给我/自己”填__self__，不猜登录人的姓名或openid。text保留用户选定的完整内容，files.files引用有权限的会话文件。已有下载链接先调用其原鉴权下载API取得会话文件，不发送本机链接或编造文件ID。确认后发送，失败用原delivery_id的retry接口，只补未成功部分。
+会话内容或生成文件发给人员：未明确飞书时只在对话提供内容/文件；明确飞书才用POST /api/message-delivery/send（不是通告上传）。“发给我/自己”自动填__self__，不用再询问收件人或拉取全员；实际账号可接收性由原接口检查。发给其他人先查GET /api/message-delivery/recipients按姓名及工号核对，recipient_ids用查询返回record_id，不猜openid。text保留用户选定的完整内容，files.files引用有权限的会话文件。已有下载链接先调用其原鉴权下载API取得会话文件，不发送本机链接或编造文件ID。确认后发送，失败用原delivery_id的retry接口，只补未成功部分。
 发送内容不一定是上一条。根据用户所指主题、日期、文件名查search_history；可用query_ref引用items.N.answer完整文本，不能把展示的截断摘要当全文。无法唯一定位时先准备发送表单，text留空，平台提供有权限的历史文字和文件多选项，请用户选择，不默认只发送上一条或擅自概括。明确指向某段文字或文件时预选对应内容。
 用户要求完整未结束/进行中通告时，调用ongoing_notices获取全量分页结果。发送时text用其query_ref引用message_text，不抄写10条预览或40条片段。complete=false时不能准备完整清单发送；普通“把这发给我”仍转发用户指向的原答复。
 prepare_business的operations逐项使用api_id、params、path_params、body、files。缺失字段用fields=[{name,label,type,required,operation_index,section,path,options:[{value,label}]}]让用户补充；type为text/textarea/number/date/time/month/datetime-local/select/multiselect/checkbox/file/object/array，section为body/params/path_params/files。已声明子字段的对象和列表用object/array，平台从真实schema生成填写项，不自行编造children/item结构。日期、时间、单选、多选必须使用相应控件；不能要求用户手写记录ID、人员ID或JSON选项列表。维修关联记录可用options_source=repair_events/repair_notices/repair_projects/repair_devices搜索选择。
@@ -149,7 +150,7 @@ def equipment_knowledge_question(question):
 def instructions_for_question(question, *, knowledge_access=True):
     """Keep shared policy; avoid resending unrelated form manuals each model turn."""
     domains = business_domains(question)
-    if MESSAGE_INTENT.search(question):
+    if feishu_delivery_requested(question):
         domains.add('messages')
     if not domains and re.search(r"重新(?:填写|填报)|继续.{0,10}(?:填写|填报|操作)|表单", question):
         return INSTRUCTIONS
@@ -183,7 +184,7 @@ def discover_for_question(catalog, question, *, keyword="", group="", page=1):
     groups = {item["name"] for item in found["groups"]}
     requested = str(group).strip()
     domains = business_domains(question) | business_domains(keyword)
-    if MESSAGE_INTENT.search(question):
+    if feishu_delivery_requested(question):
         domains.add('messages')
     if equipment_knowledge_question(question):
         domains.add("question_bank")
@@ -414,9 +415,22 @@ async def configured_model(custom_model, profile):
         key = custom_model.unprotect(profile["key_cipher"])
     except Exception:
         raise AssistantError("模型凭证无法读取，请管理员重新配置。", 503) from None
-    endpoint = custom_model._endpoint(profile["endpoint"])
-    async with AsyncOpenAI(api_key=key, base_url=endpoint[:-len("/chat/completions")],
-                           timeout=60, max_retries=1) as client:
+    from .lighthouse_ai import model_capabilities
+    capabilities = model_capabilities(profile)
+    endpoint = custom_model._endpoint(profile["endpoint"], custom_protocol=capabilities['custom_protocol'])
+    async def exact_endpoint(request):
+        if request.method == 'POST' and request.url.path.endswith('/chat/completions'):
+            import httpx
+            request.url = httpx.URL(endpoint)
+    import httpx
+    transport = None
+    if capabilities['custom_protocol']:
+        from .lighthouse_public import _verified_tls_context
+        tls = await asyncio.to_thread(_verified_tls_context, trust_env=False)
+        transport = await asyncio.to_thread(httpx.AsyncClient, verify=tls, trust_env=False,
+                                           event_hooks={'request': [exact_endpoint]})
+    async with AsyncOpenAI(api_key=key, base_url=endpoint if capabilities['custom_protocol'] else endpoint[:-len("/chat/completions")],
+                           timeout=60, max_retries=1, **({'http_client': transport} if transport else {})) as client:
         yield OpenAIChatModel(profile["model"], provider=OpenAIProvider(openai_client=client))
 
 
@@ -479,10 +493,12 @@ class LighthouseModel:
         current_pending = current_pending_query(question)
         all_pending = all_pending_modules(question)
         help_only = bool(re.search(r"(?:如何|怎么|怎样).{0,12}(?:查看|查询|使用|操作|绑定|导出|上传|设置)", question)) and not (COUNT.search(question) or DETAIL.search(question))
-        message_requested = bool(MESSAGE_INTENT.search(question))
+        message_requested = feishu_delivery_requested(question)
         if message_requested:
             domains.add('messages')
-        general_question = explicit_general_question(question) and not message_requested
+        general_question = (explicit_general_question(question) or bool(
+            MESSAGE_INTENT.search(question) and not is_business_query(question) and not business_domains(question)
+        )) and not message_requested
         business_question = is_business_query(question) or message_requested
         general_only = general_question and not any(item.get('kind') == 'api' for item in selected_context)
         knowledge_access = bool(actor.get("is_admin") or actor.get("learning_scopes"))
@@ -720,11 +736,6 @@ class LighthouseModel:
                 data, source = await full_notices(kinds[0] if kinds else "")
                 if not data['complete']:
                     return await direct('完整通告清单尚未读取完成，未发送。\n\n' + pending_reply(data))
-                people = await invoke({'api_id': 'GET /api/message-delivery/recipients'})
-                directory = people.get('_raw', people.get('data')) or {}
-                if not people.get('ok') or not directory.get('self'):
-                    return await direct('未能核对当前登录人的飞书收件身份，未发送；请核对姓名、工号及是否可直接接收消息。')
-                add_source('飞书收件人', directory, '/')
                 current = await current_actor()
                 prepared = await asyncio.to_thread(self.portal.prepare, current,
                     {'title': '发送完整未结束通告至本人', 'operations': [{'api_id': 'POST /api/message-delivery/send',
@@ -877,6 +888,10 @@ class LighthouseModel:
                     return await direct(pending_reply(await pending_data(groups, kinds[0] if len(kinds) == 1 else ""), details=wants_details, include_zero=include_zero))
 
         login_actor = await current_actor()
+        from .lighthouse_ai import model_capabilities, model_reasoning_options
+        capabilities = model_capabilities(profile)
+        if not capabilities['tool_calls'] and (requires_source or form_requested):
+            raise AssistantError("当前模型未启用工具调用，请在模型设置中开启或切换模型后查询/办理。", 400)
         login_identity = {key: safe_text(str(login_actor.get(key) or '')) for key in ('name', 'employee_no')}
         login_identity['role'] = '管理员' if login_actor.get('is_admin') else login_actor.get('role_label') or '普通账号'
         async with self.model_factory(self.assistant.model, profile) as model:
@@ -893,7 +908,8 @@ class LighthouseModel:
                              "\n本轮可以按通用对话直接回答，无需调用业务目录。")
                           + "\n当前北京时间：" + dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds"),
                           name="lighthouse", retries=1, tool_timeout=45,
-                          model_settings={"max_tokens": 5000, "parallel_tool_calls": False})
+                          model_settings={"max_tokens": 5000, **({'parallel_tool_calls': False} if capabilities['tool_calls'] else {}),
+                                          **({'extra_body': model_reasoning_options(profile)} if capabilities['reasoning'] else {})})
 
             @agent.tool_plain
             async def table_catalog(keyword: str = '', page: int = 1) -> dict:
@@ -1276,6 +1292,24 @@ class LighthouseModel:
                 return {"items": safe_data(hits), "warnings": warnings, "complete": False}
 
             @agent.tool_plain
+            async def create_text_file(name: str, content: str) -> dict:
+                """Create one private text/Python download in this conversation; never executes code or sends messages."""
+                from pathlib import Path
+                from .lighthouse_files import TEXT_EXTENSIONS
+                if (not isinstance(content, str) or not content.strip() or len(content.encode('utf-8')) > 512 * 1024
+                        or Path(name).suffix.lower() not in TEXT_EXTENSIONS | {'.py'}):
+                    raise AssistantError("仅支持非空文本或Python文件，最大512KiB。")
+                if private_identifier(content):
+                    raise AssistantError(PRIVATE_REPLY, 403)
+                current = await current_actor()
+                file = await asyncio.to_thread(self.portal.files.upload, current, name, content.encode('utf-8'), extract=False,
+                                               source_scopes=actor['scopes'])
+                turn.setdefault('file_ids', []).append(file['id'])
+                turn.setdefault('output_files', []).append(file)
+                permitted_files.append(file['id'])
+                return {"ok": True, "file_id": file['id'], "name": file['name'], "delivery": "conversation"}
+
+            @agent.tool_plain
             async def read_file(file_id: str, offset: int = 0, length: int = 4000) -> dict:
                 """Read an authorized uploaded file in chunks, following next_offset when present."""
                 current = await current_actor()
@@ -1448,7 +1482,10 @@ class LighthouseModel:
                 + "\n此前会话可用文件（沿用原用途，变更用途先核对）：" + json.dumps(safe_data(prior_files), ensure_ascii=False)]
             from .lighthouse_commands import selection_hint
             prompt[0] += selection_hint(turn.get('_command_context', []))
-            for part in await asyncio.to_thread(self.portal.files.image_parts, actor, turn.get("file_ids", [])):
+            image_parts = await asyncio.to_thread(self.portal.files.image_parts, actor, turn.get("file_ids", [])) if capabilities['image_input'] else []
+            if not capabilities['image_input'] and turn.get('file_ids'):
+                prompt[0] += "\n模型设置未启用图片输入，只能依据可靠附件文字回答；若附件为图片且没有文字，提示开启图片输入或切换模型，不推断图片内容。"
+            for part in image_parts:
                 prompt.append(BinaryContent(data=base64.b64decode(part["image_url"]["url"].split(",", 1)[1]), media_type="image/jpeg"))
             text, final_answer = PublicText(), ""
             # A text part before a tool call is not a final answer, even when the
@@ -1456,25 +1493,26 @@ class LighthouseModel:
             # first and release only the validated final answer, not tool-loop prose.
             buffer_business = bool(business_question or form_requested or public_realtime or knowledge_question)
             await emit("status", {"label": "正在思考回答"})
-            async with agent.run_stream_events(prompt, message_history=prior, usage_limits=UsageLimits(request_limit=12, total_tokens_limit=50000)) as events:
-                async for event in events:
-                    if event.event_kind == "function_tool_result" and event.part.tool_name in {"prepare_business", "prepare_planned_notice"} and plan is not None:
-                        # The native form is the next step. Another model round
-                        # can only delay it or turn it into a prose questionnaire.
-                        final_answer = "请核对下方填写项，确认后执行。" if plan["status"] == "needs_input" else "操作清单已准备，请核对后确认。"
-                        break
-                    if event.event_kind == "part_start" and getattr(event.part, "part_kind", "") == "text":
-                        delta = event.part.content
-                    elif event.event_kind == "part_delta" and getattr(event.delta, "part_delta_kind", "") == "text":
-                        delta = event.delta.content_delta
-                    else:
-                        delta = ""
-                    if delta and not buffer_business and (not requires_source or sources or plan):
-                        clean = text.push(delta)
-                        if clean:
-                            await emit("text", {"delta": clean})
-                    if event.event_kind == "agent_run_result":
-                        final_answer = str(event.result.output)
+            with agent.override(tools=[]) if not self.agent_factory and not capabilities['tool_calls'] else nullcontext():
+                async with agent.run_stream_events(prompt, message_history=prior, usage_limits=UsageLimits(request_limit=12, total_tokens_limit=50000)) as events:
+                    async for event in events:
+                        if event.event_kind == "function_tool_result" and event.part.tool_name in {"prepare_business", "prepare_planned_notice"} and plan is not None:
+                            # The native form is the next step. Another model round
+                            # can only delay it or turn it into a prose questionnaire.
+                            final_answer = "请核对下方填写项，确认后执行。" if plan["status"] == "needs_input" else "操作清单已准备，请核对后确认。"
+                            break
+                        if event.event_kind == "part_start" and getattr(event.part, "part_kind", "") == "text":
+                            delta = event.part.content
+                        elif event.event_kind == "part_delta" and getattr(event.delta, "part_delta_kind", "") == "text":
+                            delta = event.delta.content_delta
+                        else:
+                            delta = ""
+                        if delta and not buffer_business and (not requires_source or sources or plan):
+                            clean = text.push(delta)
+                            if clean:
+                                await emit("text", {"delta": clean})
+                        if event.event_kind == "agent_run_result":
+                            final_answer = str(event.result.output)
             if requires_source and plan is None and query_failures and not any(source.get("available") for source in sources):
                 final_answer = "本轮" + material_label + "未取得，暂无法确认：" + "；".join(dict.fromkeys(query_failures))
             elif requires_source and plan is None and not sources:

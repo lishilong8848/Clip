@@ -55,14 +55,15 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "PIL": "Pillow",
     "openpyxl": "openpyxl",
     "pypdf": "pypdf",
-    "sqlite_vec": "sqlite-vec==0.1.9",
+    "fastembed": "fastembed==0.9.0",
+    "faiss": "faiss-cpu==1.15.1",
     "yaml": "PyYAML",
     "anyio": "anyio",
     "pydantic": "pydantic",
     "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
     "openai": "openai==3.22.1",
     "starlette": "starlette",
-    "multipart": "python-multipart",
+    "multipart": "python-multipart==0.0.22",
     "apscheduler": "APScheduler",
     "fastapi": "fastapi",
     "uvicorn": "uvicorn",
@@ -187,7 +188,7 @@ def _has_module(module_name: str) -> bool:
     try:
         if importlib.util.find_spec(module_name) is None:
             return False
-        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1"), "websockets": ("websockets", "16.0")}
+        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1"), "websockets": ("websockets", "16.0"), "multipart": ("python-multipart", "0.0.22")}
         if module_name in pinned:
             distribution, version = pinned[module_name]
             return importlib.metadata.version(distribution) == version

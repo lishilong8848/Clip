@@ -1017,6 +1017,8 @@ class PortalAuthManager:
             "name": str(user.get("name") or user.get("en_name") or "飞书用户"),
             "avatar_url": str(user.get("avatar_url") or user.get("avatar_thumb") or ""),
             "role": "guest" if is_cabinet_guest(session) else "admin" if self.is_admin(session) else "building",
+            "login_method": "password" if session.get("source") == "personnel_password" else "feishu",
+            **({"personnel_record_id": user.get("personnel_record_id", "")} if session.get("source") == "personnel_password" else {}),
         }
 
     def create_guest_session(self) -> str:
@@ -1029,6 +1031,42 @@ class PortalAuthManager:
             "created_at_ts": now, "expires_at": now + AUTH_SESSION_TTL_SECONDS,
         }
         with self._lock:
+            self._cleanup_expired_locked(now)
+            self._sessions[session_id] = session
+            self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
+            self._state_store.put_auth_session(self._secret_hash(session_id), session)
+        return session_id
+
+    def invalidate_personnel_sessions(self, record_id: str) -> None:
+        with self._lock:
+            for session in self._sessions.values():
+                if session.get("source") == "personnel_password" and (session.get("user") or {}).get("personnel_record_id") == record_id:
+                    session["_last_personnel_check"] = 0
+
+    def create_personnel_session(self, person: dict[str, Any]) -> str:
+        identities = person.get("login_ids") or []
+        if not person.get("selectable") or person.get("needs_setup") or not person.get("password_revision") or len(identities) != 1:
+            raise PortalError("人员已停用或身份不明确，无法登录。")
+        identity = identities[0]
+        own_scopes = self._scopes_from_raw(person.get("scopes"))
+        session_id = secrets.token_urlsafe(32)
+        now = time.time()
+        session = {"user": {"open_id": identity, "name": person["name"], "employee_no": person.get("employee_no", ""),
+                            "personnel_record_id": person["id"]},
+                   "source": "personnel_password",
+                   "password_revision": person["password_revision"], "created_at_ts": now,
+                   "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   "expires_at": now + AUTH_SESSION_TTL_SECONDS}
+        with self._lock:
+            if self._open_id_explicitly_disabled(identity):
+                raise PortalError("当前账号已停用，无法登录。")
+            scopes = self.scopes_for_open_id(identity)
+            role = self.role_for_open_id(identity)
+            if len(own_scopes) == 1 and "ALL" not in scopes and own_scopes[0] not in scopes:
+                self.upsert_permission_user(open_id=identity, name=person["name"], role=role or "building",
+                    scopes=list(dict.fromkeys(scopes + own_scopes)), enabled=True, updated_by="personnel_password_login")
+            session["allowed_scopes"] = self.scopes_for_open_id(identity)
+            session["role"] = self.role_for_open_id(identity)
             self._cleanup_expired_locked(now)
             self._sessions[session_id] = session
             self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
@@ -1153,7 +1191,22 @@ class PortalAuthManager:
                     return None
                 session["allowed_scopes"] = self.scopes_for_open_id(open_id)
                 session["role"] = self.role_for_open_id(open_id)
+            if session.get("source") == "personnel_password":
+                from .personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY
+                rid = str((session.get("user") or {}).get("personnel_record_id") or "")
+                valid = bool(open_id.startswith("ou_") and rid) and now < float(session.get("created_at_ts") or 0) + AUTH_SESSION_TTL_SECONDS
+                if now - float(session.get("_last_personnel_check") or 0) >= 30:
+                    snapshot = self._state_store.get_document(DIRECTORY_NS, DIRECTORY_KEY) or {}
+                    person = (snapshot.get("people") or {}).get(rid) or {}
+                    valid = valid and person.get("selectable") and person.get("password_revision") == session.get("password_revision") and person.get("login_ids") == [open_id]
+                    session["_last_personnel_check"] = now
+                if not valid:
+                    self._sessions.pop(session_id, None)
+                    self._state_store.revoke_auth_session(self._secret_hash(session_id))
+                    return None
             session["expires_at"] = now + AUTH_SESSION_TTL_SECONDS
+            if session.get("source") == "personnel_password":
+                session["expires_at"] = min(session["expires_at"], float(session["created_at_ts"]) + AUTH_SESSION_TTL_SECONDS)
             if now - float(session.get("_last_persisted_touch_at") or 0) >= 300:
                 session["_last_persisted_touch_at"] = now
                 persisted = {

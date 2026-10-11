@@ -14,8 +14,8 @@
   button, .file-button, summary, a[download] { min-height: 38px; padding: 7px 10px; font-size: 13px; touch-action: manipulation; }
   button.icon-button { width: 38px; height: 38px; min-height: 38px; flex-basis: 38px; }
   input:not([type=checkbox]):not([type=radio]), textarea, :deep(.vnet-select-trigger), :deep(.vnet-select-input) { font-size: 16px; min-height: 44px; }
-  .building-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .building-tabs button { flex-direction: row; align-items: center; gap: 2px; padding: 8px 10px; font-size: 15px; }
+  .building-tabs, .building-tabs.with-all { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .building-tabs button, .building-tabs.with-all button { flex-direction: row; align-items: center; gap: 2px; padding: 8px 10px; font-size: 15px; }
   .building-tabs span { display: none; }
   .learner-strip { gap: 10px; align-items: flex-start; }
   .learner-strip > div { min-width: 0; }

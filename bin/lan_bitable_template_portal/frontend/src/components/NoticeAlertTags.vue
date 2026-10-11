@@ -1,12 +1,12 @@
 <template>
   <section v-if="data || error" class="notice-tags" aria-live="polite">
-    <h4>已发通告推荐标签</h4>
+    <h4>通告推荐标签（仅供现场核对，不代表已给告警打标）</h4>
     <p v-if="error">{{ error }}</p>
     <LoadingIndicator v-else-if="data?.status === 'pending'">正在后台生成推荐标签…</LoadingIndicator>
     <template v-else-if="data?.status === 'ready'">
+      <p>{{ data.title ? data.title + ' · ' : '' }}{{ data.action === 'start' ? '开始' : '更新' }}</p>
       <div v-for="(tag, index) in data.tags" :key="index">
         <strong>【{{ tag.label }}】{{ tag.content }}</strong>
-        <p>依据：{{ tag.basis }}<br />注意：{{ tag.notes }}</p>
       </div>
     </template>
     <p v-else>{{ data?.error || '推荐标签获取失败，通告业务不受影响。' }}</p>

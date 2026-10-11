@@ -415,6 +415,8 @@ function batir(): Map<number[], Map<string, { x: number; y: number }>> {
   return new Map(
   SHAPES.map((forme) => {
     const par = new Map<string, { x: number; y: number }>()
+    // The stacked shape has a separately scaled face anchored on its bottom tier.
+    if (forme.id === 'swirl-pile') return [forme.radii, par]
     for (const def of STATES) {
       if (!def.baseBody) continue
       const expressions = def.baseFace ? [null, ...EXPRESSIONS] : [null]
@@ -453,4 +455,3 @@ export function decalageDesYeux(
 /** Pour les tests : de quoi verifier la table sans refaire la geometrie. */
 /** Pour les tests : de quoi chronometrer la construction de la table. */
 export const POUR_TESTS = { batir }
-

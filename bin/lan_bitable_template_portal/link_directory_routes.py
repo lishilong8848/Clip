@@ -52,7 +52,13 @@ def install_link_directory_routes(app, controller, runtime):
                 if not isinstance(payload, dict):
                     raise PortalError("提交格式无效。")
             current = await asyncio.to_thread(manager)
-            if request.method == "GET" or refreshing:
+            if request.method == "POST" and request.url.path.endswith("/reorder"):
+                if not isinstance(payload, dict) or set(payload) != {"record_id", "target_id", "placement"}:
+                    raise PortalError("排序请求字段无效。")
+                data = await asyncio.to_thread(current.reorder,
+                                               payload["record_id"], payload["target_id"], payload["placement"])
+                data["can_edit"] = admin
+            elif request.method == "GET" or refreshing:
                 data = await asyncio.to_thread(current.read, refreshing)
                 data["can_edit"] = admin
             elif request.method == "DELETE":
@@ -68,4 +74,7 @@ def install_link_directory_routes(app, controller, runtime):
 
     app.add_api_route("/api/link-directory", endpoint, methods=["GET", "POST"])
     app.add_api_route("/api/link-directory/refresh", endpoint, methods=["POST"])
+    # Register the reorder route before the dynamic {record_id} route so the path
+    # cannot be captured as a record id.
+    app.add_api_route("/api/link-directory/reorder", endpoint, methods=["POST"])
     app.add_api_route("/api/link-directory/{record_id}", endpoint, methods=["PUT", "DELETE"])

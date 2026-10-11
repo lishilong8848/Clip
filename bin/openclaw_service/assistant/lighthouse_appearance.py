@@ -18,6 +18,7 @@ COLORS = frozenset({
 SHAPES = frozenset({
     "cercle", "galet", "squircle", "capsule", "triangle", "hexagone",
     "nuage", "goutte",
+    "swirl-pile", "heart", "star", "flower", "diamond", "shield",
 })
 
 EXPRESSIONS = frozenset({

@@ -27,9 +27,10 @@ from lan_bitable_template_portal.lighthouse_agent import (
     PortalAgent,
     _result_refs,
 )
-from lan_bitable_template_portal.lighthouse_ai import AssistantError, LighthouseAssistant
+from lan_bitable_template_portal.lighthouse_ai import AssistantError, LighthouseAssistant, safe_text
 from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog
 from lan_bitable_template_portal.lighthouse_files import LighthouseFiles
+from lan_bitable_template_portal.notice_panel_data import END_PROGRESS_DEFAULT
 
 ACTOR = {"id": "workflow-fixture-a", "scopes": ["A"], "is_admin": False}
 
@@ -1108,8 +1109,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         draft = agent.amend(ACTOR, draft["id"], {"version": 1, "values": {form["name"]: steps}})
         await agent._execute(ACTOR, agent.get_plan(ACTOR, draft["id"]), self.request)
         expanded = PollingWorkOrderService._expanded_steps(writes[0]["steps"])
-        self.assertEqual(len(expanded), 54)
-        self.assertEqual([step["step_id"] for step in expanded[38:]], [f"s{i}" for i in range(11, 15)] * 4)
+        self.assertEqual(len(expanded), 44)
+        self.assertEqual([step["step_id"] for step in expanded[32:]], [f"s{i}" for i in range(11, 15)] * 3)
         queries = {"query_" + "a" * 32: {"items": [{"sop_id": "sop-original", "version": 7, "scope": "A", "work_type": "maintenance", "name": "原名称", "steps": steps}]}}
         edited = agent.prepare(ACTOR, {"operations": [{"api_id": "PUT /api/polling-sops/{sop_id}", "path_params": {"sop_id": "sop-original"}, "body": {"name": "仅更名"}}]}, self.operation_id, [], queries=queries)
         await agent._execute(ACTOR, edited, self.request)
@@ -1240,6 +1241,55 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(patch["progress"], "已完成60%")
         self.assertEqual(patch["start_time"], "2026-09-30 09:00")
         self.assertEqual(patch["end_time"], "2026-09-30 11:00")
+
+    async def test_end_notice_accepted_default_progress_is_materialized_in_patch(self):
+        # Regression: an end action that accepts the untouched canned 本次进度 default
+        # must still materialize progress in the final operation body.patch, even
+        # though the form baseline (field["value"]) already carries that default and
+        # the diff loop would otherwise drop it as unchanged.
+        ref = "query_" + "a" * 32
+        plan = self.agent.prepare(ACTOR, {"operations": [{
+            "api_id": "POST /api/workbench-actions",
+            "body": {
+                "command_format": "notice_command",
+                "scope": "A",
+                "work_type": "maintenance",
+                "action": "end",
+                "manual": True,
+                "polling_work_order_exempt": True,
+                "patch": {"$query": {"ref": ref, "path": "draft"}},
+            },
+        }]}, self.operation_id, [], queries={ref: {"ongoing": self.ongoing, "draft": {
+            "title": "A楼测试维护", "content": "更换机组", "start_time": "2026-09-30 09:00",
+            "end_time": "2026-09-30 11:00", "location": "A楼机房", "reason": "设备更新",
+            "impact": "短时停机", "specialty": "电气", "maintenance_cycle": "每月",
+            "execution_party": "厂维", "building_codes": ["A"], "notice_type": "维保通告"}}})
+        self.assertEqual(plan["status"], "needs_input")
+        target_field = next(field for field in plan["fields"] if field["path"] == "target_record_id")
+        self.assertEqual(target_field["options_source"], "notice_targets")
+
+        options = await self.agent.field_options(ACTOR, plan["id"], target_field["name"], self.request)
+        field = next(field for field in options["fields"] if field["name"] == target_field["name"])
+        self.assertTrue(field["options"])
+        self.assertEqual(field["options"][0]["value"], "rec-original")
+
+        # Selecting a target opens the notice form whose baseline already contains the
+        # canned end default (this is the case that used to drop progress later).
+        opened = self.agent.amend(ACTOR, plan["id"], {"version": options["version"], "values": {target_field["name"]: "rec-original"}})
+        self.assertEqual(opened["status"], "needs_input")
+        form = next(field for field in opened["fields"] if field.get("native_notice"))
+        stored_form = next(field for field in self.agent.get_plan(ACTOR, plan["id"])["fields"] if field.get("native_notice"))
+        self.assertEqual(stored_form["_initial_form"]["progress"], END_PROGRESS_DEFAULT)
+        self.assertEqual(form["value"]["progress"], safe_text(END_PROGRESS_DEFAULT))
+
+        # Submit the unchanged form; the end progress default must survive to the patch.
+        amended = self.agent.amend(ACTOR, plan["id"], {"version": opened["version"], "values": {form["name"]: form["value"]}})
+        self.assertEqual(amended["status"], "awaiting_confirmation")
+        patch = self.agent.get_plan(ACTOR, plan["id"])["operations"][0]["body"]["patch"]
+        self.assertIn("progress", patch)
+        # The untouched default is retained with its original full-width punctuation
+        # from the form baseline (the diff loop would otherwise have dropped it).
+        self.assertEqual(patch["progress"], END_PROGRESS_DEFAULT)
 
     async def test_notice_binding_search_preserves_selected_record_until_cleared(self):
         from urllib.parse import urlencode

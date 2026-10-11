@@ -5,7 +5,6 @@ import logging
 import threading
 from contextlib import ExitStack
 from urllib.parse import quote, urlencode, urlsplit
-from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -58,26 +57,37 @@ ROUTES = {
 
 def install_learning_routes(app, controller, runtime):
     from .learning import LearningError, LearningService
+    from .learning_reminders import read_roster
     from .portal_service import BUILDING_OPEN_ID_MAP
 
     service = None
     service_lock = threading.Lock()
 
     def send_message(scope, message, identity):
-        from clipflow_backend.runtime_helpers import send_text_to_open_ids_guarded
+        from .learning_reminders import send_reminder
+        return send_reminder(scope, message, identity)
 
-        if scope not in SCOPES or not BUILDING_OPEN_ID_MAP.get(scope):
-            raise LearningError("通知接收楼栋无效。", 400)
-        return send_text_to_open_ids_guarded(
-            message, [BUILDING_OPEN_ID_MAP[scope]], message_uuid=str(uuid5(NAMESPACE_URL, identity)),
-        )
+    def get_login_people():
+        """Read ONLY the locally cached personnel login directory snapshot.
+
+        This intentionally reads runtime.state_store without any cloud pull, and
+        never touches password or national-ID fields.
+        """
+        from .personnel_password_login import DIRECTORY_KEY, DIRECTORY_NS
+
+        store = getattr(runtime, 'state_store', None)
+        if store is None:
+            return {}
+        return store.get_document(DIRECTORY_NS, DIRECTORY_KEY) or {}
 
     def get_service():
         nonlocal service
         with service_lock:
             if service is None:
                 service = LearningService(send_message=send_message,
+                                          get_shift_roster=lambda day: read_roster(runtime.service, day),
                                           get_people=lambda: runtime.service.signature_management.directory(refresh=True),
+                                          get_login_people=get_login_people,
                                           get_portal_url=lambda: runtime.service._critical_guard_public_base_url())
                 controller._learning = service
                 runtime.learning_service = service
@@ -105,19 +115,29 @@ def install_learning_routes(app, controller, runtime):
         if session.get("is_guest") or role == "guest":
             raise LearningError("游客无法使用画像学练，请先登录。", 403)
         admin = bool(runtime.auth_manager.is_admin(session))
-        scope = next((s for s in SCOPES if open_id == BUILDING_OPEN_ID_MAP.get(s)), "")
+        personnel = str(session.get("source") or "").strip() == "personnel_password"
+        personnel_rid = str(user.get("personnel_record_id") or session.get("personnel_record_id") or "").strip()
+        # A validated individual personnel-password identity is never a building
+        # duty shared account, even when its real open id appears in
+        # BUILDING_OPEN_ID_MAP; authentication itself rejects duplicated or
+        # missing open ids, so an individual HR identity keeps its own scope.
+        scope = "" if personnel else next((s for s in SCOPES if open_id == BUILDING_OPEN_ID_MAP.get(s)), "")
+        # Virtual `personnel_<record id>` principal is used ONLY as the resolve_self
+        # lookup argument; actor.id is always the real Feishu open id so the
+        # existing permissions/context are reused unchanged.
+        lookup = f"personnel_{personnel_rid}" if personnel and personnel_rid else open_id
         name = str(user.get("name") or session.get("name") or "")
         base = {"id": open_id, "name": name, "is_admin": admin, "scope": scope}
         if not admin and not scope:
             # Formal ordinary personal account: self-only, never shared/duty.
-            info = get_service().resolve_self(open_id)
+            info = get_service().resolve_self(lookup)
             return session, {**base, "shared_account": False, "person_id": info["person_id"],
                              "can_answer": bool(info["person_id"]), "identity_issue": info["identity_issue"]}
         if scope and not admin:
             # Building duty account is shared and read-only for its own building.
             return session, {**base, "shared_account": True, "person_id": "", "can_answer": False, "identity_issue": ""}
         # Admin: viewing allowed everywhere; answering requires a resolved self person.
-        info = get_service().resolve_self(open_id)
+        info = get_service().resolve_self(lookup)
         return session, {**base, "shared_account": False, "person_id": info["person_id"],
                          "can_answer": bool(info["person_id"]), "identity_issue": info["identity_issue"]}
 

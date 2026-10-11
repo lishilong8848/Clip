@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from PIL import Image
 
+HORIZONTAL_SIGNATURE_GAP_PX = 8
+
 
 def print_signature_image(
     source: Image.Image,

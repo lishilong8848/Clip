@@ -107,7 +107,7 @@ import cp from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 const nativeSpawn = cp.spawnSync;
-let failNative = false, malformed = false, failNetstat = false;
+let failNative = false, malformed = false, failNetstat = false, timeoutNative = false, timeoutNetstat = false;
 let helpers = 0, netstats = 0, originals = 0;
 const fallback = '2000-01-01T00:00:00.123+00:00';
 const powershell = file => String(file).toLowerCase().endsWith('powershell.exe');
@@ -116,19 +116,25 @@ cp.execFileSync = function(file, args, options) {
   throw new Error('Unrelated exec was unexpectedly intercepted');
 };
 cp.spawnSync = function(file, args, options) {
+  let liveProbe = false;
   if (file === process.env.LIGHTHOUSE_PYTHON) {
     helpers++;
     assert.deepEqual(args.slice(0, 4), ['-I', '-S', '-B', '-c']);
     assert.match(args.at(-1), /^[1-9]\\d*$/);
     assert.equal(options.shell, false);
     assert.ok(options.timeout > 0 && options.timeout <= 1000);
+    if (timeoutNative) return {status:null, stdout:'', error:Object.assign(new Error('fixture timeout'), {code:'ETIMEDOUT'})};
     if (failNative) return {status:1, stdout:''};
     if (malformed) return {status:0, stdout:'unverified timestamp'};
+    liveProbe = true;
   }
   if (String(file).toLowerCase().endsWith('netstat.exe')) {
     netstats++;
     assert.deepEqual(args, ['-ano']);
+    assert.ok(options.timeout > 0 && options.timeout <= 1000);
+    if (timeoutNetstat) return {status:null, stdout:'', error:Object.assign(new Error('fixture timeout'), {code:'ETIMEDOUT'})};
     if (failNetstat) return {status:1, stdout:''};
+    liveProbe = true;
   }
   if (powershell(file)) {
     originals++;
@@ -136,7 +142,8 @@ cp.spawnSync = function(file, args, options) {
     const stdout = args.at(-1).includes('Get-NetTCPConnection') ? process.env.OWNER_PID : fallback;
     return {status:0, stdout};
   }
-  return nativeSpawn.call(this, file, args, options);
+  // Assert the production budget above; host contention must not fail live OS correctness checks.
+  return nativeSpawn.call(this, file, args, liveProbe ? {...options, timeout:10000} : options);
 };
 await import(process.env.PRELOAD);
 const sdk = file => pathToFileURL(resolve(process.env.LIGHTHOUSE_SDK_ROOT, 'dist', file)).href;
@@ -167,6 +174,12 @@ assert.equal(start(pid), Date.parse(fallback), 'Malformed helper output bypassed
 failNetstat = true;
 assert.deepEqual(owners(4321,1000), {ok:true,pids:[pid]}, 'Failed netstat became a false empty list');
 assert.equal(originals, 6);
+malformed = false; timeoutNative = true;
+assert.equal(start(pid), Date.parse(fallback), 'Timed-out native helper lost its fallback');
+assert.equal(otherStart(pid,1000), Date.parse(fallback), 'Timed-out lock probe lost its fallback');
+failNetstat = false; timeoutNetstat = true;
+assert.deepEqual(owners(4321,1000), {ok:true,pids:[pid]}, 'Timed-out netstat became a false empty list');
+assert.equal(originals, 9);
 console.log('Readonly identity/listener scope and fallback OK');
 ''', encoding='utf-8')
             result = subprocess.run([str(node), str(script)], env={**os.environ,
@@ -697,6 +710,40 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(json.loads(requests[0].content)['model'], 'fixture-model')
             self.assertEqual(json.loads(requests[1].content)['model'], 'second-model')
             self.assertTrue(all(request.headers.get('cookie') == '' for request in requests))
+
+    async def test_model_capabilities_control_catalog_and_actual_wire_per_account(self):
+        first = await self.acquire('vision', {**_profile(), 'reasoning': True,
+            'reasoning_efforts': ['xhigh'], 'reasoning_effort': 'xhigh', 'image_input': True})
+        second = await self.acquire('plain', {**_profile(), 'tool_calls': False, 'image_input': False})
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        config = lrt.build_configuration(self.runtime.root, self.runtime.accounts, first['port'],
+            model_url='http://127.0.0.1/internal', plugin=Path('fixture'), tool_names=['lighthouse_probe'])
+        catalog = {model['id']: model for model in config['models']['providers']['lighthouse']['models']}
+        self.assertTrue(catalog[first['agent_id']]['reasoning'])
+        self.assertEqual(catalog[first['agent_id']]['input'], ['text', 'image'])
+        self.assertEqual(catalog[first['agent_id']]['compat']['supportedReasoningEfforts'], ['xhigh'])
+        self.assertEqual(catalog[second['agent_id']]['input'], ['text'])
+        self.assertEqual(config['agents']['entries'][second['agent_id']]['tools']['deny'], ['lighthouse_probe'])
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as client:
+            for item in (first, second):
+                response = await client.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'],
+                    'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': '看图'},
+                        {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,Zml4dHVyZQ=='}}]}],
+                    'tools': [{'type': 'function', 'function': {'name': 'lighthouse_probe'}}],
+                    'tool_choice': 'auto', 'parallel_tool_calls': False, 'reasoning_effort': 'low'})
+                self.assertEqual(response.status_code, 200)
+        self.assertEqual(bodies[0]['reasoning_effort'], 'xhigh')
+        self.assertEqual(len(bodies[0]['messages'][0]['content']), 2)
+        for key in ('tools', 'tool_choice', 'parallel_tool_calls', 'reasoning_effort'):
+            self.assertNotIn(key, bodies[1])
+        self.assertEqual(bodies[1]['messages'][0]['content'], [{'type': 'text', 'text': '看图'}])
 
     async def test_request_stopped_or_replaced_during_preparation_never_reaches_provider(self):
         item = await self.acquire()

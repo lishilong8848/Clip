@@ -2789,7 +2789,7 @@ def render_workbench_lite(
         else _selected_source(
             records,
             effective_record_id,
-            fallback_to_first=not bool(prefill_source_record_id or prefill_draft),
+            fallback_to_first=not bool(active_item_id or effective_record_id or prefill_source_record_id or prefill_draft),
         )
     )
     if selected_record and not selected_ongoing:
@@ -3883,7 +3883,7 @@ def render_workbench_lite(
       const loopSection=document.createElement('div'),loopHead=document.createElement('div'),loopTitle=document.createElement('strong'),loopCount=document.createElement('small'),addLoop=document.createElement('button'),repeatBox=document.createElement('div');loopSection.className='polling-loop-control';loopHead.className='polling-loop-head';loopTitle.textContent='本步后循环';loopCount.textContent=(step.repeat_rules||[]).length?`${{step.repeat_rules.length}} 条规则`:'';loopTitle.append(loopCount);addLoop.type='button';addLoop.className='polling-loop-add';addLoop.textContent='+ 添加循环';addLoop.onclick=()=>{{step.repeat_rules=Array.isArray(step.repeat_rules)?step.repeat_rules:[];if(step.repeat_rules.length>=10){{showLiteError('每步最多配置 10 条循环');return}}step.repeat_rules.push({{rule_id:pollingDraftStepId(),from_step_id:step.step_id,to_step_id:step.step_id,count:1}});restoreStep('.polling-repeat-rule:last-child select')}};loopHead.append(loopTitle,addLoop);repeatBox.className='polling-repeat-rules';
       for(const [ruleIndex,rule] of (step.repeat_rules||[]).entries()){{
         const globalRuleIndex=litePollingEditingSop.steps.slice(0,index).reduce((total,item)=>total+(item.repeat_rules||[]).length,0)+ruleIndex+1;
-        const row=document.createElement('div'),ruleLabel=document.createElement('span'),fromLabel=document.createElement('label'),fromText=document.createElement('span'),from=document.createElement('select'),toLabel=document.createElement('label'),toText=document.createElement('span'),to=document.createElement('select'),countLabel=document.createElement('label'),countText=document.createElement('span'),count=document.createElement('input'),drop=document.createElement('button');row.className='polling-repeat-rule';ruleLabel.className='polling-repeat-index';ruleLabel.textContent=`循环 ${{globalRuleIndex}}`;fromLabel.className=toLabel.className='polling-repeat-field';countLabel.className='polling-repeat-field polling-repeat-count';fromText.textContent='起始步骤';toText.textContent='结束步骤';countText.textContent='重复遍数';for(let i=0;i<=index;i++){{for(const select of [from,to]){{const option=document.createElement('option');option.value=String(litePollingEditingSop.steps[i].step_id||'');option.textContent=`第 ${{i+1}} 步`;select.append(option)}}}}from.value=String(rule.from_step_id||step.step_id||'');to.value=String(rule.to_step_id||step.step_id||'');from.setAttribute('aria-label',`第 ${{index+1}} 步循环 ${{globalRuleIndex}} 起始步骤`);to.setAttribute('aria-label',`第 ${{index+1}} 步循环 ${{globalRuleIndex}} 结束步骤`);from.onchange=()=>rule.from_step_id=from.value;to.onchange=()=>rule.to_step_id=to.value;count.type='number';count.min='1';count.max='10';count.step='1';count.required=true;count.value=String(Number(rule.count||0)||1);count.setAttribute('aria-label','再循环遍数');count.oninput=()=>rule.count=Number(count.value||0);drop.type='button';drop.className='polling-repeat-remove';drop.textContent='×';drop.title=`移除循环 ${{globalRuleIndex}}`;drop.setAttribute('aria-label',drop.title);drop.onclick=()=>{{step.repeat_rules.splice(ruleIndex,1);restoreStep('.polling-loop-add')}};fromLabel.append(fromText,from);toLabel.append(toText,to);countLabel.append(countText,count);row.append(ruleLabel,fromLabel,toLabel,countLabel,drop);repeatBox.append(row);
+        const row=document.createElement('div'),ruleLabel=document.createElement('span'),fromLabel=document.createElement('label'),fromText=document.createElement('span'),from=document.createElement('select'),toLabel=document.createElement('label'),toText=document.createElement('span'),to=document.createElement('select'),countLabel=document.createElement('label'),countText=document.createElement('span'),count=document.createElement('input'),drop=document.createElement('button');row.className='polling-repeat-rule';ruleLabel.className='polling-repeat-index';ruleLabel.textContent=`循环 ${{globalRuleIndex}}`;fromLabel.className=toLabel.className='polling-repeat-field';countLabel.className='polling-repeat-field polling-repeat-count';fromText.textContent='起始步骤';toText.textContent='结束步骤';countText.textContent='总执行遍数';for(let i=0;i<=index;i++){{for(const select of [from,to]){{const option=document.createElement('option');option.value=String(litePollingEditingSop.steps[i].step_id||'');option.textContent=`第 ${{i+1}} 步`;select.append(option)}}}}from.value=String(rule.from_step_id||step.step_id||'');to.value=String(rule.to_step_id||step.step_id||'');from.setAttribute('aria-label',`第 ${{index+1}} 步循环 ${{globalRuleIndex}} 起始步骤`);to.setAttribute('aria-label',`第 ${{index+1}} 步循环 ${{globalRuleIndex}} 结束步骤`);from.onchange=()=>rule.from_step_id=from.value;to.onchange=()=>rule.to_step_id=to.value;count.type='number';count.min='1';count.max='10';count.step='1';count.required=true;count.value=String(Number(rule.count||0)||1);count.setAttribute('aria-label','共执行遍数');count.oninput=()=>rule.count=Number(count.value||0);drop.type='button';drop.className='polling-repeat-remove';drop.textContent='×';drop.title=`移除循环 ${{globalRuleIndex}}`;drop.setAttribute('aria-label',drop.title);drop.onclick=()=>{{step.repeat_rules.splice(ruleIndex,1);restoreStep('.polling-loop-add')}};fromLabel.append(fromText,from);toLabel.append(toText,to);countLabel.append(countText,count);row.append(ruleLabel,fromLabel,toLabel,countLabel,drop);repeatBox.append(row);
       }}
       loopSection.append(loopHead,repeatBox);settings.append(reminderRow,loopSection);node.append(head,textarea,tools,flags,settings);return node;
     }}
@@ -3942,7 +3942,7 @@ def render_workbench_lite(
       const detectedRuns=maintenance?[]:pollingRunsFromContent(previewValue(document.getElementById('lite-notice-form'),'content')),hasSavedSelection=litePollingSelection?.sop_id===sop.sop_id&&litePollingSelection?.work_type===pollingSopWorkType(),initial=hasSavedSelection?litePollingSelection:(detectedRuns.length?{{run_count:detectedRuns.length,runs:detectedRuns}}:{{run_count:1,runs:maintenance?[{{label:pollingSopRunLabel()}}]:[{{from_unit:'1#',to_unit:'2#'}}]}});const countLabel=document.createElement('label'),countText=document.createElement('span'),count=document.createElement('select');countText.textContent='需要轮巡几次';for(let i=1;i<=2;i++){{const option=document.createElement('option');option.value=String(i);option.textContent=`${{i}} 次`;count.append(option)}}count.value=String(Math.min(2,Number(initial.run_count||1)));countLabel.append(countText,count);countLabel.hidden=maintenance;
       const directionTitle=document.createElement('strong');directionTitle.textContent='设备指向（1#–3# / 4#–6# 组内选择）'+(!hasSavedSelection&&detectedRuns.length?` · 已从内容识别 ${{detectedRuns.map(run=>`${{run.from_unit}}→${{run.to_unit}}`).join('、')}}`:'');directionTitle.hidden=maintenance;const runs=document.createElement('div');runs.className='polling-sop-steps';runs.hidden=maintenance;const runValues=maintenance?[hasCoolingStep?{{from_unit:String(initial.runs?.[0]?.from_unit||''),to_unit:String(initial.runs?.[0]?.to_unit||''),other_unit:String(initial.runs?.[0]?.other_unit||'')}}:{{label:pollingSopRunLabel()}}]:Array.from({{length:Number(count.value)}},(_,i)=>({{from_unit:initial.runs?.[i]?.from_unit||'1#',to_unit:initial.runs?.[i]?.to_unit||'2#'}}));if(!maintenance)pollingRunRows(runs,Number(count.value),runValues);count.onchange=()=>{{const value=Number(count.value);while(runValues.length<value)runValues.push({{from_unit:'1#',to_unit:'2#'}});runValues.length=value;pollingRunRows(runs,value,runValues)}};
       let apply=null;const coolingFields=document.createElement('div'),coolingUnitLabel=document.createElement('label'),coolingUnitText=document.createElement('span'),coolingUnit=document.createElement('select'),fromModeLabel=document.createElement('label'),fromModeText=document.createElement('span'),fromMode=document.createElement('select'),toModeLabel=document.createElement('label'),toModeText=document.createElement('span'),toMode=document.createElement('select'),coolingIssue=document.createElement('small');coolingFields.className='polling-cooling-mode';coolingUnitText.textContent='制冷单元';fromModeText.textContent='当前运行模式';toModeText.textContent='切换后运行模式';for(const [select,prompt] of [[coolingUnit,'请选择制冷单元'],[fromMode,'请选择当前模式'],[toMode,'请选择切换后模式']]){{select.required=true;const option=document.createElement('option');option.value='';option.textContent=prompt;select.append(option)}}for(const unit of litePollingUnits){{const option=document.createElement('option');option.value=unit;option.textContent=`${{unit}}制冷单元`;coolingUnit.append(option)}}for(const [code,label] of liteAdjustCoolingModes){{for(const select of [fromMode,toMode]){{const option=document.createElement('option');option.value=code;option.textContent=label;select.append(option)}}}}coolingUnit.value=litePollingUnits.includes(runValues[0]?.other_unit)?runValues[0].other_unit:'';fromMode.value=pollingAdjustModeLabel(runValues[0]?.from_unit)?runValues[0].from_unit:'';toMode.value=pollingAdjustModeLabel(runValues[0]?.to_unit)?runValues[0].to_unit:'';coolingUnit.setAttribute('aria-label','调整制冷单元');fromMode.setAttribute('aria-label','制冷单元当前运行模式');toMode.setAttribute('aria-label','制冷单元切换后运行模式');const syncCoolingSelection=()=>{{runValues[0].other_unit=coolingUnit.value;runValues[0].from_unit=fromMode.value;runValues[0].to_unit=toMode.value;const same=Boolean(fromMode.value&&fromMode.value===toMode.value);coolingIssue.textContent=same?'当前运行模式和切换后运行模式不能相同':'';coolingIssue.hidden=!same;renderCoolingPreview();if(apply)apply.disabled=syncBlocked||!sop.ready||!compatible||!coolingUnit.value||!fromMode.value||!toMode.value||same}};coolingUnit.onchange=fromMode.onchange=toMode.onchange=syncCoolingSelection;coolingUnitLabel.append(coolingUnitText,coolingUnit);fromModeLabel.append(fromModeText,fromMode);toModeLabel.append(toModeText,toMode);coolingFields.append(coolingUnitLabel,fromModeLabel,toModeLabel,coolingIssue);coolingFields.hidden=!hasCoolingStep;
-      function renderCoolingPreview() {{for(const [row,step] of previewRows){{const content=String(step.content||''),unit=runValues[0]?.other_unit,main=document.createElement('div'),meta=document.createElement('div');main.className='polling-step-preview-main';meta.className='polling-step-preview-meta';main.textContent=`${{step.order}}. ${{hasCoolingStep?content.replace('{{{{from}}}}',unit?`${{unit}}制冷单元`:'待选择制冷单元'):content}}`;if(Number(step.delay_reminder_minutes||0)>0){{const delay=document.createElement('span');delay.className='delay';delay.textContent=`完成后延时 ${{step.delay_reminder_minutes}} 分钟`;meta.append(delay)}}for(const rule of step.repeat_rules||[]){{const from=(sop.steps||[]).findIndex(item=>item.step_id===rule.from_step_id)+1,to=(sop.steps||[]).findIndex(item=>item.step_id===rule.to_step_id)+1;if(from&&to){{const loop=document.createElement('span');loop.className='loop';loop.textContent=`本步后第 ${{from}}–${{to}} 步再循环 ${{rule.count}} 遍`;meta.append(loop)}}}}row.replaceChildren(main,...(meta.childElementCount?[meta]:[]))}}}}
+      function renderCoolingPreview() {{for(const [row,step] of previewRows){{const content=String(step.content||''),unit=runValues[0]?.other_unit,main=document.createElement('div'),meta=document.createElement('div');main.className='polling-step-preview-main';meta.className='polling-step-preview-meta';main.textContent=`${{step.order}}. ${{hasCoolingStep?content.replace('{{{{from}}}}',unit?`${{unit}}制冷单元`:'待选择制冷单元'):content}}`;if(Number(step.delay_reminder_minutes||0)>0){{const delay=document.createElement('span');delay.className='delay';delay.textContent=`完成后延时 ${{step.delay_reminder_minutes}} 分钟`;meta.append(delay)}}for(const rule of step.repeat_rules||[]){{const from=(sop.steps||[]).findIndex(item=>item.step_id===rule.from_step_id)+1,to=(sop.steps||[]).findIndex(item=>item.step_id===rule.to_step_id)+1;if(from&&to){{const loop=document.createElement('span');loop.className='loop';loop.textContent=`本步后第 ${{from}}–${{to}} 步共执行 ${{rule.count}} 遍`;meta.append(loop)}}}}row.replaceChildren(main,...(meta.childElementCount?[meta]:[]))}}}}
       renderCoolingPreview();
       const peopleGrid=document.createElement('div');peopleGrid.className='polling-people-grid';const operatorLabel=document.createElement('div'),reviewerLabel=document.createElement('div'),operatorText=document.createElement('span'),reviewerText=document.createElement('span'),operator=document.createElement('input'),reviewer=document.createElement('input'),operatorResults=document.createElement('div'),reviewerResults=document.createElement('div'),currentShift=pollingCurrentShift();operatorLabel.className=reviewerLabel.className='polling-person-picker';operatorText.textContent=`操作人（当前${{currentShift}}班）`;reviewerText.textContent='现场审核人';operator.type=reviewer.type='search';operator.autocomplete=reviewer.autocomplete='off';operator.placeholder='搜索姓名、工号、岗位或楼栋';reviewer.placeholder='搜索姓名、工号、岗位或楼栋';operator.setAttribute('aria-label','搜索并选择操作人');reviewer.setAttribute('aria-label','搜索并选择现场审核人');operatorResults.className=reviewerResults.className='polling-person-results';operatorResults.hidden=reviewerResults.hidden=true;pollingBindPersonSearch(operator,operatorResults,()=>[reviewer.dataset.recordId,'h_duty_account']);pollingBindPersonSearch(reviewer,reviewerResults,()=>[operator.dataset.recordId]);
       const building=pollingCurrentBuildingLabel(),inBuilding=litePollingPeople.filter(person=>String(person.building||'').includes(building));const defaultOperator=inBuilding.find(person=>String(person.shift||'').includes(currentShift)&&/(值班长|楼长|H楼值班主管|110站站长)/.test(String(person.position||'')));const defaultReviewer=inBuilding.find(person=>String(person.record_id||'')!==String(defaultOperator?.record_id||'')&&String(person.position||'').includes('暖通工程师'));pollingChoosePerson(operator,initial.operator_record_id||defaultOperator?.record_id);pollingChoosePerson(reviewer,initial.reviewer_record_id||defaultReviewer?.record_id);
@@ -7373,36 +7373,42 @@ def render_workbench_lite(
       const form = document.getElementById('lite-notice-form'), panel = document.getElementById('lite-alert-tags');
       if (!form || !panel || document.hidden || litePageSuspended || !noticeDrawerOverlay()?.classList.contains('open')) return;
       const target = String(previewValue(form, 'target_record_id') || '').trim();
+      const workType = String(previewValue(form, 'work_type') || '');
+      panel.replaceChildren(); panel.hidden = true;
       if (isMissingTargetRecordId(target)) {{ panel.hidden = true; return; }}
       const sequence = noticeTagsSequence, controller = new AbortController();
+      const stillCurrent = () => sequence === noticeTagsSequence && panel.isConnected
+        && target === String(previewValue(form, 'target_record_id') || '').trim()
+        && workType === String(previewValue(form, 'work_type') || '');
       noticeTagsRequest = controller;
       const timeout = window.setTimeout(() => controller.abort(), 8000);
       const line = (tag, text) => {{ const node = document.createElement(tag); node.textContent = text; panel.appendChild(node); return node; }};
       let pending = false, retryDelay = 0;
       try {{
-        const query = new URLSearchParams({{target_record_id:target,work_type:String(previewValue(form,'work_type')||'')}});
+        const query = new URLSearchParams({{target_record_id:target,work_type:workType}});
         const response = await fetch('/api/notice-alert-tags?' + query, {{credentials:'same-origin',signal:controller.signal}});
         const value = await response.json();
-        if (sequence !== noticeTagsSequence || !panel.isConnected) return;
+        if (!stillCurrent()) return;
         if (!response.ok || value.ok === false) throw new Error('推荐标签暂不可用，通告业务不受影响。');
         const data = value.data;
         panel.replaceChildren(); panel.hidden = !data;
         if (!data) return;
-        const heading = line('header', '已发通告推荐标签 · ' + (data.action === 'start' ? '开始' : '更新'));
+        const heading = line('header', '通告推荐标签（仅供现场核对，不代表已给告警打标）');
         pending = data.status === 'pending';
         retryDelay = pending ? 5000 : data.status === 'failed' ? Math.max(10000, Math.min(60000, Number(data.retry_after || 0) * 1000 - Date.now())) : 0;
         if (pending) {{ const spinner = document.createElement('span'); spinner.className = 'tag-loading'; heading.prepend(spinner); line('p','正在后台生成推荐标签…'); }}
         else if (data.status === 'ready') {{
-          for (const tag of data.tags || []) {{ line('strong','【' + tag.label + '】' + tag.content); line('p','依据：' + tag.basis + '\\n注意：' + tag.notes); }}
+          line('p', (data.title ? data.title + ' · ' : '') + (data.action === 'start' ? '开始' : '更新'));
+          for (const tag of data.tags || []) line('strong','【' + tag.label + '】' + tag.content);
         }} else line('p', data.error || '推荐标签获取失败，通告业务不受影响。');
         if (data.message_warning) line('p', data.message_warning);
       }} catch (error) {{
-        if (sequence !== noticeTagsSequence || !panel.isConnected) return;
+        if (!stillCurrent()) return;
         panel.replaceChildren(); panel.hidden = false;
         line('p','推荐标签暂不可用，通告发送不受影响。');
       }} finally {{
         window.clearTimeout(timeout);
-        if (sequence === noticeTagsSequence) {{ noticeTagsRequest = null; if (retryDelay) noticeTagsTimer = window.setTimeout(refreshNoticeTags,retryDelay); }}
+        if (stillCurrent()) {{ noticeTagsRequest = null; if (retryDelay) noticeTagsTimer = window.setTimeout(refreshNoticeTags,retryDelay); }}
       }}
     }}
     function setSubmitButtons(form, action) {{
@@ -7505,6 +7511,7 @@ def render_workbench_lite(
       form.dataset.targetEnded = '';
       delete form.dataset.submitOperationId;
       delete form.dataset.pendingActionJobId;
+      setFormSubmitBusy(form, false);
       setFormValue(form, 'manual', '');
       setFormValue(form, 'manual_id', '');
       resetSourceTypeFields(form);
@@ -8812,6 +8819,12 @@ def render_workbench_lite(
     }}
     function currentNoticeMatchesDraft(form, draft) {{
       if (!form || !draft) return false;
+      if (draft.work_type && previewValue(form, 'work_type') && draft.work_type !== previewValue(form, 'work_type')) return false;
+      for (const name of ['target_record_id', 'active_item_id']) {{
+        const current = String(previewValue(form, name) || '').trim();
+        const submitted = String(draft[name] || '').trim();
+        if (current && submitted) return current === submitted;
+      }}
       const draftIds = new Set(rowIdentityCandidates(draft));
       if (!draftIds.size) return false;
       const formIds = [
@@ -9127,6 +9140,8 @@ def render_workbench_lite(
       if (!draft || draft.action !== 'start') return;
       const form = document.getElementById('lite-notice-form');
       if (!form) return;
+      if (!(draft.operation_id && form.dataset.submitOperationId === draft.operation_id)
+          && !currentNoticeMatchesDraft(form, draft)) return;
       const currentSourceId = String(previewValue(form, 'source_record_id') || '').trim();
       const draftSourceId = String(draft.source_record_id || '').trim();
       if (currentSourceId && draftSourceId && currentSourceId !== draftSourceId) return;
@@ -9195,7 +9210,7 @@ def render_workbench_lite(
       if (ok && window.parent !== window) window.parent.postMessage({{type:'clipflow:business-changed'}}, location.origin);
       const patch = jobPatch && typeof jobPatch === 'object' ? jobPatch : null;
       if (!patch || patch.kind !== 'notice_action_result') {{
-        if (ok && payload?.action === 'start') {{
+        if (ok && payload?.action === 'start' && currentNoticeMatchesDraft(document.getElementById('lite-notice-form'), payload)) {{
           applyOptimisticSubmission(document.getElementById('lite-notice-form'), 'start', payload);
         }}
         markSubmissionResult(payload, ok, message);
@@ -9307,7 +9322,9 @@ def render_workbench_lite(
       const startedAt = Date.now();
       let delay = 800;
       let readFailures = 0;
-      const updateStatus = text => {{ if (latestSubmittedJobId === jobId) setLiteStatus(text); }};
+      const isCurrent = () => latestSubmittedJobId === jobId
+        && currentNoticeMatchesDraft(document.getElementById('lite-notice-form'), payload);
+      const updateStatus = text => {{ if (isCurrent()) setLiteStatus(text); }};
       while (Date.now() - startedAt < 600000) {{
         await sleep(delay);
         const controller = new AbortController();
@@ -9326,13 +9343,14 @@ def render_workbench_lite(
           const phase = String(job.phase || '');
           if (phase === 'success') {{
             await deleteSubmittedLiteDraft(payload).catch(() => ({{}}));
+            const wasCurrent = isCurrent();
             try {{
               applyJobPatch(job.frontend_patch, payload, true, job.upload_message || '已完成');
             }} catch (error) {{
               updateStatus('通告已发送成功，但页面展示更新失败，请刷新查看，勿重复发送。');
               return true;
             }}
-            updateStatus(successfulNoticeActionText(
+            if (wasCurrent) setLiteStatus(successfulNoticeActionText(
               payload?.action,
               Boolean(job.frontend_patch?.terminal_projection_skipped),
               Boolean(job.frontend_patch?.source_fallback_active),
@@ -9344,14 +9362,15 @@ def render_workbench_lite(
           if (phase === 'failed') {{
             const message = job.error || job.upload_message || job.message_error || '发送失败';
             try {{ applyJobPatch(job.frontend_patch, payload, false, message); }} catch (error) {{}}
-            if (latestSubmittedJobId === jobId) showLiteError(message);
+            if (isCurrent()) showLiteError(message);
             updateStatus((job.remote_written ? '多维已写入，后续处理失败：' : '发送失败：') + friendlyLiteMessage(message));
             return true;
           }}
           const slow = Date.now() - startedAt >= 90000 ? `（后台仍在执行，任务号 ${{jobId}}，请勿重复提交）` : '';
           const stage = job.qt_phase === 'preparing' && ['accepted', 'queued', 'qt_queued'].includes(phase)
             ? '正在准备通告' : phase === 'qt_queued' && job.depends_on_phase
-              ? '等待同一通告上一条操作完成' : jobPhaseText(phase);
+              ? '等待同一通告上一条操作完成' : phase === 'remote_written' && job.paired_upload_status === 'failed'
+                ? '主通告已写入，正在重试关联维保同步' : jobPhaseText(phase);
           updateStatus('发送中：' + stage + (job.projection_pending && job.message_warning ? '（' + job.message_warning + '）' : slow));
         }} catch (error) {{
           readFailures += 1;
@@ -9371,12 +9390,12 @@ def render_workbench_lite(
         latestSubmittedJobId = jobId;
         pollSubmittedJob(jobId, label || '任务已完成，正在更新列表...', payload)
           .then(completed => {{
-            if (!completed || latestSubmittedJobId !== jobId) return;
+            if (!completed || form.dataset.pendingActionJobId !== jobId) return;
             delete form.dataset.pendingActionJobId;
             setFormSubmitBusy(form, false);
             if (form.isConnected) updateActionAvailability(form);
           }})
-          .catch(() => setLiteStatus('任务结果暂未确认，请刷新核对，勿重复发送。'));
+          .catch(() => {{ if (form.dataset.pendingActionJobId === jobId) setLiteStatus('任务结果暂未确认，请刷新核对，勿重复发送。'); }});
         return;
       }}
       setTimeout(() => {{

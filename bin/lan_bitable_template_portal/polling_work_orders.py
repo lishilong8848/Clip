@@ -914,10 +914,10 @@ class PollingWorkOrderService:
                     raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环规则格式无效。")
                 raw_count = rule.get("count") or 0
                 if isinstance(raw_count, bool) or not re.fullmatch(r"\d+", str(raw_count)):
-                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环次数必须为整数。")
+                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环总执行遍数必须为整数。")
                 repeat_count = int(raw_count)
                 if repeat_count not in range(1, 11):
-                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环次数必须为 1–10 遍。")
+                    raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环总执行遍数必须为 1–10 遍。")
                 repeat_rules.append({
                     "rule_id": str(rule.get("rule_id") or uuid.uuid4().hex),
                     "from_step_id": str(rule.get("from_step_id") or "").strip(),
@@ -945,7 +945,7 @@ class PollingWorkOrderService:
                 end = positions.get(rule["to_step_id"])
                 if start is None or end is None or start > end or end > index:
                     raise PortalError(f"第 {index + 1} 步的第 {rule_index} 条循环只能选择本步及之前的连续步骤区间。")
-                expanded_count += (end - start + 1) * rule["count"]
+                expanded_count += (end - start + 1) * (rule["count"] - 1)
         if expanded_count > POLLING_WORK_ORDER_MAX_EXPANDED_STEPS:
             raise PortalError(f"展开后的单次工单步骤不能超过 {POLLING_WORK_ORDER_MAX_EXPANDED_STEPS} 条。")
         return steps
@@ -961,7 +961,7 @@ class PollingWorkOrderService:
                 rule_number += 1
                 start = positions[str(rule.get("from_step_id") or "")]
                 end = positions[str(rule.get("to_step_id") or "")]
-                for round_index in range(1, int(rule.get("count") or 0) + 1):
+                for round_index in range(2, int(rule.get("count") or 0) + 1):
                     for source_index in range(start, end + 1):
                         expanded.append({
                             **copy.deepcopy(steps[source_index]),

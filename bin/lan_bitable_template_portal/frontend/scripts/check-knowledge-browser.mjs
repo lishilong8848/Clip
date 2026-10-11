@@ -26,8 +26,8 @@ await page.route('**/api/**', async route => {
   if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-knowledge' } });
   if (url.pathname === '/api/assistant/conversation') return ok({ conversation_id: 'fixture', enabled: true, configured: false, turns: [], can_manage_settings: true });
   if (url.pathname === '/api/assistant/appearance') return ok({ color: '#171717', size: 88, shape: 'circle', snap_back: true });
-  if (url.pathname === '/api/assistant/knowledge') return ok({ items: (url.searchParams.get('deleted') === '1') === removed ? [document()] : [], total: 1, page: 1, page_size: 20, is_admin: true, settings: { configured: true }, revision });
-  if (url.pathname.endsWith('/knowledge/search')) return ok({ mode: 'hybrid', warning: '', items: [{ ...section(0), name: document().name, document_id: 'guide', version: 2, url: '/knowledge-base?document=guide&version=2&chunk=0' }] });
+  if (url.pathname === '/api/assistant/knowledge') return ok({ items: (url.searchParams.get('deleted') === '1') === removed ? [document()] : [], total: 1, page: 1, page_size: 20, is_admin: true, revision });
+  if (url.pathname.endsWith('/knowledge/search')) return ok({ mode: 'keyword', warning: '', items: [{ ...section(0), name: document().name, document_id: 'guide', version: 2, url: '/knowledge-base?document=guide&version=2&chunk=0' }] });
   if (url.pathname === '/api/assistant/knowledge/documents/guide') {
     if (req.method() === 'DELETE') { assert.equal(req.postDataJSON().version, 4); removed = true; revision++; return ok(document()); }
     assert.equal(url.searchParams.get('version'), '2', 'preview uses content version, not optimistic revision');
@@ -40,6 +40,12 @@ await page.route('**/api/**', async route => {
 try {
   await page.goto(origin + '/knowledge-base');
   await page.getByText('公司出差管理办法.txt', { exact: true }).first().waitFor();
+  await page.getByText('本地全文检索', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: '知识库设置', exact: true }).count(), 0, 'KB settings button must not exist');
+  assert.equal(await page.getByLabel('API Key', { exact: true }).count(), 0, 'no separate API key config UI');
+  assert.equal(await page.getByLabel('嵌入服务端点（Embeddings）', { exact: true }).count(), 0, 'no separate embedding endpoint config UI');
+  assert.equal(await page.getByLabel('允许接收文档片段的目标端（每行一个 https 来源）', { exact: true }).count(), 0, 'no separate domain/whitelist config UI');
+  await page.screenshot({ path: path.join(output, 'knowledge-no-settings.png'), fullPage: true, animations: 'disabled' });
   await page.locator('.kb-row-main').click();
   await page.locator('.kb-section').first().waitFor();
   assert.equal(await page.locator('.kb-section').count(), 20);
@@ -96,7 +102,7 @@ try {
     assert.ok(box.x >= 0 && box.y >= 0 && box.x + box.width <= width + 1 && box.y + box.height <= 901, JSON.stringify(box));
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, screenshots: output, checks: 'preview version/pagination, delete/restore, single large resizeable window, persistence, mutually exclusive sidebar, PC bounds' }));
+  console.log(JSON.stringify({ ok: true, screenshots: output, checks: 'no embedding/api-key/domain settings UI, local full-text badge, preview version/pagination, delete/restore, single large resizeable window, persistence, mutually exclusive sidebar, PC bounds' }));
 } catch (error) {
   await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }); throw error;
 } finally {

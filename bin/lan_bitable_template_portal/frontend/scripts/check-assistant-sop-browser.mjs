@@ -43,14 +43,14 @@ try {
     await firstLoop.getByRole('button', { name: '添加本步后循环', exact: true }).click();
     await firstLoop.getByLabel('起始步骤', { exact: true }).selectOption('s1');
     await firstLoop.getByLabel('结束步骤', { exact: true }).selectOption('s6');
-    await firstLoop.getByLabel('重复遍数', { exact: true }).fill('4');
+    await firstLoop.getByLabel('总执行遍数', { exact: true }).fill('4');
     assert.equal(await firstLoop.getByLabel('结束步骤', { exact: true }).locator('option[value="s7"]').count(), 0);
     await top.getByRole('button', { name: '下一页', exact: true }).click();
     const secondLoop = rows().nth(3).getByRole('group', { name: '本步后循环', exact: true });
     await secondLoop.getByRole('button', { name: '添加本步后循环', exact: true }).click();
     await secondLoop.getByLabel('起始步骤', { exact: true }).selectOption('s11');
     await secondLoop.getByLabel('结束步骤', { exact: true }).selectOption('s14');
-    await secondLoop.getByLabel('重复遍数', { exact: true }).fill('4');
+    await secondLoop.getByLabel('总执行遍数', { exact: true }).fill('4');
     assert.equal(await secondLoop.getByLabel('结束步骤', { exact: true }).locator('option[value="s1"]').count(), 0);
     const reminder = rows().nth(3).getByRole('checkbox', { name: '开启完成后延时提醒', exact: true });
     const minutes = rows().nth(3).getByLabel('延时分钟数', { exact: true });

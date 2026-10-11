@@ -1,18 +1,14 @@
 <template>
-  <section class="kb-page">
+  <section ref="pageElement" class="kb-page" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop">
+    <VnetBackButton to="/" :disabled="uploadBusy" />
     <header class="kb-head">
       <div class="kb-title">
         <Database :size="22" aria-hidden="true" />
         <h1>共享知识库</h1>
-        <span v-if="isAdmin" class="kb-badge" :class="settingsMeta?.configured ? 'ok' : 'warn'">
-          {{ settingsMeta?.configured ? '已配置' : '未配置' }}
-        </span>
+        <span v-if="isAdmin" class="kb-badge" :class="engineBadgeClass">{{ engineBadge }}</span>
       </div>
       <div class="kb-actions">
-        <button v-if="isAdmin" type="button" class="icon-button" title="知识库设置" aria-label="知识库设置" :disabled="loadingList" @click="openSettings">
-          <Settings :size="18" />
-        </button>
-        <button type="button" class="primary" :disabled="uploadBusy" @click="openUpload">
+        <button type="button" class="primary" :disabled="uploadBusy" @click="openUpload()">
           <Upload :size="16" />上传文件
         </button>
       </div>
@@ -41,27 +37,45 @@
       <CheckCircle2 :size="18" aria-hidden="true" /><span>{{ notice }}</span>
     </div>
 
-    <div v-if="uploadPanel" class="kb-upload">
+    <div v-if="uploadPanel || dragging" class="kb-upload" :class="{ dragging }">
       <div class="kb-upload-head">
         <strong>{{ uploadTarget ? '替换文档' : '新增共享文档' }}</strong>
-        <button type="button" class="icon-button" aria-label="关闭上传" :disabled="uploadBusy" @click="uploadPanel = false"><X :size="16" /></button>
+        <button type="button" class="icon-button" aria-label="关闭上传" :disabled="uploadBusy || scanningFolder" @click="uploadPanel = false"><X :size="16" /></button>
       </div>
-      <label class="kb-upload-pick">
-        <Upload :size="15" aria-hidden="true" />选择文件
-        <input type="file" :multiple="!uploadTarget" @change="onUploadPick" />
-      </label>
-      <ul v-if="pendingFiles.length" class="kb-upload-list">
-        <li v-for="(file, index) in pendingFiles" :key="index">
+      <div class="kb-toggle" role="group" aria-label="上传方式">
+        <button type="button" :class="{ active: uploadMode === 'files' }" :aria-pressed="uploadMode === 'files'" :disabled="uploadBusy" @click="uploadMode = 'files'"><Upload :size="15" />文件</button>
+        <button type="button" :class="{ active: uploadMode === 'text' }" :aria-pressed="uploadMode === 'text'" :disabled="uploadBusy" @click="uploadMode = 'text'"><FileText :size="15" />粘贴文本</button>
+      </div>
+      <button v-if="uploadMode === 'files'" ref="dropzone" type="button" class="kb-dropzone" :disabled="uploadBusy || scanningFolder" title="拖入文件或按 Ctrl+V 粘贴文件、文本" @click="fileInput?.click()">
+        <Upload :size="24" aria-hidden="true" />
+        <strong>{{ scanningFolder ? '正在读取文件夹…' : dragging ? '松开添加文件' : '选择文件或拖入文件夹' }}</strong>
+        <span>PDF · Word（DOCX）· Excel（XLSX / XLSM）· MD · TXT · CSV · 图片</span>
+      </button>
+      <input ref="fileInput" type="file" hidden aria-label="选择知识库文件" :accept="FILE_ACCEPT" :multiple="!uploadTarget" :disabled="uploadBusy" @change="onUploadPick" />
+      <button v-if="uploadMode === 'files' && !uploadTarget" type="button" class="folder-picker" :disabled="uploadBusy || scanningFolder" @click="folderInput?.click()"><FolderOpen :size="16" />选择文件夹</button>
+      <input ref="folderInput" type="file" hidden webkitdirectory multiple aria-label="选择知识库文件夹" :disabled="uploadBusy || scanningFolder" @change="onFolderPick" />
+      <div v-if="uploadMode === 'text'" class="kb-text-entry">
+        <label>文档名称<input v-model="textName" aria-label="文档名称" placeholder="未填写时自动命名" maxlength="120" :disabled="uploadBusy" /></label>
+        <label>文档内容<textarea v-model="textContent" aria-label="文档内容" rows="6" :disabled="uploadBusy" /></label>
+        <button type="button" class="primary" :disabled="!textContent.trim() || uploadBusy" @click="addText"><FileText :size="15" />加入待上传</button>
+      </div>
+      <ul v-if="pendingFiles.length" class="kb-upload-list" aria-label="待上传文件">
+        <li v-for="(file, index) in pendingFiles.slice(0, 100)" :key="index">
           <FileText :size="14" aria-hidden="true" /><span>{{ file.name }}</span><em>{{ sizeText(file.size) }}</em>
+          <button type="button" class="icon-button" :aria-label="`移除${file.name}`" title="移除文件" :disabled="uploadBusy" @click="pendingFiles.splice(index, 1)"><X :size="15" /></button>
         </li>
       </ul>
+      <p v-if="pendingFiles.length > 100" class="muted">共 {{ pendingFiles.length }} 个文件，列表展示前100个</p>
       <p v-if="uploadError" class="alert error" role="alert"><AlertCircle :size="15" aria-hidden="true" /><span>{{ uploadError }}</span></p>
       <p v-if="uploadTarget" class="kb-upload-replace">上传后将为「{{ uploadTarget.name }}」建立新索引版本，原共享版本继续保留。</p>
       <div class="kb-upload-actions">
-        <span class="muted">最多 10 个 · 单个 ≤20MiB · 合计 ≤100MiB</span>
-        <button type="button" class="primary" :disabled="!pendingFiles.length || uploadBusy" @click="requestUpload">
+        <span class="muted">{{ pendingFiles.length }} 个文件 · 单个 ≤100MiB</span>
+        <button type="button" class="primary" :disabled="(!pendingFiles.length && !textContent.trim()) || uploadBusy || scanningFolder" @click="requestUpload">
           <Loader2 v-if="uploadBusy" :size="15" class="spin" aria-hidden="true" />{{ uploadBusy ? '上传中…' : '确认上传' }}
         </button>
+      </div>
+      <div v-if="uploadBusy" class="kb-upload-progress" role="progressbar" :aria-valuenow="uploadProgress" aria-valuemin="0" aria-valuemax="100">
+        <span :style="{ width: uploadProgress + '%' }"></span><em>{{ Math.round(uploadProgress) }}%</em>
       </div>
     </div>
 
@@ -83,7 +97,7 @@
             </button>
             <div v-if="!recycle" class="kb-row-actions">
               <button v-if="item.status === 'ready'" type="button" class="icon-button" title="下载原文件" aria-label="下载原文件" :disabled="actionBusy" @click="downloadActive(item)"><Download :size="16" /></button>
-              <button v-if="item.can_edit" type="button" class="icon-button" title="替换文件" aria-label="替换文件" :disabled="actionBusy" @click="pickReplace(item)"><RefreshCw :size="16" /></button>
+              <button v-if="item.can_edit" type="button" class="icon-button" title="替换文件" aria-label="替换文件" :disabled="actionBusy || uploadBusy || pendingFiles.length > 0 || !!textContent" @click="pickReplace(item)"><RefreshCw :size="16" /></button>
               <button v-if="item.status === 'failed' && item.can_edit" type="button" class="icon-button" title="重新索引" aria-label="重新索引" :disabled="actionBusy" @click="retryTarget = item"><RotateCcw :size="16" /></button>
               <button v-if="item.can_edit" type="button" class="icon-button danger" title="移入回收站" aria-label="移入回收站" :disabled="actionBusy" @click="deleteTarget = item"><Trash2 :size="16" /></button>
             </div>
@@ -132,41 +146,6 @@
       </aside>
     </div>
 
-    <UiTransition name="ui-overlay" appear>
-      <div v-if="settingsOpen" class="kb-backdrop" @click.self="settingsOpen = false">
-        <form class="kb-settings" role="dialog" aria-modal="true" aria-labelledby="kb-settings-title" @submit.prevent="saveSettings">
-          <header>
-            <div><span>管理员设置</span><strong id="kb-settings-title">嵌入配置</strong></div>
-            <button type="button" class="icon-button" aria-label="关闭设置" :disabled="settingsSaving" @click="settingsOpen = false"><X :size="18" /></button>
-          </header>
-          <div v-if="settingsError" class="alert error" role="alert"><AlertCircle :size="16" aria-hidden="true" /><span>{{ settingsError }}</span></div>
-          <div class="kb-settings-state">
-            <span :class="settingsDraft.configured ? 'ok' : 'warn'">{{ settingsDraft.configured ? '已配置' : '未配置（未建立向量索引，暂无可用文档）' }}</span>
-            <span v-if="settingsDraft.dimensions">{{ settingsDraft.dimensions }} 维</span>
-          </div>
-          <label>嵌入服务端点（Embeddings）
-            <input v-model="settingsDraft.endpoint" type="url" placeholder="https://…/embeddings" autocomplete="off" spellcheck="false" :disabled="settingsSaving" />
-          </label>
-          <label>模型
-            <input v-model="settingsDraft.model" type="text" placeholder="模型名称" autocomplete="off" spellcheck="false" :disabled="settingsSaving" />
-          </label>
-          <label>API Key
-            <input v-model="settingsDraft.api_key" type="password" autocomplete="new-password" placeholder="留空保持不变" spellcheck="false" :disabled="settingsSaving" @copy.prevent @cut.prevent @contextmenu.prevent />
-          </label>
-          <label>允许接收文档片段的目标端（每行一个 https 来源）
-            <textarea v-model="settingsDraft.originsText" rows="5" placeholder="https://chat.example.com" spellcheck="false" :disabled="settingsSaving" />
-          </label>
-          <p class="kb-settings-tip">将文档片段作为上下文发送给上述白名单端点；配置保存并完成索引后，员工才可检索这些文档。</p>
-          <footer>
-            <span class="muted">{{ settingsSaving ? '正在保存…' : '' }}</span>
-            <button type="button" :disabled="settingsSaving" @click="settingsOpen = false">取消</button>
-            <button type="submit" :disabled="settingsSaving"><Loader2 v-if="settingsSaving" :size="15" class="spin" aria-hidden="true" />保存</button>
-          </footer>
-        </form>
-      </div>
-    </UiTransition>
-
-    <input ref="replaceInput" type="file" hidden @change="onReplacePick" />
     <ConfirmDialog :open="!!uploadConfirm" title="确认上传" :message="uploadConfirmMessage" tone="warning" @resolve="resolveUpload" />
     <ConfirmDialog :open="!!deleteTarget" title="移入回收站" :message="deleteTarget ? '将「' + deleteTarget.name + '」移入回收站？历史共享版本保留，之后可恢复。' : ''" tone="danger" @resolve="resolveDelete" />
     <ConfirmDialog :open="!!restoreTarget" title="恢复文档" :message="restoreTarget ? '恢复「' + restoreTarget.name + '」？恢复后需要重新索引才会再次共享。' : ''" tone="primary" @resolve="resolveRestore" />
@@ -175,14 +154,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Database, Download, FileText,
-  Loader2, RefreshCw, RotateCcw, Search, Settings, Trash2, Upload, X,
+  Loader2, RefreshCw, RotateCcw, Search, Trash2, Upload, X, FolderOpen,
 } from "lucide-vue-next";
-import { requestJson, downloadFile, type Dict } from "../api/client";
+import { requestJson, downloadFile, uploadJson } from "../api/client";
 import ConfirmDialog from "./ConfirmDialog.vue";
-import UiTransition from "./UiTransition.vue";
+import VnetBackButton from "./VnetBackButton.vue";
+import { isAssistantEvent } from "../modalState";
+import { KNOWLEDGE_FILE_ACCEPT, supportedKnowledgeFile, folderFile, droppedKnowledgeFiles, knowledgeUploadBatches } from '../knowledgeFiles';
 
 const BASE = "/api/assistant/knowledge";
 
@@ -214,7 +195,7 @@ const total = ref(0);
 const recycle = ref(false);
 const items = ref<DocumentItem[]>([]);
 const isAdmin = ref(false);
-const settingsMeta = ref<Dict | null>(null);
+const settings = ref<Record<string, any>>({});
 const loadingList = ref(false);
 const quietLoading = ref(false);
 const error = ref("");
@@ -243,29 +224,26 @@ const uploadPanel = ref(false);
 const uploadTarget = ref<DocumentItem | null>(null);
 const pendingFiles = ref<File[]>([]);
 const uploadBusy = ref(false);
+const uploadProgress = ref(0);
 const uploadError = ref("");
 const uploadConfirm = ref(false);
+const pageElement = ref<HTMLElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
+const folderInput = ref<HTMLInputElement | null>(null);
+const scanningFolder = ref(false);
+let folderDisposed = false;
+const dropzone = ref<HTMLButtonElement | null>(null);
+const uploadMode = ref<'files' | 'text'>('files');
+const textName = ref("");
+const textContent = ref("");
+const dragging = ref(false);
+const FILE_ACCEPT = KNOWLEDGE_FILE_ACCEPT;
 
 const deleteTarget = ref<DocumentItem | null>(null);
 const restoreTarget = ref<DocumentItem | null>(null);
 const retryTarget = ref<DocumentItem | null>(null);
 const actionBusy = ref(false);
 
-const settingsOpen = ref(false);
-const settingsLoading = ref(false);
-const settingsSaving = ref(false);
-const settingsError = ref("");
-const settingsDraft = reactive({
-  endpoint: "",
-  model: "",
-  api_key: "",
-  originsText: "",
-  configured: false,
-  dimensions: 0,
-});
-let settingsController: AbortController | undefined;
-
-const replaceInput = ref<HTMLInputElement | null>(null);
 const pages = computed(() => Math.max(1, Math.ceil(total.value / 20)));
 const detailPages = computed(() => Math.max(1, Math.ceil(detailTotal.value / (detailPageSize.value || 20))));
 const uploadConfirmMessage = computed(() => {
@@ -278,6 +256,33 @@ const uploadConfirmMessage = computed(() => {
 let searchTimer = 0;
 let listController: AbortController | undefined;
 let pollTimer: number | undefined;
+
+function engineStatus(): string {
+  if (settings.value?.runtime?.loading || settings.value?.queued > 0) return 'preparing';
+  if (settings.value?.warning && !settings.value?.indexready) return 'pending';
+  return String(settings.value?.engine_status || settings.value?.status || "");
+}
+
+const engineBadge = computed(() => {
+  const mode = String(settings.value?.mode || "");
+  const status = engineStatus();
+  const preparing = status === "preparing";
+  if (mode === "local_faiss") {
+    return preparing ? "本地向量引擎准备中…" : "BGE small zh + FAISS 本地向量";
+  }
+  if (mode === "keyword") {
+    return preparing ? "本地全文检索（关键词）准备中…" : "本地全文检索（关键词回退）";
+  }
+  if (mode === "hybrid") {
+    return preparing ? "向量引擎准备中…" : "全文＋向量检索";
+  }
+  return preparing ? "检索引擎准备中…" : "本地全文检索";
+});
+
+const engineBadgeClass = computed(() => {
+  const status = engineStatus();
+  return { preparing: status === "preparing", ok: status !== "preparing" };
+});
 
 function statusText(status: string): string {
   const map: Record<string, string> = {
@@ -342,7 +347,7 @@ async function loadList(spinner = true, clearError = true): Promise<void> {
     total.value = Number(data.total) || 0;
     page.value = Number(data.page) || page.value;
     isAdmin.value = Boolean(data.is_admin);
-    settingsMeta.value = data.settings || null;
+    settings.value = (data.settings && typeof data.settings === "object") ? data.settings : {};
     updatePolling();
   } catch (cause) {
     if (listController === controller && !controller.signal.aborted) {
@@ -445,48 +450,145 @@ async function downloadActive(item: DocumentItem): Promise<void> {
 }
 
 function openUpload(): void {
-  uploadTarget.value = null;
-  pendingFiles.value = [];
-  uploadError.value = "";
+  if (!pendingFiles.value.length && !textContent.value) {
+    uploadTarget.value = null;
+    uploadError.value = "";
+  }
   uploadPanel.value = true;
+  void nextTick(() => dropzone.value?.focus());
 }
 
-const MAX_SINGLE = 20 * 1024 * 1024;
-const MAX_TOTAL = 100 * 1024 * 1024;
+const MAX_SINGLE = 100 * 1024 * 1024;
 
 function onUploadPick(event: Event): void {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files || []);
   input.value = "";
-  if (!files.length) return;
-  const all = uploadTarget.value ? [files[0]] : files;
-  if (all.some(file => !file.size || file.size > MAX_SINGLE)) { uploadError.value = "单个文件须非空且不超过20MiB"; return; }
-  if (all.reduce((sum, file) => sum + file.size, 0) > MAX_TOTAL) { uploadError.value = "一次上传合计不能超过100MiB"; return; }
-  if (!uploadTarget.value && all.length > 10) { uploadError.value = "一次最多上传10个文件"; return; }
+  addFiles(files);
+}
+
+function onFolderPick(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  const supported = files.filter(supportedKnowledgeFile).map(file => folderFile(file));
+  if (!supported.length) { uploadError.value = '文件夹中没有支持的文件'; return; }
+  if (addFiles(supported) && supported.length < files.length) notice.value = `已跳过 ${files.length - supported.length} 个不支持的文件。`;
+}
+
+function addFiles(files: File[]): boolean {
+  if (!files.length || uploadBusy.value) return false;
+  uploadPanel.value = true;
+  const unsupported = files.find(file => !supportedKnowledgeFile(file));
+  if (unsupported) {
+    uploadError.value = `不支持「${unsupported.name}」的文件格式；旧版 Word / Excel 请另存为 DOCX / XLSX。`;
+    return false;
+  }
+  const all = [...pendingFiles.value, ...files];
+  if (uploadTarget.value && all.length > 1) {
+    uploadError.value = "替换文档只能上传1个文件，请先移除已选文件";
+    return false;
+  }
+  if (all.some(file => !file.size || file.size > MAX_SINGLE)) { uploadError.value = "单个文件须非空且不超过100MiB"; return false; }
+  if (new Set(all.map(file => file.name)).size !== all.length) {
+    uploadError.value = "待上传列表中已有同名文件，请先移除或重命名后添加";
+    return false;
+  }
   pendingFiles.value = all;
   uploadError.value = "";
+  return true;
+}
+
+function addText(): boolean {
+  if (!textContent.value.trim()) return false;
+  let name = textName.value.trim().replace(/[\\/:*?"<>|\x00-\x1f]/g, "_");
+  if (!name) name = `粘贴文本-${Date.now()}`;
+  if (!name.toLowerCase().endsWith('.txt')) name += '.txt';
+  if (addFiles([new File([textContent.value], name, { type: "text/plain;charset=utf-8" })])) {
+    textName.value = "";
+    textContent.value = "";
+    return true;
+  }
+  return false;
+}
+
+function inputBlocked(): boolean {
+  return uploadBusy.value || scanningFolder.value || uploadConfirm.value || !!deleteTarget.value || !!restoreTarget.value || !!retryTarget.value;
+}
+
+function onPaste(event: ClipboardEvent): void {
+  if (event.defaultPrevented || isAssistantEvent(event) || inputBlocked()) return;
+  const target = event.target;
+  if (!(target instanceof Element) || (target !== document.body && !pageElement.value?.contains(target))) return;
+  if (target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])')) return;
+  const data = event.clipboardData;
+  if (!data) return;
+  const files = Array.from(data.files);
+  if (!files.length) {
+    for (const item of Array.from(data.items)) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+  }
+  if (files.length) {
+    event.preventDefault();
+    addFiles(files);
+  } else if (data.getData('text/plain').trim()) {
+    event.preventDefault();
+    uploadPanel.value = true;
+    uploadMode.value = 'text';
+    const content = data.getData('text/plain');
+    textContent.value += (textContent.value ? '\n' : '') + content;
+  }
+}
+
+function onDragOver(event: DragEvent): void {
+  if (!event.dataTransfer?.types.includes('Files') || isAssistantEvent(event)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = inputBlocked() ? 'none' : 'copy';
+  if (!inputBlocked()) dragging.value = true;
+}
+
+function onDragLeave(event: DragEvent): void {
+  if (!(event.relatedTarget instanceof Node) || !pageElement.value?.contains(event.relatedTarget)) dragging.value = false;
+}
+
+async function onDrop(event: DragEvent): Promise<void> {
+  dragging.value = false;
+  if (!event.dataTransfer?.types.includes('Files') || isAssistantEvent(event)) return;
+  event.preventDefault();
+  if (inputBlocked()) return;
+  const entries = Array.from(event.dataTransfer.items).map(item => item.webkitGetAsEntry?.()).filter((item): item is FileSystemEntry => !!item);
+  if (entries.some(item => item.isDirectory)) {
+    uploadPanel.value = true;
+    if (uploadTarget.value) { uploadError.value = '替换文档请选择单个文件'; return; }
+    scanningFolder.value = true;
+    try {
+      const files = await droppedKnowledgeFiles(entries, () => folderDisposed);
+      if (!folderDisposed && !addFiles(files)) uploadError.value ||= '文件夹中没有支持的文件';
+    } catch { if (!folderDisposed) uploadError.value = '文件夹读取失败，请检查文件访问权限后重试。'; }
+    finally { scanningFolder.value = false; }
+    return;
+  }
+  addFiles(Array.from(event.dataTransfer.files));
 }
 
 function pickReplace(item: DocumentItem): void {
   uploadTarget.value = item;
   pendingFiles.value = [];
   uploadError.value = "";
-  replaceInput.value?.click();
-}
-
-function onReplacePick(event: Event): void {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = "";
-  if (!file) return;
-  if (!file.size || file.size > MAX_SINGLE) { uploadError.value = "文件须非空且不超过20MiB"; if (uploadPanel.value) uploadPanel.value = false; return; }
-  uploadTarget.value = uploadTarget.value || null;
-  pendingFiles.value = [file];
-  uploadError.value = "";
+  uploadMode.value = 'files';
   uploadPanel.value = true;
+  void nextTick(() => {
+    dropzone.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    dropzone.value?.focus({ preventScroll: true });
+  });
 }
 
 function requestUpload(): void {
+  if (textContent.value.trim() && !addText()) return;
   if (!pendingFiles.value.length || uploadBusy.value) return;
   uploadConfirm.value = true;
 }
@@ -496,39 +598,47 @@ async function doUpload(): Promise<void> {
   const target = uploadTarget.value;
   const submitted = [...pendingFiles.value];
   uploadBusy.value = true;
+  uploadProgress.value = 0;
   clearNotice();
+  const confirmed = new Set<File>();
+  const failures: string[] = [];
+  const totalBytes = submitted.reduce((sum, file) => sum + file.size, 0);
+  let completedBytes = 0;
   try {
-    const form = new FormData();
-    for (const file of submitted) form.append("files", file);
     let url = `${BASE}/files`;
     if (target) {
       const params = new URLSearchParams({ document_id: target.id, version: String(target.version) });
       url += `?${params}`;
     }
-    const data = await requestJson(url, { method: "POST", body: form, timeoutMs: 180000 });
-    // Partial upload responses carry {items, errors}. Preserve any failed files for retry.
-    const errors = Array.isArray(data?.errors) ? data.errors : [];
-    const failedNames = new Set<string>();
-    let mappedErrors = false;
-    for (const err of errors) {
-      if (err && typeof err === "object") {
-        const name = String(err.name || err.filename || err.file || "");
-        if (name) { failedNames.add(name); mappedErrors = true; }
+    for (const batch of knowledgeUploadBatches(submitted)) {
+      if (folderDisposed) break;
+      const form = new FormData();
+      for (const file of batch) form.append('files', file);
+      const batchBytes = batch.reduce((sum, file) => sum + file.size, 0);
+      const data = await uploadJson(url, form, {
+        timeoutMs: 600_000,
+        onProgress: ({ loaded, total }) => {
+          uploadProgress.value = 100 * (completedBytes + (total > 0 ? Math.min(1, loaded / total) * batchBytes : 0)) / totalBytes;
+        },
+      });
+      if (!Array.isArray(data?.items) || !Array.isArray(data?.errors) || data.items.length + data.errors.length !== batch.length) {
+        throw new Error('上传结果不完整，未确认的文件已保留，请刷新列表核对后重试。');
       }
+      const errors = data.errors;
+      const failedNames = new Set<string>(errors.map(err => String(err?.name || err?.filename || err?.file || '')));
+      // An unidentifiable failure cannot authorize discarding any file from this batch.
+      if ([...failedNames].some(name => !batch.some(file => file.name === name)) || failedNames.size !== errors.length) {
+        throw new Error('部分文件的上传结果无法对应，未确认的文件已保留。');
+      }
+      for (const file of batch) if (!failedNames.has(file.name)) confirmed.add(file);
+      pendingFiles.value = submitted.filter(file => !confirmed.has(file));
+      completedBytes += batchBytes;
+      failures.push(...errors.map(err => err?.error || err?.message || '上传失败'));
     }
-    let keptFiles = submitted.filter(file => failedNames.has(file.name));
-    // If errors exist but carry no machine-readable file name, preserve all submitted files so none are lost.
-    if (errors.length && !mappedErrors) keptFiles = [...submitted];
-    pendingFiles.value = keptFiles;
-    const succeeded = submitted.length - keptFiles.length;
-    if (errors.length) {
-      const messages = errors.map(err => err?.error || err?.message || "上传失败").filter(Boolean);
-      uploadError.value = messages.length ? messages.join("；") : "部分文件上传失败，请检查后重试。";
-    } else {
-      uploadError.value = "";
-    }
+    uploadError.value = failures.join('；');
+    const succeeded = confirmed.size;
     if (succeeded > 0) {
-      if (keptFiles.length === 0) {
+      if (pendingFiles.value.length === 0) {
         uploadPanel.value = false;
         uploadTarget.value = null;
       }
@@ -541,10 +651,12 @@ async function doUpload(): Promise<void> {
       uploadPanel.value = true;
     }
   } catch (cause) {
-    uploadError.value = cause instanceof Error ? cause.message : "上传失败，请重试。";
+    uploadError.value = [...failures, cause instanceof Error ? cause.message : '上传失败，请重试。'].join('；');
+    if (confirmed.size) { notice.value = `已上传 ${confirmed.size} 个文件，其余文件已保留。`; await loadList(false, false); }
   } finally {
     uploadBusy.value = false;
     uploadConfirm.value = false;
+    uploadProgress.value = 0;
   }
 }
 
@@ -606,62 +718,8 @@ async function resolveRetry(accepted: boolean): Promise<void> {
   }
 }
 
-async function openSettings(): Promise<void> {
-  settingsOpen.value = true;
-  settingsError.value = "";
-  settingsLoading.value = true;
-  settingsController?.abort();
-  const controller = new AbortController();
-  settingsController = controller;
-  try {
-    const data = await requestJson(`${BASE}/settings`, { signal: controller.signal, cache: "no-store" });
-    if (settingsController !== controller || !settingsOpen.value) return;
-    settingsDraft.endpoint = data.endpoint || "";
-    settingsDraft.model = data.model || "";
-    settingsDraft.api_key = "";
-    settingsDraft.originsText = Array.isArray(data.approved_origins) ? data.approved_origins.join("\n") : "";
-    settingsDraft.configured = Boolean(data.configured);
-    settingsDraft.dimensions = Number(data.dimensions) || 0;
-  } catch (cause) {
-    if (settingsController === controller) settingsError.value = cause instanceof Error ? cause.message : "设置读取失败";
-  } finally {
-    if (settingsController === controller) settingsLoading.value = false;
-  }
-}
-
-async function saveSettings(): Promise<void> {
-  if (settingsSaving.value || settingsLoading.value) return;
-  settingsSaving.value = true;
-  settingsError.value = "";
-  const safeEndpoint = settingsDraft.endpoint.trim();
-  if (safeEndpoint && !/^https:\/\/\S+$/i.test(safeEndpoint)) {
-    settingsError.value = "端点需为完整的 HTTPS 地址";
-    settingsSaving.value = false;
-    return;
-  }
-  const origins = settingsDraft.originsText.split("\n").map(line => line.trim()).filter(Boolean);
-  const invalid = origins.find(origin => !/^https:\/\/[^\s/]+$/i.test(origin));
-  if (invalid) { settingsError.value = `来源须为 https 地址：${invalid}`; settingsSaving.value = false; return; }
-  try {
-    const payload = {
-      endpoint: safeEndpoint,
-      model: settingsDraft.model.trim(),
-      api_key: settingsDraft.api_key,
-      approved_origins: origins,
-    };
-    await requestJson(`${BASE}/settings`, { method: "PUT", body: JSON.stringify(payload), timeoutMs: 30000 });
-    settingsOpen.value = false;
-    notice.value = "知识库设置已保存。";
-    await loadList(true, true);
-  } catch (cause) {
-    settingsError.value = cause instanceof Error ? cause.message : "保存失败，请重试。";
-  } finally {
-    settingsSaving.value = false;
-    settingsController = undefined;
-  }
-}
-
 onMounted(() => {
+  document.addEventListener('paste', onPaste);
   void loadList(true, true);
   const params = new URLSearchParams(window.location.search);
   const docId = params.get("document");
@@ -687,11 +745,12 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  folderDisposed = true;
+  document.removeEventListener('paste', onPaste);
   window.clearTimeout(searchTimer);
   window.clearInterval(pollTimer);
   pollTimer = undefined;
   listController?.abort();
-  settingsController?.abort();
   detailRequest += 1;
 });
 </script>
@@ -719,7 +778,7 @@ onBeforeUnmount(() => {
 .kb-title > svg { color: var(--cf-brand-blue, #1e63ff); }
 .kb-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 0 9px; border-radius: 999px; font-size: 12px; font-weight: 850; }
 .kb-badge.ok { color: #047857; background: #ecfdf5; border: 1px solid #a7f3d0; }
-.kb-badge.warn { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; }
+.kb-badge.preparing { color: #1e40af; background: #e0ecff; border: 1px solid #bfdbfe; }
 .kb-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .kb-toolbar {
@@ -769,18 +828,41 @@ onBeforeUnmount(() => {
 }
 .kb-upload-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .kb-upload-head strong { color: #0c2d63; font-size: 15px; }
-.kb-upload-pick {
-  display: inline-flex; align-items: center; gap: 7px; width: fit-content; min-height: 34px;
-  padding: 7px 12px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: 999px;
-  background: #fff; color: var(--cf-brand-blue, #1e63ff); font-size: 13px; font-weight: 800; cursor: pointer;
+.kb-dropzone {
+  display: grid; justify-items: center; gap: 7px; width: 100%; min-height: 124px;
+  padding: 16px; border: 1px dashed #91b2dd; border-radius: 8px;
+  background: #fff; color: #33526f; font: inherit; cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
 }
-.kb-upload-pick input { display: none; }
-.kb-upload-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.kb-dropzone > svg { color: var(--cf-brand-blue, #1e63ff); }
+.kb-dropzone strong { font-size: 14px; }
+.kb-dropzone span { font-size: 12px; color: var(--cf-muted, #64748b); overflow-wrap: anywhere; }
+.kb-dropzone:hover:not(:disabled), .kb-upload.dragging .kb-dropzone { background: #edf5ff; border-color: #1e63ff; }
+.kb-dropzone:focus-visible { outline: 2px solid #1e63ff; outline-offset: 3px; }
+.kb-dropzone:disabled { opacity: 0.6; cursor: not-allowed; }
+.kb-text-entry { display: grid; gap: 10px; }
+.kb-text-entry label { display: grid; gap: 5px; min-width: 0; font-size: 13px; }
+.kb-text-entry input, .kb-text-entry textarea {
+  box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px;
+  border: 1px solid var(--cf-border, #d8e5f7); border-radius: 8px; background: #fff; color: inherit; font: inherit;
+}
+.kb-text-entry textarea { resize: vertical; min-height: 108px; max-height: 360px; line-height: 1.6; }
+.kb-text-entry input:focus-visible, .kb-text-entry textarea:focus-visible { outline: 2px solid #1e63ff; outline-offset: 1px; }
+.kb-text-entry .primary { justify-self: end; }
+.kb-upload-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: 320px; overflow-y: auto; }
+.folder-picker { justify-self: start; display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 6px 12px; border: 1px solid var(--cf-border-strong, #cfe0ff); border-radius: 8px; color: var(--cf-brand-blue, #1e63ff); background: #fff; font: inherit; font-size: 13px; cursor: pointer; }
+.folder-picker:hover:not(:disabled) { background: #edf4ff; }
+.folder-picker:disabled { opacity: .55; cursor: not-allowed; }
+.folder-picker:focus-visible { outline: 2px solid var(--cf-brand-blue, #1e63ff); outline-offset: 2px; }
 .kb-upload-list li { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
 .kb-upload-list li span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kb-upload-list li em { flex: 0 0 auto; color: var(--cf-muted, #64748b); font-style: normal; }
+.kb-upload-list li > svg { flex-shrink: 0; }
 .kb-upload-replace { margin: 0; color: var(--cf-warning, #92400e); font-size: 12px; overflow-wrap: anywhere; }
 .kb-upload-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.kb-upload-progress { display: flex; align-items: center; gap: 8px; height: 18px; border-radius: 999px; background: #eef3fb; overflow: hidden; }
+.kb-upload-progress > span { flex: 1 1 auto; align-self: stretch; background: linear-gradient(135deg, #1e63ff, #1554df); transition: width 120ms ease; border-radius: 999px; min-width: 6px; }
+.kb-upload-progress > em { flex: 0 0 auto; min-width: 34px; padding: 0 6px; color: var(--cf-muted, #64748b); font-size: 11px; font-style: normal; text-align: right; }
 
 .kb-layout {
   display: grid;
@@ -857,38 +939,6 @@ onBeforeUnmount(() => {
 .kb-section p { margin: 0; color: #334155; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .empty { display: grid; place-items: center; gap: 8px; min-height: 120px; padding: 20px; color: var(--cf-muted, #64748b); font-size: 13px; text-align: center; }
-
-.kb-backdrop { position: fixed; inset: 0; z-index: var(--cf-z-modal-backdrop, 800); display: grid; place-items: center; padding: 20px; background: rgba(9, 32, 74, 0.42); backdrop-filter: blur(4px); }
-.kb-settings {
-  display: flex; flex-direction: column; gap: 12px; width: min(560px, 100%); max-height: calc(100dvh - 40px);
-  border: 1px solid #d8e5f7; border-radius: 24px; padding: 18px; overflow: auto; box-sizing: border-box;
-  background: linear-gradient(135deg, rgba(248, 251, 255, 0.98), rgba(255, 255, 255, 0.98)), #fff;
-  box-shadow: 0 28px 80px rgba(0, 47, 135, 0.24); color: var(--cf-text, #0f172a);
-}
-.kb-settings header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.kb-settings header > div { min-width: 0; }
-.kb-settings header span { display: block; color: var(--cf-brand-blue, #1e63ff); font-size: 12px; font-weight: 900; }
-.kb-settings header strong { display: block; margin-top: 2px; color: #0c2d63; font-size: 18px; }
-.kb-settings-state { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; font-weight: 800; }
-.kb-settings-state .ok { color: #047857; }
-.kb-settings-state .warn { color: #92400e; }
-.kb-settings label { display: grid; gap: 5px; color: #475569; font-size: 13px; font-weight: 800; }
-.kb-settings input, .kb-settings textarea {
-  width: 100%; box-sizing: border-box; border: 1px solid var(--cf-border, #d8e5f7); border-radius: 14px;
-  padding: 9px 11px; background: rgba(255, 255, 255, 0.96); color: var(--cf-text, #0f172a); font: inherit;
-}
-.kb-settings textarea { resize: vertical; min-height: 100px; line-height: 1.5; }
-.kb-settings input:focus, .kb-settings textarea:focus { border-color: #155dfc; outline: none; box-shadow: 0 0 0 3px rgba(21, 93, 252, 0.14); }
-.kb-settings-tip { margin: 0; color: var(--cf-muted, #64748b); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
-.kb-settings footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #e5edf8; }
-.kb-settings footer button {
-  min-height: 34px; padding: 0 13px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: 999px;
-  background: #fff; color: #33526f; font: inherit; font-size: 13px; font-weight: 850; cursor: pointer;
-}
-.kb-settings footer button[type="submit"] {
-  border-color: transparent; background: linear-gradient(135deg, #1e63ff, #1554df); color: #fff;
-}
-.kb-settings footer button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .muted { color: var(--cf-muted, #64748b); font-size: 12px; }
 .spin { animation: kb-spin 1s linear infinite; }

@@ -313,6 +313,13 @@ class SignatureManagement:
         data = self.directory(refresh=True)
         return {k: data[k] for k in ("people", "resolved", "sources", "revision")}
 
+    def preview(self, payload) -> tuple[bytes, str]:
+        person = self.person(payload.get("source"), payload.get("record_id"))
+        if not person.get("has_signature"):
+            raise SignatureManagementError("该人员还没有可用签名，请重新签名。", 404)
+        reader = self.s.signature_image_bytes if person["source"] == "staff" else self.s.external_signature_image_bytes
+        return reader(record_id=person["record_id"])
+
     def references(self, references):
         data = self.directory()
         result, seen = [], set()
@@ -778,11 +785,15 @@ class SignatureManagement:
 
 def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, base_url="", send_text=None):
     """Both HTTP servers use exactly the same authorization/operation boundary."""
-    allowed = {"GET": {"people", "request", "duplicates"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate"}}
+    allowed = {"GET": {"people", "request", "duplicates", "preview"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate"}}
     if operation not in allowed.get(method, set()):
         raise SignatureManagementError("接口不存在。", 404)
     if operation not in {"request", "submit"} and not actor:
         raise SignatureManagementError("请先登录。", 401)
+    if operation == "preview":
+        if not is_admin:
+            raise SignatureManagementError("只有管理员可以查看签名字迹。", 403)
+        return manager.preview(payload)
     if operation in {"duplicates", "merge", "associate", "migrate"} and not is_admin:
         raise SignatureManagementError("只有管理员可以核对、关联或清理人员。", 403)
     if operation == "people":

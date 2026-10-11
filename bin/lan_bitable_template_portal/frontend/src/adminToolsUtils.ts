@@ -1,4 +1,4 @@
-export type AdminTabKey = "status" | "permissions" | "handover" | "mop" | "pressure";
+export type AdminTabKey = "status" | "permissions" | "handover" | "mop" | "feishu" | "pressure";
 
 export type ScopeLabelOption = {
   value: string;

@@ -343,7 +343,9 @@ class DrillManagementTests(unittest.TestCase):
             self.assertEqual(record["cells"]["G18"], "2026年09月29日 10时15分")
             self.assertEqual(assessment["cells"]["H12"], "2026年09月29日 11时32分")
             with zipfile.ZipFile(output) as archive:
-                self.assertGreaterEqual(sum("drill_signature_" in name for name in archive.namelist()), 2)
+                media = [name for name in archive.namelist() if "drill_signature_" in name]
+                self.assertEqual(len(media), 1)
+                self.assertEqual(archive.read(media[0]), normalize_drill_signature_png(_signature_png()))
             source_sheet = _parse_workbook(Path(definition["source"]["path"]))["sheets"][0]
             source_sheet["preview_images"] = [
                 {"row": 1, "col": 1, "data_url": "data:image/png;base64,LOGO"},
@@ -739,18 +741,33 @@ class DrillManagementTests(unittest.TestCase):
     def test_horizontal_signatures_pack_left_and_shrink_to_fit(self) -> None:
         roomy = _horizontal_signature_layout([(160, 50)] * 3, 600, 40)
         self.assertLessEqual(roomy[0][0], 4)
-        self.assertLessEqual(
-            max(
-                roomy[index + 1][0] - roomy[index][0] - roomy[index][2]
-                for index in range(len(roomy) - 1)
-            ),
-            3.01,
-        )
+        roomy_gaps = [
+            roomy[index + 1][0] - roomy[index][0] - roomy[index][2]
+            for index in range(len(roomy) - 1)
+        ]
+        # A sufficiently wide cell keeps a ~8px (HORIZONTAL_SIGNATURE_GAP_PX) gap.
+        for gap in roomy_gaps:
+            self.assertAlmostEqual(gap, 8.0, delta=0.01)
         self.assertLess(roomy[-1][0] + roomy[-1][2], 600)
 
         crowded = _horizontal_signature_layout([(160, 50)] * 10, 200, 40)
+        # Crowded cells reduce the gap to keep handwriting width but stay >0 and <=8.
+        crowded_gaps = [
+            crowded[index + 1][0] - crowded[index][0] - crowded[index][2]
+            for index in range(len(crowded) - 1)
+        ]
+        self.assertGreater(min(crowded_gaps), 0)
+        self.assertLessEqual(max(crowded_gaps), 8.0)
         self.assertLessEqual(crowded[-1][0] + crowded[-1][2], 200)
         self.assertTrue(all(width < 20 for _x, _y, width, _height in crowded))
+
+    def test_natural_signature_still_rejects_blank_images(self) -> None:
+        for color in ("white", (0, 0, 0, 0)):
+            with self.subTest(color=color):
+                content = io.BytesIO()
+                Image.new("RGBA", (40, 20), color).save(content, format="PNG")
+                with self.assertRaisesRegex(DrillError, "可见笔迹"):
+                    normalize_drill_signature_png(content.getvalue())
 
     def test_vertical_signatures_keep_an_empty_middle_slot(self) -> None:
         placements = drill_signature_layout(

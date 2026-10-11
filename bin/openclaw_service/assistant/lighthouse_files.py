@@ -24,7 +24,7 @@ WATER_PHOTO_BYTES = 8 * 1024 * 1024
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml"}
 ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | TEXT_EXTENSIONS | {".pdf", ".docx", ".xlsx", ".xlsm"}
-GENERATED_EXTENSIONS = {".zip", ".doc", ".xls", ".bin"}
+GENERATED_EXTENSIONS = {".zip", ".doc", ".xls", ".bin", ".py"}
 
 
 def upload_limit(actor, purpose=None):

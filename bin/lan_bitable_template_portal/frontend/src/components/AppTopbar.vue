@@ -11,7 +11,7 @@
     </div>
     <div class="topbar-actions">
       <button v-if="auth.loggedIn && homeMode" type="button" class="btn ghost life-guide-entry" title="参考人生指南" @click="emit('open-life-guide')"><BookOpen :size="16" aria-hidden="true" /><span>参考人生指南</span></button>
-      <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
+      <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.login_method === 'password' ? '姓名密码登录' : auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
         <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
         {{ auth.user?.name || "已登录" }}
       </span>
@@ -51,12 +51,13 @@
         <LogOut v-if="homeMode" :size="16" aria-hidden="true" />
         <span>退出</span>
       </button>
+      <button v-if="auth.loggedIn && auth.user?.login_method === 'password'" type="button" class="btn ghost" title="修改密码" @click="emit('open-password')"><KeyRound :size="16" aria-hidden="true" /><span>修改密码</span></button>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
-import { BookOpen, Fingerprint, LogOut, Settings, UserRound } from "lucide-vue-next";
+import { BookOpen, Fingerprint, KeyRound, LogOut, Settings, UserRound } from "lucide-vue-next";
 import RefreshDataMenu from "./RefreshDataMenu.vue";
 import type { LooseDict, ScopeOption } from "../types";
 
@@ -87,6 +88,7 @@ const emit = defineEmits<{
   "open-admin": [];
   "open-signatures": [];
   "open-life-guide": [];
+  "open-password": [];
   logout: [];
 }>();
 

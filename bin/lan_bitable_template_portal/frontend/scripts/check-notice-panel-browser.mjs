@@ -17,11 +17,17 @@ let edition = 'morning', day = '2026-10-09', confirmed = 0, conflict = false, po
 const base = '/api/assistant/notice-panel';
 const field = (key, label, extra = {}) => ({ key, label, kind: 'text', options: [], required: true, readonly: false, ...extra });
 function rows() {
-  return Array.from({ length: 12 }, (_, i) => ({ key: `n${i}`, title: i === 1 ? 'E楼空调运行模式调整' : `E楼${i + 1}号冷水机组月度维保`,
+  const rows = Array.from({ length: 12 }, (_, i) => ({ key: `n${i}`, title: i === 1 ? 'E楼空调运行模式调整' : `E楼${i + 1}号冷水机组月度维保`,
     work_type: i === 1 ? 'adjust' : 'maintenance', action: i === 1 ? 'update' : 'start', status: i === 1 ? '进行中' : '未开始',
     window: '2026-10-09 至 2026-10-20', selected: false, edit_all: false, brief_fields: [], blocked: '',
     fields: [field('title', '通告名称', { readonly: true }), ...(i === 1 ? [field('notice_action', '本次操作', { kind: 'select', options: ['更新', '结束'] })] : [field('progress', '本次进度', { kind: 'multiline' })]), field('content', '内容', { kind: 'multiline' }), ...(i === 0 ? [field('start_time', '开始时间（YYYY-MM-DD HH:mm）'), field('end_time', '结束时间（YYYY-MM-DD HH:mm）'), field('notice_sop', '本次工单', { kind: 'notice_sop' })] : [])],
     draft: { title: '机组维保', progress: '', content: '按周期维护设备', notice_action: '更新', ...(i === 0 ? { start_time: '2026-10-09 09:30', end_time: '2026-10-09 18:30', notice_sop: { exempt: false, scope: '', sop_id: '', sop_version: 0, operator_record_id: '', reviewer_record_id: '', runs: [] } } : {}) }, phase: '', result: '', error: '', preview: '' }));
+  const END_DEFAULT = '工作已完成，设备运行正常，请知晓！';
+  rows.push({ key: 'n12', title: 'E楼回风机组月度维保', work_type: 'maintenance', action: 'update', status: '进行中',
+    window: '2026-10-09 至 2026-10-20', selected: false, edit_all: false, brief_fields: [], blocked: '',
+    fields: [field('title', '通告名称', { readonly: true }), field('notice_action', '本次操作', { kind: 'select', options: ['更新', '结束'] }), field('progress', '本次进度', { kind: 'multiline', default_on_end: END_DEFAULT }), field('content', '内容', { kind: 'multiline' })],
+    draft: { title: '回风机组维保', progress: '', content: '按周期维护回风机组', notice_action: '更新' }, phase: '', result: '', error: '', preview: '' });
+  return rows;
 }
 page.on('pageerror', e => errors.push(e.message));
 page.on('dialog', dialog => dialog.accept());
@@ -151,7 +157,7 @@ try {
   assert.equal(await page.getByLabel('本次进度', { exact: false }).inputValue(), '工程师已到场，准备维保');
   await page.getByRole('tab', { name: '进行中通告', exact: true }).click();
   await page.getByText('E楼空调运行模式调整', { exact: true }).waitFor();
-  assert.equal(await page.locator('.notice-row').count(), 1);
+  assert.equal(await page.locator('.notice-row').count(), 2);
   assert.equal(await page.locator('.row-heading input:checked').count(), 0, 'view switch clears previous selection');
   await page.locator('.row-heading input[type=checkbox]').first().check();
   await page.getByLabel(/^本次操作/).selectOption('结束');
@@ -271,6 +277,40 @@ try {
   await visible('.notice-row');
   assert.equal(await page.getByRole('tab', { name: '未开始计划', exact: true }).getAttribute('aria-selected'), 'true', '08:00 defaults to planned page');
   assert.equal(confirmed, 1, 'period changes never send business notices');
+
+  // End-progress default round-trip on a native maintenance ongoing row.
+  await page.getByRole('tab', { name: '进行中通告', exact: true }).click();
+  await page.getByText('E楼回风机组月度维保', { exact: true }).waitFor();
+  await page.getByRole('checkbox', { name: '选择E楼回风机组月度维保', exact: true }).check();
+  const ongoingRow = page.locator('.notice-row').filter({ hasText: 'E楼回风机组月度维保' });
+  await ongoingRow.getByLabel('本次进度', { exact: false }).waitFor();
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).inputValue(), '', 'ongoing maintenance starts blank');
+  await ongoingRow.getByLabel(/^本次操作/).selectOption('结束');
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).inputValue(), '工作已完成，设备运行正常，请知晓！', 'selecting 结束 autofills the canned default');
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).count(), 1, 'autofilled default stays visible without edit_all');
+  await ongoingRow.getByLabel(/^本次操作/).selectOption('更新');
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).inputValue(), '', 'back to 更新 clears the untouched default');
+  await ongoingRow.getByLabel('本次进度', { exact: false }).fill('客户验收通过');
+  await ongoingRow.getByLabel(/^本次操作/).selectOption('结束');
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).inputValue(), '客户验收通过', 'explicit custom survives selecting 结束');
+  await ongoingRow.getByLabel(/^本次操作/).selectOption('更新');
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).inputValue(), '客户验收通过', 'custom is never cleared on 更新');
+  await ongoingRow.getByLabel(/^本次操作/).selectOption('结束');
+  assert.equal(await ongoingRow.getByLabel('本次进度', { exact: false }).inputValue(), '客户验收通过', 'custom stays put when re-entering 结束');
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.notice-panel[aria-busy="true"]'));
+  const endDraft = docs.get(`${day}-E-morning`).items.find(row => row.key === 'n12').draft;
+  assert.equal(endDraft.progress, '客户验收通过', 'saved draft keeps the custom progress');
+  await page.getByLabel('楼栋', { exact: true }).selectOption('A');
+  await visible('.notice-row');
+  await page.getByLabel('楼栋', { exact: true }).selectOption('E');
+  await page.getByRole('tab', { name: '进行中通告', exact: true }).click();
+  await page.getByText('E楼回风机组月度维保', { exact: true }).waitFor();
+  await page.getByRole('checkbox', { name: '选择E楼回风机组月度维保', exact: true }).check();
+  const reloadRow = page.locator('.notice-row').filter({ hasText: 'E楼回风机组月度维保' });
+  await reloadRow.getByLabel('本次进度', { exact: false }).waitFor();
+  assert.equal(await reloadRow.getByLabel('本次进度', { exact: false }).inputValue(), '客户验收通过', 'reload keeps the custom progress visible without edit_all');
+
   assert.deepEqual(errors, []);
   assert.ok(polls < 30, 'bounded polling');
   console.log(JSON.stringify({ ok: true, production: true, confirmed, polls, sopReads, screenshots: output, checks: 'separate planned/ongoing pages, no hidden selection submitted, retained drafts, local switching, datetime pickers/no timezone shift, SOP/people/version, multi preview, explicit confirm, 08/17 editions, conflicts, 3 PC widths, no model' }));

@@ -141,6 +141,59 @@ class LearningRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/learning/papers/p/answer", json={}).status_code, 200)
         self.auth.scope_allowed.assert_not_called()
 
+    def test_personnel_password_session_uses_virtual_directory_resolver(self):
+        # A personnel-password session carries a real Feishu open id + HR record id.
+        self.session = {
+            "source": "personnel_password",
+            "user": {"open_id": "ou_real_staff", "name": "张三", "personnel_record_id": "recH1"},
+        }
+        response = self.client.get("/api/learning/bootstrap")
+        self.assertEqual(response.status_code, 200, response.text)
+        actor = response.json()["data"]["actor"]
+        # Route isolation: actor.id stays the REAL Feishu open id, never the
+        # synthetic personnel_<record id> principal.
+        self.assertEqual(actor["id"], "ou_real_staff")
+        self.assertEqual(actor["name"], "张三")
+        self.assertEqual(actor["scope"], "")
+        self.assertEqual(actor["shared_account"], False)
+        # resolve_self receives the virtual personnel_<rid> lookup argument.
+        lookups = [args[0] for name, args in self.events if name == "resolve_self"]
+        self.assertEqual(lookups, ["personnel_recH1"])
+
+    def test_personnel_password_identity_beats_building_duty_openid_match(self):
+        # Even when the real open id is a building duty id in BUILDING_OPEN_ID_MAP,
+        # a validated individual HR password identity must remain an ordinary
+        # personal account, never a shared read-only duty account.
+        self.session = {
+            "source": "personnel_password",
+            "user": {"open_id": "building-H", "name": "值班人", "personnel_record_id": "recH9"},
+        }
+        response = self.client.get("/api/learning/bootstrap")
+        self.assertEqual(response.status_code, 200, response.text)
+        actor = response.json()["data"]["actor"]
+        self.assertEqual(actor["id"], "building-H")
+        self.assertEqual(actor["scope"], "")
+        self.assertEqual(actor["shared_account"], False)
+        lookups = [args[0] for name, args in self.events if name == "resolve_self"]
+        self.assertEqual(lookups, ["personnel_recH9"])
+
+    def test_personnel_password_admin_keeps_real_actor_and_virtual_resolver(self):
+        # Admin personnel session: building duty skip still applies and the admin
+        # actor.id stays the real open id while resolve_self uses the record id.
+        self.session = {
+            "source": "personnel_password",
+            "role": "admin",
+            "user": {"open_id": "ou_admin", "name": "管理员", "personnel_record_id": "recH2"},
+        }
+        response = self.client.get("/api/learning/bootstrap")
+        self.assertEqual(response.status_code, 200, response.text)
+        actor = response.json()["data"]["actor"]
+        self.assertEqual(actor["id"], "ou_admin")
+        self.assertEqual(actor["is_admin"], True)
+        self.assertEqual(actor["scope"], "")
+        lookups = [args[0] for name, args in self.events if name == "resolve_self"]
+        self.assertEqual(lookups, ["personnel_recH2"])
+
     def test_empty_scope_defaults_to_own_building_or_admin_all_buildings(self):
         for session, expected in (
             ({"user": {"open_id": "building-H"}}, "H"),
@@ -289,16 +342,10 @@ class LearningRouteTests(unittest.TestCase):
     def test_notification_adapter_uses_guard_and_stable_id(self):
         self.client.get("/api/learning/bootstrap")
         send = self.factory.call_args.kwargs["send_message"]
-        guard = sys.modules["clipflow_backend.runtime_helpers"].send_text_to_open_ids_guarded
-        guard.return_value = (True, "queued", [])
-        self.assertEqual(send("H", "message", "publish:today_H"), (True, "queued", []))
-        first = guard.call_args
-        send("H", "message", "publish:today_H")
-        self.assertEqual(first, guard.call_args)
-        self.assertEqual(first.args, ("message", ["building-H"]))
-        self.assertTrue(first.kwargs["message_uuid"])
-        with self.assertRaises(LearningError):
-            send("110", "message", "identity")
+        with patch('lan_bitable_template_portal.learning_reminders.send_reminder', return_value=(True, 'queued', [])) as sender:
+            card = {'elements': []}
+            self.assertEqual(send('H', card, 'publish:today_H'), (True, 'queued', []))
+            sender.assert_called_once_with('H', card, 'publish:today_H')
 
     def test_runtime_address_resolver_reuses_program_configuration_not_request_host(self):
         configured = Mock(return_value="http://192.168.224.130:18766")
@@ -610,7 +657,7 @@ class LearningPackagingTests(unittest.TestCase):
                 self.assertTrue(set(paths) <= actual)
                 package.copy_project(output)
                 self.assertTrue(all((output / path).is_file() for path in paths))
-        self.assertEqual(package.RUNTIME_MODULE_TO_PACKAGE["multipart"], "python-multipart")
+        self.assertEqual(package.RUNTIME_MODULE_TO_PACKAGE["multipart"], "python-multipart==0.0.22")
 
     def test_route_module_import_does_not_import_core_or_runtime(self):
         import importlib.util

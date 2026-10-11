@@ -1008,8 +1008,8 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(len(self.sender.calls), 6)
         resolver.assert_called_once()
         for scope, message, _ in self.sender.calls:
-            self.assertIn(f"https://portal.test:8787/learning?scope={scope}", message)
-            self.assertNotIn("old-host", message)
+            self.assertEqual(message['elements'][-1]['actions'][0]['url'], f"https://portal.test:8787/learning?scope={scope}")
+            self.assertNotIn("old-host", json.dumps(message))
         resolver.return_value = "http://192.168.1.5:18766"
         self.assertEqual(self.service.bootstrap("A", ADMIN)["settings"]["portal_url"], resolver.return_value)
         saved = self.dispatch("settings.save", {"portal_url": "http://wrong.test:1234", "publish_time": "09:00"}, ADMIN)

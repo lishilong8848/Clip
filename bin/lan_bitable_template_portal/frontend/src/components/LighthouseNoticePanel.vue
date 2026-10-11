@@ -40,7 +40,7 @@
                 <RepairFieldControl v-else-if="!field.readonly && ['start_time', 'end_time'].includes(field.key)" :field="dateField" :input-id="'npf-' + item.key + '-' + field.key" :label="fieldLabel(field)" :model-value="repairDraftInputValue(dateField, item.draft[field.key])" :required="!!field.required" :disabled="busy" compact @update:model-value="item.draft[field.key] = $event.replace('T', ' '); changed()" />
                 <template v-else><span v-if="field.readonly">{{ fieldLabel(field) }}</span><label v-else :for="'npf-' + item.key + '-' + field.key">{{ fieldLabel(field) }}<em v-if="field.required" aria-hidden="true"> *</em></label>
                 <span v-if="field.readonly || String(item.draft?.[field.key] ?? '').length > 1000" class="readonly">{{ item.draft?.[field.key] || '—' }}</span>
-                <select v-else-if="field.kind === 'select'" :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" :disabled="busy" @change="changed"><option value="">请选择</option><option v-for="value in field.options || []" :key="value" :value="value">{{ value }}</option></select>
+                <select v-else-if="field.kind === 'select'" :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" :disabled="busy" @change="onFieldChange(item, field)"><option value="">请选择</option><option v-for="value in field.options || []" :key="value" :value="value">{{ value }}</option></select>
                 <textarea v-else-if="field.kind === 'multiline'" :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" rows="1" maxlength="1000" :disabled="busy" @input="changed" />
                 <input v-else :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" type="text" maxlength="1000" :disabled="busy" @input="changed" />
                 </template>
@@ -106,9 +106,21 @@ const visibleRows = computed(() => filtered.value.slice((Math.min(page.value, pa
 const dirty = computed(() => changes().length > 0);
 function typeLabel(item: Dict): string { return ({ maintenance: '维保', change: '变更', repair: '检修', polling: '轮巡', adjust: '设备调整', power: '上下电' } as Dict)[item.work_type] || ''; }
 function fieldLabel(field: Dict): string { return String(field.label || '').replace('（YYYY-MM-DD HH:mm）', ''); }
-function briefKeys(item: Dict): string[] { return (item.fields || []).filter((field: Dict) => ['notice_action', 'notice_sop'].includes(field.key) || !field.readonly && String(item.draft?.[field.key] ?? '').trim() === '').map((field: Dict) => field.key); }
+function briefKeys(item: Dict): string[] { return (item.fields || []).filter((field: Dict) => ['notice_action', 'notice_sop'].includes(field.key) || !field.readonly && (String(item.draft?.[field.key] ?? '').trim() === '' || field.key === 'progress' && !!(item.draft?.notice_action === '结束' && field.default_on_end || String(item.draft?.[field.key] ?? '') === String(field.default_on_end || '')))).map((field: Dict) => field.key); }
 function shownFields(item: Dict): Dict[] { const keys = new Set([...(item.brief_fields || []), ...briefKeys(item)]); return (item.fields || []).filter((field: Dict) => item.edit_all || keys.has(field.key)); }
 function changed(): void { error.value = ''; window.clearTimeout(saveTimer); saveTimer = window.setTimeout(saveLocal, 350); }
+function onFieldChange(item: Dict, field: Dict): void {
+  if (field.key === 'notice_action') {
+    const progress = (item.fields || []).find((f: Dict) => f.key === 'progress');
+    const endLine = String(progress?.default_on_end || '');
+    if (String(item.draft?.notice_action ?? '') === '结束' && endLine) {
+      if (!String(item.draft?.progress ?? '').trim()) item.draft.progress = endLine;
+    } else if (String(item.draft?.notice_action ?? '') === '更新' && endLine) {
+      if (String(item.draft?.progress ?? '') === endLine) item.draft.progress = '';
+    }
+  }
+  changed();
+}
 function rememberView(): void {
   if (!run.value) return;
   try { window.sessionStorage.setItem(`notice-panel-view:${props.userId}`, JSON.stringify({ scope: run.value.scope, slot: run.value.slot, date: run.value.date, view: noticeView.value })); } catch { /* Optional navigation memory. */ }

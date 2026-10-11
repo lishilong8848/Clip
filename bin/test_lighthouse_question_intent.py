@@ -280,6 +280,27 @@ class QueryIntentAsyncTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.today = datetime.now(TZ).date()
 
+    async def test_disabled_capabilities_remove_tools_and_skip_image_processing(self):
+        seen = []
+
+        @asynccontextmanager
+        async def factory(*_):
+            async def stream(messages, info):
+                seen.append(info.function_tools)
+                yield "你好。"
+
+            yield FunctionModel(stream_function=stream)
+
+        harness = _EngineHarness({}, factory=factory, profile={
+            "name": "测试模型", "model": "fixture", "tool_calls": False, "image_input": False,
+        })
+        harness.engine.portal.files.image_parts = Mock(side_effect=AssertionError("disabled image input"))
+        result, calls, _ = await harness.ask("你好")
+        self.assertEqual(result["answer"], "你好。")
+        self.assertEqual(seen, [[]])
+        self.assertEqual(calls, [])
+        harness.engine.portal.files.image_parts.assert_not_called()
+
     async def test_notice_distinct_vs_send_counts_are_separate(self):
         calls = []
         routes = {
@@ -449,6 +470,50 @@ class QueryIntentAsyncTests(unittest.IsolatedAsyncioTestCase):
         result, calls, _ = await harness.ask("帮我翻译一句欢迎语", history=history)
         self.assertIn("日常问候", result["answer"])
         self.assertEqual(calls, [])  # no business API cracked open for a generic chat
+
+    async def test_detail_followup_lists_latest_ongoing_changes_not_earlier_sent_count(self):
+        for channel in ("", "feishu:oc_fixture"):
+            with self.subTest(channel=channel):
+                actor = {"id": "fixture-person", "scopes": ["D", "E"], "is_admin": True, "channel": channel}
+                fixture = _StreamFixture(actor)
+                fixture.seed_turn({"operation_id": "fixture_message_0001", "question": "今天有几个变更？",
+                    "answer": "今天已发送的变更通告为0条。", "status": "completed", "scopes": ["E"]})
+                state = fixture.assistant._state(actor)
+                state["turns"].append({"operation_id": "fixture_message_0002", "question": "今天进行中的变更有几个？",
+                    "answer": "当前未结束变更4条。", "status": "completed", "scopes": ["E"]})
+                state["query_scopes"] = ["E"]
+                fixture.store.put_document(NAMESPACE, fixture.assistant._key(actor), state)
+                run, _ = fixture.accept("分别是哪些？", "fixture_message_0003")
+                effective = effective_question(run["_turn"])
+                self.assertIn("进行中的变更", effective)
+                self.assertNotIn("今天有几个变更", effective)
+                self.assertEqual(run["scopes"], ["E"])
+                synthetic = {"scopes": ["E"], "queried_at": "2026-10-10T09:40:00+08:00",
+                    "groups": [{"key": "notices", "label": "未结束通告", "count": 4, "known_count": 4,
+                        "available": True, "error": "", "warnings": [], "remaining": 0,
+                        "url": "/workbench-lite?scope=E", "type_counts": {"变更": 4},
+                        "items": [{"title": "变更测试" + str(i), "scopes": ["E"], "status": "开始", "type": "变更"}
+                                  for i in range(1, 5)]}]}
+                harness = _EngineHarness({}, factory=_forbidden_factory(self))
+
+                async def authorize():
+                    return actor
+
+                async def emit(kind, value):
+                    harness.events.append((kind, value))
+
+                with patch("lan_bitable_template_portal.lighthouse_pending.collect_pending",
+                           new=AsyncMock(return_value=synthetic)) as reader:
+                    result = await harness.engine.answer({**actor, "scopes": run["scopes"], "allowed_scopes": actor["scopes"]},
+                        run["_turn"], run["_history"], None, emit, authorize, {})
+                reader.assert_awaited_once()
+                self.assertEqual(reader.call_args.kwargs["groups_only"], {"notices"})
+                self.assertEqual(reader.call_args.kwargs["notice_type"], "change")
+                self.assertEqual(reader.call_args.args[0]["scopes"], ["E"])
+                for i in range(1, 5):
+                    self.assertIn("变更测试" + str(i), result["answer"])
+                self.assertNotIn("已发送", result["answer"])
+                self.assertEqual(harness.calls, [])
 
     async def test_stream_yesterday_after_completed_event_keeps_subject_and_date(self):
         # Drive the REAL LighthouseStream._accept over its synthetic Store/model

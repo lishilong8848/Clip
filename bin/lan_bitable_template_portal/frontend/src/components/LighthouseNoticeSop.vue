@@ -158,7 +158,7 @@ const sopAttachments = computed(() => (Array.isArray(selectedSop.value?.document
 function repeatLabel(rule: Record<string, any>): string {
   const start = sopSteps.value.findIndex((step: Record<string, any>) => step.step_id === rule.from_step_id) + 1;
   const end = sopSteps.value.findIndex((step: Record<string, any>) => step.step_id === rule.to_step_id) + 1;
-  return start && end ? `本步后第${start}–${end}步再循环${rule.count}遍` : '';
+  return start && end ? `本步后第${start}–${end}步共执行${rule.count}遍` : '';
 }
 const sopRef = ref<HTMLSelectElement | null>(null);
 function syncSopValidity(): void { void nextTick(() => { const el = sopRef.value; if (!el) return; if (local.value.sop_id && selectedSop.value?.blocked_reason) el.setCustomValidity(`该SOP已锁定：${selectedSop.value.blocked_reason}`); else el.setCustomValidity(""); }); }

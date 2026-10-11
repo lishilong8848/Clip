@@ -10069,11 +10069,34 @@ class PortalRuntime:
             )
         if not target_record_id:
             return ""
-        if notice_type != "事件通告":
-            # A known binding survives retries; never turn a read failure into a create.
-            return target_record_id
         guard = external_real_write_guard()
         if guard.get("mock_external"):
+            return target_record_id
+        if notice_type != "事件通告":
+            try:
+                ok_query, query_result = query_record_by_id(target_record_id, notice_type)
+            except Exception as exc:
+                raise PortalError("原关联目标暂时无法读取，未重复新增通告，请稍后重试。") from exc
+            if not ok_query or not isinstance(query_result, dict):
+                raise PortalError(f"原关联目标核验失败，未重复新增通告：{query_result}")
+            fields = {name: cls._remote_compare_value(value) for name, value in
+                      cls._change_confirmation_fields(query_result).items()}
+            lifecycle = cls.service._target_record_lifecycle(
+                work_type=work_type, notice_type=notice_type,
+                target_record={"display_fields": fields},
+            )
+            if lifecycle.get("finished") or not lifecycle.get("active"):
+                raise PortalError("原关联目标已结束或未开始，不能作为本次开始通告复用，请重新核对关联。")
+            field_config = get_field_config(notice_type)
+            target = {
+                "title": fields.get(field_config.get("title") or field_config.get("name") or "名称"),
+                "building_codes": cls.service._target_record_building_codes(fields, field_config),
+            }
+            title_key = cls.service._semantic_notice_title(prepared)
+            if (not title_key or title_key != cls.service._semantic_notice_title(target)
+                    or cls.service._semantic_notice_building_key(prepared)
+                    != cls.service._semantic_notice_building_key(target)):
+                raise PortalError("原关联目标与本次通告名称或楼栋不一致，未修改旧记录，请重新核对关联。")
             return target_record_id
         try:
             ok_query, query_result = query_record_by_id(
@@ -11160,14 +11183,15 @@ class PortalRuntime:
         action = str(prepared.get("action") or "").strip().lower()
         if not notice_type or action not in {"start", "update", "end"}:
             return False, "后端上传缺少必要字段。", ""
-        if (
+        needs_remote_site_photo = (
             action == "end"
             and cls._end_site_photo_required(notice_type)
             and not cls._has_cumulative_site_photo_for_notice(prepared, notice_type)
-        ):
-            return False, "结束通告前必须添加至少一张现场照片。", ""
+        )
         guard = external_real_write_guard()
         if guard["mock_external"]:
+            if needs_remote_site_photo:
+                return False, "结束通告前必须添加至少一张现场照片。", ""
             job_id = str(prepared.get("job_id") or "").strip() or "mock"
             record_id = (
                 str(prepared.get("target_record_id") or "").strip()
@@ -11603,6 +11627,12 @@ class PortalRuntime:
             current_record_version or expected_record_version,
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+        # Hidden maintenance mirrors may have remote photos but no local projection.
+        existing_tokens, existing_extra_tokens, existing_response_time = (
+            cls._existing_tokens_for_notice_type(notice_type, fields)
+        )
+        if needs_remote_site_photo and not existing_extra_tokens:
+            return False, "结束通告前必须添加至少一张现场照片。", record_id
         if action == "end" and work_order_notice:
             end_error = cls._work_order_end_error(
                 target_record_id=record_id,
@@ -11636,9 +11666,6 @@ class PortalRuntime:
             remote_fields=fields,
             remote_missing=False,
             job_id=str(prepared.get("job_id") or ""),
-        )
-        existing_tokens, existing_extra_tokens, existing_response_time = (
-            cls._existing_tokens_for_notice_type(notice_type, fields)
         )
         images_ok, images_error, image_file_tokens, image_extra_file_tokens = (
             cls._upload_extra_images_for_notice(prepared, notice_type)
@@ -15410,6 +15437,18 @@ class PortalRuntime:
                     ),
                 )
                 if not paired_ok:
+                    if paired_retry_count >= 3:
+                        cls.service.mark_job(
+                            job_id,
+                            phase="failed",
+                            error=f"主通告已写入，{paired_warning}。可继续原任务，不要重新新增。",
+                            error_category="paired_upload",
+                            error_retryable=True,
+                        )
+                        cls.state_store.mark_runtime_queue_item(
+                            "qt_action", job_id, status="failed", error=paired_warning
+                        )
+                        return
                     if cls.state_store.requeue_runtime_queue_item(
                         "qt_action",
                         job_id,

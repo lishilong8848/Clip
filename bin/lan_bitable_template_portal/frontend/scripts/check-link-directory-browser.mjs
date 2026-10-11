@@ -19,6 +19,7 @@ let admin = true, failSave = false, failRefresh = false, warning = '', writes = 
 const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false } });
 const base = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
+const watchdog = setTimeout(() => { console.error('Directory browser test exceeded 90 seconds'); void browser.close(); }, 90000);
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 page.setDefaultTimeout(15000);
 const errors = [];
@@ -39,6 +40,18 @@ await page.route('**/api/**', async route => {
     const body = req.postDataJSON() || {};
     writes.push({ path: url.pathname, method, body });
     if (failSave) { failSave = false; return fail('保存失败，请重试'); }
+    if (url.pathname.endsWith('/reorder')) {
+      assert.deepEqual(Object.keys(body).sort(), ['placement', 'record_id', 'target_id']);
+      rows.sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      const source = rows.find(row => row.id === body.record_id);
+      assert.ok(source);
+      rows = rows.filter(row => row.id !== body.record_id);
+      const target = rows.findIndex(row => row.id === body.target_id);
+      assert.ok(target >= 0);
+      rows.splice(target + (body.placement === 'after' ? 1 : 0), 0, source);
+      rows.forEach((row, index) => { row.sort = (index + 1) * 10; });
+      return ok({ items: rows, can_edit: admin, updated_at: Date.now() / 1000 });
+    }
     if (method === 'POST') {
       assert.match(body.request_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       const row = { ...body, id: 'recCreated' }; delete row.request_id; rows.push(row); return ok({ item: row });
@@ -122,6 +135,77 @@ try {
   await tableRows.getByRole('button', { name: '删除链接', exact: true }).click();
   await confirm.getByRole('button', { name: '删除入口', exact: true }).click();
   await page.getByText('没有匹配的链接', { exact: true }).waitFor();
+  await search.fill('');
+  const beforeDrag = rows.map(row => row.id);
+  const moved = await tableRows.nth(4).getAttribute('data-link-id');
+  const target = await tableRows.first().getAttribute('data-link-id');
+  await tableRows.nth(4).locator('.drag-handle').dragTo(tableRows.first(), { targetPosition: { x: 180, y: 2 } });
+  await page.getByText('顺序已保存', { exact: true }).waitFor();
+  assert.equal(await tableRows.first().getAttribute('data-link-id'), moved);
+  assert.deepEqual(writes.at(-1).body, { record_id: moved, target_id: target, placement: 'before' });
+  assert.deepEqual(rows.filter(row => row.id !== moved).map(row => row.id), beforeDrag.filter(id => id !== moved));
+  await page.reload();
+  await tableRows.first().waitFor();
+  assert.equal(await tableRows.first().getAttribute('data-link-id'), moved, 'order survives reopening');
+
+  // A held pointer crosses pagination even though its source row is unmounted.
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
+  const crossId = await tableRows.nth(3).getAttribute('data-link-id');
+  const handle = tableRows.nth(3).locator('.drag-handle');
+  await handle.scrollIntoViewIfNeeded();
+  const sourceBox = await handle.boundingBox();
+  await page.mouse.move(sourceBox.x + 16, sourceBox.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(sourceBox.x - 15, sourceBox.y + 16, { steps: 5 });
+  await page.locator('.drag-pagination').waitFor();
+  const previous = page.getByRole('button', { name: '上一页', exact: true });
+  const pagerBox = await previous.boundingBox();
+  assert.ok(pagerBox.y >= 0 && pagerBox.y < 1000, 'pagination stays visible while dragging');
+  await page.mouse.move(pagerBox.x + 20, pagerBox.y + 16, { steps: 10 });
+  await page.mouse.move(pagerBox.x + 21, pagerBox.y + 16);
+  await page.waitForFunction(() => document.querySelector('.table-footer b')?.textContent?.trim().startsWith('1 /'));
+  await page.locator('.drag-pagination').waitFor();
+  await tableRows.first().scrollIntoViewIfNeeded();
+  const crossTarget = await tableRows.first().getAttribute('data-link-id');
+  const targetBox = await tableRows.first().boundingBox();
+  await page.mouse.move(targetBox.x + 150, targetBox.y + 3, { steps: 10 });
+  await page.mouse.move(targetBox.x + 151, targetBox.y + 3);
+  await page.screenshot({ path: path.join(output, 'drag-cross-page.png'), fullPage: false });
+  await page.mouse.up();
+  await page.getByText('顺序已保存', { exact: true }).waitFor();
+  assert.equal(await tableRows.first().getAttribute('data-link-id'), crossId);
+  assert.deepEqual(writes.at(-1).body, { record_id: crossId, target_id: crossTarget, placement: 'before' });
+
+  await page.getByRole('button', { name: '网页导航', exact: true }).click();
+  const hiddenOrder = rows.filter(row => row.category !== '网页导航').map(row => row.id);
+  const webId = await tableRows.last().getAttribute('data-link-id');
+  await tableRows.last().locator('.drag-handle').dragTo(tableRows.first(), { targetPosition: { x: 180, y: 2 } });
+  await page.getByText('顺序已保存', { exact: true }).waitFor();
+  assert.equal(await tableRows.first().getAttribute('data-link-id'), webId, JSON.stringify({lastWrite: writes.at(-1), webId}));
+  assert.deepEqual(rows.filter(row => row.category !== '网页导航').map(row => row.id), hiddenOrder, 'filtered drag preserves hidden rows');
+  const orderBeforeFailure = rows.map(row => row.id);
+  failSave = true;
+  await tableRows.first().locator('.drag-handle').dragTo(tableRows.last(), { targetPosition: { x: 180, y: 30 } });
+  await page.locator('.order-status.failed').waitFor();
+  assert.deepEqual(rows.map(row => row.id), orderBeforeFailure);
+  assert.equal(await tableRows.first().getAttribute('data-link-id'), webId, 'failed save does not claim reordered state');
+  const keyboardId = await tableRows.nth(1).getAttribute('data-link-id');
+  await tableRows.nth(1).locator('.drag-handle').press('ArrowUp');
+  await page.getByText('顺序已保存', { exact: true }).waitFor();
+  assert.equal(await tableRows.first().getAttribute('data-link-id'), keyboardId);
+  const writeCount = writes.length;
+  await tableRows.first().locator('.drag-handle').dragTo(tableRows.first(), { targetPosition: { x: 180, y: 2 } });
+  assert.equal(writes.length, writeCount, 'dropping on itself does not submit');
+  const cancelBox = await tableRows.first().locator('.drag-handle').boundingBox();
+  await page.mouse.move(cancelBox.x + 16, cancelBox.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(cancelBox.x - 15, cancelBox.y + 16, { steps: 4 });
+  await page.locator('.link-drag-preview').waitFor();
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  assert.equal(await page.locator('.link-drag-preview').count(), 0);
+  assert.equal(writes.length, writeCount, 'Escape cancels drag without writing');
+  await page.screenshot({ path: path.join(output, 'reordered.png'), fullPage: true });
   admin = false;
   warning = '云端目录暂时无法读取，正在显示本地已保存的链接。';
   await page.reload();
@@ -131,11 +215,12 @@ try {
   assert.equal(await page.getByRole('button', { name: '新增链接', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '编辑链接', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '删除链接', exact: true }).count(), 0);
+  assert.equal(await page.locator('.drag-handle').count(), 0);
   for (const width of [1920, 1366, 1024]) {
     await page.setViewportSize({ width, height: 1000 });
     assert.ok(await page.locator('.link-directory-page').evaluate(el => el.scrollWidth <= el.clientWidth + 1));
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, reads, writes: writes.length, screenshots: output, tested: '329 bitables and 3 website fixtures, home entry, type/search/filter/paging, CRUD, ports/query/hash, cancel, lost response retry UUID on LAN, error recovery, cached warning, readonly permissions' }));
+  console.log(JSON.stringify({ ok: true, reads, writes: writes.length, screenshots: output, tested: '332 links, CRUD, same-page/cross-page/filtered dragging, hidden order preservation, keyboard reorder, Escape cancellation, failed reorder, reload persistence, readonly permissions, 3 PC widths' }));
 } catch (e) { await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }); throw e; }
-finally { await browser.close(); await new Promise(resolve => server.httpServer.close(resolve)); }
+finally { clearTimeout(watchdog); await browser.close(); await new Promise(resolve => server.httpServer.close(resolve)); }

@@ -1,8 +1,10 @@
 """Isolation tests (unittest only) for assistant.lighthouse_knowledge.
 
-Everything runs against a temporary SQLite database with the real sqlite_vec
-extension and a fake deterministic embedder; worker thread is disabled.  No
-production data, network, packages/dist/config or credentials are touched.
+Everything runs against a temporary SQLite database with an injected deterministic
+512-dimensional embedder (query keyword accepted) and a real FAISS in-memory index
+backed by the peer ``MemoryIndex`` contract.  The worker thread is disabled.  No
+production data, network, packages/dist/config or credentials are touched, and no
+external model download is performed.
 """
 import hashlib
 import math
@@ -13,9 +15,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import faiss
+import numpy as np
+
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_knowledge import (
-    Embeddings,
+    DIMENSIONS,
+    MODE,
+    MODEL_NAME,
     KnowledgeBase,
     check_actor,
     company_question,
@@ -38,46 +45,115 @@ def _unprotect(value):
 
 
 class FakeEmbedder:
-    """Deterministic, injectable, non-network embedder."""
+    """Deterministic, injectable, non-network embedder (serialized embedding)."""
 
-    def __init__(self, dim=8):
+    def __init__(self, dim=DIMENSIONS):
         self.dim = dim
         self.calls = []
         self.fail = False
         self.fail_message = "模拟嵌入失败"
         self.closed = False
+        self._active = 0
+        self.max_active = 0
+        self.query_flags = []
 
     def vector_for(self, text):
         digest = hashlib.sha256(text.encode("utf-8")).digest()
-        vec = [(digest[i] / 255.0) * 2 - 1 for i in range(self.dim)]
+        vec = [(digest[i % len(digest)] / 255.0) * 2 - 1 for i in range(self.dim)]
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
 
-    def embed(self, texts, config):
-        self.calls.append((list(texts), dict(config)))
-        if self.fail:
-            raise AssistantError(self.fail_message, 503)
-        return [self.vector_for(text) for text in texts]
+    def embed(self, texts, config=None, *, query=False):
+        self.calls.append((list(texts), dict(config or {}), query))
+        self.query_flags.append(query)
+        self._active += 1
+        self.max_active = max(self.max_active, self._active)
+        try:
+            if self.fail:
+                raise AssistantError(self.fail_message, 503)
+            return [self.vector_for(text) for text in texts]
+        finally:
+            self._active -= 1
 
     def close(self):
         self.closed = True
 
 
-class FakeClient:
-    def __init__(self, payload=None, exception=None):
-        self.payload = payload
-        self.exception = exception
-        self.calls = []
-        self.closed = False
+class FakeMemoryIndex:
+    """Real FAISS cosine index implementing the local ``MemoryIndex`` contract."""
 
-    def request_json(self, method, url, **kwargs):
-        self.calls.append((method, url, kwargs))
-        if self.exception is not None:
-            raise self.exception
-        return self.payload
+    def __init__(self):
+        self._revision = None
+        self._ids = []
+        self._index = None
+        self._builder_ids = None
+        self._builder_vectors = None
 
-    def close(self):
-        self.closed = True
+    @property
+    def revision(self):
+        return self._revision or 0
+
+    @property
+    def count(self):
+        return len(self._ids)
+
+    def _build(self, revision, arrays, ids):
+        self._revision = int(revision)
+        self._ids = ids
+        self._index = None
+        if arrays:
+            index = faiss.IndexFlatIP(DIMENSIONS)
+            index.add(np.stack(arrays).astype("float32"))
+            self._index = index
+
+    def begin_build(self, revision):
+        self._builder_ids = []
+        self._builder_vectors = []
+        self._builder_revision = int(revision)
+
+    def add_batch(self, rows):
+        batch_arrays, batch_ids = [], []
+        for chunk_id, blob in list(rows):
+            arr = np.frombuffer(blob, dtype="<f4")
+            if arr.size != DIMENSIONS:
+                raise ValueError("bad embedding dimension")
+            norm = np.linalg.norm(arr)
+            if norm <= 0 or not np.isfinite(norm):
+                raise ValueError("bad embedding norm")
+            batch_arrays.append((arr / norm).astype("float32"))
+            batch_ids.append(int(chunk_id))
+        self._builder_ids.extend(batch_ids)
+        self._builder_vectors.extend(batch_arrays)
+
+    def end_build(self):
+        self._build(self._builder_revision, self._builder_vectors, list(self._builder_ids))
+        self._builder_ids = self._builder_vectors = None
+
+    def cancel_build(self):
+        self._builder_ids = self._builder_vectors = None
+
+    def replace(self, revision, rows):
+        arrays, ids = [], []
+        for chunk_id, blob in rows:
+            arr = np.frombuffer(blob, dtype="<f4")
+            if arr.size != DIMENSIONS:
+                raise ValueError("bad embedding dimension")
+            norm = np.linalg.norm(arr)
+            if norm <= 0 or not np.isfinite(norm):
+                raise ValueError("bad embedding norm")
+            arrays.append((arr / norm).astype("float32"))
+            ids.append(int(chunk_id))
+        self._build(revision, arrays, ids)
+
+    def search(self, vector, k=40):
+        if self._index is None or not self._ids:
+            return []
+        q = np.asarray(vector, dtype="float32")
+        norm = np.linalg.norm(q)
+        if norm <= 0 or not np.isfinite(norm):
+            return []
+        scores, idx = self._index.search((q / norm).astype("float32").reshape(1, -1), min(k, len(self._ids)))
+        return [(self._ids[int(i)], float(s)) for i, s in zip(idx[0], scores[0]) if i >= 0]
 
 
 def _text(content, name="说明.txt"):
@@ -94,15 +170,11 @@ class KnowledgeBaseTestCase(unittest.TestCase):
             embedder=self.embedder,
             protect=_protect,
             start_worker=False,
+            memory_index_factory=FakeMemoryIndex,
         )
 
-    def _save_settings(self, endpoint="https://embed.example.com/v1/embeddings",
-                       model="e-model", api_key="sk-secret", origins=("https://llm.example.com",)):
-        return self.kb.save_settings(
-            actor(admin=True),
-            {"endpoint": endpoint, "model": model, "api_key": api_key,
-             "approved_origins": list(origins)},
-        )
+    def _save_settings(self, origins=("https://llm.example.com",)):
+        return self.kb.save_settings(actor(admin=True), {"approved_origins": list(origins)})
 
     def _index(self, document_id, embedder=None):
         embedder = embedder or self.embedder
@@ -112,7 +184,7 @@ class KnowledgeBaseTestCase(unittest.TestCase):
 
 class CompanyQuestionTests(unittest.TestCase):
     def test_excludes_weather_live_business_even_with_company(self):
-        pos = ("我们公司的报销流程是什么", "公司内部制度有哪些", "知识库里的内容")
+        pos = ("我们公司的报销流程是什么", "公司内部制度有哪些", "知识库里的内容", "公司出差流程是什么", "公司的年假怎么请")
         for q in pos:
             with self.subTest(q=q):
                 self.assertTrue(company_question(q))
@@ -156,52 +228,50 @@ class SensitiveDocumentTests(unittest.TestCase):
 
 
 class SettingsTests(KnowledgeBaseTestCase):
-    def test_admin_only_and_key_redaction(self):
+    def test_admin_only_and_no_remote_credentials_stored(self):
         with self.assertRaises(AssistantError) as ctx:
-            self.kb.save_settings(actor(admin=False), {
-                "endpoint": "https://embed.example.com/v1/embeddings",
-                "model": "m", "api_key": "sk-a", "approved_origins": ["https://llm.example.com"]})
+            self.kb.save_settings(actor(admin=False), {"approved_origins": ["https://llm.example.com"]})
         self.assertEqual(ctx.exception.status, 403)
 
         result = self._save_settings()
         self.assertTrue(result["configured"])
-        self.assertEqual(result["endpoint"], "https://embed.example.com/v1/embeddings")
-        self.assertEqual(result["model"], "e-model")
-        self.assertEqual(result["dimensions"], self.embedder.dim)
+        self.assertEqual(result["engine"], MODE)
+        self.assertEqual(result["model"], MODEL_NAME)
+        self.assertEqual(result["dimensions"], DIMENSIONS)
         self.assertEqual(result["approved_origins"], ["https://llm.example.com"])
         self.assertNotIn("key_cipher", result)
         self.assertNotIn("api_key", result)
+        self.assertNotIn("endpoint", result)
 
         stored = self.kb.configuration()
-        self.assertTrue(stored["key_cipher"].startswith("CIPHER:"))
-        self.assertEqual(stored["key_cipher"], "CIPHER:sk-secret")
+        self.assertEqual(stored["mode"], MODE)
+        self.assertNotIn("key_cipher", stored)
+        self.assertNotIn("endpoint", stored)
 
-    def test_endpoint_must_be_https_embeddings(self):
-        for endpoint in ("http://embed.example.com/v1/embeddings",
-                         "https://embed.example.com/v1/chat/completions",
-                         "https://embed.example.com/not-embeddings"):
-            with self.subTest(endpoint=endpoint):
-                with self.assertRaises(AssistantError):
-                    self._save_settings(endpoint=endpoint)
+    def test_legacy_remote_payload_accepted_but_credentials_never_used(self):
+        result = self.kb.save_settings(actor(admin=True), {
+            "endpoint": "https://embed.example.com/v1/embeddings",
+            "model": "e-model",
+            "api_key": "sk-secret",
+            "approved_origins": ["https://llm.example.com"],
+        })
+        self.assertEqual(result["mode"], MODE)
+        self.assertEqual(result["model"], MODEL_NAME)
+        stored = self.kb.configuration()
+        self.assertNotIn("key_cipher", stored)
+        self.assertNotIn("endpoint", stored)
+        self.assertNotIn("model", stored)
+
+    def test_unsupported_mode_rejected(self):
+        with self.assertRaises(AssistantError):
+            self.kb.save_settings(actor(admin=True), {
+                "mode": "remote_vec", "approved_origins": ["https://llm.example.com"]})
 
     def test_origins_validation(self):
         with self.assertRaises(AssistantError):
-            self.kb.save_settings(actor(admin=True), {
-                "endpoint": "https://embed.example.com/v1/embeddings",
-                "model": "m", "api_key": "sk-a", "approved_origins": []})
+            self.kb.save_settings(actor(admin=True), {"approved_origins": []})
         with self.assertRaises(AssistantError):
-            self.kb.save_settings(actor(admin=True), {
-                "endpoint": "https://embed.example.com/v1/embeddings",
-                "model": "m", "api_key": "sk-a",
-                "approved_origins": ["http://llm.example.com"]})
-
-    def test_changing_endpoint_without_key_rejected(self):
-        self._save_settings()
-        with self.assertRaises(AssistantError):
-            self.kb.save_settings(actor(admin=True), {
-                "endpoint": "https://other.example.com/v1/embeddings",
-                "model": "e-model", "api_key": "",
-                "approved_origins": ["https://llm.example.com"]})
+            self.kb.save_settings(actor(admin=True), {"approved_origins": ["http://llm.example.com"]})
 
     def test_guest_cannot_read_or_write_settings(self):
         for g in (actor(guest=True), actor(role="guest")):
@@ -212,109 +282,6 @@ class SettingsTests(KnowledgeBaseTestCase):
                 with self.assertRaises(AssistantError) as ctx:
                     self.kb.save_settings(g, {})
                 self.assertEqual(ctx.exception.status, 403)
-
-
-class EmbedsValidationTests(unittest.TestCase):
-    def _embeddings(self, payload=None, exception=None):
-        client = FakeClient(payload=payload, exception=exception)
-        return client, Embeddings(client=client, decrypt=lambda k: k)
-
-    def test_embed_success_and_header(self):
-        client, emb = self._embeddings({"data": [
-            {"index": 1, "embedding": [0.0, 1.0]},
-            {"index": 0, "embedding": [1.0, 0.0]},
-        ]})
-        result = emb.embed(["a", "b"], {"key_cipher": "secret", "endpoint": "https://x/v1/embeddings",
-                                        "model": "m", "dimensions": 2})
-        self.assertEqual(result, [[1.0, 0.0], [0.0, 1.0]])
-        method, url, kwargs = client.calls[0]
-        self.assertEqual(method, "POST")
-        self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret")
-        self.assertEqual(kwargs["json_payload"]["model"], "m")
-        emb.close()
-        self.assertTrue(client.closed)
-
-    def test_requires_key_cipher(self):
-        _, emb = self._embeddings()
-        with self.assertRaises(AssistantError) as ctx:
-            emb.embed(["a"], {})
-        self.assertEqual(ctx.exception.status, 409)
-
-    def test_network_error_maps_to_503(self):
-        _, emb = self._embeddings(exception=RuntimeError("boom"))
-        with self.assertRaises(AssistantError) as ctx:
-            emb.embed(["a"], {"key_cipher": "k"})
-        self.assertEqual(ctx.exception.status, 503)
-
-    def _reject(self, payload, *, dims=None, texts=None):
-        texts = texts or ["a", "b"]
-        config = {"key_cipher": "k", "endpoint": "https://x/v1/embeddings", "model": "m"}
-        if dims is not None:
-            config["dimensions"] = dims
-        _, emb = self._embeddings(payload)
-        with self.assertRaises(AssistantError) as ctx:
-            emb.embed(texts, config)
-        return ctx.exception
-
-    def test_malformed_responses(self):
-        cases = [
-            ("not a dict", {"data": "nope"}),
-            ("wrong item count", {"data": [{"index": 0, "embedding": [1.0]}]}),
-            ("index not int", {"data": [
-                {"index": "0", "embedding": [1.0]},
-                {"index": 1, "embedding": [1.0]},
-            ]}),
-            ("index out of range", {"data": [
-                {"index": 0, "embedding": [1.0]},
-                {"index": 5, "embedding": [1.0]},
-            ]}),
-            ("duplicate index", {"data": [
-                {"index": 0, "embedding": [1.0]},
-                {"index": 0, "embedding": [1.0]},
-            ]}),
-            ("vector not list", {"data": [
-                {"index": 0, "embedding": "x"},
-                {"index": 1, "embedding": [1.0]},
-            ]}),
-            ("vector too long", {"data": [
-                {"index": 0, "embedding": [1.0] * 5000},
-                {"index": 1, "embedding": [1.0] * 5000},
-            ]}),
-            ("vector empty", {"data": [
-                {"index": 0, "embedding": []},
-                {"index": 1, "embedding": [1.0]},
-            ]}),
-            ("non finite", {"data": [
-                {"index": 0, "embedding": [float("nan")]},
-                {"index": 1, "embedding": [1.0]},
-            ]}),
-            ("zero norm", {"data": [
-                {"index": 0, "embedding": [0.0, 0.0]},
-                {"index": 1, "embedding": [1.0, 0.0]},
-            ]}),
-        ]
-        for label, payload in cases:
-            with self.subTest(label=label):
-                self.assertEqual(self._reject(payload).status, 502)
-
-    def test_mixed_dims_raises_409(self):
-        exc = self._reject({"data": [
-            {"index": 0, "embedding": [1.0, 0.0]},
-            {"index": 1, "embedding": [1.0, 0.0, 0.0]},
-        ]})
-        self.assertEqual(exc.status, 409)
-
-    def test_dimension_mismatch_raises_409(self):
-        exc = self._reject({"data": [
-            {"index": 0, "embedding": [1.0, 0.0]},
-            {"index": 1, "embedding": [0.0, 1.0]},
-        ]}, dims=5)
-        self.assertEqual(exc.status, 409)
-
-    def test_empty_input_returns_without_client(self):
-        client, emb = self._embeddings()
-        self.assertEqual(emb.embed([], {"key_cipher": "k"}), [])
-        self.assertEqual(client.calls, [])
 
 
 class UploadIndexSearchTests(KnowledgeBaseTestCase):
@@ -329,14 +296,18 @@ class UploadIndexSearchTests(KnowledgeBaseTestCase):
             row = db.execute(
                 "SELECT active_version,pending_version,status,chunks FROM documents WHERE id=?",
                 (doc_id,)).fetchone()
+            vec_count = db.execute(
+                "SELECT count(*) FROM local_vectors lv JOIN chunks c ON c.id=lv.chunk_id WHERE c.document_id=?",
+                (doc_id,)).fetchone()[0]
         self.assertIsNotNone(row["active_version"])
         self.assertIsNone(row["pending_version"])
         self.assertEqual(row["status"], "ready")
         self.assertGreaterEqual(row["chunks"], 1)
+        self.assertEqual(vec_count, row["chunks"])
 
         search = self.kb.search(actor(), "公司报销流程",
                                 profile={"endpoint": "https://llm.example.com"})
-        self.assertEqual(search["mode"], "hybrid")
+        self.assertEqual(search["mode"], MODE)
         self.assertTrue(search["items"])
         self.assertIn("vector", search["items"][0]["matches"])
         self.assertEqual(search["items"][0]["document_id"], doc_id)
@@ -348,9 +319,9 @@ class UploadIndexSearchTests(KnowledgeBaseTestCase):
         with self.assertRaises(AssistantError) as ctx:
             self.kb.search(actor(), "公司报销流程", profile={"endpoint": "https://evil.example.com"})
         self.assertEqual(ctx.exception.status, 403)
-        # Keyword fallback still works for a signed-in user without profile when embed available.
+        # A signed-in user without a restricted profile can still search.
         search = self.kb.search(actor(), "公司报销流程")
-        self.assertEqual(search["mode"], "hybrid")
+        self.assertEqual(search["mode"], MODE)
         self.assertEqual(search["items"][0]["document_id"], doc_id)
 
     def test_search_embedder_failure_falls_back_to_keyword(self):
@@ -439,8 +410,9 @@ class DeletePermissionsTests(KnowledgeBaseTestCase):
         self.kb.change(admin, doc_id, "delete", revision=1)
         # vectors removed immediately
         with self.kb.connect() as db:
-            self.kb._vectors(db)
-            count = db.execute("SELECT count(*) FROM vectors").fetchone()[0]
+            count = db.execute(
+                "SELECT count(*) FROM local_vectors lv JOIN chunks c ON c.id=lv.chunk_id WHERE c.document_id=?",
+                (doc_id,)).fetchone()[0]
         self.assertEqual(count, 0)
         # citations invalidated
         self.assertFalse(self.kb.evidence_current([item], profile))
@@ -524,13 +496,13 @@ class DuplicateAndRevisionTests(KnowledgeBaseTestCase):
 
 
 class SensitiveBlockTests(KnowledgeBaseTestCase):
-    def test_sensitive_document_blocked_before_external_embed(self):
+    def test_sensitive_document_blocked_before_embed(self):
         self._save_settings()
         self.embedder.calls.clear()
         name, content = _text("员工名单\n\n身份证号 110105199003071234", "名单.txt")
         doc = self.kb.upload(actor(admin=True), name, content)
         self.assertTrue(self.kb.process_one())
-        # external embed never called during indexing
+        # embedder never called during indexing for blocked documents
         self.assertEqual(self.embedder.calls, [])
         with self.kb.connect() as db:
             row = db.execute(

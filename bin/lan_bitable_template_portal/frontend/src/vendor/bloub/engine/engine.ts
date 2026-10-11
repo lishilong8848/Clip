@@ -13,6 +13,7 @@ import {
   type Silhouette
 } from './shape'
 import { STATE_BY_ID, type Pose, type StateDef, type StateId } from './states'
+import { SHAPE_BY_ID } from './skins'
 
 export interface RenderedEye {
   d: string
@@ -93,6 +94,7 @@ const lerpEye = (a: Pose['eyes'][number], b: Pose['eyes'][number], t: number) =>
 function blendPose(a: Pose, b: Pose, t: number): Pose {
   const out = 1 - t
   return {
+    bottomFace: lerp(a.bottomFace ?? 0, b.bottomFace ?? 0, t),
     sil: blend(a.sil, b.sil, t),
     offX: lerp(a.offX, b.offX, t),
     offY: lerp(a.offY, b.offY, t),
@@ -273,12 +275,16 @@ export class BotEngine {
     def: StateDef,
     t: number,
     shape: number[] | null,
-    expr: BotExpression | null
+    expr: BotExpression | null,
+    now: number
   ): Pose {
     let pose = def.pose(t)
     if (def.baseBody && shape) {
       // on garde la pose (rotation, decalage, squash) et on n'echange que le profil
       pose = { ...pose, sil: { ...pose.sil, radii: shape } }
+      const pile = SHAPE_BY_ID.get('swirl-pile')!.radii
+      pose.bottomFace = lerp(this.shapePrev === pile ? 1 : 0, this.shape === pile ? 1 : 0,
+        easings.easeInOutCubic(clamp((now - this.shapeAt) / BotEngine.SHAPE_MORPH)))
     }
     if (def.baseFace && expr) {
       pose = { ...pose, gaze: expr.gaze, split: expr.split, eyes: expr.eyes }
@@ -377,7 +383,7 @@ export class BotEngine {
     if (this.departFige) return this.departFige
     if (!this.prev) return null
     const prevDef = STATE_BY_ID.get(this.prev)!
-    return this.posed(prevDef, Math.max(0, now - this.tPrev), shape, expr)
+    return this.posed(prevDef, Math.max(0, now - this.tPrev), shape, expr, now)
   }
 
   /**
@@ -389,7 +395,7 @@ export class BotEngine {
     const def = STATE_BY_ID.get(this.cur)!
     const shape = this.shapeAtTime(now)
     const expr = this.exprAtTime(now)
-    const pose = this.posed(def, Math.max(0, now - this.tCur), shape, expr)
+    const pose = this.posed(def, Math.max(0, now - this.tCur), shape, expr, now)
     const since = now - this.tCur
     if (since >= def.morph) return pose
     const origine = this.origine(now, shape, expr)
@@ -433,7 +439,7 @@ export class BotEngine {
     const def = STATE_BY_ID.get(this.cur)!
     const shape = this.shapeAtTime(now)
     const expr = this.exprAtTime(now)
-    let pose = this.posed(def, Math.max(0, now - this.tCur), shape, expr)
+    let pose = this.posed(def, Math.max(0, now - this.tCur), shape, expr, now)
     let decalage = this.decalageAtTime(now, this.cur)
 
     // --- transition -------------------------------------------------------
@@ -502,6 +508,8 @@ export class BotEngine {
       radiusAtAngle(pose.sil.radii, Math.atan2(y, x) - pose.sil.rot)
 
     const eyes: RenderedEye[] = []
+    const bottomFace = pose.bottomFace ?? 0
+    const faceScale = 1 - .4 * bottomFace
     if (pose.eyeAlpha > 0.01) {
       const poses = eyePoses(gaze, R, pose.split)
       for (let i = 0; i < 2; i++) {
@@ -523,8 +531,8 @@ export class BotEngine {
         // a l'ecran, pas le long de l'axe de la gelule.
         const k = blinkScale(Math.min(lid, cfg.open))
         eyes.push({
-          d: capsulePath(cfg.w * R, cfg.h * R),
-          matrix: `matrix(${r2(ax)},${r2(ay * k)},${r2(cx2)},${r2(cy2 * k)},${r2(e.x * fit + (offX + decalage.x) * R)},${r2(e.y * fit + (offY + decalage.y) * R)})`,
+          d: capsulePath(cfg.w * R * faceScale, cfg.h * R * faceScale),
+          matrix: `matrix(${r2(ax)},${r2(ay * k)},${r2(cx2)},${r2(cy2 * k)},${r2(e.x * fit * faceScale + (offX + decalage.x * (1-bottomFace)) * R)},${r2(e.y * fit * faceScale + (offY + decalage.y * (1-bottomFace) + .38 * bottomFace) * R)})`,
           alpha: pose.eyeAlpha * clamp(e.depth / 0.12)
         })
       }

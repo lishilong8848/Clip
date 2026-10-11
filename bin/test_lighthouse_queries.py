@@ -13,11 +13,25 @@ from lan_bitable_template_portal.lighthouse_ai import AssistantError
 from lan_bitable_template_portal.lighthouse_model import LighthouseModel
 from lan_bitable_template_portal.lighthouse_pending import collect_pending, pending_reply
 from lan_bitable_template_portal.lighthouse_queries import (
-    EventQuery, PortalOperation, TZ, all_pending_modules, business_domains, collect_events, current_pending_query, date_window, effective_question, event_date, event_reply, query_refinement,
+    DETAIL, EventQuery, PortalOperation, TZ, all_pending_modules, business_domains, collect_events, current_pending_query, date_window, effective_question, event_date, event_reply, query_refinement,
 )
 
 
 class QueryTests(unittest.IsolatedAsyncioTestCase):
+    def test_short_detail_followups_keep_the_latest_query_meaning(self):
+        previous = "今天进行中的变更有几个？"
+        for question in ("分别是哪些？", "分别是什么", "具体有哪些？", "具体是哪几条？", "列一下", "请列出来"):
+            with self.subTest(question=question):
+                self.assertTrue(query_refinement(question))
+                effective = effective_question({"question": question, "prompt": previous + "\n" + question})
+                self.assertIn("今天进行中的变更", effective)
+                self.assertTrue(current_pending_query(effective))
+                self.assertEqual(business_domains(effective), {"notices"})
+                self.assertTrue(DETAIL.search(question))
+        for question in ("分别介绍DeepSeek和豆包", "具体有哪些人员", "列出今天已发送的维保通告", "把这些发送给我"):
+            with self.subTest(question=question):
+                self.assertFalse(query_refinement(question))
+
     def test_common_date_followups_keep_the_previous_business_subject(self):
         for question in ("9月呢", "近一个月呢", "过去7天", "上星期", "2026-09-01呢", "10月4日呢", "还剩几条？", "还有多少呢"):
             with self.subTest(question=question):

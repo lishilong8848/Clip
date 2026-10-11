@@ -150,6 +150,7 @@ class FeishuHttpClient:
         params: dict[str, Any] | None = None,
         json_payload: Any = None,
         retries: int | None = None,
+        timeout: Any = None,
     ) -> dict[str, Any]:
         import httpx
 
@@ -163,6 +164,7 @@ class FeishuHttpClient:
                     headers=headers,
                     params=params,
                     json=json_payload,
+                    **({'timeout': timeout} if timeout is not None else {}),
                 )
                 if response.status_code in RETRY_STATUS_CODES and attempt < retry_count:
                     time.sleep(self._retry_delay(response, attempt))

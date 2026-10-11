@@ -200,7 +200,7 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(len(json.loads(cloud_fields["步骤数据"])[2]["repeat_rules"]), 2)
         expanded = PollingWorkOrderService._expanded_steps(steps)
         self.assertEqual([step["step_id"] for step in expanded], [
-            "one", "two", "one", "two", "one", "two", "three", "two", "three", "one",
+            "one", "two", "one", "two", "three",
         ])
         with tempfile.TemporaryDirectory() as temp:
             service = PollingWorkOrderService(LanPortalStateStore(Path(temp) / "state.sqlite3"))
@@ -217,15 +217,16 @@ class PollingWorkOrderTests(unittest.TestCase):
                 {"record_id": "operator", "name": "操作人", "open_id": "ou_operator"},
                 {"record_id": "reviewer", "name": "审核人", "open_id": "ou_reviewer"},
             ])
-            self.assertEqual(len(prepared["polling_work_order_spec"]["steps"]), 10)
+            self.assertEqual(len(prepared["polling_work_order_spec"]["steps"]), 5)
             service.create_group(prepared, target_record_id="rec-loop-test", title="循环测试", public_base_url="")
             group = service.get_group("rec-loop-test")
-            self.assertEqual(len(group["steps"]), 10)
-            self.assertEqual(group["steps"][-1]["step_key"], "1:10")
-            self.assertIn("第3组循环第1遍", group["steps"][-1]["content"])
-            self.assertEqual([group["steps"][i]["delay_reminder_minutes"] for i in (0, 2, 4, 9)], [1, 1, 1, 1])
+            self.assertEqual(len(group["steps"]), 5)
+            self.assertEqual(group["steps"][-1]["step_key"], "1:5")
+            self.assertIn("第1组循环第2遍", group["steps"][2]["content"])
+            self.assertNotIn("第3组循环", group["steps"][-1]["content"])
+            self.assertEqual([group["steps"][i]["delay_reminder_minutes"] for i in (0, 2, 4)], [1, 1, 0])
             published = service.session(service.role_token("rec-loop-test", "operator"))
-            self.assertEqual(published["work_orders"][0]["step_count"], 10)
+            self.assertEqual(published["work_orders"][0]["step_count"], 5)
             public_step = service._step_public(group["steps"][0], 0)
             self.assertFalse({"repeat_rules", "delay_reminder_minutes", "repeat_round"} & public_step.keys())
         with self.assertRaisesRegex(Exception, "本步及之前"):
@@ -245,12 +246,76 @@ class PollingWorkOrderTests(unittest.TestCase):
         expanded = PollingWorkOrderService._expanded_steps(steps)
         self.assertEqual(
             [step["source_step_index"] for step in expanded],
-            list(range(1, 7)) + list(range(1, 7)) * 4
-            + list(range(7, 15)) + list(range(11, 15)) * 4,
+            list(range(1, 7)) + list(range(1, 7)) * 3
+            + list(range(7, 15)) + list(range(11, 15)) * 3,
         )
-        self.assertEqual({step["repeat_rule_index"] for step in expanded[6:30]}, {1})
-        self.assertEqual({step["repeat_rule_index"] for step in expanded[38:]}, {2})
-        self.assertEqual(len(expanded), 54)
+        self.assertEqual({step["repeat_rule_index"] for step in expanded[6:24]}, {1})
+        self.assertEqual({step["repeat_rule_index"] for step in expanded[32:44]}, {2})
+        self.assertEqual(len(expanded), 44)
+
+    def test_step_cycle_count_is_total_including_first_execution(self) -> None:
+        raw = [
+            {"step_id": "s1", "content": "步骤A", "operator_required": True,
+             "repeat_rules": [{"from_step_id": "s1", "to_step_id": "s1", "count": 4}]},
+        ]
+        steps = PollingWorkOrderService._normalized_steps(raw)
+        expanded = PollingWorkOrderService._expanded_steps(steps)
+        self.assertEqual(len(expanded), 4)
+        self.assertEqual([step["repeat_round"] for step in expanded], [0, 2, 3, 4])
+        self.assertEqual([step.get("repeat_rule_index") for step in expanded], [None, 1, 1, 1])
+
+    def test_step_cycle_count_1_keeps_original_only(self) -> None:
+        raw = [
+            {"step_id": "s1", "content": "步骤A", "operator_required": True,
+             "repeat_rules": [{"from_step_id": "s1", "to_step_id": "s1", "count": 1}]},
+        ]
+        steps = PollingWorkOrderService._normalized_steps(raw)
+        expanded = PollingWorkOrderService._expanded_steps(steps)
+        self.assertEqual(len(expanded), 1)
+        self.assertEqual(expanded[0]["repeat_round"], 0)
+        self.assertNotIn("repeat_rule_index", expanded[0])
+
+    def test_step_cycle_count_boundaries(self) -> None:
+        base = {"step_id": "s1", "content": "步骤A", "operator_required": True}
+        minimum = PollingWorkOrderService._normalized_steps([
+            {**base, "repeat_rules": [{"from_step_id": "s1", "to_step_id": "s1", "count": 1}]},
+        ])
+        self.assertEqual(len(PollingWorkOrderService._expanded_steps(minimum)), 1)
+        maximum = PollingWorkOrderService._normalized_steps([
+            {**base, "repeat_rules": [{"from_step_id": "s1", "to_step_id": "s1", "count": 10}]},
+        ])
+        self.assertEqual(len(PollingWorkOrderService._expanded_steps(maximum)), 10)
+        with self.assertRaisesRegex(Exception, "1–10"):
+            PollingWorkOrderService._normalized_steps([
+                {**base, "repeat_rules": [{"from_step_id": "s1", "to_step_id": "s1", "count": 0}]},
+            ])
+        with self.assertRaisesRegex(Exception, "1–10"):
+            PollingWorkOrderService._normalized_steps([
+                {**base, "repeat_rules": [{"from_step_id": "s1", "to_step_id": "s1", "count": 11}]},
+            ])
+
+    def test_existing_materialized_work_order_steps_are_not_regenerated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = LanPortalStateStore(Path(temp) / "state.sqlite3")
+            service = PollingWorkOrderService(store)
+            target = "rec-existing"
+            materialized = [
+                {"step_key": "1:1", "step_index": 1, "source_step_index": 1, "repeat_round": 0,
+                 "content": "步骤A"},
+                {"step_key": "1:2", "step_index": 2, "source_step_index": 1, "repeat_round": 2,
+                 "repeat_rule_index": 1, "content": "步骤A（第1组循环第2遍，原第1步）"},
+                {"step_key": "1:3", "step_index": 3, "source_step_index": 1, "repeat_round": 3,
+                 "repeat_rule_index": 1, "content": "步骤A（第1组循环第3遍，原第1步）"},
+                {"step_key": "1:4", "step_index": 4, "source_step_index": 1, "repeat_round": 4,
+                 "repeat_rule_index": 1, "content": "步骤A（第1组循环第4遍，原第1步）"},
+                {"step_key": "1:5", "step_index": 5, "source_step_index": 1, "repeat_round": 4,
+                 "repeat_rule_index": 1, "content": "旧版本保存的第五次执行"},
+            ]
+            store.put_document("polling_work_order", target, {
+                "target_record_id": target, "work_type": "maintenance", "state": "running",
+                "scope": "A", "steps": materialized,
+            })
+            self.assertEqual(service.get_group(target)["steps"], materialized)
 
     def test_end_remains_blocked_until_all_reminders_expire(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

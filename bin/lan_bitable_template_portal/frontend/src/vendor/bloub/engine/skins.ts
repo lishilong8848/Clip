@@ -33,6 +33,12 @@ export type ShapeId =
   | 'hexagone'
   | 'nuage'
   | 'goutte'
+  | 'swirl-pile'
+  | 'heart'
+  | 'star'
+  | 'flower'
+  | 'diamond'
+  | 'shield'
 
 export interface BotShape {
   id: ShapeId
@@ -76,6 +82,32 @@ const droplet = normalize(
 /** Capsule couchee : enveloppe de deux disques cote a cote. */
 const capsule = profileFromPolygon(hullOfCircles(-0.42, 0, 0.62, 0.42, 0, 0.62), 0, 0)
 
+const pileOutline = [{ x: .235, y: -1.18 }]
+for (const [cx1,cy1,cx2,cy2,x,y] of [
+  [.27,-.94,.42,-.81,.26,-.65], [.70,-.52,.85,-.15,.50,.04],
+  [1.24,.15,1.22,.78,.62,.84], [.30,.87,-.48,.86,-.70,.82],
+  [-1.18,.73,-1.15,.30,-.59,.12], [-.90,-.12,-.68,-.45,-.35,-.47],
+  [-.56,-.75,.13,-.93,.235,-1.18],
+]) {
+  const start = pileOutline[pileOutline.length - 1]!
+  for (let step = 1; step <= 16; step++) {
+    const t = step/16, u = 1-t
+    pileOutline.push({ x: u**3*start.x+3*u*u*t*cx1!+3*u*t*t*cx2!+t**3*x!,
+      y: u**3*start.y+3*u*u*t*cy1!+3*u*t*t*cy2!+t**3*y! })
+  }
+}
+const swirlPile = normalize(profileFromPolygon(pileOutline, 0, 0), 1.05)
+const heart = normalize(profileFromPolygon(ANGLES.map(a => ({
+  x: Math.pow(Math.sin(a), 3),
+  y: -(13*Math.cos(a)-5*Math.cos(2*a)-2*Math.cos(3*a)-Math.cos(4*a))/16,
+})), 0, 0), 1.06)
+const star = normalize(ANGLES.map(a => .82 + .20 * Math.cos(5*(a + Math.PI/2))), 1.08)
+const flower = normalize(ANGLES.map(a => .88 + .14 * Math.cos(6*a)), 1.04)
+const shield = normalize(profileFromPolygon([
+  { x: -.78, y: -.72 }, { x: .78, y: -.72 }, { x: .76, y: .18 },
+  { x: .46, y: .66 }, { x: 0, y: 1 }, { x: -.46, y: .66 }, { x: -.76, y: .18 },
+], 0, 0), 1.04)
+
 export const SHAPES: BotShape[] = [
   { id: 'cercle', radii: new Array(PROFILE_SAMPLES).fill(1) },
   { id: 'galet', radii: pebble },
@@ -88,7 +120,13 @@ export const SHAPES: BotShape[] = [
   // 0deg : sommets a gauche et a droite, donc aretes du haut et du bas plates
   { id: 'hexagone', radii: regularPolygonProfile(6, 1.04, 0.26, 0) },
   { id: 'nuage', radii: cloud },
-  { id: 'goutte', radii: droplet }
+  { id: 'goutte', radii: droplet },
+  { id: 'swirl-pile', radii: swirlPile },
+  { id: 'heart', radii: heart },
+  { id: 'star', radii: star },
+  { id: 'flower', radii: flower },
+  { id: 'diamond', radii: regularPolygonProfile(4, 1.08, .22, -90) },
+  { id: 'shield', radii: shield }
 ]
 
 // Map indexee par `string` et non par `ShapeId` : les appelants interrogent avec
@@ -145,4 +183,3 @@ export function mixHex(from: string, to: string, t: number): string {
   const c = a.map((x, i) => Math.round(x + (b[i]! - x) * t))
   return `#${c.map((x) => x.toString(16).padStart(2, '0')).join('')}`
 }
-

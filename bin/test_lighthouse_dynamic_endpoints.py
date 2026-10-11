@@ -44,9 +44,9 @@ from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: 
 KNOWN_DYNAMIC_BINDINGS = [
     dict(
         source="lan_bitable_template_portal/frontend/src/components/KnowledgeBasePage.vue",
-        line=508, kind="excluded",
+        line=591, kind="excluded",
         method_paths=[("POST", "/api/assistant/knowledge/files")],
-        window=20, needles=['requestJson(url, { method: "POST", body: form', 'let url = `${BASE}/files`;'],
+        window=20, needles=['uploadJson(url, form, {', 'let url = `${BASE}/files`;'],
         note="Shared knowledge upload uses the authenticated assistant service, not the native business-operation catalog.",
     ),
     # --- covered:可确证命中 native 目录的已知业务端点 ---
@@ -152,11 +152,11 @@ KNOWN_DYNAMIC_BINDINGS = [
 
     dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningPage.vue",
-        line=772, kind="covered",
+        line=799, kind="covered",
         method_paths=[("GET", "/api/learning/papers")],
-        window=4, needles=['`/papers?` + query({ today: 1 })'],
+        window=4, needles=['`/papers?` + query({ today: 1, mode: studyMode.value })'],
         note="个人今日题单只读查询(loadTodayPaper):requestLearning 添加 /api/learning 前缀,"
-             "命中已开放的 GET 目录;源码现已用模板字面量/反引号 ` + query(today)",
+             "命中已开放的 GET 目录;源码现已用模板字面量/反引号 ` + query(today, mode)",
     ),
 
     # --- excluded:已知端点属 native 有意排除能力,必须保持 excluded ---

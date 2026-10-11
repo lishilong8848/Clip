@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from openclaw_service.assistant.lighthouse_alert_tagging import fallback_text, tag_text
+from openclaw_service.assistant.lighthouse_alert_tagging import clean_tags, fallback_text, tag_text
 from openclaw_service.assistant.lighthouse_sources import codes
 
 NS = CHANNEL = 'notice_alert_tags'
@@ -82,11 +82,13 @@ class NoticeAlertTags:
                     self.store.enqueue_outbox_event(CHANNEL, {
                         'idempotency_key': f"display:{job['id']}:{attempt}", 'job_id': job['id'], 'display_only': True},
                         documents={(NS, key): display})
-        result = {key: job.get(key) for key in ('id', 'status', 'action', 'scopes', 'notice_type', 'target_record_id',
+        result = {key: job.get(key) for key in ('id', 'title', 'status', 'action', 'scopes', 'notice_type', 'target_record_id',
                                               'created_at', 'finished_at', 'tags', 'error', 'message_warning')}
         if job['status'] == 'failed':
-            result['error'] = fallback_text(job['notice_type'])
             result.update({key: display[key] for key in ('status', 'tags', 'error', 'finished_at', 'retry_after') if key in display})
+        # Old display overrides may still contain full rules or an outdated error.
+        result['error'] = fallback_text(job['notice_type']) if result['status'] == 'failed' else ''
+        result['tags'] = clean_tags(result.get('tags'))
         return result
 
     async def refresh_display(self, row):

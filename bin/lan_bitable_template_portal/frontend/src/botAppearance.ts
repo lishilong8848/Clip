@@ -18,6 +18,8 @@ export const BOT_COLORS = [
 export const BOT_SHAPES = [
   ['cercle', '圆形'], ['galet', '鹅卵石'], ['squircle', '圆角方形'], ['capsule', '胶囊'],
   ['triangle', '三角形'], ['hexagone', '六边形'], ['nuage', '云朵'], ['goutte', '水滴'],
+  ['swirl-pile', '卷尖便便'], ['heart', '爱心'], ['star', '星星'],
+  ['flower', '花朵'], ['diamond', '菱形'], ['shield', '盾牌'],
 ] as const;
 
 export function normalizeBot(value: unknown): BotAppearance {

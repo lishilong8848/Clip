@@ -59,7 +59,7 @@
               <Loader2 v-if="settingsLoading" :size="17" class="spin" /><Settings v-else :size="17" />
             </button>
             <button v-if="!settingsOpen" class="icon" :disabled="busy || uploading || !state.turns?.length || state.turns.some((t: Dict) => ['running', 'submitted'].includes(t.plan?.status))" title="清空会话" aria-label="清空会话" @click="clearOpen = true"><Trash2 :size="17" /></button>
-            <button class="icon" :disabled="settingsOpen && settingBusy" title="收起助手" aria-label="收起助手" @click="requestPanelClose"><X :size="19" /></button>
+            <button class="icon assistant-collapse" :disabled="settingsOpen && settingBusy" title="收起助手" aria-label="收起助手" @click="requestPanelClose"><X :size="23" /></button>
           </div>
         </header>
 
@@ -121,6 +121,32 @@
               <label class="field-label">接口地址<input v-model="editProfile.endpoint" type="text" maxlength="2000" :disabled="busy || settingBusy" placeholder="https://…/v1/chat/completions" /></label>
               <label class="field-label">模型名称<input v-model="editProfile.model" type="text" maxlength="200" :disabled="busy || settingBusy" /></label>
               <label class="field-label">API Key<input v-model="editProfile.api_key" type="password" autocomplete="new-password" :disabled="busy || settingBusy" :placeholder="editingExisting ? '留空保留原凭证' : '请输入 API Key'" maxlength="500" spellcheck="false" @copy.prevent @cut.prevent @contextmenu.prevent @dragstart.prevent /></label>
+              <fieldset class="capabilities-fieldset" :disabled="busy || settingBusy">
+                <legend>能力配置</legend>
+                <div class="capability-row">
+                  <label><input type="checkbox" name="tool_calls" v-model="editProfile.tool_calls" /><span>工具调用</span></label>
+                  <label><input type="checkbox" name="image_input" v-model="editProfile.image_input" /><span>图片输入</span></label>
+                  <label><input type="checkbox" name="reasoning" :checked="editProfile.reasoning" @change="onReasoningToggle" /><span>思考模式</span></label>
+                  <label><input type="checkbox" name="custom_protocol" v-model="editProfile.custom_protocol" /><span>自定义协议</span></label>
+                </div>
+              </fieldset>
+              <fieldset v-if="editProfile.reasoning" class="capabilities-fieldset" :disabled="busy || settingBusy">
+                <legend>思考选项</legend>
+                <div class="capability-row">
+                  <label><input type="checkbox" name="reasoning_only" v-model="editProfile.reasoning_only" @change="normalizeEffortChoice" /><span>仅思考模式</span></label>
+                  <label><input type="checkbox" name="allow_reasoning_off" v-model="editProfile.allow_reasoning_off" @change="normalizeEffortChoice" /><span>允许关闭思考</span></label>
+                </div>
+                <div class="effort-block">
+                  <span class="effort-label">支持的思考强度</span>
+                  <div class="capability-row">
+                    <label v-for="opt in EFFORT_OPTIONS" :key="opt.value"><input type="checkbox" :name="'reasoning_effort_' + opt.value" :checked="editProfile.reasoning_efforts.includes(opt.value)" @change="toggleEffort(opt.value, $event)" /><span>{{ opt.label }}</span></label>
+                  </div>
+                  <label class="effort-label" for="default-reasoning-effort">默认思考强度</label>
+                  <select id="default-reasoning-effort" name="reasoning_effort" v-model="editProfile.reasoning_effort">
+                    <option v-for="opt in effortDropdownOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                  </select>
+                </div>
+              </fieldset>
             </section>
             <p v-if="settingsError" class="failure" role="alert">{{ settingsError }}</p>
           </div>
@@ -289,7 +315,7 @@
       <ConfirmDialog :open="settingsExitOpen" title="返回会话" message="当前编辑有未保存的内容，返回后这些修改将被丢弃。" tone="warning" @resolve="confirmSettingsExit" />
       <ConfirmDialog :open="panelExitOpen" title="收起助手" message="当前编辑有未保存的内容，收起后这些修改将被丢弃。" tone="warning" @resolve="confirmPanelExit" />
     </aside>
-    <LighthouseBotSettings :open="appearanceOpen" :appearance="appearance" :target="assistantLayer || 'body'" @close="appearanceOpen = false" @saved="saveAppearance" @preview="previewAppearance = $event" />
+    <LighthouseBotSettings :open="appearanceOpen" :appearance="appearance" :theme-source="root" :target="assistantLayer || 'body'" @close="appearanceOpen = false" @saved="saveAppearance" @preview="previewAppearance = $event" />
     </div>
   </Teleport>
 </template>
@@ -362,8 +388,58 @@ async function loadAppearance(): Promise<void> {
   finally { if (appearanceController === controller) { appearanceController = undefined; appearanceLoading.value = false; } }
 }
 
-type EditProfile = { id: string; name: string; endpoint: string; model: string; api_key: string; shared: boolean };
+type ProfileCapabilities = {
+  tool_calls: boolean;
+  image_input: boolean;
+  reasoning: boolean;
+  reasoning_only: boolean;
+  allow_reasoning_off: boolean;
+  custom_protocol: boolean;
+  reasoning_efforts: string[];
+  reasoning_effort: string;
+};
+type EditProfile = { id: string; name: string; endpoint: string; model: string; api_key: string; shared: boolean } & ProfileCapabilities;
 type EditAction = { kind: 'edit'; id: string } | { kind: 'add'; shared?: boolean };
+const EFFORT_VALUES: string[] = ['low', 'medium', 'high', 'xhigh'];
+const EFFORT_OPTIONS = [
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+  { value: 'xhigh', label: '极致' },
+];
+const PROFILE_DEFAULTS: ProfileCapabilities = {
+  tool_calls: true,
+  image_input: true,
+  reasoning: false,
+  reasoning_only: false,
+  allow_reasoning_off: false,
+  custom_protocol: false,
+  reasoning_efforts: ['xhigh'],
+  reasoning_effort: 'xhigh',
+};
+function normalizeProfileCapabilities(raw: Dict): ProfileCapabilities {
+  const reasoning = !!raw.reasoning;
+  const known = EFFORT_VALUES.filter(value => (raw.reasoning_efforts || []).includes(value));
+  // reasoning=false 时按服务端规则重置子状态与强度默认值为 xhigh。
+  const efforts = reasoning && known.length ? [...new Set(known)] : ['xhigh'];
+  const storedEffort = String(raw.reasoning_effort || '');
+  // 未提供 effort 时回退到已选强度中最高的一个，而不是固定的 xhigh（只选了 low 时 xhigh 是无效值）。
+  let effort = efforts[efforts.length - 1] || 'xhigh';
+  if (storedEffort === 'off') effort = reasoning ? 'off' : 'xhigh';
+  else if (efforts.includes(storedEffort)) effort = storedEffort;
+  else if (EFFORT_VALUES.includes(storedEffort)) effort = efforts[efforts.length - 1] || 'xhigh';
+  if (effort === 'off' && (!raw.allow_reasoning_off || raw.reasoning_only)) effort = efforts[efforts.length - 1] || 'xhigh';
+  return {
+    tool_calls: raw.tool_calls !== false,
+    image_input: raw.image_input !== false,
+    reasoning,
+    reasoning_only: reasoning && !!raw.reasoning_only,
+    allow_reasoning_off: reasoning && !!raw.allow_reasoning_off,
+    custom_protocol: !!raw.custom_protocol,
+    reasoning_efforts: efforts,
+    reasoning_effort: effort,
+  };
+}
 type TurnInteraction = { kind: 'navigate'; label: string; url: string; title: string };
 type DraftFile = { localId: string; id?: string; name: string; mime?: string; size?: number; url?: string; preview?: string; uploading: boolean; error: string; is_image?: boolean };
 
@@ -511,7 +587,51 @@ function onNativeToggle(event: Event): void {
 }
 const adminModels = computed<Dict[]>(() => (modelSettings.value.models || []));
 const modelNames = computed<string[]>(() => (state.value.model_options || []).map((m: Dict) => String(m.name)).filter(Boolean));
-const canSaveProfile = computed(() => Boolean(editProfile.value && editProfile.value.name.trim() && editProfile.value.endpoint.trim() && editProfile.value.model.trim()));
+const canSaveProfile = computed(() => {
+  const p = editProfile.value;
+  if (!p || !p.name.trim() || !p.endpoint.trim() || !p.model.trim()) return false;
+  if (p.reasoning && !p.reasoning_efforts.length) return false;
+  return true;
+});
+const effortDropdownOptions = computed(() => {
+  const p = editProfile.value;
+  if (!p || !p.reasoning) return [];
+  const options = EFFORT_OPTIONS.filter(opt => p.reasoning_efforts.includes(opt.value));
+  if (p.allow_reasoning_off && !p.reasoning_only) options.push({ value: 'off', label: '关闭' });
+  return options;
+});
+function onReasoningToggle(event: Event): void {
+  const p = editProfile.value;
+  if (!p) return;
+  const checked = (event.target as HTMLInputElement).checked;
+  p.reasoning = checked;
+  if (!checked) {
+    p.reasoning_only = false;
+    p.allow_reasoning_off = false;
+    p.reasoning_efforts = ['xhigh'];
+    p.reasoning_effort = 'xhigh';
+  } else {
+    if (!p.reasoning_efforts.length) p.reasoning_efforts = ['xhigh'];
+    normalizeEffortChoice();
+  }
+}
+function toggleEffort(value: string, event: Event): void {
+  const p = editProfile.value;
+  if (!p) return;
+  const checked = (event.target as HTMLInputElement).checked;
+  p.reasoning_efforts = checked
+    ? (p.reasoning_efforts.includes(value) ? p.reasoning_efforts : [...p.reasoning_efforts, value])
+    : p.reasoning_efforts.filter(v => v !== value);
+  normalizeEffortChoice();
+}
+function normalizeEffortChoice(): void {
+  const p = editProfile.value;
+  if (!p) return;
+  const efforts = p.reasoning_efforts;
+  const allowed = new Set<string>(efforts);
+  if (p.allow_reasoning_off && !p.reasoning_only) allowed.add('off');
+  if (!allowed.has(p.reasoning_effort)) p.reasoning_effort = efforts[efforts.length - 1] || 'xhigh';
+}
 const deleteMessage = computed(() => {
   if (!deleteTarget.value) return '';
   const editingThis = Boolean(editProfile.value && String(editProfile.value.id) === String(deleteTarget.value.id) && isDirty());
@@ -1346,7 +1466,7 @@ async function loadPlanOptions(turn: Dict, field: Dict, selectedScope = '', sele
 }
 function operationPreview(op: Dict, editing = false): { label: string; value: string }[] {
   if (op.api_id === 'POST /api/message-delivery/send') return editing ? [] : [
-    { label: '收件人', value: op.selected_labels?.recipient_names || '尚未选择' },
+    { label: '收件人', value: op.selected_labels?.recipient_names || (op.body?.recipient_ids?.length === 1 && op.body.recipient_ids[0] === '__self__' ? `当前登录人${props.userName ? ' · ' + props.userName : '（本人）'}` : '尚未选择') },
     { label: '选定内容', value: op.selected_labels?.message_content || '' },
     { label: '文字', value: op.body?.text || '' },
     { label: '附件', value: (op.selected_files || []).map((file: Dict) => file.name).join('、') },
@@ -1540,24 +1660,48 @@ function newModelId(): string {
 }
 function startEdit(m: Dict): void {
   if (!canEditModel(m)) return;
-  editProfile.value = { id: String(m.id || ''), name: String(m.name || ''), endpoint: String(m.endpoint || ''), model: String(m.model || ''), api_key: '', shared: !!m.shared };
+  const caps = normalizeProfileCapabilities(m);
+  editProfile.value = {
+    id: String(m.id || ''), name: String(m.name || ''), endpoint: String(m.endpoint || ''), model: String(m.model || ''), api_key: '', shared: !!m.shared,
+    tool_calls: caps.tool_calls, image_input: caps.image_input, reasoning: caps.reasoning, reasoning_only: caps.reasoning_only, allow_reasoning_off: caps.allow_reasoning_off, custom_protocol: caps.custom_protocol, reasoning_efforts: caps.reasoning_efforts, reasoning_effort: caps.reasoning_effort,
+  };
   editingExisting.value = true;
 }
 function canEditModel(m: Dict): boolean { return !m.shared || !!modelSettings.value.can_manage_shared; }
 function startAdd(shared = false): void {
   if (shared && !modelSettings.value.can_manage_shared) return;
-  editProfile.value = { id: (shared ? 'shared_' : '') + newModelId(), name: '', endpoint: '', model: '', api_key: '', shared };
+  editProfile.value = {
+    id: (shared ? 'shared_' : '') + newModelId(), name: '', endpoint: '', model: '', api_key: '', shared,
+    ...PROFILE_DEFAULTS,
+    reasoning_efforts: [...PROFILE_DEFAULTS.reasoning_efforts],
+  };
   editingExisting.value = false;
+}
+function profileShapeDirtyFrom(baseline: ProfileCapabilities): boolean {
+  const p = editProfile.value!;
+  return p.tool_calls !== baseline.tool_calls
+    || p.image_input !== baseline.image_input
+    || p.reasoning !== baseline.reasoning
+    || p.reasoning_only !== baseline.reasoning_only
+    || p.allow_reasoning_off !== baseline.allow_reasoning_off
+    || p.custom_protocol !== baseline.custom_protocol
+    || JSON.stringify(p.reasoning_efforts) !== JSON.stringify(baseline.reasoning_efforts)
+    || p.reasoning_effort !== baseline.reasoning_effort;
 }
 function isDirty(): boolean {
   if (!editProfile.value) return false;
-  if (!editingExisting.value) return Boolean(editProfile.value.name || editProfile.value.endpoint || editProfile.value.model || editProfile.value.api_key);
+  const p = editProfile.value;
+  if (!editingExisting.value) {
+    return Boolean(p.name || p.endpoint || p.model || p.api_key) || profileShapeDirtyFrom(PROFILE_DEFAULTS);
+  }
   const m = (modelSettings.value.models || []).find((x: Dict) => String(x.id) === editProfile.value!.id);
-  if (!m) return Boolean(editProfile.value.api_key);
-  return editProfile.value.name !== String(m.name || '')
-    || editProfile.value.endpoint !== String(m.endpoint || '')
-    || editProfile.value.model !== String(m.model || '')
-    || Boolean(editProfile.value.api_key);
+  if (!m) return Boolean(p.api_key) || profileShapeDirtyFrom(PROFILE_DEFAULTS);
+  const caps = normalizeProfileCapabilities(m);
+  return p.name !== String(m.name || '')
+    || p.endpoint !== String(m.endpoint || '')
+    || p.model !== String(m.model || '')
+    || Boolean(p.api_key)
+    || profileShapeDirtyFrom(caps);
 }
 function applyEditAction(action: EditAction): void {
   if (action.kind === 'add') { startAdd(!!action.shared); return; }
@@ -1621,7 +1765,17 @@ async function saveModel(): Promise<void> {
   const p = editProfile.value;
   settingBusy.value = true; savingProfile.value = true; settingsError.value = '';
   try {
-    const profile: Dict = { id: p.id, name: p.name.trim(), endpoint: p.endpoint.trim(), model: p.model.trim() };
+    const profile: Dict = {
+      id: p.id, name: p.name.trim(), endpoint: p.endpoint.trim(), model: p.model.trim(),
+      tool_calls: !!p.tool_calls,
+      image_input: !!p.image_input,
+      reasoning: !!p.reasoning,
+      reasoning_only: !!p.reasoning_only,
+      allow_reasoning_off: !!p.allow_reasoning_off,
+      custom_protocol: !!p.custom_protocol,
+      reasoning_efforts: [...p.reasoning_efforts],
+      reasoning_effort: p.reasoning_effort,
+    };
     if (p.api_key.trim()) profile.api_key = p.api_key.trim();
     const result = await call('settings', 'PUT', { action: 'upsert', profile, scope: p.shared ? 'shared' : 'personal' });
     if (disposed) return;
@@ -2319,7 +2473,7 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
   min-height: 0;
   background: transparent;
   border: 0;
-  pointer-events: auto;
+  pointer-events: none;
   touch-action: none;
   user-select: none;
   cursor: grab;
@@ -2381,6 +2535,10 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .icon { padding: 6px; width: 32px; height: 32px; min-height: 32px; border-color: transparent; background: transparent; touch-action: manipulation; }
 .tools button { border-color: transparent; }
 .tools button:hover:not(:disabled) { background: var(--lh-surface-hover); }
+.assistant-header .tools .assistant-collapse { width:42px; height:42px; min-height:42px; flex:0 0 42px; margin-left:5px; padding:8px; border:1px solid #237e75; border-radius:8px; background:#146e63; color:#fff; transition:background 140ms ease,box-shadow 140ms ease; }
+.assistant-header .tools .assistant-collapse:hover:not(:disabled) { background:#0d584f; color:#fff; box-shadow:0 2px 7px #093e4330; }
+.assistant-header .tools .assistant-collapse:focus-visible { outline:3px solid #38bdaa; outline-offset:2px; }
+.assistant-header .tools .assistant-collapse:disabled { opacity:.5; cursor:not-allowed; }
 .thread { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px; scrollbar-gutter: stable; }.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 240px; color: var(--lh-muted); }.empty p { margin: 0; }.muted { color: var(--lh-faint-muted); font-size: 13px; }
 .turn { margin-bottom: 20px; content-visibility: auto; contain-intrinsic-size: auto 260px; }
 .turn:focus-within, .turn.is-pending { content-visibility: visible; }
@@ -2418,6 +2576,15 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .add-model { border-style: dashed; color: var(--lh-accent-strong); min-height: 34px; }.add-model:hover:not(:disabled) { background: var(--lh-accent-soft); }
 .profile-form { display: grid; gap: 12px; border-top: 1px solid var(--lh-border); padding-top: 14px; }.profile-form .field-label { display: grid; gap: 6px; font-size: 13px; color: var(--lh-charcoal); }.profile-form input[type=text], .profile-form input[type=password] { padding: 9px 10px; font: inherit; border: 1px solid var(--lh-input-border); border-radius: 8px; width: 100%; min-width: 0; color: var(--lh-charcoal); }
 .profile-form input:disabled { background: var(--lh-surface-subtle); color: var(--lh-faint-muted); }
+.capabilities-fieldset { margin: 0; padding: 10px 12px; border: 1px solid var(--lh-input-border); border-radius: 8px; background: var(--lh-surface-subtle); }
+.capabilities-fieldset legend { padding: 0 6px; font-size: 12px; color: var(--lh-charcoal-strong); }
+.capabilities-fieldset:disabled { opacity: .6; }
+.capability-row { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.capability-row label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--lh-charcoal); cursor: pointer; }
+.capability-row input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--lh-accent); }
+.effort-block { display: grid; gap: 8px; margin-top: 4px; }
+.effort-label { display: grid; gap: 5px; font-size: 12px; color: var(--lh-muted); }
+.effort-block select { font: inherit; padding: 7px 9px; border: 1px solid var(--lh-input-border); border-radius: 6px; color: var(--lh-charcoal); background: var(--lh-surface); min-height: 34px; }
 .settings-actions { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--lh-border); background: var(--lh-surface-subtle); }
 .lighthouse input:not([type=checkbox]):not([type=file]), .lighthouse textarea, .lighthouse select { color: var(--lh-charcoal); background: var(--lh-surface-subtle); }
 .composer-model { min-width: 0; display: flex; align-items: center; gap: 6px; }

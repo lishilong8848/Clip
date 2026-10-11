@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import threading
 import time
+from itertools import groupby
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,6 +27,24 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 from upload_event_module.config import config  # noqa: E402
+
+
+def _opaque_column_gaps(image) -> list[int]:
+    """Widths (px) of fully transparent columns between opaque signature blocks."""
+    alpha = image.getchannel("A")
+    width, height = image.size
+    occupied = [
+        any(alpha.getpixel((x, y)) > 0 for y in range(height))
+        for x in range(width)
+    ]
+    blocks = []
+    for present, cols in groupby(range(width), key=lambda x: occupied[x]):
+        if present:
+            cols = list(cols)
+            blocks.append((cols[0], cols[-1]))
+    if len(blocks) < 2:
+        return []
+    return [blocks[i + 1][0] - blocks[i][1] - 1 for i in range(len(blocks) - 1)]
 
 
 class FakeMopUploadService(MaintenancePortalService):
@@ -690,8 +709,14 @@ class EngineerMopUploadTests(unittest.TestCase):
         ImageDraw.Draw(signature).line((5, 140, 150, 5, 310, 125), fill="black", width=9)
         buffer = io.BytesIO()
         signature.save(buffer, format="PNG")
-        for merged, count in ((False, 1), (False, 8), (True, 1), (True, 8)):
-            with self.subTest(merged=merged, count=count), tempfile.TemporaryDirectory() as tmpdir:
+
+        for merged, count, roomy, role in (
+            (False, 1, False, "implementer"), (False, 8, False, "implementer"),
+            (True, 1, False, "implementer"), (True, 8, False, "implementer"),
+            (False, 2, True, "implementer"), (True, 3, True, "implementer"),
+            (True, 2, True, "auditor"),
+        ):
+            with self.subTest(merged=merged, count=count, roomy=roomy, role=role), tempfile.TemporaryDirectory() as tmpdir:
                 service = FakeMopUploadService(tmpdir)
                 service._signature_management = SimpleNamespace(references=lambda items: items)
                 service._ensure_mop_staff_signature_usage_confirmed = lambda **kwargs: None
@@ -701,26 +726,27 @@ class EngineerMopUploadTests(unittest.TestCase):
                 sheet = workbook.active
                 sheet.title = "MOP"
                 sheet.merge_cells("A2:B2")
-                sheet["A2"] = "维护实施人："
+                label = "维护审核人" if role == "auditor" else "维护实施人"
+                sheet["A2"] = label + "："
                 sheet["C2"].fill = PatternFill("solid", fgColor="CCE8F0")
-                sheet.column_dimensions["C"].width = 3
-                sheet.column_dimensions["D"].width = 5
+                sheet.column_dimensions["C"].width = 40 if roomy else 3
+                sheet.column_dimensions["D"].width = 40 if roomy else 5
                 sheet.row_dimensions[2].height = 12
                 sheet.row_dimensions[3].height = 9
                 if merged:
                     sheet.merge_cells("C2:D3")
                 source = Path(tmpdir) / "mop.xlsx"
                 workbook.save(source)
-                fields = [{"label": "维护实施人", "row": 1, "label_col": 0, "value_col": 2}]
+                fields = [{"label": label, "row": 1, "label_col": 0, "value_col": 2}]
                 with patch("lan_bitable_template_portal.portal_service.get_data_file_path", side_effect=lambda name: str(Path(tmpdir) / name)):
                     result = MaintenancePortalService.fill_engineer_mop_file(
                         service, scope="A", local_file_path=str(source), sheet_name="MOP", fields=fields,
-                        signatures=[{"role": "implementer", "record_id": f"person-{i}"} for i in range(count)],
+                        signatures=[{"role": role, "record_id": f"person-{i}"} for i in range(count)],
                     )
                 output = load_workbook(result["path"])
                 signed = output["MOP"]
                 self.assertEqual(result["inserted"], count)
-                self.assertEqual(signed["A2"].value, "维护实施人：")
+                self.assertEqual(signed["A2"].value, label + "：")
                 self.assertEqual(signed["C2"].fill.fgColor.rgb[-6:], "CCE8F0")
                 self.assertEqual(signed.row_dimensions[2].height, 12)
                 self.assertEqual(len(signed._images), 1)
@@ -736,6 +762,11 @@ class EngineerMopUploadTests(unittest.TestCase):
                 with Image.open(io.BytesIO(signed._images[0]._data())) as printed:
                     self.assertEqual(printed.mode, "RGBA")
                     self.assertEqual(set(printed.getchannel("A").getdata()), {0, 255})
+                    if roomy:
+                        gaps = _opaque_column_gaps(printed)
+                        self.assertEqual(len(gaps), count - 1)
+                        for gap in gaps:
+                            self.assertGreaterEqual(gap, 8)
                 output.close()
 
     def test_mop_preview_includes_row_heights_for_signature_preview(self):

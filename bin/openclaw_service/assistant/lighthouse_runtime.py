@@ -116,12 +116,17 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
     provider = 'lighthouse'
     for key, item in accounts.items():
         profile = item['profile']
+        from .lighthouse_ai import model_capabilities
+        capabilities = model_capabilities(profile)
         model = {
-            "id": item['agent_id'], "name": 'Lighthouse account model', "reasoning": False,
-            "input": ["text", "image"] if profile.get("vision_verified") else ["text"],
+            "id": item['agent_id'], "name": 'Lighthouse account model', "reasoning": capabilities["reasoning"],
+            "input": ["text", "image"] if capabilities["image_input"] else ["text"],
             "contextWindow": int(profile.get("context_window") or 64000), "maxTokens": 5000,
             "compat": {"maxTokensField": "max_tokens", "supportsDeveloperRole": False},
         }
+        if capabilities["reasoning"]:
+            model["compat"].update(supportsReasoningEffort=True,
+                supportedReasoningEfforts=capabilities["reasoning_efforts"])
         ref = provider + '/' + model['id']
         models.append(model)
         entries[item['agent_id']] = {
@@ -129,6 +134,8 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
             'agentDir': str(item['root'] / 'agent'), 'model': ref,
             'modelPolicy': {'allow': [ref]}, 'skills': [],
         }
+        if not capabilities["tool_calls"]:
+            entries[item['agent_id']]['tools'] = {'deny': list(tool_names)}
         if item.get('model_parameters'):
             entries[item['agent_id']]['models'] = {ref: {'params': item['model_parameters']}}
     config = {
@@ -296,8 +303,9 @@ class OpenClawRuntime:
                     model_key = model.unprotect(profile['key_cipher'])
                 except Exception:
                     raise AssistantError('当前系统无法读取本人模型凭证，请在模型设置中重新配置。', 503) from None
+                from .lighthouse_ai import model_capabilities
                 config_fingerprint = hashlib.sha256(json.dumps({'context': profile.get('context_window') or 64000,
-                    'vision': bool(profile.get('vision_verified')), 'plugin': plugin_hash, 'tools': list(tool_names),
+                    'capabilities': model_capabilities(profile), 'plugin': plugin_hash, 'tools': list(tool_names),
                     'parameters': model_parameters}, sort_keys=True).encode()).hexdigest()
                 item = {"key": key, "agent_id": agent_id(actor['id']), "root": root, "fingerprint": fingerprint,
                         'config_fingerprint': config_fingerprint,
@@ -591,6 +599,20 @@ class OpenClawRuntime:
         if not item or item.get('blocked') or not item.get('busy') or alias != item['agent_id']:
             return JSONResponse({'error': {'message': 'Model identity mismatch'}}, status_code=403)
         payload['model'] = item['profile']['model']
+        from .lighthouse_ai import model_capabilities, model_reasoning_options
+        capabilities = model_capabilities(item['profile'])
+        # Enforce the account profile even if the SDK cached another effort or tool policy.
+        for name in ('reasoning_effort', 'thinking', 'enable_thinking'):
+            payload.pop(name, None)
+        payload.update(model_reasoning_options(item['profile']))
+        if not capabilities['tool_calls']:
+            for name in ('tools', 'tool_choice', 'parallel_tool_calls'):
+                payload.pop(name, None)
+        if isinstance(payload.get('messages'), list):
+            for message in payload['messages']:
+                if isinstance(message, dict) and not capabilities['image_input'] and isinstance(message.get('content'), list):
+                    message['content'] = [part for part in message['content'] if not isinstance(part, dict)
+                                          or part.get('type') not in {'image_url', 'input_image', 'image'}]
         # Recovery compaction in the pinned SDK does not always emit WS events.
         messages = payload.get('messages')
         if item.get('run_id') and isinstance(messages, list) and any(isinstance(message, dict) and

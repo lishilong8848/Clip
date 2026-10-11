@@ -127,7 +127,10 @@ onBeforeUnmount(() => {
 .lighthouse-bot.arriving { animation: bot-arrive 360ms ease both; }
 @keyframes bot-arrive { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .lighthouse-bot.arriving { animation: none; } }
-.lighthouse-bot.interactive :deep(svg) { pointer-events: auto; touch-action: none; user-select: none; cursor: grab; }
+.lighthouse-bot :deep(svg), .lighthouse-bot :deep(svg *) { pointer-events: none; }
+.lighthouse-bot.interactive :deep(svg) { touch-action: none; user-select: none; cursor: grab; }
+.lighthouse-bot:not(.interactive) :deep([data-bot-hit]) { pointer-events: none !important; }
+.lighthouse-bot.interactive .bot-fallback { pointer-events: auto; }
 .lighthouse-bot.interactive :deep(svg:active) { cursor: grabbing; }
 .bot-fallback { width: 62%; height: 62%; border-radius: 50%; background: #0a0a0c; display: flex; justify-content: center; align-items: center; gap: 6px; }
 .bot-fallback i { width: 4px; height: 8px; background: #fff; border-radius: 50%; }

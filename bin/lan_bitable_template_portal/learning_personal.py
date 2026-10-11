@@ -1,6 +1,7 @@
 """Personal allocation and bounded local projections for the learning service."""
 import copy
 import datetime as dt
+import random
 import time
 from collections import Counter, defaultdict
 from contextlib import closing
@@ -44,43 +45,345 @@ def _person_login_ids(row, staff_open_ids, external_open_ids):
     return sorted(login_ids)
 
 
+def _login_directory(service):
+    """Read ONLY the local runtime.state_store snapshot of the HR login directory.
+
+    This never pulls from the cloud and never reads raw password or national-ID
+    fields: the HR snapshot only carries {id,name,employee_no,scopes,inactive,
+    selectable,needs_setup,password_revision,login_ids}. Returns (people, valid).
+
+    ``valid`` is True only when a real snapshot with a ``people`` mapping was
+    actually presented.  A missing snapshot (reader absent / non-dict / no
+    ``people`` key) yields ({}, False) so an empty login directory is never
+    mistaken for a wiped export.
+    """
+    reader = getattr(service, '_login_people_reader', None)
+    if not callable(reader):
+        return {}, False
+    snapshot = reader()
+    valid = isinstance(snapshot, dict) and isinstance(snapshot.get('people'), dict)
+    people = snapshot.get('people') if valid else {}
+    result = {}
+    for rid, row in people.items():
+        if not isinstance(row, dict):
+            continue
+        rid = str(rid or '').strip()
+        if not rid:
+            continue
+        result[rid] = row
+    return result, valid
+
+
+def _hr_active(row):
+    """A personnel row is a live login candidate only while selectable and not inactive."""
+    return bool(row.get('selectable')) and not bool(row.get('inactive'))
+
+
+def _hr_learning_scopes(row):
+    """Retain the single declared ABCDEH learning scope for a personnel row.
+
+    Clear building is required for autonomous/daily learning.  Exactly ONE
+    declared scope total must be present, and that single declared scope must lie
+    inside the bounded ABCDEH learning boundary.  A row like [A,110] declares two
+    buildings and therefore grants nothing -- it must never silently return A.
+    0 declared scopes, more than one declared scope, or an unsupported building
+    (e.g. 110) all return an empty list so no identity/learner is granted and no
+    arbitrary first-floor pick is invented.
+    """
+    declared = [s for s in dict.fromkeys(row.get('scopes') or []) if s]
+    if len(declared) != 1:
+        return []
+    return list(declared) if declared[0] in SCOPES else []
+
+
+def _shared_openids(login_people):
+    """Real Feishu open ids that appear in more than one HR row are ambiguous."""
+    counts = Counter()
+    for row in login_people.values():
+        for oid in set(row.get('login_ids') or []):
+            if oid:
+                counts[oid] += 1
+    return {oid for oid, count in counts.items() if count > 1}
+
+
+def _unique_candidate_openids(login_people, rid, shared_openids=None):
+    """Open ids of one HR row that are unique across the whole HR snapshot.
+
+    Only these may be considered for linking a future Feishu login or for
+    attaching a unique real login id to a freshly created directory person.
+    ``shared_openids`` may be precomputed once per sync and reused here so a
+    full 288-row refresh never rebuilds the whole Counter for every row.
+    """
+    if shared_openids is None:
+        shared_openids = _shared_openids(login_people)
+    row = login_people.get(rid) or {}
+    return [oid for oid in (row.get('login_ids') or []) if oid and oid not in shared_openids]
+
+
+def _directory_login_ids(login_people, rid, previous, exclude_id=None, shared_openids=None):
+    """Attach at most one unique non-shared real open id to a new directory person.
+
+    Shared or ambiguous open ids are never inserted, because that would later let
+    one Feishu principal resolve to more than one learner. The future Feishu
+    switch keeps working through a unique open id when one exists.
+    """
+    unique = _unique_candidate_openids(login_people, rid, shared_openids)
+    if not unique:
+        return []
+    bound = set()
+    for p in previous:
+        if exclude_id is not None and p['id'] == exclude_id:
+            continue
+        bound.update(p.get('login_ids') or [])
+    for oid in unique:
+        if oid not in bound:
+            return [oid]
+    return []
+
+
+def _directory_person_for(rid, row, scopes, login_ids, *, existing=None):
+    alias = 'directory:' + rid
+    if existing:
+        # preserve any previously bound aliases (e.g. a Feishu-linked learner
+        # already carrying this exact directory alias) and only add the new one.
+        aliases = sorted(set(existing.get('aliases') or []) | {alias})
+    else:
+        aliases = [alias]
+    return {'id': alias, 'person_id': alias, 'name': str(row.get('name') or ''),
+            'employee_no': str(row.get('employee_no') or ''), 'scopes': scopes,
+            'aliases': aliases, 'login_ids': login_ids, 'active': _hr_active(row),
+            'source': 'directory'}
+
+
+def _hr_field(existing, row, key):
+    """HR-updated field value; an explicitly empty HR value keeps the existing one."""
+    return str(row.get(key) or (existing or {}).get(key, ''))
+
+
+def _person_needs_hr_update(person, row, scopes, active):
+    return (person.get('active') != active or
+            person.get('name') != _hr_field(person, row, 'name') or
+            person.get('employee_no') != _hr_field(person, row, 'employee_no') or
+            person.get('scopes') != scopes)
+
+
+def _existing_person_hr_value(existing, row, scopes, active):
+    """Refresh a bound person from HR without re-writing history or dropping aliases."""
+    value = {k: v for k, v in existing.items() if not k.startswith('_')}
+    value['name'] = _hr_field(existing, row, 'name')
+    value['employee_no'] = _hr_field(existing, row, 'employee_no')
+    value['scopes'] = scopes  # replace CURRENT scopes exactly; papers keep historical scope
+    value['active'] = active
+    return value
+
+
+def _expected_directory_aliases(login_people, people, login_ids, exclude_id, shared_openids):
+    """Directory aliases expected from HR rows whose unique open id belongs to this person.
+
+    An alias is only returned when this person is the sole active owner of that
+    real, non-shared open id, so two learners never share a directory alias and
+    no merge by name/employee number ever happens.  ``shared_openids`` is a
+    precomputed ambiguous-open-id set reused across the whole refresh.
+    """
+    ids = set(str(x or '') for x in (login_ids or []))
+    result = set()
+    for rid, row in login_people.items():
+        hit = [oid for oid in (row.get('login_ids') or [])
+               if oid and oid not in shared_openids and oid in ids]
+        for oid in hit:
+            others = [p for p in people.values()
+                      if p.get('id') != exclude_id and p.get('active')
+                      and oid in set(p.get('login_ids') or [])]
+            if not others:
+                result.add('directory:' + str(rid).strip())
+    return result
+
+
+def _hr_authority_for_login(login_people, shared_openids, login_ids):
+    """The single HR row that uniquely owns a real non-shared open id of this staff row.
+
+    Returns the HR record id only when exactly one HR row carries a unique
+    non-shared open id inside ``login_ids``.  Shared/ambiguous open ids or zero
+    matches yield None (never guess which HR row is authoritative).
+    """
+    oids = set(o for o in (login_ids or []) if o)
+    matches = set()
+    for rid, row in login_people.items():
+        unique = set(_unique_candidate_openids(login_people, str(rid), shared_openids))
+        if unique & oids:
+            matches.add(str(rid).strip())
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _staff_expected_identity(login_people, people, login_ids, excluded_aliases, shared_openids):
+    """Bind a staff/signature row to an existing active learner instead of duplicating it.
+
+    Used only when the staff aliases have no exact match yet.  If exactly one
+    existing ACTIVE person already uniquely owns this staff row's real, non-shared
+    open id (and does not already carry the staff alias), that person is the same
+    persona and should gain the staff alias -- never a second person.  A shared or
+    ambiguous open id returns None so the caller falls back to a fresh staff
+    person without guessing.
+    """
+    oids = set(o for o in (login_ids or []) if o)
+    if not oids:
+        return None
+    excluded = set(excluded_aliases)
+    candidates = set()
+    for rid, row in login_people.items():
+        unique = set(_unique_candidate_openids(login_people, str(rid), shared_openids))
+        hit = unique & oids
+        if not hit:
+            continue
+        for oid in hit:
+            for p in people.values():
+                if (p.get('active') and oid in set(p.get('login_ids') or [])
+                        and not (excluded & set(p.get('aliases') or []))):
+                    candidates.add(p['id'])
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _write_person(service, conn, value, people, aliases):
+    service._put('person', value['id'], value, conn)
+    people[value['id']] = value
+    for alias in value.get('aliases') or []:
+        aliases[alias].add(value['id'])
+
+
+def _sync_directory_learner(service, conn, people, aliases, rid, row, login_people, shared_openids):
+    """One shared transactional resolver/update for a single HR personnel row.
+
+    Priority for the deterministic directory alias: (1) an exact ``directory:<rid>``
+    match already bound to this HR row (active or otherwise, so reactivations keep
+    history); (2) an existing unique ACTIVE learner matched only through a real,
+    non-shared Feishu open id; (3) a fresh deterministic ``directory:<rid>`` learner
+    (only while the HR metadata says active and inside ABCDEH).  Never merges by
+    name/employee number and never inserts shared open ids.  Returns (id, state)
+    where state is ``''`` or an issue key for the caller.
+    """
+    alias = 'directory:' + str(rid).strip()
+    scopes = _hr_learning_scopes(row)
+    active = _hr_active(row)
+    matches = aliases.get(alias) or set()
+    if len(matches) > 1:
+        return None, '<ambiguous_alias>'
+    identity = None
+    if len(matches) == 1:
+        identity = next(iter(matches))
+    else:
+        unique = _unique_candidate_openids(login_people, rid, shared_openids)
+        if len(unique) == 1:
+            oid = unique[0]
+            candidates = [p for p in people.values()
+                          if p.get('active') and oid in set(p.get('login_ids') or [])
+                          and alias not in set(p.get('aliases') or [])]
+            if len(candidates) == 1:
+                identity = candidates[0]['id']
+    if identity is None:
+        if not active or not scopes:
+            return None, ''
+        identity = alias
+    existing = people.get(identity)
+    if existing is not None:
+        value = _existing_person_hr_value(existing, row, scopes, active)
+        new_aliases = sorted(set(value.get('aliases') or []) | {alias})
+        value['aliases'] = new_aliases
+        # Skip the write when every public business field AND the alias set are
+        # identical: a repeated 288-row HR refresh must not bump SQLite revisions
+        # or mark clean persons dirty for the cloud outbox.
+        if not _person_needs_hr_update(existing, row, scopes, active) and existing.get('aliases') == new_aliases:
+            return existing['id'], ''
+    else:
+        login_ids = _directory_login_ids(login_people, rid, list(people.values()), exclude_id=alias, shared_openids=shared_openids)
+        value = _directory_person_for(rid, row, scopes, login_ids, existing=None)
+    _write_person(service, conn, value, people, aliases)
+    return value['id'], ''
+
+
 def refresh_people(service):
-    if service._people_reader is None:
+    if service._people_reader is None and getattr(service, '_login_people_reader', None) is None:
         return
-    directory = service._people_reader()
-    if not isinstance(directory, dict) or not isinstance(directory.get('people'), list) or any(
-            not source.get('ok') for source in directory.get('sources', {}).values()):
+    directory = service._people_reader() if service._people_reader else None
+    if directory is not None and (not isinstance(directory, dict) or not isinstance(directory.get('people'), list) or any(
+            not source.get('ok') for source in directory.get('sources', {}).values())):
         raise LearningError('人员目录未完整读取，已保留上次名单。', 503)
     from .lighthouse_sources import codes
-    staff_open_ids, external_open_ids = _directory_open_ids(directory)
+    staff_open_ids, external_open_ids = _directory_open_ids(directory) if directory else ({}, {})
+    login_people, hr_valid = _login_directory(service)
+    # Reuse the ambiguity check; never infer a merge between distinct staff rows.
+    shared_openids = _shared_openids(login_people)
+    if directory:
+        staff_ids = Counter(oid for row in directory['people']
+                            for oid in _person_login_ids(row, staff_open_ids, external_open_ids))
+        shared_openids.update(oid for oid, count in staff_ids.items() if count > 1)
     with service.transaction() as conn:
         previous = service._all('person', conn)
+        people = {p['id']: p for p in previous}
         aliases = defaultdict(set)
         for old in previous:
             for alias in old.get('aliases', []):
                 aliases[alias].add(old['id'])
         seen, issues = set(), []
-        for row in directory['people']:
-            keys = sorted(set([row.get('person_key', ''), *row.get('record_aliases', [])]) - {''})
-            staff = [key for key in keys if key.startswith('staff:')]
-            login_ids = _person_login_ids(row, staff_open_ids, external_open_ids)
-            matches = set().union(*(aliases[key] for key in keys))
-            scopes = sorted(codes(row.get('building')) & set(SCOPES))
-            if not keys or len(staff) > 1 or len(matches) > 1 or row.get('identity_warning') or not scopes:
-                issues.append({'name': row.get('name', ''), 'employee_no': row.get('employee_no', ''),
-                               'reason': '人员身份或楼栋需核对'})
-                continue
-            identity = next(iter(matches)) if matches else 'person_' + digest(staff[0] if staff else keys[0])[:32]
-            person = {'id': identity, 'person_id': identity, 'name': row.get('name', ''),
-                      'employee_no': row.get('employee_no', ''), 'scopes': scopes, 'aliases': keys,
-                      'login_ids': login_ids, 'active': True}
-            old = service._get('person', identity, conn)
-            if not old or any(old.get(k) != v for k, v in person.items()):
-                service._put('person', identity, person, conn)
-            seen.add(identity)
+        # --- Legacy staff/external signature directory (preserve existing aliases) ---
+        staff_flow = directory is not None
+        if directory:
+            for row in directory['people']:
+                keys = sorted(set([row.get('person_key', ''), *row.get('record_aliases', [])]) - {''})
+                staff = [key for key in keys if key.startswith('staff:')]
+                login_ids = _person_login_ids(row, staff_open_ids, external_open_ids)
+                matches = set().union(*(aliases[key] for key in keys))
+                scopes = sorted(codes(row.get('building')) & set(SCOPES))
+                if not keys or len(staff) > 1 or len(matches) > 1 or row.get('identity_warning') or not scopes:
+                    issues.append({'name': row.get('name', ''), 'employee_no': row.get('employee_no', ''),
+                                   'reason': '人员身份或楼栋需核对'})
+                    continue
+                identity = next(iter(matches)) if matches else \
+                    (_staff_expected_identity(login_people, people, login_ids, keys, shared_openids)
+                     or 'person_' + digest(staff[0] if staff else keys[0])[:32])
+                old = people.get(identity)
+                aliases_union = set(keys)
+                if old:
+                    # Never drop previously bound directory aliases; explicitly add any
+                    # expected from the HR login directory for this same real open id.
+                    aliases_union |= set(old.get('aliases') or [])
+                aliases_union |= _expected_directory_aliases(login_people, people, login_ids, identity, shared_openids)
+                person = {'id': identity, 'person_id': identity, 'name': row.get('name', ''),
+                          'employee_no': row.get('employee_no', ''), 'scopes': scopes,
+                          'aliases': sorted(aliases_union), 'login_ids': login_ids, 'active': True}
+                # The HR personnel table is the authority for a staff row that maps
+                # to exactly one HR record via a unique real open id: override the
+                # legacy signature building/name with HR so floors never flap A/B.
+                hr_rid = _hr_authority_for_login(login_people, shared_openids, login_ids)
+                if hr_rid:
+                    hr_row = login_people[hr_rid]
+                    person['scopes'] = _hr_learning_scopes(hr_row)
+                    person['name'] = str(hr_row.get('name') or '')
+                    person['employee_no'] = str(hr_row.get('employee_no') or '')
+                    person['active'] = _hr_active(hr_row)
+                if not old or any(old.get(k) != v for k, v in person.items()):
+                    _write_person(service, conn, person, people, aliases)
+                seen.add(identity)
+        # --- HR personnel login directory (shared bounded identity resolver) ---
+        if hr_valid:
+            for rid, row in sorted(login_people.items()):
+                identity, state = _sync_directory_learner(service, conn, people, aliases, rid, row, login_people, shared_openids)
+                if state == '<ambiguous_alias>':
+                    issues.append({'name': row.get('name', ''), 'employee_no': row.get('employee_no', ''),
+                                   'reason': '人员目录存在重复绑定，需核对'})
+                    continue
+                if identity:
+                    seen.add(identity)
+        # Deactivate ONLY people owned by flows that actually presented a source.
+        # A missing staff directory or missing HR snapshot must not silently wipe
+        # unrelated existing people, and a complete-empty snapshot still clears
+        # the people of that flow.
         for old in previous:
-            if old['id'] not in seen and old.get('active'):
-                service._put('person', old['id'], {**old, 'active': False}, conn)
+            if old['id'] in seen or not old.get('active'):
+                continue
+            has_staff = any(a.startswith('staff:') or a.startswith('external:') for a in old.get('aliases') or [])
+            has_dir = any(a.startswith('directory:') for a in old.get('aliases') or []) or old.get('source') == 'directory'
+            if (has_staff and staff_flow) or (has_dir and hr_valid):
+                _write_person(service, conn, {**old, 'active': False}, people, aliases)
         service._put('local', 'people_sync', {'at': stamp(), 'checked_at': time.time(), 'issues': issues}, conn, False)
 
 
@@ -110,27 +413,77 @@ def _request_login_refresh(service):
             pass
 
 
+
+
+
 def resolve_self(service, open_id):
     """Stable mapping from the session login to exactly one active local person.
 
-    Matching uses only private real-Feishu-open-id login_ids persisted by
-    refresh_people; it never falls back to name/employee-number joins. Reads are
-    strictly local: a cold upgrade (people already present, login_ids missing)
-    only wakes the existing background worker, which is throttled here.
+    Feishu identities match private login_ids (unchanged). Password principals
+    (`personnel_<HR record id>`) resolve through the persistent exact
+    `directory:<rid>` alias: an existing exact alias wins; otherwise an existing
+    unique active learner is linked ONLY through a unique non-shared real Feishu
+    open id; unmatched/ambiguous cases get their own deterministic
+    `directory:<rid>` learner. Reads are strictly local and never merge by
+    name/employee number or touch password fields. A fast lock-free read returns
+    immediately when the bound learner is already up to date; otherwise the shared
+    transactional resolver atomically syncs metadata or creates/links the learner.
     """
+    empty = {'person_id': '', 'person': None, 'identity_issue': ''}
     people_rows = service._all('person')
     login_sets = [p.get('login_ids') or [] for p in people_rows]
-    matches = [p for p, login_ids in zip(people_rows, login_sets)
-               if p.get('active') and open_id in set(login_ids)]
-    empty = {'person_id': '', 'person': None, 'identity_issue': ''}
-    if not matches:
-        if people_rows and any(not login_ids for login_ids in login_sets):
-            _request_login_refresh(service)
+    if not str(open_id).startswith('personnel_'):
+        matches = [p for p, login_ids in zip(people_rows, login_sets)
+                   if p.get('active') and open_id in set(login_ids)]
+        if not matches:
+            if people_rows and any(not login_ids for login_ids in login_sets):
+                _request_login_refresh(service)
+            return {**empty, 'identity_issue': '登录账号与人员名单尚未关联，请管理员先同步人员目录。'}
+        if len(matches) > 1:
+            return {**empty, 'identity_issue': '登录账号关联到多个人员，请管理员核对后重试。'}
+        person_row = matches[0]
+        return {'person_id': person_row['id'], 'person': person(service, person_row['id']), 'identity_issue': ''}
+
+    record_id = str(open_id).removeprefix('personnel_')
+    login_people, _ = _login_directory(service)
+    row = login_people.get(record_id)
+    if not row or not _hr_active(row) or not _hr_learning_scopes(row):
+        _request_login_refresh(service)
         return {**empty, 'identity_issue': '登录账号与人员名单尚未关联，请管理员先同步人员目录。'}
-    if len(matches) > 1:
+    alias = 'directory:' + record_id
+    scopes = _hr_learning_scopes(row)
+    active = True
+    # Fast, lock-free read for the common already-resolved and already-synced case.
+    exact = [p for p in people_rows if p.get('active') and alias in set(p.get('aliases') or [])]
+    if len(exact) == 1 and not _person_needs_hr_update(exact[0], row, scopes, active):
+        return {'person_id': exact[0]['id'], 'person': person(service, exact[0]['id']), 'identity_issue': ''}
+    if len(exact) > 1:
         return {**empty, 'identity_issue': '登录账号关联到多个人员，请管理员核对后重试。'}
-    person_row = matches[0]
-    return {'person_id': person_row['id'], 'person': person(service, person_row['id']), 'identity_issue': ''}
+    if not service._restored:
+        # Cold restore: NEVER create/bind a NEW learner before the cloud history is
+        # fully restored -- doing so would split the cloud identity into two people.
+        # Ask the existing restore worker and return an explicit restoring message;
+        # no new person or outbox write happens until the restore finishes.
+        service._restore_requested = True
+        service._wake.set()
+        return {**empty, 'identity_issue': '学习记录正在恢复，完成后即可继续；不会重复分配。'}
+
+    # Slow path: linking/creation/metadata-sync must be atomic so parallel logins
+    # never duplicate and a changed HR row is never half-applied.
+    shared_openids = _shared_openids(login_people)
+    with service.transaction() as conn:
+        rows = service._all('person', conn)
+        people = {p['id']: p for p in rows}
+        aliases = defaultdict(set)
+        for p in rows:
+            for a in p.get('aliases', []):
+                aliases[a].add(p['id'])
+        identity, state = _sync_directory_learner(service, conn, people, aliases, record_id, row, login_people, shared_openids)
+    if state == '<ambiguous_alias>':
+        return {**empty, 'identity_issue': '登录账号关联到多个人员，请管理员核对后重试。'}
+    if not identity:
+        return {**empty, 'identity_issue': '登录账号与人员名单尚未关联，请管理员先同步人员目录。'}
+    return {'person_id': identity, 'person': person(service, identity), 'identity_issue': ''}
 
 
 def people(service, actor, query):
@@ -212,6 +565,11 @@ def publish(service, day):
 
 
 def claim(service, actor, payload):
+    mode = payload.get('mode', 'daily')
+    if mode == 'practice':
+        return claim_practice(service, actor, payload)
+    if mode != 'daily':
+        raise LearningError('学练类型无效。')
     scope, self_person = service._claim_context(actor, payload)
     day = core.now().date()
     date = day.isoformat()
@@ -250,6 +608,48 @@ def claim(service, actor, payload):
                  'questions': questions, 'shortage': shortage, 'reserve_id': reserve['id'], 'notify': publication['notify']}
         service._put('paper', identity, paper, conn)
         service._put('reserve', reserve['id'], {**reserve, 'person_id': learner['id'], 'paper_id': identity}, conn)
+    return service.public_paper(paper, actor)
+
+
+def claim_practice(service, actor, payload):
+    scope, self_person = service._claim_context(actor, payload)
+    day = core.now().date()
+    date = day.isoformat()
+    if payload.get('date', date) != date:
+        raise LearningError('只能开始今日自主练习。')
+    operation = core.clean(payload.get('operation_id', ''), 150)
+    if not operation:
+        raise LearningError('缺少提交标识，请重新点击开始学练。')
+    if not service._restored:
+        service._restore_requested = True
+        service._wake.set()
+        raise LearningError('学习记录正在恢复，完成后即可开始学练。', 503)
+    with service.transaction() as conn:
+        learner = person(service, self_person['id'], scope=scope, active=True, conn=conn)
+        identity = f'practice:{date}:{learner["id"]}:{digest(operation)[:32]}'
+        existing = service._get('paper', identity, conn)
+        if existing:
+            if existing.get('deleted_at'):
+                raise LearningError('这次练习已被删除，请重新开始学练。', 409)
+            return service.public_paper(existing, actor)
+        used = {row[0] for row in conn.execute('SELECT family_id FROM learning_usage WHERE person_id=? AND day BETWEEN ? AND ?',
+            (learner['id'], (day - dt.timedelta(days=6)).isoformat(), date))}
+        available = candidates(service, conn)
+        questions, shortage = [], {}
+        for bank, wanted in QUOTAS.items():
+            pool = {q['family_id']: q for q in available if q['bank'] == bank and q['family_id'] not in used}
+            picked = random.SystemRandom().sample(list(pool.values()), min(wanted, len(pool)))
+            questions.extend({k: copy.deepcopy(v) for k, v in q.items() if not k.startswith('_')} for q in picked)
+            used.update(q['family_id'] for q in picked)
+            shortage[bank] = wanted - len(picked)
+        if any(shortage.values()):
+            missing = '；'.join(f'{BANKS[bank]}缺{count}题' for bank, count in shortage.items() if count)
+            raise LearningError('近7天去重后可用题目不足15道：' + missing + '。请补充题库或稍后再练习。')
+        paper = {'id': identity, 'mode': 'practice', 'person_id': learner['id'], 'person': learner, 'date': date, 'scope': scope,
+                 'created_at': core.now().isoformat(timespec='microseconds'), 'claimed_by': actor['id'], 'claimed_by_name': actor.get('name', ''),
+                 'questions': questions, 'shortage': shortage, 'notify': False}
+        service._put('paper', identity, paper, conn)
+        service._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
     return service.public_paper(paper, actor)
 
 
@@ -319,18 +719,22 @@ def profile(service, actor, query):
     summary = summarize(results, papers)
     people_rows, buildings = [], []
     ids = {r['person_id'] for r in results + practices} | {p['person_id'] for p in papers}
+    directory = {}
+    if actor.get('is_admin') and not scope and not identity and query.get('all_people') == '1':
+        directory = {p['id']: p for p in service._all('person')}
+        ids.update(p['id'] for p in directory.values() if p.get('active') and set(p.get('scopes') or []) & set(SCOPES))
     today = core.now().date().isoformat()
     for pid in sorted(ids):
         own = [p for p in papers if p['person_id'] == pid]
         latest = own[-1] if own else {}
-        p = service._get('person', pid) or latest.get('person') or {'id': pid, 'name': '历史人员', 'employee_no': ''}
+        p = directory.get(pid) or service._get('person', pid) or latest.get('person') or {'id': pid, 'name': '历史人员', 'employee_no': ''}
         rows = [r for r in results if r['person_id'] == pid]
         activity = rows + practices_by_person.get(pid, [])
         latest_activity = max(activity, key=lambda r: r['submitted_at'], default={})
         today_paper = service._get('paper', 'personal:' + today + ':' + pid)
         progress = service.public_paper(today_paper, actor)['stats'] if today_paper and not today_paper.get('deleted_at') and (not scope or today_paper['scope'] == scope) else None
         people_rows.append({'person_id': pid, 'name': p['name'], 'employee_no': p.get('employee_no', ''),
-            'scope': latest.get('scope') or latest_activity.get('scope', ''), 'summary': summarize(rows, own, pid=pid), 'today': progress,
+            'scope': latest.get('scope') or latest_activity.get('scope') or '、'.join(p.get('scopes') or []), 'summary': summarize(rows, own, pid=pid), 'today': progress,
             'last_answered_at': latest_activity.get('submitted_at', '')})
     for code in SCOPES:
         if not scope or scope == code:
@@ -364,7 +768,7 @@ def profile(service, actor, query):
     available = candidates(service, None) if actor.get('is_admin') else []
     inventory = {bank: {'available': len({q['family_id'] for q in available if q['bank'] == bank})} for bank in BANKS}
     today_rows = [r for r in results if r['day'] == today]
-    today_papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=today, end=today) if not p.get('deleted_at')]
+    today_papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=today, end=today) if not p.get('deleted_at') and p.get('mode') != 'practice']
     for p in today_papers:
         records.setdefault(p['id'], service._get('record', p['id']) or {})
     return {'person': learner, 'summary': summary, 'today_summary': summarize(today_rows, today_papers, practice_rows=practices_by_day.get(today, [])),

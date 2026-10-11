@@ -1093,6 +1093,15 @@ class PortalAgent:
         control = _notice_frontend_fields(work, sorted(allowed))
         defaults = _draft_from_record(original or {}, work_type=work)
         defaults.update({key: _result_refs(value, [], references, queries) for key, value in patch.items() if key in {child["path"] for child in control["children"]}})
+        # Ending a native progress-carrying notice must auto-fill 本次进度 with the
+        # canned completion text.  Historical progress from the original record is
+        # never reused as the user's input for an end action: an explicit nonblank
+        # patch.progress wins, otherwise the default is used.
+        if body.get("action") == "end" and work != "adjust":
+            from lan_bitable_template_portal.notice_panel_data import END_PROGRESS_DEFAULT
+            progress = patch.get("progress", None)
+            if progress is None or not str(progress).strip():
+                defaults["progress"] = END_PROGRESS_DEFAULT
         if work == "power" and body.get("notice_type"):
             defaults["notice_type"] = body["notice_type"]
         buildings = codes(defaults.get("building_codes")) or codes(patch.get("building")) or (codes(body.get("scope")) if body.get("scope") != "ALL" else allowed if len(allowed) == 1 else set())
@@ -1236,6 +1245,9 @@ class PortalAgent:
             op = copy.deepcopy(operation)
             op.setdefault("body", {})
             if op["api_id"] == "POST /api/message-delivery/send":
+                from .lighthouse_message_delivery import feishu_delivery_requested, self_delivery_requested
+                if question and not feishu_delivery_requested(question):
+                    raise AssistantError("尚未确认通过飞书发送，请先在当前对话提供内容；用户明确要求飞书后再准备发送。")
                 op = _result_refs(op, [], references, queries)
                 rows = [person for value in (queries or {}).values() if isinstance(value, dict)
                         for person in value.get("people", []) if isinstance(person, dict) and person.get("record_id") and person.get("employee_no") and person.get("account_nature", "").upper() == "VNET"]
@@ -1253,27 +1265,32 @@ class PortalAgent:
                     op['body'].pop('recipient_ids')
                 text = op['body'].get('text', '')
                 explicit_text = isinstance(text, str) and bool(text.strip()) and text.strip() in question
-                header = question.partition(text.strip())[0] if explicit_text else ''
+                header = question.partition(text.strip())[0] if explicit_text else question
+                to_self = self_delivery_requested(header)
+                if to_self:
+                    chosen = requested = ['__self__']
+                    op['body']['recipient_ids'] = chosen
                 people = {person['record_id']: person for person in rows}
                 if me and me.get('record_id'):
                     people[me['record_id']] = me
                 addressed = {identity for identity, person in people.items() if person.get('name') and person['name'] in header
                              and person.get('employee_no') and re.search(r'(?<!\d)' + re.escape(str(person['employee_no'])) + r'(?!\d)', header)}
-                if me and re.search(r'(?:发给|发送给|转发给|给|向)\s*(?:我|自己|本人)', header):
-                    addressed.add(me['record_id'])
+                if to_self:
+                    addressed.add(me['record_id'] if me else '__self__')
                 selected_people = {me['record_id'] if value == '__self__' and me else value for value in chosen}
-                complete = bool(chosen and chosen == requested and ('__self__' not in chosen or me)
+                complete = bool(chosen and chosen == requested and ('__self__' not in chosen or me or to_self)
                                 and selected_people == addressed and explicit_text and not file_ids and not op.get('files'))
                 if complete:
                     ready_messages[index] = {'recipient_ids': '、'.join(option['label'] for option in options if option['value'] in chosen)}
                     options = [option for option in options if option['value'] in chosen]
-                fields.extend([
+                message_fields = [
                     {"name": f"step{index}.recipient_ids", "operation_index": index, "path": "recipient_ids", "section": "body",
                      "type": "multiselect", "label": "收件人（姓名 · 工号）", "required": True, "minItems": 1, "maxItems": 10,
                      "options_source": "message_recipients", "options": options, "value": chosen, "question_text": "按姓名或工号查找，仅可选择能直接接收消息的人员。"},
                     {"name": f"step{index}.text", "operation_index": index, "path": "text", "section": "body", "type": "textarea",
                      "label": "消息正文" if explicit_text else "补充文字", "value": text if explicit_text else "", "maxlength": 50000, "required": explicit_text},
-                ])
+                ]
+                fields.extend(field for field in message_fields if not to_self or field['path'] != 'recipient_ids')
                 from .lighthouse_message_delivery import content_field
                 content = None if explicit_text else content_field(self, actor, op['body'], queries, file_ids, index)
                 if content:
@@ -2300,6 +2317,13 @@ class PortalAgent:
                     for key, item in filled.items():
                         if item != old.get(key) or body.get("action") == "start" and key not in field.get("_patch_fields", []):
                             patch[key] = item
+                    # A native end action must always carry 本次进度 in the final
+                    # payload.  The canned completion default may be accepted
+                    # unchanged (identical to the form baseline), so the diff loop
+                    # above would otherwise drop it, while an explicit edit is
+                    # already present in ``filled`` and preserved here.
+                    if body.get("action") == "end" and "progress" in filled and str(body.get("work_type") or "") != "adjust":
+                        patch["progress"] = filled["progress"]
                     if "notice_type" in filled:
                         body["notice_type"] = filled["notice_type"]
                     if "building_codes" in patch:

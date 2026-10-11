@@ -1,5 +1,5 @@
 <template>
-  <section class="link-directory-page" :aria-busy="loading">
+  <section ref="pageElement" class="link-directory-page" :aria-busy="loading" @pointermove="pointerMove" @pointerup="pointerDrop" @pointercancel="endDrag" @lostpointercapture="endDrag">
     <VnetBackButton to="/" title="返回首页" />
 
     <header class="page-head">
@@ -79,6 +79,10 @@
       <AlertCircle :size="18" aria-hidden="true" />
       <span>{{ staleWarning }}</span>
     </div>
+    <div v-if="orderMessage || reordering" class="order-status" :class="{ failed: orderFailed }" role="status">
+      <LoadingIndicator v-if="reordering">正在保存排序...</LoadingIndicator>
+      <span v-else>{{ orderMessage }}</span>
+    </div>
     <div v-if="!items.length && !error && !loading" class="state-block">
       {{ canEdit ? '暂无链接，可点击「新增链接」开始维护导航目录。' : '暂无链接。' }}
     </div>
@@ -101,7 +105,8 @@
           <tr
             v-for="row in pageItems"
             :key="String(row.id)"
-            :class="{ untrusted: !isTrustedUrl(row.url) }"
+            :data-link-id="row.id"
+            :class="{ untrusted: !isTrustedUrl(row.url), dragging: draggedId === String(row.id), moved: movedId === String(row.id), 'drop-before': dropTarget === String(row.id) && dropPlacement === 'before', 'drop-after': dropTarget === String(row.id) && dropPlacement === 'after' }"
           >
             <td class="name-cell">
               <a
@@ -145,6 +150,13 @@
                 >
                   <Trash2 :size="16" aria-hidden="true" />
                 </button>
+                <button type="button" class="icon-button drag-handle"
+                  :disabled="saving || loading"
+                  :aria-label="'调整顺序：' + row.name" title="拖动调整顺序；悬停分页按钮可跨页；也可按上下方向键"
+                  @pointerdown="startDrag($event, row)" @dragstart.prevent
+                  @keydown.up.prevent="moveByKeyboard(row, -1)" @keydown.down.prevent="moveByKeyboard(row, 1)">
+                  <GripVertical :size="17" aria-hidden="true" />
+                </button>
               </div>
             </td>
           </tr>
@@ -152,12 +164,12 @@
       </table>
     </div>
 
-    <footer v-if="filteredItems.length" class="table-footer">
+    <footer v-if="filteredItems.length" class="table-footer" :class="{ 'drag-pagination': !!draggedId }">
       <span>每页 {{ PAGE_SIZE }} 条 · 共 {{ filteredItems.length }} 条</span>
       <nav aria-label="链接列表分页">
-        <button type="button" :disabled="page <= 1" @click="page -= 1">上一页</button>
+        <button type="button" data-page-direction="-1" :disabled="page <= 1 || saving" :class="{ 'page-hover': hoverDirection === -1 }" title="拖动时悬停翻到上一页" @click="page -= 1">上一页</button>
         <b>{{ page }} / {{ pageCount }}</b>
-        <button type="button" :disabled="page >= pageCount" @click="page += 1">下一页</button>
+        <button type="button" data-page-direction="1" :disabled="page >= pageCount || saving" :class="{ 'page-hover': hoverDirection === 1 }" title="拖动时悬停翻到下一页" @click="page += 1">下一页</button>
       </nav>
     </footer>
 
@@ -241,6 +253,7 @@
       </div>
     </UiTransition>
 
+    <Teleport to="body"><div v-if="draggedId" class="link-drag-preview" :style="dragPosition"><GripVertical :size="16" /><span>{{ dragName }}</span></div></Teleport>
     <ConfirmDialog
       :open="confirmOpen"
       tone="danger"
@@ -258,6 +271,7 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import {
   AlertCircle,
   Globe,
+  GripVertical,
   Pencil,
   Plus,
   RefreshCw,
@@ -298,6 +312,16 @@ const categoryFilter = ref("");
 const kindFilter = ref<"" | "bitable" | "webpage">("");
 const page = ref(1);
 const saving = ref(false);
+const pageElement=ref<HTMLElement|null>(null),dragName=ref('');
+const pointer=reactive({x:0,y:0});
+const dragPosition=computed(()=>({left:Math.max(8,Math.min(pointer.x+12,window.innerWidth-320))+'px',top:Math.min(pointer.y+12,window.innerHeight-45)+'px'}));
+let dragStart: {id:string;pointerId:number;x:number;y:number}|null=null;
+let scrollFrame=0;
+const draggedId = ref(""), dropTarget = ref(""), dropPlacement = ref<"before" | "after">("before");
+const reordering = ref(false), movedId = ref(""), orderMessage = ref(""), orderFailed = ref(false);
+const hoverDirection = ref(0);
+let pageHoverTimer: ReturnType<typeof setTimeout> | undefined;
+let disposed = false;
 
 let readController: AbortController | undefined;
 let listGeneration = 0;
@@ -331,7 +355,8 @@ const sortedFiltered = computed(() => {
     const sa = Number(a.sort ?? 0);
     const sb = Number(b.sort ?? 0);
     if (sa !== sb) return sa - sb;
-    return String(a.id).localeCompare(String(b.id));
+    if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+    return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
   });
 });
 
@@ -347,6 +372,98 @@ watch([search, categoryFilter, kindFilter, () => items.value.length], () => {
 watch(pageCount, (count) => {
   if (page.value > count) page.value = count;
 });
+
+function clearPageHover(): void {
+  clearTimeout(pageHoverTimer);pageHoverTimer=undefined;hoverDirection.value=0;
+}
+function endDrag(): void {
+  const active=dragStart;dragStart=null;
+  clearPageHover();cancelAnimationFrame(scrollFrame);draggedId.value="";dropTarget.value="";
+  window.removeEventListener("keydown", dragKeydown, true);
+  if(active&&pageElement.value?.hasPointerCapture(active.pointerId))pageElement.value.releasePointerCapture(active.pointerId);
+}
+function dragKeydown(event:KeyboardEvent):void {
+  if(event.key==='Escape'&&dragStart){event.preventDefault();event.stopImmediatePropagation();endDrag();}
+}
+function startDrag(event: PointerEvent, row: LinkDirectoryItem): void {
+  if(!canEdit.value||saving.value||loading.value||event.button!==0||!event.isPrimary)return;
+  event.preventDefault();
+  dragStart={id:String(row.id),pointerId:event.pointerId,x:event.clientX,y:event.clientY};
+  dragName.value=row.name;pointer.x=event.clientX;pointer.y=event.clientY;
+  // Capture on the stable page, so changing pagination cannot lose the dragged row.
+  pageElement.value?.setPointerCapture(event.pointerId);
+  window.addEventListener('keydown',dragKeydown,true);
+}
+function pointerMove(event:PointerEvent):void {
+  if(!dragStart||dragStart.pointerId!==event.pointerId)return;
+  pointer.x=event.clientX;pointer.y=event.clientY;
+  if(!draggedId.value&&Math.hypot(pointer.x-dragStart.x,pointer.y-dragStart.y)<5)return;
+  if(!draggedId.value){draggedId.value=dragStart.id;movedId.value='';scrollFrame=requestAnimationFrame(scrollDrag);}
+  updateDragTarget();
+}
+function updateDragTarget():void {
+  const target=document.elementFromPoint(pointer.x,pointer.y);
+  if(!target||!pageElement.value?.contains(target)){clearPageHover();dropTarget.value='';return;}
+  const pager=target.closest<HTMLButtonElement>('button[data-page-direction]');
+  if(pager&&!pager.disabled){
+    const direction=Number(pager.dataset.pageDirection);dropTarget.value='';
+    if(pageHoverTimer&&hoverDirection.value===direction)return;
+    clearPageHover();hoverDirection.value=direction;
+    pageHoverTimer=setTimeout(async()=>{
+      pageHoverTimer=undefined;
+      if(!draggedId.value)return;
+      page.value=Math.max(1,Math.min(pageCount.value,page.value+direction));
+      await nextTick();if(draggedId.value)updateDragTarget();
+    },650);
+    return;
+  }
+  clearPageHover();
+  const row=target.closest<HTMLElement>('tr[data-link-id]');dropTarget.value=row?.dataset.linkId||'';
+  if(row){const bounds=row.getBoundingClientRect();dropPlacement.value=pointer.y<bounds.top+bounds.height/2?'before':'after';}
+}
+function scrollDrag():void {
+  if(!draggedId.value)return;
+  if(!hoverDirection.value){
+    const delta=pointer.y<65?-10:pointer.y>window.innerHeight-65?10:0;
+    if(delta){window.scrollBy(0,delta);updateDragTarget();}
+  }
+  scrollFrame=requestAnimationFrame(scrollDrag);
+}
+function pointerDrop(event:PointerEvent):void {
+  if(!dragStart||dragStart.pointerId!==event.pointerId)return;
+  if(draggedId.value)updateDragTarget();
+  const id=draggedId.value,target=dropTarget.value,placement=dropPlacement.value;endDrag();
+  if(id&&target)void moveEntry(id,target,placement);
+}
+function moveByKeyboard(row: LinkDirectoryItem, direction: number): void {
+  const index=sortedFiltered.value.findIndex(item=>String(item.id)===String(row.id));
+  const target=sortedFiltered.value[index+direction];
+  if(target)void moveEntry(String(row.id),String(target.id),direction<0?"before":"after");
+}
+async function moveEntry(id: string, target: string, placement: "before" | "after"): Promise<void> {
+  if(!canEdit.value||saving.value||loading.value||id===target)return;
+  listGeneration++;readController?.abort();saving.value=true;reordering.value=true;
+  orderMessage.value="";orderFailed.value=false;
+  try {
+    const data=await requestJson("/api/link-directory/reorder",{
+      method:"POST",body:JSON.stringify({record_id:id,target_id:target,placement}),timeoutMs:WRITE_TIMEOUT,
+    });
+    if(disposed)return;
+    if(!Array.isArray(data.items))throw new Error("排序结果未确认，请刷新目录核对。");
+    applyData(data);staleWarning.value="";movedId.value=id;
+    await nextTick();
+    const index=sortedFiltered.value.findIndex(row=>String(row.id)===id);
+    if(index>=0)page.value=Math.floor(index/PAGE_SIZE)+1;
+    orderMessage.value="顺序已保存";
+    saving.value=false;reordering.value=false;
+    await nextTick();
+    const handle=document.querySelector<HTMLElement>(".link-table tr.moved .drag-handle");
+    handle?.focus({preventScroll:true});
+    handle?.closest("tr")?.scrollIntoView({behavior:"smooth",block:"nearest"});
+  } catch(e) {
+    if(!disposed){orderFailed.value=true;orderMessage.value=e instanceof Error?e.message:"排序未完成，请刷新核对后重试。";}
+  } finally {saving.value=false;reordering.value=false;}
+}
 
 const HAS_UNSAFE_CHARS = /[\u0000-\u0020\u007f]/;
 
@@ -421,7 +538,7 @@ function applyData(data: Record<string, any>): void {
 }
 
 function onRevalidated(data: Record<string, any>): void {
-  if (modalOpen.value || saving.value) return;
+  if (modalOpen.value || saving.value || draggedId.value) return;
   applyData(data);
 }
 
@@ -677,6 +794,7 @@ watch(modalOpen, async (open, previous) => {
 });
 
 onBeforeUnmount(() => {
+  disposed=true;endDrag();
   readController?.abort();
   modalOwner?.release();
   modalOwner = undefined;
@@ -933,7 +1051,20 @@ button:disabled {
 .link-table th:nth-child(2) { width: 14%; }
 .link-table th:nth-child(3) { width: auto; }
 .link-table th:nth-child(4) { width: 72px; }
-.link-table th:nth-child(5) { width: 96px; }
+.link-table th:nth-child(5) { width: 132px; }
+
+.drag-handle { cursor: grab; color: #627990; touch-action: none; }
+.drag-handle:active { cursor: grabbing; }
+.link-table tr.dragging { opacity: .45; }
+.link-drag-preview { position:fixed; z-index:2600; pointer-events:none; display:flex; align-items:center; gap:6px; width:max-content; max-width:300px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:8px 10px; border:1px solid #b9d5f2; border-radius:6px; background:#fff; color:#244f79; box-shadow:0 4px 16px #294e7826; font-size:13px; }
+.link-drag-preview svg { flex:none; }.link-drag-preview span { overflow:hidden; text-overflow:ellipsis; }
+.link-table tr.moved { background: #edf7ff; }
+.link-table tr.drop-before td { box-shadow: inset 0 3px #2776ce; }
+.link-table tr.drop-after td { box-shadow: inset 0 -3px #2776ce; }
+.order-status { min-height: 22px; color: #237553; font-size: 13px; }
+.order-status.failed { color: #b33a3a; }
+.table-footer.drag-pagination { position: sticky; bottom: 12px; z-index: 5; padding: 10px 64px 10px 12px; background: #fff; border: 1px solid #b9d5f2; border-radius: 8px; box-shadow: 0 4px 18px #294e7820; }
+.table-footer button.page-hover { background: #e5f1ff; border-color: #2776ce; }
 
 .name-cell a {
   color: #1554df;

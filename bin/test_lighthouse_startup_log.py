@@ -12,6 +12,10 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+BIN = Path(__file__).resolve().parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
 from .lan_bitable_template_portal import lighthouse_startup_log as logs
 
 
@@ -78,7 +82,6 @@ class StartupLogTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
 
     def test_controller_reuses_one_worker_and_stop_joins_it(self):
-        sys.path.insert(0,str(Path(__file__).resolve().parent))
         from clipflow_backend.process_controller import BackendProcessPortalController
         controller = BackendProcessPortalController()
         controller._process = Mock(pid=123)
@@ -94,7 +97,6 @@ class StartupLogTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
 
     def test_launcher_start_forwards_real_child_logs_without_starting_business_backend(self):
-        sys.path.insert(0,str(Path(__file__).resolve().parent))
         from clipflow_backend.process_controller import BackendProcessPortalController
         with socket.socket() as listener:
             listener.bind(('127.0.0.1',0))

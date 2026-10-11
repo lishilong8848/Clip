@@ -42,7 +42,7 @@ from test_lighthouse_frontend_contracts import build_native_catalog  # noqa: E40
 from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: E402
 
 #: 前端的传输函数调用(不含 transport 层内部定义)。requestLearning 为学练专用封装。
-TRANSPORT_CALLS = ("requestJson", "requestBinaryJson", "downloadFile", "requestLearning", "fetch")
+TRANSPORT_CALLS = ("requestJson", "requestBinaryJson", "uploadJson", "downloadFile", "requestLearning", "fetch")
 
 #: 排除分类不再维护本地白名单:exclusion 统一由真实 lighthouse_api._route_excluded
 #: 判定(反映当前目录的实际排除规则)。被排除表示“未集成到助手目录”或“用户/安全
@@ -434,6 +434,8 @@ def _method_from_options(rest: str, default: str, file_text: str = "") -> str:
 
 
 def _transport_from_body(body_expr: str, fn: str, file_text: str = "") -> str:
+    if fn == "uploadJson":
+        return "multipart"
     if fn == "requestBinaryJson":
         return "raw"
     if fn == "downloadFile":
@@ -475,6 +477,8 @@ def _extract_frontend_calls(file_text: str, file_path: Path, base="", module_lab
                     method = m.group(1).upper() if m else (
                         "unresolved" if "?" in parts[2] else parts[2].strip().upper())
                 body_idx = 3
+            elif fn == "uploadJson":
+                path_expr, method, body_idx = parts[0], "POST", 1
             else:
                 path_expr = parts[0]
                 method_default = "POST" if fn == "requestBinaryJson" else "GET"
@@ -814,6 +818,14 @@ class FrontendCoverageAuditTests(unittest.TestCase):
         self.assertTrue(
             any(r["norm_path"] == "/api/cabinet-power/batches/recognize" and r["transport"] == "multipart"
                 for r in recs))
+
+    def test_shared_streaming_upload_is_audited_as_multipart_post(self):
+        path = BIN_DIR / 'lan_bitable_template_portal/frontend/src/components/Fixture.vue'
+        rows = _extract_frontend_calls("await uploadJson('/api/assistant/knowledge/files', form, {timeoutMs: 1000})", path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['method'], 'POST')
+        self.assertEqual(rows[0]['transport'], 'multipart')
+        self.assertEqual(rows[0]['norm_path'], '/api/assistant/knowledge/files')
 
 
     def test_inventory_is_deterministic(self):

@@ -41,6 +41,47 @@ NOTICE_SOP_RUN_KEYS = {"from_unit", "to_unit", "other_unit", "label", "run_index
 NOTICE_SOP_STRING_MAX = 200
 NOTICE_SOP_MAX_RUNS = 2
 
+# Canned 本次进度 text auto-filled when an end action is chosen with a blank value.
+# Only native work types that already carry a progress control are affected.
+END_PROGRESS_DEFAULT = "工作已完成，设备运行正常，请知晓！"
+
+
+def _progress_supports_end_default(item):
+    """Whether this native notice draft carries an editable progress control.
+
+    Only maintenance/change/repair/polling/power qualify; device-adjust and
+    event/Qt notices never expose 本次进度 and are therefore never defaulted.
+    """
+    draft = item.get("draft") or {}
+    work = str(draft.get("work_type") or "").strip()
+    if work in ("", "adjust", "event"):
+        return False
+    return any(f.get("key") == "progress" for f in item.get("fields") or [])
+
+
+def apply_end_default(draft, item, previous_action=None):
+    """Fill/revert the end-on 本次进度 default on a mutable draft.
+
+    Selecting 结束 fills the canned text when 本次进度 is blank; only a real
+    ``结束`` → ``更新`` transition (pass ``previous_action=\"结束\"`` from the merge
+    path) clears the untouched canned default.  An arbitrary update submission
+    that merely happens to carry the default text must never erase an intentional
+    user entry, so ``previous_action`` is left empty there.  A nonblank custom
+    progress is always preserved.  The action must already be ``update``/``end``
+    (start rows and later send paths are untouched).
+    """
+    if not _progress_supports_end_default(item):
+        return
+    if str(item.get("action") or "") not in ("update", "end"):
+        return
+    notice_action = str(draft.get("notice_action") or "")
+    if notice_action == "结束":
+        if not str(draft.get("progress") or "").strip():
+            draft["progress"] = END_PROGRESS_DEFAULT
+    elif notice_action == "更新":
+        if str(previous_action or "") == "结束" and str(draft.get("progress") or "").strip() == END_PROGRESS_DEFAULT:
+            draft["progress"] = ""
+
 
 def _default_notice_sop(exempt=False):
     return {"exempt": bool(exempt), "scope": "", "sop_id": "", "sop_version": 0,
@@ -352,6 +393,8 @@ def fields_for(work, draft, action):
             "readonly": key == "title" or (action == "start" and key in {"device", "repair_device", "cabinet", "quantity"} and bool(draft.get(key))) or len(str(draft.get(key) or "")) > 1000,
             "kind": "select" if choices else "multiline" if key in {"content", "reason", "impact", "progress", "symptom", "solution"} else "text",
             "options": choices})
+        if key == "progress":
+            result[-1]["default_on_end"] = END_PROGRESS_DEFAULT
     return result
 
 
@@ -452,6 +495,10 @@ def ongoing_item(service, scope, work, active):
 
 def submission(service, item, runtime=None):
     body = copy.deepcopy(item["draft"])
+    # Older clients / Feishu may send an end action without 本次进度; default it
+    # before missing-field checks, preview and the final payload so drafts,
+    # previews and confirm keep the same value.
+    apply_end_default(body, item)
     has_notice_sop_field = any(f.get("key") == "notice_sop" for f in item.get("fields") or [])
     missing = [f["label"] for f in item["fields"]
                if f["required"] and f["key"] != "notice_sop"

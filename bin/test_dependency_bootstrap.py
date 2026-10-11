@@ -13,6 +13,14 @@ from upload_event_module.services import dependency_bootstrap as deps
 
 
 class DependencyTests(unittest.TestCase):
+    def test_multipart_keeps_the_supported_streaming_parser_version(self):
+        self.assertEqual(deps.DEFAULT_MODULE_TO_PACKAGE['multipart'], 'python-multipart==0.0.22')
+        for version, supported in [('0.0.22', True), ('0.0.32', False)]:
+            with self.subTest(version=version), \
+                    patch.object(deps.importlib.util, 'find_spec', return_value=object()), \
+                    patch.object(deps.importlib.metadata, 'version', return_value=version):
+                self.assertEqual(deps._has_module('multipart'), supported)
+
     def setUp(self):
         for target, value in (('handlers', [logging.NullHandler()]), ('propagate', False)):
             guard = patch.object(deps._LOG, target, value)

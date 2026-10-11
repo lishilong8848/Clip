@@ -127,6 +127,8 @@
         @update-field="updateMopSettingField"
       />
 
+      <FeishuAssistantSettings v-else-if="tab === 'feishu'" />
+
       <AdminPressurePane
         v-else
         :pressure="pressure"
@@ -153,6 +155,7 @@ import {
 import { navigate } from "../navigation";
 import AdminHandoverPane from "./AdminHandoverPane.vue";
 import AdminMopSettingsPane from "./AdminMopSettingsPane.vue";
+import FeishuAssistantSettings from "./FeishuAssistantSettings.vue";
 import AdminPermissionPane from "./AdminPermissionPane.vue";
 import AdminPressurePane from "./AdminPressurePane.vue";
 import AdminStatusPane from "./AdminStatusPane.vue";
@@ -165,7 +168,7 @@ type MopSettingsKey = "mop_app_token" | "mop_table_id" | "mop_view_id" | "mop_ti
 
 const props = defineProps<{
   open: boolean;
-  initialTab?: "status" | "permissions" | "handover";
+  initialTab?: "status" | "permissions" | "handover" | "feishu";
   scopeOptions: Array<{ value: string; label: string }>;
 }>();
 
@@ -351,6 +354,7 @@ const adminTabs = computed(() => {
       description: "",
       badge: mopSettingsLoaded.value && !mopConfigured.value ? "待配置" : "",
     },
+    { key: "feishu" as AdminTabKey, label: "飞书智能体", description: "", badge: "" },
   ];
   if (advancedDiagnosticsVisible.value) {
     tabs.push({
@@ -389,6 +393,7 @@ const activeAdminGuide = computed(() => {
       text: "",
       badge: "离线测试",
     },
+    feishu: { title: "飞书智能体", text: "", badge: "消息应用配置" },
   };
   return guides[tab.value];
 });

@@ -154,6 +154,27 @@ class LinkRemote:
     def delete(self, record_id):
         self.request("DELETE", "records/" + record_id)
 
+    def update_orders(self, updates):
+        order = list(updates.items())
+        for start in range(0, len(order), 500):
+            batch = order[start:start + 500]
+            records = [{"record_id": record_id, "fields": {"排序": sort}} for record_id, sort in batch]
+            data = self.request("POST", "records/batch_update", {"records": records})
+            responded = data.get("records")
+            if not isinstance(responded, list):
+                raise PortalError("飞书排序更新返回缺少记录列表，请刷新核对后重试。")
+            requested = [record_id for record_id, _ in batch]
+            returned = []
+            for entry in responded:
+                if not isinstance(entry, dict):
+                    raise PortalError("飞书排序更新返回记录格式异常，请刷新核对后重试。")
+                record_id = entry.get("record_id")
+                if not isinstance(record_id, str):
+                    raise PortalError("飞书排序更新返回缺少记录编号，请刷新核对后重试。")
+                returned.append(record_id)
+            if len(returned) != len(requested) or sorted(returned) != sorted(requested):
+                raise PortalError("飞书排序更新未完成，返回的记录与请求不一致，请刷新核对后重试。")
+
 
 class LinkDirectory:
     def __init__(self, store, remote):
@@ -236,6 +257,77 @@ class LinkDirectory:
             saved = {**item, "id": record_id}
             self._save([row for row in items if row["id"] != record_id] + [saved], self._snapshot["updated_at"])
             return {"item": saved}
+
+    @staticmethod
+    def _expected_sequence(items, record_id, target_id, placement):
+        seq = [row["id"] for row in items]
+        seq.remove(record_id)
+        index = seq.index(target_id)
+        seq.insert(index if placement == "before" else index + 1, record_id)
+        return seq
+
+    @staticmethod
+    def _plan_minimal(items, seq, record_id):
+        by_id = {row["id"]: row for row in items}
+        index = seq.index(record_id)
+        lower = by_id[seq[index - 1]]["sort"] + 1 if index > 0 else 0
+        upper = by_id[seq[index + 1]]["sort"] - 1 if index + 1 < len(seq) else 1000000
+        if lower > upper:
+            return None
+        return {record_id: lower}
+
+    @staticmethod
+    def _plan_renumber(items, seq):
+        by_id = {row["id"]: row for row in items}
+        updates = {}
+        for index, rid in enumerate(seq):
+            new_sort = (index + 1) * 10
+            if new_sort > 1000000:
+                raise PortalError("导航条目过多，无法分配唯一排序。")
+            if by_id[rid]["sort"] != new_sort:
+                updates[rid] = new_sort
+        return updates
+
+    def _snapshot_result(self):
+        snapshot = copy.deepcopy(self._snapshot)
+        return {**snapshot, "stale": False, "error": ""}
+
+    def reorder(self, record_id, target_id, placement):
+        if not isinstance(placement, str) or placement not in {"before", "after"}:
+            raise PortalError("placement 须为 before 或 after。")
+        for rid in (record_id, target_id):
+            if not isinstance(rid, str) or not re.fullmatch(r"rec[A-Za-z0-9]+", rid):
+                raise PortalError("导航记录编号无效。")
+        if record_id == target_id:
+            raise PortalError("不能将链接移动到自身位置。")
+        with self._write_lock:
+            self._refresh()
+            items = copy.deepcopy(self._snapshot["items"])
+            ids = [row["id"] for row in items]
+            if record_id not in ids:
+                raise PortalNotFoundError("被移动链接已被删除，请刷新目录。")
+            if target_id not in ids:
+                raise PortalNotFoundError("目标链接已被删除，请刷新目录。")
+            seq = self._expected_sequence(items, record_id, target_id, placement)
+            if seq == ids:
+                return self._snapshot_result()
+            updates = self._plan_minimal(items, seq, record_id) or self._plan_renumber(items, seq)
+            try:
+                self.remote.update_orders(updates)
+            except Exception:
+                logging.warning("Link directory reorder update failed", exc_info=True)
+                try:
+                    self._refresh()
+                except Exception:
+                    logging.warning("Link directory re-read after reorder failure failed", exc_info=True)
+                    raise PortalError("导航排序未确认，且云端回读失败，请手动刷新核对后重试。") from None
+                raise PortalError("导航排序未确认，已回读云端实际状态，请刷新核对后重试。") from None
+            applied = copy.deepcopy(self._snapshot["items"])
+            by_id = {row["id"]: row for row in applied}
+            for rid, sort_value in updates.items():
+                by_id[rid]["sort"] = sort_value
+            self._save(applied, self._snapshot["updated_at"])
+            return self._snapshot_result()
 
     def delete(self, record_id):
         if not re.fullmatch(r"rec[A-Za-z0-9]+", record_id):

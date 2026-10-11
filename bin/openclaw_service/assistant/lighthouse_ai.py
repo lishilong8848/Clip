@@ -150,6 +150,37 @@ def unprotect_key(value):
     return win32crypt.CryptUnprotectData(base64.b64decode(value), None, None, None, 0)[1].decode()
 
 
+def model_capabilities(profile):
+    options = {}
+    for key, default in (("tool_calls", True), ("image_input", True), ("reasoning", False),
+                         ("reasoning_only", False), ("allow_reasoning_off", False), ("custom_protocol", False)):
+        value = profile.get(key, default)
+        if not isinstance(value, bool):
+            raise AssistantError("模型能力选项必须是开关。")
+        options[key] = value
+    levels = profile.get("reasoning_efforts", ["xhigh"])
+    if not isinstance(levels, list) or not levels or len(levels) > 4 or any(
+            not isinstance(level, str) or level not in {"low", "medium", "high", "xhigh"} for level in levels):
+        raise AssistantError("请选择有效的支持思考强度。")
+    options["reasoning_efforts"] = list(dict.fromkeys(levels))
+    effort = profile.get("reasoning_effort", "xhigh")
+    if not isinstance(effort, str) or effort not in options["reasoning_efforts"] and not (
+            effort == "off" and options["allow_reasoning_off"] and not options["reasoning_only"]):
+        raise AssistantError("默认思考强度必须是已支持的档位；仅思考模式不能关闭思考。")
+    options["reasoning_effort"] = effort
+    if not options["reasoning"]:
+        options.update(reasoning_only=False, allow_reasoning_off=False,
+                       reasoning_efforts=["xhigh"], reasoning_effort="xhigh")
+    return options
+
+
+def model_reasoning_options(profile):
+    options = model_capabilities(profile)
+    if not options["reasoning"]:
+        return {}
+    return {"reasoning_effort": "none" if options["reasoning_effort"] == "off" else options["reasoning_effort"]}
+
+
 class CustomModel:
     """Other modules can reuse complete(); no business writes or automatic calls."""
     def __init__(self, store, *, client=None, protect=protect_key, unprotect=unprotect_key):
@@ -216,7 +247,7 @@ class CustomModel:
         saved = self._config()
         active = self._default(saved)
         return {"enabled": bool(saved["enabled"]), "active_model_id": active["id"] if active else "",
-                "models": [{k: p[k] for k in ("id", "name", "endpoint", "model")} | {"configured": bool(p.get("key_cipher")), "shared": bool(p.get("shared"))} for p in saved["models"]],
+                "models": [{k: p[k] for k in ("id", "name", "endpoint", "model")} | model_capabilities(p) | {"configured": bool(p.get("key_cipher")), "shared": bool(p.get("shared"))} for p in saved["models"]],
                 "endpoint": active["endpoint"] if active else "", "model": active["model"] if active else "",
                 "configured": bool(active and active.get("key_cipher"))}
 
@@ -228,9 +259,8 @@ class CustomModel:
         if not profile or not profile.get("key_cipher"):
             raise AssistantError("所选模型未配置凭证，请在模型设置中补充或选择其他模型。", 503)
         profile = copy.deepcopy(profile)
-        capability = self.store.get_document('lighthouse_model_capabilities', self.capability_key(profile)) or {}
-        if capability.get('vision') is True and capability.get('checked_at', 0) > time.time() - 30 * 86400:
-            profile['vision_verified'] = True
+        # User-declared input capabilities, not an expiring offline probe, control delivery.
+        profile.update(model_capabilities(profile))
         return profile
 
     @staticmethod
@@ -238,7 +268,7 @@ class CustomModel:
         return hashlib.sha256(json.dumps({key: profile.get(key) for key in ('endpoint', 'model', 'key_cipher')}, sort_keys=True).encode()).hexdigest()
 
     @staticmethod
-    def _endpoint(value):
+    def _endpoint(value, *, custom_protocol=False):
         if not isinstance(value, str) or len(value) > 2000 or any(c.isspace() for c in value) or API_KEY.search(value):
             raise AssistantError("接口地址格式无效。")
         try:
@@ -247,7 +277,7 @@ class CustomModel:
                 raise ValueError()
             if parsed.port is not None and not (1 <= parsed.port <= 65535):
                 raise ValueError()
-            if not parsed.path.rstrip("/").endswith("/chat/completions"):
+            if not custom_protocol and not parsed.path.rstrip("/").endswith("/chat/completions"):
                 raise ValueError()
             try:
                 address = ipaddress.ip_address(parsed.hostname)
@@ -257,7 +287,7 @@ class CustomModel:
                 raise ValueError()
         except ValueError:
             raise AssistantError("请填写完整的 HTTPS chat/completions 接口，不包含账号、密码或查询参数。") from None
-        return value.rstrip("/")
+        return value if custom_protocol else value.rstrip("/")
 
     def configure(self, payload):
         if not isinstance(payload, dict):
@@ -299,7 +329,8 @@ class CustomModel:
                     profile[field] = value.strip()
                 if any(not p.get('shared') and p["id"] != identity and p["name"] == profile["name"] for p in saved["models"]):
                     raise AssistantError("模型显示名称已存在，请使用不同名称。")
-                profile["endpoint"] = self._endpoint(item.get("endpoint"))
+                profile.update(model_capabilities({**(old or {}), **item}))
+                profile["endpoint"] = self._endpoint(item.get("endpoint"), custom_protocol=profile["custom_protocol"])
                 key, clear = item.get("api_key", ""), item.get("clear_key", False)
                 if not isinstance(clear, bool) or not isinstance(key, str) or len(key) > 500 or (key and any(c.isspace() or ord(c) < 32 for c in key)):
                     raise AssistantError("API Key 格式无效。")
@@ -333,7 +364,7 @@ class CustomModel:
                                     {**saved, 'models': [p for p in saved['models'] if not p.get('shared')]})
             return self.settings()
 
-    def complete(self, messages, *, profile=None, max_tokens=1800, structured=False):
+    def complete(self, messages, *, profile=None, max_tokens=1800, structured=False, timeout=None):
         if not self._config()["enabled"]:
             raise AssistantError("灯塔助手暂未启用。", 503)
         selected = profile or self.profile()
@@ -343,7 +374,9 @@ class CustomModel:
             raise AssistantError("当前系统账号无法读取模型凭证，请在本人模型设置中重新配置。", 503) from None
         try:
             payload = self.client.request_json("POST", selected["endpoint"], headers={"Authorization": "Bearer " + key},
-                json_payload={"model": selected["model"], "messages": messages, "stream": False, "max_tokens": max(128, min(4000, int(max_tokens)))}, retries=0)
+                json_payload={"model": selected["model"], "messages": messages, "stream": False, "max_tokens": max(128, min(4000, int(max_tokens))),
+                              **model_reasoning_options(selected)}, retries=0,
+                **({'timeout': timeout} if timeout is not None else {}))
         except FeishuHTTPError as exc:
             category = exc.category
             response = getattr(exc.__cause__, "response", None)

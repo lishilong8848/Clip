@@ -1,5 +1,6 @@
 <template>
   <section class="lighthouse-knowledge" aria-label="知识库检索">
+    <KnowledgeOverview :active="props.active" :show-documents="!query.trim()" />
     <div class="lk-search">
       <Search :size="15" aria-hidden="true" />
       <input
@@ -15,7 +16,10 @@
 
     <p v-if="error" class="lk-state error" role="alert">{{ error }}</p>
     <p v-if="warning" class="lk-warning" role="status"><AlertTriangle :size="14" aria-hidden="true" /><span>{{ warning }}</span></p>
-    <p v-if="mode" class="lk-mode">{{ mode === 'hybrid' ? '混合检索' : '关键词检索' }}<template v-if="!query.trim()"> · 未检索</template></p>
+    <p v-if="mode || enginePreparing" class="lk-mode">
+      <template v-if="enginePreparing"><Loader2 :size="12" class="spin inline" aria-hidden="true" />本地向量引擎准备中…</template>
+      <template v-else>{{ modeLabel }}</template><template v-if="!query.trim()"> · 未检索</template>
+    </p>
 
     <div v-if="searching && !items.length" class="lk-state" role="status"><Loader2 :size="16" class="spin" aria-hidden="true" />检索中…</div>
     <div v-else-if="!items.length && query.trim().length >= 2" class="lk-state">未找到匹配文档</div>
@@ -35,10 +39,11 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { AlertTriangle, Database, FileText, Loader2, Search } from "lucide-vue-next";
 import { requestJson } from "../api/client";
 import { navigate } from "../navigation";
+import KnowledgeOverview from './KnowledgeOverview.vue';
 
 interface SearchItem {
   document_id: string;
@@ -56,9 +61,17 @@ const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true }
 const query = ref("");
 const items = ref<SearchItem[]>([]);
 const mode = ref("");
+const enginePreparing = ref(false);
 const warning = ref("");
 const searching = ref(false);
 const error = ref("");
+
+const modeLabel = computed(() => {
+  if (mode.value === "local_faiss") return "本地向量＋全文检索";
+  if (mode.value === "hybrid") return "全文＋向量检索";
+  if (mode.value === "keyword") return "本地全文检索（关键词回退）";
+  return "本地全文检索";
+});
 
 let debounceTimer = 0;
 let controller: AbortController | undefined;
@@ -84,6 +97,7 @@ async function runSearch(immediate = false): Promise<void> {
     suppressedSearch = false;
     items.value = [];
     mode.value = "";
+    enginePreparing.value = false;
     warning.value = "";
     error.value = "";
     searching.value = false;
@@ -107,6 +121,7 @@ async function runSearch(immediate = false): Promise<void> {
       if (controller !== current || current.signal.aborted || !props.active) return;
       items.value = data.items || [];
       mode.value = data.mode || "";
+      enginePreparing.value = String(data.engine_status || data.status || "") === "preparing";
       warning.value = data.warning || "";
     } catch (cause) {
       if (controller === current && !current.signal.aborted && props.active) {
@@ -198,7 +213,8 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 .lk-warning svg { flex: 0 0 auto; margin-top: 1px; }
-.lk-mode { margin: 0; color: var(--lh-muted, #64748b); font-size: 11px; }
+.lk-mode { margin: 0; color: var(--lh-muted, #64748b); font-size: 11px; display: inline-flex; align-items: center; gap: 4px; }
+.spin.inline { display: inline-block; flex: 0 0 auto; }
 .lk-results { display: grid; align-content: start; gap: 4px; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .lk-result {
   display: grid;

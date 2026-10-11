@@ -22,6 +22,23 @@ export type ApiRequestOptions = RequestInit & {
 
 export const AUTH_EXPIRED_EVENT = "clipflow-auth-expired";
 const AUTH_REDIRECT_FLAG = "__clipflowAuthRedirecting";
+let loginMethod = 'feishu';
+try { loginMethod = new URLSearchParams(window.location.search).get('login') === 'password' ? 'password' : window.sessionStorage.getItem('clipflow-login-method') || 'feishu'; } catch { /* Storage can be disabled by browser policy. */ }
+
+export function rememberLoginMethod(method: 'feishu' | 'password'): void {
+  loginMethod = method;
+  try { window.sessionStorage.setItem('clipflow-login-method', method); } catch { /* The in-memory preference still works. */ }
+  // Preference only; this cookie never authenticates a user.
+  try { document.cookie = `clipflow-login-method=${method}; Path=/; Max-Age=31536000; SameSite=Lax${window.location.protocol === 'https:' ? '; Secure' : ''}`; } catch { /* Login remains usable without preference cookies. */ }
+}
+
+export function preferredLoginUrl(fallback = ''): string {
+  if (loginMethod === 'password') {
+    const next = window.location.pathname + window.location.search;
+    return `/?login=password&next=${encodeURIComponent(next)}`;
+  }
+  return fallback || currentLoginUrl();
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -113,7 +130,7 @@ function scheduleAuthRedirect(loginUrl: string): void {
 function authExpiredDetail(message: string, payload: Dict): Dict {
   return {
     message,
-    login_url: String(payload.login_url || payload.loginUrl || currentLoginUrl()),
+    login_url: preferredLoginUrl(String(payload.login_url || payload.loginUrl || '')),
   };
 }
 
@@ -196,7 +213,8 @@ async function requestResponseJson(
         invalidPayload = true;
       }
     }
-    if (response.status === 401 || payload.auth_required) {
+    const checkingPassword = fetchOptions.method?.toUpperCase() === 'POST' && /\/api\/auth\/password\/(?:login|reset|change)$/.test(path.split('?')[0]);
+    if ((response.status === 401 && !checkingPassword) || payload.auth_required) {
       const message = String(payload.error || "登录已过期，请重新扫码登录。");
       const detail = authExpiredDetail(message, payload);
       hooks.onAuthExpired?.(message, response, payload);
@@ -369,4 +387,121 @@ export async function requestBinaryJson(
   return requestResponseJson(path, {
     ...options, method: options.method || "POST", body, timeoutMs: 120_000,
   }, hooks, options.headers);
+}
+
+export interface UploadProgressEvent {
+  loaded: number;
+  total: number;
+}
+
+export type UploadJsonOptions = {
+  timeoutMs?: number;
+  signal?: AbortSignal | null;
+  onProgress?: (event: UploadProgressEvent) => void;
+  hooks?: ApiClientHooks;
+};
+
+// Streaming multipart upload using XHR so a FormData file streams from disk instead of
+// buffering the whole body into memory.  Reuses the centralized auth/error/offline handling
+// of requestJson.  Never retries (uploads must not be re-sent automatically).
+export async function uploadJson(path: string, body: FormData, options: UploadJsonOptions = {}): Promise<Dict> {
+  const { timeoutMs = 600_000, signal: externalSignal, onProgress, hooks = {} } = options;
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromExternal = () => controller.abort();
+  if (externalSignal?.aborted) {
+    controller.abort();
+  } else {
+    externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  }
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, Math.max(1000, timeoutMs));
+  const cleanup = () => {
+    window.clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
+  };
+  try {
+    return await new Promise<Dict>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", path);
+      xhr.withCredentials = true;
+      xhr.responseType = "json";
+      xhr.timeout = timeoutMs;
+      controller.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+      if (onProgress && xhr.upload) {
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress({ loaded: event.loaded, total: event.total });
+        };
+      }
+      xhr.onload = () => {
+        let payload: Dict = {};
+        let invalidPayload = false;
+        try {
+          const parsed = xhr.response;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalidPayload = true;
+          else payload = parsed as Dict;
+        } catch {
+          payload = {};
+        }
+        if (xhr.status === 401 || payload.auth_required) {
+          const message = String(payload.error || "登录已过期，请重新扫码登录。");
+          const detail = authExpiredDetail(message, payload);
+          hooks.onAuthExpired?.(message, null as unknown as Response, payload);
+          window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
+          scheduleAuthRedirect(String(detail.login_url || ""));
+          reject(new ApiError(message, { status: xhr.status, payload, authRequired: true }));
+          return;
+        }
+        if (xhr.status >= 500) {
+          hooks.onServerError?.(String(payload.error || "服务异常，请稍后重试。"), null as unknown as Response, payload);
+        }
+        const okStatus = xhr.status >= 200 && xhr.status < 300;
+        if (!okStatus || payload.ok === false) {
+          reject(new ApiError(String(payload.error || `HTTP ${xhr.status}`), { status: xhr.status, payload }));
+          return;
+        }
+        if (invalidPayload) {
+          reject(new ApiError("服务器响应格式异常，当前输入已保留，请重试。", { status: xhr.status }));
+          return;
+        }
+        hooks.onOnline?.();
+        resolve(Object.prototype.hasOwnProperty.call(payload, "data") ? payload.data : payload);
+      };
+      xhr.onerror = () => {
+        // Match requestJson semantics: a cancellation (external abort or timeout) is NOT an
+        // offline state.  Only a genuine transport failure should raise the global offline banner.
+        if (controller.signal.aborted) {
+          reject(new ApiError(timedOut ? "上传超时，网络较慢或文件过大，请稍后重试。" : "上传已取消。"));
+          return;
+        }
+        hooks.onOffline?.("服务连接中断，已保留当前页面数据。", new Error("network error"));
+        window.dispatchEvent(new Event("clipflow-api-offline"));
+        reject(new ApiError("服务连接中断", { offline: true }));
+      };
+      xhr.ontimeout = () => {
+        timedOut = true;
+        reject(new ApiError("上传超时，网络较慢或文件过大，请稍后重试。"));
+      };
+      xhr.onabort = () => {
+        if (timedOut) reject(new ApiError("上传超时，网络较慢或文件过大，请稍后重试。"));
+        else reject(new ApiError("上传已取消。"));
+      };
+      // If the caller's signal was already aborted before the abort listener could be attached,
+      // never open a real network request — reject immediately with "cancelled".
+      if (controller.signal.aborted) {
+        reject(new ApiError(timedOut ? "上传超时，网络较慢或文件过大，请稍后重试。" : "上传已取消。"));
+        return;
+      }
+      xhr.send(body);
+    });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new ApiError(timedOut ? "上传超时，网络较慢或文件过大，请稍后重试。" : "上传已取消。");
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
 }

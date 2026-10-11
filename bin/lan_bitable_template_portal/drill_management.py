@@ -21,7 +21,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Callable
 
-from .signature_print import print_signature_png
+from .signature_print import HORIZONTAL_SIGNATURE_GAP_PX
 
 
 DRILL_DEFINITION_NAMESPACE = "drill_definition"
@@ -41,7 +41,7 @@ DRILL_MIN_SIGNATURE_SLOT_HEIGHT_PX = 48
 DRILL_MAX_PREVIEW_IMAGE_BYTES = 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES_BYTES = 2 * 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES = 20
-DRILL_GENERATION_RULE_VERSION = 4
+DRILL_GENERATION_RULE_VERSION = 6
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -1578,7 +1578,7 @@ def _horizontal_signature_layout(
         return []
     padding = min(4.0, area_width * 0.02, area_height * 0.08)
     gap = min(
-        3.0,
+        float(HORIZONTAL_SIGNATURE_GAP_PX),
         max(0.0, (area_width - padding * 2) / (len(image_sizes) * 10)),
     )
     max_height = max(1.0, area_height - padding * 2)
@@ -1643,7 +1643,7 @@ def normalize_drill_signature_png(content: bytes) -> bytes:
     if not content or len(content) > DRILL_MAX_SIGNATURE_BYTES:
         raise DrillError("签名图片为空或超过 2MB。")
     try:
-        from PIL import Image, ImageOps
+        from PIL import Image, ImageChops, ImageOps
 
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -1659,6 +1659,9 @@ def normalize_drill_signature_png(content: bytes) -> bytes:
                     raise DrillError("签名图片尺寸过大。")
                 image = ImageOps.exif_transpose(source).convert("RGBA")
                 image.load()
+                coverage = ImageChops.multiply(ImageOps.invert(image.convert("L")), image.getchannel("A"))
+                if not coverage.getbbox():
+                    raise DrillError("签名图片没有可见笔迹，请重新签名。")
                 output = io.BytesIO()
                 image.save(output, format="PNG", optimize=True)
                 return output.getvalue()
@@ -2100,9 +2103,6 @@ def _patch_workbook(
                 for (signer, content, _source_size), (x, y, width, height) in zip(
                     prepared, positions
                 ):
-                    content = print_signature_png(
-                        content, (max(1, round(width)), max(1, round(height)))
-                    )
                     digest = hashlib.sha256(content).hexdigest()
                     media_name = f"xl/media/drill_signature_{digest}.png"
                     suffix = 0
@@ -2297,26 +2297,8 @@ def _verify_generated_workbook(
                     item for item in placement.get("signers") or []
                     if str(item.get("record_id") or "")
                 ]
-                _row1, _col1, _row2, _col2, area_width, area_height = _row_col_pixels(
-                    sheet, str(placement["range"])
-                )
-                sizes = [
-                    _image_dimensions(signatures[str(signer["record_id"])])
-                    for signer in signers
-                ]
-                positions = drill_signature_layout(
-                    sizes, area_width, area_height, str(placement.get("layout") or ""),
-                    slot_count=int(placement.get("signature_slots") or 0),
-                    slot_indices=[
-                        int(signer.get("slot_index", index))
-                        for index, signer in enumerate(signers)
-                    ],
-                )
-                for signer, (_x, _y, width, height) in zip(signers, positions):
-                    content = print_signature_png(
-                        signatures[str(signer["record_id"])],
-                        (max(1, round(width)), max(1, round(height))),
-                    )
+                for signer in signers:
+                    content = signatures[str(signer["record_id"])]
                     expected_hashes[hashlib.sha256(content).hexdigest()] += 1
             used_relationships = set()
             actual_hashes: Counter[str] = Counter()

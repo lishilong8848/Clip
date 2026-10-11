@@ -11,6 +11,8 @@ const output = path.resolve(root, `../../../output/playwright/learning-self-${wi
 await mkdir(output, { recursive: true });
 const scopesValue = "ABCDEH".split("").map(value => ({ value, label: `${value}楼` }));
 const counterparty = { id: "p2", name: "测试人员乙", employee_no: "1002", scopes: ["A"], active: true };
+const otherBuilding = { id: 'p3', name: 'B楼测试人员', employee_no: '1003', scopes: ['B'], active: true };
+const unansweredPerson = { id: 'p4', name: '尚未学练人员', employee_no: '1004', scopes: ['H'], active: true };
 const actors = {
   admin: { is_admin: true, can_answer: true, can_view_buildings: true, self_person: { id: "admin-self", name: "管理员本人", employee_no: "9000", scopes: ["A"], active: true }, self_scope: "A", scopes: scopesValue, identity_issue: "" },
   personal: { is_admin: false, can_answer: true, can_view_buildings: false, self_person: { id: "pers-self", name: "普通人员", employee_no: "2001", scopes: ["B"], active: true }, self_scope: "B", scopes: [], identity_issue: "" },
@@ -25,6 +27,8 @@ const makePaper = person_id => ({
   scope: "A",
   date: today,
   version: 0,
+  mode: 'daily',
+  created_at: today + 'T08:00:00',
   status: "pending",
   shortage: {},
   questions: Array.from({ length: 15 }, (_, n) => ({
@@ -41,6 +45,9 @@ const makePaper = person_id => ({
 });
 function publicPaper(p) { return { ...structuredClone(p), stats: { total: p.questions.length, answered: p.questions.filter(q => q.attempt).length, shortage: 0 } }; }
 const papers = new Map();
+const practicePapers = new Map();
+let published = true;
+const allPapers = () => [...papers.values(), ...practicePapers.values()];
 function paperFor(person_id) { if (!papers.has(person_id)) papers.set(person_id, makePaper(person_id)); return papers.get(person_id); }
 const requests = [];
 const unexpected = [];
@@ -69,6 +76,7 @@ const peopleFor = () => {
   const list = new Set();
   if (currentActor.self_person) list.add(JSON.stringify(currentActor.self_person));
   list.add(JSON.stringify(counterparty));
+  if (currentActor.is_admin) [otherBuilding, unansweredPerson].forEach(p => list.add(JSON.stringify(p)));
   return [...list].map(s => JSON.parse(s));
 };
 
@@ -94,13 +102,24 @@ try {
     if (p === "/api/learning/bootstrap") return ok({ ...currentActor, scope: url.searchParams.get("scope") || "A", settings: { enabled: true, publish_time: "08:00", reminder_enabled: false }, sync: { status: "ready", pending: 0 }, today, question_problem_count: currentActor.is_admin ? 1 : 0 });
     if (p === "/api/learning/papers/claim") {
       claims.push(body);
+      if (body.mode === 'practice') {
+        const key = `${body.person_id}:${body.operation_id}`;
+        if (!practicePapers.has(key)) {
+          const paper = makePaper(body.person_id);
+          paper.id = `paper-practice-${body.person_id}-${practicePapers.size + 1}`;
+          paper.mode = 'practice'; paper.created_at = `${today}T10:00:${String(practicePapers.size).padStart(2, '0')}`;
+          paper.questions.forEach(q => { q.id = `${paper.id}:${q.id}`; });
+          practicePapers.set(key, paper);
+        }
+        return ok(publicPaper(practicePapers.get(key)));
+      }
       if (!papers.has(body.person_id)) papers.set(body.person_id, makePaper(body.person_id));
       return ok(publicPaper(papers.get(body.person_id)));
     }
     const paperAnswer = p.match(/^\/api\/learning\/papers\/paper-[^/]+\/answer$/);
     if (paperAnswer && method === "POST") {
       if (answerGate) await answerGate;
-      const paper = paperFor(body.person_id);
+      const paper = allPapers().find(paper => paper.id === p.split('/').at(-2));
       const q = paper.questions.find(q => q.id === body.question_id);
       if (q) {
         const attempt = { correct: q.type === 'interview' ? null : JSON.stringify([...(body.option_ids || [])].sort()) === JSON.stringify([...q.correct_option_ids].sort()), option_ids: body.option_ids, answer_text: body.answer_text, submitted_at: today + "T09:00:00", self_rating: body.self_rating, assisted: false };
@@ -112,20 +131,27 @@ try {
     const paperGet = p.match(/^\/api\/learning\/papers\/paper-[^/]+$/);
     if (paperGet && method === "GET") {
       const id = p.split("/").at(-1);
-      return ok(publicPaper([...papers.values()].find(p => p.id === id)));
+      return ok(publicPaper(allPapers().find(p => p.id === id)));
     }
     if (p === "/api/learning/papers" || p === "/api/learning/history") {
       const pid = url.searchParams.get("person_id");
-      const items = [...papers.values()].filter(q => !pid || q.person_id === pid).map(publicPaper);
-      return ok({ items, total: items.length, page: 1, page_size: 20, today, published: true });
+      const mode = url.searchParams.get('mode') || (url.searchParams.get('today') === '1' ? 'daily' : '');
+      const items = allPapers().filter(q => (!pid || q.person_id === pid) && (!mode || q.mode === mode)).sort((a, b) => b.created_at.localeCompare(a.created_at)).map(publicPaper);
+      return ok({ items, total: items.length, page: 1, page_size: 20, today, published });
     }
     if (p === "/api/learning/profile") {
       const id = url.searchParams.get("person_id");
       const s = { assigned: 15, answered: 10, task_answered: 10, choice_answered: 8, correct: 6, wrong: 2, accuracy: 75, independent_answered: 4, independent_correct: 3, learning_days: 3, interview_total: 2, interview_ratings: { '部分掌握': 1, '需复习': 1 }, papers: 1, answered_people: 1, received_people: 1 };
-      return ok({ person: peopleFor().find(q => q.id === id), published: true, summary: s, today_summary: s,
+      const allPeople = url.searchParams.get('all_people') === '1';
+      const people = [{person_id:counterparty.id, name:counterparty.name, scope:'A', employee_no:counterparty.employee_no, summary:s, last_answered_at:today+'T08:00:00', today:{answered:10,total:15}}];
+      if (allPeople) {
+        people.push({person_id:otherBuilding.id, name:otherBuilding.name, scope:'B', employee_no:otherBuilding.employee_no, summary:s, last_answered_at:today+'T09:00:00', today:{answered:10,total:15}});
+        people.push({person_id:unansweredPerson.id, name:unansweredPerson.name, scope:'H', employee_no:unansweredPerson.employee_no, summary:{answered:0,attempt_count:0,wrong:0,accuracy:null}, last_answered_at:'',today:null});
+      }
+      return ok({ person: peopleFor().find(q => q.id === id), published, summary: s, today_summary: s,
         trend: Array.from({length:7}, (_,n) => ({date:`2026-10-0${n+1}`, answered:n+1, people:n+1, accuracy:n*10+30})),
         banks:[{label:'新增机电综合题库', wrong:2}], topics:[],
-        distribution:[{label:'80-99%', count:1}], people:id ? [] : [{person_id:counterparty.id, name:counterparty.name, employee_no:counterparty.employee_no, summary:s, last_answered_at:'2026-10-09T08:00:00', today:{answered:10,total:15}}] });
+        distribution:[{label:'80-99%', count:1}], people:id ? [] : people });
     }
     if (p === "/api/learning/settings") return ok({ enabled: true });
     if (p === '/api/learning/questions' || p === '/api/learning/review' || p === '/api/learning/issues') return ok({ items: [], total: 0, page: 1 });
@@ -143,6 +169,31 @@ try {
   currentActor = actors.admin;
   await page.goto(`${base}/learning?view=overview&scope=A`);
   await page.getByRole("button", { name: "选择人员", exact: true }).waitFor();
+
+  // All overview includes unassigned people and preserves its scope through back/reload.
+  await page.locator('.building-tabs').getByRole('button', {name: /全部画像/}).click();
+  await page.getByRole('heading', {name:'全员学习汇总', exact:true}).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('.learning-page').length === 1);
+  assert.equal(new URL(page.url()).searchParams.get('scope'), '');
+  assert.equal(await page.locator('.building-tabs button').count(), 7);
+  await page.locator('.learning-dashboard tbody tr').filter({hasText:'尚未学练人员'}).waitFor();
+  assert.equal(await page.locator('.learning-dashboard table').getByRole('columnheader', {name:'楼栋', exact:true}).count(), 1);
+  const unassigned = page.locator('.learning-dashboard tbody tr').filter({hasText:'尚未学练人员'});
+  assert.match(await unassigned.textContent(), /数据不足.*未领取.*尚未作答/);
+  await page.locator('.learning-dashboard tbody tr').filter({hasText:'B楼测试人员'}).getByRole('button', {name:'个人画像'}).click();
+  await page.locator('.learner-strip').getByText('B楼测试人员', {exact:true}).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('.learning-page').length === 1);
+  await backButton().click();
+  await page.getByRole('heading', {name:'全员学习汇总', exact:true}).waitFor();
+  await page.reload();
+  await page.getByRole('heading', {name:'全员学习汇总', exact:true}).waitFor();
+  await page.screenshot({path:path.join(output, 'all-portrait.png'), fullPage:true});
+  assert.ok(requests.some(r => r.p === '/api/learning/profile' && r.query.all_people === '1' && !r.query.scope && !r.query.person_id));
+  assert.equal(claims.length, 0, 'all overview never claims a paper');
+  await page.locator('.building-tabs').getByRole('button', {name:/^A楼/}).click();
+  await page.getByRole('heading', {name:'人员学习汇总', exact:true}).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('.learning-page').length === 1);
+  assert.equal(await page.locator('.learning-dashboard tbody tr').filter({hasText:'B楼测试人员'}).count(), 0);
   await page.getByRole("button", { name: "选择人员", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: /测试人员乙/ }).click();
   await page.waitForURL(/\/learning\?.*(?:view=overview.*person_id=p2|person_id=p2.*view=overview)/);
@@ -315,6 +366,49 @@ try {
     await page.getByRole('dialog').waitFor();
     await fits('mobile-question-editor');
   }
+
+  // Personal autonomous rounds do not depend on daily publication or replace it.
+  currentActor = { ...actors.personal, self_person: {...actors.personal.self_person, id:'autonomous-user', name:'自主学练人员'} };
+  published = false;
+  const claimsBefore = claims.length;
+  await page.goto(`${base}/learning?view=practice`);
+  await page.getByText('今日暂无可学习题目', {exact:true}).waitFor();
+  assert.equal(claims.length, claimsBefore, 'unpublished daily paper is not claimed');
+  await page.getByRole('button', {name:'开始学练',exact:true}).click();
+  await page.getByRole('button', {name:'确认作答',exact:true}).waitFor();
+  assert.equal(await page.locator('.question-numbers button').count(), 15);
+  const firstRound = allPapers().find(p => p.person_id === 'autonomous-user');
+  assert.equal(firstRound.mode, 'practice');
+  assert.equal(claims.at(-1).mode, 'practice');
+  await page.locator('.options label').first().click();
+  await page.getByRole('button', {name:'确认作答',exact:true}).click();
+  await page.getByRole('button', {name:'再次练习',exact:true}).waitFor();
+  await page.getByRole('group', {name:'学练方式'}).getByRole('button', {name:'每日题单',exact:true}).click();
+  await page.getByText('今日暂无可学习题目', {exact:true}).waitFor();
+  await page.getByRole('group', {name:'学练方式'}).getByRole('button', {name:'自主练习',exact:true}).click();
+  await page.getByRole('button', {name:'再次练习',exact:true}).waitFor();
+  assert.equal(claims.length, claimsBefore + 1, 'mode switch continues the same practice');
+  await page.reload();
+  await page.getByText('今日暂无可学习题目', {exact:true}).waitFor();
+  await page.getByRole('group', {name:'学练方式'}).getByRole('button', {name:'自主练习',exact:true}).click();
+  await page.getByRole('button', {name:'再次练习',exact:true}).waitFor();
+  assert.equal(claims.length, claimsBefore + 1, 'reload does not generate new questions');
+  await page.screenshot({path:path.join(output, 'autonomous-practice.png'), fullPage:true, animations:'disabled'});
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'autonomous toolbar fits viewport');
+  await page.getByRole('button', {name:'开始学练',exact:true}).click();
+  await page.getByRole('button', {name:'确认作答',exact:true}).waitFor();
+  assert.equal(claims.length, claimsBefore + 2);
+  assert.notEqual(claims.at(-1).operation_id, claims.at(-2).operation_id);
+  assert.equal(firstRound.questions[0].attempt.correct, true, 'earlier round remains intact');
+  published = true;
+  await page.getByRole('group', {name:'学练方式'}).getByRole('button', {name:'每日题单',exact:true}).click();
+  await page.getByRole('button', {name:'确认作答',exact:true}).waitFor();
+  assert.equal(papers.get('autonomous-user').mode, 'daily');
+  await page.getByRole('button', {name:'学习历史',exact:true}).click();
+  await page.locator('.table-wrap tbody tr').first().waitFor();
+  assert.equal(await page.locator('.table-wrap tbody tr').count(), 3);
+  assert.equal(await page.locator('.table-wrap tbody tr').filter({hasText:'自主练习'}).count(), 2);
+  assert.equal(await page.locator('.table-wrap tbody tr').filter({hasText:'每日题单'}).count(), 1);
 
   assert.deepEqual(pageErrors, [], `browser errors: ${pageErrors.join("\n")}`);
   assert.deepEqual(unexpected, [], `unexpected requests: ${unexpected.join(", ")}`);

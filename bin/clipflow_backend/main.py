@@ -803,6 +803,8 @@ class FastAPIPortalController:
 
         from lan_bitable_template_portal.cabinet_guest import install_cabinet_guest_access
         install_cabinet_guest_access(app, self, PortalRuntime)
+        from lan_bitable_template_portal.personnel_password_login import install_personnel_password_login
+        install_personnel_password_login(app, self, PortalRuntime)
 
         # Keep compression outside the request-timing middleware so cancelled
         # streaming responses do not surface as false application errors.
@@ -838,7 +840,8 @@ class FastAPIPortalController:
         @app.get("/knowledge-base")
         async def life_guide_page(request: Request):
             if self._current_session(request) is None:
-                return Response(status_code=302, headers={"Location": "/api/auth/login?" + urlencode({"next": str(request.url.path) + ('?' + str(request.url.query) if request.url.query else '')})})
+                entry = "/?login=password&" if request.cookies.get("clipflow-login-method") == "password" else "/api/auth/login?"
+                return Response(status_code=302, headers={"Location": entry + urlencode({"next": str(request.url.path) + ('?' + str(request.url.query) if request.url.query else '')})})
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/workbench-lite")
@@ -851,7 +854,8 @@ class FastAPIPortalController:
                                if key not in {"_assistant_frame", "_frame_retry"}]
                 if next_params:
                     next_path += "?" + urlencode(next_params)
-                login_url = f"/api/auth/login?{urlencode({'next': next_path})}"
+                entry = "/?login=password&" if request.cookies.get("clipflow-login-method") == "password" else "/api/auth/login?"
+                login_url = entry + urlencode({'next': next_path})
                 return Response(status_code=302, headers={"Location": login_url})
             if str(request.url.path).rstrip('/') == '/workbench-lite' and request.query_params.get('_assistant_frame') != '1':
                 return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
@@ -7654,6 +7658,7 @@ class FastAPIPortalController:
                     allow_unscoped_target=PortalRuntime.auth_manager.is_admin(
                         session
                     ),
+                    fresh_target=True,
                 )
                 scope = str(validation.get("scope") or scope)
                 work_type = str(validation.get("work_type") or work_type)
@@ -7817,7 +7822,8 @@ class FastAPIPortalController:
                                 == bound_active_item_id
                             )
                             or (
-                                source_record_id
+                                not source_binding_only
+                                and source_record_id
                                 and str(
                                     row_payload.get("source_record_id") or ""
                                 ).strip()
@@ -7841,7 +7847,8 @@ class FastAPIPortalController:
                             else {}
                         )
                         merged = dict(row_payload)
-                        merged.update(target_active_payload)
+                        if not source_binding_only or not row_payload:
+                            merged.update(target_active_payload)
                         if not merged:
                             raise RuntimeError(
                                 "目标未结束通告投影为空，请重新查找后绑定。"

@@ -18,7 +18,13 @@ class PanelDataTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.service = self.fixture.service
-        self.current = data.now()
+        self.current = data.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        from lan_bitable_template_portal.workbench_lite import _planned_maintenance_times
+        # These tests cover SOP/photos/memory, not wall-clock-dependent default windows.
+        clock = patch('lan_bitable_template_portal.workbench_lite._planned_maintenance_times',
+                      return_value=_planned_maintenance_times(self.current))
+        clock.start()
+        self.addCleanup(clock.stop)
         self.fixture.records[0]['display_fields'].update({
             '计划开始维护时间': self.current.date().isoformat(),
             '计划结束维护时间': (self.current.date() + dt.timedelta(days=2)).isoformat(),

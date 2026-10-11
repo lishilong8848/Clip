@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import xml.etree.ElementTree as ET
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import Mock
@@ -25,7 +27,18 @@ from lan_bitable_template_portal.lighthouse_files import LighthouseFiles
 from lan_bitable_template_portal.lighthouse_model import LighthouseModel
 from test_lighthouse_stream import Store
 from test_drill_management import _fixture_xlsx, _signature_png
-from lan_bitable_template_portal.drill_management import DrillManagementService, _parse_workbook
+from lan_bitable_template_portal.drill_management import (
+    DrillManagementService,
+    _A_NS,
+    _DOC_REL_NS,
+    _PKG_REL_NS,
+    _XDR_NS,
+    _drawing_relationship_path,
+    _is_drill_signature_anchor,
+    _parse_workbook,
+    _resolve_zip_target,
+    normalize_drill_signature_png,
+)
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
 
 ACTOR = {"id": "reference-owner", "scopes": ["A"], "is_admin": False, "learning_scopes": ["A"]}
@@ -518,7 +531,61 @@ class ReferenceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["cells"]["G18"], "2026年10月01日 10时30分")
         self.assertEqual(assessment["cells"]["H12"], "2026年10月01日 11时45分")
         with zipfile.ZipFile(path) as archive:
-            self.assertGreater(sum("drill_signature_" in name for name in archive.namelist()), 2)
+            media = [name for name in archive.namelist() if "xl/media/drill_signature_" in name and name.endswith(".png")]
+            self.assertEqual(len(media), 1)
+            self.assertEqual(archive.read(media[0]), normalize_drill_signature_png(_signature_png()))
+            shared = media[0]
+            # fixture人员=4, 步骤签名槽为1/3/4；审核/评估人均为 fixture 第4人。
+            # 本月记录签名anchor = 指挥1 + 参演4 + 参演签字4 + 记录人1 + 审核人1 + 步骤(1+3+4)=19
+            # 评估表签名anchor = 参演签字4 + 评估人1 = 5
+            expected_anchors = {"本月记录": (record, 19), "评估表": (assessment, 5)}
+            expected_rows = {
+                # 从 anchor 的 from 读取 0 基 row,col；此处期望为 1 基行计数。
+                "本月记录": {8: 1, 10: 4, 13: 1, 14: 3, 15: 4, 17: 5, 18: 1},
+                "评估表": {6: 4, 12: 1},
+            }
+            # 关键区域位置校验（0 基 col 闭区间，范围依据 fixture 合并区域：C:E / G:I / D:F）。
+            expected_regions = {
+                "本月记录": {(17, 2, 4): 4, (17, 6, 8): 1, (18, 2, 4): 1},
+                "评估表": {(12, 3, 5): 1},
+            }
+            for sheet_name, (sheet, expected_count) in expected_anchors.items():
+                drawing_path = sheet["drawing_path"]
+                drawing_rels_path = _drawing_relationship_path(drawing_path)
+                drawing_root = ET.fromstring(archive.read(drawing_path))
+                relationship_root = ET.fromstring(archive.read(drawing_rels_path))
+                relationships = {
+                    str(item.attrib.get("Id") or ""): item
+                    for item in relationship_root.findall(f"{{{_PKG_REL_NS}}}Relationship")
+                }
+                anchors = [anchor for anchor in drawing_root if _is_drill_signature_anchor(anchor)]
+                self.assertEqual(len(anchors), expected_count)
+                positions = [
+                    (
+                        int((marker := anchor.find(f"{{{_XDR_NS}}}from")).findtext(f"{{{_XDR_NS}}}row") or "0") + 1,
+                        int(marker.findtext(f"{{{_XDR_NS}}}col") or "0"),
+                    )
+                    for anchor in anchors
+                ]
+                self.assertEqual(dict(Counter(row for row, _col in positions)), expected_rows[sheet_name])
+                for (row, start_col, end_col), expected_region_count in expected_regions[sheet_name].items():
+                    actual_region_count = sum(1 for r, c in positions if r == row and start_col <= c <= end_col)
+                    self.assertEqual(actual_region_count, expected_region_count,
+                                     f"{sheet_name} 第 {row} 行 {chr(start_col + 65)}:{chr(end_col + 65)} 签名数量")
+                referenced_targets = set()
+                for anchor in anchors:
+                    blip = anchor.find(f".//{{{_A_NS}}}blip")
+                    rel_id = (
+                        str(blip.attrib.get(f"{{{_DOC_REL_NS}}}embed") or "")
+                        if blip is not None else ""
+                    )
+                    relationship = relationships.get(rel_id)
+                    self.assertIsNotNone(relationship)
+                    self.assertTrue(str(relationship.attrib.get("Type") or "").endswith("/image"))
+                    referenced_targets.add(
+                        _resolve_zip_target(drawing_path, str(relationship.attrib.get("Target") or ""))
+                    )
+                self.assertEqual(referenced_targets, {shared})
         public = json.dumps(self.portal.public_plan(plan), ensure_ascii=False)
         self.assertNotIn("data:image", public)
         spec = plan["results"][1]["_task"]

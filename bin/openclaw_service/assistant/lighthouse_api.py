@@ -1222,7 +1222,7 @@ def _field_label(name: str) -> str:
         "text": "内容", "options": "选项", "rows": "记录", "items": "条目", "steps": "步骤", "enabled": "启用",
         "operator required": "操作人确认", "reviewer required": "审核人确认",
         "photo required": "需要照片", "time limit seconds": "时间限制（秒）", "delay reminder minutes": "完成后延时提醒",
-        "repeat rules": "本步后循环", "count": "重复遍数", "scope type": "范围类型", "obj name": "资源名称",
+        "repeat rules": "本步后循环", "count": "总执行遍数", "scope type": "范围类型", "obj name": "资源名称",
         "sheet types": "检查表类型",
         "file": "上传文件", "files": "上传文件",
         "inst name": "设备名称", "point name": "测点名称", "rule group no": "规则组号", "rule type": "规则类型",

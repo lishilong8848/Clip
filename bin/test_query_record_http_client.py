@@ -41,6 +41,22 @@ class _FakeFeishuClient:
 
 
 class QueryRecordHttpClientTests(unittest.TestCase):
+    def test_per_request_timeout_does_not_change_the_shared_client_defaults(self):
+        timeouts = []
+        def handle(request):
+            timeouts.append(request.extensions['timeout'])
+            return httpx.Response(200, json={'code': 0})
+        client = FeishuHttpClient(timeout=20, retries=0, transport=httpx.MockTransport(handle))
+        try:
+            client.request_json('GET', 'https://fixture.example/check', timeout=6)
+            shared = client._client
+            client.request_json('GET', 'https://fixture.example/check')
+            self.assertIs(client._client, shared)
+            self.assertEqual(timeouts[0]['read'], 6)
+            self.assertEqual(timeouts[1]['read'], 20)
+        finally:
+            client.close()
+
     def test_feishu_frequency_code_retries_without_changing_search_page(self):
         for status in (200, 400, 429):
             with self.subTest(status=status):

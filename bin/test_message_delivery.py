@@ -23,6 +23,7 @@ from openclaw_service.assistant.lighthouse_agent import PortalAgent
 from openclaw_service.assistant.lighthouse_api import PortalAPICatalog
 from openclaw_service.assistant.lighthouse_ai import LighthouseAssistant, AssistantError
 from openclaw_service.assistant.lighthouse_files import LighthouseFiles
+from openclaw_service.assistant.lighthouse_message_delivery import feishu_delivery_requested
 from openclaw_service.assistant.lighthouse_model import LighthouseModel
 
 PEOPLE = [
@@ -196,9 +197,9 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         people = MessageDelivery(self.service).recipients('ou_a')
         for recipient, name in [('__self__', '测试甲'), ('rec-b', '测试乙'), ('__self__', '自己')]:
             with self.subTest(recipient=recipient):
-                question = f'发给{name}工号' + ('1001' if recipient == '__self__' else '1002') + '一条消息:\n这是一条测试消息,接收到了吗?'
+                question = f'通过飞书发给{name}工号' + ('1001' if recipient == '__self__' else '1002') + '一条消息:\n这是一条测试消息,接收到了吗?'
                 if name == '自己':
-                    question = '发给自己：\n这是一条测试消息,接收到了吗?'
+                    question = '通过飞书发给自己：\n这是一条测试消息,接收到了吗?'
                 text = question.split('\n')[1]
                 plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
                     'body': {'recipient_ids': [recipient], 'text': text}}]}, 'message_complete_1', [], queries={'people': people}, question=question)
@@ -211,9 +212,13 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('multiselect', json.dumps(public))
                 self.assertTrue(public['can_edit'])
                 edited = self.agent.amend(self.actor, plan['id'], {'action': 'edit', 'version': plan['version']})
-                self.assertEqual([field['path'] for field in edited['fields']], ['recipient_ids', 'text'])
-                self.assertEqual(edited['fields'][1]['value'], text)
-                self.agent.amend(self.actor, plan['id'], {'version': edited['version'], 'values': {'step0.recipient_ids': [recipient], 'step0.text': '修改后正文'}})
+                if name == '自己':
+                    self.assertEqual([field['path'] for field in edited['fields']], ['text'])
+                    self.agent.amend(self.actor, plan['id'], {'version': edited['version'], 'values': {'step0.text': '修改后正文'}})
+                else:
+                    self.assertEqual([field['path'] for field in edited['fields']], ['recipient_ids', 'text'])
+                    self.assertEqual(edited['fields'][1]['value'], text)
+                    self.agent.amend(self.actor, plan['id'], {'version': edited['version'], 'values': {'step0.recipient_ids': [recipient], 'step0.text': '修改后正文'}})
                 saved = self.agent.get_plan(self.actor, plan['id'])
                 self.assertEqual(saved['operations'][0]['body']['text'], '修改后正文')
         self.controller._submit_background.assert_not_called()
@@ -223,7 +228,7 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         people['people'].append({**people['people'][1], 'record_id': 'rec-duplicate'})
         plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
             'body': {'recipient_ids': ['rec-b'], 'text': '完整正文'}}]}, 'message_duplicate', [], queries={'people': people},
-            question='发给测试乙工号1002一条消息：完整正文')
+            question='通过飞书发给测试乙工号1002一条消息：完整正文')
         self.assertEqual(plan['status'], 'needs_input')
         self.assertEqual(plan['operations'][0]['body']['text'], '完整正文')
         self.controller._submit_background.assert_not_called()
@@ -232,7 +237,7 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         people = MessageDelivery(self.service).recipients('ou_a')
         for chosen, queries in [(['__self__'], {}), (['rec-b', 'unknown'], {'people': people})]:
             plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
-                'body': {'recipient_ids': chosen, 'text': '待发文字'}}]}, 'message_incomplete', [], queries=queries, question='发给他们：待发文字')
+                'body': {'recipient_ids': chosen, 'text': '待发文字'}}]}, 'message_incomplete', [], queries=queries, question='通过飞书发给他们：待发文字')
             self.assertEqual(plan['status'], 'needs_input')
             self.assertFalse(any(field.get('native_message_content') for field in plan['fields']))
             self.assertEqual(next(field for field in plan['fields'] if field['path'] == 'text')['value'], '待发文字')
@@ -261,7 +266,7 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         engine = LighthouseModel(self.agent, model_factory=no_model)
         async def authorize(): return self.actor.copy()
         async def emit(*_): pass
-        turn = {'question': '将完整的所有进行中的通告发给我', 'operation_id': 'full_notices_001',
+        turn = {'question': '通过飞书将完整的所有进行中的通告发给我', 'operation_id': 'full_notices_001',
                 '_profile': {'name': 'fixture', 'model': 'fixture'}}
         result = await engine.answer(self.actor, turn, [], self.request, emit, authorize, {})
         self.assertEqual(calls, [('A', 1), ('A', 2)])
@@ -288,12 +293,12 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         for text in ('把这发给我', '将完整的所有进行中的通告发给李世龙', '将完整的高风险进行中的通告发给我',
                      '将昨天开始的所有进行中的通告发给我'):
             self.assertFalse(full_notice_self_request(text), text)
-        self.assertTrue(full_notice_self_request('请将A楼所有进行中的维保通告发给我'))
+        self.assertTrue(full_notice_self_request('请将A楼所有进行中的维保通告通过飞书发给我'))
 
     async def test_archived_topic_search_keeps_full_answer_and_filters_other_scope(self):
         from openclaw_service.assistant.lighthouse_model import instructions_for_question
-        self.assertIn('发送内容不一定是上一条', instructions_for_question('把前面的内容发给我'))
-        self.assertIn('/api/message-delivery/send', instructions_for_question('把前面的天气发给我'))
+        self.assertIn('发送内容不一定是上一条', instructions_for_question('通过飞书把前面的内容发给我'))
+        self.assertIn('/api/message-delivery/send', instructions_for_question('通过飞书把前面的天气发给我'))
         state = self.assistant._state(self.actor)
         full_text = '旧报告正文。' * 2000
         for identity, scope in [('older-report', 'A'), ('hidden-report', 'B')]:
@@ -321,7 +326,7 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         async def emit(*_): pass
         async def authorize(): return self.actor.copy()
         result = await LighthouseModel(self.agent, model_factory=factory).answer(self.actor,
-            {'question': '把前面上周的巡检报告发给我，不是最新一条', 'operation_id': 'archived_message_01',
+            {'question': '通过飞书把前面上周的巡检报告发给我，不是最新一条', 'operation_id': 'archived_message_01',
              'file_ids': [], '_profile': {'model': 'fixture', 'name': 'fixture'}}, [], self.request, emit, authorize, {})
         self.assertIn('plan', result, result)
         plan = self.agent.get_plan(self.actor, result['plan']['id'])
@@ -387,6 +392,133 @@ class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
             result = await client.post('/api/message-delivery/send', json=payload, headers={'Origin': 'http://testserver'})
             self.assertEqual(result.status_code, 401)
         self.controller._submit_background.assert_not_called()
+
+    async def test_without_feishu_send_preparation_blocked_no_cloud_write(self):
+        # New rule: no explicit Feishu intent -> sending via Feishu must be blocked,
+        # and nothing is persisted to the cloud/store.
+        question = '发给我一条消息：这是一条测试消息,接收到了吗?'
+        with self.assertRaises(AssistantError):
+            self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
+                'body': {'recipient_ids': ['__self__'], 'text': '这是一条测试消息,接收到了吗?'}}]},
+                'blocked_no_feishu_001', [], question=question)
+        self.assertEqual(list(self.store.list_documents('lighthouse_agent_plans')), [])
+        self.controller._submit_background.assert_not_called()
+        self.service._load_signature_people.assert_not_called()
+
+    async def test_feishu_to_self_with_missing_recipient_auto_self_no_recipient_field(self):
+        # Explicit Feishu + "发给我": model omitted recipient_ids -> auto __self__,
+        # no recipient selection field, and deliverability stays at the original API.
+        question = '通过飞书发给我：这是一条测试消息,接收到了吗?'
+        plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
+            'body': {'text': '这是一条测试消息,接收到了吗?'}}]}, 'feishu_self_missing_recipient_001', [], question=question)
+        self.assertEqual(plan['status'], 'awaiting_confirmation')
+        self.assertEqual(plan['operations'][0]['body']['recipient_ids'], ['__self__'])
+        self.assertEqual(plan['fields'], [])
+        self.assertNotIn('recipient_ids', [field.get('path') for field in plan['fields']])
+        self.service._load_signature_people.assert_not_called()
+        self.controller._submit_background.assert_not_called()
+
+    async def test_generated_file_feishu_to_self_auto_self_without_asking_recipient(self):
+        # Generated/conversation file sent via Feishu to "me" defaults to __self__
+        # and does not re-ask for the recipient; delivery check stays at original API.
+        file = self.files.upload(self.actor, '报告.txt', '报告内容'.encode('utf-8'), extract=False)
+        question = '通过飞书把这文件发给我：请查收'
+        plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
+            'body': {'text': '请查收'}}]}, 'generated_file_feishu_self_001', [file['id']], question=question)
+        self.assertEqual(plan['operations'][0]['body']['recipient_ids'], ['__self__'])
+        self.assertEqual(plan['status'], 'needs_input')
+        self.assertNotIn('recipient_ids', [field.get('path') for field in plan['fields']])
+        self.service._load_signature_people.assert_not_called()
+        self.controller._submit_background.assert_not_called()
+
+    async def test_body_says_send_to_me_does_not_override_external_recipient(self):
+        # "发给我" inside the message body must not replace an explicitly named
+        # external recipient (name + employee number in the header).
+        people = MessageDelivery(self.service).recipients('ou_a')
+        question = '通过飞书发给测试乙工号1002一条消息：发给我看看'
+        plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
+            'body': {'recipient_ids': ['rec-b'], 'text': '发给我看看'}}]}, 'external_recipient_kept_001', [],
+            queries={'people': people}, question=question)
+        self.assertEqual(plan['status'], 'awaiting_confirmation')
+        self.assertEqual(plan['operations'][0]['body']['recipient_ids'], ['rec-b'])
+        self.assertNotIn('__self__', plan['operations'][0]['body']['recipient_ids'])
+        self.assertEqual(plan['fields'], [])
+        self.controller._submit_background.assert_not_called()
+
+    async def test_send_to_me_and_others_keeps_multi_recipient(self):
+        # "发给我和其他人" must keep both recipients, not collapse to self only.
+        people = MessageDelivery(self.service).recipients('ou_a')
+        question = '通过飞书发给我和测试乙工号1002一条消息：完整正文'
+        plan = self.agent.prepare(self.actor, {'operations': [{'api_id': 'POST /api/message-delivery/send',
+            'body': {'recipient_ids': ['__self__', 'rec-b'], 'text': '完整正文'}}]}, 'multi_recipient_001', [],
+            queries={'people': people}, question=question)
+        op = plan['operations'][0]['body']
+        self.assertEqual(sorted(op['recipient_ids']), ['__self__', 'rec-b'])
+        self.assertEqual(plan['status'], 'needs_input')
+        recipient_field = next(field for field in plan['fields'] if field.get('path') == 'recipient_ids')
+        self.assertEqual(sorted(recipient_field['value']), ['__self__', 'rec-b'])
+        self.controller._submit_background.assert_not_called()
+
+    async def test_create_text_file_py_in_conversation_no_directory_no_send_owner_isolated(self):
+        # create_text_file keeps a private .py file in-conversation: no feishu intent
+        # means no people-directory lookup and no send; file owner is isolated.
+        invoked = []
+        original_invoke = self.agent.catalog.invoke
+        async def recording_invoke(operation, *args, **kwargs):
+            invoked.append(operation.get('api_id'))
+            return await original_invoke(operation, *args, **kwargs)
+        self.agent.catalog.invoke = recording_invoke
+
+        turn = {'question': '帮我写个py文件，文件中是一个冒泡排序的示例，仅一个文件然后发给我',
+                'operation_id': 'text_file_001', 'file_ids': [], '_profile': {'name': 'fixture', 'model': 'fixture'}}
+        code = '''def bubble_sort(arr):
+    n = len(arr)
+    for i in range(n - 1):
+        for j in range(n - 1 - i):
+            if arr[j] > arr[j + 1]:
+                arr[j], arr[j + 1] = arr[j + 1], arr[j]
+    return arr
+
+print(bubble_sort([3, 1, 2]))
+'''
+        async def stream(messages, info):
+            results = [part.content for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            if not results:
+                yield {0: DeltaToolCall(name='create_text_file', json_args=json.dumps({'name': 'bubble_sort.py', 'content': code}))}
+            else:
+                self.assertEqual(results[0]['delivery'], 'conversation')
+                yield '已生成冒泡排序示例Python文件，可在对话中下载。'
+        @asynccontextmanager
+        async def factory(*_):
+            yield FunctionModel(stream_function=stream)
+        async def emit(*_): pass
+        async def authorize(): return self.actor.copy()
+        result = await LighthouseModel(self.agent, model_factory=factory).answer(
+            self.actor, turn, [], self.request, emit, authorize, {})
+        self.assertNotIn('plan', result)
+        self.assertEqual(len(result['output_files']), 1)
+        self.assertEqual(len(turn['file_ids']), 1)
+        file_id = turn['file_ids'][0]
+        file = self.files.get(self.actor, file_id)
+        self.assertEqual(file['name'], 'bubble_sort.py')
+        self.assertEqual(Path(file['path']).read_bytes().decode('utf-8'), code)
+        self.assertNotIn('GET /api/message-delivery/recipients', invoked)
+        self.assertNotIn('POST /api/message-delivery/send', invoked)
+        self.controller._submit_background.assert_not_called()
+        with self.assertRaises(AssistantError):
+            self.files.get({'id': 'ou_b', 'scopes': ['A'], 'allowed_scopes': ['A']}, file_id)
+
+    async def test_feishu_delivery_requested_channel_classification(self):
+        # Delivery is only requested through an explicit Feishu channel; plain
+        # "发给我" or file-generation stay in-conversation.
+        false_cases = ['发给我', '生成一个介绍飞书API的py文件然后发给我', '不发飞书只在对话给我']
+        true_cases = ['通过飞书发给我', '将文件用飞书发给本人', '发飞书']
+        for question in false_cases:
+            with self.subTest(question=question, expected=False):
+                self.assertFalse(feishu_delivery_requested(question), question)
+        for question in true_cases:
+            with self.subTest(question=question, expected=True):
+                self.assertTrue(feishu_delivery_requested(question), question)
 
 
 if __name__ == '__main__':

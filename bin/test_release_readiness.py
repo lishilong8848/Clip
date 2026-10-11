@@ -28,6 +28,7 @@ class ReleaseReadinessTests(unittest.TestCase):
             directory = Path(kwargs['env']['CLIPFLOW_DATA_DIR'])
             self.assertTrue(directory.is_dir())
             self.assertEqual(kwargs['env']['PYTHONIOENCODING'], 'utf-8')
+            self.assertEqual(kwargs['env']['PYTHONNOUSERSITE'], '1')
             self.assertTrue(kwargs['check'])
             self.assertEqual(kwargs['timeout'], 900)
             calls.append((args[3:], directory))
@@ -112,20 +113,54 @@ class ReleaseReadinessTests(unittest.TestCase):
 
     def test_preflight_uses_one_interpreter_for_dependency_checks_and_tests(self) -> None:
         python = readiness.BIN_DIR / '.venv/Scripts/python.exe'
-        with patch.object(package_portable, '_find_dist_venv_python', return_value=python), \
+        with patch.object(package_portable, '_find_build_python', return_value=python), \
                 patch.object(package_portable, 'log'), \
                 patch.object(package_portable, '_assert_project_iterator_excludes_runtime_data'), \
                 patch.object(package_portable, '_cleanup_vue_dist_assets'), \
                 patch.object(package_portable, '_ensure_packaging_preflight_dependencies') as ensure, \
+                patch.object(package_portable, '_verify_runtime_imports', return_value=True) as imports, \
                 patch.object(package_portable.subprocess, 'run') as run:
             package_portable._run_packaging_preflight_tests()
         ensure.assert_called_once_with(python)
+        imports.assert_called_once_with(python, package_portable.PROJECT_ROOT)
         self.assertGreater(len(run.call_args_list), 5)
         self.assertTrue(all(call.args[0][0] == str(python) for call in run.call_args_list))
+        self.assertTrue(all(call.kwargs['env']['PYTHONNOUSERSITE'] == '1' for call in run.call_args_list))
         compile_call = run.call_args_list[0]
         self.assertEqual(compile_call.args[0][1], '-c')
         self.assertIn('cfile=', compile_call.args[0][2])
         self.assertNotIn('PYTHONPYCACHEPREFIX', compile_call.kwargs.get('env', {}))
+
+    def test_build_uses_project_python_even_when_launched_from_system_python(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / 'bin/.venv/Scripts/python.exe'
+            system = root / 'system/python.exe'
+            for executable in (project, system):
+                executable.parent.mkdir(parents=True, exist_ok=True)
+                executable.touch()
+            with patch.dict(package_portable.os.environ, {'PACKAGE_BUILD_PYTHON': ''}), \
+                    patch.object(package_portable, 'PROJECT_ROOT', root), \
+                    patch.object(package_portable, 'PREFERRED_BUILD_PYTHON', system), \
+                    patch.object(package_portable.sys, 'executable', str(system)):
+                self.assertEqual(package_portable._find_build_python(), project)
+                with patch.dict(package_portable.os.environ, {'PACKAGE_BUILD_PYTHON': str(system)}):
+                    self.assertEqual(package_portable._find_build_python(), system)
+                project.unlink()
+                self.assertEqual(package_portable._find_build_python(), system)
+
+    def test_preflight_stops_before_tests_when_runtime_imports_fail(self) -> None:
+        python = readiness.BIN_DIR / '.venv/Scripts/python.exe'
+        with patch.object(package_portable, '_find_build_python', return_value=python), \
+                patch.object(package_portable, 'log'), \
+                patch.object(package_portable, '_assert_project_iterator_excludes_runtime_data'), \
+                patch.object(package_portable, '_cleanup_vue_dist_assets'), \
+                patch.object(package_portable, '_ensure_packaging_preflight_dependencies'), \
+                patch.object(package_portable, '_verify_runtime_imports', return_value=False), \
+                patch.object(package_portable, '_run_preflight_check') as run:
+            with self.assertRaisesRegex(RuntimeError, '打包运行时导入失败'):
+                package_portable._run_packaging_preflight_tests()
+        self.assertFalse(any(call.args[0][1:3] == ['-m', 'unittest'] for call in run.call_args_list))
 
     def test_packaging_filter_reuses_validated_relative_paths(self) -> None:
         root = package_portable.PROJECT_ROOT
@@ -140,12 +175,51 @@ class ReleaseReadinessTests(unittest.TestCase):
                 with patch.object(Path, 'resolve', side_effect=AssertionError('already validated')):
                     self.assertEqual(package_portable._is_excluded(source, root=root, relative_path=Path(relative)), excluded)
 
+    def test_full_package_skips_runtime_and_databases_before_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'source'
+            output = Path(directory) / 'full'
+            runtime_files = ['bin/runtime/node.exe', 'bin/runtime/cache/model.bin',
+                             'bin/data/private.db', 'bin/cache.sqlite3', 'private.db',
+                             'bin/subfolder/cache.sqlite3-wal']
+            for relative in ['bin/refactored_main.py', *runtime_files]:
+                item = root / relative
+                item.parent.mkdir(parents=True, exist_ok=True)
+                item.write_text('fixture', encoding='utf-8')
+            original_copy = package_portable.shutil.copy2
+
+            def copy_file(source, destination, **kwargs):
+                self.assertNotIn(Path(source).relative_to(root).as_posix(), runtime_files)
+                return original_copy(source, destination, **kwargs)
+
+            with patch.object(package_portable, 'PROJECT_ROOT', root), \
+                    patch.object(package_portable.shutil, 'copy2', side_effect=copy_file):
+                package_portable.copy_project(output)
+            self.assertTrue((output / 'bin/refactored_main.py').is_file())
+            self.assertFalse((output / 'bin/runtime').exists())
+            self.assertEqual(package_portable._scan_runtime_data_files(output), [])
+
     def test_dependency_probe_does_not_mix_site_packages(self) -> None:
         python = Path('selected-python')
         with patch.object(package_portable, '_run_cmd_capture', return_value=(True, '')) as run:
             self.assertEqual(package_portable._missing_selected_modules(python, ['pydantic']), [])
         self.assertEqual(run.call_args.args[0][:2], [str(python), '-c'])
         self.assertNotIn('sys.path', run.call_args.args[0][2])
+
+    def test_packaging_dependency_commands_disable_user_site_packages(self) -> None:
+        for command in (package_portable._run_cmd, package_portable._run_cmd_capture):
+            with self.subTest(command=command.__name__), \
+                    patch.object(package_portable.subprocess, 'run',
+                                 return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+                command(['python', '-c', 'pass'])
+                self.assertEqual(run.call_args.kwargs['env']['PYTHONNOUSERSITE'], '1')
+
+    def test_preflight_preserves_explicit_environment_without_mutating_it(self) -> None:
+        env = {'FIXTURE': 'kept', 'PYTHONNOUSERSITE': '0'}
+        with patch.object(package_portable.subprocess, 'run') as run, patch.object(package_portable, 'log'):
+            package_portable._run_preflight_check(['python', 'check.py'], env=env)
+        self.assertEqual(run.call_args.kwargs['env'], {'FIXTURE': 'kept', 'PYTHONNOUSERSITE': '1'})
+        self.assertEqual(env['PYTHONNOUSERSITE'], '0')
 
     def test_dependency_probe_checks_missing_and_pinned_versions_without_loading_sdk(self) -> None:
         def capture(args):
@@ -161,6 +235,19 @@ class ReleaseReadinessTests(unittest.TestCase):
             self.assertEqual(package_portable._missing_selected_modules(
                 Path('python'), ['lark_oapi', 'missing_fixture', 'pydantic_ai', 'openai']),
                 ['missing_fixture', 'openai'])
+
+    def test_multipart_pin_matches_startup_and_rejects_incompatible_parser(self) -> None:
+        from bin.upload_event_module.services import dependency_bootstrap as deps
+        self.assertEqual(package_portable.RUNTIME_MODULE_TO_PACKAGE['multipart'],
+                         deps.DEFAULT_MODULE_TO_PACKAGE['multipart'])
+        def capture(args):
+            output = io.StringIO()
+            with patch('importlib.util.find_spec', return_value=object()), \
+                    patch('importlib.metadata.version', return_value='0.0.32'), redirect_stdout(output):
+                exec(args[2], {})
+            return True, output.getvalue()
+        with patch.object(package_portable, '_run_cmd_capture', side_effect=capture):
+            self.assertEqual(package_portable._missing_selected_modules(Path('python'), ['multipart']), ['multipart'])
 
     def test_frontend_dist_rejects_native_prompt(self) -> None:
         dist_index = (

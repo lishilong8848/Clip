@@ -95,7 +95,7 @@
               </div>
               <small v-if="person.signature_reason">{{ person.signature_reason }}</small>
               <small v-if="person.effective_has_signature">默认使用{{ person.effective_source === 'staff' ? '正式表' : '临时表' }}签名</small>
-              <small v-if="person.has_signature" class="protected-signature"><ShieldCheck :size="13" />签名内容仅供后端生成文件，不在网页展示</small>
+              <small v-if="person.has_signature" class="protected-signature"><ShieldCheck :size="13" />签名内容仅供管理员在网页预览，普通用户不可见</small>
             </div>
             <div v-if="person.request" class="request-state">
               <span><Link2 :size="14" />{{ requestLabel(person.request.status) }}</span>
@@ -104,8 +104,9 @@
               <small v-if="person.request.error" class="error">{{ person.request.error }}</small>
             </div>
             <div class="row-actions">
-              <button class="btn blue" @click="openSend(person)">{{ person.has_signature ? '重新签名' : '发送签名链接' }}</button>
-              <button v-if="isAdmin && person.source === 'external'" class="btn" @click="openAssociate(person)">关联正式人员</button>
+              <button v-if="isAdmin && person.has_signature" type="button" class="btn preview-btn" @click="openPreview(person)"><Eye :size="14" />查看签名</button>
+              <button type="button" class="btn blue" @click="openSend(person)">{{ person.has_signature ? '重新签名' : '发送签名链接' }}</button>
+              <button v-if="isAdmin && person.source === 'external'" type="button" class="btn" @click="openAssociate(person)">关联正式人员</button>
             </div>
           </article>
         </div>
@@ -121,11 +122,14 @@
         <div v-if="!duplicateGroups.length" class="empty">未发现同名的临时人员记录。</div>
         <article v-for="group in duplicateGroups" :key="group.name">
           <strong>{{ group.name }}</strong>
-          <label v-for="person in group.people" :key="person.record_id" class="duplicate-row">
-            <input v-model="group.selected" type="checkbox" :value="person.record_id" />
-            <span>{{ person.name }}　{{ person.employee_no || '无工号' }}　{{ person.building }}　{{ person.record_id }}</span>
+          <div v-for="person in group.people" :key="person.record_id" class="duplicate-row">
+            <label class="duplicate-check">
+              <input v-model="group.selected" type="checkbox" :value="person.record_id" />
+              <span>{{ person.name }}　{{ person.employee_no || '无工号' }}　{{ person.building }}　{{ person.record_id }}</span>
+            </label>
             <span v-if="person.has_signature" class="protected-signature"><ShieldCheck :size="13" />已有签名</span>
-          </label>
+            <button v-if="isAdmin && person.has_signature" type="button" class="btn preview-btn" @click="openPreview(person)"><Eye :size="14" />查看签名</button>
+          </div>
           <div class="duplicate-options">
             <label><span>保留人员记录</span><select v-model="group.keep"><option v-for="p in group.people" :key="p.record_id" :value="p.record_id">{{ p.record_id }}</option></select></label>
             <label><span>保留签名</span><select v-model="group.signature"><option v-for="p in group.people.filter((p: Dict) => p.has_signature)" :key="p.record_id" :value="p.record_id">{{ p.record_id }}</option></select></label>
@@ -137,7 +141,7 @@
       </section>
     </template>
 
-    <dialog ref="dialog" @cancel.prevent="closeModal">
+    <dialog ref="dialog" :aria-label="dialogAriaLabel" @cancel.prevent="closeModal">
       <form @submit.prevent="submitModal">
         <header><div><span class="dialog-kicker">签名管理</span><h3>{{ modalTitle }}</h3></div><button type="button" class="icon-btn" aria-label="关闭" :disabled="sending" @click="closeModal"><X :size="19" /></button></header>
         <template v-if="modal === 'create'">
@@ -159,6 +163,25 @@
             </button>
           </div>
           <label class="check-row"><input v-model="samePerson" type="checkbox" required />我已核对姓名、工号和楼栋，确认是同一个人</label>
+        </template>
+        <template v-else-if="modal === 'preview'">
+          <div class="selected-summary">
+            <span class="avatar">{{ personInitial(selectedPerson || {}) }}</span>
+            <div>
+              <small>{{ selectedPerson?.source === 'staff' ? '正式人员' : '临时人员' }}{{ selectedPerson?.employee_no ? ' · 工号 ' + selectedPerson.employee_no : ' · 无工号' }}</small>
+              <strong>{{ selectedPerson?.name }}</strong>
+            </div>
+          </div>
+          <div class="signature-preview preview-area" aria-live="polite">
+            <img v-if="previewSrc" :key="previewSrc" :src="previewSrc" alt="签名预览" :class="{ hidden: previewLoading || previewError }" @load="previewLoaded" @error="previewFailed" />
+            <div v-if="previewLoading" class="preview-overlay" role="status">
+              <span class="preview-state"><RefreshCw :size="19" class="spin" />正在加载签名…</span>
+            </div>
+            <div v-else-if="previewError" class="preview-overlay error" role="alert">
+              <span class="preview-state error"><CircleAlert :size="19" />{{ previewError }}</span>
+              <button v-if="canPreview" type="button" class="btn preview-retry" @click="loadPreview"><RefreshCw :size="14" />重试</button>
+            </div>
+          </div>
         </template>
         <template v-else>
           <div class="selected-summary"><span class="avatar">{{ personInitial(selectedPerson || {}) }}</span><div><small>签名人员</small><strong>{{ selectedPerson?.name }}　{{ selectedPerson?.building }}</strong></div></div>
@@ -183,7 +206,16 @@
           <p class="hint">链接24小时有效，请在局域网内交由本人完成手写签名；重新发送后旧链接失效。</p>
         </template>
         <p v-if="modalError" class="notice error" role="alert"><CircleAlert :size="17" />{{ modalError }}</p>
-        <footer><button type="button" class="btn" :disabled="sending" @click="closeModal">取消</button><button class="btn blue" :disabled="modalSubmitDisabled">{{ sending ? '处理中…' : modalSubmitLabel }}</button></footer>
+        <footer>
+          <template v-if="modal === 'preview'">
+            <button type="button" class="btn" @click="closeModal">关闭</button>
+            <button type="button" class="btn blue" @click="switchPreviewToSend">重新签名</button>
+          </template>
+          <template v-else>
+            <button type="button" class="btn" :disabled="sending" @click="closeModal">取消</button>
+            <button class="btn blue" :disabled="modalSubmitDisabled">{{ sending ? '处理中…' : modalSubmitLabel }}</button>
+          </template>
+        </footer>
       </form>
     </dialog>
 
@@ -196,7 +228,7 @@
 <script setup lang="ts">
 import VnetBackButton from "./VnetBackButton.vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { CheckCircle2, CircleAlert, Fingerprint, Link2, Plus, RefreshCw, Search, ShieldCheck, UserRound, UsersRound, X } from "lucide-vue-next";
+import { CheckCircle2, CircleAlert, Eye, Fingerprint, Link2, Plus, RefreshCw, Search, ShieldCheck, UserRound, UsersRound, X } from "lucide-vue-next";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { requestJson, type Dict } from "../api/client";
 
@@ -207,6 +239,7 @@ const query = ref(""), source = ref(""), status = ref(""), scope = ref(""), page
 const loading = ref(false), notice = ref(""), noticeError = ref(false);
 const sending = ref(false), modal = ref(""), modalError = ref(""), dialog = ref<HTMLDialogElement | null>(null);
 const selectedPerson = ref<Dict | null>(null), operationId = ref("");
+const previewSrc = ref(""), previewLoading = ref(false), previewError = ref("");
 const recipient = ref("");
 const relayQuery = ref(""), relayDirectory = ref<Dict[]>([]), relayLoading = ref(false);
 const draft = ref({ name: "", building: "", employee_no: "", specialty: "" });
@@ -221,11 +254,18 @@ const hasPending = computed(() => people.value.some(p => ["sent", "saving", "sen
 const hasFilters = computed(() => Boolean(query.value || source.value || status.value || scope.value));
 const totalPages = computed(() => Math.max(1, Math.ceil(count.value / 50)));
 const resultRange = computed(() => !count.value ? "0 人" : `${(page.value - 1) * 50 + 1}–${Math.min(page.value * 50, count.value)} / ${count.value} 人`);
-const modalTitle = computed(() => modal.value === "create" ? "新增临时人员" : modal.value === "associate" ? "关联正式人员" : "发送签名链接");
+const modalTitle = computed(() => modal.value === "create" ? "新增临时人员" : modal.value === "associate" ? "关联正式人员" : modal.value === "preview" ? "签名预览" : "发送签名链接");
 const modalSubmitLabel = computed(() => modal.value === "create" ? "新增并继续" : modal.value === "associate" ? "确认关联" : "发送链接");
 const modalSubmitDisabled = computed(() => sending.value
   || (modal.value === "associate" && (!staffId.value || !samePerson.value))
   || (modal.value === "send" && !recipient.value));
+const dialogAriaLabel = computed(() => {
+  if (modal.value === "create") return "新增临时人员";
+  if (modal.value === "associate") return "关联正式人员";
+  if (modal.value === "preview") return `签名预览 · ${selectedPerson.value?.name || "人员"}`;
+  return "发送签名链接";
+});
+const canPreview = computed(() => props.isAdmin && props.loggedIn && Boolean(selectedPerson.value?.has_signature && selectedPerson.value?.record_id));
 const filterDirectory = (rows: Dict[], value: string) => {
   const terms = value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return rows;
@@ -264,9 +304,44 @@ async function load(refresh = false) {
   }
 }
 
-async function showModal(kind: string) { modal.value = kind; modalError.value = ""; operationId.value = uuid(); await nextTick(); dialog.value?.showModal(); }
-function closeModal() { if (!sending.value) { dialog.value?.close(); modal.value = ""; } }
+async function showModal(kind: string) { modal.value = kind; modalError.value = ""; operationId.value = uuid(); await nextTick(); if (dialog.value && !dialog.value.open) dialog.value.showModal(); }
+function closeModal() { if (!sending.value) { clearPreview(); dialog.value?.close(); modal.value = ""; } }
 function openCreate() { draft.value = { name: "", building: "", employee_no: "", specialty: "" }; void showModal("create"); }
+function openPreview(person: Dict) {
+  if (!props.loggedIn || !props.isAdmin || !person.has_signature || !person.record_id) return;
+  selectedPerson.value = person;
+  loadPreview();
+  void showModal("preview");
+}
+function loadPreview() {
+  if (!canPreview.value) return;
+  previewSrc.value = "";
+  previewLoading.value = true;
+  previewError.value = "";
+  const params = new URLSearchParams({
+    source: selectedPerson.value?.source === "staff" ? "staff" : "external",
+    record_id: String(selectedPerson.value?.record_id || ""),
+    _rt: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+  });
+  previewSrc.value = "/api/signatures/management/preview?" + params.toString();
+}
+function previewLoaded(event: Event) {
+  if (modal.value !== "preview" || !props.loggedIn || !props.isAdmin) return;
+  const img = event.currentTarget as HTMLImageElement;
+  if (img.src !== new URL(previewSrc.value, document.baseURI).href) return;
+  previewLoading.value = false; previewError.value = "";
+}
+function previewFailed(event: Event) {
+  if (modal.value !== "preview" || !props.loggedIn || !props.isAdmin) return;
+  const img = event.currentTarget as HTMLImageElement;
+  if (img.src !== new URL(previewSrc.value, document.baseURI).href) return;
+  previewLoading.value = false; previewError.value = "签名图片读取失败，请重试。";
+}
+function clearPreview() { previewSrc.value = ""; previewLoading.value = false; previewError.value = ""; }
+function switchPreviewToSend() {
+  clearPreview();
+  if (selectedPerson.value) openSend(selectedPerson.value);
+}
 function openSend(person: Dict) {
   selectedPerson.value = person;
   recipient.value = person.source === "staff" && person.can_receive_message ? "direct" : "";
@@ -301,6 +376,7 @@ async function searchRelayPeople() {
 }
 
 async function submitModal() {
+  if (!["create", "associate", "send"].includes(modal.value)) return;
   if (modalSubmitDisabled.value) return;
   sending.value = true; modalError.value = "";
   try {
@@ -357,6 +433,12 @@ watch([query, source, status, scope], () => { page.value = 1; if (searchTimer) c
 watch(page, () => void load());
 watch(recipient, () => { operationId.value = uuid(); });
 watch(() => props.loggedIn, value => { if (value) void load(); }, { immediate: true });
+watch([() => props.loggedIn, () => props.isAdmin], ([loggedIn, admin]) => {
+  if (!loggedIn || !admin) {
+    clearPreview();
+    if (modal.value === "preview") { dialog.value?.close(); modal.value = ""; }
+  }
+});
 onBeforeUnmount(() => { disposed = true; ++seq; ++staffSeq; ++relaySeq; if (searchTimer) clearTimeout(searchTimer); if (pollTimer) clearTimeout(pollTimer); });
 </script>
 
@@ -364,6 +446,17 @@ onBeforeUnmount(() => { disposed = true; ++seq; ++staffSeq; ++relaySeq; if (sear
 .signature-management{width:min(1680px,100%);margin:auto;padding:26px 32px 48px;color:#0f2748}.signature-hero{position:relative;overflow:hidden;display:flex;align-items:center;justify-content:space-between;gap:24px;min-height:154px;padding:28px 32px;border:1px solid rgba(255,255,255,.22);border-radius:24px;background:linear-gradient(115deg,#064fc5 0%,#003b9f 55%,#012a7d 100%);box-shadow:0 20px 48px rgba(0,47,135,.22);color:#fff}.signature-hero::after{content:"";position:absolute;right:-40px;bottom:-86px;width:360px;height:220px;border:1px solid rgba(255,255,255,.2);border-radius:50%;box-shadow:0 0 0 34px rgba(255,255,255,.05),0 0 0 72px rgba(255,255,255,.035)}.hero-copy,.hero-actions{position:relative;z-index:1}.eyebrow{display:inline-flex;align-items:center;gap:7px;margin-bottom:10px;color:#cfe4ff;font-size:12px;font-weight:850}.signature-hero h2{display:flex;align-items:center;gap:12px;margin:0;font-size:29px;line-height:1.2}.signature-hero p{margin:10px 0 0;color:rgba(255,255,255,.76);font-size:13px}.hero-actions,.pagination,.pagination>div,.duplicates header,dialog header,dialog footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.btn,.icon-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:42px;border:1px solid #d8e5f7;border-radius:14px;padding:8px 14px;background:#fff;color:#174f9b;font:inherit;font-size:13px;font-weight:850;cursor:pointer;text-decoration:none;transition:border-color .18s,background .18s,box-shadow .18s}.btn:hover:not(:disabled),.icon-btn:hover:not(:disabled){border-color:#91bfff;background:#f4f9ff;box-shadow:0 8px 20px rgba(30,99,255,.1)}.btn:disabled,.icon-btn:disabled{opacity:.5;cursor:not-allowed}.btn.blue,.hero-primary{border-color:transparent;background:linear-gradient(135deg,#1e63ff,#1554df);color:#fff;box-shadow:0 10px 22px rgba(30,99,255,.24)}.hero-ghost{border-color:rgba(255,255,255,.34);background:rgba(255,255,255,.12);color:#fff}.hero-ghost:hover:not(:disabled){border-color:rgba(255,255,255,.62);background:rgba(255,255,255,.2)}.danger-text,.error{color:#b42332}.btn:focus-visible,.icon-btn:focus-visible,input:focus-visible,select:focus-visible,.staff-results button:focus-visible{outline:3px solid #8db8ff;outline-offset:2px}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:20px 0}.stats article{display:flex;align-items:center;gap:13px;min-height:88px;border:1px solid #d8e5f7;border-radius:18px;background:rgba(255,255,255,.88);padding:16px 18px;box-shadow:0 10px 26px rgba(0,47,135,.07)}.stats article div{display:grid;gap:3px}.stats small{color:#60748e;font-size:12px;font-weight:750}.stats b{color:#102f59;font-size:25px}.stat-icon{display:grid;width:42px;height:42px;place-items:center;border-radius:13px}.stat-icon.success{background:#e8fbf2;color:#087a55}.stat-icon.pending{background:#eef5ff;color:#145fd1}.stat-icon.warning{background:#fff5df;color:#a45e00}.stat-icon.neutral{background:#edf1f7;color:#526981}.notice{display:flex;align-items:flex-start;gap:8px;margin:0 0 14px;border:1px solid #cde0ff;border-radius:14px;background:#edf6ff;padding:11px 14px;color:#17549e;font-size:13px}.notice.error{border-color:#ffd0d5;background:#fff1f2;color:#b42332}.directory-panel,.duplicates{position:relative;border:1px solid #d8e5f7;border-radius:22px;background:rgba(255,255,255,.9);box-shadow:0 14px 34px rgba(0,47,135,.08)}.directory-panel{overflow:hidden}.section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:20px 22px 14px}.section-head h3,.duplicates h3,dialog h3{margin:0;color:#102f59;font-size:18px}.section-head p,.duplicates header p{margin:5px 0 0;color:#61748e;font-size:12px}.result-count{border:1px solid #cfe0ff;border-radius:999px;background:#eff6ff;padding:6px 10px;color:#1559bd;font-size:12px;font-weight:850;white-space:nowrap}.filters{display:grid;grid-template-columns:minmax(280px,1.7fr) repeat(3,minmax(130px,.7fr)) auto;align-items:end;gap:10px;padding:0 22px 16px}.filters label,.form-grid label,dialog form>label,.duplicate-options label{display:grid;gap:6px;color:#425975;font-size:12px;font-weight:750}.filters label>span,.form-grid label>span,dialog form>label>span,.duplicate-options label>span{padding-left:2px}.search-input{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;min-height:44px;border:1px solid #cbd8eb;border-radius:14px;background:#fff;padding:0 10px;color:#73869e}.search-input:focus-within{border-color:#4d91ff;box-shadow:0 0 0 3px rgba(30,99,255,.12)}input,select{width:100%;min-width:0;min-height:44px;border:1px solid #cbd8eb;border-radius:14px;background:#fff;padding:9px 11px;color:#102f59;font:inherit}input[type=checkbox]{width:18px;height:18px;min-height:0;accent-color:#1e63ff}.search-input input{min-height:40px;border:0;padding:7px 8px;outline:0;box-shadow:none}.search-input button,.icon-btn{width:38px;min-height:38px;border:0;border-radius:10px;background:transparent;padding:0;color:#60748e}.clear-filter{white-space:nowrap}.source-status{display:flex;gap:14px;flex-wrap:wrap;border-top:1px solid #edf2f8;border-bottom:1px solid #edf2f8;background:#f8fbff;padding:9px 22px;color:#62738a;font-size:11px}.source-status span{display:inline-flex;align-items:center;gap:6px}.source-status i{width:7px;height:7px;border-radius:50%;background:#13a474}.source-status i.bad{background:#d34150}.loading-line{position:absolute;z-index:2;top:0;left:0;width:34%;height:3px;border-radius:999px;background:#1e63ff;animation:loading 1.1s ease-in-out infinite}.people{display:grid;gap:9px;padding:14px}.person-card{display:grid;grid-template-columns:minmax(210px,1.25fr) minmax(150px,.9fr) minmax(190px,1fr) minmax(160px,.8fr) auto;align-items:center;gap:15px;border:1px solid #e0e9f5;border-radius:17px;background:#fff;padding:14px 15px;transition:border-color .18s,box-shadow .18s}.person-card:hover{border-color:#b7d1f5;box-shadow:0 9px 24px rgba(15,86,228,.07)}.person-info,.selected-summary{display:flex;align-items:center;gap:11px;min-width:0}.person-info>div,.selected-summary>div{display:grid;gap:4px;min-width:0}.person-info strong,.selected-summary strong{overflow:hidden;color:#102f59;font-size:15px;text-overflow:ellipsis;white-space:nowrap}.person-info small,.selected-summary small,.signature-state small,.request-state small{color:#61748e;font-size:11px;overflow-wrap:anywhere}.avatar{display:grid;width:42px;height:42px;flex:0 0 auto;place-items:center;border-radius:13px;background:linear-gradient(135deg,#1e63ff,#00a7ce);color:#fff;font-weight:900}.avatar.small{width:34px;height:34px;border-radius:10px}.person-tags{display:flex;gap:5px;flex-wrap:wrap}.person-tags span{border:1px solid #dce7f4;border-radius:999px;background:#f7faff;padding:4px 7px;color:#526981;font-size:10px;font-weight:750}.person-tags .source-staff{border-color:#cfe0ff;background:#eff6ff;color:#1559bd}.person-tags .source-temp{border-color:#d7e1ec;background:#f1f5f9;color:#516277}.signature-state,.request-state,.row-actions{display:grid;gap:5px;min-width:0}.state-title,.request-state>span{display:flex;align-items:center;gap:5px;color:#526981;font-size:12px;font-weight:850}.state-title.good{color:#087a55}.state-title.warning{color:#a45e00}.signature-preview{display:grid;width:150px;height:55px;place-items:center;overflow:hidden;border:1px solid #e1eaf4;border-radius:10px;background:repeating-linear-gradient(45deg,#f8fafc 0 7px,#fff 7px 14px)}.signature-preview img,.duplicates img{max-width:100%;max-height:100%;object-fit:contain;-webkit-user-drag:none;user-select:none}.row-actions{justify-items:stretch}.row-actions .btn{white-space:nowrap}.empty{display:grid;min-height:170px;place-content:center;justify-items:center;gap:7px;padding:30px;color:#60748e;text-align:center}.empty strong{color:#294667}.empty span{font-size:12px}.pagination{justify-content:space-between;border-top:1px solid #edf2f8;padding:14px 18px;color:#60748e;font-size:12px}.pagination>div>span{min-width:90px;text-align:center}.duplicates{display:grid;gap:13px;margin-top:18px;padding:20px}.duplicates article{display:grid;gap:11px;border-top:1px solid #e4ecf6;padding:15px 0}.duplicate-row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.duplicate-row span{font-size:12px}.duplicate-row img{width:120px;height:48px;margin-left:auto}.duplicate-options,.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.check-row{display:flex!important;align-items:center;gap:8px;color:#425975;font-size:12px}.state-panel{display:flex;align-items:center;justify-content:center;gap:13px;min-height:220px;margin-top:20px;border:1px solid #d8e5f7;border-radius:22px;background:#fff;color:#294667}.state-panel>div{display:grid;gap:4px}.state-panel p{margin:0;color:#61748e;font-size:12px}dialog{width:min(590px,calc(100vw - 28px));max-height:90dvh;overflow:auto;border:1px solid #d8e5f7;border-radius:22px;padding:0;color:#172c49;box-shadow:0 28px 80px rgba(1,42,125,.3)}dialog::backdrop{background:rgba(5,27,62,.58);backdrop-filter:blur(3px)}dialog form{display:grid;gap:15px;padding:22px}dialog header{justify-content:space-between;border-bottom:1px solid #e7eef8;padding-bottom:13px}.dialog-kicker{display:block;margin-bottom:3px;color:#1e63ff;font-size:10px;font-weight:900}.selected-summary{border:1px solid #d8e5f7;border-radius:15px;background:#f7faff;padding:11px}.hint{margin:0;border-radius:12px;background:#f3f7fc;padding:10px 12px;color:#60748e;font-size:12px;line-height:1.55}.staff-results{display:grid;max-height:290px;overflow:auto;gap:6px;border:1px solid #dce7f4;border-radius:15px;background:#f8fbff;padding:7px}.staff-results>button{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:9px;border:1px solid transparent;border-radius:12px;background:#fff;padding:8px;color:#294667;text-align:left;cursor:pointer}.staff-results>button:hover,.staff-results>button.selected{border-color:#77adff;background:#eff6ff}.staff-results>button>span:not(.avatar){display:grid;gap:3px;min-width:0}.staff-results strong,.staff-results small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.staff-results small{color:#60748e;font-size:11px}.staff-state{display:flex;align-items:center;justify-content:center;gap:7px;min-height:76px;color:#60748e;font-size:12px}dialog footer{position:sticky;bottom:-22px;margin:2px -22px -22px;padding:14px 22px;border-top:1px solid #e2ebf6;background:rgba(255,255,255,.96)}.spin{animation:spin .9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@keyframes loading{0%{transform:translateX(-110%)}50%{transform:translateX(190%)}100%{transform:translateX(410%)}}
 .person-tags .message-ready{border-color:#bcebd7;background:#eafaf2;color:#087a55}.person-tags .message-relay{border-color:#f4d49b;background:#fff7e8;color:#9a5a08}.warning-hint{border:1px solid #f4d49b!important;background:#fff7e8!important;color:#8a520b!important}.recipient-direct{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;min-height:48px;border:1px solid #d8e5f7;border-radius:13px;background:#fff;padding:9px 12px;color:#294667;text-align:left;cursor:pointer}.recipient-direct span{display:grid;gap:2px}.recipient-direct small{color:#60748e}.recipient-direct:hover,.recipient-direct.selected{border-color:#6ba5ff;background:#edf5ff;color:#1459bb}.recipient-section{display:grid;gap:8px}.recipient-section>strong{color:#425975;font-size:12px}.recipient-pinned{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.recipient-pinned button{min-height:40px;border:1px solid #d8e5f7;border-radius:11px;background:#fff;color:#49617d;font:inherit;font-size:12px;font-weight:850;cursor:pointer}.recipient-pinned button:hover,.recipient-pinned button.selected{border-color:#6ba5ff;background:#edf5ff;color:#1459bb;box-shadow:0 0 0 2px rgba(30,99,255,.08)}
 .protected-signature{display:inline-flex;align-items:center;gap:5px;color:#087a55!important}
+.preview-btn{min-height:32px;gap:5px;padding:4px 9px;border-radius:10px;font-size:12px}
+.duplicate-check{display:flex;align-items:center;gap:9px;min-width:0;cursor:pointer}
+.duplicate-check span{min-width:0}
+.signature-preview.preview-area{position:relative;width:100%;height:auto;min-height:150px;border-radius:12px;place-items:center;background:#fff}
+.signature-preview.preview-area img{width:auto;height:auto;max-width:100%;max-height:55vh;object-fit:contain;-webkit-user-drag:none;user-select:none}
+.signature-preview.preview-area img.hidden{visibility:hidden}
+.preview-overlay{position:absolute;inset:0;display:grid;place-content:center;justify-items:center;gap:10px;background:rgba(255,255,255,.85);border-radius:12px}
+.preview-overlay.error{background:rgba(255,247,247,.92)}
+.preview-state{display:flex;align-items:center;gap:8px;color:#60748e;font-size:13px;text-align:center}
+.preview-state.error{color:#b42332}
+.preview-retry{min-height:34px}
 @media(max-width:1200px){.stats{grid-template-columns:repeat(2,1fr)}.filters{grid-template-columns:minmax(240px,1fr) repeat(3,minmax(120px,.6fr))}.clear-filter{grid-column:1/-1;justify-self:start}.person-card{grid-template-columns:1.2fr .8fr 1fr auto}.request-state{grid-column:2/4}.row-actions{grid-column:4;grid-row:1/3}}
 @media(max-width:760px){.signature-management{padding:14px}.signature-hero{display:grid;padding:22px;border-radius:20px}.signature-hero h2{font-size:24px}.hero-actions{justify-content:flex-start}.hero-actions .btn{flex:1 1 140px}.stats{gap:8px;margin:13px 0}.stats article{min-height:76px;padding:12px}.filters{grid-template-columns:1fr 1fr;padding:0 14px 14px}.search-field{grid-column:1/-1}.section-head{padding:16px 15px 12px}.source-status{padding:9px 14px}.people{padding:9px}.person-card{grid-template-columns:1fr 1fr;padding:13px}.person-info,.person-tags,.signature-state,.request-state,.row-actions{grid-column:1/-1}.row-actions{grid-row:auto;display:flex}.row-actions .btn{flex:1}.pagination{align-items:flex-start}.duplicate-options,.form-grid{grid-template-columns:1fr}dialog form{padding:18px}dialog footer{bottom:-18px;margin:2px -18px -18px;padding:13px 18px}}
 @media(max-width:440px){.stats{grid-template-columns:1fr 1fr}.stats b{font-size:21px}.stat-icon{width:36px;height:36px}.filters{grid-template-columns:1fr}.search-field{grid-column:auto}.pagination{display:grid;justify-items:center}.pagination>div{width:100%;justify-content:space-between}.signature-preview{width:100%}.recipient-pinned{grid-template-columns:repeat(2,minmax(0,1fr))}}

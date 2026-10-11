@@ -141,7 +141,9 @@ def install_lighthouse_routes(app, controller, runtime):
             for name in ('content-type', 'range'):
                 if request.headers.get(name):
                     headers[name] = request.headers[name]
-            limit = 100 * 1024 * 1024 + 65536 if action in {'files', 'knowledge/files'} else 10 * 1024 * 1024 + 65536 if action == 'skills/install' else 4 * 1024 * 1024 if action.startswith('plans/') else 128000 if action in {'messages', 'agent', 'chat'} else 16000
+            # knowledge/files streams large multipart batches (300MiB + framing overhead); ordinary
+            # assistant attachments keep their original 100MiB ceiling with the same auth.
+            limit = 300 * 1024 * 1024 + 65536 if action == 'knowledge/files' else 100 * 1024 * 1024 + 65536 if action == 'files' else 10 * 1024 * 1024 + 65536 if action == 'skills/install' else 4 * 1024 * 1024 if action.startswith('plans/') else 128000 if action in {'messages', 'agent', 'chat'} else 16000
             async def content():
                 size = 0
                 async for chunk in request.stream():

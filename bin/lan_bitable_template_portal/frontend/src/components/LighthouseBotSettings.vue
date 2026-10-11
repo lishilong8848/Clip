@@ -1,7 +1,7 @@
 <template>
   <Teleport :to="target">
     <UiTransition name="ui-overlay" appear>
-      <div v-if="open" class="bot-settings-backdrop" @click.self="close">
+      <div v-if="open" class="bot-settings-backdrop" :style="theme" @click.self="close">
         <form ref="dialog" class="bot-settings" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" @submit.prevent="save">
           <header><h2 id="bot-settings-title">图标设置</h2><button type="button" class="close" aria-label="关闭图标设置" :disabled="saving" @click="close"><X :size="18" /></button></header>
           <div class="settings-body">
@@ -30,12 +30,18 @@ import { nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { Check, Loader2, RotateCcw, X } from 'lucide-vue-next';
 import { requestJson } from '../api/client';
 import { acquireModal } from '../modalState';
+import { inheritedControlTheme } from '../controlTheme';
 import { BOT_COLORS, BOT_SHAPES, DEFAULT_BOT, normalizeBot, type BotAppearance } from '../botAppearance';
 import LighthouseBot from './LighthouseBot.vue';
 
-const props = withDefaults(defineProps<{ open: boolean; appearance: BotAppearance; target?: string | HTMLElement }>(), { target: 'body' });
+const props = withDefaults(defineProps<{ open: boolean; appearance: BotAppearance; target?: string | HTMLElement; themeSource?: HTMLElement | null }>(), { target: 'body' });
 const emit = defineEmits<{ close: []; saved: [value: BotAppearance]; preview: [value: BotAppearance] }>();
 const dialog = ref<HTMLElement | null>(null), draft = ref({ ...DEFAULT_BOT }), saving = ref(false), error = ref('');
+const theme = ref<Record<string, string>>({});
+watch(() => [props.open, draft.value.color, props.themeSource], async () => {
+  await nextTick();
+  if (!disposed && props.open) theme.value = inheritedControlTheme(props.themeSource || null);
+}, { flush: 'post' });
 let modal: ReturnType<typeof acquireModal> | undefined, returnFocus: HTMLElement | null = null, disposed = false;
 let controller: AbortController | undefined;
 watch(draft, value => { if (props.open) emit('preview', { ...value }); }, { deep: true });
@@ -92,4 +98,15 @@ footer { border-top: 1px solid #e4eae5; }.reset { margin-right: auto; font-size:
 button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #397554; outline-offset: 3px; }
 @media (max-width: 420px) { .colors > div { grid-template-columns: repeat(6, 1fr); gap: 10px; }.swatch { width: 28px; justify-self: center; } }
 @media print { .bot-settings-backdrop { display: none; } }
+.bot-settings { background: var(--lh-surface, #fff); color: var(--lh-charcoal, #27342d); border-color: var(--lh-border-strong, #cdd8d0); color-scheme: inherit; }
+header, footer { border-color: var(--lh-border, #e4eae5); background: var(--lh-surface-subtle, #fff); }
+button, select { background: var(--lh-surface-subtle, #fff); border-color: var(--lh-border-strong, #cdd8d0); }
+button:hover:not(:disabled) { background: var(--lh-surface-hover, #edf4f0); }
+.swatch, .swatch:hover:not(:disabled) { background: var(--swatch); }
+.swatch[aria-pressed=true], button:focus-visible, select:focus-visible, input:focus-visible { outline-color: var(--lh-accent, #397554); }
+.size output { color: var(--lh-muted, #526b5d); }
+.size input, .switches input { accent-color: var(--lh-action, #397554); }
+.save { background: var(--lh-action, #397554); border-color: var(--lh-action, #397554); }
+.save:hover:not(:disabled) { background: var(--lh-action-hover, #2b6042); }
+.error { color: var(--lh-danger, #a12d2d); }
 </style>

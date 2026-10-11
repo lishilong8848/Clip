@@ -192,11 +192,15 @@ class FeishuAssistant:
 
     async def _start_worker(self):
         from upload_event_module.services.process_lifetime import register_child_process
+        from openclaw_service.protocol import atomic_json
+        # A saved configuration takes effect next startup, not on a worker retry.
+        worker_config = self.root / "feishu_assistant_active.json"
+        await asyncio.to_thread(atomic_json, worker_config, self.config)
         callback = f"http://127.0.0.1:{self.controller.bound_port or self.controller.preferred_port}/api/assistant/feishu-event"
         flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
         self.starts.append(time.monotonic())
         self.process = await asyncio.to_thread(subprocess.Popen,
-            [sys.executable, "-m", "lan_bitable_template_portal.feishu_assistant_worker", "--config", str(self.config_path), "--callback", callback],
+            [sys.executable, "-m", "lan_bitable_template_portal.feishu_assistant_worker", "--config", str(worker_config), "--callback", callback],
             cwd=str(Path(__file__).resolve().parents[1]), creationflags=flags)
         if not register_child_process(self.process.pid):
             self.process.terminate()
@@ -211,7 +215,8 @@ class FeishuAssistant:
             from .portal_service import external_real_write_guard
             if not external_real_write_guard()["real_write_allowed"]: return
             self.secret = unprotect_key(self.config["bridge_cipher"])
-            self.inbox = await asyncio.to_thread(Inbox, self.root / "feishu_assistant.sqlite3")
+            suffix = "_" + hashlib.sha256(self.config["app_id"].encode()).hexdigest()[:24] if self.config.get("isolated_inbox") else ""
+            self.inbox = await asyncio.to_thread(Inbox, self.root / ("feishu_assistant" + suffix + ".sqlite3"))
             self.messenger = FeishuMessenger(self.config)
             await self._start_worker()
             self.runner = asyncio.create_task(self._run())
@@ -919,6 +924,8 @@ def _filter_options(options, term):
 
 def install_feishu_assistant(app, controller, runtime, ready):
     service = FeishuAssistant(controller, runtime, ready)
+    from .feishu_assistant_settings import install_feishu_assistant_settings
+    install_feishu_assistant_settings(app, controller, runtime, service)
 
     async def incoming(request: Request):
         return await service.receive(request)

@@ -1,8 +1,10 @@
 import concurrent.futures
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,9 +23,32 @@ from lan_bitable_template_portal.workbench_lite import (  # noqa: E402
 )
 
 
+@contextmanager
+def auth_test_directory():
+    managers = []
+    manager_type = PortalAuthManager
+
+    def create():
+        manager = manager_type()
+        managers.append(manager)
+        return manager
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch(__name__ + ".PortalAuthManager", side_effect=create):
+            try:
+                yield tmp
+            finally:
+                for manager in managers:
+                    manager.shutdown()
+                    manager._cleanup_executor.shutdown(
+                        wait=True, cancel_futures=True
+                    )
+                    manager._state_store.shutdown_write_worker()
+
+
 class PortalAuthPersistenceTests(unittest.TestCase):
     def test_oauth_state_survives_restart_and_is_consumed_once(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with auth_test_directory() as tmp:
             root = Path(tmp)
 
             def fake_data_path(name):
@@ -67,7 +92,7 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                     )
 
     def test_concurrent_oauth_callbacks_only_consume_state_once(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with auth_test_directory() as tmp:
             root = Path(tmp)
 
             def fake_data_path(name):
@@ -113,7 +138,7 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                 self.assertEqual(winner[2], "/workbench-lite?scope=A")
 
     def test_session_survives_restart_and_logout_revokes_it(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with auth_test_directory() as tmp:
             root = Path(tmp)
 
             def fake_data_path(name):
@@ -153,7 +178,7 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                 self.assertIsNone(after_logout.get_session(session_id))
 
     def test_expired_oauth_state_keeps_the_original_return_path(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with auth_test_directory() as tmp:
             root = Path(tmp)
 
             def fake_data_path(name):
@@ -188,7 +213,7 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                     manager._cleanup_executor.shutdown(wait=True)
 
     def test_disabling_user_revokes_a_persisted_session_immediately(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with auth_test_directory() as tmp:
             root = Path(tmp)
 
             def fake_data_path(name):
@@ -225,6 +250,101 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                 )
 
                 self.assertIsNone(PortalAuthManager().get_session(session_id))
+
+    def test_teardown_waits_for_background_cleanup_before_removing_temp(
+        self,
+    ):
+        # Deterministic regression: teardown must wait for the background
+        # cleanup task (which holds the temp SQLite DB) before removing the
+        # temp dir. Use Events, not sleeps; failures propagate via `errors`.
+        cleanup_started = threading.Event()
+        release_cleanup = threading.Event()
+        wait_true_seen = threading.Event()
+        cleanup_finished = threading.Event()
+        observed: list[str] = []
+        errors: list[BaseException] = []
+
+        def run_body() -> None:
+            try:
+                with auth_test_directory() as tmp:
+                    root = Path(tmp)
+                    with patch(
+                        "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                        side_effect=lambda name: str(root / name),
+                    ):
+                        manager = PortalAuthManager()
+                        store = manager._state_store
+                        original_cleanup = store.cleanup_auth_runtime
+                        original_shutdown = manager._cleanup_executor.shutdown
+
+                        def blocking_cleanup(*args, **kwargs):
+                            observed.append("cleanup:started")
+                            cleanup_started.set()
+                            assert release_cleanup.wait(timeout=10), (
+                                "release_cleanup timeout"
+                            )
+                            try:
+                                return original_cleanup(*args, **kwargs)
+                            finally:
+                                observed.append("cleanup:finished")
+                                cleanup_finished.set()
+
+                        def patched_shutdown(wait=False, cancel_futures=False):
+                            if wait:
+                                wait_true_seen.set()
+                                release_cleanup.wait(timeout=20)
+                            return original_shutdown(
+                                wait=wait, cancel_futures=cancel_futures
+                            )
+
+                        store.cleanup_auth_runtime = blocking_cleanup
+                        manager._cleanup_executor.shutdown = patched_shutdown
+                        with manager._lock:
+                            manager._last_persistent_cleanup = time.time() - 120
+                            now = time.time()
+                            manager._cleanup_expired_locked(now)
+                        # Wait for the submitted task to start BEFORE exiting
+                        # the context so teardown's cancel_futures cannot
+                        # cancel a not-yet-started task.
+                        if not cleanup_started.wait(timeout=10):
+                            raise AssertionError(
+                                "cleanup task did not start before teardown"
+                            )
+
+                observed.append("teardown:complete")
+            except BaseException as exc:
+                errors.append(exc)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run_body)
+            try:
+                self.assertTrue(
+                    cleanup_started.wait(timeout=10),
+                    "background cleanup task did not start before teardown",
+                )
+                self.assertFalse(cleanup_finished.is_set())
+                self.assertTrue(
+                    wait_true_seen.wait(timeout=10),
+                    "teardown did not wait on the cleanup executor (wait=True)",
+                )
+                self.assertFalse(cleanup_finished.is_set())
+            finally:
+                release_cleanup.set()
+            future.result(timeout=15)
+
+        self.assertEqual(
+            errors,
+            [],
+            "run_body raised an error; see traceback of the first error",
+        )
+        self.assertEqual(
+            observed,
+            [
+                "cleanup:started",
+                "cleanup:finished",
+                "teardown:complete",
+            ],
+        )
 
 
 class WorkbenchFragmentTests(unittest.TestCase):

@@ -493,7 +493,7 @@ class NoticePanel:
         return self.public_run(identity)
 
     def _apply_changes(self, doc, changes):
-        from .notice_panel_data import _normalize_notice_sop_shape
+        from .notice_panel_data import _normalize_notice_sop_shape, apply_end_default
         if not isinstance(changes, list):
             raise PortalError("变更列表格式无效。")
         by_key = {item["key"]: item for item in doc.get("items") or []}
@@ -546,6 +546,9 @@ class NoticePanel:
             parsed.append((item, has_sel, selected, has_all, edit_all, raw_draft))
         # Apply atomically; brief_fields are captured before filling.
         for item, has_sel, selected, has_all, edit_all, raw_draft in parsed:
+            # Capture the action before this change so apply_end_default can
+            # tell a real 结束→更新 transition from an arbitrary update.
+            previous_action = str((item.get("draft") or {}).get("notice_action") or "")
             if has_sel:
                 item["selected"] = selected
                 item["dirty"] = True
@@ -565,6 +568,10 @@ class NoticePanel:
                         continue
                     item.setdefault("draft", {})[fkey] = str(value).strip()
                     item["dirty"] = True
+            # Reconcile the canned end-on 本次进度 default with the pending draft:
+            # selecting 结束 fills a blank value, reverting 结束→更新 drops only the
+            # untouched default (custom text is preserved).
+            apply_end_default(item.setdefault("draft", {}), item, previous_action)
 
     def _preview(self, doc):
         selected = [item for item in doc.get("items") or [] if item.get("selected")]

@@ -13,7 +13,7 @@
       </div>
     </header>
 
-    <div v-if="ready && viewMode === 'overview' && !learner && canViewBuildings" class="building-tabs" aria-label="学练楼栋"><button v-for="building in scopes.filter(s => s.value)" :key="building.value" :class="{ active: scope === building.value }" :disabled="busy" @click="changeScope(building.label)">{{ building.label }}<span>人员学练</span></button></div>
+    <div v-if="ready && viewMode === 'overview' && !learner && canViewBuildings" class="building-tabs" :class="{ 'with-all': isAdmin }" aria-label="学练楼栋"><button v-for="building in overviewScopes" :key="building.value" :class="{ active: scope === building.value }" :disabled="busy" @click="changeScope(building.label)">{{ building.label }}<span>{{ building.value ? '人员学练' : '全员' }}</span></button></div>
     <div v-if="ready && viewMode === 'practice' && !learner && identityIssue" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ identityIssue }}</span></div>
     <div v-if="ready" class="learner-strip"><div><strong>{{ learner ? learner.name : scopeLabel + '学习汇总' }}</strong><span v-if="learner">工号 {{ learner.employee_no || '未填写' }}<template v-if="viewMode === 'practice'"> · 当前答题人</template></span></div><div class="actions"><button v-if="viewMode === 'overview' && canViewBuildings" :disabled="busy" @click="openPeople"><Search :size="16" />{{ learner ? '切换人员' : '选择人员' }}</button></div></div>
     <nav v-if="ready && (viewMode === 'overview' || learner)" class="tabs" aria-label="学练页面">
@@ -32,16 +32,20 @@
         <div class="toolbar">
           <div class="actions">
             <button v-if="reading && tab !== 'today'" :disabled="busy" @click="saveDraft(); reading = false; loadView()"><ChevronLeft :size="16" />返回{{ tab === 'review' ? '复习列表' : '学习历史' }}</button>
-            <span v-if="tab === 'today'" class="muted">今日题单 · {{ date }}</span>
+            <span v-if="tab === 'today'" class="muted">{{ studyMode === 'practice' ? '自主练习' : '每日题单' }} · {{ date }}</span>
             <span v-else>{{ paper?.date }} · {{ paper?.scope }}楼</span>
             <span v-if="paper" class="muted">已完成 {{ answered }} / {{ validCount }} 题</span>
             <span v-if="paper?.status" class="badge">{{ paper.status === 'completed' ? '已完成' : paper.status === 'published' ? '已发布' : paper.status === 'pending' ? '待完成' : paper.status }}</span>
+          </div>
+          <div v-if="tab === 'today' && viewMode === 'practice' && boot.can_answer" class="actions">
+            <div class="view-switch" role="group" aria-label="学练方式"><button :class="{ active: studyMode === 'daily' }" :aria-pressed="studyMode === 'daily'" :disabled="busy || loading" @click="switchStudyMode('daily')">每日题单</button><button :class="{ active: studyMode === 'practice' }" :aria-pressed="studyMode === 'practice'" :disabled="busy || loading" @click="switchStudyMode('practice')">自主练习</button></div>
+            <button class="primary" :disabled="busy || loading" @click="startSelfPractice"><Loader2 v-if="busy" :size="16" class="spin" /><Shuffle v-else :size="16" />开始学练</button>
           </div>
         </div>
         <div v-if="paper?.legacy" class="muted read-only"><Eye :size="16" />旧楼栋题单 · 只读历史，不计入个人画像</div>
         <div v-if="shortageText(paper?.shortage)" class="alert warning"><AlertCircle :size="18" />{{ shortageText(paper?.shortage) }}</div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取题单…</div>
-        <div v-else-if="!paper || !paper.questions?.length" class="empty"><BookOpen :size="30" /><strong>今日暂无可学习题目</strong><span>{{ syncActive ? '题库正在同步，请稍后刷新。' : '题单未发布或有效题目不足。' }}</span></div>
+        <div v-else-if="!paper || !paper.questions?.length" class="empty"><BookOpen :size="30" /><strong>{{ studyMode === 'practice' ? '尚未开始自主练习' : '今日暂无可学习题目' }}</strong><span>{{ syncActive ? '题库正在同步，请稍后刷新。' : studyMode === 'practice' ? '点击开始学练，随机生成15题。' : '每日题单未发布或有效题目不足，可开始自主练习。' }}</span></div>
         <div v-else-if="current" class="practice-layout">
           <aside class="question-rail" aria-label="题号导航">
             <h2>题目 <span>{{ paper.questions.length }}</span></h2>
@@ -93,7 +97,7 @@
         <div v-if="tab === 'questions' && selected.length" class="batch-bar"><span>已选 {{ selected.length }} 题</span><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter(q => selected.includes(q.id)), 'published')"><CheckCircle2 :size="16" />批量启用</button><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter(q => selected.includes(q.id)), 'disabled')"><X :size="16" />批量停用</button><button :disabled="busy || loading" @click="selected = []">取消选择</button></div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取…</div>
         <div class="table-wrap" :class="{ stale: loading }" :inert="loading || undefined">
-          <table v-if="tab === 'history'"><thead><tr><th>日期</th><th>楼栋 / 人员</th><th>完成进度</th><th>正确率</th><th>缺题</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.date }}</td><td>{{ row.scope }}楼<small>{{ row.person?.name || '旧楼栋题单' }}</small></td><td>{{ row.stats?.answered ?? row.answered ?? 0 }} / {{ row.stats?.total ?? row.questions?.length ?? row.assigned ?? '—' }}</td><td>{{ percent(row.stats?.accuracy) }}</td><td>{{ shortageText(row.shortage) || '无' }}</td><td>{{ row.status === 'completed' ? '已完成' : '已发布' }}</td><td><div class="row-actions"><button :disabled="loading || busy" @click="loadPaper(row.id)"><Eye :size="15" />查看题单</button><button v-if="isAdmin" class="icon-button danger" :disabled="loading || busy" :aria-label="`删除${row.scope}楼${row.date}题单`" title="删除题单" @click="deletePaper(row.id)"><Trash2 :size="16" /></button></div></td></tr></tbody></table>
+          <table v-if="tab === 'history'"><thead><tr><th>日期 / 类型</th><th>楼栋 / 人员</th><th>完成进度</th><th>正确率</th><th>缺题</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.date }}<small>{{ row.mode === 'practice' ? '自主练习' : '每日题单' }} · {{ timeLabel(row.created_at) }}</small></td><td>{{ row.scope }}楼<small>{{ row.person?.name || '旧楼栋题单' }}</small></td><td>{{ row.stats?.answered ?? row.answered ?? 0 }} / {{ row.stats?.total ?? row.questions?.length ?? row.assigned ?? '—' }}</td><td>{{ percent(row.stats?.accuracy) }}</td><td>{{ shortageText(row.shortage) || '无' }}</td><td>{{ row.status === 'completed' ? '已完成' : '待完成' }}</td><td><div class="row-actions"><button :disabled="loading || busy" @click="loadPaper(row.id)"><Eye :size="15" />查看题单</button><button v-if="isAdmin" class="icon-button danger" :disabled="loading || busy" :aria-label="`删除${row.scope}楼${row.date}题单`" title="删除题单" @click="deletePaper(row.id)"><Trash2 :size="16" /></button></div></td></tr></tbody></table>
           <table v-else-if="tab === 'review'"><thead><tr><th>题目</th><th>题型 / 知识点</th><th>题单日期</th><th>结果</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="`${row.paper_id}:${questionId(row.question)}`"><td class="stem-cell">{{ row.question.stem }}<small v-if="row.question.note" class="note-excerpt">{{ row.question.note }}</small></td><td>{{ typeLabels[row.question.type] }}<small>{{ row.question.topic }}</small></td><td>{{ row.date }}</td><td :class="{ danger: row.question.attempt?.correct === false }">{{ resultText(row.question) }}</td><td><button :disabled="loading || busy" @click="loadPaper(row.paper_id, questionId(row.question))"><BookOpen :size="15" />复习</button></td></tr></tbody></table>
           <table v-else-if="tab === 'issues'"><thead><tr><th>楼栋 / 时间</th><th>质疑内容</th><th>类别</th><th>原题版本</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.scope }}楼<small>{{ timeLabel(row.created_at) }}</small></td><td class="stem-cell">{{ row.description }}<small>{{ row.stem || row.question?.stem || row.snapshot?.stem }}</small></td><td>{{ categoryLabels[row.category] || row.category }}</td><td>{{ row.question_version }}</td><td><span class="badge" :class="{ 'success-badge': ['resolved', 'no_change'].includes(row.status), 'warning-badge': row.status === 'needs_info' }">{{ issueLabels[row.status] || row.status }}</span></td><td><button :disabled="loading || busy" @click="openIssue({}, row)"><MessageSquare :size="15" />{{ isAdmin ? '处理' : '查看与补充' }}</button></td></tr></tbody></table>
           <table v-else><thead><tr><th class="check-cell"><input type="checkbox" aria-label="选择当前页题目" :disabled="loading || busy" :checked="rows.length > 0 && selected.length === rows.length" @change="selected = ($event.target as HTMLInputElement).checked ? rows.map(q => q.id) : []" /></th><th>题目</th><th>题库 / 题型</th><th>专业 / 知识点</th><th>年度</th><th>状态 / 问题</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td><input v-model="selected" type="checkbox" :value="row.id" :disabled="loading || busy" :aria-label="`选择题目 ${row.stem}`" /></td><td class="stem-cell"><span class="table-stem" :title="row.stem">{{ row.stem }}</span></td><td>{{ bankLabels[row.bank] }}<small>{{ row.type_label || typeLabels[row.type] }}</small></td><td>{{ row.specialty || '—' }}<small>{{ row.topic || '—' }}</small></td><td>{{ row.year || '—' }}</td><td><span class="badge" :class="{ 'success-badge': row.status === 'published', 'warning-badge': row.status === 'disabled' }">{{ statusLabels[row.status] }}</span><small v-if="row.problems?.length" class="danger">{{ row.problems.join('；') }}</small></td><td><div class="row-actions"><button class="icon-button" aria-label="编辑题目" title="编辑题目" :disabled="busy || loading" @click="editQuestion(row.id)"><Pencil :size="16" /></button><button class="icon-button" aria-label="复制题目" title="复制题目" :disabled="busy || loading" @click="copyQuestion(row)"><Copy :size="16" /></button><button v-if="row.status !== 'deleted'" class="icon-button" :aria-label="row.status === 'published' ? '停用题目' : '发布题目'" :title="row.status === 'published' ? '停用题目' : '发布题目'" :disabled="busy || loading" @click="setQuestionStatus([row], row.status === 'published' ? 'disabled' : 'published')"><X v-if="row.status === 'published'" :size="16" /><Check v-else :size="16" /></button><button v-if="row.status === 'deleted'" class="icon-button" aria-label="恢复为草稿" title="恢复为草稿" :disabled="busy || loading" @click="setQuestionStatus([row], 'draft')"><RotateCcw :size="16" /></button><button v-else class="icon-button danger" aria-label="删除题目" title="移入回收站" :disabled="busy || loading" @click="setQuestionStatus([row], 'deleted')"><Trash2 :size="16" /></button></div></td></tr></tbody></table>
@@ -105,7 +109,7 @@
       <template v-else-if="tab === 'profile'">
         <form class="toolbar profile-toolbar" :class="{ 'custom-period': !filters.period }" @submit.prevent="loadView"><div class="filters"><VnetSelect input-id="learning-select-7" :model-value="({ '7': '近7天', '30': '近30天' } as Dict)[filters.period] || '自定义'" :options="['近7天', '近30天', '自定义']" label="统计周期" @update:model-value="setPeriod(keyFor({ '7': '近7天', '30': '近30天' }, $event)); loadView()" /><label class="inline-field">开始<input v-model="filters.from" aria-label="统计开始日期" type="date" /></label><label class="inline-field">结束<input v-model="filters.to" aria-label="统计结束日期" type="date" /></label><button :disabled="loading || busy"><Search :size="16" />查询</button></div><button v-if="isAdmin" type="button" :disabled="busy || loading" @click="exportData('results')"><Download :size="16" />导出报表</button></form>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取统计…</div>
-        <LearningDashboard :data="profile" :person="learner" :show-continue="viewMode === 'practice' && boot.can_answer" :disabled="busy || loading" @select="selectLearner" @continue="continueLearning" />
+        <LearningDashboard :data="profile" :person="learner" :all-scopes="allPortrait" :show-continue="viewMode === 'practice' && boot.can_answer" :disabled="busy || loading" @select="selectLearner" @continue="continueLearning" />
       </template>
 
       <form v-else-if="tab === 'settings'" class="settings-form" @submit.prevent="saveSettings">
@@ -236,6 +240,8 @@ export function parseLearningImport(text: string, csv = false): Array<{ question
 
 <style scoped>
 .building-tabs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }.building-tabs button { display: flex; justify-content: space-between; padding: 15px 18px; font-size: 18px; }.building-tabs span { color: #657b95; font-size: 12px; }.building-tabs .active { background: #eaf2ff; border-color: #5890e8; color: #174fab; }.learner-strip { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid #dce5ef; }.learner-strip strong { font-size: 18px; }.learner-strip span { margin-left: 14px; color: #64758b; }.people-list { display: grid; gap: 0; }.people-list button { display: grid; grid-template-columns: 1fr 1fr 1fr 20px; padding: 13px 16px; border-radius: 0; border-width: 0 0 1px; text-align: left; color: #25425f; }.people-list small { color: #64758b; }
+.building-tabs.with-all { grid-template-columns: repeat(7, minmax(0, 1fr)); }.building-tabs.with-all button { padding-inline: 10px; font-size: 16px; }
+@media (min-width: 701px) and (max-width: 1050px) { .building-tabs.with-all span { display: none; } }
 .learning-page { max-width: 1800px; margin: 0 auto; padding: 22px 30px 40px; color: #17263b; font-size: 14px; letter-spacing: 0; }
 .learning-page *, .learning-modal * { box-sizing: border-box; }
 .page-head, .heading, .actions, .filters, .row-actions, .question-meta, .toolbar, .section-heading, .pagination, .question-footer, .learning-modal > header, .learning-modal > footer { display: flex; align-items: center; gap: 10px; }
@@ -381,7 +387,7 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Star, Trash2, Upload, X, ChartNoAxesCombined } from "lucide-vue-next";
+import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shuffle, Star, Trash2, Upload, X, ChartNoAxesCombined } from "lucide-vue-next";
 import { ApiError, downloadFile, requestJson } from "../api/client";
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { requestLearning, type LearningApiOptions } from "../api/learning";
@@ -405,7 +411,7 @@ const reviewLabels: Dict = { wrong: "错题", favorites: "收藏", notes: "笔�
 const tabs = computed(() => {
     if (viewMode.value === "overview") {
       return [
-        { id: "profile", label: learner.value ? "个人画像" : "楼栋汇总", icon: ChartNoAxesCombined },
+        { id: "profile", label: learner.value ? "个人画像" : allPortrait.value ? "全部画像" : "楼栋汇总", icon: ChartNoAxesCombined },
         { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
         ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
       ];
@@ -427,7 +433,9 @@ const peopleRows = ref<Dict[]>([]), peopleIssues = ref<Dict[]>([]), peopleSearch
 let readRequest: AbortController | undefined, peopleRequest: AbortController | undefined;
 const isAdmin = computed(() => boot.value.is_admin === true);
 const scopes = computed<Array<{ value: string; label: string }>>(() => (boot.value.scopes || []).filter((s: Dict) => s.value));
-const scopeLabel = computed(() => scopes.value.find(s => s.value === scope.value)?.label || (scope.value ? `${scope.value}楼` : ''));
+const overviewScopes = computed(() => isAdmin.value ? [{ value: '', label: '全部画像' }, ...scopes.value] : scopes.value);
+const allPortrait = computed(() => viewMode.value === 'overview' && isAdmin.value && !scope.value && !learner.value);
+const scopeLabel = computed(() => viewMode.value === 'overview' && isAdmin.value && !scope.value ? '全部楼栋' : scopes.value.find(s => s.value === scope.value)?.label || (scope.value ? `${scope.value}楼` : ''));
 const canAnswer = computed(() => viewMode.value === "practice" && boot.value.can_answer === true && !!learner.value && !paper.value?.legacy && paper.value?.person_id === boot.value.self_person?.id && learner.value.id === boot.value.self_person?.id);
 const canViewBuildings = computed(() => boot.value.can_view_buildings === true);
 const identityIssue = computed(() => String(boot.value.identity_issue || ""));
@@ -439,6 +447,7 @@ const viewMode = computed<"practice" | "overview">(() => {
   return boot.value.can_answer === false ? "overview" : "practice";
 });
 const paper = ref<Dict | null>(null), reading = ref(false), index = ref(0), practice = ref(false);
+const studyMode = ref<'daily' | 'practice'>('daily'), selfPracticeOperation = ref(uid());
 const current = computed<Dict | null>(() => paper.value?.questions?.[index.value] || null);
 const displayedAttempt = computed<Dict | null>(() => current.value?.practice?.at(-1) || current.value?.attempt || null);
 const answered = computed(() => (paper.value?.questions || []).filter((q: Dict) => q.attempt && !q.invalid && !q.needs_review).length);
@@ -684,7 +693,7 @@ async function loadView(): Promise<void> {
     if (tab.value === "today") {
       if (!learner.value) { paper.value = null; return; }
       saveDraft(); paper.value = null;
-      const data = await requestLearning(readOptions,`/papers?${query({ today: 1 })}`);
+      const data = await requestLearning(readOptions,`/papers?${query({ today: 1, mode: studyMode.value })}`);
       if (token !== epoch) return;
       date.value = data.today || date.value;
       const p = data.items?.[0];
@@ -698,7 +707,7 @@ async function loadView(): Promise<void> {
       const extra = tab.value === "questions" ? { search: filters.search, status: filters.status, bank: filters.bank, problems: filters.problems ? 1 : "" }
         : tab.value === "review" ? { kind: filters.review, bank: filters.reviewBank, search: filters.search }
         : tab.value === "issues" ? { status: filters.issue, search: filters.search }
-        : { from: filters.from, to: filters.to, period: filters.period, ...(tab.value === "history" && legacyHistory.value ? { legacy: 1, person_id: "" } : {}) };
+        : { from: filters.from, to: filters.to, period: filters.period, ...(tab.value === 'profile' && allPortrait.value ? { all_people: 1 } : {}), ...(tab.value === "history" && legacyHistory.value ? { legacy: 1, person_id: "" } : {}) };
       const data = await requestLearning(readOptions,`/${tab.value}?${query(extra)}`);
       if (token !== epoch) return;
       if (tab.value === "profile") { profile.value = data; if (learner.value && data.person) learner.value = data.person; }
@@ -716,7 +725,7 @@ async function switchTab(value: Tab): Promise<void> {
   else await loadView();
 }
 async function changeScope(label: string): Promise<void> {
-  const next = scopes.value.find(s => s.label === label)?.value;
+  const next = overviewScopes.value.find(s => s.label === label)?.value;
   if (next === undefined || busy.value) return;
   saveDraft(); scope.value = next; reading.value = false; paper.value = null; learner.value = null; tab.value = "profile"; profile.value = {};
   for (const key of Object.keys(pages)) pages[key] = 1;
@@ -768,19 +777,34 @@ async function enterPracticeToday(): Promise<void> {
   if (viewMode.value !== "practice" || !boot.value.self_person || boot.value.can_answer !== true) return;
   await loadTodayPaper();
 }
+async function switchStudyMode(mode: 'daily' | 'practice'): Promise<void> {
+  if (busy.value || loading.value || studyMode.value === mode) return;
+  saveDraft(); studyMode.value = mode; paper.value = null;
+  await loadTodayPaper();
+}
+async function startSelfPractice(): Promise<void> {
+  if (busy.value || loading.value || viewMode.value !== 'practice' || !boot.value.can_answer || !learner.value) return;
+  saveDraft();
+  await perform(async () => {
+    const data = await requestLearning(learningOptions, '/papers/claim', 'POST', { mode: 'practice', scope: scope.value, person_id: learner.value!.id, operation_id: selfPracticeOperation.value });
+    epoch++; paper.value = data; date.value = data.date; studyMode.value = 'practice'; tab.value = 'today'; reading.value = true; index.value = 0;
+    selfPracticeOperation.value = uid(); hydrateQuestion();
+  }, '自主练习已生成，开始作答。');
+}
 async function loadTodayPaper(): Promise<void> {
   if (!learner.value || viewMode.value !== "practice" || busy.value) return;
   const token = ++epoch;
   loading.value = true; error.value = "";
   try {
-    const data = await requestLearning(learningOptions, `/papers?` + query({ today: 1 }));
+    const data = await requestLearning(learningOptions, `/papers?` + query({ today: 1, mode: studyMode.value }));
     if (token !== epoch) return;
+    date.value = data.today || date.value;
     let p = data.items?.[0] || null;
-    if (!p && boot.value.can_answer === true) {
+    if (!p && studyMode.value === 'daily' && data.published && boot.value.can_answer === true) {
       p = await requestLearning(learningOptions, "/papers/claim", "POST", { scope: scope.value, person_id: learner.value.id });
     }
     if (token !== epoch) return;
-    if (!p?.questions) p = await requestLearning(learningOptions, `/papers/${encodeURIComponent(p.id)}`);
+    if (p && !p.questions) p = await requestLearning(learningOptions, `/papers/${encodeURIComponent(p.id)}`);
     if (token !== epoch) return;
     paper.value = p; tab.value = "today"; reading.value = true; index.value = 0; hydrateQuestion();
   } catch (e) { if (token === epoch && !disposed) error.value = String((e as Error).message); }
@@ -830,7 +854,7 @@ async function bootstrap(): Promise<void> {
         learner.value = boot.value.self_person || null;
         scope.value = boot.value.self_scope || scope.value || "";
       } else {
-        scope.value = scopes.value.some(s => s.value === scope.value) ? scope.value : boot.value.scope || scopes.value[0]?.value || "";
+        scope.value = overviewScopes.value.some(s => s.value === scope.value) ? scope.value : boot.value.scope || scopes.value[0]?.value || "";
         learner.value = props.personId ? { id: props.personId } : null;
         if (learner.value && boot.value.self_person?.id === learner.value.id) learner.value = boot.value.self_person;
       }
@@ -861,7 +885,7 @@ async function checkToday(): Promise<void> {
   if (disposed || document.hidden || tab.value !== "today" || !learner.value || busy.value || loading.value) return;
   const token = epoch;
   try {
-    const data = await requestLearning(learningOptions, `/papers?${query({ today: 1, refresh: 1 })}`);
+    const data = await requestLearning(learningOptions, `/papers?${query({ today: 1, mode: studyMode.value, refresh: 1 })}`);
     if (disposed || token !== epoch || tab.value !== "today" || busy.value || loading.value) return;
     const day = data.today || date.value;
     const changed = day !== date.value || data.items?.[0]?.id !== paper.value?.id;

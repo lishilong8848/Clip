@@ -290,7 +290,7 @@ export class BloubBot {
     // 身体：纸色打底（填满眼睛洞能看到的位置）→ mask 挖眼 → 墨色身体
     this.layerBody = this.el('g') as SVGGElement
     this.scene.appendChild(this.layerBody)
-    this.pathBodyPaper = this.el('path', { fill: this.opts.paper }) as SVGPathElement
+    this.pathBodyPaper = this.el('path', { fill: this.opts.paper, 'data-bot-hit': '' }) as SVGPathElement
     this.layerBody.appendChild(this.pathBodyPaper)
     this.groupInk = this.el('g') as SVGGElement
     this.groupInk.setAttribute('mask', `url(#${this.uid}-m)`)
@@ -743,6 +743,8 @@ export class BloubBot {
     this.attr(this.pathBodyPaper, 'd', f.bodyPath)
     this.attr(this.rectInk, 'fill', fillInk)
     this.attr(this.layerBody, 'opacity', String(f.bodyAlpha))
+    const hitMode = f.bodyAlpha > 0 ? 'visiblePainted' : 'none'
+    if (this.pathBodyPaper.style.pointerEvents !== hitMode) this.pathBodyPaper.style.pointerEvents = hitMode
 
     // --- 前层粒子 ---
     this.layerDotsFront.style.display = f.dotsBehind ? 'none' : ''

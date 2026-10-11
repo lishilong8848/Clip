@@ -346,7 +346,7 @@ class ValidationTests(unittest.TestCase):
         blob = b"a" * (MAX_BYTES + 1)
         with self.assertRaises(AssistantError) as ctx:
             extract_sections(blob, "big.txt")
-        self.assertIn("20MiB", str(ctx.exception))
+        self.assertIn("100MiB", str(ctx.exception))
 
     def test_total_extracted_char_limit_raises_not_truncates(self):
         # "段落甲乙丙丁" = 6 chars x 400_000 = 2.4M chars (>2M, still <20MiB)
@@ -393,10 +393,16 @@ class SplitTests(unittest.TestCase):
             self.assertEqual(second["text"][:12], first["text"][-12:])
 
     def test_chunk_count_bound_raises(self):
-        huge = [{"text": "字" * 5000, "location": "f"}]
+        huge = [{"text": "字" * (MAX_CHUNKS + 1), "location": "f"}]
         with self.assertRaises(AssistantError) as ctx:
             split_sections(huge, size=1, overlap=0)
         self.assertIn(str(MAX_CHUNKS), str(ctx.exception))
+
+    def test_default_chunks_fit_local_bge_context(self):
+        text = "公司费用报销流程。" * 180
+        parts = split_sections([{"text": text, "location": "f"}])
+        self.assertTrue(all(len(part["text"]) <= 420 for part in parts))
+        self.assertGreater(len(parts), 1)
 
     def test_empty_paragraph_skipped(self):
         parts = split_sections([{"text": "   \n\n ", "location": "f"}])

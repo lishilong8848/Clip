@@ -62,7 +62,7 @@ from .signature_crypto import (
     SignatureCryptoManager,
     encrypted_signature_file_name,
 )
-from .signature_print import print_signature_image
+from .signature_print import HORIZONTAL_SIGNATURE_GAP_PX, print_signature_image
 from .repair_status_index import (
     build_repair_status_source_signature,
     repair_completed_at_seconds,
@@ -9104,6 +9104,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             allow_multiple_followups=True,
         )
         auto_fields = dict(auto.get("fields") or {})
+        # Saving progress is not an explicit request to clear the completion time.
+        if auto_fields.get("维修结束时间（2026）") in (None, "", [], {}):
+            auto_fields.pop("维修结束时间（2026）", None)
         auto_fields[REPAIR_MANAGEMENT_FOLLOWUP_LINK_FIELD_NAME] = (
             ",".join(followup_ids) if followup_ids else None
         )
@@ -14848,10 +14851,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "actual_start",
                 "实际开始时间",
             )
-            projected["维修结束时间（2026）"] = target_value(
+            target_end = target_value(
                 "actual_end",
                 "实际结束时间",
             )
+            if target_end not in (None, "", [], {}):
+                projected["维修结束时间（2026）"] = target_end
             projected["维修进展描述"] = self._repair_management_plain_text(
                 target_value("progress", "进度（完成情况）")
             )
@@ -30550,6 +30555,12 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     @staticmethod
     def _items_identity_intersects(keys: set[str], item_keys: set[str]) -> bool:
+        # A shared plan can have multiple executions; an explicit target wins.
+        for kind in ("target", "active"):
+            left = {key for key in keys if f":{kind}:" in key}
+            right = {key for key in item_keys if f":{kind}:" in key}
+            if left and right:
+                return bool(left.intersection(right))
         return bool(keys and item_keys and keys.intersection(item_keys))
 
     def _find_qt_active_snapshot(
@@ -30575,8 +30586,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         work_type = str(identity.get("work_type") or "").strip()
         matchers = [
-            ("active", active_item_id),
             ("target", target_record_id),
+            ("active", active_item_id),
             ("source", source_record_id),
         ]
         if not any(value for _kind, value in matchers):
@@ -30591,6 +30602,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                     else {}
                 )
                 if work_type and self._item_work_type(payload) != work_type:
+                    continue
+                row_target = canonical_target_record_id(payload) or str(row.get("record_id") or "")
+                if target_record_id and row_target and target_record_id != row_target:
+                    continue
+                row_active = str(row.get("active_item_id") or payload.get("active_item_id") or "")
+                if (kind == "source" and active_item_id and row_active and active_item_id != row_active
+                        and not (not row_target and row.get("origin") == "source_snapshot_refresh")):
                     continue
                 if kind == "active" and value in {
                     str(row.get("active_item_id") or ""),
@@ -31452,6 +31470,24 @@ class MaintenancePortalService(RepairOperationsMixin):
         action_type = str(undo.get("action_type") or "").strip().lower()
         identity_keys = set(str(key or "") for key in (undo.get("identity_keys") or []) if str(key or ""))
         work_type = self._item_work_type(undo)
+        original_target = str(undo.get("target_record_id") or "").strip()
+        if original_target:
+            identity_keys = {key for key in identity_keys if not key.startswith((f"{work_type}:target:", f"{work_type}:record:"))}
+            identity_keys.add(f"{work_type}:target:{original_target}")
+        local = copy.deepcopy(local)
+        # Old checkpoints may include another execution of the same source plan.
+        for field in ("daily_item", "qt_active"):
+            saved = local.get(field)
+            item = saved.get("payload") if field == "qt_active" and isinstance(saved, dict) else saved
+            if isinstance(item, dict) and not self._items_identity_intersects(
+                identity_keys, self._work_status_identity_keys(item)
+            ):
+                local.pop(field, None)
+        local["work_items"] = [
+            saved for saved in local.get("work_items") or []
+            if isinstance(saved, dict) and isinstance(saved.get("item"), dict)
+            and self._items_identity_intersects(identity_keys, self._work_status_identity_keys(saved["item"]))
+        ]
         if target_record_id:
             identity_keys.add(f"{work_type}:target:{target_record_id}")
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -33567,6 +33603,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         active_item_id: str = "",
         allow_finished: bool = False,
         allow_unscoped_target: bool = False,
+        fresh_target: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
         work_type = self._normalize_notice_work_type_alias(work_type)
@@ -33597,13 +33634,34 @@ class MaintenancePortalService(RepairOperationsMixin):
         target_active_payload: dict[str, Any] = {}
         if target_record_id:
             try:
-                target_records = self._target_records_for_notice_type(
-                    notice_type,
-                    work_type,
-                    force_refresh=allow_finished,
-                )
+                if fresh_target:
+                    app_token = str(config.app_token or "").strip()
+                    table_id = str(config.get_table_id(notice_type) or "").strip()
+                    if not app_token or not table_id:
+                        raise PortalError("目标多维配置不完整。")
+                    snapshot = self._state_store.get_repair_snapshot_meta(
+                        self._notice_target_snapshot_source_key(work_type)
+                    )
+                    metas = []
+                    if snapshot.get("app_token") == app_token and snapshot.get("table_id") == table_id:
+                        metas = [self._repair_snapshot_field_meta(item) for item in (snapshot.get("fields") or [])
+                                 if isinstance(item, dict)]
+                    meta_by_name = {meta.field_name: meta for meta in metas}
+                    if not meta_by_name:
+                        _metas, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
+                    # An explicit binding must not succeed from an old/degraded table snapshot.
+                    target_records = self._load_table_records_by_ids(
+                        app_token=app_token, table_id=table_id, meta_by_name=meta_by_name,
+                        work_type=work_type, notice_type=notice_type, record_ids=[target_record_id],
+                    )
+                else:
+                    target_records = self._target_records_for_notice_type(
+                        notice_type,
+                        work_type,
+                        force_refresh=allow_finished,
+                    )
             except Exception as exc:
-                raise PortalError(f"查询{notice_type}目标表失败：{exc}") from exc
+                raise PortalError(f"核验{notice_type}目标记录失败，关联未修改：{exc}") from exc
             target_record = next(
                 (
                     record
@@ -33612,7 +33670,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 ),
                 None,
             )
-            if target_record is None:
+            if target_record is None and not fresh_target:
                 try:
                     target_records = self._target_records_for_notice_type(
                         notice_type,
@@ -37010,14 +37068,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         table_id: str,
         source: str,
         person: dict[str, Any] | None = None,
+        preserve_ink: bool = False,
     ) -> bytes:
         key_field = SIGNATURE_KEY_FIELD if table_id == SIGNATURE_TABLE_ID else TEMP_SIGNATURE_KEY_FIELD
         metadata = self._signature_crypto.metadata_from_field(fields.get(key_field))
         signature_sha = str(metadata.get("signature_sha256") or "").strip()
+        # Original ink must not reuse the older darkened signature cache.
+        cache_record_id = f"original_{record_id}" if preserve_ink else record_id
         if self._signature_crypto.is_encrypted_metadata(metadata) and signature_sha:
-            cached = self._signature_crypto.read_cache(record_id, signature_sha)
+            cached = self._signature_crypto.read_cache(cache_record_id, signature_sha)
             if cached:
-                if not self._signature_crypto.is_portable_metadata(metadata):
+                if not preserve_ink and not self._signature_crypto.is_portable_metadata(metadata):
                     self._maybe_migrate_plain_signature_async(
                         table_id=table_id,
                         record_id=record_id,
@@ -37040,16 +37101,16 @@ class MaintenancePortalService(RepairOperationsMixin):
                     payload={"source": source},
                 )
                 raise PortalError(str(exc)) from exc
-            png = self._transparent_signature_png(plain)
+            png = plain if preserve_ink else self._transparent_signature_png(plain)
             signature_sha = signature_sha or hashlib.sha256(png).hexdigest()
-            self._signature_crypto.write_cache(record_id, signature_sha, png)
+            self._signature_crypto.write_cache(cache_record_id, signature_sha, png)
             self._mark_signature_crypto_migration(
                 table_id=table_id,
                 record_id=record_id,
                 status="encrypted",
                 payload={"source": source},
             )
-            if not self._signature_crypto.is_portable_metadata(metadata):
+            if not preserve_ink and not self._signature_crypto.is_portable_metadata(metadata):
                 self._maybe_migrate_plain_signature_async(
                     table_id=table_id,
                     record_id=record_id,
@@ -37060,6 +37121,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 )
             return png
 
+        if preserve_ink:
+            return content
         png = self._transparent_signature_png(content)
         self._mark_signature_crypto_migration(
             table_id=table_id,
@@ -37907,7 +37970,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
             data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
             for item in data.get("items") or []:
-                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                fields = {key: value for key, value in (item.get("fields") or {}).items() if key != "密码"} if isinstance(item.get("fields"), dict) else {}
                 if self._signature_person_inactive(fields.get(SIGNATURE_INACTIVE_FIELD)):
                     continue
                 user_info = self._signature_user_info(fields.get(SIGNATURE_USER_FIELD))
@@ -37953,7 +38016,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 portable_signature = self._signature_crypto.is_portable_metadata(
                     signature_crypto_metadata
                 )
-                building = self._mop_field_text(fields, ["楼栋", "机楼/专业"])
+                building = self._mop_field_text(fields, ["楼栋", "楼栋（用）", "机楼/专业"])
                 account_nature = self._mop_field_text(fields, ["账号性质"])
                 can_receive_message = bool(
                     open_id and account_nature.strip().upper() == "VNET"
@@ -38229,8 +38292,8 @@ class MaintenancePortalService(RepairOperationsMixin):
     def drill_signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
         record_id = str(record_id or "").strip()
         if record_id.startswith("external:"):
-            return self.external_signature_image_bytes(record_id=record_id.split(":", 1)[1])
-        return self.signature_image_bytes(record_id=record_id)
+            return self.external_signature_image_bytes(record_id=record_id.split(":", 1)[1], preserve_ink=True)
+        return self.signature_image_bytes(record_id=record_id, preserve_ink=True)
 
     def temporary_signature_people(
         self,
@@ -38486,7 +38549,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "saved_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-    def signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
+    def signature_image_bytes(self, *, record_id: str, preserve_ink: bool = False) -> tuple[bytes, str]:
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("缺少签名人员记录。")
@@ -38506,7 +38569,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not person.get("has_signature"):
             effective = self.signature_management.directory()["resolved"].get(f"staff:{record_id}")
             if effective and effective.get("source") == "external" and effective.get("has_signature"):
-                return self.external_signature_image_bytes(record_id=effective["record_id"])
+                return self.external_signature_image_bytes(record_id=effective["record_id"], preserve_ink=preserve_ink)
         fields = person.get("raw_fields") if isinstance(person.get("raw_fields"), dict) else {}
         attachments = [
             self._attachment_with_cache_context(
@@ -38529,11 +38592,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 table_id=SIGNATURE_TABLE_ID,
                 source="staff",
                 person=person,
+                preserve_ink=preserve_ink,
             ),
             "image/png",
         )
 
-    def external_signature_image_bytes(self, *, record_id: str) -> tuple[bytes, str]:
+    def external_signature_image_bytes(self, *, record_id: str, preserve_ink: bool = False) -> tuple[bytes, str]:
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("缺少其他人员签名记录。")
@@ -38582,6 +38646,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 table_id=TEMP_SIGNATURE_TABLE_ID,
                 source="external",
                 person=person,
+                preserve_ink=preserve_ink,
             ),
             "image/png",
         )
@@ -41122,7 +41187,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                         role_sources.append(source_image.convert("RGBA"))
                 if not role_sources:
                     continue
-                gap = min(4, max(0, (max_signature_width - len(role_sources)) // max(1, len(role_sources) - 1)))
+                gap = min(HORIZONTAL_SIGNATURE_GAP_PX, max(1, max_signature_width // (len(role_sources) * 10)))
                 available_width = max_signature_width - gap * (len(role_sources) - 1)
                 if available_width < len(role_sources):
                     raise PortalError("签名栏位太窄，无法放下所选签名。")
@@ -42989,6 +43054,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     }:
                         return str(existing.get("job_id") or ""), False
                     if phase == "failed":
+                        if existing.get("paired_upload_pending"):
+                            existing["paired_upload_retry_count"] = 0
                         existing["request"] = copy.deepcopy(request_payload)
                         existing["phase"] = "accepted"
                         existing["error"] = ""
@@ -43194,6 +43261,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not request_payload.get("action") or not request_payload.get("work_type"):
                 raise PortalError("任务缺少可重试请求内容，请重新发起通告。")
             job["request"] = copy.deepcopy(request_payload)
+            if job.get("paired_upload_pending"):
+                job["paired_upload_retry_count"] = 0
             job["phase"] = "accepted"
             job["accepted_at"] = now_ts
             job["message_started_at"] = 0.0

@@ -237,7 +237,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "openpyxl": "openpyxl",
 
     "pypdf": "pypdf",
-    "sqlite_vec": "sqlite-vec==0.1.9",
+    "fastembed": "fastembed==0.9.0",
+    "faiss": "faiss-cpu==1.15.1",
     "yaml": "PyYAML",
 
     "anyio": "anyio",
@@ -254,7 +255,7 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "starlette": "starlette",
 
-    "multipart": "python-multipart",
+    "multipart": "python-multipart==0.0.22",
 
     "lark_oapi": "lark-oapi",
 
@@ -305,7 +306,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "openpyxl",
 
     "pypdf",
-    "sqlite_vec",
+    "fastembed",
+    "faiss",
     "yaml",
 
     "anyio",
@@ -391,12 +393,14 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.cabinet_power_evidence",
     "lan_bitable_template_portal.cabinet_power_text",
     "pypdf",
-    "sqlite_vec",
+    "fastembed",
+    "faiss",
     "lark_oapi",
 ]
 
 PACKAGING_PREFLIGHT_MODULES = [
     "yaml",
+    "openpyxl",
     "pydantic_ai",
     "openai",
     "httpx",
@@ -411,7 +415,8 @@ PACKAGING_PREFLIGHT_MODULES = [
     "uvicorn",
     "lark_oapi",
     "pypdf",
-    "sqlite_vec",
+    "fastembed",
+    "faiss",
 ]
 
 
@@ -884,6 +889,10 @@ def _find_build_python() -> Path | None:
 
         candidates.append(Path(env_python))
 
+    project_python = _find_dist_venv_python(PROJECT_ROOT)
+    if project_python:
+        candidates.append(project_python)
+
     candidates.append(PREFERRED_BUILD_PYTHON)
 
     current_python = (sys.executable or "").strip()
@@ -980,6 +989,8 @@ def _run_cmd(
 
             cwd=str(cwd) if cwd else None,
 
+            env={**os.environ, "PYTHONNOUSERSITE": "1"},
+
         )
 
     except Exception as exc:
@@ -1027,6 +1038,8 @@ def _run_cmd_capture(args: list[str], *, cwd: Path | None = None) -> tuple[bool,
             check=False,
 
             cwd=str(cwd) if cwd else None,
+
+            env={**os.environ, "PYTHONNOUSERSITE": "1"},
 
         )
 
@@ -1086,7 +1099,7 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
     script_lines = [
         "import importlib.util",
         "import importlib.metadata",
-        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0')}",
+        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0'), 'multipart': ('python-multipart', '0.0.22')}",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
@@ -1104,7 +1117,7 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
 
 
 def _ensure_packaging_preflight_dependencies(python_exe: Path | None = None) -> None:
-    python_exe = python_exe or _find_dist_venv_python(PROJECT_ROOT) or Path(sys.executable)
+    python_exe = python_exe or _find_build_python() or Path(sys.executable)
     missing = _missing_selected_modules(python_exe, PACKAGING_PREFLIGHT_MODULES)
     if not missing:
         return
@@ -1389,6 +1402,10 @@ def _ignore_names(dirpath: str, names: list[str]) -> set[str]:
             ignore.add(name)
             continue
 
+        if _is_runtime_data_path(base / name, PROJECT_ROOT):
+            ignore.add(name)
+            continue
+
         if _is_development_only_path(base / name, PROJECT_ROOT):
 
             ignore.add(name)
@@ -1541,6 +1558,7 @@ def _assert_project_iterator_excludes_runtime_data() -> None:
 
 
 def _run_preflight_check(args: list[str], **kwargs) -> None:
+    kwargs['env'] = {**kwargs.get('env', os.environ), 'PYTHONNOUSERSITE': '1'}
     label = (f"{args[3]} 等 {len(args) - 3} 个测试模块" if args[1:3] == ["-m", "unittest"]
              else "Python 语法检查" if args[1] == "-c" else Path(args[1]).name)
     started = time.monotonic()
@@ -1568,7 +1586,7 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
             log(f"{label} 开始")
         with tempfile.TemporaryDirectory(prefix="clipflow_preflight_") as directory:
             env = dict(kwargs.get("env", os.environ))
-            env.update(CLIPFLOW_DATA_DIR=directory, PYTHONIOENCODING="utf-8")
+            env.update(CLIPFLOW_DATA_DIR=directory, PYTHONIOENCODING="utf-8", PYTHONNOUSERSITE="1")
             options = {**kwargs, "env": env}
             with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as output:
                 failed = False
@@ -1609,7 +1627,7 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
 def _run_packaging_preflight_tests() -> None:
 
     log("开始执行打包前自动测试。")
-    test_python = str(_find_dist_venv_python(PROJECT_ROOT) or sys.executable)
+    test_python = str(_find_build_python() or sys.executable)
     log(f"测试解释器: {test_python}")
 
     _assert_project_iterator_excludes_runtime_data()
@@ -1704,6 +1722,11 @@ def _run_packaging_preflight_tests() -> None:
         log("检查开始: 测试依赖安装状态")
         _ensure_packaging_preflight_dependencies(Path(test_python))
         log(f"测试依赖检查通过，耗时 {time.monotonic() - dependency_started:.1f} 秒")
+        import_started = time.monotonic()
+        log("检查开始: 打包运行时实际导入")
+        if not _verify_runtime_imports(Path(test_python), PROJECT_ROOT):
+            raise RuntimeError(f"打包运行时导入失败，请检查上述依赖错误。解释器: {test_python}")
+        log(f"打包运行时实际导入通过，耗时 {time.monotonic() - import_started:.1f} 秒")
         _run_preflight_check(
             [test_python, os.fspath(readiness_script)],
             cwd=PROJECT_ROOT,
@@ -1733,7 +1756,7 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_learning", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries",
+         "bin.test_learning", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_portal_auth_persistence",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
@@ -1758,8 +1781,10 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
          "bin.test_planned_notices", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
-                "bin.test_feishu_assistant", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited",
-                "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer",
+                "bin.test_feishu_assistant", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited",
+                "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
+                "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_lighthouse_knowledge_stream_storage", "bin.test_notice_end_progress",
+                "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
                 "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
          "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
         cwd=PROJECT_ROOT,
@@ -2631,6 +2656,9 @@ def copy_project(dist_dir: Path) -> None:
 
     for item in PROJECT_ROOT.iterdir():
 
+        if _is_runtime_data_path(item, PROJECT_ROOT):
+            continue
+
         if item.name in EXCLUDE_TOP_LEVEL or _is_development_only_path(
             item, PROJECT_ROOT
         ):
@@ -2654,11 +2682,20 @@ def copy_project(dist_dir: Path) -> None:
             shutil.copy2(item, target)
 
     _include_assistant_skills(PROJECT_ROOT, dist_dir)
+    _include_knowledge_model(PROJECT_ROOT, dist_dir)
     _assert_no_runtime_data_in_output(dist_dir, "完整构建产物")
     _assert_no_development_files_in_output(dist_dir, "完整构建产物")
 
 
 
+
+
+def _include_knowledge_model(project: Path, destination: Path) -> list[Path]:
+    from bin.openclaw_service.assistant.lighthouse_knowledge_model import bundle_model
+    files = bundle_model(project, destination)
+    if files:
+        log('已校验并内置知识库 BGE 模型，用户端无需首次联网下载。')
+    return files
 
 
 def find_latest_full_dist(exclude: Path | None = None) -> Path | None:
@@ -2884,6 +2921,8 @@ def build_patch(
         log(f"已补齐当前前端资源: {bundled_frontend_assets} 个。")
 
     _include_assistant_skills(PROJECT_ROOT, patch_dir)
+    bundled_model_files = _include_knowledge_model(PROJECT_ROOT, patch_dir)
+    added += sum(rel not in baseline_files and not (PROJECT_ROOT / rel).is_file() for rel in bundled_model_files)
 
     deleted = 0
 
@@ -2898,6 +2937,7 @@ def build_patch(
             for p in current_files
 
         }
+        current_set.update(bundled_model_files)
 
         for rel in baseline_files.keys():
 

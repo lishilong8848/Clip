@@ -44,6 +44,7 @@ export interface EyeCfg {
 }
 
 export interface Pose {
+  bottomFace?: number
   /** silhouette du corps, en unites de rayon de boule */
   sil: Silhouette
   /** decalage global du corps ET des yeux */
@@ -710,4 +711,3 @@ export const SEQUENCE: StateId[] = [
   'burst',
   'comet'
 ]
-

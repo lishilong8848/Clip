@@ -27,6 +27,7 @@ from lan_bitable_template_portal.lighthouse_ai import (
     MODEL,
     NAMESPACE,
     LighthouseAssistant,
+    model_capabilities,
 )
 from upload_event_module.services.http_client import FeishuHttpClient
 
@@ -82,6 +83,64 @@ class ForActorModelTests(unittest.TestCase):
         self.client = make_client(lambda request: httpx.Response(200, json={
             "choices": [{"message": {"content": "ok"}}]}))
         self.addCleanup(self.client.close)
+
+    def test_advanced_configuration_roundtrip_is_private_and_reaches_request(self):
+        requests = []
+        client = make_client(lambda request: requests.append(request) or httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}]}))
+        self.addCleanup(client.close)
+        base = CustomModel(self.store, client=client, protect=protect, unprotect=unprotect)
+        first, second = base.for_actor('first'), base.for_actor('second')
+        fields = {'id': 'custom', 'name': '我的模型', 'model': 'custom-model',
+                  'endpoint': 'https://provider.example/custom/infer', 'api_key': 'test-key',
+                  'custom_protocol': True, 'tool_calls': True, 'image_input': True,
+                  'reasoning': True, 'reasoning_only': True, 'allow_reasoning_off': True,
+                  'reasoning_efforts': ['high', 'xhigh'], 'reasoning_effort': 'xhigh'}
+        settings = first.configure({'action': 'upsert', 'profile': fields})
+        first.configure({'action': 'select', 'id': 'custom'})
+        first.complete([{'role': 'user', 'content': '你好'}])
+        self.assertEqual(str(requests[-1].url), fields['endpoint'])
+        self.assertEqual(json.loads(requests[-1].content)['reasoning_effort'], 'xhigh')
+        self.assertEqual(model_capabilities(settings['models'][0]), model_capabilities(fields))
+        self.assertNotIn('test-key', json.dumps(settings))
+        self.assertFalse(second.settings()['models'])
+        first.configure({'action': 'upsert', 'profile': {**fields, 'api_key': '', 'reasoning_only': False,
+            'reasoning_effort': 'off', 'tool_calls': False, 'image_input': False}})
+        first.complete([])
+        self.assertEqual(json.loads(requests[-1].content)['reasoning_effort'], 'none')
+        first.configure({'action': 'upsert', 'profile': {'id': 'custom', 'name': '改名', 'model': 'custom-model',
+            'endpoint': fields['endpoint']}})
+        self.assertEqual(first.profile()['reasoning_effort'], 'off')
+        self.assertFalse(first.profile()['image_input'])
+
+    def test_advanced_configuration_rejects_invalid_values_without_overwriting(self):
+        model, client = account_bound_model(self.store, 'first')
+        self.addCleanup(client.close)
+        valid = {'id': 't', 'name': '测试', 'model': 'fixture', 'endpoint': ENDPOINT, 'api_key': 'fixture-key'}
+        model.configure({'action': 'upsert', 'profile': valid})
+        before = model.settings()
+        for change in ({'image_input': 'yes'}, {'tool_calls': 1}, {'reasoning': True, 'reasoning_efforts': []},
+                       {'reasoning': True, 'reasoning_efforts': ['unsupported']},
+                       {'reasoning': True, 'reasoning_only': True, 'allow_reasoning_off': True, 'reasoning_effort': 'off'},
+                       {'reasoning': True, 'reasoning_efforts': ['low'], 'reasoning_effort': 'xhigh'}):
+            with self.subTest(change=change), self.assertRaises(AssistantError):
+                model.configure({'action': 'upsert', 'profile': {**valid, **change}})
+            self.assertEqual(model.settings(), before)
+        for endpoint in ('http://public.example/custom', 'https://127.0.0.1/custom',
+                         'https://user:pass@provider.example/custom', 'https://provider.example/custom?token=secret'):
+            with self.subTest(endpoint=endpoint), self.assertRaises(AssistantError):
+                model.configure({'action': 'upsert', 'profile': {**valid, 'custom_protocol': True, 'endpoint': endpoint}})
+            self.assertEqual(model.settings(), before)
+
+    def test_legacy_picture_support_does_not_require_probe_and_explicit_off_wins(self):
+        model, client = account_bound_model(self.store, 'first')
+        self.addCleanup(client.close)
+        fields = {'id': 't', 'name': 'MiniMax', 'model': 'WanWu/MiniMax-Auto', 'endpoint': ENDPOINT, 'api_key': 'fixture-key'}
+        model.configure({'action': 'upsert', 'profile': fields})
+        self.assertTrue(model.profile()['image_input'])
+        self.assertNotIn('vision_verified', model.profile())
+        model.configure({'action': 'upsert', 'profile': {**fields, 'api_key': '', 'image_input': False}})
+        self.assertFalse(model.profile()['image_input'])
 
     def test_for_actor_returns_instance_bound_to_account(self):
         """for_actor returns an account-bound model with shared client/lock/store."""
@@ -490,6 +549,37 @@ class SharedDefaultModelsTests(unittest.TestCase):
             with self.subTest(question=question), self.assertRaises(AssistantError):
                 stream._accept(actor, {'question': question, 'conversation_id': conversation,
                                       'operation_id': 'scope_free_business_question'})
+
+
+class DirectModelProtocolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_custom_endpoint_image_and_reasoning_reach_openai_sdk(self):
+        from pydantic_ai import Agent, BinaryContent
+        from lan_bitable_template_portal.lighthouse_model import configured_model
+        from unittest.mock import patch
+        store = MemoryStore()
+        model, sync_client = account_bound_model(store, 'fixture')
+        self.addCleanup(sync_client.close)
+        model.configure({'action': 'upsert', 'profile': {'id': 't', 'name': '测试', 'model': 'fixture',
+            'endpoint': 'https://provider.example/custom/infer', 'custom_protocol': True, 'api_key': 'test-key',
+            'reasoning': True}})
+        captured = []
+        async def provider(request):
+            captured.append(request)
+            return httpx.Response(200, json={'id': 'test', 'object': 'chat.completion', 'created': 1, 'model': 'fixture',
+                'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': '红色正方形'}}]})
+        real_client = httpx.AsyncClient
+        class FixtureClient(real_client):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs, transport=httpx.MockTransport(provider))
+        with patch.object(httpx, 'AsyncClient', FixtureClient):
+            async with configured_model(model, model.profile()) as configured:
+                result = await Agent(configured, model_settings={'extra_body': {'reasoning_effort': 'xhigh'}}).run(
+                    ['图片是什么', BinaryContent(data=b'synthetic-image', media_type='image/png')])
+        self.assertEqual(result.output, '红色正方形')
+        self.assertEqual(str(captured[0].url), 'https://provider.example/custom/infer')
+        body = json.loads(captured[0].content)
+        self.assertEqual(body['reasoning_effort'], 'xhigh')
+        self.assertEqual(body['messages'][0]['content'][1]['type'], 'image_url')
 
 
 if __name__ == "__main__":

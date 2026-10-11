@@ -17,12 +17,16 @@ from fastapi.responses import JSONResponse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.notice_alert_tags import NoticeAlertTags, NS, CHANNEL, install_notice_alert_tag_routes
-from openclaw_service.assistant.lighthouse_alert_tagging import fallback_text, recommend, rules
+from openclaw_service.assistant.lighthouse_alert_tagging import clean_tags, fallback_text, recommend, rules, tag_text
 from openclaw_service.assistant import lighthouse_skills
 
 
 def tags(name):
     return [{'label': '维护', 'content': name, 'basis': '已发维护通告，包含维护操作。', 'notes': '窗口及实际告警触发关系待现场核对。'}]
+
+
+def minimal_tags(name):
+    return [{'label': '维护', 'content': name}]
 
 
 class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
@@ -103,7 +107,7 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 5)
         self.assertEqual(peak, 2)
 
-    async def test_model_failure_sends_short_type_specific_fallback_to_floor_and_li(self):
+    async def test_model_failure_sends_short_concise_fallback_to_floor_and_li(self):
         attempts = []
         async def fail(*args):
             attempts.append(args)
@@ -120,22 +124,22 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('易错点速查', body)
             self.assertNotIn('name: alert-tagging', body)
             self.assertNotIn('【检修】', body)
-            self.assertEqual(len(body.split('\n\n')[1].splitlines()), 4)
+            self.assertNotIn('依据', body)
+            self.assertNotIn('注意', body)
+            self.assertEqual(len(body.split('\n\n')[1].splitlines()), 2)
         visible = self.tags.latest('recE', 'maintenance', ['E'])
         self.assertEqual(visible['status'], 'failed')
         self.assertEqual(visible['error'], fallback_text('维保通告'))
 
-    def test_fallback_is_three_lines_for_each_notice_type_without_reading_skill(self):
-        expected = {'维保通告': '【维护】', '变更通告': '【变更】', '设备检修': '【检修】',
-                    '设备轮巡': '【设备轮巡】', '设备调整': '【设备调整】',
-                    '上电通告': '【上下电】', '下电通告': '【上下电】',
-                    '事件通告': '按实际根因', '未识别类型': '通告类型未识别'}
+    def test_fallback_is_one_concise_failure_sentence_for_each_notice_type_without_reading_skill(self):
+        kinds = ['维保通告', '变更通告', '设备检修', '设备轮巡', '设备调整',
+                 '上电通告', '下电通告', '事件通告', '未识别类型']
         with patch('openclaw_service.assistant.lighthouse_alert_tagging.rules', side_effect=AssertionError('no full skill in fallback')):
-            for kind, text in expected.items():
+            for kind in kinds:
                 with self.subTest(kind=kind):
                     body = fallback_text(kind)
-                    self.assertIn(text, body)
-                    self.assertEqual(len(body.splitlines()), 3)
+                    self.assertEqual(body, '推荐标签获取失败，通告业务不受影响。')
+                    self.assertEqual(len(body.splitlines()), 1)
                     self.assertLess(len(body), 200)
 
     def test_mixed_failed_batch_uses_each_notice_type_and_preserves_ready_tags(self):
@@ -193,7 +197,7 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         await restarted.tick()
         visible = restarted.latest('recE', 'maintenance', ['E'])
         self.assertEqual(visible['status'], 'ready')
-        self.assertEqual(visible['tags'], tags('one'))
+        self.assertEqual(visible['tags'], clean_tags(tags('one')))
         self.assertEqual(len(self.calls), 1)
         self.sender.assert_not_called()
         self.assertEqual(self.store.get_document(NS, original['key']), job)
@@ -219,8 +223,50 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         async def success(owner, notices): return {row['id']: tags(row['title']) for row in notices}
         self.tags.recommend = success
         await self.tags.tick()
-        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['tags'], tags('new'))
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['tags'], clean_tags(tags('new')))
         self.assertEqual(self.sender.call_count, 2)  # New update only, never the display retry.
+
+    async def test_failed_display_overrides_cannot_restore_legacy_long_error(self):
+        self.enqueue()
+        await self.tags.tick()
+        job_key = self.store.list_documents(NS, key_prefix='job:')[0]
+        job = {**job_key['payload'], 'status': 'failed', 'tags': [], 'finished_at': 1, 'error': 'legacy job error'}
+        self.store.put_document(NS, job_key['key'], job)
+        now = [1000]
+        self.tags.clock = lambda: now[0]
+        legacy_error = 'old rules\n依据：旧依据\n注意：旧注意'
+        display = {'status': 'failed', 'error': legacy_error, 'retry_after': now[0] + 5000, 'attempts': 1}
+        self.store.put_document(NS, 'display:' + job['id'], display)
+        receipts = copy.deepcopy(self.store.list_documents(NS, key_prefix='batch:'))
+        self.sender.reset_mock()
+        self.calls.clear()
+        visible = self.tags.latest('recE', 'maintenance', ['E'])
+        self.assertEqual(visible['status'], 'failed')
+        self.assertEqual(visible['error'], fallback_text('维保通告'))
+        self.assertNotIn('依据', visible['error'])
+        self.assertNotIn('注意', visible['error'])
+        # The legacy display override must not regenerate now (still backing off)
+        # and must neither resend nor invoke the model.
+        self.assertEqual(self.store.list_outbox_events(CHANNEL), [])
+        self.assertEqual(self.calls, [])
+        self.sender.assert_not_called()
+        # Old display/job storage and notification receipts are immutable.
+        self.assertEqual(self.store.get_document(NS, job_key['key']), job)
+        self.assertEqual(self.store.get_document(NS, 'display:' + job['id']), display)
+        self.assertEqual(self.store.list_documents(NS, key_prefix='batch:'), receipts)
+        # A pending retry must not keep reporting a previous failed attempt.
+        now[0] += 5001
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['status'], 'pending')
+        self.assertEqual(self.tags.latest('recE', 'maintenance', ['E'])['error'], '')
+        self.assertEqual(len(self.store.list_outbox_events(CHANNEL)), 1)
+        # Sanitization preserves ready status and tags even when the job node is
+        # still marked failed (legacy inconsistent state).
+        self.store.put_document(NS, 'display:' + job['id'],
+            {'status': 'ready', 'tags': tags('已就绪标签'), 'error': legacy_error, 'retry_after': now[0] + 5000})
+        ready = self.tags.latest('recE', 'maintenance', ['E'])
+        self.assertEqual(ready['status'], 'ready')
+        self.assertEqual(ready['tags'], clean_tags(tags('已就绪标签')))
+        self.assertEqual(ready['error'], '')
 
     async def test_restart_recovers_leased_tag_jobs_only(self):
         self.enqueue()
@@ -241,14 +287,71 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
             lighthouse_skills._parse_builtin([{'name': 'alert-tagging', 'description': 'test', 'references': ['../private.md']}])
         model = Mock()
         model.complete.return_value = json.dumps({'items': [{'id': 'notice_1', 'tags': tags('内阻刷新')}]}, ensure_ascii=False)
-        self.assertEqual(recommend(model, [{'id': 'one', 'text': '整条通告', 'action': 'start'}])['one'][0]['label'], '维护')
+        result = recommend(model, [{'id': 'one', 'text': '整条通告', 'action': 'start'}])['one']
+        self.assertEqual(result[0]['label'], '维护')
+        self.assertEqual(result[0]['content'], '内阻刷新')
+        self.assertEqual(sorted(result[0]), ['content', 'label'])
         messages = model.complete.call_args.args[0]
         self.assertIn('待现场核对', messages[0]['content'])
         self.assertIn('整条通告', messages[1]['content'])
         self.assertEqual(json.loads(messages[1]['content'])[0]['id'], 'notice_1')
+        prompt = messages[0]['content']
+        self.assertNotIn('basis', prompt)
+        self.assertNotIn('notes', prompt)
+        self.assertIn('"content"', prompt)
+        self.assertNotIn('"basis"', prompt)
+        self.assertNotIn('"notes"', prompt)
         model.complete.return_value = json.dumps({'items': [{'id': 'unknown', 'tags': tags('测试')}]})
         with self.assertRaises(ValueError):
             recommend(model, [{'id': 'other', 'text': 'another'}])
+
+    async def test_exact_polling_message_uses_concise_shared_heading(self):
+        async def polling_model(owner, notices):
+            return {row['id']: [{'label': '设备轮巡', 'content': '制冷单元及二次泵轮巡'}] for row in notices}
+        self.tags.recommend = polling_model
+        self.tags.enqueue(
+            {'notice_type': '设备轮巡', 'title': 'EA118机房A楼制冷单元及二次泵轮巡通告',
+             'text': '轮巡通告原文', 'building_codes': ['E'], 'action': 'start'},
+            operation_id='polling', target_record_id='recPoll', request={'_auth_open_id': 'ou_owner'})
+        await self.tags.tick()
+        body = self.sender.call_args.args[0]
+        expected = (
+            '通告推荐标签（仅供现场核对，不代表已给告警打标）\n\n'
+            'EA118机房A楼制冷单元及二次泵轮巡通告 · 开始\n'
+            '【设备轮巡】制冷单元及二次泵轮巡'
+        )
+        self.assertEqual(body, expected)
+
+    def test_model_minimal_json_works_without_explanations(self):
+        model = Mock()
+        model.complete.return_value = json.dumps(
+            {'items': [{'id': 'notice_1', 'tags': minimal_tags('内阻刷新')}]}, ensure_ascii=False)
+        result = recommend(model, [{'id': 'one', 'text': '整条通告', 'action': 'start'}])['one']
+        self.assertEqual(result, clean_tags(minimal_tags('内阻刷新')))
+        # Legacy extra explanation keys are ignored for this generation and never propagated.
+        model.complete.return_value = json.dumps(
+            {'items': [{'id': 'notice_1', 'tags': tags('内阻刷新')}]}, ensure_ascii=False)
+        result = recommend(model, [{'id': 'one', 'text': '整条通告', 'action': 'start'}])['one']
+        self.assertEqual(result, clean_tags(minimal_tags('内阻刷新')))
+        self.assertNotIn('basis', result[0])
+        self.assertNotIn('notes', result[0])
+
+    def test_legacy_stored_rich_tags_strip_in_send_and_api(self):
+        self.enqueue('legacy', scopes=['E'])
+        jobs = [row['payload'] for row in self.store.list_documents(NS, key_prefix='job:')]
+        for job in jobs:
+            job.update(status='ready', tags=tags('旧标签'))
+        batch = self.tags.batch(jobs)
+        self.tags.notify(batch, jobs)
+        for call in self.sender.call_args_list:
+            body = call.args[0]
+            self.assertIn('【维护】旧标签', body)
+            self.assertNotIn('依据', body)
+            self.assertNotIn('注意', body)
+        visible = self.tags.latest('recE', 'maintenance', ['E'])
+        self.assertEqual(visible['tags'], clean_tags(tags('旧标签')))
+        self.assertNotIn('basis', visible['tags'][0])
+        self.assertNotIn('notes', visible['tags'][0])
 
     def test_handoff_failure_never_changes_notice_or_cabinet_followup(self):
         from lan_bitable_template_portal.server import PortalRuntime
@@ -289,6 +392,10 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
             result = (await client.get(url)).json()['data']
             self.assertEqual(result['status'], 'ready')
             self.assertEqual(result['scopes'], ['E'])
+            self.assertEqual(result['title'], 'one')
+            self.assertEqual(result['tags'], clean_tags(tags('one')))
+            self.assertNotIn('basis', result['tags'][0])
+            self.assertNotIn('notes', result['tags'][0])
             self.assertNotIn('recipients', result)
             controller._current_session = lambda request: None
             self.assertEqual((await client.get(url)).status_code, 401)
@@ -344,7 +451,14 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         end = script.index('function setSubmitButtons', start)
         tags_script = script[start:end]
         self.assertIn('node.textContent = text', tags_script)
-        self.assertIn('sequence !== noticeTagsSequence', tags_script)
+        self.assertIn('sequence === noticeTagsSequence && panel.isConnected', tags_script)
+        self.assertIn("target === String(previewValue(form, 'target_record_id')", tags_script)
+        self.assertIn("workType === String(previewValue(form, 'work_type')", tags_script)
+        self.assertEqual(tags_script.count('if (!stillCurrent()) return;'), 2)
+        self.assertIn('通告推荐标签（仅供现场核对，不代表已给告警打标）', tags_script)
+        self.assertNotIn('已发通告推荐标签', tags_script)
+        self.assertNotIn('tag.basis', tags_script)
+        self.assertNotIn('tag.notes', tags_script)
         self.assertNotIn('innerHTML', tags_script)
 
 

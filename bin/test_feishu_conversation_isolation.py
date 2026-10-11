@@ -168,6 +168,25 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await rebuilt.runtime.close()
 
+    async def test_group_detail_followup_inherits_only_the_same_person_latest_question(self):
+        suite = self.suite
+        person_a = _feishu_actor("ou_A_AAAA", "oc_GRP1")
+        person_b = _feishu_actor("ou_B_BBBB", "oc_GRP1")
+        await self._submit(suite, person_a, "今天有几个变更？", "followup_person_A1_0001")
+        await self._finish(suite)
+        await self._submit(suite, person_a, "今天进行中的变更有几个？", "followup_person_A2_0001")
+        await self._finish(suite)
+        await self._submit(suite, person_b, "今天发生了几条事件？", "followup_person_B1_0001")
+        await self._finish(suite)
+        await self._submit(suite, person_a, "分别是哪些？", "followup_person_A3_0001")
+        await self._finish(suite)
+        call = suite.engine.calls[-1]
+        self.assertEqual(call["actor"], person_a["id"])
+        self.assertIn("进行中的变更", call["turn"]["prompt"])
+        self.assertNotIn("今天有几个变更", call["turn"]["prompt"])
+        self.assertNotIn("事件", call["turn"]["prompt"])
+        self.assertTrue(all("事件" not in turn["question"] for turn in call["history"]))
+
     async def test_200_people_relogin_reuse_persistent_context_and_summary(self):
         from openclaw_service.store import AssistantStore
         from concurrent.futures import ThreadPoolExecutor

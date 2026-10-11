@@ -172,7 +172,7 @@ def normalize_question(raw):
 
 
 class LearningService:
-    def __init__(self, root=None, cloud=None, send_message=None, get_portal_url=None, get_people=None):
+    def __init__(self, root=None, cloud=None, send_message=None, get_portal_url=None, get_people=None, get_login_people=None, get_shift_roster=None):
         if root is None:
             from upload_event_module.utils import get_data_file_path
             root = Path(get_data_file_path("learning"))
@@ -182,8 +182,11 @@ class LearningService:
         self._lock = threading.RLock()
         self._cloud = cloud
         self._sender = send_message
+        self._shift_roster_reader = get_shift_roster
+        self._notification_lock = threading.Lock()
         self._portal_url = get_portal_url
         self._people_reader = get_people
+        self._login_people_reader = get_login_people
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = None
@@ -229,7 +232,10 @@ class LearningService:
                 for paper in self._all('paper', conn):
                     self._index_paper(paper, conn)
                 conn.execute('PRAGMA user_version=2')
-            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_paper_identity ON documents(person_id,day) WHERE kind='paper' AND person_id<>''")
+            if conn.execute('PRAGMA user_version').fetchone()[0] < 3:
+                conn.execute('DROP INDEX IF EXISTS learning_paper_identity')
+                conn.execute('PRAGMA user_version=3')
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_paper_identity ON documents(person_id,day) WHERE kind='paper' AND person_id<>'' AND COALESCE(json_extract(payload,'$.mode'),'daily')<>'practice'")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_reserve_claim ON documents(person_id,day) WHERE kind='reserve' AND person_id<>''")
             conn.commit()
 
@@ -420,7 +426,7 @@ class LearningService:
     def tick(self, current=None):
         current = current or now()
         settings = self.settings()
-        manual_mode = bool(self._get("local", "manual_publish"))
+        manual_mode = bool(self._get("local", "manual_publish")) or bool((self._get('local', 'self_practice_sync') or {}).get('enabled'))
         refreshed = False
         if self._restore_requested and not self._restored:
             self.restore()
@@ -652,9 +658,8 @@ class LearningService:
     def _send(self, scope, message, identity):
         if self._sender:
             return self._sender(scope, message, identity)
-        from .portal_service import BUILDING_OPEN_ID_MAP
-        from upload_event_module.services.robot_webhook import send_text_to_open_ids
-        return send_text_to_open_ids(message, [BUILDING_OPEN_ID_MAP[scope]], message_uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, identity)))
+        from .learning_reminders import send_reminder
+        return send_reminder(scope, message, identity)
 
     @staticmethod
     def _correction_matches(notification, paper):
@@ -664,7 +669,15 @@ class LearningService:
         return q is not None and notification.get("target_fingerprint") == digest([LearningService._question_content(q), bool(q.get("invalid")), q.get("correction")])
 
     def send_notifications(self, current):
+        with self._notification_lock:
+            self._send_notifications(current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ))
+
+    def _send_notifications(self, current):
+        from .learning_reminders import enqueue_shift_reminders, reminder_card
         settings = self.settings()
+        if not settings['enabled']:
+            return
+        enqueue_shift_reminders(self, current)
         date = current.date().isoformat()
         link = None
         with self.transaction() as conn:
@@ -672,7 +685,7 @@ class LearningService:
                 for paper in self._documents("paper", start=date, end=date, conn=conn):
                     key = "reminder:personal:" + date + ":" + paper["scope"]
                     record = self._get("record", paper["id"], conn) or {}
-                    if paper["date"] == date and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and not self._completed(paper, record) and not self._get("notification", key, conn):
+                    if paper["date"] == date and paper.get('mode') != 'practice' and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and not self._completed(paper, record) and not self._get("notification", key, conn):
                         self._put("notification", key, {"id": key, "kind": "reminder", "personal_mode": True, "scope": paper["scope"], "date": date, "status": "pending"}, conn)
         for notification in self._all("notification"):
             if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
@@ -690,12 +703,12 @@ class LearningService:
             elif notification["kind"] == "correction" and not self._correction_matches(notification, paper):
                 notification["status"] = "superseded"
             else:
-                if (paper and paper["_dirty"]) or (self._get("publication", self._publication_key(date)) or {}).get("_dirty"):
+                if notification['kind'] != 'shift' and ((paper and paper["_dirty"]) or (self._get("publication", self._publication_key(date)) or {}).get("_dirty")):
                     continue
                 if notification["kind"] == "correction" and (self._get("record", notification.get("paper_id", "")) or {}).get("_dirty"):
                     continue
                 outstanding = [p for p in self._documents("paper", scope=notification["scope"], start=date, end=date)
-                               if not p.get("deleted_at") and p["questions"] and not self._completed(p, self._get("record", p["id"]) or {})] if notification["kind"] == "reminder" else []
+                               if p.get('mode') != 'practice' and not p.get("deleted_at") and p["questions"] and not self._completed(p, self._get("record", p["id"]) or {})] if notification["kind"] == "reminder" else []
                 if notification["kind"] == "reminder" and not outstanding:
                     notification["status"] = "skipped_completed"
                 else:
@@ -708,11 +721,14 @@ class LearningService:
                     if paper:
                         message += f"，共{len(paper['questions'])}题。"
                     elif notification["kind"] == "publish" and notification.get("personal_mode"):
-                        message += "，请选择人员领取，每人15题。"
+                        message += "，请使用本人账号登录答题，每人15题。"
                     elif outstanding:
                         message += f"，已领取的{len(outstanding)}份个人题单待完成。"
-                    message += f"\n{link}/learning?scope={notification['scope']}"
-                    result = self._send(notification["scope"], message, notification["id"])
+                    url = f"{link}/learning?view=practice" if notification['kind'] == 'shift' else f"{link}/learning?scope={notification['scope']}"
+                    try:
+                        result = self._send(notification.get('open_id') or notification['scope'], reminder_card(message, url), notification['id'])
+                    except Exception:
+                        result = (False, '学习提醒发送失败，后台稍后重试。')
                     ok = result[0] if isinstance(result, tuple) else bool(result)
                     notification["status"] = "sent" if ok else "pending"
                     notification["error"] = "" if ok else str(result[1] if isinstance(result, tuple) else "消息发送失败")
@@ -909,6 +925,7 @@ class LearningService:
         record = record if record is not None else self._get("record", paper["id"]) or {}
         result = {k: paper[k] for k in ("id", "date", "scope", "shortage", "created_at")}
         result.update(person_id=paper.get("person_id", ""), person=paper.get("person"), legacy=not bool(paper.get("person_id")))
+        result['mode'] = paper.get('mode', 'daily')
         result.update({"version": record.get("version", 0), "status": "completed" if self._completed(paper, record) else "pending", "completed_at": record.get("completed_at", ""),
                        "sync_pending": bool(paper.get("_dirty") or record.get("_dirty")), "questions": []})
         for q in paper["questions"]:
@@ -1011,6 +1028,8 @@ class LearningService:
                 record["completed_at"] = stamp()
                 record["late"] = now().date().isoformat() > paper["date"]
             self._put("record", paper["id"], record, conn)
+            if paper.get('mode') == 'practice':
+                self._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
         record["_dirty"] = True
         return self.public_paper(paper, actor, record)
 
@@ -1033,7 +1052,12 @@ class LearningService:
         query = self._date_filters(query)
         papers = [p for p in self._documents("paper", scope=scope, person_id=person_id,
             start=query.get("date") or query.get("from", ""), end=query.get("date") or query.get("to", ""), legacy=legacy) if not p.get("deleted_at")]
-        papers.sort(key=lambda p: (p["date"], p["scope"]), reverse=True)
+        mode = query.get('mode', 'daily' if query.get('today') == '1' else '')
+        if mode:
+            if mode not in {'daily', 'practice'}:
+                raise LearningError('学练类型无效。')
+            papers = [p for p in papers if p.get('mode', 'daily') == mode]
+        papers.sort(key=lambda p: (p["date"], p["scope"], p.get('created_at', ''), p['id']), reverse=True)
         result = self._page(papers, query)
         result["items"] = [self.public_paper(p, actor) for p in result["items"]]
         if query.get("today") == "1":
@@ -1127,6 +1151,7 @@ class LearningService:
             "question_id": q["id"],
             "question": q.get("stem", ""),
             "kind": kind,
+            "mode": paper.get('mode', 'daily'),
             "option_ids": sorted(attempt.get("option_ids") or []),
             "answer_text": attempt.get("answer_text", ""),
             "correct": attempt.get("correct"),
@@ -1601,7 +1626,7 @@ class LearningService:
         query = self._date_filters(query)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
-        writer.writerow(["日期", "楼栋", "姓名", "工号", "人员标识", "题库", "题目", "首次正确", "使用提示", "自评", "提交时间", "无效题", "更正说明", "操作账号"])
+        writer.writerow(["日期", "楼栋", "姓名", "工号", "人员标识", "题库", "题目", "首次正确", "使用提示", "自评", "提交时间", "无效题", "更正说明", "操作账号", "题单类型"])
         safe = lambda value: "'" + str(value) if str(value).startswith(("=", "+", "-", "@", "\t", "\r")) else value
         for p in self._documents("paper", person_id=str(query.get("person_id") or ""), scope=scope,
                                  start=query.get("from", ""), end=query.get("to", ""), legacy=query.get("legacy") == "1"):
@@ -1613,7 +1638,7 @@ class LearningService:
                     continue
                 a = record.get("entries", {}).get(q["id"], {}).get("attempt") or {}
                 person = p.get("person") or {}
-                writer.writerow([safe(value) for value in [p["date"], p["scope"], person.get("name", ""), person.get("employee_no", ""), p.get("person_id", ""), BANKS[q["bank"]], q["stem"], a.get("correct", ""), a.get("assisted", ""), a.get("self_rating", ""), a.get("submitted_at", ""), bool(q.get("invalid")), q.get("correction", ""), a.get("operator_name") or a.get("operator_id", "")]])
+                writer.writerow([safe(value) for value in [p["date"], p["scope"], person.get("name", ""), person.get("employee_no", ""), p.get("person_id", ""), BANKS[q["bank"]], q["stem"], a.get("correct", ""), a.get("assisted", ""), a.get("self_rating", ""), a.get("submitted_at", ""), bool(q.get("invalid")), q.get("correction", ""), a.get("operator_name") or a.get("operator_id", ""), '自主练习' if p.get('mode') == 'practice' else '每日题单']])
         return output.getvalue().encode("utf-8-sig"), "学练记录.csv", "text/csv; charset=utf-8"
 
     def dispatch(self, action, payload, actor, query):

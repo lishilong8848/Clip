@@ -6963,7 +6963,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
-    def test_backend_source_start_reuses_binding_without_remote_query(self):
+    def test_backend_source_start_reuses_binding_after_single_target_read(self):
         old_store = PortalRuntime.state_store
         with tempfile.TemporaryDirectory() as tmp:
             store = LanPortalStateStore(Path(tmp) / "lan_portal_state.sqlite3")
@@ -7005,7 +7005,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(
                     portal_server_module,
                     "query_record_by_id",
-                    return_value=(True, {"fields": {"名称": "A楼测试维保"}}),
+                    return_value=(True, {"fields": {"名称": "A楼测试维保", "楼栋": "A楼", "维保状态": "开始"}}),
                 ) as query_record, patch.object(
                     portal_server_module,
                     "create_bitable_record_by_payload",
@@ -7020,7 +7020,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(message, "rec-maint-existing")
         self.assertEqual(record_id, "rec-maint-existing")
-        query_record.assert_not_called()
+        query_record.assert_called_once_with("rec-maint-existing", "维保通告")
         create_record.assert_not_called()
 
     def test_backend_manual_start_creates_directly_without_semantic_target_query(self):
@@ -14928,6 +14928,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     identity["target_record_id"],
                     "rec-target-binding",
                 )
+                manual_fields = {"title": "A楼手填维保", "progress": "现场完成60%", "content": "本次维护内容",
+                    "site_images": [{"name": "现场.png"}], "start_time": "2026-08-22 09:30",
+                    "text": "【维保通告】状态：更新\n【名称】A楼手填维保\n【进度】现场完成60%"}
+                active_payload.update(manual_fields)
+                store.upsert_qt_active_item(active_payload, section="other", origin="portal")
                 with patch.object(
                     PortalRuntime.auth_manager,
                     "scopes_for_open_id",
@@ -14963,6 +14968,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     binding_service.source_candidate_calls[-1]["source_record_id"],
                     "rec-source-binding",
                 )
+                cold_store = LanPortalStateStore(store.db_path)
+                rebound = next(row["payload"] for row in cold_store.list_visible_qt_active_items()
+                    if row["payload"].get("target_record_id") == "rec-target-binding")
+                for key, value in manual_fields.items():
+                    self.assertEqual(rebound[key], value, key)
+                self.assertEqual(rebound["source_record_id"], "rec-source-binding")
                 outbox = store.list_outbox_events("qt_action", limit=20)
                 self.assertTrue(outbox)
                 self.assertEqual(

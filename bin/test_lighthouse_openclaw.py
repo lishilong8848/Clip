@@ -631,6 +631,40 @@ class OpenClawRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         FakeGatewayClient._reset()
 
+    async def test_image_and_thinking_options_reach_native_run_without_probe(self):
+        from pydantic_ai import BinaryContent
+        for image_input in (True, False):
+            agent = _recovery_agent()
+            agent.profile = {'image_input': image_input, 'reasoning': True, 'reasoning_only': True,
+                             'reasoning_efforts': ['xhigh'], 'reasoning_effort': 'xhigh'}
+            client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+            agent.client = client
+            prompt = ['图片中是什么？', BinaryContent(data=b'synthetic-image', media_type='image/png')]
+            with self.subTest(image_input=image_input):
+                _ = [event async for event in agent._events(client, prompt, [])]
+                params = next(params for method, params in client.calls if method == 'agent')
+                self.assertEqual(params['thinking'], 'xhigh')
+                self.assertEqual(bool(params.get('attachments')), image_input)
+                self.assertNotIn('尚未验证', params['message'])
+                if image_input:
+                    self.assertEqual(params['attachments'][0]['mimeType'], 'image/png')
+                    self.assertEqual(params['attachments'][0]['content'], 'c3ludGhldGljLWltYWdl')
+
+    async def test_disabled_model_tools_cannot_execute_a_callback(self):
+        agent = _recovery_agent()
+        agent.running = True
+        agent.profile = {'tool_calls': False}
+        called = AsyncMock()
+        async def tool():
+            await called()
+            return {'ok': True}
+        agent.tools['lighthouse_probe'] = Tool(tool)
+        bridge = BusinessBridge()
+        bridge.active[agent.token] = agent
+        with self.assertRaisesRegex(AssistantError, '未启用工具调用'):
+            await bridge.call(agent.token, {'session_key': agent.session_key, 'tool': 'lighthouse_probe', 'call_id': 't', 'params': {}})
+        called.assert_not_awaited()
+
     async def test_history_migration_once_per_session_rechecked_after_reset_and_restart(self):
         agent = _recovery_agent()
         client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token')
