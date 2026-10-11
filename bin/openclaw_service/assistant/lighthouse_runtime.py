@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -77,7 +78,7 @@ def agent_id(identity):
 
 def model_provider_error(status, body=b''):
     """Keep native recovery semantics without disclosing upstream error details."""
-    if status in {400, 413}:
+    if status in {400, 413, 415, 422}:
         try:
             payload = json.loads(body)
             error = payload.get('error', payload) if isinstance(payload, dict) else {}
@@ -90,6 +91,10 @@ def model_provider_error(status, body=b''):
                 any(term in message for term in ('context length', 'context window')) and \
                 any(term in message for term in ('exceed', 'too long', 'limit')):
             return {'code': 'context_length_exceeded', 'message': 'Context length exceeded'}
+        if code in {'vision_unsupported', 'unsupported_image', 'image_not_supported', 'invalid_image', 'invalid_image_url', 'invalid_image_format'} or \
+                re.search(r'image|vision|multimodal|multi.modal|图像|图片|视觉', message) and \
+                re.search(r'unsupported|not support|invalid|not enabled|disabled|不支持|无效|未启用', message):
+            return {'code': 'vision_unsupported', 'message': 'Model provider rejected image input'}
     if status in {401, 403}:
         code, message = 'invalid_api_key', 'Model provider authentication failed'
     elif status == 429:
@@ -634,7 +639,7 @@ class OpenClawRuntime:
         if response.status_code != 200:
             error_body = bytearray()
             try:
-                if response.status_code in {400, 413}:
+                if response.status_code in {400, 413, 415, 422}:
                     async with asyncio.timeout(2):
                         async for chunk in response.aiter_bytes():
                             if len(error_body) + len(chunk) > 16384:

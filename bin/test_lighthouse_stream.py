@@ -369,14 +369,17 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         image = io.BytesIO()
         Image.new('RGB', (16, 16), 'green').save(image, format='PNG')
         file = self.portal.files.upload(self.actor, '当前图片.png', image.getvalue(), extract=False)
-        for enabled, question, attached, expected in (
-            (True, '看看这张图片里有什么', [], 1),
-            (True, '看看这张图片里有什么', [file['id']], 1),
-            (False, '看看这张图片里有什么', [], 0),
-            (True, '解释冒泡排序的原理', [], 0),
+        model_calls = []
+        for enabled, question, attached, expected, extracted in (
+            (True, '看看这张图片里有什么', [], 1, ''),
+            (True, '看看这张图片里有什么', [file['id']], 1, ''),
+            (False, '看看这张图片里有什么', [], 0, ''),
+            (False, '看看这张图片里有什么', [file['id']], 0, '可靠OCR文字'),
+            (True, '解释冒泡排序的原理', [], 0, ''),
         ):
             with self.subTest(enabled=enabled, question=question, attached=bool(attached)):
                 async def stream(messages, info):
+                    model_calls.append(enabled)
                     content = [part.content for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'user-prompt']
                     images = [item for value in content if isinstance(value, list) for item in value if isinstance(item, BinaryContent)]
                     self.assertEqual(len(images), expected)
@@ -387,12 +390,18 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
                 async def factory(*_): yield FunctionModel(stream_function=stream)
                 engine = LighthouseModel(self.portal, model_factory=factory)
                 async def emit(*_): pass
-                with patch.object(self.portal.files, 'text', return_value={'text': '', 'error': ''}):
+                with patch.object(self.portal.files, 'text', return_value={'text': extracted, 'error': ''}):
                     result = await engine.answer(self.actor,
                         {'question': question, 'preview_file': file, 'file_ids': attached,
                          'operation_id': 'preview_image_0001', '_profile': {'name': 'fixture', 'model': 'fixture', 'image_input': enabled}},
                         [], self.request, emit, self.authorize, {})
-                self.assertEqual(result['answer'], '测试回答。')
+                if enabled or extracted:
+                    self.assertEqual(result['answer'], '测试回答。')
+                else:
+                    self.assertIn('未启用“图片输入”', result['answer'])
+                    self.assertIn('图片已保留', result['answer'])
+                    self.assertEqual(result['sources'], [])
+        self.assertEqual(len(model_calls), 4, 'an empty image with vision off must not start model inference')
         self.assertEqual(self.reads, [])
 
     async def test_archived_search_preserves_answer_and_file_source_scopes(self):

@@ -132,15 +132,37 @@ class ForActorModelTests(unittest.TestCase):
                 model.configure({'action': 'upsert', 'profile': {**valid, 'custom_protocol': True, 'endpoint': endpoint}})
             self.assertEqual(model.settings(), before)
 
-    def test_legacy_picture_support_does_not_require_probe_and_explicit_off_wins(self):
+    def test_picture_input_defaults_off_and_explicit_opt_in_survives_reads(self):
         model, client = account_bound_model(self.store, 'first')
         self.addCleanup(client.close)
         fields = {'id': 't', 'name': 'MiniMax', 'model': 'WanWu/MiniMax-Auto', 'endpoint': ENDPOINT, 'api_key': 'fixture-key'}
         model.configure({'action': 'upsert', 'profile': fields})
-        self.assertTrue(model.profile()['image_input'])
+        self.assertFalse(model.profile()['image_input'])
         self.assertNotIn('vision_verified', model.profile())
+        model.configure({'action': 'upsert', 'profile': {**fields, 'api_key': '', 'image_input': True}})
+        self.assertTrue(model.profile()['image_input'])
+        self.assertTrue(model.settings()['models'][0]['image_input'])
         model.configure({'action': 'upsert', 'profile': {**fields, 'api_key': '', 'image_input': False}})
         self.assertFalse(model.profile()['image_input'])
+
+    def test_existing_image_defaults_reset_once_without_changing_other_settings(self):
+        base = CustomModel(self.store, client=self.client, protect=protect, unprotect=unprotect)
+        profile = {'id': 'old', 'name': 'Old', 'model': 'fixture', 'endpoint': ENDPOINT,
+                   'key_cipher': 'encrypted:old-key', 'image_input': True, 'reasoning': True,
+                   'reasoning_efforts': ['high'], 'reasoning_effort': 'high', 'tool_calls': False}
+        for key in ('model', 'model:private'):
+            self.store.put_document(NAMESPACE, key, {'enabled': True, 'active_model_id': 'old',
+                'shared_models_linked': True, 'models': [profile]})
+        self.assertFalse(base.profile()['image_input'])
+        own = base.for_actor('private')
+        self.assertFalse(own.profile('old')['image_input'])
+        self.assertEqual(own.profile('old')['key_cipher'], profile['key_cipher'])
+        self.assertEqual(own.profile('old')['reasoning_effort'], 'high')
+        self.assertFalse(own.profile('old')['tool_calls'])
+        base.configure({'action': 'upsert', 'profile': {**profile, 'image_input': True}})
+        self.assertTrue(base.profile()['image_input'])
+        self.assertTrue(base.for_actor('new-user').profile()['image_input'])
+        self.assertFalse(own.profile('old')['image_input'], 'personal profile remains independent')
 
     def test_for_actor_returns_instance_bound_to_account(self):
         """for_actor returns an account-bound model with shared client/lock/store."""
@@ -290,9 +312,9 @@ class ForActorModelTests(unittest.TestCase):
         model.configure({"action": "toggle", "enabled": False})
         model.configure({"action": "select", "id": "default"})
         self.assertEqual(self.store.get_document(NAMESPACE, "model"), global_before)
-        # A global config that already exists stays byte-for-byte untouched.
-        global_doc = {"enabled": True, "active_model_id": "default",
-                      "models": [{"id": "default", "name": "只读全局", "endpoint": ENDPOINT, "model": MODEL}]}
+        # An already migrated global config stays byte-for-byte untouched.
+        global_doc = {"enabled": True, "active_model_id": "default", "image_input_default_version": 1,
+                      "models": [{"id": "default", "name": "只读全局", "endpoint": ENDPOINT, "model": MODEL, "image_input": False}]}
         self.store.put_document(NAMESPACE, "model", copy.deepcopy(global_doc))
         base_b = CustomModel(self.store, client=self.client, protect=protect, unprotect=unprotect)
         base_b.for_actor("actor_b").configure({"api_key": "key-b"})
@@ -502,6 +524,28 @@ class SharedDefaultModelsTests(unittest.TestCase):
         with self.assertRaises(AssistantError):
             self.service.model_for(self.user).profile('shared_Deepseek')
 
+    def test_all_shared_capabilities_follow_admin_for_existing_and_new_accounts(self):
+        self.shared()
+        actors = [self.user, {'id': 'second', 'scopes': ['B']},
+                  {**self.user, 'channel': 'feishu:group'}]
+        for actor in actors:
+            self.assertFalse(self.service.model_for(actor).profile()['image_input'])
+        self.service.model_for(self.user).configure({'action': 'upsert', 'profile': {
+            'id': 'private', 'name': 'Private', 'model': 'private', 'endpoint': ENDPOINT,
+            'api_key': 'fixture-personal', 'image_input': False}})
+        for image_input, effort in ((True, 'high'), (False, 'off')):
+            changes = {'image_input': image_input, 'tool_calls': False, 'custom_protocol': True,
+                       'reasoning': True, 'reasoning_only': image_input, 'allow_reasoning_off': True,
+                       'reasoning_efforts': ['medium', 'high', 'xhigh'], 'reasoning_effort': effort}
+            self.shared(**changes)
+            for actor in [*actors, {'id': 'new-user', 'scopes': ['H']}]:
+                bound = self.service.model_for(actor)
+                self.assertEqual(model_capabilities(bound.profile('shared_first')), model_capabilities(changes))
+                public = next(row for row in self.service.model_settings(actor)['models'] if row['id'] == 'shared_first')
+                self.assertEqual(model_capabilities(public), model_capabilities(changes))
+                self.assertNotIn('key_cipher', public)
+            self.assertFalse(self.service.model_for(self.user).profile('private')['image_input'])
+
     def test_non_admin_cannot_change_shared_models_even_through_personal_endpoint(self):
         self.shared()
         before = copy.deepcopy(self.store.docs)
@@ -561,7 +605,7 @@ class DirectModelProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(sync_client.close)
         model.configure({'action': 'upsert', 'profile': {'id': 't', 'name': '测试', 'model': 'fixture',
             'endpoint': 'https://provider.example/custom/infer', 'custom_protocol': True, 'api_key': 'test-key',
-            'reasoning': True}})
+            'reasoning': True, 'image_input': True}})
         captured = []
         async def provider(request):
             captured.append(request)

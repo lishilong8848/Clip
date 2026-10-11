@@ -34,6 +34,7 @@ def native_model_error(error, *, timeout=False):
         ('model provider authentication failed', 'model_auth', 502, '模型认证未通过，请核对本人模型设置。'),
         ('model provider rate limit exceeded', 'model_busy', 429, '模型服务繁忙或额度不足，请稍后重试原消息。'),
         ('model provider model not found', 'model_request', 502, '模型名称或接口地址无效，请核对本人模型设置。'),
+        ('model provider rejected image input', 'vision_unsupported', 502, '模型未接受图片输入，原图已保留。请关闭图片输入后使用识别文字，或切换支持识图的模型重试。'),
         ('model provider rejected request', 'model_request', 502, '模型接口不接受当前请求，请核对模型地址及工具调用支持。'),
         ('model provider timed out', 'timeout', 504, '模型服务响应超时，原消息已保留，可重试。'),
         ('model provider unavailable', 'model_connection', 502, '未能连接模型服务，请稍后重试；这不代表网页与灯塔的连接中断。'),

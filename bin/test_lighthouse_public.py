@@ -844,7 +844,8 @@ class PublicSourcesIsolatedTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(200, json=_wttr_nantong_payload())
         with patch.dict(os.environ, {CUSTOM_KEY_ENV: ''}):
             source = self.make_src(handler)
-            for city, question in [('南通市', '南通今天天气怎么样?'), ('Nantong', '南通今天天气怎么样?'), ('南通', 'Nantong天气怎么样?')]:
+            for city, question in [('南通市', '南通今天天气怎么样?'), ('Nantong', '南通今天天气怎么样?'), ('南通', 'Nantong天气怎么样?'),
+                                   ('江苏南通', '江苏南通今天天气怎么样?'), ('江苏省南通市', '江苏省南通市天气怎么样?')]:
                 result = await source.weather(city, question)
                 self.assertTrue(result['ok'], result)
                 self.assertEqual(result['city'], '南通')
@@ -870,6 +871,19 @@ class PublicSourcesIsolatedTests(unittest.IsolatedAsyncioTestCase):
             result = await source.weather('南通', '南通天气')
         self.assertTrue(result['ok'])
         fallback.assert_awaited_once()
+
+    async def test_malformed_weather_provider_does_not_abort_other_sources(self):
+        source = self.make_src(lambda request: self.fail('isolated providers only'))
+        result = {'ok': True, 'source': 'fixture-weather'}
+        with patch.dict(os.environ, {CUSTOM_KEY_ENV: ''}), patch.object(source, '_weather_china', side_effect=UnicodeDecodeError('utf8', b'x', 0, 1, 'invalid')), \
+                patch.object(source, '_weather_wttr', new_callable=AsyncMock, return_value=result) as wttr:
+            self.assertEqual(await source.weather('南通', '南通天气'), result)
+            wttr.assert_awaited_once()
+        with patch.dict(os.environ, {CUSTOM_KEY_ENV: ''}), patch.object(source, '_weather_china', return_value={'ok': False}), \
+                patch.object(source, '_weather_wttr', side_effect=TypeError('malformed response')), \
+                patch.object(source, '_weather_fallback', new_callable=AsyncMock, return_value=result) as search:
+            self.assertEqual(await source.weather('南通', '南通天气'), result)
+            search.assert_awaited_once()
 
     async def test_weather_invalid_forecast_structure_is_unavailable_not_faked(self):
         def handler(request):

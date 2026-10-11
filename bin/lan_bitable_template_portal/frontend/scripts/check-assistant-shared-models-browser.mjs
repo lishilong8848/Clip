@@ -82,14 +82,28 @@ try {
     assert.equal(await page.getByRole('button', { name: '删除', exact: true }).count(), admin ? 1 : 0);
     if (admin) {
       await page.getByRole('button', { name: '添加默认模型', exact: true }).click();
+      assert.equal(await page.getByRole('checkbox', { name: '图片输入', exact: true }).isChecked(), false);
       assert(await page.getByRole('button', { name: '保存', exact: true }).isDisabled());
       await page.getByLabel('显示名称', { exact: true }).fill('新共享模型');
       await page.getByLabel('接口地址', { exact: true }).fill(shared.endpoint);
       await page.getByLabel('模型名称', { exact: true }).fill('fixture-2');
       await page.getByLabel('API Key', { exact: true }).fill('synthetic-fixture-key');
+      await page.getByRole('checkbox', { name: '工具调用', exact: true }).uncheck();
+      await page.getByRole('checkbox', { name: '思考模式', exact: true }).check();
+      await page.getByRole('checkbox', { name: '仅思考模式', exact: true }).check();
+      await page.getByRole('checkbox', { name: '自定义协议', exact: true }).check();
+      await page.getByRole('checkbox', { name: '高', exact: true }).check();
+      await page.getByLabel('默认思考强度', { exact: true }).selectOption('high');
       await page.getByRole('button', { name: '保存', exact: true }).click();
       await page.locator('.model-card').filter({ hasText: '新共享模型' }).waitFor();
       assert.equal(captured.scope, 'shared');
+      assert.equal(captured.profile.image_input, false);
+      assert.equal(captured.profile.tool_calls, false);
+      assert.equal(captured.profile.reasoning, true);
+      assert.equal(captured.profile.reasoning_only, true);
+      assert.equal(captured.profile.custom_protocol, true);
+      assert.deepEqual(new Set(captured.profile.reasoning_efforts), new Set(['high', 'xhigh']));
+      assert.equal(captured.profile.reasoning_effort, 'high');
       assert.equal(await page.getByLabel('API Key', { exact: true }).inputValue(), '');
       await page.locator('.model-card').filter({ hasText: '新共享模型' }).getByRole('button', { name: '删除', exact: true }).click();
       await page.getByText(/所有账号将无法再选择此默认模型/).waitFor();
@@ -101,6 +115,7 @@ try {
       assert.equal(await page.locator('.profile-form').count(), 0);
       await page.getByRole('button', { name: '添加模型', exact: true }).click();
       await page.getByText('添加个人模型', { exact: true }).waitFor();
+      assert.equal(await page.getByRole('checkbox', { name: '图片输入', exact: true }).isChecked(), false);
     }
     await page.screenshot({ path: path.join(output, admin ? 'admin-settings.png' : 'user-settings.png') });
     assert.deepEqual(errors, []);

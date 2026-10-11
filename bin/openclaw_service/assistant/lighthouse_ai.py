@@ -153,7 +153,7 @@ def unprotect_key(value):
 
 def model_capabilities(profile):
     options = {}
-    for key, default in (("tool_calls", True), ("image_input", True), ("reasoning", False),
+    for key, default in (("tool_calls", True), ("image_input", False), ("reasoning", False),
                          ("reasoning_only", False), ("allow_reasoning_off", False), ("custom_protocol", False)):
         value = profile.get(key, default)
         if not isinstance(value, bool):
@@ -227,6 +227,7 @@ class CustomModel:
                             own.append(profile)
                     saved.update(models=own, shared_models_linked=True)
                     self.store.put_document(NAMESPACE, self._config_key, saved)
+                saved = self._image_input_default(saved)
                 return {**saved, "models": [
                     {**p, "id": SHARED_MODEL_PREFIX + p['id'], "shared": True} for p in shared['models']
                 ] + saved.get('models', [])}
@@ -236,7 +237,15 @@ class CustomModel:
                     {"id": "default", "name": "灯塔默认模型", "endpoint": ENDPOINT, "model": MODEL,
                      "key_cipher": saved["key_cipher"]}] if saved.get("key_cipher") else []}
                 self.store.put_document(NAMESPACE, self._config_key, saved)
-            return saved
+            return self._image_input_default(saved)
+
+    def _image_input_default(self, saved):
+        # Old releases enabled vision implicitly; reset once, then keep explicit opt-ins.
+        if saved.get('image_input_default_version') != 1:
+            saved = {**saved, 'image_input_default_version': 1,
+                     'models': [{**profile, 'image_input': False} for profile in saved['models']]}
+            self.store.put_document(NAMESPACE, self._config_key, saved)
+        return saved
 
     @staticmethod
     def _default(saved):

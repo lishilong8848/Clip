@@ -785,6 +785,27 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(item['model_key'], response.text)
         self.assertNotIn('private-record-id', response.text)
 
+    async def test_model_proxy_reports_rejected_images_without_provider_secrets(self):
+        item = await self.acquire('first')
+        code = 400
+        async def upstream(request):
+            return httpx.Response(code, json={'error': {'message': 'Image input is not supported. ' + item['model_key']}})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as client:
+            for code in (400, 415, 422):
+                response = await client.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id']})
+                self.assertEqual(response.status_code, code)
+                self.assertEqual(response.json()['error'], {
+                    'code': 'vision_unsupported', 'message': 'Model provider rejected image input'})
+                self.assertNotIn(item['model_key'], response.text)
+                from openclaw_service.assistant.lighthouse_openclaw import native_model_error
+                error = native_model_error(response.json()['error'])
+                self.assertEqual(error.category, 'vision_unsupported')
+                self.assertIn('模型未接受图片输入', str(error))
+
     async def test_model_proxy_recognizes_context_message_but_not_arbitrary_provider_errors(self):
         item = await self.acquire()
         body = {'error': {'message': "This model's maximum context length is 8192 tokens. Your messages resulted in 9000 tokens."}}

@@ -9,6 +9,7 @@ import re
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager, nullcontext
+from pathlib import Path
 
 from .lighthouse_ai import AssistantError, BUSINESS_QUERY, CONTACT, MODEL_QUESTION, PRIVATE_REPLY, explicit_general_question, is_business_query, private_identifier, safe_data, safe_text
 from .lighthouse_sources import MODULE_HELP, SCOPES, codes, record_codes
@@ -1566,6 +1567,14 @@ class LighthouseModel:
             image_parts = await asyncio.to_thread(self.portal.files.image_parts, actor, image_ids) if capabilities['image_input'] else []
             if not capabilities['image_input'] and image_ids:
                 prompt[0] += "\n模型设置未启用图片输入，只能依据可靠附件文字回答；若附件为图片且没有文字，提示开启图片输入或切换模型，不推断图片内容。"
+                if not business_question and not form_requested and not any(item.get('text', '').strip() for item in file_context) \
+                        and re.search(r'识图|识别.*图|看.{0,10}(?:图|照片|截图)|(?:图片|图像|图中|图里|照片|截图).{0,15}(?:内容|什么|分析|总结|解释)', question):
+                    from .lighthouse_files import IMAGE_EXTENSIONS
+                    images = [await asyncio.to_thread(self.portal.files.get, actor, identity) for identity in image_ids]
+                    if any(Path(item['name']).suffix.lower() in IMAGE_EXTENSIONS for item in images):
+                        answer = '当前模型未启用“图片输入”，图片已保留，未发送给模型。请启用支持识图模型的“图片输入”后重试（共享默认模型由管理员设置），或粘贴图片中的文字。'
+                        await emit('text', {'delta': answer})
+                        return {'answer': answer, 'sources': []}
             for part in image_parts:
                 prompt.append(BinaryContent(data=base64.b64decode(part["image_url"]["url"].split(",", 1)[1]), media_type="image/jpeg"))
             text, final_answer = PublicText(), ""

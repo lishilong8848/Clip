@@ -413,7 +413,7 @@ const EFFORT_OPTIONS = [
 ];
 const PROFILE_DEFAULTS: ProfileCapabilities = {
   tool_calls: true,
-  image_input: true,
+  image_input: false,
   reasoning: false,
   reasoning_only: false,
   allow_reasoning_off: false,
@@ -435,7 +435,7 @@ function normalizeProfileCapabilities(raw: Dict): ProfileCapabilities {
   if (effort === 'off' && (!raw.allow_reasoning_off || raw.reasoning_only)) effort = efforts[efforts.length - 1] || 'xhigh';
   return {
     tool_calls: raw.tool_calls !== false,
-    image_input: raw.image_input !== false,
+    image_input: raw.image_input === true,
     reasoning,
     reasoning_only: reasoning && !!raw.reasoning_only,
     allow_reasoning_off: reasoning && !!raw.allow_reasoning_off,

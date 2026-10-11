@@ -360,6 +360,8 @@ def _city_syntax_injection(city: str) -> Optional[str]:
 
 def _canonical_city(city: str) -> str:
     text = _compact(city)
+    if re.fullmatch(r'江苏(?:省)?\s*南通(?:市)?', text):
+        return '南通'
     for name, english in KNOWN_CHINESE_CITIES.items():
         if text in {name, name + "市"} or text.lower() == english.lower():
             return name
@@ -1051,7 +1053,7 @@ class PublicSources:
                     if commercial.get("ok"):
                         return commercial
                     reasons.append(commercial.get("note") or "商业天气服务暂不可用。")
-                except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError):
+                except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
                     reasons.append("商业天气服务请求未完成。")
             # The Chinese site resolves Nantong exactly; wttr may use a nearby station.
             if city in CHINA_WEATHER_CITIES:
@@ -1060,11 +1062,11 @@ class PublicSources:
                     if china.get('ok'):
                         return china
                     reasons.append(china.get('note') or '中国天气网暂不可用。')
-                except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError):
+                except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
                     reasons.append('中国天气网请求未完成。')
             try:
                 wttr = await bounded(self._weather_wttr(city, queried_at), 8)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
                 wttr = {"ok": False}
             if wttr.get("ok"):
                 return wttr
