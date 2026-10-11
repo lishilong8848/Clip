@@ -318,8 +318,8 @@ def _xlsx_sections(content, filename):
     try:
         sections = []
         total_rows = 0     # cumulative across the whole workbook (not per sheet)
-        max_col = 0        # widest width seen anywhere in the workbook
         total_chars = 0
+        scanned_chars = 0
         produced = False
 
         def add_section(sheet_title, header_cells, batch_rows):
@@ -342,25 +342,36 @@ def _xlsx_sections(content, filename):
             produced = True
 
         for sheet in workbook.worksheets:
+            # Dimensions include blank formatting; only populated columns form the table.
+            sheet.reset_dimensions()
+            columns = set()
+            for row in sheet.iter_rows(values_only=True):
+                populated = {index for index, cell in enumerate(row) if _clean(cell)}
+                if not populated:
+                    continue
+                total_rows += 1
+                if total_rows > MAX_ROWS:
+                    raise AssistantError(f"Excel所有工作表合计超过{MAX_ROWS}行，请拆分后上传。")
+                columns.update(populated)
+                if len(columns) > MAX_COLS:
+                    raise AssistantError(f"Excel超过{MAX_COLS}列，请精简列后上传。")
+                scanned_chars += sum(len(_clean(row[index])) for index in populated)
+                if scanned_chars > MAX_CHARS:
+                    raise AssistantError("文档提取文字超过200万字符上限，请拆分文件后上传。")
+            if not columns:
+                continue
+            columns = sorted(columns)
             produced = False
             header = None
             header_row = 0
             batch = []      # bounded batch of (original_row_no, cells)
             for row_number, row in enumerate(sheet.iter_rows(values_only=True), 1):
-                total_rows += 1
-                if total_rows > MAX_ROWS:
-                    raise AssistantError(
-                        f"Excel所有工作表合计超过{MAX_ROWS}行，请拆分后上传。")
-                cells = [_clean(cell) for cell in row]
-                max_col = max(max_col, len(cells))
-                if max_col > MAX_COLS:
-                    raise AssistantError(
-                        f"Excel超过{MAX_COLS}列，请精简列后上传。")
+                cells = [_clean(row[index]) if index < len(row) else '' for index in columns]
+                if not any(cells):
+                    continue
                 if header is None:
                     header = cells
                     header_row = row_number
-                    continue
-                if not any(cells):       # blank-but-present row
                     continue
                 batch.append((row_number, cells))
                 if len(batch) >= BATCH_ROWS:

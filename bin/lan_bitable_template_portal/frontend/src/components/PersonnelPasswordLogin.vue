@@ -35,7 +35,7 @@
           @update:model-value="selectPerson" />
       </label>
 
-      <p v-if="selectedPerson && selectedPerson.needs_setup && !requiresPasswordChange" class="hint first-hint" role="status">
+      <p v-if="!requiresPasswordChange && (!selectedPerson || selectedPerson.needs_setup)" class="hint first-hint" role="status">
         <KeyRound :size="14" aria-hidden="true" />
         首次登录密码为本人身份证号后6位，验证后须立即修改
       </p>

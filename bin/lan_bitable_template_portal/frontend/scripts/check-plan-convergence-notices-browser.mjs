@@ -47,6 +47,11 @@ const hitEmpty = { blockId: 1004, blockName: blockNameEmpty, reason: '房间号 
 const hitLateSnap = { blockId: 1005, blockName: blockNameLateSnap, reason: '房间号 L-300' };
 const hitLateDetail = { blockId: 1006, blockName: blockNameLateDetail, reason: '房间号 D-400' };
 const hitMissing = { blockId: 9999, blockName: blockNameMissing, reason: '房间号 Z-999' };
+blockData[1007] = { blockId: 1007, blockName: 'B-124多规则屏蔽', status: '1', alarmBlockDetailResultList: [
+  detailRow('d-1007-1', '楼宇自控', 'B-124机房', '电源告警', '全部', ''),
+  detailRow('d-1007-2', '控制柜', 'B-124机房', '指示灯告警', '全部', ''),
+  detailRow('d-1007-3', '控制柜', 'B-150机房', '另一包间告警', '全部', ''),
+] };
 const records = {
   maintenance: [
     row('same-id', title, { auto_check_status: 'ready', auto_checked_at: checkedAt, hits: [] }),
@@ -61,6 +66,9 @@ const records = {
     row('jump-late-snap', 'E楼迟到快照', { auto_check_status: 'ready', auto_checked_at: checkedAt, hits: [hitLateSnap] }),
     row('jump-late-detail', 'F楼迟到详情', { auto_check_status: 'ready', auto_checked_at: checkedAt, hits: [hitLateDetail] }),
     row('jump-missing', 'G楼缓存外屏蔽', { auto_check_status: 'ready', auto_checked_at: checkedAt, hits: [hitMissing] }),
+    row('shared-resource', 'B楼控制柜多规则检修', { device: '', rooms: ['B-124'], location: 'B-124控制柜',
+      auto_check_status: 'ready', auto_checked_at: checkedAt,
+      hits: [{ blockId: 1007, blockName: 'B-124多规则屏蔽', reason: '空间位置 B-124' }] }),
   ],
   change: [
     row('same-id', 'B楼控制柜更换变更', { fault: '更换控制柜指示灯', device: 'B-124-BAS-101' }),
@@ -195,12 +203,24 @@ try {
   await page.screenshot({ path: path.join(output, 'multi-jump.png') });
   await switchTo('检修核对');
 
+  // A matched resource covers several detail rows: highlight them all for 3s, without inventing a unique row.
+  await tableRow('B楼控制柜多规则检修').locator('.pc-hit').click();
+  await page.locator('.pc-focused-detail').first().waitFor();
+  assert.equal(await page.locator('.pc-focused-detail').count(), 2);
+  assert.deepEqual(await page.locator('.pc-focused-detail td:nth-child(3)').allTextContents(), ['电源告警', '指示灯告警']);
+  assert.equal(await page.getByText('已定位屏蔽记录，无法唯一定位明细，请在原列表中核对。', { exact: true }).count(), 0);
+  assert.equal(await dlg.count(), 0);
+  assert.ok(!snapshots.some(s => String(s.body.blockId) === '1007'), 'no extra remote snapshot query on focus');
+  await page.screenshot({ path: path.join(output, 'multi-resource-highlight.png'), fullPage: true });
+  await page.waitForFunction(() => !document.querySelector('.pc-focused-detail'), null, { timeout: 4000 });
+  await switchTo('检修核对');
+
   // ---- cache-missing block appended into the list when not cached ----
   await tableRow('G楼缓存外屏蔽').waitFor();
   await tableRow('G楼缓存外屏蔽').locator('.pc-hit').click();
   await page.waitForTimeout(400);
   assert.equal(await page.locator('.pc-tabs button.active').innerText(), '核对台');
-  assert.equal(await page.locator('.pc-list .pc-section-head small').innerText(), String(initialBlockCount + 1), 'missing block appended to full block list');
+  assert.equal(await page.locator('.pc-list .pc-section-head small').innerText(), String(initialBlockCount + 2), 'missing blocks appended to full block list');
   const missingRecord = page.locator('.pc-record.selected');
   await missingRecord.waitFor();
   assert.match(await missingRecord.innerText(), new RegExp(blockNameMissing));

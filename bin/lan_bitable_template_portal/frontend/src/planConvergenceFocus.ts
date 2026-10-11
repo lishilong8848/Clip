@@ -2,14 +2,14 @@
  * Conservative, deterministic UI focus targeting for block-detail rows after a
  * maintenance/change notice hit. Pure UI logic; never invents matches from block
  * titles or fuzzy substrings. We only highlight rows backed by real equipment
- * identifiers or unambiguous room tokens, and we drop rows whose room clearly
+ * identifiers or matching configured resources, and we drop rows whose room clearly
  * contradicts the notice's declared building.
  */
 
 type Row = Record<string, any>;
 type Notice = Record<string, any>;
 
-const DEVICE_KEYS = ["instances", "instanceNames", "instName", "insNames"];
+const DEVICE_KEYS = ["instances", "instanceNames", "instanceName", "instName", "insName", "insNames"];
 const EXPLICIT_KEYS = ["instanceIds", "instance_ids", "insIds", "ins_ids", "deviceIds", "device_ids", "instIds", "inst_ids"];
 
 /** Flatten scalar/array/object to a searchable string without "[object Object]". */
@@ -81,6 +81,7 @@ function conflicts(row: Row, declared: Set<string>): boolean {
   if (declared.size === 0) return false;
   const present = new Set<string>();
   for (const r of [...rooms(row.spaceModel), ...rooms(row.spaceModelName)]) present.add(r[0]);
+  for (const b of buildings([row.spaceModel, row.spaceModelName])) present.add(b);
   if (present.size === 0) return false;
   return [...present].every(b => !declared.has(b));
 }
@@ -115,28 +116,31 @@ export function focusedDetailIndexes(rows: Row[], notice: Notice): number[] {
     }
     if (hit && !conflicts(row, declared)) deviceMatches.push(i);
   }
-  if (deviceMatches.length > 0) return deviceMatches;
-
-  // --- Step 2: unambiguous room-token fallback (each row counted once) ---
+  // A configured room can cover several device types/rules; each matching row matters.
   const noticeRooms = new Set<string>();
   for (const src of [notice.rooms, notice.location, notice.name, notice.device]) {
     for (const r of rooms(src)) noticeRooms.add(r);
   }
-  if (noticeRooms.size === 0) return [];
-
-  let found = -1;
-  let ambiguous = false;
+  const resourceMatches: number[] = [];
+  const matched = new Set(deviceMatches);
+  const noticeText = text([notice.device, notice.name]).toUpperCase();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i] || {};
+    if (matched.has(i)) continue;
+    // A range for another named device must not be highlighted just for sharing a room.
+    if (ids.size && DEVICE_KEYS.some(key => equipmentCodes(row[key]).size)) continue;
+    if (explicit.size && tokens(row.instanceIds).length) continue;
     const rowRooms = new Set<string>([...rooms(row.spaceModel), ...rooms(row.spaceModelName)]);
     let matches = false;
     for (const rr of rowRooms) {
       if (noticeRooms.has(rr) && (declared.size === 0 || declared.has(rr[0]))) { matches = true; break; }
     }
-    if (matches) {
-      if (found === -1) found = i;
-      else { ambiguous = true; break; }
-    }
+    const type = text(row.classifyModelName || row.classifyModel).trim().toUpperCase();
+    const typeMatches = type.length >= 2 && !['全部', '设备', '其他'].includes(type) && noticeText.includes(type);
+    const rowBuildings = new Set([...rowRooms].map(room => room[0]));
+    for (const building of buildings([row.spaceModel, row.spaceModelName])) rowBuildings.add(building);
+    const typeInBuilding = typeMatches && [...rowBuildings].some(building => declared.has(building));
+    if ((matches || (!noticeRooms.size && typeInBuilding)) && !conflicts(row, declared)) resourceMatches.push(i);
   }
-  return ambiguous || found === -1 ? [] : [found];
+  return [...deviceMatches, ...resourceMatches].sort((a, b) => a - b);
 }

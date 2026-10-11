@@ -1,6 +1,7 @@
 """Local/native fast paths must not require an LLM, gateway, or cloud writes."""
 import asyncio
 import datetime as dt
+import json
 import os
 import sys
 import unittest
@@ -103,6 +104,124 @@ class FastPathTests(unittest.IsolatedAsyncioTestCase):
         today = dt.datetime.now(public.TZ).date()
         self.assertEqual(public.weather_request('明天南通天气'), ('南通', (today + dt.timedelta(days=1)).isoformat()))
         self.assertIn('覆盖范围', public.weather_reply({'ok': True, 'daily': []}, '南通', '2026-10-01'))
+
+    def test_explicit_city_never_inherits_previous_city(self):
+        previous = '南通今天天气怎么样'
+        today = dt.datetime.now(public.TZ).date().isoformat()
+        self.assertEqual(public.weather_request('石家庄今天天气怎么样', previous), ('石家庄', today))
+        for question in ('保定今天天气怎么样', '哈尔滨明天有雨吗', 'Tokyo weather today?',
+                         '巴黎明天气温多少', '今天哪里下雨'):
+            with self.subTest(question=question):
+                result = public.weather_request(question, previous)
+                self.assertTrue(result is None or result[0] != '南通')
+                with self.assertRaises(public.PublicQueryError):
+                    public._ensure_public_city('南通', question, previous)
+        for question in ('明天呢', '今天天气怎么样', '明天会不会下雨', '那明天温度多少度？', 'What about tomorrow?'):
+            with self.subTest(question=question):
+                self.assertEqual(public.weather_request(question, previous)[0], '南通')
+                public._ensure_public_city('南通', question, previous)
+
+    async def test_city_switch_and_followup_are_correct_in_web_and_feishu(self):
+        today = dt.datetime.now(public.TZ).date()
+        async def forecast(city, question, **kwargs):
+            return {'ok': True, 'city': city, 'sourceURL': 'https://example.com/forecast',
+                    'daily': [{'date': (today + dt.timedelta(days=offset)).isoformat(), 'min': 15, 'max': 23}
+                              for offset in (0, 1)]}
+        weather = Mock(weather=AsyncMock(side_effect=forecast))
+        engine = LighthouseModel(self.portal, model_factory=no_model, public_sources=weather)
+        for channel in ('', 'feishu:fixture-group'):
+            actor = {**self.actor, 'channel': channel}
+            question = '石家庄今天天气怎么样'
+            history = [{'question': '南通今天天气怎么样', 'status': 'completed'}]
+            result = await engine.answer(actor, {'question': question, 'operation_id': 'switched-weather',
+                '_profile': self.model.profile()}, history, self.request, AsyncMock(), self.authorize, {})
+            weather.weather.assert_awaited_with('石家庄', question)
+            self.assertIn('石家庄', result['answer'])
+            self.assertNotIn('南通', result['answer'])
+            result = await engine.answer(actor, {'question': '明天呢', 'operation_id': 'switched-followup',
+                '_profile': self.model.profile()}, [{'question': question, 'status': 'completed'}],
+                self.request, AsyncMock(), self.authorize, {})
+            weather.weather.assert_awaited_with('石家庄', '明天呢', previous_question=question)
+            self.assertIn('石家庄', result['answer'])
+            self.assertNotIn('南通', result['answer'])
+        self.assertEqual(self.reads, [])
+
+    def test_weather_parses_nationwide_places_and_keeps_county_names(self):
+        day = dt.datetime.now(public.TZ).date().isoformat()
+        for city in ('保定', '哈尔滨', '伊宁', '三亚', '嘉峪关', '会宁', '新会', '易县', '海门区', '呼和浩特', '和田',
+                     '河北省保定市易县', '广西壮族自治区北海市', '北京市朝阳区'):
+            with self.subTest(city=city):
+                question = city + '今天天气怎么样'
+                self.assertEqual(public.weather_request(question), (city, day))
+                self.assertEqual(public.weather_request('今天天气怎么样', question), (city, day))
+        self.assertEqual(public.weather_request('帮我查一下哈尔滨明天有雨吗')[0], '哈尔滨')
+        self.assertEqual(public.weather_request('会宁县今天会不会下雨')[0], '会宁县')
+        for question in ('今天全国天气怎么样', '保定和南通今天天气', '今天哪里下雨'):
+            self.assertIsNone(public.weather_request(question, '南通今天天气'))
+
+    async def test_nationwide_catalogue_is_cached_for_concurrent_city_queries(self):
+        now = dt.datetime.now(public.TZ)
+        locations = [('河北', '保定', '易县', '101090212'), ('黑龙江', '哈尔滨', '哈尔滨', '101050101'),
+                     ('新疆', '伊犁', '伊宁', '101131001'), ('海南', '三亚', '三亚', '101310201'),
+                     ('广东', '江门', '新会', '101281104'), ('甘肃', '白银', '会宁', '101161303'),
+                     ('江苏', '南通', '海门', '101190508'), ('新疆', '伊犁', '伊宁县', '101131004')]
+        catalog, names, calls = {}, {}, []
+        for province, prefecture, district, code in locations:
+            catalog.setdefault(province, {}).setdefault(prefecture, {})[district] = {'AREAID': code, 'NAMECN': district}
+            names[code] = district
+        async def handler(request):
+            calls.append(str(request.url))
+            if str(request.url) == public.CHINA_WEATHER_CATALOG_URL:
+                await asyncio.sleep(.01)
+                return httpx.Response(200, text='var city_data = ' + json.dumps(catalog, ensure_ascii=False) + ';')
+            name = names.get(request.url.path.split('/')[-1].removesuffix('.shtml'))
+            if name:
+                return httpx.Response(200, text=f'<title>{name}天气</title><input id="fc_24h_internal_update_time" value="{now:%Y%m%d%H}">'
+                                      f'<li class="sky"><h1>{now.day}日（今天）</h1><p class="wea">晴</p><p class="tem"><span>23</span><i>12℃</i></p></li>')
+            return httpx.Response(404)
+        source = public.PublicSources(client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        with patch.dict(os.environ, {public.CUSTOM_KEY_ENV: ''}):
+            cities = [row[2] for row in locations] * 3
+            results = await asyncio.gather(*(source.weather(city, city + '今天天气') for city in cities))
+            for city, result in zip(cities, results):
+                self.assertTrue(result['ok'], result)
+                self.assertEqual(result['city'], city)
+                self.assertEqual(result['capability']['provider'], 'china-weather')
+            qualified = await source.weather('河北省保定市易县', '河北省保定市易县今天天气')
+            self.assertTrue(qualified['ok'], qualified)
+            self.assertIn('101090212', qualified['sourceURL'])
+            for city, code in (('新疆伊宁市', '101131001'), ('新疆伊宁县', '101131004')):
+                result = await source.weather(city, city + '今天天气')
+                self.assertTrue(result['ok'], result)
+                self.assertIn(code, result['sourceURL'])
+            rainy = await source.weather('新会会', '新会会下雨吗')
+            self.assertTrue(rainy['ok'], rainy)
+            self.assertEqual(rainy['city'], '新会')
+        self.assertEqual(calls.count(public.CHINA_WEATHER_CATALOG_URL), 1)
+        await source.close()
+
+    async def test_same_named_counties_require_province_before_weather_fetch(self):
+        now = dt.datetime.now(public.TZ)
+        catalog = {province: {prefecture: {'朝阳': {'AREAID': code, 'NAMECN': '朝阳'}}}
+                   for province, prefecture, code in [('北京', '北京', '101010300'), ('辽宁', '朝阳', '101071201')]}
+        calls = []
+        def handler(request):
+            calls.append(str(request.url))
+            if str(request.url) == public.CHINA_WEATHER_CATALOG_URL:
+                return httpx.Response(200, text='var city_data = ' + json.dumps(catalog, ensure_ascii=False))
+            return httpx.Response(200, text=f'<title>朝阳天气</title><input id="fc_24h_internal_update_time" value="{now:%Y%m%d%H}">'
+                                  f'<li class="sky"><h1>{now.day}日（今天）</h1><p class="wea">晴</p><p class="tem"><span>23</span><i>12℃</i></p></li>')
+        source = public.PublicSources(client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        with patch.dict(os.environ, {public.CUSTOM_KEY_ENV: ''}):
+            ambiguous = await source.weather('朝阳', '朝阳今天天气')
+            self.assertFalse(ambiguous['ok'])
+            self.assertTrue(ambiguous['ambiguous'])
+            self.assertIn('请补充省市', ambiguous['note'])
+            self.assertEqual(calls, [public.CHINA_WEATHER_CATALOG_URL])
+            result = await source.weather('辽宁省朝阳市', '辽宁省朝阳市今天天气')
+            self.assertTrue(result['ok'], result)
+            self.assertIn('101071201', result['sourceURL'])
+        await source.close()
 
     def test_selected_weather_understands_english_dates_and_rejects_conflicts(self):
         today = dt.datetime.now(public.TZ).date()

@@ -522,9 +522,9 @@ class LighthouseModel:
         requires_source = requires_source or knowledge_question and source_requested
         previous_weather = ""
         if self.public_sources:
-            from .lighthouse_public import WEATHER_INTENT, WEATHER_FOLLOWUP, WEATHER_EXPLANATION, _forbidden_inputs
+            from .lighthouse_public import WEATHER_INTENT, weather_followup, WEATHER_EXPLANATION, _forbidden_inputs
             previous = history[-1].get("question", "") if history else ""
-            if WEATHER_INTENT.search(previous) and WEATHER_FOLLOWUP.search(question) and not WEATHER_EXPLANATION.search(question) and not _forbidden_inputs(previous, question):
+            if WEATHER_INTENT.search(previous) and weather_followup(question) and not WEATHER_EXPLANATION.search(question) and not _forbidden_inputs(previous, question):
                 previous_weather = previous
         public_realtime = bool(self.public_sources and not business_question and (selected_tools & {'weather', 'public_search', 'public_page'}
             or previous_weather or WEATHER_INTENT.search(question) and not WEATHER_EXPLANATION.search(question)
@@ -823,6 +823,7 @@ class LighthouseModel:
                 except ValueError:
                     return await direct('本轮实时资料未取得：未能核对要查询的城市，请明确城市名称；内部业务数据不会提交给天气服务。')
                 await current_actor()
+                city = value.get('city') or city
                 if value.get('ok'):
                     add_source(city + '天气', value, value['sourceURL'])
                 return await direct(weather_reply(value, city, day))

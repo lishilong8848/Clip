@@ -17309,16 +17309,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 [
                     {
                         "source_record_id": "event-d-processing",
+                        "occurrence_time": dt.datetime.now().strftime("%Y-%m-01 08:00"),
                         "building_codes": ["D"],
                         "status": "处理中",
                     },
                     {
                         "source_record_id": "event-d-ended",
+                        "occurrence_time": dt.datetime.now().strftime("%Y-%m-01 09:00"),
                         "building_codes": ["D"],
                         "status": "已结束",
                     },
                     {
                         "source_record_id": "event-d-e-recovered",
+                        "occurrence_time": dt.datetime.now().strftime("%Y-%m-01 10:00"),
                         "building_codes": ["D", "E"],
                         "status": "已恢复待闭环",
                     },
@@ -17354,6 +17357,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(result["scopes"]["CAMPUS"]["event_total"], 1)
             self.assertEqual(result["scopes"]["ALL"]["event_total"], 3)
             self.assertEqual(result["scopes"]["ALL"]["event_processing"], 2)
+
+    def test_scope_overview_event_count_matches_occurrence_month_not_activity_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._new_temp_service(Path(tmp))
+            month = service._normalize_event_month()
+            previous_year = str(int(month[:4]) - 1) + month[4:]
+            records = [{"source_record_id": "event-" + str(i), "building_codes": ["A", "B"],
+                        "status": "处理中" if i < 2 else "已结束",
+                        "occurrence_time": (month if i < 19 else previous_year) + "-01 08:00"}
+                       for i in range(400)]
+            service._records = service._change_records = service._repair_records = []
+            service._state_store.replace_event_month_snapshot(service._current_month_label(), records)
+            result = service.get_scope_overview(scopes=["ALL", "A", "B", "CAMPUS"])
+            self.assertEqual(result["scopes"]["ALL"]["event_total"], 19)
+            self.assertEqual(result["scopes"]["ALL"]["event_processing"], 2)
+            self.assertEqual(result["scopes"]["A"]["event_total"], 19)
+            self.assertEqual(result["scopes"]["CAMPUS"]["event_total"], 19)
+            self.assertEqual(service.get_event_monthly_overview()["stats"]["total"], 19)
+            self.assertEqual(len(service._state_store.get_event_month_snapshot(service._current_month_label())["records"]), 400)
 
     def test_scope_overview_only_counts_startable_source_records_as_pending(self):
         with tempfile.TemporaryDirectory() as tmp:

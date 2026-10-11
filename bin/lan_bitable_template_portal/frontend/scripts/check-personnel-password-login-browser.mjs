@@ -213,12 +213,16 @@ try {
 
   // --- Block 2: first-time national-ID-last6 hint conditional + empty selection error ---
   await openForm();
+  await page.getByText('首次登录密码为本人身份证号后6位，验证后须立即修改', { exact: true }).waitFor();
   await select().selectOption('recZhangsanA');
   await page.getByText('首次登录密码为本人身份证号后6位，验证后须立即修改', { exact: true }).waitFor();
   await select().selectOption('recZhangsanB');
   assert.equal(await page.getByText('首次登录密码为本人身份证号后6位，验证后须立即修改', { exact: true }).count(), 0,
     'needs_setup=false 的人员不应显示初始密码提示');
+  await select().selectOption('recWangwu');
+  await page.getByText('首次登录密码为本人身份证号后6位，验证后须立即修改', { exact: true }).waitFor();
   await select().selectOption('');
+  await select().press('Escape');
   await page.getByRole('button', { name: '姓名密码登录', exact: true }).click();
   await page.getByText('请先选择姓名。', { exact: true }).waitFor();
   assert.equal(loginPosts.length, 0, '未选择人员不应发起登录请求');
@@ -860,6 +864,8 @@ try {
   // --- Block R2b: after reset, login with new password works (needs login) ---
   await openForm();
   await select().selectOption('recZhangsanA');
+  assert.equal(await page.getByText('首次登录密码为本人身份证号后6位，验证后须立即修改', { exact: true }).count(), 0,
+    '成功重置后再次选择该人员，应隐藏首次登录提示（needs_setup 为 false）');
   await page.locator('#personnel-password').fill('newpass4321');
   const loginResetBase = loginPosts.length;
   await page.getByRole('button', { name: '姓名密码登录', exact: true }).click();
@@ -870,8 +876,6 @@ try {
   const prefAfterLogin = await page.evaluate(() => window.sessionStorage.getItem('clipflow-login-method'));
   assert.equal(prefAfterLogin, 'password', '实际密码提交应记住 password 偏好');
   assert.equal(await page.locator('#personnel-new-password').count(), 0, '重置成功后不应残留改密表单');
-  assert.equal(await page.getByText('首次登录密码为本人身份证号后6位，验证后须立即修改', { exact: true }).count(), 0,
-    '成功重置后应隐藏首次登录提示（needs_setup 为 false）');
   await page.screenshot({ path: path.join(output, 'r2b-reset-then-login.png'), fullPage: true, animations: 'disabled' });
 
   // --- Block R1c: malformed HTTP 200 (no requires_password_change:true) must NOT pass verification ---

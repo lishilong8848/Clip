@@ -9,11 +9,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../../output/playwright/link-directory');
 await mkdir(output, { recursive: true });
 const fixture = Array.from({ length: 329 }, (_, i) => ({ name: i === 0 ? '机柜基础资料' : `示例表 ${i}`,
-  url: `https://vnet.feishu.cn/base/example?table=tblExample${i}`, purpose: '隔离测试用途', sort: i + 1,
+  url: `https://vnet.feishu.cn/base/example?table=tblExample${i}`, purpose: '隔离测试用途', sort: (i + 1) * 10,
   category: i === 0 ? '设备管理' : '南通全景驾驶舱-维护管理' }));
-fixture.push({ name: '平台门户', url: 'https://www.sm.sjhl.online:3001/nantong-base', purpose: '网站入口', sort: 330, category: '网页导航' });
-fixture.push({ name: '培训持证', url: 'https://www.sm.sjhl.online:3001/training-certification-management?module=certificate', purpose: '网站入口', sort: 331, category: '网页导航' });
-fixture.push({ name: '孪生图谱', url: 'https://www.sm.sjhl.online:8787/', purpose: '网站入口', sort: 332, category: '网页导航' });
+fixture.push({ name: '平台门户', url: 'https://www.sm.sjhl.online:3001/nantong-base', purpose: '网站入口', sort: 3300, category: '网页导航' });
+fixture.push({ name: '培训持证', url: 'https://www.sm.sjhl.online:3001/training-certification-management?module=certificate', purpose: '网站入口', sort: 3310, category: '网页导航' });
+fixture.push({ name: '孪生图谱', url: 'https://www.sm.sjhl.online:8787/', purpose: '网站入口', sort: 3320, category: '网页导航' });
 let rows = fixture.map((row, i) => ({ ...row, id: `rec${i + 1}` }));
 let admin = true, failSave = false, failRefresh = false, warning = '', writes = [], reads = 0;
 const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false } });
@@ -77,8 +77,10 @@ try {
   await tableRows.first().waitFor();
   await page.waitForFunction(() => !document.querySelector('.ui-page-leave-active, .ui-page-enter-active'));
   assert.equal(await tableRows.count(), 25);
+  assert.deepEqual(await tableRows.locator('.sort-cell').allTextContents(), Array.from({ length: 25 }, (_, i) => String(i + 1)), 'display ordinals, not internal sort weights');
   await page.getByRole('button', { name: '网页导航', exact: true }).click();
   assert.equal(await tableRows.count(), 3);
+  assert.deepEqual(await tableRows.locator('.sort-cell').allTextContents(), ['1', '2', '3'], 'filtered numbers start at 1');
   assert.equal(await page.getByRole('link', { name: '培训持证', exact: true }).getAttribute('href'), fixture[330].url);
   assert.equal(await page.getByRole('link', { name: '孪生图谱', exact: true }).getAttribute('href'), fixture[331].url);
   await page.screenshot({ path: path.join(output, 'websites.png'), fullPage: true });
@@ -86,6 +88,7 @@ try {
   assert.equal(await tableRows.locator('a:not([rel="noopener noreferrer"])').count(), 0);
   await page.getByRole('button', { name: '下一页', exact: true }).click();
   assert.match(await page.locator('.table-footer b').innerText(), /2/);
+  assert.deepEqual(await tableRows.locator('.sort-cell').allTextContents(), Array.from({ length: 25 }, (_, i) => String(i + 26)), 'second page continues numbering');
   await search.fill('机柜基础资料');
   assert.equal(await tableRows.count(), 1);
   await page.getByRole('combobox', { name: '按分类筛选' }).selectOption('南通全景驾驶舱-维护管理');
@@ -174,6 +177,7 @@ try {
   await page.mouse.up();
   await page.getByText('顺序已保存', { exact: true }).waitFor();
   assert.equal(await tableRows.first().getAttribute('data-link-id'), crossId);
+  assert.equal(await tableRows.first().locator('.sort-cell').innerText(), '1', 'cross-page reordered list is renumbered');
   assert.deepEqual(writes.at(-1).body, { record_id: crossId, target_id: crossTarget, placement: 'before' });
 
   await page.getByRole('button', { name: '网页导航', exact: true }).click();

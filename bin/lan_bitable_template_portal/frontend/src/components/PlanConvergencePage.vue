@@ -25,7 +25,7 @@
         <template v-else>
           <div class="pc-section-head"><h3>{{ detail.blockName || '屏蔽记录' }}</h3><button class="pc-icon" title="记录详情" aria-label="查看记录全部信息" @click="showFields(detail, '屏蔽记录信息')"><Info :size="17" /></button></div>
           <dl class="pc-metadata"><div><dt>创建人</dt><dd>{{ detail.userName || '—' }}</dd></div><div><dt>开始时间</dt><dd>{{ detail.startTime || '—' }}</dd></div><div><dt>结束时间</dt><dd>{{ detail.endTime || '—' }}</dd></div><div><dt>屏蔽明细</dt><dd>{{ detailRows.length }} 项</dd></div></dl>
-          <div class="pc-table-wrap"><table><thead><tr><th>设备类型</th><th>关联资源</th><th>告警规则</th><th>关联设备</th><th class="pc-actions-cell">查看</th></tr></thead><tbody><tr v-for="(row, n) in detailPageRows" :key="row.blockDetailId || n" :class="{ 'pc-focused-detail': focusedDetail === row }"><td>{{ row.classifyModel || row.classifyModelName || row.domainCode || '—' }}</td><td>{{ row.spaceModel || row.spaceModelName || '—' }}</td><td>{{ row.relateConfig || row.alarmConfigId || '—' }}</td><td>{{ row.instances || row.instanceIds || '—' }}</td><td><div class="pc-row-tools"><button class="pc-icon" title="明细信息" aria-label="查看明细信息" @click="showFields(row, '屏蔽明细')"><Info :size="15" /></button><button class="pc-icon" :class="{ 'pc-focused-action': focusedDetail === row }" title="实例快照" aria-label="查看实例快照" @click="drill(row, 'snapshots')"><Camera :size="15" /></button><button class="pc-icon" title="规则视图" aria-label="查看规则视图" @click="drill(row, 'rule-view')"><ListFilter :size="15" /></button><button class="pc-icon" title="本地测点" aria-label="查看本地测点" :disabled="!boot.points_ready" @click="showPoints(row)"><Activity :size="15" /></button></div></td></tr><tr v-if="!detailRows.length"><td colspan="5" class="muted">此记录没有屏蔽明细</td></tr></tbody></table></div>
+          <div class="pc-table-wrap"><table><thead><tr><th>设备类型</th><th>关联资源</th><th>告警规则</th><th>关联设备</th><th class="pc-actions-cell">查看</th></tr></thead><tbody><tr v-for="(row, n) in detailPageRows" :key="row.blockDetailId || n" :class="{ 'pc-focused-detail': focusedDetails.has(row) }"><td>{{ row.classifyModel || row.classifyModelName || row.domainCode || '—' }}</td><td>{{ row.spaceModel || row.spaceModelName || '—' }}</td><td>{{ row.relateConfig || row.alarmConfigId || '—' }}</td><td>{{ row.instances || row.instanceIds || '—' }}</td><td><div class="pc-row-tools"><button class="pc-icon" title="明细信息" aria-label="查看明细信息" @click="showFields(row, '屏蔽明细')"><Info :size="15" /></button><button class="pc-icon" :class="{ 'pc-focused-action': focusedDetails.has(row) }" title="实例快照" aria-label="查看实例快照" @click="drill(row, 'snapshots')"><Camera :size="15" /></button><button class="pc-icon" title="规则视图" aria-label="查看规则视图" @click="drill(row, 'rule-view')"><ListFilter :size="15" /></button><button class="pc-icon" title="本地测点" aria-label="查看本地测点" :disabled="!boot.points_ready" @click="showPoints(row)"><Activity :size="15" /></button></div></td></tr><tr v-if="!detailRows.length"><td colspan="5" class="muted">此记录没有屏蔽明细</td></tr></tbody></table></div>
           <div v-if="detailPages > 1" class="pc-pager"><button class="pc-icon" aria-label="上一页明细" :disabled="detailPage <= 1" @click="detailPage--"><ChevronLeft :size="17" /></button><span>{{ detailPage }} / {{ detailPages }}</span><button class="pc-icon" aria-label="下一页明细" :disabled="detailPage >= detailPages" @click="detailPage++"><ChevronRight :size="17" /></button></div>
           <section class="pc-match">
             <div class="pc-section-head"><h3>规则集核对</h3><button class="pc-icon" title="刷新规则集" aria-label="刷新规则集" @click="loadRuleSets"><RefreshCw :size="15" /></button></div>
@@ -103,22 +103,23 @@ const blockPageRows=computed(()=>filteredBlocks.value.slice((blockPage.value-1)*
 watch([search,status],()=>blockPage.value=1);
 async function loadBlocks() { if(listLoading.value) return; listLoading.value=true; error.value=''; try { const data=await requestJson(base+'/blocks?refresh=1',{...requestOptions,timeoutMs:180_000}); if(!disposed){blocks.value=data.items;loadedAt.value=data.loaded_at;blockPage.value=1;} }catch(e){report(e);}finally{listLoading.value=false;} }
 const selectedId=ref(''), queryId=ref(''), detail=ref<Dict|null>(null), detailLoading=ref(false), detailPage=ref(1);
-const focusedDetail=ref<Dict|null>(null);
+const focusedDetails=ref(new Set<Dict>());
 let focusTimer:ReturnType<typeof setTimeout>|undefined;
-function clearDetailFocus(){clearTimeout(focusTimer);focusedDetail.value=null;}
-async function highlightDetail(row:Dict){
+function clearDetailFocus(){clearTimeout(focusTimer);focusedDetails.value.clear();}
+async function highlightDetails(rows:Dict[]){
   clearDetailFocus();
   await nextTick();
-  if(disposed||!detailRows.value.includes(row))return;
-  focusedDetail.value=row;
-  detailPage.value=Math.floor(detailRows.value.indexOf(row)/25)+1;
-  focusTimer=setTimeout(()=>{focusedDetail.value=null;},3000);
+  const available=new Set(detailRows.value),targets=rows.filter(row=>available.has(row));
+  if(disposed||!targets.length)return;
+  focusedDetails.value=new Set(targets);
+  detailPage.value=Math.floor(detailRows.value.indexOf(targets[0])/25)+1;
+  focusTimer=setTimeout(clearDetailFocus,3000);
   await nextTick();
   document.querySelector('.pc-focused-detail')?.scrollIntoView({behavior:'smooth',block:'center'});
 }
 watch(selectedId,clearDetailFocus);
 const detailRows=computed<Dict[]>(()=>detail.value?.alarmBlockDetailResultList || []), detailPages=computed(()=>Math.max(1,Math.ceil(detailRows.value.length/25))), detailPageRows=computed(()=>detailRows.value.slice((detailPage.value-1)*25,detailPage.value*25));
-async function chooseBlock(id:string) { if(!id.trim())return; const seq=++detailRequest; selectedId.value=id.trim(); queryId.value=id.trim();detail.value=null;focusedDetail.value=null;matchResult.value=null;excelResult.value=null;detailLoading.value=true;error.value=''; try{const data=await requestJson(base+'/blocks/'+encodeURIComponent(id.trim()),requestOptions);if(seq===detailRequest && !disposed){detail.value=data;detailPage.value=1;return data;}}catch(e){if(seq===detailRequest)report(e);}finally{if(seq===detailRequest)detailLoading.value=false;} }
+async function chooseBlock(id:string) { if(!id.trim())return; const seq=++detailRequest; selectedId.value=id.trim(); queryId.value=id.trim();detail.value=null;clearDetailFocus();matchResult.value=null;excelResult.value=null;detailLoading.value=true;error.value=''; try{const data=await requestJson(base+'/blocks/'+encodeURIComponent(id.trim()),requestOptions);if(seq===detailRequest && !disposed){detail.value=data;detailPage.value=1;return data;}}catch(e){if(seq===detailRequest)report(e);}finally{if(seq===detailRequest)detailLoading.value=false;} }
 const ruleSets=ref<Dict[]>([]), setId=ref(''), matchLoading=ref(false), matchResult=ref<Dict|null>(null);
 const ruleSetLabel=(row:Dict)=>`${row.name}（${row.item_count || 0} 项）`;
 const setOptions=computed(()=>ruleSets.value.map(ruleSetLabel)),setLabel=computed(()=>{const row=ruleSets.value.find(row=>String(row.id)===setId.value);return row?ruleSetLabel(row):'';});
@@ -143,7 +144,7 @@ function dialogSnapshot(){return {title:dialog.title,kind:dialog.kind,rows:dialo
 function showDialogRow(row:Dict){const previous=dialogSnapshot();showFields(row,'详细信息');dialog.previous=previous;}
 function showFields(row:Dict,title:string){const labels:Dict={blockId:'屏蔽 ID',blockName:'屏蔽名称',startTime:'开始时间',endTime:'结束时间',creatTime:'创建时间',userName:'创建人',blockDetailId:'明细 ID',classifyModel:'设备类型',classifyModelId:'类型 ID',domainCode:'域编码',spaceModel:'关联资源',spaceModelId:'资源 ID',relateConfig:'告警规则',alarmConfigId:'告警规则 ID',instances:'关联设备',instanceIds:'设备 ID',changeId:'变更 ID',taskId:'任务 ID',status:'状态'};showDialog(title,'table',Object.entries(row).filter(([k,v])=>k!=='alarmBlockDetailResultList'&&v!=null).map(([key,value])=>({label:labels[key]||key,value:valueText(value)})),[{key:'label',label:'字段'},{key:'value',label:'内容'}]);}
 async function drill(row:Dict,kind:'snapshots'|'rule-view'){
-  if(kind==='snapshots')void highlightDetail(row);
+  if(kind==='snapshots')void highlightDetails([row]);
   showDialog(kind==='snapshots'?'实例快照 · '+(detail.value?.blockName||selectedId.value):'规则视图',kind);
   dialog.loading=true;const seq=dialogRequest;
   try{const data=await post('/'+kind,kind==='snapshots'?{blockId:selectedId.value,blockDetailId:row.blockDetailId,instanceIds:row.instanceIds}:{classifyModelId:row.classifyModelId,domainCode:row.domainCode,alarmName:'',ruleName:''},180_000);if(seq!==dialogRequest||disposed)return;dialog.rows=data.map((item:Dict)=>({...item,enabledLabel:item.enable?'启用':'禁用'}));dialog.columns=kind==='snapshots'?[{key:'insName',label:'实例名称'},{key:'insStandardId',label:'实例标准 ID'},{key:'objName',label:'对象类型'}]:[{key:'alarmName',label:'告警名称'},{key:'ruleName',label:'规则名称'},{key:'alarmConfigId',label:'配置 ID'},{key:'enabledLabel',label:'状态'}];}catch(e){if(seq===dialogRequest)dialog.error=e instanceof Error?e.message:String(e);}finally{if(seq===dialogRequest)dialog.loading=false;}
@@ -220,8 +221,8 @@ async function locateNoticeBlock(hit:Dict, record:Dict){
   if(disposed||seq!==noticeJumpRequest||selectedId.value!==id)return;
   document.querySelector('.pc-record.selected')?.scrollIntoView({behavior:'smooth',block:'nearest'});
   const indexes=focusedDetailIndexes(detailRows.value,record);
-  if(indexes.length)await highlightDetail(detailRows.value[indexes[0]]);
-  else if(detailRows.value.length>1)notice.value='已定位屏蔽记录，无法唯一定位明细，请在原列表中核对。';
+  if(indexes.length)await highlightDetails(indexes.map(index=>detailRows.value[index]));
+  else if(detailRows.value.length>1)notice.value='已定位屏蔽记录，当前明细缺少与通告设备或资源对应的信息，请在原列表中核对。';
 }
 function switchTab(value:Tab){noticeJumpRequest++;tab.value=value;if(value==='rules'){visitedRules.value=true;void loadRuleSets();}if((value==='maintenance'||value==='change')&&!noticeAudits[value].visited)void loadNoticeAudit(value);const url=new URL(location.href);url.searchParams.set('tab',value);navigate(url,{replace:true});}
 const confirmOpen=ref(false);let confirmProceed:(()=>void)|null=null;

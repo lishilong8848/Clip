@@ -27628,6 +27628,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             for item in event_snapshot.get("records", [])
             if isinstance(item, dict)
         ]
+        event_records, _unknown_time_count = self._event_records_in_month(
+            event_records, self._normalize_event_month(default_month), "occurrence_time"
+        )
         overview: dict[str, dict[str, Any]] = {}
         prepared_workbenches: dict[str, dict[str, Any]] = {}
         has_scope_filter = scopes is not None

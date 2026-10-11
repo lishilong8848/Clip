@@ -97,13 +97,13 @@
             <th>名称</th>
             <th>分类</th>
             <th>用途</th>
-            <th class="sort-col">排序</th>
+            <th class="sort-col">序号</th>
             <th v-if="canEdit" class="ops-col"><span class="sr-only">操作</span></th>
           </tr>
         </thead>
         <tbody>
           <tr
-            v-for="row in pageItems"
+            v-for="(row, index) in pageItems"
             :key="String(row.id)"
             :data-link-id="row.id"
             :class="{ untrusted: !isTrustedUrl(row.url), dragging: draggedId === String(row.id), moved: movedId === String(row.id), 'drop-before': dropTarget === String(row.id) && dropPlacement === 'before', 'drop-after': dropTarget === String(row.id) && dropPlacement === 'after' }"
@@ -127,7 +127,7 @@
             </td>
             <td class="category-cell">{{ row.category || '—' }}</td>
             <td class="purpose-cell">{{ row.purpose || '—' }}</td>
-            <td class="sort-cell">{{ Number(row.sort ?? 0) }}</td>
+            <td class="sort-cell">{{ (page - 1) * PAGE_SIZE + index + 1 }}</td>
             <td v-if="canEdit" class="ops-cell">
               <div class="row-actions">
                 <button

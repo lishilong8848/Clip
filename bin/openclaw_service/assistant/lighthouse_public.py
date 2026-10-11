@@ -47,7 +47,7 @@ MAX_CITY_CHARS = 40
 SEARCH_MIN_QUERY_LEN = 2
 SEARCH_QUALIFIERS = frozenset({'official', 'documentation', 'docs', 'tutorial', 'site', 'org', 'com', 'net', 'gov', 'cn'})
 FORECAST_DAYS = 3
-WEATHER_INTENT = re.compile(r"天气|气温|预报|下雨|下雪|降雨|降雪|温度|\b(?:weather|forecast|temperature|rain|snow|precipitation)\b", re.I)
+WEATHER_INTENT = re.compile(r"天气|气温|预报|下雨|下雪|有雨|有雪|降雨|降雪|温度|\b(?:weather|forecast|temperature|rain|snow|precipitation)\b", re.I)
 WEATHER_EXPLANATION = re.compile(r"翻译|译成|怎么说|原理|含义|术语|是什么意思|定义|怎么(?:预测|预报)|如何(?:制作|预测|预报)"
     r"|\b(?:translate|translation|spell|definition|meaning)\b|^\s*what\s+is\s+(?:the\s+)?weather[?.\s]*$", re.I)
 WEATHER_FOLLOWUP = re.compile(WEATHER_INTENT.pattern + r"|^(?:那|那么|what about\s+|how about\s+)?"
@@ -69,11 +69,13 @@ _CITY_DANGER_CHARS = re.compile(r"[/\\@:]")
 # Keyless public weather community service (wttr.in JSON API). HTTPS fixed host only.
 WTTR_URL = "https://wttr.in/{city}?format=j1&lang=zh"
 WTTR_LABEL = "publicweathercommunity no SLA"
-CHINA_WEATHER_CITIES = {'南通': '101190501'}
+CHINA_WEATHER_CITIES = {'南通': '101190501', '石家庄': '101090101'}
 CHINA_WEATHER_URL = 'https://www.weather.com.cn/weather/{code}.shtml'
+CHINA_WEATHER_CATALOG_URL = 'https://j.i8tq.com/weather2020/search/city.js'
 # Known Chinese cities -> canonical English names so the keyless lookup is deterministic.
 KNOWN_CHINESE_CITIES = {
     "南通": "Nantong",
+    "石家庄": "Shijiazhuang",
     "上海": "Shanghai",
     "北京": "Beijing",
     "南京": "Nanjing",
@@ -110,6 +112,32 @@ NANTONG_LAT = 32.0167
 NANTONG_LON = 120.8667
 NANTONG_RADIUS_KM = 30.0
 
+def weather_followup(question):
+    """Only location-free followups may inherit a previously requested city."""
+    day = (r'(?:前天|昨天|今天|今晚|明天|后天|那边|那里|(?:下|本|上)周|周末|(?:周|星期)[一二三四五六日天]'
+           r'|20\d{2}[-年/.]\d{1,2}[-月/.]\d{1,2}日?|\d{1,2}月\d{1,2}日)')
+    subject = r'(?:天气(?:预报)?|气温|温度|(?:还)?(?:会不会|会)?(?:下雨|下雪|有雨|有雪|降雨|降雪)(?:概率)?)'
+    return bool(re.fullmatch(
+        r'(?:那么|那|请问|请|帮我(?:查|看)(?:一下|下)?)?(?:' + day + r'(?:的)?(?:' + subject + r')?|' + subject + r')'
+        r'(?:怎么样|如何|多少度|多少|几度|呢|吗|么)?[?？。!！\s]*'
+        r'|(?:what about\s+|how about\s+)?(?:today|tonight|tomorrow|yesterday|day after tomorrow|day before yesterday'
+        r'|(?:next|this|last)\s+(?:week|weekend)|monday|tuesday|wednesday|thursday|friday|saturday|sunday'
+          r'|weather|temperature)(?:\s+(?:weather|temperature))?[?.!\s]*', _compact(question), re.I))
+
+def _weather_cities(question, *, selected=False):
+    match = WEATHER_INTENT.search(question)
+    phrase = question[:match.start()] if match else question if selected else ''
+    phrase = re.sub(r'20\d{2}[-年/.]\d{1,2}[-月/.]\d{1,2}日?|\d{1,2}月\d{1,2}日|'
+                    r'前天|昨天|今天|今晚|明天|后天', '', phrase)
+    phrase = re.sub(r'^(?:(?:请问|请|我想知道|我想了解|告诉我|帮我|查询|查|看看|看|我现在在|我在)(?:一下|下)?)+', '', phrase.strip())
+    phrase = re.sub(r'(?:的|会不会)$', '', phrase.strip(' ，,。?？'))
+    if re.fullmatch(r'[\u4e00-\u9fff]{2,30}', phrase):
+        if re.search(r'以及|、|哪里|哪个|什么|全国|各地|所有|这里|那里|当地|家里|一下|怎么', phrase) or any(
+                re.search(re.escape(city) + r'[和与]|[和与]' + re.escape(city), phrase) for city in KNOWN_CHINESE_CITIES):
+            return []
+        return [_canonical_city(phrase)]
+    return [city for city in KNOWN_CHINESE_CITIES if _city_in_question(city, question)]
+
 def weather_request(question, previous_question='', *, selected=False):
     """Only unambiguous single-city, single-date queries bypass the model."""
     if len(question) > 100 or _forbidden_inputs(question) or WEATHER_EXPLANATION.search(question) \
@@ -123,9 +151,9 @@ def weather_request(question, previous_question='', *, selected=False):
             r'|january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sep|october|oct|november|nov|december|dec)\b',
             question, re.I):
         return None
-    cities = [city for city in KNOWN_CHINESE_CITIES if _city_in_question(city, question)]
-    if not cities and previous_question:
-        cities = [city for city in KNOWN_CHINESE_CITIES if _city_in_question(city, previous_question)]
+    cities = _weather_cities(question, selected=selected)
+    if not cities and previous_question and weather_followup(question):
+        cities = _weather_cities(previous_question)
     if len(cities) != 1:
         return None
     full_date = r'(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})日?(?!\d)'
@@ -358,6 +386,10 @@ def _city_syntax_injection(city: str) -> Optional[str]:
     return None
 
 
+def _weather_place_key(value):
+    return re.sub(r'特别行政区|壮族自治区|回族自治区|维吾尔自治区|自治区|自治州|自治县|省|市|县|区|[\s·、-]', '', value)
+
+
 def _canonical_city(city: str) -> str:
     text = _compact(city)
     if re.fullmatch(r'江苏(?:省)?\s*南通(?:市)?', text):
@@ -393,7 +425,7 @@ def _ensure_public_city(city: str, question: str, previous_question: str = "") -
     if not _city_in_question(city, question):
         # Only a server-supplied immediately preceding public weather question
         # can supply the city. Never forward history or business results.
-        if previous_question and WEATHER_INTENT.search(previous_question) and WEATHER_FOLLOWUP.search(question) \
+        if previous_question and WEATHER_INTENT.search(previous_question) and weather_followup(question) \
                 and not WEATHER_EXPLANATION.search(question) \
                 and not _forbidden_inputs(previous_question) \
                 and not any(_city_in_question(name, question) and name != _canonical_city(city) for name in KNOWN_CHINESE_CITIES):
@@ -886,6 +918,9 @@ class PublicSources:
         self._pool = None
         self._pool_lock = asyncio.Lock()
         self._pages = {}
+        self._weather_places = {}
+        self._weather_places_at = 0
+        self._weather_places_lock = asyncio.Lock()
 
     def prepare(self):
         if not self._injected:
@@ -914,6 +949,8 @@ class PublicSources:
                 await self._pool.aclose()
                 self._pool = None
             self._pages.clear()
+            self._weather_places.clear()
+            self._weather_places_at = 0
 
     def _unavailable(self, source: str, url: str, queried_at: str,
                      city: Optional[str] = None, note: str = "") -> dict:
@@ -1055,15 +1092,14 @@ class PublicSources:
                     reasons.append(commercial.get("note") or "商业天气服务暂不可用。")
                 except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
                     reasons.append("商业天气服务请求未完成。")
-            # The Chinese site resolves Nantong exactly; wttr may use a nearby station.
-            if city in CHINA_WEATHER_CITIES:
-                try:
-                    china = await bounded(self._weather_china(city, queried_at), 5)
-                    if china.get('ok'):
-                        return china
-                    reasons.append(china.get('note') or '中国天气网暂不可用。')
-                except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
-                    reasons.append('中国天气网请求未完成。')
+            # Resolve the official nationwide catalogue, not a few predefined cities.
+            try:
+                china = await bounded(self._weather_china(city, queried_at), 5)
+                if china.get('ok') or china.get('ambiguous'):
+                    return china
+                reasons.append(china.get('note') or '中国天气网暂不可用。')
+            except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
+                reasons.append('中国天气网请求未完成。')
             try:
                 wttr = await bounded(self._weather_wttr(city, queried_at), 8)
             except (asyncio.TimeoutError, PublicQueryError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError):
@@ -1142,17 +1178,75 @@ class PublicSources:
                                "provider": "wttr.in-keyless",
                                "label": WTTR_LABEL}}
 
+    async def _china_places(self):
+        async with self._weather_places_lock:
+            age = asyncio.get_running_loop().time() - self._weather_places_at
+            if self._weather_places_at and age < (86400 if self._weather_places else 60):
+                return self._weather_places
+            self._weather_places_at = asyncio.get_running_loop().time()
+            async with self._client() as client:
+                async with client.stream('GET', CHINA_WEATHER_CATALOG_URL, timeout=self._timeout) as response:
+                    if response.status_code != 200:
+                        raise PublicQueryError('全国天气地点目录暂不可用。')
+                    raw = (await _read_bounded(response, '天气地点')).decode('utf-8')
+            match = re.fullmatch(r'\s*var city_data\s*=\s*(\{.*\})\s*;?\s*', raw, re.S)
+            data = json.loads(match[1]) if match else None
+            if not isinstance(data, dict):
+                raise PublicQueryError('全国天气地点目录结构无效。')
+            places = {}
+            for province, cities in data.items():
+                if not isinstance(cities, dict):
+                    raise PublicQueryError('全国天气地点目录结构无效。')
+                for prefecture, districts in cities.items():
+                    if not isinstance(districts, dict):
+                        raise PublicQueryError('全国天气地点目录结构无效。')
+                    for district, row in districts.items():
+                        if not isinstance(row, dict) or not re.fullmatch(r'101\d{6}', str(row.get('AREAID', ''))):
+                            continue
+                        entry = {'code': row['AREAID'], 'name': row.get('NAMECN') or district,
+                                 'label': ' · '.join(dict.fromkeys((province, prefecture, district)))}
+                        for parts in ((district,), (province, district), (prefecture, district), (province, prefecture, district)):
+                            key = _weather_place_key(''.join(dict.fromkeys(parts)))
+                            places.setdefault(key, {})[entry['code']] = entry
+            if not places:
+                raise PublicQueryError('全国天气地点目录为空。')
+            self._weather_places = places
+            return places
+
     async def _weather_china(self, city, queried_at):
-        url = CHINA_WEATHER_URL.format(code=CHINA_WEATHER_CITIES[city])
+        code, name, label = CHINA_WEATHER_CITIES.get(city), city, city
+        if code is None:
+            places = await self._china_places()
+            candidates = list(places.get(_weather_place_key(city), {}).values())
+            if not candidates:
+                for suffix in ('会', '有', '要'):
+                    if city.endswith(suffix):
+                        candidates = list(places.get(_weather_place_key(city[:-len(suffix)]), {}).values())
+                        if candidates:
+                            city = city[:-len(suffix)]
+                            break
+            if len(candidates) > 1:
+                precise = [row for row in candidates if city.endswith(row['name'])]
+                if not precise and city.endswith(('市', '县', '区')):
+                    precise = [row for row in candidates if city[:-1].endswith(row['name'])]
+                if precise:
+                    candidates = precise
+            if len(candidates) != 1:
+                note = ('存在同名地点：' + '、'.join(row['label'] for row in candidates[:8]) + '；请补充省市。'
+                        if candidates else '未找到明确的城市或县区，请补充省市及地点名称。')
+                return {**self._unavailable('china_weather', CHINA_WEATHER_CATALOG_URL, queried_at, city=city, note=note),
+                        'ambiguous': bool(candidates), 'candidates': candidates[:8]}
+            code, name, label = (candidates[0][key] for key in ('code', 'name', 'label'))
+        url = CHINA_WEATHER_URL.format(code=code)
         async with self._client() as client:
             async with client.stream('GET', url, timeout=self._timeout) as response:
                 if response.status_code != 200:
                     raise PublicQueryError('中国天气网暂不可用。')
-                daily = _china_forecast(await _read_bounded(response, '天气'), city, queried_at)
+                daily = _china_forecast(await _read_bounded(response, '天气'), name, queried_at)
         if not daily:
             return self._unavailable('china_weather', url, queried_at, city=city, note='中国天气网页日期或预报结构无效。')
         return {'ok': True, 'source': '中国天气网', 'sourceURL': url, 'queried_at': queried_at,
-                'city': city, 'daily': daily, 'count': len(daily), 'timezone': SHANGHAI_TZ,
+                'city': city, 'resolved_city': label, 'daily': daily, 'count': len(daily), 'timezone': SHANGHAI_TZ,
                 'current': None, 'observation_time': None, 'observation_unavailable': True,
                 'observation_note': '该来源仅提供天气预报，不提供当前实测气温。',
                 'capability': {'structured_weather': True, 'provider': 'china-weather'}}

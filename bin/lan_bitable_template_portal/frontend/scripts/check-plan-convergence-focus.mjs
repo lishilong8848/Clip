@@ -175,7 +175,7 @@ assert.deepEqual(focusedDetailIndexes([row()], notice()), [0], "single row -> [0
     row({ spaceModel: "B-124机房", spaceModelName: "B-124机房" }),
     row({ spaceModel: "B-124机房", spaceModelName: "B-124机房" }),
   ];
-  assert.deepEqual(focusedDetailIndexes(dedupAmb, roomNotice), [], "two distinct same-room rows still ambiguous");
+  assert.deepEqual(focusedDetailIndexes(dedupAmb, roomNotice), [0, 1], "all configured rows for the matching resource are located");
 }
 
 // ---- mismatched building: room match rejected ----
@@ -224,7 +224,7 @@ assert.deepEqual(focusedDetailIndexes([row()], notice()), [0], "single row -> [0
   assert.deepEqual(focusedDetailIndexes(rows3, pre3), [1], "longer BAS-1010 kept, BAS-101 excluded");
 }
 
-// ---- no clues / name-only / ambiguous room -> [] ----
+// ---- no clues / name-only -> []; shared resources highlight all relevant rows ----
 {
   assert.deepEqual(
     focusedDetailIndexes([row({}), row({})], notice({ device: "", rooms: [] })),
@@ -240,8 +240,32 @@ assert.deepEqual(focusedDetailIndexes([row()], notice()), [0], "single row -> [0
     "name-only -> []"
   );
   const ambRows = [row({ spaceModel: "B-124机房" }), row({ spaceModel: "B-124机房" }), row({})];
-  assert.deepEqual(focusedDetailIndexes(ambRows, notice({ device: "", rooms: ["B-124"] })), [],
-    "ambiguous multiple room matches -> []");
+  assert.deepEqual(focusedDetailIndexes(ambRows, notice({ device: "", rooms: ["B-124"] })), [0, 1],
+    "multiple rows for one configured resource are not a failed unique match");
+}
+
+// Multiple device hits are all relevant, irrespective of rule or pagination.
+{
+  const rows = [row({ instances: 'BAS-101', spaceModel: 'B-124机房' }),
+    row({ instances: 'BAS-103', spaceModel: 'B-124机房', relateConfig: '另一个规则' }),
+    row({ instances: 'BAS-1010', spaceModel: 'B-124机房' }),
+    row({ instances: 'BAS-101', spaceModel: 'C-124机房' })];
+  assert.deepEqual(focusedDetailIndexes(rows, notice()), [0, 1], 'all device hits, no prefix/wrong-building matches');
+}
+
+// ---- explicit conflicting devices / covering ranges / device type evidence ----
+{
+  const rows = [row({ instances: 'BAS-999', spaceModel: 'B-124机房' }),
+    row({ instances: 'BAS-1010', spaceModel: 'B-124机房' })];
+  assert.deepEqual(focusedDetailIndexes(rows, notice({ device: 'B-124-BAS-101', name: '' })), [], 'same room cannot override another explicit device');
+  const ranges = [row({ instances: 'BAS-101', spaceModel: 'B-124机房' }),
+    row({ instances: '全部', spaceModel: 'B-124机房', instanceIds: '' }),
+    row({ instances: 'BAS-999', spaceModel: 'B-124机房' })];
+  assert.deepEqual(focusedDetailIndexes(ranges, notice({ device: 'B-124-BAS-101', name: '' })), [0, 1], 'specific device and covering all-device range both match');
+  const typed = [row({ classifyModel: '蓄电池', spaceModel: '南通数据中心A', instances: '全部', instanceIds: '' }),
+    row({ classifyModel: '蓄电池', spaceModel: '南通数据中心B', instances: '全部', instanceIds: '' }),
+    row({ classifyModel: '开关柜', spaceModel: '南通数据中心A', instances: '全部', instanceIds: '' })];
+  assert.deepEqual(focusedDetailIndexes(typed, notice({ device: '', name: 'A楼蓄电池检修', building: 'A楼', location: '', rooms: [] })), [0], 'literal device type and declared building locate all-device ranges');
 }
 
 // ---- block title never used ----

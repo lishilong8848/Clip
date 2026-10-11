@@ -255,6 +255,32 @@ class ExtractXlsxTests(unittest.TestCase):
             extract_sections(make_xlsx(rows), "wide.xlsx")
         self.assertIn("超过100列", str(ctx.exception))
 
+    def test_xlsx_blank_formatting_dimensions_do_not_count_as_content_columns(self):
+        from openpyxl.styles import PatternFill
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(['项目', '说明'])
+        sheet.append(['变压器', '先核对报警'])
+        sheet.cell(row=3, column=500).fill = PatternFill('solid', fgColor='FFFF00')
+        sheet.cell(row=3, column=400, value='   ')
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        sections = extract_sections(buffer.getvalue(), '有格式的表.xlsx')
+        self.assertEqual(sections[0]['text'], '项目\t说明\n变压器\t先核对报警')
+        self.assertIn('行2-2', sections[0]['location'])
+
+    def test_xlsx_sparse_columns_keep_values_and_matching_headers(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        for row, column, value in ((1, 2, '设备'), (1, 500, '状态'), (2, 2, '变压器'), (2, 500, '待核对'),
+                                  (3, 2, 0), (3, 500, False)):
+            sheet.cell(row=row, column=column, value=value)
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        sections = extract_sections(buffer.getvalue(), '分散列.xlsx')
+        self.assertEqual(sections[0]['text'], '设备\t状态\n变压器\t待核对\n0\tFalse')
+        self.assertIn('列：设备、状态', sections[0]['location'])
+
     def test_xlsx_row_limit_raises(self):
         rows = [[i, "x"] for i in range(20001)]
         with self.assertRaises(AssistantError) as ctx:

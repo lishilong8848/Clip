@@ -338,7 +338,8 @@ const displayScopeOptions = computed(() => {
 });
 const activeAggregate = computed(() => {
   const allCounts = scopeCounts("ALL");
-  if (allCounts.pending || allCounts.ongoing) return allCounts;
+  const all = props.overview.ALL;
+  if (activeMode.value === "event" ? all?.event_total != null : all?.[`${activeMetricWorkType.value}_pending`] != null) return allCounts;
   return displayScopeOptions.value.reduce(
     (total, scope) => {
       const code = normalizeScopeValue(scope.value, "");
@@ -504,8 +505,10 @@ const homeBroadcastStats = computed(() => {
   const allEventStats = props.overview.ALL || {};
   const hasAllEventStats = Object.prototype.hasOwnProperty.call(allEventStats, "event_total");
   return {
-    ongoing,
-    pending,
+    ongoing: Object.prototype.hasOwnProperty.call(allEventStats, "ongoing_title_count")
+      ? Number(allEventStats.ongoing_title_count || 0) : ongoing,
+    pending: Object.prototype.hasOwnProperty.call(allEventStats, "maintenance_pending")
+      ? broadcastWorkTypes.reduce((total, type) => total + typedScopeCounts("ALL", type.key).pending, 0) : pending,
     events: hasAllEventStats ? Number(allEventStats.event_total || 0) : events,
     processingEvents: hasAllEventStats
       ? Number(allEventStats.event_processing || 0)
@@ -578,6 +581,9 @@ const homeBroadcastSummary = computed(() => {
 });
 
 function aggregateWorkTypeCounts(workType: string): { pending: number; ongoing: number } {
+  if (Object.prototype.hasOwnProperty.call(props.overview.ALL || {}, `${workType}_pending`)) {
+    return typedScopeCounts("ALL", workType);
+  }
   return broadcastScopes.value.reduce(
     (total, scope) => {
       const counts = typedScopeCounts(scope.value, workType);
@@ -784,8 +790,8 @@ function eventScopeCounts(scope: string): { total: number; processing: number } 
   const code = normalizeScopeValue(scope, "ALL");
   const item = props.overview[code] || {};
   return {
-    total: Number(item.event_total || item.event_pending || item.event_count || 0),
-    processing: Number(item.event_processing || item.event_ongoing || item.event_open || 0),
+    total: Number(item.event_total ?? item.event_pending ?? item.event_count ?? 0),
+    processing: Number(item.event_processing ?? item.event_ongoing ?? item.event_open ?? 0),
   };
 }
 
@@ -804,8 +810,8 @@ function scopeCounts(scope: string): { pending: number; ongoing: number } {
   }
   if (activeMetricWorkType.value === "event") {
     return {
-      pending: Number(item.event_total || item.total || 0),
-      ongoing: Number(item.event_processing || item.processing || 0),
+      pending: Number(item.event_total ?? item.total ?? 0),
+      ongoing: Number(item.event_processing ?? item.processing ?? 0),
     };
   }
   if (activeMetricWorkType.value === "handover") {
