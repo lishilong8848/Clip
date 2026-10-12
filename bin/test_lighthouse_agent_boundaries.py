@@ -51,6 +51,10 @@ class Store:
     def put_document(self, namespace, key, value):
         self.docs[namespace, key] = copy.deepcopy(value)
 
+    def list_documents(self, namespace, *, key_prefix=""):
+        return [{"key": key, "payload": copy.deepcopy(value)} for (ns, key), value in self.docs.items()
+                if ns == namespace and key.startswith(key_prefix)]
+
 
 def _png_bytes():
     output = io.BytesIO()

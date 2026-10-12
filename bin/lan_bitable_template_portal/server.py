@@ -5124,6 +5124,9 @@ class PortalRuntime:
         if parsed.path in {"/api/maintenance-actions", "/api/workbench-actions"}:
             try:
                 payload = self._read_json_body()
+                if str(payload.get("action", "")).startswith(("delete", "remove")) and not PortalRuntime.auth_manager.account_profile(
+                        (session.get("user") or {}).get("open_id"))["can_delete_business"]:
+                    raise PortalError("仅超级管理员或本楼栋主管可删除业务记录。")
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -5207,6 +5210,8 @@ class PortalRuntime:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/ongoing-items/delete":
             try:
+                if not PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))["can_delete_business"]:
+                    raise PortalError("仅超级管理员或本楼栋主管可删除业务记录。")
                 payload = self._read_json_body()
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
@@ -10354,13 +10359,20 @@ class PortalRuntime:
             for name in get_field_config(notice_type).values()
             if str(name or "").strip()
         }
-        if not writable_names:
-            return dict(fields)
-        return {
-            str(name): value
-            for name, value in fields.items()
-            if str(name or "").strip() in writable_names
-        }
+        handler = get_notice_handler(notice_type)
+        restored = {}
+        for name, value in fields.items():
+            if writable_names and str(name or "").strip() not in writable_names:
+                continue
+            # batch_get returns text segments; record writes require a string.
+            text_segments = isinstance(value, list) and bool(value) and all(
+                isinstance(item, dict) and isinstance(item.get("text"), str)
+                for item in value
+            )
+            if text_segments or (isinstance(value, dict) and isinstance(value.get("text"), str)):
+                value = handler._normalize_response_text(value)
+            restored[str(name)] = value
+        return restored
 
     @classmethod
     def _create_backend_undo_checkpoint(
@@ -10400,6 +10412,8 @@ class PortalRuntime:
         if float(undo.get("expires_at") or 0) <= time.time():
             cls.state_store.mark_notice_undo_action(undo_id, "expired", error="回退记录已过期")
             raise PortalError("该回退记录已过期。")
+        undo, paired_undo = cls.service.paired_notice_undo(undo)
+        undo_id = str(undo.get("undo_id") or undo_id)
         notice_type = str(undo.get("notice_type") or "").strip()
         action_type = str(undo.get("action_type") or "").strip().lower()
         target_record_id = str(
@@ -10416,6 +10430,12 @@ class PortalRuntime:
             notice_type,
             remote.get("fields") if isinstance(remote.get("fields"), dict) else {},
         )
+        paired_target_id = str((paired_undo or {}).get("target_record_id") or "")
+        paired_remote = (paired_undo or {}).get("remote") or {}
+        paired_fields = cls._undo_restore_fields(NOTICE_TYPE_MAINTENANCE, paired_remote.get("fields") or {})
+        if paired_undo and (not target_record_id or not paired_target_id or (action_type != "start" and
+                (not paired_fields or paired_remote.get("missing") or not remote_fields or remote.get("missing")))):
+            raise PortalError("双表回退缺少完整目标快照，未执行回退。")
         restored_record_id = target_record_id
         remote_message = ""
         related_remote_result: dict[str, Any] = {
@@ -10532,6 +10552,22 @@ class PortalRuntime:
         else:
             remote_message = "远端记录不可恢复，仅恢复本地状态。"
 
+        if paired_undo:
+            if not guard["mock_external"]:
+                if not guard["real_write_allowed"]:
+                    raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
+                if action_type == "start":
+                    ok, result = query_record_by_id(paired_target_id, NOTICE_TYPE_MAINTENANCE)
+                    if ok:
+                        ok, result = delete_bitable_record(paired_target_id, NOTICE_TYPE_MAINTENANCE)
+                    elif cls._remote_record_not_found(result):
+                        ok = True
+                else:
+                    ok, result = update_bitable_record_fields(paired_target_id, NOTICE_TYPE_MAINTENANCE, paired_fields)
+                if not ok:
+                    raise PortalError(f"维保目标表回退失败：{result}；双表回退未完成，可重试原回退。")
+            remote_message = "变更与维保目标表已恢复" if action_type != "start" else "变更与维保开始记录已删除"
+
         if is_repair_end or has_source_end_snapshot:
             if guard["mock_external"]:
                 related_remote_result = {
@@ -10569,6 +10605,10 @@ class PortalRuntime:
                 source_record_id=str(undo.get("source_record_id") or ""),
                 target_record_id=target_record_id,
             )
+            if paired_undo:
+                cls.state_store.mark_notice_identity_deleted(
+                    work_type=WORK_TYPE_MAINTENANCE, active_item_id=str(paired_undo.get("active_item_id") or ""),
+                    source_record_id=str(paired_undo.get("source_record_id") or ""), target_record_id=paired_target_id)
         local_result = cls.service.restore_notice_undo_local(
             undo,
             target_record_id=restored_record_id,
@@ -10601,17 +10641,21 @@ class PortalRuntime:
                     )
             except Exception as exc:
                 log_warning(f"变更回退后恢复截图确认任务失败: {exc}")
-        cls.state_store.mark_notice_undo_action(
+        completion = {
+            "restored_target_record_id": restored_record_id,
+            "remote_message": remote_message,
+            "applied_by": requested_by,
+            "applied_job_id": job_id,
+            "related_remote": related_remote_result,
+        }
+        related_actions = {paired_undo["undo_id"]: {**completion, "restored_target_record_id": paired_target_id}} if paired_undo else {}
+        if not cls.state_store.mark_notice_undo_action(
             undo_id,
             "undone",
-            payload_patch={
-                "restored_target_record_id": restored_record_id,
-                "remote_message": remote_message,
-                "applied_by": requested_by,
-                "applied_job_id": job_id,
-                "related_remote": related_remote_result,
-            },
-        )
+            payload_patch=completion,
+            **({"related_actions": related_actions} if related_actions else {}),
+        ):
+            raise PortalError("通告已恢复，但回退状态保存未完成，请继续原回退。")
         if notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
             undo_action = {"start": "delete", "update": "update", "end": "undo_end", "delete": "undo_delete"}.get(action_type)
             if undo_action:

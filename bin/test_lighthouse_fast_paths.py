@@ -46,6 +46,26 @@ class FastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('暂未取得', result['answer'])
         self.assertEqual(self.reads, [])
 
+    async def test_location_free_weather_uses_site_without_model_or_business(self):
+        source = Mock(weather=AsyncMock(return_value={'ok': False, 'note': '隔离天气源暂不可用'}))
+        engine = LighthouseModel(self.portal, model_factory=no_model, public_sources=source)
+        for question, history, city in (
+            ('今天天气怎么样', [], '南通'),
+            ('明天呢', [{'question': '今天天气怎么样', 'status': 'completed'}], '南通'),
+            ('石家庄今天天气怎么样', [], '石家庄'),
+            ('今天天气怎么样', [{'question': '上海明天天气怎么样', 'status': 'completed'}], '上海'),
+        ):
+            with self.subTest(question=question, city=city):
+                source.weather.reset_mock()
+                result = await engine.answer(self.actor, {'question': question, '_profile': self.model.profile()},
+                    history, self.request, AsyncMock(), self.authorize, {})
+                self.assertEqual(source.weather.call_args.args[0], city)
+                self.assertIn(city, result['answer'])
+                public._ensure_public_city(city, question, history[-1]['question'] if history else '')
+        self.assertEqual(self.reads, [])
+        with self.assertRaises(ValueError):
+            public._ensure_public_city('南通', '石家庄今天天气怎么样')
+
     async def test_pasted_start_prepares_native_form_only_with_scope_protection(self):
         writes = []
         @self.app.post('/api/workbench-actions')

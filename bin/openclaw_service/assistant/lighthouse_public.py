@@ -111,6 +111,8 @@ MAX_NETWORK_SECONDS = 20
 NANTONG_LAT = 32.0167
 NANTONG_LON = 120.8667
 NANTONG_RADIUS_KM = 30.0
+# The deployed portal serves the Nantong site; never infer a city from a proxy IP.
+SITE_WEATHER_CITY = '南通'
 
 def weather_followup(question):
     """Only location-free followups may inherit a previously requested city."""
@@ -154,6 +156,8 @@ def weather_request(question, previous_question='', *, selected=False):
     cities = _weather_cities(question, selected=selected)
     if not cities and previous_question and weather_followup(question):
         cities = _weather_cities(previous_question)
+    if not cities and weather_followup(question) and (WEATHER_INTENT.search(question) or WEATHER_INTENT.search(previous_question)):
+        cities = [SITE_WEATHER_CITY]
     if len(cities) != 1:
         return None
     full_date = r'(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})日?(?!\d)'
@@ -423,6 +427,9 @@ def _ensure_public_city(city: str, question: str, previous_question: str = "") -
     if not _compact(question):
         raise PublicQueryError("缺少用户问题文本。")
     if not _city_in_question(city, question):
+        if weather_followup(question) and WEATHER_INTENT.search(question) and not _weather_cities(previous_question) \
+                and _canonical_city(city) == SITE_WEATHER_CITY:
+            return
         # Only a server-supplied immediately preceding public weather question
         # can supply the city. Never forward history or business results.
         if previous_question and WEATHER_INTENT.search(previous_question) and weather_followup(question) \

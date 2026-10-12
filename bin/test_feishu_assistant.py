@@ -66,12 +66,15 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(result['content']['file_key'], 'file_v3_abc-def')
         self.assertNotIn('text', result['content'])
 
-    def test_conversation_separates_people_rooms_and_web(self):
+    def test_conversation_separates_people_but_reuses_rooms_and_web(self):
         keys = [LighthouseAssistant._key(actor) for actor in [
             {"id": "a"}, {"id": "b"}, {"id": "a", "channel": "feishu:oc_1"},
             {"id": "a", "channel": "feishu:oc_2"}, {"id": "b", "channel": "feishu:oc_1"}]]
-        self.assertEqual(len(set(keys)), 5)
+        self.assertEqual(len(set(keys)), 2)
         self.assertEqual(keys[0], "conversation:a")
+        self.assertEqual(keys[0], keys[2])
+        self.assertEqual(keys[2], keys[3])
+        self.assertEqual(keys[1], keys[4])
 
 
 class InboxTests(unittest.TestCase):
@@ -143,6 +146,33 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         await self.channel._drain(message["union_id"])
         self.assertEqual(self.channel.answer.await_count, 1)
         self.assertEqual(self.channel.inbox.owners(), [])
+
+    async def test_history_sync_retry_uses_saved_reply_without_reexecuting_business(self):
+        message = parse_message(event(content='确认执行', message_id='history'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        reply = {'text': '操作已完成', 'sync_history': True, 'actor_id': 'ou_A', 'conversation_id': 'same'}
+        self.channel.answer = AsyncMock(return_value=reply)
+        self.channel._request_context = AsyncMock(return_value=(None, {'id': 'ou_A', 'channel': 'feishu:oc_Chat'}))
+        self.channel._call = AsyncMock(side_effect=[TimeoutError(), {'recorded': True}])
+        self.channel.messenger = SimpleNamespace(send=AsyncMock(), react=AsyncMock())
+        await self.channel._drain(message['union_id'])
+        self.channel.messenger.send.assert_not_awaited()
+        self.channel.inbox.set(message['message_id'], 'reply', delay=0)
+        await self.channel._drain(message['union_id'])
+        self.channel.answer.assert_awaited_once()
+        self.channel.messenger.send.assert_awaited_once()
+        calls = self.channel._call.await_args_list
+        self.assertEqual(calls[0].args[2], 'channel-replies')
+        self.assertEqual(calls[0].args[3], calls[1].args[3])
+
+    async def test_history_sync_after_clear_does_not_restore_previous_conversation(self):
+        message = parse_message(event(message_id='historycleared'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        reply = {'text': '旧回复', 'sync_history': True, 'actor_id': 'ou_A', 'conversation_id': 'old'}
+        self.channel._request_context = AsyncMock(return_value=(None, {'id': 'ou_A'}))
+        self.channel._call = AsyncMock(side_effect=AssistantError('会话已变化', 409))
+        await self.channel._sync_reply_history(message, reply)
+        self.assertNotIn('sync_history', reply)
 
     async def test_stopped_attachment_reply_retains_distinct_notice_until_delivery(self):
         message = parse_message(event(message_id='filestopped'), 'cliTest', 'ouBot')
@@ -253,6 +283,22 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reply.args[0].endswith('/' + message['message_id'] + '/reply'))
         self.assertNotIn('receive_id', reply.kwargs['json'])
         self.assertIn('内部业务资料', reply.kwargs['json']['content'])
+
+    async def test_editable_reply_uses_real_callback_message_and_falls_back_only_on_rejection(self):
+        messenger = FeishuMessenger({})
+        client = SimpleNamespace(post=AsyncMock(side_effect=[
+            SimpleNamespace(json=lambda: {'code': 230001}), SimpleNamespace(json=lambda: {'code': 0})]))
+        messenger.client = AsyncMock(return_value=client)
+        messenger.headers = AsyncMock(return_value={})
+        message = parse_message(event(chat_type='group'), 'cliTest', 'ouBot')
+        message.update(message_id='crd_synthetic', reply_to_message_id='om_actualcard')
+        reply = {'text': '填写仍保留', 'card': {'schema': '2.0', 'body': {'elements': []}}}
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            await messenger.send(message, reply)
+        self.assertEqual(client.post.await_count, 2)
+        self.assertTrue(all(call.args[0].endswith('/om_actualcard/reply') for call in client.post.await_args_list))
+        self.assertNotIn('card', reply)
+        self.assertIn('原填写仍保留', json.loads(client.post.await_args.kwargs['json']['content'])['body']['elements'][0]['content'])
 
     async def test_parallel_group_answers_keep_original_message_and_retry_uuid(self):
         messenger = FeishuMessenger({})

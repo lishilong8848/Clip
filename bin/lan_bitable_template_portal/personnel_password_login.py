@@ -27,7 +27,10 @@ DIRECTORY_KEY = TABLE_ID
 PRINCIPAL_PREFIX = "personnel_"  # Learning lookup only; never a login OpenID.
 ROUNDS = 600_000
 IDENTITY_PATTERN = re.compile(r"(?:[0-9]{15}|[0-9]{17}[0-9Xx])")
-FIELDS = ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD, "岗位"]
+# Legacy six-char plaintext initial (last-six of the national ID, trailing X/x
+# case-insensitive); "123" and PBKDF2 hashes never match this shape.
+INITIAL_PASSWORD_PATTERN = re.compile(r"[0-9]{5}[0-9Xx]")
+FIELDS = ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD, "体系岗位"]
 KDF_SLOTS = threading.BoundedSemaphore(2)
 
 
@@ -73,6 +76,7 @@ class PersonnelPasswordLogin:
         self.limit_lock = threading.Lock()
         self.attempts = {}
         self.snapshot = store.get_document(DIRECTORY_NS, DIRECTORY_KEY) or {}
+        self.auth._account_directory_provider = lambda: self.snapshot
 
     def limited(self, key, limit):
         now = time.monotonic()
@@ -100,7 +104,8 @@ class PersonnelPasswordLogin:
         inactive = service._signature_person_inactive(fields.get("离职/异动情况"))
         reason = "该人员已离职或异动" if inactive else "人员姓名未填写" if not name else ""
         stored = service._mop_field_text(fields, [PASSWORD_FIELD])
-        initial = not stored
+        legacy_initial = bool(stored) and bool(INITIAL_PASSWORD_PATTERN.fullmatch(stored))
+        initial = not stored or legacy_initial
         user = service._signature_user_info(fields.get("员工姓名"))
         open_id = user.get("open_id", "") or service._mop_field_text(fields, ["飞书 open_id"])
         if not reason and not re.fullmatch(r"ou_[A-Za-z0-9]+", open_id):
@@ -110,14 +115,14 @@ class PersonnelPasswordLogin:
                 "inactive": inactive, "selectable": not reason, "disabled_reason": reason,
                 "needs_setup": initial,
                 "account_nature": service._mop_field_text(fields, ["账号性质"]),
-                "position": service._mop_field_text(fields, ["岗位"]), "assignments": assignments,
+                "position": service._mop_field_text(fields, ["体系岗位", "岗位"]), "assignments": assignments,
                 "specialties": [item for item in assignments if item in PERMISSION_DIRECTORY_SPECIALTY_LABELS],
                 "login_ids": [open_id] if re.fullmatch(r"ou_[A-Za-z0-9]+", open_id) else [],
                 "password_revision": "" if initial or not stored else hashlib.sha256(stored.encode("utf-8")).hexdigest()}
 
     def directory(self, force=False):
         with self.directory_lock:
-            if force or self.snapshot.get("schema") != 2 or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
+            if force or self.snapshot.get("schema") != 3 or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
                 service = self.service()
                 records, token, seen = {}, "", set()
                 for _ in range(20):
@@ -156,11 +161,12 @@ class PersonnelPasswordLogin:
                             removed[oid] = "人员已从目录移除，请管理员核对"
                 for oid in current_ids:
                     removed.pop(oid, None)
-                snapshot = {"people": records, "loaded_at": time.time(), "schema": 2,
+                snapshot = {"people": records, "loaded_at": time.time(), "schema": 3,
                             "removed_identities": removed}
                 self.store.put_document(DIRECTORY_NS, DIRECTORY_KEY, snapshot)
                 self.snapshot = snapshot
                 self.auth.sync_directory_permissions(records.values())
+                self.auth._account_directory_refresh_failed = False
             return self.snapshot
 
     def people(self):
@@ -278,7 +284,19 @@ class PersonnelPasswordLogin:
             stored = self.service()._mop_field_text(row["fields"], [PASSWORD_FIELD])
             if person["needs_setup"]:
                 identity = self.identity_number(row)
-                if not hmac.compare_digest(password.upper().encode(), identity[-6:].encode()):
+                suffix = identity[-6:].upper()
+                if stored:
+                    if not INITIAL_PASSWORD_PATTERN.fullmatch(stored):
+                        raise PasswordLoginError("姓名或密码不正确。", 401)
+                    expected = stored.upper()
+                    # Stored initial must equal the current identity suffix or the
+                    # HR record is stale; never authenticate such a mismatch.
+                    if not hmac.compare_digest(expected.encode(), suffix.encode()):
+                        raise PasswordLoginError("检测到人员记录中初始密码与身份证号不一致，请通过忘记密码重置或联系管理员核对记录。", 409)
+                else:
+                    expected = suffix
+                # Initial branch only: trim copied whitespace; X is case-insensitive.
+                if not hmac.compare_digest(password.strip().upper().encode(), expected.encode()):
                     raise PasswordLoginError("姓名或密码不正确。", 401)
                 new_password = payload.get("new_password")
                 if new_password is None:
@@ -395,17 +413,19 @@ def install_personnel_password_login(app, controller, runtime):
         return JSONResponse({"ok": error is None, **({"error": error} if error else {"data": data})}, status_code=status, headers=headers)
 
     async def refresh_directory():
+        await asyncio.sleep(1)
         while True:
-            await asyncio.sleep(300)
-            if service is not None:
+            if runtime.auth_manager.configured():
                 try:
-                    await asyncio.to_thread(service.people)
+                    await asyncio.to_thread(lambda: get_service().people())
                 except Exception as exc:
+                    runtime.auth_manager._account_directory_refresh_failed = True
                     logging.warning("Personnel login directory refresh deferred: %s", type(exc).__name__)
+            await asyncio.sleep(300)
 
     async def startup():
         nonlocal refresher
-        # No startup cloud read: refresh begins only after this login method is used.
+        # Warm trusted HR once in the background; it never blocks portal startup.
         refresher = asyncio.create_task(refresh_directory())
 
     async def shutdown():

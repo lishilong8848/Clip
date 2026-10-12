@@ -80,7 +80,7 @@ class LighthouseStream:
     def _patch_turn(self, actor, run, changes, *, finish=False):
         with self.assistant._lock:
             state = self.assistant._state(actor)
-            if state["id"] != run["conversation_id"]:
+            if run["conversation_id"] not in [state["id"], *state.get('legacy_conversation_ids', [])]:
                 return False
             turn = next((item for item in state["turns"] if item["operation_id"] == run["operation_id"]), None)
             if not turn or turn.get("run_id") != run["id"] or turn.get("status") != "pending":
@@ -135,8 +135,11 @@ class LighthouseStream:
             previous = next((item for item in reversed(state['turns']) if item is not old and item.get('question')), None)
             awaiting_clarification = bool(previous and previous.get('status') == 'completed' and previous.get('clarification')
                 and self.assistant._allowed(previous, actor))
+            clarification_id = payload.get('clarification_operation_id')
+            if clarification_id and (not awaiting_clarification or clarification_id != previous.get('operation_id')):
+                raise AssistantError('原询问已变化，请在最新消息中补充。', 409)
             clarification_reply = bool(awaiting_clarification and not files and not selections
-                and (DATE_TOKEN.fullmatch(clean_question.rstrip('呢？?。！! ')) or selection_reply(clean_question)
+                and (clarification_id or DATE_TOKEN.fullmatch(clean_question.rstrip('呢？?。！! ')) or selection_reply(clean_question)
                      or clean_question in previous['clarification'].get('options', [])
                      or named_clarification_reply(clean_question, previous)))
             refining = clarification_reply or query_refinement(clean_question) and not awaiting_clarification
@@ -201,6 +204,7 @@ class LighthouseStream:
                         commands=selected_commands, submitted_commands=copy.deepcopy(selections), _command_context=command_context,
                         attachments=attachments, preview_file=preview_file, output_files=[], downloads=[], status="pending", answer="", error="", error_code="", process=[], sources=[], scopes=scopes,
                         access_scopes=actor["scopes"],
+                        source_channel='feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
                         run_id=run_id, attempt_id=attempt, model_name=profile["name"], plan=None, clarification=None,
                         _clarification_reply=clarification_reply or bool(old and old['question'] == clean_question and old.get('_clarification_reply')))
             if not old:
@@ -376,7 +380,8 @@ class LighthouseStream:
             raise AssistantError("回答任务不存在或无权访问。", 404)
         if not cancelling and set(run.get("access_scopes", run["scopes"])) - set(actor["scopes"]):
             raise AssistantError("当前账号无权查看此回答。", 403)
-        if run["conversation_id"] != self._read(actor)["id"]:
+        state = self._read(actor)
+        if run["conversation_id"] not in [state['id'], *state.get('legacy_conversation_ids', [])]:
             raise AssistantError("原会话已清空。", 404)
         return run
 
@@ -445,7 +450,10 @@ class LighthouseStream:
         state = await asyncio.to_thread(self._read, actor)
         if not isinstance(before, (int, float)) or before <= 0:
             raise AssistantError("历史分页位置无效。")
-        documents = await asyncio.to_thread(self.store.list_documents, MESSAGES, key_prefix=state["id"] + ":")
+        documents = []
+        for conversation_id in [*state.get('legacy_conversation_ids', []), state['id']]:
+            documents.extend(await asyncio.to_thread(self.store.list_documents, MESSAGES, key_prefix=conversation_id + ':'))
+        documents = list({doc['payload']['operation_id']: doc for doc in documents}.values())
         turns = [doc["payload"] for doc in documents if doc["payload"].get("at", 0) < before and self.assistant._allowed(doc["payload"], actor)]
         turns.sort(key=lambda item: item.get("at", 0))
         return {"turns": [public_turn(t) for t in turns[-30:]], "has_more": len(turns) > 30}

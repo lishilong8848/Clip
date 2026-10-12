@@ -10018,6 +10018,7 @@ class LanPortalStateStore:
         status: str = "available",
         scope: str = "",
         action_type: str = "",
+        job_id: str = "",
         created_after: float = 0,
         include_expired: bool = False,
         limit: int = 200,
@@ -10037,6 +10038,9 @@ class LanPortalStateStore:
         if action_type:
             clauses.append("action_type = ?")
             params.append(action_type)
+        if job_id:
+            clauses.append("json_extract(payload_json, '$.job_id') = ?")
+            params.append(self._text(job_id))
         if created_after:
             clauses.append("created_at >= ?")
             params.append(created_after)
@@ -10067,6 +10071,7 @@ class LanPortalStateStore:
         *,
         error: str = "",
         payload_patch: dict[str, Any] | None = None,
+        related_actions: dict[str, dict[str, Any]] | None = None,
     ) -> bool:
         undo_id = self._text(undo_id)
         status = self._text(status)
@@ -10076,35 +10081,30 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
-                row = conn.execute(
-                    "SELECT payload_json FROM notice_undo_actions WHERE undo_id = ?",
-                    (undo_id,),
-                ).fetchone()
-                if not row:
-                    return False
-                payload = self._loads(str(row["payload_json"] or ""), {})
-                payload = payload if isinstance(payload, dict) else {}
-                if isinstance(payload_patch, dict):
-                    payload.update(payload_patch)
-                payload["status"] = status
-                payload["updated_at"] = now
-                payload["error"] = self._text(error)
-                applied_at = now if status == "undone" else None
-                conn.execute(
+                patches = {**(related_actions or {}), undo_id: payload_patch}
+                updates = []
+                for current_id, current_patch in patches.items():
+                    row = conn.execute(
+                        "SELECT payload_json FROM notice_undo_actions WHERE undo_id = ?",
+                        (current_id,),
+                    ).fetchone()
+                    if not row:
+                        return False
+                    payload = self._loads(str(row["payload_json"] or ""), {})
+                    payload = payload if isinstance(payload, dict) else {}
+                    if isinstance(current_patch, dict):
+                        payload.update(current_patch)
+                    payload.update(status=status, updated_at=now, error=self._text(error))
+                    updates.append((status, self._text(error), self._json(payload), now,
+                                    now if status == "undone" else None, current_id))
+                conn.executemany(
                     """
                     UPDATE notice_undo_actions
                     SET status = ?, error = ?, payload_json = ?, updated_at = ?,
                         applied_at = COALESCE(?, applied_at)
                     WHERE undo_id = ?
                     """,
-                    (
-                        status,
-                        self._text(error),
-                        self._json(payload),
-                        now,
-                        applied_at,
-                        undo_id,
-                    ),
+                    updates,
                 )
                 conn.commit()
         return True

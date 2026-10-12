@@ -641,7 +641,7 @@ try {
     assert.equal(await page.locator('#personnel-new-password').count(), 0, '有效飞书管理员不得出现初始密码修改表单');
     assert.equal(peoplePosts.length, 0, '有效飞书管理员不得请求 /api/auth/password/people');
     assert.equal(loginPosts.length, loginPostsAdminBase, '有效飞书管理员不得请求 /api/auth/password/login');
-    assert.equal(await page.getByRole('button', { name: '打开管理员诊断和权限管理' }).count(), 1, '管理员应显示管理员入口');
+    assert.equal(await page.getByRole('button', { name: '打开账号与权限设置' }).count(), 1, '管理员应显示管理员入口');
     assert.match(String(await page.locator('.security-watermark').textContent()), /李四/, '应显示飞书管理员用户身份水印');
     assert.equal(page.url(), origin + '/', '有效飞书管理员不应被强制重定向');
     await page.screenshot({ path: path.join(output, '12-feishu-admin-authenticated.png'), fullPage: true, animations: 'disabled' });

@@ -537,7 +537,8 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
     app_status_notices = src_dir / "components" / "AppStatusNotices.vue"
     auth_panels = src_dir / "components" / "AuthPanels.vue"
     admin_tools = src_dir / "components" / "AdminTools.vue"
-    admin_permission_users = src_dir / "components" / "AdminPermissionUsers.vue"
+    admin_accounts = src_dir / "components" / "AdminAccounts.vue"
+    admin_chrome = src_dir / "components" / "AdminWorkspaceChrome.vue"
     scope_home = src_dir / "components" / "ScopeHome.vue"
     home_dashboard = src_dir / "components" / "HomeDashboard.vue"
     scope_home_utils = src_dir / "scopeHomeUtils.ts"
@@ -552,7 +553,8 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         ("AppTopbar.vue", app_topbar),
         ("AppStatusNotices.vue", app_status_notices),
         ("AdminTools.vue", admin_tools),
-        ("AdminPermissionUsers.vue", admin_permission_users),
+        ("AdminAccounts.vue", admin_accounts),
+        ("AdminWorkspaceChrome.vue", admin_chrome),
         ("AuthPanels.vue", auth_panels),
         ("ScopeHome.vue", scope_home),
         ("HomeDashboard.vue", home_dashboard),
@@ -606,18 +608,38 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
 
     admin_text = files["AdminTools.vue"]
     for marker in (
-        "VNET admin skin",
+        "管理员设置", "admin-settings-layout", "admin-settings-content", "返回首页", "#d8e5f0",
     ):
         if marker not in admin_text:
-            errors.append(f"AdminTools.vue 管理员页缺少蓝白权限卡片样式: {marker}")
-    admin_permission_users_text = files["AdminPermissionUsers.vue"]
+            errors.append(f"AdminTools.vue 管理员整页缺少布局或蓝白样式: {marker}")
+    shell_rules = re.findall(r"\.admin-shell\s*\{([^}]+)\}", admin_text)
+    if any(re.search(r"position\s*:\s*(?:fixed|absolute)", rule) for rule in shell_rules):
+        errors.append("AdminTools.vue 管理员设置不能恢复为浮层")
+    # /admin/settings must stay gated by canManageAccounts so L2/L3 accounts don't get full admin.
+    if 'v-else-if="isAdminSettingsPage && canManageAccounts"' not in app_text or "/admin/settings" not in app_text:
+        errors.append("App.vue 缺少 isAdminSettingsPage && canManageAccounts 门禁的管理员设置入口")
+    if "const canManageAccounts = computed(() => isAdmin.value || auth.user?.can_manage_accounts === true);" not in app_text:
+        errors.append("App.vue 未按 isAdmin 或 server can_manage_accounts===true 派生 canManageAccounts")
+    if ':system-admin="isAdmin"' not in app_text:
+        errors.append("App.vue 未将 isAdmin 传入 AdminTools 的 system-admin 绑定")
+    if '<section v-else-if="isAdminSettingsPage" class="settings-denied">' not in app_text:
+        errors.append("App.vue 缺少普通账号无人员管理权限的拒绝页")
+    if "<AdminAccounts v-if=\"!systemAdmin\"" not in admin_text:
+        errors.append("AdminTools.vue 未将非系统管理员渲染到 AdminAccounts 分支")
+    if not re.search(r"<AdminWorkspaceChrome\s+v-if=\"systemAdmin\"", admin_text):
+        errors.append("AdminTools.vue 缺少 AdminWorkspaceChrome 的 systemAdmin 门禁")
+    if "if (props.systemAdmin === false) { tab.value = 'permissions'; return; }" not in admin_text:
+        errors.append("AdminTools.vue 缺少非系统管理员提前返回，避免发起全局配置请求")
+    chrome = files["AdminWorkspaceChrome.vue"]
+    for marker in ('其他设置', 'v-if="otherOpen"', 'aria-expanded', '账号与权限'):
+        if marker not in chrome:
+            errors.append(f"管理员设置导航缺少 {marker}")
+    admin_accounts_text = files["AdminAccounts.vue"]
     for marker in (
-        ".permission-row:hover",
-        ".scope-checks label:has(input:checked)",
-        "grid-template-columns: minmax(140px, 0.75fr) minmax(200px, 1fr)",
+        "category-tabs", "category_options", "岗位分类筛选", "canEdit", "type=\"password\"", ".table-wrap", "#2563eb",
     ):
-        if marker not in admin_permission_users_text:
-            errors.append(f"AdminPermissionUsers.vue 管理员权限用户列表缺少蓝白权限卡片样式: {marker}")
+        if marker not in admin_accounts_text:
+            errors.append(f"AdminAccounts.vue 账号列表缺少分类、保护或样式: {marker}")
 
     auth_text = files["AuthPanels.vue"]
     for marker in (

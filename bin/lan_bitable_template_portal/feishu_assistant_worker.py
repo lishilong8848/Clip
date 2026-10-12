@@ -27,7 +27,9 @@ def main():
     with lock:
         import httpx
         # The local callback never leaves loopback. TLS loading is not needed here.
-        local = httpx.Client(trust_env=False, verify=False, timeout=5)
+        # Card callbacks must be answered within 3 seconds, so the local durable
+        # ingest is given a hard 2s budget.
+        local = httpx.Client(trust_env=False, verify=False, timeout=2)
         cloud = httpx.Client(timeout=15)
         response = cloud.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
             json={"app_id": config["app_id"], "app_secret": secret}).json()
@@ -47,7 +49,31 @@ def main():
             result = local.post(args.callback, headers=headers, content=lark.JSON.marshal(data).encode("utf-8"))
             result.raise_for_status()
 
-        handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(received).build()
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            CallBackToast, P2CardActionTriggerResponse,
+        )
+
+        def card_action_triggered(data):
+            # Acknowledge durable receipt only; business execution runs asynchronously.
+            response = P2CardActionTriggerResponse()
+            toast = CallBackToast()
+            try:
+                received(data)
+            except Exception as exc:  # pragma: no cover - durable inbox re-accepts via dedup
+                print("[ClipFlow][FeishuAssistant] 卡片回调入库暂不可用: " + type(exc).__name__, flush=True)
+                toast.type = "error"
+                toast.content = "暂未接收，请稍后重试"
+                response.toast = toast
+                return response
+            toast.type = "info"
+            toast.content = "已收到，正在处理"
+            response.toast = toast
+            return response
+
+        handler = (lark.EventDispatcherHandler.builder("", "")
+            .register_p2_im_message_receive_v1(received)
+            .register_p2_card_action_trigger(card_action_triggered)
+            .build())
         class SafeLogs(logging.Filter):
             def filter(self, record):
                 text = record.getMessage().replace(secret, "[redacted]").replace(bridge, "[redacted]")
@@ -57,7 +83,7 @@ def main():
                 return True
         from lark_oapi.core.log import logger
         logger.addFilter(SafeLogs())
-        print("[ClipFlow][FeishuAssistant] 开始连接飞书智能体；请订阅 im.message.receive_v1，群聊需 @机器人", flush=True)
+        print("[ClipFlow][FeishuAssistant] 开始连接飞书智能体；请订阅 im.message.receive_v1 与 card.action.trigger，群聊需 @机器人", flush=True)
         try:
             lark.ws.Client(config["app_id"], secret, event_handler=handler, log_level=lark.LogLevel.INFO).start()
         finally:

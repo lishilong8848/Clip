@@ -36,6 +36,7 @@ from lan_bitable_template_portal.portal_service import MaintenancePortalService,
 from clipflow_backend.main import FastAPIPortalController
 from fastapi.testclient import TestClient
 from lan_bitable_template_portal.workbench_lite import (
+    _WORK_ORDER_DOM_HELPERS,
     render_polling_work_order_page,
     render_polling_work_order_steps_page,
     render_workbench_lite,
@@ -1522,6 +1523,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             "let current=null,timer=0,message='';const document={},nodes=new Map();",
             "const q=id=>{if(!nodes.has(id))nodes.set(id,{replaceChildren(){}});return nodes.get(id)};",
             "const workOrderCard=()=>{},status=text=>message=text;",
+            _WORK_ORDER_DOM_HELPERS,
             render,
             "render({state:'upload_pending'});assert.match(message,/全部工单已完成/);assert.equal(q('retry').hidden,false);",
             "render({state:'upload_pending',last_error:'fixture timeout'});assert.match(message,/待重试：fixture timeout/);",

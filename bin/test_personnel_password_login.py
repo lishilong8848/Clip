@@ -272,6 +272,11 @@ class PersonnelLoginHarness:
             self.auth._state_store,
             self.auth,
         )
+        # Real trusted-roster snapshot: account_profile derives home/job from the
+        # same directory PersonnelPasswordLogin builds, never from an invented
+        # role flag. This is required because the modernized production code
+        # derives roles/scopes from HR home (机楼/专业) and job (体系岗位).
+        self.auth._account_directory_provider = lambda: self.login.snapshot
 
     def close(self):
         # Stop the auth manager (and its SQLite write worker) fully; errors
@@ -332,7 +337,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         # The directory search must never request the national-ID field.
         self.assertEqual(
             self.harness.service._last_search_field_names,
-            ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD, "岗位"],
+            ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD, "体系岗位"],
         )
         self.assertNotIn(ppl.IDENTITY_FIELD, self.harness.service._last_search_field_names)
         self.assertEqual(len(first["items"]), 2)
@@ -410,6 +415,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
             {"record_id": "recLegacy", "fields": {"姓名": "旧默认", "机楼/专业": "C楼", PASSWORD_FIELD: "123",
                                                  "员工姓名": _user("旧默认", "ou_fixture2")}},
             {"record_id": "recSix", "fields": {"姓名": "六位", "机楼/专业": "C楼", PASSWORD_FIELD: "123456",
+                                              "身份证号": IDENTITY_NUMBER,
                                               "员工姓名": _user("六位", "ou_fixture3")}},
         ]
         self.harness.service._pages = [_page(rows)]
@@ -421,11 +427,14 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         # Blank is an unprovisioned setup account: needs_setup and selectable.
         self.assertTrue(listed["recNoPwd"]["needs_setup"])
         self.assertTrue(listed["recNoPwd"]["selectable"])
-        # Non-empty legacy plaintext values are selectable but never a valid
-        # credential (verify_password requires the pbkdf2 hash format).
+        # Stored plaintext "123" is NOT the six-character initial shape:
+        # not needs_setup, but never a valid credential (verify_password only
+        # accepts pbkdf2 hashes).
         self.assertFalse(listed["recLegacy"]["needs_setup"])
         self.assertTrue(listed["recLegacy"]["selectable"])
-        self.assertFalse(listed["recSix"]["needs_setup"])
+        # Stored plaintext with the six-character initial shape (even a bogus
+        # "123456") is advertised as needs_setup but still selectable.
+        self.assertTrue(listed["recSix"]["needs_setup"])
         self.assertTrue(listed["recSix"]["selectable"])
 
         # Blank account: the synthetic-ID last-six bootstrap unlocks setup.
@@ -447,17 +456,242 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
             )
         self.assertEqual(caught.exception.status, 401)
 
-        # Legacy plaintext stored passwords ("123" and "123456") are never
-        # accepted even when typed verbatim.
-        for rid, stored, oid in (("recLegacy", "123", "ou_fixture2"), ("recSix", "123456", "ou_fixture3")):
-            self._open(rid, {"姓名": "旧账号", "机楼/专业": "C楼", PASSWORD_FIELD: stored,
-                             "员工姓名": _user("旧账号", oid)})
-            self.harness.service._pages = [_page([_rec(rid)])]
+        # Legacy plaintext "123" (not the initial shape) is never accepted even
+        # when typed verbatim: it falls to verify_password which rejects it.
+        self._open("recLegacy", {"姓名": "旧账号", "机楼/专业": "C楼", PASSWORD_FIELD: "123",
+                                 "员工姓名": _user("旧账号", "ou_fixture2")})
+        self.harness.service._pages = [_page([_rec("recLegacy")])]
+        with self.assertRaises(PasswordLoginError) as caught:
+            self.harness.login.login(
+                {"person_id": "recLegacy", "password": "123"}, "127.0.0.1"
+            )
+        self.assertEqual(caught.exception.status, 401)
+
+        # Stored "123456" IS the initial shape, but it does NOT match the current
+        # row's identity suffix "01234X": login must not authenticate, must show
+        # the mismatched-record guidance, and must never write.
+        self._open("recSix", {"姓名": "旧账号", "机楼/专业": "C楼", PASSWORD_FIELD: "123456",
+                              "身份证号": IDENTITY_NUMBER,
+                              "员工姓名": _user("旧账号", "ou_fixture3")})
+        self.harness.service._pages = [_page([_rec("recSix")])]
+        with _allow_real_writes():
             with self.assertRaises(PasswordLoginError) as caught:
                 self.harness.login.login(
-                    {"person_id": rid, "password": stored}, "127.0.0.1"
+                    {"person_id": "recSix", "password": "123456"}, "127.0.0.1"
                 )
-            self.assertEqual(caught.exception.status, 401, stored)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("重置", str(caught.exception))
+        self.assertEqual(self.harness.service._patch_calls, 0)
+
+    # ---- legacy pre-filled six-character initial passwords ----------------
+    def _prefilled_fields(self, rid, stored, *, identity=IDENTITY_NUMBER, oid="ou_fixturePfx", password_value=None):
+        fields = {"姓名": "预填", "机楼/专业": "A楼", "身份证号": identity,
+                  PASSWORD_FIELD: stored if password_value is None else password_value,
+                  "员工姓名": _user("预填", oid)}
+        self._open(rid, fields)
+        return fields
+
+    def test_prefilled_initial_plaintext_first_step_no_write_or_session(self):
+        # A stored plaintext six-character initial (zero-prefixed, typed with a
+        # lowercase trailing x) unlocks forced password change with no write and
+        # no session.
+        self._prefilled_fields("recP1", "01234X", oid="ou_fixtureP1")
+        self.harness.service._pages = [_page([_rec("recP1")])]
+        with _allow_real_writes():
+            data, session_id = self.harness.login.login(
+                {"person_id": "recP1", "password": "01234x"}, "127.0.0.1"
+            )
+        self.assertEqual(data, {"requires_password_change": True})
+        self.assertIsNone(session_id)
+        self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_prefilled_initial_rich_text_first_step_no_write_or_session(self):
+        # Feishu returns 密码 as rich text (list of text segments); _mop_field_text
+        # extracts the plaintext initial and the same first-step rules apply.
+        self._prefilled_fields("recPr", None, oid="ou_fixturePr",
+                               password_value=[{"text": "01234X"}])
+        self.harness.service._pages = [_page([_rec("recPr")])]
+        with _allow_real_writes():
+            data, session_id = self.harness.login.login(
+                {"person_id": "recPr", "password": BOOTSTRAP}, "127.0.0.1"
+            )
+        self.assertEqual(data, {"requires_password_change": True})
+        self.assertIsNone(session_id)
+        self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_prefilled_initial_x_case_insensitive_stored_and_typed(self):
+        # The trailing national-ID check digit X is case-insensitive on BOTH the
+        # stored prefilled initial and the typed value, and the leading zero is
+        # preserved in the comparison.
+        cases = (("01234X", "01234x"), ("01234x", "01234X"))
+        rows = []
+        for index, (stored, _) in enumerate(cases):
+            rid = f"recPci{index}"
+            fields = self._prefilled_fields(rid, stored, oid=f"ou_fixturePci{index}")
+            rows.append({"record_id": rid, "fields": dict(fields)})
+        self.harness.service._pages = [_page(rows)]
+        self.harness.login.people()  # build and cache the directory once
+
+        for index, (stored, typed) in enumerate(cases):
+            rid = f"recPci{index}"
+            self.harness.service._pages = [_page([_rec(rid)])]
+            with _allow_real_writes():
+                data, session_id = self.harness.login.login(
+                    {"person_id": rid, "password": typed}, "127.0.0.1"
+                )
+            self.assertEqual(data, {"requires_password_change": True})
+            self.assertIsNone(session_id)
+            self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_prefilled_initial_wrong_input_rejected_no_write(self):
+        # A wrong typed initial for a stored prefilled initial is rejected with
+        # 401 and nothing is written.
+        self._prefilled_fields("recPw", BOOTSTRAP, oid="ou_fixturePw")
+        self.harness.service._pages = [_page([_rec("recPw")])]
+        with _allow_real_writes():
+            with self.assertRaises(PasswordLoginError) as caught:
+                self.harness.login.login(
+                    {"person_id": "recPw", "password": "112233"}, "127.0.0.1"
+                )
+        self.assertEqual(caught.exception.status, 401)
+        self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_initial_branch_trims_copied_surrounding_whitespace(self):
+        # Both initial branches (blank bootstrap and stored prefilled initial)
+        # trim copied surrounding whitespace; a padded real value still unlocks
+        # the forced change with no write or session.
+        padded = f"  {BOOTSTRAP}\t"
+        self._open("recPsp", {"姓名": "预填", "机楼/专业": "A楼", "身份证号": IDENTITY_NUMBER,
+                              PASSWORD_FIELD: BOOTSTRAP, "员工姓名": _user("预填", "ou_fixturePsp")})
+        self._open("recBsp", {"姓名": "空白", "机楼/专业": "A楼", "身份证号": IDENTITY_NUMBER,
+                              PASSWORD_FIELD: "", "员工姓名": _user("空白", "ou_fixtureBsp")})
+        self.harness.service._pages = [_page([
+            {"record_id": "recPsp", "fields": dict(self.harness.service._records["recPsp"])},
+            {"record_id": "recBsp", "fields": dict(self.harness.service._records["recBsp"])},
+        ])]
+        self.harness.login.people()  # build and cache the directory once
+        for rid in ("recPsp", "recBsp"):
+            self.harness.service._pages = [_page([_rec(rid)])]
+            with _allow_real_writes():
+                data, session_id = self.harness.login.login(
+                    {"person_id": rid, "password": padded}, "127.0.0.1"
+                )
+            self.assertEqual(data, {"requires_password_change": True})
+            self.assertIsNone(session_id)
+            self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_configured_pbkdf2_password_keeps_exact_whitespace_and_case(self):
+        # A configured PBKDF2 password is byte-exact: copied surrounding
+        # whitespace or altered case must not authenticate; only the exact
+        # value works (no initial-branch trimming applies here).
+        stored = hash_password("Pass1234")
+        self._open("recPk", {"姓名": "精确", "机楼/专业": "A楼", PASSWORD_FIELD: stored,
+                             "员工姓名": _user("精确", "ou_fixturePk")})
+        for bad in (" Pass1234 ", "\tPass1234", "pass1234", "PASS1234"):
+            self.harness.service._pages = [_page([_rec("recPk")])]
+            with self.assertRaises(PasswordLoginError) as caught:
+                self.harness.login.login(
+                    {"person_id": "recPk", "password": bad}, "127.0.0.1"
+                )
+            self.assertEqual(caught.exception.status, 401, bad)
+        self.harness.service._pages = [_page([_rec("recPk")])]
+        data, session_id = self.harness.login.login(
+            {"person_id": "recPk", "password": "Pass1234"}, "127.0.0.1"
+        )
+        self.assertTrue(session_id)
+        self.assertIn("scope=A", data["redirect_url"])
+
+    def test_prefilled_initial_corrupted_mismatched_six_digits_rejected(self):
+        # Stored initial is a six-digit shape but does not match the current row's
+        # identity suffix -> clear admin-record guidance, 409, no write, no session.
+        self._prefilled_fields("recPmm", "123456", oid="ou_fixturePmm")
+        self.harness.service._pages = [_page([_rec("recPmm")])]
+        with _allow_real_writes():
+            with self.assertRaises(PasswordLoginError) as caught:
+                self.harness.login.login(
+                    {"person_id": "recPmm", "password": "123456"}, "127.0.0.1"
+                )
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("不一致", str(caught.exception))
+        self.assertIn("重置", str(caught.exception))
+        self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_prefilled_initial_existing_pbkdf2_hash_never_falls_back(self):
+        # A stored PBKDF2 hash never falls back to the initial suffix even if the
+        # submitted value equals the identity suffix; needs_setup is False and the
+        # hash path rejects it.
+        stored = hash_password("GoodPass1")
+        self._prefilled_fields("recPh", stored, oid="ou_fixturePh")
+        self.harness.service._pages = [_page([{"record_id": "recPh", "fields": dict(self.harness.service._records["recPh"])}])]
+        listed = {p["id"]: p for p in self.harness.login.people()["items"]}
+        self.assertFalse(listed["recPh"]["needs_setup"])
+        self.harness.service._pages = [_page([_rec("recPh")])]
+        with self.assertRaises(PasswordLoginError) as caught:
+            self.harness.login.login(
+                {"person_id": "recPh", "password": BOOTSTRAP}, "127.0.0.1"
+            )
+        self.assertEqual(caught.exception.status, 401)
+        self.assertEqual(self.harness.service._patch_calls, 0)
+
+    def test_prefilled_initial_full_change_persists_pbkdf2_and_old_initial_stops(self):
+        # Forced change succeeds to a real PBKDF2 hash with post-write readback;
+        # afterwards the saved password works, the old prefilled initial does not,
+        # and the needs_setup flag clears.
+        self._prefilled_fields("recPc", BOOTSTRAP, oid="ou_fixturePc")
+        self.harness.service._pages = [_page([_rec("recPc")])]
+        with _allow_real_writes():
+            data, session_id = self.harness.login.login(
+                {"person_id": "recPc", "password": BOOTSTRAP, "new_password": "NewPass123"},
+                "127.0.0.1",
+            )
+        self.assertTrue(session_id)
+        self.assertIsNone(data.get("requires_password_change"))
+        self.assertEqual(self.harness.service._patch_calls, 1)
+        self.assertEqual(set(self.harness.service._last_patch_fields), {PASSWORD_FIELD})
+        written = self.harness.service._last_patch_fields[PASSWORD_FIELD]
+        self.assertTrue(written.startswith("pbkdf2_sha256$"))
+        self.assertTrue(verify_password("NewPass123", written))
+        self.assertEqual(self.harness.service._request_json_calls, 2)
+
+        # old prefilled initial no longer works
+        self.harness.service._pages = [_page([_rec("recPc")])]
+        with self.assertRaises(PasswordLoginError) as caught:
+            self.harness.login.login(
+                {"person_id": "recPc", "password": BOOTSTRAP}, "127.0.0.1"
+            )
+        self.assertEqual(caught.exception.status, 401)
+
+        # new password logs in
+        self.harness.service._pages = [_page([_rec("recPc")])]
+        data, session_id2 = self.harness.login.login(
+            {"person_id": "recPc", "password": "NewPass123"}, "127.0.0.1"
+        )
+        self.assertTrue(session_id2)
+        self.assertIn("scope=A", data["redirect_url"])
+
+    def test_prefilled_initial_identity_suffix_never_exposed(self):
+        # The cached directory for a prefilled-initial account advertises
+        # needs_setup and an empty password_revision, but never stores the
+        # identity, the suffix, or any digest of them.
+        self._prefilled_fields("recPsec", BOOTSTRAP, oid="ou_fixturePsec")
+        self.harness.service._pages = [_page([{"record_id": "recPsec", "fields": dict(self.harness.service._records["recPsec"])}])]
+        self.harness.login.people()
+        cached = self.harness.auth._state_store.get_document(
+            ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY
+        ) or {}
+        people = cached.get("people") or {}
+        self.assertIn("recPsec", people)
+        self.assertTrue(people["recPsec"]["needs_setup"])
+        self.assertEqual(people["recPsec"]["password_revision"], "")
+        serialized = json.dumps(people["recPsec"])
+        for secret in (IDENTITY_NUMBER, BOOTSTRAP,
+                       hashlib.sha256(IDENTITY_NUMBER.encode("utf-8")).hexdigest(),
+                       hashlib.sha256(BOOTSTRAP.encode("utf-8")).hexdigest()):
+            self.assertNotIn(secret, serialized)
+        public = self.harness.login.people()["items"]
+        serialized_public = json.dumps(public, ensure_ascii=False)
+        self.assertNotIn(BOOTSTRAP, serialized_public)
+        self.assertNotIn(IDENTITY_NUMBER, serialized_public)
 
     # ---- first login ------------------------------------------------------
     def test_initial_bootstrap_returns_requires_password_change_and_no_session_or_write(self):
@@ -820,7 +1054,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
     def test_multifloor_and_nofloor_login_authenticate_but_no_autogrant(self):
         # Blank-floor and multi-floor people CAN authenticate (pending session),
         # but NEVER get an auto-chosen floor: the redirect stays "/" (permission
-        # UI) and no permission entry is created for them.
+        # UI) and the roster entry carries zero scopes (no auto-grant of all).
         stored = hash_password("Pass1234")
         fields = {
             "recMulti": {"姓名": "多楼", "机楼/专业": "A楼H楼",
@@ -846,7 +1080,13 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
             session = self.harness.auth.get_session(session_id)
             self.assertEqual(session["allowed_scopes"], [], rid)
             users = {u["open_id"]: u for u in self.harness.auth.get_permissions_payload()["users"]}
-            self.assertNotIn(f["员工姓名"][0]["open_id"], users, rid)
+            # Authenticating without an unambiguous home must yield ZERO scopes:
+            # no auto-chosen floor, no auto-grant of all buildings. The zero-scope
+            # roster entry may exist, but it must carry nothing.
+            perm = users.get(f["员工姓名"][0]["open_id"])
+            self.assertIsNotNone(perm, rid)
+            self.assertEqual(perm["scopes"], [], rid)
+            self.assertEqual(perm["role"], "building", rid)
 
     def test_duplicate_open_id_denied_before_write_including_attempted_remember_cache(self):
         # Two active people share the same open_id. Both are marked
@@ -1128,7 +1368,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
             "needs_setup": False, "password_revision": "rev-1", "account_nature": "外部账号",
             "login_ids": [open_id],
         }
-        snapshot = {"people": {rid: person}, "loaded_at": time.time(), "schema": 2}
+        snapshot = {"people": {rid: person}, "loaded_at": time.time(), "schema": 3}
         self.harness.auth._state_store.put_document(ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, snapshot)
         self.harness.login.snapshot = snapshot
         if disabled:
@@ -1140,9 +1380,9 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
     def test_change_out_of_view_removed_inactive_or_disabled_fail(self):
         # out-of-view / removed: no directory entry for this person.
         self.harness.auth._state_store.put_document(
-            ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, {"people": {}, "loaded_at": time.time(), "schema": 2}
+            ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, {"people": {}, "loaded_at": time.time(), "schema": 3}
         )
-        self.harness.login.snapshot = {"people": {}, "loaded_at": time.time(), "schema": 2}
+        self.harness.login.snapshot = {"people": {}, "loaded_at": time.time(), "schema": 3}
         session = {"source": "personnel_password", "user": {"personnel_record_id": "recNope"}}
         with self.assertRaises(PasswordLoginError) as caught:
             self.harness.login.change(
@@ -1246,13 +1486,14 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
         self.addCleanup(_shutdown_manager, mgr)
         return mgr
 
-    def _person(self, rid="recS", scopes=("A",), open_id="ou_fixture1"):
+    def _person(self, rid="recS", scopes=("A",), open_id="ou_fixture1", position="运维值班员"):
         return {
             "id": rid,
             "name": "张三",
             "employee_no": "E001",
             "building": "A楼",
             "scopes": list(scopes),
+            "position": position,
             "selectable": True,
             "inactive": False,
             "disabled_reason": "",
@@ -1263,8 +1504,12 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
 
     def _seed_directory(self, mgr, person):
         store = mgr._state_store
-        payload = {"people": {person["id"]: dict(person)}, "loaded_at": time.time(), "schema": 2}
+        payload = {"people": {person["id"]: dict(person)}, "loaded_at": time.time(), "schema": 3}
         store.put_document(ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, payload)
+        # The modernized auth manager derives roles/scopes from the real roster
+        # snapshot (机楼/专业 home, 体系岗位 job) - never from an invented flag.
+        snapshot = {"people": {person["id"]: dict(person)}, "loaded_at": time.time(), "schema": 3}
+        mgr._account_directory_provider = lambda snap=snapshot: snap
 
     def test_creates_building_principal_real_open_id_exact_floor_absolute_ttl_and_restart(self):
         person = self._person(scopes=("E",), open_id="ou_fixtureE")
@@ -1276,6 +1521,7 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
         identity = person["login_ids"][0]
 
         fresh = self._build_manager()
+        self._seed_directory(fresh, person)
         session = fresh.get_session(session_id)
         self.assertIsNotNone(session)
         self.assertEqual(session["user"]["open_id"], identity)
@@ -1324,23 +1570,34 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
         restarted2._state_store.put_document(ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, snapshot2)
         self.assertIsNone(restarted2.get_session(session_id3))
 
-    def test_admin_role_preserved_not_inferred_from_name(self):
+    def test_legacy_arbitrary_admin_grant_not_honored_for_ordinary_identity(self):
+        # The HR roster defines the authority: an ordinary C-building operator is
+        # NOT an admin even if a legacy saved grant claimed role=admin/ALL. The
+        # raw legacy value is seeded directly into _save_permissions_locked (the
+        # production API now rejects such incompatible grants), and after a
+        # personnel session the identity resolves to building + its own home
+        # only - no arbitrary admin escalation is preserved.
         person = self._person("recX", scopes=("C",), open_id="ou_fixtureX")
         mgr = self._build_manager()
         self._seed_directory(mgr, person)
+        legacy = mgr._load_permissions_locked()
+        legacy.setdefault("users", {})["ou_fixtureX"] = {
+            "name": "管理员", "role": "admin", "scopes": ["ALL"],
+            "enabled": True, "locked": False,
+        }
+        mgr._save_permissions_locked(legacy)
         session_id = mgr.create_personnel_session(person)
-        identity = person["login_ids"][0]
-        mgr.upsert_permission_user(open_id=identity, name="管理员", role="admin", scopes=["ALL"],
-                                   enabled=True, updated_by="test")
         fresh = self._build_manager()
+        self._seed_directory(fresh, person)
         session = fresh.get_session(session_id)
         self.assertIsNotNone(session)
-        # Existing admin permission on the real open_id is preserved; it is not
-        # downgraded to building simply because the directory name is 管理员 or
-        # because the HR row only lists a building.
-        self.assertEqual(session["role"], "admin")
-        self.assertIn("ALL", session["allowed_scopes"])
-        self.assertTrue(fresh.is_admin(session))
+        # No escalation: the identity is a building operator with its own home.
+        self.assertEqual(session["role"], "building")
+        self.assertEqual(session["allowed_scopes"], ["C"])
+        self.assertFalse(fresh.is_admin(session))
+        users = {u["open_id"]: u for u in fresh.get_permissions_payload()["users"]}
+        self.assertEqual(users["ou_fixtureX"]["role"], "building")
+        self.assertEqual(users["ou_fixtureX"]["scopes"], ["C"])
 
     def test_session_survives_manager_restart(self):
         person = self._person(open_id="ou_fixture1")
@@ -1366,14 +1623,14 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
             mgr.create_personnel_session(bootstrap_person)
         self.assertIn("无法登录", str(caught.exception))
 
-    # New requirement: unknown open_id auto-floor only persisted permission.
+    # New requirement: session scopes are exactly the HR home floor.
     def test_unknown_ou_auto_floor_only_persisted_permission(self):
         person = self._person("recU", scopes=("E",), open_id="ou_fixtureU")
         mgr = self._build_manager()
         self._seed_directory(mgr, person)
         session_id = mgr.create_personnel_session(person)
-        # Auto-grant persists exactly one unambiguous building for a brand-new
-        # (unknown) real open_id, without inventing an admin role.
+        # The roster home (机楼/专业=E) defines the single building scope - no
+        # invented admin role, no cross-building grant added.
         users = {u["open_id"]: u for u in mgr.get_permissions_payload()["users"]}
         perm = users.get("ou_fixtureU")
         self.assertIsNotNone(perm)
@@ -1383,25 +1640,36 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
         self.assertEqual(session["allowed_scopes"], ["E"])
         self.assertEqual(session["user"]["open_id"], "ou_fixtureU")
 
-    # New requirement: existing other floor preserved.
-    def test_existing_other_floor_preserved_on_auto_grant(self):
+    # New requirement: legacy extra cross-building grants are NOT honored.
+    def test_legacy_extra_cross_building_grant_not_preserved(self):
+        # Home is fixed by HR (机楼/专业=E). A legacy saved grant that added an
+        # extra cross-building scope (B) must NOT remain effective: the identity
+        # resolves to its own home E only. Seeded directly via
+        # _save_permissions_locked because the modernized API rejects such a
+        # cross-building grant.
         person = self._person("recM", scopes=("E",), open_id="ou_fixtureM")
         mgr = self._build_manager()
-        mgr.upsert_permission_user(open_id="ou_fixtureM", name="李四", role="building",
-                                   scopes=["B"], enabled=True, updated_by="test")
         self._seed_directory(mgr, person)
+        legacy = mgr._load_permissions_locked()
+        legacy.setdefault("users", {})["ou_fixtureM"] = {
+            "name": "李四", "role": "building", "scopes": ["B"],
+            "enabled": True, "locked": False,
+        }
+        mgr._save_permissions_locked(legacy)
         session_id = mgr.create_personnel_session(person)
-        users = {u["open_id"]: u for u in mgr.get_permissions_payload()["users"]}
-        perm = users.get("ou_fixtureM")
-        self.assertEqual(set(perm["scopes"]), {"B", "E"})
-        self.assertEqual(perm["role"], "building")
-        session = mgr.get_session(session_id)
-        self.assertEqual(set(session["allowed_scopes"]), {"B", "E"})
+        fresh = self._build_manager()
+        self._seed_directory(fresh, person)
+        session = fresh.get_session(session_id)
+        self.assertEqual(session["allowed_scopes"], ["E"])
+        users = {u["open_id"]: u for u in fresh.get_permissions_payload()["users"]}
+        self.assertEqual(set(users["ou_fixtureM"]["scopes"]), {"E"})
+        self.assertEqual(users["ou_fixtureM"]["role"], "building")
 
     # New requirement: explicitly disabled permission user is not reactivated.
     def test_explicit_disabled_not_reactivated(self):
         person = self._person("recD", scopes=("A",), open_id="ou_fixtureD")
         mgr = self._build_manager()
+        self._seed_directory(mgr, person)
         mgr.upsert_permission_user(open_id="ou_fixtureD", name="停用", role="building",
                                    scopes=["A"], enabled=False, updated_by="test")
         self._seed_directory(mgr, person)
@@ -1418,9 +1686,13 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
         mgr = self._build_manager()
         self._seed_directory(mgr, person)
         session_id = mgr.create_personnel_session(person)
-        # No permission is auto-created for an ambiguous multi-floor row.
+        # An ambiguous (multi-floor) identity authenticates but resolves to ZERO
+        # scopes - no auto-floor and no auto-grant of all buildings.
         users = {u["open_id"]: u for u in mgr.get_permissions_payload()["users"]}
-        self.assertNotIn("ou_fixtureA", users)
+        perm = users.get("ou_fixtureA")
+        self.assertIsNotNone(perm)
+        self.assertEqual(perm["scopes"], [])
+        self.assertEqual(perm["role"], "building")
         session = mgr.get_session(session_id)
         self.assertEqual(session["allowed_scopes"], [])
 
@@ -1556,6 +1828,12 @@ class PortalFeishuSessionMappingTests(_TempDirTestCase):
     def test_feishu_admin_session_restored_without_password_table(self):
         mgr = self._build_manager()
         open_id = "ou_fixture_admin"
+        # The Feishu identity is an H-department manager: HR home H + 体系岗位 经理
+        # resolves to L1 (admin) - the authority comes from the roster, not from
+        # the saved session role.
+        mgr._account_directory_provider = lambda: {"people": {"recAdmin": {
+            "id": "recAdmin", "name": "管理员", "scopes": ["H"], "position": "项目经理",
+            "selectable": True, "inactive": False, "login_ids": [open_id]}}}
         mgr.upsert_permission_user(
             open_id=open_id, name="管理员", role="admin", scopes=[],
             enabled=True, updated_by="test",
@@ -1585,6 +1863,11 @@ class PortalFeishuSessionMappingTests(_TempDirTestCase):
     def test_feishu_building_session_role_and_scopes_unchanged(self):
         mgr = self._build_manager()
         open_id = "ou_fixture_building"
+        # The Feishu identity is an ordinary operator whose HR home (机楼/专业) is
+        # exactly E; the authority is derived from the roster snapshot.
+        mgr._account_directory_provider = lambda: {"people": {"recBuilding": {
+            "id": "recBuilding", "name": "楼栋用户", "scopes": ["E"], "position": "运维值班员",
+            "selectable": True, "inactive": False, "login_ids": [open_id]}}}
         mgr.upsert_permission_user(
             open_id=open_id, name="楼栋用户", role="building", scopes=["E"],
             enabled=True, updated_by="test",
@@ -1661,7 +1944,7 @@ class PersonnelPasswordRouteTests(_TempDirTestCase):
         }
         self.auth._state_store.put_document(
             ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY,
-            {"people": {rid: person}, "loaded_at": time.time(), "schema": 2},
+            {"people": {rid: person}, "loaded_at": time.time(), "schema": 3},
         )
         return self.auth.create_personnel_session(person)
 

@@ -99,7 +99,8 @@ class FakeController:
 
 
 class FakeRuntime:
-    auth_manager = type('Auth', (), {'is_admin': lambda self, session: session['user']['role'] == 'admin'})()
+    auth_manager = type('Auth', (), {'is_admin': lambda self, session: session['user']['role'] == 'admin',
+                                    'session_scopes': lambda self, session: ['ALL']})()
 
     def __init__(self):
         self.state_store = MemoryStore()

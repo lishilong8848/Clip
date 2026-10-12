@@ -63,6 +63,10 @@ from lan_bitable_template_portal.portal_service import WORK_TYPE_POWER  # noqa: 
 from lan_bitable_template_portal.portal_service import WORK_TYPE_REPAIR  # noqa: E402
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
 from lan_bitable_template_portal.portal_auth import PortalAuthManager  # noqa: E402
+from lan_bitable_template_portal.portal_auth import (  # noqa: E402
+    BUILDING_OPEN_ID_MAP as PORTAL_BUILDING_OPEN_ID_MAP,
+    LI_SHILONG_OPEN_ID,
+)
 from lan_bitable_template_portal.workbench_lite import (  # noqa: E402
     MAINTENANCE_CYCLE_OPTIONS as PORTAL_MAINTENANCE_CYCLE_OPTIONS,
 )
@@ -635,6 +639,21 @@ def _build_zhihang_change_record(
 
 
 class LanTemplateWorkStatusTests(unittest.TestCase):
+    def setUp(self):
+        auth = PortalRuntime.auth_manager
+        names = ("_state_store", "_sessions", "_permissions_cache", "_permissions_cache_until",
+                 "_account_directory_provider", "_account_directory_loader", "_account_index_cache",
+                 "_account_directory_refresh_failed")
+        saved = {name: copy.deepcopy(auth.__dict__[name]) if name in {"_sessions", "_permissions_cache"}
+                 else auth.__dict__[name] for name in names if name in auth.__dict__}
+        def restore():
+            for name in names:
+                if name in saved:
+                    setattr(auth, name, saved[name])
+                else:
+                    auth.__dict__.pop(name, None)
+        self.addCleanup(restore)
+
     def _new_temp_service(self, root: Path, service_cls=_TestMaintenancePortalService):
         def fake_data_path(name):
             return str(root / name)
@@ -652,6 +671,42 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.addCleanup(store_patcher.stop)
         return service_cls()
+
+    def _portal_hr_snapshot(self, people, *, removed_identities=None):
+        """Synthetic trusted HR snapshot used by PortalAuthManager fixtures.
+
+        Production derives building from HR 机楼/专业 (person['scopes']) and
+        occupation from 体系岗位 (person['position']); only the fields below are
+        consulted by account_profile/directory_person/sync_directory_permissions.
+        """
+        return {
+            "people": people,
+            "loaded_at": time.time(),
+            "schema": 3,
+            "removed_identities": removed_identities or {},
+        }
+
+    def _attach_portal_hr(self, manager, people, *, removed_identities=None):
+        manager._account_directory_provider = lambda: self._portal_hr_snapshot(
+            people,
+            removed_identities=removed_identities,
+        )
+        # Drop any cached directory index so later lookups use the fresh snapshot.
+        manager._account_index_cache = (None, {})
+
+    def _person(self, rid, open_id, name, scopes, position, *, selectable=True,
+                inactive=False, disabled_reason=""):
+        return {
+            "id": rid,
+            "name": name,
+            "employee_no": "9" + rid[-4:],
+            "scopes": list(scopes),
+            "inactive": inactive,
+            "selectable": selectable,
+            "disabled_reason": disabled_reason,
+            "position": position,
+            "login_ids": [open_id],
+        }
 
     def test_portal_service_empty_source_config_falls_back_to_defaults(self):
         service = MaintenancePortalService(app_token="", table_id="")
@@ -2317,38 +2372,70 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "user": {"open_id": open_id},
             }
 
-        self.assertTrue(
-            FastAPIPortalController._local_notice_image_access_allowed(
-                session("A", "a-user"), item, user={"open_id": "a-user"}
-            )
-        )
-        self.assertTrue(
-            FastAPIPortalController._local_notice_image_access_allowed(
-                session("B", "b-user"), item, user={"open_id": "b-user"}
-            )
-        )
-        self.assertFalse(
-            FastAPIPortalController._local_notice_image_access_allowed(
-                session("C", "c-user"), item, user={"open_id": "c-user"}
-            )
-        )
-        h_open_id = portal_server_module.BUILDING_OPEN_ID_MAP["H"]
-        self.assertTrue(
-            FastAPIPortalController._local_notice_image_access_allowed(
-                session("H", h_open_id), item, user={"open_id": h_open_id}
-            )
-        )
-        pending = {**item, "target_written": False}
-        self.assertFalse(
-            FastAPIPortalController._local_notice_image_access_allowed(
-                session("A", "a-user"), pending, user={"open_id": "a-user"}
-            )
-        )
-        self.assertTrue(
-            FastAPIPortalController._local_notice_image_access_allowed(
-                session("A", "uploader"), pending, user={"open_id": "uploader"}
-            )
-        )
+        original_manager = PortalRuntime.auth_manager
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
+            ):
+                manager = PortalAuthManager()
+                # Ordinary scope users must resolve to trusted HR own-floor
+                # identities with an enabled permission grant.
+                self._attach_portal_hr(manager, {
+                    "recAU": self._person("recAU", "a-user", "A用户", ["A"], "暖通工程师"),
+                    "recBU": self._person("recBU", "b-user", "B用户", ["B"], "暖通工程师"),
+                    "recCU": self._person("recCU", "c-user", "C用户", ["C"], "暖通工程师"),
+                })
+                for open_id, scope in (("a-user", "A"), ("b-user", "B"), ("c-user", "C")):
+                    manager.upsert_permission_user(
+                        open_id=open_id,
+                        name=open_id,
+                        role="building",
+                        scopes=[scope],
+                        enabled=True,
+                        updated_by="test",
+                    )
+                PortalRuntime.auth_manager = manager
+            try:
+                self.assertTrue(
+                    FastAPIPortalController._local_notice_image_access_allowed(
+                        session("A", "a-user"), item, user={"open_id": "a-user"}
+                    )
+                )
+                self.assertTrue(
+                    FastAPIPortalController._local_notice_image_access_allowed(
+                        session("B", "b-user"), item, user={"open_id": "b-user"}
+                    )
+                )
+                self.assertFalse(
+                    FastAPIPortalController._local_notice_image_access_allowed(
+                        session("C", "c-user"), item, user={"open_id": "c-user"}
+                    )
+                )
+                h_open_id = portal_server_module.BUILDING_OPEN_ID_MAP["H"]
+                self.assertTrue(
+                    FastAPIPortalController._local_notice_image_access_allowed(
+                        session("H", h_open_id), item, user={"open_id": h_open_id}
+                    )
+                )
+                pending = {**item, "target_written": False}
+                self.assertFalse(
+                    FastAPIPortalController._local_notice_image_access_allowed(
+                        session("A", "a-user"), pending, user={"open_id": "a-user"}
+                    )
+                )
+                self.assertTrue(
+                    FastAPIPortalController._local_notice_image_access_allowed(
+                        session("A", "uploader"), pending, user={"open_id": "uploader"}
+                    )
+                )
+            finally:
+                PortalRuntime.auth_manager = original_manager
 
     def test_pending_notice_images_are_scoped_to_draft_owner(self):
         from lan_bitable_template_portal.local_notice_images import LocalNoticeImageStore
@@ -14636,45 +14723,61 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 return {"candidates": []}
 
         previous_service = PortalRuntime.service
-        previous_sessions = dict(PortalRuntime.auth_manager._sessions)
+        previous_manager = PortalRuntime.auth_manager
         service = _LookupService()
         PortalRuntime.service = service
-        with PortalRuntime.auth_manager._lock:
-            PortalRuntime.auth_manager._sessions = {
-                "candidate-admin": {
-                    "session_id": "candidate-admin",
-                    "user": {"open_id": "candidate-admin", "name": "管理员"},
-                    "role": "admin",
-                    "allowed_scopes": ["ALL"],
-                    "expires_at": time.time() + 3600,
-                },
-                "candidate-building": {
-                    "session_id": "candidate-building",
-                    "user": {"open_id": "candidate-building", "name": "E楼"},
-                    "role": "building",
-                    "allowed_scopes": ["E"],
-                    "expires_at": time.time() + 3600,
-                },
-            }
-        try:
-            client = TestClient(
-                FastAPIPortalController(
-                    host="127.0.0.1", port=18766
-                )._build_app()
-            )
-            with patch.object(
-                PortalRuntime.auth_manager,
-                "scopes_for_open_id",
-                side_effect=lambda open_id: (
-                    ["ALL"] if open_id == "candidate-admin" else ["E"]
-                ),
-            ), patch.object(
-                PortalRuntime.auth_manager,
-                "role_for_open_id",
-                side_effect=lambda open_id: (
-                    "admin" if open_id == "candidate-admin" else "building"
-                ),
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def fake_data_path(name):
+                return str(root / name)
+
+            with patch(
+                "lan_bitable_template_portal.portal_auth.get_data_file_path",
+                side_effect=fake_data_path,
             ):
+                manager = PortalAuthManager()
+                # Candidate identities are trusted HR records: LI_SHILONG is the
+                # L0 super-admin and the building candidate is an E-floor engineer.
+                self._attach_portal_hr(manager, {
+                    "candidate-building": self._person(
+                        "candidate-building", "candidate-building", "E楼", ["E"], "暖通工程师"),
+                })
+                manager.upsert_permission_user(
+                    open_id="candidate-building",
+                    name="E楼",
+                    role="building",
+                    scopes=["E"],
+                    enabled=True,
+                    updated_by="test",
+                )
+                portal_manager = manager
+                with portal_manager._lock:
+                    portal_manager._sessions = {
+                        "candidate-admin": {
+                            "session_id": "candidate-admin",
+                            "user": {"open_id": LI_SHILONG_OPEN_ID, "name": "管理员"},
+                            "role": "admin",
+                            "allowed_scopes": portal_manager._admin_scopes(),
+                            "expires_at": time.time() + 3600,
+                        },
+                        "candidate-building": {
+                            "session_id": "candidate-building",
+                            "user": {"open_id": "candidate-building", "name": "E楼"},
+                            "role": "building",
+                            "allowed_scopes": ["E"],
+                            "expires_at": time.time() + 3600,
+                        },
+                    }
+            PortalRuntime.auth_manager = portal_manager
+            try:
+                directory_provider = portal_manager._account_directory_provider
+                client = TestClient(
+                    FastAPIPortalController(
+                        host="127.0.0.1", port=18766
+                    )._build_app()
+                )
+                portal_manager._account_directory_provider = directory_provider
                 for session_id, context, expected_scope in (
                     ("candidate-admin", "target_table", "ALL"),
                     ("candidate-admin", "planned_target_table", "E"),
@@ -14698,10 +14801,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         service.calls[-1]["include_current_month_finished"],
                         context == "planned_target_table",
                     )
-        finally:
-            PortalRuntime.service = previous_service
-            with PortalRuntime.auth_manager._lock:
-                PortalRuntime.auth_manager._sessions = previous_sessions
+            finally:
+                PortalRuntime.auth_manager = previous_manager
+        PortalRuntime.service = previous_service
 
     def test_notice_identity_binding_updates_shared_ongoing_and_source_status(self):
         class _BindingService:
@@ -21444,7 +21546,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     }
 
                 session = manager.get_session("sid")
-                self.assertEqual(manager.session_scopes(session), ["A"])
+                # Legacy grants migrate into the persisted store but, because the
+                # migrated identity is unknown to HR (no 机楼/专业, no 体系岗位), the
+                # derived scope rules are empty and no effective scope is granted.
+                self.assertEqual(manager.session_scopes(session), [])
 
                 stored = manager._state_store.get_auth_permissions()
                 self.assertEqual(stored["users"]["ou_test"]["scopes"], ["A"])
@@ -21467,14 +21572,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 session = manager.get_session("sid")
-                self.assertEqual(manager.session_scopes(session), ["A"])
+                # The migration already ran once, so the later JSON keeps the
+                # original stored grant, and the unknown HR identity stays scopeless.
+                self.assertEqual(manager.session_scopes(session), [])
 
                 permission_path.write_text("{bad json", encoding="utf-8")
                 self.assertEqual(manager.scopes_for_open_id("ou_unknown"), [])
                 self.assertTrue(permission_path.exists())
                 self.assertFalse(list(root.glob("lan_portal_auth.bad.*.json")))
 
-    def test_h_building_has_all_scope_access_without_admin_role(self):
+    def test_h_building_duty_is_l1_admin_with_all_scope_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -21486,9 +21593,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
-                h_open_id = "ou_55647926b7fbfe46507ef7e8afa76315"
+                h_open_id = PORTAL_BUILDING_OPEN_ID_MAP["H"]
+                # H duty account is now a fixed L1 full-scope administrator.
+                self.assertEqual(manager.account_profile(h_open_id)["level"], "L1")
+                self.assertEqual(manager.role_for_open_id(h_open_id), "admin")
+                self.assertTrue(manager.account_profile(h_open_id)["can_delete_business"])
                 scopes = manager.scopes_for_open_id(h_open_id)
-                self.assertNotIn("ALL", scopes)
+                self.assertEqual(scopes, manager._admin_scopes())
+                self.assertIn("ALL", scopes)
                 for scope in ["CAMPUS", "110", "A", "B", "C", "D", "E", "H"]:
                     self.assertIn(scope, scopes)
 
@@ -21497,7 +21609,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "role": manager.role_for_open_id(h_open_id),
                     "allowed_scopes": scopes,
                 }
-                self.assertFalse(manager.is_admin(session))
+                self.assertTrue(manager.is_admin(session))
                 self.assertTrue(manager.scope_allowed(session, "ALL"))
                 self.assertEqual(manager.default_scope(session), "ALL")
 
@@ -21513,6 +21625,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                # Trusted HR identities: account_profile derives the disabled
+                # A-floor engineer (building, own A) and the H manager (L1 admin).
+                self._attach_portal_hr(manager, {
+                    "recDisabled": self._person(
+                        "recDisabled", "ou_disabled", "禁用用户", ["A"], "暖通工程师"),
+                    "recAdmin": self._person(
+                        "recAdmin", "ou_admin", "新增管理员", ["H"], "运维经理"),
+                })
                 payload, changed = manager.save_permissions_payload(
                     [
                         {
@@ -21535,8 +21655,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
                 users = {item["open_id"]: item for item in payload["users"]}
                 self.assertIn("ou_902e364a6c2c6c20893c02abe505a7b2", users)
-                self.assertIn("ou_a6644e62a43b916c6bc26148cf74f208", users)
                 self.assertTrue(users["ou_902e364a6c2c6c20893c02abe505a7b2"]["locked"])
+                # Fixed H duty account remains an L1 full-access administrator.
+                h_id = portal_server_module.BUILDING_OPEN_ID_MAP["H"]
+                self.assertIn(h_id, users)
+                self.assertEqual(manager.account_profile(h_id)["level"], "L1")
+                self.assertEqual(manager.scopes_for_open_id(h_id), manager._admin_scopes())
+                self.assertEqual(manager.role_for_open_id(h_id), "admin")
                 self.assertEqual(manager.scopes_for_open_id("ou_disabled"), [])
                 self.assertEqual(manager.role_for_open_id("ou_admin"), "admin")
                 self.assertTrue(manager.scope_allowed({
@@ -21557,6 +21682,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                # Trusted HR identity: an A-floor engineer has own-floor ["A"] only.
+                self._attach_portal_hr(manager, {
+                    "recDirectory": self._person(
+                        "recDirectory", "ou_directory_user", "目录人员", ["A"], "暖通工程师"),
+                })
                 manager.upsert_permission_user(
                     open_id="ou_directory_user",
                     name="目录人员",
@@ -21564,28 +21694,40 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     updated_by="ou_admin",
                 )
 
-                payload, changed, results = manager.bulk_merge_permission_users(
-                    [
-                        {
-                            "open_id": "ou_directory_user",
-                            "name": "目录人员新名称",
-                            "scopes": ["B", "C"],
-                        }
-                    ],
-                    updated_by="ou_admin",
-                )
+                # Cross-building extension (A -> B/C) is explicitly rejected and
+                # permissions stay unchanged; the user keeps only a pending request.
+                with self.assertRaisesRegex(PortalError, "不支持额外跨楼授权"):
+                    manager.bulk_merge_permission_users(
+                        [
+                            {
+                                "open_id": "ou_directory_user",
+                                "name": "目录人员新名称",
+                                "scopes": ["B", "C"],
+                            }
+                        ],
+                        updated_by="ou_admin",
+                    )
 
-                by_open_id = {item["open_id"]: item for item in payload["users"]}
-                self.assertEqual(
-                    by_open_id["ou_directory_user"]["scopes"],
-                    ["A", "B", "C"],
+                existing = next(
+                    item
+                    for item in manager.get_permissions_payload()["users"]
+                    if item["open_id"] == "ou_directory_user"
                 )
-                self.assertEqual(
-                    by_open_id["ou_directory_user"]["name"],
-                    "目录人员新名称",
+                self.assertEqual(existing["scopes"], ["A"])
+                self.assertEqual(existing["name"], "目录人员")
+
+                request = manager.create_permission_request(
+                    open_id="ou_directory_user",
+                    name="目录人员新名称",
+                    scopes=["B"],
+                    reason="临时支援B楼",
                 )
-                self.assertEqual(changed, ["ou_directory_user"])
-                self.assertEqual(results[0]["added_scopes"], ["B", "C"])
+                self.assertEqual(request["requested_scopes"], ["B"])
+                self.assertEqual(request["status"], "pending")
+                self.assertEqual(
+                    manager.get_current_permission_request("ou_directory_user")["request_id"],
+                    request["request_id"],
+                )
 
     def test_portal_auth_remove_permission_user_persists_and_protects_admin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -21599,6 +21741,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                # Trusted HR identity: A-floor engineer eligible to be removed.
+                self._attach_portal_hr(manager, {
+                    "recRemove": self._person(
+                        "recRemove", "ou_remove_me", "待删除用户", ["A"], "暖通工程师"),
+                })
                 manager.upsert_permission_user(
                     open_id="ou_remove_me",
                     name="待删除用户",
@@ -21612,24 +21759,42 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
 
                 self.assertTrue(removed)
-                self.assertNotIn(
-                    "ou_remove_me",
-                    {item["open_id"] for item in payload["users"]},
-                )
-                self.assertNotIn(
-                    "ou_remove_me",
-                    {
-                        item["open_id"]
-                        for item in manager.get_permissions_payload()["users"]
-                    },
-                )
-                locked = next(
+                # Ordinary accounts are tombstoned with enabled=False for history;
+                # they are no longer effective but remain in the persisted store.
+                disabled = next(
                     item
                     for item in payload["users"]
-                    if item.get("locked")
+                    if item["open_id"] == "ou_remove_me"
                 )
-                with self.assertRaisesRegex(PortalError, "固定管理员不能删除"):
-                    manager.remove_permission_user(locked["open_id"])
+                self.assertIs(disabled["enabled"], False)
+                stored = manager._state_store.get_auth_permissions()
+                self.assertIn("ou_remove_me", stored["users"])
+                self.assertIs(stored["users"]["ou_remove_me"]["enabled"], False)
+                self.assertEqual(manager.scopes_for_open_id("ou_remove_me"), [])
+                self.assertIn(
+                    "ou_remove_me",
+                    {item["open_id"] for item in manager.get_permissions_payload()["users"]},
+                )
+
+                # Directory sync must NOT re-enable a removed (disabled) identity.
+                manager.sync_directory_permissions(
+                    [self._person("recRemove", "ou_remove_me", "待删除用户", ["A"], "暖通工程师")]
+                )
+                self.assertEqual(manager.scopes_for_open_id("ou_remove_me"), [])
+                self.assertIs(
+                    manager._state_store.get_auth_permissions()["users"]["ou_remove_me"]["enabled"],
+                    False,
+                )
+
+                # Required admin and fixed H duty are undeletable.
+                with self.assertRaisesRegex(PortalError, "固定管理员和值班账号不能删除"):
+                    manager.remove_permission_user(
+                        "ou_902e364a6c2c6c20893c02abe505a7b2"
+                    )
+                with self.assertRaisesRegex(PortalError, "固定管理员和值班账号不能删除"):
+                    manager.remove_permission_user(
+                        portal_server_module.BUILDING_OPEN_ID_MAP["H"]
+                    )
 
     def test_permission_directory_extracts_position_buildings_and_specialties(self):
         person = MaintenancePortalService._permission_directory_person(
@@ -21772,6 +21937,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                # Trusted HR identity: A-floor engineer may keep only own ["A"].
+                # Requesting CAMPUS/ALL is a cross-building escalation that must be
+                # rejected at approval with unchanged permissions and a pending request.
+                self._attach_portal_hr(manager, {
+                    "recRequester": self._person(
+                        "recRequester", "ou_requester", "申请人", ["A"], "暖通工程师"),
+                })
+                manager.save_permissions_payload(
+                    [
+                        {
+                            "open_id": "ou_requester",
+                            "name": "申请人",
+                            "role": "building",
+                            "scopes": ["A"],
+                            "enabled": True,
+                        }
+                    ],
+                    updated_by="ou_actor",
+                )
                 request = manager.create_permission_request(
                     open_id="ou_requester",
                     name="申请人",
@@ -21782,7 +21966,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     manager.get_current_permission_request("ou_requester")["request_id"],
                     request["request_id"],
                 )
-                self.assertEqual(request["requested_scopes"], ["A", "CAMPUS"])
+                # Own floor A is already granted; ALL is reserved; only CAMPUS escalates.
+                self.assertEqual(request["requested_scopes"], ["CAMPUS"])
                 stored = manager._state_store.get_permission_request(request["request_id"])
                 self.assertNotIn("code", stored)
                 self.assertEqual(stored.get("code_hash"), "")
@@ -21794,21 +21979,18 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         updated_by="ou_admin",
                     )
 
-                result = manager.approve_permission_request(
-                    request["request_id"],
-                    scopes=["A", "CAMPUS"],
-                    updated_by="ou_admin",
-                )
-                self.assertEqual(result["request"]["status"], "approved")
-                self.assertEqual(
-                    manager.scopes_for_open_id("ou_requester"), ["A", "CAMPUS"]
-                )
-                approved = manager._state_store.get_permission_request(
-                    request["request_id"]
-                )
-                self.assertEqual(approved["approved_scopes"], ["A", "CAMPUS"])
-                self.assertEqual(approved["status"], "approved")
-                self.assertEqual(manager.get_current_permission_request("ou_requester"), {})
+                with self.assertRaisesRegex(PortalError, "不支持额外跨楼授权"):
+                    manager.approve_permission_request(
+                        request["request_id"],
+                        scopes=["CAMPUS"],
+                        updated_by="ou_admin",
+                    )
+                # Rejected approval leaves own-floor permissions unchanged.
+                self.assertEqual(manager.scopes_for_open_id("ou_requester"), ["A"])
+                # The pending request is preserved (not consumed by the rejection).
+                pending = manager.get_current_permission_request("ou_requester")
+                self.assertEqual(pending["request_id"], request["request_id"])
+                self.assertEqual(pending["status"], "pending")
 
     def test_portal_auth_permission_request_replaces_pending_request(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -21912,6 +22094,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                # Trusted HR identity: disabled A-floor engineer, restored within
+                # his own floor (valid own-floor restoration, no escalation).
+                self._attach_portal_hr(manager, {
+                    "recDisabledApply": self._person(
+                        "recDisabledApply", "ou_disabled_apply", "禁用后申请", ["A"], "暖通工程师"),
+                })
                 manager.save_permissions_payload(
                     [
                         {
@@ -21924,17 +22112,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     ],
                     updated_by="ou_actor",
                 )
+                self.assertEqual(manager.scopes_for_open_id("ou_disabled_apply"), [])
                 request = manager.create_permission_request(
                     open_id="ou_disabled_apply",
                     name="禁用后申请",
-                    scopes=["E"],
+                    scopes=["A"],
                     reason="恢复权限",
                 )
+                self.assertEqual(request["requested_scopes"], ["A"])
                 manager.approve_permission_request(
                     request["request_id"],
                     updated_by="ou_admin",
                 )
-                self.assertEqual(manager.scopes_for_open_id("ou_disabled_apply"), ["E"])
+                self.assertEqual(manager.scopes_for_open_id("ou_disabled_apply"), ["A"])
 
     def test_portal_auth_permission_request_adds_missing_scopes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -21948,6 +22138,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                # Trusted HR identity: A-floor engineer has own ["A"] only. Adding
+                # B is a cross-building extension that approval must reject, keeping
+                # permissions unchanged and the pending request alive.
+                self._attach_portal_hr(manager, {
+                    "recAddScope": self._person(
+                        "recAddScope", "ou_add_scope", "追加楼栋", ["A"], "暖通工程师"),
+                })
                 manager.save_permissions_payload(
                     [
                         {
@@ -21967,11 +22164,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     reason="临时支援B楼",
                 )
                 self.assertEqual(request["requested_scopes"], ["B"])
-                manager.approve_permission_request(
-                    request["request_id"],
-                    updated_by="ou_admin",
-                )
-                self.assertEqual(manager.scopes_for_open_id("ou_add_scope"), ["A", "B"])
+                with self.assertRaisesRegex(PortalError, "不支持额外跨楼授权"):
+                    manager.approve_permission_request(
+                        request["request_id"],
+                        updated_by="ou_admin",
+                    )
+                self.assertEqual(manager.scopes_for_open_id("ou_add_scope"), ["A"])
+                pending = manager.get_current_permission_request("ou_add_scope")
+                self.assertEqual(pending["request_id"], request["request_id"])
+                self.assertEqual(pending["status"], "pending")
 
     def test_portal_auth_rejects_reserved_meta_open_id(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -22010,6 +22211,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 side_effect=fake_data_path,
             ):
                 manager = PortalAuthManager()
+                self._attach_portal_hr(manager, {"recA": self._person("recA", "ou_a", "A楼", ["A"], "值班员")})
+                manager.sync_directory_permissions(manager._account_directory_provider()["people"].values())
                 session = {
                     "user": {"open_id": "ou_a", "name": "A楼"},
                     "role": "building",
@@ -24593,7 +24796,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "admin", "open_id": ""},
+                "user": {"name": "admin", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["ALL"],
                 "expires_at": time.time() + 3600,
@@ -24647,7 +24850,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = service._state_store
             PortalRuntime.auth_manager._state_store = service._state_store
             PortalRuntime.auth_manager.upsert_permission_user(
-                open_id="ou_workbench",
+                open_id=PORTAL_BUILDING_OPEN_ID_MAP["C"],
                 name="测试用户",
                 role="user",
                 scopes=["C"],
@@ -24655,7 +24858,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 updated_by="test",
             )
             PortalRuntime.auth_manager.upsert_permission_user(
-                open_id="ou_admin",
+                open_id=LI_SHILONG_OPEN_ID,
                 name="admin",
                 role="admin",
                 scopes=["ALL"],
@@ -24683,7 +24886,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions[session_id] = {
                     "session_id": session_id,
-                    "user": {"name": "admin", "open_id": "ou_admin"},
+                    "user": {"name": "admin", "open_id": LI_SHILONG_OPEN_ID},
                     "role": "building",
                     "allowed_scopes": [],
                     "expires_at": time.time() + 3600,
@@ -24833,7 +25036,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             PortalRuntime.state_store = service._state_store
             PortalRuntime.auth_manager._state_store = service._state_store
             PortalRuntime.auth_manager.upsert_permission_user(
-                open_id="ou_admin",
+                open_id=LI_SHILONG_OPEN_ID,
                 name="admin",
                 role="admin",
                 scopes=["ALL"],
@@ -24844,7 +25047,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions[session_id] = {
                     "session_id": session_id,
-                    "user": {"name": "admin", "open_id": "ou_admin"},
+                    "user": {"name": "admin", "open_id": LI_SHILONG_OPEN_ID},
                     "role": "building",
                     "allowed_scopes": [],
                     "expires_at": time.time() + 3600,
@@ -25388,7 +25591,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "测试用户", "open_id": ""},
+                "user": {"name": "测试用户", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["ALL"],
                 "expires_at": time.time() + 3600,
@@ -25651,7 +25854,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "session_id": session_id,
                 "user": {
                     "name": "A楼用户",
-                    "open_id": portal_server_module.BUILDING_OPEN_ID_MAP["A"],
+                    "open_id": LI_SHILONG_OPEN_ID,
                 },
                 "role": "building",
                 "allowed_scopes": ["A"],
@@ -25871,7 +26074,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         PortalRuntime.auth_manager._state_store = PortalRuntime.state_store
         PortalRuntime.auth_manager.upsert_permission_user(
-            open_id="ou_delete",
+            open_id=LI_SHILONG_OPEN_ID,
             name="测试用户",
             role="admin",
             scopes=["ALL"],
@@ -25882,7 +26085,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "测试用户", "open_id": "ou_delete"},
+                "user": {"name": "测试用户", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["ALL"],
                 "expires_at": time.time() + 3600,
@@ -25993,7 +26196,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 now=_test_datetime(8, "09:00"),
             )
         PortalRuntime.auth_manager.upsert_permission_user(
-            open_id="ou_delete_tombstone",
+            open_id=LI_SHILONG_OPEN_ID,
             name="测试用户",
             role="admin",
             scopes=["ALL"],
@@ -26004,7 +26207,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "测试用户", "open_id": "ou_delete_tombstone"},
+                "user": {"name": "测试用户", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["ALL"],
                 "expires_at": time.time() + 3600,
@@ -26084,7 +26287,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         client = TestClient(controller._build_app())
         session = {
-            "user": {"name": "测试用户", "open_id": "ou_delete_recovery"},
+            "user": {"name": "测试用户", "open_id": LI_SHILONG_OPEN_ID},
             "role": "admin",
             "allowed_scopes": ["ALL"],
             "expires_at": time.time() + 3600,
@@ -26147,7 +26350,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_fastapi_ongoing_delete_busy_returns_conflict(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         session = {
-            "user": {"name": "测试用户", "open_id": "ou_delete_busy"},
+            "user": {"name": "测试用户", "open_id": LI_SHILONG_OPEN_ID},
             "role": "admin",
             "allowed_scopes": ["ALL"],
             "expires_at": time.time() + 3600,
@@ -26200,7 +26403,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         client = TestClient(controller._build_app())
         session = {
-            "user": {"name": "测试用户", "open_id": "ou_cleanup_failure"},
+            "user": {"name": "测试用户", "open_id": LI_SHILONG_OPEN_ID},
             "role": "admin",
             "allowed_scopes": ["ALL"],
             "expires_at": time.time() + 3600,
@@ -27348,6 +27551,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             scope="E",
             work_type="maintenance",
             manual=False,
+            can_delete=True,
         )
         self.assertIn('name="target_record_id" value=""', source_only_html)
         self.assertIn(
@@ -27410,6 +27614,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scope="E",
                     work_type=work_type,
                     manual=False,
+                    can_delete=True,
                 )
                 self.assertIn(
                     f'name="target_record_id" value="{target_record_id}"',
@@ -27507,6 +27712,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "expires_at": time.time() + 3600,
                 }
             client = TestClient(controller._build_app())
+            self._attach_portal_hr(PortalRuntime.auth_manager, {
+                "recRequester": self._person("recRequester", "ou_requester", "申请人", ["A"], "值班员")})
+            PortalRuntime.auth_manager._permissions_cache = None
+            PortalRuntime.auth_manager._permissions_cache_until = 0
 
             try:
                 with patch.object(controller, "_proxy_request", side_effect=AssertionError("proxy used")):
@@ -29118,6 +29327,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             work_type="maintenance",
             manual=False,
             is_admin=False,
+            can_delete=True,
         )
         admin_html = _detail_form(
             record=None,
@@ -29126,6 +29336,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             work_type="maintenance",
             manual=False,
             is_admin=True,
+            can_delete=True,
         )
 
         self.assertIn('data-ongoing-delete-mode="remote"', user_html)
@@ -29155,6 +29366,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             work_type="event",
             manual=False,
             is_admin=False,
+            can_delete=True,
         )
 
         self.assertIn('data-local-only="1"', user_html)
@@ -29238,7 +29450,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIn('id="lite-undo-confirm"', html)
         self.assertIn("确认回退这条通告", html)
         self.assertIn("openUndoConfirm(undoButton);", html)
-        self.assertIn("await pollUndoJob(jobId);", html)
+        self.assertIn("if (!(await pollUndoJob(jobId))) return;", html)
+        self.assertIn('id="lite-undo-confirm-status"', html)
         self.assertIn("function undoCreatedTime(value)", html)
         self.assertIn("undoCreatedTime(item.undo_created_at)", html)
         self.assertIn(
@@ -29307,7 +29520,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "record_type_counts": {"change": 1},
                 "ongoing_type_counts": {"change": 1},
             },
-            session={"user": {"name": "测试用户"}, "is_admin": False},
+            session={"can_delete_business": True, "user": {"name": "测试用户"}, "is_admin": False},
             scope="A",
             work_type="change",
             record_id="rec-maintenance-source",

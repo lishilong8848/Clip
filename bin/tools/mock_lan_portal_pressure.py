@@ -10,6 +10,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from unittest.mock import patch
 
 BIN_DIR = Path(__file__).resolve().parents[1]
 if str(BIN_DIR) not in sys.path:
@@ -18,7 +19,7 @@ if str(BIN_DIR) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
-from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, PortalAuthManager  # noqa: E402
+from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, LI_SHILONG_OPEN_ID, PortalAuthManager  # noqa: E402
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
@@ -107,10 +108,11 @@ def run_pressure(
     try:
         PortalRuntime.service = MockPortalService(scenario=scenario)
         PortalRuntime.state_store = LanPortalStateStore(Path(temp_dir.name) / "state.sqlite3")
-        PortalRuntime.auth_manager = PortalAuthManager()
+        with patch("lan_bitable_template_portal.portal_auth.get_data_file_path", side_effect=lambda name: str(Path(temp_dir.name) / name)):
+            PortalRuntime.auth_manager = PortalAuthManager()
         PortalRuntime.auth_manager._state_store = PortalRuntime.state_store
         PortalRuntime.auth_manager.upsert_permission_user(
-            open_id="ou_mock_admin",
+            open_id=LI_SHILONG_OPEN_ID,
             name="mock-admin",
             role="admin",
             scopes=["ALL"],
@@ -120,7 +122,7 @@ def run_pressure(
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "mock-admin", "open_id": "ou_mock_admin"},
+                "user": {"name": "mock-admin", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["ALL"],
                 "expires_at": time.time() + 3600,

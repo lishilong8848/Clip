@@ -45,6 +45,131 @@ class ReleaseReadinessTests(unittest.TestCase):
         ok, offenders = readiness.check_frontend_api_client()
         self.assertTrue(ok, '\n'.join(offenders))
 
+    def test_admin_settings_guard_checks_full_page_not_old_style_comment(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+        def reverted_modal(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            return value.replace('.admin-shell {', '.admin-shell { position: fixed;') if path.name == 'AdminTools.vue' else value
+        with patch.object(Path, 'read_text', reverted_modal):
+            ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertFalse(ok)
+        self.assertTrue(any('不能恢复为浮层' in error for error in errors))
+
+    def test_admin_capability_gate_is_required(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+
+        def replaced_gate(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path.name != 'App.vue':
+                return value
+            # Replace the capability gate with the obsolete literal old guard.
+            value = value.replace(
+                'v-else-if="isAdminSettingsPage && canManageAccounts"',
+                'v-else-if="isAdminSettingsPage && isAdmin"',
+            )
+            return value
+
+        with patch.object(Path, 'read_text', replaced_gate):
+            ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertFalse(ok)
+        self.assertTrue(
+            any('canManageAccounts 门禁' in error for error in errors),
+            '\n'.join(errors),
+        )
+
+    def test_admin_system_admin_binding_is_required(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+
+        def removed_binding(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path.name != 'App.vue':
+                return value
+            # Drop the system-admin binding so L2/L3 accounts could be treated as admins.
+            return value.replace(':system-admin="isAdmin"', ':system-admin="false"')
+
+        with patch.object(Path, 'read_text', removed_binding):
+            ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertFalse(ok)
+        self.assertTrue(
+            any('system-admin 绑定' in error for error in errors),
+            '\n'.join(errors),
+        )
+
+    def test_admin_non_admin_early_return_is_required(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+
+        def removed_early_return(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path.name != 'AdminTools.vue':
+                return value
+            # Remove the gate that stops non-system admins from issuing global requests.
+            return value.replace(
+                "if (props.systemAdmin === false) { tab.value = 'permissions'; return; }",
+                "if (props.systemAdmin === false) { tab.value = 'permissions'; }",
+            )
+
+        with patch.object(Path, 'read_text', removed_early_return):
+            ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertFalse(ok)
+        self.assertTrue(
+            any('非系统管理员提前返回' in error for error in errors),
+            '\n'.join(errors),
+        )
+
+    def test_admin_accounts_functional_branch_is_required(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+
+        def removed_accounts_branch(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path.name != 'AdminTools.vue':
+                return value
+            # Drop the functional v-if=!systemAdmin gate so non-admins lose the accounts UI.
+            return value.replace(
+                '<AdminAccounts v-if="!systemAdmin"',
+                '<AdminAccounts v-if="true"',
+            )
+
+        with patch.object(Path, 'read_text', removed_accounts_branch):
+            ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertFalse(ok)
+        self.assertTrue(
+            any('AdminAccounts 分支' in error for error in errors),
+            '\n'.join(errors),
+        )
+
+    def test_admin_workspace_chrome_gate_is_required(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+
+        def removed_chrome_gate(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            if path.name != 'AdminTools.vue':
+                return value
+            # Remove the v-if=systemAdmin gate so non-admins could reach the admin nav.
+            return value.replace(
+                '      <AdminWorkspaceChrome\n        v-if="systemAdmin"\n',
+                '      <AdminWorkspaceChrome\n',
+            )
+
+        with patch.object(Path, 'read_text', removed_chrome_gate):
+            ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertFalse(ok)
+        self.assertTrue(
+            any('AdminWorkspaceChrome 的 systemAdmin 门禁' in error for error in errors),
+            '\n'.join(errors),
+        )
+
     def test_preflight_shards_run_concurrently_with_isolated_data_and_all_modules(self):
         barrier = threading.Barrier(3, timeout=5)
         calls = []

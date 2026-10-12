@@ -16,7 +16,7 @@
     <p v-if="message" class="saved" role="status"><CheckCircle2 :size="16" />{{ message }}</p>
     <p v-else-if="restartRequired" class="pending" role="status">配置已保存，等待程序重启后生效。</p>
     <footer>
-      <span class="scope-note">飞书开放平台需启用机器人、长连接事件订阅 im.message.receive_v1，并发布应用。</span>
+      <span class="scope-note">飞书开放平台需启用机器人，长连接订阅 im.message.receive_v1 与卡片回调 card.action.trigger，并发布应用。</span>
       <button type="submit" class="primary" :disabled="busy || !loaded || !appId.trim() || ((!hasSecret || appId.trim() !== savedAppId) && !appSecret.trim())"><Loader2 v-if="saving" :size="16" class="spin" /><Save v-else :size="16" />{{ saving ? '保存中…' : '保存配置' }}</button>
     </footer>
   </form>

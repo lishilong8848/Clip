@@ -37,6 +37,10 @@ class MemoryStore:
     def put_document(self, namespace, key, data):
         self.docs[namespace, key] = copy.deepcopy(data)
 
+    def list_documents(self, namespace, *, key_prefix=''):
+        return [{'key': key, 'payload': copy.deepcopy(value)} for (space, key), value in self.docs.items()
+                if space == namespace and key.startswith(key_prefix)]
+
 
 class AssistantTests(unittest.TestCase):
     def setUp(self):

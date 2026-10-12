@@ -23,6 +23,7 @@ from .lighthouse_message_delivery import MESSAGE_INTENT, feishu_delivery_request
 GENERAL_INSTRUCTIONS = """你是灯塔助手，一个使用当前配置模型、并可调用已接入工具的AI智能体，不仅是业务问答入口。使用中文和简洁Markdown。
 “发给我”默认在当前对话中提供文字或下载文件，不是发送飞书。只有本轮明确要求/确认通过飞书发送，才准备飞书发送操作，收件人“我/本人”始终使用当前登录人。用户要求文本或Python文件时调用create_text_file提供实际文件，不执行代码，不只给代码块或声称不存在的文件已生成。
 可以正常聊天、解释知识、写作、翻译、分析问题和提供代码，不要因为问题不属于灯塔业务而拒绝回答。普通问题直接回答，不查无关的业务接口，不附带功能推销。
+需要用户补充必要信息或选择偏好时，用ask_business_question生成可填写的询问，普通问答也可使用；已有明确资料时不多问。用户填写只是补充信息，不代表授权执行操作。
 通用建议不要把特定条件下的经验当作普遍要求。涉及现行安全规范、医疗、法律、金融等高风险建议，优先核对当前权威来源；未核实时只给一般原则并说明限制，不编造或强推数字阈值、强制周期和标准版本。
 用户未说明操作系统及版本时，先给通用方法；提及具体菜单或操作入口须说明适用的系统或前提，不把某一版本的路径当成所有设备共有的入口。
 本轮工具未返回可核实的权威来源时，不提供密码最短长度、固定轮换周期等安全数值；只给一般原则、操作入口和需确认的条件。模型记忆不算本轮核验；即使作为建议、例子或经验，也不写密码位数或轮换天数、月份，不先给数字再加免责声明。
@@ -562,6 +563,7 @@ class LighthouseModel:
         plan = None
         clarification = ""
         clarification_options = []
+        clarification_multiple = False
         unsupported_preparation = ""
         permitted_files = list(turn.get("file_ids", []))
         artifact_source_scopes = set(actor['scopes'])
@@ -1457,11 +1459,10 @@ class LighthouseModel:
                 return {'query_ref': reference, **safe_data(value)}
 
             @agent.tool_plain(sequential=True)
-            async def ask_business_question(question: str, options: list[str] | None = None) -> dict:
-                """Ask for an ambiguous business target or intent and stop this turn without preparing or executing a write."""
-                nonlocal clarification, clarification_options
+            async def ask_business_question(question: str, options: list[str] | None = None, multiple: bool = False) -> dict:
+                """Ask one necessary follow-up with optional choices, for business or general questions; never executes a write."""
+                nonlocal clarification, clarification_options, clarification_multiple
                 await current_actor()
-                require_business_intent()
                 if plan is not None:
                     return {"ok": False, "error": "已有待填写或待确认表单，请在原表单补充，不另行询问或执行。"}
                 choices = options or []
@@ -1473,6 +1474,7 @@ class LighthouseModel:
                     raise ModelRetry("询问不包含内部编号、凭证或个人敏感信息，只使用业务名称等可见信息。")
                 clarification = text
                 clarification_options = [safe_text(choice.strip()) for choice in choices]
+                clarification_multiple = multiple
                 return {"ok": True, "status": "needs_clarification", "question": text, "business_written": False}
 
             @agent.tool_plain(sequential=True)
@@ -1679,7 +1681,7 @@ class LighthouseModel:
             warnings = list(dict.fromkeys(warning for source in sources for warning in source.get("warnings", [])))
             return {"answer": final_answer or text.text, "sources": sources, "_references": references,
                     "_artifact_source_scopes": sorted(artifact_source_scopes),
-                    **({"clarification": {"options": clarification_options}} if clarification and plan is None else {}),
+                    **({"clarification": {"options": clarification_options, **({'multiple': True} if clarification_multiple else {})}} if clarification and plan is None else {}),
                     **({"downloads": turn["downloads"]} if turn.get("downloads") else {}),
                     **({"warnings": warnings} if warnings else {}),
                     **({"file_ids": turn["file_ids"], "output_files": turn["output_files"]} if turn.get("output_files") else {}),

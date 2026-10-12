@@ -119,6 +119,16 @@ class QueryContractTests(unittest.TestCase):
 
 
 class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_general_followup_uses_structured_question_without_business_access(self):
+        async def ask(messages, info):
+            yield {0: DeltaToolCall(name='ask_business_question', json_args=json.dumps({
+                'question': '这篇文章想面向什么读者?', 'options': ['新手', '专业读者'],
+            }))}
+        result, calls, _ = await self.run_question('帮我写一篇科普文章', ask, channel='feishu:oc_fixture')
+        self.assertEqual(result.get('clarification'), {'options': ['新手', '专业读者']})
+        self.assertEqual(calls, [])
+        self.assertNotIn('plan', result)
+
     async def test_plain_language_clarification_also_retains_followup_state(self):
         inquiry = '请问需要删除哪一条维修单?'
         async def stream(messages, info):

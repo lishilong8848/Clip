@@ -250,6 +250,14 @@ class PortalAuthPersistenceTests(unittest.TestCase):
             ):
                 session_id = "disabled-user-session"
                 manager = PortalAuthManager()
+                # A realistic roster identity with HR home E so upsert validates
+                # against the trusted directory (authority comes from roster).
+                manager._account_directory_provider = lambda: {"people": {"recDisabled": {
+                    "id": "recDisabled", "name": "禁用测试用户", "scopes": ["E"],
+                    "building": "E楼", "position": "运维值班员", "selectable": True,
+                    "inactive": False, "needs_setup": False, "password_revision": "rev-1",
+                    "account_nature": "外部账号", "login_ids": ["ou_disabled_session"],
+                }}}
                 manager.upsert_permission_user(
                     open_id="ou_disabled_session",
                     name="禁用测试用户",

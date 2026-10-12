@@ -3,6 +3,9 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer } from 'node:net';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../..', 'output/playwright/navigation');
@@ -18,9 +21,24 @@ for (const filename of await readdir(assets)) {
   }
 }
 assert(moduleAssets.AdminTools && moduleAssets.LighthouseStructuredField);
-const base = 'http://127.0.0.1:19003';
+const reservation = createServer();
+await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
+const port = reservation.address().port;
+await new Promise(resolve => reservation.close(resolve));
+const project = path.resolve(root, '../../..');
+const base = 'http://127.0.0.1:' + port;
+const server = spawn(path.join(project, 'bin/.venv/Scripts/python.exe'), ['-B', 'bin/tools/lighthouse_stream_preview.py'], {
+  cwd: project, windowsHide: true, env: { ...process.env, LIGHTHOUSE_NATIVE_PREVIEW: '0', LIGHTHOUSE_PREVIEW_PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'],
+});
+let log = '';
+server.stdout.on('data', value => log += value); server.stderr.on('data', value => log += value);
 const browser = await chromium.launch({ headless: true });
 try {
+  for (let i = 0; i < 80; i++) {
+    try { if ((await fetch(base + '/api/health')).ok) break; } catch {}
+    if (server.exitCode !== null || i === 79) throw new Error(log || 'isolated preview did not start');
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
   assert.equal((await (await context.request.get(base + '/api/health')).json()).instance_id, 'isolated-lighthouse-stream');
   const page = await context.newPage(), errors = [], calls = [], scripts = new Set();
@@ -94,4 +112,7 @@ try {
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ mode: eager ? 'eager-import-comparison' : 'optimized', ...metrics }));
   await context.close();
-} finally { await browser.close(); }
+} finally {
+  await browser.close();
+  if (server.exitCode === null) { server.kill(); await once(server, 'exit'); }
+}

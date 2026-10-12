@@ -23,6 +23,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from openclaw_service.assistant.lighthouse_ai import AssistantError, safe_text, private_identifier, unprotect_key
+from . import feishu_notice_forms as notice_forms
 from .portal_auth import AUTH_COOKIE_NAME, AUTH_SESSION_TTL_SECONDS
 
 
@@ -179,13 +180,13 @@ class FeishuMessenger:
         client = await self.client()
         # Reply to the originating message; identity and conversation remain per sender.
         text = safe_text(reply.get("text") or '', limit=120000) or "本轮未取得回答，请稍后重新提问。"
-        if len(text) > 3500:
+        if len(text) > 3500 and not reply.get('card'):
             if not reply.get('long_text_file_key'):
                 reply['long_text_file_key'] = await self.upload_file('完整回复.md', text.encode('utf-8'))
                 if checkpoint: await checkpoint()
             text = '完整回复已整理为Markdown文件，请查看附件。涉及业务操作时，请先核对文件中的操作与字段，再回复确认。'
-        card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": text}]}}
-        parts = [('attachment-stopped' if reply.get('attachment_stopped') else 'answer:0', 'interactive', card)]
+        card = reply.get('card') or {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": text}]}}
+        parts = [('attachment-stopped' if reply.get('attachment_stopped') else 'answer:fallback' if reply.get('card_rejected') else 'answer:0', 'interactive', card)]
         if reply.get('long_text_file_key'):
             parts.append(('long-text', 'file', {'file_key': reply['long_text_file_key']}))
         parts.extend(('file:' + file['id'], 'file', {'file_key': file['file_key']}) for file in reply.get('files', []) if file.get('file_key'))
@@ -194,10 +195,17 @@ class FeishuMessenger:
                 continue
             body = {"msg_type": kind, "content": json.dumps(content, ensure_ascii=False),
                 "uuid": hashlib.sha256((message["message_id"] + ":" + part).encode()).hexdigest()[:32]}
-            url = "https://open.feishu.cn/open-apis/im/v1/messages/" + message["message_id"] + "/reply"
+            url = "https://open.feishu.cn/open-apis/im/v1/messages/" + (message.get('reply_to_message_id') or message["message_id"]) + "/reply"
             response = await client.post(url, headers=await self.headers(), json=body)
             data = response.json()
             if data.get("code") != 0:
+                if reply.get('card') and data.get('code') in {230001, 230099}:
+                    reply.pop('card', None)
+                    reply['card_rejected'] = True
+                    reply['text'] = '交互表单暂未显示，原填写仍保留，可继续回复补充。\n\n' + text
+                    if checkpoint:
+                        await checkpoint()
+                    return await self.send(message, reply, checkpoint=checkpoint)
                 if data["code"] in {99991663, 99991664, 99991665}: self.expires = 0
                 raise AssistantError("飞书回复发送未完成，已保留回答稍后重试。", 503)
             reply.setdefault('sent_parts', []).append(part)
@@ -273,10 +281,16 @@ class FeishuAssistant:
                 self.bot_id = data["bot_id"]
                 print("[ClipFlow][FeishuAssistant] 消息接收器已准备，正在连接飞书；等待消息事件", flush=True)
             else:
-                message = parse_message(data, self.config["app_id"], self.bot_id)
+                from .feishu_assistant_questions import parse_question_event
+                from .feishu_notice_cards import parse_card_event
+                message = (parse_question_event(data, self.config['app_id'])
+                           or parse_card_event(data, self.config['app_id'])
+                           or parse_message(data, self.config["app_id"], self.bot_id))
+                if not message and (data.get('header') or {}).get('event_type') == 'card.action.trigger':
+                    return JSONResponse({'ok': False}, status_code=400)
                 if message:
                     added = await asyncio.to_thread(self.inbox.add, message)
-                    if added:
+                    if added and not message.get('kind'):
                         mid = message['message_id']
                         self.reactions[mid] = asyncio.create_task(self._react(message))
                         self.reactions[mid].add_done_callback(lambda _, mid=mid: self.reactions.pop(mid, None))
@@ -352,7 +366,10 @@ class FeishuAssistant:
             result = response.json()
             if not result.get("ok"):
                 raise AssistantError(result.get("error") or "助手暂时不可用，原消息已保留。", response.status_code)
-            return result.get("data") or {}
+            data = result.get('data') or {}
+            if path.startswith('plans/') and isinstance(data, dict) and data.get('id'):
+                request.state.feishu_plan = data
+            return data
         finally:
             # Non-execution contexts are always released, even on HTTP error, so no
             # per-chat authorization is leaked. Confirmation contexts (confirm/retry)
@@ -364,33 +381,51 @@ class FeishuAssistant:
         if message.get("problem"):
             return {"text": "请发送不超过12000字的文字、图片或文件，每次最多10个附件。身份证号、住址不提供查询。"}
         request, actor = await self._request_context(message)
+        conversation = await self._call(request, actor, "conversation")
+        clarification_id = None
+        if message.get('kind') == 'question_action':
+            from .feishu_assistant_questions import read_question_reply
+            question, clarification_id = await asyncio.to_thread(read_question_reply, self, message, actor, conversation)
+            message = {**message, 'question': question}
+            request.state.feishu_question = question
+        def direct_reply(reply):
+            return {**reply, 'actor_id': actor['id'], 'conversation_id': conversation.get('conversation_id'),
+                    'sync_history': True}
+        if message.get('kind') == 'card_action':
+            from .feishu_notice_cards import handle_card
+            return direct_reply(await handle_card(self, message, request, actor, conversation))
         from .assistant_read_consent import ReadConsent
         consent = ReadConsent(self.runtime.state_store)
         if message['question'].strip() == '取消查询':
             await asyncio.to_thread(consent.cancel, actor)
-            return {'text': '本会话的查询授权已取消，未开始新的数据读取。'}
+            return direct_reply({'text': '本会话的查询授权已取消，未开始新的数据读取。'})
         confirmed = re.fullmatch(r'确认查询\s+([a-f0-9]{8})', message['question'].strip())
         if confirmed:
             original = await asyncio.to_thread(consent.approve, actor, confirmed[1])
             message = {**message, 'question': original}
             request.state.feishu_question = original
-        conversation = await self._call(request, actor, "conversation")
         from .feishu_assistant_files import handle_files
         file_reply = await handle_files(self, message, request, actor, conversation)
         if file_reply and 'text' in file_reply:
-            return file_reply
+            return direct_reply(file_reply)
         file_ids = file_reply.get('file_ids', []) if file_reply else []
         if file_reply and file_reply.get('question'):
             message = {**message, 'question': file_reply['question']}
             request.state.feishu_question = message['question']
         question = message["question"].strip()
         plans = {t['plan'].get('id', str(i)): t['plan'] for i, t in enumerate(conversation.get('turns', [])) if t.get('plan')}
-        plan_reply = await self._feishu_plan_command(message, request, actor, plans) if not file_ids else None
+        plan_reply = await self._feishu_plan_command(message, request, actor, plans) if not file_ids and not clarification_id else None
         if plan_reply is not None:
-            return {"text": safe_text(plan_reply, limit=30000)}
+            reply = direct_reply({"text": safe_text(plan_reply, limit=30000)})
+            selected, _ = self._resolve_plan(message, plans, None, actor)
+            current = getattr(getattr(request, 'state', None), 'feishu_plan', None) or selected
+            if current and current.get('id'):
+                await self._attach_form_card(reply, message, request, actor, conversation, current)
+            return reply
         operation = "feishu_" + hashlib.sha256(message["message_id"].encode()).hexdigest()[:40]
         data = await self._call(request, actor, "chat", {"conversation_id": conversation["conversation_id"], "operation_id": operation,
-            "attempt_id": operation, "question": question, "file_ids": file_ids})
+            "attempt_id": operation, "question": question, "file_ids": file_ids,
+            **({'clarification_operation_id': clarification_id} if clarification_id else {})})
         turn = next((turn for turn in data.get("turns", []) if turn.get("operation_id") == operation), None)
         if not turn: raise AssistantError("助手没有返回本条消息的处理结果，请稍后重试。", 503)
         text = turn.get("answer") or turn.get("error") or "本轮没有生成有效回答，请重新提问。"
@@ -403,10 +438,49 @@ class FeishuAssistant:
         company_sources = [source for source in turn.get('sources', []) if source.get('kind') == 'company_knowledge']
         if company_sources:
             text += '\n\n公司资料来源：\n' + '\n'.join(f"[{source['number']}] {source['title']}" for source in company_sources)
-        return {"text": safe_text(text, limit=120000), 'actor_id': actor['id'],
+        from .feishu_assistant_questions import prepare_question_card
+        try:
+            card = await asyncio.to_thread(prepare_question_card, self, message, actor, conversation, turn)
+        except (AssistantError, OSError, sqlite3.Error, ValueError) as exc:
+            logging.warning('Feishu question form unavailable: %s', type(exc).__name__)
+            card = None
+        reply = {"text": safe_text(text, limit=120000), **({'card': card} if card else {}), 'actor_id': actor['id'],
                 'conversation_id': conversation['conversation_id'],
                 'files': [{'id': file['id'], 'name': file['name']} for file in ([] if pending_reads else turn.get('output_files', []))
                           if isinstance(file, dict) and re.fullmatch('[a-f0-9]{32}', str(file.get('id', '')))]}
+        if turn.get('plan') and not pending_reads:
+            await self._attach_form_card(reply, message, request, actor, conversation, turn['plan'])
+        return reply
+
+    async def _attach_form_card(self, reply, message, request, actor, conversation, plan):
+        if plan.get('status') not in {'needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'}:
+            return
+        try:
+            from .feishu_notice_cards import prepare_card
+            result = await prepare_card(self, message, actor, conversation, plan)
+            if result.get('card'):
+                reply['card'] = result['card']
+        except Exception as exc:
+            logging.warning('Feishu form unavailable, original reply retained: %s', type(exc).__name__)
+
+    async def _sync_reply_history(self, message, reply):
+        if not reply.get('sync_history'):
+            return
+        request, actor = await self._request_context(message)
+        if actor['id'] != reply.get('actor_id'):
+            raise AssistantError('人员身份已变化，本条回复未同步。', 403)
+        try:
+            await self._call(request, actor, 'channel-replies', {
+                'conversation_id': reply['conversation_id'],
+                'operation_id': 'feishu_' + hashlib.sha256(message['message_id'].encode()).hexdigest()[:40],
+                'question': message['question'], 'answer': reply['text'],
+            })
+        except AssistantError as exc:
+            if exc.status != 409:
+                raise
+            # A deliberate clear must not restore an older channel reply.
+        reply.pop('sync_history', None)
+        await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
 
     async def _reply_file_context(self, message, reply):
         request, actor = await self._request_context(message)
@@ -451,7 +525,7 @@ class FeishuAssistant:
             # contains a colon must fall through to the normal chat and never be
             # mistaken for a field write.
             return None
-        key = (actor.get("id") or message["sender_id"], message["chat_id"])
+        key = actor.get("id") or message["sender_id"]
         select = re.fullmatch(r"选择计划\s*(\d+)", question)
         if select:
             all_ids = list(plans)
@@ -516,12 +590,36 @@ class FeishuAssistant:
             return "已取消该待补充或待确认操作，未提交新的业务。"
 
         if _looks_like_field_lines(question):
-            plan, prompt = self._resolve_plan(message, plans, {"needs_input"}, actor)
+            # Awaiting-confirmation plans can also be edited (returned to
+            # needs_input by the Agent). Detection must consider native notice
+            # and notice_sop leaves in addition to the simple top-level fields.
+            plan, prompt = self._resolve_plan(message, plans,
+                                              {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}, actor)
             if plan is not None:
                 names = [m.group(1).strip() for line in (question or "").splitlines()
                          for m in [re.fullmatch(r"([^:：]{1,120})[:：].*", line.strip())] if m]
-                recognized = any(_resolve_field(plan.get("fields", []), name) != (None, None) for name in names)
-                if not recognized:
+
+                def _is_plan_field(name):
+                    field, error = _resolve_field(plan.get("fields", []), name)
+                    if field is not None or error:
+                        return True  # a real field line, even if ambiguous
+                    try:
+                        if notice_forms.resolve_notice_leaf(plan.get("fields", []), name) is not None:
+                            return True
+                    except AssistantError:
+                        return True  # clearly a notice leaf line, ambiguity surfaced on edit
+                    # A name under a native field's qualified prefix (even with no
+                    # resolvable child) is still a planned edit and must be denied,
+                    # not silently treated as prose.
+                    for f in (plan.get("fields") or []):
+                        if not (notice_forms.is_native_notice(f) or notice_forms.is_native_notice_sop(f)):
+                            continue
+                        fname = str(f.get("name") or "")
+                        if (name or "") == fname or (name or "").startswith(fname + ".") or (fname + ".") in (name or ""):
+                            return True
+                    return False
+
+                if not any(_is_plan_field(name) for name in names):
                     return None  # prose with a colon, not a field edit
                 return await self._fill_fields(message, request, actor, plans)
             if prompt:
@@ -534,11 +632,8 @@ class FeishuAssistant:
         if len(matches) == 1:
             return matches[0], None
         if len(matches) > 1:
-            # The selection hint is ephemeral, but ownership is always rechecked:
-            # keying by the stable actor identity keeps one person's pick from
-            # leaking into another user's conversation, and we only honour it in
-            # this exact chat and against the current candidate plans.
-            key = ((actor or {}).get("id") or message["sender_id"], message["chat_id"])
+            # Selection follows the person; current plan ownership is still rechecked.
+            key = (actor or {}).get("id") or message["sender_id"]
             picked_id = self.picked_plan.get(key)
             for plan in matches:
                 if picked_id is not None and plan.get("id") == picked_id:
@@ -546,14 +641,45 @@ class FeishuAssistant:
             return None, _choose_text(plans)
         return None, None
 
+    async def _plan_to_needs_input(self, request, actor, plan):
+        """Return an awaiting-confirmation plan to needs_input (idempotent).
+
+        The real ``PortalAgent.amend`` only accepts direct PATCH values while the
+        plan is ``needs_input``, and ``PortalAgent.field_options`` returns 409 for
+        any other status.  Reusing ``action: \"edit\"`` (with version anti-replay and
+        ownership enforcement from ``_call``) is the same path the web edit uses.
+        """
+        if plan.get("status") in {"awaiting_confirmation", "awaiting_second_confirmation"}:
+            return await self._call(request, actor, f"plans/{plan['id']}",
+                                    {"version": plan["version"], "action": "edit"}, method="PATCH")
+        return plan
+
     async def _show_options(self, message, request, actor, plans, field_txt, search):
-        plan, prompt = self._resolve_plan(message, plans, {"needs_input"}, actor)
+        plan, prompt = self._resolve_plan(message, plans,
+                                              {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}, actor)
         if plan is None:
             return prompt if prompt else "当前没有待补充字段的操作计划。"
+        plan = await self._plan_to_needs_input(request, actor, plan)
         fields = plan.get("fields", [])
         field, error = _resolve_field(fields, field_txt)
         if field is None:
+            # Native notice/SOP leaves are resolved as text names (child or SOP leaf).
+            try:
+                leaf_target = notice_forms.resolve_notice_leaf(fields, field_txt)
+            except AssistantError as exc:
+                return str(exc)
+            if leaf_target is not None:
+                parent_field, child = leaf_target
+                if notice_forms.is_native_notice(parent_field):
+                    return self._native_leaf_options(parent_field, child, search)
+                return await self._show_notice_sop_options(request, actor, plan, parent_field, search)
             return error or ("未找到字段“" + safe_text(field_txt, limit=120) + "”。可用字段：" + _available_fields_text(fields))
+        if error:
+            return error
+        if notice_forms.is_native_notice(field):
+            return "字段“" + safe_text(field["name"], limit=120) + "”为通告整体对象；可选看其中叶子项的候选选项，例如“查看选项 " + field["name"] + ".楼栋”。"
+        if notice_forms.is_native_notice_sop(field):
+            return await self._show_notice_sop_options(request, actor, plan, field, search)
         inline = field.get("options") or []
         if inline and field.get("type") in {"select", "multiselect", "radio"} and not field.get("options_source"):
             return _options_text(field, _filter_options(inline, search), search)
@@ -569,47 +695,200 @@ class FeishuAssistant:
         return _options_text(updated, options, search,
                              server_partial=bool(updated.get("options_has_more")))
 
+    @staticmethod
+    def _native_leaf_options(parent_field, child, search):
+        if notice_forms.field_protected(parent_field):
+            return ("字段“" + safe_text(parent_field.get("name"), limit=120)
+                    + "”为只读/隐藏字段，不能通过飞书文本查看/修改，请在灯塔原业务页面核对。")
+        if child.get("hidden"):
+            return "该项为内部只读/隐藏字段，不暴露给飞书文本填写，请在灯塔原业务页面核对。"
+        if notice_forms.child_protected(child):
+            return "该项为只读字段，不需要也无法在飞书内填写。"
+        if not notice_forms.child_supported(child):
+            return "该项为复杂内容，请在灯塔原业务页面填写。"
+        options = child.get("options") or []
+        if child.get("type") not in {"select", "radio", "multiselect"} or child.get("options_source") or not options:
+            return ("该填写项没有独立候选选项，请按上一条查看结果中的字段类型直接填写（可用“查看选项 "
+                    + safe_text(parent_field.get("name"), limit=120) + "”查看整体）。")
+        return notice_forms.leaf_options_line(parent_field, child, search)
+
+    async def _show_notice_sop_options(self, request, actor, plan, field, search):
+        plan = await self._plan_to_needs_input(request, actor, plan)
+        name = str(field.get("name") or "step0.notice_sop")
+        params = {"field": name}
+        if search:
+            params["scope"] = search
+        result = await self._call(request, actor, f"plans/{plan['id']}/options", params=params)
+        updated = next((item for item in result.get("fields", []) if item.get("name") == name), None) or field
+        lines = ["字段 **" + safe_text(name, limit=120) + "**（SOP/人员选择）已加载:（楼栋 "
+                 + safe_text(str(updated.get("directory_scope") or search or "（未限定）"), limit=40) + "）"]
+        sops = updated.get("sops") or []
+        if not sops:
+            lines.append("（该楼栋暂无可用 SOP）")
+        for sop in sops:
+            blocked = "（不可用：" + safe_text(str(sop.get("blocked_reason") or "已停用"), limit=40) + "）" if sop.get("blocked_reason") else ""
+            lines.append("·  SOP " + safe_text(str(sop.get("name") or sop.get("sop_id")), limit=80)
+                         + "（" + notice_forms._mode_label(sop.get("mode")) + "）" + blocked)
+        people = updated.get("people") or []
+        if people:
+            lines.append("可选人员：")
+            lines.append("·  " + "、".join(
+                safe_text(str(p.get("name") or p.get("label") or p.get("record_id")), limit=40)
+                for p in people[:30]))
+        scopes = updated.get("scopes") or []
+        if scopes:
+            lines.append("可选楼栋：" + "、".join(
+                safe_text(scope, limit=20) for scope in notice_forms.scope_display_names(scopes)[:30]))
+        lines.append("")
+        lines.append("填写方式：")
+        lines.append("  " + name + ".不使用工单：是/否")
+        lines.append("  " + name + ".楼栋：[楼栋代码]")
+        lines.append("  " + name + ".SOP：[SOP名称]")
+        lines.append("  " + name + ".操作人：[人员姓名]")
+        lines.append("  " + name + ".审核人：[人员姓名]")
+        lines.append("  " + name + ".运行：[起点#→终点#]（轮巡可多组，调整用“起点#→终点#／调整单元”）")
+        lines.append("未发送“不使用工单：是”时不会跳过工单确认，服务端仍会校验选择。")
+        return "\n".join(lines)
+
     async def _fill_fields(self, message, request, actor, plans):
-        plan, prompt = self._resolve_plan(message, plans, {"needs_input"}, actor)
+        statuses = {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}
+        plan, prompt = self._resolve_plan(message, plans, statuses, actor)
         if plan is None:
             return prompt if prompt else "当前没有待补充字段的操作计划。"
-        fields = plan.get("fields", [])
-        entries = []
-        for line in [item.strip() for item in (message["question"] or "").splitlines() if item.strip()]:
-            match = re.fullmatch(r"([^:：]{1,120})[:：](.*)", line)
-            name = (match.group(1).strip() if match else "")
-            if not match:
-                return "未识别字段“" + safe_text(name or line, limit=120) + "”。请逐行回复“字段名：值”。可用字段：" + _available_fields_text(fields)
-            field, error = _resolve_field(fields, name)
-            if field is None:
-                return error or ("未识别字段“" + safe_text(name, limit=120) + "”。可用字段：" + _available_fields_text(fields))
-            if _field_protected(field):
-                return "字段“" + safe_text(name, limit=120) + "”为只读字段，不能通过飞书文本修改，请在灯塔原业务页面核对。"
-            entries.append((field, match.group(2).strip()))
-        if not entries:
+
+        def _parse(fields):
+            entries = []
+            for line in [item.strip() for item in (message["question"] or "").splitlines() if item.strip()]:
+                match = re.fullmatch(r"([^:：]{1,120})[:：](.*)", line)
+                name = (match.group(1).strip() if match else "")
+                if not match:
+                    return None, ("未识别字段“" + safe_text(name or line, limit=120)
+                                  + "”。请逐行回复“字段名：值”。可用字段：" + _available_fields_text(fields))
+                raw = match.group(2).strip()
+                field, error = _resolve_field(fields, name)
+                if field is not None:
+                    if notice_forms.is_native_notice(field) or notice_forms.is_native_notice_sop(field):
+                        return None, ("字段“" + safe_text(name, limit=120) + "”为整体对象，请按上一条展示的叶子字段名填写（如“"
+                                      + name + ".标题：xxx”）。")
+                    if _field_protected(field):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”为只读字段，不能通过飞书文本修改，请在灯塔原业务页面核对。")
+                    if not _feishu_supported_type(field):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”属于复杂表单（选人/签名/附件/对象等），飞书文本无法安全填写。请在灯塔原业务页面填写提交，飞书内保持不变。")
+                    entries.append(("simple", field, None, raw))
+                    continue
+                if error:
+                    return None, error
+                try:
+                    leaf_target = notice_forms.resolve_notice_leaf(fields, name)
+                except AssistantError as exc:
+                    return None, str(exc)
+                if leaf_target is None:
+                    return None, ("未识别字段“" + safe_text(name, limit=120)
+                                  + "”。可用字段：" + _available_fields_text(fields))
+                parent_field, child = leaf_target
+                if notice_forms.is_native_notice(parent_field):
+                    # Defect #1: a protected parent field blocks ALL leaf edits,
+                    # even when an individual child looks writable.
+                    if notice_forms.field_protected(parent_field):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”所属的父字段为只读/隐藏字段，不能通过飞书文本修改，请在灯塔原业务页面核对。")
+                    if child.get("hidden"):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”为内部只读字段，不能通过飞书文本修改，请在灯塔原业务页面核对进度。")
+                    if notice_forms.child_protected(child):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”为只读字段，不能通过飞书文本修改，请在灯塔原业务页面核对。")
+                    if not notice_forms.child_supported(child):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”为复杂内容，飞书文本无法安全填写，请在灯塔原业务页面填写。")
+                    entries.append(("native_notice", parent_field, child, raw))
+                else:
+                    # native_sop parent protection too: a read-only/hidden
+                    # native SOP field can never be edited through leaf lines.
+                    if notice_forms.field_protected(parent_field):
+                        return None, ("字段“" + safe_text(name, limit=120)
+                                      + "”所属的父字段为只读/隐藏字段，不能通过飞书文本修改，请在灯塔原业务页面核对。")
+                    entries.append(("native_sop", parent_field, child, raw))
+            if not entries:
+                return None, None
+            return entries, None
+
+        # Pass 1: validate every line against the CURRENT plan before any
+        # action=edit, so a typo/unknown/protected field never silently strips
+        # an awaiting-confirmation preview.
+        entries, error = _parse(plan.get("fields", []))
+        if error:
+            return error
+        if entries is None:
             return None
-        if len({id(field) for field, _ in entries}) != len(entries):
-            return "填写的字段有重复，请每行只写一个字段。"
-        unsupported = [field for field, _ in entries if not _feishu_supported_type(field)]
-        if unsupported:
-            return "字段 " + "、".join(_field_label(field) for field in unsupported[:20]) + \
-                   " 属于复杂表单（选人/签名/附件/对象等），飞书文本无法安全填写。请在灯塔原业务页面填写提交，飞书内保持不变。"
+
+        returned_to_input = False
+        if plan["status"] in {"awaiting_confirmation", "awaiting_second_confirmation"}:
+            # Field lines are valid; only now is it safe to return the plan to
+            # needs_input so the Agent accepts the actual PATCH values.
+            plan = await self._plan_to_needs_input(request, actor, plan)
+            returned_to_input = True
+            # Re-parse against the refreshed plan (same names, refreshed data).
+            entries, error = _parse(plan.get("fields", []))
+            if error:
+                return error
+            if entries is None:
+                return None
+
+        seen = set()
+        for kind, field, child, _ in entries:
+            if kind == "simple":
+                leaf_id = ""
+            else:
+                leaf_id = str(child.get("path")) if kind == "native_notice" else str(child.get("key"))
+            identity = (kind, field.get("name"), leaf_id)
+            if identity in seen:
+                if kind == "simple":
+                    return "填写的字段有重复，请每行只写一个字段。"
+                return ("填写的叶子项“" + safe_text((child.get("label") or child.get("path") or child.get("key")), limit=80)
+                        + "”有重复，请每行只写一项。")
+            seen.add(identity)
         values = {}
-        for field, raw in entries:
-            try:
-                values[field["name"]] = _typed_value(field, raw)
-            except AssistantError as exc:
-                return "字段“" + _field_label(field) + "”： " + str(exc)
-        for field, raw in entries:
-            if not field.get("options_source"):
+        try:
+            for kind, field, child, raw in entries:
+                if kind == "simple":
+                    values.setdefault(field["name"], _typed_value(field, raw))
+                elif kind == "native_notice":
+                    typed = notice_forms.typed_child_value(child, raw)
+                    parent_value = values.setdefault(field["name"], dict(field))
+                    # Merge into the parent placeholder built separately below.
+                    parent_value.setdefault("__edits__", {})[child["path"]] = typed
+                else:
+                    sop_value = values.setdefault(field["name"], dict(field))
+                    sop_value.setdefault("__sop_edits__", {})[child["key"]] = raw
+        except AssistantError as exc:
+            return str(exc)
+        # Validate simple option-source fields against their loaded options.
+        for kind, field, child, raw in entries:
+            if kind != "simple" or not field.get("options_source"):
                 continue
             options = {str(option.get("value")) for option in (field.get("options") or [])}
             chosen = [values[field["name"]]] if field.get("type") != "multiselect" else list(values[field["name"]])
             if not options or not all(item in options for item in chosen):
                 return "字段“" + _field_label(field) + "”的候选项尚未加载，请先发送“查看选项 " + field["name"] + "”，再填写。"
+        # Convert native placeholders into real parent objects.
+        final = {}
+        try:
+            for key, value in values.items():
+                if isinstance(value, dict) and "__edits__" in value:
+                    final[key] = notice_forms.build_native_notice_value(value, value["__edits__"])
+                elif isinstance(value, dict) and "__sop_edits__" in value:
+                    final[key] = notice_forms.build_notice_sop_value(value, value["__sop_edits__"])
+                else:
+                    final[key] = value
+        except AssistantError as exc:
+            return str(exc)
         result = await self._call(request, actor, "plans/" + plan["id"],
-                                  {"version": plan["version"], "values": values}, method="PATCH")
-        return "已按你的填写更新操作计划（未执行）。\n\n" + self.plan_text(result)
+                                  {"version": plan["version"], "values": final}, method="PATCH")
+        note = ("已现将待确认计划返回到可编辑状态，" if returned_to_input else "")
+        return "已按你的填写更新操作计划（未执行）。" + note + "\n\n" + self.plan_text(result)
 
     def _no_pending_hint(self, plans):
         awaiting = any(plan.get("status") in {"awaiting_confirmation", "awaiting_second_confirmation"} for plan in plans.values())
@@ -622,6 +901,11 @@ class FeishuAssistant:
 
     @staticmethod
     def _fields_text(plan):
+        native = any(notice_forms.is_native_notice(field) or notice_forms.is_native_notice_sop(field)
+                     for field in plan.get("fields", [])[:40])
+        if native:
+            text, _ = notice_forms.full_native_fields_text(plan)
+            return text
         lines = ["**" + safe_text(str(plan.get("title") or "业务操作"), limit=120)
                  + "**（待补充字段，版本 " + str(plan.get("version")) + "）"]
         fields = plan.get("fields", [])
@@ -709,13 +993,14 @@ class FeishuAssistant:
                 pending_reaction = self.reactions.get(message['message_id'])
                 if pending_reaction:
                     await asyncio.shield(pending_reaction)
-                else:
+                elif not message.get('kind'):
                     await self._react(message)
                 try: reply = await self.answer(message)
                 except Exception as exc:
                     reply = {"text": safe_text(str(exc)) if isinstance(exc, AssistantError) else "助手暂时无法处理本条消息，请稍后重新提问；未自动重发业务。"}
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "reply", reply)
             try:
+                await self._sync_reply_history(message, reply)
                 await self._prepare_reply_files(message, reply)
                 async def checkpoint():
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
@@ -961,7 +1246,8 @@ def _resolve_field(fields, raw_name):
 
 
 def _field_protected(field):
-    return bool(field.get("readonly") or field.get("read_only") or field.get("disabled"))
+    return bool(field.get("readonly") or field.get("read_only") or field.get("disabled")
+                or field.get("hidden") or field.get("只读"))
 
 
 def _field_label(field):

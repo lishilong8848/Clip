@@ -15,6 +15,13 @@ def normalized_actions(value):
     return OP_PATTERN.findall(re.sub(r"(?<!电)转测试电", "正式电转测试电", value))
 
 
+def empty_operation_groups(payload):
+    groups = payload.get("groups")
+    return isinstance(groups, list) and not any(
+        any(text_value(group.get(key)) for key in ("action", "actual", "expected"))
+        for group in groups if isinstance(group, dict))
+
+
 def source_sheet(op,formats):
     names=[f["sheet"] for f in formats]
     if op.get("source") in names: return op["source"]

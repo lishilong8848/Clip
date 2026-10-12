@@ -15,7 +15,7 @@ from fastapi import Request, Response
 
 
 class WorkbenchShellTests(unittest.IsolatedAsyncioTestCase):
-    async def call_route(self, path, query='', authenticated=True, ongoing=None, detail_only=False):
+    async def call_route(self, path, query='', authenticated=True, ongoing=None, detail_only=False, can_delete=True):
         session = {'user': {'open_id': 'fixture', 'name': 'Fixture'}, 'role': 'admin'} if authenticated else None
         renderer = Mock(return_value='<html><body><main class="workspace">native</main></body></html>')
         service = SimpleNamespace(query_records=Mock(return_value={'records': [], 'ongoing': []}))
@@ -26,7 +26,8 @@ class WorkbenchShellTests(unittest.IsolatedAsyncioTestCase):
             _cached_service_payload=lambda _key, loader: loader(),
             _portal_error_response=lambda error, **_: Response(str(error), status_code=500))
         runtime = SimpleNamespace(service=service, _ongoing_items_marker=lambda _: 'fixture', auth_manager=SimpleNamespace(
-            default_scope=lambda _: 'E', filter_scope_options=lambda options, _: options, is_admin=lambda _: True))
+            default_scope=lambda _: 'E', filter_scope_options=lambda options, _: options, is_admin=lambda _: True,
+            account_profile=lambda _: {'can_delete_business': can_delete}))
         tree = ast.parse((Path(__file__).parent / 'clipflow_backend/main.py').read_text(encoding='utf-8-sig'))
         node = copy.deepcopy(next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == 'workbench_lite_page'))
         node.decorator_list = []
@@ -63,6 +64,12 @@ class WorkbenchShellTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'class="workspace"', response.body)
         renderer.assert_called_once(); controller._static_file_response.assert_not_called()
+
+    async def test_ordinary_account_native_page_receives_no_delete_capability(self):
+        response, _, renderer, _, _ = await self.call_route('/api/workbench/lite-fragment',
+            'scope=E&work_type=maintenance', can_delete=False)
+        self.assertEqual(response.status_code, 200, response.body)
+        self.assertFalse(renderer.call_args.kwargs['session']['can_delete_business'])
 
     async def test_ongoing_detail_does_not_requery_full_workbench(self):
         for kind in ['maintenance', 'change', 'repair', 'power', 'polling', 'adjust']:

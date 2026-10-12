@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .personnel_password_login import PasswordLoginError
 from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
+from .account_policy import CATEGORY_OPTIONS, account_allowed, categorize_position
 
 
 def revision(value):
@@ -24,7 +25,7 @@ class AccountManagement:
         self.directory = directory
         self.auth, self.store = directory.auth, directory.store
 
-    def accounts(self, refresh=False):
+    def accounts(self, refresh=False, actor=None):
         warning = ""
         try:
             snapshot = self.directory.directory(force=refresh)
@@ -39,19 +40,34 @@ class AccountManagement:
         for oid, scope in duties.items():
             by_id.setdefault(oid, {"name": self.auth.scope_label(scope) + "值班账号", "role": "building",
                                   "scopes": [], "enabled": True, "locked": False})
+        people = snapshot.get("people", {})
+        # Only an explicit inactive flag on the current personnel cache means
+        # "departed". A `removed_identities` tombstone merely records a row being
+        # removed from the directory and is deliberately not treated as a
+        # departure, so a matching permission record may still surface as legacy.
+        active_ids = {oid for person in people.values() if not person.get("inactive") for oid in (person.get("login_ids") or [])}
+        departed_ids = {oid for person in people.values() if person.get("inactive") for oid in (person.get("login_ids") or [])}
+        # A departed person's known login_ids must not resurface as legacy
+        # permission rows. If the same open_id also belongs to a CURRENT active
+        # record, that active personnel remains displayed (the id is in
+        # active_ids). Shared duty accounts are always retained regardless.
+        suppressed_legacy = departed_ids - active_ids
         activity = {row["key"]: row["payload"] for row in self.store.list_documents("account_last_login")}
         items, seen = [], set()
-        for person in snapshot.get("people", {}).values():
+        for person in people.values():
             oid = next(iter(person.get("login_ids") or []), "")
-            if oid in duties:
+            if oid in duties or person.get("inactive"):
                 continue
             cfg = by_id.get(oid, {})
             nature = str(person.get("account_nature") or "").strip()
             blocked = person.get("disabled_reason") or self.auth.directory_block_reason(oid)
+            position = str(person.get("position") or "").strip()
             items.append({"id": person["id"], "record_id": person["id"], "open_id": oid,
                           "name": person["name"], "employee_no": person.get("employee_no", ""),
                           "kind": "vnet" if nature.upper() == "VNET" else "external" if nature else "unknown",
-                          "account_nature": nature, "own_scopes": person.get("scopes", []),
+                          "account_nature": nature, "position": position,
+                          "category": categorize_position(position),
+                          "own_scopes": person.get("scopes", []),
                           "role": cfg.get("role", "building"), "scopes": cfg.get("scopes", []),
                           "directory_scopes": cfg.get("directory_scopes", []),
                           "enabled": cfg.get("enabled", True), "authorized": bool(cfg),
@@ -64,17 +80,55 @@ class AccountManagement:
         for oid, cfg in by_id.items():
             if oid in seen and oid not in duties:
                 continue
+            if oid not in duties and oid in suppressed_legacy:
+                continue
             items.append({"id": "account:" + oid, "record_id": "", "open_id": oid,
                           "name": cfg["name"], "employee_no": "", "kind": "duty" if oid in duties else "legacy",
                           "account_nature": "值班账号" if oid in duties else "历史账号",
+                          "position": "", "category": "duty" if oid in duties else "other",
                           "own_scopes": [duties[oid]] if oid in duties else [],
                           "role": cfg["role"], "scopes": cfg["scopes"], "enabled": cfg["enabled"],
                           "directory_scopes": cfg.get("directory_scopes", []), "authorized": oid in raw_permissions,
                           "locked": cfg["locked"], "blocked_reason": self.auth.directory_block_reason(oid),
                           "can_set_password": False, "password_set": False,
                           "revision": revision(raw_permissions.get(oid)), "last_login": activity.get(oid, {}).get("at")})
+        profile = self.auth.account_profile(actor.get("open_id")) if actor is not None else None
+        for item in items:
+            target = self.auth.account_profile(item["open_id"])
+            item["level"] = target["level"]
+            item["category"] = target["category"]
+            item["scopes"] = target["scope_rules"]
+            item["role"] = "admin" if target["level"] in {"L0", "L1"} else "building"
+            item["can_edit"] = not profile or account_allowed(profile, item, "edit")
+            item["can_delete"] = bool(profile and account_allowed(profile, item, "delete") and item["open_id"] != actor.get("open_id"))
+            item["can_set_password"] = item["can_set_password"] and item["can_edit"]
+        if profile:
+            items = [item for item in items if account_allowed(profile, item, "view") or account_allowed(profile, item, "edit")]
+            if profile["level"] == "L2":
+                # This is an edit selector, not a general personnel directory or activity report.
+                for item in items:
+                    for key in ("last_login", "password_set", "account_nature", "employee_no"):
+                        item.pop(key, None)
+        options = permissions["scope_options"]
+        if profile and profile["level"] == "L3":
+            options = [option for option in options if option["value"] == profile["home_scope"]]
         return {"items": sorted(items, key=lambda x: (x["kind"] != "duty", x["name"], x["id"])),
-                "scope_options": permissions["scope_options"], "loaded_at": snapshot.get("loaded_at"), "warning": warning}
+                "scope_options": options, "category_options": CATEGORY_OPTIONS,
+                "policy": profile or {},
+                "loaded_at": snapshot.get("loaded_at"), "warning": warning}
+
+    def check(self, actor, item, action):
+        profile = self.auth.account_profile(actor.get("open_id"))
+        target = self.auth.account_profile(item.get("open_id"))
+        current = {**item, "category": target["category"], "level": target["level"],
+                   "own_scopes": [target["home_scope"]] if target["home_scope"] else [],
+                   "role": "admin" if target["level"] in {"L0", "L1"} else "building"}
+        if not account_allowed(profile, current, action):
+            self.store.record_business_operation_audit(domain="accounts", action=action, status="denied",
+                actor_open_id=actor.get("open_id", ""), actor_name=actor.get("name", ""),
+                target_record_id=item.get("id", ""), metadata={"level": profile["level"]})
+            raise PasswordLoginError("当前账号无权管理此人员，未修改任何数据。", 403)
+        return profile
 
     def update(self, payload, actor):
         if not isinstance(payload, dict) or set(payload) != {"changes"} or not isinstance(payload["changes"], list) or not 1 <= len(payload["changes"]) <= 300:
@@ -100,14 +154,17 @@ class AccountManagement:
                 seen.add(oid)
                 if item["locked"]:
                     raise PasswordLoginError("固定管理员权限不可修改。", 403)
+                self.check(actor, item, "edit")
                 if change["revision"] != revision(users.get(oid)):
                     raise PasswordLoginError("该账号权限已变化，请刷新后重新确认。", 409)
                 if change["role"] not in ("admin", "building") or type(change["enabled"]) is not bool or not isinstance(change["scopes"], list):
                     raise PasswordLoginError("角色或启用状态无效。")
                 if any(not isinstance(scope, str) or scope not in valid_scopes for scope in change["scopes"]):
                     raise PasswordLoginError("包含无效楼栋。")
-                if oid == actor_id and (not change["enabled"] or change["role"] != "admin"):
-                    raise PasswordLoginError("不能停用自己或取消自己的管理员权限。", 403)
+                if change["role"] != item["role"] or set(change["scopes"]) != set(item["scopes"]):
+                    raise PasswordLoginError("管理级别和楼栋按人员目录统一确定，不能单独更改或跨楼授权。", 403)
+                if oid == actor_id and not change["enabled"]:
+                    raise PasswordLoginError("不能停用自己的登录权限。", 403)
                 before = copy.deepcopy(users.get(oid) or {})
                 scopes = self.auth._admin_scopes() if change["role"] == "admin" else self.auth._scopes_from_raw(change["scopes"])
                 own = item["own_scopes"] if len(item["own_scopes"]) == 1 else []
@@ -133,6 +190,10 @@ class AccountManagement:
         new = payload["new_password"]
         if not isinstance(new, str) or new != payload["confirm_password"]:
             raise PasswordLoginError("两次输入的密码不一致。")
+        item = next((item for item in self.accounts()["items"] if item["id"] == rid), None)
+        if not item:
+            raise PasswordLoginError("所选人员不在当前目录中。", 404)
+        self.check(actor, item, "edit")
         directory = self.directory
         directory.limited("admin-password:" + str(actor.get("open_id")), 30)
         directory.directory()
@@ -145,6 +206,8 @@ class AccountManagement:
             oid = directory.login_identity(person)
             if person["login_ids"] != cached["login_ids"] or not person["selectable"]:
                 raise PasswordLoginError("人员身份或状态已变化，请刷新后核对。", 409)
+            if person["scopes"] != cached["scopes"] or person.get("position") != cached.get("position"):
+                raise PasswordLoginError("人员所属楼栋或岗位已变化，请刷新后重新核对。", 409)
             nature = person["account_nature"].upper()
             if not nature or nature == "VNET" or oid in BUILDING_OPEN_ID_MAP.values() or oid in REQUIRED_ADMIN_USERS:
                 raise PasswordLoginError("此账号使用飞书登录，不能在灯塔修改飞书密码。", 403)
@@ -162,6 +225,32 @@ class AccountManagement:
             self.store.record_business_operation_audit(audit_id=audit["audit_id"], status="success")
         return {"password_changed": True}
 
+    def delete(self, rid, payload, actor):
+        if not isinstance(payload, dict) or set(payload) != {"revision"}:
+            raise PasswordLoginError("删除账号参数无效。")
+        item = next((item for item in self.accounts()["items"] if item["id"] == rid), None)
+        if not item or not item["open_id"]:
+            raise PasswordLoginError("账号不存在。", 404)
+        self.check(actor, item, "delete")
+        if item["open_id"] == actor.get("open_id"):
+            raise PasswordLoginError("不能删除自己的账号权限。", 403)
+        with self.auth._lock:
+            previous = self.auth._load_permissions_locked()
+            following = copy.deepcopy(previous)
+            users = following.setdefault("users", {})
+            oid = item["open_id"]
+            if payload["revision"] != revision(users.get(oid)):
+                raise PasswordLoginError("该账号权限已变化，请刷新后重新确认。", 409)
+            # Revocation is a tombstone: HR sync must not recreate a deleted grant.
+            users[oid] = {**users.get(oid, {}), "name": item["name"], "role": item["role"], "enabled": False,
+                          "scopes": users.get(oid, {}).get("scopes", item["scopes"])}
+            audit = self.store.record_business_operation_audit(domain="accounts", action="delete", status="started",
+                actor_open_id=actor.get("open_id", ""), actor_name=actor.get("name", ""), target_record_id=rid,
+                metadata={"name": item["name"], "target_open_id": oid})
+            self.auth._save_permissions_locked(following)
+            self.store.record_business_operation_audit(audit_id=audit["audit_id"], status="success")
+        return {"deleted": True, "history_preserved": True}
+
 
 def install_account_management(app, controller, runtime, get_directory):
     def response(data=None, error=None, status=200):
@@ -169,17 +258,24 @@ def install_account_management(app, controller, runtime, get_directory):
                             status_code=status, headers={"Cache-Control": "no-store"})
 
     async def dispatch(request, operation):
-        denied, session = await asyncio.to_thread(controller._require_admin_response, request)
-        if denied is not None:
-            return denied
+        session = await asyncio.to_thread(controller._current_session, request)
+        if not session:
+            return response(error="请先登录。", status=401)
+        actor = session.get("user") or {}
+        profile = await asyncio.to_thread(runtime.auth_manager.account_profile, actor.get("open_id"))
+        if not profile["can_manage_accounts"]:
+            return response(error="当前账号没有人员管理权限。", status=403)
         try:
-            actor = session.get("user") or {}
             manager = AccountManagement(await asyncio.to_thread(get_directory))
             if request.method == "GET":
                 if operation == "audit":
+                    if profile["level"] == "L2":
+                        raise PasswordLoginError("当前级别不能查看人员变更记录。", 403)
                     rows = await asyncio.to_thread(runtime.state_store.list_business_operation_audits, domain="accounts", limit=100)
+                    if profile["level"] == "L3":
+                        rows = [row for row in rows if row.get("actor_open_id") == actor.get("open_id")]
                     return response({"items": rows})
-                return response(await asyncio.to_thread(manager.accounts, request.query_params.get("refresh") == "true"))
+                return response(await asyncio.to_thread(manager.accounts, request.query_params.get("refresh") == "true", actor))
             origin = urlsplit(request.headers.get("origin") or request.headers.get("referer") or "")
             base = urlsplit(controller._request_base_url(request))
             if (origin.scheme, origin.netloc) != (base.scheme, base.netloc) or request.headers.get("sec-fetch-site") == "cross-site":
@@ -187,6 +283,8 @@ def install_account_management(app, controller, runtime, get_directory):
             payload = await controller._read_json_request(request, max_bytes=128 * 1024 if operation == "permissions" else 8192)
             if operation == "permissions":
                 data = await asyncio.to_thread(manager.update, payload, actor)
+            elif operation == "delete":
+                data = await asyncio.to_thread(manager.delete, request.path_params["record_id"], payload, actor)
             else:
                 data = await asyncio.to_thread(manager.password, request.path_params["record_id"], payload, actor)
             controller._clear_read_cache(("auth_status",))
@@ -213,3 +311,7 @@ def install_account_management(app, controller, runtime, get_directory):
     @app.post("/api/auth/accounts/{record_id}/password")
     async def password(request: Request):
         return await dispatch(request, "password")
+
+    @app.delete("/api/auth/accounts/{record_id}")
+    async def delete_account(request: Request):
+        return await dispatch(request, "delete")

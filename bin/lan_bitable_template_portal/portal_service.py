@@ -5302,7 +5302,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or raw_fields.get("员工工号")
             ).strip(),
             "position": cls._repair_management_plain_text(
-                display_fields.get("岗位") or raw_fields.get("岗位")
+                display_fields.get("体系岗位") or raw_fields.get("体系岗位")
+                or display_fields.get("岗位") or raw_fields.get("岗位")
             ).strip(),
             "assignments": assignments,
             "scopes": scopes,
@@ -16490,6 +16491,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                     or "link" in str(meta.ui_type or "").lower()
                     else None
                 )
+        # Keep the timestamp on ordinary saves, but replace it when explicitly changing the repair link.
+        if (not repair_relation_changed and "维修结束时间（2026）" not in cleaned
+                and merged.get("维修结束时间（2026）") in (None, "", [], {})):
+            merged.pop("维修结束时间（2026）", None)
         _metas, meta_by_name = self._ensure_repair_followup_select_options(
             merged,
             meta_by_name,
@@ -31048,6 +31053,44 @@ class MaintenancePortalService(RepairOperationsMixin):
             annotated.append(row)
         return annotated
 
+    def paired_notice_undo(self, undo, *, candidates=None):
+        """Pair only snapshots from the same dual-write job, never by title."""
+        context = undo.get("context") or {}
+        action = undo.get("action_type")
+        mirror = context.get("paired_target_role") == "maintenance_mirror"
+        dual_change = undo.get("work_type") == WORK_TYPE_CHANGE and self._truthy_flag(context.get("sync_maintenance_target"))
+        if action not in {"start", "update", "end"} or not (mirror or dual_change):
+            return undo, None
+        job_id = str(undo.get("job_id") or context.get("job_id") or "")
+        suffix = ":paired-maintenance"
+        if mirror:
+            if not job_id.endswith(suffix):
+                raise PortalError("双表回退缺少原操作编号，未执行回退。")
+            job_id = job_id[:-len(suffix)]
+        if not job_id:
+            raise PortalError("双表回退缺少原操作编号，未执行回退。")
+        if candidates is None:
+            candidates = self._state_store.list_notice_undo_actions(action_type=action, job_id=job_id)
+            candidates += self._state_store.list_notice_undo_actions(action_type=action, job_id=job_id + suffix)
+        mains = [item for item in candidates if item.get("job_id") == job_id
+                 and item.get("action_type") == action and item.get("work_type") == WORK_TYPE_CHANGE
+                 and item.get("notice_type") == NOTICE_TYPE_CHANGE
+                 and self._truthy_flag((item.get("context") or {}).get("sync_maintenance_target"))]
+        mirrors = [item for item in candidates if item.get("job_id") == job_id + suffix
+                   and item.get("action_type") == action and item.get("work_type") == WORK_TYPE_MAINTENANCE
+                   and item.get("notice_type") == NOTICE_TYPE_MAINTENANCE
+                   and (item.get("context") or {}).get("paired_target_role") == "maintenance_mirror"]
+        if len(mains) != 1 or len(mirrors) != 1:
+            raise PortalError("双表回退缺少同一次操作的完整快照，未执行回退。")
+        main, paired = mains[0], mirrors[0]
+        paired_target = str((main.get("context") or {}).get("paired_maintenance_target_record_id")
+                            or ((main.get("context") or {}).get("paired_maintenance_upload") or {}).get("target_record_id") or "")
+        if (main.get("source_record_id") != paired.get("source_record_id")
+                or main.get("scope") != paired.get("scope")
+                or (paired_target and paired_target != paired.get("target_record_id"))):
+            raise PortalError("双表回退关联不一致，未执行回退。")
+        return main, paired
+
     def list_available_notice_undos(
         self,
         *,
@@ -31073,6 +31116,13 @@ class MaintenancePortalService(RepairOperationsMixin):
             limit=5000,
         )
         for undo in undo_items:
+            if (undo.get("context") or {}).get("paired_target_role") == "maintenance_mirror":
+                try:
+                    main, paired = self.paired_notice_undo(undo, candidates=undo_items)
+                    if paired and main.get("undo_id") != undo.get("undo_id"):
+                        continue
+                except PortalError:
+                    pass  # Keep incomplete legacy snapshots visible with an explicit apply error.
             enriched_undo = self._enrich_ongoing_identity_item(
                 undo,
                 scope=scope,
@@ -31117,8 +31167,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
             raise PortalError("该回退记录已过期。")
         scope = self._normalize_scope(scope or undo.get("scope") or "ALL")
+        undo, paired_undo = self.paired_notice_undo(undo)
         undo = self._enrich_ongoing_identity_item(undo, scope=scope)
-        if not self._scope_matches_item(scope, undo):
+        if not self._scope_matches_item(scope, undo) or (paired_undo and not self._scope_matches_item(scope, paired_undo)):
             raise PortalError("当前账号无权回退该通告。")
         request_payload = {
             "action": "undo",
@@ -38050,7 +38101,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "employee_no": self._mop_field_text(fields, ["员工工号", "工号"]),
                     "building": building,
                     "scope_text": building,
-                    "position": self._mop_field_text(fields, ["岗位"]),
+                    "position": self._mop_field_text(fields, ["体系岗位", "岗位"]),
                     "team": self._mop_field_text(fields, ["班组"]),
                     "shift": self._mop_field_text(fields, ["班次"]),
                     "account_nature": account_nature,

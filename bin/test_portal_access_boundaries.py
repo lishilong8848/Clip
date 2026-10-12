@@ -3,6 +3,7 @@ import sys
 import re
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -19,12 +20,37 @@ from lan_bitable_template_portal.state_store import LanPortalStateStore
 class PortalAccessBoundaries(unittest.TestCase):
     def setUp(self):
         self.session = None
-        self.auth = PortalAuthManager.__new__(PortalAuthManager)
-        self.auth.get_session = lambda _: self.session
-        self.state = Mock()
-        self.state.get_document.return_value = None
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.data_dir = Path(self.temp.name)
+        # Build a real PortalAuthManager backed by an isolated temp store so the
+        # full account_profile / is_admin / scopes_for_open_id code paths run
+        # (constructor-initialized _lock, _state_store, permissions cache, etc.).
+        with patch('lan_bitable_template_portal.portal_auth.get_data_file_path',
+                   side_effect=lambda name: str(self.data_dir / name)):
+            self.auth = PortalAuthManager()
+        self.addCleanup(self.auth.shutdown)
+        self.addCleanup(self.auth._cleanup_executor.shutdown, wait=True, cancel_futures=True)
+        self.addCleanup(self.auth._state_store.shutdown_write_worker)
+        self.auth.get_session = lambda _: self.session
+
+        def directory_provider():
+            # Realistic trusted roster snapshot. Authority is derived from the
+            # roster (机楼/专业 home + 体系岗位 job), matching production.
+            person = {
+                'id': 'recFixture', 'name': '测试人员', 'position': '运维值班员',
+                'scopes': ['D'], 'building': 'D楼', 'selectable': True,
+                'inactive': False, 'needs_setup': False, 'password_revision': 'rev-1',
+                'account_nature': '外部账号', 'login_ids': ['ou_fixture'],
+            }
+            if self.session and self.session.get('role') == 'admin':
+                # H 项目经理 -> L1 manager (admin). This is the only way an
+                # identity legitimately becomes admin under the new rules.
+                person.update(position='项目经理', scopes=['H'], building='H楼')
+            return {'people': {'recFixture': person}, 'loaded_at': time.time(), 'schema': 3}
+
+        self.state = Mock()
+        self.state.get_document.return_value = None
         self.state.db_path = Path(self.temp.name) / 'fixture.sqlite3'
         self.state.get_backend_runtime.return_value = {'fixture_private_runtime': 'not public'}
         service = MaintenancePortalService.__new__(MaintenancePortalService)
@@ -40,10 +66,25 @@ class PortalAccessBoundaries(unittest.TestCase):
         with patch('clipflow_backend.main.LanPortalStateStore', return_value=self.state), patch(
                 'clipflow_backend.main.DrillManagementService', return_value=Mock()):
             self.controller = FastAPIPortalController()
+        # The controller constructor re-installs a fresh PortalAuthManager and
+        # overwrites PortalRuntime.auth_manager; point it back at our fixture
+        # manager so the controlled get_session / real account_profile run.
+        PortalRuntime.auth_manager = self.auth
         self.addCleanup(self.controller._background_executor.shutdown, wait=True, cancel_futures=True)
         self.addCleanup(self.controller._drill_executor.shutdown, wait=True, cancel_futures=True)
         self.controller._consume_rate_limit = Mock(return_value=(True, 0))
         self.app = self.controller._build_app()
+        # _build_app() runs the route installers (personnel_password_login etc.)
+        # which overwrite the fixture manager's _account_directory_provider with
+        # the real login-snapshot lambda. Re-apply our trusted roster provider and
+        # the enabled tombstone NOW so account_profile resolves by roster.
+        self.auth._account_directory_provider = directory_provider
+        payload = self.auth._load_permissions_locked()
+        payload.setdefault('users', {})['ou_fixture'] = {
+            'name': '测试人员', 'role': 'building', 'scopes': ['D'],
+            'enabled': True, 'locked': False,
+        }
+        self.auth._save_permissions_locked(payload)
         self.client = TestClient(self.app, client=('198.51.100.14', 4321), follow_redirects=False)
         self.addCleanup(self.client.close)
 

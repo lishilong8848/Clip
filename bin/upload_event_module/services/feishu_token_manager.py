@@ -14,6 +14,7 @@ from .http_client import FeishuHTTPError, FeishuHttpClient, classify_feishu_erro
 TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
 USER_ACCESS_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/access_token"
+OAUTH_TOKEN_URL = "https://accounts.feishu.cn/oauth/v3/token"
 USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
 TOKEN_REFRESH_MARGIN_SECONDS = 60
 APP_TOKEN_TTL_FALLBACK_SECONDS = 7200
@@ -148,6 +149,26 @@ class FeishuTokenManager:
         if not code:
             raise FeishuTokenError("登录 code 为空")
         return self._exchange_login_code_once(code, force_refresh=False)
+
+    def exchange_oauth_login_code(self, code: str, *, redirect_uri: str) -> dict[str, Any]:
+        if not str(code or '').strip() or not redirect_uri:
+            raise FeishuTokenError("登录授权码或回调地址为空")
+        payload = self._request_json(
+            "POST", OAUTH_TOKEN_URL,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            json_payload={"grant_type": "authorization_code", "client_id": str(config.app_id or '').strip(),
+                          "client_secret": str(config.app_secret or '').strip(), "code": code,
+                          "redirect_uri": redirect_uri}, retries=1,
+        )
+        if payload.get('error') or int(payload.get('code') or 0) != 0:
+            raise FeishuTokenError(payload.get('error_description') or payload.get('msg') or "飞书授权未完成")
+        token = str(payload.get('access_token') or '').strip()
+        if not token:
+            raise FeishuTokenError("飞书授权未返回用户令牌")
+        user = self.fetch_user_info(token)
+        if not user.get('open_id'):
+            raise FeishuTokenError("飞书授权未返回用户身份，请重新登录")
+        return user
 
     def fetch_user_info(self, user_access_token: str) -> dict[str, Any]:
         user_access_token = str(user_access_token or "").strip()

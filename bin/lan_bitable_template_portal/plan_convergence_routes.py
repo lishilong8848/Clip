@@ -127,15 +127,15 @@ def install_plan_convergence_routes(app, controller, runtime):
                 raise rules.RuleConflictError('请重新读取规则集后保存，当前填写已保留。')
             return rules.save_set(set_id, payload.get('name', saved['name']), payload.get('remark', saved['remark']), payload['items'], expected_version=payload['expected_version'])
         if action == 'maintenance/records':
-            return current.maintenance_records()
+            return current.maintenance_records(allowed_scopes=query.get('_allowed_scopes'))
         if action in {'maintenance/points', 'change/points'}:
-            return current.notice_points('repair' if action.startswith('maintenance') else 'change', query.get('record_id'), query.get('block_id'))
+            return current.notice_points('repair' if action.startswith('maintenance') else 'change', query.get('record_id'), query.get('block_id'), allowed_scopes=query.get('_allowed_scopes'))
         if action == 'maintenance/check':
-            return current.maintenance_check(payload.get('record_id') or None)
+            return current.maintenance_check(payload.get('record_id') or None, allowed_scopes=query.get('_allowed_scopes'))
         if action == 'change/records':
-            return current.change_records()
+            return current.change_records(allowed_scopes=query.get('_allowed_scopes'))
         if action == 'change/check':
-            return current.change_check(payload.get('record_id') or None)
+            return current.change_check(payload.get('record_id') or None, allowed_scopes=query.get('_allowed_scopes'))
         if action == 'settings':
             if method == 'PUT':
                 auth.save_config(payload)
@@ -177,6 +177,7 @@ def install_plan_convergence_routes(app, controller, runtime):
                 ):
                     return JSONResponse({'ok': False, 'error': '不允许跨来源提交'}, status_code=403)
             query = {**dict(request.query_params), **request.path_params}
+            query['_allowed_scopes'] = runtime.auth_manager.session_scopes(session)
             payload = {}
             if action == 'excel':
                 payload = {'content': await body(request, 8 * 1024 * 1024),

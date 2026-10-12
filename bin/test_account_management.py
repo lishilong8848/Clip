@@ -23,6 +23,10 @@ from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, REQUIR
 class AccountManagementTests(_TempDirTestCase):
     def setUp(self):
         super().setUp()
+        self.enterContext(patch(
+            'lan_bitable_template_portal.portal_auth.config',
+            SimpleNamespace(app_id='cli_fixture_accounts', app_secret='fixture-only-not-a-real-secret'),
+        ))
         self.h = PersonnelLoginHarness(self.root)
         self.addCleanup(self.h.close)
         self.h.auth._account_directory_provider = lambda: self.h.login.snapshot
@@ -47,9 +51,10 @@ class AccountManagementTests(_TempDirTestCase):
         data = {key: item[key] for key in ('id', 'revision', 'role', 'scopes', 'enabled')}
         return self.manager.update({'changes': [{**data, **changes}]}, self.actor)
 
-    def test_unified_directory_includes_duty_positions_and_preserves_all_permissions(self):
+    def test_unified_directory_includes_duty_positions_and_rejects_scope_change(self):
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
-        self.h.auth._state_store.put_document('fixture_history', 'history', {'do_not_touch': True})
+        history_doc = {'do_not_touch': True}
+        self.h.auth._state_store.put_document('fixture_history', 'history', history_doc)
         listing = self.manager.accounts()
         self.assertTrue(any(x['id'] == 'recAccount' for x in listing['items']))
         self.assertEqual(set(x['open_id'] for x in listing['items'] if x['kind'] == 'duty'), set(BUILDING_OPEN_ID_MAP.values()))
@@ -57,27 +62,61 @@ class AccountManagementTests(_TempDirTestCase):
         self.assertEqual(len(self.h.login.permission_people()['items']), 1)
         self.assertEqual(self.h.login.permission_people()['items'][0]['position'], '运维值班员')
         self.assertEqual(self.h.service._permission_directory_cache['items'][0]['position'], '运维值班员')
+        # A read-only listing never mutates the persisted permissions.
         self.assertEqual(self.h.auth._load_permissions_locked(), before)
         self.assertNotIn('password_revision', json.dumps(listing))
         self.assertNotIn(IDENTITY_NUMBER, json.dumps(listing))
-        self.update(scopes=['B'])
+        # HR scope/role is read-only: a cross-building escalation is rejected.
+        with self.assertRaisesRegex(PasswordLoginError, '不能单独更改或跨楼授权'):
+            self.update(scopes=['B'])
+        # An enabled-only edit is still permitted and preserves every other account
+        # plus the pre-upgrade history snapshot.
+        self.update(enabled=False)
         after = self.h.auth._load_permissions_locked()
         for oid, user in before['users'].items():
+            if oid == 'ou_fixtureAccount':
+                continue
             self.assertEqual(after['users'][oid], user)
-        self.assertEqual(self.h.auth._state_store.get_document('fixture_history', 'history'), {'do_not_touch': True})
+        # The edited account only flipped enabled=False; HR scope/role stayed put.
+        edited = after['users']['ou_fixtureAccount']
+        self.assertFalse(edited['enabled'])
+        self.assertEqual(edited['role'], 'building')
+        self.assertEqual(edited['scopes'], ['A'])
+        self.assertEqual(self.h.auth._state_store.get_document('fixture_history', 'history'), history_doc)
         self.assertEqual(self.h.auth._state_store.get_document('account_management', 'permissions_before_upgrade'), before)
 
-    def test_manual_revocation_is_not_added_back_by_login(self):
+    def test_manual_revocation_tombstone_is_not_reactivated_by_login(self):
         person = self.h.login.snapshot['people']['recAccount']
         self.h.auth.sync_directory_permissions([person], on_login=True)
         self.assertEqual(self.item()['scopes'], ['A'])
-        self.update(scopes=[])
+        # Explicit revocation is an enabled=False tombstone; HR scope/role stays
+        # read-only so the auto-scope is retained but the account is disabled.
+        self.update(enabled=False)
+        # A roster refresh/login sync must not re-enable the revoked account.
         self.h.auth.sync_directory_permissions([person], on_login=True)
         self.refresh()
-        self.assertEqual(self.item()['scopes'], [])
+        self.assertFalse(self.item()['enabled'])
+        # A disabled account resolves to zero scopes - revocation is real.
+        self.assertEqual(self.h.auth.scopes_for_open_id('ou_fixtureAccount'), [])
 
     def test_legacy_partial_permission_save_preserves_unsubmitted_people_and_duty_accounts(self):
-        self.update(scopes=['A', 'C'])
+        # Modernized update() rejects role/scope changes, so seed a legacy
+        # extra-scope grant directly to exercise the migration/save path.
+        payload = self.h.auth._load_permissions_locked()
+        payload.setdefault('users', {})['ou_fixtureAccount'] = {
+            'name': '测试外部', 'role': 'building', 'scopes': ['A', 'C'],
+            'enabled': True, 'locked': False,
+        }
+        self.h.auth._save_permissions_locked(payload)
+        self.refresh()
+        # ou_other is a real roster identity with home D so the save validates against
+        # the trusted directory rather than being treated as an unknown open_id.
+        self.h.login.snapshot['people']['recOther'] = {
+            'id': 'recOther', 'name': '另一人员', 'building': 'D楼', 'scopes': ['D'],
+            'position': '运维值班员', 'selectable': True, 'inactive': False,
+            'needs_setup': False, 'password_revision': 'rev-1', 'account_nature': '外部账号',
+            'login_ids': ['ou_other'],
+        }
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
         result, changed = self.h.auth.save_permissions_payload([
             {'open_id': 'ou_other', 'name': '另一人员', 'role': 'building', 'scopes': ['D'], 'enabled': True}],
@@ -86,12 +125,26 @@ class AccountManagementTests(_TempDirTestCase):
         for oid, user in before['users'].items():
             for key, value in user.items():
                 self.assertEqual(after['users'][oid][key], value)
-        self.assertEqual(set(changed) - set(REQUIRED_ADMIN_USERS), {'ou_other'})
+        # The partial save adds only ou_other; the required admin (Li) and the
+        # fixed duty/building accounts are auto-managed by _ensure_required_admins.
+        fixed = set(REQUIRED_ADMIN_USERS) | set(BUILDING_OPEN_ID_MAP.values())
+        self.assertEqual(set(changed) - fixed, {'ou_other'})
         self.assertEqual(after['default_scopes'], before['default_scopes'])
         self.assertTrue(any(item['open_id'] == 'ou_other' for item in result['users']))
 
-    def test_admin_password_api_then_new_password_login_preserves_grants_and_history(self):
-        self.update(scopes=['A', 'C'])
+    def test_admin_password_api_then_new_password_login_keeps_hr_home_scopes_and_history(self):
+        # Seed a legacy extra cross-building grant directly (the modernized API
+        # rejects scope changes); after a fresh login only the HR home scope A
+        # remains authoritative - the legacy C grant is not preserved.
+        payload = self.h.auth._load_permissions_locked()
+        payload.setdefault('users', {})['ou_fixtureAccount'] = {
+            'name': '测试外部', 'role': 'building', 'scopes': ['A', 'C'],
+            'enabled': True, 'locked': False,
+        }
+        self.h.auth._save_permissions_locked(payload)
+        self.refresh()
+        # Compare persisted defaults, independent of the 5s permission-cache lifetime.
+        self.h.auth._permissions_cache_until = 0
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
         self.h.auth._state_store.put_document('fixture_history', 'history', {'keep': True})
         with _allow_real_writes():
@@ -134,7 +187,7 @@ class AccountManagementTests(_TempDirTestCase):
                 self.assertEqual(second.status_code, 200, second.text)
                 session = self.h.auth.get_session(client.cookies['lan_portal_session'])
                 self.assertEqual(session['user']['open_id'], 'ou_fixtureAccount')
-                self.assertEqual(set(session['allowed_scopes']), {'A', 'C'})
+                self.assertEqual(set(session['allowed_scopes']), {'A'})
                 self.assertNotIn('requires_password_change', second.json()['data'])
         with _allow_real_writes():
             asyncio.run(exercise())
@@ -142,24 +195,44 @@ class AccountManagementTests(_TempDirTestCase):
         for oid, cfg in before['users'].items():
             if oid != 'ou_fixtureAccount':
                 self.assertEqual(after['users'][oid], cfg)
-        for key in ('scopes', 'role', 'enabled'):
-            self.assertEqual(after['users']['ou_fixtureAccount'][key], before['users']['ou_fixtureAccount'][key])
+        # The legacy extra C grant was normalized away on login - the HR home A
+        # is now the sole authoritative scope, with role/enabled unchanged.
+        self.assertEqual(after['users']['ou_fixtureAccount']['scopes'], ['A'])
+        self.assertEqual(after['users']['ou_fixtureAccount']['role'], before['users']['ou_fixtureAccount']['role'])
         self.assertEqual(self.h.auth._state_store.get_document('fixture_history', 'history'), {'keep': True})
 
-    def test_move_floor_updates_only_auto_scope_and_preserves_extra_scope(self):
+    def test_move_floor_updates_home_and_drops_extra_cross_building_scope(self):
         person = self.h.login.snapshot['people']['recAccount']
         self.h.auth.sync_directory_permissions([person], on_login=True)
-        self.update(scopes=['A', 'C'])
+        # Seed a legacy extra cross-building grant (A plus C) directly; the
+        # modernized API rejects such a scope change outright.
+        payload = self.h.auth._load_permissions_locked()
+        payload.setdefault('users', {})['ou_fixtureAccount'] = {
+            'name': '测试外部', 'role': 'building', 'scopes': ['A', 'C'],
+            'enabled': True, 'locked': False,
+        }
+        self.h.auth._save_permissions_locked(payload)
+        # HR home moves to B楼: the identity's scope follows the home and the
+        # legacy extra C is no longer effective (no cross-building grant).
         self.fields['机楼/专业'] = 'B楼'
         self.refresh()
-        self.assertEqual(set(self.item()['scopes']), {'B', 'C'})
+        # Re-read the person now that HR home is B, then sync so the saved grant
+        # follows the new home; the legacy extra C is dropped.
+        person = self.h.login.snapshot['people']['recAccount']
+        self.h.auth.sync_directory_permissions([person], on_login=True)
+        self.assertEqual(set(self.item()['scopes']), {'B'})
+        self.assertEqual(set(self.h.auth.scopes_for_open_id('ou_fixtureAccount')), {'B'})
+        self.assertEqual(set(self.h.auth._load_permissions_locked()['users']['ou_fixtureAccount']['scopes']), {'B'})
 
     def test_stale_save_rejected_without_touching_other_accounts(self):
         old = self.item()
-        self.update(scopes=['A'])
+        # An enabled-only edit is allowed and commits a new revision...
+        self.update(enabled=False)
+        # ...so re-submitting the stale revision (old enabled=True) is rejected as
+        # already-changed, and no other account is touched.
         with self.assertRaisesRegex(PasswordLoginError, '已变化'):
-            self.update(old, scopes=['B'])
-        self.assertEqual(self.item()['scopes'], ['A'])
+            self.update({**old, 'enabled': True})
+        self.assertFalse(self.item()['enabled'])
 
     def test_fixed_admin_self_disable_invalid_scopes_and_batch_atomicity(self):
         admin = next(x for x in self.manager.accounts()['items'] if x['open_id'] == self.actor['open_id'])
@@ -198,7 +271,7 @@ class AccountManagementTests(_TempDirTestCase):
         self.assertTrue(any(x['id'] == 'recAccount' for x in data['items']))
         self.assertEqual(self.h.auth.scopes_for_open_id('ou_fixtureAccount'), ['A'])
 
-    def test_feishu_actual_identity_gets_same_scope_without_new_account_and_outage_never_grants(self):
+    def test_feishu_actual_identity_keeps_hr_home_and_outage_keeps_cached_home(self):
         self.fields['账号性质'] = 'VNET'
         self.refresh()
         self.h.auth._account_directory_loader = lambda: self.h.login.directory()
@@ -207,15 +280,17 @@ class AccountManagementTests(_TempDirTestCase):
             state = parse_qs(urlsplit(self.h.auth.start_login(redirect_uri=redirect)).query)['state'][0]
             with patch.object(self.h.auth, '_exchange_login_code', return_value={'open_id': 'ou_fixtureAccount', 'name': '测试外部'}):
                 return self.h.auth.complete_login(code='fixture', state=state, redirect_uri=redirect)[0]
-        self.h.auth._account_directory_loader = lambda: (_ for _ in ()).throw(OSError('offline'))
-        sid = login()
-        self.assertEqual(self.h.auth.get_session(sid)['allowed_scopes'], [])
-        self.h.auth._account_directory_loader = lambda: self.h.login.directory()
+        # A VNET (Feishu-only) identity resolves to its HR home A with no password
+        # account created - the actual identity gets the same scope as the roster.
         sid = login()
         self.assertEqual(self.h.auth.get_session(sid)['allowed_scopes'], ['A'])
         self.assertEqual(self.h.auth.get_session(sid)['user']['open_id'], 'ou_fixtureAccount')
-        self.update(scopes=[])
-        self.assertEqual(self.h.auth.get_session(login())['allowed_scopes'], [])
+        # On a directory outage the complete cached roster is preserved (never
+        # dropped), so the already-verified home A is still served - there is no
+        # blanket all-scopes auto-grant on failure.
+        self.h.auth._account_directory_loader = lambda: (_ for _ in ()).throw(OSError('offline'))
+        sid = login()
+        self.assertEqual(self.h.auth.get_session(sid)['allowed_scopes'], ['A'])
 
     def test_restored_session_rejects_old_password_and_inactive_person(self):
         with _allow_real_writes():
@@ -258,25 +333,40 @@ class AccountManagementTests(_TempDirTestCase):
         self.assertFalse(self.item()['enabled'])
 
     def test_routes_reject_non_admin_cross_origin_and_unknown_password_fields(self):
-        allowed = False
+        # Real admin (Li, L0) and ordinary building (ou_fixtureAccount, L4)
+        # Feishu sessions so the dispatcher's _current_session + runtime.auth_manager
+        # authorization path is exercised end to end.
+        redirect = 'http://fixture/api/auth/feishu/callback'
+        def login_identity(identity):
+            state = parse_qs(urlsplit(self.h.auth.start_login(redirect_uri=redirect)).query)['state'][0]
+            with patch.object(self.h.auth, '_exchange_login_code', return_value=identity):
+                return self.h.auth.complete_login(code='fixture', state=state, redirect_uri=redirect)[0]
+        admin_sid = login_identity(self.actor)
+        building_sid = login_identity({'open_id': 'ou_fixtureAccount', 'name': '测试外部'})
+
         async def read_json(request, max_bytes):
             return await request.json()
+        def current_session(request):
+            return self.h.auth.get_session(request.cookies.get('lan_portal_session', ''))
         controller = SimpleNamespace(
-            _require_admin_response=lambda request: (None, {'user': self.actor}) if allowed else (JSONResponse({'ok': False}, status_code=403), {}),
+            _current_session=current_session,
             _request_base_url=lambda request: 'http://fixture', _read_json_request=read_json,
             _clear_read_cache=lambda keys: None)
-        runtime = SimpleNamespace(state_store=self.h.auth._state_store)
+        runtime = SimpleNamespace(state_store=self.h.auth._state_store, auth_manager=self.h.auth)
         app = FastAPI()
         install_account_management(app, controller, runtime, lambda: self.h.login)
 
         async def exercise():
-            nonlocal allowed
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:
-                self.assertEqual((await client.get('/api/auth/accounts')).status_code, 403)
-                self.assertEqual((await client.post('/api/auth/accounts/recAccount/password', json={})).status_code, 403)
-                allowed = True
-                self.assertEqual((await client.get('/api/auth/accounts')).status_code, 200)
-                self.assertEqual((await client.post('/api/auth/accounts/permissions', json={'changes': []}, headers={'Origin': 'https://other'})).status_code, 403)
-                self.assertEqual((await client.post('/api/auth/accounts/recAccount/password', json={'password': 'DoNotAccept'}, headers={'Origin': 'http://fixture'})).status_code, 400)
+                # not logged in
+                self.assertEqual((await client.get('/api/auth/accounts')).status_code, 401)
+                # logged in but not a manager (ordinary building identity)
+                self.assertEqual((await client.get('/api/auth/accounts', cookies={'lan_portal_session': building_sid})).status_code, 403)
+                # a manager can list accounts
+                self.assertEqual((await client.get('/api/auth/accounts', cookies={'lan_portal_session': admin_sid})).status_code, 200)
+                # cross-origin write rejected even for a manager
+                self.assertEqual((await client.post('/api/auth/accounts/permissions', json={'changes': []}, headers={'Origin': 'https://other'}, cookies={'lan_portal_session': admin_sid})).status_code, 403)
+                # unknown password field rejected
+                self.assertEqual((await client.post('/api/auth/accounts/recAccount/password', json={'password': 'DoNotAccept'}, headers={'Origin': 'http://fixture'}, cookies={'lan_portal_session': admin_sid})).status_code, 400)
         asyncio.run(exercise())
         self.assertEqual(self.h.service._patch_calls, 0)

@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../..', 'output/playwright/ui-motion');
 await mkdir(output, { recursive: true });
 const targets = {
-  AdminTools: ['admin-shell'], CabinetPowerBatchPage: ['row-editor-overlay', 'image-preview'],
+  CabinetPowerBatchPage: ['row-editor-overlay', 'image-preview'],
   CabinetPowerPage: ['scrim', 'evidence-preview'], ConfirmDialog: ['confirm-backdrop'],
   CriticalGuardPage: ['image-viewer', 'template-editor-overlay'], CriticalGuardSignatureDrawer: ['guard-signature-backdrop'],
   DailyTaskChecklistPage: ['send-dialog-backdrop'], EngineerMopPage: ['signature-manager-backdrop'],

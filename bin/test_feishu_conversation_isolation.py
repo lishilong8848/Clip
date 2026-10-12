@@ -1,8 +1,7 @@
 """Regression: Feishu assistant conversations isolate by the authenticated person.
 
-The Feishu transport routes a message under ``lighthouse_channel == "feishu:" + chat_id``
-and the assistant keys persistent state with ``LighthouseAssistant._key(actor)`` using
-``actor["id"]`` plus a hash of that channel.  These tests verify isolation at the real
+The Feishu transport retains channel authorization while the assistant keys state by
+the authenticated actor ID shared with the web. These tests verify isolation at the real
 storage/stream/plan/file boundaries when two people with the same display name share one
 Feishu group.  Everything runs against an in-memory Store and a local temporary directory
 with a fake engine; nothing touches the network or real business data.
@@ -120,6 +119,77 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(asyncio.gather(*suite.runtime.workers.values(),
                                               return_exceptions=True), 8)
 
+    async def test_old_channel_history_merges_once_with_archive_and_clear(self):
+        import hashlib
+        suite = self.suite
+        person = _web_actor('ou_A_AAAA')
+        legacy = []
+        for index, channel in enumerate(('feishu:group1', 'feishu:private')):
+            key = 'conversation:' + person['id'] + ':' + hashlib.sha256(channel.encode()).hexdigest()[:24]
+            value = {'id': 'legacy-' + str(index), 'turns': [
+                {'operation_id': f'legacy_{index}_{j:04d}', 'at': index * 120 + j + 1, 'question': f'旧问题{index}-{j}',
+                 'answer': '旧回答', 'status': 'completed', 'scopes': ['E']} for j in range(120)]}
+            suite.store.put_document('lighthouse_ai', key, value)
+            legacy.append((key, value))
+        suite.store.put_document('lighthouse_ai', 'conversation:' + person['id'], {'id': 'web-original', 'turns': []})
+        first = suite.assistant._state(person)
+        self.assertEqual(first['id'], 'web-original')
+        self.assertEqual(len(first['turns']), 100)
+        self.assertEqual(set(first['legacy_conversation_ids']), {'legacy-0', 'legacy-1'})
+        self.assertEqual(len(suite.store.list_documents('lighthouse_messages', key_prefix='web-original:')), 240)
+        self.assertEqual(suite.assistant._state(_feishu_actor(person['id'], 'other-group')), first)
+        page = await suite.runtime.history(person, first['turns'][0]['at'])
+        self.assertEqual(len(page['turns']), 30)
+        for key, original in legacy:
+            self.assertEqual(suite.store.get_document('lighthouse_ai', key), original)
+        suite.assistant.clear(person)
+        self.assertEqual(suite.assistant._state(_feishu_actor(person['id'], 'group1'))['turns'], [])
+        self.assertNotEqual(suite.assistant._state(person)['id'], first['id'])
+
+    async def test_direct_feishu_commands_are_saved_once_without_model_execution(self):
+        suite = self.suite
+        actor = _feishu_actor('ou_A_AAAA', 'group1')
+        state = suite.assistant._state(actor)
+        payload = {'operation_id': 'feishu_' + 'a' * 40, 'conversation_id': state['id'],
+                   'question': '进度:处理完成', 'answer': '已更新填写,请确认后发送。'}
+        suite.assistant.record_channel_reply(actor, payload)
+        suite.assistant.record_channel_reply(actor, payload)
+        turns = (await suite.runtime.conversation(_web_actor(actor['id'])))['turns']
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0]['question'], payload['question'])
+        self.assertEqual(turns[0]['answer'], payload['answer'])
+        self.assertEqual(suite.engine.calls, [])
+        stale = copy.deepcopy(state)
+        suite.assistant._save_state(actor, stale)
+        self.assertEqual(suite.assistant._state(actor)['turns'][0]['operation_id'], payload['operation_id'])
+        with self.assertRaises(AssistantError):
+            suite.assistant.record_channel_reply(_web_actor(actor['id']), payload)
+        with self.assertRaises(AssistantError):
+            suite.assistant.record_channel_reply(_feishu_actor('ou_B_BBBB', 'group1'), payload)
+
+    async def test_card_followup_binds_to_current_question_and_preserves_context(self):
+        suite = self.suite
+        actor = _feishu_actor('ou_A_AAAA', 'group1')
+        state = suite.assistant._state(actor)
+        state['turns'] = [{'operation_id': 'original_question_0001', 'question': '帮我写一篇文章',
+                          'answer': '面向什么读者?', 'status': 'completed', 'scopes': ['E'],
+                          'clarification': {'options': ['专业读者', '新手']}, 'at': 1}]
+        suite.store.put_document('lighthouse_ai', suite.assistant._key(actor), state)
+        async def authorize():
+            return actor
+        body = {'conversation_id': state['id'], 'question': '面向新员工,侧重实际例子',
+                'operation_id': 'card_reply_0000001', 'clarification_operation_id': 'stale_question'}
+        with self.assertRaises(AssistantError) as error:
+            await suite.runtime.submit(actor, body, suite.request, authorize)
+        self.assertEqual(error.exception.status, 409)
+        body['clarification_operation_id'] = 'original_question_0001'
+        await suite.runtime.submit(actor, body, suite.request, authorize)
+        await self._finish(suite)
+        saved = suite.assistant._state(actor)['turns'][-1]
+        self.assertTrue(saved['_clarification_reply'])
+        self.assertIn('帮我写一篇文章', saved['prompt'])
+        self.assertIn(body['question'], saved['prompt'])
+
     async def test_same_group_same_name_separate_states_and_reconstruct_isolated(self):
         suite = self.suite
         A = _feishu_actor("ou_A_AAAA", "oc_GRP1")
@@ -160,11 +230,10 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
 
             web_a = _web_actor(A["id"])
             group2_a = _feishu_actor(A["id"], "oc_GRP2")
-            self.assertNotEqual(LighthouseAssistant._key(web_a), key_a)
-            self.assertNotEqual(LighthouseAssistant._key(group2_a), key_a)
-            self.assertEqual(rebuilt.assistant._state(web_a)["turns"], [])
-            self.assertTrue(all(turn["question"] != "A的第一个问题"
-                                for turn in rebuilt.assistant._state(group2_a)["turns"]))
+            self.assertEqual(LighthouseAssistant._key(web_a), key_a)
+            self.assertEqual(LighthouseAssistant._key(group2_a), key_a)
+            self.assertEqual(rebuilt.assistant._state(web_a)["turns"], state_a['turns'])
+            self.assertEqual(rebuilt.assistant._state(group2_a)["turns"], state_a['turns'])
         finally:
             await rebuilt.runtime.close()
 
@@ -229,7 +298,7 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
             await self._submit(self.suite, person, '今天E楼有几条通告', 'business_no_scope_0001')
         self.assertEqual(error.exception.status, 403)
 
-    async def test_web_and_group_channels_and_different_groups_are_distinct_storage(self):
+    async def test_web_and_groups_share_one_person_conversation_and_context(self):
         suite = self.suite
         person_a = "ou_A_AAAA"
         group1 = _feishu_actor(person_a, "oc_GRP1")
@@ -237,16 +306,20 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
         web = _web_actor(person_a)
 
         keys = {LighthouseAssistant._key(actor) for actor in (group1, group2, web)}
-        self.assertEqual(len(keys), 3)
+        self.assertEqual(len(keys), 1)
 
         await self._submit(suite, group1, "群里的问题", "channel_op_G1_0001")
         await self._finish(suite)
         for actor in (group2, web):
             state = suite.store.get_document("lighthouse_ai", LighthouseAssistant._key(actor))
-            self.assertTrue(state is None or all(turn["question"] != "群里的问题"
-                                                 for turn in state["turns"]))
+            self.assertEqual([turn['question'] for turn in state['turns']], ['群里的问题'])
+            self.assertEqual(state['turns'][0]['answer'], '回答:' + person_a)
         state1 = suite.store.get_document("lighthouse_ai", LighthouseAssistant._key(group1))
         self.assertEqual([turn["question"] for turn in state1["turns"]], ["群里的问题"])
+        await self._submit(suite, web, '接着刚才的问题', 'channel_op_WEB_0001')
+        await self._finish(suite)
+        self.assertEqual(suite.engine.calls[-1]['history'][0]['question'], '群里的问题')
+        self.assertEqual(suite.assistant._state(group2)['id'], state1['id'])
 
     async def test_same_group_concurrent_runs_isolate_and_deny_foreign_admin_run(self):
         suite = self.suite
@@ -289,7 +362,7 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
             await suite.runtime.stop(B, ack_a1["run_id"])
         self.assertEqual(error.exception.status, 404)
 
-    async def test_portal_plan_rejects_foreign_and_other_conversation_but_allows_owner(self):
+    async def test_portal_plan_allows_same_owner_across_channels_but_rejects_others_and_clear(self):
         suite = self.suite
         A = _feishu_actor("ou_A_AAAA", "oc_GRP1")
         B = _feishu_actor("ou_B_BBBB", "oc_GRP1", is_admin=True)
@@ -309,15 +382,14 @@ class FeishuIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.status, 404)
 
         other_group = _feishu_actor(A["id"], "oc_GRP2")
-        with self.assertRaises(AssistantError) as error:
-            suite.portal.get_plan(other_group, plan_id)
-        self.assertEqual(error.exception.status, 409)
-        with self.assertRaises(AssistantError) as error:
-            suite.portal.cancel(other_group, plan_id)
-        self.assertEqual(error.exception.status, 409)
-
-        cancelled = suite.portal.cancel(A, plan_id)
+        self.assertEqual(suite.portal.get_plan(other_group, plan_id)['id'], plan_id)
+        self.assertEqual(suite.portal.get_plan(_web_actor(A['id']), plan_id)['id'], plan_id)
+        cancelled = suite.portal.cancel(other_group, plan_id)
         self.assertEqual(cancelled["status"], "cancelled")
+        suite.assistant.clear(_web_actor(A['id']))
+        with self.assertRaises(AssistantError) as error:
+            suite.portal.get_plan(A, plan_id)
+        self.assertEqual(error.exception.status, 409)
 
     async def test_files_are_private_and_foreign_submission_rejected_without_model(self):
         suite = self.suite

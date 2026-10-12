@@ -19,11 +19,12 @@
       :refresh-cooldown="refreshCooldown"
       :event-refresh-title="refreshButtonTitle('event')"
       :is-admin="isAdmin"
+      :can-manage-accounts="canManageAccounts"
       :home-mode="isScopeHomeDashboard"
       @switch-scope="switchScope"
       @update:refresh-menu-open="refreshMenuOpen = $event"
       @refresh-event="refreshEvent"
-      @open-admin="showAdminTools = true"
+      @open-admin="navigate('/admin/settings')"
       @open-signatures="navigate('/signature-management')"
       @open-life-guide="navigate('/life-guide')"
       @open-password="navigate('/?account=password')"
@@ -42,14 +43,6 @@
         <strong>{{ workbenchOpeningText }}</strong>
       </div>
     </div>
-
-    <AdminTools
-      v-if="adminToolsLoaded && isAdmin"
-      :open="showAdminTools && isAdmin"
-      :initial-tab="adminInitialTab"
-      :scope-options="requestableScopes"
-      @close="closeAdminTools"
-    />
 
     <div ref="pageContent" class="page-content">
     <UiTransition name="ui-page" :appear="false">
@@ -92,8 +85,8 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage)"
-      :checking="authChecking"
+      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage)"
+      :checking="authChecking || auth.directoryPending"
       :logged-in="auth.loggedIn"
       :user="auth.user"
       :password-settings="isPasswordSettingsPage && auth.loggedIn && auth.user.login_method === 'password'"
@@ -109,6 +102,20 @@
       @confirm="confirmPermissionRequest"
       @back="isPasswordSettingsPage ? navigate('/') : closePermissionRequestPanel()"
     />
+
+    <AdminTools
+      v-else-if="isAdminSettingsPage && canManageAccounts"
+      :open="true"
+      :system-admin="isAdmin"
+      :initial-tab="adminInitialTab"
+      :scope-options="requestableScopes"
+      @close="navigate('/')"
+      @select-tab="navigate('/admin/settings?tab=' + $event, { replace: true })"
+    />
+    <section v-else-if="isAdminSettingsPage" class="settings-denied">
+      <h2>账号与权限</h2><p>当前账号没有人员管理权限。</p>
+      <button type="button" @click="navigate('/')">返回首页</button>
+    </section>
 
     <EventManagementPage
       v-else-if="isEventPage"
@@ -179,6 +186,7 @@
       :scope="routeParams.get('scope') || ''"
       :is-admin="isAdmin"
       :read-only="isGuest"
+      :can-delete="auth.user?.can_delete_business === true"
       :user-id="String(auth.user?.open_id || '')"
     />
 
@@ -318,10 +326,11 @@ watch([routePath, windowLocationSearch], ([path, search], [previousPath, previou
 const currentScope = ref(normalizeScopeValue(routeParams.value.get("scope") || ""));
 const authChecking = ref(true);
 const loading = ref(false);
-const showAdminTools = ref(false);
-const adminToolsLoaded = ref(false);
-watch(showAdminTools, visible => { if (visible) adminToolsLoaded.value = true; });
-const adminInitialTab = ref<"status" | "permissions" | "handover" | "feishu">();
+const adminInitialTab = computed(() => {
+  const value = routeParams.value.get('tab');
+  return ['status', 'permissions', 'handover', 'mop', 'feishu', 'pressure'].includes(value || '')
+    ? value as 'status' | 'permissions' | 'handover' | 'mop' | 'feishu' | 'pressure' : 'permissions';
+});
 const showPermissionRequestPanel = ref(false);
 const refreshMenuOpen = ref(false);
 const eventRefreshing = ref(false);
@@ -349,6 +358,8 @@ const permissionRequest = reactive({
 });
 const auth = reactive({
   loggedIn: false,
+  directoryPending: false,
+  directoryWarning: '',
   user: {} as Dict,
   scopeOptions: [] as ScopeOption[],
   loginUrl: "/api/auth/login",
@@ -363,6 +374,7 @@ let appDisposed = false;
 const refreshCooldownTimers = new Map<string, number>();
 
 const isHistoryMemoryPage = computed(() => routePath.value === "/admin/history-memory");
+const isAdminSettingsPage = computed(() => routePath.value.replace(/\/$/, '') === '/admin/settings');
 const isWorkbenchLitePage = computed(() => routePath.value === "/workbench-lite");
 const workbenchVisited = ref(isWorkbenchLitePage.value);
 const lastWorkbenchSearch = ref(windowLocationSearch.value);
@@ -408,24 +420,14 @@ const criticalGuardScope = computed(() => {
 const drillScope = computed(() => normalizeScopeValue(routeParams.value.get("scope") || "", ""));
 const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeParams.value.get("request_id") || routeParams.value.get("record_id") || routeParams.value.get("temporary_id")));
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
+const canManageAccounts = computed(() => isAdmin.value || auth.user?.can_manage_accounts === true);
 const isGuest = computed(() => auth.user?.role === 'guest');
 watch([isAdmin, () => routeParams.value.get("admin")], ([admin, tab]) => {
   if (admin && (tab === "status" || tab === "permissions" || tab === "handover" || tab === "feishu")) {
-    adminInitialTab.value = tab;
-    showAdminTools.value = true;
+    navigate('/admin/settings?tab=' + tab, { replace: true });
   }
 }, { immediate: true });
 
-function closeAdminTools(): void {
-  showAdminTools.value = false;
-  adminInitialTab.value = undefined;
-  const url = new URL(window.location.href);
-  if (url.searchParams.has("admin")) {
-    url.searchParams.delete("admin");
-    window.history.replaceState(window.history.state, "", url);
-    updateLocationRefs();
-  }
-}
 const watermarkDate = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 const watermarkText = computed(() => `内部资料 · ${String(auth.user?.name || "VNET").trim()} · ${watermarkDate}`);
 const visibleScopeOptions = computed(() => auth.scopeOptions.length ? auth.scopeOptions : requestableScopes);
@@ -435,6 +437,7 @@ const repairModuleProps = computed(() => (
     : {
         scope: currentScope.value,
         scopeOptions: visibleScopeOptions.value,
+        canDelete: auth.user?.can_delete_business === true,
         focusRecordId: String(routeParams.value.get("record_id") || "").trim(),
       }
 ));
@@ -464,6 +467,7 @@ const permissionPanelEmptyText = computed(() => (
     : "当前没有可申请的楼栋权限。"
 ));
 const headerSubtitle = computed(() => {
+  if (isAdminSettingsPage.value) return isAdmin.value ? "管理员设置" : "账号与权限";
   if (isHistoryMemoryPage.value) return "管理工具 · 历史通告记忆导入";
   if (isEngineerMopPage.value) return `${scopeLabel(currentScope.value)} · 工程师 MOP 填写`;
   if (isRepairManagementPage.value) return `${scopeLabel(currentScope.value)} · 检修管理`;
@@ -598,6 +602,7 @@ function markAuthExpired(message = "登录已过期，请重新扫码登录。")
   clearOverview(); currentOverviewKey = ''; overviewRequest++;
   scopeOverview.value = {}; handoverLinks.value = {};
   auth.loggedIn = false;
+  auth.directoryPending = false;
   auth.user = {};
   auth.scopeOptions = [];
   clearAuthKeepalive();
@@ -632,6 +637,11 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     const data = await portalRequest(`/api/auth/status?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     const nextLoggedIn = Boolean(data.logged_in);
     auth.loggedIn = nextLoggedIn;
+    auth.directoryPending = nextLoggedIn && data.directory_pending === true;
+    const previousDirectoryWarning = auth.directoryWarning;
+    auth.directoryWarning = nextLoggedIn ? String(data.directory_warning || '') : '';
+    if (auth.directoryWarning) syncText.value = auth.directoryWarning;
+    else if (previousDirectoryWarning && syncText.value === previousDirectoryWarning) syncText.value = '请选择功能';
     auth.user = data.user || {};
     if (nextLoggedIn) rememberLoginMethod(auth.user.login_method === 'password' ? 'password' : 'feishu');
     auth.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
@@ -642,14 +652,18 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     }
     const nextOverviewKey = nextLoggedIn ? overviewKey(auth.user, auth.scopeOptions) : '';
     setReadCacheIdentity(nextOverviewKey);
-    if (currentOverviewKey !== nextOverviewKey) {
+    const identityChanged = currentOverviewKey !== nextOverviewKey;
+    if (identityChanged) {
       workbenchVisited.value = isWorkbenchLitePage.value;
       currentOverviewKey = nextOverviewKey; overviewRequest++;
       scopeOverview.value = nextOverviewKey ? readOverview(nextOverviewKey) || {} : {};
       handoverLinks.value = {};
     }
     if (nextLoggedIn) {
-      scheduleAuthKeepalive();
+      scheduleAuthKeepalive(auth.directoryPending ? 3000 : authKeepaliveMs);
+      if (options.silent && identityChanged && auth.scopeOptions.length && routePath.value === '/' && !routeParams.value.get('mode')) {
+        void Promise.all([loadOverview(), loadHandoverLinks()]);
+      }
     } else {
       clearAuthKeepalive();
       if ((wasLoggedIn || currentRouteNeedsAuth()) && !authRedirectInProgress && !shouldSuppressAuthRedirect()) {

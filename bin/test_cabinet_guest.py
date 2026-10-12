@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.cabinet_guest import install_cabinet_guest_access
 from lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
-from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, PortalAuthManager
+from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, PortalAuthManager, LI_SHILONG_OPEN_ID
 
 
 class CabinetGuestTests(unittest.TestCase):
@@ -170,11 +170,11 @@ class CabinetGuestTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_guest_entry_does_not_replace_employee_login(self):
-        self.auth.upsert_permission_user(open_id='ou_fixture_admin', name='Fixture Admin', role='admin',
+        self.auth.upsert_permission_user(open_id=LI_SHILONG_OPEN_ID, name='Fixture Admin', role='admin',
                                          scopes=['ALL'], enabled=True, updated_by='fixture')
         self.auth._sessions['employee-session'] = {
             'role': 'admin', 'allowed_scopes': ['ALL'], 'expires_at': 9999999999,
-            'user': {'open_id': 'ou_fixture_admin', 'name': 'Fixture Admin'},
+            'user': {'open_id': LI_SHILONG_OPEN_ID, 'name': 'Fixture Admin'},
         }
         with patch.object(self.auth, 'create_guest_session') as create:
             response = self.client.post('/api/auth/guest', headers={'Cookie': AUTH_COOKIE_NAME + '=employee-session'})

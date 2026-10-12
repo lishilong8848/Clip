@@ -192,7 +192,7 @@
           </div>
           <div>
             <button
-              v-if="editingRecordId"
+              v-if="editingRecordId && canDelete"
               type="button"
               class="followup-button danger"
               :disabled="saving"
@@ -355,6 +355,7 @@ const props = withDefaults(defineProps<{
   summaryTitle: string;
   embedded?: boolean;
   readOnly?: boolean;
+  canDelete?: boolean;
   refreshVersion?: number;
 }>(), {
   embedded: false,

@@ -753,6 +753,10 @@ class FastAPIPortalController:
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
+            from lan_bitable_template_portal.account_policy import business_delete_denial
+            denial = await business_delete_denial(request, self, PortalRuntime)
+            if denial is not None:
+                return denial
             group = self._endpoint_group(request)
             started = time.perf_counter()
             rate_limited = False
@@ -833,6 +837,12 @@ class FastAPIPortalController:
         @app.get("/admin/history-memory")
         @app.get("/admin/history-memory/")
         async def admin_history_memory_page(request: Request):
+            return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
+
+        @app.get("/admin/settings")
+        @app.get("/admin/settings/")
+        async def admin_settings_page(request: Request):
+            # The shell renders login/denial states; all settings APIs require admin.
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
         @app.get("/life-guide")
@@ -994,6 +1004,7 @@ class FastAPIPortalController:
                     session,
                 )
                 render_session = dict(session)
+                render_session["can_delete_business"] = PortalRuntime.auth_manager.account_profile(open_id)["can_delete_business"]
                 render_session["can_manage_change_confirmations"] = bool(
                     PortalRuntime.auth_manager.is_admin(session)
                     or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
@@ -1190,7 +1201,7 @@ class FastAPIPortalController:
                 notice_undos: list[dict[str, Any]] = []
                 html_body = render_workbench_lite(
                     payload=payload if isinstance(payload, dict) else {},
-                    session=session,
+                    session={**session, "can_delete_business": PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))["can_delete_business"]},
                     scope=checked_scope,
                     work_type=parsed_work_type,
                     month=month or _current_month_label(),
@@ -7474,6 +7485,9 @@ class FastAPIPortalController:
                     action_type=str(request.query_params.get("action_type") or ""),
                     since_seconds=float(request.query_params.get("since_seconds") or 0),
                 )
+                profile = PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))
+                if not profile["can_delete_business"]:
+                    items = [item for item in items if item.get("undo_action_type") != "start"]
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -10657,12 +10671,18 @@ class FastAPIPortalController:
             raise ValueError("请求体长度无效。")
         if length > limit:
             raise ValueError("请求体过大，请减少粘贴内容后重试。")
+        cached = getattr(request, "_body", None)
+        if cached is not None:
+            if len(cached) > limit:
+                raise ValueError("请求体过大，请减少内容后重试。")
+            return cached
         body = bytearray()
         async for chunk in request.stream():
             if len(body) + len(chunk) > limit:
                 raise ValueError("请求体过大，请减少内容后重试。")
             body.extend(chunk)
-        return bytes(body)
+        request._body = bytes(body)
+        return request._body
 
     @classmethod
     async def _read_json_request(

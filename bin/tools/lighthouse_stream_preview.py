@@ -113,6 +113,19 @@ if native:
         return {"model_calls": model_calls, "business_calls": business_calls}
 
 preview_host = install_test_backend(app, controller, runtime)
+
+@app.post('/fixture/feishu-reply')
+async def fixture_feishu_reply(request: Request):
+    payload = await request.json()
+    code = payload.get('scope', 'D')
+    assert code in {'D', 'E'}
+    actor = {'id': 'fixture-' + code, 'scopes': [code], 'channel': 'feishu:isolated-group'}
+    state = assistant._state(actor)
+    return assistant.record_channel_reply(actor, {
+        'conversation_id': state['id'], 'operation_id': 'feishu_' + code.lower() * 40,
+        'question': code + '楼飞书问题同步', 'answer': code + '楼飞书回复同步',
+    })
+
 if native:
     from openclaw_service.assistant.lighthouse_runtime import OpenClawRuntime
     preview_host.manager = OpenClawRuntime(Path(temp.name) / 'accounts')

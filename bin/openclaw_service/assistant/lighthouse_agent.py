@@ -1006,7 +1006,7 @@ class PortalAgent:
                 raise AssistantError("当前权限已变化，请重新准备操作。", 403)
             if turn.get("run_id") != plan["assistant_run_id"] or turn.get("status") != "completed" or (turn.get("plan") or {}).get("id") != identity:
                 raise AssistantError("操作对应的回答已变化或未完成，请在当前会话重新确认。", 409)
-        current = plan.get("conversation_id") == state["id"] if plan.get("conversation_id") else any(
+        current = plan.get("conversation_id") in [state["id"], *state.get('legacy_conversation_ids', [])] if plan.get("conversation_id") else any(
             turn.get("operation_id") == plan.get("turn_id") and (turn.get("plan") or {}).get("id") == identity
             for turn in state.get("turns", []))
         if not current:

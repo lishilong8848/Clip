@@ -150,7 +150,8 @@ async def _preview(portal, actor, plan, identity, request):
     # prepare persists a normal form; reuse this selection's identity so browser drafts cannot cross plans.
     await asyncio.to_thread(portal.store.delete_document, NAMESPACE, prepared["id"])
     prepared["_planned"] = {**meta, "stage": "preview", "selected": selected,
-        "field_sources": data["field_sources"], "missing_fields": data["missing_fields"], "source_version": data["version"]}
+        "field_sources": data["field_sources"], "missing_fields": data["missing_fields"], "source_version": data["version"],
+        "recommendations": copy.deepcopy(data.get('recommendations', []))}
     prepared.setdefault("selected_labels", {}).setdefault("0", {})["source_record_id"] = selected["title"]
     fixed_fields = {"title", "building_codes", "device", "repair_device", "cabinet", "quantity"}
     if selected["work_type"] == "power":
@@ -245,7 +246,7 @@ async def amend_selection(portal, actor, identity, payload, request):
         plan.update(operations=[], status="needs_input", results=[], error="")
         plan.pop("_review_fields", None)
         plan.pop("_review_operations", None)
-        for key in ("selected", "field_sources", "missing_fields", "source_version"):
+        for key in ("selected", "field_sources", "missing_fields", "source_version", "recommendations"):
             meta.pop(key, None)
         meta.update(stage="candidate", candidates=[])
         plan["fields"] = [_field("query", "通告名称", value=meta["query"], maxlength=200)]
@@ -270,7 +271,7 @@ async def amend_selection(portal, actor, identity, payload, request):
 
 def preview_metadata(plan, expanded):
     meta = plan["_planned"]
-    result = {key: copy.deepcopy(meta[key]) for key in ("stage", "scope", "month", "field_sources", "missing_fields") if key in meta}
+    result = {key: copy.deepcopy(meta[key]) for key in ("stage", "scope", "month", "field_sources", "missing_fields", "recommendations") if key in meta}
     if meta.get("selected"):
         result["selected"] = {key: meta["selected"][key] for key in ("title", "building", "work_type", "progress")}
     if meta["stage"] == "preview" and expanded:

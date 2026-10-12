@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 from .cabinet_power_excel import CabinetError, COLORS, OPS, RACK_TYPES, STATES, TOTALS, baseline_correction_operations, baseline_matches_inventory, calculate, derive_records, dates, digest, export_workbook, inventory_state_baseline, operation_key, system_name, text_value, project_layout,completed_state_event,room_summary,confirmed_c_summary,confirmed_c_state
-from .cabinet_power_data import from_feishu, to_fields, group_events, source_sheet, table_columns, normalized_actions
+from .cabinet_power_data import from_feishu, to_fields, group_events, source_sheet, table_columns, normalized_actions, empty_operation_groups
 from .cabinet_power_store import CabinetStore
 
 APP_TOKEN="ASLxbfESPahdTKs0A9NccgbrnXc"
@@ -1035,10 +1035,7 @@ class CabinetPowerService:
             old=next((o for o in self._snapshot(old_scope)["operations"] if o["record_id"]==record_id),None) if record_id else None
             if record_id and not old: raise CabinetError("本地记录不存在，请刷新对应楼栋",404)
             if old and old["version"]!=payload.get("expected_version"): raise CabinetError("记录已被修改，请重新打开后保存",409)
-            delete_requested=bool(old and isinstance(payload.get("groups"),list) and not any(
-                any(text_value(group.get(key)) for key in ("action","actual","expected"))
-                for group in payload["groups"] if isinstance(group,dict)
-            ))
+            delete_requested=bool(old and empty_operation_groups(payload))
             if delete_requested:
                 if old_scope!=scope: raise CabinetError("删除记录时不能同时调整楼栋",409)
                 journal={"operation_id":oid,"scope":scope,"old_scope":scope,"owner":owner,

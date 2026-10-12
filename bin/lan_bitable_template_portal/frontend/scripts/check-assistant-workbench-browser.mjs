@@ -48,7 +48,7 @@ try {
   const mask = await page.locator('.assistant-launcher svg mask').getAttribute('id');
   await input.fill('导航时继续这次回答');
   await page.getByRole('button', { name: '发送问题', exact: true }).click();
-  await page.locator('.module-maintenance .module-card__main').click();
+  await page.locator('.module-maintenance .module-card__main').click({ position: { x: 24, y: 32 } });
   await page.locator('.scope-card').getByRole('button', { name: '进入维护管理', exact: true }).click();
   const native = page.frameLocator('iframe[title="通告管理"]');
   await native.locator('.workspace').waitFor();
@@ -59,7 +59,15 @@ try {
   await page.waitForFunction(() => (document.querySelector('.assistant .answer') || document.querySelector('.answer'))?.textContent.includes('未完成维修单'));
   assert.equal(posts.length, 1, 'navigation never resubmits the original question');
 
-  await native.locator('.notice-row').first().click();
+  await input.fill('网页未发送草稿');
+  await page.request.post(base + '/fixture/feishu-reply', { data: { scope: 'E' } });
+  await page.request.post(base + '/fixture/feishu-reply', { data: { scope: 'D' } });
+  await page.getByText('D楼飞书回复同步', { exact: true }).waitFor({ timeout: 15000 });
+  assert.equal(await page.getByText('E楼飞书回复同步', { exact: true }).count(), 0, 'another person stays isolated');
+  assert.equal(await input.inputValue(), '网页未发送草稿', 'incoming Feishu reply preserves unsent web draft');
+  assert.equal(posts.length, 1, 'incoming reply only reads state without invoking the model');
+
+  await native.locator('.notice-row').first().click({ position: { x: 24, y: 20 } });
   await native.locator('.notice-detail-overlay.open').waitFor();
   await input.fill('抽屉内外仍可使用助手');
   await input.press('Tab');

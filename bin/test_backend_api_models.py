@@ -31,7 +31,7 @@ from clipflow_backend.api_models import (  # noqa: E402
 )
 from clipflow_backend.main import FastAPIPortalController  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME  # noqa: E402
+from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, PortalAuthManager, LI_SHILONG_OPEN_ID, BUILDING_OPEN_ID_MAP  # noqa: E402
 from lan_bitable_template_portal.server import PortalRuntime  # noqa: E402
 from lan_bitable_template_portal.state_store import LanPortalStateStore  # noqa: E402
 
@@ -512,6 +512,18 @@ class _FakeMopSignatureRouteService:
 
 
 class BackendApiModelTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_auth = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_auth.cleanup)
+        with patch("lan_bitable_template_portal.portal_auth.get_data_file_path",
+                   side_effect=lambda name: str(Path(self.temp_auth.name) / name)):
+            auth = PortalAuthManager()
+        self.addCleanup(auth._state_store.shutdown_write_worker)
+        self.addCleanup(auth._cleanup_executor.shutdown, wait=True, cancel_futures=True)
+        self.addCleanup(auth.shutdown)
+        self.enterContext(patch.object(PortalRuntime, "auth_manager", auth))
+        self.enterContext(patch.object(PortalRuntime, "state_store", auth._state_store))
+
     def test_mop_download_uses_authenticated_fill_and_returns_attachment(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_sessions = dict(PortalRuntime.auth_manager._sessions)
@@ -663,14 +675,14 @@ class BackendApiModelTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "测试管理员", "open_id": ""},
+                "user": {"name": "测试管理员", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["A"],
                 "expires_at": 9999999999,
             }
             PortalRuntime.auth_manager._sessions["critical-guard-user-session"] = {
                 "session_id": "critical-guard-user-session",
-                "user": {"name": "普通用户", "open_id": ""},
+                "user": {"name": "普通用户", "open_id": BUILDING_OPEN_ID_MAP["A"]},
                 "role": "user",
                 "allowed_scopes": ["A"],
                 "expires_at": 9999999999,
@@ -791,10 +803,14 @@ class BackendApiModelTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "测试管理员", "open_id": ""},
+                "user": {"name": "测试管理员", "open_id": LI_SHILONG_OPEN_ID},
                 "role": "admin",
                 "allowed_scopes": ["E"],
                 "expires_at": 9999999999,
+            }
+            PortalRuntime.auth_manager._sessions["repair-e-duty"] = {
+                "user": {"name": "E楼值班", "open_id": BUILDING_OPEN_ID_MAP["E"]},
+                "role": "building", "allowed_scopes": ["E"], "expires_at": 9999999999,
             }
         client = TestClient(controller._build_app())
         headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
@@ -820,7 +836,7 @@ class BackendApiModelTests(unittest.TestCase):
                 unauth = client.get("/api/repair-management/records?scope=E")
                 denied = client.get(
                     "/api/repair-management/records?scope=A",
-                    headers=headers,
+                    headers={"Cookie": f"{AUTH_COOKIE_NAME}=repair-e-duty"},
                 )
                 listed = client.get(
                     "/api/repair-management/records?scope=E&q=冷站&state=completed&limit=3&focus_record_id=rec-focus",

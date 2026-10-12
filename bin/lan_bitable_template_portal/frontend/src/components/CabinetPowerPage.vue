@@ -112,7 +112,7 @@
           <thead><tr><th v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4 }" :style="frozenStyle(column)">{{ column.label }}<small v-if="column.group !== undefined">{{ groupLabel(column.group, activeFormat) }}</small></th><th class="row-actions">操作</th></tr></thead>
           <tbody><tr v-for="op in records.items || []" :key="op.record_id" :class="{ 'source-issue': op.issues.length }">
             <td v-for="column in activeFormat?.columns || []" :key="column.column" :class="{ frozen: column.column <= 4, 'empty-cell': !sourceCell(op, column) }" :data-label="column.group === undefined ? column.label : groupLabel(column.group, activeFormat) + ' · ' + column.label" :style="frozenStyle(column)"><button v-if="column.field === 'rack'" :disabled="recordsLoading" class="link" @click="openHistory(op.room, op.rack)">{{ op.rack }}</button><span v-else>{{ sourceCell(op, column) }}</span></td>
-            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button v-if="!readOnly" :disabled="recordsLoading" class="icon-button" :title="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" :aria-label="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)"><Trash2 v-if="isResidualEmptyRecord(op)" :size="16" /><Pencil v-else :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
+            <td class="row-actions" data-label="操作"><button :disabled="recordsLoading" class="icon-button" title="查看完整历史" aria-label="查看完整历史" @click="openRecordDetails(op)"><History :size="16" /></button><button v-if="!readOnly && (!isResidualEmptyRecord(op) || canDelete)" :disabled="recordsLoading" class="icon-button" :title="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" :aria-label="isResidualEmptyRecord(op) ? '删除空记录' : '编辑记录'" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)"><Trash2 v-if="isResidualEmptyRecord(op)" :size="16" /><Pencil v-else :size="16" /></button><small v-if="op.issues.length" class="test-text">待核实 {{ op.issues.length }} 项</small></td>
           </tr></tbody>
         </table><p v-if="!recordsLoading && !records.total" class="empty">没有符合条件的记录</p></div>
         <footer class="pagination"><span>共 {{ records.total || 0 }} 条记录</span><button :disabled="recordsLoading || records.page <= 1" aria-label="上一页" @click="loadRecords(records.page - 1)"><ChevronLeft :size="16" /></button><template v-for="(pageNumber, index) in pageNumbers" :key="pageNumber"><span v-if="index && pageNumber - pageNumbers[index - 1] > 1" class="ellipsis">…</span><button class="page-number" :class="{ active: pageNumber === records.page }" :disabled="recordsLoading" :aria-label="'第 ' + pageNumber + ' 页'" :aria-current="pageNumber === records.page ? 'page' : undefined" @click="loadRecords(pageNumber)">{{ pageNumber }}</button></template><button :disabled="recordsLoading || records.page >= totalPages" aria-label="下一页" @click="loadRecords(records.page + 1)"><ChevronRight :size="16" /></button></footer>
@@ -130,7 +130,7 @@
           <div v-if="selectedRack && !readOnly" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading" role="status"><LoadingIndicator>正在读取完整历史…</LoadingIndicator></p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
-            <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button v-if="!readOnly" class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
+            <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button v-if="!readOnly && (!isResidualEmptyRecord(op) || canDelete)" class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
             <ol v-if="op.events.length" class="timeline"><li v-for="(event, i) in sortedEvents(op.events)" :key="event.id || i"><b>{{ event.action }} · {{ event.result || '待核实' }}</b><dl class="event-times"><div><dt>期望完成时间</dt><dd><time>{{ event.expected || '未填写' }}</time></dd></div><div><dt>实际完成时间</dt><dd><time>{{ event.actual || '未填写' }}</time></dd></div></dl><p v-if="event.failure_reason" class="event-failure">失败原因：{{ event.failure_reason }}</p><div v-if="event.evidence_images?.length" class="history-images"><button v-for="image in imagesWithIds(event)" :key="image.image_id" type="button" :aria-label="'查看确认截图 ' + event.action" @click="previewEvidence = evidenceUrl(op.record_id,image.image_id,true)"><img :src="evidenceUrl(op.record_id,image.image_id)" alt="上下电确认截图" loading="lazy" /></button></div><div v-if="documentsWithIds(event).length" class="history-documents"><a v-for="file in documentsWithIds(event)" :key="file.file_id" :href="documentUrl(op.record_id,file.file_id)">{{ file.name }}</a></div></li></ol>
             <p v-else>机柜资料已登记，尚无操作。</p>
@@ -232,7 +232,8 @@ import { navigate, registerNavigationGuard } from '../navigation';
 import { isAssistantEvent } from '../modalState';
 import ConfirmDialog from './ConfirmDialog.vue';
 import VnetBackButton from './VnetBackButton.vue';
-const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string; readOnly?: boolean }>();
+const props = defineProps<{ scope: string; isAdmin: boolean; userId?: string; readOnly?: boolean; canDelete?: boolean }>();
+const canDelete = computed(() => props.canDelete === true || props.isAdmin);
 const api = '/api/cabinet-power';
 const read = (path: string, params: Dict = {}, timeoutMs = 90000, signal?: AbortSignal) => requestJson(api + '/' + path + '?' + new URLSearchParams({ scope: props.scope, ...params }), { timeoutMs, signal });
 const write = (path: string, data: Dict, method = 'POST') => requestJson(api + '/' + path, { method, body: JSON.stringify({ ...data, scope: data.scope || props.scope }), timeoutMs: 90000 });
@@ -602,7 +603,7 @@ function openPowerEditor(): void {
   editorOpen.value=true; void focusModal();
 }
 const isResidualEmptyRecord = (op: Dict): boolean => !op.events?.length && !op.source_row;
-function requestDeleteEmptyRecord(op: Dict): void { openEditor(op); deleteRecordConfirmOpen.value = true; void focusModal(); }
+function requestDeleteEmptyRecord(op: Dict): void { if (!canDelete.value) return; openEditor(op); deleteRecordConfirmOpen.value = true; void focusModal(); }
 function changeEditorSheet(): void {
   const format = overview.value.sheet_formats?.find((f: Dict) => f.sheet === form.source);
   form.groups = (format?.groups || [{}]).map(() => newGroup(false));
@@ -633,6 +634,7 @@ async function openStateSwitch(target: string): Promise<void> {
   }
 }
 async function saveRecord(confirmedDelete = false): Promise<void> {
+  if (editingId.value && !(form.groups || []).some(groupHasBusinessData) && !canDelete.value) { saveError.value = '当前账号无权删除记录，请保留操作内容后再保存。'; return; }
   if (saving.value || moveLoading.value) return;
   if (editingId.value && !(form.groups || []).some(groupHasBusinessData) && !confirmedDelete) { deleteRecordConfirmOpen.value = true; void focusModal(); return; }
   const hash = JSON.stringify(form);

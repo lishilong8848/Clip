@@ -36,6 +36,9 @@ KNOWLEDGE_ROUTES = (
     ('knowledge/documents/{document_id}/file', ['GET']),
     ('knowledge/documents/{document_id}/restore', ['POST']),
     ('knowledge/documents/{document_id}/retry', ['POST']),
+    ('knowledge/groups', ['GET', 'POST']),
+    ('knowledge/groups/{group_id}', ['PATCH', 'DELETE']),
+    ('knowledge/groups/{group_id}/documents', ['PUT', 'DELETE']),
 )
 
 
@@ -123,6 +126,18 @@ def install_knowledge_routes(app, authorize, get_knowledge):
                     data = await asyncio.to_thread(service.search, actor, query.get('q', ''))
                 elif action == 'settings':
                     data = await asyncio.to_thread(service.settings, actor) if request.method == 'GET' else await asyncio.to_thread(service.save_settings, actor, payload)
+                elif action == 'groups':
+                    data = await asyncio.to_thread(service.groups, actor) if request.method == 'GET' else await asyncio.to_thread(service.create_group, actor, payload.get('name'))
+                elif action.startswith('groups/'):
+                    parts = action.split('/')
+                    group_id = parts[1]
+                    if len(parts) == 2:
+                        data = await asyncio.to_thread(service.rename_group, actor, group_id, payload.get('name')) if request.method == 'PATCH' else await asyncio.to_thread(service.delete_group, actor, group_id)
+                    elif len(parts) == 3 and parts[2] == 'documents':
+                        document_ids = payload.get('document_ids')
+                        data = await asyncio.to_thread(service.set_documents_group, actor, group_id, document_ids) if request.method == 'PUT' else await asyncio.to_thread(service.remove_documents_group, actor, group_id, document_ids)
+                    else:
+                        raise AssistantError('知识库请求参数无效。')
                 elif action.endswith('/file'):
                     path, name = await asyncio.to_thread(service.file, actor, identity, query.get('version'))
                     return FileResponse(path, filename=name, media_type='application/octet-stream',

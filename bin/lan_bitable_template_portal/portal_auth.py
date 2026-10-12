@@ -29,6 +29,7 @@ from .portal_service import (
 )
 from .state_store import DEFAULT_STATE_DB_NAME, LanPortalStateStore
 from .cabinet_guest import GUEST_SCOPES, GUEST_SESSION_PREFIX, is_cabinet_guest
+from .account_policy import categorize_position
 
 
 AUTH_COOKIE_NAME = "lan_portal_session"
@@ -40,10 +41,10 @@ AUTH_MAX_SESSIONS = 500
 PERMISSION_REQUEST_TTL_SECONDS = 15 * 60
 PERMISSION_REVIEW_TTL_SECONDS = 30 * 24 * 60 * 60
 PERMISSION_REQUEST_MAX_ATTEMPTS = 5
-FEISHU_AUTH_INDEX_URL = "https://open.feishu.cn/open-apis/authen/v1/index"
+FEISHU_AUTH_INDEX_URL = "https://accounts.feishu.cn/open-apis/authen/v1/authorize"
+OAUTH_STATE_PREFIX = "oauth3_"
 REQUIRED_ADMIN_USERS = {
     LI_SHILONG_OPEN_ID: "李世龙",
-    MA_JINYU_OPEN_ID: "马进宇",
 }
 
 
@@ -169,27 +170,24 @@ class PortalAuthManager:
         for code, open_id in BUILDING_OPEN_ID_MAP.items():
             users[open_id] = {
                 "name": self.scope_label(code),
-                "role": "building",
-                "scopes": ["CAMPUS", *BUILDING_SCOPE_CODES] if code == "H" else [code],
+                "role": "admin" if code == "H" else "building",
+                "scopes": self._admin_scopes() if code == "H" else [code],
             }
         users[LI_SHILONG_OPEN_ID] = {
             "name": "李世龙",
             "role": "admin",
             "scopes": self._admin_scopes(),
         }
-        users[MA_JINYU_OPEN_ID] = {
-            "name": "马进宇",
-            "role": "admin",
-            "scopes": self._admin_scopes(),
-        }
         return {
-            "version": 1,
+            "version": 2,
             "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "default_scopes": [],
             "users": users,
         }
 
     def _ensure_required_admins_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("version", 1) < 2 and not self._state_store.get_document("account_management", "permissions_before_levels"):
+            self._state_store.put_document("account_management", "permissions_before_levels", payload)
         users = payload.get("users")
         if not isinstance(users, dict):
             users = {}
@@ -208,7 +206,16 @@ class PortalAuthManager:
             if users.get(open_id) != desired:
                 users[open_id] = desired
                 changed = True
+        for code, open_id in BUILDING_OPEN_ID_MAP.items():
+            existing = users.get(open_id) if isinstance(users.get(open_id), dict) else {}
+            desired = {**existing, "name": existing.get("name") or self.scope_label(code), "role": "admin" if code == "H" else "building",
+                       "scopes": self._admin_scopes() if code == "H" else [code],
+                       "enabled": existing.get("enabled") is not False, "locked": False}
+            if existing != desired:
+                users[open_id] = desired
+                changed = True
         if changed:
+            payload["version"] = 2
             payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self._save_permissions_locked(payload)
         return payload
@@ -249,6 +256,12 @@ class PortalAuthManager:
         self._state_store.put_auth_permissions(payload)
         self._permissions_cache = copy.deepcopy(payload)
         self._permissions_cache_until = time.monotonic() + 5.0
+
+    def _permission_user(self, open_id: str) -> dict[str, Any]:
+        with self._lock:
+            if self._permissions_cache is None or time.monotonic() >= self._permissions_cache_until:
+                self._load_permissions_locked()
+            return copy.deepcopy((self._permissions_cache.get("users") or {}).get(open_id) or {})
 
     def _backup_corrupt_permissions_locked(self) -> None:
         if not self._permission_path.exists():
@@ -332,28 +345,44 @@ class PortalAuthManager:
         open_id = str(open_id or "").strip()
         if self.directory_block_reason(open_id):
             return []
-        with self._lock:
-            payload = self._load_permissions_locked()
-            users = payload.get("users") or {}
-            user_cfg = users.get(open_id) if isinstance(users, dict) else None
-            if isinstance(user_cfg, dict):
-                if user_cfg.get("enabled") is False:
-                    return []
-                return self._scopes_from_raw(user_cfg.get("scopes"))
-            return self._scopes_from_raw(payload.get("default_scopes"))
+        user_cfg = self._permission_user(open_id)
+        if not user_cfg or user_cfg.get("enabled") is False:
+            return []
+        return self.account_profile(open_id)["scope_rules"]
 
     def role_for_open_id(self, open_id: str) -> str:
         open_id = str(open_id or "").strip()
         if self.directory_block_reason(open_id):
             return "building"
-        with self._lock:
-            payload = self._load_permissions_locked()
-            users = payload.get("users") or {}
-            user_cfg = users.get(open_id) if isinstance(users, dict) else None
-            if isinstance(user_cfg, dict) and user_cfg.get("enabled") is False:
-                return "building"
-            role = str((user_cfg or {}).get("role") or "").strip().lower()
-            return "admin" if role == "admin" else "building"
+        profile = self.account_profile(open_id)
+        return "admin" if profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"] else "building"
+
+    def account_profile(self, open_id: str) -> dict[str, Any]:
+        """Derive management authority from trusted identity, HR and saved grants."""
+        open_id = str(open_id or "").strip()
+        cfg = self._permission_user(open_id)
+        duty = next((code for code, oid in BUILDING_OPEN_ID_MAP.items() if oid == open_id), "")
+        person = {} if duty else self.directory_person(open_id)
+        homes = [code for code in person.get("scopes", []) if code in BUILDING_SCOPE_CODES]
+        home = duty or (homes[0] if len(homes) == 1 else "")
+        category = "duty" if duty else categorize_position(person.get("position"))
+        if category == "other":
+            category = categorize_position(" ".join(person.get("assignments") or []))
+        enabled = bool(cfg) and cfg.get("enabled") is not False and not self.directory_block_reason(open_id)
+        level = "L4"
+        if open_id == LI_SHILONG_OPEN_ID:
+            level = "L0"
+        elif duty == "H" or (home == "H" and category == "manager"):
+            level = "L1"
+        elif home == "H" and category == "engineer":
+            level = "L2"
+        elif home and category == "supervisor":
+            level = "L3"
+        can_manage = enabled and level != "L4"
+        return {"level": level, "category": category, "home_scope": home,
+                "scope_rules": self._admin_scopes() if level in {"L0", "L1"} or duty == "H" else [home] if home else [],
+                "can_manage_accounts": can_manage, "can_view_accounts": can_manage and level != "L2",
+                "can_delete_business": enabled and level in {"L0", "L1", "L3"}}
 
     def _open_id_explicitly_disabled(self, open_id: str) -> bool:
         open_id = str(open_id or "").strip()
@@ -361,11 +390,7 @@ class PortalAuthManager:
             return False
         if self.directory_block_reason(open_id):
             return True
-        with self._lock:
-            payload = self._load_permissions_locked()
-            users = payload.get("users") or {}
-            user_cfg = users.get(open_id) if isinstance(users, dict) else None
-            return isinstance(user_cfg, dict) and user_cfg.get("enabled") is False
+        return self._permission_user(open_id).get("enabled") is False
 
     def directory_person(self, open_id: str) -> dict[str, Any]:
         provider = getattr(self, "_account_directory_provider", None)
@@ -405,23 +430,20 @@ class PortalAuthManager:
                 if identity in REQUIRED_ADMIN_USERS or identity in BUILDING_OPEN_ID_MAP.values():
                     continue
                 previous = users.get(identity) or {}
-                if previous.get("enabled") is False or previous.get("role") == "admin":
-                    continue
-                if not on_login and "directory_scopes" not in previous:
-                    continue
                 own = self._scopes_from_raw(person.get("scopes"))
                 own = own if len(own) == 1 else []
-                if not previous and not own:
-                    continue
-                manual = [scope for scope in previous.get("scopes", []) if scope not in previous.get("directory_scopes", [])]
-                automatic = [scope for scope in own if scope not in previous.get("denied_scopes", []) and scope not in manual]
-                following = {**previous, "name": previous.get("name") or person["name"],
-                             "role": previous.get("role") or "building", "enabled": True,
-                             "scopes": self._scopes_from_raw(manual + automatic), "directory_scopes": automatic}
+                manager = own == ["H"] and categorize_position(person.get("position")) == "manager"
+                scopes = self._admin_scopes() if manager else own
+                following = {**previous, "name": person["name"],
+                             "role": "admin" if manager else "building", "enabled": previous.get("enabled") is not False,
+                             "scopes": scopes, "directory_scopes": scopes, "denied_scopes": [], "locked": False}
                 if previous != following:
                     users[identity] = following
                     changed = True
             if changed:
+                if not self._state_store.get_document("account_management", "permissions_before_levels"):
+                    self._state_store.put_document("account_management", "permissions_before_levels", self._load_permissions_locked())
+                payload["version"] = 2
                 payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 self._save_permissions_locked(payload)
 
@@ -433,10 +455,8 @@ class PortalAuthManager:
         for open_id, user_cfg in users.items():
             if not isinstance(user_cfg, dict):
                 continue
-            scopes = self._scopes_from_raw(user_cfg.get("scopes"))
-            role = "admin" if str(user_cfg.get("role") or "").lower() == "admin" else "building"
-            if role == "admin":
-                scopes = self._admin_scopes()
+            scopes = self.scopes_for_open_id(open_id)
+            role = self.role_for_open_id(open_id)
             user_list.append(
                 {
                     "open_id": str(open_id or "").strip(),
@@ -457,6 +477,14 @@ class PortalAuthManager:
             "users": user_list,
             "required_admin_open_ids": list(REQUIRED_ADMIN_USERS.keys()),
         }
+
+    def validate_identity_grant(self, open_id, role, scopes):
+        profile = self.account_profile(open_id)
+        expected_role = "admin" if profile["level"] in {"L0", "L1"} else "building"
+        if not profile["scope_rules"]:
+            raise PortalError("该账号尚无明确人员身份和所属楼栋，请先核对人员目录。")
+        if role != expected_role or set(scopes) != set(profile["scope_rules"]):
+            raise PortalError("角色和楼栋由机楼/专业、体系岗位统一确定，不支持额外跨楼授权。")
 
     def save_permissions_payload(
         self,
@@ -486,6 +514,7 @@ class PortalAuthManager:
                 role = "admin" if role == "admin" else "building"
                 enabled = raw.get("enabled") is not False
                 scopes = self._admin_scopes() if role == "admin" else self._scopes_from_raw(raw.get("scopes"))
+                self.validate_identity_grant(open_id, role, scopes)
                 if enabled and role != "admin" and not scopes:
                     raise PortalError(f"{name or open_id} 未选择可访问楼栋。")
                 users[open_id] = {
@@ -497,7 +526,7 @@ class PortalAuthManager:
                 }
             payload = {
                 **previous,
-                "version": 1,
+                "version": 2,
                 "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "default_scopes": self._scopes_from_raw(previous.get("default_scopes")),
                 "users": users,
@@ -537,6 +566,7 @@ class PortalAuthManager:
         normalized_scopes = (
             self._admin_scopes() if role == "admin" else self._scopes_from_raw(scopes)
         )
+        self.validate_identity_grant(open_id, role, normalized_scopes)
         if enabled and role != "admin" and not normalized_scopes:
             raise PortalError("未选择可访问楼栋，无法写入门户权限。")
         with self._lock:
@@ -564,14 +594,15 @@ class PortalAuthManager:
         open_id = str(open_id or "").strip()
         if not open_id:
             raise PortalError("缺少 open_id，无法删除门户权限。")
-        if open_id in REQUIRED_ADMIN_USERS:
-            raise PortalError("固定管理员不能删除。")
+        if open_id in REQUIRED_ADMIN_USERS or open_id in BUILDING_OPEN_ID_MAP.values():
+            raise PortalError("固定管理员和值班账号不能删除。")
         with self._lock:
             payload = self._load_permissions_locked()
             users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
             payload["users"] = users
-            removed = users.pop(open_id, None) is not None
+            removed = open_id in users
             if removed:
+                users[open_id] = {**users[open_id], "enabled": False}
                 payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 payload["updated_by"] = str(updated_by or "")
                 self._save_permissions_locked(payload)
@@ -603,23 +634,16 @@ class PortalAuthManager:
                 if not open_id or open_id == "__meta__":
                     raise PortalError("批量授权人员缺少有效 open_id。")
                 incoming_scopes = self._scopes_from_raw(raw.get("scopes"))
+                profile = self.account_profile(open_id)
+                expected_role = "admin" if profile["level"] in {"L0", "L1"} else "building"
+                self.validate_identity_grant(open_id, expected_role, incoming_scopes)
                 if not incoming_scopes:
                     raise PortalError(
                         f"{str(raw.get('name') or open_id)} 未配置可授权楼栋。"
                     )
                 existing = users.get(open_id) if isinstance(users.get(open_id), dict) else {}
-                existing_role = (
-                    "admin"
-                    if str(existing.get("role") or "").strip().lower() == "admin"
-                    else "building"
-                )
-                merged_scopes = (
-                    self._admin_scopes()
-                    if existing_role == "admin" or open_id in REQUIRED_ADMIN_USERS
-                    else self._scopes_from_raw(
-                        [*(existing.get("scopes") or []), *incoming_scopes]
-                    )
-                )
+                existing_role = expected_role
+                merged_scopes = list(profile["scope_rules"])
                 next_user = {
                     **existing,
                     "name": str(
@@ -667,8 +691,8 @@ class PortalAuthManager:
                     continue
                 if user_cfg.get("enabled") is False:
                     continue
-                role = str(user_cfg.get("role") or "").strip().lower()
-                if role == "admin":
+                profile = self.account_profile(open_id)
+                if profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"]:
                     recipients.append(str(open_id or "").strip())
         return [item for item in dict.fromkeys(recipients) if item]
 
@@ -963,8 +987,7 @@ class PortalAuthManager:
             payload["status"] = "approved"
             payload["approved_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             payload["approved_at_ts"] = now_ts
-            self._state_store.put_permission_request(payload)
-            return self.upsert_permission_user(
+            permissions = self.upsert_permission_user(
                 open_id=open_id,
                 name=str(payload.get("name") or open_id),
                 role="building",
@@ -972,26 +995,35 @@ class PortalAuthManager:
                 enabled=True,
                 updated_by=updated_by,
             )
+            self._state_store.put_permission_request(payload)
+            return permissions
 
     def is_admin(self, session: dict[str, Any] | None) -> bool:
         if not isinstance(session, dict):
             return False
-        role = str(session.get("role") or "").strip().lower()
-        if not role:
-            role = str((session.get("user") or {}).get("role") or "").strip().lower()
-        return role == "admin"
+        identity = (session.get("user") or {}).get("open_id")
+        if identity:
+            profile = self.account_profile(identity)
+            return profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"]
+        return False
 
     def session_scopes(self, session: dict[str, Any] | None) -> list[str]:
         if not isinstance(session, dict):
             return []
-        return self._scopes_from_raw(session.get("allowed_scopes"))
+        scopes = self._scopes_from_raw(session.get("allowed_scopes"))
+        if not is_cabinet_guest(session):
+            identity = (session.get("user") or {}).get("open_id", "")
+            if identity:
+                return self.scopes_for_open_id(identity)
+        return scopes
 
     def scope_allowed(self, session: dict[str, Any] | None, scope: str) -> bool:
         requested = self.normalize_scope(scope)
         scopes = self.session_scopes(session)
-        if requested == "ALL":
-            return "ALL" in scopes or self._has_full_scope_access(scopes)
-        return "ALL" in scopes or requested in scopes
+        allowed = ("ALL" in scopes or self._has_full_scope_access(scopes)) if requested == "ALL" else "ALL" in scopes or requested in scopes
+        if not allowed and isinstance(session, dict):
+            logging.warning("楼栋越权访问已拒绝: actor=%s scope=%s", (session.get("user") or {}).get("open_id", ""), requested)
+        return allowed
 
     def default_scope(self, session: dict[str, Any] | None) -> str:
         scopes = self.session_scopes(session)
@@ -1005,10 +1037,12 @@ class PortalAuthManager:
     def filter_scope_options(
         self, options: list[dict[str, Any]], session: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
+        scopes = self.session_scopes(session)
+        full_access = "ALL" in scopes or self._has_full_scope_access(scopes)
         return [
             copy.deepcopy(option)
             for option in options
-            if self.scope_allowed(session, str(option.get("value") or ""))
+            if (full_access or self.normalize_scope(option.get("value")) in scopes)
         ]
 
     def filter_scope_overview(
@@ -1075,12 +1109,20 @@ class PortalAuthManager:
     ) -> dict[str, Any]:
         logged_in = isinstance(session, dict)
         scope_options = self.filter_scope_options(SCOPE_OPTIONS, session) if logged_in else []
+        provider = getattr(self, "_account_directory_provider", None)
+        identity = ((session or {}).get("user") or {}).get("open_id", "")
+        directory_missing = bool(logged_in and not is_cabinet_guest(session) and provider
+                                 and identity not in REQUIRED_ADMIN_USERS and identity not in BUILDING_OPEN_ID_MAP.values()
+                                 and not (provider() or {}).get("loaded_at"))
+        directory_failed = bool(getattr(self, "_account_directory_refresh_failed", False))
         return {
             "configured": self.configured(),
             "logged_in": logged_in,
             "user": self.public_user(session) if logged_in else None,
             "allowed_scopes": self.session_scopes(session),
             "scope_options": scope_options,
+            "directory_pending": directory_missing and not directory_failed,
+            "directory_warning": "人员目录暂时无法读取，请稍后重试或联系管理员；未使用旧跨楼权限。" if directory_missing and directory_failed else "",
             "default_scope": self.default_scope(session),
             "login_url": f"/api/auth/login?{urlencode({'next': self._normalize_next_path(next_path)})}",
             "redirect_uri": str(redirect_uri or "").strip(),
@@ -1102,6 +1144,7 @@ class PortalAuthManager:
             "avatar_url": str(user.get("avatar_url") or user.get("avatar_thumb") or ""),
             "role": "guest" if is_cabinet_guest(session) else "admin" if self.is_admin(session) else "building",
             "login_method": "password" if session.get("source") == "personnel_password" else "feishu",
+            **({} if is_cabinet_guest(session) else self.account_profile(open_id)),
             **({"personnel_record_id": user.get("personnel_record_id", "")} if session.get("source") == "personnel_password" else {}),
         }
 
@@ -1156,7 +1199,7 @@ class PortalAuthManager:
     def start_login(self, *, redirect_uri: str, next_path: str = "/") -> str:
         if not self.configured():
             raise PortalError("未配置飞书 App ID 或 App Secret，无法启用扫码登录。")
-        state = secrets.token_urlsafe(24)
+        state = OAUTH_STATE_PREFIX + secrets.token_urlsafe(24)
         now = time.time()
         normalized_next = self._normalize_next_path(next_path)
         expires_at = now + AUTH_STATE_TTL_SECONDS
@@ -1175,7 +1218,8 @@ class PortalAuthManager:
                 expires_at=expires_at,
             )
         params = {
-            "app_id": str(config.app_id or "").strip(),
+            "client_id": str(config.app_id or "").strip(),
+            "response_type": "code",
             "redirect_uri": redirect_uri,
             "state": state,
         }
@@ -1220,7 +1264,8 @@ class PortalAuthManager:
         if expected_redirect and expected_redirect != redirect_uri:
             raise PortalError("登录回调地址与发起地址不一致。")
 
-        user = self._exchange_login_code(code)
+        # Persisted pre-upgrade requests keep their original token exchange.
+        user = self._exchange_login_code(code, redirect_uri=redirect_uri) if state.startswith(OAUTH_STATE_PREFIX) else self._exchange_login_code(code)
         open_id = str(user.get("open_id") or "").strip()
         if not open_id:
             raise PortalError("飞书登录未返回 open_id。")
@@ -1347,8 +1392,10 @@ class PortalAuthManager:
         except Exception as exc:
             raise PortalError(f"获取飞书 app_access_token 失败: {exc}") from exc
 
-    def _exchange_login_code(self, code: str) -> dict[str, Any]:
+    def _exchange_login_code(self, code: str, *, redirect_uri: str = "") -> dict[str, Any]:
         try:
+            if redirect_uri:
+                return token_manager.exchange_oauth_login_code(code, redirect_uri=redirect_uri)
             return token_manager.exchange_login_code(code)
         except Exception as exc:
             raise PortalError(f"获取飞书用户身份失败: {exc}") from exc

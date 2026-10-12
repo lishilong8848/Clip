@@ -134,6 +134,10 @@ class RecordingStore:
             self.blocked_delta = self.timer - before
         return copy.deepcopy(self.docs.get((namespace, key)))
 
+    def list_documents(self, namespace, *, key_prefix=""):
+        return [{"key": key, "payload": copy.deepcopy(value)} for (ns, key), value in self.docs.items()
+                if ns == namespace and key.startswith(key_prefix)]
+
     def put_document(self, namespace, key, value):
         ident = threading.get_ident()
         self.put_threads.append(ident)

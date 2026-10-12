@@ -210,6 +210,13 @@ class AssistantStore:
 
     # ------------------------------------------------------------------- API
 
+    def get_document_updated_at(self, namespace, key):
+        self._require_namespace(namespace)
+        self._require_key(key)
+        with self._lock, closing(self._connect()) as conn:
+            row = conn.execute('SELECT updated_at FROM documents WHERE namespace=? AND key=?', (namespace, key)).fetchone()
+        return float(row['updated_at']) if row else 0.0
+
     def get_document(self, namespace, key):
         self._require_namespace(namespace)
         self._require_key(key)

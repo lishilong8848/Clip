@@ -197,6 +197,10 @@ def install_assistant_routes(app, host):
         try:
             actor = await actor_for(request)
             action = request.url.path.removeprefix("/api/assistant/")
+            if action == 'conversation/stamp':
+                current = await asyncio.to_thread(get_service)
+                stamp = await asyncio.to_thread(current.conversation_stamp, actor)
+                return JSONResponse({'ok': True, 'data': {'stamp': stamp}}, headers={'Cache-Control': 'no-store'})
             payload = {}
             if request.method != "GET":
                 # Browser CSRF is checked by the portal; host.authorize requires
@@ -270,6 +274,8 @@ def install_assistant_routes(app, host):
                     return JSONResponse({"ok": True, "data": {"files": results}}, headers={"Cache-Control": "no-store"})
                 body = bytearray()
                 body_limit = 128000 if action in {"agent", "messages"} or action.startswith("plans/") else 16000
+                if action == 'channel-replies':
+                    body_limit = 1024 * 1024
                 if action.startswith("plans/") and (request.method == "PATCH" or action.endswith("/cabinet-text-preview")):
                     current_agent = await ready_agent()
                     plan = await asyncio.to_thread(current_agent.get_plan, actor, action.split("/")[1])
@@ -412,10 +418,14 @@ def install_assistant_routes(app, host):
                     data = await current_agent.refresh(actor, plan, request)
                 return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
             current = await asyncio.to_thread(get_service)
+            if action == 'channel-replies':
+                data = await asyncio.to_thread(current.record_channel_reply, actor, payload)
+                return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
             if action == "conversation":
                 if request.method == "GET":
                     current_streams = await ready_streams()
                     warm_current(current_streams, actor)
+                    stamp = await asyncio.to_thread(current.conversation_stamp, actor)
                     data = await current_streams.conversation(actor)
                     if agent is not None:
                         refreshed = False
@@ -426,6 +436,7 @@ def install_assistant_routes(app, host):
                                 refreshed = True
                         if refreshed:
                             data = await current_streams.conversation(actor)
+                    data['sync_stamp'] = stamp
                     return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
                 if request.method == "DELETE":
                     current_turns = (await asyncio.to_thread(current.conversation, actor)).get("turns", [])
@@ -459,6 +470,8 @@ def install_assistant_routes(app, host):
         for method in methods:
             app.add_api_route("/api/assistant/" + path, endpoint, methods=[method], name="lighthouse_" + path.replace("/", "_") + "_" + method.lower())
     app.add_api_route("/api/assistant/plans/{plan_id}/retry", endpoint, methods=["POST"], name="lighthouse_plan_retry")
+    app.add_api_route('/api/assistant/channel-replies', endpoint, methods=['POST'], name='lighthouse_channel_replies')
+    app.add_api_route('/api/assistant/conversation/stamp', endpoint, methods=['GET'], name='lighthouse_conversation_stamp')
     async def disconnect():
         pending = list(agent.tasks) if agent is not None else []
         if streams is not None:

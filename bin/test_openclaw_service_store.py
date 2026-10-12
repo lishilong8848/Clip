@@ -186,6 +186,17 @@ class AssistantStoreCRUDTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    def test_conversation_stamp_is_owner_specific_and_does_not_decode_history(self):
+        from unittest.mock import patch
+        self.assertEqual(self.store.get_document_updated_at('lighthouse_ai', 'conversation:a'), 0)
+        self.store.put_document('lighthouse_ai', 'conversation:a', {'turns': ['large history']})
+        first = self.store.get_document_updated_at('lighthouse_ai', 'conversation:a')
+        self.store.put_document('lighthouse_ai', 'conversation:b', {'turns': []})
+        with patch('openclaw_service.store._json_loads_strict', side_effect=AssertionError('must not load transcript')):
+            self.assertEqual(self.store.get_document_updated_at('lighthouse_ai', 'conversation:a'), first)
+        self.store.put_document('lighthouse_ai', 'conversation:a', {'turns': ['new reply']})
+        self.assertGreater(self.store.get_document_updated_at('lighthouse_ai', 'conversation:a'), first)
+
     def test_roundtrip_document(self):
         self.store.put_document("lighthouse_ai", "k1", {"a": 1})
         self.assertEqual(self.store.get_document("lighthouse_ai", "k1"), {"a": 1})

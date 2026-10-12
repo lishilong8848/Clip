@@ -209,6 +209,15 @@
                     </div>
                     <ol class="plan-steps"><li v-for="(op, i) in turn.plan.operations || []" :key="i"><strong>{{ op.name || '业务操作' }}</strong><dl><template v-for="item in operationPreview(op, turn.plan.status === 'needs_input' && (turn.plan.fields || []).some((field: Dict) => (field.operation_index || 0) === i))" :key="item.label"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></template></dl></li></ol>
                     <form v-if="turn.plan.status === 'needs_input'" class="plan-form" @submit.prevent="amendPlan(turn)">
+                      <details v-if="turn.plan.planned_notice?.recommendations?.length" class="planned-notice-recommendations wide-field">
+                        <summary>参考其他楼栋的历史填写</summary>
+                        <div v-for="(item, index) in turn.plan.planned_notice.recommendations" :key="index">
+                          <strong>{{ item.source_building }} · {{ item.source_title }}</strong>
+                          <dl><template v-for="(value, key) in item.suggested_values" :key="key"><dt>{{ noticeRecommendationLabel(turn.plan, String(key)) }}</dt><dd>{{ value }}</dd></template></dl>
+                          <button type="button" :disabled="isPlanBusy(turn.plan)" @click="applyNoticeRecommendation(turn.plan, item)"><Check :size="14" />填入空白项</button>
+                          <small>已转换楼栋，请核对现场适用性；不会覆盖已填写内容。</small>
+                        </div>
+                      </details>
                       <div v-for="field in visiblePlanFields(turn.plan)" :key="turn.plan.id + ':' + field.name" class="plan-field" :class="{ 'checkbox-field': field.type === 'checkbox', 'wide-field': ['object', 'array', 'textarea', 'multiselect', 'file'].includes(field.type) }"><component :is="planFieldIsGroup(field) ? 'span' : 'label'" :for="planFieldIsGroup(field) ? undefined : planFieldId(turn.plan, field)">{{ field.label }}<b v-if="field.required" aria-hidden="true"> *</b></component>
                         <p v-if="field.question_text" class="plan-question">{{ field.question_text }}</p>
                         <div v-if="field.options_source && !field.native_cabinet_correct && !field.native_notice_sop" class="option-search"><input v-if="!field.native_drill" v-model="planValues[turn.plan.id + ':search:' + field.name]" type="search" maxlength="120" placeholder="按名称查找" aria-label="查找可选记录" /><button type="button" :disabled="isPlanBusy(turn.plan)" @click="loadPlanOptions(turn, field)"><Search :size="15" />{{ field.native_drill ? '读取人员目录' : '查找' }}</button></div>
@@ -859,13 +868,25 @@ function abortRead(): void {
 }
 function scheduleRead(): void {
   window.clearTimeout(timer);
-  if (open.value && !disposed && (state.value.busy || sending.value || state.value.turns?.some((t: Dict) => ['running', 'submitted'].includes(t.plan?.status)))) {
+  if (open.value && !disposed && !document.hidden) {
+    const busy = state.value.busy || sending.value || state.value.turns?.some((t: Dict) => ['running', 'submitted'].includes(t.plan?.status));
     timer = window.setTimeout(() => {
+      if (!open.value || disposed || document.hidden) return;
+      if (!busy) { void readConversationStamp(); return; }
       const hasRunningPlan = state.value.turns?.some((t: Dict) => ['running', 'submitted'].includes(t.plan?.status));
       if (!hasRunningPlan && streamRun && streamChat.value?.status === 'streaming' && performance.now() - lastStreamUpdateAt < 6000) scheduleRead();
       else void readState(false, false);
-    }, 2200);
+    }, busy ? 2200 : 5000);
   }
+}
+async function readConversationStamp(): Promise<void> {
+  try {
+    const result = await call('conversation/stamp', 'GET', undefined, 5000);
+    if (!disposed && open.value && !document.hidden && !readInFlight && typeof result.stamp === 'string' && result.stamp !== state.value.sync_stamp) {
+      await readState(false, false);
+    }
+  } catch { /* Retry a lightweight timestamp read; retain the visible conversation. */ }
+  finally { if (!disposed) scheduleRead(); }
 }
 async function readState(showLoading = true, force = false): Promise<void> {
   if (!showLoading && readInFlight && !force) { scheduleRead(); return; }
@@ -1051,7 +1072,7 @@ watch(() => { const messages = streamChat.value?.messages; return messages?.[mes
   lastStreamUpdateAt = performance.now();
   if (!document.hidden && !renderTimer) renderTimer = window.setTimeout(() => { renderTimer = 0; renderStream(); }, 160);
 });
-function resumeStreamRendering(): void { if (!document.hidden && open.value) renderStream(); }
+function resumeStreamRendering(): void { if (!document.hidden && open.value) { renderStream(); scheduleRead(); } }
 async function attachStream(runId: string): Promise<void> {
   if (!runId || disposed || !open.value || (streamRun === runId && streamChat.value?.status !== 'error')) return;
   disconnectStream();
@@ -1623,6 +1644,20 @@ async function planCall(turn: Dict, suffix: string, method: string, payload: Dic
   finally { delete planBusy[turn.plan.id]; if (!disposed) scheduleRead(); }
 }
 function amendPlan(turn: Dict): Promise<void> { const values: Dict = {}; for (const field of turn.plan.fields || []) values[field.name] = planValues[turn.plan.id + ':' + field.name]; return planCall(turn, '', 'PATCH', { version: turn.plan.version, values }); }
+function noticeRecommendationLabel(plan: Dict, key: string): string {
+  return (plan.fields || []).find((field: Dict) => field.native_notice)?.children?.find((child: Dict) => child.path === key)?.label || key;
+}
+function applyNoticeRecommendation(plan: Dict, item: Dict): void {
+  const field = (plan.fields || []).find((value: Dict) => value.native_notice);
+  if (!field || field.read_only || field.hidden || field.disabled || plan.status !== 'needs_input') return;
+  const key = plan.id + ':' + field.name;
+  const current = { ...(planValues[key] || field.value || {}) };
+  for (const child of field.children || []) {
+    if (child.hidden || child.read_only || child.disabled || child.readonly || current[child.path] !== '' && current[child.path] !== undefined && current[child.path] !== null) continue;
+    if (typeof item.suggested_values?.[child.path] === 'string') current[child.path] = item.suggested_values[child.path];
+  }
+  planValues[key] = current;
+}
 async function resetPlannedNotice(turn: Dict): Promise<void> {
   await planCall(turn, '', 'PATCH', { version: turn.plan.version, action: 'planned-reset', reset_confirmed: true });
   plannedReset[turn.plan.id] = false;
@@ -2638,6 +2673,13 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .planned-notice-selected > span { color: var(--lh-muted); font-size: 12px; }
 .planned-notice-selected button { justify-self: start; display: inline-flex; align-items: center; gap: 5px; }
 .planned-notice-text { margin: 12px 0; }
+.planned-notice-recommendations { grid-column: 1 / -1; min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--lh-border); }
+.planned-notice-recommendations summary { cursor: pointer; color: var(--lh-accent); font-size: 13px; }
+.planned-notice-recommendations > div { padding: 10px 0; display: grid; gap: 7px; }
+.planned-notice-recommendations dl { margin: 0; display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 5px 8px; font-size: 12px; }
+.planned-notice-recommendations dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.planned-notice-recommendations button { justify-self: start; display: inline-flex; align-items: center; gap: 5px; }
+.planned-notice-recommendations small { color: var(--lh-muted); }
 .planned-notice-text h4 { margin: 0 0 8px; font-size: 13px; }
 .planned-notice-text pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; margin: 0; }
 .plan-steps { padding-left: 20px; margin: 12px 0; }

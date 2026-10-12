@@ -491,7 +491,7 @@ class LighthouseAssistant:
     @staticmethod
     def _key(actor):
         channel = actor.get("channel")
-        suffix = ":" + hashlib.sha256(channel.encode()).hexdigest()[:24] if channel else ""
+        suffix = ":" + hashlib.sha256(channel.encode()).hexdigest()[:24] if channel and not channel.startswith('feishu:') else ""
         return "conversation:" + actor["id"] + suffix
 
     @staticmethod
@@ -501,10 +501,69 @@ class LighthouseAssistant:
     def _state(self, actor):
         with self._lock:
             data = self.store.get_document(NAMESPACE, self._key(actor))
+            if (not actor.get('channel') or actor['channel'].startswith('feishu:')) and not (data or {}).get('unified_person'):
+                previous = self.store.list_documents(NAMESPACE, key_prefix='conversation:' + actor['id'] + ':')
+                previous.sort(key=lambda item: item.get('updated_at', 0))
+                states = [item['payload'] for item in previous if isinstance(item.get('payload'), dict) and item['payload'].get('id')]
+                if data is None and states:
+                    data = copy.deepcopy(states[-1])
+                data = data or {'id': uuid.uuid4().hex, 'turns': []}
+                turns = {}
+                for old in [*states, data]:
+                    for turn in old.get('turns', []):
+                        if turn.get('operation_id'):
+                            turns[turn['operation_id']] = copy.deepcopy(turn)
+                data['turns'] = sorted(turns.values(), key=lambda item: item.get('at', 0))
+                data['legacy_conversation_ids'] = list(dict.fromkeys(old['id'] for old in states if old['id'] != data['id']))
+                data['unified_person'] = True
+                # Keep original channel documents and message archives for recovery.
+                if states and data['turns']:
+                    archive = {data['id'] + ':' + turn['operation_id']: turn for turn in data['turns']}
+                    writer = getattr(self.store, 'put_documents', None)
+                    if callable(writer):
+                        writer('lighthouse_messages', archive)
+                    else:
+                        for archive_key, turn in archive.items():
+                            self.store.put_document('lighthouse_messages', archive_key, turn)
+                    data['message_archive_ready'] = True
+                self._trim_turns(data)
+                self.store.put_document(NAMESPACE, self._key(actor), data)
             if data is None:
                 data = {"id": uuid.uuid4().hex, "turns": []}
                 self.store.put_document(NAMESPACE, self._key(actor), data)
             return data
+
+    def conversation_stamp(self, actor):
+        reader = getattr(self.store, 'get_document_updated_at', None)
+        if callable(reader):
+            return str(reader(NAMESPACE, self._key(actor)))
+        return hashlib.sha256(json.dumps(self._state(actor), sort_keys=True).encode()).hexdigest()
+
+    def record_channel_reply(self, actor, payload):
+        if not actor.get('channel', '').startswith('feishu:'):
+            raise AssistantError('该接口仅用于已验证的飞书消息。', 403)
+        operation = payload.get('operation_id')
+        if not isinstance(operation, str) or not re.fullmatch(r'feishu_[a-f0-9]{40}', operation):
+            raise AssistantError('消息编号无效。')
+        if any(not isinstance(payload.get(key), str) or not payload[key].strip() or len(payload[key]) > limit
+               for key, limit in [('question', 12000), ('answer', 120000)]):
+            raise AssistantError('消息内容无效。')
+        with self._lock:
+            state = self._state(actor)
+            if state['id'] != payload.get('conversation_id'):
+                raise AssistantError('会话已变化，本条回复未覆盖新会话。', 409)
+            existing = next((t for t in state['turns'] if t['operation_id'] == operation), None)
+            existing = existing or self.store.get_document('lighthouse_messages', state['id'] + ':' + operation)
+            if existing:
+                return {'recorded': True}
+            turn = {'operation_id': operation, 'at': time.time(), 'question': safe_text(payload['question'], limit=12000),
+                    'answer': safe_text(payload['answer'], limit=120000), 'status': 'completed', 'source_channel': 'feishu',
+                    'scopes': actor['scopes'], 'access_scopes': actor['scopes'], 'sources': [], 'process': []}
+            state['turns'].append(turn)
+            self.store.put_document('lighthouse_messages', state['id'] + ':' + operation, turn)
+            self._trim_turns(state)
+            self.store.put_document(NAMESPACE, self._key(actor), state)
+        return {'recorded': True}
 
     @staticmethod
     def _selected(data, settings):
@@ -600,7 +659,7 @@ class LighthouseAssistant:
             previous = self._state(actor)
             if any((turn.get("plan") or {}).get("status") in {"running", "submitted"} for turn in previous.get("turns", [])):
                 raise AssistantError("业务操作仍在处理，请完成后再清空会话。", 409)
-            self.store.put_document(NAMESPACE, self._key(actor), {"id": uuid.uuid4().hex, "turns": [], "model_id": previous.get("model_id", "")})
+            self.store.put_document(NAMESPACE, self._key(actor), {"id": uuid.uuid4().hex, "turns": [], "model_id": previous.get("model_id", ""), "unified_person": True})
             return self.conversation(actor)
 
     def _save_state(self, actor, state):
@@ -615,8 +674,8 @@ class LighthouseAssistant:
                     if saved.get("answer"):
                         turn["answer"] = saved["answer"]
             retained = {turn["operation_id"] for turn in state.get("turns", [])}
-            state["turns"] = [copy.deepcopy(turn) for identity, turn in previous.items() if identity not in retained
-                and (turn.get("plan") or {}).get("status") in {"running", "submitted"}] + state["turns"]
+            state["turns"] = sorted([copy.deepcopy(turn) for identity, turn in previous.items() if identity not in retained]
+                + state["turns"], key=lambda turn: turn.get('at', 0))
             self._trim_turns(state)
             self.store.put_document(NAMESPACE, self._key(actor), state)
 

@@ -118,6 +118,57 @@ class KnowledgeRoutes(unittest.IsolatedAsyncioTestCase):
         response = await self.client.request('DELETE', path, headers={'admin': '1'}, json={'version': latest})
         self.assertEqual(response.status_code, 200)
 
+    async def test_group_routes_create_assign_filter_and_delete(self):
+        base = '/api/assistant/knowledge'
+        admin_headers = {'admin': '1'}
+        # create group through the HTTP route (real service)
+        response = await self.client.post(base + '/groups', headers=admin_headers, json={'name': '财务组'})
+        self.assertEqual(response.status_code, 200, response.text)
+        group = response.json()['data']
+        self.assertEqual(group['name'], '财务组')
+
+        # GET /groups must expose the exact HTTP contract the frontend consumes:
+        # data.groups[] plus data.total. Keeping this in sync with the JS fixture
+        # (check-knowledge-browser.mjs) prevents a mock-only mismatch from masking a
+        # real API-contract regression.
+        listed = await self.client.get(base + '/groups', headers=admin_headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        groups_payload = listed.json()['data']
+        self.assertIsInstance(groups_payload['groups'], list)
+        self.assertEqual(groups_payload['total'], 1)
+        first = groups_payload['groups'][0]
+        for key in ('id', 'name', 'owner_name', 'created_at', 'count', 'can_manage'):
+            self.assertIn(key, first, f'GET /groups group object missing "{key}"')
+        self.assertEqual(first['id'], group['id'])
+
+        # upload a document through the service, then assign via route
+        document = self.kb.upload(actor('admin', admin=True, name='Admin'), *_text('公司报销', '报销.txt'))
+        self.assertTrue(self.kb.process_one())
+        assign = await self.client.put(f"{base}/groups/{group['id']}/documents", headers=admin_headers,
+                                       json={'document_ids': [document['id']]})
+        self.assertEqual(assign.status_code, 200, assign.text)
+        self.assertEqual(assign.json()['data']['updated'], 1)
+
+        # filter listing returns the grouped document
+        listing = await self.client.get(base, headers=admin_headers, params={'group': group['id']})
+        data = listing.json()['data']
+        self.assertEqual(data['total'], 1)
+        self.assertEqual(data['items'][0]['id'], document['id'])
+        self.assertEqual(data['items'][0]['group_name'], '财务组')
+
+        # ungrouped filter no longer contains it
+        ungrouped = (await self.client.get(base, headers=admin_headers, params={'group': 'ungrouped'})).json()['data']
+        self.assertEqual(ungrouped['total'], 0)
+
+        # delete group through route; document returns to ungrouped and file/index intact
+        removed = await self.client.request('DELETE', base + '/groups/' + group['id'], headers=admin_headers)
+        self.assertEqual(removed.status_code, 200)
+        ungrouped2 = (await self.client.get(base, headers=admin_headers, params={'group': 'ungrouped'})).json()['data']
+        self.assertEqual(ungrouped2['total'], 1)
+        # original file still downloadable
+        file_resp = await self.client.get(base + '/documents/' + document['id'] + '/file')
+        self.assertEqual(file_resp.status_code, 200)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -146,8 +146,15 @@ def prefill_record(service, record, selected, *, scope, month, work_type, source
     version_data = {"scope": scope, "month": month, "type": work_type, "source": source,
                     "memory": {key: memory.get(key) for key in STABLE[work_type]}}
     version = hashlib.sha256(json.dumps(version_data, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
-    return {"source_record": source, "selected": selected, "draft": draft, "field_sources": origins,
-            "missing_fields": missing, "version": version, "scope": scope, "month": month}
+    result = {"source_record": source, "selected": selected, "draft": draft, "field_sources": origins,
+              "missing_fields": missing, "version": version, "scope": scope, "month": month}
+    from .planned_notice_recommendations import build_recommendations
+    recommendation_payload = build_recommendations(
+        service, record=record, draft=draft, scope=scope, month=month, work_type=work_type)
+    result["recommendations"] = recommendation_payload["recommendations"]
+    if recommendation_payload.get("notice"):
+        result["recommendations_notice"] = recommendation_payload["notice"]
+    return result
 
 
 def validate_submission(service, payload):

@@ -444,6 +444,7 @@
           :summary-record-id="editingRecordId"
           :summary-title="selectedRecordTitle"
           :read-only="selectedRecordReadOnly"
+          :can-delete="canDelete"
           :refresh-version="repairSourceRefreshVersion"
           @changed="handleFollowupChanged"
           @source-refreshed="handleRepairSourceRefreshed"
@@ -462,7 +463,7 @@
             </div>
             <div class="editor-action-buttons">
               <button
-                v-if="editingRecordId"
+                v-if="editingRecordId && canDelete"
                 type="button"
                 class="btn secondary"
                 @click="requestOpenRepairNoticeWorkbench"
@@ -770,6 +771,7 @@ const props = defineProps<{
   scope: string;
   scopeOptions: ScopeOption[];
   focusRecordId?: string;
+  canDelete?: boolean;
 }>();
 
 const loading = ref(false);

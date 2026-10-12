@@ -20,13 +20,60 @@
         <input v-model="search" type="search" placeholder="搜索文件名" aria-label="搜索知识库" spellcheck="false" />
         <Loader2 v-if="loadingList" :size="15" class="spin" aria-hidden="true" />
       </label>
+      <div v-if="!recycle" class="kb-group-filter" role="group" aria-label="分组过滤">
+        <button type="button" :class="{ active: groupFilter === 'all' }" :aria-pressed="groupFilter === 'all'" @click="switchGroupFilter('all')">全部</button>
+        <button type="button" :class="{ active: groupFilter === 'ungrouped' }" :aria-pressed="groupFilter === 'ungrouped'" @click="switchGroupFilter('ungrouped')">未分组</button>
+        <button
+          v-for="g in groups" :key="g.id" type="button"
+          :class="{ active: groupFilter === g.id }" :aria-pressed="groupFilter === g.id"
+          @click="switchGroupFilter(g.id)">{{ g.name }}<em v-if="g.count > 0">{{ g.count }}</em>
+        </button>
+      </div>
       <div class="kb-toggle" role="group" aria-label="列表范围">
         <button :class="{ active: !recycle }" :aria-pressed="!recycle" @click="switchBin(false)"><FileText :size="15" />可用文档</button>
         <button :class="{ active: recycle }" :aria-pressed="recycle" @click="switchBin(true)"><Trash2 :size="15" />回收站</button>
       </div>
+      <button type="button" class="icon-button" title="管理分组" aria-label="管理分组" :disabled="recycle || loadingList" @click="groupPanelOpen = !groupPanelOpen">
+        <FolderOpen :size="17" />
+      </button>
       <button type="button" class="icon-button" title="刷新" aria-label="刷新列表" :disabled="loadingList" @click="refresh">
         <RefreshCw :size="17" :class="{ spin: loadingList }" />
       </button>
+    </div>
+
+    <div v-if="groupPanelOpen && !recycle" class="kb-groups-panel" role="group" aria-label="分组管理">
+      <div class="kb-groups-create">
+        <input v-model="newGroupName" aria-label="新分组名称" placeholder="新分组名称（≤50字）" maxlength="50" :disabled="groupBusy" @keyup.enter="createGroup" />
+        <button type="button" class="primary" :disabled="!newGroupName.trim() || groupBusy" @click="createGroup"><FolderPlus :size="15" />新建</button>
+      </div>
+      <ul v-if="groups.length" class="kb-groups-list">
+        <li v-for="g in groups" :key="g.id">
+          <Folder :size="15" aria-hidden="true" />
+          <span><strong>{{ g.name }}</strong><small>{{ g.count }} 个文件 · {{ g.owner_name || '—' }}</small></span>
+          <template v-if="renameTarget?.id === g.id">
+            <input v-model="renameText" :aria-label="`重命名分组${g.name}`" maxlength="50" :disabled="groupBusy" @keyup.enter="confirmRename()" />
+            <button type="button" class="icon-button" title="确认重命名" aria-label="确认重命名" :disabled="groupBusy || !renameText.trim()" @click="confirmRename()"><Check :size="15" /></button>
+            <button type="button" class="icon-button" title="取消" aria-label="取消重命名" :disabled="groupBusy" @click="renameTarget = null"><X :size="15" /></button>
+          </template>
+          <template v-else-if="g.can_manage">
+            <button type="button" class="icon-button" title="重命名" aria-label="重命名分组" :disabled="groupBusy" @click="startRename(g)"><Pencil :size="15" /></button>
+            <button type="button" class="icon-button danger" title="删除分组" aria-label="删除分组" :disabled="groupBusy" @click="deleteGroupTarget = g"><Trash2 :size="15" /></button>
+          </template>
+          <em v-else class="muted">只读</em>
+        </li>
+      </ul>
+      <p v-else class="muted kb-groups-empty">还没有分组，新建一个以组织文档；删除分组仅会把文件退回未分组。</p>
+    </div>
+
+    <div v-if="!recycle && selectedIds.size > 0" class="kb-batch-bar" role="toolbar" aria-label="批量分组">
+      <span class="kb-batch-count">已选 {{ selectedIds.size }} 个文件（当前页）</span>
+      <select v-model="assignGroupId" aria-label="目标分组" :disabled="groupBusy">
+        <option value="">选择分组…</option>
+        <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</option>
+      </select>
+      <button type="button" class="primary" :disabled="!assignGroupId || groupBusy" @click="assignSelection"><Check :size="15" />应用分组</button>
+      <button type="button" class="ghost-button" :disabled="groupBusy" @click="unassignSelection">移出分组</button>
+      <button type="button" class="ghost-button" :disabled="groupBusy" @click="clearSelection">取消选择</button>
     </div>
 
     <div v-if="error" class="alert error" role="alert">
@@ -86,12 +133,27 @@
           {{ recycle ? '回收站是空的' : search.trim() ? '没有匹配的文档' : '尚未上传文档' }}
         </div>
         <ul v-else class="kb-list" aria-label="文档列表">
-          <li v-for="item in items" :key="item.id" class="kb-row" :class="{ selected: detail?.id === item.id }">
-            <button type="button" class="kb-row-main" @click="openDetail(item)">
+          <li v-for="item in items" :key="item.id" class="kb-row" :class="{ selected: detail?.id === item.id || selectedIds.has(item.id) }">
+            <div v-if="!recycle" class="kb-row-check">
+              <button
+                type="button"
+                class="checkbox-button"
+                :class="{ checked: selectedIds.has(item.id) }"
+                role="checkbox"
+                :aria-checked="selectedIds.has(item.id)"
+                :aria-label="selectedIds.has(item.id) ? `取消选择${item.name}` : `选择${item.name}`"
+                :disabled="!item.can_edit"
+                @click="toggleSelect(item.id)"
+              >
+                <CheckSquare v-if="selectedIds.has(item.id)" :size="17" aria-hidden="true" />
+                <Square v-else :size="17" aria-hidden="true" />
+              </button>
+            </div>
+            <button type="button" class="kb-row-main" :class="{ 'with-check': !recycle }" @click="openDetail(item)">
               <span class="kb-file-icon"><FileText :size="17" aria-hidden="true" /></span>
               <span class="kb-row-text">
                 <strong>{{ item.name }}</strong>
-                <small>{{ item.owner_name || '—' }} · {{ sizeText(item.size) }} · {{ item.chunks || 0 }} 片段 · {{ timeText(item.updated_at) }}</small>
+                <small>{{ item.owner_name || '—' }} · {{ sizeText(item.size) }} · {{ item.chunks || 0 }} 片段 · {{ timeText(item.updated_at) }} · {{ item.group_name || '未分组' }}</small>
               </span>
               <em class="kb-status" :class="statusClass(item.status)">{{ statusText(item.status) }}</em>
             </button>
@@ -107,11 +169,32 @@
             <p v-if="item.error && !recycle" class="kb-row-error" role="alert">{{ item.error }}</p>
           </li>
         </ul>
+        <div v-if="!recycle && items.length" class="kb-select-all">
+          <button type="button" class="checkbox-button" :class="{ checked: allPageSelected }" role="checkbox" :aria-checked="allPageSelected" :aria-label="allPageSelected ? '取消全选本页' : '全选本页'" @click="toggleSelectAll">
+            <CheckSquare v-if="allPageSelected" :size="15" aria-hidden="true" />
+            <Square v-else :size="15" aria-hidden="true" />
+          </button>
+          <span>{{ allPageSelected ? '已全选本页' : '全选本页' }}</span>
+        </div>
         <footer v-if="pages > 1" class="kb-pager">
-          <span>共 {{ total }} 项</span>
-          <button class="icon-button" aria-label="上一页" :disabled="page <= 1 || loadingList" @click="changePage(page - 1)"><ChevronLeft :size="16" /></button>
-          <span>{{ page }} / {{ pages }}</span>
-          <button class="icon-button" aria-label="下一页" :disabled="page >= pages || loadingList" @click="changePage(page + 1)"><ChevronRight :size="16" /></button>
+          <span class="kb-total">共 {{ total }} 项</span>
+          <nav class="kb-pager-nav" aria-label="分页">
+            <button class="pager-button" aria-label="首页" :disabled="page <= 1 || loadingList" @click="changePage(1)"><ChevronsLeft :size="15" /></button>
+            <button class="pager-button" aria-label="上一页" :disabled="page <= 1 || loadingList" @click="changePage(page - 1)"><ChevronLeft :size="15" /></button>
+            <template v-for="(num, index) in pageNumbers" :key="num">
+              <span v-if="index > 0 && num - pageNumbers[index - 1] > 1" class="pager-ellipsis" aria-hidden="true">…</span>
+              <button
+                class="pager-button"
+                :class="{ current: num === page }"
+                :aria-current="num === page ? 'page' : undefined"
+                :aria-label="`第 ${num} 页`"
+                :disabled="loadingList"
+                @click="changePage(num)"
+              >{{ num }}</button>
+            </template>
+            <button class="pager-button" aria-label="下一页" :disabled="page >= pages || loadingList" @click="changePage(page + 1)"><ChevronRight :size="15" /></button>
+            <button class="pager-button" aria-label="末页" :disabled="page >= pages || loadingList" @click="changePage(pages)"><ChevronsRight :size="15" /></button>
+          </nav>
         </footer>
       </div>
 
@@ -150,14 +233,16 @@
     <ConfirmDialog :open="!!deleteTarget" title="移入回收站" :message="deleteTarget ? '将「' + deleteTarget.name + '」移入回收站？历史共享版本保留，之后可恢复。' : ''" tone="danger" @resolve="resolveDelete" />
     <ConfirmDialog :open="!!restoreTarget" title="恢复文档" :message="restoreTarget ? '恢复「' + restoreTarget.name + '」？恢复后需要重新索引才会再次共享。' : ''" tone="primary" @resolve="resolveRestore" />
     <ConfirmDialog :open="!!retryTarget" title="重新索引" :message="retryTarget ? '对「' + retryTarget.name + '」重新执行索引？' : ''" tone="primary" @resolve="resolveRetry" />
+    <ConfirmDialog :open="!!deleteGroupTarget" title="删除分组" :message="deleteGroupTarget ? '删除分组「' + deleteGroupTarget.name + '」？其中文件将退回未分组，文件本身与索引不受影响。' : ''" tone="danger" @resolve="resolveDeleteGroup" />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
-  AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Database, Download, FileText,
-  Loader2, RefreshCw, RotateCcw, Search, Trash2, Upload, X, FolderOpen,
+  AlertCircle, Check, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
+  Database, Download, FileText, Folder, FolderOpen, FolderPlus, Loader2, Pencil, RefreshCw, RotateCcw,
+  Search, Square, Trash2, Upload, X,
 } from "lucide-vue-next";
 import { requestJson, downloadFile, uploadJson } from "../api/client";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -181,6 +266,17 @@ interface DocumentItem {
   size: number;
   chunks: number;
   error?: string;
+  group_id?: string | null;
+  group_name?: string | null;
+}
+
+interface GroupItem {
+  id: string;
+  name: string;
+  owner_name: string;
+  count: number;
+  can_manage: boolean;
+  created_at: unknown;
 }
 
 interface Section {
@@ -244,7 +340,27 @@ const restoreTarget = ref<DocumentItem | null>(null);
 const retryTarget = ref<DocumentItem | null>(null);
 const actionBusy = ref(false);
 
+const groups = ref<GroupItem[]>([]);
+const groupFilter = ref<string>("all");
+const selectedIds = ref<Set<string>>(new Set());
+const assignGroupId = ref("");
+const groupBusy = ref(false);
+const groupPanelOpen = ref(false);
+const newGroupName = ref("");
+const renameTarget = ref<GroupItem | null>(null);
+const renameText = ref("");
+const deleteGroupTarget = ref<GroupItem | null>(null);
+
 const pages = computed(() => Math.max(1, Math.ceil(total.value / 20)));
+const pageNumbers = computed(() => {
+  const current = page.value;
+  const last = pages.value;
+  const wanted = new Set<number>([1, last]);
+  for (let i = Math.max(2, current - 2); i <= Math.min(last - 1, current + 2); i++) wanted.add(i);
+  return [...wanted].sort((a, b) => a - b);
+});
+const editableOnPage = computed(() => items.value.filter((item) => item.can_edit));
+const allPageSelected = computed(() => editableOnPage.value.length > 0 && editableOnPage.value.every((item) => selectedIds.value.has(item.id)));
 const detailPages = computed(() => Math.max(1, Math.ceil(detailTotal.value / (detailPageSize.value || 20))));
 const uploadConfirmMessage = computed(() => {
   if (uploadTarget.value) return "上传后将替换当前文档并建立新索引版本，原共享版本保留。确认继续？";
@@ -255,7 +371,9 @@ const uploadConfirmMessage = computed(() => {
 
 let searchTimer = 0;
 let listController: AbortController | undefined;
+let groupsController: AbortController | undefined;
 let pollTimer: number | undefined;
+let clampRetry = 0;
 
 function engineStatus(): string {
   if (settings.value?.runtime?.loading || settings.value?.queued > 0) return 'preparing';
@@ -341,6 +459,10 @@ async function loadList(spinner = true, clearError = true): Promise<void> {
       deleted: recycle.value ? "1" : "0",
     });
     if (search.value.trim()) params.set("q", search.value.trim());
+    if (!recycle.value) {
+      if (groupFilter.value === "ungrouped") params.set("group", "ungrouped");
+      else if (groupFilter.value !== "all") params.set("group", groupFilter.value);
+    }
     const data = await requestJson(`${BASE}?${params}`, { signal: controller.signal, cache: "no-store" });
     if (listController !== controller || controller.signal.aborted) return;
     items.value = data.items || [];
@@ -348,7 +470,23 @@ async function loadList(spinner = true, clearError = true): Promise<void> {
     page.value = Number(data.page) || page.value;
     isAdmin.value = Boolean(data.is_admin);
     settings.value = (data.settings && typeof data.settings === "object") ? data.settings : {};
+    // Only keep selections for documents still on this page and still editable.
+    pruneSelection();
     updatePolling();
+    // If the request resolved to an empty page beyond the last valid one (e.g. the
+    // final item was deleted by another user), clamp back to the last valid page and
+    // re-read once. clampRetry guards against a looping refetch if the backend is
+    // itself returning a conflicting count.
+    if (page.value > pages.value && clampRetry < 1) {
+      clampRetry += 1;
+      page.value = pages.value;
+      selectedIds.value = new Set();
+      assignGroupId.value = "";
+      await loadList(spinner, clearError);
+      clampRetry = 0;
+      return;
+    }
+    clampRetry = 0;
   } catch (cause) {
     if (listController === controller && !controller.signal.aborted) {
       if (clearError) error.value = cause instanceof Error ? cause.message : "文档读取失败";
@@ -358,11 +496,19 @@ async function loadList(spinner = true, clearError = true): Promise<void> {
   }
 }
 
+function pruneSelection(): void {
+  const visible = new Set(items.value.filter((item) => item.can_edit).map((item) => item.id));
+  const retained = [...selectedIds.value].filter((id) => visible.has(id));
+  if (retained.length !== selectedIds.value.size) selectedIds.value = new Set(retained);
+}
+
 function onSearchChange(): void {
   window.clearTimeout(searchTimer);
   listController?.abort();
   searchTimer = window.setTimeout(() => {
     if (page.value !== 1) page.value = 1;
+    selectedIds.value = new Set();
+    assignGroupId.value = "";
     void loadList();
   }, 450);
 }
@@ -372,12 +518,168 @@ function switchBin(next: boolean): void {
   if (recycle.value === next) return;
   recycle.value = next;
   page.value = 1;
+  selectedIds.value.clear();
+  assignGroupId.value = "";
+  groupPanelOpen.value = false;
   void loadList();
 }
-function refresh(): void { void loadList(true, true); }
+function refresh(): void { void loadList(true, true); void loadGroups(); }
 function changePage(next: number): void {
   page.value = next;
+  // Selection must never carry over across pages ("仅本页"); clear before refetch.
+  selectedIds.value = new Set();
+  assignGroupId.value = "";
   void loadList(true, true);
+}
+function switchGroupFilter(next: string): void {
+  if (groupFilter.value === next) return;
+  groupFilter.value = next;
+  page.value = 1;
+  selectedIds.value.clear();
+  assignGroupId.value = "";
+  void loadList();
+}
+function toggleSelect(id: string): void {
+  const item = items.value.find((it) => it.id === id);
+  if (item && !item.can_edit) return; // never allow selecting an un-editable document
+  const set = selectedIds.value;
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+  selectedIds.value = new Set(set);
+}
+function toggleSelectAll(): void {
+  if (allPageSelected.value) selectedIds.value = new Set();
+  else selectedIds.value = new Set(items.value.filter((item) => item.can_edit).map((item) => item.id));
+}
+function clearSelection(): void {
+  selectedIds.value = new Set();
+  assignGroupId.value = "";
+}
+
+async function reloadAdjusted(): Promise<void> {
+  await loadList();
+  if (page.value > pages.value) {
+    page.value = pages.value;
+    await loadList();
+  }
+  selectedIds.value = new Set();
+  assignGroupId.value = "";
+}
+
+async function loadGroups(): Promise<void> {
+  groupsController?.abort();
+  const controller = new AbortController();
+  groupsController = controller;
+  try {
+    const data = await requestJson(`${BASE}/groups`, { signal: controller.signal, cache: "no-store" });
+    if (groupsController !== controller || controller.signal.aborted) return;
+    groups.value = Array.isArray(data.groups) ? data.groups : [];
+  } catch (cause) {
+    if (groupsController === controller && !controller.signal.aborted) {
+      error.value = `分组加载失败，请刷新重试：${cause instanceof Error ? cause.message : "网络异常"}`;
+    }
+  } finally {
+    if (groupsController === controller) groupsController = undefined;
+  }
+}
+
+async function createGroup(): Promise<void> {
+  const name = newGroupName.value.trim();
+  if (!name || groupBusy.value) return;
+  groupBusy.value = true;
+  clearNotice();
+  try {
+    await requestJson(`${BASE}/groups`, { method: "POST", body: JSON.stringify({ name }) });
+    notice.value = `已创建分组「${name}」。`;
+    newGroupName.value = "";
+    await loadGroups();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "创建分组失败。";
+  } finally {
+    groupBusy.value = false;
+  }
+}
+
+function startRename(group: GroupItem): void {
+  renameTarget.value = group;
+  renameText.value = group.name;
+}
+
+async function confirmRename(): Promise<void> {
+  const target = renameTarget.value;
+  const name = renameText.value.trim();
+  if (!target || !name || groupBusy.value) return;
+  groupBusy.value = true;
+  clearNotice();
+  try {
+    await requestJson(`${BASE}/groups/${encodeURIComponent(target.id)}`, { method: "PATCH", body: JSON.stringify({ name }) });
+    notice.value = `已重命名分组为「${name}」。`;
+    renameTarget.value = null;
+    await loadGroups();
+    if (groupFilter.value !== "all" && groupFilter.value !== "ungrouped") await loadList();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "重命名分组失败。";
+  } finally {
+    groupBusy.value = false;
+  }
+}
+
+async function resolveDeleteGroup(confirm: boolean): Promise<void> {
+  const target = deleteGroupTarget.value;
+  if (!confirm || !target || groupBusy.value) return;
+  groupBusy.value = true;
+  clearNotice();
+  try {
+    await requestJson(`${BASE}/groups/${encodeURIComponent(target.id)}`, { method: "DELETE" });
+    notice.value = `已删除分组「${target.name}」，文件已退回未分组。`;
+    deleteGroupTarget.value = null;
+    if (groupFilter.value === target.id) groupFilter.value = "all";
+    await loadGroups();
+    await reloadAdjusted();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "删除分组失败。";
+    deleteGroupTarget.value = null;
+  } finally {
+    groupBusy.value = false;
+  }
+}
+
+async function assignSelection(): Promise<void> {
+  if (!assignGroupId.value || !selectedIds.value.size || groupBusy.value) return;
+  const ids = [...selectedIds.value];
+  groupBusy.value = true;
+  clearNotice();
+  try {
+    await requestJson(`${BASE}/groups/${encodeURIComponent(assignGroupId.value)}/documents`, {
+      method: "PUT", body: JSON.stringify({ document_ids: ids }),
+    });
+    notice.value = `已将 ${ids.length} 个文件分入「${groups.value.find((g) => g.id === assignGroupId.value)?.name || ''}」。`;
+    await loadGroups();
+    await reloadAdjusted();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "分组失败，请检查选择后重试。";
+  } finally {
+    groupBusy.value = false;
+  }
+}
+
+async function unassignSelection(): Promise<void> {
+  if (!selectedIds.value.size || groupBusy.value) return;
+  const ids = [...selectedIds.value];
+  groupBusy.value = true;
+  clearNotice();
+  try {
+    await requestJson(`${BASE}/groups/ungrouped/documents`, {
+      method: "PUT", body: JSON.stringify({ document_ids: ids }),
+    });
+    notice.value = `已将 ${ids.length} 个文件移出分组。`;
+    await loadGroups();
+    await reloadAdjusted();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : "移出分组失败，请重试。";
+  } finally {
+    groupBusy.value = false;
+  }
 }
 
 function openDetail(item: DocumentItem): void {
@@ -676,7 +978,7 @@ async function resolveDelete(accepted: boolean): Promise<void> {
     await requestJson(`${BASE}/documents/${encodeURIComponent(item.id)}`, { method: "DELETE", body: JSON.stringify({ version: item.version }) });
     if (detail.value?.id === item.id) closeDetail();
     notice.value = "已移入回收站。";
-    await loadList(true, false);
+    await reloadAdjusted();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "删除失败，请重试。";
   } finally {
@@ -693,7 +995,7 @@ async function resolveRestore(accepted: boolean): Promise<void> {
   try {
     await requestJson(`${BASE}/documents/${encodeURIComponent(item.id)}/restore`, { method: "POST", body: JSON.stringify({ version: item.version }) });
     notice.value = "已恢复文档。";
-    await loadList(true, false);
+    await reloadAdjusted();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "恢复失败，请重试。";
   } finally {
@@ -710,7 +1012,7 @@ async function resolveRetry(accepted: boolean): Promise<void> {
   try {
     await requestJson(`${BASE}/documents/${encodeURIComponent(item.id)}/retry`, { method: "POST", body: JSON.stringify({ version: item.version }) });
     notice.value = "已重新提交索引。";
-    await loadList(true, false);
+    await reloadAdjusted();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "操作失败，请重试。";
   } finally {
@@ -721,6 +1023,7 @@ async function resolveRetry(accepted: boolean): Promise<void> {
 onMounted(() => {
   document.addEventListener('paste', onPaste);
   void loadList(true, true);
+  void loadGroups();
   const params = new URLSearchParams(window.location.search);
   const docId = params.get("document");
   const version = params.get("version");
@@ -751,6 +1054,7 @@ onBeforeUnmount(() => {
   window.clearInterval(pollTimer);
   pollTimer = undefined;
   listController?.abort();
+  groupsController?.abort();
   detailRequest += 1;
 });
 </script>
@@ -915,7 +1219,73 @@ onBeforeUnmount(() => {
 .primary:hover:not(:disabled) { filter: brightness(1.04); }
 .primary:disabled { opacity: 0.55; cursor: not-allowed; }
 
-.kb-pager { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 10px 4px 2px; color: var(--cf-muted, #64748b); font-size: 12px; }
+.kb-pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 4px 2px; color: var(--cf-muted, #64748b); font-size: 12px; flex-wrap: wrap; }
+.kb-total { white-space: nowrap; }
+.kb-pager-nav { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.pager-button {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 30px; padding: 0 7px;
+  border: 1px solid var(--cf-border, #d8e5f7); border-radius: 9px; background: #fff; color: #33526f; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer;
+}
+.pager-button:hover:not(:disabled) { border-color: var(--cf-border-strong, #cfe0ff); background: #f4f8ff; }
+.pager-button.current { background: linear-gradient(135deg, #1e63ff, #1554df); border-color: transparent; color: #fff; box-shadow: 0 6px 14px rgba(30, 99, 255, 0.28); }
+.pager-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.pager-ellipsis { color: var(--cf-muted, #64748b); padding: 0 2px; user-select: none; }
+
+.kb-group-filter { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; flex: 1 1 260px; }
+.kb-group-filter button {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 10px;
+  border: 1px solid transparent; border-radius: 999px; background: transparent; color: #48627f; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer;
+}
+.kb-group-filter button em { font-style: normal; font-weight: 800; font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #e0edff; color: #1e63ff; }
+.kb-group-filter button:hover { background: #f4f8ff; }
+.kb-group-filter button.active { background: #e8f1ff; border-color: #cfe0ff; color: var(--cf-brand-blue, #1e63ff); }
+.kb-group-filter button.active em { background: #fff; }
+
+.kb-groups-panel {
+  margin-top: 10px; padding: 12px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: var(--cf-radius-card, 18px);
+  background: rgba(248, 251, 255, 0.9); display: grid; gap: 10px;
+}
+.kb-groups-create { display: flex; gap: 8px; }
+.kb-groups-create input { flex: 1 1 auto; min-width: 0; padding: 8px 12px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: var(--cf-radius-control, 14px); background: #fff; color: var(--cf-text, #0f172a); font: inherit; }
+.kb-groups-create button { white-space: nowrap; }
+.kb-groups-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 240px; overflow: auto; }
+.kb-groups-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: 12px; background: #fff; }
+.kb-groups-list li > svg { flex: 0 0 auto; color: var(--cf-brand-blue, #1e63ff); }
+.kb-groups-list li > span { flex: 1 1 auto; min-width: 0; display: grid; gap: 1px; }
+.kb-groups-list li strong { color: #0c2d63; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-groups-list li small { color: var(--cf-muted, #64748b); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-groups-list li input { width: 150px; padding: 6px 9px; border: 1px solid var(--cf-border-strong, #cfe0ff); border-radius: 10px; background: #fff; font: inherit; font-size: 12px; }
+.kb-groups-empty { margin: 0; }
+.kb-groups-list .muted { font-style: normal; }
+
+.kb-batch-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding: 10px 12px;
+  border: 1px solid #cfe0ff; border-radius: var(--cf-radius-card, 16px); background: #f0f6ff;
+}
+.kb-batch-count { color: var(--cf-brand-blue, #1e63ff); font-weight: 850; font-size: 12px; white-space: nowrap; }
+.kb-batch-bar select { padding: 7px 10px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: 12px; background: #fff; color: var(--cf-text, #0f172a); font: inherit; font-size: 13px; }
+.ghost-button {
+  display: inline-flex; align-items: center; gap: 5px; min-height: 34px; padding: 0 12px;
+  border: 1px solid var(--cf-border, #d8e5f7); border-radius: var(--cf-radius-control, 14px); background: #fff; color: #33526f; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer;
+}
+.ghost-button:hover:not(:disabled) { border-color: var(--cf-border-strong, #cfe0ff); background: #f4f8ff; }
+.ghost-button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.kb-list .kb-row { display: grid; grid-template-columns: auto 1fr; align-items: center; }
+.kb-row-check { display: flex; align-items: center; padding-right: 6px; grid-column: 1; grid-row: 1; }
+.kb-row-main { grid-column: 1 / -1; grid-row: 1; }
+.kb-row-main.with-check { grid-column: 2; }
+.kb-list .kb-row .kb-row-actions { grid-column: 1 / -1; justify-content: flex-start; }
+.checkbox-button {
+  display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px;
+  border: 0; background: transparent; color: var(--cf-muted, #64748b); cursor: pointer; padding: 0;
+}
+.checkbox-button.checked { color: var(--cf-brand-blue, #1e63ff); }
+.checkbox-button:hover:not(:disabled) { color: var(--cf-brand-blue, #1e63ff); }
+.checkbox-button:disabled { cursor: not-allowed; opacity: 0.35; }
+.kb-row-main.with-check { padding-left: 8px; }
+.kb-select-all { display: flex; align-items: center; gap: 4px; padding: 6px 4px 0; color: var(--cf-muted, #64748b); font-size: 12px; }
+.kb-select-all .checkbox-button { width: 22px; height: 22px; }
 
 .kb-detail {
   min-width: 0; padding: 12px; border: 1px solid var(--cf-border, #d8e5f7);

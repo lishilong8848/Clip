@@ -398,10 +398,11 @@ class PlanConvergenceService:
         if selected['check_status'] == 'ready':
             record['hits'] = selected['hits']
 
-    def maintenance_records(self, record_id=None):
+    def maintenance_records(self, record_id=None, *, allowed_scopes=None):
         if self._ongoing_provider is None:
             raise ValueError('本地未结束通告读取入口未接入')
         records = maintenance.ongoing_records(self._ongoing_provider('ALL'), work_type='repair')
+        records = self._visible_notice_records(records, allowed_scopes)
         for record in records:
             self._overlay_check_results(record, 'repair')
         if record_id is not None:
@@ -410,10 +411,11 @@ class PlanConvergenceService:
                 raise FileNotFoundError('该检修通告已结束、删除或不在当前未结束列表中，请刷新列表')
         return records
 
-    def change_records(self, record_id=None):
+    def change_records(self, record_id=None, *, allowed_scopes=None):
         if self._ongoing_provider is None:
             raise ValueError('本地未结束通告读取入口未接入')
         records = maintenance.ongoing_records(self._ongoing_provider('ALL'), work_type='change')
+        records = self._visible_notice_records(records, allowed_scopes)
         for record in records:
             self._overlay_check_results(record, 'change')
         if record_id is not None:
@@ -422,14 +424,27 @@ class PlanConvergenceService:
                 raise FileNotFoundError('该变更通告已结束、删除或不在当前未结束列表中，请刷新列表')
         return records
 
-    def maintenance_check(self, record_id=None, *, records=None):
-        return self._manual_check('repair', record_id, records=records, list_method=self.maintenance_records)
+    @staticmethod
+    def _visible_notice_records(records, allowed_scopes):
+        if allowed_scopes is None:
+            return records
+        from .portal_service import MaintenancePortalService
+        allowed = set(allowed_scopes)
+        if 'ALL' in allowed:
+            return records
+        return [row for row in records if (codes := set(MaintenancePortalService._building_codes_from_value(row.get('building'))))
+                and codes <= allowed]
 
-    def change_check(self, record_id=None, *, records=None):
-        return self._manual_check('change', record_id, records=records, list_method=self.change_records)
+    def maintenance_check(self, record_id=None, *, records=None, allowed_scopes=None):
+        return self._manual_check('repair', record_id, records=records,
+                                  list_method=self.maintenance_records if allowed_scopes is None else lambda rid: self.maintenance_records(rid, allowed_scopes=allowed_scopes))
 
-    def notice_points(self, kind, record_id, block_id):
-        rows = self.change_records(record_id) if kind == 'change' else self.maintenance_records(record_id)
+    def change_check(self, record_id=None, *, records=None, allowed_scopes=None):
+        return self._manual_check('change', record_id, records=records,
+                                  list_method=self.change_records if allowed_scopes is None else lambda rid: self.change_records(rid, allowed_scopes=allowed_scopes))
+
+    def notice_points(self, kind, record_id, block_id, *, allowed_scopes=None):
+        rows = self.change_records(record_id, allowed_scopes=allowed_scopes) if kind == 'change' else self.maintenance_records(record_id, allowed_scopes=allowed_scopes)
         row = rows[0]
         hit = next((h for h in row.get('hits', []) if str(h['blockId']) == str(block_id)), None)
         if row.get('check_status') != 'ready' or not hit:

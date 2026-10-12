@@ -180,7 +180,7 @@ def install_lighthouse_routes(app, controller, runtime):
             if upstream is not None:
                 await upstream.aclose()
 
-    paths = (('appearance', ['GET', 'PUT']), ('conversation', ['GET', 'DELETE', 'PATCH']),
+    paths = (('appearance', ['GET', 'PUT']), ('conversation', ['GET', 'DELETE', 'PATCH']), ('conversation/stamp', ['GET']),
         ('chat', ['POST']), ('settings', ['GET', 'PUT']), ('question-bank', ['GET']),
         ('question-material', ['GET']), ('work-orders', ['GET']), ('messages', ['POST']),
         ('history', ['GET']), ('runs/{run_id}/stream', ['GET']), ('runs/{run_id}/cancel', ['POST']),

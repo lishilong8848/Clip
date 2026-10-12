@@ -7,6 +7,7 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -125,6 +126,66 @@ def _session_id(response) -> str:
 
 
 class PortalAuthCancelLoginTests(unittest.TestCase):
+    def test_new_authorization_endpoint_denial_returns_to_login(self):
+        config = SimpleNamespace(app_id='cli_fixture_oauth', app_secret='fixture-secret')
+        with _isolated_manager() as make, patch('lan_bitable_template_portal.portal_auth.config', config):
+            manager = make()
+            url = urlsplit(manager.start_login(redirect_uri=CALLBACK_URI, next_path='/learning'))
+            query = parse_qs(url.query)
+            self.assertEqual(url.netloc, 'accounts.feishu.cn')
+            self.assertEqual(url.path, '/open-apis/authen/v1/authorize')
+            self.assertEqual(query['response_type'], ['code'])
+            self.assertEqual(query['client_id'], [config.app_id])
+            self.assertNotIn('fixture-secret', url.query)
+            state = query['state'][0]
+            response, _ = _callback(manager, {'state': state, 'error': 'access_denied'})
+            self.assertEqual(_location_parts(response.headers['location'])[1]['next'], ['/learning'])
+            self.assertFalse(manager._sessions)
+            self.assertEqual(manager.cancel_login(state=state, redirect_uri=CALLBACK_URI), '/')
+
+    def test_new_code_exchange_survives_restart_and_uses_same_app_identity(self):
+        from upload_event_module.services.feishu_token_manager import FeishuTokenManager, OAUTH_TOKEN_URL, USER_INFO_URL
+        config = SimpleNamespace(app_id='cli_fixture_oauth', app_secret='fixture-secret')
+        client = Mock()
+        client.request_json.side_effect = [
+            {'code': 0, 'access_token': 'fixture-user-token'},
+            {'code': 0, 'data': {'open_id': 'ou_fixtureOAuth', 'name': '授权身份'}},
+        ]
+        with _isolated_manager() as make, patch('lan_bitable_template_portal.portal_auth.config', config), \
+                patch('upload_event_module.services.feishu_token_manager.config', config), \
+                patch('lan_bitable_template_portal.portal_auth.token_manager', FeishuTokenManager(client)):
+            first = make()
+            query = parse_qs(urlsplit(first.start_login(redirect_uri=CALLBACK_URI, next_path='/learning')).query)
+            manager = make()
+            response, _ = _callback(manager, {'code': 'fixture-code', 'state': query['state'][0]})
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers['location'], '/learning')
+            session = manager.get_session(_session_id(response))
+            self.assertEqual(session['user']['open_id'], 'ou_fixtureOAuth')
+            self.assertEqual(session['allowed_scopes'], [])
+            self.assertNotIn('access_token', session['user'])
+            self.assertEqual([call.args[1] for call in client.request_json.call_args_list], [OAUTH_TOKEN_URL, USER_INFO_URL])
+            body = client.request_json.call_args_list[0].kwargs['json_payload']
+            self.assertEqual(body, {'client_id': config.app_id, 'client_secret': config.app_secret,
+                'grant_type': 'authorization_code', 'code': 'fixture-code', 'redirect_uri': CALLBACK_URI})
+
+    def test_oauth_token_error_or_missing_identity_never_creates_session(self):
+        from upload_event_module.services.feishu_token_manager import FeishuTokenManager
+        config = SimpleNamespace(app_id='cli_fixture_oauth', app_secret='fixture-secret')
+        for responses in ([{'code': 20003, 'error': 'invalid_grant'}], [{'code': 0}],
+                          [{'code': 0, 'access_token': 'fixture-token'}, {'code': 0, 'data': {}}]):
+            with self.subTest(responses=responses), _isolated_manager() as make, \
+                    patch('lan_bitable_template_portal.portal_auth.config', config), \
+                    patch('upload_event_module.services.feishu_token_manager.config', config):
+                client = Mock()
+                client.request_json.side_effect = responses
+                with patch('lan_bitable_template_portal.portal_auth.token_manager', FeishuTokenManager(client)):
+                    manager = make()
+                    state = parse_qs(urlsplit(manager.start_login(redirect_uri=CALLBACK_URI)).query)['state'][0]
+                    response, _ = _callback(manager, {'state': state, 'code': 'fixture-code'})
+                    self.assertNotEqual(response.status_code, 302)
+                    self.assertFalse(manager._sessions)
+
     def test_cancel_login_returns_sanitized_original_and_consumes_once(self):
         with _isolated_manager() as make:
             m = make()

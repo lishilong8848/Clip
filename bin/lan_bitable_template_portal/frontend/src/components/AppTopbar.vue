@@ -38,10 +38,10 @@
         @refresh-event="emit('refresh-event')"
       />
       <button type="button"
-        v-if="isAdmin"
+        v-if="isAdmin || canManageAccounts"
         class="btn ghost admin-entry settings-entry"
-        aria-label="打开管理员诊断和权限管理"
-        title="打开管理员诊断和权限管理"
+        aria-label="打开账号与权限设置"
+        title="打开账号与权限设置"
         @click="emit('open-admin')"
       >
         <Settings v-if="homeMode" :size="18" aria-hidden="true" />
@@ -78,6 +78,7 @@ const props = defineProps<{
   refreshCooldown: Record<string, boolean>;
   eventRefreshTitle: string;
   isAdmin: boolean;
+  canManageAccounts?: boolean;
   homeMode?: boolean;
 }>();
 

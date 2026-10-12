@@ -110,6 +110,20 @@ def check_actor(actor, *, admin=False):
         raise AssistantError('仅管理员可修改知识库模型设置。', 403)
 
 
+def _validate_group_name(name):
+    """Validate and normalize a group display name (length bounded, no control chars)."""
+    if not isinstance(name, str):
+        raise AssistantError('分组名称无效。')
+    name = name.strip()
+    if not name:
+        raise AssistantError('请填写分组名称。')
+    if len(name) > 50:
+        raise AssistantError('分组名称最长50个字符。')
+    if any(ord(c) < 32 for c in name):
+        raise AssistantError('分组名称包含无效字符。')
+    return name
+
+
 def _pack(vector, dim=DIMENSIONS):
     """Convert a validated float vector into a little-endian float32 blob."""
     if type(vector) is not list or len(vector) != dim:
@@ -257,6 +271,12 @@ class KnowledgeBase:
             CREATE TABLE IF NOT EXISTS local_vectors(
                 chunk_id INTEGER PRIMARY KEY,embedding BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS local_vectors_chunk ON local_vectors(chunk_id);
+            CREATE TABLE IF NOT EXISTS knowledge_groups(
+                id TEXT PRIMARY KEY,name TEXT NOT NULL,owner TEXT NOT NULL,owner_name TEXT NOT NULL,created_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS knowledge_groups_name ON knowledge_groups(lower(name));
+            CREATE TABLE IF NOT EXISTS doc_group_members(
+                document_id TEXT PRIMARY KEY,group_id TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS doc_group_members_group ON doc_group_members(group_id);
         ''')
         db.execute("UPDATE documents SET status='queued' WHERE status='indexing' AND deleted=0")
 
@@ -537,8 +557,13 @@ class KnowledgeBase:
     # ------------------------------------------------------------------ public rows
     @staticmethod
     def _public(row, actor):
-        return {key: row[key] for key in ('id', 'name', 'owner_name', 'active_version', 'status', 'error', 'updated_at', 'size', 'chunks')} | {
+        result = {key: row[key] for key in ('id', 'name', 'owner_name', 'active_version', 'status', 'error', 'updated_at', 'size', 'chunks')} | {
             'version': row['revision'], 'can_edit': bool(actor.get('is_admin') or row['owner'] == actor['id'])}
+        if 'group_id' in row.keys():
+            result['group_id'] = row['group_id']
+        if 'group_name' in row.keys():
+            result['group_name'] = row['group_name']
+        return result
 
     @staticmethod
     def _editable(row, actor, revision):
@@ -559,16 +584,35 @@ class KnowledgeBase:
             raise AssistantError('页码无效。') from None
         deleted = str(query.get('deleted', '0')) == '1'
         q = str(query.get('q') or '').strip()[:200]
-        sql, values = 'deleted=?', [int(deleted)]
+        # Qualify every column against `documents`: the FROM joins knowledge_groups,
+        # whose columns (name/owner_name/owner) overlap and would otherwise make the
+        # predicates below ambiguous when q/trash filters are present.
+        sql, values = 'documents.deleted=?', [int(deleted)]
         if deleted and not actor.get('is_admin'):
-            sql += ' AND owner=?'
+            sql += ' AND documents.owner=?'
             values.append(actor['id'])
         if q:
-            sql += " AND (instr(lower(name),lower(?))>0 OR instr(lower(owner_name),lower(?))>0)"
+            sql += " AND (instr(lower(documents.name),lower(?))>0 OR instr(lower(documents.owner_name),lower(?))>0)"
             values += [q, q]
+        group_filter = str(query.get('group') or '').strip()
+        if not deleted and group_filter and group_filter not in ('all', '*'):
+            if group_filter in ('ungrouped', 'none', '0'):
+                sql += ' AND NOT EXISTS (SELECT 1 FROM doc_group_members m WHERE m.document_id=documents.id)'
+            else:
+                sql += ' AND EXISTS (SELECT 1 FROM doc_group_members m WHERE m.document_id=documents.id AND m.group_id=?)'
+                values.append(group_filter)
         with self.connect() as db:
             total = db.execute('SELECT count(*) FROM documents WHERE ' + sql, values).fetchone()[0]
-            rows = db.execute('SELECT * FROM documents WHERE ' + sql + ' ORDER BY updated_at DESC,id LIMIT 20 OFFSET ?', [*values, (page - 1) * 20]).fetchall()
+            # Clamp to the last valid page so a document removed/deleted (by this user
+            # or another) on the final page never leaves the UI on an empty page.
+            last_page = max(1, -(-total // 20))
+            if page > last_page:
+                page = last_page
+            rows = db.execute('SELECT documents.*, g.id AS group_id, g.name AS group_name FROM documents '
+                              'LEFT JOIN doc_group_members gm ON gm.document_id=documents.id '
+                              'LEFT JOIN knowledge_groups g ON g.id=gm.group_id '
+                              'WHERE ' + sql + ' ORDER BY documents.updated_at DESC,documents.id LIMIT 20 OFFSET ?',
+                              [*values, (page - 1) * 20]).fetchall()
             revision = self._revision(db)
         return {'items': [self._public(row, actor) for row in rows], 'total': total, 'page': page, 'page_size': 20,
                 'is_admin': bool(actor.get('is_admin')), 'settings': self.settings(actor), 'revision': revision}
@@ -822,6 +866,148 @@ class KnowledgeBase:
         self._ensure_worker()
         self._wake.set()
         return result
+
+    # ------------------------------------------------------------------ groups
+    def _group_row(self, actor, row):
+        return {'id': row['id'], 'name': row['name'], 'owner_name': row['owner_name'],
+                'created_at': row['created_at'], 'count': row['count'],
+                'can_manage': bool(actor.get('is_admin') or row['owner'] == actor['id'])}
+
+    def groups(self, actor):
+        """List all organizational groups with their current (non-deleted) file counts."""
+        check_actor(actor)
+        with self.connect() as db:
+            rows = db.execute('''
+                SELECT g.id, g.name, g.owner, g.owner_name, g.created_at,
+                       (SELECT count(*) FROM doc_group_members m
+                        JOIN documents d ON d.id=m.document_id
+                        WHERE m.group_id=g.id AND d.deleted=0) AS count
+                FROM knowledge_groups g ORDER BY g.created_at, g.id''').fetchall()
+        return {'groups': [self._group_row(actor, row) for row in rows], 'total': len(rows)}
+
+    def create_group(self, actor, name):
+        """Create a new organizational group (any signed-in user can create)."""
+        check_actor(actor)
+        name = _validate_group_name(name)
+        gid = uuid.uuid4().hex
+        stamp = time.time()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM knowledge_groups WHERE lower(name)=lower(?)', (name,)).fetchone():
+                raise AssistantError('已存在同名分组。', 409)
+            db.execute('INSERT INTO knowledge_groups(id,name,owner,owner_name,created_at) VALUES(?,?,?,?,?)',
+                       (gid, name, actor['id'], safe_text(actor.get('name') or '用户', limit=100), stamp))
+            row = db.execute('SELECT id,name,owner,owner_name,created_at,0 AS count FROM knowledge_groups WHERE id=?', (gid,)).fetchone()
+        return self._group_row(actor, row)
+
+    def rename_group(self, actor, group_id, name):
+        """Rename a group (creator or admin only)."""
+        check_actor(actor)
+        name = _validate_group_name(name)
+        group_id = str(group_id or '').strip()
+        if not group_id or len(group_id) > 64:
+            raise AssistantError('分组编号无效。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
+            if not row:
+                raise AssistantError('分组不存在。', 404)
+            if not actor.get('is_admin') and row['owner'] != actor['id']:
+                raise AssistantError('仅分组创建者或管理员可管理该分组。', 403)
+            if db.execute('SELECT 1 FROM knowledge_groups WHERE id<>? AND lower(name)=lower(?)', (group_id, name)).fetchone():
+                raise AssistantError('已存在同名分组。', 409)
+            db.execute('UPDATE knowledge_groups SET name=? WHERE id=?', (name, group_id))
+            count = db.execute('SELECT count(*) FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE m.group_id=? AND d.deleted=0', (group_id,)).fetchone()[0]
+            row = db.execute('SELECT id,name,owner,owner_name,created_at FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
+        return self._group_row(actor, dict(row, count=count))
+
+    def delete_group(self, actor, group_id):
+        """Delete a group; member files return to ungrouped (files/index untouched)."""
+        check_actor(actor)
+        group_id = str(group_id or '').strip()
+        if not group_id or len(group_id) > 64:
+            raise AssistantError('分组编号无效。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
+            if not row:
+                raise AssistantError('分组不存在。', 404)
+            if not actor.get('is_admin') and row['owner'] != actor['id']:
+                raise AssistantError('仅分组创建者或管理员可管理该分组。', 403)
+            db.execute('DELETE FROM doc_group_members WHERE group_id=?', (group_id,))
+            db.execute('DELETE FROM knowledge_groups WHERE id=?', (group_id,))
+        return {'deleted': True}
+
+    def _normalize_document_ids(self, document_ids):
+        if not isinstance(document_ids, (list, tuple)) or not document_ids:
+            raise AssistantError('请选择要分组的文件。')
+        if len(document_ids) > 100:
+            raise AssistantError('单次最多操作100个文件。', 413)
+        ids = [str(i).strip() for i in document_ids]
+        ids = list(dict.fromkeys(i for i in ids if i))
+        if not ids or any(len(i) > 64 for i in ids):
+            raise AssistantError('文件编号无效。')
+        return ids
+
+    def set_documents_group(self, actor, group_id, document_ids):
+        """Assign documents to a group (atomic; all must be editable by actor)."""
+        check_actor(actor)
+        ids = self._normalize_document_ids(document_ids)
+        target = None if group_id in (None, '', 'ungrouped', 'none') else str(group_id or '').strip()
+        if target is not None and (not target or len(target) > 64):
+            raise AssistantError('分组编号无效。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if target is not None and not db.execute('SELECT 1 FROM knowledge_groups WHERE id=?', (target,)).fetchone():
+                raise AssistantError('分组不存在。', 404)
+            missing, forbidden = [], []
+            for identity in ids:
+                row = db.execute('SELECT owner,deleted FROM documents WHERE id=?', (identity,)).fetchone()
+                if not row or row['deleted']:
+                    missing.append(identity)
+                elif not actor.get('is_admin') and row['owner'] != actor['id']:
+                    forbidden.append(identity)
+            if forbidden:
+                raise AssistantError('存在无权操作的文件，未做任何修改。', 403)
+            if missing:
+                raise AssistantError('存在已删除或不存在的文件，未做任何修改。', 404)
+            if target is not None:
+                # A document belongs to exactly one group; assigning moves it.
+                for identity in ids:
+                    db.execute('DELETE FROM doc_group_members WHERE document_id=?', (identity,))
+                    db.execute('INSERT OR REPLACE INTO doc_group_members(document_id,group_id) VALUES(?,?)', (identity, target))
+            else:
+                db.executemany('DELETE FROM doc_group_members WHERE document_id=?', [(identity,) for identity in ids])
+        return {'updated': len(ids)}
+
+    def remove_documents_group(self, actor, group_id, document_ids):
+        """Remove documents from a group / unassign them (atomic, edit permission enforced)."""
+        check_actor(actor)
+        ids_ = self._normalize_document_ids(document_ids)
+        group_id_str = str(group_id or '').strip()
+        if group_id_str and len(group_id_str) > 64:
+            raise AssistantError('分组编号无效。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if group_id_str and not db.execute('SELECT 1 FROM knowledge_groups WHERE id=?', (group_id_str,)).fetchone():
+                raise AssistantError('分组不存在。', 404)
+            forbidden, missing = [], []
+            for identity in ids_:
+                row = db.execute('SELECT owner,deleted FROM documents WHERE id=?', (identity,)).fetchone()
+                if not row or row['deleted']:
+                    missing.append(identity)
+                elif not actor.get('is_admin') and row['owner'] != actor['id']:
+                    forbidden.append(identity)
+            if forbidden:
+                raise AssistantError('存在无权操作的文件，未做任何修改。', 403)
+            if missing:
+                raise AssistantError('存在已删除或不存在的文件，未做任何修改。', 404)
+            if group_id_str:
+                db.executemany('DELETE FROM doc_group_members WHERE document_id=? AND group_id=?',
+                               [(identity, group_id_str) for identity in ids_])
+            else:
+                db.executemany('DELETE FROM doc_group_members WHERE document_id=?', [(identity,) for identity in ids_])
+        return {'updated': len(ids_)}
 
     def _document_version(self, db, actor, identity, version=None):
         row = db.execute('SELECT * FROM documents WHERE id=?', (identity,)).fetchone()

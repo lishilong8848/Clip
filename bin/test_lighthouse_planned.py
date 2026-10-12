@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi import FastAPI, Request
@@ -103,6 +104,47 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(field.get("native_notice_binding") for field in plan["fields"]))
         self.assertEqual(self.writes, [])
         self.model.complete.assert_not_called()
+
+    async def test_feishu_card_edits_and_confirms_through_real_plan_and_workbench_api(self):
+        from lan_bitable_template_portal import feishu_notice_cards as cards
+        plan = await self.begin()
+        state = self.assistant._state(self.actor)
+        state['turns'] = [{'operation_id': self.turn['operation_id'], 'question': '发送维保通告',
+                          'plan': plan, 'answer': '请补充', 'status': 'completed', 'scopes': self.actor['scopes']}]
+        self.store.put_document('lighthouse_ai', self.assistant._key(self.actor), state)
+        async def call(request, actor, path, body=None, *, method=None, plan_id=None, params=None):
+            identity = path.split('/')[1]
+            if path.endswith('/confirm'):
+                return await self.agent.confirm(actor, identity, body, request)
+            if method == 'PATCH':
+                return self.agent.amend(actor, identity, body)
+            return self.agent.public_plan(self.agent.get_plan(actor, identity), actor)
+        bot = SimpleNamespace(runtime=SimpleNamespace(state_store=self.store), _call=call)
+        message = {'message_id': 'om_origin', 'chat_id': 'oc_group', 'union_id': 'on_person', 'chat_type': 'group'}
+        conversation = self.assistant.conversation(self.actor)
+        prepared = await cards.prepare_card(bot, message, self.actor, conversation, plan)
+        notice = next(field for field in plan['fields'] if field.get('native_notice'))
+        sop = next(field for field in plan['fields'] if field.get('native_notice_sop'))
+        form_values = {cards._leaf_id('nnot', notice, 'progress'): '本次现场已核对',
+                       cards._leaf_id('sop', sop, 'exempt'): '是'}
+        callback = {**message, 'card': {'value': {'kind': 'notice_form', 'action': 'save', 'ticket': prepared['ticket']},
+                                     'form_value': form_values}}
+        result = await cards.handle_card(bot, callback, self.request, self.actor, conversation)
+        self.assertEqual(result.get('plan', {}).get('status'), 'awaiting_confirmation', result)
+        self.assertEqual(self.writes, [])
+        current = result['plan']
+        self.assertEqual(self.agent.get_plan(self.actor, plan['id'])['operations'][0]['body']['patch']['progress'], '本次现场已核对')
+        for _ in range(2):
+            callback['card'] = {'value': {'kind': 'notice_card', 'action': 'confirm', 'ticket': result['ticket']}}
+            result = await cards.handle_card(bot, callback, self.request, self.actor, self.assistant.conversation(self.actor))
+            if (result.get('plan') or {}).get('status') != 'awaiting_second_confirmation':
+                break
+        if self.agent.tasks:
+            await asyncio.wait_for(asyncio.gather(*tuple(self.agent.tasks)), 8)
+        self.assertEqual(len(self.writes), 1, result)
+        self.assertEqual(self.writes[0]['source_record_id'], 'source-1')
+        again = await cards.handle_card(bot, callback, self.request, self.actor, self.assistant.conversation(self.actor))
+        self.assertEqual(len(self.writes), 1, again)
 
     async def test_internal_time_marker_not_submitted_but_spoof_guard_stays_enabled(self):
         plan = await self.begin()
@@ -239,6 +281,10 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(runtime.close)
         for channel in ('', 'feishu:oc_fixture'):
             actor = {**self.actor, 'is_admin': True, 'channel': channel}
+            if channel:
+                shared = (await runtime.conversation(actor))['turns'][-1]
+                self.assertEqual(shared['plan']['planned_notice']['stage'], 'preview')
+                self.assistant.clear(actor)
 
             async def authorize():
                 return copy.deepcopy(actor)

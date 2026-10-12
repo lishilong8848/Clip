@@ -2279,6 +2279,7 @@ def _local_event_ongoing_detail(
     scope: str,
     source_month: str,
     is_admin: bool,
+    can_delete: bool = False,
 ) -> str:
     title = _record_display_title(item)
     active_item_id = str(item.get("active_item_id") or "").strip()
@@ -2288,7 +2289,7 @@ def _local_event_ongoing_detail(
     delete_action = (
         '<button class="btn danger-ghost" type="button" '
         'data-ongoing-delete-mode="remote">删除通告</button>'
-    )
+    ) if can_delete else ""
     notice_text_html = (
         f'<pre class="local-event-text">{_e(notice_text)}</pre>'
         if notice_text
@@ -2335,6 +2336,7 @@ def _detail_form(
     parsed_action: str = "",
     source_link_options: list[dict[str, str]] | None = None,
     is_admin: bool = False,
+    can_delete: bool = False,
     prefill_draft: dict[str, str] | None = None,
     prefill_source_record_id: str = "",
     prefill_target_record_id: str = "",
@@ -2352,6 +2354,7 @@ def _detail_form(
             scope=scope,
             source_month=source_month,
             is_admin=is_admin,
+            can_delete=can_delete,
         )
     work = _work_type(work_type) if work_type else _item_work_type(source)
     explicit_prefill_source_id = str(prefill_source_record_id or "").strip()
@@ -2513,19 +2516,18 @@ def _detail_form(
         action_buttons = (
             "<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"update\">发送更新</button>"
             "<button class=\"btn danger\" type=\"submit\" name=\"submit_action\" value=\"end\">发送结束</button>"
-            "<button class=\"btn danger-ghost\" type=\"button\" data-ongoing-delete-mode=\"remote\">删除通告</button>"
         )
     elif ongoing_item:
         action_buttons = (
             '<button class="btn primary" type="submit" '
             'name="submit_action" value="start">发送开始</button>'
-            '<button class="btn danger-ghost" type="button" '
-            'data-ongoing-delete-mode="remote">删除通告</button>'
         )
     else:
         action_buttons = (
             f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
         )
+    if ongoing_item and can_delete:
+        action_buttons += '<button class="btn danger-ghost" type="button" data-ongoing-delete-mode="remote">删除通告</button>'
     datalists = (
         f"<datalist id=\"specialty-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in SPECIALTY_OPTIONS)}</datalist>"
         f"<datalist id=\"maintenance-cycle-options\">{''.join(f'<option value=\"{_e(item)}\"></option>' for item in MAINTENANCE_CYCLE_OPTIONS)}</datalist>"
@@ -2828,6 +2830,7 @@ def render_workbench_lite(
     ).strip()
     user = session.get("user") if isinstance(session.get("user"), dict) else {}
     is_admin_session = bool(session.get("is_admin")) or str(session.get("role") or "").strip().lower() == "admin"
+    can_delete_business = bool(session.get("can_delete_business", is_admin_session))
     can_manage_change_confirmations = bool(
         session.get("can_manage_change_confirmations")
     )
@@ -2862,7 +2865,7 @@ def render_workbench_lite(
         month=selected_month,
         manual="1",
     )
-    undo_items = notice_undos or []
+    undo_items = [item for item in notice_undos or [] if can_delete_business or item.get("undo_action_type") != "start"]
     source_loaded_at = str(payload.get("last_loaded_at") or "").strip()
     source_loaded_text = source_loaded_at or "暂无成功同步时间"
     undo_html = "".join(
@@ -3438,6 +3441,7 @@ def render_workbench_lite(
     .undo-confirm-copy {{ display:grid; gap:8px; padding:16px 18px; }}
     .undo-confirm-copy strong {{ color:#0c244d; font-size:15px; line-height:1.45; overflow-wrap:anywhere; }}
     .undo-confirm-copy span {{ color:#64748b; font-size:12px; line-height:1.5; }}
+    #lite-undo-confirm-status {{ max-width:none; border-radius:6px; padding:8px 10px; font-weight:500; overflow-wrap:anywhere; white-space:pre-wrap; }}
     body.has-dirty-lite-form .job-status {{ color:#b15d00; }}
     body.has-dirty-lite-form .job-status.success {{ color:#087443; }}
     body.has-dirty-lite-form .job-status.failed {{ color:#b42318; }}
@@ -3608,7 +3612,7 @@ def render_workbench_lite(
                 </form>
               </div>
             </section>
-            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
+            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, can_delete=can_delete_business, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
             <section id="lite-alert-tags" class="notice-alert-tags" aria-live="polite" hidden></section>
           </div>
         </section>
@@ -3736,6 +3740,7 @@ def render_workbench_lite(
       <div class="undo-confirm-copy">
         <strong id="lite-undo-confirm-name"></strong>
         <span id="lite-undo-confirm-meta"></span>
+        <span id="lite-undo-confirm-status" class="action-reason" role="status" aria-live="polite" hidden></span>
       </div>
       <footer class="end-check-actions">
         <button class="btn ghost" type="button" id="lite-undo-confirm-cancel">取消</button>
@@ -7140,6 +7145,8 @@ def render_workbench_lite(
       const metaNode = document.getElementById('lite-undo-confirm-meta');
       if (nameNode) nameNode.textContent = title;
       if (metaNode) metaNode.textContent = [action, createdAt ? '操作时间 ' + createdAt : ''].filter(Boolean).join(' · ');
+      const status = document.getElementById('lite-undo-confirm-status');
+      if (status) {{ status.hidden = true; status.textContent = ''; status.classList.remove('blocked'); }}
       modal.hidden = false;
       document.getElementById('lite-undo-confirm-apply')?.focus();
     }}
@@ -7169,8 +7176,11 @@ def render_workbench_lite(
       const undoId = undoButton?.getAttribute('data-undo-id') || '';
       if (!undoButton || !undoId) return;
       const applyButton = document.getElementById('lite-undo-confirm-apply');
+      if (applyButton?.disabled) return;
       setButtonBusy(applyButton, true);
       undoButton.disabled = true;
+      const status = document.getElementById('lite-undo-confirm-status');
+      if (status) {{ status.hidden = false; status.textContent = '正在回退，请稍候...'; status.classList.remove('blocked'); }}
       clearLiteHtmlCache();
       try {{
         const response = await fetch('/api/notice-undo/' + encodeURIComponent(undoId) + '/apply', {{
@@ -7183,14 +7193,17 @@ def render_workbench_lite(
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '回退失败');
         const jobId = (data.data && data.data.job_id) || data.job_id || '';
-        closeUndoConfirm();
+        if (!jobId) throw new Error('回退任务未返回编号，请刷新核对后重试。');
         setLiteStatus('回退已受理，正在恢复通告...');
-        await pollUndoJob(jobId);
+        if (!(await pollUndoJob(jobId))) return;
+        if (pendingUndoButton === undoButton) closeUndoConfirm();
         clearLiteHtmlCache();
         await refreshCurrentLite('回退成功，正在更新列表...', ['.status', '.summary', '.workspace']);
         setLiteStatus('回退成功，通告已恢复');
       }} catch (error) {{
-        showLiteError(error && error.message ? error.message : '回退失败');
+        const message = friendlyLiteMessage(error && error.message ? error.message : '回退失败');
+        showLiteError(message);
+        if (status && pendingUndoButton === undoButton) {{ status.hidden = false; status.textContent = message; status.classList.add('blocked'); }}
         undoButton.disabled = false;
       }} finally {{
         setButtonBusy(applyButton, false);
@@ -9723,14 +9736,17 @@ _POLLING_WORK_ORDER_STYLE += r"""
 @media(prefers-reduced-motion:reduce){::view-transition-old(root),::view-transition-new(root){animation-duration:.01ms!important}}
 """
 
+_WORK_ORDER_DOM_HELPERS = r"""function appendChildrenSafe(target,nodes){for(const node of nodes)target.appendChild(node)}function replaceChildrenSafe(target,nodes){if(!target)return;if(typeof target.replaceChildren==='function'){target.replaceChildren(...nodes);return}while(target.firstChild)target.removeChild(target.firstChild);for(const node of nodes)target.appendChild(node)}"""
+
+
 def render_polling_work_order_page() -> str:
     return r"""<!doctype html>
 <html lang="zh-CN"><head><script src="/assets/connection-guard.js" defer></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单总览</title><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
 <body><main class="shell"><section class="head"><span id="role">轮巡工单总览</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status loading" role="status" aria-live="polite">正在读取工单状态...</div><button id="retry" class="action" type="button" hidden>重试上传工单附件</button><div class="toolbar"><button id="cancel-selection" class="secondary danger" type="button" hidden>取消当前选择</button></div><section id="overview" class="work-orders" aria-label="轮巡工单列表"></section><p class="links">选择一个未完成工单后，将进入独立步骤页面。</p></main>
 <script>
-const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false,loading=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const stepsUrl=run=>`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`;
-function workOrderCard(order){const button=document.createElement('button'),strong=document.createElement('strong'),label=document.createElement('small'),progress=document.createElement('span');button.type='button';button.className=`work-order ${order.state}`;button.disabled=!order.selectable||busy;strong.textContent=`工单 ${order.run_index}`;label.textContent=order.label;progress.textContent=`已完成 ${order.completed_steps}/${order.step_count} 步 · ${order.state==='completed'?'已完成':order.state==='active'?'已选择，进入步骤':order.state==='available'?'可选择':'另一工单执行中'}`;button.append(strong,label,progress);button.onclick=()=>openWorkOrder(order);return button}
-function render(data){current=data;const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;q('overview').replaceChildren(...(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?(data.last_error?`全部工单已完成，表格上传待重试：${data.last_error}`:'全部工单已完成，表格正在后台上传。'):data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
+const token=new URLSearchParams(location.search).get('token')||'';let current=null,timer=0,busy=false,loading=false;const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const stepsUrl=run=>`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`;""" + _WORK_ORDER_DOM_HELPERS + r"""
+function workOrderCard(order){const button=document.createElement('button'),strong=document.createElement('strong'),label=document.createElement('small'),progress=document.createElement('span');button.type='button';button.className=`work-order ${order.state}`;button.disabled=!order.selectable||busy;strong.textContent=`工单 ${order.run_index}`;label.textContent=order.label;progress.textContent=`已完成 ${order.completed_steps}/${order.step_count} 步 · ${order.state==='completed'?'已完成':order.state==='active'?'已选择，进入步骤':order.state==='available'?'可选择':'另一工单执行中'}`;appendChildrenSafe(button,[strong,label,progress]);button.onclick=()=>openWorkOrder(order);return button}
+function render(data){current=data;const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单总览`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;q('summary').textContent=`${data.sop_name||''} · ${data.work_orders?.length||0} 个工单`;replaceChildrenSafe(q('overview'),(data.work_orders||[]).map(workOrderCard));q('retry').hidden=data.state!=='upload_pending';q('cancel-selection').hidden=!data.can_release_selection;const completed=data.state==='completed',stopped=['cancelled','stopped'].includes(data.state),active=(data.work_orders||[]).find(order=>order.state==='active'),available=(data.work_orders||[]).some(order=>order.state==='available');status(completed?'全部工单已完成，工单表格已上传。':data.state==='upload_pending'?(data.last_error?`全部工单已完成，表格上传待重试：${data.last_error}`:'全部工单已完成，表格正在后台上传。'):data.last_error||(active?`工单 ${active.run_index} 已被选择，请进入同一工单`:available?'请选择一个未完成工单':'暂无可执行工单'),completed?'success':data.last_error?'error':'');if(completed||stopped)clearInterval(timer)}
 async function openWorkOrder(order){if(!current||busy||!order.selectable)return;busy=true;let message='',refresh=false;render(current);status(`正在进入工单 ${order.run_index}...`);try{const r=await fetch('/api/polling-work-orders/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(order.run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false){refresh=r.status===409;throw new Error(body.error||'工单进入失败')}location.assign(stepsUrl(body.data.current_run_index||order.run_index));return}catch(error){message=error.message||'工单进入失败'}finally{busy=false;if(refresh)await load();else if(current)render(current);if(message)status(message,'error')}}
 async function cancelSelection(){if(!current||busy||!current.can_release_selection)return;busy=true;let message='',tone='';render(current);status('正在取消当前选择...');try{const r=await fetch('/api/polling-work-orders/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:Number(current.current_run_index),expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'取消选择失败');current=body.data;message='已取消，未完成工单可以重新选择';tone='success'}catch(error){message=error.message||'取消选择失败';tone='error'}finally{busy=false;if(current)render(current);status(message,tone)}}
 async function load(){if(busy||loading)return;loading=true;try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(busy)return;if(!r.ok||body.ok===false){const error=new Error(body.error||'工单读取失败');error.terminal=[403,404].includes(r.status);throw error}render(body.data)}catch(error){status(error.message||'工单读取失败','error');if(error.terminal)clearInterval(timer)}finally{loading=false}}
@@ -9744,9 +9760,9 @@ def render_polling_work_order_steps_page() -> str:
 <html lang="zh-CN"><head><script src="/assets/connection-guard.js" defer></script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>轮巡工单步骤</title><link rel="stylesheet" href="/assets/page-navigation.css"><style>""" + _POLLING_WORK_ORDER_STYLE + r"""</style></head>
 <body><main class="shell"><section id="page-navigation" class="head"><div id="page-back-slot"><button id="back" class="vnet-back-button" type="button" aria-label="返回" title="返回工单总览"><span aria-hidden="true">&#8592;</span>返回</button></div><span id="role">轮巡工单步骤</span><h1 id="title">正在加载...</h1><p id="summary"></p></section><div id="status" class="status loading" role="status" aria-live="polite">正在读取工单状态...</div><section id="steps" class="steps" aria-label="当前工单步骤"></section><p class="links">页面会自动刷新；浏览器返回不会取消当前选择。</p></main>
 <script>
-const params=new URLSearchParams(location.search),token=params.get('token')||'',runIndex=Number.parseInt(params.get('run_index')||'',10),overviewUrl=`/polling-work-order?token=${encodeURIComponent(token)}`;let current=null,timer=0,clock=0,busy=false,loading=false,navigating=false,receivedAt=Date.now();const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const remaining=step=>Math.max(0,Math.ceil(Number(step.remaining_seconds||0)-(Date.now()-receivedAt)/1000));const goOverview=()=>{if(!navigating){navigating=true;location.replace(overviewUrl)}};const goSelected=run=>{if(!navigating){navigating=true;location.replace(`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`)}};
-function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`第 ${Number(step.step_index||0)} 步`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';head.append(title,badge);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;checks.append(mark)}const photoRequired=step.photo_required!==false,photoCount=(step.photos||[]).length,hasPhoto=photoCount>0,photoMark=document.createElement('em');photoMark.className=hasPhoto||!photoRequired?'done':'waiting';photoMark.textContent=hasPhoto?`操作照片 ${photoCount} 张`:photoRequired?'操作照片待拍':'无需拍照';checks.append(photoMark);const wait=remaining(step);if(step.position==='current'&&wait>0){const mark=document.createElement('em');mark.className='waiting';mark.dataset.countdown='1';mark.textContent=`倒计时 ${wait} 秒`;checks.append(mark)}article.append(head,run,content,checks);if(hasPhoto){const gallery=document.createElement('div');gallery.className='photos';for(const photo of step.photos){const link=document.createElement('a'),image=document.createElement('img');link.href=photo.preview_url;link.target='_blank';link.rel='noopener';image.className='photo-thumb';image.src=photo.preview_url;image.alt=photo.name||'操作照片';image.loading='eager';image.decoding='async';image.onerror=()=>status('操作照片已保存，但缩略图加载失败，请刷新页面重试','error');link.append(image);gallery.append(link)}article.append(gallery)}if(photoRequired&&step.position==='current'&&current&&!step.operator_confirmed&&!step.reviewer_confirmed){const upload=document.createElement('label'),input=document.createElement('input');upload.className='photo-upload';upload.textContent=hasPhoto?'继续添加照片':'拍照/上传操作照片';input.type='file';input.accept='image/*';input.setAttribute('capture','environment');input.disabled=busy;input.onchange=()=>uploadStepPhoto(step,input.files&&input.files[0]);upload.append(input);article.append(upload)}if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.dataset.confirmAction='1';button.textContent=busy?'处理中...':done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0;button.onclick=()=>confirmStep(step.step_key);article.append(button);if(current.role==='reviewer'&&current.can_rollback_previous){const rollback=document.createElement('button');rollback.type='button';rollback.className='secondary danger rollback';rollback.textContent='回退上一步';rollback.disabled=busy;rollback.onclick=()=>rollbackPrevious(step.step_key);article.append(rollback)}}return article}
-function render(data){current=data;const selected=Number(data.current_run_index||0);if(!selected){goOverview();return}if(selected!==runIndex){goSelected(selected);return}const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单步骤`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;const order=(data.work_orders||[]).find(item=>Number(item.run_index)===runIndex);q('summary').textContent=`${data.sop_name||''} · 工单 ${runIndex} · ${order?.label||''}`;q('back').title=data.can_release_selection?'退出当前工单并重新选择':'返回工单总览';q('steps').replaceChildren(...(data.steps||[]).filter(step=>Number(step.run_index)===runIndex).map(card));status(data.last_error||`工单 ${runIndex} · ${order?.label||''}`,data.last_error?'error':'')}
+const params=new URLSearchParams(location.search),token=params.get('token')||'',runIndex=Number.parseInt(params.get('run_index')||'',10),overviewUrl=`/polling-work-order?token=${encodeURIComponent(token)}`;let current=null,timer=0,clock=0,busy=false,loading=false,navigating=false,receivedAt=Date.now();const q=id=>document.getElementById(id);const status=(text,type='')=>{q('status').textContent=text;q('status').className='status '+type+(!type&&/正在(?:读取|加载|进入|退出|取消|上传|处理)/.test(text)?' loading':'')};const remaining=step=>Math.max(0,Math.ceil(Number(step.remaining_seconds||0)-(Date.now()-receivedAt)/1000));const goOverview=()=>{if(!navigating){navigating=true;location.replace(overviewUrl)}};const goSelected=run=>{if(!navigating){navigating=true;location.replace(`/polling-work-order/steps?token=${encodeURIComponent(token)}&run_index=${Number(run)}`)}};""" + _WORK_ORDER_DOM_HELPERS + r"""
+function card(step){const article=document.createElement('article');article.className='step '+step.position;const head=document.createElement('header'),title=document.createElement('b'),badge=document.createElement('span');title.textContent=`第 ${Number(step.step_index||0)} 步`;badge.textContent=step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步';appendChildrenSafe(head,[title,badge]);const run=document.createElement('small');run.textContent=step.run_label;const content=document.createElement('p');content.textContent=step.content;const checks=document.createElement('div');checks.className='checks';for(const [needed,done,label] of [[step.operator_required,step.operator_confirmed,'操作人'],[step.reviewer_required,step.reviewer_confirmed,'现场审核人']]){const mark=document.createElement('em');mark.className=done?'done':'';mark.textContent=!needed?`${label}不需要`:done?`${label}已确认`:`${label}待确认`;appendChildrenSafe(checks,[mark])}const photoRequired=step.photo_required!==false,photoCount=(step.photos||[]).length,hasPhoto=photoCount>0,photoMark=document.createElement('em');photoMark.className=hasPhoto||!photoRequired?'done':'waiting';photoMark.textContent=hasPhoto?`操作照片 ${photoCount} 张`:photoRequired?'操作照片待拍':'无需拍照';appendChildrenSafe(checks,[photoMark]);const wait=remaining(step);if(step.position==='current'&&wait>0){const mark=document.createElement('em');mark.className='waiting';mark.dataset.countdown='1';mark.textContent=`倒计时 ${wait} 秒`;appendChildrenSafe(checks,[mark])}appendChildrenSafe(article,[head,run,content,checks]);if(hasPhoto){const gallery=document.createElement('div');gallery.className='photos';for(const photo of step.photos){const link=document.createElement('a'),image=document.createElement('img');link.href=photo.preview_url;link.target='_blank';link.rel='noopener';image.className='photo-thumb';image.src=photo.preview_url;image.alt=photo.name||'操作照片';image.loading='eager';image.decoding='async';image.onerror=()=>status('操作照片已保存，但缩略图加载失败，请刷新页面重试','error');appendChildrenSafe(link,[image]);appendChildrenSafe(gallery,[link])}appendChildrenSafe(article,[gallery])}if(photoRequired&&step.position==='current'&&current&&!step.operator_confirmed&&!step.reviewer_confirmed){const upload=document.createElement('label'),input=document.createElement('input');upload.className='photo-upload';upload.textContent=hasPhoto?'继续添加照片':'拍照/上传操作照片';input.type='file';input.accept='image/*';input.setAttribute('capture','environment');input.disabled=busy;input.onchange=()=>uploadStepPhoto(step,input.files&&input.files[0]);appendChildrenSafe(upload,[input]);appendChildrenSafe(article,[upload])}if(step.position==='current'&&current){const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed;const button=document.createElement('button');button.className='action';button.dataset.confirmAction='1';button.textContent=busy?'处理中...':done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=busy||!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0;button.onclick=()=>confirmStep(step.step_key);appendChildrenSafe(article,[button]);if(current.role==='reviewer'&&current.can_rollback_previous){const rollback=document.createElement('button');rollback.type='button';rollback.className='secondary danger rollback';rollback.textContent='回退上一步';rollback.disabled=busy;rollback.onclick=()=>rollbackPrevious(step.step_key);appendChildrenSafe(article,[rollback])}}return article}
+function render(data){current=data;const selected=Number(data.current_run_index||0);if(!selected){goOverview();return}if(selected!==runIndex){goSelected(selected);return}const typeLabel=data.work_type==='adjust'?'设备调整':data.work_type==='maintenance'?'维保':'轮巡';document.title=`${typeLabel}工单步骤`;q('role').textContent=`${data.role_label}：${data.assigned_person?.name||'未命名'}`;q('title').textContent=data.title||`${typeLabel}工单`;const order=(data.work_orders||[]).find(item=>Number(item.run_index)===runIndex);q('summary').textContent=`${data.sop_name||''} · 工单 ${runIndex} · ${order?.label||''}`;q('back').title=data.can_release_selection?'退出当前工单并重新选择':'返回工单总览';replaceChildrenSafe(q('steps'),(data.steps||[]).filter(step=>Number(step.run_index)===runIndex).map(card));status(data.last_error||`工单 ${runIndex} · ${order?.label||''}`,data.last_error?'error':'')}
 function refreshCountdown(){if(!current||busy)return;const step=(current.steps||[]).find(item=>item.position==='current'&&Number(item.run_index)===runIndex);if(!step)return;const wait=remaining(step),mark=document.querySelector('[data-countdown]'),button=document.querySelector('[data-confirm-action]');if(mark){if(wait>0)mark.textContent=`倒计时 ${wait} 秒`;else mark.remove()}if(!button)return;const required=current.role==='operator'?step.operator_required:step.reviewer_required,done=current.role==='operator'?step.operator_confirmed:step.reviewer_confirmed,waiting=current.role==='reviewer'&&step.operator_required&&!step.operator_confirmed,photoRequired=step.photo_required!==false,hasPhoto=(step.photos||[]).length>0;button.textContent=done?'已确认':waiting?'等待操作人确认':photoRequired&&!hasPhoto?'请先拍照':wait>0?`等待 ${wait} 秒`:`确认当前步骤（${current.role_label}）`;button.disabled=!required||done||waiting||(photoRequired&&!hasPhoto)||wait>0}
 async function leaveWorkOrder(){if(!current||busy)return;if(!current.can_release_selection){goOverview();return}busy=true;let message='';render(current);status('正在退出当前工单...');try{const r=await fetch('/api/polling-work-orders/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,run_index:runIndex,expected_version:current.version})}),body=await r.json();if(!r.ok||body.ok===false)throw new Error(body.error||'退出工单失败');goOverview()}catch(error){message=error.message||'退出工单失败'}finally{busy=false;if(message){if(current)render(current);status(message,'error')}}}
 async function load(){if(busy||loading||navigating)return;loading=true;try{const r=await fetch(`/api/polling-work-orders/session?token=${encodeURIComponent(token)}`,{credentials:'same-origin'}),body=await r.json();if(busy)return;if(!r.ok||body.ok===false){const error=new Error(body.error||'工单读取失败');error.terminal=[403,404].includes(r.status);throw error}const next=body.data,sameView=current&&Number(current.version)===Number(next.version)&&Number(current.current_run_index)===Number(next.current_run_index)&&Number(current.current_index)===Number(next.current_index);current=next;receivedAt=Date.now();if(sameView)refreshCountdown();else render(current)}catch(error){status(error.message||'工单读取失败','error');if(error.terminal){clearInterval(timer);clearInterval(clock)}}finally{loading=false}}

@@ -205,6 +205,9 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                 db_path = Path(directory) / "state.sqlite3"
                 def get_document(self, namespace, key): return copy.deepcopy(docs.get((namespace, key)))
                 def put_document(self, namespace, key, value): docs[namespace, key] = copy.deepcopy(value)
+                def list_documents(self, namespace, *, key_prefix=""):
+                    return [{"key": key, "payload": copy.deepcopy(value)} for (ns, key), value in docs.items()
+                            if ns == namespace and key.startswith(key_prefix)]
             store, model, app = Store(), Mock(), FastAPI()
             model.settings.return_value = {"configured": True, "enabled": True, "active_model_id": "default", "models": [{"id": "default", "name": "测试", "model": "mock", "configured": True}]}
             model.profile.return_value = {"id": "default", "name": "测试", "model": "mock"}

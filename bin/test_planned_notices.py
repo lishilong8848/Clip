@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lan_bitable_template_portal import planned_notice_recommendations as recs
 from lan_bitable_template_portal import planned_notices as planned
 from lan_bitable_template_portal.portal_service import MaintenancePortalService, PortalError
 from lan_bitable_template_portal.state_store import LanPortalStateStore
@@ -311,6 +312,300 @@ class PlannedNativeTests(unittest.TestCase):
         saved = self.service.get_job(identity)
         self.assertEqual(saved["phase"], "success")
         self.assertIn("历史记忆未保存", saved["memory_warning"])
+
+
+class CrossBuildingRecommendationTests(unittest.TestCase):
+    """Cross-building notice-history recommendation backend (read-only, local)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = MaintenancePortalService()
+        self.service._state_store = LanPortalStateStore(Path(self.tmp.name) / "state.sqlite3")
+        self.service.ensure_snapshot_loaded = Mock()
+        self.month = self.service._current_month_label()
+        self.records = [{
+            "record_id": "source-e",
+            "work_type": "maintenance",
+            "display_fields": {
+                "楼栋": "E楼", "维护总项": "E楼冷水机组月度维护", "维护周期": "每月",
+                "维护实施状态": "未开始", "计划维护月份": self.month,
+            },
+        }]
+        self.service._workbench_records = Mock(side_effect=lambda **_: copy.deepcopy(self.records))
+
+    def remember_a(self, total="A楼冷水机组月度维护", cycle="每月", content="对A楼冷水机组进行月度维护保养，检查运行参数，无停运影响。",
+                   order=10.0, location="A楼冷水机组机房", extra=None):
+        self.service._remember_draft_fields(
+            building="A楼", maintenance_total=total, maintenance_cycle=cycle,
+            location=location, content=content, reason="按周期维护", impact="无影响",
+            extra_fields={"execution_party": "厂维", "specialty": "暖通", "progress": "已完成100%", **(extra or {})},
+            success_order=order,
+        )
+
+    def recommend(self, **overrides):
+        kwargs = {"scope": "E", "month": self.month, "work_type": "maintenance",
+                  "source_record_id": "source-e", **overrides}
+        return recs.cross_building_recommendations(self.service, **kwargs)
+
+    def test_a_to_e_building_conversion_in_title_and_body(self):
+        self.remember_a()
+        result = self.recommend()
+        self.assertEqual(result["total"], 1)
+        rec = result["recommendations"][0]
+        self.assertEqual(rec["source_building"], "A楼")
+        self.assertEqual(rec["source_title"], "A楼冷水机组月度维护")
+        self.assertNotIn("source_record_id", rec)
+        self.assertIn("E楼冷水机组", rec["suggested_values"]["content"])
+        self.assertNotIn("A楼", rec["suggested_values"]["content"])
+        self.assertIn("location", rec["needs_site_confirmation"])
+        self.assertEqual(
+            set(rec.keys()),
+            {"source_building", "source_title", "work_type", "source_updated_at",
+             "needs_site_confirmation", "suggested_values"},
+        )
+
+    def test_different_device_not_recommended(self):
+        self.remember_a(total="A楼空调机组维护")
+        result = self.recommend()
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["recommendations"], [])
+
+    def test_whitelist_status_not_copied(self):
+        self.remember_a()
+        result = self.recommend()
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("progress", suggested)
+        self.assertNotIn("已完成100%", " ".join(suggested.values()))
+
+    def test_existing_field_not_overwritten(self):
+        self.remember_a()
+        self.records[0]["display_fields"]["内容"] = "本次计划内容"
+        result = self.recommend()
+        self.assertEqual(result["total"], 1)
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+
+    def test_cycle_mismatch_is_blocked(self):
+        self.remember_a(cycle="每季")
+        result = self.recommend()
+        self.assertEqual(result["total"], 0)
+
+    def test_no_network(self):
+        import socket
+        calls = []
+        original = socket.socket
+        def guarded(*args, **kwargs):
+            calls.append(1)
+            raise AssertionError("network socket used during recommendation")
+        socket.socket = guarded
+        try:
+            self.remember_a()
+            result = self.recommend()
+            self.assertEqual(result["total"], 1)
+        finally:
+            socket.socket = original
+        self.assertEqual(calls, [], "recommendation must not touch the network")
+
+    def test_no_production_write(self):
+        self.remember_a()
+        with patch.object(self.service, "_save_building_memory_locked", side_effect=AssertionError("wrote memory")) as save_spy, \
+             patch.object(self.service, "_remember_draft_fields", side_effect=AssertionError("remembered draft")):
+            result = self.recommend()
+        self.assertEqual(result["total"], 1)
+        save_spy.assert_not_called()
+        # No memory/draft value was written for the target E楼 record.
+        e_memory = self.service._get_record_memory(self.records[0])
+        self.assertEqual(e_memory.get("content"), "")
+        self.assertEqual(e_memory.get("location"), "")
+
+    def test_building_code_does_not_rewrite_english_words(self):
+        self.remember_a(content="A楼 API 接口服务正常，Apple 设备运行稳定。")
+        result = self.recommend()
+        suggested = result["recommendations"][0]["suggested_values"]["content"]
+        self.assertEqual(suggested, "E楼 API 接口服务正常，Apple 设备运行稳定。")
+        self.assertNotIn("A楼", suggested)
+
+    def test_unportable_field_dropped_not_partial(self):
+        self.remember_a(content="对A楼冷水机组进行维护，目标ID=abc，不能搬移。")
+        result = self.recommend()
+        self.assertEqual(result["total"], 1)
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+        self.assertIn("execution_party", suggested)
+        self.assertIn("specialty", suggested)
+
+    def test_max_three_candidates_ordered_by_recent_success(self):
+        self.remember_a(total="A楼冷水机组月度维护", order=2.0)
+        self.service._remember_draft_fields(
+            building="B楼", maintenance_total="B楼冷水机组月度维护", maintenance_cycle="每月",
+            location="B楼冷水机组机房", content="对B楼冷水机组进行月度维护保养，无影响。",
+            reason="按周期维护", impact="无影响",
+            extra_fields={"execution_party": "厂维", "specialty": "暖通", "progress": "已完成100%"},
+            success_order=30.0,
+        )
+        self.service._remember_draft_fields(
+            building="D楼", maintenance_total="D楼冷水机组月度维护", maintenance_cycle="每月",
+            location="D楼冷水机组机房", content="对D楼冷水机组进行月度维护保养，无影响。",
+            reason="按周期维护", impact="无影响",
+            extra_fields={"execution_party": "厂维", "specialty": "暖通", "progress": "已完成100%"},
+            success_order=20.0,
+        )
+        result = self.recommend(limit=3)
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(
+            [r["source_building"] for r in result["recommendations"]],
+            ["B楼", "D楼", "A楼"],  # most recent success first
+        )
+
+    def test_no_history_returns_empty(self):
+        result = self.recommend()
+        self.assertEqual(result, {"total": 0, "recommendations": []})
+
+    def test_inline_device_ids_without_spaces_never_move_to_another_building(self):
+        for text in ('更换A-301-RPP-DC-003设备', '检查AU12345设备', '引用recvxkQEsN7vs6记录'):
+            with self.subTest(text=text):
+                self.remember_a(content=text)
+                values = self.recommend()['recommendations'][0]['suggested_values']
+                self.assertNotIn('content', values)
+
+    def test_old_json_memory_read_only_no_state_write(self):
+        self.service._memory_dir = Path(self.tmp.name)
+        building = "A楼"
+        path = self.service._building_memory_path(building)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "building": "A楼",
+            "items": {
+                self.service._memory_item_key("maintenance", "A楼冷水机组月度维护", "每月"): {
+                    "work_type": "maintenance",
+                    "memory_name": "A楼冷水机组月度维护",
+                    "maintenance_total": "A楼冷水机组月度维护",
+                    "maintenance_cycle": "每月",
+                    "location": "A楼冷水机组机房",
+                    "content": "对A楼冷水机组进行月度维护保养，检查运行参数，无停运影响。",
+                    "reason": "按周期维护",
+                    "impact": "无影响",
+                    "success_order": 10.0,
+                    "updated_at": "2026-10-01 09:00:00",
+                }
+            }
+        }, ensure_ascii=False), encoding="utf-8")
+        with patch.object(self.service._state_store, "put_document",
+                          side_effect=AssertionError("recommendation must not write state")) as put_spy:
+            result = self.recommend()
+        put_spy.assert_not_called()
+        self.assertEqual(result["total"], 1)
+
+    def test_source_device_number_blocked_not_recommended(self):
+        self.remember_a(content="对A楼A-301-RPP-DC-003设备进行月度维护，无停运影响。")
+        result = self.recommend()
+        self.assertEqual(result["total"], 1)
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+        self.assertIn("execution_party", suggested)
+
+    def test_au_device_number_blocked_not_recommended(self):
+        self.remember_a(content="对AU设备编号进行维护，检查运行参数，无影响。")
+        result = self.recommend()
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+
+    def test_chinese_room_and_hash_device_blocked(self):
+        for snippet in ("对302机房设备进行维护", "对301房间设备进行巡检", "对2#冷机进行维护"):
+            with self.subTest(snippet=snippet):
+                self.remember_a(content=snippet + "，无影响。")
+                result = self.recommend()
+                self.assertEqual(result["total"], 1)
+                self.assertNotIn("content", result["recommendations"][0]["suggested_values"])
+
+    def test_mixed_building_field_rejected_not_rewritten(self):
+        self.remember_a(content="对A楼和B楼设备进行联合维护，无影响。")
+        result = self.recommend()
+        self.assertEqual(result["total"], 1)
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+        self.assertIn("execution_party", suggested)
+
+    def test_personnel_assignment_and_internal_ids_blocked(self):
+        self.remember_a(content="由李某操作，openid=ou_123，对A楼冷水机组进行维护。")
+        result = self.recommend()
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+
+    def test_a_building_can_reference_e_history_with_rewrite(self):
+        self.service._remember_draft_fields(
+            building="E楼", maintenance_total="E楼冷水机组月度维护", maintenance_cycle="每月",
+            location="E楼冷水机组机房",
+            content="对E楼冷水机组进行月度维护保养，检查EA平台运行参数，无停运影响。",
+            reason="按周期维护", impact="无影响",
+            extra_fields={"execution_party": "厂维", "specialty": "暖通", "progress": "已完成100%"},
+            success_order=10.0,
+        )
+        self.records = [{
+            "record_id": "source-a",
+            "work_type": "maintenance",
+            "display_fields": {
+                "楼栋": "A楼", "维护总项": "A楼冷水机组月度维护", "维护周期": "每月",
+                "维护实施状态": "未开始", "计划维护月份": self.month,
+            },
+        }]
+        result = recs.cross_building_recommendations(
+            self.service, scope="A", month=self.month, work_type="maintenance",
+            source_record_id="source-a")
+        self.assertEqual(result["total"], 1)
+        rec = result["recommendations"][0]
+        self.assertEqual(rec["source_building"], "E楼")
+        self.assertIn("A楼冷水机组", rec["suggested_values"]["content"])
+        self.assertNotIn("E楼", rec["suggested_values"]["content"])
+
+    def test_ea118_machine_room_e_to_a_blocked(self):
+        self.service._remember_draft_fields(
+            building="E楼", maintenance_total="E楼冷水机组月度维护", maintenance_cycle="每月",
+            location="E楼机房",
+            content="对E楼EA118机房空调进行维护，检查EA118机房设备，无停运影响。",
+            reason="按周期维护", impact="无影响",
+            extra_fields={"execution_party": "厂维", "specialty": "暖通", "progress": "已完成100%"},
+            success_order=10.0,
+        )
+        self.records = [{
+            "record_id": "source-a",
+            "work_type": "maintenance",
+            "display_fields": {
+                "楼栋": "A楼", "维护总项": "A楼冷水机组月度维护", "维护周期": "每月",
+                "维护实施状态": "未开始", "计划维护月份": self.month,
+            },
+        }]
+        result = recs.cross_building_recommendations(
+            self.service, scope="A", month=self.month, work_type="maintenance",
+            source_record_id="source-a")
+        self.assertEqual(result["total"], 1)
+        suggested = result["recommendations"][0]["suggested_values"]
+        self.assertNotIn("content", suggested)
+        self.assertIn("execution_party", suggested)
+
+
+class PrefillRecommendationIntegrationTests(PlannedNativeTests):
+    def test_prefill_returns_recommendations_without_touching_draft(self):
+        self.remember(content="A楼历史内容")
+        self.service._remember_draft_fields(
+            building="B楼", maintenance_total="B楼冷水机组月度维护", maintenance_cycle="每月",
+            location="B楼机房", content="对B楼冷水机组进行月度维护，无停运影响。",
+            reason="按周期维护", impact="无影响",
+            extra_fields={"execution_party": "厂维", "specialty": "暖通", "progress": "已完成100%"},
+            success_order=10.0,
+        )
+        planned.prefill(self.service, scope="A", month=self.month, work_type="maintenance",
+                        source_record_id="source-1")
+        result = planned.prefill(self.service, scope="A", month=self.month, work_type="maintenance",
+                                 source_record_id="source-1")
+        self.assertIn("recommendations", result)
+        self.assertTrue(result["recommendations"])
+        self.assertEqual(result["recommendations"][0]["source_building"], "B楼")
+        # the cross-building recommendation is advisory only: draft stays empty for the
+        # not-recommended fields
+        self.assertEqual(result["draft"]["content"], "A楼历史内容")
+        self.assertEqual(result["draft"]["progress"], "")
 
 
 if __name__ == "__main__":

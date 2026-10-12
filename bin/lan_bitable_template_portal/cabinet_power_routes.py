@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from .cabinet_power import CabinetPowerService
 from .cabinet_power_batches import MAX_FILE_BYTES, MAX_TOTAL_BYTES
 from .cabinet_power_excel import CabinetError, TOTALS
+from .cabinet_power_data import empty_operation_groups
 from pathlib import Path
 from .cabinet_guest import cabinet_guest_api_allowed, is_cabinet_guest
 
@@ -240,6 +241,10 @@ def install_cabinet_power_routes(app,controller,runtime):
                 data=await asyncio.to_thread(service.pending_status,scope,owner,admin)
             elif path.startswith("writes/"):
                 oid=path.split("/")[1]
+                if path.endswith(("/resume", "/reconcile")):
+                    journal=service.local.document(scope,"write:"+oid) or {}
+                    if journal.get("delete") and not runtime.auth_manager.account_profile(owner)["can_delete_business"]:
+                        raise CabinetError("当前账号无权继续删除机柜记录",403)
                 if path.endswith("/resume"): data=await asyncio.to_thread(service.resume_write,scope,oid,owner,admin,defer=query.get('defer')=='1')
                 elif path.endswith("/reconcile"): data=await asyncio.to_thread(service.reconcile_write,scope,oid,owner,admin)
                 else: data=await asyncio.to_thread(service.write_status,scope,oid,owner,admin,details=query.get('details')=='1')
@@ -262,6 +267,8 @@ def install_cabinet_power_routes(app,controller,runtime):
                     headers={"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"})
             elif (path=="operations" and request.method=="POST") or (path.startswith("operations/") and request.method=="PATCH"):
                 rid=path.split("/")[1] if "/" in path else ""
+                if rid and empty_operation_groups(payload) and not runtime.auth_manager.account_profile(owner)["can_delete_business"]:
+                    raise CabinetError("仅超级管理员或本楼栋主管可删除机柜记录",403)
                 data=await asyncio.to_thread(service.save_operation,scope,payload,owner,rid,can_move_scope=bool(admin and payload.get("confirm_scope_move") is True),defer=query.get('defer')=='1')
             else:
                 kind={"refresh":"refresh","exports":"export"}.get(path)

@@ -1,335 +1,49 @@
 <template>
-  <section v-if="activeTab !== 'permissions'" class="admin-overview" aria-label="管理员概览">
-    <button type="button"
-      v-for="item in overviewItems"
-      :key="item.key"
-      :class="item.tone"
-      :aria-label="item.ariaLabel"
-      :title="`打开${item.targetLabel}`"
-      @click="emit('select-tab', item.target)"
-    >
-      <span>{{ item.label }}</span>
-      <strong>{{ item.value }}</strong>
-      <small>{{ item.hint }}</small>
+  <nav class="admin-workspace-tabs" aria-label="管理员工作区">
+    <button type="button" :class="{ active: activeTab === 'permissions' }" :aria-current="activeTab === 'permissions' ? 'page' : undefined" @click="emit('select-tab', 'permissions')">
+      <UsersRound :size="18" /><span>账号与权限</span><b v-if="accountBadge">{{ accountBadge }}</b>
     </button>
-  </section>
-
-  <nav class="tabs admin-workspace-tabs" aria-label="管理员工作区">
-    <button type="button"
-      v-for="item in tabs"
-      :key="item.key"
-      :class="{ active: activeTab === item.key }"
-      @click="emit('select-tab', item.key)"
-    >
-      <strong>{{ item.label }}</strong>
-      <small v-if="item.description">{{ item.description }}</small>
-      <b v-if="item.badge">{{ item.badge }}</b>
+    <button type="button" class="other-toggle" :aria-expanded="otherOpen" aria-controls="admin-other-settings" @click="otherOpen = !otherOpen">
+      <Settings2 :size="18" /><span>其他设置</span><ChevronDown :size="16" :class="{ rotated: otherOpen }" />
     </button>
+    <UiTransition name="ui-page">
+      <div v-if="otherOpen" id="admin-other-settings" class="other-settings">
+        <button v-for="item in otherTabs" :key="item.key" type="button" :class="{ active: activeTab === item.key }" :aria-current="activeTab === item.key ? 'page' : undefined" @click="emit('select-tab', item.key)">
+          <component :is="icons[item.key]" :size="16" /><span>{{ item.label }}</span><b v-if="item.badge">{{ item.badge }}</b>
+        </button>
+        <button v-if="!advancedVisible" type="button" @click="emit('toggle-advanced')"><Wrench :size="16" /><span>高级诊断</span></button>
+      </div>
+    </UiTransition>
   </nav>
-
-  <div v-if="activeTab !== 'permissions'" class="admin-advanced-toggle">
-    <button type="button" class="btn ghost" @click="emit('toggle-advanced')">
-      {{ advancedVisible ? "收起高级诊断" : "显示高级诊断" }}
-    </button>
-  </div>
-
-  <section v-if="activeTab !== 'permissions'" class="admin-current-guide" :class="activeTab" aria-live="polite">
-    <div>
-      <strong>{{ activeGuide.title }}</strong>
-    </div>
-    <span>{{ activeGuide.badge }}</span>
-  </section>
 </template>
 
 <script setup lang="ts">
-import type { AdminTabKey } from "../adminToolsUtils";
-
-type AdminOverviewItem = {
-  key: string;
-  label: string;
-  value: string;
-  hint: string;
-  tone: string;
-  target: AdminTabKey;
-  targetLabel: string;
-  ariaLabel: string;
-};
-
-type AdminTabItem = {
-  key: AdminTabKey;
-  label: string;
-  description: string;
-  badge: string;
-};
-
-defineProps<{
-  overviewItems: AdminOverviewItem[];
-  tabs: AdminTabItem[];
+import { computed, ref, watch } from 'vue';
+import { Activity, ChevronDown, ClipboardList, FileCog, MessageSquare, Settings2, UsersRound, Wrench } from 'lucide-vue-next';
+import type { AdminTabKey } from '../adminToolsUtils';
+const props = defineProps<{
+  tabs: Array<{ key: AdminTabKey; label: string; description: string; badge: string }>;
   activeTab: AdminTabKey;
-  activeGuide: { title: string; text?: string; badge: string };
   advancedVisible: boolean;
 }>();
-
-const emit = defineEmits<{
-  "select-tab": [tab: AdminTabKey];
-  "toggle-advanced": [];
-}>();
+const emit = defineEmits<{ 'select-tab': [tab: AdminTabKey]; 'toggle-advanced': [] }>();
+const otherOpen = ref(props.activeTab !== 'permissions');
+const accountBadge = computed(() => props.tabs.find(item => item.key === 'permissions')?.badge);
+const otherTabs = computed(() => props.tabs.filter(item => item.key !== 'permissions'));
+const icons = { status: Activity, permissions: UsersRound, handover: ClipboardList, mop: FileCog, feishu: MessageSquare, pressure: Wrench };
+watch(() => props.activeTab, tab => { if (tab !== 'permissions') otherOpen.value = true; });
 </script>
 
 <style scoped>
-.admin-overview {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.admin-overview button {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-  border: 1px solid #d8e5f7;
-  border-radius: 16px;
-  padding: 12px 14px;
-  background: rgba(255, 255, 255, 0.86);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  box-shadow: 0 10px 24px rgba(15, 73, 153, 0.07);
-  cursor: pointer;
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease,
-    transform 0.16s ease;
-}
-
-.admin-overview button:hover {
-  border-color: #a7c7ff;
-  box-shadow: 0 14px 30px rgba(15, 73, 153, 0.12);
-  transform: translateY(-1px);
-}
-
-.admin-overview button:focus-visible {
-  outline: 3px solid rgba(30, 99, 255, 0.18);
-  outline-offset: 2px;
-}
-
-.admin-overview button span,
-.admin-overview button small {
-  min-width: 0;
-  overflow: hidden;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 850;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-overview button strong {
-  min-width: 0;
-  overflow: hidden;
-  color: #075bd8;
-  font-size: 20px;
-  font-weight: 950;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-overview button.good {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.admin-overview button.good strong {
-  color: #047857;
-}
-
-.admin-overview button.warn {
-  border-color: #fde68a;
-  background: #fffbeb;
-}
-
-.admin-overview button.warn strong {
-  color: #b45309;
-}
-
-.tabs {
-  border: 1px solid #d8e5f7;
-  border-radius: 20px;
-  padding: 6px;
-  background: rgba(255, 255, 255, 0.76);
-}
-
-.tabs button {
-  border: 1px solid transparent;
-  background: rgba(248, 251, 255, 0.72);
-}
-
-.admin-workspace-tabs {
-  position: sticky;
-  top: 72px;
-  z-index: 2;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 6px;
-  overflow: visible;
-}
-
-.admin-workspace-tabs button {
-  position: relative;
-  min-width: 0;
-  min-height: 58px;
-  display: grid;
-  align-content: center;
-  justify-items: start;
-  gap: 4px;
-  border-radius: 16px;
-  padding: 9px 12px;
-  color: #475569;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  white-space: normal;
-}
-
-.admin-workspace-tabs button.active {
-  border-color: #1e63ff;
-  background: linear-gradient(135deg, #1e63ff, #1554df);
-  color: #fff;
-  box-shadow: 0 12px 26px rgba(30, 99, 255, 0.22);
-}
-
-.admin-workspace-tabs strong,
-.admin-workspace-tabs small {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.admin-workspace-tabs strong {
-  font-size: 14px;
-  font-weight: 950;
-}
-
-.admin-workspace-tabs small {
-  color: inherit;
-  font-size: 12px;
-  font-weight: 750;
-  opacity: 0.82;
-}
-
-.admin-workspace-tabs b {
-  position: absolute;
-  top: 6px;
-  right: 7px;
-  min-width: 22px;
-  height: 22px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 999px;
-  padding: 0 6px;
-  background: #fff7ed;
-  color: #c2410c;
-  font-size: 11px;
-  font-weight: 950;
-}
-
-.admin-workspace-tabs button.active b {
-  background: rgba(255, 255, 255, 0.92);
-  color: #075bd8;
-}
-
-.admin-advanced-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  min-width: 0;
-  margin-top: -4px;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.admin-advanced-toggle .btn {
-  min-height: 32px;
-  border: 1px solid #d8e5f7;
-  border-radius: 999px;
-  padding: 6px 12px;
-  background: rgba(248, 251, 255, 0.86);
-  color: #3156c9;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 850;
-  cursor: pointer;
-}
-
-.admin-current-guide {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  border: 1px solid rgba(191, 219, 254, 0.86);
-  border-radius: 18px;
-  padding: 12px 14px;
-  background:
-    linear-gradient(135deg, rgba(239, 246, 255, 0.96), rgba(255, 255, 255, 0.92)),
-    #ffffff;
-  box-shadow: 0 10px 22px rgba(0, 47, 135, 0.06);
-}
-
-.admin-current-guide strong {
-  display: block;
-  color: #071a39;
-  font-size: 15px;
-  font-weight: 950;
-}
-
-.admin-current-guide span {
-  flex: 0 0 auto;
-  border: 1px solid #cfe0ff;
-  border-radius: 999px;
-  padding: 6px 10px;
-  background: #eff6ff;
-  color: #075bd8;
-  font-size: 12px;
-  font-weight: 950;
-  white-space: nowrap;
-}
-
-.admin-current-guide.permissions span {
-  border-color: #fed7aa;
-  background: #fff7ed;
-  color: #9a3412;
-}
-
-.admin-current-guide.mop span {
-  border-color: #bbf7d0;
-  background: #ecfdf5;
-  color: #047857;
-}
-
-@media (max-width: 980px) {
-  .admin-overview,
-  .admin-workspace-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .admin-workspace-tabs {
-    position: static;
-  }
-
-  .admin-current-guide {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-}
-
-@media (max-width: 640px) {
-  .admin-overview,
-  .admin-workspace-tabs {
-    grid-template-columns: 1fr;
-  }
-}
+.admin-workspace-tabs { display: grid; gap: 6px; position: sticky; top: 90px; }
+button { width: 100%; min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #49627d; font: inherit; font-size: 14px; text-align: left; cursor: pointer; transition: background 160ms ease, color 160ms ease; }
+button span { flex: 1; min-width: 0; overflow-wrap: anywhere; }button svg { flex-shrink: 0; }
+button:hover { background: #e8f0fa; }button.active { background: #e6effe; color: #1858bd; font-weight: 650; border-color: #c9dcfa; }
+button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+b { min-width: 20px; padding: 2px 5px; background: #e9eef5; color: #526b84; font-size: 11px; text-align: center; border-radius: 4px; }
+.other-toggle { margin-top: 8px; border-top: 1px solid #dce6f0; border-radius: 0; padding-top: 15px; }
+.other-toggle svg:last-child { transition: transform 180ms ease; }.rotated { transform: rotate(180deg); }
+.other-settings { display: grid; gap: 4px; padding-left: 10px; }.other-settings button { font-size: 13px; min-height: 38px; }
+@media(max-width:640px) { .admin-workspace-tabs { position: static; }.other-settings { grid-template-columns: repeat(2, minmax(0,1fr)); padding: 0; } }
+@media(prefers-reduced-motion:reduce) { button,.other-toggle svg:last-child { transition: none; } }
 </style>
