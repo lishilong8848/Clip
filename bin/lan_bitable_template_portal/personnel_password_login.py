@@ -27,7 +27,7 @@ DIRECTORY_KEY = TABLE_ID
 PRINCIPAL_PREFIX = "personnel_"  # Learning lookup only; never a login OpenID.
 ROUNDS = 600_000
 IDENTITY_PATTERN = re.compile(r"(?:[0-9]{15}|[0-9]{17}[0-9Xx])")
-FIELDS = ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD]
+FIELDS = ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD, "岗位"]
 KDF_SLOTS = threading.BoundedSemaphore(2)
 
 
@@ -88,6 +88,7 @@ class PersonnelPasswordLogin:
             queue.append(now)
 
     def person(self, row):
+        from .portal_service import MaintenancePortalService, PERMISSION_DIRECTORY_SPECIALTY_LABELS
         service = self.service()
         fields = row.get("fields") or {}
         rid = str(row.get("record_id") or "")
@@ -95,6 +96,7 @@ class PersonnelPasswordLogin:
             raise PasswordLoginError("人员目录返回了无效记录，未使用不完整名单。", 503)
         name = service._mop_field_text(fields, ["姓名"]) or service._signature_user_info(fields.get("员工姓名")).get("name", "")
         scopes = service._building_codes_from_value(fields.get("机楼/专业"))
+        assignments = MaintenancePortalService._repair_management_select_items(fields.get("机楼/专业"))
         inactive = service._signature_person_inactive(fields.get("离职/异动情况"))
         reason = "该人员已离职或异动" if inactive else "人员姓名未填写" if not name else ""
         stored = service._mop_field_text(fields, [PASSWORD_FIELD])
@@ -108,12 +110,14 @@ class PersonnelPasswordLogin:
                 "inactive": inactive, "selectable": not reason, "disabled_reason": reason,
                 "needs_setup": initial,
                 "account_nature": service._mop_field_text(fields, ["账号性质"]),
+                "position": service._mop_field_text(fields, ["岗位"]), "assignments": assignments,
+                "specialties": [item for item in assignments if item in PERMISSION_DIRECTORY_SPECIALTY_LABELS],
                 "login_ids": [open_id] if re.fullmatch(r"ou_[A-Za-z0-9]+", open_id) else [],
                 "password_revision": "" if initial or not stored else hashlib.sha256(stored.encode("utf-8")).hexdigest()}
 
-    def people(self):
+    def directory(self, force=False):
         with self.directory_lock:
-            if self.snapshot.get("schema") != 2 or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
+            if force or self.snapshot.get("schema") != 2 or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
                 service = self.service()
                 records, token, seen = {}, "", set()
                 for _ in range(20):
@@ -144,12 +148,57 @@ class PersonnelPasswordLogin:
                 for item in records.values():
                     if any(identities[oid] > 1 for oid in item["login_ids"]):
                         item.update(selectable=False, disabled_reason="多人使用同一OpenID，请管理员核对人员记录")
-                snapshot = {"people": records, "loaded_at": time.time(), "schema": 2}
+                removed = dict(self.snapshot.get("removed_identities") or {})
+                current_ids = {oid for item in records.values() for oid in item["login_ids"]}
+                for old in self.snapshot.get("people", {}).values():
+                    for oid in old.get("login_ids", []):
+                        if oid not in current_ids:
+                            removed[oid] = "人员已从目录移除，请管理员核对"
+                for oid in current_ids:
+                    removed.pop(oid, None)
+                snapshot = {"people": records, "loaded_at": time.time(), "schema": 2,
+                            "removed_identities": removed}
                 self.store.put_document(DIRECTORY_NS, DIRECTORY_KEY, snapshot)
                 self.snapshot = snapshot
-            keys = ("id", "name", "employee_no", "building", "selectable", "disabled_reason", "needs_setup", "account_nature")
-            items = [{key: item[key] for key in keys} for item in self.snapshot.get("people", {}).values() if not item["inactive"]]
-            return {"items": sorted(items, key=lambda item: (item["name"], item["building"], item["id"])), "loaded_at": self.snapshot.get("loaded_at")}
+                self.auth.sync_directory_permissions(records.values())
+            return self.snapshot
+
+    def people(self):
+        from .portal_auth import BUILDING_OPEN_ID_MAP
+        snapshot = self.directory()
+        keys = ("id", "name", "employee_no", "building", "selectable", "disabled_reason", "needs_setup", "account_nature")
+        items = []
+        for person in snapshot.get("people", {}).values():
+            if person["inactive"]:
+                continue
+            item = {key: person[key] for key in keys}
+            item["login_method"] = "feishu" if person["account_nature"].upper() == "VNET" or any(oid in BUILDING_OPEN_ID_MAP.values() for oid in person["login_ids"]) else "password"
+            if any(self.auth._open_id_explicitly_disabled(oid) for oid in person["login_ids"]):
+                item.update(selectable=False, disabled_reason=item["disabled_reason"] or "当前账号已停用")
+            items.append(item)
+        return {"items": sorted(items, key=lambda item: (item["name"], item["building"], item["id"])), "loaded_at": snapshot.get("loaded_at")}
+
+    def permission_people(self, *, force_refresh=False, query=""):
+        snapshot = self.directory(force=force_refresh)
+        items = []
+        for person in snapshot.get("people", {}).values():
+            if person["inactive"]:
+                continue
+            item = {"record_id": person["id"], "name": person["name"], "employee_no": person["employee_no"],
+                    "open_id": next(iter(person["login_ids"]), ""), "scopes": person["scopes"],
+                    "scope_labels": [self.auth.scope_label(scope) for scope in person["scopes"]],
+                    "selectable": person["selectable"], "unavailable_reason": person["disabled_reason"],
+                    "assignments": person.get("assignments", [person["building"]]),
+                    "specialties": person.get("specialties", []), "position": person.get("position", ""),
+                    "account_nature": person["account_nature"]}
+            if not query or query.casefold() in " ".join([item["name"], item["employee_no"], person["building"]]).casefold():
+                items.append(item)
+        result = {"items": items, "total": len(items), "returned": len(items), "loaded_ts": snapshot["loaded_at"],
+                "selectable_total": sum(item["selectable"] for item in items),
+                "loaded_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(snapshot["loaded_at"]))}
+        if not query:
+            self.service()._permission_directory_cache = copy.deepcopy(result)
+        return result
 
     def record(self, rid):
         payload = self.service()._request_json("records/" + rid, app_token=APP_TOKEN, table_id=TABLE_ID)
@@ -181,7 +230,7 @@ class PersonnelPasswordLogin:
             raise PasswordLoginError("该人员身份证号缺失或格式无效，请联系管理员核对人员表。", 409)
         return value
 
-    def save_password(self, rid, new_password):
+    def save_password(self, rid, new_password, *, allow_disabled=False):
         if not isinstance(new_password, str) or not 8 <= len(new_password.strip()) <= 128 or len(new_password) > 128:
             raise PasswordLoginError("新密码须为8至128个字符，不能继续使用初始密码。")
         replacement = hash_password(new_password)
@@ -198,10 +247,10 @@ class PersonnelPasswordLogin:
         if self.service()._mop_field_text(row["fields"], [PASSWORD_FIELD]) != replacement:
             raise PasswordLoginError("新密码保存未确认，请用新密码重新登录；若不成功，请稍后重试。", 503)
         person = self.person(row)
-        if not person["selectable"] or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
-            raise PasswordLoginError("密码已保存，但人员状态或身份已变化，请联系管理员核对。", 403)
         self.remember(person)
         self.auth.invalidate_personnel_sessions(rid)
+        if not person["selectable"] or (not allow_disabled and self.auth._open_id_explicitly_disabled(self.login_identity(person))):
+            raise PasswordLoginError("密码已保存，但人员状态或身份已变化，请联系管理员核对。", 403)
         return person
 
     def login(self, payload, client):
@@ -223,7 +272,8 @@ class PersonnelPasswordLogin:
             if not person["selectable"] or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
                 raise PasswordLoginError(person["disabled_reason"] or "当前账号已停用。", 403)
             self.remember(person)
-            if person["account_nature"].upper() == "VNET":
+            from .portal_auth import BUILDING_OPEN_ID_MAP
+            if person["account_nature"].upper() == "VNET" or self.login_identity(person) in BUILDING_OPEN_ID_MAP.values():
                 raise PasswordLoginError("VNET人员请使用飞书登录授权。", 403)
             stored = self.service()._mop_field_text(row["fields"], [PASSWORD_FIELD])
             if person["needs_setup"]:
@@ -276,7 +326,8 @@ class PersonnelPasswordLogin:
                 raise PasswordLoginError("所选人员不在当前名单中，请重新选择。", 403)
             row = self.record(rid)
             person = self.person(row)
-            if person["account_nature"] != "外部账号":
+            from .portal_auth import BUILDING_OPEN_ID_MAP
+            if not person["account_nature"] or person["account_nature"].upper() == "VNET" or self.login_identity(person) in BUILDING_OPEN_ID_MAP.values():
                 raise PasswordLoginError("忘记密码仅适用于外部人员，其他人员请使用飞书登录。", 403)
             if not person["selectable"] or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
                 raise PasswordLoginError(person["disabled_reason"] or "当前账号已停用。", 403)
@@ -328,7 +379,14 @@ def install_personnel_password_login(app, controller, runtime):
         with creation_lock:
             if service is None:
                 service = PersonnelPasswordLogin(lambda: runtime.service, runtime.state_store, runtime.auth_manager)
+                runtime.service._unified_account_directory = service.permission_people
         return service
+
+    runtime.auth_manager._account_directory_provider = lambda: get_service().snapshot
+    runtime.auth_manager._account_directory_loader = lambda: get_service().directory()
+    controller._account_directory = get_service
+    from .account_management import install_account_management
+    install_account_management(app, controller, runtime, get_service)
 
     def result(data=None, error=None, status=200, cookie=None):
         headers = {"Cache-Control": "no-store"}

@@ -332,14 +332,14 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         # The directory search must never request the national-ID field.
         self.assertEqual(
             self.harness.service._last_search_field_names,
-            ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD],
+            ["姓名", "员工姓名", "员工工号", "机楼/专业", "离职/异动情况", "飞书 open_id", "账号性质", PASSWORD_FIELD, "岗位"],
         )
         self.assertNotIn(ppl.IDENTITY_FIELD, self.harness.service._last_search_field_names)
         self.assertEqual(len(first["items"]), 2)
         for item in first["items"]:
             self.assertEqual(
                 set(item),
-                {"id", "name", "employee_no", "building", "selectable", "disabled_reason", "needs_setup", "account_nature"},
+                {"id", "name", "employee_no", "building", "selectable", "disabled_reason", "needs_setup", "account_nature", "login_method"},
             )
             for forbidden in ("password", PASSWORD_FIELD, "password_revision", "open_id", "openid",
                               "stored", "scopes", "login_ids", ppl.IDENTITY_FIELD, "identity"):

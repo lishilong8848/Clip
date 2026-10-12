@@ -1648,6 +1648,9 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "clipflow_backend" / "runtime_helpers.py",
         PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "process_lifetime.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "account_management.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "personnel_password_login.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_auth.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "signature_print.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "repair_operations.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning.py",
@@ -1763,11 +1766,11 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_learning", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_portal_auth_persistence", "bin.test_portal_access_boundaries",
+         "bin.test_learning", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
-         "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls",
+         "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",
          "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes",
          "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
          "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",

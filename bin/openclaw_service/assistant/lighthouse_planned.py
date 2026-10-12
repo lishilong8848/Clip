@@ -137,9 +137,12 @@ async def _preview(portal, actor, plan, identity, request):
         raise AssistantError(selected["verification_note"], 409)
     data = await _read(portal, actor, request, "GET /api/workbench/planned-notice-prefill", {
         "scope": meta["scope"], "month": meta["month"], "work_type": selected["work_type"], "source_record_id": identity})
+    draft = copy.deepcopy(data["draft"])
+    # Web-only time provenance is not a business field or an actor credential.
+    draft.pop("_auto_plan_times", None)
     body = {"command_format": "notice_command", "scope": meta["scope"], "source_month": meta["month"],
         "work_type": selected["work_type"], "action": "start", "manual": False,
-        "source_record_id": identity, "planned_notice_version": data["version"], "patch": data["draft"]}
+        "source_record_id": identity, "planned_notice_version": data["version"], "patch": draft}
     prepared = await asyncio.to_thread(portal.prepare, actor,
         {"title": "发送计划通告：" + selected["title"], "operations": [{"api_id": "POST /api/workbench-actions", "body": body}],
          "explanation": "请核对自动填充内容并补齐空白项；确认前不会发送。"},

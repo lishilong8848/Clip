@@ -22,6 +22,18 @@
         @keydown="handleCustomKeydown"
       />
       <button
+        v-if="clearable && modelValue"
+        type="button"
+        class="vnet-combobox-clear"
+        :disabled="disabled"
+        :aria-label="`清空${label || '内容'}`"
+        :title="`清空${label || '内容'}`"
+        @pointerdown.prevent
+        @click.stop.prevent="clearValue"
+      >
+        <X :size="16" aria-hidden="true" />
+      </button>
+      <button
         type="button"
         class="vnet-combobox-toggle"
         :disabled="disabled"
@@ -108,7 +120,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Check, ChevronDown, Search } from "lucide-vue-next";
+import { Check, ChevronDown, Search, X } from "lucide-vue-next";
 import { inheritedControlTheme } from "../controlTheme";
 
 const props = withDefaults(defineProps<{
@@ -121,6 +133,7 @@ const props = withDefaults(defineProps<{
   required?: boolean;
   error?: string;
   allowCustom?: boolean;
+  clearable?: boolean;
   menuZIndex?: number;
 }>(), {
   modelValue: "",
@@ -130,6 +143,7 @@ const props = withDefaults(defineProps<{
   required: false,
   error: "",
   allowCustom: false,
+  clearable: false,
 });
 
 const emit = defineEmits<{
@@ -147,7 +161,7 @@ const searchRef = ref<HTMLInputElement | null>(null);
 const open = ref(false);
 const query = ref("");
 const activeIndex = ref(-1);
-const menuPosition = ref({ top: 0, left: 0, width: 220 });
+const menuPosition = ref({ top: 0, left: 0, width: 220, maxHeight: 340 });
 const menuTheme = ref<Record<string, string>>({});
 let positionFrame = 0;
 let globalListenersAttached = false;
@@ -173,6 +187,7 @@ const menuStyle = computed(() => ({
   top: `${menuPosition.value.top}px`,
   left: `${menuPosition.value.left}px`,
   width: `${menuPosition.value.width}px`,
+  maxHeight: `${menuPosition.value.maxHeight}px`,
   ...(props.menuZIndex == null ? {} : { zIndex: props.menuZIndex }),
 }));
 
@@ -183,17 +198,30 @@ function optionId(index: number): string {
 function updatePosition(): void {
   if (!open.value) return;
   const trigger = triggerRef.value;
-  if (!trigger) return;
-  const rect = trigger.getBoundingClientRect();
+  const menu = menuRef.value;
+  const options = menu?.querySelector<HTMLElement>('.vnet-select-options');
+  if (!trigger || !menu || !options) return;
+  const rect = (trigger.closest('.vnet-combobox-control') || trigger).getBoundingClientRect();
+  const viewport = window.visualViewport;
   const viewportPadding = 10;
-  const width = Math.max(180, rect.width);
-  const estimatedHeight = Math.min(330, 56 + filteredOptions.value.length * 38);
-  const spaceBelow = window.innerHeight - rect.bottom - viewportPadding;
-  const openAbove = spaceBelow < Math.min(220, estimatedHeight) && rect.top > spaceBelow;
+  const top = (viewport?.offsetTop || 0) + viewportPadding;
+  const left = (viewport?.offsetLeft || 0) + viewportPadding;
+  const bottom = top + (viewport?.height || window.innerHeight) - viewportPadding * 2;
+  const right = left + (viewport?.width || window.innerWidth) - viewportPadding * 2;
+  const width = Math.min(Math.max(180, rect.width), right - left);
+  // Measure untransformed content and fit it outside the input, including the software keyboard.
+  const naturalHeight = menu.offsetHeight - options.offsetHeight + Math.min(280, options.scrollHeight);
+  const belowTop = Math.max(top, rect.bottom + 6);
+  const aboveBottom = Math.min(bottom, rect.top - 6);
+  const spaceBelow = Math.max(0, bottom - belowTop);
+  const spaceAbove = Math.max(0, aboveBottom - top);
+  const openAbove = spaceBelow < Math.min(220, naturalHeight) && spaceAbove > spaceBelow;
+  const maxHeight = Math.min(naturalHeight, openAbove ? spaceAbove : spaceBelow);
   menuPosition.value = {
-    top: openAbove ? Math.max(viewportPadding, rect.top - estimatedHeight - 6) : rect.bottom + 6,
-    left: Math.min(Math.max(viewportPadding, rect.left), window.innerWidth - width - viewportPadding),
+    top: openAbove ? aboveBottom - maxHeight : belowTop,
+    left: Math.min(Math.max(left, rect.left), right - width),
     width,
+    maxHeight,
   };
 }
 
@@ -211,6 +239,8 @@ function attachGlobalListeners(): void {
   document.addEventListener("pointerdown", handleDocumentPointerDown, true);
   window.addEventListener("resize", schedulePositionUpdate);
   window.addEventListener("scroll", schedulePositionUpdate, true);
+  window.visualViewport?.addEventListener("resize", schedulePositionUpdate);
+  window.visualViewport?.addEventListener("scroll", schedulePositionUpdate);
 }
 
 function detachGlobalListeners(): void {
@@ -219,6 +249,8 @@ function detachGlobalListeners(): void {
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   window.removeEventListener("resize", schedulePositionUpdate);
   window.removeEventListener("scroll", schedulePositionUpdate, true);
+  window.visualViewport?.removeEventListener("resize", schedulePositionUpdate);
+  window.visualViewport?.removeEventListener("scroll", schedulePositionUpdate);
   if (positionFrame) {
     window.cancelAnimationFrame(positionFrame);
     positionFrame = 0;
@@ -242,6 +274,8 @@ async function showMenu(initialQuery = ""): Promise<void> {
   await nextTick();
   if (menuHost.value) menuRef.value?.showPopover?.();
   updatePosition();
+  await nextTick();
+  if (!open.value) return;
   if (searchable.value) searchRef.value?.focus();
   else scrollActiveIntoView();
 }
@@ -273,13 +307,17 @@ async function handleCustomInput(event: Event): Promise<void> {
   emit("update:modelValue", value);
   emit("change", value);
   query.value = value;
-  if (!open.value && !props.disabled) {
-    menuTheme.value = inheritedControlTheme(rootRef.value);
-    open.value = true;
-    activeIndex.value = initialActiveIndex();
-    await nextTick();
-    updatePosition();
-  }
+  if (!open.value) await showMenu(value);
+}
+
+function clearValue(): void {
+  if (props.disabled) return;
+  emit("update:modelValue", "");
+  emit("change", "");
+  closeMenu();
+  restoringTriggerFocus = true;
+  try { triggerRef.value?.focus({ preventScroll: true }); }
+  finally { restoringTriggerFocus = false; }
 }
 
 function toggleCustomMenu(): void {
@@ -320,7 +358,14 @@ function moveActive(delta: number): void {
 
 function scrollActiveIntoView(): void {
   if (activeIndex.value < 0) return;
-  document.getElementById(optionId(activeIndex.value))?.scrollIntoView({ block: "nearest" });
+  const option = document.getElementById(optionId(activeIndex.value));
+  const list = option?.parentElement;
+  if (!option || !list) return;
+  const top = option.offsetTop - list.offsetTop;
+  if (top < list.scrollTop) list.scrollTop = top;
+  else if (top + option.offsetHeight > list.scrollTop + list.clientHeight) {
+    list.scrollTop = top + option.offsetHeight - list.clientHeight;
+  }
 }
 
 function selectActive(): void {
@@ -429,6 +474,22 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
+.vnet-combobox-clear {
+  flex: 0 0 36px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--lh-muted, #56708f);
+  cursor: pointer;
+}
+.vnet-combobox-clear:hover:not(:disabled),
+.vnet-combobox-clear:focus-visible {
+  background: var(--lh-surface-hover, #edf4ff);
+  color: var(--lh-accent-strong, #0b56bd);
+}
+
 .vnet-select.open .vnet-combobox-control,
 .vnet-combobox-control:focus-within {
   border-color: var(--lh-accent, #1e63ff);
@@ -449,6 +510,7 @@ onBeforeUnmount(() => {
 }
 
 .vnet-combobox-control input:disabled,
+.vnet-combobox-clear:disabled,
 .vnet-combobox-toggle:disabled {
   cursor: not-allowed;
 }
@@ -514,6 +576,8 @@ onBeforeUnmount(() => {
 
 .vnet-select-menu {
   position: fixed;
+  display: flex;
+  flex-direction: column;
   z-index: 2100;
   overflow: hidden;
   border: 1px solid var(--lh-border-strong, #c9d8eb);
@@ -524,6 +588,7 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select-search {
+  flex-shrink: 0;
   min-height: 42px;
   display: flex;
   align-items: center;
@@ -552,6 +617,7 @@ onBeforeUnmount(() => {
 }
 
 .vnet-select-options {
+  min-height: 0;
   max-height: 280px;
   overflow-x: hidden;
   overflow-y: auto;

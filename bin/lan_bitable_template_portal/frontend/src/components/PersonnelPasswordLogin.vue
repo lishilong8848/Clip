@@ -31,10 +31,11 @@
       <label class="field" for="personnel-name-select">
         <span class="field-label"><User :size="15" aria-hidden="true" /> 姓名</span>
         <VnetSelect input-id="personnel-name-select" :model-value="personSearch" :options="personOptions"
-          allow-custom placeholder="输入姓名或工号查找" label="姓名" :disabled="busy" required
+          allow-custom clearable placeholder="输入姓名或工号查找" label="姓名" :disabled="busy" required
           @update:model-value="selectPerson" />
       </label>
 
+      <p v-if="selectedPerson" class="hint" role="status">{{ selectedPerson.name }} · {{ selectedPerson.building || '所属楼栋待核对' }} · {{ selectedPerson.login_method === 'feishu' || selectedPerson.account_nature?.toUpperCase() === 'VNET' ? '飞书登录' : '姓名密码登录' }}</p>
       <p v-if="!requiresPasswordChange && (!selectedPerson || selectedPerson.needs_setup)" class="hint first-hint" role="status">
         <KeyRound :size="14" aria-hidden="true" />
         首次登录密码为本人身份证号后6位，验证后须立即修改
@@ -106,7 +107,7 @@
       <label class="field" for="personnel-reset-name">
         <span class="field-label"><User :size="15" aria-hidden="true" /> 姓名</span>
         <VnetSelect input-id="personnel-reset-name" :model-value="personSearch" :options="personOptions"
-          allow-custom placeholder="查找外部人员姓名或工号" label="姓名" :disabled="busy" required
+          allow-custom clearable placeholder="查找外部人员姓名或工号" label="姓名" :disabled="busy" required
           @update:model-value="selectPerson" />
       </label>
 
@@ -262,6 +263,7 @@ type Person = {
   disabled_reason?: string;
   needs_setup?: boolean;
   account_nature?: string;
+  login_method?: string;
 };
 
 type VerifyStatus = "idle" | "checking" | "passed" | "failed";
@@ -346,7 +348,7 @@ function optionLabel(item: Person): string {
 }
 
 const availablePeople = computed(() => people.value.filter(item => item.selectable !== false
-  && (mode.value !== 'reset' || item.account_nature === '外部账号')));
+  && (mode.value !== 'reset' || (!!item.account_nature && item.account_nature.toUpperCase() !== 'VNET' && item.login_method !== 'feishu'))));
 const personChoices = computed(() => availablePeople.value.map((item, index, all) => {
   const label = optionLabel(item);
   return { id: item.id, label: all.filter(other => optionLabel(other) === label).length > 1 ? `${label}（同名 ${index + 1}）` : label };
@@ -359,7 +361,7 @@ function selectPerson(value: string): void {
   if (id === selectedId.value) return;
   selectedId.value = id;
   onSelectionChange();
-  if (mode.value === 'login' && selectedPerson.value?.account_nature?.toUpperCase() === 'VNET') {
+  if (mode.value === 'login' && (selectedPerson.value?.login_method === 'feishu' || selectedPerson.value?.account_nature?.toUpperCase() === 'VNET')) {
     // Keep password as the return preference so browser Back does not restart OAuth.
     rememberLoginMethod('password');
     navigateHard(`/api/auth/login?next=${encodeURIComponent(currentUrlPath())}`);
@@ -498,7 +500,7 @@ function enterResetMode(): void {
   clearVerify();
   clearAllSecrets();
   mode.value = "reset";
-  if (selectedPerson.value?.account_nature !== '外部账号') { selectedId.value = ''; personSearch.value = ''; }
+  if (!selectedPerson.value?.account_nature || selectedPerson.value.account_nature.toUpperCase() === 'VNET' || selectedPerson.value.login_method === 'feishu') { selectedId.value = ''; personSearch.value = ''; }
   if (!peopleLoaded.value) void fetchPeople();
 }
 
@@ -524,7 +526,7 @@ async function fetchPeople(): Promise<void> {
     peopleLoaded.value = true;
     if (selectedId.value) {
       const selected = personChoices.value.find(item => item.id === selectedId.value);
-      if (!selected || selectedPerson.value?.account_nature?.toUpperCase() === 'VNET') {
+      if (!selected || selectedPerson.value?.login_method === 'feishu' || selectedPerson.value?.account_nature?.toUpperCase() === 'VNET') {
         selectedId.value = ''; personSearch.value = ''; clearVerify(); clearAllSecrets();
       } else personSearch.value = selected.label;
     }
@@ -1005,5 +1007,10 @@ select {
 
 .spin {
   animation: pwd-spin 0.9s linear infinite;
+}
+
+@media (max-width: 600px) {
+  .field :deep(.vnet-combobox-control input) { font-size: 16px; }
+  .field :deep(.vnet-combobox-clear) { flex-basis: 40px; }
 }
 </style>

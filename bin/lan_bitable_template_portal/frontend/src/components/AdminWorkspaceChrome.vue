@@ -1,5 +1,5 @@
 <template>
-  <section class="admin-overview" aria-label="管理员概览">
+  <section v-if="activeTab !== 'permissions'" class="admin-overview" aria-label="管理员概览">
     <button type="button"
       v-for="item in overviewItems"
       :key="item.key"
@@ -27,13 +27,13 @@
     </button>
   </nav>
 
-  <div class="admin-advanced-toggle">
+  <div v-if="activeTab !== 'permissions'" class="admin-advanced-toggle">
     <button type="button" class="btn ghost" @click="emit('toggle-advanced')">
       {{ advancedVisible ? "收起高级诊断" : "显示高级诊断" }}
     </button>
   </div>
 
-  <section class="admin-current-guide" :class="activeTab" aria-live="polite">
+  <section v-if="activeTab !== 'permissions'" class="admin-current-guide" :class="activeTab" aria-live="polite">
     <div>
       <strong>{{ activeGuide.title }}</strong>
     </div>

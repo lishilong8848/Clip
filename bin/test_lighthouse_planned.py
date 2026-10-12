@@ -60,6 +60,8 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
             identity = request.query_params.get("source_record_id")
             row = next(row for row in self.rows if row["source_record_id"] == identity)
             draft = {**VALID_STARTS[kind], "title": row["title"], "building_codes": [scope], "progress": ""}
+            if kind == "maintenance":
+                draft["_auto_plan_times"] = "1"
             return {"ok": True, "data": {"draft": draft, "version": "v1", "field_sources": {"content": "history"},
                 "missing_fields": ["progress"] if kind != "adjust" else [], "selected": row,
                 "source_record": {"source_record_id": identity, "record_id": identity, "work_type": kind,
@@ -101,6 +103,15 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(field.get("native_notice_binding") for field in plan["fields"]))
         self.assertEqual(self.writes, [])
         self.model.complete.assert_not_called()
+
+    async def test_internal_time_marker_not_submitted_but_spoof_guard_stays_enabled(self):
+        plan = await self.begin()
+        saved = self.agent.get_plan(self.actor, plan['id'])
+        self.assertNotIn('_auto_plan_times', saved['operations'][0]['body']['patch'])
+        body = copy.deepcopy(saved['operations'][0]['body'])
+        body['patch']['actor'] = {'is_admin': True}
+        with self.assertRaisesRegex(AssistantError, '身份伪装'):
+            self.agent.catalog.validate_operation({'api_id': 'POST /api/workbench-actions', 'body': body})
 
     async def test_admin_asks_even_page_default_scope_and_uses_current_explicit_scope(self):
         admin = {**self.actor, "is_admin": True, "scopes": ["E"], "allowed_scopes": list("ABCDEH")}

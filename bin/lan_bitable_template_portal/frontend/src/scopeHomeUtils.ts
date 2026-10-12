@@ -193,7 +193,7 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
   },
   tools: {
     kicker: "其他工具",
-    title: "选择辅助工具",
+    title: "选择其它功能入口",
     description: "",
     actionLabel: "选择工具",
   },

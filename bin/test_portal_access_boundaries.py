@@ -22,6 +22,7 @@ class PortalAccessBoundaries(unittest.TestCase):
         self.auth = PortalAuthManager.__new__(PortalAuthManager)
         self.auth.get_session = lambda _: self.session
         self.state = Mock()
+        self.state.get_document.return_value = None
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state.db_path = Path(self.temp.name) / 'fixture.sqlite3'

@@ -4,11 +4,69 @@
     <strong>正在确认登录状态</strong>
   </section>
 
-  <section v-else-if="!loggedIn" class="center-state">
-    <strong>登录灯塔</strong>
-    <a class="btn blue" :href="loginUrl || '/api/auth/login'" @click="rememberLoginMethod('feishu')">飞书登录</a>
-    <PersonnelPasswordLogin />
-    <form action="/api/auth/guest" method="post"><button class="btn" type="submit">访客查看机柜</button></form>
+  <section v-else-if="!loggedIn" class="center-state login-panel">
+    <div class="login-head">
+      <span class="login-shield"><ShieldCheck :size="28" aria-hidden="true" /></span>
+      <strong>登录灯塔</strong>
+    </div>
+
+    <p v-if="authCancelled" class="login-notice" role="status">已取消飞书授权，可重新选择登录方式。</p>
+
+    <div class="login-tabs" role="tablist" aria-label="登录方式" @keydown="onTabKeydown">
+      <button
+        v-for="tab in tabs"
+        :id="`login-tab-${tab.value}`"
+        :key="tab.value"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === tab.value ? 'true' : 'false'"
+        :aria-controls="`login-panel-${tab.value}`"
+        :tabindex="activeTab === tab.value ? 0 : -1"
+        :class="['login-tab', { active: activeTab === tab.value }]"
+        @click="selectTab(tab.value)"
+      >
+        <component :is="tab.icon" :size="16" aria-hidden="true" />
+        <span>{{ tab.label }}</span>
+      </button>
+    </div>
+
+    <div
+      v-if="activeTab === 'feishu'"
+      id="login-panel-feishu"
+      role="tabpanel"
+      class="login-panel-body"
+      aria-labelledby="login-tab-feishu"
+    >
+      <div class="feishu-authorize">
+        <div class="feishu-qr" aria-hidden="true"><QrCode :size="64" /></div>
+        <strong>使用本人飞书账号授权</strong>
+        <p>可以验证身份后申请灯塔访问权限。</p>
+        <a class="btn blue feishu-btn" :href="feishuLoginUrl" @click="handleFeishuLogin">飞书扫码登录</a>
+      </div>
+    </div>
+
+    <div
+      v-else-if="activeTab === 'password'"
+      id="login-panel-password"
+      role="tabpanel"
+      class="login-panel-body password-panel"
+      aria-labelledby="login-tab-password"
+    >
+      <PersonnelPasswordLogin />
+    </div>
+
+    <div
+      v-else
+      id="login-panel-guest"
+      role="tabpanel"
+      class="login-panel-body guest-panel"
+      aria-labelledby="login-tab-guest"
+    >
+      <p class="guest-copy">可查看机柜数据并单独导出楼栋文件；不可修改数据或一键上传。</p>
+      <form action="/api/auth/guest" method="post">
+        <button class="btn blue guest-btn" type="submit">访客查看机柜</button>
+      </form>
+    </div>
   </section>
 
   <section v-else-if="loggedIn && passwordSettings" class="center-state request-panel">
@@ -84,7 +142,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import { QrCode, UserRound, Eye, ShieldCheck } from "lucide-vue-next";
 import VnetBackButton from "./VnetBackButton.vue";
 import PersonnelPasswordLogin from "./PersonnelPasswordLogin.vue";
 import { rememberLoginMethod } from "../api/client";
@@ -119,6 +178,129 @@ const emit = defineEmits<{
   back: [];
   "update-request": [patch: Partial<typeof props.request>];
 }>();
+
+// --- Login panel tabs (only used by the !loggedIn branch) ---
+const tabs = [
+  { value: "feishu", label: "飞书扫码登录", icon: QrCode },
+  { value: "password", label: "账号密码登录", icon: UserRound },
+  { value: "guest", label: "访客查看机柜", icon: Eye },
+] as const;
+
+type TabValue = (typeof tabs)[number]["value"];
+
+const activeTab = ref<TabValue>(initialLoginTab());
+
+function initialLoginTab(): TabValue {
+  if (typeof window === "undefined") return "feishu";
+  const login = new URLSearchParams(window.location.search).get("login");
+  if (login === "password" || login === "guest") return login;
+  return "feishu";
+}
+
+const authCancelled = computed(() => {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("auth_notice") === "cancelled";
+});
+
+function selectTab(value: TabValue): void {
+  activeTab.value = value;
+}
+
+function onTabKeydown(event: KeyboardEvent): void {
+  const current = tabs.findIndex((tab) => tab.value === activeTab.value);
+  let next = current;
+  switch (event.key) {
+    case "ArrowRight":
+      next = (current + 1) % tabs.length;
+      break;
+    case "ArrowLeft":
+      next = (current - 1 + tabs.length) % tabs.length;
+      break;
+    case "Home":
+      next = 0;
+      break;
+    case "End":
+      next = tabs.length - 1;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  activeTab.value = tabs[next].value;
+  const tabEl = document.getElementById(`login-tab-${tabs[next].value}`);
+  tabEl?.focus();
+}
+
+const LOGIN_ENTRY_VALUES = ["password", "feishu", "guest"] as const;
+
+function sanitizeCleanPath(value: string): string {
+  const text = String(value || "").trim();
+  if (
+    !text.startsWith("/")
+    || text.startsWith("//")
+    || text.includes("\\")
+    || text.startsWith("/api/")
+    || /[\u0000-\u001F\u007F]/.test(text)
+  ) return "";
+  let url: URL;
+  try {
+    url = new URL(text, window.location.origin);
+  } catch {
+    return "";
+  }
+  if (url.origin !== window.location.origin) return "";
+  return url.pathname + url.search + url.hash;
+}
+
+function unwrapLoginEntry(value: string): string {
+  let current = value;
+  for (let depth = 0; depth < 5; depth++) {
+    const href = sanitizeCleanPath(current);
+    if (!href) return "";
+    let url: URL;
+    try {
+      url = new URL(href, window.location.origin);
+    } catch {
+      return "";
+    }
+    const login = url.searchParams.get("login");
+    if (login && (LOGIN_ENTRY_VALUES as readonly string[]).includes(login)) {
+      const nested = url.searchParams.get("next");
+      if (nested === null || nested === "") return "";
+      current = nested;
+      continue;
+    }
+    return href;
+  }
+  return "";
+}
+
+const feishuLoginUrl = computed(() => {
+  const base = new URL("/api/auth/login", window.location.origin);
+  let candidateNext = "";
+  if (typeof window !== "undefined") {
+    const params = new URLSearchParams(window.location.search);
+    const explicitLogin = params.get("login");
+    const explicitNext = params.get("next");
+    if (explicitLogin && explicitNext !== null && explicitNext !== undefined) {
+      candidateNext = unwrapLoginEntry(explicitNext);
+    } else {
+      let propNext = "";
+      try {
+        propNext = new URL(String(props.loginUrl || ""), window.location.origin).searchParams.get("next") || "";
+      } catch {
+        /* malformed props.loginUrl: ignore, still fall back to /api/auth/login */
+      }
+      if (propNext) candidateNext = unwrapLoginEntry(propNext);
+    }
+    if (candidateNext) base.searchParams.set("next", candidateNext);
+  }
+  return base.pathname + base.search;
+});
+
+function handleFeishuLogin(): void {
+  rememberLoginMethod("feishu");
+}
 
 function toggleScope(scope: string, checked: boolean): void {
   const next = new Set(props.request.scopes);
@@ -287,15 +469,238 @@ p,
   white-space: nowrap;
 }
 
-.login-hint {
+.login-panel {
+  width: min(600px, calc(100vw - 32px));
+  margin-top: 36px;
+  padding: 30px;
+  display: grid;
+  gap: 16px;
+  justify-items: stretch;
+  align-content: start;
+  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+/* Disable the shared document badge / decorative pseudo backgrounds for the
+   login panel only. This must come after the shared .center-state rules so it
+   wins over their higher-specificity selectors. */
+.center-state.login-panel::before,
+.center-state.login-panel::after {
+  display: none;
+}
+
+.center-state.login-panel {
+  background: #ffffff;
+  backdrop-filter: none;
+}
+
+.login-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+}
+
+.login-shield {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #eaf3ff, #f5faff);
+  color: #1678ff;
+  box-shadow: 0 12px 24px rgba(20, 103, 226, 0.16);
+}
+
+.login-head > strong {
+  color: #071a39;
+  font-size: 21px;
+  line-height: 1.25;
+  font-weight: 950;
+  letter-spacing: 0;
+}
+
+.login-notice {
+  width: 100%;
   display: inline-flex;
-  border: 1px solid #cfe0ff;
-  border-radius: 999px;
-  padding: 6px 10px;
-  background: #eff6ff;
-  color: #0757d7;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  border: 1px solid #fecaca;
+  border-radius: 14px;
+  padding: 9px 11px;
+  background: #fff1f2;
+  color: #b91c1c;
   font-size: 12px;
   font-weight: 900;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.login-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #d8e5f7;
+  border-radius: 16px;
+  background: rgba(248, 251, 255, 0.92);
+}
+
+.login-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 9px 6px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: #5f7189;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.login-tab span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.login-tab:hover {
+  color: #0f4fb8;
+}
+
+.login-tab:focus-visible {
+  outline: 3px solid rgba(0, 91, 255, 0.22);
+  outline-offset: 1px;
+}
+
+.login-tab.active {
+  background: #eaf3ff;
+  border-color: #a8c9f5;
+  color: #0757d7;
+  box-shadow: 0 1px 2px rgba(21, 93, 252, 0.06);
+}
+
+.login-panel-body {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  text-align: center;
+  padding: 4px 2px 2px;
+  animation: login-panel-in 0.18s ease;
+}
+
+/* Password panel: keep label/form content left-aligned and stretch the
+   PersonnelPasswordLogin child across the full panel width. */
+.login-panel-body.password-panel {
+  justify-items: start;
+  text-align: left;
+  width: 100%;
+}
+
+.login-panel-body.password-panel :deep(.pwd-form),
+.login-panel-body.password-panel :deep(.app-link),
+.login-panel-body.password-panel :deep(.load-state) {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+@keyframes login-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.feishu-authorize {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.feishu-qr {
+  display: grid;
+  place-items: center;
+  width: 108px;
+  height: 108px;
+  border: 1px dashed #bcd7fe;
+  border-radius: 22px;
+  background: rgba(245, 250, 255, 0.9);
+  color: #1678ff;
+}
+
+.feishu-authorize > strong {
+  color: #0f2f6a;
+  font-size: 15px;
+  font-weight: 950;
+  letter-spacing: 0;
+}
+
+.feishu-authorize > p {
+  max-width: 260px;
+  margin: 0;
+  color: #5f7189;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.feishu-btn {
+  width: 100%;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  border-radius: 15px;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.guest-panel {
+  gap: 12px;
+}
+
+.guest-copy {
+  margin: 0;
+  color: #5f7189;
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.guest-panel form {
+  width: 100%;
+}
+
+.guest-btn {
+  width: 100%;
+  min-height: 42px;
+  border-radius: 15px;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-panel,
+  .login-panel-body,
+  .login-tab {
+    animation: none;
+    transition: none;
+  }
 }
 
 .request-steps {
@@ -545,6 +950,23 @@ textarea {
   .center-state {
     margin-block: 24px;
     padding: 22px;
+  }
+
+  .login-panel {
+    margin-block: 20px;
+    padding: 18px 16px 20px;
+    width: min(420px, calc(100vw - 20px));
+  }
+
+  .login-tab {
+    gap: 4px;
+    font-size: 11px;
+    padding: 9px 4px;
+  }
+
+  .feishu-qr {
+    width: 92px;
+    height: 92px;
   }
 
   .scope-pill {

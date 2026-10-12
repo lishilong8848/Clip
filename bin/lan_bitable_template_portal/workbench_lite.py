@@ -2998,9 +2998,11 @@ def render_workbench_lite(
     .workspace.is-switching {{ position:relative; min-height:420px; }}
     .workspace.is-switching > * {{ opacity:0; pointer-events:none; }}
     .workspace.is-switching::before {{ content:""; position:absolute; inset:0; z-index:3; border:1px solid #d8e5f7; border-radius:20px; background:linear-gradient(135deg,rgba(255,255,255,.96),rgba(238,246,255,.94)); box-shadow:0 14px 32px rgba(15,73,153,.08); }}
-    .workspace.is-switching::after {{ content:attr(data-loading-text); position:absolute; left:50%; top:50%; z-index:4; transform:translate(-50%,-50%); min-width:180px; min-height:42px; border-radius:999px; padding:11px 22px; display:flex; align-items:center; justify-content:center; color:#0a57d8; background:#fff; border:1px solid #cfe0ff; box-shadow:0 12px 28px rgba(31,99,255,.14); font-size:14px; font-weight:950; }}
-    .workspace-loading-spinner {{ display:none; }}
-    .workspace.is-switching > .workspace-loading-spinner {{ display:block; opacity:1; position:absolute; left:calc(50% - 112px); top:calc(50% - 8px); z-index:5; width:16px; height:16px; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
+    .workspace-loading-state {{ display:none; }}
+    .workspace.is-switching > .workspace-loading-state {{ display:grid; place-items:center; position:absolute; inset:0; z-index:4; opacity:1; min-width:0; padding:16px; box-sizing:border-box; }}
+    .workspace-loading-status {{ display:inline-flex; align-items:center; gap:10px; max-width:100%; min-width:0; padding:12px 18px; box-sizing:border-box; border-radius:12px; color:#0a57d8; background:#fff; border:1px solid #cfe0ff; box-shadow:0 8px 22px rgba(31,99,255,.1); font-size:14px; font-weight:900; }}
+    .workspace-loading-status > span:last-child {{ min-width:0; overflow-wrap:anywhere; }}
+    .workspace-loading-spinner {{ flex:0 0 18px; width:18px; height:18px; box-sizing:border-box; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
     .lite-loading-state::before {{ content:""; display:inline-block; width:14px; height:14px; margin-right:8px; vertical-align:middle; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
     .panel.loading::before {{ width:14px; height:14px; top:20px; left:auto; right:98px; z-index:6; background:none; border:2px solid #cfe0ff; border-top-color:#0a57d8; border-radius:50%; animation:liteSpin 1s linear infinite; }}
     .panel.notice-detail-drawer.loading::before {{ display:block; top:90px; right:106px; }}
@@ -4471,14 +4473,22 @@ def render_workbench_lite(
       if (!workspace) return;
       workspace.classList.toggle('is-switching', Boolean(enabled));
       workspace.setAttribute('aria-busy', enabled ? 'true' : 'false');
-      if (enabled && !workspace.querySelector(':scope > .workspace-loading-spinner')) {{
+      let loading = workspace.querySelector(':scope > .workspace-loading-state');
+      if (enabled && !loading) {{
+        loading = document.createElement('div');
+        loading.className = 'workspace-loading-state';
+        const status = document.createElement('div');
+        status.className = 'workspace-loading-status';
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
         const spinner = document.createElement('span');
         spinner.className = 'workspace-loading-spinner';
         spinner.setAttribute('aria-hidden', 'true');
-        workspace.append(spinner);
+        status.append(spinner, document.createElement('span'));
+        loading.append(status);
+        workspace.append(loading);
       }}
-      if (enabled) workspace.dataset.loadingText = label || '正在加载通告';
-      else delete workspace.dataset.loadingText;
+      if (enabled) loading.lastElementChild.lastElementChild.textContent = label || '正在加载通告';
     }}
     function setButtonBusy(button, enabled) {{
       if (!button) return;

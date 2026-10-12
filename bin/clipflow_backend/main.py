@@ -5794,7 +5794,7 @@ class FastAPIPortalController:
                 return admin_response
             try:
                 data = await asyncio.to_thread(
-                    PortalRuntime.service.get_permission_directory_people,
+                    self._account_directory().permission_people,
                     force_refresh=bool(refresh),
                     query=q,
                 )
@@ -8213,6 +8213,7 @@ class FastAPIPortalController:
                         request, PermissionDirectoryGrantRequest
                     )
                 ).to_payload()
+                await asyncio.to_thread(self._account_directory)
                 resolved = await asyncio.to_thread(
                     PortalRuntime.service.resolve_permission_directory_grants,
                     payload.get("record_ids") or [],
@@ -10478,6 +10479,12 @@ class FastAPIPortalController:
         code = str(request.query_params.get("code") or "")
         state = str(request.query_params.get("state") or "")
         redirect_uri = f"{self._request_base_url(request)}/api/auth/feishu/callback"
+        if request.query_params.get("error") or not code:
+            next_path = PortalRuntime.auth_manager.cancel_login(state=state, redirect_uri=redirect_uri)
+            response = Response(status_code=302, headers={"Location": "/?" + urlencode({
+                "login": "feishu", "auth_notice": "cancelled", "next": next_path})})
+            response.headers.append("Set-Cookie", PortalRuntime.auth_manager.auth_retry_cookie_header(active=False))
+            return response
         try:
             session_id, next_path = PortalRuntime.auth_manager.complete_login(
                 code=code,

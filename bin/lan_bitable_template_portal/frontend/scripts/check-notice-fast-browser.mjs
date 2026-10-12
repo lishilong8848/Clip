@@ -36,7 +36,8 @@ try:
         linked_record={**draft,'record_id':'plan-'+kind,'work_type':kind,'linked_ongoing':row,
                        'display_fields':{'名称':row['title'],'楼栋':'A楼','专业':'电气','计划进度':'进行中'}}
         linked_html=render_workbench_lite(**{**args,'payload':{'records':[linked_record],'ongoing':[row]}})
-        pages[kind]={'html':html,'detail':detail,'linked_html':linked_html}
+        pages[kind]={'html':html,'detail':detail,'linked_html':linked_html,
+                     'fragments':extract_workbench_lite_fragments(html)}
     print(json.dumps({'plans':plans,'pages':pages},ensure_ascii=False))
 finally: test.tmp.cleanup()
 `], { cwd: repo, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
@@ -78,6 +79,7 @@ try {
   let conversationTurns = null, confirmationCalls = 0, previewMessage = null;
   let artifactRun = '', artifactStream = '';
   let checkTagRecovery = false, tagReads = 0;
+  let switchGate = null, switchFailure = false;
   const planReads = [];
   await context.route(base + '/api/**', async route => {
     const url = new URL(route.request().url());
@@ -138,6 +140,13 @@ try {
       else await new Promise(resolve => setTimeout(resolve, 180));
       data = { canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: fixture.pages[url.searchParams.get('work_type')].detail } };
     } else if (url.pathname === '/api/workbench/lite-fragment') {
+      if (switchGate) {
+        const gate = switchGate;
+        await gate;
+        if (switchFailure) return route.fulfill({ status: 503, json: { ok: false, error: '隔离读取失败' } });
+        return route.fulfill({ json: { ok: true, data: { canonical_url: '/workbench-lite?' + url.searchParams,
+          fragments: fixture.pages[url.searchParams.get('work_type')].fragments } } });
+      }
       fragments++;
       return route.fulfill({ status: 503, json: { ok: false, error: 'Fixture must not reload unchanged lists' } });
     } else if (url.pathname === '/api/auth/status') data = { logged_in: true, user: { open_id: 'fixture-nav', name: 'Fixture', role: 'admin' },
@@ -161,6 +170,47 @@ try {
   });
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
+  await page.goto(base + '/native?kind=adjust');
+  for (const [index, kind] of Object.keys(fixture.pages).entries()) {
+    await page.setViewportSize({ width: [1280, 1366, 1920][index % 3], height: 768 });
+    let releaseSwitch;
+    switchGate = new Promise(resolve => { releaseSwitch = resolve; });
+    await page.locator(`.type-tab[href*="work_type=${kind}"]`).click();
+    await page.locator('.workspace.is-switching .workspace-loading-status').waitFor();
+    const layout = await page.locator('.workspace-loading-status').evaluate(node => {
+      const bounds = element => { const r = element.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; };
+      return { workspace: bounds(node.closest('.workspace')), status: bounds(node), spinner: bounds(node.firstElementChild),
+        label: bounds(node.lastElementChild), viewport: innerWidth, animation: getComputedStyle(node.firstElementChild).animationName,
+        scrolling: document.documentElement.scrollWidth > innerWidth };
+    });
+    const inside = (outer, inner) => inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom;
+    assert(inside(layout.workspace, layout.status), 'loading status stays inside the workspace');
+    assert(inside(layout.status, layout.spinner) && inside(layout.status, layout.label), 'spinner and text stay inside one status box');
+    assert(layout.spinner.right < layout.label.left, 'spinner never overlaps the label');
+    assert.equal(layout.animation, 'liteSpin');
+    assert.equal(layout.scrolling, false, 'switching never creates horizontal overflow');
+    if (index === 0) await page.screenshot({ path: path.join(output, 'category-loading.png') });
+    switchFailure = index === 5;
+    releaseSwitch();
+    await page.locator('.workspace.is-switching').waitFor({ state: 'detached' });
+    assert.equal(await page.locator('.workspace-loading-status:visible').count(), 0, 'success and failure both clear the loading state');
+    switchGate = null; switchFailure = false;
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(base + '/native?kind=maintenance');
+  let releaseSwitch;
+  switchGate = new Promise(resolve => { releaseSwitch = resolve; });
+  for (const kind of ['change', 'repair']) {
+    const requested = page.waitForRequest(request => new URL(request.url()).pathname === '/api/workbench/lite-fragment'
+      && new URL(request.url()).searchParams.get('work_type') === kind);
+    await page.locator(`.type-tab[href*="work_type=${kind}"]`).click();
+    await requested;
+  }
+  assert.equal(await page.locator('.workspace-loading-status').count(), 1, 'rapid switching reuses one loading status');
+  releaseSwitch();
+  await page.locator('.workspace.is-switching').waitFor({ state: 'detached' });
+  assert.equal(new URL(page.url()).searchParams.get('work_type'), 'repair', 'an outdated response cannot override the latest category');
+  switchGate = null;
   for (const kind of Object.keys(fixture.pages)) {
     let releaseDetail;
     detailGate = new Promise(resolve => { releaseDetail = resolve; });

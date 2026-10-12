@@ -176,6 +176,19 @@ class PortalAuthority:
         context, actor = await self.authorize(message.get('context_id'))
         if action == 'authorize':
             return actor
+        if action == 'feishu_document':
+            from openclaw_service.assistant.lighthouse_documents import read_document
+            if set(payload) - {'url', 'offset', 'scopes'}:
+                raise AssistantError('文档读取参数无效。')
+            scoped = self.narrowed(actor, payload.get('scopes', actor['scopes']))
+            result = await asyncio.to_thread(read_document, self.runtime.service, scoped,
+                payload.get('url'), payload.get('offset', 0))
+            await self.authorize(message.get('context_id'))
+            import logging
+            logging.info('Assistant document read actor=%s channel=%s scopes=%s characters=%s',
+                hashlib.sha256(actor['id'].encode()).hexdigest()[:12], 'feishu' if actor.get('channel') else 'web',
+                ','.join(scoped['scopes']), result['total_characters'])
+            return result
         if action in {'table_catalog', 'table_records', 'staff_count'}:
             if self.tables is None:
                 from .assistant_tables import AssistantTables

@@ -5323,6 +5323,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         force_refresh: bool = False,
         query: str = "",
     ) -> dict[str, Any]:
+        unified = getattr(self, "_unified_account_directory", None)
+        if unified:
+            return unified(force_refresh=force_refresh, query=query)
         now = time.time()
         with self._permission_directory_cache_lock:
             cached = self._permission_directory_cache

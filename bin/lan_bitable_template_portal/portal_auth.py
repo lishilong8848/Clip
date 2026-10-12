@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 import threading
 import time
@@ -143,12 +144,12 @@ class PortalAuthManager:
                 return "/"
             pairs = parse_qsl(parts.query, keep_blank_values=True)
             query = dict(pairs)
-            # OAuth selected from the password entry should return to the original page.
-            if path == "/" and query.get("login") == "password" and query.get("next"):
+            # Any login tab returns to the original page, not back into the login entry.
+            if path == "/" and query.get("login") in {"password", "feishu", "guest"} and query.get("next"):
                 text = query["next"].strip()
                 continue
             query_text = urlencode([(key, value) for key, value in pairs if key not in {"code", "state"}
-                                    and not (path == "/" and key == "login" and value == "password")])
+                                    and not (path == "/" and key in {"login", "auth_notice"})])
             return urlunsplit(("", "", path, query_text, parts.fragment)) or "/"
         return "/"
 
@@ -329,6 +330,8 @@ class PortalAuthManager:
 
     def scopes_for_open_id(self, open_id: str) -> list[str]:
         open_id = str(open_id or "").strip()
+        if self.directory_block_reason(open_id):
+            return []
         with self._lock:
             payload = self._load_permissions_locked()
             users = payload.get("users") or {}
@@ -341,6 +344,8 @@ class PortalAuthManager:
 
     def role_for_open_id(self, open_id: str) -> str:
         open_id = str(open_id or "").strip()
+        if self.directory_block_reason(open_id):
+            return "building"
         with self._lock:
             payload = self._load_permissions_locked()
             users = payload.get("users") or {}
@@ -354,11 +359,71 @@ class PortalAuthManager:
         open_id = str(open_id or "").strip()
         if not open_id:
             return False
+        if self.directory_block_reason(open_id):
+            return True
         with self._lock:
             payload = self._load_permissions_locked()
             users = payload.get("users") or {}
             user_cfg = users.get(open_id) if isinstance(users, dict) else None
             return isinstance(user_cfg, dict) and user_cfg.get("enabled") is False
+
+    def directory_person(self, open_id: str) -> dict[str, Any]:
+        provider = getattr(self, "_account_directory_provider", None)
+        snapshot = provider() if provider else {}
+        cached = getattr(self, "_account_index_cache", (None, {}))
+        if cached[0] is not snapshot:
+            index = {}
+            for person in snapshot.get("people", {}).values():
+                for identity in person.get("login_ids", []):
+                    if identity not in index or not person.get("inactive"):
+                        index[identity] = person
+            cached = (snapshot, index)
+            self._account_index_cache = cached
+        return cached[1].get(open_id, {})
+
+    def directory_block_reason(self, open_id: str) -> str:
+        # Shared duty accounts and recovery administrators are not personal HR records.
+        if open_id in REQUIRED_ADMIN_USERS or open_id in BUILDING_OPEN_ID_MAP.values():
+            return ""
+        person = self.directory_person(open_id)
+        if person and not person.get("selectable"):
+            return str(person.get("disabled_reason") or "人员身份待核对")
+        provider = getattr(self, "_account_directory_provider", None)
+        snapshot = provider() if provider else {}
+        return snapshot.get("removed_identities", {}).get(open_id, "")
+
+    def sync_directory_permissions(self, people, *, on_login=False) -> None:
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload.setdefault("users", {})
+            changed = False
+            for person in people:
+                identities = person.get("login_ids") or []
+                if not person.get("selectable") or len(identities) != 1:
+                    continue
+                identity = identities[0]
+                if identity in REQUIRED_ADMIN_USERS or identity in BUILDING_OPEN_ID_MAP.values():
+                    continue
+                previous = users.get(identity) or {}
+                if previous.get("enabled") is False or previous.get("role") == "admin":
+                    continue
+                if not on_login and "directory_scopes" not in previous:
+                    continue
+                own = self._scopes_from_raw(person.get("scopes"))
+                own = own if len(own) == 1 else []
+                if not previous and not own:
+                    continue
+                manual = [scope for scope in previous.get("scopes", []) if scope not in previous.get("directory_scopes", [])]
+                automatic = [scope for scope in own if scope not in previous.get("denied_scopes", []) and scope not in manual]
+                following = {**previous, "name": previous.get("name") or person["name"],
+                             "role": previous.get("role") or "building", "enabled": True,
+                             "scopes": self._scopes_from_raw(manual + automatic), "directory_scopes": automatic}
+                if previous != following:
+                    users[identity] = following
+                    changed = True
+            if changed:
+                payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self._save_permissions_locked(payload)
 
     def get_permissions_payload(self) -> dict[str, Any]:
         with self._lock:
@@ -380,6 +445,8 @@ class PortalAuthManager:
                     "scopes": scopes,
                     "enabled": user_cfg.get("enabled") is not False,
                     "locked": str(open_id or "").strip() in REQUIRED_ADMIN_USERS,
+                    "directory_scopes": list(user_cfg.get("directory_scopes") or []),
+                    "denied_scopes": list(user_cfg.get("denied_scopes") or []),
                 }
             )
         user_list.sort(key=lambda item: (0 if item["locked"] else 1, item["name"], item["open_id"]))
@@ -404,7 +471,8 @@ class PortalAuthManager:
         with self._lock:
             previous = self._load_permissions_locked()
             previous_users = previous.get("users") if isinstance(previous.get("users"), dict) else {}
-            users: dict[str, dict[str, Any]] = {}
+            # Omitted accounts are not revocations; removal has its own endpoint.
+            users: dict[str, dict[str, Any]] = copy.deepcopy(previous_users)
             for raw in raw_users:
                 if not isinstance(raw, dict):
                     continue
@@ -421,15 +489,17 @@ class PortalAuthManager:
                 if enabled and role != "admin" and not scopes:
                     raise PortalError(f"{name or open_id} 未选择可访问楼栋。")
                 users[open_id] = {
+                    **previous_users.get(open_id, {}),
                     "name": name or open_id,
                     "role": role,
                     "scopes": scopes,
                     "enabled": enabled,
                 }
             payload = {
+                **previous,
                 "version": 1,
                 "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "default_scopes": [],
+                "default_scopes": self._scopes_from_raw(previous.get("default_scopes")),
                 "users": users,
                 "updated_by": str(updated_by or ""),
             }
@@ -474,6 +544,7 @@ class PortalAuthManager:
             users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
             payload["users"] = users
             users[open_id] = {
+                **users.get(open_id, {}),
                 "name": str(name or open_id).strip()[:80] or open_id,
                 "role": role,
                 "scopes": normalized_scopes,
@@ -550,6 +621,7 @@ class PortalAuthManager:
                     )
                 )
                 next_user = {
+                    **existing,
                     "name": str(
                         raw.get("name") or existing.get("name") or open_id
                     ).strip()[:80]
@@ -557,6 +629,7 @@ class PortalAuthManager:
                     "role": "admin" if open_id in REQUIRED_ADMIN_USERS else existing_role,
                     "scopes": merged_scopes,
                     "enabled": True,
+                    "denied_scopes": [scope for scope in existing.get("denied_scopes", []) if scope not in incoming_scopes],
                 }
                 if users.get(open_id) != next_user:
                     users[open_id] = next_user
@@ -1017,6 +1090,10 @@ class PortalAuthManager:
         if not isinstance(session, dict):
             return {}
         user = dict(session.get("user") or {})
+        open_id = str(user.get("open_id") or "")
+        person = self.directory_person(open_id) if open_id not in BUILDING_OPEN_ID_MAP.values() else {}
+        if person.get("selectable"):
+            user.update(name=person.get("name") or user.get("name"), employee_no=person.get("employee_no", ""))
         return {
             "open_id": str(user.get("open_id") or ""),
             "union_id": str(user.get("union_id") or ""),
@@ -1055,7 +1132,6 @@ class PortalAuthManager:
         if not person.get("selectable") or person.get("needs_setup") or not person.get("password_revision") or len(identities) != 1:
             raise PortalError("人员已停用或身份不明确，无法登录。")
         identity = identities[0]
-        own_scopes = self._scopes_from_raw(person.get("scopes"))
         session_id = secrets.token_urlsafe(32)
         now = time.time()
         session = {"user": {"open_id": identity, "name": person["name"], "employee_no": person.get("employee_no", ""),
@@ -1067,17 +1143,14 @@ class PortalAuthManager:
         with self._lock:
             if self._open_id_explicitly_disabled(identity):
                 raise PortalError("当前账号已停用，无法登录。")
-            scopes = self.scopes_for_open_id(identity)
-            role = self.role_for_open_id(identity)
-            if len(own_scopes) == 1 and "ALL" not in scopes and own_scopes[0] not in scopes:
-                self.upsert_permission_user(open_id=identity, name=person["name"], role=role or "building",
-                    scopes=list(dict.fromkeys(scopes + own_scopes)), enabled=True, updated_by="personnel_password_login")
+            self.sync_directory_permissions([person], on_login=True)
             session["allowed_scopes"] = self.scopes_for_open_id(identity)
             session["role"] = self.role_for_open_id(identity)
             self._cleanup_expired_locked(now)
             self._sessions[session_id] = session
             self._trim_by_expiry_locked(self._sessions, AUTH_MAX_SESSIONS)
             self._state_store.put_auth_session(self._secret_hash(session_id), session)
+            self._state_store.put_document("account_last_login", identity, {"at": now, "method": "password"})
         return session_id
 
     def start_login(self, *, redirect_uri: str, next_path: str = "/") -> str:
@@ -1107,6 +1180,17 @@ class PortalAuthManager:
             "state": state,
         }
         return f"{FEISHU_AUTH_INDEX_URL}?{urlencode(params)}"
+
+    def cancel_login(self, *, state: str, redirect_uri: str) -> str:
+        state = str(state or "").strip()
+        if not state:
+            return "/"
+        with self._lock:
+            self._states.pop(state, None)
+            payload = self._state_store.consume_auth_oauth_state(self._secret_hash(state), now=time.time())
+        if not payload or payload.get("redirect_uri") != redirect_uri:
+            return "/"
+        return self._normalize_next_path(str(payload.get("next") or "/"))
 
     def complete_login(
         self, *, code: str, state: str, redirect_uri: str
@@ -1140,6 +1224,20 @@ class PortalAuthManager:
         open_id = str(user.get("open_id") or "").strip()
         if not open_id:
             raise PortalError("飞书登录未返回 open_id。")
+        loader = getattr(self, "_account_directory_loader", None)
+        if loader:
+            directory_ready = False
+            try:
+                loader()
+                directory_ready = True
+            except Exception:
+                # A directory outage must not drop existing verified Feishu permissions.
+                logging.warning("Account directory refresh unavailable during Feishu login")
+            person = self.directory_person(open_id)
+            if self._open_id_explicitly_disabled(open_id):
+                raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
+            if person and directory_ready:
+                self.sync_directory_permissions([person], on_login=True)
         if user.get("union_id"):
             self._state_store.put_document("feishu_assistant_identity", user["union_id"], {
                 key: user.get(key, "") for key in ("open_id", "union_id", "name", "employee_no")})
@@ -1163,6 +1261,7 @@ class PortalAuthManager:
                 self._secret_hash(session_id),
                 session,
             )
+            self._state_store.put_document("account_last_login", open_id, {"at": now, "method": "feishu"})
         return session_id, self._normalize_next_path(str(state_payload.get("next") or "/"))
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:

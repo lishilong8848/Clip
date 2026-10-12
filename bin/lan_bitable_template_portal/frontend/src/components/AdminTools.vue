@@ -61,12 +61,8 @@
         v-model:request-search="permissionRequestSearch"
         v-model:request-status="permissionRequestStatus"
         v-model:reject-reason="permissionRejectReason"
-        v-model:user-search="permissionUserSearch"
-        v-model:user-filter="permissionUserFilter"
         :busy="busy"
         :pending-request-count="pendingPermissionRequestCount"
-        :enabled-user-count="enabledPermissionUserCount"
-        :admin-user-count="adminPermissionUserCount"
         :request-items="filteredPermissionRequests"
         :scope-options="scopeOptions"
         :selected-request-ids="selectedRequestIds"
@@ -76,21 +72,9 @@
         :request-scope-labels="requestScopeLabels"
         :current-scope-labels="currentScopeLabels"
         :review-scopes="reviewScopes"
-        :users="filteredPermissionUsers"
-        :users-total="permissions.users.length"
-        :user-scope-summary="permissionUserScopeSummary"
-        :directory-items="permissionDirectoryItems"
-        :directory-selected-ids="permissionDirectorySelectedIds"
-        :directory-scope-options="buildingScopes"
-        :directory-selected-scopes="permissionDirectorySelectedScopes"
-        :directory-loading="permissionDirectoryLoading"
-        :directory-granting="permissionDirectoryGranting"
-        :directory-loaded-at="permissionDirectoryLoadedAt"
-        :directory-error="permissionDirectoryError"
+        :users="permissions.users"
         @load-permissions="loadPermissions"
         @load-requests="loadPermissionRequests"
-        @add-user="addPermissionUser"
-        @save="savePermissions"
         @approve-selected="approveSelectedPermissionRequests"
         @reject-selected="rejectSelectedPermissionRequests"
         @toggle-all="toggleAllFilteredPermissionRequests"
@@ -98,12 +82,6 @@
         @toggle-review-scope="toggleReviewScope"
         @approve="approvePermissionRequest"
         @reject="rejectPermissionRequest"
-        @toggle-user-scope="toggleUserScope"
-        @remove-user="removePermissionUser"
-        @load-directory="loadPermissionDirectory"
-        @grant-directory="grantPermissionDirectory"
-        @toggle-directory="togglePermissionDirectoryRecord"
-        @toggle-directory-scope="togglePermissionDirectoryScope"
       />
 
       <AdminHandoverPane
@@ -195,17 +173,7 @@ const permissionRequests = ref<Dict[]>([]);
 const permissionRequestStatus = ref("pending");
 const permissionRequestSearch = ref("");
 const permissionRejectReason = ref("");
-const permissionUserSearch = ref("");
-const permissionUserFilter = ref("all");
 const selectedRequestIds = reactive(new Set<string>());
-const permissionDirectoryItems = ref<Dict[]>([]);
-const permissionDirectorySelectedIds = reactive(new Set<string>());
-const permissionDirectorySelectedScopes = reactive(new Set<string>());
-const permissionDirectoryLoading = ref(false);
-const permissionDirectoryGranting = ref(false);
-const permissionDirectoryLoadedAt = ref("");
-const permissionDirectoryError = ref("");
-const permissionOriginalRoles = new Map<string, string>();
 const advancedDiagnosticsVisible = ref(false);
 const handoverLinks = reactive<Record<string, string>>({});
 const handoverPassword = ref("");
@@ -338,7 +306,7 @@ const adminTabs = computed(() => {
     },
     {
       key: "permissions" as AdminTabKey,
-      label: "权限管理",
+      label: "账号与权限",
       description: "",
       badge: pendingPermissionRequestCount.value ? `${pendingPermissionRequestCount.value}` : "",
     },
@@ -374,7 +342,7 @@ const activeAdminGuide = computed(() => {
       badge: backendQueueTotal.value ? `${backendQueueTotal.value} 条排队` : "队列空闲",
     },
     permissions: {
-      title: "权限管理",
+      title: "账号与权限",
       text: "",
       badge: pendingPermissionRequestCount.value ? `${pendingPermissionRequestCount.value} 待审批` : "暂无申请",
     },
@@ -407,30 +375,6 @@ const allFilteredPendingSelected = computed(() => {
   const pending = filteredPermissionRequests.value.filter((item) => item.status === "pending");
   return pending.length > 0 && pending.every((item) => selectedRequestIds.has(String(item.request_id || "")));
 });
-const filteredPermissionUsers = computed(() => {
-  const query = permissionUserSearch.value.trim().toLowerCase();
-  return permissions.users.filter((user) => {
-    const role = String(user.role || "building");
-    const enabled = user.enabled !== false;
-    if (permissionUserFilter.value === "admin" && role !== "admin") return false;
-    if (permissionUserFilter.value === "building" && role === "admin") return false;
-    if (permissionUserFilter.value === "disabled" && enabled) return false;
-    if (permissionUserFilter.value === "locked" && !user.locked) return false;
-    if (!query) return true;
-    const scopeText = (Array.isArray(user.scopes) ? user.scopes : [])
-      .map((scope) => scopeOptionLabel(scope))
-      .join(" ");
-    const haystack = [
-      user.name,
-      user.open_id,
-      role === "admin" ? "管理员" : "普通用户",
-      enabled ? "启用" : "禁用",
-      scopeText,
-    ].join(" ").toLowerCase();
-    return haystack.includes(query);
-  });
-});
-
 const api = requestJson;
 
 watch([() => props.open, () => props.initialTab], ([open]) => {
@@ -445,7 +389,6 @@ function selectAdminTab(next: AdminTabKey): void {
   if (next === "status") void loadStatus();
   else if (next === "permissions") {
     void loadPermissions();
-    void loadPermissionDirectory(false);
   }
   else if (next === "handover") void loadHandover();
   else if (next === "mop") void loadMopSettings();
@@ -640,91 +583,10 @@ async function loadPermissions(): Promise<void> {
     ]);
     permissions.users.splice(0, permissions.users.length, ...(data.users || []));
     permissions.scope_options.splice(0, permissions.scope_options.length, ...(data.scope_options || []));
-    permissionOriginalRoles.clear();
-    for (const user of permissions.users) {
-      const openId = String(user.open_id || "").trim();
-      if (openId) permissionOriginalRoles.set(openId, String(user.role || "building"));
-    }
   } catch (error: any) {
     message.value = error?.message || "权限加载失败";
   } finally {
     busy.value = false;
-  }
-}
-
-async function loadPermissionDirectory(force = false): Promise<void> {
-  if (permissionDirectoryLoading.value) return;
-  permissionDirectoryLoading.value = true;
-  permissionDirectoryError.value = "";
-  try {
-    const suffix = force ? "?refresh=true" : "";
-    const data = await api(`/api/auth/permission-directory${suffix}`);
-    const items = Array.isArray(data.items) ? data.items : [];
-    permissionDirectoryItems.value = items;
-    permissionDirectoryLoadedAt.value = String(data.loaded_at || "");
-    const validRecordIds = new Set(
-      items
-        .filter((item: Dict) => item.selectable)
-        .map((item: Dict) => String(item.record_id || "").trim())
-        .filter(Boolean),
-    );
-    for (const recordId of Array.from(permissionDirectorySelectedIds)) {
-      if (!validRecordIds.has(recordId)) permissionDirectorySelectedIds.delete(recordId);
-    }
-  } catch (error: any) {
-    permissionDirectoryError.value = error?.message || "人员权限表读取失败";
-  } finally {
-    permissionDirectoryLoading.value = false;
-  }
-}
-
-function togglePermissionDirectoryRecord(recordId: string, checked: boolean): void {
-  const normalized = String(recordId || "").trim();
-  if (!normalized) return;
-  if (checked) permissionDirectorySelectedIds.add(normalized);
-  else permissionDirectorySelectedIds.delete(normalized);
-}
-
-function togglePermissionDirectoryScope(scope: string, checked: boolean): void {
-  const normalized = String(scope || "").trim();
-  if (!buildingScopes.some((option) => option.value === normalized)) return;
-  if (checked) permissionDirectorySelectedScopes.add(normalized);
-  else permissionDirectorySelectedScopes.delete(normalized);
-}
-
-async function grantPermissionDirectory(): Promise<void> {
-  const recordIds = Array.from(permissionDirectorySelectedIds);
-  const scopes = Array.from(permissionDirectorySelectedScopes);
-  if (!recordIds.length || !scopes.length || permissionDirectoryGranting.value) return;
-  const scopeLabels = buildingScopes
-    .filter((option) => permissionDirectorySelectedScopes.has(option.value))
-    .map((option) => option.label);
-  const confirmed = await requestConfirm({
-    tone: "primary",
-    kicker: "批量授权",
-    title: `为 ${recordIds.length} 名人员添加楼栋权限`,
-    message: `本次授权：${scopeLabels.join("、")}。已有楼栋权限不会被移除。`,
-    details: ["离职人员、运维值班长、运维值班员不会出现在人员列表中"],
-    confirmLabel: "确认授权",
-    confirmClass: "blue",
-  });
-  if (!confirmed) return;
-  permissionDirectoryGranting.value = true;
-  permissionDirectoryError.value = "";
-  try {
-    const data = await api("/api/auth/permission-directory/grant", {
-      method: "POST",
-      body: JSON.stringify({ record_ids: recordIds, scopes }),
-    });
-    const changedCount = Number(data.changed_count || 0);
-    const failedCount = Array.isArray(data.failed) ? data.failed.length : 0;
-    message.value = `人员授权完成：更新 ${changedCount} 人${failedCount ? `，跳过 ${failedCount} 条` : ""}`;
-    permissionDirectorySelectedIds.clear();
-    await Promise.all([loadPermissions(), loadPermissionDirectory(false)]);
-  } catch (error: any) {
-    permissionDirectoryError.value = error?.message || "人员批量授权失败";
-  } finally {
-    permissionDirectoryGranting.value = false;
   }
 }
 
@@ -923,40 +785,6 @@ async function rejectSelectedPermissionRequests(): Promise<void> {
   }
 }
 
-function addPermissionUser(): void {
-  permissions.users.push({ open_id: "", name: "", role: "building", scopes: [], enabled: true });
-}
-
-async function removePermissionUser(user: Dict): Promise<void> {
-  if (user.locked) return;
-  const label = String(user.name || user.open_id || "该用户");
-  const confirmed = await requestConfirm({
-    tone: "danger",
-    kicker: "权限删除",
-    title: `删除「${label}」`,
-    message: "确认后立即删除该人员的门户权限。",
-    details: ["固定管理员和当前登录管理员不会被删除", "删除后该人员将无法进入已授权楼栋"],
-    confirmLabel: "确认删除",
-  });
-  if (!confirmed) return;
-  busy.value = true;
-  try {
-    const data = await api("/api/auth/permissions/remove", {
-      method: "POST",
-      body: JSON.stringify({
-        open_id: String(user.open_id || "").trim(),
-        operation_id: `permission-delete:${String(user.open_id || "").trim()}:${Date.now()}`,
-      }),
-    });
-    message.value = data.removed ? "用户权限已删除" : "该用户已不在权限列表中";
-    await Promise.all([loadPermissions(), loadPermissionDirectory(false)]);
-  } catch (error: any) {
-    message.value = error?.message || "用户权限删除失败";
-  } finally {
-    busy.value = false;
-  }
-}
-
 function requestConfirm(options: {
   tone?: "danger" | "warning" | "primary";
   kicker: string;
@@ -986,55 +814,6 @@ function resolveConfirm(confirmed: boolean): void {
   confirmDialog.open = false;
   confirmDialog.resolve = undefined;
   if (resolver) resolver(confirmed);
-}
-
-function toggleUserScope(user: Dict, scope: string, checked: boolean): void {
-  const next = new Set((user.scopes || []) as string[]);
-  if (checked) next.add(scope);
-  else next.delete(scope);
-  user.scopes = Array.from(next);
-}
-
-function permissionUserScopeSummary(user: Dict): string {
-  if (String(user.role || "") === "admin") return "管理员 · 全部楼栋";
-  const values = Array.isArray(user.scopes) ? user.scopes.map((item: unknown) => String(item || "").trim()).filter(Boolean) : [];
-  if (!values.length) return "未选择楼栋";
-  const labels = values.map(scopeOptionLabel).filter(Boolean);
-  if (labels.length <= 3) return labels.join("、");
-  return `${labels.slice(0, 3).join("、")} 等 ${labels.length} 个`;
-}
-
-async function savePermissions(): Promise<void> {
-  const roleChanges = permissions.users
-    .filter((user) => {
-      const openId = String(user.open_id || "").trim();
-      const oldRole = permissionOriginalRoles.get(openId) || "building";
-      const nextRole = String(user.role || "building");
-      return openId && oldRole !== nextRole && (oldRole === "admin" || nextRole === "admin");
-    })
-    .map((user) => `${user.name || user.open_id}: ${permissionOriginalRoles.get(String(user.open_id || "").trim()) || "building"} -> ${user.role || "building"}`);
-  if (roleChanges.length) {
-    const confirmed = await requestConfirm({
-      tone: "warning",
-      kicker: "管理员身份变更",
-      title: "确认修改管理员身份",
-      message: "管理员拥有全部楼栋和管理权限，请确认这些角色变更是预期操作。",
-      details: roleChanges.slice(0, 8),
-      confirmLabel: "确认保存",
-      confirmClass: "blue",
-    });
-    if (!confirmed) return;
-  }
-  busy.value = true;
-  try {
-    await api("/api/auth/permissions", { method: "POST", body: JSON.stringify({ users: permissions.users }) });
-    message.value = "权限已保存";
-    await loadPermissions();
-  } catch (error: any) {
-    message.value = error?.message || "权限保存失败";
-  } finally {
-    busy.value = false;
-  }
 }
 
 async function loadHandover(): Promise<void> {

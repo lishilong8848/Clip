@@ -172,6 +172,7 @@ try {
   }
   async function openForm() {
     await page.goto(origin + '/');
+    await page.getByRole('tab', { name: '账号密码登录', exact: true }).click();
     const passwordSelect = page.locator('#personnel-name-select');
     await passwordSelect.waitFor();
     await passwordSelect.waitFor();
@@ -188,7 +189,30 @@ try {
   const resetSelect = () => personPicker('#personnel-reset-name');
   const identity = () => page.locator('#personnel-identity-number');
 
-  // --- Block 0: direct form, no toggle to unfold ---
+  // Default scan entry is local and lazy; choosing a method never logs in by itself.
+  await page.goto(origin + '/');
+  const feishuTab = page.getByRole('tab', { name: '飞书扫码登录', exact: true });
+  await feishuTab.waitFor();
+  assert.equal(await feishuTab.getAttribute('aria-selected'), 'true');
+  assert.equal(await page.getByRole('tab').count(), 3);
+  assert.equal(await page.locator('#personnel-name-select').count(), 0, '扫码页不加载密码表单');
+  await page.screenshot({ path: path.join(output, 'login-feishu-desktop.png'), fullPage: true, animations: 'disabled' });
+  await feishuTab.press('End');
+  const guestTab = page.getByRole('tab', { name: '访客查看机柜', exact: true });
+  assert.equal(await guestTab.getAttribute('aria-selected'), 'true');
+  assert.equal(await page.locator('form[action="/api/auth/guest"]').count(), 1);
+  assert.equal(await page.locator('#personnel-name-select').count(), 0);
+  await page.screenshot({ path: path.join(output, 'login-guest-desktop.png'), fullPage: true, animations: 'disabled' });
+  await guestTab.press('Home');
+  assert.equal(await feishuTab.getAttribute('aria-selected'), 'true');
+  await page.goto(origin + '/?login=feishu&auth_notice=cancelled&next=' + encodeURIComponent('/workbench-lite?scope=E'));
+  await page.getByText('已取消飞书授权，可重新选择登录方式。', { exact: true }).waitFor();
+  const retryLink = page.getByRole('link', { name: '飞书扫码登录', exact: true });
+  assert.equal(new URL(await retryLink.getAttribute('href'), origin).searchParams.get('next'), '/workbench-lite?scope=E');
+  assert.equal(await page.getByRole('tab', { name: '飞书扫码登录', exact: true }).getAttribute('aria-selected'), 'true');
+  await page.screenshot({ path: path.join(output, 'login-cancelled.png'), fullPage: true, animations: 'disabled' });
+
+  // --- Block 0: password tab opens the original form without an extra toggle ---
   await openForm();
   assert.equal(await page.locator('#personnel-name-select').count(), 1, '姓名下拉应直接显示');
   assert.equal(await page.locator('#personnel-password').count(), 1, '密码输入应直接显示');
@@ -227,6 +251,83 @@ try {
   await page.getByText('请先选择姓名。', { exact: true }).waitFor();
   assert.equal(loginPosts.length, 0, '未选择人员不应发起登录请求');
   await page.screenshot({ path: path.join(output, '02-hint-and-empty.png'), fullPage: true, animations: 'disabled' });
+
+  // The open list must fit beside the input even with the mobile keyboard visible.
+  const originalPeopleCount = peopleDb.length;
+  peopleDb.push(...Array.from({ length: 60 }, (_, index) => ({
+    id: `recMobile${index}`, name: `测试人员${index}`, employee_no: `TEST-${index}`,
+    building: 'A楼', selectable: true, needs_setup: false, account_nature: '外部账号',
+  })));
+  async function assertPickerBounds() {
+    await page.waitForFunction(() => {
+      const input = document.querySelector('#personnel-name-select');
+      const menu = document.querySelector('.vnet-select-menu');
+      if (!input || !menu) return false;
+      const field = input.closest('.vnet-combobox-control').getBoundingClientRect();
+      const list = menu.getBoundingClientRect();
+      const view = window.visualViewport;
+      const top = view?.offsetTop || 0, left = view?.offsetLeft || 0;
+      return (list.bottom <= field.top - 4 || list.top >= field.bottom + 4)
+        && list.top >= top && list.bottom <= top + (view?.height || innerHeight)
+        && list.left >= left && list.right <= left + (view?.width || innerWidth);
+    }, null, { timeout: 2000 });
+  }
+  try {
+    await page.setViewportSize({ width: 390, height: 360 });
+    await openForm();
+    await select().click();
+    await assertPickerBounds();
+    await page.screenshot({ path: path.join(output, 'mobile-short-viewport.png'), animations: 'disabled' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await assertPickerBounds();
+    // Keyboard resize can change only visualViewport, not window.innerHeight.
+    await page.evaluate(() => {
+      const rect = document.querySelector('#personnel-name-select').getBoundingClientRect();
+      Object.defineProperty(visualViewport, 'height', { configurable: true, value: rect.bottom + 90 });
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    await assertPickerBounds();
+    const list = page.locator('.vnet-select-options');
+    assert.equal(await list.evaluate(el => el.scrollHeight > el.clientHeight), true, '长名单应在列表内滚动');
+    await page.screenshot({ path: path.join(output, 'mobile-keyboard.png'), animations: 'disabled' });
+    const scrollBefore = await page.evaluate(() => scrollY);
+    for (let index = 0; index < 12; index++) await select().press('ArrowDown');
+    assert.equal(await page.evaluate(() => scrollY), scrollBefore, '键盘选择只滚动选项，不拖动整个登录页面');
+    assert.ok(await list.evaluate(el => el.scrollTop) > 0);
+    await page.evaluate(() => {
+      Object.defineProperty(visualViewport, 'offsetTop', { configurable: true, value: 100 });
+      visualViewport.dispatchEvent(new Event('scroll'));
+    });
+    await assertPickerBounds();
+    await select().fill('测试人员59');
+    await assertPickerBounds();
+    await page.getByRole('option', { name: '测试人员59 · A楼 · TEST-59', exact: true }).click();
+    await page.locator('#personnel-password').fill('fixture-password');
+    await page.getByRole('button', { name: '清空姓名', exact: true }).click();
+    assert.equal(await select().inputValue(), '');
+    assert.equal(await page.locator('#personnel-password').inputValue(), '', '清空人员同时清除旧密码');
+    const beforeClearSubmit = loginPosts.length;
+    await page.getByRole('button', { name: '姓名密码登录', exact: true }).click();
+    await page.getByText('请先选择姓名。', { exact: true }).waitFor();
+    assert.equal(loginPosts.length, beforeClearSubmit, '清空后不得仍使用旧人员身份登录');
+    await select().fill('张三');
+    await assertPickerBounds();
+    assert.equal(await page.getByRole('option').count(), 2);
+    await page.getByRole('button', { name: '清空姓名', exact: true }).click();
+    assert.equal(await select().inputValue(), '', '尚未选人的搜索文字也可以清空');
+    await select().fill('王五');
+    await page.getByRole('option', { name: labelFor('recWangwu'), exact: true }).click();
+    assert.equal(await select().inputValue(), labelFor('recWangwu'), '清空后仍可重新选择');
+    await page.getByRole('listbox').waitFor({ state: 'hidden' });
+    await page.screenshot({ path: path.join(output, 'mobile-name-selected.png'), animations: 'disabled' });
+    await openResetForm();
+    await resetSelect().selectOption('recZhangsanA');
+    await page.getByRole('button', { name: '清空姓名', exact: true }).click();
+    assert.equal(await resetSelect().inputValue(), '', '忘记密码的姓名框同样支持清空');
+  } finally {
+    peopleDb.splice(originalPeopleCount);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  }
 
   // --- Block 3: valid initial response shows first-change form without navigation; change person clears secrets ---
   await openForm();
@@ -444,9 +545,11 @@ try {
     await page.locator('#personnel-name-select').waitFor();
     assert.equal(new URL(page.url()).searchParams.get('next'), target, 'learning login must preserve the requested page');
     assert.equal(await page.getByRole('button', { name: '姓名密码登录', exact: true }).count(), 1);
-    assert.equal(await page.getByRole('button', { name: '访客查看机柜', exact: true }).count(), 1);
-    const feishuLink = page.getByRole('link', { name: '飞书登录', exact: true });
+    assert.equal(await page.getByRole('tab', { name: '访客查看机柜', exact: true }).count(), 1);
+    await page.getByRole('tab', { name: '飞书扫码登录', exact: true }).click();
+    const feishuLink = page.getByRole('link', { name: '飞书扫码登录', exact: true });
     assert.match(await feishuLink.getAttribute('href'), /^\/api\/auth\/login/, 'OAuth remains an explicit login choice');
+    await page.getByRole('tab', { name: '账号密码登录', exact: true }).click();
     assert.equal(await page.locator('.learning-page').count(), 0, 'unauthenticated visitors cannot receive learning data');
   }
   await page.waitForFunction(() => {
@@ -618,8 +721,7 @@ try {
       return ok({});
     });
     await feishuClickPage.goto(origin + '/');
-    await feishuClickPage.locator('#personnel-name-select').waitFor();
-    await feishuClickPage.getByRole('link', { name: '飞书登录', exact: true }).click();
+    await feishuClickPage.getByRole('link', { name: '飞书扫码登录', exact: true }).click();
     await feishuClickPage.waitForTimeout(150);
     const pref = await feishuClickPage.evaluate(() => window.sessionStorage.getItem('clipflow-login-method'));
     assert.equal(pref, 'feishu', '点击飞书登录应记住 feishu 偏好');
@@ -953,6 +1055,7 @@ try {
     await page.waitForTimeout(120);
     assert.equal(resetPosts.length, beforeResetBusy + 1, 'busy 时重复核验不得重复提交');
     assert.equal(await resetSelect().isDisabled(), true, 'in-flight 时应禁用姓名切换');
+    assert.equal(await page.getByRole('button', { name: '清空姓名', exact: true }).isDisabled(), true, '提交期间不可清空姓名');
     assert.equal(await identity().isDisabled(), true, 'in-flight 时应禁用身份证号输入');
     const backBtn = page.getByRole('button', { name: '返回密码登录', exact: true });
     assert.equal(await backBtn.isDisabled(), true, 'in-flight 时应禁用切换模式');
@@ -1007,6 +1110,7 @@ try {
   await page.waitForURL(url => url.pathname === '/api/auth/login');
   assert.equal(loginPosts.length, beforeInternal, 'VNET selection never submits a password');
   await page.goBack();
+  await page.getByRole('tab', { name: '账号密码登录', exact: true }).click();
   await select().waitFor();
   await page.clock.install();
   await openForm();
