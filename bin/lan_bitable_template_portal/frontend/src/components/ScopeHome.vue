@@ -3,7 +3,7 @@
     <UiTransition name="ui-page" :appear="false">
     <HomeDashboard
       v-if="!activeMode"
-      :modules="moduleCards"
+      :modules="filteredModuleCards"
       :enabled-module-count="enabledModuleCount"
       :can-request-more-scopes="Boolean(canRequestMoreScopes)"
       :broadcast-items="homeBroadcastItems"
@@ -277,6 +277,7 @@ const props = defineProps<{
   overviewLoading?: boolean;
   handoverLinks: Record<string, string>;
   canRequestMoreScopes?: boolean;
+  modules?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -312,10 +313,69 @@ const waterSnapshot = ref<Dict>({});
 const waterBuildingsError = ref("");
 let waterBuildingsPollTimer: number | null = null;
 
-const enabledModuleCount = computed(() => moduleCards.filter((item) => !item.disabled).length);
+// ---- Module-based filtering of home cards / entries ----
+const userModules = computed(() => {
+  const raw = props.modules;
+  return Array.isArray(raw) ? raw : [];
+});
+const hasModule = (moduleId: string): boolean => !moduleId || userModules.value.includes(moduleId);
+function entryModule(entry: string): string {
+  switch (entry) {
+    case "event": return "event";
+    case "maintenance": return "maintenance";
+    case "maintenance_mop": return "engineer_mop";
+    case "change": return "change";
+    case "repair_management": return "repair_management";
+    case "repair": return "repair";
+    case "water": return "water";
+    case "critical_guard": return "critical_guard";
+    case "drill": return "drills";
+    case "learning": return "learning";
+    case "cabinet_power": return "cabinet";
+    case "daily": return "daily";
+    case "power": return "power";
+    case "polling": return "polling";
+    case "adjust": return "adjust";
+    case "handover": return "handover";
+    case "plan_convergence": return "plan_convergence";
+    default: return "";
+  }
+}
+const toolsModule: Record<string, string> = {
+  learning: "learning", daily: "daily", power: "power", polling: "polling",
+  adjust: "adjust", handover: "handover", plan_convergence: "plan_convergence",
+};
+const capacityModule: Record<string, string> = { water: "water", cabinet_power: "cabinet" };
+const cardModules: Record<string, string[]> = {
+  event: ["event"],
+  maintenance: ["maintenance", "engineer_mop"],
+  change: ["change"],
+  repair_management: ["repair_management", "repair"],
+  risk: ["critical_guard"],
+  capacity: ["water", "cabinet"],
+  tools: ["daily", "power", "polling", "adjust", "handover", "plan_convergence", "learning"],
+  drill: ["drills"],
+};
+const filteredModuleCards = computed(() =>
+  moduleCards
+    .map((card) => {
+      const allowedModules = cardModules[card.key] || [];
+      if (!allowedModules.some(hasModule)) return null;
+      const secondary = (card.secondaryActions || []).filter((action) => hasModule(entryModule(action.key)));
+      const primaryAction = hasModule(entryModule(card.primaryAction.key)) ? card.primaryAction : secondary.shift();
+      if (!primaryAction) return null;
+      return { ...card, primaryAction, secondaryActions: secondary };
+    })
+    .filter((card): card is NonNullable<typeof card> => Boolean(card)),
+);
+const filteredToolEntries = computed(() => toolEntries.filter((entry) => hasModule(toolsModule[entry.key] || "")));
+const filteredCapacityEntries = computed(() => capacityEntries.filter((entry) => hasModule(capacityModule[entry.key] || "")));
+const isEntryAllowed = (entry: string): boolean => hasModule(entryModule(entry));
+
+const enabledModuleCount = computed(() => filteredModuleCards.value.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
 const isEntryMenu = computed(() => ["tools", "capacity"].includes(activeMode.value));
-const activeMenuEntries = computed(() => activeMode.value === "capacity" ? capacityEntries : toolEntries);
+const activeMenuEntries = computed(() => activeMode.value === "capacity" ? filteredCapacityEntries.value : filteredToolEntries.value);
 const isToolScopeMode = computed(() => ["daily", "power", "polling", "adjust", "handover"].includes(activeMode.value));
 const activeMetricWorkType = computed(() => {
   if (activeMode.value === "maintenance_mop") return "maintenance";

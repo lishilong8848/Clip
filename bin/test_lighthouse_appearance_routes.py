@@ -24,6 +24,7 @@ class AppearanceRouteTests(unittest.TestCase):
         self.controller = SimpleNamespace(_current_session=lambda request: self.session,
             _request_base_url=lambda request: str(request.base_url).rstrip("/"))
         self.runtime = SimpleNamespace(state_store=self.store, auth_manager=SimpleNamespace(
+            account_profile=lambda _: {"modules": ["assistant"]},
             session_scopes=lambda session: session["allowed_scopes"], is_admin=lambda session: session["role"] == "admin"))
         self.client = self.app_client()
         self.addCleanup(self.client.close)

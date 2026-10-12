@@ -4,8 +4,8 @@
       <div class="notice-heading"><span class="notice-mark"><ListChecks :size="19" /></span><div><h3>通告待办</h3><small>{{ editionLabel }}</small></div></div>
     </header>
     <div class="notice-filters">
-      <label><span>楼栋</span><span class="notice-select"><select v-model="scope" aria-label="楼栋" :disabled="busy || running" @change="changeScope"><option value="">请选择楼栋</option><option v-for="item in meta.scopes || []" :key="item.value" :value="item.value">{{ item.label }}</option></select><ChevronDown :size="13" aria-hidden="true" /></span></label>
-      <label v-if="meta.edition?.slot === 'evening'"><span>时段</span><span class="notice-select"><select v-model="slot" aria-label="时段" :disabled="busy || running" @change="loadCurrent(false)"><option value="morning">今日 08:00</option><option value="evening">今日 17:00</option></select><ChevronDown :size="13" aria-hidden="true" /></span></label>
+      <label><span>楼栋</span><span class="notice-select"><select v-model="scope" aria-label="楼栋" :disabled="busy || running || uploading" @change="changeScope"><option value="">请选择楼栋</option><option v-for="item in meta.scopes || []" :key="item.value" :value="item.value">{{ item.label }}</option></select><ChevronDown :size="13" aria-hidden="true" /></span></label>
+      <label v-if="meta.edition?.slot === 'evening'"><span>时段</span><span class="notice-select"><select v-model="slot" aria-label="时段" :disabled="busy || running || uploading" @change="loadCurrent(false)"><option value="morning">今日 08:00</option><option value="evening">今日 17:00</option></select><ChevronDown :size="13" aria-hidden="true" /></span></label>
       <label class="notice-search"><Search :size="15" /><input v-model="search" aria-label="搜索通告" placeholder="搜索通告名称" @input="page = 1" /></label>
     </div>
     <div class="notice-tabs" role="tablist" aria-label="通告分类">
@@ -46,7 +46,24 @@
                 </template>
               </div>
               <small v-if="!shownFields(item).length" class="notice-meta">暂无待补充字段</small>
-            </div></div>
+            </div>
+            <div class="notice-photos">
+              <div v-for="pfield in photoFields(item)" :key="pfield.key" class="notice-photo-block">
+                <div class="notice-photo-head"><span>{{ pfield.label }}</span><em v-if="pfield.maxItems">（最多 {{ pfield.maxItems }} 张）</em></div>
+                <div v-if="(item.draft?.[pfield.key] || []).length" class="notice-photo-grid">
+                  <figure v-for="(photo, idx) in item.draft?.[pfield.key] || []" :key="String(photo.upload_id || photo.local_image_id || photo.file_token || idx)" class="notice-photo">
+                    <img v-if="photoPreview(photo)" :src="photoPreview(photo)" :alt="photo.file_name || pfield.label" />
+                    <button class="icon" :disabled="busy || uploading" :title="'移除' + pfield.label" :aria-label="'移除' + pfield.label" @click="removePhoto(item, pfield, idx)"><X :size="13" /></button>
+                  </figure>
+                </div>
+                <label class="notice-photo-add" :class="{ uploading }">
+                  <input type="file" accept="image/*" :aria-label="pfield.label" :multiple="pfield.key === 'extra_images'" :disabled="busy || uploading || (item.draft?.[pfield.key] || []).length >= (pfield.maxItems || 0)" @change="onPhotoFiles(item, pfield, ($event.target as HTMLInputElement))" />
+                  <Loader2 v-if="uploading" class="spin" :size="13" /><ImagePlus v-else :size="13" />{{ uploading ? '上传中…' : '添加' }}
+                </label>
+                <p v-if="photoErrors[item.key + ':' + pfield.key]" class="notice-error" role="alert">{{ photoErrors[item.key + ':' + pfield.key] }}</p>
+              </div>
+            </div>
+          </div>
           </UiTransition>
           <p v-if="item.error" class="notice-error">{{ item.error }}</p>
           <pre v-if="run.state === 'confirm'" class="notice-preview">{{ item.preview }}</pre>
@@ -57,8 +74,8 @@
     </div>
     <footer class="notice-footer">
       <div v-if="pages > 1" class="notice-pages"><button class="icon" :disabled="page <= 1" title="上一页" aria-label="上一页" @click="page--"><ChevronLeft :size="16" /></button><span>{{ page }} / {{ pages }}</span><button class="icon" :disabled="page >= pages" title="下一页" aria-label="下一页" @click="page++"><ChevronRight :size="16" /></button></div>
-      <div v-if="editable" class="notice-actions"><button class="icon" :disabled="busy || !dirty" title="保存草稿" aria-label="保存草稿" @click="act('save')"><Save :size="17" /></button><button class="icon" :disabled="busy" title="重新读取待办" aria-label="重新读取待办" @click="refreshRows"><RefreshCw :size="17" /></button><button class="primary" :disabled="busy || !selected.length" @click="act('preview')"><Loader2 v-if="busy" class="spin" :size="15" /><Check v-else :size="15" />预览所选 {{ selected.length }} 条</button></div>
-      <div v-else-if="run?.state === 'confirm'" class="notice-actions"><button :disabled="busy" @click="act('edit')">返回修改</button><button class="primary" :disabled="busy" @click="act('confirm')"><Loader2 v-if="busy" class="spin" :size="15" /><Send v-else :size="15" />确认发送 {{ selected.length }} 条</button></div>
+      <div v-if="editable" class="notice-actions"><button class="icon" :disabled="busy || uploading || !dirty" title="保存草稿" aria-label="保存草稿" @click="act('save')"><Save :size="17" /></button><button class="icon" :disabled="busy || uploading" title="重新读取待办" aria-label="重新读取待办" @click="refreshRows"><RefreshCw :size="17" /></button><button class="primary" :disabled="busy || uploading || !selected.length" @click="act('preview')"><Loader2 v-if="busy || uploading" class="spin" :size="15" /><Check v-else :size="15" />预览所选 {{ selected.length }} 条</button></div>
+      <div v-else-if="run?.state === 'confirm'" class="notice-actions"><button :disabled="busy || uploading" @click="act('edit')">返回修改</button><button class="primary" :disabled="busy || uploading" @click="act('confirm')"><Loader2 v-if="busy || uploading" class="spin" :size="15" /><Send v-else :size="15" />确认发送 {{ selected.length }} 条</button></div>
       <div v-else-if="run?.state === 'done'" class="notice-actions"><button v-if="selected.some(item => item.convergence_confirmation_required)" class="primary" :disabled="busy" @click="act('confirm_unmatched')"><AlertCircle :size="15" />确认未匹配项并继续发送</button><button v-if="selected.some(item => item.phase === 'failed' && !item.convergence_confirmation_required)" :disabled="busy" @click="act('retry')"><RotateCcw :size="15" />重试失败项</button><button :disabled="busy" @click="act('refresh')"><RefreshCw :size="15" />继续办理其他通告</button></div>
       <span v-else-if="running" class="notice-meta">已提交，关闭面板后仍会继续办理</span>
       <span v-else-if="run?.state === 'expired'" class="notice-meta">此批待办已跨日，请查看今日待办</span>
@@ -68,8 +85,8 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { AlertCircle, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Clock3, ListChecks, Loader2, Pencil, RefreshCw, RotateCcw, Save, Search, Send } from 'lucide-vue-next';
-import { ApiError, requestJson, type Dict } from '../api/client';
+import { AlertCircle, Building2, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Clock3, ImagePlus, ListChecks, Loader2, Pencil, RefreshCw, RotateCcw, Save, Search, Send, Upload, X } from 'lucide-vue-next';
+import { ApiError, requestBinaryJson, requestJson, type Dict } from '../api/client';
 import RepairFieldControl from './RepairFieldControl.vue';
 import LighthouseNoticeSop from './LighthouseNoticeSop.vue';
 import { repairDraftInputValue } from '../repairManagementUtils';
@@ -83,6 +100,8 @@ const slot = ref(''), conflict = ref(false);
 const noticeView = ref('planned'), contentRoot = ref<HTMLElement | null>(null);
 const expanded = reactive<Record<string, boolean>>({});
 const sopDirectories = reactive<Record<string, Dict>>({});
+const uploading = ref(false);
+const photoErrors = reactive<Record<string, string>>({});
 const dateField = { ui_type: 'datetime' };
 let original: Dict | null = null, disposed = false, serial = 0, timer = 0, saveTimer = 0, polling = false, editionPending = false;
 let controller: AbortController | undefined;
@@ -106,8 +125,8 @@ const visibleRows = computed(() => filtered.value.slice((Math.min(page.value, pa
 const dirty = computed(() => changes().length > 0);
 function typeLabel(item: Dict): string { return ({ maintenance: '维保', change: '变更', repair: '检修', polling: '轮巡', adjust: '设备调整', power: '上下电' } as Dict)[item.work_type] || ''; }
 function fieldLabel(field: Dict): string { return String(field.label || '').replace('（YYYY-MM-DD HH:mm）', ''); }
-function briefKeys(item: Dict): string[] { return (item.fields || []).filter((field: Dict) => ['notice_action', 'notice_sop'].includes(field.key) || !field.readonly && (String(item.draft?.[field.key] ?? '').trim() === '' || field.key === 'progress' && !!(item.draft?.notice_action === '结束' && field.default_on_end || String(item.draft?.[field.key] ?? '') === String(field.default_on_end || '')))).map((field: Dict) => field.key); }
-function shownFields(item: Dict): Dict[] { const keys = new Set([...(item.brief_fields || []), ...briefKeys(item)]); return (item.fields || []).filter((field: Dict) => item.edit_all || keys.has(field.key)); }
+function briefKeys(item: Dict): string[] { return (item.fields || []).filter((field: Dict) => field.kind !== 'photos' && (['notice_action', 'notice_sop'].includes(field.key) || !field.readonly && (String(item.draft?.[field.key] ?? '').trim() === '' || field.key === 'progress' && !!(item.draft?.notice_action === '结束' && field.default_on_end || String(item.draft?.[field.key] ?? '') === String(field.default_on_end || ''))))).map((field: Dict) => field.key); }
+function shownFields(item: Dict): Dict[] { const keys = new Set([...(item.brief_fields || []), ...briefKeys(item)]); return (item.fields || []).filter((field: Dict) => field.kind !== 'photos' && (item.edit_all || keys.has(field.key))); }
 function changed(): void { error.value = ''; window.clearTimeout(saveTimer); saveTimer = window.setTimeout(saveLocal, 350); }
 function onFieldChange(item: Dict, field: Dict): void {
   if (field.key === 'notice_action') {
@@ -153,6 +172,65 @@ async function loadSops(item: Dict, query = ''): Promise<void> {
   } catch (e) { if (!disposed && run.value?.id === identity && sopDirectories[item.key] === entry) entry.error = e instanceof Error ? e.message : '工单目录读取失败，请重试'; }
   finally { entry.loading = false; }
 }
+function photoFields(item: Dict): Dict[] { return (item.fields || []).filter((field: Dict) => field.kind === 'photos'); }
+function photoErrorKey(item: Dict, field: Dict): string { return item.key + ':' + field.key; }
+function showPhotoError(item: Dict, field: Dict, message: string): void { photoErrors[photoErrorKey(item, field)] = message; }
+function clearPhotoError(item: Dict, field: Dict): void { delete photoErrors[photoErrorKey(item, field)]; }
+function photoPreview(photo: Dict): string { return /^\/api\/notice-images\/[a-f0-9]{32}$/.test(String(photo.preview_url || '')) ? photo.preview_url : ''; }
+async function uploadPhotoFile(item: Dict, field: Dict, file: File): Promise<Dict> {
+  if (!run.value || String(file.type || '').startsWith('image/') === false) throw new Error('只能上传图片作为' + field.label + '。');
+  if (file.size > 8 * 1024 * 1024) throw new Error((field.label || '图片') + '不能超过 8MB。');
+  const identity = 'notice-panel:' + run.value.id + ':' + item.key;
+  const scope = String(run.value.scope || '');
+  const query = new URLSearchParams({ file_name: file.name || 'site_photo.png', identity, kind: field.key === 'ali_confirmation_images' ? 'ali' : 'site', scope });
+  const data = await requestBinaryJson('/api/notice-attachments?' + query.toString(), file, { headers: { 'Content-Type': String(file.type || 'image/png') } });
+  if (!data.upload_id) throw new Error((field.label || '图片') + '上传返回缺少 upload_id。');
+  return { upload_id: data.upload_id, local_image_id: data.local_image_id, file_name: data.file_name || file.name, mime_type: data.mime_type || file.type, size: data.size || file.size, expires_at: data.expires_at, preview_url: data.preview_url || '' };
+}
+async function onPhotoFiles(item: Dict, field: Dict, input: HTMLInputElement): Promise<void> {
+  if (!run.value || busy.value || uploading.value) return;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (!files.length) return;
+  const maxItems = Number(field.maxItems || 0);
+  const existing = Array.isArray(item.draft?.[field.key]) ? item.draft[field.key] : [];
+  const room = maxItems ? Math.max(0, maxItems - existing.length) : Number.MAX_SAFE_INTEGER;
+  const pending = files.slice(0, room);
+  if (pending.length < files.length) showPhotoError(item, field, (field.label || '图片') + '最多 ' + maxItems + ' 张。');
+  else clearPhotoError(item, field);
+  if (!pending.length) { changed(); return; }
+  uploading.value = true;
+  const runId = run.value.id;
+  try {
+    const uploaded: Dict[] = [];
+    for (const file of pending) {
+      try {
+        const receipt = await uploadPhotoFile(item, field, file);
+        if (disposed || run.value?.id !== runId) return;
+        uploaded.push(receipt);
+      } catch (error) {
+        showPhotoError(item, field, error instanceof Error ? error.message : '上传失败，已保留原有内容。');
+        break;
+      }
+    }
+    if (uploaded.length) {
+      item.draft[field.key] = (existing.slice()).concat(uploaded);
+      changed();
+    }
+  } finally {
+    uploading.value = false;
+  }
+}
+function removePhoto(item: Dict, field: Dict, index: number): void {
+  if (busy.value || uploading.value) return;
+  const current = Array.isArray(item.draft?.[field.key]) ? item.draft[field.key].slice() : [];
+  if (index < 0 || index >= current.length) return;
+  const removed = current.splice(index, 1)[0];
+  if (removed && removed.preview_url && String(removed.preview_url).startsWith('blob:')) URL.revokeObjectURL(removed.preview_url);
+  item.draft[field.key] = current;
+  clearPhotoError(item, field);
+  changed();
+}
 function changes(): Dict[] {
   if (!run.value || !original || !editable.value) return [];
   const originals = new Map<string, Dict>((original.items || []).map((item: Dict) => [item.key, item]));
@@ -164,6 +242,8 @@ function changes(): Dict[] {
       const value = item.draft?.[field.key], previous = old.draft?.[field.key];
       if (field.kind === 'notice_sop') {
         if (JSON.stringify(value) !== JSON.stringify(previous)) draft[field.key] = JSON.parse(JSON.stringify(value));
+      } else if (field.kind === 'photos') {
+        if (JSON.stringify(value ?? []) !== JSON.stringify(previous ?? [])) draft[field.key] = JSON.parse(JSON.stringify(value ?? []));
       } else if (String(value ?? '') !== String(previous ?? '')) draft[field.key] = String(value ?? '');
     }
     return item.selected !== old.selected || !!item.edit_all !== !!old.edit_all || Object.keys(draft).length ? [{ key: item.key, selected: !!item.selected, edit_all: !!item.edit_all, draft }] : [];
@@ -179,6 +259,7 @@ function receive(value: Dict, restore = false): void {
   if (disposed) return;
   if (run.value?.id !== value.id) {
     for (const key in sopDirectories) delete sopDirectories[key];
+    for (const key in photoErrors) delete photoErrors[key];
     noticeView.value = value.slot === 'evening' ? 'ongoing' : 'planned';
     try {
       const saved = JSON.parse(window.sessionStorage.getItem(`notice-panel-view:${props.userId}`) || 'null');
@@ -196,7 +277,7 @@ function receive(value: Dict, restore = false): void {
         if (!item.brief_fields?.length) item.brief_fields = briefKeys(item); item.selected = !!update.selected; item.edit_all = !!update.edit_all;
         for (const field of item.fields || []) {
           const savedValue = update.draft?.[field.key];
-          if (!field.readonly && (typeof savedValue === 'string' || field.kind === 'notice_sop' && savedValue && typeof savedValue === 'object' && !Array.isArray(savedValue))) item.draft[field.key] = savedValue;
+          if (!field.readonly && (typeof savedValue === 'string' || field.kind === 'notice_sop' && savedValue && typeof savedValue === 'object' && !Array.isArray(savedValue) || field.kind === 'photos' && Array.isArray(savedValue))) item.draft[field.key] = savedValue;
         }
         if (item.selected) expanded[item.key] = true;
       }
@@ -232,7 +313,7 @@ async function readLatest(): Promise<void> {
   finally { busy.value = false; schedule(); }
 }
 async function act(action: string): Promise<void> {
-  if (!run.value || busy.value) return;
+  if (!run.value || busy.value || uploading.value) return;
   if(action === 'confirm_unmatched' && !window.confirm('以下通告尚未匹配计划收敛，是否仍要发送？\n\n'+selected.value.filter(item=>item.convergence_confirmation_required).map(item=>item.title).join('\n')))return;
   saveLocal(); const id = run.value.id; busy.value = true; error.value = ''; window.clearTimeout(timer);
   try {
@@ -256,10 +337,10 @@ async function act(action: string): Promise<void> {
 }
 async function poll(): Promise<void> {
   if (polling) return;
-  if (disposed || document.hidden || busy.value || loading.value) { schedule(); return; }
+  if (disposed || document.hidden || busy.value || loading.value || uploading.value) { schedule(); return; }
   polling = true;
   try {
-    const next = await requestJson(base, { timeoutMs: 15000 }); if (disposed) return;
+    const next = await requestJson(base, { timeoutMs: 15000 }); if (disposed || uploading.value) return;
     if (next.edition?.id && next.edition.id !== meta.value.edition?.id) editionPending = true;
     meta.value = next;
     emit('availability', !!meta.value.edition || !!run.value);
@@ -367,6 +448,22 @@ input:disabled { cursor: not-allowed; }
 .notice-field :deep(.repair-date-control input) { min-height: 34px; padding-right: 38px; background: var(--lh-surface); }
 .notice-field :deep(.repair-field-label) { font-size: 12px; }
 .notice-field :deep(.lhs-people-cols) { grid-template-columns: minmax(0, 1fr); }
+.notice-photos { display: grid; gap: 10px; padding: 5px 4px 2px; border-top: 1px dashed var(--lh-border); }
+.notice-photo-block { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.notice-photo-head { display: flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--lh-muted); }
+.notice-photo-head span { color: var(--lh-charcoal); font-weight: 600; }
+.notice-photo-head em { font-style: normal; color: var(--lh-faint-muted); font-size: 11px; }
+.notice-photo-grid { display: flex; flex-wrap: wrap; gap: 7px; }
+.notice-photo { position: relative; width: 58px; height: 58px; margin: 0; border-radius: 8px; overflow: hidden; border: 1px solid var(--lh-border); background: var(--lh-surface-subtle); }
+.notice-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.notice-photo .icon { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; min-height: 20px; padding: 0; border-radius: 50%; border-color: transparent; background: rgb(16 24 32 / 45%); color: #fff; opacity: 0; transition: opacity 140ms ease; }
+.notice-photo:hover .icon { opacity: 1; }
+.notice-photo-add { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 5px; align-self: flex-start; min-height: 30px; padding: 5px 10px; border: 1px dashed var(--lh-border-strong); border-radius: var(--lh-control-radius, 8px); background: var(--lh-surface-subtle); color: var(--lh-accent-strong); font-size: 12px; cursor: pointer; }
+.notice-photo-add:hover:not(:disabled) { background: var(--lh-surface-hover); }
+.notice-photo-add.uploading { color: var(--lh-muted); pointer-events: none; }
+.notice-photo-add input[type=file] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.notice-photo-add:disabled, .notice-photo-add input:disabled { cursor: not-allowed; }
+.notice-photo-block > .notice-error { margin: 0; border: 0; padding-left: 0; }
 .readonly { white-space: pre-wrap; font-size: 13px; line-height: 1.6; color: var(--lh-charcoal); }
 .notice-error, .notice-warning { font-size: 12px; line-height: 1.6; margin: 8px 14px; overflow-wrap: anywhere; }
 .notice-error { color: var(--lh-danger, #b32d35); }.notice-warning { color: var(--lh-warn, #916018); }

@@ -27,6 +27,15 @@ from . import feishu_notice_forms as notice_forms
 from .portal_auth import AUTH_COOKIE_NAME, AUTH_SESSION_TTL_SECONDS
 
 
+# One pending plan-status result poll per plan (deduplicated per person+plan).
+# Incremental delays grow up to a 15s cap; after at least ~15 minutes of polling
+# a clear "still processing" notice is sent once and polling stops (audit #6).
+_PLAN_STATUS_DELAYS = (3, 5, 8, 10, 12, 15)
+_PLAN_STATUS_MAX_ATTEMPTS = 64  # 64 polls, most at the 15s cap ≈ 16 minutes.
+_PLAN_STATUS_TERMINAL = frozenset({"completed", "failed", "cancelled", "superseded"})
+_PLAN_STATUS_FEEDBACK = frozenset({"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"})
+
+
 def parse_message(payload, app_id, bot_id):
     header, event = payload.get("header") or {}, payload.get("event") or {}
     if header.get("app_id") != app_id or header.get("event_type") != "im.message.receive_v1":
@@ -94,13 +103,44 @@ class Inbox:
             return db.execute("INSERT OR IGNORE INTO messages(id,owner,payload,state) VALUES(?,?,?,'pending')",
                 (message["message_id"], message["union_id"] or "sender:" + message["sender_id"], json.dumps(message, ensure_ascii=False))).rowcount == 1
 
+    def add_plan_status(self, payload, delay):
+        """Insert (or refresh) one delayed, deduplicated plan-status poll event."""
+        payload = dict(payload)
+        payload["kind"] = "plan_status"
+        owner = str(payload.get("owner") or "") or "plan_status"
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO messages(id,owner,payload,state,retry_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,state='pending',retry_at=excluded.retry_at",
+                (payload["message_id"], owner, json.dumps(payload, ensure_ascii=False),
+                 "pending", time.time() + delay))
+
+    def due_plan_statuses(self, now=None):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,payload FROM messages WHERE state IN ('pending','reply') AND retry_at<=? "
+                "AND COALESCE(json_extract(payload,'$.kind'),'')='plan_status' "
+                "ORDER BY retry_at LIMIT 50", (now if now is not None else time.time(),)).fetchall()
+            return [json.loads(r[1]) for r in rows]
+
+    def reschedule_plan_status(self, identity, delay, payload):
+        payload = dict(payload)
+        payload["kind"] = "plan_status"
+        with self.connect() as db:
+            db.execute("UPDATE messages SET state='pending',retry_at=?,payload=? WHERE id=?",
+                       (time.time() + delay, json.dumps(payload, ensure_ascii=False), identity))
+
     def owners(self):
         with self.connect() as db:
-            return [r[0] for r in db.execute("SELECT DISTINCT owner FROM messages WHERE state IN ('pending','reply') AND retry_at<=?", (time.time(),))]
+            return [r[0] for r in db.execute(
+                "SELECT DISTINCT owner FROM messages WHERE state IN ('pending','reply') AND retry_at<=? "
+                "AND COALESCE(json_extract(payload,'$.kind'),'')<>'plan_status'", (time.time(),))]
 
     def take(self, owner):
         with self.connect() as db:
-            row = db.execute("SELECT id,payload,state,reply FROM messages WHERE owner=? AND state IN ('pending','reply') AND retry_at<=? ORDER BY rowid LIMIT 1", (owner, time.time())).fetchone()
+            row = db.execute("SELECT id,payload,state,reply FROM messages WHERE owner=? AND state IN ('pending','reply') "
+                             "AND retry_at<=? AND COALESCE(json_extract(payload,'$.kind'),'')<>'plan_status' "
+                             "ORDER BY rowid LIMIT 1", (owner, time.time())).fetchone()
             if not row: return None
             db.execute("UPDATE messages SET state='processing' WHERE id=?", (row[0],))
             return {**json.loads(row[1]), "reply": json.loads(row[3]) if row[3] else None}
@@ -109,6 +149,31 @@ class Inbox:
         with self.connect() as db:
             db.execute("UPDATE messages SET state=?,reply=COALESCE(?,reply),retry_at=? WHERE id=?",
                 (state, json.dumps(reply, ensure_ascii=False) if reply is not None else None, time.time() + delay, identity))
+
+    def reply_for(self, identity):
+        """Read a previously persisted outgoing reply for the row (no consume).
+
+        Used by the plan-status notifier so a lost-response retry resends the
+        exact same card/ticket/uuid instead of minting a new one that would
+        invalidate the already delivered card."""
+        with self.connect() as db:
+            row = db.execute("SELECT reply,state FROM messages WHERE id=?", (identity,)).fetchone()
+            if not row or row[1] == 'done':
+                return None
+            return json.loads(row[0]) if row[0] else None
+
+    def store_plan_status_reply(self, identity, reply):
+        """Upsert an outgoing result reply onto a plan-status row before sending.
+
+        Keeps the same card/ticket/uuid available for a lost-response retry.  A
+        row normally already exists (created by add_plan_status); this upserts so
+        short-lived notifies are persisted even when the poll row was removed."""
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO messages(id,owner,payload,state,reply,retry_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET state='reply',reply=excluded.reply,retry_at=0",
+                (identity, "plan_status", "{}", "reply",
+                 json.dumps(reply, ensure_ascii=False), 0))
 
     def claim_reaction(self, identity):
         with self.connect() as db:
@@ -225,6 +290,8 @@ class FeishuAssistant:
         self.process, self.runner, self.bot_id = None, None, ""
         self.tasks, self.sessions = {}, {}
         self.picked_plan = {}
+        self.plan_tasks = {}  # identity -> plan_status poll task (independent of normal drain)
+        self.plan_status_slots = asyncio.Semaphore(4)
         self.reactions = {}
         self.reaction_slots = asyncio.Semaphore(4)
         self.closing = False
@@ -414,7 +481,7 @@ class FeishuAssistant:
             request.state.feishu_question = message['question']
         question = message["question"].strip()
         plans = {t['plan'].get('id', str(i)): t['plan'] for i, t in enumerate(conversation.get('turns', [])) if t.get('plan')}
-        plan_reply = await self._feishu_plan_command(message, request, actor, plans) if not file_ids and not clarification_id else None
+        plan_reply = await self._feishu_plan_command(message, request, actor, plans, conversation) if not file_ids and not clarification_id else None
         if plan_reply is not None:
             reply = direct_reply({"text": safe_text(plan_reply, limit=30000)})
             selected, _ = self._resolve_plan(message, plans, None, actor)
@@ -510,7 +577,7 @@ class FeishuAssistant:
             for file in reply['files']:
                 await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
 
-    async def _feishu_plan_command(self, message, request, actor, plans):
+    async def _feishu_plan_command(self, message, request, actor, plans, conversation=None):
         """Deterministic Feishu text commands for the existing plan edit APIs.
 
         Only exact reserved commands alter a plan; everything else falls through
@@ -579,6 +646,14 @@ class FeishuAssistant:
                 return "此操作需要先确认，请核对后发送“确认执行”。"
             result = await self._call(request, actor, f"plans/{plan['id']}/confirm",
                                       {"version": plan["version"], "stage": stage}, plan_id=plan["id"])
+            # Both text and card confirmations must be tracked; schedule the
+            # pending-result poll (running/submitted) and give clear photo
+            # guidance when the kernel returns the plan to needs_input.
+            await self.schedule_plan_status(message, result, conversation, actor.get("id"))
+            if result.get("status") == "needs_input":
+                photo_hint = FeishuAssistant._pending_photo_hint(result)
+                base = self.plan_text(result)
+                return base + (("\n\n" + photo_hint) if photo_hint else "\n\n请补充缺少的字段或发送现场照片后重新确认，填写已保留，不会重复提交。")
             return self.plan_text(result)
 
         if question == "取消操作":
@@ -905,7 +980,8 @@ class FeishuAssistant:
                      for field in plan.get("fields", [])[:40])
         if native:
             text, _ = notice_forms.full_native_fields_text(plan)
-            return text
+            photo_hint = FeishuAssistant._pending_photo_hint(plan)
+            return text + (("\n\n" + photo_hint) if photo_hint else "")
         lines = ["**" + safe_text(str(plan.get("title") or "业务操作"), limit=120)
                  + "**（待补充字段，版本 " + str(plan.get("version")) + "）"]
         fields = plan.get("fields", [])
@@ -935,6 +1011,44 @@ class FeishuAssistant:
         else:
             lines.append("以上字段均不可通过飞书文本修改；请在灯塔原业务页面填写提交。")
         return "\n".join(lines)
+
+    @staticmethod
+    def _photo_value_count(field):
+        value = field.get("value")
+        if value is None:
+            value = field.get("selected_files") or []
+        if isinstance(value, (list, tuple)):
+            return sum(1 for item in value if item not in (None, ""))
+        return 1 if value not in (None, "") else 0
+
+    @staticmethod
+    def _pending_photo_hint(plan):
+        """Short, plain-language instruction about missing REQUIRED notice
+        photos.  ``required`` means at least one photo (never maxItems) and
+        optional photo fields are never flagged missing (audit #1). No internal
+        field names or ids are shown (audit #7)."""
+        missing, shown = [], []
+        for field in (plan.get("fields") or []):
+            if not field.get("native_notice_photos"):
+                continue
+            kind = str(field.get("native_notice_photos"))
+            label = safe_text(str(field.get("label") or ""), limit=60) or (
+                "现场照片" if kind == "site" else "资料截图")
+            count = FeishuAssistant._photo_value_count(field)
+            if count:
+                shown.append(f"{label}（已选 {count} 张）")
+            elif field.get("required"):
+                missing.append(label)
+        photo_hint_parts = []
+        if shown:
+            photo_hint_parts.append("已选照片：" + "、".join(dict.fromkeys(shown)))
+        if missing:
+            photo_hint_parts.append("缺少：" + "、".join(dict.fromkeys(missing)))
+        if not photo_hint_parts:
+            return ""
+        guide = ("飞书卡片不能直接上传文件控件，请把照片图片直接发送到本会话补充。"
+                 "若同时有多个待补充照片的通告/类别，请先回复“补照片计划 N”指定要补哪一项。")
+        return "照片提示：" + "；".join(photo_hint_parts) + "。" + guide
 
     def _status_text(self, plan):
         status = plan.get("status")
@@ -1016,6 +1130,195 @@ class FeishuAssistant:
                 logging.warning("Feishu assistant reply deferred: %s", type(exc).__name__)
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "reply", delay=60)
 
+    async def schedule_plan_status(self, message, plan, conversation=None, actor_id=None):
+        """Register one deduplicated pending-result poll per person+plan.
+
+        Only called right after a text or card confirmation that moved the plan
+        into an accepted/running/submitted state (an *accepted* plan is NOT the
+        same as send/receipt success, see audit #6).  The payload is bound to
+        the operator and conversation so a cleared/rotated session cancels the
+        outstanding notification; it never re-submits business, it only re-reads
+        the plan later (growing delays, capped at 15s) and pushes the actual
+        terminal result to the original person/session/group.
+        """
+        if not (self.inbox and plan and plan.get("status") in {"running", "submitted"}):
+            return
+        owner = message.get("union_id") or ""
+        message_id = message.get("message_id") or message.get("reply_to_message_id")
+        if not owner or not message_id:
+            return
+        identity = "plan_status_" + hashlib.sha256((owner + ":" + str(plan.get("id") or "")).encode()).hexdigest()[:40]
+        original = {key: message.get(key) for key in ("message_id", "reply_to_message_id", "chat_id", "chat_type", "sender_id", "union_id")}
+        payload = {
+            "message_id": identity,
+            "owner": owner,
+            "plan_id": str(plan.get("id") or ""),
+            "plan_version": plan.get("version"),
+            "conversation_id": str((conversation or {}).get("conversation_id") or ""),
+            "actor_id": str(actor_id or message.get("sender_id") or ""),
+            "attempts": 0,
+            "created_at": time.time(),
+            "original": {key: value for key, value in original.items() if value is not None},
+        }
+        await asyncio.to_thread(self.inbox.add_plan_status, payload, _PLAN_STATUS_DELAYS[0])
+
+    async def _run_plan_status(self, identity, payload):
+        try:
+            async with self.plan_status_slots:
+                await self._poll_plan_status(identity, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.warning("Feishu plan-status poll deferred: %s: %s", type(exc).__name__, str(exc)[:200])
+            try:
+                await asyncio.to_thread(self.inbox.reschedule_plan_status, identity, _PLAN_STATUS_DELAYS[-1], payload)
+            except sqlite3.Error:
+                pass
+        finally:
+            self.plan_tasks.pop(identity, None)
+            if self.event:
+                self.event.set()
+
+    async def _poll_plan_status(self, identity, payload):
+        original = payload.get("original") or {}
+        if not original.get("message_id"):
+            await asyncio.to_thread(self.inbox.set, identity, "done")
+            return
+        request_context = {**original, "question": "[状态查询]"}
+        try:
+            request, actor = await self._request_context(request_context)
+            # The pending poll is bound to the operator who confirmed and the
+            # conversation they used; a rotated identity or cleared conversation
+            # cancels the outstanding notification without erroring (audit #6).
+            bound_actor = payload.get("actor_id")
+            if bound_actor and str(actor.get("id") or "") != str(bound_actor):
+                await asyncio.to_thread(self.inbox.set, identity, "done")
+                return
+            conversation = await self._call(request, actor, "conversation")
+            bound_conversation = payload.get("conversation_id")
+            if bound_conversation and str(conversation.get("conversation_id") or "") != str(bound_conversation):
+                await asyncio.to_thread(self.inbox.set, identity, "done")
+                return
+        except AssistantError as exc:
+            # Session or conversation was closed: clear-session must cancel the
+            # outstanding notification without erroring or re-submitting.
+            if exc.status in {401, 403, 410}:
+                await asyncio.to_thread(self.inbox.set, identity, "done")
+                return
+            raise
+        plan = next((turn.get("plan") for turn in (conversation.get("turns") or [])
+                     if turn.get("plan") and str(turn["plan"].get("id") or "") == str(payload.get("plan_id") or "")), None)
+        if plan is None:
+            # Original conversation no longer exposes this plan (e.g. cleared);
+            # drop the pending-result task as the requirement expects.
+            await asyncio.to_thread(self.inbox.set, identity, "done")
+            return
+        status = plan.get("status")
+        if status in _PLAN_STATUS_TERMINAL or status in _PLAN_STATUS_FEEDBACK:
+            # Terminal results, plans returned for more input, and plans that
+            # moved back into (second) confirmation all get explicit feedback
+            # instead of being left waiting forever (audit #6).
+            await self._notify_plan_status(identity, original, request, actor, plan, conversation.get("conversation_id"))
+            await asyncio.to_thread(self.inbox.set, identity, "done")
+            return
+        # Still running/submitted: schedule the next (capped) poll.
+        attempts = int(payload.get("attempts") or 0)
+        if attempts >= _PLAN_STATUS_MAX_ATTEMPTS:
+            text = ("该业务操作已提交原流程处理，已等待超过15分钟仍无最终结果，说明仍在处理中。"
+                    "无需重复提交；可发送“操作状态”查询最新进度，或到灯塔网页查看最终结果。")
+            await self._notify_plan_status(identity, original, request, actor, plan, conversation.get("conversation_id"), text)
+            await asyncio.to_thread(self.inbox.set, identity, "done")
+            return
+        delay = _PLAN_STATUS_DELAYS[min(attempts, len(_PLAN_STATUS_DELAYS) - 1)]
+        await asyncio.to_thread(self.inbox.reschedule_plan_status, identity, delay, {**payload, "attempts": attempts + 1})
+
+    async def _notify_plan_status(self, identity, original, request, actor, plan, conversation_id, preset_text=None):
+        status = plan.get("status")
+        if preset_text:
+            text = preset_text
+        elif status == "completed":
+            title = safe_text(str(plan.get("title") or "业务操作"), limit=60)
+            text = "你确认的“" + title + "”操作已完成。"
+        elif status == "failed":
+            text = "该业务操作执行失败：" + safe_text(str(plan.get("error") or "请查看原任务详情"), limit=300)
+        elif status in {"cancelled", "superseded"}:
+            text = "该业务操作%s；已执行的部分不会自动撤销。" % ("已取消" if status == "cancelled" else "已被最新的提交替代")
+        elif status in {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}:
+            text = _plain_status_line(plan)
+        else:
+            return
+        reply = {"text": text}
+        original_target = original.get("reply_to_message_id") or original.get("message_id") or ""
+        result_tag = hashlib.sha256((original_target + ":" + str(plan.get("id")) + ":" + str(plan.get("version")) + ":" + str(status)).encode()).hexdigest()[:32]
+        stored_reply = await asyncio.to_thread(self.inbox.reply_for, identity)
+        reused = stored_reply is not None and stored_reply.get("_result_tag") == result_tag
+        if reused:
+            reply = stored_reply
+        elif status in {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}:
+            # Attach a fresh, editable card so the operator can finish the form
+            # directly in Feishu; the explanation must be plain language, never
+            # kernel status terms (audit #5/#7).
+            try:
+                from .feishu_notice_cards import prepare_card
+                card_result = await prepare_card(self, original, actor,
+                                                 {"conversation_id": conversation_id} if conversation_id else {},
+                                                 plan)
+                if card_result.get("card"):
+                    reply["card"] = card_result["card"]
+                    reply["ticket"] = card_result["ticket"]
+                    reply["text"] = _plain_status_line(plan)
+            except Exception:
+                logging.warning("Feishu result card unavailable for status %s", status)
+
+        # The result message must have its OWN deterministic message_id (independent
+        # of the original confirmation message) derived from the original reply
+        # target + plan id/version/status.  Reusing time.time() made the id random
+        # on every retry, which rebuilt the card/ticket and invalidated an already
+        # delivered card (audit #5 / lost-response retry).  ``reply_to_message_id``
+        # is the true original real message (original.reply_to_message_id first).
+        original_target = (original or {}).get("reply_to_message_id") or (original or {}).get("message_id") or ""
+        plan_id = str(plan.get("id") or "")
+        plan_version = plan.get("version")
+        # Track the exact terminal result the outgoing notification reflects, so a
+        # same-status/version retry reuses the persisted reply while a genuinely
+        # different result rebuilds it.
+        result_tag = hashlib.sha256(
+            (original_target + ":" + plan_id + ":" + str(plan_version) + ":" + str(status)).encode()
+        ).hexdigest()[:32]
+        notify_id = "notify_" + hashlib.sha256(
+            (original_target + ":" + plan_id + ":" + str(plan_version) + ":" + str(status)).encode()
+        ).hexdigest()[:32]
+        notify_message = {
+            "message_id": notify_id,
+            "reply_to_message_id": original_target or original.get("message_id"),
+            "chat_id": original.get("chat_id"),
+            "chat_type": original.get("chat_type"),
+            "sender_id": original.get("sender_id"),
+            "union_id": original.get("union_id"),
+            "question": "[状态通知]",
+        }
+        # Reuse a previously persisted outgoing reply when it reflects the same
+        # actual result.  This keeps the exact same card/ticket on a lost-response
+        # retry instead of rebuilding new tickets that would invalidate the card
+        # already delivered to the user.
+        if not reused:
+            # Persist the result reply on the plan-status inbox row BEFORE sending,
+            # so a lost response can resend the identical payload later.
+            reply["_result_tag"] = result_tag
+            await asyncio.to_thread(self.inbox.store_plan_status_reply, identity, reply)
+        send_reply = {key: value for key, value in reply.items() if key != "_result_tag"}
+        await self.messenger.send(notify_message, send_reply)
+        if conversation_id:
+            operation_id = "feishu_" + hashlib.sha256((notify_id + ":result").encode()).hexdigest()[:40]
+            try:
+                # channel-replies must NOT carry a non-existent status param
+                # (audit #5); only the fields the endpoint expects are sent.
+                await self._call(request, actor, "channel-replies",
+                                 {"conversation_id": conversation_id, "operation_id": operation_id,
+                                  "question": "[操作结果]", "answer": send_reply["text"]})
+            except AssistantError:
+                pass
+
     async def _run(self):
         while not self.closing:
             self.event.clear()
@@ -1031,6 +1334,14 @@ class FeishuAssistant:
                 if self.tasks[owner].done():
                     task = self.tasks.pop(owner)
                     if not task.cancelled() and task.exception(): logging.warning("Feishu assistant worker interrupted")
+            for status_payload in await asyncio.to_thread(self.inbox.due_plan_statuses):
+                identity = status_payload.get("message_id")
+                if not identity or (identity in self.plan_tasks and not self.plan_tasks[identity].done()):
+                    continue
+                self.plan_tasks[identity] = asyncio.create_task(self._run_plan_status(identity, status_payload))
+            for identity in list(self.plan_tasks):
+                if self.plan_tasks[identity].done():
+                    self.plan_tasks.pop(identity, None)
             try: await asyncio.wait_for(self.event.wait(), 10)
             except asyncio.TimeoutError: pass
 
@@ -1039,7 +1350,7 @@ class FeishuAssistant:
         if self.process and self.process.poll() is None:
             self.process.terminate()
             await asyncio.to_thread(self.process.wait, 5)
-        pending = [task for task in [self.runner, *self.tasks.values(), *self.reactions.values()] if task and not task.done()]
+        pending = [task for task in [self.runner, *self.tasks.values(), *self.reactions.values(), *self.plan_tasks.values()] if task and not task.done()]
         for task in pending: task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         if self.messenger: await self.messenger.close()
@@ -1063,6 +1374,24 @@ def _plan_state_hint(plan):
     if status == "cancelled":
         return "该操作已取消，未提交业务。"
     return ""
+
+
+def _plain_status_line(plan):
+    """Plain-language explanation of a non-terminal plan state for result
+    notifications.  Never uses kernel status terms (audit #5/#7)."""
+    status = plan.get("status")
+    if status == "needs_input":
+        base = ("业务核对未通过，还需要补充一些必填内容后再确认（比如现场照片）。"
+                "你之前填写的内容已经保留，不会重复提交。")
+        photo_hint = FeishuAssistant._pending_photo_hint(plan)
+        return base + (("\n" + photo_hint) if photo_hint else "")
+    if status == "awaiting_confirmation":
+        return ("操作还没执行，正在等你再次确认。请核对内容后确认执行，"
+                "或取消这次操作。你之前的填写还保留着。")
+    if status == "awaiting_second_confirmation":
+        return ("操作还没执行，风险较高，正在等你再次确认。请核对后再次确认，"
+                "或取消这次操作。你之前的填写还保留着。")
+    return "该业务操作仍在处理中，请稍后查看最新结果。"
 
 
 def _choose_text(plans):

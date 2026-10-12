@@ -150,6 +150,7 @@ def build_app(tmp):
     runtime = SimpleNamespace(
         state_store=store,
         auth_manager=SimpleNamespace(
+            account_profile=lambda _: {"modules": ["assistant"]},
             session_scopes=lambda s: ["A", "B", "C", "D", "E", "H"],
             is_admin=lambda s: True,
         ),

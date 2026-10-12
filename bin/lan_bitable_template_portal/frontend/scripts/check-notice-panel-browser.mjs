@@ -13,6 +13,8 @@ const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1366, height: 900 }, timezoneId: 'UTC' });
 page.setDefaultTimeout(12000);
 const errors = [], requests = [], docs = new Map();
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64');
+const photoReceipt = { upload_id: 'a'.repeat(32), file_name: '现场.png', mime_type: 'image/png', size: png.length, expires_at: Date.now() / 1000 + 3600, preview_url: '/api/notice-images/' + 'b'.repeat(32) };
 let edition = 'morning', day = '2026-10-09', confirmed = 0, conflict = false, polls = 0, sopReads = 0, sopVersion = 3, sopFail = false;
 const base = '/api/assistant/notice-panel';
 const field = (key, label, extra = {}) => ({ key, label, kind: 'text', options: [], required: true, readonly: false, ...extra });
@@ -27,6 +29,7 @@ function rows() {
     window: '2026-10-09 至 2026-10-20', selected: false, edit_all: false, brief_fields: [], blocked: '',
     fields: [field('title', '通告名称', { readonly: true }), field('notice_action', '本次操作', { kind: 'select', options: ['更新', '结束'] }), field('progress', '本次进度', { kind: 'multiline', default_on_end: END_DEFAULT }), field('content', '内容', { kind: 'multiline' })],
     draft: { title: '回风机组维保', progress: '', content: '按周期维护回风机组', notice_action: '更新' }, phase: '', result: '', error: '', preview: '' });
+  for (const row of rows) { row.fields.push(field('extra_images', '现场照片', { kind: 'photos', required: false, maxItems: 10 })); row.draft.extra_images = []; }
   return rows;
 }
 page.on('pageerror', e => errors.push(e.message));
@@ -39,6 +42,16 @@ await page.route('**/api/**', async route => {
   const url = new URL(route.request().url()), method = route.request().method();
   requests.push([method, url.pathname]);
   const reply = (data, status = 200) => route.fulfill({ status, json: { ok: true, data } });
+  if (url.pathname === '/api/auth/status') return reply({ logged_in: true, user: { open_id: 'notice-fixture', modules: ['assistant', 'maintenance', 'adjust', 'knowledge'] } });
+  if (url.pathname === '/api/notice-attachments') {
+    assert.equal(method, 'POST');
+    assert.equal(url.searchParams.get('kind'), 'site');
+    assert.match(url.searchParams.get('identity'), /:n0$/);
+    assert.deepEqual(route.request().postDataBuffer(), png);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    return reply(photoReceipt);
+  }
+  if (url.pathname.startsWith('/api/notice-images/')) return route.fulfill({ contentType: 'image/png', body: png });
   if (url.pathname === '/api/assistant/conversation') return reply({ conversation_id: 'fixture', enabled: true, configured: false, busy: false,
     turns: [{ operation_id: 'fixture-answer', question: '今天有哪些通告需要处理？', answer: '### 今日通告\n\n当前有 **2 条待开始**、**1 条进行中**。\n\n| 通告 | 状态 |\n|---|---|\n| 冷水机组月度维保 | 待开始 |\n| 空调运行模式调整 | 进行中 |\n\n以上为隔离测试数据。', status: 'completed', model_name: '测试模型', sources: [] }], model_name: 'WanWu/Deepseek-Auto', model_options: [{ name: 'WanWu/Deepseek-Auto' }], can_manage_settings: true });
   if (url.pathname === base) return reply({ edition: { id: day + '-' + edition, date: day, slot: edition, label: edition === 'morning' ? '08:00通告待办' : '17:00通告待办' }, scopes: [{ value: 'E', label: 'E楼' }, { value: 'A', label: 'A楼' }] });
@@ -90,6 +103,8 @@ try {
   assert.equal(await page.getByText('E楼空调运行模式调整', { exact: true }).count(), 0, 'ongoing notices are not mixed into plans');
   assert.equal(await page.locator('.notice-fields').count(), 0);
   await page.locator('.row-heading input[type=checkbox]').first().check();
+  await page.getByLabel('现场照片', { exact: true }).setInputFiles({ name: '现场.png', mimeType: 'image/png', buffer: png });
+  await page.waitForFunction(() => document.querySelector('.notice-photo img')?.naturalWidth === 1);
   await page.getByLabel('本次进度', { exact: false }).fill('工程师已到场，准备维保');
   const selectedStyle = await page.locator('.notice-row').first().evaluate(el => ({ selected: el.classList.contains('selected'), shadow: getComputedStyle(el).boxShadow }));
   assert.equal(selectedStyle.selected, true);
@@ -145,6 +160,7 @@ try {
   const saved = docs.get(`${day}-E-morning`).items[0].draft;
   assert.equal(saved.start_time, '2026-10-09 11:00');
   assert.equal(saved.end_time, '2026-10-09 19:00');
+  assert.equal(saved.extra_images[0].upload_id, photoReceipt.upload_id);
   assert.deepEqual(saved.notice_sop, { exempt: false, scope: 'E', sop_id: 'sop-one', sop_version: 3, operator_record_id: 'operator', reviewer_record_id: 'reviewer', runs: [] });
   await page.locator('.row-heading input[type=checkbox]').first().check();
   assert.equal(await page.getByLabel('本次进度', { exact: false }).inputValue(), '工程师已到场，准备维保');

@@ -45,6 +45,79 @@ NOTICE_SOP_MAX_RUNS = 2
 # Only native work types that already carry a progress control are affected.
 END_PROGRESS_DEFAULT = "工作已完成，设备运行正常，请知晓！"
 
+# Optional attachment receipts carried in the panel draft. Site photos are
+# optional for every native work type; the Ali confirmation screenshot is
+# optional (max 1) and change-only. Exact arrays/counts are validated before
+# the native submission path runs.
+SITE_PHOTO_MAX = 10
+ALI_CONFIRMATION_MAX = 1
+PHOTO_FIELD_KEYS = ("extra_images", "ali_confirmation_images")
+
+
+def photo_fields_for(work, action):
+    """Optional photo field descriptors appended to native item fields.
+
+    The uploads remain optional (``required=False``) so start/update/end can run
+    without any attachment; the existing cumulative end-site-photo validator
+    still enforces the ending requirement. Work types without an Ali screenshot
+    never receive that descriptor.
+    """
+    fields = [
+        {"key": "extra_images", "label": "现场照片", "required": False,
+         "readonly": False, "kind": "photos", "maxItems": SITE_PHOTO_MAX,
+         "options": []},
+    ]
+    if str(work or "").strip() == "change":
+        fields.append(
+            {"key": "ali_confirmation_images", "label": "阿里确认截图",
+             "required": False, "readonly": False, "kind": "photos",
+             "maxItems": ALI_CONFIRMATION_MAX, "options": []})
+    return fields
+
+
+def _photo_receipt_value(entry, label):
+    """Validate one attachment receipt object; returns a bounded copy."""
+    if not isinstance(entry, dict):
+        raise PortalError(f"{label}存在无效回执。")
+    receipt = entry.get("upload_id")
+    if not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 128:
+        raise PortalError(f"{label}存在无效回执。")
+    return {
+        key: copy.deepcopy(entry[key]) for key in
+        ("upload_id", "local_image_id", "file_name", "mime_type", "size", "expires_at", "preview_url")
+        if key in entry
+    }
+
+
+def _validate_photo_arrays(body, work_type):
+    """Validate exact optional photo receipt arrays and bound them in place."""
+    site = body.get("extra_images")
+    if site is None:
+        body["extra_images"] = []
+    elif not isinstance(site, list):
+        raise PortalError("现场照片格式无效。")
+    elif len(site) > SITE_PHOTO_MAX:
+        raise PortalError(f"现场照片最多 {SITE_PHOTO_MAX} 张。")
+    else:
+        body["extra_images"] = [_photo_receipt_value(item, "现场照片") for item in site]
+
+    ali = body.get("ali_confirmation_images")
+    if ali is None:
+        ali = []
+    elif not isinstance(ali, list):
+        raise PortalError("阿里确认截图格式无效。")
+    elif len(ali) > ALI_CONFIRMATION_MAX:
+        raise PortalError(f"阿里确认截图最多 {ALI_CONFIRMATION_MAX} 张。")
+    else:
+        ali = [_photo_receipt_value(item, "阿里确认截图") for item in ali]
+    if str(work_type or "").strip() == "change":
+        body["ali_confirmation_images"] = ali
+    elif ali:
+        # Non-change notices never accept the change-only screenshot.
+        raise PortalError("阿里确认截图仅适用于变更通告。")
+    else:
+        body.pop("ali_confirmation_images", None)
+
 
 def _progress_supports_end_default(item):
     """Whether this native notice draft carries an editable progress control.
@@ -395,6 +468,8 @@ def fields_for(work, draft, action):
             "options": choices})
         if key == "progress":
             result[-1]["default_on_end"] = END_PROGRESS_DEFAULT
+    # Optional attachment receipts (现场照片 always; 阿里确认截图 change-only).
+    result.extend(photo_fields_for(work, action))
     return result
 
 
@@ -495,6 +570,8 @@ def ongoing_item(service, scope, work, active):
 
 def submission(service, item, runtime=None):
     body = copy.deepcopy(item["draft"])
+    # Validate/bind optional attachment receipt arrays before the native checks.
+    _validate_photo_arrays(body, body.get("work_type", ""))
     # Older clients / Feishu may send an end action without 本次进度; default it
     # before missing-field checks, preview and the final payload so drafts,
     # previews and confirm keep the same value.

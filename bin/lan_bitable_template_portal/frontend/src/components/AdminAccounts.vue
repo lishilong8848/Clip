@@ -56,22 +56,47 @@
         <tbody><tr v-for="row in audits" :key="row.audit_id"><td>{{ formatTime(row.updated_at) }}</td><td>{{ row.actor_name || '管理员' }}</td><td>{{ actionLabel(row.action) }}</td><td><template v-if="row.action === 'password' || row.action === 'delete'">{{ row.metadata?.name }}</template><div v-for="(change, i) in row.metadata?.changes || []" :key="i">{{ change.name }}：{{ scopesLabel(change.before?.scopes || []) }} → {{ scopesLabel(change.after?.scopes || []) }}；{{ change.after?.enabled === false ? '停用' : change.after?.role === 'admin' ? '管理员' : '普通用户' }}</div></td><td>{{ statusLabel(row.status) }}</td></tr><tr v-if="!audits.length"><td colspan="5" class="empty">暂无变更记录</td></tr></tbody></table></div>
     </template>
     <Teleport to="body">
-      <UiTransition name="ui-drawer">
+      <UiTransition name="ui-overlay">
         <div v-if="draft" class="account-overlay" @click.self="closeEditor">
           <section ref="editor" class="account-editor" role="dialog" aria-modal="true" aria-labelledby="account-editor-title" tabindex="-1">
             <header><div><h2 id="account-editor-title">{{ draft?.name }}</h2><span class="muted">{{ draft ? kinds[draft.kind] : '' }}</span></div><button type="button" class="icon" aria-label="关闭账号详情" :disabled="saving" @click="closeEditor"><X :size="20" /></button></header>
             <p v-if="editorError" class="error" role="alert">{{ editorError }}</p>
             <p v-if="notice" class="success" role="status">{{ notice }}</p>
-            <div v-if="draft" class="editor-body">
-              <dl><template v-if="myLevel !== 'L2'"><dt>工号</dt><dd>{{ draft.employee_no || '未填写' }}</dd></template><dt>所属楼栋</dt><dd>{{ scopesLabel(draft.own_scopes) }}</dd><dt>权限级别</dt><dd>{{ levelLabel(draft.level) }}</dd><dt>角色</dt><dd>{{ draft.role === 'admin' ? '管理员' : '普通用户' }}</dd><dt>可访问楼栋</dt><dd>{{ scopesLabel(draft.scopes) }}</dd><dt>登录方式</dt><dd>{{ draft.can_set_password ? '姓名密码登录' : '飞书登录' }}</dd><dt>OpenID</dt><dd class="identity">{{ draft.open_id || '未关联' }}</dd></dl>
+            <div v-if="draft" class="editor-body" :class="{ 'access-readonly': !canEditAccess(draft) }">
+              <dl><template v-if="myLevel !== 'L2'"><dt>工号</dt><dd>{{ draft.employee_no || '未填写' }}</dd></template><dt>所属楼栋</dt><dd>{{ scopesLabel(draft.own_scopes) }}</dd><dt>权限级别</dt><dd>{{ levelLabel(draft.level) }}</dd><dt>角色</dt><dd>{{ draft.role === 'admin' ? '管理员' : '普通用户' }}</dd><dt>可访问楼栋</dt><dd>{{ scopesLabel(draft.scopes) }}</dd><dt>可用模块</dt><dd :title="moduleLabel(draft.modules)">{{ (draft.modules || []).length }} 项</dd><dt>登录方式</dt><dd>{{ draft.can_set_password ? '姓名密码登录' : '飞书登录' }}</dd><dt>OpenID</dt><dd class="identity">{{ draft.open_id || '未关联' }}</dd></dl>
               <p v-if="draft.blocked_reason" class="warning">{{ draft.blocked_reason }}</p>
-              <fieldset :disabled="saving || !canEdit(draft)"><legend>账号状态</legend>
+              <fieldset class="account-state" :disabled="saving || !canEdit(draft)"><legend>账号状态</legend>
                 <label class="check"><input v-model="draft.enabled" type="checkbox" />启用登录</label>
                 <p v-if="!canEdit(draft)" class="warning">当前级别只能查看该账号，不能修改。角色与可访问楼栋由HR统一管理。</p>
-                <p v-else class="muted">角色与可访问楼栋由HR统一管理，这里只能调整启用状态。</p>
-                <button type="button" class="primary" @click="saveAccount"><Save :size="16" />{{ saving ? '正在保存' : '保存启用状态' }}</button>
+                <button type="button" class="primary" @click="saveEnabled"><Save :size="16" />{{ saving ? '正在保存' : '保存启用状态' }}</button>
               </fieldset>
-              <form v-if="draft.can_set_password" @submit.prevent="savePassword">
+              <fieldset v-if="canEditAccess(draft)" class="account-access" :disabled="saving"><legend>访问权限</legend>
+                <p class="muted">此处设置的级别、岗位、楼栋与模块会覆盖HR默认授权。</p>
+                <label><span>权限级别</span>
+                  <select v-model="draft.level" aria-label="权限级别" :disabled="isFixedDuty" @change="changeLevel">
+                    <option v-for="opt in accessLevelOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                  </select>
+                  <small v-if="isFixedDuty" class="muted">固定值班账号级别不可修改。</small>
+                </label>
+                <label><span>岗位分类</span>
+                  <select v-model="draft.category" aria-label="岗位分类">
+                    <option v-for="opt in accessCategoryOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                  </select>
+                </label>
+                <fieldset class="check-group" :disabled="draft.level === 'L1'"><legend>可访问楼栋（多选）</legend>
+                  <label class="check" v-for="scope in accessScopeOptions" :key="scope.value">
+                    <input type="checkbox" :value="scope.value" v-model="draft.scopes" />{{ scope.label }}
+                  </label>
+                </fieldset>
+                <div class="module-groups">
+                  <fieldset v-for="group in moduleGroups" :key="group.label" class="module-group"><legend>{{ group.label }}</legend>
+                    <div class="module-options"><label class="check" v-for="mod in group.options" :key="mod.value" :class="{ granted: draft.modules?.includes(mod.value) }">
+                      <input type="checkbox" :value="mod.value" v-model="draft.modules" :disabled="mod.value === 'accounts' && draft.level === 'L4'" />{{ mod.label }}
+                    </label></div>
+                  </fieldset>
+                </div>
+              </fieldset>
+              <form v-if="draft.can_set_password" class="account-password" @submit.prevent="savePassword">
                 <fieldset :disabled="saving"><legend>修改灯塔登录密码</legend><p class="muted">{{ draft.password_set ? '密码已设置' : '尚未设置正式密码' }} · 保存后该人员需重新登录</p>
                   <label for="admin-account-new-password">新密码</label><input id="admin-account-new-password" v-model="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required />
                   <label for="admin-account-confirm-password">再次输入新密码</label><input id="admin-account-confirm-password" v-model="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required />
@@ -80,6 +105,7 @@
               </form>
               <p v-else class="muted">{{ draft.kind === 'vnet' || draft.kind === 'duty' ? '飞书账号密码请在飞书中修改。' : '该账号未关联可使用密码登录的在岗人员。' }}</p>
             </div>
+            <footer class="editor-footer"><span class="muted">{{ (draft?.modules || []).length }} 项模块权限</span><button type="button" :disabled="saving" @click="closeEditor">关闭</button><button v-if="draft && canEditAccess(draft)" type="button" class="primary" :disabled="saving" @click="saveAccess"><Save :size="16" />{{ saving ? '正在保存' : '保存权限' }}</button></footer>
           </section>
         </div>
       </UiTransition>
@@ -92,7 +118,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, KeyRound, RefreshCw, Save, Search, Settings2, Trash2, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { acquireModal } from '../modalState';
-type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean };
+type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; home_scope?: string };
 const props = defineProps<{ pendingCount: number; permissions: Dict[] }>();
 const emit = defineEmits<{ changed: [] }>();
 const kinds: Record<string, string> = { vnet: 'VNET人员', external: '非VNET人员', duty: '值班账号', legacy: '历史账号', unknown: '类型待核对' };
@@ -108,7 +134,7 @@ const tabs = computed(() => {
   list.push({ value: 'audit', label: '变更记录' });
   return list;
 });
-const tab = ref('accounts'), items = ref<Account[]>([]), scopeOptions = ref<{value: string; label: string}[]>([]), categoryOptions = ref<{value: string; label: string}[]>([]);
+const tab = ref('accounts'), items = ref<Account[]>([]), scopeOptions = ref<{value: string; label: string}[]>([]), categoryOptions = ref<{value: string; label: string}[]>([]), moduleOptions = ref<{value: string; label: string; group?: string}[]>([]), levelOptions = ref<{value: string; label: string}[]>([]);
 const search = ref(''), kind = ref(''), building = ref(''), state = ref(''), category = ref(''), page = ref(1);
 const loading = ref(false), saving = ref(false), error = ref(''), notice = ref(''), warning = ref(''), loadedAt = ref(0);
 const draft = ref<Account | null>(null), editor = ref<HTMLElement | null>(null);
@@ -135,6 +161,49 @@ function categoryLabel(value: string) { return categoryOptions.value.find(x => x
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 20)));
 const pageItems = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20));
 function canEdit(item: Account) { return item.can_edit === true; }
+// Access grants (level/category/scopes/modules) are governed by the backend's
+// per-account `can_edit_access` flag, which already incorporates `can_edit`.
+function canEditAccess(item: Account) { return item.can_edit_access === true; }
+// H-building fixed duty accounts never have their level changed, regardless of
+// anything else the access panel offers.
+const isFixedDuty = computed(() => draft.value?.kind === 'duty' && (draft.value.home_scope === 'H' || draft.value.own_scopes?.includes('H')));
+const actorModules = computed(() => Array.isArray(policy.value?.modules) ? policy.value.modules as string[] : []);
+const isSuperAdmin = computed(() => ['L0', 'L1'].includes(myLevel.value));
+const accessLevelOptions = computed(() => levelOptions.value);
+const accessCategoryOptions = computed(() => categoryOptions.value);
+const accessModuleOptions = computed(() => moduleOptions.value.filter(option => actorModules.value.includes(option.value)));
+const moduleGroups = computed(() => ['业务管理', '通告办理', '协作与资料', '系统管理', '功能模块'].map(label => ({ label, options: accessModuleOptions.value.filter(option => (option.group || '功能模块') === label) })).filter(group => group.options.length));
+const accessScopeOptions = computed(() => {
+  const options = scopeOptions.value;
+  if (!draft.value) return options;
+  if (isSuperAdmin.value) return options;
+  const own = new Set(draft.value.own_scopes || []);
+  return options.filter(option => own.has(option.value) || option.value === draft.value?.home_scope);
+});
+
+function modulesForLevel(level?: string): string[] {
+  return accessModuleOptions.value.filter(option => level !== 'L4' || option.value !== 'accounts').map(option => option.value);
+}
+function scopesForLevel(level?: string): string[] {
+  const d = draft.value;
+  if (!d) return [];
+  if (level === 'L1') return accessScopeOptions.value.map(option => option.value);
+  const own = new Set([...(d.own_scopes || []), ...(d.home_scope ? [d.home_scope] : [])]);
+  return accessScopeOptions.value.filter(option => own.has(option.value)).map(option => option.value);
+}
+function roleForLevel(level?: string): string {
+  return level === 'L1' ? 'admin' : 'building';
+}
+
+// Snapshot of the opened account's access fields so a rejected save can restore
+// the old (server-reported) role/modules instead of leaving an incompatible draft.
+let draftOriginal: Pick<Account, 'level' | 'category' | 'scopes' | 'modules' | 'role'> | null = null;
+
+function moduleLabel(modules?: string[]) {
+  const list = Array.isArray(modules) ? modules : [];
+  if (!list.length) return '未配置';
+  return list.map(value => moduleOptions.value.find(option => option.value === value)?.label || value).join('、');
+}
 function actionLabel(action: string) { return action === 'password' ? '修改密码' : action === 'delete' ? '撤销登录' : '修改权限'; }
 function statusLabel(status: string) { return status === 'success' ? '成功' : status === 'failed' ? '未完成' : status === 'denied' ? '已拒绝' : '处理中'; }
 function stateLabel(item: Account) { return item.blocked_reason ? '待核对' : !item.enabled ? '已停用' : item.scopes.length ? '已授权' : '未授权'; }
@@ -146,6 +215,7 @@ async function load(refresh = false) {
   try {
     const data = await requestJson(`/api/auth/accounts${refresh ? '?refresh=true' : ''}`, { signal: abort.signal });
     items.value = data.items || []; scopeOptions.value = data.scope_options || []; categoryOptions.value = data.category_options || [];
+    moduleOptions.value = data.module_options || []; levelOptions.value = data.level_options || [];
     policy.value = data.policy || {};
     loadedAt.value = data.loaded_at || 0; warning.value = data.warning || '';
     // Permission reload downgrade guard: switch stale tabs back to accounts and close a
@@ -167,20 +237,44 @@ async function loadAudit() {
   finally { auditLoading.value = false; }
 }
 function switchTab(value: string) { tab.value = value; if (value === 'audit') void loadAudit(); }
-function openAccount(item: Account) { notice.value = ''; editorError.value = ''; newPassword.value = ''; confirmPassword.value = ''; draft.value = { ...item, scopes: [...item.scopes] }; }
-function closeEditor() { if (saving.value) return; draft.value = null; newPassword.value = ''; confirmPassword.value = ''; editorError.value = ''; }
+function openAccount(item: Account) {
+  notice.value = ''; editorError.value = ''; newPassword.value = ''; confirmPassword.value = '';
+  draft.value = { ...item, scopes: [...(item.scopes || item.own_scopes || [])], modules: [...(item.modules || [])] };
+  draftOriginal = {
+    level: item.level,
+    category: item.category,
+    scopes: [...(item.scopes || item.own_scopes || [])],
+    modules: [...(item.modules || [])],
+    role: item.role,
+  };
+}
+function closeEditor() { if (saving.value) return; draft.value = null; draftOriginal = null; newPassword.value = ''; confirmPassword.value = ''; editorError.value = ''; }
 function permissionChange(item: Account) { return { id: item.id, revision: item.revision, role: item.role, scopes: item.scopes, enabled: item.enabled }; }
+function accessChange(item: Account) { return { id: item.id, revision: item.revision, role: item.role, scopes: item.scopes, enabled: item.enabled, level: item.level, category: item.category, modules: item.modules }; }
+function dispatchAuthChanged() { window.dispatchEvent(new Event('auth-account-changed')); }
 async function savePermissions(changes: ReturnType<typeof permissionChange>[]) {
   if (saving.value) return;
   saving.value = true; editorError.value = '';
   try {
     await requestJson('/api/auth/accounts/permissions', { method: 'POST', body: JSON.stringify({ changes }), signal: abort.signal });
     notice.value = `已保存 ${changes.length} 个账号的权限`;
-    saving.value = false; closeEditor(); await load(); emit('changed');
-  } catch (e: any) { editorError.value = e.message || '权限保存失败'; }
+    saving.value = false; closeEditor(); await load(); emit('changed'); dispatchAuthChanged();
+  } catch (e: any) {
+    editorError.value = e.message || '权限保存失败';
+    // A rejected save must keep the old (server-reported) role/modules rather than
+    // leaving an incompatible level/provided combination on screen.
+    if (draft.value && draftOriginal) {
+      draft.value.level = draftOriginal.level;
+      draft.value.category = draftOriginal.category;
+      draft.value.scopes = [...draftOriginal.scopes];
+      draft.value.modules = [...(draftOriginal.modules || [])];
+      draft.value.role = draftOriginal.role;
+    }
+  }
   finally { saving.value = false; }
 }
-function saveAccount() { if (draft.value) void savePermissions([permissionChange(draft.value)]); }
+function saveEnabled() { if (draft.value) void savePermissions([{ ...permissionChange(draft.value), role: draftOriginal?.role || draft.value.role, scopes: [...(draftOriginal?.scopes || draft.value.scopes)] }]); }
+function saveAccess() { if (draft.value) void savePermissions([accessChange(draft.value)]); }
 async function deleteAccount(item: Account) {
   if (saving.value) return;
   const target = item.name;
@@ -190,7 +284,7 @@ async function deleteAccount(item: Account) {
   try {
     await requestJson(`/api/auth/accounts/${encodeURIComponent(item.id)}`, { method: 'DELETE', signal: abort.signal, body: JSON.stringify({ revision: item.revision }) });
     notice.value = `已撤销${target}的登录权限（历史记录保留）`;
-    await load(); emit('changed');
+    await load(); emit('changed'); dispatchAuthChanged();
   } catch (e: any) { if (!abort.signal.aborted) error.value = e.message || '撤销登录权限未完成'; }
   finally { saving.value = false; }
 }
@@ -224,6 +318,14 @@ watch(() => !!draft.value, async open => {
 });
 watch([search, kind, building, state, category], () => { page.value = 1; });
 watch(pageCount, value => page.value = Math.min(page.value, value));
+function changeLevel(): void {
+  const d = draft.value;
+  if (!d || !d.level) return;
+  const level = d.level;
+  d.role = roleForLevel(level);
+  d.scopes = scopesForLevel(level);
+  d.modules = modulesForLevel(level);
+}
 watch(() => JSON.stringify(props.permissions), () => { if (!saving.value) void load(); });
 onMounted(() => { void load(); window.addEventListener('keydown', escape, true); });
 onBeforeUnmount(() => { abort.abort(); newPassword.value = ''; confirmPassword.value = ''; modal?.release(); window.removeEventListener('keydown', escape, true); });
@@ -244,8 +346,12 @@ input:not([type=checkbox]),select { min-height: 36px; padding: 7px 9px; border: 
 .table-wrap { overflow: auto; }table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }th { background: #f0f5fb; color: #506884; white-space: nowrap; font-weight: 600; }th,td { border-bottom: 1px solid #e0e8f1; padding: 11px 10px; }td small { display: block; margin-top: 4px; }.scope-cell { max-width: 240px; line-height: 1.6; }.category-cell { min-width: 130px; line-height: 1.6; }.category-cell small { max-width: 200px; overflow-wrap: anywhere; }.tag,.status { display: inline-block; padding: 3px 6px; background: #f0f4f9; border-radius: 4px; font-size: 12px; white-space: nowrap; }.tag.level { background: #e8f0fe; color: #1d5fbf; }.ok { background: #e6f5ed; color: #186742; }.warn { background: #fff2df; color: #8b4c03; }.link-button { border: 0; color: #1d60c6; white-space: nowrap; }.link-button.danger { color: #b3231e; }.account-actions { white-space: nowrap; }.empty { padding: 32px; text-align: center; color: #63778e; }
 .pagination { justify-content: flex-end; font-size: 13px; }.pagination > span:first-child { margin-right: auto; }
 .error,.warning,.success { margin: 0; padding: 10px 12px; border-radius: 6px; font-size: 13px; line-height: 1.6; }.error { background: #fff0f0; color: #a92b2b; }.warning { background: #fff7e7; color: #805600; }.success { background: #eaf7ef; color: #206a44; }
-.account-overlay { position: fixed; inset: 0; z-index: 4000; background: #142b4938; display: flex; justify-content: flex-end; }.account-editor { width: 500px; max-width: 100%; height: 100%; overflow: auto; background: #fff; color: #203650; box-shadow: -10px 0 36px #19355526; padding: 22px; outline: none; }.account-editor header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid #dce6f0; padding-bottom: 16px; }.account-editor h2 { margin: 0 0 6px; font-size: 19px; }.icon { width: 38px; padding: 0; }.editor-body { display: grid; gap: 22px; padding-top: 16px; }.account-editor dl { display: grid; grid-template-columns: 80px 1fr; margin: 0; gap: 10px; font-size: 13px; }.account-editor dt { color: #63778e; }.account-editor dd { margin: 0; }.identity { overflow-wrap: anywhere; }
+.account-overlay { position: fixed; inset: 0; z-index: 4000; background: #142b4959; display: flex; align-items: center; justify-content: center; padding: 24px; }.account-editor { width: min(1180px, 100%); max-height: 92vh; overflow: hidden; display: flex; flex-direction: column; background: #fff; border: 1px solid #dce6f0; border-radius: 8px; color: #203650; box-shadow: 0 20px 64px #19355538; outline: none; }.account-editor header { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid #dce6f0; padding: 18px 24px; background: #f4f8fe; }.account-editor h2 { margin: 0 0 6px; font-size: 19px; }.icon { width: 38px; padding: 0; }.editor-body { min-height: 0; overflow: auto; display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 22px 28px; padding: 22px 24px; align-items: start; }.account-editor dl { grid-column: 1; display: grid; grid-template-columns: 80px minmax(0, 1fr); margin: 0; gap: 10px; font-size: 13px; }.account-editor dt { color: #63778e; }.account-editor dd { margin: 0; overflow-wrap: anywhere; }.identity { overflow-wrap: anywhere; }
+.account-state, .account-password, .editor-body > p { grid-column: 1; }.editor-body .account-access { grid-column: 2; grid-row: 1 / span 5; border-top: 0; padding: 0 0 0 26px; border-left: 1px solid #dce6f0; }.account-access > label { display: grid; grid-template-columns: 100px 1fr; align-items: center; gap: 10px; }.module-groups { display: grid; gap: 18px; }.editor-body .module-group { padding-top: 10px; }.module-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }.module-options .check { min-height: 38px; padding: 6px 8px; line-height: 1.5; border-radius: 4px; cursor: pointer; }.module-options .check:hover { background: #f1f5fb; }.module-options .granted { background: #edf4ff; color: #1555b6; }.module-options input { flex: none; }.editor-footer { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 14px 24px; border-top: 1px solid #dce6f0; background: #f8fafc; }.editor-footer > span { margin-right: auto; }.account-editor > .error, .account-editor > .success { margin: 10px 24px 0; }.editor-body.access-readonly { grid-template-columns: 1fr; }.account-editor:has(.access-readonly) { width: min(640px, 100%); }
 fieldset { border: 0; border-top: 1px solid #dce6f0; padding: 15px 0 0; margin: 0; display: grid; gap: 12px; min-width: 0; }legend { font-weight: 700; padding-right: 10px; font-size: 14px; }.check { display: flex; align-items: center; gap: 10px; font-size: 13px; }.primary { background: #1f62de; border-color: #1f62de; color: white; justify-self: start; }.primary:hover:not(:disabled) { background: #154cad; color: white; }form label { font-size: 13px; }.spin { animation: account-spin 1s linear infinite; }@keyframes account-spin { to { transform: rotate(360deg); } }
+.editor-body .check-group { border: 1px solid #dce6f0; border-radius: 7px; padding: 10px 12px 6px; background: #f8fafc; }.check-group legend { font-size: 12px; color: #506884; }.editor-body label { font-size: 13px; }.editor-body label > span { display: block; margin-bottom: 5px; color: #506884; }
+.editor-body .check-group { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; padding-bottom: 12px; }
+.account-access .check-group { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 @media(max-width:600px) { .metrics { grid-template-columns: repeat(2,1fr); gap: 14px; }.filters .search { flex-basis: 100%; }.account-editor { padding: 16px; } }
 @media(prefers-reduced-motion:reduce) { .spin { animation: none; } }
 </style>

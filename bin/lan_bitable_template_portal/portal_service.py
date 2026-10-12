@@ -1254,6 +1254,12 @@ class PortalError(RuntimeError):
     pass
 
 
+class PortalNoticePhotoRequiredError(PortalError):
+    status_code = 422
+    error_code = "notice_photo_required"
+    details = {"kind": "site", "min_count": 1}
+
+
 class PortalConflictError(PortalError):
     status_code = 409
 
@@ -21669,7 +21675,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             work_type=work_type,
         ):
             return
-        raise PortalError("结束通告前必须至少上传过一张现场照片，可在开始、更新或结束任意一次上传。")
+        raise PortalNoticePhotoRequiredError("结束通告前必须至少上传过一张现场照片，可在开始、更新或结束任意一次上传。")
 
     @staticmethod
     def _site_photo_payload(request_payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -35697,6 +35703,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         ongoing_page: int | str = 1,
         ongoing_page_size: int | str = 0,
         ongoing_items_authoritative: bool = False,
+        allowed_work_types: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
@@ -35726,6 +35733,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         merged_ongoing = self._project_ongoing_items(
             scope, [*canonical_ongoing, *(ongoing_items or [])]
         )
+        if allowed_work_types is not None:
+            merged_ongoing = [item for item in merged_ongoing if self._item_work_type(item) in allowed_work_types]
         include_records = "records" in requested_sections
         include_record_counts = include_records or "stats" in requested_sections
         include_ongoing = "ongoing" in requested_sections
@@ -35747,6 +35756,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             scope=scope,
             source_snapshot=scope_snapshot,
         ) if include_record_counts else []
+        if allowed_work_types is not None:
+            scoped_records = [record for record in scoped_records if self._record_work_type(record) in allowed_work_types]
+            include_zhihang = include_zhihang and WORK_TYPE_CHANGE in allowed_work_types
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
             month=selected_month,
@@ -35779,6 +35791,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         daily_summary = self.get_daily_summary(
             scope=scope, ongoing_items=merged_ongoing
         ) if requested_sections & {"stats", "daily", "closed"} else {"stats": {}, "items": []}
+        if allowed_work_types is not None:
+            from .module_access import filter_workbench
+            daily_summary = filter_workbench({"daily_summary": daily_summary, "ongoing_type_counts": self._work_type_counts(merged_ongoing)}, allowed_work_types)["daily_summary"]
         if requested_sections & {"records", "stats", "daily", "closed"}:
             merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
         if "closed" in requested_sections or "daily" in requested_sections:

@@ -13,7 +13,17 @@ from fastapi.responses import JSONResponse
 
 from .personnel_password_login import PasswordLoginError
 from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
-from .account_policy import CATEGORY_OPTIONS, account_allowed, categorize_position
+from .account_policy import (
+    CATEGORY_OPTIONS,
+    MODULE_OPTIONS,
+    LEVEL_OPTIONS,
+    PolicyViolation,
+    account_allowed,
+    categorize_position,
+    category_options_for,
+    level_options_for,
+    resolve_access_change,
+)
 
 
 def revision(value):
@@ -97,9 +107,12 @@ class AccountManagement:
             target = self.auth.account_profile(item["open_id"])
             item["level"] = target["level"]
             item["category"] = target["category"]
+            item["home_scope"] = target["home_scope"]
             item["scopes"] = target["scope_rules"]
-            item["role"] = "admin" if target["level"] in {"L0", "L1"} else "building"
+            item["modules"] = list(target["modules"])
+            item["role"] = target.get("role") or ("admin" if target["level"] in {"L0", "L1"} else "building")
             item["can_edit"] = not profile or account_allowed(profile, item, "edit")
+            item["can_edit_access"] = bool(item["can_edit"]) and self._access_editable(profile, item)
             item["can_delete"] = bool(profile and account_allowed(profile, item, "delete") and item["open_id"] != actor.get("open_id"))
             item["can_set_password"] = item["can_set_password"] and item["can_edit"]
         if profile:
@@ -112,10 +125,38 @@ class AccountManagement:
         options = permissions["scope_options"]
         if profile and profile["level"] == "L3":
             options = [option for option in options if option["value"] == profile["home_scope"]]
+        level_options = level_options_for(profile["level"]) if profile else copy.deepcopy(LEVEL_OPTIONS)
+        category_options = category_options_for(profile["level"]) if profile else copy.deepcopy(CATEGORY_OPTIONS)
         return {"items": sorted(items, key=lambda x: (x["kind"] != "duty", x["name"], x["id"])),
-                "scope_options": options, "category_options": CATEGORY_OPTIONS,
+                "scope_options": options, "category_options": category_options,
+                "module_options": copy.deepcopy(MODULE_OPTIONS), "level_options": level_options,
                 "policy": profile or {},
                 "loaded_at": snapshot.get("loaded_at"), "warning": warning}
+
+    @staticmethod
+    def _access_editable(profile, item):
+        """Whether the acting profile may edit the item's access override.
+
+        Fixed H duty and L0 accounts are never editable, the enabled toggle is
+        governed separately by ``can_edit`` (kept as before). L2 may only manage
+        an already-L2 engineer and L3 only own-building L4 accounts.
+        """
+        if profile is None:
+            return False
+        target_level = str(item.get("level") or "")
+        if target_level == "L0":
+            return False
+        if item.get("category") == "duty" and list(item.get("own_scopes") or []) == ["H"]:
+            return False  # fixed H duty
+        act_level = str(profile.get("level") or "")
+        if act_level in {"L0", "L1"}:
+            return True
+        if act_level == "L2":
+            # L2 只能做基础编辑/启用，不能编辑/传播访问等级或模块等更高能力。
+            return False
+        if act_level == "L3":
+            return target_level == "L4"
+        return False
 
     def check(self, actor, item, action):
         profile = self.auth.account_profile(actor.get("open_id"))
@@ -137,13 +178,20 @@ class AccountManagement:
         accounts = {item["id"]: item for item in listing["items"]}
         actor_id = str(actor.get("open_id") or "")
         valid_scopes = {item["value"] for item in listing["scope_options"]}
+        allowed_keys = {"id", "revision", "role", "scopes", "enabled", "level", "category", "modules"}
         with self.auth._lock:
+            # Re-fetch the actor profile inside the lock so policy grants never use a
+            # cached profile captured before a concurrent permission change.
+            actor_profile = self.auth.account_profile(actor_id)
             previous = self.auth._load_permissions_locked()
             following = copy.deepcopy(previous)
             users = following.setdefault("users", {})
             seen, changes = set(), []
             for change in payload["changes"]:
-                if not isinstance(change, dict) or set(change) != {"id", "revision", "role", "scopes", "enabled"}:
+                if not isinstance(change, dict):
+                    raise PasswordLoginError("账号修改参数无效。")
+                keys = set(change)
+                if not {"id", "revision"}.issubset(keys) or not keys.issubset(allowed_keys):
                     raise PasswordLoginError("账号修改参数无效。")
                 item = accounts.get(str(change["id"]))
                 if not item or not item["open_id"] or item["blocked_reason"]:
@@ -157,24 +205,90 @@ class AccountManagement:
                 self.check(actor, item, "edit")
                 if change["revision"] != revision(users.get(oid)):
                     raise PasswordLoginError("该账号权限已变化，请刷新后重新确认。", 409)
-                if change["role"] not in ("admin", "building") or type(change["enabled"]) is not bool or not isinstance(change["scopes"], list):
-                    raise PasswordLoginError("角色或启用状态无效。")
-                if any(not isinstance(scope, str) or scope not in valid_scopes for scope in change["scopes"]):
-                    raise PasswordLoginError("包含无效楼栋。")
-                if change["role"] != item["role"] or set(change["scopes"]) != set(item["scopes"]):
-                    raise PasswordLoginError("管理级别和楼栋按人员目录统一确定，不能单独更改或跨楼授权。", 403)
-                if oid == actor_id and not change["enabled"]:
+                if "enabled" not in change or type(change["enabled"]) is not bool:
+                    raise PasswordLoginError("启用状态无效。")
+                enabled = change["enabled"]
+                if oid == actor_id and not enabled:
                     raise PasswordLoginError("不能停用自己的登录权限。", 403)
+                if oid == actor_id and any(key in change for key in ("level", "category", "modules", "role", "scopes")):
+                    raise PasswordLoginError("不能修改自己的管理权限，仅可调整启用状态。", 403)
                 before = copy.deepcopy(users.get(oid) or {})
-                scopes = self.auth._admin_scopes() if change["role"] == "admin" else self.auth._scopes_from_raw(change["scopes"])
-                own = item["own_scopes"] if len(item["own_scopes"]) == 1 else []
-                users[oid] = {**before, "name": before.get("name") or item["name"], "role": change["role"],
-                              "scopes": scopes, "enabled": change["enabled"],
-                              "directory_scopes": [scope for scope in before.get("directory_scopes", []) if scope in scopes],
-                              "denied_scopes": [scope for scope in own if scope not in scopes]}
+                new_format = any(key in change for key in ("level", "category", "modules"))
+                if not new_format and "role" not in change and "scopes" not in change:
+                    # Legacy payload only toggling `enabled`: preserve any existing
+                    # explicit grant and never overwrite level/category/modules/scopes.
+                    next_cfg = {**before, "enabled": enabled}
+                elif not new_format:
+                    # Legacy format: only role/scopes/enabled is accepted and the
+                    # HR-derived role/scopes remain read-only (no raw escalation).
+                    if change["role"] not in ("admin", "building") or not isinstance(change["scopes"], list):
+                        raise PasswordLoginError("角色或启用状态无效。")
+                    if any(not isinstance(scope, str) or scope not in valid_scopes for scope in change["scopes"]):
+                        raise PasswordLoginError("包含无效楼栋。")
+                    if change["role"] != item["role"] or set(change["scopes"]) != set(item["scopes"]):
+                        raise PasswordLoginError("管理级别和楼栋按人员目录统一确定，不能单独更改或跨楼授权。", 403)
+                    scopes = self.auth._admin_scopes() if change["role"] == "admin" else self.auth._scopes_from_raw(change["scopes"])
+                    own = item["own_scopes"] if len(item["own_scopes"]) == 1 else []
+                    next_cfg = {**before, "name": before.get("name") or item["name"], "role": change["role"],
+                                "scopes": scopes, "enabled": enabled,
+                                "directory_scopes": [scope for scope in before.get("directory_scopes", []) if scope in scopes],
+                                "denied_scopes": [scope for scope in own if scope not in scopes]}
+                else:
+                    if not self._access_editable(actor_profile, item):
+                        raise PasswordLoginError("当前账号不能修改此人员的级别、岗位或访问权限。", 403)
+                    if "role" in change and change["role"] not in ("admin", "building"):
+                        raise PasswordLoginError("角色无效。")
+                    if "level" in change and str(change["level"]).strip() not in {"L1", "L2", "L3", "L4"}:
+                        raise PasswordLoginError("无效的管理级别。")
+                    if "category" in change and not any(option["value"] == str(change["category"]).strip() for option in CATEGORY_OPTIONS):
+                        raise PasswordLoginError("无效的业务岗位。")
+                    if "modules" in change and not isinstance(change["modules"], list):
+                        raise PasswordLoginError("模块参数无效。")
+                    target_profile = self.auth.account_profile(oid)
+                    try:
+                        resolved = resolve_access_change(
+                            actor_profile, target_profile,
+                            level=change.get("level"), category=change.get("category"),
+                            scopes=change.get("scopes"), modules=change.get("modules"))
+                    except PolicyViolation as exc:
+                        raise PasswordLoginError(str(exc), exc.status)
+                    if "role" in change and change["role"] != resolved["role"]:
+                        raise PasswordLoginError("角色与管理级别不一致，请按级别选择真实角色。", 403)
+                    final_scopes = self.auth._scopes_from_raw(resolved["scopes"])
+                    if any(scope not in valid_scopes and scope not in {"ALL", "CAMPUS"} for scope in final_scopes):
+                        raise PasswordLoginError("包含无效楼栋。")
+                    final_modules = [str(module) for module in resolved["modules"]]
+                    # Migrate a legacy record to an explicit override record, seeded
+                    # from the HR-derived profile (historical dirty scopes ignored).
+                    effective = users.get(oid) or {}
+                    if effective.get("access_version") != 1:
+                        effective = {**effective,
+                                     "level": target_profile["level"],
+                                     "category": target_profile["category"],
+                                     "modules": list(target_profile["modules"]),
+                                     "scopes": list(target_profile["scope_rules"]),
+                                     "role": target_profile.get("role") or ("admin" if target_profile["level"] in {"L0", "L1"} else "building"),
+                                     "access_version": 1}
+                    else:
+                        effective = copy.deepcopy(effective)
+                    own = item["own_scopes"] if len(item["own_scopes"]) == 1 else []
+                    next_cfg = {**effective,
+                                "name": effective.get("name") or item["name"],
+                                "level": resolved["level"], "category": resolved["category"],
+                                "scopes": final_scopes, "modules": final_modules,
+                                "role": resolved["role"], "enabled": enabled, "access_version": 1,
+                                "directory_scopes": [scope for scope in effective.get("directory_scopes", []) if scope in final_scopes],
+                                "denied_scopes": [scope for scope in own if scope not in final_scopes],
+                                "locked": False}
+                users[oid] = next_cfg
+                before_summary = {key: before.get(key) for key in ("role", "scopes", "enabled")}
+                after_summary = {key: users[oid].get(key) for key in ("role", "scopes", "enabled")}
+                if new_format:
+                    for key in ("level", "category", "modules"):
+                        before_summary[key] = before.get(key)
+                        after_summary[key] = users[oid].get(key)
                 changes.append({"name": item["name"], "open_id": oid,
-                                "before": {key: before.get(key) for key in ("role", "scopes", "enabled")},
-                                "after": {key: users[oid][key] for key in ("role", "scopes", "enabled")}})
+                                "before": before_summary, "after": after_summary})
             if not self.store.get_document("account_management", "permissions_before_upgrade"):
                 self.store.put_document("account_management", "permissions_before_upgrade", previous)
             audit = self.store.record_business_operation_audit(domain="accounts", action="permissions", status="started",

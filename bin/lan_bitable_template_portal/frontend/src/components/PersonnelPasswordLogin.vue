@@ -104,7 +104,12 @@
     <form v-else-if="mode === 'reset'" class="pwd-form" novalidate @submit.prevent="submitReset">
       <p class="reset-note">验证本人身份后即可设置新密码</p>
 
-      <label class="field" for="personnel-reset-name">
+      <div v-if="isPersonFixed" class="current-account">
+        <span class="field-label"><User :size="15" aria-hidden="true" /> 当前账号</span>
+        <strong>{{ changeUserName || "当前登录人员" }}</strong>
+      </div>
+
+      <label v-else class="field" for="personnel-reset-name">
         <span class="field-label"><User :size="15" aria-hidden="true" /> 姓名</span>
         <VnetSelect input-id="personnel-reset-name" :model-value="personSearch" :options="personOptions"
           allow-custom clearable placeholder="查找外部人员姓名或工号" label="姓名" :disabled="busy" required
@@ -282,7 +287,11 @@ const selectedId = ref("");
 const personSearch = ref("");
 let peopleRefreshTimer: number | undefined;
 let peopleFetching = false;
-const mode = ref<"login" | "reset" | "change">("login");
+// Initialized directly from initialMode so the very first render never flashes
+// the person selector when the entry point is "change" (logged-in password change).
+const mode = ref<"login" | "reset" | "change">(
+  props.initialMode === "change" ? "change" : "login",
+);
 const cameFromChange = ref(false);
 const password = ref("");
 const currentPassword = ref("");
@@ -304,14 +313,30 @@ const verifyTimer = ref<number | null>(null);
 const verifyController = ref<AbortController | null>(null);
 let verifySeq = 0;
 
-const peopleNeeded = computed(() => mode.value !== "change");
-
-const selectedPerson = computed<Person | null>(() =>
-  people.value.find(item => item.id === selectedId.value) ?? null,
-);
+// True only inside the reset flow that is reached from the logged-in "change"
+// password form. There the person is fixed to the current session user and no
+// person selector is shown (only identity number + new password are entered).
+const isPersonFixed = computed(() => mode.value === "reset" && cameFromChange.value);
 
 const changeUserName = computed(() => String(props.userName || "").trim());
 const changePersonId = computed(() => String(props.personId || "").trim());
+
+// Resolves the fixed person in the reset-from-change flow. Prefers the matching
+// directory entry when present; otherwise synthesizes a stand-in from the
+// session props (id + name) so identity verification can run without a dropdown.
+const fixedResetPerson = computed<Person | null>(() => {
+  if (!isPersonFixed.value) return null;
+  const id = changePersonId.value;
+  if (!id) return null;
+  const found = people.value.find(item => item.id === id);
+  return found || { id, name: changeUserName.value || "", selectable: true };
+});
+
+const peopleNeeded = computed(() => mode.value !== "change" && !isPersonFixed.value);
+
+const selectedPerson = computed<Person | null>(() =>
+  fixedResetPerson.value ?? people.value.find(item => item.id === selectedId.value) ?? null,
+);
 
 const loginSubmitLabel = computed(() =>
   requiresPasswordChange.value ? "设置新密码并登录" : "姓名密码登录",
@@ -496,12 +521,21 @@ function scheduleIdentityVerify(): void {
 
 function enterResetMode(): void {
   if (busy.value || mode.value === "reset") return;
-  cameFromChange.value = mode.value === "change";
+  const fromChange = mode.value === "change";
+  cameFromChange.value = fromChange;
   clearVerify();
   clearAllSecrets();
   mode.value = "reset";
-  if (!selectedPerson.value?.account_nature || selectedPerson.value.account_nature.toUpperCase() === 'VNET' || selectedPerson.value.login_method === 'feishu') { selectedId.value = ''; personSearch.value = ''; }
-  if (!peopleLoaded.value) void fetchPeople();
+  if (fromChange) {
+    // Logged-in password change: keep the current session person fixed. Only the
+    // identity number + new password are asked; no person dropdown / re-selection.
+    selectedId.value = changePersonId.value;
+    personSearch.value = changeUserName.value;
+  } else {
+    // Not logged-in forget flow: external personnel remain selectable.
+    if (!selectedPerson.value?.account_nature || selectedPerson.value.account_nature.toUpperCase() === 'VNET' || selectedPerson.value.login_method === 'feishu') { selectedId.value = ''; personSearch.value = ''; }
+    if (!peopleLoaded.value) void fetchPeople();
+  }
 }
 
 function exitResetMode(): void {
@@ -710,9 +744,9 @@ async function submitChange(): Promise<void> {
 }
 
 onMounted(() => {
-  mode.value = props.initialMode === "change" ? "change" : "login";
+  // mode is already resolved from initialMode at setup time (no first-frame flash).
   if (mode.value === "change") selectedId.value = changePersonId.value;
-  if (mode.value !== "change") void fetchPeople();
+  if (mode.value === "login") void fetchPeople();
   peopleRefreshTimer = window.setInterval(() => {
     if (!document.hidden && peopleNeeded.value && !busy.value && resetVerified.value !== 'checking') void fetchPeople();
   }, 60000);

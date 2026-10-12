@@ -348,6 +348,7 @@ class World:
         self.runtime = SimpleNamespace(
             state_store=SimpleNamespace(db_path=str(self.legacy_db)),
             auth_manager=SimpleNamespace(
+                account_profile=lambda _: {"modules": ["assistant", "maintenance", "change", "repair", "learning", "knowledge", "links"]},
                 session_scopes=lambda session: list(session.get("scopes", [])),
                 is_admin=lambda session: bool(session.get("is_admin", False)),
             ),
@@ -551,6 +552,7 @@ class BusinessWorld:
         self.runtime = SimpleNamespace(
             state_store=SimpleNamespace(db_path=str(self.legacy_db)),
             auth_manager=SimpleNamespace(
+                account_profile=lambda _: {"modules": ["assistant", "maintenance", "change", "repair", "learning", "knowledge", "links"]},
                 session_scopes=lambda session: list(session.get("scopes", [])),
                 is_admin=lambda session: bool(session.get("is_admin", False)),
             ),

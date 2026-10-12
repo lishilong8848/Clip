@@ -228,7 +228,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError): self.channel._user("on_user")
 
     async def test_actor_uses_original_permission_and_channel_is_server_state_only(self):
-        auth = SimpleNamespace(session_scopes=lambda _: ["D"], is_admin=lambda _:False)
+        auth = SimpleNamespace(session_scopes=lambda _: ["D"], is_admin=lambda _:False, account_profile=lambda _: {"modules": ["assistant"]})
         ctrl = SimpleNamespace(_current_session=lambda _: {"role": "building", "user": {"open_id": "ou_Original", "name": "D楼"}})
         request = Request({"type": "http", "headers": [(b"x-lighthouse-channel", b"feishu:oc_Evil")], "state": {}})
         actor = await actor_for(ctrl, SimpleNamespace(auth_manager=auth), request)

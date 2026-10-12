@@ -115,7 +115,7 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
         from lan_bitable_template_portal.lighthouse_bridge import actor_for
         controller = SimpleNamespace(_current_session=Mock(return_value={'open_id': 'ou_session', 'user': {
             'name': '李世龙', 'user_id': 'not-an-employee-number', 'union_id': 'private-union'}}))
-        runtime = SimpleNamespace(auth_manager=SimpleNamespace(session_scopes=Mock(return_value=['A']), is_admin=Mock(return_value=True)))
+        runtime = SimpleNamespace(auth_manager=SimpleNamespace(session_scopes=Mock(return_value=['A']), is_admin=Mock(return_value=True), account_profile=Mock(return_value={'modules': ['assistant']})))
         actor = await actor_for(controller, runtime, self.request)
         self.assertEqual(actor['name'], '李世龙')
         self.assertEqual(actor['employee_no'], '')

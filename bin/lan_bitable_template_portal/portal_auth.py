@@ -29,7 +29,11 @@ from .portal_service import (
 )
 from .state_store import DEFAULT_STATE_DB_NAME, LanPortalStateStore
 from .cabinet_guest import GUEST_SCOPES, GUEST_SESSION_PREFIX, is_cabinet_guest
-from .account_policy import categorize_position
+from .account_policy import (
+    MODULE_IDS,
+    default_modules,
+    categorize_position,
+)
 
 
 AUTH_COOKIE_NAME = "lan_portal_session"
@@ -355,12 +359,20 @@ class PortalAuthManager:
         if self.directory_block_reason(open_id):
             return "building"
         profile = self.account_profile(open_id)
-        return "admin" if profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"] else "building"
+        return profile.get("role", "admin" if profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"] else "building")
 
     def account_profile(self, open_id: str) -> dict[str, Any]:
-        """Derive management authority from trusted identity, HR and saved grants."""
+        """Derive management authority from trusted identity, HR and saved grants.
+
+        ``access_version == 1`` marks an explicitly configured permission record
+        whose ``level``/``category``/``modules``/``scopes`` take priority over the
+        HR-derived defaults. Legacy records (without the marker) keep deriving from
+        the trusted HR identity so historical raw roles / admin / dirty scopes can
+        never grant new authority by themselves.
+        """
         open_id = str(open_id or "").strip()
         cfg = self._permission_user(open_id)
+        overridden = bool(cfg) and cfg.get("access_version") == 1
         duty = next((code for code, oid in BUILDING_OPEN_ID_MAP.items() if oid == open_id), "")
         person = {} if duty else self.directory_person(open_id)
         homes = [code for code in person.get("scopes", []) if code in BUILDING_SCOPE_CODES]
@@ -369,20 +381,74 @@ class PortalAuthManager:
         if category == "other":
             category = categorize_position(" ".join(person.get("assignments") or []))
         enabled = bool(cfg) and cfg.get("enabled") is not False and not self.directory_block_reason(open_id)
+
         level = "L4"
         if open_id == LI_SHILONG_OPEN_ID:
             level = "L0"
+        elif duty == "H":
+            level = "L1"
+        elif overridden and str(cfg.get("level") or "").strip() in {"L1", "L2", "L3", "L4"}:
+            level = str(cfg.get("level")).strip()
         elif duty == "H" or (home == "H" and category == "manager"):
             level = "L1"
         elif home == "H" and category == "engineer":
             level = "L2"
         elif home and category == "supervisor":
             level = "L3"
-        can_manage = enabled and level != "L4"
-        return {"level": level, "category": category, "home_scope": home,
-                "scope_rules": self._admin_scopes() if level in {"L0", "L1"} or duty == "H" else [home] if home else [],
-                "can_manage_accounts": can_manage, "can_view_accounts": can_manage and level != "L2",
-                "can_delete_business": enabled and level in {"L0", "L1", "L3"}}
+
+        if overridden and str(cfg.get("category") or "").strip():
+            category = str(cfg.get("category")).strip()
+
+        # Scope rules: L0/L1/H duty are effectively full-ALL; manual override wins
+        # for L2-L4; legacy records always follow HR home.
+        if level in {"L0", "L1"} or duty == "H":
+            scope_rules = self._admin_scopes()
+        elif overridden and isinstance(cfg.get("scopes"), list):
+            manual = self._scopes_from_raw(cfg.get("scopes"))
+            scope_rules = manual or ([home] if home else [])
+        else:
+            scope_rules = [home] if home else []
+
+        # Modules: L0/L1 are effectively ALL modules; an explicit override
+        # (``access_version == 1``) wins; already-materialized legacy modules
+        # (``module_access_version == 1``) are honoured; unknown or disabled
+        # identities never receive functionality derived from level defaults.
+        if not enabled:
+            # Disabled / blocked identity fails closed: no module grants at all.
+            modules = []
+        elif level == "L0" or duty == "H":
+            modules = list(default_modules(level))
+        elif overridden and isinstance(cfg.get("modules"), list):
+            # Empty is a valid explicit full revocation and must NOT fall back to
+            # the level defaults. Only a genuinely absent module field would keep
+            # deriving from the level defaults.
+            modules = [str(module) for module in cfg.get("modules") if str(module) in MODULE_IDS]
+        elif cfg.get("module_access_version") == 1 and isinstance(cfg.get("modules"), list):
+            # Materialized in an earlier directory sync / migration. Empty set is
+            # preserved as an explicit full revocation.
+            modules = [str(module) for module in cfg.get("modules") if str(module) in MODULE_IDS]
+        elif bool(person) or bool(duty):
+            # Valid, currently-known, enabled identity: default to the level's
+            # capability.
+            modules = list(default_modules(level))
+        else:
+            # Unknown identity: never grant default modules.
+            modules = []
+
+        # 账号管理能力同时取决于账号管理模块是否仍然可用。
+        can_manage = enabled and level != "L4" and "accounts" in modules
+        role = "admin" if enabled and level in {"L0", "L1"} else "building"
+        return {
+            "level": level,
+            "category": category,
+            "home_scope": home,
+            "role": role,
+            "modules": modules,
+            "scope_rules": scope_rules,
+            "can_manage_accounts": can_manage,
+            "can_view_accounts": can_manage and level != "L2",
+            "can_delete_business": enabled and level in {"L0", "L1", "L3"},
+        }
 
     def _open_id_explicitly_disabled(self, open_id: str) -> bool:
         open_id = str(open_id or "").strip()
@@ -417,6 +483,33 @@ class PortalAuthManager:
         snapshot = provider() if provider else {}
         return snapshot.get("removed_identities", {}).get(open_id, "")
 
+    def _hr_derived_modules(self, identity: str, person: dict[str, Any]) -> list[str]:
+        """Modules a *valid* HR identity is entitled to before any explicit grant.
+
+        This deliberately ignores enabled/disabled store state: it is used when
+        materialising the first legacy migration for an identity that has not yet
+        been written into the permission store (where ``cfg`` would be empty and
+        therefore look "disabled").
+        """
+        duty_code = next((code for code, oid in BUILDING_OPEN_ID_MAP.items() if oid == identity), "")
+        homes = [code for code in person.get("scopes", []) if code in BUILDING_SCOPE_CODES]
+        home = duty_code or (homes[0] if len(homes) == 1 else "")
+        category = "duty" if duty_code else categorize_position(person.get("position"))
+        if category == "other":
+            category = categorize_position(" ".join(person.get("assignments") or []))
+        level = "L4"
+        if identity == LI_SHILONG_OPEN_ID:
+            level = "L0"
+        elif duty_code == "H":
+            level = "L1"
+        elif home == "H" and category == "manager":
+            level = "L1"
+        elif home == "H" and category == "engineer":
+            level = "L2"
+        elif home and category == "supervisor":
+            level = "L3"
+        return list(default_modules(level))
+
     def sync_directory_permissions(self, people, *, on_login=False) -> None:
         with self._lock:
             payload = self._load_permissions_locked()
@@ -434,9 +527,36 @@ class PortalAuthManager:
                 own = own if len(own) == 1 else []
                 manager = own == ["H"] and categorize_position(person.get("position")) == "manager"
                 scopes = self._admin_scopes() if manager else own
-                following = {**previous, "name": person["name"],
-                             "role": "admin" if manager else "building", "enabled": previous.get("enabled") is not False,
-                             "scopes": scopes, "directory_scopes": scopes, "denied_scopes": [], "locked": False}
+                # Manually configured access (access_version=1) must survive an
+                # HR directory sync: only identity/name/enabled stay HR-managed.
+                if previous.get("access_version") == 1:
+                    following = {**previous, "name": person["name"],
+                                 "enabled": previous.get("enabled") is not False,
+                                 "directory_scopes": scopes, "denied_scopes": [],
+                                 "locked": False}
+                elif previous.get("module_access_version") == 1 and isinstance(previous.get("modules"), list):
+                    # Legacy modules already materialized in an earlier migration:
+                    # keep them and only refresh the HR-managed identity fields
+                    # (without ever promoting the old role/scopes to access_version).
+                    following = {**previous, "name": person["name"],
+                                 "role": "admin" if manager else "building",
+                                 "enabled": previous.get("enabled") is not False,
+                                 "scopes": scopes, "directory_scopes": scopes,
+                                 "denied_scopes": [], "locked": False,
+                                 "modules": list(previous["modules"]),
+                                 "module_access_version": 1}
+                else:
+                    # First sight of this valid identity: actually persist the
+                    # HR-derived modules into the store and mark module_access_version.
+                    # Old dirty role/scopes remain non-authoritative (no access_version).
+                    derived = self._hr_derived_modules(identity, person)
+                    following = {**previous, "name": person["name"],
+                                 "role": "admin" if manager else "building",
+                                 "enabled": previous.get("enabled") is not False,
+                                 "scopes": scopes, "directory_scopes": scopes,
+                                 "modules": derived,
+                                 "module_access_version": 1,
+                                 "denied_scopes": [], "locked": False}
                 if previous != following:
                     users[identity] = following
                     changed = True
@@ -1004,7 +1124,7 @@ class PortalAuthManager:
         identity = (session.get("user") or {}).get("open_id")
         if identity:
             profile = self.account_profile(identity)
-            return profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"]
+            return profile["role"] == "admin"
         return False
 
     def session_scopes(self, session: dict[str, Any] | None) -> list[str]:
@@ -1144,7 +1264,7 @@ class PortalAuthManager:
             "avatar_url": str(user.get("avatar_url") or user.get("avatar_thumb") or ""),
             "role": "guest" if is_cabinet_guest(session) else "admin" if self.is_admin(session) else "building",
             "login_method": "password" if session.get("source") == "personnel_password" else "feishu",
-            **({} if is_cabinet_guest(session) else self.account_profile(open_id)),
+            **({"modules": ["cabinet"]} if is_cabinet_guest(session) else self.account_profile(open_id)),
             **({"personnel_record_id": user.get("personnel_record_id", "")} if session.get("source") == "personnel_password" else {}),
         }
 

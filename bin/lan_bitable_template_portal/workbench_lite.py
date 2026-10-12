@@ -2645,6 +2645,10 @@ def render_workbench_lite(
     prefill_action: str = "",
     prefill_context_id: str = "",
 ) -> str:
+    from .module_access import MODULE_IDS, filter_workbench
+    module_grants = set(session.get("allowed_modules", MODULE_IDS))
+    payload = filter_workbench(payload, module_grants)
+    notice_undos = [item for item in (notice_undos or []) if _item_work_type(item) in module_grants]
     records = payload.get("records") if isinstance(payload.get("records"), list) else []
     ongoing = (
         [
@@ -2833,7 +2837,8 @@ def render_workbench_lite(
     can_delete_business = bool(session.get("can_delete_business", is_admin_session))
     can_manage_change_confirmations = bool(
         session.get("can_manage_change_confirmations")
-    )
+    ) and "change" in module_grants
+    engineer_link = f'<a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>' if "engineer_mop" in module_grants else ""
     change_confirmation_button = (
         '<button class="top-link" id="lite-change-confirmation-open" type="button" '
         'aria-haspopup="dialog" aria-controls="lite-change-confirmations">变更确认</button>'
@@ -2857,6 +2862,7 @@ def render_workbench_lite(
         f"<span>{_e(label)}</span><span class=\"type-counts\" aria-label=\"待发起 {record_counts.get(key, 0)}，进行中 {ongoing_counts.get(key, 0)}\"><b class=\"type-count pending\">{_e(record_counts.get(key, 0))}</b><i>/</i><b class=\"type-count ongoing\">{_e(ongoing_counts.get(key, 0))}</b></span>"
         "</a>"
         for key, label in WORK_TYPE_FILTER_LABELS.items()
+        if key == ALL_WORK_TYPE or key in module_grants
     )
     manual_url = _query_url(
         "/workbench-lite",
@@ -3520,7 +3526,7 @@ def render_workbench_lite(
     </div>
     <nav class="top-actions">
       <label class="scope-switch"><b class="scope-icon" aria-hidden="true">楼</b><span>当前楼栋</span><select class="scope-select" id="lite-scope-select" aria-label="切换楼栋">{scope_select}</select></label>
-      <a class="top-link" href="/engineer/mop?scope={_e(scope)}" aria-label="打开维护单管理">维护单</a>
+      {engineer_link}
       {change_confirmation_button}
       <a class="exit" href="/api/auth/logout" aria-label="退出登录">退出</a>
     </nav>
@@ -3537,7 +3543,7 @@ def render_workbench_lite(
       <div class="manual-picker" id="manual-picker">
         <button class="btn ghost" id="manual-open" type="button" aria-expanded="false" aria-controls="manual-menu">纯手填</button>
         <div class="manual-menu" id="manual-menu">
-          {''.join(f'<a href="{_e(_manual_url(scope, key, selected_month))}">{_e(label)}</a>' for key, label in WORK_TYPE_LABELS.items())}
+          {''.join(f'<a href="{_e(_manual_url(scope, key, selected_month))}">{_e(label)}</a>' for key, label in WORK_TYPE_LABELS.items() if key in module_grants)}
         </div>
       </div>
       <div class="refresh-picker" id="refresh-picker">

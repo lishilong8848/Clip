@@ -26,6 +26,9 @@ def install_test_backend(app, controller, runtime):
     root = Path(runtime.state_store.db_path).resolve().parent
     if not root.is_relative_to(Path(tempfile.gettempdir()).resolve()):
         raise AssertionError('Assistant route tests require a temporary data root')
+    if isinstance(runtime.auth_manager, SimpleNamespace) and not hasattr(runtime.auth_manager, 'account_profile'):
+        from lan_bitable_template_portal.module_access import MODULE_IDS
+        runtime.auth_manager.account_profile = lambda _: {'modules': sorted(MODULE_IDS)}
     current_actor = ContextVar('assistant_route_fixture_actor', default=None)
     async def authorize(request):
         actor = await actor_for(controller, runtime, request)

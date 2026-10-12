@@ -10,12 +10,12 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <button v-if="auth.loggedIn && homeMode" type="button" class="btn ghost life-guide-entry" title="参考人生指南" @click="emit('open-life-guide')"><BookOpen :size="16" aria-hidden="true" /><span>参考人生指南</span></button>
+      <button v-if="auth.loggedIn && homeMode && hasModule('life_guide')" type="button" class="btn ghost life-guide-entry" title="参考人生指南" @click="emit('open-life-guide')"><BookOpen :size="16" aria-hidden="true" /><span>参考人生指南</span></button>
       <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.login_method === 'password' ? '姓名密码登录' : auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
         <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
         {{ auth.user?.name || "已登录" }}
       </span>
-      <button v-if="auth.loggedIn && homeMode" type="button" class="btn ghost settings-entry"
+      <button v-if="auth.loggedIn && homeMode && hasModule('signatures')" type="button" class="btn ghost settings-entry"
         aria-label="签名管理" title="签名管理" @click="emit('open-signatures')">
         <Fingerprint :size="20" aria-hidden="true" />
       </button>
@@ -38,7 +38,7 @@
         @refresh-event="emit('refresh-event')"
       />
       <button type="button"
-        v-if="isAdmin || canManageAccounts"
+        v-if="(isAdmin || canManageAccounts) && hasModule('accounts')"
         class="btn ghost admin-entry settings-entry"
         aria-label="打开账号与权限设置"
         title="打开账号与权限设置"
@@ -79,6 +79,7 @@ const props = defineProps<{
   eventRefreshTitle: string;
   isAdmin: boolean;
   canManageAccounts?: boolean;
+  modules?: string[];
   homeMode?: boolean;
 }>();
 
@@ -92,6 +93,11 @@ const emit = defineEmits<{
   "open-password": [];
   logout: [];
 }>();
+
+function hasModule(moduleId: string): boolean {
+  if (!moduleId) return true;
+  return Array.isArray(props.modules) && props.modules.includes(moduleId);
+}
 
 function onScopeChange(event: Event): void {
   emit("switch-scope", (event.target as HTMLSelectElement).value);

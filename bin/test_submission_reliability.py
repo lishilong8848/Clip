@@ -471,7 +471,7 @@ class SubmissionReliabilityTests(unittest.TestCase):
         from fastapi.testclient import TestClient
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         self.store.begin_repair_management_operation("scope-check", operation_type="project_update", scope="B", payload_hash="h")
-        with patch.object(PortalRuntime, "service", self.service), patch.object(self.service, "repair_operation_status", return_value={"status": "processing"}) as recover:
+        with patch.object(PortalRuntime.auth_manager, "account_profile", return_value={"modules": ["repair_management"], "role": "building", "scope_rules": ["B"]}), patch.object(PortalRuntime, "service", self.service), patch.object(self.service, "repair_operation_status", return_value={"status": "processing"}) as recover:
             client = TestClient(controller._build_app())
             with patch.object(controller, "_current_session", return_value=None):
                 self.assertEqual(client.get("/api/repair-management/operations/scope-check").status_code, 401)
@@ -481,7 +481,8 @@ class SubmissionReliabilityTests(unittest.TestCase):
                 self.assertEqual(authorize.call_args.args[1], "B")
                 recover.assert_not_called()
             with patch.object(controller, "_current_session", return_value={"user": {"open_id": "test"}}), patch.object(controller, "_authorized_scope_or_error", return_value="B"):
-                self.assertEqual(client.post("/api/repair-management/operations/scope-check").status_code, 200)
+                response = client.post("/api/repair-management/operations/scope-check")
+                self.assertEqual(response.status_code, 200, response.text)
                 recover.assert_called_once_with("scope-check", recover=True)
 
     def test_source_end_recovery_preserves_actual_end_time(self):

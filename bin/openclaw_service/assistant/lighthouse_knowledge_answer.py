@@ -110,6 +110,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize):
     current = await authorize()
     if current['id'] != actor['id']:
         raise AssistantError('登录身份已变化，请重新提问。', 403)
+    if 'modules' in current and 'knowledge' not in current['modules']:
+        raise AssistantError('当前账号尚未获授共享知识库权限。', 403)
     knowledge = await asyncio.to_thread(factory)
     profile = turn['_profile']
     await emit('status', {'label': '正在检索公司知识库'})

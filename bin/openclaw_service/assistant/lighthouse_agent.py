@@ -945,6 +945,7 @@ class PortalAgent:
             if isinstance(operation.get('body'), dict):
                 operation['body'].pop('plan_convergence_confirmation', None)
             operation["selected_files"] = [describe_file(identity) for identities in (expanded[index].get("files") or {}).values() for identity in identities]
+            operation["selected_files"].extend(describe_file(identity) for identities in plan.get("_notice_files", {}).get(str(index), {}).values() for identity in identities)
             if operation.get("api_id") in _WATER_WRITES:
                 operation["selected_files"].extend(describe_file(identity) for identity in plan.get("_water_files", {}).get(str(index), []))
             labels = plan.get("selected_labels", {}).get(str(index), {})
@@ -1024,6 +1025,10 @@ class PortalAgent:
 
     def _check_plan_file(self, actor, operation, identity):
         item = self.files.get(actor, identity)
+        from .lighthouse_notice_photos import NOTICE_WRITES
+        if operation["api_id"] in NOTICE_WRITES:
+            if not str(item.get("mime") or "").startswith("image/") or not 0 < item.get("size", 0) <= 8 * 1024 * 1024:
+                raise AssistantError("通告照片须为有效图片，单张不超过8MiB。")
         if operation["api_id"] in _WATER_WRITES:
             if not str(item.get("mime") or "").startswith("image/") or not 0 < item.get("size", 0) <= 8 * 1024 * 1024:
                 raise AssistantError("水表照片须为有效图片，单张不超过8MiB。")
@@ -1593,6 +1598,8 @@ class PortalAgent:
                 notice_form = self._notice_form(actor, op, queries, references, index)
                 if notice_form:
                     fields.append(notice_form)
+                    from .lighthouse_notice_photos import photo_fields
+                    fields.extend(photo_fields(index, body.get("work_type", "maintenance")))
                     from .lighthouse_notice_sop import SELECTION_KEYS, selection_field
                     raw = body.get("patch") or {}
                     selected = _result_refs({"$query": raw["$query"]}, [], references, queries) if "$query" in raw else {}
@@ -1909,6 +1916,8 @@ class PortalAgent:
             if field.get("type") == "file":
                 operation = normalized[field.get("operation_index", 0)]
                 descriptor = self.catalog.get(operation["api_id"])
+                if field.get("native_notice_photos") and operation["api_id"] in {"POST /api/workbench-actions", "POST /api/maintenance-actions"}:
+                    continue
                 if field.get("native_water_photos") and operation["api_id"] in _WATER_WRITES:
                     continue
                 if field.get("section") != "files" or field.get("path") not in descriptor.get("files", []):
@@ -2214,6 +2223,19 @@ class PortalAgent:
                             fields=copy.deepcopy(plan["_review_fields"]), operations=copy.deepcopy(plan["_review_operations"]))
                 self._save_plan(actor, plan)
                 return self.public_plan(plan, actor)
+            if payload.get("action") == "attach_files" and plan["status"] == "needs_input":
+                from .lighthouse_notice_photos import select_photos
+                values = payload.get("values")
+                editable = {field["name"]: field for field in plan["fields"] if field.get("native_notice_photos") and field["operation_index"] >= len(plan.get("results", []))}
+                if set(payload) - {"action", "version", "values"} or not isinstance(values, dict) or not values or set(values) - set(editable):
+                    raise AssistantError("请选择当前通告表单中的照片项。")
+                for name, value in values.items():
+                    field = editable[name]
+                    select_photos(self, actor, plan, field, value)
+                    field.update(value=list(value), _edit_value=list(value))
+                plan["version"] += 1
+                self._save_plan(actor, plan)
+                return self.public_plan(plan, actor)
             if payload.get("action") or plan["status"] != "needs_input":
                 raise AssistantError("请先返回修改，再补充填写。", 409)
             values = payload.get("values") or {}
@@ -2257,6 +2279,10 @@ class PortalAgent:
                     body = water_payload(field, {**old, **filled}, actor)
                     op = plan["operations"][field["operation_index"]]
                     op["body"].update(body)
+                    continue
+                if field.get("native_notice_photos"):
+                    from .lighthouse_notice_photos import select_photos
+                    select_photos(self, actor, plan, field, value)
                     continue
                 if field.get("native_water_photos"):
                     if not isinstance(value, list) or len(value) > field["maxItems"] or any(not isinstance(item, str) for item in value) or len(set(value)) != len(value):
@@ -2783,6 +2809,9 @@ class PortalAgent:
                     form["value"] = _form_value(form["_initial_form"], reference)
                     plan["fields"] = [field for field in plan["fields"] if field["operation_index"] != index or field.get("path") not in {"target_record_id", "patch"} and not str(field.get("path", "")).startswith("patch.")]
                     plan["fields"].append(form)
+                    from .lighthouse_notice_photos import photo_fields
+                    if not any(field.get("native_notice_photos") and field["operation_index"] == index for field in plan["fields"]):
+                        plan["fields"].extend(photo_fields(index, op["body"].get("work_type")))
                 if opened_notice:
                     for field in plan["fields"]:
                         if field["name"] in edit_values:
@@ -3817,6 +3846,14 @@ class PortalAgent:
                     _creation_form(actor, op)
                 plan.update(status="running", error="")
                 await self._durable_save(actor, plan)
+                from .lighthouse_notice_photos import NOTICE_WRITES, restore_photo_form, stage_photos
+                if op["api_id"] in NOTICE_WRITES:
+                    try:
+                        await stage_photos(self, actor, plan, index, op, request)
+                    except AssistantError as exc:
+                        restore_photo_form(plan, index, str(exc) + " 填写已保留，请补充照片后继续确认。")
+                        await self._durable_save(actor, plan)
+                        return
                 if op["api_id"] in _WATER_WRITES:
                     plan["_water_stage"] = {"index": index, "phase": "photos"}
                     await self._durable_save(actor, plan)
@@ -3833,6 +3870,10 @@ class PortalAgent:
                     await self._durable_save(actor, plan)
                 result = await self._invoke(actor, op, request, uploads=True)
                 raw = result.get("_raw", result.get("data"))
+                if not result.get("ok") and op["api_id"] in NOTICE_WRITES and isinstance(raw, dict) and raw.get("error_code") == "notice_photo_required":
+                    restore_photo_form(plan, index, result.get("error") or "请上传至少一张现场照片，再确认结束通告。", required=True)
+                    await self._durable_save(actor, plan)
+                    return
                 if result.get("ok") and op["api_id"] == _DRILL_CREATE:
                     result["query_reply"] = "演练模板已保存为草稿，尚未发布。请继续核对模板配置后再发布。"
                 if result.get("ok") and op["api_id"] == _MORNING_GENERATE and isinstance(raw, dict):
@@ -3996,6 +4037,21 @@ class PortalAgent:
     def _refresh_final(self, actor, plan_id):
         with self.assistant._lock:
             current = self.get_plan(actor, plan_id)
+            results = current.get("results") or []
+            last = results[-1] if results else {}
+            missing_photo = str(current.get("error") or "") in {
+                "结束通告前必须至少上传过一张现场照片，可在开始、更新或结束任意一次上传。",
+                "结束通告前必须添加至少一张现场照片。",
+            }
+            # Upgrade pre-submit validation failures only; an accepted job is never replayed.
+            data = last.get("_raw", last.get("data")) or {}
+            if current["status"] == "failed" and missing_photo and last.get("ok") is False and last.get("status") in {400, 403, 422} and not last.get("_task") and isinstance(data, dict) and not data.get("job_id"):
+                from .lighthouse_notice_photos import NOTICE_WRITES, restore_photo_form
+                index = len(results) - 1
+                if current["operations"][index]["api_id"] in NOTICE_WRITES:
+                    current["results"].pop()
+                    restore_photo_form(current, index, current["error"], required=True)
+                    self._save_plan(actor, current)
             public = self.public_plan(current, actor)
             state = self.assistant._state(actor)
             turn = next((turn for turn in state["turns"] if turn.get("operation_id") == current["turn_id"]), None)

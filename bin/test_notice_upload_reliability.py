@@ -211,7 +211,8 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
         native.expand_workbench_action_command.side_effect = lambda payload, **_kw: payload
         with patch.object(backend, "LanPortalStateStore", return_value=PortalRuntime.state_store):
             controller = FastAPIPortalController(host="127.0.0.1", port=18766)
-        with patch.object(PortalRuntime, "service", native), \
+        with patch.object(PortalRuntime.auth_manager, "account_profile", return_value={"modules": ["maintenance"]}), \
+             patch.object(PortalRuntime, "service", native), \
              patch.object(controller, "_current_session", return_value={"user": {"open_id": "fixture", "name": "fixture"}}), \
              patch.object(controller, "_authorized_scope_or_error", return_value="A"), \
              patch.object(controller, "_get_ongoing", return_value=[{"record_id": "rec-existing"}]) as ongoing:

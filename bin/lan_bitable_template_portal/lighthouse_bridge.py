@@ -33,6 +33,10 @@ async def actor_for(controller, runtime, request):
         allowed.update('ABCDE')
     actor = {'id': identity, 'is_admin': runtime.auth_manager.is_admin(session),
         'scopes': sorted(allowed & SCOPES), 'can_manage_settings': True}
+    from .module_access import allowed_modules
+    actor['modules'] = sorted(allowed_modules(runtime.auth_manager, session))
+    if 'assistant' not in actor['modules']:
+        raise AssistantError('当前账号尚未获授灯塔助手权限。', 403)
     actor['name'] = str(user.get('name') or user.get('en_name') or session.get('name') or '').strip()
     actor['employee_no'] = str(user.get('employee_no') or user.get('employee_number') or '').strip()
     actor['role_label'] = '管理员' if actor['is_admin'] else '楼栋值班账号' if identity in BUILDING_OPEN_ID_MAP.values() else '普通账号'
@@ -92,6 +96,8 @@ class PortalAuthority:
             raise AssistantError('原登录授权已失效，未重新提交业务。', 403)
         current = await actor_for(self.controller, self.runtime, context['request'])
         prior = context['actor']
+        if set(prior.get('modules', [])) - set(current.get('modules', [])):
+            raise AssistantError('功能权限已变化，请重新操作。', 403)
         if current['id'] != prior['id'] or set(prior['scopes']) - set(current['scopes']) or prior['is_admin'] and not current['is_admin']:
             raise AssistantError('登录身份或权限已变化，请重新操作。', 403)
         if (prior.get('learning_person_id') and current.get('learning_person_id')
@@ -99,6 +105,7 @@ class PortalAuthority:
             raise AssistantError('学练人员身份已变化，请重新操作。', 403)
         # A long-running turn cannot gain new scopes without a fresh user request.
         current['scopes'] = list(prior['scopes'])
+        current['modules'] = list(prior.get('modules', []))
         current['learning_scopes'] = sorted(set(current['learning_scopes']) & set(prior['learning_scopes']))
         return context, current
 
@@ -140,6 +147,10 @@ class PortalAuthority:
         if not isinstance(operation, dict):
             raise AssistantError('业务操作参数无效。')
         descriptor = catalog.get(operation.get('api_id', ''))
+        from .module_access import required_modules
+        needed = required_modules(descriptor['path'], (operation.get('body') or {}).get('work_type') or (operation.get('params') or {}).get('work_type', ''))
+        if needed and not needed & set(actor.get('modules', [])):
+            raise AssistantError('当前账号尚未获授该功能权限。', 403)
         if descriptor['read_only'] and re.search(r'people|signature|personnel|recipients|customer|contract|/plan-convergence/|/files|download|export', operation.get('api_id', ''), re.I):
             consent = await asyncio.to_thread(self.read_consent.require, actor, 'invoke', operation,
                 descriptor.get('group', '') + '：' + descriptor.get('name', '读取受保护业务资料'),
@@ -190,6 +201,8 @@ class PortalAuthority:
                 ','.join(scoped['scopes']), result['total_characters'])
             return result
         if action in {'table_catalog', 'table_records', 'staff_count'}:
+            if 'links' not in actor.get('modules', []):
+                raise AssistantError('当前账号尚未获授多维表导航与查询权限。', 403)
             if self.tables is None:
                 from .assistant_tables import AssistantTables
                 self.tables = AssistantTables(self.runtime.service, self.runtime.state_store)
@@ -238,8 +251,13 @@ class PortalAuthority:
             if consent:
                 raise AssistantError(consent['message'], 409)
             hits, warnings = await asyncio.to_thread(LocalAssistantSources(self.runtime.state_store), payload.get('question', ''), scoped)
+            from .module_access import visible_url
+            hits = [hit for hit in hits if visible_url(actor.get('modules', []), hit.get('url', ''))]
             return {'hits': hits, 'warnings': warnings}
         if action == 'cached':
+            modules = {'events': {'event'}, 'orders': {'maintenance', 'polling', 'adjust'}, 'mops': {'engineer_mop'}}.get(payload.get('kind', ''), set())
+            if not modules & set(actor.get('modules', [])):
+                raise AssistantError('当前账号尚未获授该业务模块权限。', 403)
             from openclaw_service.assistant.lighthouse_pending import cached_items
             scoped = self.narrowed(actor, payload.get('scopes'))
             return await asyncio.to_thread(cached_items, payload.get('kind', ''), scoped['scopes'], self.runtime, allowed=actor['scopes'])
@@ -248,14 +266,20 @@ class PortalAuthority:
         if not isinstance(query, dict):
             raise AssistantError('查询参数无效。')
         if action == 'question_bank':
+            if 'learning' not in actor.get('modules', []):
+                raise AssistantError('当前账号尚未获授画像学练权限。', 403)
             return await asyncio.to_thread(question_bank, getattr(self.runtime, 'learning_service', None), actor, query)
         if action == 'question_material':
+            if 'learning' not in actor.get('modules', []):
+                raise AssistantError('当前账号尚未获授画像学练权限。', 403)
             consent = await asyncio.to_thread(self.read_consent.require, actor, action, payload,
                 '读取原权限内的题库附件资料', getattr(context['request'].state, 'feishu_question', ''))
             if consent:
                 raise AssistantError(consent['message'], 409)
             return await asyncio.to_thread(question_material_file, getattr(self.runtime, 'learning_service', None), actor, query)
         if action == 'work_orders':
+            if not set(actor.get('modules', [])) & {'maintenance', 'polling', 'adjust'}:
+                raise AssistantError('当前账号尚未获授工单所属功能权限。', 403)
             return await asyncio.to_thread(work_order_records, self.runtime.state_store, actor, query)
         raise AssistantError('业务桥入口不存在。', 404)
 

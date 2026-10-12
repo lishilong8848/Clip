@@ -55,6 +55,10 @@ class FakeBot:
         self.plan = None              # the plan the test believes is current
         self.save_override = None     # optional result for a save PATCH
         self.options_result = None    # result for plans/{id}/options
+        self.tracked = []
+
+    async def schedule_plan_status(self, message, plan, conversation, actor_id):
+        self.tracked.append((message, plan, conversation, actor_id))
 
     async def _call(self, request, actor, path, body=None, plan_id=None, *, method=None, params=None):
         self.calls.append({

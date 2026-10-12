@@ -41,8 +41,8 @@ def upload_limit(actor, purpose=None):
             raise AssistantError("仅管理员可上传演练模板。", 403)
         return {"purpose": "drill_template", "max_items": 1, "max_bytes": DRILL_TEMPLATE_BYTES,
                 "batch_bytes": MAX_BATCH_BYTES, "extensions": {".xlsx"}, "extract": False}
-    if purpose == "water_photo":
-        return {"purpose": "water_photo", "max_items": 20, "max_bytes": WATER_PHOTO_BYTES,
+    if purpose in {"water_photo", "notice_photo"}:
+        return {"purpose": purpose, "max_items": 20 if purpose == "water_photo" else 10, "max_bytes": WATER_PHOTO_BYTES,
                 "batch_bytes": MAX_BATCH_BYTES, "extensions": IMAGE_EXTENSIONS, "extract": False}
     raise AssistantError("不支持的上传用途。", 400)
 

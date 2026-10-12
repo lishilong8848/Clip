@@ -7,6 +7,7 @@
       :class="{ 'learning-topbar': isLearningPage }"
       v-if="!isWorkbenchLitePage && !signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
       :brand-logo-src="brandLogoSrc"
+      :modules="userModules"
       :header-subtitle="headerSubtitle"
       :auth="auth"
       :is-engineer-mop-page="isEngineerMopPage"
@@ -45,11 +46,19 @@
     </div>
 
     <div ref="pageContent" class="page-content">
+    <section v-if="pageAccessDenied" class="module-denied" role="alert">
+      <h2>没有该功能权限</h2>
+      <p>当前账号未授予「{{ pageAccessDeniedLabel }}」功能，如需使用请在下方申请或联系管理员。</p>
+      <div class="module-denied-actions">
+        <button type="button" @click="navigate('/')">返回首页</button>
+        <button type="button" class="primary" @click="openAdditionalPermissionRequest">申请权限</button>
+      </div>
+    </section>
     <UiTransition name="ui-page" :appear="false">
-    <WorkbenchLitePage v-if="workbenchVisited && auth.loggedIn" v-show="isWorkbenchLitePage" :key="currentOverviewKey" :search="lastWorkbenchSearch" :active="isWorkbenchLitePage" />
+    <WorkbenchLitePage v-if="workbenchVisited && auth.loggedIn && !pageAccessDenied" v-show="isWorkbenchLitePage" :key="currentOverviewKey" :search="lastWorkbenchSearch" :active="isWorkbenchLitePage" />
     </UiTransition>
     <UiTransition name="ui-page" :css="!isDrillPrintPage && !isMorningMeetingPrintPage">
-    <template v-if="!isWorkbenchLitePage">
+    <template v-if="!isWorkbenchLitePage && !pageAccessDenied">
 
     <HistoryMemoryPage
       v-if="isHistoryMemoryPage"
@@ -205,6 +214,7 @@
 
     <ScopeHome
       v-else
+      :modules="userModules"
       :initial-mode="routeParams.get('entry') || ''"
       :scope-options="visibleScopeOptions"
       :overview="scopeOverview"
@@ -231,12 +241,12 @@
     </UiTransition>
     </div>
 
-    <button v-if="isScopeHomeDashboard && !isGuest" type="button" class="home-link-directory" @click="navigate('/link-directory')">
+    <button v-if="isScopeHomeDashboard && !isGuest && hasModule('links')" type="button" class="home-link-directory" @click="navigate('/link-directory')">
       <Library :size="18" aria-hidden="true" />多维表导航
     </button>
 
     <LighthouseAssistant
-      v-if="auth.loggedIn && auth.user?.role !== 'guest'"
+      v-if="auth.loggedIn && !pageAccessDenied && auth.user?.role !== 'guest' && hasModule('assistant')"
       :key="String(auth.user?.open_id || '')"
       :user-name="String(auth.user?.name || '')"
       :user-id="String(auth.user?.open_id || '')"
@@ -253,6 +263,7 @@ import AppTopbar from "./components/AppTopbar.vue";
 import { LighthouseAssistant } from './lighthouseEntry';
 import AsyncPageState from "./components/AsyncPageState.vue";
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, preferredLoginUrl, rememberLoginMethod } from "./api/client";
+import { setModulePermissions } from "./api/modulePermissions";
 import { navigate, navigateHard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
 import { usePageReadRefresh } from './api/usePageReadRefresh';
@@ -422,6 +433,94 @@ const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeP
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const canManageAccounts = computed(() => isAdmin.value || auth.user?.can_manage_accounts === true);
 const isGuest = computed(() => auth.user?.role === 'guest');
+
+// ---- Module-based authorisation ----
+const userModules = computed(() => {
+  const raw = auth.user?.modules;
+  return Array.isArray(raw) ? raw.filter((item: unknown): item is string => typeof item === "string") : [];
+});
+function hasModule(moduleId: string): boolean {
+  if (!moduleId) return true;
+  return userModules.value.includes(moduleId);
+}
+const MODULE_LABELS: Record<string, string> = {
+  maintenance: "维护管理", change: "变更管理", repair: "检修通告管理", polling: "设备轮巡",
+  adjust: "设备调整", power: "上/下电通告", event: "事件管理", engineer_mop: "维护单管理",
+  repair_management: "检修管理", cabinet: "机柜上下电", daily: "每日任务", water: "水耗管理",
+  critical_guard: "重保管理", drills: "演练管理", learning: "画像学练", plan_convergence: "计划收敛审查",
+  signatures: "签名管理", knowledge: "知识库", links: "多维表导航", life_guide: "人生指南",
+  handover: "交接班审核", assistant: "灯塔助手", accounts: "账号与权限",
+};
+function homeEntryModule(entry: string): string {
+  switch (entry) {
+    case "event": return "event";
+    case "maintenance": return "maintenance";
+    case "maintenance_mop": return "engineer_mop";
+    case "change": return "change";
+    case "repair_management": return "repair_management";
+    case "repair": return "repair";
+    case "water": return "water";
+    case "critical_guard": return "critical_guard";
+    case "drill": return "drills";
+    case "learning": return "learning";
+    case "cabinet_power": return "cabinet";
+    case "daily": return "daily";
+    case "power": return "power";
+    case "polling": return "polling";
+    case "adjust": return "adjust";
+    case "handover": return "handover";
+    case "plan_convergence": return "plan_convergence";
+    default: return "";
+  }
+}
+function moduleForCurrentRoute(): string {
+  const path = routePath.value;
+  const entry = String(routeParams.value.get("entry") || "").trim();
+  if (routeParams.value.get("mode") === "events") return "event";
+  if (path === "/") return homeEntryModule(entry);
+  if (path === "/admin/settings" || path === "/admin/history-memory") return "accounts";
+  if (path === "/engineer/mop") return "engineer_mop";
+  if (path === "/repair-management" || path === "/repair-status") return "repair_management";
+  if (path === "/learning") return "learning";
+  if (path === "/plan-convergence") return "plan_convergence";
+  if (path === "/life-guide") return "life_guide";
+  if (path === "/link-directory") return "links";
+  if (path === "/knowledge-base") return "knowledge";
+  if (path === "/water-management") return "water";
+  if (path === "/cabinet-power" || path === "/cabinet-power/batches") return "cabinet";
+  if (path === "/critical-guard") return "critical_guard";
+  if (path === "/drill-management" || path === "/drill-management/print") return "drills";
+  if (path === "/signature-management") return "signatures";
+  if (path === "/signature") return signatureLinkMode.value ? "" : "signatures";
+  if (path === "/daily-tasks" || path === "/daily-tasks/morning-meeting/print") return "daily";
+  if (path === "/workbench-lite") {
+    const workType = String(routeParams.value.get("work_type") || "maintenance").toLowerCase();
+    switch (workType) {
+      case "all": return ["maintenance", "change", "repair", "polling", "adjust", "power"].find(hasModule) || "maintenance";
+      case "change": return "change";
+      case "repair": return "repair";
+      case "power": return "power";
+      case "polling": return "polling";
+      case "adjust": return "adjust";
+      default: return "maintenance";
+    }
+  }
+  return "";
+}
+const pageAccessDenied = computed(() => {
+  if (!auth.loggedIn || authChecking.value) return "";
+  const required = moduleForCurrentRoute();
+  if (!required) return "";
+  return hasModule(required) ? "" : required;
+});
+const pageAccessDeniedLabel = computed(() => MODULE_LABELS[pageAccessDenied.value] || pageAccessDenied.value);
+watch(
+  pageAccessDenied,
+  (denied) => {
+    if (denied) clearOverview();
+  },
+  { flush: "post" },
+);
 watch([isAdmin, () => routeParams.value.get("admin")], ([admin, tab]) => {
   if (admin && (tab === "status" || tab === "permissions" || tab === "handover" || tab === "feishu")) {
     navigate('/admin/settings?tab=' + tab, { replace: true });
@@ -604,6 +703,7 @@ function markAuthExpired(message = "登录已过期，请重新扫码登录。")
   auth.loggedIn = false;
   auth.directoryPending = false;
   auth.user = {};
+  setModulePermissions([]);
   auth.scopeOptions = [];
   clearAuthKeepalive();
   syncText.value = message;
@@ -643,6 +743,7 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     if (auth.directoryWarning) syncText.value = auth.directoryWarning;
     else if (previousDirectoryWarning && syncText.value === previousDirectoryWarning) syncText.value = '请选择功能';
     auth.user = data.user || {};
+    setModulePermissions(Array.isArray(auth.user?.modules) ? auth.user.modules : []);
     if (nextLoggedIn) rememberLoginMethod(auth.user.login_method === 'password' ? 'password' : 'feishu');
     auth.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
     auth.loginUrl = data.login_url || "/api/auth/login";
@@ -956,11 +1057,15 @@ async function confirmPermissionRequest(): Promise<void> {
 function refreshHomeAfterWrite(): void {
   if (auth.loggedIn && routePath.value === '/' && !routeParams.value.get('mode')) void Promise.all([loadOverview(), loadHandoverLinks()]);
 }
+function refreshAuthAfterPermissionChange(): void {
+  if (auth.loggedIn && !isSignaturePage.value) void loadAuthStatus({ silent: true }).catch(() => null);
+}
 
 onMounted(async () => {
   appDisposed = false;
   window.addEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   window.addEventListener('clipflow-business-changed', refreshHomeAfterWrite);
+  window.addEventListener('auth-account-changed', refreshAuthAfterPermissionChange);
   window.addEventListener("popstate", updateLocationRefs);
   window.addEventListener("focus", checkAuthAfterPageReturn);
   document.addEventListener("visibilitychange", handleAuthVisibilityChange);
@@ -991,6 +1096,7 @@ onBeforeUnmount(() => {
   pageAnimation?.cancel();
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   window.removeEventListener('clipflow-business-changed', refreshHomeAfterWrite);
+  window.removeEventListener('auth-account-changed', refreshAuthAfterPermissionChange);
   window.removeEventListener("popstate", updateLocationRefs);
   window.removeEventListener("focus", checkAuthAfterPageReturn);
   document.removeEventListener("visibilitychange", handleAuthVisibilityChange);
@@ -1688,4 +1794,12 @@ select {
 .home-link-directory{position:fixed;left:22px;bottom:18px;z-index:30;display:inline-flex;align-items:center;gap:8px;padding:10px 16px;border:1px solid #cad9ed;border-radius:8px;background:#fff;color:#185cb4;font:inherit;font-size:14px;cursor:pointer;box-shadow:0 3px 12px #244c7c14;transition:background .18s,box-shadow .18s}
 .home-link-directory:hover{background:#edf4ff;box-shadow:0 4px 16px #244c7c24}
 .home-link-directory:focus-visible{outline:3px solid #94bff4;outline-offset:3px}
+.module-denied{width:min(520px,88vw);margin:70px auto;padding:34px 30px;border:1px solid #f3c8c8;border-radius:12px;background:#fff8f8;text-align:center}
+.module-denied h2{margin:0 0 10px;color:#b42318;font-size:20px}
+.module-denied p{margin:0 0 22px;color:#5a6372;font-size:14px;line-height:1.7}
+.module-denied-actions{display:flex;gap:12px;justify-content:center}
+.module-denied-actions button{padding:9px 18px;border:1px solid #cad9ed;border-radius:8px;background:#fff;color:#185cb4;font:inherit;font-size:14px;cursor:pointer}
+.module-denied-actions button.primary{background:#185cb4;border-color:#185cb4;color:#fff}
+.module-denied-actions button:hover{filter:brightness(.97)}
+.module-denied-actions button:focus-visible{outline:3px solid #94bff4;outline-offset:3px}
 </style>

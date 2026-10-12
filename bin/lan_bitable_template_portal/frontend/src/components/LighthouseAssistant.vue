@@ -26,15 +26,15 @@
     >
       <UiTransition name="ui-popover" @before-leave="pinClosingPanel" @before-enter="unpinPanel" @leave-cancelled="unpinPanel">
       <section v-if="open" class="assistant-shell" aria-label="灯塔助手" role="dialog" aria-labelledby="assistant-title">
-      <div v-if="desktopNotices" id="assistant-notice-sidebar" class="assistant-sidebar" :class="{ expanded: sidebarVisible }" :inert="!sidebarVisible || undefined" :aria-hidden="!sidebarVisible">
+      <div v-if="desktopNotices && hasSidebarAccess" id="assistant-notice-sidebar" class="assistant-sidebar" :class="{ expanded: sidebarVisible }" :inert="!sidebarVisible || undefined" :aria-hidden="!sidebarVisible">
         <div class="sidebar-tabs" role="tablist" aria-label="侧边栏内容">
-          <button type="button" role="tab" :aria-selected="sidebarTab === 'notices'" :class="{ active: sidebarTab === 'notices' }" @click="selectSidebarTab('notices')">通告待办</button>
-          <button type="button" role="tab" :aria-selected="sidebarTab === 'knowledge'" :class="{ active: sidebarTab === 'knowledge' }" @click="selectSidebarTab('knowledge')">知识库</button>
+          <button v-if="hasNoticeAccess" type="button" role="tab" :aria-selected="sidebarTab === 'notices'" :class="{ active: sidebarTab === 'notices' }" @click="selectSidebarTab('notices')">通告待办</button>
+          <button v-if="canUseModule('knowledge')" type="button" role="tab" :aria-selected="sidebarTab === 'knowledge'" :class="{ active: sidebarTab === 'knowledge' }" @click="selectSidebarTab('knowledge')">知识库</button>
         </div>
-        <div v-if="sidebarTab === 'notices'" class="sidebar-body">
+        <div v-if="sidebarTab === 'notices' && hasNoticeAccess" class="sidebar-body">
           <LighthouseNoticePanel :key="userId" :user-id="userId" :active="sidebarVisible" @availability="noticeAvailable = $event" @edition="onNoticeEdition" />
         </div>
-        <div v-else class="sidebar-body">
+        <div v-else-if="canUseModule('knowledge')" class="sidebar-body">
           <LighthouseKnowledge :active="sidebarVisible" />
         </div>
       </div>
@@ -49,7 +49,7 @@
           @lostpointercapture="onDragCaptureLost"
         >
           <div class="panel-title">
-            <button v-if="desktopNotices" class="icon sidebar-toggle" :title="sidebarVisible ? '收起侧边栏' : '展开侧边栏'" aria-label="侧边栏（通告待办 / 知识库）" :aria-expanded="sidebarVisible" aria-controls="assistant-notice-sidebar" @click="toggleSidebar"><PanelLeftClose v-if="sidebarVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
+            <button v-if="desktopNotices && hasSidebarAccess" class="icon sidebar-toggle" :title="sidebarVisible ? '收起侧边栏' : '展开侧边栏'" aria-label="侧边栏（通告待办 / 知识库）" :aria-expanded="sidebarVisible" aria-controls="assistant-notice-sidebar" @click="toggleSidebar"><PanelLeftClose v-if="sidebarVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
             <span class="assistant-mark"><Bot :size="20" /></span><div class="panel-heading"><h2 id="assistant-title">灯塔助手</h2>
             <span class="header-status" :class="{ active: loading || busy || activePlans.length, warning: !loading && !!error, awaiting: headerStatus.startsWith('待你') }" role="status">{{ headerStatus }}</span></div>
           </div>
@@ -338,6 +338,7 @@ import type { Chat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
 import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, ListChecks, Loader2, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Wrench, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
+import { canUseModule } from '../api/modulePermissions';
 import { repairDeviceDependentPatch, repairDraftInputValue } from '../repairManagementUtils';
 import { navigate } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -678,9 +679,15 @@ const artifactWidth = computed(() => Math.min(520, Math.max(280, (panelWidthLimi
 function openArtifact(file: Dict): void { if (safeAttachmentUrl(file.url)) artifactFile.value = file; }
 watch(() => [props.userId, state.value.conversation_id], () => { artifactFile.value = null; });
 const sidebarTab = ref<'notices' | 'knowledge'>('notices');
+const hasNoticeAccess = computed(() => ['maintenance', 'change', 'repair', 'polling', 'adjust', 'power'].some(canUseModule));
+const hasSidebarAccess = computed(() => hasNoticeAccess.value || canUseModule('knowledge'));
+watch([hasNoticeAccess, () => canUseModule('knowledge')], () => {
+  if (!hasNoticeAccess.value) sidebarTab.value = 'knowledge';
+  else if (!canUseModule('knowledge')) sidebarTab.value = 'notices';
+}, { immediate: true });
 const desktopNotices = ref(window.innerWidth >= 1000);
 let noticeEdition = '';
-const sidebarVisible = computed(() => !artifactFile.value && desktopNotices.value && sidebarDockOpen.value && (noticeAvailable.value || sidebarUserOpened.value || sidebarTab.value === 'knowledge'));
+const sidebarVisible = computed(() => hasSidebarAccess.value && !artifactFile.value && desktopNotices.value && sidebarDockOpen.value && (noticeAvailable.value || sidebarUserOpened.value || sidebarTab.value === 'knowledge'));
 const noticeWidth = computed(() => Math.min(360, Math.max(240, Math.floor((panelWidthLimit.value || window.innerWidth - 48) * .4))));
 const sideWidth = computed(() => artifactFile.value ? artifactWidth.value : sidebarVisible.value ? noticeWidth.value : 0);
 const conversationWidthLimit = computed(() => Math.max(1, (panelWidthLimit.value || window.innerWidth - 50) - sideWidth.value - 2));
@@ -1166,7 +1173,7 @@ async function uploadFile(file: File, purpose = ''): Promise<Dict> {
   if (purpose === 'drill_template' && !file.name.toLowerCase().endsWith('.xlsx')) throw new Error('演练模板仅支持 .xlsx 文件');
   if (purpose === 'water_photo' && !file.type.startsWith('image/')) throw new Error('水表照片仅支持图片');
   const form = new FormData(); form.append('files', file);
-  const result = await requestJson('/api/assistant/files' + (['drill_template', 'water_photo'].includes(purpose) ? '?purpose=' + purpose : ''), { method: 'POST', body: form, timeoutMs: 180000 });
+  const result = await requestJson('/api/assistant/files' + (['drill_template', 'water_photo', 'notice_photo'].includes(purpose) ? '?purpose=' + purpose : ''), { method: 'POST', body: form, timeoutMs: 180000 });
   if (!result.files?.[0]?.id) throw new Error('文件上传未完成');
   return result.files[0];
 }
@@ -1208,12 +1215,13 @@ async function addPlanFiles(files: File[], plan: Dict, field: Dict): Promise<voi
   if (isPlanBusy(plan) || disposed) return;
   if (!files.length) return;
   const key = plan.id + ':' + field.name, limit = field.maxItems ?? 10;
-  const purpose = field.native_water_photos ? 'water_photo' : field.purpose === 'drill_template' ? 'drill_template' : '', maxMiB = purpose === 'drill_template' ? 64 : purpose === 'water_photo' ? 8 : 20;
+  const purpose = field.native_notice_photos ? 'notice_photo' : field.native_water_photos ? 'water_photo' : field.purpose === 'drill_template' ? 'drill_template' : '', maxMiB = purpose === 'drill_template' ? 64 : ['water_photo', 'notice_photo'].includes(purpose) ? 8 : 20;
   const maxBytes = Math.min(Number(field.max_bytes) || maxMiB * 1024 * 1024, maxMiB * 1024 * 1024);
   const existing = limit === 1 ? [] : planChoices(plan, field);
   if (existing.length + files.length > limit) { planErrors[plan.id] = `此处最多选择 ${limit} 个文件`; return; }
   if (files.some(file => !file.size || file.size > maxBytes) || files.reduce((n, file) => n + file.size, 0) + existing.reduce<number>((n, id) => n + (planFiles[id]?.size || 0), 0) > 100 * 1024 * 1024) { planErrors[plan.id] = `单份须非空，最多${maxBytes / 1024 / 1024}MiB、合计最多100MiB`; return; }
   if (field.native_water_photos && files.some(file => !file.type.startsWith('image/'))) { planErrors[plan.id] = '水表照片仅支持图片'; return; }
+  if (field.native_notice_photos && files.some(file => !file.type.startsWith('image/'))) { planErrors[plan.id] = '通告照片仅支持图片'; return; }
   planBusy[plan.id] = true;
   delete planErrors[plan.id];
   const progress = planUploadProgress[plan.id] = { key, name: '', done: 0, total: files.length };

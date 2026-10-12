@@ -383,6 +383,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
             _auth_required_response=lambda: JSONResponse({"ok": False}, status_code=401),
             _request_base_url=lambda request: str(request.base_url).rstrip("/"))
         runtime = SimpleNamespace(state_store=self.store, auth_manager=SimpleNamespace(
+            account_profile=lambda _: {"modules": ["assistant"]},
             is_admin=lambda s: s.get("role") == "admin", session_scopes=lambda s: s["allowed_scopes"]))
         app = FastAPI()
         install_lighthouse_routes(app, controller, runtime)
@@ -424,6 +425,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
             _auth_required_response=lambda: JSONResponse({"ok": False}, status_code=401),
             _request_base_url=lambda request: str(request.base_url).rstrip("/"))
         runtime = SimpleNamespace(state_store=self.store, auth_manager=SimpleNamespace(
+            account_profile=lambda _: {"modules": ["assistant"]},
             is_admin=lambda s: False, session_scopes=lambda s: s["allowed_scopes"]))
         app = FastAPI()
         install_lighthouse_routes(app, controller, runtime)

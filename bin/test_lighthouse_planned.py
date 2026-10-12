@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -119,7 +119,7 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
             if method == 'PATCH':
                 return self.agent.amend(actor, identity, body)
             return self.agent.public_plan(self.agent.get_plan(actor, identity), actor)
-        bot = SimpleNamespace(runtime=SimpleNamespace(state_store=self.store), _call=call)
+        bot = SimpleNamespace(runtime=SimpleNamespace(state_store=self.store), _call=call, schedule_plan_status=AsyncMock())
         message = {'message_id': 'om_origin', 'chat_id': 'oc_group', 'union_id': 'on_person', 'chat_type': 'group'}
         conversation = self.assistant.conversation(self.actor)
         prepared = await cards.prepare_card(bot, message, self.actor, conversation, plan)

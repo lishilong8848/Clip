@@ -22,7 +22,7 @@ class LearningBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.controller = SimpleNamespace(_current_session=lambda _: self.session)
         self.runtime = SimpleNamespace(
             state_store=None,
-            auth_manager=SimpleNamespace(session_scopes=lambda _: ['A', 'H'], is_admin=lambda _: False),
+            auth_manager=SimpleNamespace(session_scopes=lambda _: ['A', 'H'], is_admin=lambda _: False, account_profile=lambda _: {'modules': ['assistant', 'learning']}),
             learning_service=SimpleNamespace(resolve_self=self.resolve))
         self.request = Request({'type': 'http', 'headers': [], 'state': {}})
 

@@ -45,6 +45,27 @@ _NAMESPACE = "feishu_notice_cards"
 _ALLOWED_KINDS = frozenset({"notice_form", "notice_card"})
 _ALLOWED_ACTIONS = frozenset({"save", "confirm", "edit", "cancel", "adopt", "load-directory", "add-row", "remove-row"})
 
+_STATUS_PLAIN = {
+    "draft": "草稿",
+    "editing": "编辑中",
+    "needs_input": "待补充内容",
+    "awaiting_confirmation": "待确认",
+    "awaiting_second_confirmation": "待再次确认",
+    "running": "处理中",
+    "submitted": "已提交，处理中",
+    "accepted": "已受理",
+    "completed": "已完成",
+    "failed": "处理失败",
+    "cancelled": "已取消",
+    "superseded": "已被新操作替代",
+}
+
+
+def _status_plain(plan):
+    """User-facing label for a plan state. Never leaks kernel status terms (#5/#7)."""
+    raw = str(plan.get("status") or "")
+    return _STATUS_PLAIN.get(raw, "处理中")
+
 _SOP_LEAF_LABELS = {
     "exempt": "不使用工单",
     "scope": "楼栋",
@@ -580,9 +601,8 @@ def _submit_button(ticket):
 
 def _intro_markdown(plan, editable):
     title = safe_text(str(plan.get("title") or "业务操作"), limit=120)
-    status = plan.get("status")
     version = plan.get("version")
-    line = "**" + title + "**（版本 " + str(version) + "，状态：" + str(status) + "）"
+    line = "**" + title + "**（版本 " + str(version) + "，状态：" + _status_plain(plan) + "）"
     if editable:
         line += "\n请在卡片中修改可编辑字段，然后点击【保存修改】。保存仅更新操作计划，不会执行任何业务。"
     else:
@@ -659,6 +679,61 @@ def _array_buttons(plan, ticket):
     return buttons
 
 
+def _photos_markdown(field):
+    """Renderer for native_notice_photos fields: show selected photo names and
+    explicit sending instructions. Never fabricates a fake file-upload control
+    and never leaks the internal field name or an empty maxBytes hint (audit #7)."""
+    kind = str(field.get("native_notice_photos"))
+    label = safe_text(str(field.get("label") or ""), limit=120) or ("现场照片" if kind == "site" else "资料截图")
+    names = []
+    for item in field.get("selected_files") or []:
+        if isinstance(item, dict):
+            names.append(safe_text(str(item.get("name") or "照片"), limit=120))
+        elif item:
+            names.append(safe_text(str(item), limit=120))
+    max_items = int(field.get("maxItems") or 1)
+    lines = ["## " + label]
+    if names:
+        lines.append("已选照片：**" + ("、".join(names[:max_items])) + "**"
+                     + ((" 等共 " + str(len(names)) + " 张") if len(names) > max_items else ""))
+    else:
+        lines.append("（尚未选择照片）")
+    lines.append("> 飞书卡片不能直接上传文件控件，请把照片图片直接发送到本会话补充"
+                 "（单张 ≤8MiB，最多 " + str(max_items) + " 张）。"
+                 "若同时有多个待补充照片的通告/类别，请先回复“补照片计划 N”指定要补哪一项。")
+    return {"tag": "markdown", "content": "\n".join(lines)}
+
+
+def _photo_guidance_text(plan):
+    """Short text hint for a needs_input plan that has pending notice photos.
+    A photo field is "missing" only when it is required and empty (at least one
+    required); optional site/alias fields are never reported as missing (audit #1)."""
+    missing, shown, optional = [], [], []
+    for field in (plan.get("fields") or []):
+        if not field.get("native_notice_photos"):
+            continue
+        kind = str(field.get("native_notice_photos"))
+        label = safe_text(str(field.get("label") or ""), limit=60) or ("现场照片" if kind == "site" else "资料截图")
+        count = len(field.get("value") or field.get("selected_files") or [])
+        required = bool(field.get("required"))
+        if count == 0 and required:
+            missing.append(label)
+        elif count == 0:
+            optional.append(label + "（可选）")
+        else:
+            shown.append(f"{label}（已选 {count} 张）")
+    parts = []
+    if shown:
+        parts.append("已选：" + "、".join(shown))
+    if missing:
+        parts.append("缺少：" + "、".join(missing))
+    if optional:
+        parts.append("可选未填：" + "、".join(optional))
+    if not parts:
+        return ""
+    return "照片状态：" + "；".join(parts) + "。请直接发送照片图片到本会话补充。"
+
+
 def _build_editable_card(plan, ticket):
     title = safe_text(str(plan.get("title") or "业务操作"), limit=120)
     kind = "notice_card"
@@ -668,6 +743,15 @@ def _build_editable_card(plan, ticket):
     editable_any = False
     for field in plan.get("fields") or []:
         name = str(field.get("name") or "")
+        if field.get("native_notice_photos"):
+            form_children.append(_photos_markdown(field))
+            # Photo info is sent as direct chat images, not a Feishu input control,
+            # so it never appears in form_value.  A photo-only needs_input card must
+            # still render its Save button so the operator can proceed after sending
+            # the photos; _handle_save preserves the selected files.
+            needs_form = True
+            editable_any = True
+            continue
         if notice_forms.is_native_notice(field):
             if notice_forms.field_protected(field):
                 form_children.append({"tag": "markdown", "content": "## " + safe_text(field.get("label") or name, limit=120)
@@ -884,6 +968,12 @@ def _runs_preview(runs):
 def _preview_field_lines(field):
     name = str(field.get("name") or "")
     label = safe_text(str(field.get("label") or name), limit=60)
+    if field.get("native_notice_photos"):
+        names = [safe_text(str(item.get("name") or "照片"), limit=60)
+                 if isinstance(item, dict) else safe_text(str(item), limit=60)
+                 for item in (field.get("selected_files") or field.get("value") or [])]
+        return [f"{label}：" + (("、".join(names)) if names else "（未选）")
+                + "（发送照片补充，非上传控件）"]
     if field.get("hidden"):
         return []
     if not notice_forms.is_native_notice(field) and (field.get("type") in {"object", "array"} or field.get("person_picker")):
@@ -934,7 +1024,7 @@ def _preview_fields_markdown(plan):
 def _preview_markdown(plan, action):
     status = plan.get("status")
     title = safe_text(str(plan.get("title") or "业务操作"), limit=120)
-    lines = ["**" + title + "**（版本 " + str(plan.get("version")) + "，状态：" + str(status) + "）"]
+    lines = ["**" + title + "**（版本 " + str(plan.get("version")) + "，状态：" + _status_plain(plan) + "）"]
     planned = plan.get("planned_notice") or {}
     text = planned.get("text")
     if text:
@@ -960,7 +1050,7 @@ def _build_status_card(plan, ticket):
     """Plain status card (terminal statuses: no execute button)."""
     status = plan.get("status")
     title = safe_text(str(plan.get("title") or "业务操作"), limit=120)
-    lines = ["**" + title + "**（版本 " + str(plan.get("version")) + "，状态：" + str(status) + "）"]
+    lines = ["**" + title + "**（版本 " + str(plan.get("version")) + "，状态：" + _status_plain(plan) + "）"]
     if status == "completed":
         lines.append("该操作已完成，无需卡片操作。")
     elif status in {"running", "submitted"}:
@@ -1091,6 +1181,23 @@ async def _handle_save(bot, message, request, actor, conversation, plan, ticket)
         values = _build_values(plan.get("fields") or [], card.get("form_value") or {})
     except AssistantError as exc:
         return _reply_text(str(exc), error=str(exc))
+    # Photo fields are NOT Feishu input controls and therefore never appear in
+    # form_value.  Preserve their currently selected files on every save so a
+    # photo-only card can be saved (and the selection is never silently dropped).
+    for field in plan.get("fields") or []:
+        if not field.get("native_notice_photos"):
+            continue
+        selected = field.get("value") or field.get("selected_files") or []
+        ids = []
+        for item in selected:
+            if isinstance(item, dict):
+                fid = item.get("file_id") or item.get("id")
+                if fid:
+                    ids.append(fid)
+            elif item not in (None, ""):
+                ids.append(item)
+        if ids:
+            values[str(field.get("name") or "")] = ids
     if not values:
         return _reply_text("没有需要保存的字段变更，请修改后再保存。", error="empty_values")
     try:
@@ -1140,9 +1247,33 @@ async def _handle_confirm(bot, message, request, actor, conversation, plan, tick
         preview = build_preview_card(result, new_ticket, just_saved=False)
         return _reply_text("此操作风险较高，已进入再次确认。请核对后在卡片中点击【再次确认执行】。",
                            card=preview, status="promoted", plan=result, ticket=new_ticket)
+    final_status = (result or {}).get("status")
     await asyncio.to_thread(_consume_ticket, bot, ticket)
+    # The kernel returns the plan to needs_input when notice photos are missing;
+    # render a fresh form with explicit photo guidance (request #1 / #3) instead
+    # of always answering "已确认并交由原业务流程执行".
+    if final_status == "needs_input" or (result or {}).get("missing_fields"):
+        editable = await prepare_card(bot, message, actor, conversation, result or plan)
+        extra = _photo_guidance_text(result or plan)
+        text = ("确认未完成：内核已返回待补充填写（可能缺少现场照片），你的填写已保留。"
+                + (("\n" + extra) if extra else "")
+                + "\n请在卡片中补充后重新点【保存】并确认，系统不会重复提交业务。")
+        return _reply_text(text, card=editable["card"], status="needs_more",
+                           plan=result, ticket=editable["ticket"])
+    if final_status in {"running", "submitted"}:
+        await bot.schedule_plan_status(message, result, conversation, (actor or {}).get("id"))
+        text = ("已确认并提交原业务流程，正在原流程中处理。结果将稍后自动推送，"
+                "也可发送“操作状态”查询，不会重复提交。")
+        if (result or {}).get("error"):
+            text = "已确认并交由原业务流程执行。原流程提示：" + safe_text(str(result.get("error")), limit=300)
+        return _reply_text(text, card=None, status="confirmed", plan=result)
+    if final_status == "completed":
+        return _reply_text("操作已确认并完成。", card=None, status="completed", plan=result)
+    if final_status == "failed":
+        return _reply_text("已确认，但原流程执行失败：" + safe_text(str((result or {}).get("error") or "请查看原任务"), limit=300),
+                           card=None, status="failed", plan=result)
     return _reply_text((result or {}).get("error") or "已确认并交由原业务流程执行。",
-                       card=None, status="confirmed", plan=result)
+                       card=None, status=final_status or "confirmed", plan=result)
 
 
 async def _handle_edit(bot, message, request, actor, conversation, plan, ticket):

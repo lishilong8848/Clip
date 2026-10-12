@@ -753,6 +753,10 @@ class FastAPIPortalController:
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
+            from lan_bitable_template_portal.module_access import module_denial
+            denial = await module_denial(request, self, PortalRuntime)
+            if denial is not None:
+                return denial
             from lan_bitable_template_portal.account_policy import business_delete_denial
             denial = await business_delete_denial(request, self, PortalRuntime)
             if denial is not None:
@@ -925,10 +929,12 @@ class FastAPIPortalController:
                 )
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 payload_task = asyncio.to_thread(
+                    # Restrict before pagination, including the native iframe page.
                     self._cached_service_payload,
                     (
                         "workbench",
                         open_id,
+                        tuple(sorted(PortalRuntime.auth_manager.account_profile(open_id).get("modules", []))),
                         scope,
                         month,
                         specialty,
@@ -954,6 +960,7 @@ class FastAPIPortalController:
                         ongoing_page=ongoing_page,
                         ongoing_page_size=ONGOING_PAGE_SIZE,
                         ongoing_items_authoritative=True,
+                        allowed_work_types=set(PortalRuntime.auth_manager.account_profile(open_id).get("modules", [])),
                     ),
                 )
                 stage_started_at = time.perf_counter()
@@ -1005,6 +1012,7 @@ class FastAPIPortalController:
                 )
                 render_session = dict(session)
                 render_session["can_delete_business"] = PortalRuntime.auth_manager.account_profile(open_id)["can_delete_business"]
+                render_session["allowed_modules"] = PortalRuntime.auth_manager.account_profile(open_id).get("modules", [])
                 render_session["can_manage_change_confirmations"] = bool(
                     PortalRuntime.auth_manager.is_admin(session)
                     or open_id == str(BUILDING_OPEN_ID_MAP.get("H") or "")
@@ -1177,6 +1185,8 @@ class FastAPIPortalController:
                     parsed_work_type = str(work_type or "maintenance")
                 if parsed_work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     parsed_work_type = "maintenance"
+                from lan_bitable_template_portal.module_access import require_module
+                require_module(PortalRuntime.auth_manager, session, parsed_work_type)
                 ongoing = await asyncio.to_thread(
                     self._get_ongoing,
                     checked_scope,
@@ -1201,7 +1211,7 @@ class FastAPIPortalController:
                 notice_undos: list[dict[str, Any]] = []
                 html_body = render_workbench_lite(
                     payload=payload if isinstance(payload, dict) else {},
-                    session={**session, "can_delete_business": PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))["can_delete_business"]},
+                    session={**session, "can_delete_business": PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))["can_delete_business"], "allowed_modules": PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id")).get("modules", [])},
                     scope=checked_scope,
                     work_type=parsed_work_type,
                     month=month or _current_month_label(),
@@ -2223,6 +2233,8 @@ class FastAPIPortalController:
                 )
                 data = {**data, "scope_options": allowed_options}
                 data = PortalRuntime.auth_manager.filter_scope_overview(data, session)
+                from lan_bitable_template_portal.module_access import allowed_modules, filter_overview
+                data = filter_overview(data, allowed_modules(PortalRuntime.auth_manager, session))
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
@@ -2427,6 +2439,8 @@ class FastAPIPortalController:
                 }
                 open_id = str((session.get("user") or {}).get("open_id") or "")
                 payload_key = "records" if request.url.path == "/api/records" else "workbench"
+                from lan_bitable_template_portal.module_access import allowed_modules, NOTICE_MODULES
+                granted_work_types = allowed_modules(PortalRuntime.auth_manager, session) & NOTICE_MODULES
                 if payload_key == "records":
                     work_type = ""
                     sections = ()
@@ -2435,6 +2449,7 @@ class FastAPIPortalController:
                     (
                         payload_key,
                         open_id,
+                        tuple(sorted(granted_work_types)),
                         scope,
                         month,
                         specialty,
@@ -2460,6 +2475,7 @@ class FastAPIPortalController:
                         ongoing_page=ongoing_page,
                         ongoing_page_size=ongoing_page_size,
                         ongoing_items_authoritative=True,
+                        **({"allowed_work_types": granted_work_types} if granted_work_types != NOTICE_MODULES else {}),
                     ),
                 )
                 if payload_key == "workbench" and prefetch_only:
@@ -2505,6 +2521,8 @@ class FastAPIPortalController:
                                 or {}
                             )
                     payload = filtered_payload
+                from lan_bitable_template_portal.module_access import allowed_modules, filter_workbench
+                payload = filter_workbench(payload, allowed_modules(PortalRuntime.auth_manager, session))
                 return self._json_ok(request, session, payload)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
@@ -10650,6 +10668,9 @@ class FastAPIPortalController:
         )
 
     def _json_ok(self, request: Request, session: dict, payload: dict):
+        if request.url.path in {"/api/bootstrap", "/api/workbench/closed", "/api/history-summary"}:
+            from lan_bitable_template_portal.module_access import allowed_modules, filter_workbench
+            payload = filter_workbench(payload, allowed_modules(PortalRuntime.auth_manager, session))
         data = PortalRuntime._with_runtime_warnings(payload if isinstance(payload, dict) else {})
         return self._json_response(
             request,
@@ -11922,6 +11943,10 @@ class FastAPIPortalController:
 
     @staticmethod
     def _job_visible_to_session(job: dict, session: dict) -> bool:
+        from lan_bitable_template_portal.module_access import allowed_modules
+        request_payload = job.get("request") if isinstance(job.get("request"), dict) else {}
+        if str(request_payload.get("work_type") or "maintenance") not in allowed_modules(PortalRuntime.auth_manager, session):
+            return False
         if PortalRuntime.auth_manager.is_admin(session):
             return True
         open_id = str((session.get("user") or {}).get("open_id") or "")

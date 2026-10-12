@@ -66,6 +66,10 @@ class FakeAuth:
     def _open_id_explicitly_disabled(self, oid):
         return oid in self.disabled
 
+    def account_profile(self, oid):
+        from lan_bitable_template_portal.module_access import MODULE_IDS
+        return {"modules": [] if oid in self.disabled else list(MODULE_IDS)}
+
     def scope_allowed(self, session, scope):
         if not isinstance(session, dict):
             return False
@@ -702,7 +706,8 @@ class AuthReevalTests(PanelTestBase):
         self.addCleanup(manager2.close)
         manager2.tick()
         after = manager2.public_run(identity)
-        self.assertEqual(after["items"][0]["phase"], "failed")
+        self.assertEqual(after["items"], [])
+        self.assertEqual(self.store.get_document(panel.NS, identity)["items"][0]["phase"], "failed")
         self.assertEqual(self.native.await_count, 0)
 
 

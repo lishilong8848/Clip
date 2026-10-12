@@ -53,6 +53,7 @@ class DefaultEngineTests(unittest.TestCase):
                 controller = SimpleNamespace(_current_session=lambda _: session,
                     _request_base_url=lambda request: str(request.base_url).rstrip("/"), bound_port=19004, preferred_port=19004)
                 runtime = SimpleNamespace(state_store=store, auth_manager=SimpleNamespace(
+                    account_profile=lambda _: {'modules': ['assistant']},
                     session_scopes=lambda value: value["allowed_scopes"], is_admin=lambda _: False))
                 app = FastAPI()
                 engine = Mock(max_parallel=2, close=AsyncMock())

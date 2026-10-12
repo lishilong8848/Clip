@@ -8,6 +8,7 @@ after explicit user preview + confirmation.
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -62,6 +63,7 @@ def brief_field_keys(item):
     draft = item.get("draft") or {}
     return [f["key"] for f in item.get("fields") or []
             if f["key"] == "notice_action" or (not f.get("readonly") and
+               f.get("kind") != "photos" and
                (draft.get(f["key"]) is None or not str(draft[f["key"]]).strip()))]
 
 
@@ -132,6 +134,46 @@ def _migrate_legacy_notice_sop(doc):
                 "notice_sop" if str(key).strip() == "work_order_choice" else key
                 for key in item["brief_fields"]
             ]
+
+
+# The six notice work types the assistant panel can operate on.
+NOTICE_MODULES = frozenset({"maintenance", "change", "repair", "polling", "adjust", "power"})
+
+
+def _migrate_legacy_notice_photos(doc):
+    """Backfill missing optional photo field descriptors into edit/failed drafts.
+
+    Only works against ``edit``/``failed`` documents so confirm/running/done
+    ``payload`` objects are never touched. Standalone records (fresh builds) get
+    the descriptors from ``fields_for``; this only covers records persisted
+    before the photo feature shipped. Existing fields are preserved verbatim.
+    """
+    if not isinstance(doc, dict) or str(doc.get("state") or "") not in ("edit", "failed"):
+        return
+    from .notice_panel_data import photo_fields_for
+    for item in doc.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        fields = item.get("fields") or []
+        field_keys = {f.get("key") for f in fields if isinstance(f, dict)}
+        draft = item.get("draft") or {}
+        work_type = str(draft.get("work_type") or "").strip()
+        action = str(item.get("action") or draft.get("action") or "").strip()
+        # Only work types the native panel builds are eligible.
+        if work_type not in NOTICE_MODULES:
+            continue
+        missing = [f for f in photo_fields_for(work_type, action)
+                   if f["key"] not in field_keys]
+        if missing and isinstance(fields, list):
+            fields.extend(missing)
+            item["fields"] = fields
+        if not isinstance(draft, dict):
+            continue
+        draft.setdefault("extra_images", [])
+        if work_type == "change":
+            draft.setdefault("ali_confirmation_images", [])
+            if not isinstance(draft["ali_confirmation_images"], list):
+                draft["ali_confirmation_images"] = []
 
 
 class PanelVersionConflict(PortalError):
@@ -211,6 +253,7 @@ class NoticePanel:
         if not doc:
             raise PortalError("通告待办不存在或已清空。")
         _migrate_legacy_notice_sop(doc)
+        _migrate_legacy_notice_photos(doc)
         return doc
 
     @staticmethod
@@ -273,6 +316,25 @@ class NoticePanel:
         self.controller._authorized_scope_or_error(session, doc["scope"])
         return session
 
+    def _allowed_modules(self, session):
+        from .module_access import allowed_modules
+        return set(allowed_modules(self.runtime.auth_manager, session)) & NOTICE_MODULES
+
+    def _owner_modules(self, doc):
+        owner = str(doc.get("owner") or "").strip()
+        if not owner:
+            return set()
+        return self._allowed_modules({"user": {"open_id": owner}})
+
+    def _reject_unauthorized_selected(self, doc, allowed):
+        """Never preview/confirm a persisted selected item the owner can no longer operate."""
+        for item in doc.get("items") or []:
+            if not item.get("selected"):
+                continue
+            work_type = str((item.get("draft") or {}).get("work_type") or "")
+            if work_type and allowed is not None and work_type not in allowed:
+                raise PortalError("无权修改该工作类型的通告。")
+
     def _assert_current_date(self, doc):
         current = _edition_now()
         if not current or current["date"] != doc.get("date"):
@@ -281,10 +343,16 @@ class NoticePanel:
     # ---- public payloads ------------------------------------------------
     def public_items(self, doc):
         from .notice_panel_data import _normalize_item_notice_sop
+        allowed = self._owner_modules(doc)
         result = []
         for item in doc.get("items") or []:
             _normalize_item_notice_sop(item)
             item_draft = item.get("draft") or {}
+            work_type = str(item_draft.get("work_type") or "")
+            # Unauthorized persisted items must never surface, even when they
+            # exist from a time when the owner had broader module grants.
+            if work_type and work_type not in allowed:
+                continue
             public_draft = {}
             for field in item.get("fields") or []:
                 key = field["key"]
@@ -381,8 +449,13 @@ class NoticePanel:
 
     def _build_items(self, doc):
         from .notice_panel_data import build_items
-        rows = build_items(self.runtime.service, doc["scope"], "all",
-                           self.controller._get_ongoing(doc["scope"]))
+        allowed = self._owner_modules(doc)
+        if not allowed:
+            return []
+        ongoing = self.controller._get_ongoing(doc["scope"])
+        rows = [row for work in (["all"] if allowed == NOTICE_MODULES else sorted(allowed))
+                for row in build_items(self.runtime.service, doc["scope"], work, ongoing)
+                if (row.get("draft") or {}).get("work_type") in allowed]
         preferred = "update" if doc.get("slot") == "evening" else "start"
         return sorted(rows, key=lambda item: (bool(item.get("blocked")),
                                               item.get("action") != preferred,
@@ -458,24 +531,28 @@ class NoticePanel:
             if action != "retry":
                 self._assert_current_date(doc)
             changes = payload.get("changes") or []
+            allowed = self._owner_modules(doc)
             if action in ("confirm", "edit", "refresh", "retry", "confirm_unmatched") and changes:
                 raise PortalError("该操作不接受变更。")
-            if action in ("save", "preview"):
-                self._apply_changes(doc, changes)
             if action == "save":
+                self._apply_changes(doc, changes, allowed)
                 doc["state"] = "edit"
                 doc.pop("error", None)
             elif action == "preview":
+                self._apply_changes(doc, changes, allowed)
+                self._reject_unauthorized_selected(doc, allowed)
                 self._preview(doc)
             elif action == "edit":
                 self._edit_from_confirm(doc)
             elif action == "confirm":
+                self._reject_unauthorized_selected(doc, allowed)
                 self._confirm(doc, session)
             elif action == "refresh":
                 self._refresh(doc)
             elif action == "retry":
                 self._retry(doc)
             elif action == 'confirm_unmatched':
+                self._reject_unauthorized_selected(doc, allowed)
                 for item in doc.get('items', []):
                     if item.get('selected') and item.get('phase') == 'failed' and item.get('convergence_confirmation'):
                         item['payload']['plan_convergence_confirmation'] = item.pop('convergence_confirmation')
@@ -492,7 +569,7 @@ class NoticePanel:
             self._queue("advance:" + identity, self._advance, identity)
         return self.public_run(identity)
 
-    def _apply_changes(self, doc, changes):
+    def _apply_changes(self, doc, changes, allowed=None):
         from .notice_panel_data import _normalize_notice_sop_shape, apply_end_default
         if not isinstance(changes, list):
             raise PortalError("变更列表格式无效。")
@@ -511,6 +588,11 @@ class NoticePanel:
             item = by_key.get(key)
             if not item:
                 raise PortalError("变更对象不存在。")
+            # Reject modifications to persisted items whose work type the owner is
+            # no longer granted; unauthorized items must never be edited/selected.
+            item_work_type = str((item.get("draft") or {}).get("work_type") or "")
+            if item_work_type and (allowed is not None and item_work_type not in allowed):
+                raise PortalError("无权修改该工作类型的通告。")
             if key in seen:
                 raise PortalError("变更列表中同一通告只能出现一次。")
             seen.add(key)
@@ -536,6 +618,16 @@ class NoticePanel:
                         continue
                     if fkey == "notice_sop":
                         _normalize_notice_sop_shape(value)
+                        continue
+                    if field.get("kind") == "photos":
+                        from .notice_panel_data import _photo_receipt_value
+                        if not isinstance(value, list):
+                            raise PortalError("照片回执格式无效。")
+                        max_items = int(field.get("maxItems") or 0)
+                        if max_items and len(value) > max_items:
+                            raise PortalError(f"{field.get('label')}最多 {max_items} 张。")
+                        for entry in value:
+                            _photo_receipt_value(entry, str(field.get("label") or fkey))
                         continue
                     if not isinstance(value, str):
                         raise PortalError("字段填写必须是文本。")
@@ -564,6 +656,11 @@ class NoticePanel:
                         continue
                     if fkey == "notice_sop":
                         item.setdefault("draft", {})[fkey] = _normalize_notice_sop_shape(value)
+                        item["dirty"] = True
+                        continue
+                    if field.get("kind") == "photos":
+                        from .notice_panel_data import _photo_receipt_value
+                        item.setdefault("draft", {})[fkey] = [_photo_receipt_value(entry, field["label"]) for entry in value]
                         item["dirty"] = True
                         continue
                     item.setdefault("draft", {})[fkey] = str(value).strip()

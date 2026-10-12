@@ -208,7 +208,7 @@ class BridgeReadTests(unittest.IsolatedAsyncioTestCase):
         store = Memory()
         runtime = SimpleNamespace(state_store=store)
         authority = PortalAuthority(None, None, runtime, SimpleNamespace(instance='i', lease='l'))
-        actor = {**ADMIN, 'channel': 'feishu:oc_private'}
+        actor = {**ADMIN, 'channel': 'feishu:oc_private', 'modules': ['assistant', 'links']}
         request = Request({'type': 'http', 'state': {'feishu_question': '在职人数'}})
         authority.authorize = AsyncMock(return_value=({'request': request}, actor))
         authority.tables = SimpleNamespace(staff_count=Mock(return_value={'total': 5}))
