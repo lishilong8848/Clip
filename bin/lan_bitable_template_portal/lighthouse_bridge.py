@@ -78,7 +78,7 @@ class PortalAuthority:
                 self.catalog = PortalAPICatalog(self.app)
         return self.catalog
 
-    def context(self, request, actor, *, plan_id=None):
+    def context(self, request, actor, *, plan_id=None, shared_plan=None):
         now = time.monotonic()
         expired = [key for key, value in self.contexts.items() if value['expires'] <= now]
         for key in expired:
@@ -87,7 +87,9 @@ class PortalAuthority:
             raise AssistantError('助手请求较多，请稍后继续。', 429)
         identity = secrets.token_urlsafe(32)
         self.contexts[identity] = {'request': request, 'actor': copy.deepcopy(actor),
-            'expires': now + 1800, 'plan_id': plan_id, 'lease': self.client.lease}
+            'expires': now + 1800, 'plan_id': plan_id, 'lease': self.client.lease,
+            'shared_plan': copy.deepcopy(shared_plan),
+            'feishu_topic': copy.deepcopy(getattr(getattr(request, 'state', None), 'feishu_topic', None))}
         return identity
 
     async def authorize(self, identity):
@@ -107,6 +109,15 @@ class PortalAuthority:
         current['scopes'] = list(prior['scopes'])
         current['modules'] = list(prior.get('modules', []))
         current['learning_scopes'] = sorted(set(current['learning_scopes']) & set(prior['learning_scopes']))
+        # Only the verified Feishu callback creates this server-side capability.
+        shared = context.get('shared_plan')
+        if shared and current.get('channel') == 'feishu:' + shared.get('chat_id', ''):
+            current['_shared_plan'] = copy.deepcopy(shared)
+        topic = context.get('feishu_topic')
+        channel = current.get('channel', '')
+        if (isinstance(topic, dict) and channel.startswith('feishu:')
+                and str(topic.get('id', '')).startswith(channel.removeprefix('feishu:') + ':om_')):
+            current['_feishu_topic'] = {'id': topic['id'], 'context': str(topic.get('context', ''))[:5000]}
         return context, current
 
     @staticmethod
@@ -121,8 +132,10 @@ class PortalAuthority:
         wanted = {identity for values in (operation.get('files') or {}).values() for identity in (values if isinstance(values, list) else [values])}
         root = (self.client.root / 'files').resolve()
         files, total = {}, 0
+        grant = actor.get('_shared_plan') or {}
+        shared_ids = set(grant.get('file_ids', [])) if actor.get('channel') == 'feishu:' + str(grant.get('chat_id')) else set()
         for item in uploads:
-            if not isinstance(item, dict) or item.get('owner') != actor['id'] or item.get('id') not in wanted:
+            if not isinstance(item, dict) or item.get('owner') != actor['id'] and item.get('id') not in shared_ids or item.get('id') not in wanted:
                 raise AssistantError('附件不存在或没有访问权限。', 403)
             identity = item['id']
             if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity) or identity in files:

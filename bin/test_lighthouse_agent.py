@@ -169,6 +169,43 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["turns"][-1]["sources"][0]["data"]["status"], 403)
         self.assertIn("无权查询", result["turns"][-1]["answer"])
 
+    async def test_group_shared_plan_uses_actual_actor_and_preserves_personal_histories(self):
+        self.decisions({'action': 'prepare', 'title': '共享通告', 'operations': [
+            {'api_id': 'POST /api/fixture-submit', 'body': {'scope': 'A', 'title': '测试通告'}}]})
+        result = await self.agent.chat(ACTOR, self.payload, self.request)
+        plan = result['turns'][-1]['plan']
+        raw = self.agent.get_plan(ACTOR, plan['id'])
+        delegate = {**ACTOR, 'id': 'fixture-b', 'name': '实际确认人', 'channel': 'feishu:oc_Group',
+            '_shared_plan': {'id': plan['id'], 'owner': ACTOR['id'], 'conversation_id': raw['conversation_id'], 'chat_id': 'oc_Group'}}
+        before = copy.deepcopy(self.assistant._state(delegate))
+        for invalid in ({**delegate, 'scopes': ['B']}, {**delegate, 'channel': 'feishu:oc_Other'},
+                        {**delegate, '_shared_plan': {**delegate['_shared_plan'], 'id': 'another'}}):
+            with self.assertRaises(AssistantError): self.agent.get_plan(invalid, plan['id'])
+        first = await self.agent.confirm(delegate, plan['id'], {'version': plan['version'], 'stage': 'review'}, self.request)
+        if first['status'] == 'awaiting_second_confirmation':
+            await self.agent.confirm(delegate, plan['id'], {'version': first['version'], 'stage': 'execute'}, self.request)
+        await self.agent.confirm(delegate, plan['id'], {'version': first['version'], 'stage': 'execute'}, self.request)
+        await asyncio_gather(self.agent)
+        final = self.agent.get_plan(ACTOR, plan['id'])
+        self.assertEqual(final['status'], 'completed')
+        self.assertEqual(final['confirmed_by']['id'], delegate['id'])
+        self.assertEqual(final['owner'], ACTOR['id'])
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.assistant._state(delegate)['turns'], before['turns'])
+        self.assertEqual(self.assistant.conversation(ACTOR)['turns'][-1]['plan']['status'], 'completed')
+        self.assistant.clear(ACTOR)
+        with self.assertRaises(AssistantError): self.agent.get_plan(delegate, plan['id'])
+
+    def test_shared_files_are_limited_to_the_current_server_grant(self):
+        shared = self.files.upload(ACTOR, 'shared.txt', b'shared plan attachment')
+        private = self.files.upload(ACTOR, 'private.txt', b'not in the shared plan')
+        actor = {**ACTOR, 'id': 'fixture-b', 'channel': 'feishu:oc_Group',
+                 '_shared_plan': {'id': 'plan', 'chat_id': 'oc_Group', 'file_ids': [shared['id']]}}
+        self.assertEqual(self.files.get(actor, shared['id'])['owner'], ACTOR['id'])
+        with self.assertRaises(AssistantError): self.files.get(actor, private['id'])
+        with self.assertRaises(AssistantError): self.files.get({**actor, 'channel': 'feishu:oc_Other'}, shared['id'])
+        with self.assertRaises(AssistantError): self.files.get({**actor, '_shared_plan': {}}, shared['id'])
+
     async def test_cancelled_and_foreign_plans_cannot_execute(self):
         decision = {"operations": [{"api_id": "DELETE /api/drills/{drill_id}", "path_params": {"drill_id": "drill1"}}]}
         plan = self.agent.prepare(ACTOR, decision, self.payload["operation_id"], [])

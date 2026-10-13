@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>灯塔 · 个人工作台</title><link rel="icon" href="/assets/clipflow-favicon.svg"><script src="/assets/connection-guard.js" defer></script>
+<style>body{margin:0;background:#f5f5f7;color:#1d1d1f;font:14px system-ui,sans-serif}.entry-loading{min-height:80vh;display:grid;place-content:center;gap:16px;text-align:center}.entry-loading a{color:#0071e3}.entry-spinner{width:24px;height:24px;border:3px solid #e5e5ea;border-top-color:#0071e3;border-radius:50%;animation:spin 1s linear infinite;margin:auto}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}}</style></head>
+<body><div id="app"><div class="entry-loading" role="status"><span class="entry-spinner"></span><strong id="entry-status">正在打开新版工作台</strong><a href="/?frontend=legacy">返回旧版</a></div></div>
+<script>
+  window.addEventListener('unhandledrejection', event => {
+    if (event.reason instanceof DOMException && event.reason.name === 'AbortError' && event.reason.message === 'Transition was skipped') event.preventDefault();
+  });
+  for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
+    if (event.viewTransition) { event.viewTransition.ready.catch(() => {}); event.viewTransition.finished.catch(() => {}); }
+  });
+</script>
+<script type="module">
+  const base = '/assets/workspace-v2/';
+  try {
+    const response = await fetch(base + 'entry.json', { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error('entry');
+    const manifest = await response.json();
+    const safe = name => typeof name === 'string' && /^[a-zA-Z0-9_-]+\.(js|css)$/.test(name);
+    if (!safe(manifest.entry) || !manifest.entry.endsWith('.js') || !Array.isArray(manifest.css) || !manifest.css.every(safe)) throw new Error('manifest');
+    for (const name of manifest.css) { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = base + name; document.head.append(link); }
+    await import(base + manifest.entry);
+  } catch {
+    document.getElementById('entry-status').textContent = '新版暂未加载成功，请刷新或返回旧版。';
+    document.querySelector('.entry-spinner')?.remove();
+  }
+</script></body></html>

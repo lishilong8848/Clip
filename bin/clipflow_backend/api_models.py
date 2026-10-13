@@ -297,6 +297,7 @@ class DrillGenerateRequest(APIModel):
 class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""
+    approver_open_id: str = Field(default="", max_length=100)
 
 
 class PermissionRequestConfirm(APIModel):

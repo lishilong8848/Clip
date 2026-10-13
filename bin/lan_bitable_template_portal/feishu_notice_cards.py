@@ -174,16 +174,18 @@ def _issue_ticket(bot, message, actor, conversation, plan, *, event_id="", mark_
     ticket = _actor_prefix(message, actor) + "_" + secrets.token_urlsafe(16)
     original = str((message or {}).get("reply_to_message_id")
                    or (message or {}).get("message_id") or "")
+    shared = (message or {}).get('_shared_plan') or {}
     payload = {
-        "owner_open_id": str((actor or {}).get("id") or ""),
-        "owner_union": str((message or {}).get("union_id") or ""),
+        "owner_open_id": shared.get('owner') or str((actor or {}).get("id") or ""),
+        "owner_union": shared.get('owner_union') or str((message or {}).get("union_id") or ""),
         "plan_id": str((plan or {}).get("id") or ""),
         "plan_version": (plan or {}).get("version"),
         "fields": (plan or {}).get("fields") or [],
-        "conversation_id": str((conversation or {}).get("conversation_id") or ""),
+        "conversation_id": shared.get('conversation_id') or str((conversation or {}).get("conversation_id") or ""),
         "chat_id": str((message or {}).get("chat_id") or ""),
         "chat_type": str((message or {}).get("chat_type") or "group"),
         "original_message_id": original,
+        "root_id": (message or {}).get('root_id') or original,
         "event_id": str(event_id or ""),
         "created_at": time.time(),
         "consumed": bool(mark_consumed),
@@ -221,9 +223,12 @@ def _validate_ticket(bot, ticket, message, actor, conversation):
         return None, None, "卡片已过期，请重新打开后处理。此操作未执行。"
     operator_open = str((actor or {}).get("id") or "")
     operator_union = str((message or {}).get("union_id") or "")
-    if not operator_open or operator_open != str(tick.get("owner_open_id") or ""):
+    grant = message.get('_shared_plan') or {}
+    shared = bool(grant.get('id') == tick.get('plan_id') and grant.get('owner') == tick.get('owner_open_id')
+                  and grant.get('chat_id') == tick.get('chat_id') and grant.get('conversation_id') == tick.get('conversation_id'))
+    if not operator_open or operator_open != str(tick.get("owner_open_id") or "") and not shared:
         return None, None, "只能由发起该操作的本人在卡片中操作，管理员不能代他人执行。"
-    if operator_union and tick.get("owner_union") and operator_union != str(tick.get("owner_union") or ""):
+    if not shared and operator_union and tick.get("owner_union") and operator_union != str(tick.get("owner_union") or ""):
         return None, None, "操作人身份不匹配，无法继续。"
     if str((message or {}).get("chat_id") or "") != str(tick.get("chat_id") or ""):
         return None, None, "原会话已变化，无法在此卡片中操作。"
@@ -235,6 +240,35 @@ def _validate_ticket(bot, ticket, message, actor, conversation):
     if int(plan.get("version") or -1) != int(tick.get("plan_version") or -2):
         return None, None, "计划已更新（版本变化），请重新打开最新卡片处理。"
     return tick, {**plan, "fields": tick.get("fields", plan.get("fields") or [])}, None
+
+
+async def bind_shared_card(bot, message, request, actor, conversation, *, ticket=None):
+    """Bind only a delivered group-topic plan, never another person's conversation."""
+    inbox = getattr(bot, 'inbox', None)
+    if not inbox:
+        return conversation
+    topic = await asyncio.to_thread(inbox.thread_for, message)
+    if not topic or topic.get('chat_type') != 'group':
+        return conversation
+    card = message.get('card') or {}
+    ticket = ticket or (card.get('value') or {}).get('ticket') or card.get('ticket')
+    tick = await asyncio.to_thread(_require_store(bot).get_document, _NAMESPACE, str(ticket or ''))
+    if (not tick or tick.get('chat_id') != message.get('chat_id') or tick.get('root_id') != topic['root_id'] or tick.get('consumed')
+            or time.time() - tick.get('created_at', 0) > _TICKET_TTL_SECONDS):
+        raise AssistantError('该话题表单已更新或失效，请使用最新表单，未执行操作。', 409)
+    grant = {'id': tick['plan_id'], 'owner': tick['owner_open_id'], 'owner_union': tick.get('owner_union', ''),
+             'conversation_id': tick['conversation_id'], 'chat_id': topic['chat_id']}
+    request.state.feishu_shared_plan = grant
+    plan = await bot._call(request, actor, 'plans/' + tick['plan_id'])
+    if plan.get('version') != tick.get('plan_version'):
+        raise AssistantError('话题表单已被其他人修改，请核对最新版本后再操作。', 409)
+    selected = [file for operation in plan.get('operations') or [] for file in operation.get('selected_files') or []]
+    selected.extend(file for field in plan.get('fields') or [] for file in field.get('selected_files') or [])
+    grant['file_ids'] = sorted({file['id'] for file in selected if isinstance(file, dict)
+                               and re.fullmatch(r'[a-f0-9]{32}', str(file.get('id') or ''))})
+    message.update(_shared_plan=grant, _actor_conversation_id=conversation.get('conversation_id'),
+                   root_id=topic['root_id'], thread_id=topic['thread_id'], chat_type='group')
+    return {'conversation_id': tick['conversation_id'], 'turns': [{'plan': plan}]}
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +768,47 @@ def _photo_guidance_text(plan):
     return "照片状态：" + "；".join(parts) + "。请直接发送照片图片到本会话补充。"
 
 
+def _field_column(label, component, notes=()):
+    return {'tag': 'column', 'width': 'weighted', 'weight': 1,
+            'elements': [_label_md(label), *({'tag': 'markdown', 'content': note} for note in notes), component]}
+
+
+def _recommended_field_note(plan, field, child):
+    if notice_forms.notice_parent_value(field).get(child.get('path')) not in (None, '', []):
+        return []
+    for recommendation in (plan.get('planned_notice') or {}).get('recommendations') or []:
+        value = (recommendation.get('suggested_values') or {}).get(child.get('path'))
+        if value:
+            return ['参考 ' + safe_text(str(recommendation.get('source_building') or ''), limit=40)
+                    + ' 成功历史：' + safe_text(str(value), limit=300) + '\n采用推荐后仍可编辑，请核对本楼实际情况。']
+    return []
+
+
+def _compact_form(elements):
+    result, pair = [], []
+
+    def flush():
+        if pair:
+            result.append({'tag': 'column_set', 'flex_mode': 'flow', 'columns': list(pair)})
+            pair.clear()
+
+    for element in elements:
+        if element.get('tag') != 'column':
+            flush()
+            result.append(element)
+            continue
+        component = element['elements'][-1]
+        # Long descriptions retain a full row; short editable fields share two columns.
+        wide = len(str(component.get('default_value') or '')) > 120
+        if wide:
+            flush()
+        pair.append(element)
+        if wide or len(pair) == 2:
+            flush()
+    flush()
+    return result
+
+
 def _build_editable_card(plan, ticket):
     title = safe_text(str(plan.get("title") or "业务操作"), limit=120)
     kind = "notice_card"
@@ -765,10 +840,8 @@ def _build_editable_card(plan, ticket):
                 cid = _leaf_id("nnot", field, child.get("path"))
                 comp, notes = _notice_leaf_component(field, child, cid)
                 if comp:
-                    form_children.append(_label_md(child.get("label") or child.get("path")))
-                    for note in notes:
-                        form_children.append({"tag": "markdown", "content": note})
-                    form_children.append(comp)
+                    form_children.append(_field_column(child.get("label") or child.get("path"), comp,
+                                                       [*notes, *_recommended_field_note(plan, field, child)]))
                     rendered = True
                     editable_any = True
                     needs_form = True
@@ -789,8 +862,7 @@ def _build_editable_card(plan, ticket):
                 cid = _leaf_id("sop", field, key)
                 comp = _sop_component(field, key, cid, mode)
                 if comp:
-                    form_children.append(_label_md(_SOP_LEAF_LABELS[key]))
-                    form_children.append(comp)
+                    form_children.append(_field_column(_SOP_LEAF_LABELS[key], comp))
                     rendered = True
                     needs_form = True
             if not _sop_directory_loaded(field):
@@ -810,10 +882,7 @@ def _build_editable_card(plan, ticket):
                 cid = _generic_id(field, path)
                 comp, notes = _simple_component(child, cid)
                 if comp:
-                    form_children.append(_label_md(child.get("label") or path))
-                    for note in notes:
-                        form_children.append({"tag": "markdown", "content": note})
-                    form_children.append(comp)
+                    form_children.append(_field_column(child.get("label") or path, comp, notes))
                     rendered = True
                     editable_any = True
                     needs_form = True
@@ -825,10 +894,7 @@ def _build_editable_card(plan, ticket):
             cid = _leaf_id("simple", field, name)
             comp, notes = _simple_component(field, cid)
             if comp:
-                form_children.append(_label_md(field.get("label") or name))
-                for note in notes:
-                    form_children.append({"tag": "markdown", "content": note})
-                form_children.append(comp)
+                form_children.append(_field_column(field.get("label") or name, comp, notes))
                 editable_any = True
                 needs_form = True
 
@@ -843,7 +909,7 @@ def _build_editable_card(plan, ticket):
         form_children.extend(recommend)
         if editable_any:
             form_children.append(_submit_button(ticket))
-        elements.append({"tag": "form", "name": "notice_form", "elements": form_children})
+        elements.append({"tag": "form", "name": "notice_form", "elements": _compact_form(form_children)})
     else:
         # No editable field and no load/recommend actions: a form container would
         # be illegal JSON2, so fall back to plain markdown.
@@ -1152,6 +1218,8 @@ def _merge_directory(base_plan, updated):
 # ---------------------------------------------------------------------------
 
 def _reply_text(text, **extra):
+    if extra.get('plan'):
+        extra.update(topic_plan_id=extra['plan'].get('id'), topic_plan_status=extra['plan'].get('status'))
     return {"text": text, **extra}
 
 

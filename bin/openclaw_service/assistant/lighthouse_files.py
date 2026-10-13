@@ -232,7 +232,9 @@ class LighthouseFiles:
         if not isinstance(identity, str) or not re.fullmatch(r"[a-f0-9]{32}", identity):
             raise AssistantError("附件编号无效。", 404)
         item = self.store.get_document(FILE_NAMESPACE, identity)
-        if not item or item.get("owner") != actor["id"] or item.get("deleted_at"):
+        grant = actor.get('_shared_plan') or {}
+        shared = identity in grant.get('file_ids', []) and actor.get('channel') == 'feishu:' + str(grant.get('chat_id'))
+        if not item or item.get("owner") != actor["id"] and not shared or item.get("deleted_at"):
             raise AssistantError("附件不存在或没有访问权限。", 404)
         if set(item.get("source_scopes", [])) - set(actor.get("allowed_scopes", actor["scopes"])):
             raise AssistantError("当前账号已无权读取该业务文件。", 403)

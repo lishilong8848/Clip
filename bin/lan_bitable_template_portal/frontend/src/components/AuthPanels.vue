@@ -94,7 +94,7 @@
       <span :class="{ active: request.scopes.length > 0 }">
         <b>2</b>
         <strong>提交申请</strong>
-        <small>管理员门户审批</small>
+        <small>飞书或网页审批</small>
       </span>
       <span :class="{ active: Boolean(request.requestId), rejected: request.status === 'rejected' }">
         <b>3</b>
@@ -123,6 +123,11 @@
       </label>
     </div>
     <p v-else class="hint">{{ emptyText || "当前没有可继续申请的楼栋权限。" }}</p>
+    <div class="permission-approver">
+      <strong id="permission-approver-label">选择审批人</strong>
+      <NSelect :value="request.approverOpenId || null" :options="approvers" label-field="name" value-field="open_id" filterable :loading="approversLoading" :disabled="busy" aria-labelledby="permission-approver-label" placeholder="选择接收飞书申请的管理员" @update:value="value=>$emit('update-request',{approverOpenId:value})" />
+      <span v-if="approverError" class="hint" role="alert">{{ approverError }} <button type="button" class="btn" @click="loadApprovers">重试</button></span>
+    </div>
     <textarea
       :value="request.reason"
       placeholder="申请原因（可选，便于管理员判断）"
@@ -138,15 +143,17 @@
       <span>{{ requestStatusDescription }}</span>
     </div>
     <p v-if="request.message" class="hint">{{ request.message }}</p>
+    <p v-if="request.status === 'pending' && request.notificationStatus === 'failed'" class="hint" role="alert">{{ request.notificationError || '飞书通知未完成，申请已保留，管理员仍可在网页审批。' }} <button type="button" class="btn" :disabled="retryingNotification" @click="retryNotification">重试飞书通知</button></p>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { NSelect } from "naive-ui";
 import { QrCode, UserRound, Eye, ShieldCheck } from "lucide-vue-next";
 import VnetBackButton from "./VnetBackButton.vue";
 import PersonnelPasswordLogin from "./PersonnelPasswordLogin.vue";
-import { rememberLoginMethod } from "../api/client";
+import { rememberLoginMethod, requestJson } from "../api/client";
 
 type Dict = Record<string, any>;
 
@@ -164,6 +171,9 @@ const props = defineProps<{
     message: string;
     status?: string;
     rejectReason?: string;
+    approverOpenId?: string;
+    notificationStatus?: string;
+    notificationError?: string;
   };
   requestableScopes: Array<{ value: string; label: string }>;
   title?: string;
@@ -310,11 +320,15 @@ function toggleScope(scope: string, checked: boolean): void {
 }
 
 const requestStatusTitle = computed(() => {
+  if (props.request.status === "approved") return "申请已通过";
   if (props.request.status === "rejected") return "申请未通过";
+  if (props.request.status === "superseded") return "已有新的申请";
   return "申请已提交，等待管理员审批";
 });
 
 const requestStatusDescription = computed(() => {
+  if (props.request.status === "approved") return "权限已同步生效。";
+  if (props.request.status === "superseded") return "本次申请已被新申请替代，请查看最新申请。";
   if (props.request.status === "rejected") {
     const reason = String(props.request.rejectReason || "").trim();
     return reason ? `拒绝原因：${reason}。可调整楼栋或原因后重新提交。` : "管理员未通过该申请，可调整楼栋或原因后重新提交。";
@@ -326,11 +340,12 @@ const submitTitle = computed(() => {
   if (props.busy) return "正在提交申请";
   if (!props.requestableScopes.length) return props.emptyText || "当前没有可继续申请的楼栋权限";
   if (!props.request.scopes.length) return "请先选择要申请的楼栋";
+  if (!props.request.approverOpenId) return "请选择审批人";
   return "提交权限申请，等待管理员审批";
 });
 
 const canSubmit = computed(() => {
-  return !props.busy && props.requestableScopes.length > 0 && props.request.scopes.length > 0;
+  return !props.busy && props.requestableScopes.length > 0 && props.request.scopes.length > 0 && approvers.value.some(item=>item.open_id===props.request.approverOpenId);
 });
 
 const userOpenId = computed(() => String(props.user?.open_id || "").trim());
@@ -343,9 +358,28 @@ const userLineText = computed(() => {
   const name = String(props.user?.name || "").trim();
   return `当前登录：${name || "已完成飞书登录"}`;
 });
+const approvers=ref<Array<{open_id:string;name:string}>>([]),approversLoading=ref(false),approverError=ref(''),retryingNotification=ref(false);
+let requestAbort:AbortController|undefined,pollTimer:ReturnType<typeof setTimeout>|undefined,disposed=false;
+async function loadApprovers(){
+  requestAbort?.abort();const abort=new AbortController();requestAbort=abort;approversLoading.value=true;approverError.value='';
+  try{const data=await requestJson('/api/auth/permission-approvers',{signal:abort.signal,timeoutMs:12000});if(abort.signal.aborted)return;approvers.value=Array.isArray(data.items)?data.items:[];if(!approvers.value.length)approverError.value='暂无可用审批人，请联系管理员。';}
+  catch(e:any){if(!abort.signal.aborted)approverError.value=e.message||'审批人读取失败';}finally{if(requestAbort===abort)approversLoading.value=false;}
+}
+async function pollRequest(){
+  if(disposed||!props.loggedIn||props.passwordSettings||!props.request.requestId||props.request.status!=='pending')return;
+  const owner=props.user?.open_id,id=props.request.requestId;
+  try{if(!document.hidden){const data=await requestJson('/api/auth/permission-requests/current?request_id='+encodeURIComponent(id),{cache:'no-store',timeoutMs:10000});if(disposed||props.user?.open_id!==owner||props.request.requestId!==id)return;const current=data.request;if(current){emit('update-request',{status:current.status,rejectReason:current.reject_reason||'',notificationStatus:current.notification_status||'',notificationError:current.notification_error||''});if(current.status==='approved')window.dispatchEvent(new Event('auth-account-changed'));}}}
+  catch{/* Keep the accepted application visible when status reads temporarily fail. */}
+  if(!disposed&&props.request.status==='pending')pollTimer=setTimeout(pollRequest,6000);
+}
+async function retryNotification(){retryingNotification.value=true;try{await requestJson('/api/auth/permission-requests/'+encodeURIComponent(props.request.requestId)+'/notify',{method:'POST',body:'{}'});emit('update-request',{notificationStatus:'queued',notificationError:''});}catch(e:any){emit('update-request',{notificationError:e.message||'通知重试失败'});}finally{retryingNotification.value=false;}}
+watch(()=>[props.loggedIn,props.checking,props.passwordSettings,props.user?.open_id],()=>{if(props.loggedIn&&!props.checking&&!props.passwordSettings)void loadApprovers();else requestAbort?.abort();},{immediate:true});
+watch(()=>[props.request.requestId,props.request.status],()=>{clearTimeout(pollTimer);if(props.request.status==='pending')pollTimer=setTimeout(pollRequest,1000);},{immediate:true});
+onBeforeUnmount(()=>{disposed=true;requestAbort?.abort();clearTimeout(pollTimer);});
 </script>
 
 <style scoped>
+.permission-approver{width:100%;display:grid;gap:8px}.permission-approver>strong{font-size:14px}
 .center-state {
   position: relative;
   z-index: 0;

@@ -1,0 +1,17 @@
+import { createApp } from 'vue';
+import Workspace from './Workspace.vue';
+import LoadingIndicator from '../components/LoadingIndicator.vue';
+import UiTransition from '../components/UiTransition.vue';
+import '../global.css';
+import './workspace.css';
+import './interactions.css';
+import './events.css';
+import './cabinetBatch.css';
+import './dashboard/dashboard.css';
+import { installActionMotion } from './actionMotion';
+import { installLinkNavigation } from './navigation';
+document.documentElement.classList.add('workspace-v2');
+installLinkNavigation();
+installActionMotion();
+document.addEventListener('click',event=>{const input=event.target instanceof HTMLInputElement?event.target:null;if(input&&!input.disabled&&!input.readOnly&&['date','time','month','datetime-local'].includes(input.type)){try{input.showPicker?.();}catch{/* Native focus remains available on unsupported browsers. */}}});
+createApp(Workspace).component('LoadingIndicator', LoadingIndicator).component('UiTransition', UiTransition).mount('#app');

@@ -996,14 +996,30 @@ class PortalAgent:
 
     def get_plan(self, actor, identity):
         plan = self.store.get_document(PLAN_NAMESPACE, identity)
-        if not plan or plan.get("owner") != actor["id"]:
+        grant = actor.get('_shared_plan') or {}
+        shared = bool(plan and grant.get('id') == identity and grant.get('owner') == plan.get('owner')
+                      and grant.get('conversation_id') == plan.get('conversation_id')
+                      and actor.get('channel') == 'feishu:' + str(grant.get('chat_id')))
+        if not plan or plan.get("owner") != actor["id"] and not shared:
             raise AssistantError("操作计划不存在或无权访问。", 404)
-        if set(plan.get("scopes", [])) - set(actor["scopes"]):
+        scopes = set(plan.get('scopes', []))
+        if shared:
+            from .lighthouse_sources import codes
+            from lan_bitable_template_portal.module_access import required_modules
+            required = set()
+            for operation in plan.get('operations', []):
+                body, params = operation.get('body') or {}, operation.get('params') or {}
+                required.update(codes(body.get('scope')) or codes(params.get('scope')) or scopes)
+                modules = required_modules(operation['api_id'].split(' ')[-1], body.get('work_type', params.get('work_type', '')))
+                if modules and not modules & set(actor.get('modules', [])):
+                    raise AssistantError('当前操作人没有该业务模块权限，未代为处理。', 403)
+            scopes = required or scopes
+        if scopes - set(actor["scopes"]):
             raise AssistantError("当前账号已无权访问此操作计划。", 403)
-        state = self.assistant._state(actor)
+        state = self.assistant._state({**actor, 'id': plan['owner']} if shared else actor)
         if plan.get("assistant_run_id"):
             turn = next((item for item in state.get("turns", []) if item.get("operation_id") == plan.get("turn_id")), {})
-            if not self.assistant._allowed(turn, actor):
+            if not shared and not self.assistant._allowed(turn, actor):
                 raise AssistantError("当前权限已变化，请重新准备操作。", 403)
             if turn.get("run_id") != plan["assistant_run_id"] or turn.get("status") != "completed" or (turn.get("plan") or {}).get("id") != identity:
                 raise AssistantError("操作对应的回答已变化或未完成，请在当前会话重新确认。", 409)
@@ -1959,15 +1975,18 @@ class PortalAgent:
         return plan
 
     def _save_plan(self, actor, plan):
+        if actor['id'] != plan['owner']:
+            plan['last_modified_by'] = {'id': actor['id'], 'name': actor.get('name', ''), 'at': time.time()}
         self.store.put_document(PLAN_NAMESPACE, plan["id"], plan)
         with self.assistant._lock:
-            state = self.assistant._state(actor)
+            owner_actor = {**actor, 'id': plan['owner'], 'scopes': plan['scopes']}
+            state = self.assistant._state(owner_actor)
             turn = next((t for t in state["turns"] if t.get("operation_id") == plan["turn_id"]), None)
             if turn:
-                turn["plan"] = self.public_plan(plan, actor)
+                turn["plan"] = self.public_plan(plan, owner_actor)
                 if plan["status"] in {"completed", "failed", "cancelled", "submitted", "superseded"}:
                     turn["answer"] = {"completed": "操作已完成。", "failed": "操作未完成：" + plan.get("error", ""), "cancelled": "操作已取消。", "submitted": "操作已提交，后台仍在处理。", "superseded": "已由最新提交替代，旧任务不再重试。"}[plan["status"]]
-                self.store.put_document("lighthouse_ai", self.assistant._key(actor), state)
+                self.store.put_document("lighthouse_ai", self.assistant._key(owner_actor), state)
 
     def _save_chat(self, actor, state, *, finish=False):
         if finish:
@@ -3501,6 +3520,7 @@ class PortalAgent:
 
     def _mark_running(self, actor, plan):
         previous = copy.deepcopy(plan)
+        plan['confirmed_by'] = {'id': actor['id'], 'name': actor.get('name', ''), 'at': time.time()}
         plan.pop("_review_fields", None)
         plan.pop("_review_operations", None)
         plan.update(status="running", version=plan["version"] + 1)

@@ -29,24 +29,26 @@ class ShiftReminderTests(TestCase):
         self.run_at(7)
         self.reader.assert_not_called()
         self.run_at(8)
-        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_night'])
+        self.sender.assert_not_called()
+        self.run_at(13)
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
         self.service = self.make_service()
         with ThreadPoolExecutor(max_workers=5) as pool:
-            list(pool.map(lambda _: self.run_at(13), range(5)))
+            list(pool.map(lambda _: self.run_at(20), range(5)))
         self.reader.assert_called_once_with('2026-10-10')
-        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_night', 'ou_external'])
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external', 'ou_night'])
         for call in self.sender.call_args_list:
             self.assertEqual(call.args[1]['elements'][-1]['actions'][0]['url'], 'http://portal.test:18766/learning?view=practice')
-        self.run_at(8, 11)
+        self.run_at(13, 11)
         self.assertEqual(self.reader.call_count, 2)
 
     def test_failure_preserves_other_recipient_and_retries_same_identity(self):
         self.sender.side_effect = [OSError('offline'), (True, '', []), (True, '', [])]
         with patch.object(learning.time, 'time', return_value=1000):
-            self.run_at(13)
+            self.run_at(20)
         self.assertEqual(self.sender.call_count, 2)
         with patch.object(learning.time, 'time', return_value=1301):
-            self.run_at(13)
+            self.run_at(20)
         self.assertEqual(self.sender.call_args_list[0].args[2], self.sender.call_args_list[2].args[2])
         self.reader.assert_called_once()
 
@@ -55,8 +57,8 @@ class ShiftReminderTests(TestCase):
         with self.service.transaction() as conn:
             self.service._put('notification', 'building', {'id': 'building', 'scope': 'A', 'date': '2026-10-10', 'kind': 'publish', 'status': 'pending'}, conn)
         with patch.object(reminders.time, 'time', return_value=1000):
-            self.run_at(8)
-            self.run_at(8)
+            self.run_at(13)
+            self.run_at(13)
         self.reader.assert_called_once()
         self.assertEqual(self.sender.call_args.args[0], 'A')
         self.assertEqual(self.sender.call_args.args[1]['elements'][-1]['actions'][0]['url'], 'http://portal.test:18766/learning?scope=A')
@@ -67,6 +69,45 @@ class ShiftReminderTests(TestCase):
         self.run_at(13)
         self.reader.assert_not_called()
         self.sender.assert_not_called()
+
+    def test_old_pending_night_waits_until_new_time(self):
+        key = 'shift:2026-10-10:夜:ou_night'
+        with self.service.transaction() as conn:
+            self.service._put('notification', key, {'id': key, 'kind': 'shift', 'shift': '夜',
+                'scope': '', 'date': '2026-10-10', 'open_id': 'ou_night', 'status': 'pending'}, conn)
+        self.run_at(13)
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
+        self.run_at(20)
+        self.run_at(21)
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external', 'ou_night'])
+
+    def test_old_single_time_settings_get_new_shift_defaults_without_resetting_other_flags(self):
+        with self.service.transaction() as conn:
+            self.service._put('settings', 'main', {'enabled': True, 'publish_time': '08:00',
+                'reminder_enabled': True, 'reminder_time': '18:00'}, conn, False)
+        settings = self.service.settings()
+        self.assertEqual((settings['publish_time'], settings['night_publish_time']), ('13:00', '20:00'))
+        self.assertTrue(settings['reminder_enabled'])
+        self.assertEqual(settings['reminder_time'], '18:00')
+
+    def test_configured_shift_times_apply_to_both_people_and_cached_roster(self):
+        with self.service.transaction() as conn:
+            self.service._put('settings', 'main', {**learning.DEFAULT_SETTINGS, 'enabled': True,
+                'publish_time': '14:00', 'night_publish_time': '21:00'}, conn, False)
+        self.run_at(13)
+        self.reader.assert_not_called()
+        self.run_at(14)
+        self.run_at(20)
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
+        self.run_at(21)
+        self.assertEqual(self.sender.call_count, 2)
+        self.reader.assert_called_once()
+
+    def test_restored_invalid_shift_times_fall_back_without_stopping_worker(self):
+        with self.service.transaction() as conn:
+            self.service._put('settings', 'main', {'enabled': True, 'publish_time': None,
+                'night_publish_time': '25:61'}, conn, False)
+        self.assertEqual(reminders.shift_times(self.service.settings()), {'白': '13:00', '夜': '20:00'})
 
     def test_roster_view_pagination_dates_exclusions_and_external_users(self):
         timestamp = int(dt.datetime(2026, 10, 10, tzinfo=learning.TZ).timestamp()*1000)

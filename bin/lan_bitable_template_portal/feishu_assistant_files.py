@@ -109,7 +109,8 @@ def parse_resources(message, content):
 def _identity(actor, message):
     actor_id = str(actor.get("id") or message.get("sender_id") or "")
     channel = str(actor.get("channel") or "feishu:" + str(message.get("chat_id") or ""))
-    owner = hashlib.sha256((actor_id + ":" + channel).encode()).hexdigest()
+    topic = str(message.get('root_id') or message.get('thread_id') or '')
+    owner = hashlib.sha256((actor_id + ":" + channel + (':' + topic if topic else '')).encode()).hexdigest()
     return owner, actor_id, channel
 
 
@@ -175,7 +176,8 @@ async def handle_files(bot, message, request, actor, conversation):
             return await _stash_photos_for_selection(bot, message, request, actor, store,
                                                      owner, actor_id, channel, resources,
                                                      conversation, target[1], question)
-        return await _take_pending(bot, message, store, owner, actor_id, channel, resources, question, conversation.get('conversation_id'))
+        return await _take_pending(bot, message, store, owner, actor_id, channel, resources, question,
+                                   message.get('_actor_conversation_id') or conversation.get('conversation_id'))
 
     if question in {'取消读取附件', '取消知识库操作'}:
         key = owner if question == '取消读取附件' else _kb_key(owner, {})
@@ -231,7 +233,8 @@ async def _take_pending(bot, message, store, owner, actor_id, channel, resources
         }
         await asyncio.to_thread(store.put_document, NAMESPACE, key, pending)
     names = "、".join(r["name"] or ("图片" if r["kind"] == "image" else "文件") for r in resources)
-    return {"text": f"已收到{len(resources)}个附件（{names}）。回复“{CONFIRM_READ}”以读取并纳入本会话"
+    where = '请在本话题回复' if message.get('root_id') and message.get('chat_type') == 'group' else '回复'
+    return {"text": f"已收到{len(resources)}个附件（{names}）。{where}“{CONFIRM_READ}”以读取并纳入本会话"
                     f"（每个≤20MiB、合计≤100MiB，仅当前会话使用，不自动加入公司知识库）；也可回复“取消读取附件”。"}
 
 

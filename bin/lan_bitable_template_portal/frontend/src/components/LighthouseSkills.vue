@@ -1,9 +1,12 @@
 <template>
   <section class="skill-manager" aria-label="技能管理">
     <header><button type="button" class="skill-icon" :aria-label="detail ? '返回技能列表' : '返回会话'" @click="detail ? detail = null : $emit('close')"><ArrowLeft :size="18" /></button><strong>{{ detail ? detail.label : '技能' }}</strong>
-      <button v-if="!detail" type="button" class="install" :disabled="installing" @click="fileInput?.click()"><Loader2 v-if="installing" :size="15" class="spin" /><Upload v-else :size="15" />{{ installing ? '安装中' : '安装技能' }}</button>
+      <button v-if="!detail" type="button" class="install" :aria-pressed="toolsOpen" @click="toolsOpen = !toolsOpen">{{ toolsOpen ? '技能' : '工具与MCP' }}</button>
+      <button v-if="!detail && !toolsOpen" type="button" class="install" :disabled="installing" @click="fileInput?.click()"><Loader2 v-if="installing" :size="15" class="spin" /><Upload v-else :size="15" />{{ installing ? '安装中' : '安装技能' }}</button>
       <input ref="fileInput" type="file" accept=".md,.zip" hidden @change="install" />
     </header>
+    <LighthouseTools v-if="toolsOpen" @changed="emit('changed')" />
+    <template v-else>
     <div v-if="error" class="skill-error" role="alert">{{ error }}</div>
     <p v-if="notice" class="skill-notice" role="status">{{ notice }}</p>
     <div v-if="loading" class="skill-state" role="status"><Loader2 :size="18" class="spin" />读取中</div>
@@ -26,19 +29,22 @@
       <footer>{{ filtered.length }} 个技能<span>共享 {{ items.filter(item => item.source === 'shared').length }} / 20</span></footer>
     </template>
     <ConfirmDialog :open="!!deleteTarget" title="删除共享技能" :message="'删除“' + (deleteTarget?.label || '') + '”？所有账号将无法再选择此技能，已发送消息的记录保留。'" tone="danger" @resolve="remove" />
+    </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue';
 import { ArrowLeft, BookOpen, ChevronRight, FileText, Loader2, RefreshCw, Search, Trash2, Upload } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import ConfirmDialog from './ConfirmDialog.vue';
 import LighthouseReply from './LighthouseReply.vue';
+const LighthouseTools = defineAsyncComponent(() => import('./LighthouseTools.vue'));
 
 const emit = defineEmits<{ close: []; use: [Dict]; changed: [] }>();
 const items = ref<Dict[]>([]), query = ref(''), source = ref(''), loading = ref(false), installing = ref(false), reading = ref(false);
 const error = ref(''), notice = ref(''), detail = ref<Dict | null>(null), deleteTarget = ref<Dict | null>(null);
+const toolsOpen = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null), guide = ref(''), nextOffset = ref(0), references = ref<string[]>([]);
 const currentReference = ref('');
 const filtered = computed(() => items.value.filter(item => (!source.value || item.source === source.value) && (item.label + ' ' + item.description).toLowerCase().includes(query.value.trim().toLowerCase())));

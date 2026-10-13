@@ -1,0 +1,9 @@
+.workspace-v2-native { color-scheme: light; --primary: #0071e3; --accent: #0071e3; --radius: 8px; }
+.workspace-v2-native body { background: #f5f5f7 !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; letter-spacing: 0; }
+.workspace-v2-native .page-header,.workspace-v2-native .topbar,.workspace-v2-native .header { box-shadow: none; }
+.workspace-v2-native button,.workspace-v2-native input,.workspace-v2-native select,.workspace-v2-native textarea { border-radius: 8px !important; font-family: inherit; }
+.workspace-v2-native button { transition: color .16s, background-color .16s, border-color .16s; }
+.workspace-v2-native :focus-visible { outline: 2px solid #1762cf; outline-offset: 2px; }
+.workspace-v2-native .workspace { max-width: none !important; }
+@media(max-width:700px){.workspace-v2-native body{font-size:14px}.workspace-v2-native .workspace{display:flex!important;flex-direction:column;min-width:0!important}.workspace-v2-native .workspace>*{width:100%!important;min-width:0!important;max-width:100%!important}.workspace-v2-native input,.workspace-v2-native select,.workspace-v2-native textarea{max-width:100%;font-size:16px}.workspace-v2-native button{min-height:40px}.workspace-v2-native table{max-width:100%}.workspace-v2-native .form-grid{grid-template-columns:minmax(0,1fr)!important}}
+@media(prefers-reduced-motion:reduce){.workspace-v2-native *{animation:none!important;transition:none!important}}

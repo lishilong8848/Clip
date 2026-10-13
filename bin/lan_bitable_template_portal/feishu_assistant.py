@@ -36,7 +36,7 @@ _PLAN_STATUS_TERMINAL = frozenset({"completed", "failed", "cancelled", "supersed
 _PLAN_STATUS_FEEDBACK = frozenset({"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"})
 
 
-def parse_message(payload, app_id, bot_id):
+def parse_message(payload, app_id, bot_id, *, inbox=None):
     header, event = payload.get("header") or {}, payload.get("event") or {}
     if header.get("app_id") != app_id or header.get("event_type") != "im.message.receive_v1":
         return None
@@ -49,7 +49,13 @@ def parse_message(payload, app_id, bot_id):
             (ids.get("open_id"), r"ou_[A-Za-z0-9]+"))):
         return None
     mentions = message.get("mentions") or []
-    if message["chat_type"] == "group" and not any((m.get("id") or {}).get("open_id") == bot_id for m in mentions):
+    root, thread = str(message.get('root_id') or ''), str(message.get('thread_id') or '')
+    parent = str(message.get('parent_id') or '')
+    if any(value and not re.fullmatch(pattern, value) for value, pattern in
+           ((root, r'om_[A-Za-z0-9]+'), (thread, r'omt_[A-Za-z0-9]+'), (parent, r'om_[A-Za-z0-9]+'))):
+        return None
+    in_topic = bool(inbox and (root or thread) and inbox.has_thread(message['chat_id'], root, thread))
+    if message["chat_type"] == "group" and not in_topic and not any((m.get("id") or {}).get("open_id") == bot_id for m in mentions):
         return None
     content = json.loads(message.get("content") or "{}")
     question, problem = "", ""
@@ -76,6 +82,8 @@ def parse_message(payload, app_id, bot_id):
     if private_identifier(question):
         question, problem = "[敏感查询]", "private"
     return {"message_id": message["message_id"], "chat_id": message["chat_id"], "chat_type": message["chat_type"],
+            **({'root_id': root} if root else {}), **({'thread_id': thread} if thread else {}),
+             **({'parent_id': parent} if parent else {}),
             "sender_id": ids["open_id"], "union_id": str(ids.get("union_id") or ""), "problem": problem,
             "question": safe_text(question, limit=12000) or "[内容已隐去]",
             'content': {**({key: content[key] for key in ('file_key', 'file_name') if key in content} if any(r['kind'] == 'file' for r in resources) else {}),
@@ -90,6 +98,25 @@ class Inbox:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, owner TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, reply TEXT, retry_at REAL NOT NULL DEFAULT 0)")
             db.execute("CREATE INDEX IF NOT EXISTS message_owner_state ON messages(state,retry_at,owner)")
+            db.execute("CREATE TABLE IF NOT EXISTS reply_threads (chat_id TEXT NOT NULL, root_id TEXT NOT NULL, thread_id TEXT NOT NULL, chat_type TEXT NOT NULL, ticket TEXT NOT NULL DEFAULT '', PRIMARY KEY(chat_id,thread_id))")
+            db.execute("CREATE INDEX IF NOT EXISTS reply_thread_root ON reply_threads(chat_id,root_id)")
+            db.execute("CREATE TABLE IF NOT EXISTS reply_thread_messages (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, thread_id TEXT NOT NULL)")
+            for name in ('ticket', 'plan_id'):
+                if name not in {row[1] for row in db.execute('PRAGMA table_info(reply_thread_messages)')}:
+                    db.execute("ALTER TABLE reply_thread_messages ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(messages)')}
+            for name, declaration in [('created_at', 'REAL NOT NULL DEFAULT 0'), ('updated_at', 'REAL NOT NULL DEFAULT 0'), ('retries', 'INTEGER NOT NULL DEFAULT 0')]:
+                if name not in columns:
+                    db.execute('ALTER TABLE messages ADD COLUMN ' + name + ' ' + declaration)
+            if 'created_at' not in columns:
+                db.execute('UPDATE messages SET created_at=?,updated_at=? WHERE created_at=0', (time.time(), time.time()))
+            db.execute("CREATE TABLE IF NOT EXISTS topic_roots (chat_id TEXT,root_id TEXT,chat_type TEXT,updated_at REAL,PRIMARY KEY(chat_id,root_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS topic_plans (chat_id TEXT,root_id TEXT,plan_id TEXT,ticket TEXT,card_id TEXT,updated_at REAL,PRIMARY KEY(chat_id,root_id,plan_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS topic_posts (message_id TEXT PRIMARY KEY,chat_id TEXT,root_id TEXT,question TEXT,answer TEXT,access TEXT,created_at REAL)")
+            db.execute('CREATE INDEX IF NOT EXISTS topic_posts_recent ON topic_posts(chat_id,root_id,created_at)')
+            db.execute('CREATE INDEX IF NOT EXISTS topic_posts_expiry ON topic_posts(created_at)')
+            db.execute('CREATE INDEX IF NOT EXISTS topic_plans_expiry ON topic_plans(updated_at)')
+            db.execute('CREATE INDEX IF NOT EXISTS messages_retention ON messages(state,updated_at)')
             db.execute("UPDATE messages SET state='pending' WHERE state='processing'")
 
     @contextmanager
@@ -100,8 +127,12 @@ class Inbox:
 
     def add(self, message):
         with self.connect() as db:
-            return db.execute("INSERT OR IGNORE INTO messages(id,owner,payload,state) VALUES(?,?,?,'pending')",
-                (message["message_id"], message["union_id"] or "sender:" + message["sender_id"], json.dumps(message, ensure_ascii=False))).rowcount == 1
+            added = db.execute("INSERT OR IGNORE INTO messages(id,owner,payload,state,created_at,updated_at) VALUES(?,?,?,'pending',?,?)",
+                (message["message_id"], message["union_id"] or "sender:" + message["sender_id"], json.dumps(message, ensure_ascii=False), time.time(), time.time())).rowcount == 1
+            if added and not message.get('kind'):
+                db.execute('INSERT INTO topic_roots VALUES(?,?,?,?) ON CONFLICT(chat_id,root_id) DO UPDATE SET updated_at=excluded.updated_at',
+                           (message['chat_id'], message.get('root_id') or message['message_id'], message['chat_type'], time.time()))
+            return added
 
     def add_plan_status(self, payload, delay):
         """Insert (or refresh) one delayed, deduplicated plan-status poll event."""
@@ -110,10 +141,10 @@ class Inbox:
         owner = str(payload.get("owner") or "") or "plan_status"
         with self.connect() as db:
             db.execute(
-                "INSERT INTO messages(id,owner,payload,state,retry_at) VALUES(?,?,?,?,?) "
+                "INSERT INTO messages(id,owner,payload,state,retry_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,state='pending',retry_at=excluded.retry_at",
                 (payload["message_id"], owner, json.dumps(payload, ensure_ascii=False),
-                 "pending", time.time() + delay))
+                  "pending", time.time() + delay, time.time(), time.time()))
 
     def due_plan_statuses(self, now=None):
         with self.connect() as db:
@@ -147,8 +178,124 @@ class Inbox:
 
     def set(self, identity, state, reply=None, delay=0):
         with self.connect() as db:
-            db.execute("UPDATE messages SET state=?,reply=COALESCE(?,reply),retry_at=? WHERE id=?",
-                (state, json.dumps(reply, ensure_ascii=False) if reply is not None else None, time.time() + delay, identity))
+            db.execute("UPDATE messages SET state=?,reply=COALESCE(?,reply),retry_at=?,updated_at=? WHERE id=?",
+                (state, json.dumps(reply, ensure_ascii=False) if reply is not None else None, time.time() + delay, time.time(), identity))
+            route = (reply or {}).get('thread_route') or {}
+            if all(re.fullmatch(pattern, str(route.get(key) or '')) for key, pattern in
+                   (('chat_id', r'oc_[A-Za-z0-9]+'), ('root_id', r'om_[A-Za-z0-9]+'), ('thread_id', r'omt_[A-Za-z0-9]+'))):
+                db.execute("INSERT INTO reply_threads(chat_id,root_id,thread_id,chat_type,ticket) VALUES(?,?,?,?,?) "
+                           "ON CONFLICT(chat_id,thread_id) DO UPDATE SET ticket=CASE WHEN excluded.ticket<>'' THEN excluded.ticket ELSE reply_threads.ticket END",
+                           (route['chat_id'], route['root_id'], route['thread_id'], route.get('chat_type', ''), reply.get('ticket', '')))
+                for mid in reply.get('thread_messages', []):
+                    if re.fullmatch(r'om_[A-Za-z0-9]+', str(mid)):
+                        db.execute('INSERT OR IGNORE INTO reply_thread_messages(message_id,chat_id,thread_id,ticket,plan_id) VALUES(?,?,?,?,?)',
+                                   (mid, route['chat_id'], route['thread_id'], reply.get('ticket', ''), reply.get('topic_plan_id', '')))
+                plan_id = reply.get('topic_plan_id')
+                if plan_id and reply.get('ticket'):
+                    db.execute('INSERT INTO topic_plans VALUES(?,?,?,?,?,?) ON CONFLICT(chat_id,root_id,plan_id) DO UPDATE SET ticket=excluded.ticket,card_id=excluded.card_id,updated_at=excluded.updated_at',
+                               (route['chat_id'], route['root_id'], plan_id, reply['ticket'], reply.get('card_message_id', ''), time.time()))
+
+    def thread_for(self, message):
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            if message.get('thread_id'):
+                row = db.execute('SELECT * FROM reply_threads WHERE chat_id=? AND thread_id=?',
+                                 (message['chat_id'], message['thread_id'])).fetchone()
+            elif message.get('root_id'):
+                row = db.execute('SELECT * FROM reply_threads WHERE chat_id=? AND root_id=?',
+                                 (message['chat_id'], message['root_id'])).fetchone()
+            else:
+                row = db.execute('SELECT t.* FROM reply_threads t JOIN reply_thread_messages m '
+                                 'ON t.chat_id=m.chat_id AND t.thread_id=m.thread_id WHERE m.chat_id=? AND m.message_id=?',
+                                 (message['chat_id'], message.get('reply_to_message_id', ''))).fetchone()
+            root = message.get('root_id') or (message.get('message_id') if message.get('chat_type') == 'group' else '')
+            if not row and root:
+                row = db.execute("SELECT chat_id,root_id,chat_type,'' AS ticket,? AS thread_id FROM topic_roots WHERE chat_id=? AND root_id=?",
+                                 (message.get('thread_id', ''), message['chat_id'], root)).fetchone()
+            return dict(row) if row else None
+
+    def has_thread(self, chat_id, root_id, thread_id):
+        if not root_id and not thread_id:
+            return False
+        with self.connect() as db:
+            if thread_id:
+                row = db.execute('SELECT root_id FROM reply_threads WHERE chat_id=? AND thread_id=?',
+                                 (chat_id, thread_id)).fetchone()
+                if row:
+                    return bool(not root_id or row[0] == root_id)
+                if root_id and db.execute('SELECT 1 FROM reply_threads WHERE chat_id=? AND root_id=?', (chat_id, root_id)).fetchone():
+                    return False
+            return bool(root_id and (db.execute('SELECT 1 FROM reply_threads WHERE chat_id=? AND root_id=? LIMIT 1',
+                              (chat_id, root_id)).fetchone() or db.execute('SELECT 1 FROM topic_roots WHERE chat_id=? AND root_id=?',
+                              (chat_id, root_id)).fetchone()))
+
+    def topic_plans(self, message):
+        topic = self.thread_for(message)
+        if not topic:
+            return []
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            return [dict(row) for row in db.execute('SELECT * FROM topic_plans WHERE chat_id=? AND root_id=? ORDER BY plan_id',
+                                                   (topic['chat_id'], topic['root_id']))]
+
+    def referenced_plan(self, message):
+        reference = message.get('parent_id') or message.get('reply_to_message_id')
+        with self.connect() as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute('SELECT ticket,plan_id FROM reply_thread_messages WHERE chat_id=? AND message_id=?',
+                             (message['chat_id'], reference)).fetchone()
+            return dict(row) if row else {}
+
+    def retire_topic_plan(self, message, plan_id):
+        with self.connect() as db:
+            row = db.execute('SELECT ticket FROM topic_plans WHERE chat_id=? AND root_id=? AND plan_id=?',
+                             (message['chat_id'], message.get('root_id'), plan_id)).fetchone()
+            db.execute('DELETE FROM topic_plans WHERE chat_id=? AND root_id=? AND plan_id=?',
+                       (message['chat_id'], message.get('root_id'), plan_id))
+            if row:
+                db.execute("UPDATE reply_threads SET ticket='' WHERE chat_id=? AND root_id=? AND ticket=?",
+                           (message['chat_id'], message.get('root_id'), row[0]))
+
+    def remember_public_reply(self, message, reply):
+        route = reply.get('thread_route') or {}
+        if not route.get('root_id') or reply.get('thread_fallback') or not reply.get('delivery_access'):
+            return
+        with self.connect() as db:
+            db.execute('INSERT OR IGNORE INTO topic_posts VALUES(?,?,?,?,?,?,?)',
+                       (message['message_id'], route['chat_id'], route['root_id'], safe_text(message.get('question'), limit=1500),
+                        safe_text(reply.get('text'), limit=2500), json.dumps(reply['delivery_access']), time.time()))
+
+    def topic_context(self, message, actor):
+        topic = self.thread_for(message)
+        if not topic:
+            return ''
+        with self.connect() as db:
+            rows = db.execute('SELECT question,answer,access FROM topic_posts WHERE chat_id=? AND root_id=? ORDER BY created_at DESC LIMIT 4',
+                              (topic['chat_id'], topic['root_id'])).fetchall()
+        parts = []
+        for question, answer, raw in reversed(rows):
+            access = json.loads(raw)
+            if set(access.get('scopes', [])) <= set(actor.get('scopes', [])) and set(access.get('modules', [])) <= set(actor.get('modules', [])):
+                parts.append('话题问题：' + question + '\n已公开回复（历史）：' + answer)
+        return '\n\n'.join(parts)[-5000:]
+
+    def defer_delivery(self, identity, *, permanent=False, reason=''):
+        with self.connect() as db:
+            row = db.execute('SELECT retries FROM messages WHERE id=?', (identity,)).fetchone()
+            attempts = (row[0] if row else 0) + 1
+            stopped = permanent or attempts >= 8
+            db.execute("UPDATE messages SET retries=?,state=?,retry_at=?,updated_at=?,reply=json_set(COALESCE(reply,'{}'),'$.delivery_error',?) WHERE id=?",
+                       (attempts, 'stopped' if stopped else 'reply', time.time() + min(300, 5 * 2 ** min(attempts, 6)), time.time(), safe_text(reason, limit=240), identity))
+            return stopped
+
+    def cleanup(self, now=None):
+        now = time.time() if now is None else now
+        with self.connect() as db:
+            # Keep message IDs as tombstones so delayed duplicate events stay deduplicated.
+            db.execute("UPDATE messages SET state='archived',owner='',payload='{}',reply=NULL WHERE id IN (SELECT id FROM messages WHERE state IN ('done','stopped') AND updated_at<? LIMIT 1000)", (now - 30 * 86400,))
+            db.execute('DELETE FROM topic_posts WHERE rowid IN (SELECT rowid FROM topic_posts WHERE created_at<? LIMIT 1000)', (now - 30 * 86400,))
+            db.execute("UPDATE reply_threads SET ticket='' WHERE ticket IN (SELECT ticket FROM topic_plans WHERE updated_at<? LIMIT 500)", (now - 1800,))
+            db.execute('DELETE FROM topic_plans WHERE rowid IN (SELECT rowid FROM topic_plans WHERE updated_at<? LIMIT 500)', (now - 1800,))
 
     def reply_for(self, identity):
         """Read a previously persisted outgoing reply for the row (no consume).
@@ -170,10 +317,10 @@ class Inbox:
         short-lived notifies are persisted even when the poll row was removed."""
         with self.connect() as db:
             db.execute(
-                "INSERT INTO messages(id,owner,payload,state,reply,retry_at) VALUES(?,?,?,?,?,?) "
+                "INSERT INTO messages(id,owner,payload,state,reply,retry_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET state='reply',reply=excluded.reply,retry_at=0",
                 (identity, "plan_status", "{}", "reply",
-                 json.dumps(reply, ensure_ascii=False), 0))
+                  json.dumps(reply, ensure_ascii=False), 0, time.time(), time.time()))
 
     def claim_reaction(self, identity):
         with self.connect() as db:
@@ -238,12 +385,12 @@ class FeishuMessenger:
             raise AssistantError('飞书文件上传未完成，将保留文件重试。', 503)
         return key
 
-    async def send(self, message, reply, *, checkpoint=None):
+    async def send(self, message, reply, *, checkpoint=None, authorize=None):
         from .portal_service import external_real_write_guard
         if not external_real_write_guard()["real_write_allowed"]:
             raise AssistantError("当前运行模式不允许发送真实飞书消息。", 403)
         client = await self.client()
-        # Reply to the originating message; identity and conversation remain per sender.
+        # Threads affect delivery only; each participant keeps their own account context.
         text = safe_text(reply.get("text") or '', limit=120000) or "本轮未取得回答，请稍后重新提问。"
         if len(text) > 3500 and not reply.get('card'):
             if not reply.get('long_text_file_key'):
@@ -251,6 +398,10 @@ class FeishuMessenger:
                 if checkpoint: await checkpoint()
             text = '完整回复已整理为Markdown文件，请查看附件。涉及业务操作时，请先核对文件中的操作与字段，再回复确认。'
         card = reply.get('card') or {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": text}]}}
+        if reply.get('thread_fallback'):
+            card = {**card, 'body': {**card.get('body', {}), 'elements': [
+                {'tag': 'markdown', 'content': '当前会话不支持话题回复，已保留原回复和表单。'},
+                *card.get('body', {}).get('elements', [])]}}
         parts = [('attachment-stopped' if reply.get('attachment_stopped') else 'answer:fallback' if reply.get('card_rejected') else 'answer:0', 'interactive', card)]
         if reply.get('long_text_file_key'):
             parts.append(('long-text', 'file', {'file_key': reply['long_text_file_key']}))
@@ -258,21 +409,42 @@ class FeishuMessenger:
         for part, kind, content in parts:
             if part in reply.get('sent_parts', []):
                 continue
+            if authorize:
+                await authorize()
             body = {"msg_type": kind, "content": json.dumps(content, ensure_ascii=False),
+                "reply_in_thread": not reply.get('thread_fallback', False),
                 "uuid": hashlib.sha256((message["message_id"] + ":" + part).encode()).hexdigest()[:32]}
-            url = "https://open.feishu.cn/open-apis/im/v1/messages/" + (message.get('reply_to_message_id') or message["message_id"]) + "/reply"
+            target = message.get('root_id') or message.get('reply_to_message_id') or message['message_id']
+            url = "https://open.feishu.cn/open-apis/im/v1/messages/" + target + "/reply"
             response = await client.post(url, headers=await self.headers(), json=body)
             data = response.json()
             if data.get("code") != 0:
+                if data.get('code') in {230071, 230072} and not reply.get('thread_fallback'):
+                    reply['thread_fallback'] = True
+                    if checkpoint: await checkpoint()
+                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize)
                 if reply.get('card') and data.get('code') in {230001, 230099}:
                     reply.pop('card', None)
                     reply['card_rejected'] = True
                     reply['text'] = '交互表单暂未显示，原填写仍保留，可继续回复补充。\n\n' + text
                     if checkpoint:
                         await checkpoint()
-                    return await self.send(message, reply, checkpoint=checkpoint)
+                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize)
                 if data["code"] in {99991663, 99991664, 99991665}: self.expires = 0
+                if data['code'] in {230001, 230002, 230006, 230013, 230038, 230050, 230054, 230055, 230075, 230099, 230110, 230111, 232009, 99991672, 99991679}:
+                    raise AssistantError('飞书回复无法送达（权限、目标或消息格式不可用），已停止自动重试。返回码：' + str(data['code']),
+                                         403, category='feishu_delivery_permanent')
                 raise AssistantError("飞书回复发送未完成，已保留回答稍后重试。", 503)
+            delivered = data.get('data') or {}
+            if delivered.get('thread_id'):
+                reply['thread_route'] = {'chat_id': message['chat_id'],
+                    'chat_type': message['chat_type'],
+                    'root_id': delivered.get('root_id') or message.get('root_id') or target,
+                    'thread_id': delivered['thread_id']}
+                if delivered.get('message_id'):
+                    reply.setdefault('thread_messages', []).append(delivered['message_id'])
+                    if kind == 'interactive':
+                        reply['card_message_id'] = delivered['message_id']
             reply.setdefault('sent_parts', []).append(part)
             if checkpoint: await checkpoint()
 
@@ -290,6 +462,7 @@ class FeishuAssistant:
         self.process, self.runner, self.bot_id = None, None, ""
         self.tasks, self.sessions = {}, {}
         self.picked_plan = {}
+        self.topic_choices = {}
         self.plan_tasks = {}  # identity -> plan_status poll task (independent of normal drain)
         self.plan_status_slots = asyncio.Semaphore(4)
         self.reactions = {}
@@ -297,6 +470,7 @@ class FeishuAssistant:
         self.closing = False
         self.event = asyncio.Event()
         self.starts = []
+        self.next_cleanup = 0
 
     async def _start_worker(self):
         from upload_event_module.services.process_lifetime import register_child_process
@@ -327,6 +501,8 @@ class FeishuAssistant:
             self.inbox = await asyncio.to_thread(Inbox, self.root / ("feishu_assistant" + suffix + ".sqlite3"))
             self.messenger = FeishuMessenger(self.config)
             await self._start_worker()
+            if getattr(self, "permission_cards", None):
+                await self.permission_cards.recover()
             self.runner = asyncio.create_task(self._run())
             print("[ClipFlow][FeishuAssistant] 飞书智能体正在后台建立消息长连接，不影响其他业务", flush=True)
         except Exception as exc:
@@ -350,9 +526,11 @@ class FeishuAssistant:
             else:
                 from .feishu_assistant_questions import parse_question_event
                 from .feishu_notice_cards import parse_card_event
-                message = (parse_question_event(data, self.config['app_id'])
+                from .permission_review_cards import parse_event as parse_permission_event
+                message = (parse_permission_event(data, self.config['app_id'])
+                           or parse_question_event(data, self.config['app_id'])
                            or parse_card_event(data, self.config['app_id'])
-                           or parse_message(data, self.config["app_id"], self.bot_id))
+                           or await asyncio.to_thread(parse_message, data, self.config["app_id"], self.bot_id, inbox=self.inbox))
                 if not message and (data.get('header') or {}).get('event_type') == 'card.action.trigger':
                     return JSONResponse({'ok': False}, status_code=400)
                 if message:
@@ -418,7 +596,9 @@ class FeishuAssistant:
 
     async def _call(self, request, actor, path, body=None, plan_id=None, *, method=None, params=None):
         current, authority = await self.ready()
-        context = authority.context(request, actor, plan_id=plan_id)
+        shared = getattr(getattr(request, 'state', None), 'feishu_shared_plan', None)
+        sharing = shared and (path == 'plans/' + shared['id'] or path.startswith('plans/' + shared['id'] + '/'))
+        context = authority.context(request, actor, plan_id=plan_id, **({'shared_plan': shared} if sharing else {}))
         headers = {"Authorization": "Bearer " + current.key, "x-clipflow-instance": current.instance,
             "x-clipflow-lease": current.lease, "x-clipflow-context": context}
         http_method = method or ("GET" if body is None else "POST")
@@ -445,10 +625,18 @@ class FeishuAssistant:
                 authority.contexts.pop(context, None)
 
     async def answer(self, message):
+        if message.get("kind") == "permission_review":
+            return await self.permission_cards.handle(message)
         if message.get("problem"):
             return {"text": "请发送不超过12000字的文字、图片或文件，每次最多10个附件。身份证号、住址不提供查询。"}
         request, actor = await self._request_context(message)
         conversation = await self._call(request, actor, "conversation")
+        topic = await asyncio.to_thread(self.inbox.thread_for, message) if self.inbox else None
+        if topic:
+            message.update(root_id=topic['root_id'], thread_id=topic['thread_id'], chat_type=topic['chat_type'])
+            if request is not None:
+                request.state.feishu_topic = {'id': message['chat_id'] + ':' + topic['root_id'],
+                                             'context': await asyncio.to_thread(self.inbox.topic_context, message, actor)}
         clarification_id = None
         if message.get('kind') == 'question_action':
             from .feishu_assistant_questions import read_question_reply
@@ -457,10 +645,12 @@ class FeishuAssistant:
             request.state.feishu_question = question
         def direct_reply(reply):
             return {**reply, 'actor_id': actor['id'], 'conversation_id': conversation.get('conversation_id'),
+                    'delivery_access': self._delivery_access(actor),
                     'sync_history': True}
         if message.get('kind') == 'card_action':
-            from .feishu_notice_cards import handle_card
-            return direct_reply(await handle_card(self, message, request, actor, conversation))
+            from .feishu_notice_cards import handle_card, bind_shared_card
+            card_conversation = await bind_shared_card(self, message, request, actor, conversation)
+            return direct_reply(await handle_card(self, message, request, actor, card_conversation))
         from .assistant_read_consent import ReadConsent
         consent = ReadConsent(self.runtime.state_store)
         if message['question'].strip() == '取消查询':
@@ -472,7 +662,22 @@ class FeishuAssistant:
             message = {**message, 'question': original}
             request.state.feishu_question = original
         from .feishu_assistant_files import handle_files
-        file_reply = await handle_files(self, message, request, actor, conversation)
+        plan_conversation = conversation
+        question = message['question'].strip()
+        field_lines = _looks_like_field_lines(question)
+        topic_command = question in {'确认', '确认发送', '确认执行', '再次确认执行', '取消操作', '编辑操作', '查看当前计划', '操作状态', '重试操作'} or question.startswith(('补充 ', '修改 ', '查看选项 ', '选择计划', '补照片计划'))
+        content = message.get('content') or {}
+        topic_photos = any(row for row in content.get('content', []))
+        if message.get('chat_type') == 'group' and (message.get('root_id') or message.get('thread_id')):
+            # A topic must never fall back to the person's unrelated private plans.
+            plan_conversation = {**conversation, 'turns': []}
+            if topic_command or topic_photos or field_lines:
+                plan_conversation, problem = await self._topic_plan(message, request, actor, conversation, topic)
+                if problem:
+                    return direct_reply({'text': problem})
+                if (topic_command or field_lines and message.get('root_id') != message['message_id']) and not plan_conversation.get('turns'):
+                    return direct_reply({'text': '当前话题没有可确认或编辑的业务表单，请先在本话题发起操作；未处理你在其他会话中的待办。'})
+        file_reply = await handle_files(self, message, request, actor, plan_conversation)
         if file_reply and 'text' in file_reply:
             return direct_reply(file_reply)
         file_ids = file_reply.get('file_ids', []) if file_reply else []
@@ -480,8 +685,9 @@ class FeishuAssistant:
             message = {**message, 'question': file_reply['question']}
             request.state.feishu_question = message['question']
         question = message["question"].strip()
-        plans = {t['plan'].get('id', str(i)): t['plan'] for i, t in enumerate(conversation.get('turns', [])) if t.get('plan')}
-        plan_reply = await self._feishu_plan_command(message, request, actor, plans, conversation) if not file_ids and not clarification_id else None
+        plans = {t['plan'].get('id', str(i)): t['plan'] for i, t in enumerate(plan_conversation.get('turns', [])) if t.get('plan')}
+        command_message = {**message, 'question': '操作状态'} if topic and re.fullmatch(r'选择计划\s*\d+', question) else message
+        plan_reply = await self._feishu_plan_command(command_message, request, actor, plans, conversation) if not file_ids and not clarification_id else None
         if plan_reply is not None:
             reply = direct_reply({"text": safe_text(plan_reply, limit=30000)})
             selected, _ = self._resolve_plan(message, plans, None, actor)
@@ -513,6 +719,7 @@ class FeishuAssistant:
             card = None
         reply = {"text": safe_text(text, limit=120000), **({'card': card} if card else {}), 'actor_id': actor['id'],
                 'conversation_id': conversation['conversation_id'],
+                'delivery_access': self._delivery_access(actor),
                 'files': [{'id': file['id'], 'name': file['name']} for file in ([] if pending_reads else turn.get('output_files', []))
                           if isinstance(file, dict) and re.fullmatch('[a-f0-9]{32}', str(file.get('id', '')))]}
         if turn.get('plan') and not pending_reads:
@@ -520,15 +727,88 @@ class FeishuAssistant:
         return reply
 
     async def _attach_form_card(self, reply, message, request, actor, conversation, plan):
-        if plan.get('status') not in {'needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'}:
+        reply['topic_plan_id'] = plan.get('id')
+        reply['topic_plan_status'] = plan.get('status')
+        if plan.get('status') in {'completed', 'cancelled', 'superseded'}:
+            if self.inbox and message.get('root_id') and plan.get('id'):
+                await asyncio.to_thread(self.inbox.retire_topic_plan, message, plan['id'])
             return
         try:
             from .feishu_notice_cards import prepare_card
             result = await prepare_card(self, message, actor, conversation, plan)
             if result.get('card'):
                 reply['card'] = result['card']
+                reply['ticket'] = result['ticket']
         except Exception as exc:
             logging.warning('Feishu form unavailable, original reply retained: %s', type(exc).__name__)
+
+    @staticmethod
+    def _delivery_access(actor):
+        return {'scopes': sorted(actor.get('scopes', [])), 'modules': sorted(actor.get('modules', [])),
+                'is_admin': bool(actor.get('is_admin'))}
+
+    async def _validate_delivery(self, message, reply):
+        if not reply.get('actor_id'):
+            return  # Transport/authentication error notices contain no model result.
+        request, actor = await self._request_context(message)
+        prior = reply.get('delivery_access')
+        if (actor['id'] != reply['actor_id'] or not isinstance(prior, dict)
+                or set(prior.get('scopes', [])) - set(actor.get('scopes', []))
+                or set(prior.get('modules', [])) - set(actor.get('modules', []))
+                or prior.get('is_admin') and not actor.get('is_admin')):
+            raise AssistantError('原回复权限已变化，请在当前会话重新提问。', 403, category='delivery_revoked')
+        current = await self._call(request, actor, 'conversation')
+        if current.get('conversation_id') != reply.get('conversation_id'):
+            raise AssistantError('原会话已清空，旧回复不再发送。', 410, category='delivery_revoked')
+
+    async def _topic_plan(self, message, request, actor, conversation, topic):
+        from .feishu_notice_cards import bind_shared_card
+        empty = {**conversation, 'turns': []}
+        if not topic:
+            return empty, None
+        bindings = await asyncio.to_thread(self.inbox.topic_plans, message)
+        if not bindings and topic.get('ticket'):
+            bindings = [{'ticket': topic['ticket']}]
+        candidates = []
+        for binding in bindings:
+            try:
+                scoped = await bind_shared_card(self, message, request, actor, conversation, ticket=binding['ticket'])
+                plan = scoped['turns'][0]['plan']
+                if plan.get('status') in {'completed', 'cancelled', 'superseded'}:
+                    await asyncio.to_thread(self.inbox.retire_topic_plan, message, plan['id'])
+                else:
+                    candidates.append((binding, plan))
+            except AssistantError as exc:
+                if exc.status not in {403, 404, 409, 410}:
+                    raise
+        request.state.feishu_shared_plan = None
+        message.pop('_shared_plan', None)
+        if not candidates:
+            return empty, None
+        selected = re.fullmatch(r'选择计划\s*(\d+)', message.get('question', '').strip())
+        if selected:
+            index = int(selected[1]) - 1
+            choices = self.topic_choices.get(_plan_key(message, actor)) or {}
+            ids = choices.get('ids', [])
+            if not 0 <= index < len(ids) or choices.get('expires', 0) < time.time() or ids[index] not in {p['id'] for _, p in candidates}:
+                return empty, '计划选项已变化或过期，请回复“查看当前计划”重新选择。'
+            self.picked_plan[_plan_key(message, actor)] = ids[index]
+        reference = message.get('parent_id') or message.get('reply_to_message_id')
+        referenced = await asyncio.to_thread(self.inbox.referenced_plan, message)
+        if referenced.get('plan_id') and not any(p['id'] == referenced['plan_id'] and b['ticket'] == referenced['ticket'] for b, p in candidates):
+            return empty, '你回复的卡片已更新或结束，请核对最新卡片后再操作，未提交业务。'
+        exact = [item for item in candidates if reference and item[0].get('card_id') == reference]
+        picked = self.picked_plan.get(_plan_key(message, actor))
+        chosen = exact or [item for item in candidates if item[1]['id'] == picked]
+        if not chosen and len(candidates) == 1:
+            chosen = candidates
+        if len(chosen) != 1:
+            self.topic_choices[_plan_key(message, actor)] = {'ids': [p['id'] for _, p in candidates], 'expires': time.time() + 1800}
+            if len(self.topic_choices) > 2000:
+                self.topic_choices.pop(next(iter(self.topic_choices)), None)
+            return empty, '本话题有多项待办，请先回复“选择计划 编号”，或直接回复对应卡片：\n' + '\n'.join(
+                f"{i + 1}、{safe_text(item[1].get('title') or '业务操作', limit=120)}（{item[1].get('status')}）" for i, item in enumerate(candidates))
+        return await bind_shared_card(self, message, request, actor, conversation, ticket=chosen[0][0]['ticket']), None
 
     async def _sync_reply_history(self, message, reply):
         if not reply.get('sync_history'):
@@ -587,12 +867,14 @@ class FeishuAssistant:
         requiring the authorized original page, never silently written.
         """
         question = (message["question"] or "").strip()
+        if message.get('_shared_plan') and question in {'确认', '确认发送'}:
+            question = '确认执行'
         if not plans:
             # With no pending plans there is nothing to edit. Ordinary prose that
             # contains a colon must fall through to the normal chat and never be
             # mistaken for a field write.
             return None
-        key = actor.get("id") or message["sender_id"]
+        key = _plan_key(message, actor)
         select = re.fullmatch(r"选择计划\s*(\d+)", question)
         if select:
             all_ids = list(plans)
@@ -708,7 +990,7 @@ class FeishuAssistant:
             return matches[0], None
         if len(matches) > 1:
             # Selection follows the person; current plan ownership is still rechecked.
-            key = (actor or {}).get("id") or message["sender_id"]
+            key = _plan_key(message, actor)
             picked_id = self.picked_plan.get(key)
             for plan in matches:
                 if picked_id is not None and plan.get("id") == picked_id:
@@ -1114,13 +1396,27 @@ class FeishuAssistant:
                     reply = {"text": safe_text(str(exc)) if isinstance(exc, AssistantError) else "助手暂时无法处理本条消息，请稍后重新提问；未自动重发业务。"}
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "reply", reply)
             try:
+                await self._validate_delivery(message, reply)
                 await self._sync_reply_history(message, reply)
                 await self._prepare_reply_files(message, reply)
+                if reply.get('files'):
+                    await self._validate_delivery(message, reply)
                 async def checkpoint():
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
-                await self.messenger.send(message, reply, checkpoint=checkpoint)
+                await self.messenger.send(message, reply, checkpoint=checkpoint, authorize=lambda: self._validate_delivery(message, reply))
+                await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)
+                if reply.get('topic_plan_id') and reply.get('topic_plan_status') in {'completed', 'cancelled', 'superseded'}:
+                    route_message = {**message, **(reply.get('thread_route') or {})}
+                    await asyncio.to_thread(self.inbox.retire_topic_plan, route_message, reply['topic_plan_id'])
                 await asyncio.to_thread(self.inbox.set, message["message_id"], "done")
             except Exception as exc:
+                if isinstance(exc, AssistantError) and (exc.category == 'delivery_revoked' or exc.status in {401, 403, 404, 410} and reply.get('actor_id') and exc.category != 'feishu_file_upload_permission'):
+                    if exc.category == 'feishu_delivery_permanent':
+                        await asyncio.to_thread(self.inbox.defer_delivery, message['message_id'], permanent=True, reason=str(exc))
+                    else:
+                        await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', {
+                            'text': '原回复无法通过当前权限及会话校验，旧内容已停止发送。请重新提问。', 'attachment_stopped': True}, delay=0)
+                    continue
                 upload_denied = isinstance(exc, AssistantError) and exc.category == 'feishu_file_upload_permission'
                 if isinstance(exc, AssistantError) and (upload_denied or exc.status in {401, 403, 404, 410} and reply.get('files')):
                     stopped = {'text': str(exc) if upload_denied else '原会话或文件访问权限已变化，本次文件发送已停止。请在当前会话重新提出需要。',
@@ -1128,7 +1424,9 @@ class FeishuAssistant:
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', stopped, delay=5)
                     return
                 logging.warning("Feishu assistant reply deferred: %s", type(exc).__name__)
-                await asyncio.to_thread(self.inbox.set, message["message_id"], "reply", delay=60)
+                await asyncio.to_thread(self.inbox.defer_delivery, message['message_id'],
+                                        permanent=isinstance(exc, AssistantError) and exc.category == 'feishu_delivery_permanent',
+                                        reason=str(exc) if isinstance(exc, AssistantError) else type(exc).__name__)
 
     async def schedule_plan_status(self, message, plan, conversation=None, actor_id=None):
         """Register one deduplicated pending-result poll per person+plan.
@@ -1148,13 +1446,13 @@ class FeishuAssistant:
         if not owner or not message_id:
             return
         identity = "plan_status_" + hashlib.sha256((owner + ":" + str(plan.get("id") or "")).encode()).hexdigest()[:40]
-        original = {key: message.get(key) for key in ("message_id", "reply_to_message_id", "chat_id", "chat_type", "sender_id", "union_id")}
+        original = {key: message.get(key) for key in ("message_id", "reply_to_message_id", "chat_id", "chat_type", "sender_id", "union_id", "root_id", "thread_id", "_shared_plan")}
         payload = {
             "message_id": identity,
             "owner": owner,
             "plan_id": str(plan.get("id") or ""),
             "plan_version": plan.get("version"),
-            "conversation_id": str((conversation or {}).get("conversation_id") or ""),
+            "conversation_id": str(message.get('_actor_conversation_id') or (conversation or {}).get("conversation_id") or ""),
             "actor_id": str(actor_id or message.get("sender_id") or ""),
             "attempts": 0,
             "created_at": time.time(),
@@ -1187,6 +1485,8 @@ class FeishuAssistant:
         request_context = {**original, "question": "[状态查询]"}
         try:
             request, actor = await self._request_context(request_context)
+            if original.get('_shared_plan'):
+                request.state.feishu_shared_plan = original['_shared_plan']
             # The pending poll is bound to the operator who confirmed and the
             # conversation they used; a rotated identity or cleared conversation
             # cancels the outstanding notification without erroring (audit #6).
@@ -1208,6 +1508,14 @@ class FeishuAssistant:
             raise
         plan = next((turn.get("plan") for turn in (conversation.get("turns") or [])
                      if turn.get("plan") and str(turn["plan"].get("id") or "") == str(payload.get("plan_id") or "")), None)
+        if original.get('_shared_plan'):
+            try:
+                plan = await self._call(request, actor, 'plans/' + payload['plan_id'])
+            except AssistantError as exc:
+                if exc.status in {401, 403, 404, 409, 410}:
+                    await asyncio.to_thread(self.inbox.set, identity, 'done')
+                    return
+                raise
         if plan is None:
             # Original conversation no longer exposes this plan (e.g. cleared);
             # drop the pending-result task as the requirement expects.
@@ -1247,14 +1555,15 @@ class FeishuAssistant:
             text = _plain_status_line(plan)
         else:
             return
-        reply = {"text": text}
+        reply = {"text": text, 'actor_id': actor['id'], 'conversation_id': conversation_id,
+                 'delivery_access': self._delivery_access(actor), 'topic_plan_id': plan.get('id'), 'topic_plan_status': status}
         original_target = original.get("reply_to_message_id") or original.get("message_id") or ""
         result_tag = hashlib.sha256((original_target + ":" + str(plan.get("id")) + ":" + str(plan.get("version")) + ":" + str(status)).encode()).hexdigest()[:32]
         stored_reply = await asyncio.to_thread(self.inbox.reply_for, identity)
         reused = stored_reply is not None and stored_reply.get("_result_tag") == result_tag
         if reused:
             reply = stored_reply
-        elif status in {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"}:
+        elif status in {"needs_input", "awaiting_confirmation", "awaiting_second_confirmation", "failed"}:
             # Attach a fresh, editable card so the operator can finish the form
             # directly in Feishu; the explanation must be plain language, never
             # kernel status terms (audit #5/#7).
@@ -1289,6 +1598,7 @@ class FeishuAssistant:
             (original_target + ":" + plan_id + ":" + str(plan_version) + ":" + str(status)).encode()
         ).hexdigest()[:32]
         notify_message = {
+            **{key: original[key] for key in ('root_id', 'thread_id', '_shared_plan') if original.get(key)},
             "message_id": notify_id,
             "reply_to_message_id": original_target or original.get("message_id"),
             "chat_id": original.get("chat_id"),
@@ -1307,7 +1617,13 @@ class FeishuAssistant:
             reply["_result_tag"] = result_tag
             await asyncio.to_thread(self.inbox.store_plan_status_reply, identity, reply)
         send_reply = {key: value for key, value in reply.items() if key != "_result_tag"}
-        await self.messenger.send(notify_message, send_reply)
+        async def checkpoint():
+            await asyncio.to_thread(self.inbox.set, identity, 'reply', {**send_reply, '_result_tag': result_tag})
+        await self._validate_delivery(notify_message, send_reply)
+        await self.messenger.send(notify_message, send_reply, checkpoint=checkpoint, authorize=lambda: self._validate_delivery(notify_message, send_reply))
+        await asyncio.to_thread(self.inbox.remember_public_reply, notify_message, send_reply)
+        if status in {'completed', 'cancelled', 'superseded'}:
+            await asyncio.to_thread(self.inbox.retire_topic_plan, {**notify_message, **(send_reply.get('thread_route') or {})}, plan['id'])
         if conversation_id:
             operation_id = "feishu_" + hashlib.sha256((notify_id + ":result").encode()).hexdigest()[:40]
             try:
@@ -1322,6 +1638,12 @@ class FeishuAssistant:
     async def _run(self):
         while not self.closing:
             self.event.clear()
+            if time.monotonic() >= self.next_cleanup:
+                try:
+                    await asyncio.to_thread(self.inbox.cleanup)
+                except sqlite3.Error:
+                    logging.warning('Feishu inbox cleanup deferred')
+                self.next_cleanup = time.monotonic() + 3600
             self.starts = [stamp for stamp in self.starts if time.monotonic() - stamp < 600]
             if self.process and self.process.poll() is not None and len(self.starts) < 3 and (
                     not self.starts or time.monotonic() - self.starts[-1] > 120):
@@ -1354,6 +1676,12 @@ class FeishuAssistant:
         for task in pending: task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
         if self.messenger: await self.messenger.close()
+
+
+def _plan_key(message, actor=None):
+    identity = (actor or {}).get('id') or message['sender_id']
+    root = message.get('root_id') or message.get('thread_id')
+    return identity + ':' + message['chat_id'] + ':' + root if root else identity
 
 
 def _looks_like_field_lines(question):
@@ -1614,6 +1942,8 @@ def install_feishu_assistant(app, controller, runtime, ready):
     service = FeishuAssistant(controller, runtime, ready)
     from .feishu_assistant_settings import install_feishu_assistant_settings
     install_feishu_assistant_settings(app, controller, runtime, service)
+    from .permission_review_cards import install as install_permission_cards
+    install_permission_cards(app, service)
 
     async def incoming(request: Request):
         return await service.receive(request)

@@ -371,6 +371,32 @@ class CrossBuildingRecommendationTests(unittest.TestCase):
         self.assertEqual(result["total"], 0)
         self.assertEqual(result["recommendations"], [])
 
+    def test_site_prefix_variants_match_but_device_ids_remain_distinct(self):
+        self.records[0]['display_fields']['维护总项'] = 'EA118机房E楼BA系统资料维护'
+        self.remember_a(total='EA118_C01机房A楼BA系统资料维护', content='按规范操作，对A楼BA系统资料进行维护。')
+        recommended = self.recommend()['recommendations'][0]
+        self.assertEqual(recommended['suggested_values']['content'], '按规范操作，对E楼BA系统资料进行维护。')
+        self.assertNotEqual(recs._comparison_title(self.service, 'A楼A-123-BAS-1维护', 'maintenance'),
+                            recs._comparison_title(self.service, 'E楼E-123-BAS-1维护', 'maintenance'))
+
+    def test_adopted_fields_only_become_target_memory_after_native_success(self):
+        self.remember_a()
+        suggested = self.recommend()['recommendations'][0]['suggested_values']
+        pending = []
+        token = planned.deferred_memory.set(pending)
+        try:
+            self.service._remember_draft_fields(building='E楼', maintenance_total='E楼冷水机组月度维护',
+                maintenance_cycle='每月', location=suggested['location'], content=suggested['content'],
+                reason=suggested['reason'], impact=suggested['impact'], extra_fields={key: suggested[key] for key in ('execution_party', 'specialty')})
+        finally:
+            planned.deferred_memory.reset(token)
+        self.assertFalse(self.service._get_record_memory(self.records[0])['content'])
+        planned.save_success_memory(self.service, {'accepted_at': 20, 'prepared': {'planned_memory': pending}})
+        memory = self.service._get_record_memory(self.records[0])
+        self.assertEqual(memory['content'], suggested['content'])
+        self.assertEqual(memory['execution_party'], suggested['execution_party'])
+        self.assertEqual(self.recommend()['recommendations'], [])
+
     def test_whitelist_status_not_copied(self):
         self.remember_a()
         result = self.recommend()

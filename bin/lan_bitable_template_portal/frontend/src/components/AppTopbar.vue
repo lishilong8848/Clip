@@ -10,6 +10,7 @@
       </div>
     </div>
     <div class="topbar-actions">
+      <FrontendVersionSwitch :enabled="Boolean(auth.loggedIn && homeMode)" :login="!auth.loggedIn" :identity="String(auth.user?.open_id || '')" />
       <button v-if="auth.loggedIn && homeMode && hasModule('life_guide')" type="button" class="btn ghost life-guide-entry" title="参考人生指南" @click="emit('open-life-guide')"><BookOpen :size="16" aria-hidden="true" /><span>参考人生指南</span></button>
       <span v-if="auth.loggedIn" class="user-chip" :title="auth.user?.login_method === 'password' ? '姓名密码登录' : auth.user?.open_id ? `飞书身份：${auth.user.open_id}` : ''">
         <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
@@ -59,6 +60,7 @@
 <script setup lang="ts">
 import { BookOpen, Fingerprint, KeyRound, LogOut, Settings, UserRound } from "lucide-vue-next";
 import RefreshDataMenu from "./RefreshDataMenu.vue";
+import FrontendVersionSwitch from "./FrontendVersionSwitch.vue";
 import type { LooseDict, ScopeOption } from "../types";
 
 const props = defineProps<{

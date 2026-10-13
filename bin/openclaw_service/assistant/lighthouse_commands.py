@@ -18,6 +18,12 @@ TOOLS = {
     'staff_headcount': ('在职人数', '完整人员表的在岗数量、重复记录核对和读取时间'),
     'feishu_document': ('读取飞书文档', '读取本轮提供的飞书文档链接，遵守楼栋权限并隐藏敏感信息'),
     'parse_notice': ('解析通告', '解析非事件通告，核对后才可办理'),
+    'discover_extensions': ('MCP与扩展工具', '按用途发现已启用工具，自动选择并沿用账号权限'),
+    'read_attachment_document': ('文档增强与OCR', '本地读取附件表格结构、识别图片及扫描PDF文字'),
+    'create_chart': ('图表生成', '根据已核验数据在本地生成柱状图、折线图及饼图'),
+    'analyze_spreadsheets': ('Excel跨表分析', '合并附件、核对关键列差异、分类汇总，不改原件'),
+    'process_pdf': ('PDF整理', '合并、提取、拆分与旋转PDF页面，只生成新文件'),
+    'create_flowchart': ('流程图生成', '按节点与连线离线绘制流程图，不上传公司数据'),
 }
 LIMIT = 4
 

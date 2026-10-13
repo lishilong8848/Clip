@@ -8,7 +8,12 @@ APP_TOKEN = 'KdCZbSL5CaTErKsFwFucddA5nYd'
 TABLE_ID = 'tblRV9KeWFh9xCkm'
 VIEW_ID = 'vew6jLlGzq'
 TZ = dt.timezone(dt.timedelta(hours=8))
-SHIFT_TIMES = {'夜': '08:00', '白': '13:00'}
+SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
+
+
+def shift_times(settings):
+    return {'白': settings.get('publish_time') or SHIFT_TIMES['白'],
+            '夜': settings.get('night_publish_time') or SHIFT_TIMES['夜']}
 
 
 def read_roster(service, day):
@@ -52,7 +57,8 @@ def read_roster(service, day):
 
 
 def enqueue_shift_reminders(service, current):
-    if not service._shift_roster_reader or current.strftime('%H:%M') < '08:00':
+    times = shift_times(service.settings())
+    if not service._shift_roster_reader or current.strftime('%H:%M') < min(times.values()):
         return
     day = current.date().isoformat()
     snapshot = service._get('local', 'shift_roster') or {}
@@ -72,7 +78,7 @@ def enqueue_shift_reminders(service, current):
             service._put('local', 'shift_roster', snapshot, conn, False)
     with service.transaction() as conn:
         for person in snapshot['people']:
-            if current.strftime('%H:%M') < SHIFT_TIMES[person['shift']]:
+            if current.strftime('%H:%M') < times[person['shift']]:
                 continue
             key = f"shift:{day}:{person['shift']}:{person['open_id']}"
             if service._get('notification', key, conn):

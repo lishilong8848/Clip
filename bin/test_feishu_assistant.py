@@ -102,6 +102,25 @@ class InboxTests(unittest.TestCase):
             self.inbox.add(parse_message(event(str(number), message_id=str(number)), "cliTest", "ouBot"))
         self.assertEqual(len(self.inbox.owners()), 30)
 
+    def test_known_group_topic_accepts_other_members_without_mentions_after_restart(self):
+        original = parse_message(event(chat_type='group'), 'cliTest', 'ouBot')
+        self.inbox.add(original)
+        self.inbox.set(original['message_id'], 'reply', {'thread_route': {'chat_id': 'oc_Chat',
+            'root_id': original['message_id'], 'thread_id': 'omt_Topic', 'chat_type': 'group'},
+            'thread_messages': ['om_Card'], 'ticket': 'fixture-ticket'})
+        restored = Inbox(self.path)
+        payload = event('anotherPerson', chat_type='group', message_id='followup')
+        payload['event']['message'].update(mentions=[], root_id=original['message_id'], thread_id='omt_Topic')
+        received = parse_message(payload, 'cliTest', 'ouBot', inbox=restored)
+        self.assertEqual(received['union_id'], 'on_anotherPerson')
+        self.assertEqual(received['thread_id'], 'omt_Topic')
+        self.assertEqual(restored.thread_for({'chat_id': 'oc_Chat', 'reply_to_message_id': 'om_Card'})['ticket'], 'fixture-ticket')
+        for changes in ({'chat_id': 'oc_Other'}, {'thread_id': 'omt_Other'}, {'root_id': 'om_Other'}):
+            changed = copy.deepcopy(payload)
+            changed['event']['message'].update(changes)
+            self.assertIsNone(parse_message(changed, 'cliTest', 'ouBot', inbox=restored))
+        self.assertIsNone(parse_message(payload, 'wrong-app', 'ouBot', inbox=restored))
+
 
 class ChannelTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -152,6 +171,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.channel.inbox.add(message)
         reply = {'text': '操作已完成', 'sync_history': True, 'actor_id': 'ou_A', 'conversation_id': 'same'}
         self.channel.answer = AsyncMock(return_value=reply)
+        self.channel._validate_delivery = AsyncMock()
         self.channel._request_context = AsyncMock(return_value=(None, {'id': 'ou_A', 'channel': 'feishu:oc_Chat'}))
         self.channel._call = AsyncMock(side_effect=[TimeoutError(), {'recorded': True}])
         self.channel.messenger = SimpleNamespace(send=AsyncMock(), react=AsyncMock())
@@ -181,6 +201,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
                  'sent_parts': ['answer:0'], 'files': [{'id': 'a' * 32, 'file_key': 'old_key'}]}
         self.channel.inbox.set(message['message_id'], 'reply', reply)
         self.channel.answer = AsyncMock()
+        self.channel._validate_delivery = AsyncMock()
         self.channel._prepare_reply_files = AsyncMock(side_effect=AssistantError('文件权限失效', 403))
         self.channel.messenger = SimpleNamespace(send=AsyncMock())
         await self.channel._drain(message['union_id'])
@@ -219,6 +240,33 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
                               ("127.0.0.1", [(b"authorization", b"Bearer private"), (b"origin", b"http://evil")])]:
             request = Request({"type": "http", "client": (host, 1), "headers": headers})
             self.assertEqual((await self.channel.receive(request)).status_code, 403)
+
+    async def test_topic_without_shared_form_does_not_confirm_private_pending_plan(self):
+        message = parse_message(event(chat_type='group', content='确认执行'), 'cliTest', 'ouBot')
+        message.update(root_id='om_TopicRoot', thread_id='omt_Topic')
+        self.channel._request_context = AsyncMock(return_value=(None, {'id': 'ou_Actual'}))
+        self.channel._call = AsyncMock(return_value={'conversation_id': 'own', 'turns': [
+            {'plan': {'id': 'private', 'status': 'awaiting_confirmation', 'version': 1}}]})
+        result = await self.channel.answer(message)
+        self.assertIn('未处理你在其他会话中的待办', result['text'])
+        self.channel._call.assert_awaited_once()
+
+    async def test_shared_capability_does_not_replace_actual_authority(self):
+        from lan_bitable_template_portal.lighthouse_bridge import PortalAuthority
+        actor = {'id': 'ou_Actual', 'scopes': ['E'], 'modules': ['assistant', 'maintenance'],
+                 'learning_scopes': [], 'is_admin': False, 'channel': 'feishu:oc_Group'}
+        authority = PortalAuthority(None, self.controller, self.runtime, SimpleNamespace(lease='fixture'))
+        grant = {'id': 'specific-plan', 'owner': 'ou_OriginAdmin', 'conversation_id': 'origin', 'chat_id': 'oc_Group'}
+        key = authority.context(None, actor, plan_id='specific-plan', shared_plan=grant)
+        with patch('lan_bitable_template_portal.lighthouse_bridge.actor_for', AsyncMock(return_value=copy.deepcopy(actor))):
+            _, actual = await authority.authorize(key)
+        self.assertEqual(actual['id'], 'ou_Actual')
+        self.assertFalse(actual['is_admin'])
+        self.assertEqual(actual['scopes'], ['E'])
+        self.assertEqual(actual['_shared_plan']['owner'], 'ou_OriginAdmin')
+        revoked = {**actor, 'modules': ['assistant']}
+        with patch('lan_bitable_template_portal.lighthouse_bridge.actor_for', AsyncMock(return_value=revoked)):
+            with self.assertRaises(AssistantError): await authority.authorize(key)
 
     async def test_user_mapping_uses_union_not_names_or_sender_open_id(self):
         self.store.put_document("feishu_assistant_identity", "on_user", {"union_id": "on_user", "open_id": "ou_Original", "name": "同名员工"})
@@ -283,6 +331,49 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reply.args[0].endswith('/' + message['message_id'] + '/reply'))
         self.assertNotIn('receive_id', reply.kwargs['json'])
         self.assertIn('内部业务资料', reply.kwargs['json']['content'])
+        self.assertTrue(reply.kwargs['json']['reply_in_thread'])
+
+    async def test_thread_response_checkpoints_route_and_all_parts_keep_same_root(self):
+        messenger = FeishuMessenger({})
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0,
+            'data': {'message_id': 'om_Delivered', 'root_id': 'om_Root', 'thread_id': 'omt_Topic'}})))
+        messenger.client = AsyncMock(return_value=client)
+        messenger.headers = AsyncMock(return_value={})
+        message = parse_message(event(chat_type='group'), 'cliTest', 'ouBot')
+        message.update(root_id='om_Root', thread_id='omt_Topic')
+        self.channel.inbox.add(message)
+        reply = {'text': '处理结果', 'files': [{'id': 'fixture', 'file_key': 'file_fixture'}]}
+        async def checkpoint():
+            self.channel.inbox.set(message['message_id'], 'reply', reply)
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            await messenger.send(message, reply, checkpoint=checkpoint)
+            await messenger.send(message, reply, checkpoint=checkpoint)
+        self.assertEqual(client.post.await_count, 2)
+        for call in client.post.await_args_list:
+            self.assertTrue(call.args[0].endswith('/om_Root/reply'))
+            self.assertTrue(call.kwargs['json']['reply_in_thread'])
+        self.assertTrue(self.channel.inbox.has_thread('oc_Chat', 'om_Root', 'omt_Topic'))
+
+    async def test_unsupported_topic_falls_back_once_with_same_uuid_but_network_errors_do_not(self):
+        for code in (230071, 230072, 99991400):
+            messenger = FeishuMessenger({})
+            client = SimpleNamespace(post=AsyncMock(side_effect=[SimpleNamespace(json=lambda: {'code': code}),
+                                                                 SimpleNamespace(json=lambda: {'code': 0})]))
+            messenger.client = AsyncMock(return_value=client)
+            messenger.headers = AsyncMock(return_value={})
+            message = parse_message(event(), 'cliTest', 'ouBot')
+            reply = {'text': '保留的回复'}
+            with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+                if code == 99991400:
+                    with self.assertRaises(AssistantError): await messenger.send(message, reply)
+                    self.assertEqual(client.post.await_count, 1)
+                    self.assertNotIn('thread_fallback', reply)
+                else:
+                    await messenger.send(message, reply)
+                    calls = client.post.await_args_list
+                    self.assertTrue(calls[0].kwargs['json']['reply_in_thread'])
+                    self.assertFalse(calls[1].kwargs['json']['reply_in_thread'])
+                    self.assertEqual(calls[0].kwargs['json']['uuid'], calls[1].kwargs['json']['uuid'])
 
     async def test_editable_reply_uses_real_callback_message_and_falls_back_only_on_rejection(self):
         messenger = FeishuMessenger({})

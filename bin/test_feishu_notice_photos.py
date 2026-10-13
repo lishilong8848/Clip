@@ -195,7 +195,9 @@ class _FakeMessenger:
     def __init__(self, sink):
         self.sink = sink
 
-    async def send(self, message, reply, checkpoint=None):
+    async def send(self, message, reply, checkpoint=None, authorize=None):
+        if authorize:
+            await authorize()
         self.sink.append((copy.deepcopy(message), copy.deepcopy(reply)))
         if checkpoint:
             await checkpoint()
@@ -566,7 +568,9 @@ class ResultNotificationTests(unittest.TestCase):
             def __init__(self, sent, failures):
                 self.sent, self.failures = sent, failures
 
-            async def send(self, message, reply, checkpoint=None):
+            async def send(self, message, reply, checkpoint=None, authorize=None):
+                if authorize:
+                    await authorize()
                 if self.failures["n"] == 0:
                     self.failures["n"] += 1
                     raise AssistantError("网络中断", 503)

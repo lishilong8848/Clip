@@ -1,0 +1,29 @@
+button[data-v2-action]{position:relative!important;isolation:isolate;overflow:hidden!important;clip-path:inset(0 0 round 6px);transition:clip-path 300ms ease-in-out,background-color 300ms ease-in-out!important}
+button[data-v2-action="pending"],button[data-v2-action="success"],button[data-v2-action="error"]{color:transparent!important;clip-path:inset(max(0px,calc((100% - var(--v2-action-size))/2)) max(0px,calc((100% - var(--v2-action-size))/2)) round 100px)}
+button[data-v2-action]>:not(.v2-action-feedback){opacity:0!important;transition:opacity 120ms ease!important}
+button[data-v2-action="restore"]>:not(.v2-action-feedback){opacity:1!important;transition:opacity 180ms ease 120ms!important}button[data-v2-action="restore"]>.v2-action-feedback{opacity:0;transition:opacity 120ms}
+button[data-v2-action="pending"]{background:#e8f1ee!important;border-color:transparent!important}
+button[data-v2-action="success"]{background:#16804a!important;border-color:transparent!important}
+button[data-v2-action="error"]{background:#bd3c48!important;border-color:transparent!important}
+.workspace-v2 .pwd-form:has(.error-message) button.submit:not([data-v2-action]),.workspace-v2 .pwd-form:has(.error-message) button.submit[data-v2-action="restore"]{background:#fff1f2!important;color:#b42332!important;border:1px solid #ec9098!important;box-shadow:none!important}
+.workspace-v2 .v2-main input.v2-password-invalid:focus-visible{outline-color:#bd3c48}
+.v2-action-feedback{position:absolute!important;left:50%;top:50%;transform:translate(-50%,-50%);display:grid;place-items:center;width:26px;height:26px;color:#087f74;pointer-events:none}
+[data-v2-action="pending"]>.v2-action-feedback>svg{animation:v2-button-spin .8s linear infinite}
+[data-v2-action="success"]>.v2-action-feedback,[data-v2-action="error"]>.v2-action-feedback{color:white}
+[data-v2-action="success"]>.v2-action-feedback>svg{stroke-dasharray:36;stroke-dashoffset:36;animation:v2-check-draw .28s ease-out forwards}
+@keyframes v2-button-spin{to{transform:rotate(360deg)}}@keyframes v2-check-draw{to{stroke-dashoffset:0}}
+.workspace-v2 input[type=checkbox]{accent-color:var(--v2-blue,#087f74)}
+.workspace-v2 input[data-v2-binary]{appearance:none!important;flex-shrink:0;width:48px!important;height:28px!important;min-height:28px!important;border:0!important;border-radius:20px!important;background:#939e99!important;box-shadow:none!important;position:relative;cursor:pointer;vertical-align:middle;transition:background-color 350ms ease}
+.workspace-v2 input[data-v2-binary]::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:white;box-shadow:0 1px 3px #0002;transform:translateX(0);transition:transform 350ms cubic-bezier(.3,1.25,.5,1)}
+.workspace-v2 input[data-v2-binary]:checked{background:var(--v2-blue,#087f74)!important}
+.workspace-v2 input[data-v2-binary]:checked::after{transform:translateX(20px)}
+.workspace-v2 input[data-v2-binary][data-v2-toggled]:checked::after{animation:v2-jelly-on 350ms cubic-bezier(.3,1.25,.5,1)}
+.workspace-v2 input[data-v2-binary][data-v2-toggled]:not(:checked)::after{animation:v2-jelly-off 350ms cubic-bezier(.3,1.25,.5,1)}
+.workspace-v2 input[data-v2-binary]:active::after{scale:1.16 .94}
+.workspace-v2 input[data-v2-binary]:disabled{opacity:.45;cursor:not-allowed}
+.workspace-v2 input[data-v2-binary]:focus-visible{outline:2px solid #087f74;outline-offset:3px}
+.workspace-v2 .n-switch{--n-rail-width:48px!important;--n-rail-height:28px!important;--n-button-width:22px!important;--n-button-height:22px!important;--n-button-width-pressed:30.8px!important}
+.workspace-v2 .n-switch__button{transition:transform 350ms cubic-bezier(.3,1.25,.5,1),width 350ms cubic-bezier(.3,1.25,.5,1),left 350ms cubic-bezier(.3,1.25,.5,1)!important}
+@keyframes v2-jelly-on{0%{transform:translateX(0) scaleX(1)}50%{transform:translateX(11px) scaleX(1.4) scaleY(.8)}80%{transform:translateX(21px) scaleX(.94)}100%{transform:translateX(20px) scaleX(1)}}
+@keyframes v2-jelly-off{0%{transform:translateX(20px)}50%{transform:translateX(9px) scaleX(1.4) scaleY(.8)}80%{transform:translateX(-1px) scaleX(.94)}100%{transform:translateX(0)}}
+@media(prefers-reduced-motion:reduce){button[data-v2-action],button[data-v2-action] .v2-action-feedback svg,.workspace-v2 input[data-v2-binary]::after,.workspace-v2 .n-switch__button{animation:none!important;transition:none!important}}

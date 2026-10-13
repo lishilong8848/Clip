@@ -115,7 +115,10 @@
       <form v-else-if="tab === 'settings'" class="settings-form" @submit.prevent="saveSettings">
         <h2>题库与题单</h2><div class="actions"><button type="button" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库与人员</button><button type="button" class="primary" :title="boot.silent_manual_publish ? '生成今日题单，不发送飞书消息' : '请重启主程序后使用静默发布'" :disabled="busy || jobRunning || !boot.silent_manual_publish" @click="runJob('publish')"><Send :size="16" />手动发布题单</button></div>
         <h2>每日发布</h2><label class="checkbox-label"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy" />每日自动发布</label>
-        <label v-if="settingsForm.enabled" class="time-field">发布时间<input v-model="settingsForm.publish_time" type="time" required :disabled="busy" /></label>
+        <label v-if="settingsForm.enabled" class="time-field">白班题单发布时间<input v-model="settingsForm.publish_time" type="time" required :disabled="busy" /></label>
+        <div v-if="settingsForm.enabled" class="shift-push-times">
+          <label class="time-field">夜班题单发布时间<input v-model="settingsForm.night_publish_time" type="time" required :disabled="busy" /></label>
+        </div>
         <h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label>
         <label v-if="settingsForm.reminder_enabled" class="time-field">提醒时间<input v-model="settingsForm.reminder_time" type="time" required :disabled="busy" /></label>
         <footer class="actions"><button class="primary" :disabled="busy || loading"><Save :size="16" />保存设置</button></footer>
@@ -468,7 +471,7 @@ const selected = ref<string[]>([]);
 const pageNumber = computed(() => pages[tab.value] || 1);
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / 20)));
 const jumpPage = ref<number>(1);
-const settingsForm = reactive<Dict>({ enabled: false, publish_time: "08:00", reminder_enabled: false, reminder_time: "17:00", portal_url: "" });
+const settingsForm = reactive<Dict>({ enabled: false, publish_time: "13:00", night_publish_time: "20:00", reminder_enabled: false, reminder_time: "17:00", portal_url: "" });
 let settingsSnapshot = "";
 const syncActive = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status) || Number(boot.value.sync?.pending || 0) > 0);
 const jobRunning = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status));
@@ -905,10 +908,10 @@ async function runJob(kind: "refresh" | "publish"): Promise<void> {
   });
 }
 async function saveSettings(): Promise<void> {
-  if (!/^\d{2}:\d{2}$/.test(settingsForm.publish_time) || !/^\d{2}:\d{2}$/.test(settingsForm.reminder_time)) { error.value = "请填写有效时间。"; return; }
+  if (![settingsForm.publish_time, settingsForm.night_publish_time, settingsForm.reminder_time].every(value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value))) { error.value = "请填写有效时间。"; return; }
   if (settingsForm.enabled && !boot.value.settings?.enabled && !await ask("启用每日自动发布", "启用后将按设置定时发布题单并发送通知。确认启用？")) return;
   await perform(async () => {
-    const payload = { enabled: settingsForm.enabled, publish_time: settingsForm.publish_time, reminder_enabled: settingsForm.reminder_enabled, reminder_time: settingsForm.reminder_time };
+    const payload = { enabled: settingsForm.enabled, publish_time: settingsForm.publish_time, night_publish_time: settingsForm.night_publish_time, reminder_enabled: settingsForm.reminder_enabled, reminder_time: settingsForm.reminder_time };
     const result = await requestLearning(learningOptions,"/settings", "PUT", payload);
     Object.assign(settingsForm, result); settingsSnapshot = JSON.stringify(settingsForm);
     boot.value.settings = copy(settingsForm); boot.value = await requestLearning(learningOptions,`/bootstrap?scope=${encodeURIComponent(scope.value)}`); schedulePoll();

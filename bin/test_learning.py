@@ -371,8 +371,10 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(self.sender.calls, [])
         self.assertEqual(self.service._all("notification"), [])
         self.assertEqual(self.service._all("reserve"), papers)
-        tomorrow = CURRENT + dt.timedelta(days=1)
+        tomorrow = (CURRENT + dt.timedelta(days=1)).replace(hour=13, minute=0)
         with patch.object(self.service, "refresh"):
+            self.service.tick(tomorrow.replace(hour=12, minute=59))
+            self.assertEqual(self.sender.calls, [])
             self.service.tick(tomorrow)
         self.assertEqual(len(self.sender.calls), 6)
         self.assertTrue(self.service._get("publication", self.service._publication_key(tomorrow.date().isoformat()))["notify"])

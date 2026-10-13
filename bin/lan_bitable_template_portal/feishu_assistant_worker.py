@@ -83,7 +83,7 @@ def main():
                 return True
         from lark_oapi.core.log import logger
         logger.addFilter(SafeLogs())
-        print("[ClipFlow][FeishuAssistant] 开始连接飞书智能体；请订阅 im.message.receive_v1 与 card.action.trigger，群聊需 @机器人", flush=True)
+        print("[ClipFlow][FeishuAssistant] 开始连接飞书智能体；请订阅 im.message.receive_v1 与 card.action.trigger。群聊新问题需 @机器人；已建立的话题可继续回复，免 @ 需应用获授接收群消息权限。", flush=True)
         try:
             lark.ws.Client(config["app_id"], secret, event_handler=handler, log_level=lark.LogLevel.INFO).start()
         finally:

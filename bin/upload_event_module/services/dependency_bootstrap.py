@@ -64,6 +64,13 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "anyio": "anyio",
     "pydantic": "pydantic",
     "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
+    "mcp": "mcp==1.30.0",
+    "markitdown": "markitdown[docx,xlsx,pptx,pdf]==0.1.8",
+    "magika": "magika==0.6.2",
+    "rapidocr": "rapidocr==3.10.0",
+    "onnxruntime": "onnxruntime==1.23.2",
+    "pypdfium2": "pypdfium2==5.14.0",
+    "playwright": "playwright==1.63.0",
     "openai": "openai==3.22.1",
     "starlette": "starlette",
     "multipart": "python-multipart==0.0.22",
@@ -191,7 +198,11 @@ def _has_module(module_name: str) -> bool:
     try:
         if importlib.util.find_spec(module_name) is None:
             return False
-        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1"), "websockets": ("websockets", "16.0"), "multipart": ("python-multipart", "0.0.22")}
+        if module_name == 'markitdown' and any(importlib.util.find_spec(name) is None
+                for name in ('mammoth', 'pandas', 'pdfplumber', 'dateutil')):
+            return False
+        pinned = {"pydantic_ai": ("pydantic-ai-slim", "2.52.0"), "openai": ("openai", "3.22.1"), "websockets": ("websockets", "16.0"), "multipart": ("python-multipart", "0.0.22"), "mcp": ("mcp", "1.30.0"),
+                  "markitdown": ("markitdown", "0.1.8"), "magika": ("magika", "0.6.2"), "rapidocr": ("rapidocr", "3.10.0"), "onnxruntime": ("onnxruntime", "1.23.2"), "pypdfium2": ("pypdfium2", "5.14.0"), "playwright": ("playwright", "1.63.0")}
         if module_name in pinned:
             distribution, version = pinned[module_name]
             return importlib.metadata.version(distribution) == version

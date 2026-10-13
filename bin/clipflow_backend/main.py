@@ -695,6 +695,9 @@ class FastAPIPortalController:
         actor_name: str,
         reason: str = "",
     ) -> dict:
+        cards = getattr(self, "_permission_cards", None)
+        if cards:
+            cards.enqueue_update(str(permission_request.get("request_id") or ""))
         open_id = str(permission_request.get("open_id") or "").strip()
         if not open_id:
             return {"ok": False, "message": "申请人 openid 为空，无法通知。"}
@@ -5862,7 +5865,7 @@ class FastAPIPortalController:
                 return self._auth_required_response()
             user = session.get("user") if isinstance(session.get("user"), dict) else {}
             permission_request = PortalRuntime.auth_manager.get_current_permission_request(
-                str(user.get("open_id") or "")
+                str(user.get("open_id") or ""), str(request.query_params.get("request_id") or "")
             )
             return self._json_ok(request, session, {"request": permission_request or None})
 
@@ -8138,7 +8141,14 @@ class FastAPIPortalController:
                     name=str(user.get("name") or user.get("en_name") or "飞书用户"),
                     scopes=payload.get("scopes") or [],
                     reason=str(payload.get("reason") or ""),
+                    approver_open_id=str(payload.get("approver_open_id") or ""),
                 )
+                if data.get("approver_open_id"):
+                    cards = getattr(self, "_permission_cards", None)
+                    if cards:
+                        cards.enqueue(data["request_id"])
+                    self._clear_read_cache(("auth_status",))
+                    return self._json_ok(request, session, {"request": data})
                 recipients = PortalRuntime.auth_manager.admin_open_ids()
                 labels = "、".join(data.get("requested_scope_labels") or [])
                 reason = str(data.get("reason") or "").strip() or "未填写"

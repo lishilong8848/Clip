@@ -25,6 +25,16 @@ def install_assistant_routes(app, host):
     tagging_pool = None
     knowledge = None
     knowledge_lock = threading.Lock()
+    extensions = None
+    extensions_lock = threading.Lock()
+
+    def get_extensions():
+        nonlocal extensions
+        with extensions_lock:
+            if extensions is None:
+                from .lighthouse_extensions import ExtensionTools
+                extensions = ExtensionTools(host.store)
+        return extensions
 
     def get_knowledge():
         nonlocal knowledge
@@ -68,6 +78,7 @@ def install_assistant_routes(app, host):
                 from .lighthouse_files import LighthouseFiles
                 agent = PortalAgent(current, host.catalog, LighthouseFiles(host.store, root=host.state / 'files'))
                 agent.get_knowledge = get_knowledge
+                agent.get_extensions = get_extensions
             return agent
 
     async def ready_agent():
@@ -163,6 +174,8 @@ def install_assistant_routes(app, host):
             await asyncio.to_thread(service.model.close)
         if knowledge is not None:
             await asyncio.to_thread(knowledge.close)
+        if extensions is not None:
+            await extensions.pool.close()
     # Host starts preparation only after migration and portal registration.
     from .lighthouse_knowledge_routes import install_knowledge_routes
     install_knowledge_routes(app, actor_for, get_knowledge)
@@ -303,6 +316,16 @@ def install_assistant_routes(app, host):
                 data = await asyncio.to_thread(commands, host.store, actor, current_agent.catalog,
                     kind=request.query_params.get('kind', 'skills'), keyword=request.query_params.get('keyword', ''),
                     group=request.query_params.get('group', ''), page=request.query_params.get('page', 1))
+                return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
+            if action == 'extensions':
+                tools = get_extensions()
+                if request.method == 'PUT':
+                    data = await asyncio.to_thread(tools.registry.save, actor, payload)
+                else:
+                    data = await asyncio.to_thread(tools.registry.public, actor)
+                return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
+            if action.endswith('/test') and action.startswith('extensions/'):
+                data = await get_extensions().test(actor, action.split('/')[1])
                 return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
             if action == 'skills':
                 from .lighthouse_commands import skills
@@ -472,6 +495,8 @@ def install_assistant_routes(app, host):
     app.add_api_route("/api/assistant/plans/{plan_id}/retry", endpoint, methods=["POST"], name="lighthouse_plan_retry")
     app.add_api_route('/api/assistant/channel-replies', endpoint, methods=['POST'], name='lighthouse_channel_replies')
     app.add_api_route('/api/assistant/conversation/stamp', endpoint, methods=['GET'], name='lighthouse_conversation_stamp')
+    app.add_api_route('/api/assistant/extensions', endpoint, methods=['GET', 'PUT'], name='lighthouse_extensions')
+    app.add_api_route('/api/assistant/extensions/{server_id}/test', endpoint, methods=['POST'], name='lighthouse_extensions_test')
     async def disconnect():
         pending = list(agent.tasks) if agent is not None else []
         if streams is not None:

@@ -11,9 +11,11 @@ import asyncio
 import copy
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 # Make both the project root and `bin/` importable so `openclaw_service` and
 # the `lan_bitable_template_portal` package resolve.
@@ -85,6 +87,52 @@ class FakeBot:
             return {**base, "version": (base.get("version") or 0) + 1,
                     "status": "awaiting_confirmation"}
         return {}
+
+
+class SharedTopicTests(unittest.IsolatedAsyncioTestCase):
+    async def test_other_group_member_uses_same_plan_but_keeps_actual_identity(self):
+        from lan_bitable_template_portal.feishu_assistant import Inbox
+        with tempfile.TemporaryDirectory() as root:
+            bot = FakeBot()
+            bot.inbox = Inbox(Path(root) / 'messages.sqlite3')
+            plan = base_plan(status='awaiting_confirmation')
+            original = {'message_id': 'om_Root', 'chat_id': 'oc_Group', 'chat_type': 'group', 'union_id': 'on_Origin'}
+            prepared = await cards.prepare_card(bot, original, ACTOR, conversation_with(plan), plan)
+            bot.inbox.add(original)
+            bot.inbox.set('om_Root', 'reply', {'thread_route': {'chat_id': 'oc_Group', 'root_id': 'om_Root',
+                'thread_id': 'omt_Group', 'chat_type': 'group'}, 'thread_messages': ['om_Card'], 'ticket': prepared['ticket']})
+            callback = {**original, 'message_id': 'callback', 'union_id': 'on_Other', 'reply_to_message_id': 'om_Card',
+                        'card': {'value': {'kind': 'notice_card', 'action': 'confirm', 'ticket': prepared['ticket']}}}
+            actor = {'id': 'open_user_2', 'scopes': ['E']}
+            request = SimpleNamespace(state=SimpleNamespace())
+            bot._call = AsyncMock(return_value=plan)
+            own_conversation = {'conversation_id': 'other_person_conversation', 'turns': []}
+            selected = await cards.bind_shared_card(bot, callback, request, actor, own_conversation)
+            self.assertEqual(request.state.feishu_shared_plan['owner'], ACTOR['id'])
+            self.assertEqual(callback['_actor_conversation_id'], 'other_person_conversation')
+            self.assertEqual(own_conversation['turns'], [])
+            self.assertIsNone(cards._validate_ticket(bot, prepared['ticket'], callback, actor, selected)[2])
+            await cards.handle_card(bot, callback, request, actor, selected)
+            confirm = bot._call.await_args_list[-1]
+            self.assertEqual(confirm.args[1]['id'], 'open_user_2')
+            self.assertEqual(confirm.args[2], 'plans/plan_1/confirm')
+
+    async def test_compact_columns_retain_controls_labels_and_field_recommendations(self):
+        bot = FakeBot()
+        plan = base_plan()
+        plan['planned_notice']['recommendations'] = [{'source_building': 'A楼', 'source_title': '资料维护',
+            'suggested_values': {'job_text': '对E楼资料进行维护', 'building': '不应覆盖'}}]
+        prepared = await cards.prepare_card(bot, message(), ACTOR, conversation_with(plan), plan)
+        nodes = walk(prepared['card'])
+        sets = [node for node in nodes if node.get('tag') == 'column_set']
+        self.assertTrue(sets)
+        self.assertTrue(all(1 <= len(row['columns']) <= 2 for row in sets))
+        self.assertTrue(any(node.get('tag') == 'picker_datetime' for node in nodes))
+        field_text = '\n'.join(node.get('content', '') for node in nodes if node.get('tag') == 'markdown')
+        self.assertIn('参考 A楼 成功历史：对E楼资料进行维护', field_text)
+        self.assertNotIn('参考 A楼 成功历史：不应覆盖', field_text)
+        ids = [node['name'] for node in nodes if node.get('tag') in {'input', 'select_static', 'multi_select_static', 'picker_datetime'}]
+        self.assertEqual(len(ids), len(set(ids)))
 
 
 ACTOR = {"id": "open_user_1"}
@@ -215,7 +263,7 @@ def walk(card):
     while stack:
         node = stack.pop()
         results.append(node)
-        for key in ("elements", "children"):
+        for key in ("elements", "children", "columns"):
             for sub in node.get(key) or []:
                 stack.append(sub)
     return results

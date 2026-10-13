@@ -190,6 +190,7 @@ def install_lighthouse_routes(app, controller, runtime):
         ('plans/{plan_id}/cabinet-text-preview', ['POST']), ('plans/{plan_id}/repair-prefill', ['POST']),
         ('plans/{plan_id}/notice-prefill', ['POST']), ('commands', ['GET']), ('skills', ['GET']),
         ('skills/install', ['POST']), ('skills/{skill_name}', ['GET', 'DELETE']))
+    paths += (('extensions', ['GET', 'PUT']), ('extensions/{server_id}/test', ['POST']))
     from openclaw_service.assistant.lighthouse_knowledge_routes import KNOWLEDGE_ROUTES
     for path, methods in (*paths, *KNOWLEDGE_ROUTES):
         app.add_api_route('/api/assistant/' + path, endpoint, methods=methods, name='lighthouse_' + path.replace('/', '_'))

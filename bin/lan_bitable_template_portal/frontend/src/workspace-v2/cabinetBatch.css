@@ -1,0 +1,32 @@
+.workspace-v2 .v2-main .batch-page { max-width:100%; padding:0; }
+.workspace-v2 .batch-page .v2-batch-methods { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:12px 0 18px; border-bottom:1px solid var(--v2-border); }
+.workspace-v2 .batch-page .text-entry { padding:20px 0 0; border:0; background:none; border-radius:0; box-shadow:none; }
+.workspace-v2 .batch-page .v2-paste-heading,.workspace-v2 .batch-page .v2-paste-result-heading { display:flex; align-items:center; flex-wrap:wrap; gap:9px; margin-bottom:12px; }
+.workspace-v2 .v2-paste-heading>svg { color:var(--v2-blue); }
+.workspace-v2 .batch-page .v2-paste-heading h2,.workspace-v2 .batch-page .v2-paste-result-heading h2 { margin:0; font-size:16px; font-weight:600; color:var(--v2-ink); }
+.workspace-v2 .v2-paste-heading span,.workspace-v2 .v2-paste-result-heading span { color:var(--v2-muted); font-size:12px; }
+.workspace-v2 .v2-paste-result-heading span.warning { color:#975c0b; }
+.workspace-v2 .batch-page .text-input-bar { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; padding:0 0 22px; background:none; border:0; }
+.workspace-v2 .batch-page .text-input-bar textarea { grid-column:1/-1; min-height:128px; max-height:300px; resize:vertical; width:100%; padding:14px 16px; border:1px solid #c9d7d1; border-radius:8px; background:#fff; line-height:1.65; font-size:14px; transition:border-color 180ms ease-out,box-shadow 180ms ease-out; }
+.workspace-v2 .batch-page .text-input-bar textarea:focus { border-color:var(--v2-blue); outline:0; box-shadow:0 0 0 3px #087f7415; }
+.workspace-v2 .batch-page .text-input-bar>span { grid-column:1; grid-row:2; align-self:center; font-size:12px; color:var(--v2-muted); }
+.workspace-v2 .batch-page .text-input-bar>button { grid-column:2; grid-row:2; }
+.workspace-v2 .batch-page .text-toolbar { gap:10px; padding:12px 0; flex-wrap:wrap; }
+.workspace-v2 .batch-page .text-preview { border-radius:8px; border:1px solid var(--v2-border); background:#fff; }
+.workspace-v2 .batch-page .text-preview thead th { background:#edf3f0; color:#3c534b; font-weight:600; }
+.workspace-v2 .batch-page .v2-paste-distribution { max-width:760px; padding:0 0 16px; }
+.workspace-v2 .batch-page .v2-paste-distribution .v2-chart-surface { height:180px; }
+.workspace-v2 .batch-page .text-empty { min-height:180px; display:flex; align-items:center; justify-content:center; background:#fff; border:1px dashed #c9d7d1; border-radius:8px; color:var(--v2-muted); }
+.workspace-v2 .batch-page .text-footer { position:sticky; bottom:0; z-index:5; padding:14px 0; border-top:1px solid var(--v2-border); background:var(--v2-bg); flex-wrap:wrap; gap:12px; }
+.workspace-v2 .batch-page .text-footer>.primary { background:#087f74; border-color:#087f74; color:white; }
+.workspace-v2 .batch-page .text-footer>.primary:disabled { opacity:.45; cursor:not-allowed; }
+@media(max-width:760px) {
+  .workspace-v2 .batch-page .v2-batch-methods .n-button { min-height:44px; }
+  .workspace-v2 .batch-page .text-input-bar textarea { min-height:150px; }
+  .workspace-v2 .batch-page .text-toolbar { display:grid; grid-template-columns:minmax(0,1fr); }
+  .workspace-v2 .batch-page .text-source-picker,.workspace-v2 .batch-page .text-search { min-width:0; width:100%; }
+  .workspace-v2 .batch-page .text-source-picker select { min-width:0; flex:1; }
+  .workspace-v2 .batch-page .text-footer { bottom:calc(62px + env(safe-area-inset-bottom)); }
+  .workspace-v2 .batch-page .text-footer>.primary { min-height:44px; width:100%; justify-content:center; }
+  .workspace-v2 .batch-page .text-footer .pagination { width:100%; flex-wrap:wrap; }
+}

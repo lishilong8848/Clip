@@ -192,6 +192,15 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/openclaw_service/client.py"),
     Path("bin/openclaw_service/protocol.py"),
     Path("bin/openclaw_service/update.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_extensions.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_mcp_builtin.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_mcp_office.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_mcp_public.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_document_tools.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_office_tools.py"),
+    Path("bin/openclaw_service/assistant/lighthouse_diagrams.py"),
+    Path("bin/resources/assistant_tools/mermaid.min.js"),
+    Path("bin/resources/assistant_tools/MERMAID-LICENSE.txt"),
     Path("bin/lan_bitable_template_portal/lighthouse_routes.py"),
     Path("bin/lan_bitable_template_portal/lighthouse_bridge.py"),
     Path("bin/openclaw_service/assistant/openclaw/runtime.json"),
@@ -256,6 +265,13 @@ RUNTIME_MODULE_TO_PACKAGE = {
 
     "pydantic": "pydantic",
     "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
+    "mcp": "mcp==1.30.0",
+    "markitdown": "markitdown[docx,xlsx,pptx,pdf]==0.1.8",
+    "magika": "magika==0.6.2",
+    "rapidocr": "rapidocr==3.10.0",
+    "onnxruntime": "onnxruntime==1.23.2",
+    "pypdfium2": "pypdfium2==5.14.0",
+    "playwright": "playwright==1.63.0",
     "openai": "openai==3.22.1",
 
     "starlette": "starlette",
@@ -322,6 +338,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
 
     "pydantic",
     "pydantic_ai",
+    "mcp",
+    "markitdown", "magika", "rapidocr", "onnxruntime", "pypdfium2", "playwright",
     "openai",
 
     "starlette",
@@ -363,6 +381,13 @@ SMOKE_IMPORT_MODULES = [
     "openclaw_service.assistant.routes",
     "openclaw_service.assistant.lighthouse_commands",
     "openclaw_service.assistant.lighthouse_shared_skills",
+    "openclaw_service.assistant.lighthouse_extensions",
+    "openclaw_service.assistant.lighthouse_mcp_builtin",
+    "openclaw_service.assistant.lighthouse_mcp_office",
+    "openclaw_service.assistant.lighthouse_mcp_public",
+    "openclaw_service.assistant.lighthouse_document_tools",
+    "openclaw_service.assistant.lighthouse_office_tools",
+    "openclaw_service.assistant.lighthouse_diagrams",
     "lan_bitable_template_portal.lighthouse_bridge",
     "upload_event_module.services.event_relay_server",
     "upload_event_module.services.process_lifetime",
@@ -405,6 +430,7 @@ SMOKE_IMPORT_MODULES = [
 ]
 
 PACKAGING_PREFLIGHT_MODULES = [
+    "mcp",
     "docx", "pptx", "reportlab",
     "yaml",
     "openpyxl",
@@ -1106,13 +1132,16 @@ def _missing_selected_modules(venv_python: Path, modules: list[str]) -> list[str
     script_lines = [
         "import importlib.util",
         "import importlib.metadata",
-        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0'), 'multipart': ('python-multipart', '0.0.22')}",
+        "pinned = {'pydantic_ai': ('pydantic-ai-slim', '2.52.0'), 'openai': ('openai', '3.22.1'), 'websockets': ('websockets', '16.0'), 'multipart': ('python-multipart', '0.0.22'), 'mcp': ('mcp', '1.30.0')}",
+        "pinned.update({'markitdown': ('markitdown', '0.1.8'), 'magika': ('magika', '0.6.2'), 'rapidocr': ('rapidocr', '3.10.0'), 'onnxruntime': ('onnxruntime', '1.23.2'), 'pypdfium2': ('pypdfium2', '5.14.0')})",
+        "pinned['playwright'] = ('playwright', '1.63.0')",
         "mods = " + repr(modules),
         "missing = []",
         "for name in mods:",
         "    try:",
         "        if importlib.util.find_spec(name) is None: missing.append(name)",
         "        elif name in pinned and importlib.metadata.version(pinned[name][0]) != pinned[name][1]: missing.append(name)",
+        "        elif name == 'markitdown' and any(importlib.util.find_spec(dep) is None for dep in ('mammoth', 'pandas', 'pdfplumber', 'dateutil')): missing.append(name)",
         "    except Exception:",
         "        missing.append(name)",
         "print('\\n'.join(missing))",
@@ -1773,7 +1802,9 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
          "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",
-         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes",
+         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
+         "bin.test_lighthouse_document_tools",
+         "bin.test_lighthouse_office_tools",
          "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
          "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",
          "bin.test_lighthouse_mop_fields", "bin.test_lighthouse_mop_workflows", "bin.test_lighthouse_plan_workflows",
@@ -1793,7 +1824,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
          "bin.test_planned_notices", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
-                "bin.test_feishu_assistant", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited",
+                "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
                 "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
                 "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_lighthouse_knowledge_stream_storage", "bin.test_notice_end_progress",
                 "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
@@ -1845,6 +1876,25 @@ def _run_packaging_preflight_tests() -> None:
     log("补丁传输与打包完整性测试通过。")
 
     log("打包前自动测试完成。")
+
+
+def _ensure_mcp_frontend_assets() -> None:
+    frontend = PROJECT_ROOT / "bin/lan_bitable_template_portal/frontend"
+    inputs = [frontend / "src/components/LighthouseTools.vue", frontend / "src/components/LighthouseSkills.vue"]
+    if not all(path.is_file() for path in inputs):
+        return
+    entry = frontend / "dist/assistant.html"
+    current = entry.is_file() and entry.stat().st_mtime >= max(path.stat().st_mtime for path in inputs)
+    if current:
+        current = any("/api/assistant/extensions" in (PROJECT_ROOT / path).read_text(encoding="utf-8")
+                      for path in referenced_assets(PROJECT_ROOT) if path.suffix == ".js")
+    if current:
+        return
+    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if not npm:
+        raise RuntimeError("助手工具页面尚未构建，且未找到npm；请安装构建环境后重新打包，不能发布旧工具页面。")
+    log("助手工具页面有更新，正在构建完整前端资源。")
+    subprocess.run([npm, "run", "build"], cwd=frontend, check=True, timeout=300)
 
 
 def _cleanup_vue_dist_assets() -> None:
@@ -2194,6 +2244,12 @@ def _zip_patch_dir(patch_dir: Path) -> Path:
 
     # Older clients extract below this layout. Reserve 64 characters for the install root.
     legacy_prefix = "x" * 64 + f"/bin/data/remote_patch/.extract_{zip_path.stem}/"
+    members = [f"{patch_dir.name}/{src.relative_to(patch_dir).as_posix()}" for src in patch_dir.rglob("*") if src.is_file()]
+    if any(len((legacy_prefix + member).encode("utf-16-le")) // 2 >= 260 for member in members):
+        # Keep the archive's root/layout; shortening only its name also shortens old extract directories.
+        zip_path = BUILD_DIR / ("patch_" + hashlib.sha256(patch_dir.name.encode("utf-8")).hexdigest()[:12] + ".zip")
+        legacy_prefix = "x" * 64 + f"/bin/data/remote_patch/.extract_{zip_path.stem}/"
+        log("补丁采用短文件名，避免旧版 Windows 更新器临时路径过长。")
     for src in patch_dir.rglob("*"):
         if not src.is_file():
             continue
@@ -3314,6 +3370,8 @@ def main() -> None:
         )
         log("现有补丁上传并核验完成。")
         return
+
+    _ensure_mcp_frontend_assets()
 
     if args.preflight_test:
 

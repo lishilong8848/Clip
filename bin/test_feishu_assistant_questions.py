@@ -32,7 +32,9 @@ class QuestionForms(unittest.TestCase):
         card, event, message = self.make({'choice': '0', 'answer': '重点写实际例子'})
         self.assertEqual(card['schema'], '2.0')
         elements = card['body']['elements'][0]['elements']
-        self.assertEqual(elements[1]['tag'], 'select_static')
+        self.assertEqual(elements[1]['tag'], 'column_set')
+        self.assertEqual(len(elements[1]['columns']), 2)
+        self.assertEqual(elements[1]['columns'][0]['elements'][-1]['tag'], 'select_static')
         self.assertEqual(elements[-1]['form_action_type'], 'submit')
         reply, prior = forms.read_question_reply(self.bot, message, self.actor, self.conversation)
         self.assertEqual(reply, '新员工\n重点写实际例子')
@@ -43,7 +45,7 @@ class QuestionForms(unittest.TestCase):
     def test_multiple_choices_and_free_text(self):
         self.turn['clarification']['multiple'] = True
         card, _, message = self.make({'choice': ['1', '0'], 'answer': ''})
-        self.assertEqual(card['body']['elements'][0]['elements'][1]['tag'], 'multi_select_static')
+        self.assertEqual(card['body']['elements'][0]['elements'][1]['columns'][0]['elements'][-1]['tag'], 'multi_select_static')
         self.assertEqual(forms.read_question_reply(self.bot, message, self.actor, self.conversation)[0], '有经验人员、新员工')
         self.turn['clarification']['options'] = []
         _, _, message = self.make({'answer': '详细描述'})
@@ -78,6 +80,32 @@ class QuestionForms(unittest.TestCase):
             forms.read_question_reply(self.bot, other, self.actor, self.conversation)
         event['event']['action']['form_value']['forged_owner'] = 'admin'
         self.assertIsNone(forms.parse_question_event(event, 'app'))
+
+    def test_same_topic_member_can_supply_clarification_without_borrowing_context(self):
+        self.message.update(chat_type='group')
+        _, _, message = self.make({'choice': '0', 'answer': '给大家看'})
+        self.bot.inbox = SimpleNamespace(thread_for=lambda _: {'chat_type': 'group', 'root_id': 'om_original'})
+        actor = {'id': 'ou_other', 'scopes': ['D']}
+        message['union_id'] = 'on_other'
+        own_conversation = {'conversation_id': 'other', 'turns': []}
+        answer, prior = forms.read_question_reply(self.bot, message, actor, own_conversation)
+        self.assertIn('写篇文章', answer)
+        self.assertIn('新员工', answer)
+        self.assertIsNone(prior)
+        self.assertEqual(own_conversation['turns'], [])
+        self.bot.inbox.thread_for = lambda _: {'chat_type': 'group', 'root_id': 'om_elsewhere'}
+        with self.assertRaises(AssistantError): forms.read_question_reply(self.bot, message, actor, own_conversation)
+
+    def test_new_question_in_another_topic_does_not_delete_first_card(self):
+        self.message.update(chat_type='group', root_id='om_first')
+        _, _, first = self.make({'choice': '0'})
+        second_turn = {**self.turn, 'operation_id': 'second_question', 'feishu_topic': 'oc_group:om_second'}
+        forms.prepare_question_card(self.bot, {**self.message, 'root_id': 'om_second'}, self.actor,
+                                    self.conversation, second_turn)
+        conversation = {**self.conversation, 'turns': [self.turn, second_turn]}
+        answer, prior = forms.read_question_reply(self.bot, first, self.actor, conversation)
+        self.assertEqual(prior, self.turn['operation_id'])
+        self.assertEqual(answer, '新员工')
 
 
 if __name__ == '__main__':

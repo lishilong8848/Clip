@@ -99,6 +99,35 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(text.endswith("data: [DONE]\n\n"))
         self.assertFalse((await self.runtime.conversation(self.actor))["busy"])
 
+    async def test_feishu_topic_refinement_uses_public_topic_not_last_private_question(self):
+        self.actor.update(channel='feishu:oc_Test', _feishu_topic={'id': 'oc_Test:om_First', 'context': ''})
+        await self.submit('D楼进行中的变更有哪些')
+        await self.finish()
+        self.actor.pop('_feishu_topic')
+        self.actor.pop('channel')
+        await self.submit('无关的私聊内容fixture')
+        await self.finish()
+        self.actor.update(channel='feishu:oc_Test', _feishu_topic={'id': 'oc_Test:om_First', 'context': '已公开：D楼变更甲和乙'})
+        await self.submit('分别是哪些？')
+        await self.finish()
+        turn = self.engine.calls[-1]['turn']
+        self.assertEqual(turn['question'], '分别是哪些?')
+        self.assertIn('D楼变更甲和乙', turn['prompt'])
+        self.assertNotIn('无关的私聊内容fixture', turn['prompt'])
+        self.assertEqual(turn['feishu_topic'], 'oc_Test:om_First')
+
+    async def test_untrusted_payload_cannot_supply_topic_context(self):
+        await self.submit('你好', _feishu_topic={'id': 'oc_Test:om_Forged', 'context': 'untrusted fixture'})
+        await self.finish()
+        self.assertNotIn('untrusted fixture', self.engine.calls[-1]['turn']['prompt'])
+        self.assertEqual(self.engine.calls[-1]['turn']['feishu_topic'], '')
+
+    async def test_explicit_general_question_does_not_inherit_business_topic(self):
+        self.actor.update(channel='feishu:oc_Test', _feishu_topic={'id': 'oc_Test:om_First', 'context': '内部通告待发送'})
+        await self.submit('介绍一下Python的列表')
+        await self.finish()
+        self.assertNotIn('内部通告待发送', self.engine.calls[-1]['turn']['prompt'])
+
     async def test_completed_runs_release_private_history_and_checkpoint_less_often(self):
         async def answer(actor, turn, history, request, emit, authorize, context):
             for value in range(10):

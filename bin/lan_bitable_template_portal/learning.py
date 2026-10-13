@@ -26,7 +26,7 @@ QUOTAS = {"written": 8, "duty": 1, "professional": 1, "supplemental": 5}
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 100 * 1024 * 1024
-DEFAULT_SETTINGS = {"enabled": False, "publish_time": "08:00", "reminder_enabled": False, "reminder_time": "17:00", "portal_url": ""}
+DEFAULT_SETTINGS = {"enabled": False, "publish_time": "13:00", "night_publish_time": "20:00", "reminder_enabled": False, "reminder_time": "17:00", "portal_url": ""}
 ISSUE_STATES = {"pending", "processing", "needs_info", "resolved", "no_change", "withdrawn"}
 RATINGS = {"部分掌握", "需复习"}
 
@@ -348,7 +348,14 @@ class LearningService:
         return self._cloud
 
     def settings(self):
-        return {**DEFAULT_SETTINGS, **{k: v for k, v in (self._get("settings", "main") or {}).items() if not k.startswith("_")}}
+        stored = {k: v for k, v in (self._get("settings", "main") or {}).items() if not k.startswith("_")}
+        if "night_publish_time" not in stored:
+            stored.update(publish_time="13:00", night_publish_time="20:00")
+        result = {**DEFAULT_SETTINGS, **stored}
+        for field in ("publish_time", "night_publish_time"):
+            if not isinstance(result[field], str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", result[field]):
+                result[field] = DEFAULT_SETTINGS[field]
+        return result
 
     def portal_url(self):
         try:
@@ -471,7 +478,7 @@ class LearningService:
             day = current.date().isoformat()
             if not self.settings()["enabled"] and not manual_mode:
                 return
-            due = (settings["enabled"] and current.strftime("%H:%M") >= settings["publish_time"]
+            due = (settings["enabled"] and current.strftime("%H:%M") >= min(settings["publish_time"], settings["night_publish_time"])
                    or self._manual_publish_pending(day))
             if due and not self._get("publication", self._publication_key(day)):
                 if not refreshed:
@@ -673,7 +680,7 @@ class LearningService:
             self._send_notifications(current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ))
 
     def _send_notifications(self, current):
-        from .learning_reminders import enqueue_shift_reminders, reminder_card
+        from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times
         settings = self.settings()
         if not settings['enabled']:
             return
@@ -703,6 +710,8 @@ class LearningService:
             elif notification["kind"] == "correction" and not self._correction_matches(notification, paper):
                 notification["status"] = "superseded"
             else:
+                if notification['kind'] == 'shift' and current.strftime('%H:%M') < shift_times(current_settings).get(notification.get('shift'), '23:59'):
+                    continue
                 if notification['kind'] != 'shift' and ((paper and paper["_dirty"]) or (self._get("publication", self._publication_key(date)) or {}).get("_dirty")):
                     continue
                 if notification["kind"] == "correction" and (self._get("record", notification.get("paper_id", "")) or {}).get("_dirty"):
@@ -1718,7 +1727,7 @@ class LearningService:
                     if not isinstance(payload[flag], bool):
                         raise LearningError("启用设置必须为布尔值")
                     settings[flag] = payload[flag]
-            for field in ("publish_time", "reminder_time"):
+            for field in ("publish_time", "night_publish_time", "reminder_time"):
                 if field in payload:
                     if not isinstance(payload[field], str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", payload[field]):
                         raise LearningError("请填写有效的发布或提醒时间")

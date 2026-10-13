@@ -5,7 +5,7 @@
   {"name": "company-knowledge", "description": "仅本轮选择或输入 /公司知识库 时，优先检索公司文件并引用出处；无合适资料时查询安全的公开来源。"},
   {"name": "assistant-general", "description": "日常问答、写作、翻译、代码解释和本会话附件阅读。"},
   {"name": "assistant-calculation", "description": "安全的本地算式、百分比、北京时间与日期差计算。"},
-  {"name": "lighthouse-extension", "description": "灯塔助手后续新增已审核插件、技能和受控工具的接入方法。"},
+  {"name": "lighthouse-extension", "description": "MCP与办公扩展：表格统计和差异核对、单位换算、文档目录、文本处理、官方汇率及微软文档的自动调用。"},
   {"name": "lighthouse-notices", "description": "维保、变更、检修、上下电、轮巡、调整通告的查询、解析、计划关联及原生发送流程。"},
   {"name": "lighthouse-events", "description": "事件通告查询、发生时间统计、闭环和转检修；发送仍由Qt办理。"},
   {"name": "lighthouse-repairs", "description": "维修单、跟进记录、设备台账、关联事件和检修通告的查询及保存流程。"},

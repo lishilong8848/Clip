@@ -366,6 +366,9 @@ const permissionRequest = reactive({
   message: "",
   status: "",
   rejectReason: "",
+  approverOpenId: "",
+  notificationStatus: "",
+  notificationError: "",
 });
 const auth = reactive({
   loggedIn: false,
@@ -818,6 +821,9 @@ async function loadCurrentPermissionRequest(): Promise<void> {
     permissionRequest.scopes = Array.isArray(request.requested_scopes) ? request.requested_scopes : permissionRequest.scopes;
     permissionRequest.status = request.status || "";
     permissionRequest.rejectReason = request.reject_reason || "";
+    permissionRequest.approverOpenId = request.approver_open_id || "";
+    permissionRequest.notificationStatus = request.notification_status || "";
+    permissionRequest.notificationError = request.notification_error || "";
     if (permissionRequest.requestId) {
       permissionRequest.message = permissionRequest.status === "rejected"
         ? "最近一次申请未通过，可调整后重新提交。"
@@ -1010,11 +1016,13 @@ async function submitPermissionRequest(): Promise<void> {
   try {
     const data = await portalRequest("/api/auth/permission-requests", {
       method: "POST",
-      body: JSON.stringify({ scopes: permissionRequest.scopes, reason: permissionRequest.reason }),
+      body: JSON.stringify({ scopes: permissionRequest.scopes, reason: permissionRequest.reason, approver_open_id: permissionRequest.approverOpenId }),
     });
     permissionRequest.requestId = data.request_id || data.request?.request_id || "";
     permissionRequest.status = data.status || data.request?.status || "pending";
     permissionRequest.rejectReason = data.reject_reason || data.request?.reject_reason || "";
+    permissionRequest.notificationStatus = data.request?.notification_status || "";
+    permissionRequest.notificationError = data.request?.notification_error || "";
     permissionRequest.message = "申请已提交，等待管理员审批。";
   } catch (error: any) {
     permissionRequest.message = error?.message || "提交失败";
@@ -1032,6 +1040,9 @@ async function openAdditionalPermissionRequest(): Promise<void> {
     message: "",
     status: "",
     rejectReason: "",
+    approverOpenId: "",
+    notificationStatus: "",
+    notificationError: "",
   });
   showPermissionRequestPanel.value = true;
   await loadCurrentPermissionRequest();
@@ -1047,6 +1058,9 @@ function closePermissionRequestPanel(): void {
     message: "",
     status: "",
     rejectReason: "",
+    approverOpenId: "",
+    notificationStatus: "",
+    notificationError: "",
   });
   syncText.value = "请选择功能";
 }

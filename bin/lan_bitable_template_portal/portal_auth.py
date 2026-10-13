@@ -846,13 +846,20 @@ class PortalAuthManager:
             "attempts": attempts,
             "max_attempts": max_attempts,
             "remaining_attempts": max(0, max_attempts - attempts),
+            "approver_open_id": str(payload.get("approver_open_id") or ""),
+            "approver_name": str(payload.get("approver_name") or ""),
+            "notification_status": str(payload.get("notification_status") or ""),
+            "notification_error": str(payload.get("notification_error") or ""),
         }
 
-    def get_current_permission_request(self, open_id: str) -> dict[str, Any]:
+    def get_current_permission_request(self, open_id: str, request_id: str = "") -> dict[str, Any]:
         open_id = str(open_id or "").strip()
         if not open_id:
             return {}
         with self._lock:
+            if request_id:
+                payload = self._state_store.get_permission_request(request_id)
+                return self._public_permission_request(payload) if isinstance(payload, dict) and payload.get("open_id") == open_id else {}
             payload = self._state_store.get_active_permission_request(open_id)
             if not isinstance(payload, dict):
                 payload = self._state_store.get_latest_permission_request(
@@ -868,6 +875,7 @@ class PortalAuthManager:
         name: str = "",
         scopes: Any = None,
         reason: str = "",
+        approver_open_id: str = "",
     ) -> dict[str, Any]:
         open_id = str(open_id or "").strip()
         if not open_id:
@@ -884,6 +892,9 @@ class PortalAuthManager:
         if not requested_scopes:
             raise PortalError("请选择尚未拥有权限的楼栋或园区。")
         reason = str(reason or "").strip()[:500]
+        approver_open_id = str(approver_open_id or "").strip()
+        if approver_open_id and approver_open_id not in self.admin_open_ids():
+            raise PortalError("所选审批人已不是可用管理员，请重新选择。")
         request_id = secrets.token_urlsafe(18)
         now_ts = time.time()
         expires_at_ts = now_ts + PERMISSION_REVIEW_TTL_SECONDS
@@ -895,6 +906,10 @@ class PortalAuthManager:
             "name": str(name or "飞书用户").strip()[:80] or "飞书用户",
             "requested_scopes": requested_scopes,
             "reason": reason,
+            "approver_open_id": approver_open_id,
+            "approver_name": str(self._permission_user(approver_open_id).get("name") or "管理员") if approver_open_id else "",
+            "review_card_token": secrets.token_urlsafe(32) if approver_open_id else "",
+            "notification_status": "queued" if approver_open_id else "",
             "status": "pending",
             "code_hash": "",
             "code_salt": "",
@@ -947,6 +962,8 @@ class PortalAuthManager:
                 raise PortalError("权限申请不存在或已失效。")
             if str(payload.get("status") or "") != "pending":
                 raise PortalError("该权限申请已处理。")
+            if float(payload.get("expires_at_ts") or 0) and time.time() >= float(payload["expires_at_ts"]):
+                raise PortalError("该权限申请已过期，请申请人重新提交。")
             requested_scopes = self._permission_request_scopes_from_raw(scopes)
             if not requested_scopes:
                 requested_scopes = self._permission_request_scopes_from_raw(
@@ -968,14 +985,29 @@ class PortalAuthManager:
             payload["approved_scopes"] = requested_scopes
             payload["updated_at"] = now
             payload["updated_at_ts"] = now_ts
-            permissions = self.upsert_permission_user(
-                open_id=open_id,
-                name=str(payload.get("name") or open_id),
-                role="building",
-                scopes=merged_scopes,
-                enabled=True,
-                updated_by=updated_by,
-            )
+            actor_profile = self.account_profile(updated_by)
+            if actor_profile["level"] in {"L0", "L1"} and actor_profile["can_manage_accounts"] and open_id not in BUILDING_OPEN_ID_MAP.values() and open_id not in REQUIRED_ADMIN_USERS:
+                from .account_policy import resolve_access_change
+                if not self.directory_person(open_id) or self.directory_block_reason(open_id) or self._open_id_explicitly_disabled(open_id):
+                    raise PortalError("申请人的有效人员身份已变化，请先在账号管理中核对。")
+                target_profile = self.account_profile(open_id)
+                resolved = resolve_access_change(actor_profile, target_profile, scopes=merged_scopes)
+                permissions = copy.deepcopy(self._load_permissions_locked())
+                users = permissions.setdefault("users", {})
+                existing = users.get(open_id) or {}
+                users[open_id] = {**existing, "name": existing.get("name") or payload.get("name") or open_id,
+                    "level": resolved["level"], "category": resolved["category"], "role": resolved["role"],
+                    "scopes": list(resolved["scopes"]), "modules": list(resolved["modules"]), "access_version": 1,
+                    "enabled": existing.get("enabled", True),
+                    "denied_scopes": [scope for scope in existing.get("denied_scopes", []) if scope not in resolved["scopes"]]}
+                permissions.update(updated_at=now, updated_by=updated_by)
+                self._save_permissions_locked(permissions)
+                permissions = self.get_permissions_payload()
+            else:
+                permissions = self.upsert_permission_user(
+                    open_id=open_id, name=str(payload.get("name") or open_id), role="building",
+                    scopes=merged_scopes, enabled=True, updated_by=updated_by,
+                )
             self._state_store.put_permission_request(payload)
         return {"request": self._public_permission_request(payload), "permissions": permissions}
 

@@ -21,7 +21,7 @@ _SITE_CONFIRM_FIELDS = ("location", "execution_party")
 _UNPORTABLE_MARKERS = (
     "柜号", "机柜", "机房编号", "设备编号", "设备id", "目标id",
     "target_record_id", "target_id", "recordid", "record_id",
-    "openid", "open_id", "签名", "签字", "负责", "操作", "经办", "指派",
+    "openid", "open_id", "签名", "签字", "负责人", "操作人", "经办人", "指派",
     "联系电话", "手机号", "手机号码", "现场", "进度", "已完成", "进行中", "未开始",
 )
 _UNPORTABLE_PATTERNS = (
@@ -49,6 +49,13 @@ def _canonical_memory_name(service, item: dict[str, Any], work_type: str) -> str
     ).strip()
     if not value:
         return ""
+    return _comparison_title(service, value, work_type)
+
+
+def _comparison_title(service, value, work_type):
+    # Strip only the site/building prefix, never a device identifier in the title.
+    value = re.sub(r'^\s*EA118[\s_-]*(?:C01[\s_-]*)?(?:机房|数据中心|基地)?[\s_-]*', '', str(value), flags=re.I)
+    value = re.sub(r'^(?:南通基地|南通)?\s*[ABCDEH](?:楼|栋)[\s_-]*', '', value, flags=re.I)
     return service._canonical_history_notice_title(value, work_type)
 
 
@@ -240,7 +247,7 @@ def build_recommendations(
         target_label = service._building_label_from_codes([service._normalize_scope(scope)])
     target_name = _record_memory_name(service, record, work_type)
     target_cycle = _record_memory_cycle(service, record, work_type)
-    target_canonical = service._canonical_history_notice_title(target_name, work_type)
+    target_canonical = _comparison_title(service, target_name, work_type)
     if not target_canonical:
         return {"total": 0, "recommendations": []}
 
