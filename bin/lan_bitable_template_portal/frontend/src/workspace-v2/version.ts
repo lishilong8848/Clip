@@ -1,6 +1,24 @@
 export const WORKSPACE_ENTRY = '/assets/workspace-v2/index.html';
 export type FrontendVersion = 'legacy' | 'workspace';
 const prefix = 'clipflow:frontend-version:';
+let preparing:Promise<void>|undefined;
+export function prepareWorkspaceEntry():Promise<void>{
+  if(preparing)return preparing;
+  preparing=(async()=>{
+    const base=WORKSPACE_ENTRY.slice(0,WORKSPACE_ENTRY.lastIndexOf('/')+1);
+    const {requestJson}=await import('../api/client');
+    const manifest=await requestJson(base+'entry.json',{cache:'no-store',timeoutMs:5000});
+    const files=[manifest.entry,...(Array.isArray(manifest.css)?manifest.css:[])];
+    for(const name of files){
+      if(typeof name!=='string'||!/^[a-zA-Z0-9_-]+\.(js|css)$/.test(name))continue;
+      if(document.querySelector(`link[data-workspace-preload="${name}"]`))continue;
+      const link=document.createElement('link');link.dataset.workspacePreload=name;link.href=base+name;
+      link.rel=name.endsWith('.js')?'modulepreload':'preload';if(name.endsWith('.css'))link.as='style';
+      document.head.append(link);
+    }
+  })().catch(()=>{preparing=undefined;});
+  return preparing;
+}
 
 export function readVersion(identity: string): FrontendVersion {
   if (!identity) return 'legacy';

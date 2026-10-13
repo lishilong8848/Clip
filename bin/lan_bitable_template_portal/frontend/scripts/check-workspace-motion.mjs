@@ -53,9 +53,9 @@ try{
  await thread.evaluate(el=>{el.scrollTop=el.scrollHeight;});await page.waitForTimeout(500);assert.equal(await page.evaluate(()=>window.follows()),true);
  await page.evaluate(()=>window.text('<img src=x onerror="alert(1)">安全文本 [坏链接](javascript:alert(1))'));
  assert.equal(await page.locator('.assistant-rich-reply img,.assistant-rich-reply a[href^="javascript:"]').count(),0);
- await page.locator('#motion-chart').scrollIntoViewIfNeeded();await page.locator('#motion-chart svg').waitFor();await page.waitForTimeout(1500);
+ await page.locator('#motion-chart').scrollIntoViewIfNeeded();await page.locator('#motion-chart .v2-chart-canvas svg').waitFor();await page.waitForTimeout(1500);
  const instance=await page.locator('#motion-chart .v2-chart-canvas').getAttribute('_echarts_instance_');
- await page.locator('#motion-chart svg path[fill="#0071e3"]').first().click();assert.equal(await page.evaluate(()=>window.chartSelection),1,'bar click selects the source item');
+ await page.locator('#motion-chart svg path[fill="#197f70"]').first().click();assert.equal(await page.evaluate(()=>window.chartSelection),1,'bar click selects the source item');
  await page.evaluate(()=>window.changeChart());await page.waitForTimeout(650);assert.equal(await page.locator('#motion-chart .v2-chart-canvas').getAttribute('_echarts_instance_'),instance,'new values reuse the chart instance');
  await page.locator('#motion-chart').getByText('折线图',{exact:true}).click();await page.waitForTimeout(1300);await page.locator('#motion-chart .v2-chart-end').waitFor();
  const plot=await page.locator('#motion-chart .v2-chart-canvas').boundingBox();await page.mouse.move(plot.x+50,plot.y+100);await page.mouse.down();await page.mouse.move(plot.x+plot.width-40,plot.y+100,{steps:6});assert.equal(await page.locator('#motion-chart .v2-chart-end').count(),0,'line scrubbing hides the idle endpoint');await page.mouse.up();await page.locator('#motion-chart .v2-chart-end').waitFor();

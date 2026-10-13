@@ -1,5 +1,5 @@
 <template>
-  <button v-if="enabled || login" type="button" class="frontend-version-switch" :class="{'is-login':login}" :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" @click="requestVersion(open)"><PanelsTopLeft :size="16" aria-hidden="true" /><span>切换新版</span></button>
+  <button v-if="enabled || login" type="button" class="frontend-version-switch" :class="{'is-login':login}" :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" @pointerenter="prepareWorkspaceEntry" @focus="prepareWorkspaceEntry" @click="requestVersion(open)"><PanelsTopLeft :size="16" aria-hidden="true" /><span>切换新版</span></button>
   <NModal v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
 </template>
 <script setup lang="ts">
@@ -7,7 +7,7 @@ import { watch, onBeforeUnmount } from 'vue';
 import { PanelsTopLeft } from 'lucide-vue-next';
 import { NModal } from 'naive-ui';
 import { useAuthVersionGuard } from '../workspace-v2/authVersionGuard';
-import { readVersion, saveVersion, workspaceUrl, loginVersionUrl, WORKSPACE_ENTRY } from '../workspace-v2/version';
+import { readVersion, saveVersion, workspaceUrl, loginVersionUrl, WORKSPACE_ENTRY,prepareWorkspaceEntry } from '../workspace-v2/version';
 const props = defineProps<{ identity: string; enabled: boolean; login?: boolean }>();
 const {busy:versionBusy,confirming:confirmVersion,request:requestVersion,confirm:finishVersion}=useAuthVersionGuard();
 let switching=false;

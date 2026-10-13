@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 const result=await build({entryPoints:['src/workspace-v2/dashboard/layout.ts'],bundle:true,platform:'node',format:'cjs',write:false});
 const module={exports:{}};
 new Function('module','exports','require',result.outputFiles[0].text)(module,module.exports,createRequire(import.meta.url));
-const {defaults,sanitize,saveLayout,readLayout,layoutKey,widget}=module.exports;
+const {defaults,sanitize,saveLayout,readLayout,layoutKey,widget,motionTemplates,allowedKind}=module.exports;
 const user={open_id:'test-alice',level:'L1',modules:['maintenance','change','event','plan_convergence','learning','water']};
 const other={...user,open_id:'test-bob'};
 const storage=new Map();
@@ -17,6 +17,14 @@ assert.match(widget('notices',user).id,/^[a-f0-9]{32}$/,'LAN HTTP must not requi
 globalThis.crypto.randomUUID=randomUUID;
 assert(base.widgets.some(w=>w.kind==='tasks')&&base.widgets.some(w=>w.kind==='shortcuts'));
 assert(!base.widgets.some(w=>w.kind==='notices'||w.kind==='events'),'default is work, not a mandatory chart board');
+for(const template of motionTemplates){
+  const configured=widget(template.kind,user,{presentation:template.presentation});
+  assert.equal(sanitize({version:1,widgets:[configured]},user,['A']).widgets[0].presentation,template.presentation);
+  assert.equal(allowedKind(template.kind,{...user,modules:[]}),false,'templates cannot grant business permissions');
+}
+const legacyWidget=widget('tasks',user);delete legacyWidget.presentation;
+assert.equal(sanitize({version:1,widgets:[legacyWidget]},user,['A']).widgets[0].presentation,'default','existing layouts keep their appearance');
+assert.equal(sanitize({version:1,widgets:[widget('water',user,{presentation:'timeline'})]},user,['A']).widgets[0].presentation,'default','invalid per-module presentations are removed');
 for(const role of ['L0','L1','L2','L3','L4'])assert(defaults({...user,level:role,category:role==='L4'?'operator':'engineer'}).widgets.length);
 assert.equal(defaults({...user,level:'L4',category:'operator',modules:['maintenance']}).widgets.find(w=>w.kind==='tasks').title,'待处理事项','building work is not labelled as personal ownership');
 const malicious={version:1,widgets:[{...widget('notices',user),scope:'E',w:999,h:-1,x:900,title:'<script>x</script>'},{...widget('tasks',user),module:'accounts'},null]};

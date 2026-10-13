@@ -3,8 +3,12 @@
     <header v-if="!tasksOnly" class="v2-section-title"><h2><template v-if="expanded">{{ title }}</template><NButton v-else text class="v2-section-link" @click="$emit('open',target)">{{ title }}<ArrowRight :size="15" /></NButton></h2><NButton text :loading="loading" :aria-label="'刷新' + title" @click="load"><RefreshCw :size="15" /></NButton></header>
     <NSkeleton v-if="loading && !ready" :repeat="3" text />
     <NAlert v-if="error" type="warning" :bordered="false">{{ error }}</NAlert>
-    <div v-if="stats.length && !tasksOnly" class="v2-inline-stats"><div v-for="item in stats" :key="item.label"><strong>{{ item.value ?? '—' }}</strong><span>{{ item.label }}</span></div></div>
-    <NProgress v-if="progress !== null && !tasksOnly" type="line" :percentage="progress" :show-indicator="false" :height="8" />
+    <div v-if="presentation==='progress' && ready && !tasksOnly" class="v2-learning-progress">
+      <NButton data-v2-navigation text :disabled="Boolean(error)||progress===null" aria-label="查看今日学练进度" @click="$emit('open',target)"><NProgress v-if="progress!==null" type="circle" :percentage="progress" :stroke-width="7" :show-indicator="false" /><span v-else class="v2-progress-unknown"></span><span class="v2-progress-label"><strong>{{ progress===null?'—':Math.round(progress)+'%' }}</strong><small>今日已答</small></span></NButton>
+    </div>
+    <div v-if="stats.length && !tasksOnly" class="v2-inline-stats" :class="{'v2-metric-tiles':presentation==='metrics'}"><NButton v-for="item in stats" :key="item.label" data-v2-navigation quaternary :disabled="Boolean(error)||item.value===null" :aria-label="item.label+'，查看明细'" @click="$emit('open',target)"><strong><NNumberAnimation v-if="typeof item.value==='number'" :from="0" :to="item.value" :precision="Number.isInteger(item.value)?0:2" :duration="reduced?0:650" /><template v-else>{{ item.value ?? '—' }}</template></strong><span>{{ item.label }}</span></NButton></div>
+    <MotionChart v-if="showChart" :title="presentation==='chart'?'':kind==='learning'?'今日答题构成':kind==='water'?'本月水耗':'核对状态'" :items="chartItems" :view="kind==='learning'?'donut':'horizontal'" :unit="kind==='water'?'t':kind==='learning'?'题':'条'" :loading="loading" :failed="Boolean(error)||chartIncomplete" @select="item=>$emit('open',String(item.url||target))" />
+    <NProgress v-else-if="progress !== null && !tasksOnly && presentation!=='progress'" type="line" :percentage="progress" :show-indicator="false" :height="8" />
     <NList v-if="rows.length" :show-divider="true" class="v2-compact-list">
       <NListItem v-for="row in brief ? rows.slice(0,3) : tasksOnly ? rows.slice(0,12) : expanded || kind === 'water' ? rows : rows.slice(0,5)" :key="row.id"><NButton text class="v2-row-title" @click="$emit('open',row.url)">{{ row.title }}</NButton><template #suffix><NTag size="small" :bordered="false" :type="row.warning ? 'warning' : 'default'">{{ row.status }}</NTag></template></NListItem>
     </NList>
@@ -14,15 +18,22 @@
 </template>
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { NAlert, NButton, NEmpty, NList, NListItem, NProgress, NSkeleton, NTag } from 'naive-ui';
+import { NAlert, NButton, NEmpty, NList, NListItem, NNumberAnimation, NProgress, NSkeleton, NTag } from 'naive-ui';
 import { ArrowRight, RefreshCw } from 'lucide-vue-next';
 import { requestJson, type Dict } from './client';
 import { beijingDate, count, modules, moduleUrl } from './modules';
 import { mopNoticeNeedsAction, noticeIsEnded } from '../mopSelectionUtils';
-const props = defineProps<{kind:string;scope:string;scopes:{value:string;label:string}[];user:Dict;personal?:boolean;expanded?:boolean;tasksOnly?:boolean;brief?:boolean}>();
+import MotionChart from './MotionChart.vue';
+import type { ChartItem } from './vipboard';
+const props = defineProps<{kind:string;scope:string;scopes:{value:string;label:string}[];user:Dict;personal?:boolean;expanded?:boolean;tasksOnly?:boolean;brief?:boolean;presentation?:string}>();
 defineEmits<{open:[url:string]}>();
 const element=ref<HTMLElement>(),loading=ref(false),ready=ref(false),error=ref(''),note=ref(''),empty=ref('当前没有待处理事项');
+const motion=window.matchMedia('(prefers-reduced-motion: reduce)'),reduced=ref(motion.matches);
+function motionChanged(){reduced.value=motion.matches;}
+motion.addEventListener('change',motionChanged);
 const rows=ref<Dict[]>([]),stats=ref<{label:string;value:string|number|null}[]>([]),progress=ref<number|null>(null);
+const chartItems=ref<ChartItem[]>([]),chartIncomplete=ref(false);
+const showChart=computed(()=>!props.tasksOnly&&ready.value&&['learning','water','plan_convergence'].includes(props.kind)&&(!props.presentation||['default','chart'].includes(props.presentation))&&(chartItems.value.length>0||chartIncomplete.value));
 const title=computed(()=>props.kind==='learning'?(props.personal?'我的学练':'楼栋学练'):props.kind==='plan_convergence'?'计划收敛 · 需关注':props.kind==='cabinet'?'机柜上下电待办':modules.find(m=>m.id===props.kind)?.label || '待处理');
 const target=computed(()=>props.kind==='learning'?'/learning?view='+ (props.personal?'practice':'overview')+(props.personal?'':'&scope='+props.scope):props.kind==='cabinet'?'/cabinet-power/batches?'+new URLSearchParams({scope:props.scope,status:'todo'}):moduleUrl(modules.find(m=>m.id===props.kind)!,props.scope));
 const buildingScopes=computed(()=>props.scopes.filter(s=>'ABCDE'.split('').includes(s.value)&&(['ALL','CAMPUS'].includes(props.scope)||s.value===props.scope)).map(s=>s.value));
@@ -32,8 +43,9 @@ function array(value:unknown):Dict[]{if(!Array.isArray(value))throw new Error('�
 async function load(){
   if(disposed||document.hidden)return;
   abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';
-  const get=(path:string,params:Dict={})=>requestJson(path+'?'+new URLSearchParams(params),{signal:controller.signal,timeoutMs:12000});
+  const get=(path:string,params:Dict={})=>requestJson(path+'?'+new URLSearchParams(params),{signal:controller.signal});
   let nextRows:Dict[]=[],nextStats:{label:string;value:string|number|null}[]=[],nextNote='',nextEmpty='当前没有待处理事项',nextProgress:number|null=null;
+  let nextChart:ChartItem[]=[],incomplete=false;
   try{
     if(props.kind==='plan_convergence'){
       let unchecked=0,unmatched=0,excluded=0;
@@ -51,6 +63,7 @@ async function load(){
         }
       }
       nextStats=[{label:'已核对未匹配',value:unmatched},{label:'待核对 / 待重核',value:unchecked}];
+      nextChart=nextStats.map(item=>({label:item.label,value:Number(item.value),url:target.value}));
       nextNote=excluded?'仅现有核对结果；D/E楼按原规则不参与':'读取已有核对结果，不自动连接智航';
     }else if(props.kind==='learning'){
       const boot=await get('/api/learning/bootstrap');
@@ -61,6 +74,8 @@ async function load(){
         nextStats=props.personal?[{label:'近7天已答',value:count(s.answered)},{label:'选择题错题',value:count(s.wrong)},{label:'首次正确率',value:s.accuracy==null?null:Number(s.accuracy).toFixed(1)+'%'}]:[{label:'今日已答人数',value:count(t.answered_people)},{label:'今日完成人数',value:count(t.completed_people)},{label:'已领取未开始',value:count(t.not_started_people)}];
         const total=count(t.assigned),done=count(t.task_answered);
         nextProgress=total&&done!==null?Math.min(100,done/total*100):null;
+        if(total!==null&&done!==null&&done<=total)nextChart=[{label:'已答',value:done},{label:'未答',value:total-done}];
+        else incomplete=true;
         nextNote=props.personal?`今日进度 ${done??'—'} / ${total??'—'}；仅已领取题单`:'只统计人员任务，备用题不计入待办';
         nextEmpty=data.published?'今日已发布，可继续学练':'今日尚未发布，可进入自主练习';
       }
@@ -76,6 +91,8 @@ async function load(){
       const data=await Promise.all(scopes.map(async s=>({scope:s.value,label:s.label,data:await get('/api/capacity/water/bootstrap',{scope:s.value})})));
       const sum=(key:string)=>{const values=data.map(item=>count(item.data.summary?.[key]));return values.some(v=>v===null)?null:Number(values.reduce<number>((total,v)=>total+(v??0),0).toFixed(2));};
       nextStats=[{label:'本月记录',value:sum('record_count')},{label:'本月耗水量 / t',value:sum('total_usage')},{label:'有照片记录',value:sum('photo_records')}];
+      incomplete=data.some(item=>count(item.data.summary?.total_usage)===null);
+      nextChart=data.map(item=>({label:item.label,value:count(item.data.summary?.total_usage)??0,url:'/water-management?scope='+item.scope}));
       if(data.length>1)nextRows=data.map(item=>({id:item.scope,title:item.label+'水耗',status:`${count(item.data.summary?.record_count)??'—'}条 · ${count(item.data.summary?.total_usage)??'—'} t`,url:'/water-management?scope='+item.scope}));
       const latest=Math.max(...data.map(item=>Number(item.data.summary?.latest_date_ms)||0));
       nextEmpty=latest?'最近统计 '+new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai'}).format(new Date(latest)):'暂无统计日期';
@@ -108,12 +125,12 @@ async function load(){
       nextNote=complete?(props.kind==='drills'?'当前月份 · 已发布演练':'按授权楼栋查询，最多展示5条'):'部分汇总字段缺失，请进入详情核对';
     }
     if(controller.signal.aborted)return;
-    rows.value=nextRows;stats.value=nextStats;note.value=nextNote;empty.value=nextEmpty;progress.value=nextProgress;ready.value=true;
+    rows.value=nextRows;stats.value=nextStats;note.value=nextNote;empty.value=nextEmpty;progress.value=nextProgress;chartItems.value=nextChart;chartIncomplete.value=incomplete;ready.value=true;
   }catch(e:any){if(!controller.signal.aborted){error.value=e.message||'读取失败，不能判断为零';note.value=ready.value?'保留上次读取的数据':'';}}
   finally{if(abort===controller)loading.value=false;}
 }
 watch(()=>[props.scope,props.kind,props.personal],()=>{abort?.abort();ready.value=false;rows.value=[];stats.value=[];error.value='';if(visible)void load();});
 function changed(){if(visible)void load();}
 onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&!ready.value&&!loading.value)void load();},{rootMargin:'80px'});if(element.value)observer.observe(element.value);window.addEventListener('clipflow-business-changed',changed);});
-onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',changed);});
+onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',changed);motion.removeEventListener('change',motionChanged);});
 </script>

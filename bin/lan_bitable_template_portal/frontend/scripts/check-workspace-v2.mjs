@@ -109,6 +109,9 @@ try {
   await page.goto(origin+'/');
   await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();
   assert.equal(await page.locator('.v2-shell').count(),0);
+  await page.getByRole('button',{name:'切换新版',exact:true}).hover();
+  await page.locator('link[data-workspace-preload][rel="modulepreload"]').waitFor({state:'attached'});
+  assert.equal(await page.locator('link[data-workspace-preload][rel="stylesheet"]').count(),0,'preparing V2 must not apply V2 styles to the old page');
   await page.getByRole('button',{name:'切换新版',exact:true}).click();
   await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   const originalUser=user;user={...user,open_id:'ou_second_person_fixture',name:'另一名验收人员'};

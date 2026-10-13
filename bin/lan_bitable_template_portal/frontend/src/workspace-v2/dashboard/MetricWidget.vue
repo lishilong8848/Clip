@@ -35,11 +35,11 @@ async function load(){
     let next:typeof items.value=[],nextRecords:Dict[]=[],nextStamp='';
     if(props.item.kind==='events'){
       const range=eventPeriodRange(period.value),payloads:Dict[]=[];
-      for(const month of range.months)payloads.push(await requestJson('/api/events/monthly?'+new URLSearchParams({scope:props.scope,month}),{signal:controller.signal,timeoutMs:15000}));
+      for(const month of range.months)payloads.push(await requestJson('/api/events/monthly?'+new URLSearchParams({scope:props.scope,month}),{signal:controller.signal}));
       const data=mergeEventMonths(payloads,range);if(data.unknown_time_count)throw new Error('部分事件缺少可核验日期，请先在事件管理中核对。');
       nextRecords=data.records;next=eventTrend(nextRecords,range);nextStamp=range.caption;
     }else{
-      const data=await requestJson('/api/scope-overview?scope='+encodeURIComponent(props.scope),{signal:controller.signal,timeoutMs:15000});
+      const data=await requestJson('/api/scope-overview?scope='+encodeURIComponent(props.scope),{signal:controller.signal});
       if(data.source_snapshot_ready===false)throw new Error('本地资料尚未准备完成，不能判断为零。');
       const values=data.scopes?.[props.scope];if(!values)throw new Error('所选楼栋统计尚未返回。');
       for(const entry of modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))){

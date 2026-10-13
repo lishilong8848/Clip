@@ -1,5 +1,15 @@
 # Workspace V2 Design Contract
 
+## VIPBoard Integration
+
+The local `vipboard-charts` skill supplies visual references, not production business code. `vipboard.ts` adapts bar, horizontal comparison, line, area, donut and pie patterns to the existing ECharts module; `MotionChart.vue` owns lifecycle, loading/error/zero states, resizing and drill-down. No second chart runtime or raw demo HTML is loaded.
+
+Personal workspace templates are optional, permission-filtered and stored by the existing per-user layout contract. Water charts compare only water usage in tonnes; learning charts use claimed paper counts; event trends retain the existing date-range query and detail records. Unknown values are not plotted as zero. Native Vue business tables/forms receive scoped presentation rules in `vipboard.css`; their controls, handlers and backend contracts remain intact.
+
+The desktop sidebar keeps the existing module list and permissions, adds local search and keyboard selection, and retains independent scrolling. Narrow desktop expansion must not hide labels. Mobile retains the bottom navigation.
+
+Checks: `check:vipboard`, the workspace layout/customization suite, event/cabinet tests, typecheck and the independent V2 production build. The skill also has `scripts/check-runtime.mjs` for reusable library safety/lifecycle regressions.
+
 Source: UI/UX Pro Max v2.15.0, verified local searches on 2026-10-12.
 Motion reference: linyi-ui/ui-motion-skill, pinned commit f29be3bd659f8a6bab7fdfe6e8d589e40ccf004d. Reviewed SKILL and references; installed as a development-only skill. Apply Submit Morph, Jelly Toggle and Streaming Reply only to the presentation, retaining existing validation, confirmations and checkbox multi-selection semantics.
 

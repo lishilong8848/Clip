@@ -42,7 +42,9 @@ try{
   await submit().click();await page.waitForFunction(()=>document.querySelector('.pwd-form button[type=submit]').disabled);
   const version=page.getByRole('button',{name:'切换旧版',exact:true});await page.waitForFunction(()=>document.querySelector('.v2-header-actions button').disabled);
   assert.equal(await version.isDisabled(),true);const before=page.url();await version.evaluate(el=>el.click());assert.equal(page.url(),before);
-  await answerFailure();await page.waitForFunction(()=>document.querySelector('.pwd-form button[type=submit]').dataset.v2Action==='error',null,{timeout:800});await page.waitForFunction(()=>{const el=document.querySelector('#personnel-password');return document.activeElement===el&&el.selectionEnd-el.selectionStart===13;});
+  assert.equal(await submit().getAttribute('data-v2-action'),null,'login keeps its ordinary loading button without morphing');
+  await answerFailure();await page.waitForFunction(()=>{const el=document.querySelector('#personnel-password');return document.activeElement===el&&el.selectionEnd-el.selectionStart===13;});
+  assert.equal(await submit().getAttribute('data-v2-action'),null);assert.equal(await submit().evaluate(el=>getComputedStyle(el).color),'rgb(180, 35, 50)');
   assert.equal(await version.isDisabled(),false);await page.screenshot({path:path.join(output,'login-validation-desktop.png'),fullPage:true});
   await page.waitForFunction(()=>!document.querySelector('.pwd-form button[type=submit]').dataset.v2Action);
   await page.locator('#personnel-password').fill('anotherWrong1');assert.equal(await page.locator('.error-message').count(),0);await submit().click();await page.waitForFunction(()=>document.querySelector('.pwd-form button[type=submit]').disabled);
@@ -60,6 +62,7 @@ try{
   await version.click();await page.getByRole('button',{name:'继续填写',exact:true}).click();
   await submit().click();await page.waitForFunction(()=>document.querySelector('.v2-header-actions button').disabled);assert.equal(await version.isDisabled(),true);assert(writes.includes('/api/auth/password/change'));
   await answerFailure();await page.waitForFunction(()=>{const el=document.querySelector('#personnel-current-password');return document.activeElement===el&&el.selectionEnd-el.selectionStart===10;});
+  assert.deepEqual(await page.evaluate(()=>window.invalidMotion||[]),[],'password forms never use three-stage motion');
   assert.deepEqual(errors,[]);
   console.log('PASS: real login validation, no false success, busy/dirty version guards in both versions, password focus and user override, centered desktop/mobile, change-password guard; isolated responses only.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

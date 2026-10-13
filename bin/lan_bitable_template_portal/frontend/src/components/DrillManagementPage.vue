@@ -455,24 +455,24 @@
             <section v-else class="assessment-view">
               <div v-if="hasReviewMapping" class="field-grid two assessment-fields">
                 <label class="span-two">
-                  <span>演练审核人 / 评估人 <b>*</b></span>
+                  <span>演练审核人 / 评估人</span>
                   <VnetSelect
                     input-id="drill-evaluator"
                     label="演练评估人"
                     :model-value="personOptionLabel(evaluatorId)"
-                    :options="commanderPersonOptionLabels"
+                    :options="['不填写', ...commanderPersonOptionLabels]"
                     :disabled="busy"
-                    required
+                    placeholder="请选择（可留空）"
                     @update:model-value="selectEvaluatorByLabel"
                   />
                   <small v-if="evaluatorId && selectedEvaluator && !selectedEvaluator.has_signature" class="missing-signature-hint">该人员尚未保存签名</small>
                 </label>
                 <label>
-                  <span>演练审核人签名时间 <b>*</b></span>
+                  <span>演练审核人签名时间</span>
                   <input v-model="execution.signature_time" type="datetime-local" :disabled="busy" @input="markDirty" />
                 </label>
                 <label>
-                  <span>演练评估人评估时间 <b>*</b></span>
+                  <span>演练评估人评估时间</span>
                   <input v-model="execution.evaluation_time" type="datetime-local" :disabled="busy" @input="markDirty" />
                 </label>
               </div>
@@ -1187,18 +1187,10 @@ function selectCommanderByLabel(label: string): void {
 
 function selectEvaluatorByLabel(label: string): void {
   if (!execution.value) return;
+  if (label === '不填写') { execution.value.evaluator = {}; markDirty(); return; }
   const person = personFromOptionLabel(label);
   if (!person) return;
   execution.value.evaluator = compactPerson(person);
-  if (!execution.value.signature_time || !execution.value.evaluation_time) {
-    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-    }).formatToParts(new Date()).map(({ type, value }) => [type, value]));
-    const currentTime = `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
-    execution.value.signature_time ||= currentTime;
-    execution.value.evaluation_time ||= currentTime;
-  }
   markDirty();
 }
 
@@ -1294,9 +1286,8 @@ function validateExecution(): string[] {
   if (!execution.value.first_start_time) errors.push("请选择首步开始时间");
   if (!commanderId.value) errors.push("请选择指挥人");
   if (hasReviewMapping.value) {
-    if (!evaluatorId.value) errors.push("请选择演练评估人");
-    if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(execution.value.signature_time || ""))) errors.push("请选择有效的演练审核人签名时间");
-    if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(execution.value.evaluation_time || ""))) errors.push("请选择有效的演练评估人评估时间");
+    if (execution.value.signature_time && !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(execution.value.signature_time))) errors.push("请选择有效的演练审核人签名时间");
+    if (execution.value.evaluation_time && !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(execution.value.evaluation_time))) errors.push("请选择有效的演练评估人评估时间");
   }
   if (!participantIds.value.length) errors.push("请选择参演人员");
   if (participantIds.value.length > 10) errors.push("参演人员不能超过 10 人");

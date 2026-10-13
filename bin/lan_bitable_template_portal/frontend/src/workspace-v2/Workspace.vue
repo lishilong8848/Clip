@@ -4,7 +4,7 @@
       <div class="v2-shell" :class="{ 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode" class="v2-header">
-          <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" quaternary circle aria-label="展开或收起导航" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
+          <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
           <div id="page-back-slot" />
           <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
@@ -14,10 +14,7 @@
           </div>
         </header>
         <div v-if="printMode" id="page-back-slot" hidden />
-        <aside v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" class="v2-sidebar" aria-label="功能导航">
-          <div class="v2-nav-top"><span v-if="!collapsed">工作空间</span><NButton text :aria-label="collapsed ? '展开导航' : '收起导航'" @click="collapsed = !collapsed"><PanelLeft :size="17" /></NButton></div>
-          <NMenu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="menuOptions" :value="selectedMenu" :indent="18" @update:value="selectMenu" />
-        </aside>
+        <SidebarNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" :name="String(user.name||'当前账号')" :scope-label="scopeLabel" @select="selectMenu" @personal="navigate('/?view=my')" />
         <main class="v2-main">
           <div v-if="loggedIn && !publicLink && !printMode && scopes.length > 1 && scopeSelectable && !['my','permission'].includes(view)" class="v2-context">
             <span>业务范围</span>
@@ -68,10 +65,9 @@ import { personaFor } from './persona';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate } from './navigation';
 import { theme } from './theme';
-import HomePage from './HomePage.vue';
-import NativeWorkspace from './NativeWorkspace.vue';
 import OverviewPanel from './OverviewPanel.vue';
 import MobileNavigation from './MobileNavigation.vue';
+import SidebarNavigation from './SidebarNavigation.vue';
 import {useAuthVersionGuard} from './authVersionGuard';
 const {busy:versionBusy,confirming:confirmVersion,request:requestVersion,confirm:finishVersion}=useAuthVersionGuard();
 function animateMobilePage(direction:number){
@@ -81,6 +77,8 @@ function animateMobilePage(direction:number){
 import { LighthouseAssistant } from '../lighthouseEntry';
 import AsyncPageState from '../components/AsyncPageState.vue';
 const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, loadingComponent: AsyncPageState, errorComponent: AsyncPageState, delay: 100, timeout: 30000 });
+const HomePage = lazy(() => import('./HomePage.vue'));
+const NativeWorkspace = lazy(() => import('./NativeWorkspace.vue'));
 const AuthPanels = lazy(() => import('../components/AuthPanels.vue'));
 const pages: Record<string, any> = {
   event: lazy(() => import('../components/EventManagementPage.vue')),

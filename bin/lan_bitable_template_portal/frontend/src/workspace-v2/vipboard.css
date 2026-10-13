@@ -1,0 +1,14 @@
+/* VIPBoard table/form rhythm, scoped to the independent workspace build. */
+.workspace-v2 .v2-shell:is(.is-auth,.is-public,.is-print,.is-guest){--nav-width:0px}
+.workspace-v2 .v2-main :is(.table-wrap,.n-data-table){border-radius:8px;border-color:var(--v2-border)}
+.workspace-v2 .v2-main :is(.table-wrap th,.n-data-table-th){background:#f3f7f5;font-weight:600;color:#53665c;line-height:1.5}
+.workspace-v2 .v2-main :is(.table-wrap td,.n-data-table-td){border-bottom-color:#e8eee9;line-height:1.65;transition:background-color 160ms ease-out}
+.workspace-v2 .v2-main .table-wrap tbody tr:hover>td{background:#f4f8f5}
+.workspace-v2 .v2-main :is(.form-grid,.filter-row,.filters) :is(input,select,textarea):focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
+.workspace-v2 .v2-main :is(.form-grid,.filters) label{line-height:1.5}
+.workspace-v2 .v2-main .v2-inline-stats{gap:12px 24px}
+.workspace-v2 .v2-main .v2-inline-stats strong{font-variant-numeric:tabular-nums}
+.workspace-v2 .v2-main .v2-compact-list .n-list-item{transition:background-color 160ms ease-out}
+@media(hover:hover){.workspace-v2 .v2-main .v2-compact-list .n-list-item:hover{background:#f4f8f5}}
+@media(max-width:760px){.workspace-v2 .v2-main .v2-inline-stats{gap:12px}.workspace-v2 .v2-main .v2-inline-stats>.n-button{flex:1;min-width:90px}}
+@media(prefers-reduced-motion:reduce){.workspace-v2 .v2-main :is(.table-wrap td,.n-data-table-td,.v2-compact-list .n-list-item){transition:none}}

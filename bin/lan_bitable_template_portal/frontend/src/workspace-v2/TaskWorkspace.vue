@@ -1,5 +1,5 @@
 <template>
-  <div class="v2-home" :class="{'v2-task-embedded':embedded}">
+  <div class="v2-home" :class="{'v2-task-embedded':embedded,'v2-task-timeline':presentation==='timeline'}">
     <template v-if="view !== 'functions'">
       <section v-if="!embedded" class="v2-welcome"><div><span class="v2-eyebrow">{{ today }} · {{ greeting }}</span><h1>{{ view === 'tasks' ? '待处理事项' : personaTitles[persona] }}</h1><p>{{ scopeLabel }} · {{ user.name }}</p></div><NButton secondary :loading="taskLoading" :disabled="!taskTabs.length" @click="refresh"><template #icon><RefreshCw :size="16" /></template>刷新</NButton></section>
       <nav v-if="!embedded && view === 'home' && persona !== 'duty' && commonActions.length" class="v2-common-actions" aria-label="常用操作">
@@ -38,7 +38,7 @@ import { modules, moduleIcons, navigationModules, NOTICE_IDS, beijingDate, count
 import { eventStatusTone } from '../eventManagementUtils';
 import { personaFor, personaTitles } from './persona';
 import OverviewPanel from './OverviewPanel.vue';
-const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;embedded?:boolean;initialKind?:string;brief?:boolean}>();
+const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string}>();
 const emit=defineEmits<{open:[url:string]}>();
 const open=(url:string)=>emit('open',url);
 const today=beijingDate(), greeting=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',weekday:'long'}).format(new Date());
@@ -103,13 +103,13 @@ async function loadTasks(){
   try{
     const existing=cache.get('tasks:'+key);let data:Dict;
     if(existing&&Date.now()-existing.at<30000)data=existing.value;
-    else if(NOTICE_IDS.includes(kind))data=await requestJson('/api/workbench?'+new URLSearchParams({scope:props.scope,work_type:kind,month:Number(today.slice(5,7))+'月',sections:'records,ongoing,stats',records_page:'1',records_page_size:'12',ongoing_page:'1',ongoing_page_size:'12'}),{signal:abort.signal,timeoutMs:15000});
-    else if(kind==='repair_management')data=await requestJson('/api/repair-management/status?'+new URLSearchParams({scope:props.scope,state:'all',period:'all',limit:'12',offset:'0'}),{signal:abort.signal,timeoutMs:15000});
-    else if(kind==='event')data=await requestJson('/api/events/monthly?'+new URLSearchParams({scope:props.scope,month:today.slice(0,7)}),{signal:abort.signal,timeoutMs:15000});
+    else if(NOTICE_IDS.includes(kind))data=await requestJson('/api/workbench?'+new URLSearchParams({scope:props.scope,work_type:kind,month:Number(today.slice(5,7))+'月',sections:'records,ongoing,stats',records_page:'1',records_page_size:'12',ongoing_page:'1',ongoing_page_size:'12'}),{signal:abort.signal});
+    else if(kind==='repair_management')data=await requestJson('/api/repair-management/status?'+new URLSearchParams({scope:props.scope,state:'all',period:'all',limit:'12',offset:'0'}),{signal:abort.signal});
+    else if(kind==='event')data=await requestJson('/api/events/monthly?'+new URLSearchParams({scope:props.scope,month:today.slice(0,7)}),{signal:abort.signal});
     else if(kind==='learning'){
-      const boot=await requestJson('/api/learning/bootstrap',{signal:abort.signal,timeoutMs:15000});
-      data=boot.self_person?.id?{...(await requestJson('/api/learning/profile?'+new URLSearchParams({scope:boot.self_scope,person_id:boot.self_person.id,period:'7'}),{signal:abort.signal,timeoutMs:15000})),self_scope:boot.self_scope}: {unlinked:true};
-    }else data=await requestJson('/api/daily-tasks?'+new URLSearchParams({scope:props.scope,date:today}),{signal:abort.signal,timeoutMs:15000});
+      const boot=await requestJson('/api/learning/bootstrap',{signal:abort.signal});
+      data=boot.self_person?.id?{...(await requestJson('/api/learning/profile?'+new URLSearchParams({scope:boot.self_scope,person_id:boot.self_person.id,period:'7'}),{signal:abort.signal})),self_scope:boot.self_scope}: {unlinked:true};
+    }else data=await requestJson('/api/daily-tasks?'+new URLSearchParams({scope:props.scope,date:today}),{signal:abort.signal});
     if(abort.signal.aborted)return;
     if(data.source_snapshot_ready===false)throw new Error('本地资料尚未准备完成，请稍后重试。');
     if(NOTICE_IDS.includes(kind)){

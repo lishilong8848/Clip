@@ -30,6 +30,8 @@ from lan_bitable_template_portal.portal_service import (  # noqa: E402
 
 class DrillBackendIntegrationTests(unittest.TestCase):
     def test_http_routes_filter_drafts_and_create_empty_execution(self):
+        self.enterContext(patch.object(PortalRuntime.auth_manager, "account_profile", return_value={"modules": ["drills"]}))
+        self.enterContext(patch.object(PortalRuntime.auth_manager, "is_admin", side_effect=lambda session: (session or {}).get("role") == "admin"))
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         definitions = [
             {
@@ -297,6 +299,7 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         upload.assert_not_called()
 
     def test_preview_and_print_return_names_without_reading_signatures(self):
+        self.enterContext(patch.object(PortalRuntime.auth_manager, "account_profile", return_value={"modules": ["drills"]}))
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         model = {"signature_cells": [{"range": "H14", "signers": [{"record_id": "rec-1", "name": "甲"}]}]}
         controller._drills = Mock()
@@ -431,6 +434,12 @@ class DrillBackendIntegrationTests(unittest.TestCase):
         self.assertEqual(execution["evaluator"], {"record_id": "reviewer", "name": "评估人"})
         people[1]["has_signature"] = False
         with self.assertRaisesRegex(PortalError, "评估人"):
+            controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
+        execution["evaluator"] = {}
+        controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
+        self.assertEqual(execution["evaluator"], {})
+        people[0]["has_signature"] = False
+        with self.assertRaisesRegex(PortalError, "参演人"):
             controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
 
     def test_step_signer_slots_keep_empty_middle_position(self):

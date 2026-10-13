@@ -33,7 +33,7 @@ async function load(){
   if(!entries.value.length||document.hidden){loading.value=false;return;}
   const controller=new AbortController();abort=controller;loading.value=true;
   try{
-    const result=await requestJson('/api/scope-overview?scope='+encodeURIComponent(props.scope),{signal:controller.signal,timeoutMs:15000});
+    const result=await requestJson('/api/scope-overview?scope='+encodeURIComponent(props.scope),{signal:controller.signal});
     if(controller.signal.aborted)return;
     if(result.source_snapshot_ready===false||!result.scopes?.[props.scope])throw new Error('概况暂未就绪，不能判断为零。');
     data.value=result.scopes[props.scope];

@@ -14,7 +14,8 @@
     "check:plan-convergence": "node --experimental-strip-types scripts/check-plan-convergence.ts",
     "smoke": "python ../../tools/frontend_runtime_smoke.py",
     "typecheck": "vue-tsc --noEmit",
-    "check:workspace-v2": "node scripts/check-workspace-layout.mjs && node scripts/check-workspace-controls.mjs && node scripts/check-workspace-v2.mjs && node scripts/check-workspace-motion.mjs && node scripts/check-workspace-events-cabinet.mjs && node scripts/check-workspace-auth.mjs"
+    "check:vipboard": "node scripts/check-workspace-vipboard.mjs",
+    "check:workspace-v2": "node scripts/check-workspace-layout.mjs && node scripts/check-workspace-controls.mjs && node scripts/check-workspace-requests.mjs && node scripts/check-workspace-v2.mjs && node scripts/check-workspace-motion.mjs && node scripts/check-workspace-events-cabinet.mjs && node scripts/check-workspace-auth.mjs"
   },
   "dependencies": {
     "@ai-sdk/vue": "3.0.299",

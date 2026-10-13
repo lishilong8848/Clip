@@ -63,7 +63,7 @@ export function installActionMotion(doc:Document=document):()=>void{
     const check=(event.target as Element)?.closest?.('[role=checkbox]') as HTMLElement|null;
     if(check&&check.getAttribute('aria-disabled')!=='true')check.dataset.v2Toggled='true';
     const button=(event.target as Element)?.closest?.('button') as HTMLButtonElement|null;
-    if(!button||button.disabled||button.getAttribute('aria-disabled')==='true'||button.closest('[role=checkbox],[role=switch],[data-v2-navigation]')||reduced())return;
+    if(!button||button.disabled||button.getAttribute('aria-disabled')==='true'||button.closest('[role=checkbox],[role=switch],[data-v2-navigation],.login-tabs,.pwd-form')||reduced())return;
     if(button.type==='submit'&&button.form&&!button.form.noValidate&&!button.form.checkValidity())return;
     if(actions.has(button)){event.preventDefault();event.stopImmediatePropagation();return;}
     const feedback=doc.createElement('span');feedback.className='v2-action-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-label','处理中');

@@ -98,5 +98,51 @@ export async function checkCustomization(page,output){
   await page.locator('.n-dialog').getByRole('button',{name:'恢复默认',exact:true}).click();
   await page.getByRole('button',{name:'保存布局',exact:true}).click();
   await page.waitForFunction(count=>document.querySelectorAll('.v2-widget-grid>.grid-stack-item').length===count,count);
-  console.log('PASS: add/edit/remove/cancel, navigation guard, donut data, persisted sizes, real resize+drag, desktop/mobile and role-default restore.');
+  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
+  for(const name of ['待办时间线','学练进度环','水耗指标卡']){
+    await page.getByRole('button',{name:'添加组件',exact:true}).click();
+    await page.locator('.v2-motion-template').filter({hasText:name}).click();
+    if(name==='待办时间线'){await editor.locator('.n-form-item').filter({hasText:'待办业务'}).locator('.n-select').click();await page.locator('.n-base-select-option').getByText('维保通告',{exact:true}).click();}
+    await editor.getByRole('button',{name:'应用设置',exact:true}).click();await editor.waitFor({state:'hidden'});
+    const panel=page.locator(`.v2-widget[aria-label="${name}"]`);await panel.scrollIntoViewIfNeeded();
+    if(name==='待办时间线')await panel.locator('.v2-task-timeline .v2-task-row').first().waitFor();
+    if(name==='学练进度环'){await panel.locator('.v2-progress-label').getByText('40%',{exact:true}).waitFor();assert.equal(await panel.locator('.n-progress').count(),1,'one progress display, no duplicate bar');}
+    if(name==='水耗指标卡'){await panel.locator('.v2-metric-tiles').waitFor();assert.equal(await panel.locator('.v2-metric-tiles>.n-button').count(),3);assert.equal(await panel.locator('button button').count(),0);}
+  }
+  await page.getByRole('button',{name:'保存布局',exact:true}).click();
+  await page.reload();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('.v2-widget').count(),count+3,'motion template selection persists');
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:width<700?844:1000});
+    const panel=page.locator('.v2-widget[aria-label="学练进度环"]');await panel.scrollIntoViewIfNeeded();await panel.getByText('40%',{exact:true}).waitFor();
+    await page.locator('.v2-widget[aria-label="水耗指标卡"]').scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    await page.screenshot({path:path.join(output,`motion-blocks-widgets-${width}.png`),fullPage:true});
+  }
+  await page.setViewportSize({width:1440,height:1000});await main.evaluate(el=>el.scrollTop=0);
+  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();await page.getByRole('button',{name:'恢复默认',exact:true}).click();await page.locator('.n-dialog').getByRole('button',{name:'恢复默认',exact:true}).click();await page.getByRole('button',{name:'保存布局',exact:true}).click();
+  await page.waitForFunction(count=>document.querySelectorAll('.v2-widget-grid>.grid-stack-item').length===count,count);
+  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
+  for(const name of ['通告占比环','通告横向对比','通告分类饼图','事件面积趋势','事件折线趋势','楼栋水耗对比','今日答题构成']){
+    await page.getByRole('button',{name:'添加组件',exact:true}).click();
+    await page.getByRole('textbox',{name:'搜索组件'}).fill(name).catch(async error=>{await page.screenshot({path:path.join(output,'vipboard-library-failure.png'),fullPage:true});console.error(await page.locator('.v2-widget-library').ariaSnapshot());throw error;});
+    await page.locator('.v2-chart-template').filter({hasText:name}).click();
+    await editor.getByRole('button',{name:'应用设置',exact:true}).click();await editor.waitFor({state:'hidden'});
+    const panel=page.locator(`.v2-widget[aria-label="${name}"]`);await panel.scrollIntoViewIfNeeded();await panel.locator('.v2-chart-canvas svg').first().waitFor();
+  }
+  await page.getByRole('button',{name:'保存布局',exact:true}).click();await page.reload();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('.v2-widget').count(),count+7,'all chart templates persist across reload');
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:1000});
+    for(const name of ['通告占比环','通告横向对比','通告分类饼图','事件面积趋势','事件折线趋势','楼栋水耗对比','今日答题构成']){
+      const panel=page.locator(`.v2-widget[aria-label="${name}"]`);await panel.scrollIntoViewIfNeeded();
+      const plot=panel.locator('.v2-motion-chart[aria-busy="false"] .v2-chart-canvas[aria-hidden="false"] svg');await plot.waitFor();await plot.locator('path').first().waitFor({state:'attached'});
+    }
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    await page.screenshot({path:path.join(output,`vipboard-widgets-${width}.png`),fullPage:true});
+  }
+  await page.setViewportSize({width:1440,height:1000});await main.evaluate(el=>el.scrollTop=0);
+  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();await page.getByRole('button',{name:'恢复默认',exact:true}).click();await page.locator('.n-dialog').getByRole('button',{name:'恢复默认',exact:true}).click();await page.getByRole('button',{name:'保存布局',exact:true}).click();
+  await page.waitForFunction(count=>document.querySelectorAll('.v2-widget-grid>.grid-stack-item').length===count,count);
+  console.log('PASS: add/edit/remove/cancel, navigation guard, persisted sizes, drag, seven chart templates, desktop/mobile and role-default restore.');
 }

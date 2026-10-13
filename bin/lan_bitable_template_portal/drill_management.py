@@ -1346,11 +1346,12 @@ def _validate_execution(definition: dict[str, Any], execution: dict[str, Any]) -
         errors.append("演练评估签名区域映射不完整。")
     elif all(review_ranges):
         evaluator = _person(execution.get("evaluator"))
-        if not evaluator["record_id"] or not evaluator["name"]:
+        if any(evaluator.values()) and (not evaluator["record_id"] or not evaluator["name"]):
             errors.append("请选择演练评估人。")
-        if _parse_evaluation_time(execution.get("signature_time", execution.get("evaluation_time"))) is None:
+        signature_time = execution.get("signature_time", execution.get("evaluation_time"))
+        if str(signature_time or "").strip() and _parse_evaluation_time(signature_time) is None:
             errors.append("请选择有效的演练审核人签名时间。")
-        if _parse_evaluation_time(execution.get("evaluation_time")) is None:
+        if str(execution.get("evaluation_time") or "").strip() and _parse_evaluation_time(execution.get("evaluation_time")) is None:
             errors.append("请选择有效的演练评估人评估时间。")
     selected = set(ids)
     step_signers = execution.get("step_signers") if isinstance(execution.get("step_signers"), dict) else {}

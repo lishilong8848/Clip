@@ -11,7 +11,7 @@ const server = http.createServer((req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(req.url.startsWith('/child')
     ? '<input value="Child filling"><script>' + script + '</script>'
-    : '<input id="draft" value="Retained filling"><button id="action">Local action</button><script>' + script + '</script>');
+    : '<input id="draft" value="Retained filling"><button id="action">Local action</button><script'+(req.url.startsWith('/workspace')?' data-workspace-v2="1"':'')+'>' + script + '</script>');
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const base = 'http://127.0.0.1:' + server.address().port;
@@ -56,6 +56,15 @@ try {
   assert((await page.locator('#clipflow-connection-guard').innerText()).includes('已重启'));
   assert.equal(await page.locator('#draft').inputValue(), 'User edits remain intact');
   assert.deepEqual(errors, []);
+  const workspace=await browser.newPage();
+  await workspace.clock.install();
+  await workspace.addInitScript(()=>{window.fetch=(_url,options)=>new Promise((resolve,reject)=>{window.probeSignal=options.signal;window.finishProbe=()=>resolve(new Response(JSON.stringify({ok:true,service:'clipflow_backend',instance_id:'slow-fixture'}),{headers:{'content-type':'application/json'}}));options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')));});});
+  await workspace.goto(base+'/workspace');await workspace.waitForFunction(()=>!!window.probeSignal);
+  await workspace.clock.fastForward(6000);assert.equal(await workspace.evaluate(()=>window.probeSignal.aborted),false,'a busy but running V2 backend is not rejected at five seconds');
+  await workspace.evaluate(()=>window.finishProbe());await workspace.waitForTimeout(20);assert.equal(await workspace.locator('#clipflow-connection-warning').count(),0);
+  await workspace.evaluate(()=>{void window.ClipFlowConnectionGuard.check();});await workspace.clock.fastForward(15001);await workspace.clock.fastForward(16001);await workspace.locator('#clipflow-connection-warning').waitFor();
+  assert.match(await workspace.locator('#clipflow-connection-warning').innerText(),/暂忙或网络暂不可达/);assert.equal(await workspace.locator('#draft').inputValue(),'Retained filling');
+  await workspace.close();
   console.log('[ConnectionGuardBrowser] OK: transient loss retains input, recovery removes warning, shared iframe probe, restart still requires refresh.');
 } finally {
   await browser.close();

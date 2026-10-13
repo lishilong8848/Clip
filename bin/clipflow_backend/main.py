@@ -10901,16 +10901,8 @@ class FastAPIPortalController:
     ) -> dict[str, dict[str, Any]]:
         commander_id = self._drill_person_record_id(execution.get("commander"))
         evaluator_id = self._drill_person_record_id(execution.get("evaluator"))
-        mapping = (definition.get("configuration") or {}).get("mapping") or {}
-        assessment = mapping.get("assessment") or {}
-        needs_evaluator = all((
-            mapping.get("reviewer_signature"), mapping.get("review_time"),
-            assessment.get("evaluator_signature"), assessment.get("evaluation_time"),
-        ))
         if require_complete and not commander_id:
             raise PortalError("请选择一名演练指挥人。")
-        if require_complete and needs_evaluator and not evaluator_id:
-            raise PortalError("请选择演练评估人。")
         participant_ids = [
             self._drill_person_record_id(item)
             for item in (execution.get("participants") or [])

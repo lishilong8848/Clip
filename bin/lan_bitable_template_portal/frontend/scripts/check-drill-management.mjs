@@ -107,4 +107,16 @@ peopleSearch.value = "临时参演人";
 assert.deepEqual(filteredPeople.value.map(person => person.record_id), ["external:temporary-1"], "跨楼栋临时签名人员可搜索");
 assert(commanderPeople.value.some(person => person.record_id === "external:temporary-1"), "临时签名人员也可选为指挥人");
 
-console.log("drill management static check passed");
+const execution = ref({drill_date:'2026-09-29',first_start_time:'09:00',evaluator:{},signature_time:'',evaluation_time:''});
+const validationContext={execution,commanderId:ref('p1'),hasReviewMapping:ref(true),evaluatorId:ref(''),participantIds:ref(['p1']),executionSteps:ref([]),missingSignaturePeople:ref([])};
+const validateExecution=new Function(...Object.keys(validationContext),`${ts.transpile(page.slice(page.indexOf('function validateExecution()'),page.indexOf('function buildExecutionPayload()')))};return validateExecution;`)(...Object.values(validationContext));
+assert.deepEqual(validateExecution(),[],'the three review fields are optional');
+execution.value.signature_time='invalid';assert(validateExecution().includes('请选择有效的演练审核人签名时间'));
+execution.value.signature_time='';execution.value.evaluation_time='invalid';assert(validateExecution().includes('请选择有效的演练评估人评估时间'));
+execution.value.evaluation_time='';validationContext.commanderId.value='';assert(validateExecution().includes('请选择指挥人'),'commander remains mandatory');
+const chooseEvaluator=new Function('execution','personFromOptionLabel','compactPerson','markDirty',`${ts.transpile(page.slice(page.indexOf('function selectEvaluatorByLabel('),page.indexOf('\nfunction ',page.indexOf('function selectEvaluatorByLabel(')+1)))};return selectEvaluatorByLabel;`)(execution,()=>({record_id:'p2',name:'评估人'}),person=>person,()=>{});
+chooseEvaluator('评估人');assert.equal(execution.value.signature_time,'');assert.equal(execution.value.evaluation_time,'','choosing a person must not fabricate timestamps');
+execution.value.signature_time='2026-09-29T10:15';chooseEvaluator('不填写');assert.deepEqual(execution.value.evaluator,{});assert.equal(execution.value.signature_time,'2026-09-29T10:15','clearing the person preserves independently entered times');
+const reviewTemplate=page.slice(page.indexOf('<span>演练审核人 / 评估人'),page.indexOf('<div v-if="previewLoading" class="inline-state"><Loader2 :size="20" class="spinning" /> 正在读取评估表'));
+assert(!reviewTemplate.includes('<b>*</b>')&&!/\srequired[\s>]/.test(reviewTemplate),'optional review controls have no required markers');
+console.log("drill management checks passed, including optional review fields, clearing and supplied-time validation");

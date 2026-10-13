@@ -1,6 +1,7 @@
 /* Shared by Vue, notice editing and LAN work-order pages. No business retries. */
 (() => {
   if (window.ClipFlowConnectionGuard) return;
+  const workspace = document.currentScript?.dataset.workspaceV2 === '1';
   try {
     if (window.parent !== window && new URLSearchParams(location.search).get('_assistant_frame') === '1' && window.parent.ClipFlowConnectionGuard) {
       window.ClipFlowConnectionGuard = window.parent.ClipFlowConnectionGuard;
@@ -8,7 +9,7 @@
       return;
     }
   } catch { /* A cross-origin parent cannot own this page's connection checks. */ }
-  let checking = false, failures = 0, instance = '', blocked = false, timer = 0;
+  let checking = false, failures = 0, instance = '', blocked = false, timer = 0, suspended = false, probe;
   const style = document.createElement('style');
   style.textContent = `html.clipflow-connection-lost body>*:not(#clipflow-connection-guard){display:none!important}
     #clipflow-connection-guard{position:fixed;inset:0;z-index:2147483647;display:grid;place-items:center;background:linear-gradient(145deg,#edf4ff,#fff);color:#213b5d;font:15px 'Microsoft YaHei',Arial,sans-serif}
@@ -38,11 +39,12 @@
     panel.querySelector('[data-connection-reason]').textContent = reason;
   }
   async function check() {
-    if (checking) return;
+    if (checking || workspace && (suspended || document.hidden)) return;
     clearTimeout(timer);
     checking = true;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    probe = controller;
+    const timeout = setTimeout(() => controller.abort(), workspace ? 15000 : 5000);
     try {
       const response = await fetch('/api/health?probe=1', { cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
       const data = await response.json();
@@ -53,27 +55,28 @@
       if (blocked) document.querySelector('#clipflow-connection-guard [data-connection-status]').textContent = '连接已恢复，请点击“刷新页面”重新加载。';
       else document.getElementById('clipflow-connection-warning')?.remove();
     } catch (_) {
+      if (workspace && suspended) return;
       failures += 1;
       if (blocked) {
         document.querySelector('#clipflow-connection-guard [data-connection-status]').textContent = '连接尚未恢复。';
       } else if (failures >= 2 && !document.getElementById('clipflow-connection-warning')) {
         const warning = document.createElement('div'); warning.id = 'clipflow-connection-warning'; warning.setAttribute('role', 'status');
-        warning.append(document.createTextNode('暂时无法连接程序，当前页面和填写已保留。正在自动重新检测，请勿重复提交。'));
+        warning.append(document.createTextNode(workspace ? '连接检测未及时响应，程序可能暂忙或网络暂不可达。页面和填写已保留，请勿重复提交；正在重新检测。' : '暂时无法连接程序，当前页面和填写已保留。正在自动重新检测，请勿重复提交。'));
         const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重新检测'; retry.onclick = check;
         warning.append(retry); document.body.append(warning);
       }
     } finally {
       clearTimeout(timeout); checking = false;
-      timer = setTimeout(check, failures === 1 ? 1000 : document.hidden ? 30000 : 10000);
+      if (!(workspace && (suspended || document.hidden))) timer = setTimeout(check, failures === 1 ? 1000 : document.hidden ? 30000 : 10000);
     }
   }
   window.ClipFlowConnectionGuard = { check };
   window.addEventListener('offline', check);
   window.addEventListener('online', check);
-  window.addEventListener('pageshow', check);
+  window.addEventListener('pageshow', () => { suspended = false; check(); });
   window.addEventListener('clipflow-api-offline', check);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
-  window.addEventListener('pagehide', () => clearTimeout(timer));
+  window.addEventListener('pagehide', () => { clearTimeout(timer); if (workspace) { suspended = true; probe?.abort(); } });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', check, { once: true });
   else check();
 })();
