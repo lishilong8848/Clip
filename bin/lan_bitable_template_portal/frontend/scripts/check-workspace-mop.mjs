@@ -8,7 +8,7 @@ import { preview } from 'vite';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../../output/playwright/workspace-mop');
 const before = process.argv.includes('--before');
-const site = process.env.CLIPFLOW_MOP_PREVIEW_SITE || path.resolve(root, before ? '../../../output/header-polish-build' : '../../../output/mop-workspace-build');
+const site = process.env.CLIPFLOW_MOP_PREVIEW_SITE || path.resolve(root, before ? '../../../output/header-polish-build' : 'dist');
 await mkdir(output, { recursive: true });
 const server = await preview({ root, configFile: false, logLevel: 'error', build: { outDir: site }, preview: { host: '127.0.0.1', port: 0 } });
 const origin = 'http://127.0.0.1:' + server.httpServer.address().port;
@@ -62,6 +62,15 @@ try {
     assert(left.x + left.width <= right.x, 'Desktop keeps notice and MOP selection side by side');
     const upload = await page.locator('.local-mop-upload').boundingBox();
     assert(upload.y + upload.height < 900, 'Local-file upload stays in the desktop viewport');
+    for (const [width,height] of [[1366,768],[1024,768],[390,844]]) {
+      await page.setViewportSize({width,height});
+      await page.screenshot({path:path.join(output,`binding-${width}.png`),animations:'disabled'});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'binding page stays within viewport');
+      const panel=await page.locator('.binding-panel').boundingBox(),card=await page.locator('.mop-selected-file-card').boundingBox();
+      assert(card.x>=panel.x&&card.x+card.width<=panel.x+panel.width+1,'selected file stays inside its panel');
+      if(width>=1366){const box=await page.locator('.local-mop-upload').boundingBox();assert(box.y+box.height<=height,'local upload must remain reachable on a 768px-high desktop');}
+    }
+    await page.setViewportSize({width:1440,height:900});
     const search = page.getByPlaceholder('搜索通告、楼栋、专业');
     await search.fill('BA系统'); assert.equal(await page.locator('.notice-row').count(), 2);
     await page.locator('.notice-row').first().click();

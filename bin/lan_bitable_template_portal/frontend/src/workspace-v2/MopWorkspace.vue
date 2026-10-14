@@ -55,7 +55,7 @@ async function followSelection(event: MouseEvent) {
 .v2-mop-workspace :deep(.mop-summary span) { color: var(--mop-muted); font-size: 12px; font-weight: 400; }
 .v2-mop-workspace :deep(.mop-summary strong) { margin: 0; font-size: 17px; font-weight: 600; color: var(--mop-ink); font-variant-numeric: tabular-nums; }
 
-.v2-mop-workspace :deep(.mop-layout) { grid-template-columns: minmax(270px, .7fr) minmax(0, 1.6fr); gap: 18px; align-items: stretch; }
+.v2-mop-workspace :deep(.mop-layout) { container: mop-selection / inline-size; grid-template-columns: minmax(270px, .7fr) minmax(0, 1.6fr); gap: 18px; align-items: start; }
 .v2-mop-workspace :deep(.panel) { min-width: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: 0; }
 .v2-mop-workspace :deep(.panel-head) { align-items: center; min-height: 32px; gap: 10px; }
 .v2-mop-workspace :deep(.panel-head h2) { color: var(--mop-ink); font-size: 15px; font-weight: 600; }
@@ -143,6 +143,25 @@ async function followSelection(event: MouseEvent) {
   .v2-mop-workspace :deep(.notice-panel) { padding: 0; border-right: 0; }
   .v2-mop-workspace :deep(.notice-list) { max-height: 300px; min-height: 100px; }
   .v2-mop-workspace :deep(.binding-panel) { scroll-margin-top: calc(var(--head-height, 68px) + 12px); }
+}
+@container mop-selection (max-width: 680px) {
+  .v2-mop-workspace :deep(.binding-panel) { grid-template-columns: minmax(0,1fr); grid-template-rows: auto; grid-template-areas: 'heading' 'notice' 'chosen' 'search' 'count' 'candidates' 'upload'; }
+  .v2-mop-workspace :deep(.mop-selected-file-card) { display: flex; }
+  .v2-mop-workspace :deep(.mop-candidate-list) { height: auto; max-height: 280px; }
+}
+@media (min-width: 1251px) and (max-height: 820px) {
+  .v2-mop-workspace.engineer-mop { gap: 8px; }
+  .v2-mop-workspace :deep(.mop-head) { padding-bottom: 8px; }
+  .v2-mop-workspace > :deep(.mop-flow-steps article) { padding: 2px 0; }
+  .v2-mop-workspace > :deep(.mop-flow-steps article small) { display: none; }
+  .v2-mop-workspace :deep(.mop-summary) { padding: 6px 0 8px; }
+  .v2-mop-workspace :deep(.notice-list) { min-height: 180px; max-height: max(180px,calc(100dvh - 480px)); }
+  .v2-mop-workspace :deep(.mop-candidate-list) { min-height: 100px; max-height: max(100px,calc(100dvh - 660px)); }
+  .v2-mop-workspace :deep(.binding-panel) { grid-template-rows: auto auto auto auto minmax(100px,1fr) auto; gap: 8px 14px; }
+  .v2-mop-workspace :deep(.mop-selected-file-card) { padding: 10px; gap: 6px; }
+  .v2-mop-workspace :deep(.selected-file-actions) { padding-top: 8px; }
+  .v2-mop-workspace :deep(.selected-file-actions .btn) { min-height: 36px; }
+  .v2-mop-workspace :deep(.local-mop-upload) { min-height: 56px; padding: 8px 10px; }
 }
 @media (max-width: 600px) {
   .v2-mop-workspace.engineer-mop { gap: 10px; padding-bottom: 12px; }

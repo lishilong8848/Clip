@@ -5,6 +5,7 @@
       <div class="v2-widget-form-grid">
         <NFormItem v-if="presentationOptions(draft.kind).length>1" label="组件样式"><NSelect v-model:value="draft.presentation" :options="presentationOptions(draft.kind)" /></NFormItem>
         <NFormItem v-if="draft.kind==='tasks'" label="待办业务"><NSelect v-model:value="draft.module" :options="taskOptions(user)" filterable /></NFormItem>
+        <NFormItem v-if="draft.kind==='notice_actions'" label="默认通告分类"><NSelect v-model:value="draft.module" :options="taskOptions(user).filter(item=>NOTICE_IDS.includes(item.value))" /></NFormItem>
         <NFormItem v-if="!['shortcuts','learning','pre_shift'].includes(draft.kind)" label="楼栋范围"><NSelect v-model:value="draft.scope" :options="[{value:'current',label:'跟随工作台楼栋'},...scopes]" /></NFormItem>
         <NFormItem label="组件宽度"><NSelect v-model:value="draft.w" :options="[{label:'紧凑 · 1/3',value:4},{label:'标准 · 1/2',value:6},{label:'宽幅 · 2/3',value:8},{label:'整行',value:12}]" /></NFormItem>
         <NFormItem label="组件高度"><NSelect v-model:value="draft.h" :options="[{label:'紧凑',value:3},{label:'标准',value:5},{label:'加高',value:7},{label:'超高',value:9}]" /></NFormItem>
@@ -22,7 +23,7 @@
 import { ref,watch } from 'vue';
 import { NAlert,NButton,NForm,NFormItem,NInput,NModal,NSelect } from 'naive-ui';
 import type { Dict } from '../client';
-import { navigationModules } from '../modules';
+import { navigationModules,NOTICE_IDS } from '../modules';
 import { displayOptions,presentationOptions,taskOptions,type Widget } from './layout';
 const props=defineProps<{value:Widget|null;user:Dict;scopes:{value:string;label:string}[]}>();
 const emit=defineEmits<{close:[];apply:[value:Widget]}>();

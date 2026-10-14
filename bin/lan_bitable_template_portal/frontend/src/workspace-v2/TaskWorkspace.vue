@@ -12,7 +12,12 @@
           <template v-else>
           <NAlert v-if="taskError" type="warning" :bordered="false">{{ taskError }} <NButton text @click="loadTasks">重试</NButton></NAlert>
           <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading"><NList class="v2-mobile-tasks"><NListItem v-for="row in visibleRows" :key="row.key">
-            <NButton data-v2-navigation quaternary class="v2-task-row" @click="open(row.url)">
+            <article v-if="actionMode" class="v2-task-operation">
+              <div class="v2-task-operation-head"><NButton text class="v2-operation-title" data-v2-navigation @click="open(row.url)">{{row.title}}</NButton><NTag size="small" :bordered="false">{{row.status}}</NTag></div>
+              <div class="v2-mobile-task-meta"><span>{{row.scope}}</span><span v-if="row.time">{{row.time}}</span><span v-if="row.progress!==null">进度 {{row.progress}}%</span><span v-if="taskKind==='repair_management'">跟进 {{row.followupCount??'—'}} 条</span></div>
+              <div class="v2-task-operation-actions"><NButton v-for="control in rowControls(row)" :key="control.label" data-v2-navigation size="small" secondary :type="control.primary?'primary':'default'" @click="open(control.url)"><component :is="control.icon" :size="14" />{{control.label}}</NButton></div>
+            </article>
+            <NButton v-else data-v2-navigation quaternary class="v2-task-row" @click="open(row.url)">
               <span class="v2-task-copy"><span class="v2-task-title">{{ row.title }}</span><span class="v2-mobile-task-meta"><span>{{ row.scope }}</span><span v-if="row.time">{{ row.time }}</span><NTag v-if="dueLabel(row)" type="warning" size="small" :bordered="false">{{ dueLabel(row) }}</NTag></span></span>
               <span class="v2-task-state"><NTag size="small" :bordered="false" :type="row.status==='未开始'?'default':'info'">{{ row.status }}</NTag><small v-if="row.progress!==null">进度 {{ row.progress }}%</small></span>
               <span class="v2-task-action">{{ brief?'查看':taskKind==='learning'?(row.status==='未开始'?'开始学练':'继续学练'):'办理' }}<ChevronRight :size="16" class="v2-task-arrow" aria-hidden="true" /></span>
@@ -32,13 +37,13 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NDataTable, NEmpty, NList, NListItem, NSelect, NSpin, NTag, type DataTableColumns } from 'naive-ui';
-import { ArrowRight, ChevronRight, RefreshCw } from 'lucide-vue-next';
+import { ArrowRight, ChevronRight, FileText, MessageSquarePlus, PencilLine, Play, RefreshCw, SquareCheck } from 'lucide-vue-next';
 import { requestJson, type Dict } from './client';
 import { modules, moduleIcons, navigationModules, NOTICE_IDS, beijingDate, count, moduleUrl } from './modules';
 import { eventStatusTone } from '../eventManagementUtils';
 import { personaFor, personaTitles } from './persona';
 import OverviewPanel from './OverviewPanel.vue';
-const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string}>();
+const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean}>();
 const emit=defineEmits<{open:[url:string]}>();
 const open=(url:string)=>emit('open',url);
 const today=beijingDate(), greeting=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',weekday:'long'}).format(new Date());
@@ -65,7 +70,7 @@ const taskTabs=computed(()=>persona.value==='personal' && props.view==='home' ? 
   ...(permitted.value.includes('event')?[{id:'event',label:'事件'}]:[]),
   ...(permitted.value.includes('learning')?[{id:'learning',label:'我的学练'}]:[]),
   ...panelKinds.filter(id=>permitted.value.includes(id)).map(id=>({id,label:modules.find(m=>m.id===id)!.label})),
-].sort((a,b)=>{const order=persona.value==='engineer'?['event','repair_management']:persona.value==='supervisor'?['event','daily']:NOTICE_IDS;return (order.indexOf(a.id)<0?99:order.indexOf(a.id))-(order.indexOf(b.id)<0?99:order.indexOf(b.id));}));
+].sort((a,b)=>{const order=persona.value==='engineer'?['event','repair_management']:persona.value==='supervisor'?['event','daily']:NOTICE_IDS;return (order.indexOf(a.id)<0?99:order.indexOf(a.id))-(order.indexOf(b.id)<0?99:order.indexOf(b.id));}).filter(item=>!props.actionMode||(props.initialKind==='repair_management'?item.id==='repair_management':NOTICE_IDS.includes(item.id))));
 const taskUrl=computed(()=>{if(taskKind.value==='learning')return '/learning?view=practice';const m=modules.find(m=>m.id===taskKind.value);return m?moduleUrl(m,props.scope):'';});
 const footerTarget=computed(()=>props.brief?'/?'+new URLSearchParams({view:'tasks',kind:taskKind.value,scope:props.scope}):taskUrl.value);
 const columns=computed<DataTableColumns<Dict>>(()=>[
@@ -80,7 +85,14 @@ function dueLabel(row:Dict){if(!row.dueAt||!Number.isFinite(dueTime(row.dueAt)))
 const featureGroups=computed(()=>{const entries=navigationModules(permitted.value);return [...new Set(entries.map(m=>m.group))].map(name=>({name,items:entries.filter(m=>m.group===name)}));});
 function text(value:any):string {return Array.isArray(value)?value.map(text).join('、'):value&&typeof value==='object'?String(value.text||value.name||''):String(value??'');}
 function items(value:unknown):Dict[]{if(!Array.isArray(value))throw new Error('待办资料未完整返回，请重试或进入业务列表核对。');return value;}
-function toRows(items:Dict[],kind:string):Dict[]{
+function rowControls(row:Dict){
+  const link=(key:string,value:string)=>{const url=new URL(row.url,location.origin);url.searchParams.set(key,value);return url.pathname+url.search;};
+  if(taskKind.value==='repair_management')return [{label:'填写跟进',url:link('workspace_tab','followups'),icon:MessageSquarePlus,primary:true},{label:'维修单',url:link('workspace_tab','project'),icon:FileText,primary:false}];
+  if(row.ongoing)return [{label:'更新',url:link('notice_action','update'),icon:PencilLine,primary:true},{label:'结束',url:link('notice_action','end'),icon:SquareCheck,primary:false}];
+  if(/进行中|已开始|^开始$|^更新$/.test(row.status))return [{label:'核验并办理',url:row.url,icon:FileText,primary:true}];
+  return [{label:'填写开始',url:link('notice_action','start'),icon:Play,primary:true}];
+}
+function toRows(items:Dict[],kind:string,ongoing=false):Dict[]{
   return items.map((item,i)=>{
     const fields=item.display_fields||item.fields||{},id=item.active_item_id||item.record_id||item.id;
     const url=new URL(moduleUrl(modules.find(m=>m.id===kind)!,props.scope),location.origin);
@@ -92,6 +104,7 @@ function toRows(items:Dict[],kind:string):Dict[]{
       scope:text(item.building_codes||item.building||item.scope||fields['楼栋'])||scopeLabel.value,
       time:text(item.time||item.start_time||item.updated_at||item.created_at||fields['开始时间']||fields['故障发生时间']),
       progress:count(item.progress_percent??item.progress),dueAt:item.end_time||item.deadline||'',url:url.pathname+url.search,
+      ongoing,followupCount:count(item.followup_count),
     };
   });
 }
@@ -104,6 +117,7 @@ async function loadTasks(){
     const existing=cache.get('tasks:'+key);let data:Dict;
     if(existing&&Date.now()-existing.at<30000)data=existing.value;
     else if(NOTICE_IDS.includes(kind))data=await requestJson('/api/workbench?'+new URLSearchParams({scope:props.scope,work_type:kind,month:Number(today.slice(5,7))+'月',sections:'records,ongoing,stats',records_page:'1',records_page_size:'12',ongoing_page:'1',ongoing_page_size:'12'}),{signal:abort.signal});
+    // This status API's "all" already means unfinished, so both widget types share the read.
     else if(kind==='repair_management')data=await requestJson('/api/repair-management/status?'+new URLSearchParams({scope:props.scope,state:'all',period:'all',limit:'12',offset:'0'}),{signal:abort.signal});
     else if(kind==='event')data=await requestJson('/api/events/monthly?'+new URLSearchParams({scope:props.scope,month:today.slice(0,7)}),{signal:abort.signal});
     else if(kind==='learning'){
@@ -115,7 +129,7 @@ async function loadTasks(){
     if(NOTICE_IDS.includes(kind)){
       const active=items(data.ongoing);const linked=new Set(active.flatMap((r:Dict)=>[r.source_record_id,r.record_id,r.active_item_id].filter(Boolean)));
       const pending=items(data.records).filter((r:Dict)=>{const status=text(r.source_progress||r.source_status||r.work_summary?.status||r.status||r.display_fields?.['维护实施状态']||r.display_fields?.['变更进度']);return !linked.has(r.record_id)&&!(/已结束|正常结束|延期结束|闭环|已完成|作废|删除/.test(status)&&!status.includes('未结束'));});
-      rows.value=[...toRows(active,kind),...toRows(pending,kind)].slice(0,12);taskNote.value=`当前显示 ${rows.value.length} 条`;
+      rows.value=[...toRows(active,kind,true),...toRows(pending,kind)].slice(0,12);taskNote.value=`当前显示 ${rows.value.length} 条`;
     } else if(kind==='learning'){
       const total=count(data.today_summary?.assigned),done=count(data.today_summary?.task_answered);
       if(total && done!==null && done<total)rows.value=[{key:'self-learning',title:'今日学练',status:done?'答题中':'未开始',scope:data.self_scope,time:`已答 ${done} / ${total} 题`,progress:null,url:'/learning?view=practice'}];

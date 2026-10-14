@@ -155,6 +155,9 @@ try{
   await page.locator('.v2-event-period .n-date-picker').click();
   await page.locator('.n-date-panel').waitFor();await page.keyboard.press('Escape');
   await page.goto(entry+'?__page=/&mode=events&scope=A&period=week');
+  const dateWarning=page.getByText('1 条记录缺少有效的事件发生时间，未计入当前时间范围。',{exact:true});
+  await dateWarning.waitFor();
+  assert.equal(await dateWarning.evaluate(el=>Boolean(el.closest('[data-v2-feedback]'))),false,'persistent data-quality warnings stay inline and do not cover mobile actions');
   await page.getByRole('button',{name:'展开事件明细',exact:true}).click();
   await page.locator('.event-list-panel .event-row').filter({hasText:'跨月变压器告警'}).waitFor();
   assert.equal(await page.locator('.event-list-panel .event-row').count(),2,'building filter stays authorized');

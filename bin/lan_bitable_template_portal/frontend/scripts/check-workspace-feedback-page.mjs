@@ -70,9 +70,11 @@ try{
   assert.equal(await page.locator('.error-message').count(),0,'editing clears the original validation state and toast');
   loggedIn=true;
   await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=maintenance');
-  const noticeAlert=page.locator('.v2-notice-feedback[data-v2-feedback-visible=true]');
+  const noticeAlert=page.locator('.v2-notice-feedback');
   await noticeAlert.waitFor();
-  assert.equal(await noticeAlert.getAttribute('data-v2-feedback-tone'),'error','compiled NAlert preserves its exact error type');
+  assert.equal(await noticeAlert.getAttribute('role'),'alert');
+  assert.equal(await noticeAlert.getAttribute('data-v2-feedback'),null,'notice errors stay beside the failed list instead of covering the editor');
+  assert.equal(await noticeAlert.getAttribute('data-v2-feedback-kind'),'error','compiled NAlert preserves its exact error type');
   const reads=noticeReads;failNotice=false;
   await noticeAlert.getByRole('button',{name:'重新读取',exact:true}).click();
   await page.waitForFunction(()=>!document.querySelector('.v2-notice-feedback'));

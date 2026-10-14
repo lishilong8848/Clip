@@ -1,6 +1,7 @@
 ﻿import argparse
 
 import hashlib
+from copy import copy
 
 import json
 
@@ -60,6 +61,9 @@ DEFAULT_GITEE_MANIFEST_PATH = "updates/latest_patch.json"
 LEGACY_PATCH_ZIP_NAME = "ClipFlow_patch_only.zip"
 
 REMOTE_PATCH_HISTORY = 3
+
+# Conservative public-raw budget; anonymous download verification is still required.
+GITEE_RAW_MAX_BYTES = 10_000_000
 
 PREFLIGHT_WORKERS = min(4, os.cpu_count() or 1)
 
@@ -2243,6 +2247,39 @@ def _cleanup_old_patch_zips() -> int:
 
 
 
+def _compact_patch_zip(zip_path: Path) -> bool:
+    original_size = zip_path.stat().st_size
+    if original_size <= GITEE_RAW_MAX_BYTES:
+        return False
+    compact_path = None
+    try:
+        with zipfile.ZipFile(zip_path) as source:
+            if all(info.compress_type == zipfile.ZIP_LZMA for info in source.infolist()):
+                return False
+            with tempfile.NamedTemporaryFile(dir=zip_path.parent, prefix=".compact-", suffix=".zip", delete=False) as temporary:
+                compact_path = Path(temporary.name)
+            # Clients use Python zipfile, which already supports LZMA; keep every member and its path.
+            with zipfile.ZipFile(compact_path, "w", compression=zipfile.ZIP_LZMA) as target:
+                target.comment = source.comment
+                for info in source.infolist():
+                    member = copy(info)
+                    member.compress_type = zipfile.ZIP_LZMA
+                    with source.open(info) as reader, target.open(member, "w") as writer:
+                        shutil.copyfileobj(reader, writer, 1024 * 1024)
+            with zipfile.ZipFile(compact_path) as check:
+                if check.testzip() is not None:
+                    raise RuntimeError("高压缩补丁校验失败，原补丁已保留。")
+            compact_size = compact_path.stat().st_size
+            if compact_size >= original_size:
+                return False
+        compact_path.replace(zip_path)
+        log(f"完整补丁高压缩完成: {original_size / 1024 ** 2:.2f} -> {compact_size / 1024 ** 2:.2f} MiB；未删减运行文件。")
+        return True
+    finally:
+        if compact_path is not None:
+            compact_path.unlink(missing_ok=True)
+
+
 def _zip_patch_dir(patch_dir: Path) -> Path:
 
     zip_path = BUILD_DIR / f"{patch_dir.name}.zip"
@@ -2295,6 +2332,7 @@ def _zip_patch_dir(patch_dir: Path) -> Path:
 
         raise RuntimeError(f"补丁压缩包校验失败: {broken}")
 
+    _compact_patch_zip(zip_path)
     return zip_path
 
 
@@ -2411,7 +2449,7 @@ def _write_latest_patch_manifest(
 
         "zip_size": zip_size,
 
-        "zip_url": zip_url,
+        "zip_url": zip_url + "?" + urlencode({"_clipflow_sha256": zip_sha256}),
 
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
 
@@ -2626,8 +2664,11 @@ def _load_existing_patch() -> tuple[Path, Path, dict]:
     if not isinstance(manifest, dict) or _safe_int(manifest.get("target_patch_version"), 0) <= 0:
         raise RuntimeError("本地补丁清单格式或补丁号无效。")
     name = manifest.get("zip_name")
+    patch_dir_name = f"{manifest.get('target_version', '')}_patch_only"
+    valid_names = {f"{patch_dir_name}.zip",
+                   "patch_" + hashlib.sha256(patch_dir_name.encode("utf-8")).hexdigest()[:12] + ".zip"}
     if (not isinstance(name, str) or not name or name != Path(name).name
-            or "\\" in name or name != f"{manifest.get('target_version', '')}_patch_only.zip"):
+            or "\\" in name or name not in valid_names):
         raise RuntimeError("本地补丁清单的 ZIP 文件名无效。")
     patch_zip = BUILD_DIR / name
     if (not patch_zip.is_file()
@@ -2641,6 +2682,32 @@ def _publish_patch(
     patch_zip: Path, manifest_path: Path, manifest: dict, *,
     repo_url: str, branch: str, subdir: str, manifest_repo_path: str,
 ) -> None:
+    download = urlparse(str(manifest.get("zip_url", "")))
+    if download.hostname == "gitee.com" and "/raw/" in download.path:
+        if patch_zip.stat().st_size > GITEE_RAW_MAX_BYTES:
+            with tempfile.TemporaryDirectory(dir=patch_zip.parent, prefix=".compact-release-") as folder:
+                compact = Path(folder) / patch_zip.name
+                shutil.copy2(patch_zip, compact)
+                if _compact_patch_zip(compact):
+                    checksum = _hash_file(compact)
+                    updated = dict(manifest, zip_size=compact.stat().st_size, zip_sha256=checksum,
+                                   zip_url=download._replace(query=urlencode({"_clipflow_sha256": checksum})).geturl())
+                    temporary = Path(folder) / "latest_patch.json"
+                    temporary.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+                    backup = Path(folder) / "original.zip"
+                    patch_zip.replace(backup)
+                    try:
+                        compact.replace(patch_zip)
+                        temporary.replace(manifest_path)
+                    except BaseException:
+                        backup.replace(patch_zip)
+                        raise
+                    manifest.update(updated)
+        if patch_zip.stat().st_size > GITEE_RAW_MAX_BYTES:
+            raise RuntimeError(
+                "完整补丁高压缩后仍超过 Gitee 匿名下载的保守体积上限，已停止推送，未发布新的更新清单。"
+                "本地完整补丁已保留；请使用支持匿名下载的发布渠道，不要向用户分发 Gitee 登录凭据。"
+            )
     if not _upload_patch_to_gitee(
         patch_zip, manifest_path, repo_url=repo_url, branch=branch,
         subdir=subdir, manifest_repo_path=manifest_repo_path,
@@ -2676,6 +2743,8 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
                 published.get("target_patch_version") != manifest["target_patch_version"]
                 or published.get("zip_sha256", "").lower() != expected_hash
                 or published.get("zip_name") != manifest["zip_name"]
+                or published.get("zip_size") != expected_size
+                or published.get("zip_url") != manifest["zip_url"]
             ):
                 raise RuntimeError("远端清单尚未更新到本次补丁")
             hasher = hashlib.sha256()
@@ -2695,7 +2764,8 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
             with exc:
                 detail = exc.read(2048).decode("utf-8", errors="replace").lower()
             if exc.code in {401, 403}:
-                reason = ("Gitee 拒绝匿名下载大文件，需要登录；请移除补丁中的安装器等非运行文件后重新打包"
+                reason = ("Gitee 对此文件需要登录；可用 --retry-upload 先自动压缩并重试现有完整补丁，"
+                          "仍失败时需改用支持匿名下载的发布渠道，不能把发布账号凭据发给用户"
                           if "large file require login" in detail
                           else "Gitee 拒绝匿名下载，请检查仓库公开权限或下载限制")
                 raise RuntimeError(

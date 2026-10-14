@@ -428,9 +428,10 @@ watch(()=>[props.url,props.active,props.scope],()=>{
   if(params.value.has('records_page')||params.value.has('pending_page'))pages.value.planned=pageNumber(params.value.get('records_page')||params.value.get('pending_page'));
   if(params.value.has('ongoing_page'))pages.value.ongoing=pageNumber(params.value.get('ongoing_page'));
   void load();
-  if(params.value.has('active_item_id')||params.value.has('record_id'))void openRecord(null,true);
+  if(params.value.has('active_item_id')||params.value.has('record_id'))void openRecord(null,true,requestedAction());
 });
-onMounted(()=>{void load();if(params.value.has('active_item_id')||params.value.has('record_id'))void openRecord(null,true);if(params.value.has('change_confirmation')&&moreOptions.value.some(o=>o.key==='change'))changeOpen.value=true;document.addEventListener('visibilitychange',visibility);window.addEventListener('beforeunload',beforeUnload);window.addEventListener('resize',measureViewport);});
+function requestedAction(){const value=params.value.get('notice_action')||'';return ['start','update','end'].includes(value)?value:'';}
+onMounted(()=>{void load();if(params.value.has('active_item_id')||params.value.has('record_id'))void openRecord(null,true,requestedAction());if(params.value.has('change_confirmation')&&moreOptions.value.some(o=>o.key==='change'))changeOpen.value=true;document.addEventListener('visibilitychange',visibility);window.addEventListener('beforeunload',beforeUnload);window.addEventListener('resize',measureViewport);});
 watch(undoOpen,value=>{if(!value)window.clearTimeout(undoTimer);});
 onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();detailAbort?.abort();syncAbort?.abort();window.clearTimeout(timer);window.clearTimeout(sourceTimer);window.clearTimeout(undoTimer);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('beforeunload',beforeUnload);window.removeEventListener('resize',measureViewport);});
 </script>

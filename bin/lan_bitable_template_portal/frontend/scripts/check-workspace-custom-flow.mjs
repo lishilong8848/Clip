@@ -43,6 +43,7 @@ export async function checkCustomization(page,output){
   await chart.scrollIntoViewIfNeeded();
   const resize=chart.locator('xpath=..').locator('.ui-resizable-se');
   const before=Number(await chart.locator('xpath=..').getAttribute('gs-h'));
+  await resize.hover();
   const box=await resize.boundingBox();assert(box,'resize handle is available');
   await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2,box.y+box.height/2+95,{steps:12});await page.mouse.up();
   await page.waitForFunction(({key,before})=>Number(document.querySelector(`[data-widget-id="${key}"]`).getAttribute('gs-h'))>before,{key,before});
@@ -50,6 +51,7 @@ export async function checkCustomization(page,output){
   const afterResize=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:ou_v2_fixture')));
   assert(afterResize.widgets.find(w=>w.id===key).h>before,'resize is persisted');
   await page.getByRole('button',{name:'自定义工作台',exact:true}).click();await chart.scrollIntoViewIfNeeded();
+  await resize.hover();
   const shrinkBox=await resize.boundingBox();
   await page.mouse.move(shrinkBox.x+shrinkBox.width/2,shrinkBox.y+shrinkBox.height/2);await page.mouse.down();await page.mouse.move(shrinkBox.x+shrinkBox.width/2,shrinkBox.y-350,{steps:15});await page.mouse.up();
   await page.waitForFunction(key=>Number(document.querySelector(`[data-widget-id="${key}"]`).getAttribute('gs-h'))===3,key);
@@ -58,7 +60,7 @@ export async function checkCustomization(page,output){
   await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
   await page.evaluate(()=>window.scrollTo(0,0));
   const quick=page.locator('.grid-stack-item[data-widget-kind="shortcuts"]'),dragKey=await quick.getAttribute('data-widget-id');
-  const handle=page.getByRole('button',{name:'拖动常用办理',exact:true}),handleBox=await handle.boundingBox();
+  const handle=page.getByRole('button',{name:'拖动常用办理',exact:true});await handle.hover();const handleBox=await handle.boundingBox();
   const oldY=Number(await quick.getAttribute('gs-y'));
   await page.mouse.move(handleBox.x+10,handleBox.y+10);await page.mouse.down();await page.mouse.move(handleBox.x+10,handleBox.y+330,{steps:20});
   await page.screenshot({path:path.join(output,'custom-drag-active.png')});

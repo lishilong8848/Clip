@@ -17,6 +17,15 @@ assert.match(widget('notices',user).id,/^[a-f0-9]{32}$/,'LAN HTTP must not requi
 globalThis.crypto.randomUUID=randomUUID;
 assert(base.widgets.some(w=>w.kind==='tasks')&&base.widgets.some(w=>w.kind==='shortcuts'));
 assert(!base.widgets.some(w=>w.kind==='notices'||w.kind==='events'),'default is work, not a mandatory chart board');
+const operationUser={...user,modules:['change','repair_management']};
+for(const kind of ['notice_actions','repair_actions']){
+  const item=widget(kind,operationUser);
+  assert.equal(item.module,kind==='notice_actions'?'change':'repair_management');
+  assert(allowedKind(kind,operationUser));assert(!allowedKind(kind,{...operationUser,role:'guest'}));
+  assert.equal(sanitize({version:1,widgets:[item]},operationUser,['A']).widgets[0].kind,kind);
+  assert.equal(sanitize({version:1,widgets:[item]},{...operationUser,modules:[]},['A']).widgets.length,0);
+  assert.equal(sanitize({version:1,widgets:[{...item,module:'accounts'}]},operationUser,['A']).widgets.length,0);
+}
 for(const template of motionTemplates){
   const configured=widget(template.kind,user,{presentation:template.presentation});
   assert.equal(sanitize({version:1,widgets:[configured]},user,['A']).widgets[0].presentation,template.presentation);

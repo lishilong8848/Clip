@@ -22,6 +22,9 @@ export function adaptPageFilters(source, filename) {
   const file = filename.replaceAll('\\', '/').split('/').pop();
   const allowed = containers[file];
   if (!allowed) return source;
+  if (file === 'PlanConvergencePage.vue') {
+    source = source.replace('<button v-for="item in tabs"', '<button data-v2-navigation v-for="item in tabs"');
+  }
   const { descriptor } = parse(source), edits = [];
   const hasSearch = node => node.props?.some(p => p.type === 6 && p.name === 'type' && p.value?.content === 'search') || node.children?.some(hasSearch);
   function visit(node, overlay = false) {
@@ -36,8 +39,11 @@ export function adaptPageFilters(source, filename) {
       return;
     }
     if (node.type === 1 && !overlay && eligible && classes.some(c => allowed.includes(c))) {
-      const active = file === 'NoticeWorkspace.vue' ? ' v-if="active"' : '';
-      edits.push([node.loc.start.offset, node.loc.end.offset, `<Teleport${active} :to="__v2FilterTarget() || 'body'" :disabled="!__v2FilterTarget()">${node.loc.source}</Teleport>`]);
+      const active = file === 'NoticeWorkspace.vue' ? ' v-if="active"'
+        : file === 'PlanConvergencePage.vue' && classes.includes('pc-list-filters') ? ' v-if="tab === \'review\'"' : '';
+      const content = file === 'PlanConvergencePage.vue'
+        ? node.loc.source.replace('class="', 'class="v2-plan-filters ') : node.loc.source;
+      edits.push([node.loc.start.offset, node.loc.end.offset, `<Teleport${active} :to="__v2FilterTarget() || 'body'" :disabled="!__v2FilterTarget()">${content}</Teleport>`]);
       return;
     }
     for (const child of node.children || []) visit(child, overlay);

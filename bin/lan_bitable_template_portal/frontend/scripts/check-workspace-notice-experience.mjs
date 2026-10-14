@@ -103,8 +103,11 @@ try{
  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('alert').filter({hasText:'请完成本次工单'}).waitFor();
  await page.getByRole('button',{name:'选择工单及人员',exact:true}).click();
  await page.locator('.lhs-sop .n-select').click();await page.locator('.n-base-select-option').getByText('E楼标准工单',{exact:true}).click();
- await page.locator('.lhs-people .n-select').first().click();await page.locator('.n-base-select-option').getByText('操作员',{exact:true}).click();
- await page.locator('.lhs-people .n-select').last().click();await page.locator('.n-base-select-option:visible').getByText('审核员',{exact:true}).last().click();
+ await page.waitForFunction(()=>[...document.querySelectorAll('.n-base-select-menu')].every(el=>!el.getClientRects().length));
+ await page.locator('.lhs-people .n-select').first().click();await page.locator('.n-base-select-menu:visible').getByText('操作员',{exact:true}).click();
+ await page.waitForFunction(()=>[...document.querySelectorAll('.n-base-select-menu')].every(el=>!el.getClientRects().length));
+ await page.locator('.lhs-people .n-select').last().click();await page.locator('.n-base-select-menu:visible').getByText('审核员',{exact:true}).click();
+ await page.waitForFunction(()=>[...document.querySelectorAll('.n-base-select-menu')].every(el=>!el.getClientRects().length));
  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByLabel('发送前确认',{exact:true}).waitFor();
  await page.getByRole('button',{name:'返回修改',exact:true}).click();await pane('通告内容');await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(output,'missing-recommendation-mobile.png'),fullPage:true});
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);

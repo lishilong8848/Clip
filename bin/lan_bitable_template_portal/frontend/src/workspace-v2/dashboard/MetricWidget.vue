@@ -27,10 +27,10 @@ const host=ref<HTMLElement>(),loading=ref(false),ready=ref(false),error=ref(''),
 const items=ref<Array<{label:string;value:number;url?:string;start?:number;end?:number}>>([]),records=ref<Dict[]>([]),details=ref<Dict[]>([]),showDetails=ref(false),detailTitle=ref('事件明细');
 const total=computed(()=>items.value.reduce((sum,item)=>sum+item.value,0));
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-let observer:IntersectionObserver|undefined,abort:AbortController|undefined,visible=false,disposed=false;
+let observer:IntersectionObserver|undefined,abort:AbortController|undefined,visible=false,disposed=false,stale=true;
 async function load(){
   if(!visible||disposed||document.hidden)return;
-  abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';
+  abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';stale=true;
   try{
     let next:typeof items.value=[],nextRecords:Dict[]=[],nextStamp='';
     if(props.item.kind==='events'){
@@ -48,7 +48,7 @@ async function load(){
       }
       nextStamp=String(data.last_loaded_at||'当前状态');
     }
-    if(controller.signal.aborted)return;items.value=next;records.value=nextRecords;stamp.value=nextStamp;ready.value=true;
+    if(controller.signal.aborted)return;items.value=next;records.value=nextRecords;stamp.value=nextStamp;ready.value=true;stale=false;
   }catch(e){if(!controller.signal.aborted)error.value=e instanceof Error?e.message:'统计读取失败，不能判断为零。';}
   finally{if(abort===controller)loading.value=false;}
 }
@@ -61,7 +61,8 @@ function drill(item?:typeof items.value[number]){
 function openEvent(row:Dict){emit('open','/?'+new URLSearchParams({mode:'events',detail:'1',scope:props.scope,record_id:eventRecordId(row),month:String(row.occurrence_time).slice(0,7)}));}
 watch(()=>props.item.period,value=>period.value=value);
 watch(()=>[props.scope,props.item.kind,props.item.metric,period.value],()=>{abort?.abort();ready.value=false;items.value=[];records.value=[];showDetails.value=false;void load();});
-function visibility(){if(document.hidden)abort?.abort();else if(!ready.value)void load();}
-onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&!ready.value&&!loading.value)void load();},{rootMargin:'80px'});if(host.value)observer.observe(host.value);window.addEventListener('clipflow-business-changed',load);document.addEventListener('visibilitychange',visibility);});
-onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',load);document.removeEventListener('visibilitychange',visibility);});
+function changed(){stale=true;void load();}
+function visibility(){if(document.hidden)abort?.abort();else if(stale||!ready.value)void load();}
+onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&(stale||!ready.value)&&!loading.value)void load();},{rootMargin:'80px'});if(host.value)observer.observe(host.value);window.addEventListener('clipflow-business-changed',changed);document.addEventListener('visibilitychange',visibility);});
+onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',changed);document.removeEventListener('visibilitychange',visibility);});
 </script>

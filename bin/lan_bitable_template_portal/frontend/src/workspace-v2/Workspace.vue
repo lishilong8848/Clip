@@ -5,7 +5,7 @@
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode" class="v2-header">
           <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
-          <div id="page-back-slot" />
+          <div id="page-back-slot" data-v2-navigation />
           <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
             <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" @change="navColor=$event" />
@@ -35,10 +35,21 @@
             </nav>
             <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :view="view" :initial-kind="route.searchParams.get('kind')||undefined" @open="navigate($event)" />
             <section v-else-if="view === 'my' && route.pathname === '/'" class="v2-my">
-              <header class="v2-profile-heading"><UserRound :size="26" /><div><h1>{{ user.name }}</h1><p>个人信息与设置</p></div></header>
-              <NDescriptions bordered size="small" label-placement="left" :label-style="{width:'7em',whiteSpace:'nowrap'}" :column="1"><NDescriptionsItem label="角色">{{ levelLabel }} · {{ user.category_label || categoryLabel }}</NDescriptionsItem><NDescriptionsItem label="可访问楼栋">{{ scopes.map(s => s.label).join('、') || '暂无' }}</NDescriptionsItem><NDescriptionsItem label="登录方式">{{ user.login_method === 'password' ? '姓名密码登录' : '飞书登录' }}</NDescriptionsItem></NDescriptions>
-              <div class="v2-profile-actions"><NButton v-if="granted.includes('accounts')" data-v2-navigation secondary type="primary" @click="navigate('/admin/settings')"><Settings :size="17" />账号与设置</NButton><NButton v-if="user.login_method === 'password'" data-v2-navigation @click="navigate('/?account=password')">修改密码</NButton><NButton data-v2-navigation @click="navigate('/?view=permission')">申请权限</NButton><NButton type="error" secondary :loading="logoutBusy" :disabled="logoutBusy" @click="logout"><LogOut :size="17" />退出登录</NButton></div>
-              <section class="v2-profile-access" aria-label="功能权限"><h2>功能权限</h2><div class="v2-profile-modules"><NTag v-for="item in modules.filter(m=>granted.includes(m.id))" :key="item.id" size="small" :bordered="false">{{ item.label }}</NTag><span v-if="!granted.length">暂无已授权功能</span></div></section>
+              <header class="v2-profile-heading"><NAvatar :size="48" :style="{background:'var(--v2-nav-active)',color:'var(--v2-nav-text)'}"><UserRound :size="25" /></NAvatar><div><h1>{{ user.name }}</h1><p>个人信息与设置</p></div><NButton data-v2-navigation quaternary @click="navigate('/')"><ArrowLeft :size="16" />返回工作台</NButton></header>
+              <div class="v2-profile-layout">
+                <section class="v2-profile-identity" aria-label="账号信息">
+                  <h2><UserRound :size="17" />账号信息</h2>
+                  <dl><div><dt>角色</dt><dd>{{ levelLabel }} · {{ user.category_label || categoryLabel }}</dd></div><div><dt>登录方式</dt><dd>{{ user.login_method === 'password' ? '姓名密码登录' : '飞书登录' }}</dd></div></dl>
+                  <h2><Building2 :size="17" />可访问楼栋</h2><div class="v2-profile-scopes"><NTag v-for="scope in scopes" :key="scope.value" :bordered="false" size="small">{{ scope.label }}</NTag><span v-if="!scopes.length">暂无</span></div>
+                  <div class="v2-profile-actions">
+                    <NButton v-if="granted.includes('accounts')" data-v2-navigation secondary type="primary" @click="navigate('/admin/settings')"><Settings :size="17" /><span>账号与设置</span><ChevronRight :size="16" /></NButton>
+                    <NButton v-if="user.login_method === 'password'" data-v2-navigation secondary @click="navigate('/?account=password')"><KeyRound :size="17" /><span>修改密码</span><ChevronRight :size="16" /></NButton>
+                    <NButton data-v2-navigation secondary @click="navigate('/?view=permission')"><ShieldCheck :size="17" /><span>申请权限</span><ChevronRight :size="16" /></NButton>
+                    <NButton type="error" quaternary :loading="logoutBusy" :disabled="logoutBusy" @click="logout"><LogOut :size="17" /><span>退出登录</span></NButton>
+                  </div>
+                </section>
+                <section class="v2-profile-access" aria-label="功能权限"><h2><ShieldCheck :size="17" />功能权限<NTag size="small" :bordered="false">{{ granted.length }} 项</NTag></h2><div v-for="group in profileGroups" :key="group.name" class="v2-profile-group"><h3>{{ group.name }}</h3><div class="v2-profile-modules"><NTag v-for="item in group.items" :key="item.id" size="small" :bordered="false">{{ item.label }}</NTag></div></div><NEmpty v-if="!granted.length" description="暂无已授权功能" /></section>
+              </div>
             </section>
             <section v-else-if="view === 'handover' && route.pathname === '/'" class="v2-links"><h2>交接班审核</h2><NSpin :show="handoverLoading"><div class="v2-feature-grid"><NButton v-for="(url, scope) in handovers" :key="scope" tag="a" :href="String(url)" target="_blank" rel="noopener noreferrer">{{ scope }}楼审核</NButton></div><NEmpty v-if="!handoverLoading && !Object.keys(handovers).length" description="暂无可用审核入口" /></NSpin></section>
             <section v-else-if="view === 'assistant' && route.pathname === '/'" class="v2-links"><h2>灯塔助手</h2><NButton type="primary" @click="openAssistant">打开会话</NButton></section>
@@ -60,8 +71,8 @@
 </template>
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { NAlert, NButton, NConfigProvider, NDescriptions, NDescriptionsItem, NDialogProvider, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, dateZhCN, zhCN } from 'naive-ui';
-import { Activity, ClipboardList, Droplets, Grid2X2, House, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound } from 'lucide-vue-next';
+import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, dateZhCN, zhCN } from 'naive-ui';
+import { Activity, ArrowLeft, Building2, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
 import { modules, moduleIcons, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate } from './modules';
@@ -112,10 +123,13 @@ const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), us
 const operationError=ref(''),logoutBusy=ref(false);
 const navColor=ref(DEFAULT_NAV_COLOR);
 let disposed = false, timer = 0, checkingAuth = false;
-const lifetime = new AbortController();
+let authRead:AbortController|undefined;
+function cancelAuth(){authRead?.abort();authRead=undefined;checkingAuth=false;window.clearTimeout(timer);}
+function refreshAuth(){cancelAuth();void loadAuth();}
 const watermarkDay=beijingDate();
 function preventSignatureDrag(event:DragEvent){const image=(event.target as Element)?.closest?.('img');if(image&&(image.src.includes('/api/signatures/')||image.alt.includes('签名')))event.preventDefault();}
 const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.modules, scopes.value]));
+const profileGroups = computed(() => [...new Set(modules.map(item=>item.group))].map(name=>({name,items:modules.filter(item=>item.group===name&&granted.value.includes(item.id))})).filter(group=>group.items.length));
 const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? user.value.modules : []);
 const activeModule = computed(() => moduleForRoute(route.value));
 const view = computed(() => route.value.searchParams.get('view') || 'home');
@@ -194,25 +208,26 @@ const componentProps = computed(() => {
   }
 });
 async function loadAuth() {
-  if (checkingAuth || disposed) return;
+  if (checkingAuth || disposed || logoutBusy.value) return;
   checkingAuth = true;
+  const controller=new AbortController();authRead=controller;
   try {
-    const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search + window.location.hash), {signal:lifetime.signal, cache:'no-store',timeoutMs:15000});
-    if (disposed) return;
+    const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search + window.location.hash), {signal:controller.signal, cache:'no-store',timeoutMs:15000});
+    if (disposed || controller.signal.aborted || authRead!==controller) return;
     loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; loginUrl.value = data.login_url || '/api/auth/login';
     setModulePermissions(granted.value); setReadCacheIdentity(identityKey.value); authError.value = data.directory_warning || '';
     if (loggedIn.value && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
     if (user.value.role === 'guest' && route.value.pathname !== '/cabinet-power') navigate('/cabinet-power', {replace:true,bypassGuard:true});
-  } catch (e:any) { if (!disposed) authError.value = e.message || '登录状态读取失败'; }
-  finally { checking.value = false; checkingAuth = false; window.clearTimeout(timer); if (!disposed && loggedIn.value && !document.hidden) timer = window.setTimeout(loadAuth,60000); }
+  } catch (e:any) { if (!disposed && !controller.signal.aborted) authError.value = e.message || '登录状态读取失败'; }
+  finally { if(authRead===controller){authRead=undefined;checking.value = false; checkingAuth = false; window.clearTimeout(timer); if (!disposed && loggedIn.value && !document.hidden) timer = window.setTimeout(loadAuth,60000);} }
 }
 async function logout() {
-  if(logoutBusy.value)return;logoutBusy.value=true;operationError.value='';
+  if(logoutBusy.value)return;logoutBusy.value=true;operationError.value='';cancelAuth();
   try { await requestJson('/api/auth/logout',{method:'POST',body:'{}'}); invalidateReadCache(); setModulePermissions([]); loggedIn.value=false; user.value={}; scopes.value=[]; navigate('/',{replace:true,bypassGuard:true}); }
   catch(e){operationError.value=e instanceof Error?e.message:'退出失败，请重试。';}
-  finally{logoutBusy.value=false;}
+  finally{logoutBusy.value=false;if(loggedIn.value&&!disposed&&!document.hidden)timer=window.setTimeout(loadAuth,60000);}
 }
-function expired(event: Event) { (event as CustomEvent).preventDefault?.(); loggedIn.value=false; user.value={}; scopes.value=[]; setModulePermissions([]); invalidateReadCache(); navigate('/?login=password&next=' + encodeURIComponent(window.location.pathname + window.location.search), {replace:true,bypassGuard:true}); }
+function expired(event: Event) { (event as CustomEvent).preventDefault?.(); cancelAuth();checking.value=false;loggedIn.value=false; user.value={}; scopes.value=[]; setModulePermissions([]); invalidateReadCache(); navigate('/?login=password&next=' + encodeURIComponent(window.location.pathname + window.location.search), {replace:true,bypassGuard:true}); }
 function routeChanged() { statusRevision++; route.value = logicalUrl(); authError.value=''; operationError.value=''; }
 function visibility() { if(document.hidden) window.clearTimeout(timer); else void loadAuth(); }
 const permission = reactive({scopes:[] as string[],reason:'',code:'',requestId:'',message:'',status:'',rejectReason:'',approverOpenId:'',notificationStatus:'',notificationError:''}), permissionBusy=ref(false);
@@ -226,7 +241,14 @@ watch(()=>[permissionPage.value,loggedIn.value,user.value.open_id],async(_value,
   catch{/* A temporary read failure must not block a new application. */}
 });
 const handovers=ref<Dict>({}),handoverLoading=ref(false);
-watch([view,loggedIn],async()=>{if(view.value!=='handover'||!loggedIn.value||!granted.value.includes('handover'))return; handoverLoading.value=true;try{handovers.value=(await requestJson('/api/handover-links',{signal:lifetime.signal})).links||{};}catch(e:any){authError.value=e.message;}finally{handoverLoading.value=false;} });
-onMounted(()=>{void loadAuth();window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',loadAuth);window.addEventListener('workspace-permissions-stale',loadAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
-onBeforeUnmount(()=>{disposed=true;lifetime.abort();window.clearTimeout(timer);window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',loadAuth);window.removeEventListener('workspace-permissions-stale',loadAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
+watch([view,loggedIn,identityKey],async(_value,_old,onCleanup)=>{
+  handovers.value={};handoverLoading.value=false;
+  if(view.value!=='handover'||!loggedIn.value||!granted.value.includes('handover'))return;
+  const controller=new AbortController();onCleanup(()=>controller.abort());handoverLoading.value=true;
+  try{const data=await requestJson('/api/handover-links',{signal:controller.signal});if(!controller.signal.aborted)handovers.value=data.links||{};}
+  catch(e:any){if(!controller.signal.aborted)authError.value=e.message;}
+  finally{if(!controller.signal.aborted)handoverLoading.value=false;}
+});
+onMounted(()=>{void loadAuth();window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',refreshAuth);window.addEventListener('workspace-permissions-stale',refreshAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
+onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
 </script>

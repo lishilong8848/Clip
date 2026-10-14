@@ -9,4 +9,28 @@
 .workspace-v2 #workspace-page-filters :is(.water-filter-main,.water-date-filter,.water-filter-extra){display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}
 .workspace-v2 #workspace-page-filters .event-list-tools{margin-left:0}
 .workspace-v2 #workspace-page-filters .water-filter-extra{flex-basis:100%}
+.workspace-v2 #workspace-page-filters:not(:has(*)){display:none}
+.workspace-v2 #workspace-page-filters .v2-plan-filters{display:flex;flex:1;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;min-width:0;margin:0}
+.workspace-v2 #workspace-page-filters .v2-plan-filters>.pc-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
+.workspace-v2 #workspace-page-filters .v2-plan-filters>.pc-actions:first-child{flex:1}
+.workspace-v2 #workspace-page-filters .v2-plan-filters input[type=search]{flex:1;min-width:180px;width:100%;max-width:440px;height:36px;padding:7px 11px;border:1px solid var(--v2-border);border-radius:6px;background:#fff;color:var(--v2-ink);font:inherit;font-size:14px;outline-offset:2px}
+.workspace-v2 #workspace-page-filters .v2-plan-filters>.vnet-select{width:160px;flex:none}
+.workspace-v2 #workspace-page-filters .v2-plan-filters button:not(.n-button){display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:7px 11px;border:1px solid var(--v2-border);border-radius:6px;background:#fff;color:var(--v2-ink);font:inherit;font-size:13px;cursor:pointer}
+.workspace-v2 #workspace-page-filters .v2-plan-filters button.primary{background:var(--v2-blue);border-color:var(--v2-blue);color:#fff}
+.workspace-v2 #workspace-page-filters .v2-plan-filters button:disabled{opacity:.5;cursor:not-allowed}
+.workspace-v2 #workspace-page-filters .v2-plan-filters :is(input,button):focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
+.workspace-v2 .v2-main>.pc-page{padding:0 0 24px}
 @media(max-width:760px){.workspace-v2 #workspace-page-filters{gap:8px;padding:10px;margin:10px 0 12px}.workspace-v2 #workspace-page-filters :is(.v2-scope-select,.water-scope){width:125px}.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters){flex-basis:100%}.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters)>.n-input{flex-basis:100%;width:100%;min-width:0;max-width:none}}
+@media(max-width:760px){
+  .workspace-v2 .pc-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px}
+  .workspace-v2 .pc-tabs button{min-width:0;padding:9px 3px;gap:4px;font-size:12px;white-space:nowrap}
+  .workspace-v2 .pc-tabs button svg{width:15px;height:15px;flex:none}
+  .workspace-v2 #workspace-page-filters .v2-plan-filters>.pc-actions{flex-basis:100%}
+  .workspace-v2 #workspace-page-filters .v2-plan-filters input[type=search]{min-width:0;max-width:none;font-size:16px}
+  .workspace-v2 #workspace-page-filters .v2-plan-filters>.vnet-select{width:130px}
+  .workspace-v2 #workspace-page-filters .v2-notice-filters{display:grid;grid-template-columns:minmax(62px,.8fr) minmax(88px,1.2fr) auto;gap:6px}
+  .workspace-v2 #workspace-page-filters .v2-notice-filters.has-scopes{grid-template-columns:minmax(70px,.9fr) minmax(62px,.7fr) minmax(88px,1.2fr) auto}
+  .workspace-v2 #workspace-page-filters .v2-notice-filters>.n-input{grid-column:1/-1}
+  .workspace-v2 #workspace-page-filters .v2-notice-filters>.n-select{width:100%;min-width:0}
+  .workspace-v2 #workspace-page-filters .v2-notice-filters>.n-button{padding-inline:10px}
+}

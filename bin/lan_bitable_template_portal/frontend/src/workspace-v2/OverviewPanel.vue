@@ -38,11 +38,11 @@ const title=computed(()=>props.kind==='learning'?(props.personal?'我的学练':
 const target=computed(()=>props.kind==='learning'?'/learning?view='+ (props.personal?'practice':'overview')+(props.personal?'':'&scope='+props.scope):props.kind==='cabinet'?'/cabinet-power/batches?'+new URLSearchParams({scope:props.scope,status:'todo'}):moduleUrl(modules.find(m=>m.id===props.kind)!,props.scope));
 const buildingScopes=computed(()=>props.scopes.filter(s=>'ABCDE'.split('').includes(s.value)&&(['ALL','CAMPUS'].includes(props.scope)||s.value===props.scope)).map(s=>s.value));
 const footerTarget=computed(()=>props.brief?'/?'+new URLSearchParams({view:'tasks',kind:props.kind,scope:props.scope}):target.value);
-let abort:AbortController|undefined,observer:IntersectionObserver|undefined,visible=false,disposed=false;
+let abort:AbortController|undefined,observer:IntersectionObserver|undefined,visible=false,disposed=false,stale=true;
 function array(value:unknown):Dict[]{if(!Array.isArray(value))throw new Error('资料未完整返回，请进入详情核对。');return value;}
 async function load(){
   if(disposed||document.hidden)return;
-  abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';
+  abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';stale=true;
   const get=(path:string,params:Dict={})=>requestJson(path+'?'+new URLSearchParams(params),{signal:controller.signal});
   let nextRows:Dict[]=[],nextStats:{label:string;value:string|number|null}[]=[],nextNote='',nextEmpty='当前没有待处理事项',nextProgress:number|null=null;
   let nextChart:ChartItem[]=[],incomplete=false;
@@ -125,12 +125,13 @@ async function load(){
       nextNote=complete?(props.kind==='drills'?'当前月份 · 已发布演练':'按授权楼栋查询，最多展示5条'):'部分汇总字段缺失，请进入详情核对';
     }
     if(controller.signal.aborted)return;
-    rows.value=nextRows;stats.value=nextStats;note.value=nextNote;empty.value=nextEmpty;progress.value=nextProgress;chartItems.value=nextChart;chartIncomplete.value=incomplete;ready.value=true;
+    rows.value=nextRows;stats.value=nextStats;note.value=nextNote;empty.value=nextEmpty;progress.value=nextProgress;chartItems.value=nextChart;chartIncomplete.value=incomplete;ready.value=true;stale=false;
   }catch(e:any){if(!controller.signal.aborted){error.value=e.message||'读取失败，不能判断为零';note.value=ready.value?'保留上次读取的数据':'';}}
   finally{if(abort===controller)loading.value=false;}
 }
 watch(()=>[props.scope,props.kind,props.personal],()=>{abort?.abort();ready.value=false;rows.value=[];stats.value=[];progress.value=null;chartItems.value=[];chartIncomplete.value=false;note.value='';error.value='';if(visible)void load();});
-function changed(){if(visible)void load();}
-onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&!ready.value&&!loading.value)void load();},{rootMargin:'80px'});if(element.value)observer.observe(element.value);window.addEventListener('clipflow-business-changed',changed);});
-onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',changed);motion.removeEventListener('change',motionChanged);});
+function changed(){stale=true;if(visible)void load();}
+function visibility(){if(document.hidden)abort?.abort();else if(visible&&(stale||!ready.value))void load();}
+onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&(stale||!ready.value)&&!loading.value)void load();},{rootMargin:'80px'});if(element.value)observer.observe(element.value);window.addEventListener('clipflow-business-changed',changed);document.addEventListener('visibilitychange',visibility);});
+onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',changed);document.removeEventListener('visibilitychange',visibility);motion.removeEventListener('change',motionChanged);});
 </script>

@@ -95,3 +95,10 @@
 .workspace-v2 .v2-shell.is-auth>.v2-main{margin-left:0;padding:32px 20px}
 .workspace-v2 .v2-shell.is-auth>.v2-main>.login-panel,.workspace-v2 .v2-main>.request-panel:has(.pwd-form){width:100%;max-width:540px;margin:0 auto;padding:28px}
 @media(max-width:760px){.workspace-v2 .v2-shell.is-auth>.v2-main{padding:18px 10px}.workspace-v2 .v2-shell.is-auth>.v2-main>.login-panel,.workspace-v2 .v2-main>.request-panel:has(.pwd-form){padding:20px 16px}.v2-task-embedded .v2-section-foot{flex-direction:row}}
+.v2-task-operation{padding:12px 0;min-width:0;width:100%;display:grid;gap:9px}
+.v2-task-operation-head{display:flex;align-items:flex-start;gap:10px;justify-content:space-between}
+.v2-task-operation-head>.n-tag{flex:none}
+.v2-task-operation .v2-operation-title{white-space:normal;text-align:left;line-height:1.6;height:auto;font-weight:600;min-width:0;justify-content:flex-start}
+.v2-task-operation .v2-operation-title .n-button__content{white-space:normal;overflow-wrap:anywhere;display:block}
+.v2-task-operation-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+.v2-task-operation-actions .n-button__content{gap:6px}

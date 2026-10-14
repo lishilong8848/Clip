@@ -9,6 +9,7 @@ function clear(action:Action){
   window.clearTimeout(action.timer);actions.delete(action.button);action.finished=true;
   for(const [key,value] of jobs)if(value===action)jobs.delete(key);
   render(null,action.feedback);action.feedback.remove();delete action.button.dataset.v2Action;
+  delete action.button.dataset.v2ActionPosition;
   action.button.style.removeProperty('--v2-action-size');
   if(current===action)current=undefined;
 }
@@ -75,7 +76,8 @@ export function installActionMotion(doc:Document=document):()=>void{
     const feedback=doc.createElement('span');feedback.className='v2-action-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-label','处理中');
     const action:Action={button,feedback,started:performance.now(),pending:0,observed:false,succeeded:false,failed:false,waiting:false,timer:0,finished:false,minimum:1200};
     actions.set(button,action);current=action;
-    button.style.setProperty('--v2-action-size',Math.max(28,Math.min(48,button.getBoundingClientRect().height))+'px');
+    if(getComputedStyle(button).position==='static')button.dataset.v2ActionPosition='relative';
+    button.style.setProperty('--v2-action-size',Math.max(1,Math.min(48,button.clientHeight,button.clientWidth))+'px');
     // Defer decoration until the original click handlers have inspected the target.
     window.setTimeout(()=>{
       if(!button.isConnected||!action.observed){clear(action);return;}

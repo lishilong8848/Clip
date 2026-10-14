@@ -5,7 +5,7 @@
     <NButton v-for="entry in entries" :key="entry.id" quaternary @click="$emit('open',moduleUrl(entry,scope))"><span class="v2-shortcut-icon"><component :is="moduleIcons[entry.icon as keyof typeof moduleIcons]" :size="20" /></span><span>{{ entry.label }}</span><ArrowUpRight :size="16" /></NButton>
     <NEmpty v-if="!entries.length" description="尚未添加常用功能" size="small" />
   </nav>
-  <TaskWorkspace v-else-if="item.kind==='tasks'" :user="user" :scopes="scopes" :scope="scope" view="tasks" embedded :brief="brief" :presentation="item.presentation" :initial-kind="item.module" @open="$emit('open',$event)" />
+  <TaskWorkspace v-else-if="['tasks','notice_actions','repair_actions'].includes(item.kind)" :user="user" :scopes="scopes" :scope="scope" view="tasks" embedded :action-mode="item.kind!=='tasks'" :brief="item.kind==='tasks'&&brief" :presentation="item.presentation" :initial-kind="item.module" @open="$emit('open',$event)" />
   <PreShiftCheck v-else-if="item.kind==='pre_shift'" :user="user" />
   <MetricWidget v-else-if="item.kind==='notices'||item.kind==='events'" :item="item" :user="user" :scope="scope" @open="$emit('open',$event)" />
   <OverviewPanel v-else :kind="item.kind" :scope="scope" :scopes="scopes" :user="user" :personal="item.kind==='learning'" :presentation="item.presentation" @open="$emit('open',$event)" />

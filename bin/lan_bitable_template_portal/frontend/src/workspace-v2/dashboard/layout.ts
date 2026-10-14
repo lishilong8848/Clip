@@ -4,7 +4,7 @@ import { personaFor } from '../persona';
 import { randomHexId } from '../../browserStorage';
 import { chartViews,type ChartView } from '../vipboard';
 
-export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift';
+export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift' | 'notice_actions' | 'repair_actions';
 export type Widget = {
   id:string; kind:WidgetKind; title:string; module:string; scope:string;
   display:ChartView|'number'; period:'week'|'month'; metric:'ongoing'|'pending';
@@ -16,6 +16,8 @@ export const catalog = [
   {kind:'pre_shift',title:'班前检查',description:'本班检查清单、异常备注及提交状态',icon:'ClipboardList'},
   {kind:'tasks',title:'业务待办',description:'未开始、进行中与需关注事项',icon:'ClipboardList'},
   {kind:'shortcuts',title:'常用操作',description:'直接进入常用业务办理',icon:'LayoutGrid'},
+  {kind:'notice_actions',title:'通告办理',description:'计划开始、进行中更新与结束，进入原表单确认',icon:'ClipboardList'},
+  {kind:'repair_actions',title:'维修跟进',description:'未完成维修项目，直接填写跟进或查看维修单',icon:'Wrench'},
   {kind:'notices',title:'通告分布',description:'按类型查看当前进行中或待发计划',icon:'ChartNoAxesCombined'},
   {kind:'events',title:'事件趋势',description:'本周或本月的每日事件与明细',icon:'ChartColumn'},
   {kind:'learning',title:'我的学练',description:'本人今日进度及近期答题情况',icon:'BookOpen'},
@@ -47,10 +49,13 @@ export function taskOptions(user:Dict){return modules.filter(m=>taskIds.includes
 export function allowedKind(kind:WidgetKind,user:Dict){
   const granted:string[]=user.modules||[];
   if(kind==='pre_shift')return user.role!=='guest'&&granted.length>0&&(mandatoryCheck(user)||['L0','L1'].includes(user.level)||['supervisor','manager'].includes(user.category));
+  if(kind==='notice_actions')return user.role!=='guest'&&NOTICE_IDS.some(id=>granted.includes(id));
+  if(kind==='repair_actions')return user.role!=='guest'&&granted.includes('repair_management');
   return kind==='shortcuts'?navigationModules(granted).length>0:kind==='tasks'?taskOptions(user).length>0:kind==='notices'?NOTICE_IDS.some(id=>granted.includes(id)):granted.includes(kind==='events'?'event':kind);
 }
 export function widget(kind:WidgetKind,user:Dict,overrides:Partial<Widget>={}):Widget{
-  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module:taskOptions(user)[0]?.value||'',scope:'current',display:'bar',period:'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:6,h:5,...overrides};
+  const module=kind==='repair_actions'?'repair_management':kind==='notice_actions'?NOTICE_IDS.find(id=>(user.modules||[]).includes(id))||'':taskOptions(user)[0]?.value||'';
+  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:6,h:5,...overrides};
 }
 export function mandatoryCheck(user:Dict){return user.role!=='guest'&&['operator','shift_leader','duty'].includes(user.category);}
 function withChecks(widgets:Widget[],user:Dict,initial=false){
@@ -81,6 +86,8 @@ export function sanitize(value:unknown,user:Dict,scopes:string[]):Layout{
   for(const item of (value as Layout).widgets){
     if(!item||!catalog.some(c=>c.kind===item.kind)||!allowedKind(item.kind,user)||typeof item.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(item.id)||seen.has(item.id))continue;
     if(item.kind==='tasks'&&!granted.includes(item.module))continue;
+    if(item.kind==='notice_actions'&&(!NOTICE_IDS.includes(item.module)||!granted.includes(item.module)))continue;
+    if(item.kind==='repair_actions'&&item.module!=='repair_management')continue;
     if(item.kind==='pre_shift'&&widgets.some(w=>w.kind==='pre_shift'))continue;
     seen.add(item.id);const w=integer(item.w,6,3,12);
     const presentation=presentationOptions(item.kind).some(p=>p.value===item.presentation)?item.presentation:'default';

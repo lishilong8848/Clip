@@ -43,7 +43,7 @@ try{
     if(url.pathname==='/api/cabinet-power/bootstrap')return ok({status:'succeeded',ready:1,total:1,buildings:[{scope:'A',status:'succeeded'}]});
     if(url.pathname==='/api/cabinet-power/overview')return ok({version:1,record_count:1,issues:[],counts:{total:1,formal:1,test:0,off:0,unknown:0},rooms:[{id:'201',name:'201机房',sheet:'201',total:1,counts:{formal:1,test:0,off:0,unknown:0},types:{'服务器机柜':1,'网络机柜':0}}],sheet_formats:[]});
     if(url.pathname==='/api/cabinet-power/racks')return ok({version:1,items:[rack]});
-    if(url.pathname==='/api/cabinet-power/rooms/201/layout')return ok({layout:{width:240,height:160,cells:[{...rack,ref:'A1',x:8,y:8,width:70,height:50,text:'A01',style:{}}]}});
+    if(url.pathname==='/api/cabinet-power/rooms/201/layout')return ok({layout:{width:720,height:360,cells:[{ref:'title',x:0,y:0,width:300,height:32,text:'201机房',style:{}},{...rack,ref:'A1',x:120,y:80,width:70,height:40,text:'A01',style:{}}]}});
     if(url.pathname==='/api/cabinet-power/operations')return new Promise(resolve=>{historyReply=async()=>{await ok({items:[],total:0,page:1,rack_state:rack});resolve();};});
     if(req.method()!=='GET')throw new Error('Unexpected write '+url.pathname);
     return ok({items:[],records:[],scopes:[],settings:{},total:0,groups:[],permissions:{},engine:{},stats:{}});
@@ -59,7 +59,23 @@ try{
   for(const width of [1440,390]){await page.setViewportSize({width,height:width<700?844:900});await page.waitForTimeout(200);assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));assert((await filters.boundingBox()).x<width*.3);}
   await page.setViewportSize({width:1440,height:900});await page.goto(entry+'?__page=/link-directory');await filters.getByRole('searchbox',{name:'按名称、用途或分类搜索',exact:true}).waitFor();assert.equal(await page.locator('.link-directory .toolbar').count(),0,'link search moves to the same filter region');
   await page.goto(entry+'?__page=/knowledge-base');await filters.getByRole('searchbox',{name:'搜索知识库',exact:true}).waitFor();
-  await page.emulateMedia({reducedMotion:'no-preference'});await page.goto(entry+'?__page=/cabinet-power&scope=A');await page.getByRole('button',{name:'原始平面图',exact:true}).click();await filters.getByRole('textbox',{name:'搜索平面图',exact:true}).waitFor();const cell=page.locator('.map-cell').filter({hasText:'A01'});await cell.waitFor();const started=Date.now();await cell.click();await page.getByRole('dialog',{name:'机柜完整历史',exact:true}).waitFor();await page.waitForFunction(()=>document.querySelector('.map-cell[data-v2-action="success"]'));assert(Date.now()-started<1100,'actual rack button completes when the drawer opens, not when history arrives');assert.equal(typeof historyReply,'function');await historyReply();await page.getByRole('button',{name:'关闭历史',exact:true}).click();await page.emulateMedia({reducedMotion:'reduce'});
+  await page.emulateMedia({reducedMotion:'no-preference'});await page.goto(entry+'?__page=/cabinet-power&scope=A');
+  await page.getByRole('button',{name:'原始平面图',exact:true}).click();await filters.getByRole('textbox',{name:'搜索平面图',exact:true}).waitFor();
+  const cell=page.locator('.map-cell').filter({hasText:'A01'});await cell.waitFor();
+  const beforeBox=await cell.boundingBox(),started=Date.now();await cell.click();
+  await page.getByRole('dialog',{name:'机柜完整历史',exact:true}).waitFor();
+  await page.waitForFunction(()=>document.querySelector('.map-cell[data-v2-action="success"]'));
+  assert(Date.now()-started<1100,'actual rack button completes when the drawer opens, not when history arrives');
+  assert.equal(await cell.evaluate(el=>getComputedStyle(el).position),'absolute','button feedback must preserve the floor plan coordinate system');
+  const afterBox=await cell.boundingBox();assert(Math.abs(afterBox.x-beforeBox.x)<1&&Math.abs(afterBox.y-beforeBox.y)<1,'rack does not jump when feedback appears');
+  assert.equal(await cell.getAttribute('aria-pressed'),'true','the opened rack remains visibly selected');
+  const feedbackBox=await cell.locator('.v2-action-feedback svg').boundingBox();assert(feedbackBox.width<=afterBox.width&&feedbackBox.height<=afterBox.height,'feedback fits a scaled rack');
+  assert.equal(typeof historyReply,'function');await historyReply();await page.getByRole('button',{name:'关闭历史',exact:true}).click();
+  assert.equal(await cell.getAttribute('aria-pressed'),'false');
+  await page.waitForFunction(()=>!document.querySelector('.map-cell[data-v2-action]'));await page.emulateMedia({reducedMotion:'reduce'});
+  await cell.focus();await cell.press('Enter');await page.getByRole('dialog',{name:'机柜完整历史',exact:true}).waitFor();
+  assert.equal(await cell.getAttribute('aria-pressed'),'true','keyboard/reduced-motion users still get selected feedback');
+  assert.equal(await cell.getAttribute('data-v2-action'),null);await historyReply();await page.getByRole('button',{name:'关闭历史',exact:true}).click();
   scopes=['A'];templates=templates.slice(0,1);await page.goto(entry+'?view=sops');await page.locator('.v2-sop-item').filter({hasText:'A楼维保模板'}).waitFor();assert.equal(await page.locator('.v2-sop-item').count(),1,'ALL does not expand a single-building account');
   assert.deepEqual(errors,[]);const output=path.resolve(root,'../../../output/playwright/workspace-filters');await mkdir(output,{recursive:true});await page.screenshot({path:path.join(output,'sop-all.png'),fullPage:true});
   console.log('PASS: V2-only filter relocation, valid templates, all-authorized SOPs/types, 3-read limit, correct building on edits, search placement, PC/mobile. All writes mocked.');

@@ -1,19 +1,15 @@
 import assert from 'node:assert/strict';
-import {mkdir,readFile} from 'node:fs/promises';
+import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createServer} from 'vite';
+import {preview} from 'vite';
 import {chromium} from 'playwright';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../output/playwright/nav-theme');
 const entry='/assets/workspace-v2/index.html';
-const server=await createServer({root,configFile:path.join(root,'vite.workspace-v2.config.ts'),base:'/',optimizeDeps:{entries:[]},logLevel:'error',plugins:[{name:'nav-theme-fixture',configureServer(server){server.middlewares.use(async(req,res,next)=>{
-  if(req.url.split('?')[0]===entry){res.setHeader('Content-Type','text/html');res.end('<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="app"></div><script type="module" src="/src/workspace-v2/main.ts"></script>');return;}
-  if(req.url==='/assets/vnet-logo.png'){res.setHeader('Content-Type','image/png');res.end(await readFile(path.join(root,'public/assets/vnet-logo.png')));return;}
-  next();
-});}}],server:{host:'127.0.0.1',port:0}});
-await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 let account='fixture-a',page;const errors=[];
 try{
@@ -38,8 +34,22 @@ try{
   });
   const luminance=rgb=>rgb.map(n=>n/255).map(n=>n<=.04045?n/12.92:((n+.055)/1.055)**2.4).reduce((sum,n,i)=>sum+n*[.2126,.7152,.0722][i],0);
   const contrast=(a,b)=>(Math.max(luminance(a),luminance(b))+.05)/(Math.min(luminance(a),luminance(b))+.05);
+  const assertHeaderSeam=async()=>{
+    const header=page.locator('.v2-header'),sidebar=page.locator('.v2-sidebar');
+    const box=await header.boundingBox(),brand=await page.locator('.v2-brand').boundingBox();
+    assert(Math.abs(brand.y+brand.height/2-(box.y+box.height/2))<=1,'brand is vertically centered without the old fade padding');
+    assert.equal(await header.evaluate(el=>getComputedStyle(el,'::after').content),'none','no fade strip over differently colored sidebar and content');
+    if(await sidebar.isVisible()){
+      const side=await sidebar.boundingBox(),head=await page.locator('.v2-nav-head').boundingBox(),main=await page.locator('.v2-main').boundingBox();
+      assert(Math.abs(box.y+box.height-side.y)<=1,'sidebar starts exactly at header bottom');
+      assert(Math.abs(side.y-head.y)<=1,'navigation heading has no gap above it');
+      assert(Math.abs(main.y-side.y)<=1,'content and navigation start on the same baseline');
+      assert(Math.abs(main.x-(side.x+side.width))<=1,'content follows the sidebar edge');
+    }
+  };
   const initial=await colors();
   await page.getByRole('button',{name:'导航配色',exact:true}).click();
+  await page.screenshot({path:path.join(output,'theme-picker-open.png')});
   for(const label of ['松石青','石墨灰','莓果红','海湾蓝']){
     await page.getByRole('button',{name:label,exact:true}).click();const next=await colors();
     assert(luminance(next.side)>luminance(next.top),'sidebar stays lighter than header');
@@ -47,6 +57,7 @@ try{
     assert(contrast([244,248,255],next.top)>=4.5,'header text remains readable');
     if(label!=='海湾蓝'){assert.notEqual(next.header,initial.header);assert.notEqual(next.sidebar,initial.sidebar);}
     assert.equal(await page.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');
+    await assertHeaderSeam();
   }
   await page.locator('.v2-theme-picker .n-color-picker').click();
   for(const custom of ['#ffffff','#000000','#e0bb66']){
@@ -55,6 +66,7 @@ try{
     await page.waitForFunction(color=>document.querySelector('.v2-shell').style.getPropertyValue('--v2-nav-color')===color,custom);
     const next=await colors();assert(luminance(next.side)>luminance(next.top));
     assert(contrast(next.text,next.side)>=4.5&&contrast([244,248,255],next.top)>=4.5,'custom extremes remain readable');
+    await assertHeaderSeam();
     assert.equal(await page.evaluate(()=>localStorage.getItem('clipflow:workspace-nav-color:fixture-a')),custom,'custom color is persisted');
   }
   await page.getByText('导航配色',{exact:true}).last().click();
@@ -73,6 +85,7 @@ try{
     await page.setViewportSize({width,height:900});await page.waitForTimeout(250);
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),'header controls fit viewport');
     const box=await page.getByRole('button',{name:'导航配色',exact:true}).boundingBox();assert(box.x>=0&&box.x+box.width<=width);
+    await assertHeaderSeam();
     await page.screenshot({path:path.join(output,'theme-'+width+'.png'),fullPage:true});
     if(width>760){
       const sidebar=page.locator('.v2-sidebar'),head=page.locator('.v2-nav-head');
@@ -80,14 +93,16 @@ try{
       assert(sideBox.width>=200,'expanded navigation keeps room for heading and search');
       assert(headBox.x>=sideBox.x&&headBox.x+headBox.width<=sideBox.x+sideBox.width+1,'navigation heading stays inside sidebar');
       assert(!await sidebar.evaluate(el=>el.scrollWidth>el.clientWidth+1),'navigation has no horizontal overflow');
-      assert.equal(await page.locator('.v2-header').evaluate(el=>getComputedStyle(el,'::after').left),'0px','header fade also covers sidebar top');
       await page.getByRole('button',{name:'收起导航',exact:true}).click();await page.waitForTimeout(250);
       assert.equal(Math.round((await sidebar.boundingBox()).width),64,'collapsed navigation is consistent');
       assert(!await sidebar.evaluate(el=>el.scrollWidth>el.clientWidth+1),'collapsed controls fit sidebar');
+      await assertHeaderSeam();
+      await page.screenshot({path:path.join(output,'theme-collapsed-'+width+'.png')});
       await page.getByRole('button',{name:'展开导航',exact:true}).click();await page.waitForTimeout(250);
+      await assertHeaderSeam();
     }
   }
   assert.deepEqual(errors,[]);
   console.log('PASS: linked palettes, readable contrast, per-account persistence, transparent logo, seamless header, desktop responsive collapse and mobile header. No business writes.');
 }catch(error){if(page){await page.screenshot({path:path.join(output,'failure.png'),fullPage:true});console.error(errors,await page.locator('body').innerText());}throw error;}
-finally{await browser.close();await server.close();}
+finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

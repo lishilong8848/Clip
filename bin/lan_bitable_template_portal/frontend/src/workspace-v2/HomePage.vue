@@ -30,7 +30,7 @@
 <script setup lang="ts">
 import { computed,onBeforeUnmount,ref } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,useDialog,useMessage } from 'naive-ui';
-import { ArrowDown,ArrowUp,BookOpen,ChartColumn,ChartNoAxesCombined,Check,CircleCheck,ClipboardList,Droplets,GripVertical,LayoutGrid,ListTree,PanelsTopLeft,Plus,RefreshCw,RotateCcw,Settings2,SlidersHorizontal,X } from 'lucide-vue-next';
+import { ArrowDown,ArrowUp,BookOpen,ChartColumn,ChartNoAxesCombined,Check,CircleCheck,ClipboardList,Droplets,GripVertical,LayoutGrid,ListTree,PanelsTopLeft,Plus,RefreshCw,RotateCcw,Settings2,SlidersHorizontal,Wrench,X } from 'lucide-vue-next';
 import type { Dict } from './client';
 import { beijingDate } from './modules';
 import { personaFor,personaTitles } from './persona';
@@ -52,7 +52,7 @@ const initial=readLayout(props.user,props.scopes.map(s=>s.value));
 let saved=JSON.stringify(initial.layout),raw=initial.raw;
 let removeGuard:(()=>void)|undefined;
 const layout=ref<Layout>(initial.layout),editing=ref(false),library=ref(false),selected=ref<Widget|null>(null),error=ref(initial.error);
-const today=beijingDate(),icons={ClipboardList,LayoutGrid,ChartNoAxesCombined,ChartColumn,BookOpen,Droplets,ListTree,CircleCheck,PanelsTopLeft};
+const today=beijingDate(),icons={ClipboardList,LayoutGrid,ChartNoAxesCombined,ChartColumn,BookOpen,Droplets,ListTree,CircleCheck,PanelsTopLeft,Wrench};
 const scopeLabel=computed(()=>props.scopes.find(s=>s.value===props.scope)?.label||props.scope);
 const librarySearch=ref('');
 const matches=(entry:{title:string;description:string})=>(entry.title+entry.description).toLowerCase().includes(librarySearch.value.trim().toLowerCase());

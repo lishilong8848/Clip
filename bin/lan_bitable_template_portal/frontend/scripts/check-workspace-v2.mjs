@@ -106,7 +106,7 @@ async function context() {
       if(message.location().url.startsWith(origin+'/api/workbench-actions')&&expectedNoticeErrors.delete(message.text()))return;
       // The legacy login request is cancelled by the expected full-page return to V2.
       const url=new URL(page.url());
-      if(url.pathname==='/'&&url.searchParams.get('auth_notice')==='cancelled'&&message.text().startsWith('ApiError: Failed to fetch'))return;
+      if(url.pathname==='/'&&url.searchParams.get('auth_notice')==='cancelled'&&/^ApiError: (Failed to fetch|暂时无法连接服务，请检查网络连接后重试。)/.test(message.text()))return;
       errors.push({url:page.url(),message:message.text()});console.log('CONSOLE',message.text());
     });
   });
@@ -171,7 +171,11 @@ try {
   assert(await page.locator('.v2-task-action').getByText('办理',{exact:true}).count()>0);
   await page.screenshot({path:path.join(output,'tasks-mobile.png'),fullPage:true});
   await page.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
-  await checkCustomization(page,output);
+  try{await checkCustomization(page,output);}catch(error){
+    await page.screenshot({path:path.join(output,'customization-failure.png'),fullPage:true});
+    console.error('Customization geometry:',await page.locator('.grid-stack-item').evaluateAll(items=>items.map(el=>({id:el.dataset.widgetId,attributes:[...el.attributes].filter(a=>a.name.startsWith('gs-')).map(a=>[a.name,a.value]),node:el.gridstackNode&&{x:el.gridstackNode.x,y:el.gridstackNode.y,w:el.gridstackNode.w,h:el.gridstackNode.h,minH:el.gridstackNode.minH},box:{top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom}}))));
+    throw error;
+  }
   assert.equal(await page.locator('.v2-sidebar').getByRole('menuitem',{name:'账号与权限',exact:true}).count(),0,'settings lives in the personal page');
   await page.getByRole('button',{name:'打开个人页面',exact:true}).click();
   await page.getByRole('heading',{name:'验收管理员',exact:true}).waitFor();
@@ -215,9 +219,9 @@ try {
   await page.getByText('已提交原业务任务',{exact:true}).waitFor();
   assert.equal(writes.length,1);assert.equal(writes[0].action,'start');assert.equal(writes[0].scope,'A');
   assert.equal(writes[0].patch.content,'隔离验收，不发送真实通告');
-  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'返回列表',exact:true}).click();
   noticeFailure='unmatched';
-  await page.getByRole('button',{name:'新建通告',exact:true}).click();await page.getByText('手填维保通告',{exact:true}).click();
+  await page.getByRole('button',{name:'手填维保通告',exact:true}).click();
   await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('第一次填写');
   await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
   await page.getByRole('button',{name:'返回核对',exact:true}).click();
@@ -225,17 +229,17 @@ try {
   await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
   await page.getByText('已提交原业务任务',{exact:true}).waitFor();
   assert.equal(writes.at(-1).patch.content,'取消确认后更正的内容','cancelled confirmation must not retain the old frozen payload');
-  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'返回列表',exact:true}).click();
   noticeFailure='network';
-  await page.getByRole('button',{name:'新建通告',exact:true}).click();await page.getByText('手填维保通告',{exact:true}).click();
+  await page.getByRole('button',{name:'手填维保通告',exact:true}).click();
   await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('网络中断后原样重试');
   await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
-  await page.getByRole('button',{name:'重试原提交',exact:true}).waitFor();
-  assert(await page.getByRole('textbox',{name:'通告内容',exact:true}).isDisabled(),'unknown write result locks the original payload');
+  await page.getByRole('button',{name:'核验并重试原提交',exact:true}).waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'通告内容',exact:true}).count(),0,'unknown write result replaces editing with the original task recovery view');
   const previous=structuredClone(writes.at(-1));
-  await page.getByRole('button',{name:'重试原提交',exact:true}).click();await page.getByText('已提交原业务任务',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'核验并重试原提交',exact:true}).click();await page.getByText('已提交原业务任务',{exact:true}).waitFor();
   assert.deepEqual(writes.at(-1),previous,'retry keeps both original operation ID and fields');
-  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'返回列表',exact:true}).click();
   await page.getByRole('menuitem',{name:'个人工作台'}).click();
   await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   assert.match(await page.locator('.v2-scope-select').innerText(),/A楼/,'returning home preserves chosen building');
@@ -261,7 +265,7 @@ try {
   const modulePages = [
     ['/?mode=events&scope=A', '.event-page'], ['/repair-management?scope=A', '.repair-management-page'],
     ['/repair-status?scope=A', '.repair-status-page'], ['/engineer/mop?scope=A', '.engineer-mop'],
-    ['/cabinet-power', '.cabinet-page'], ['/water-management?scope=A', '.water-page'],
+    ['/cabinet-power', '.cabinet-page'], ['/water-management?scope=A', '.v2-water'],
     ['/critical-guard', '.guard-page'], ['/drill-management', '.drill-page'],
     ['/learning?view=overview', '.learning-page'], ['/plan-convergence', '.pc-page'],
     ['/knowledge-base', '.kb-page'], ['/link-directory', '.link-directory-page'],
@@ -295,9 +299,9 @@ try {
     for(const width of [1440,390]){await rolePage.setViewportSize({width,height:width<700?844:1000});await rolePage.screenshot({path:path.join(output,`role-${level}-${category}-${width}.png`),fullPage:true});assert.equal(await rolePage.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);}
     assert.equal(requests.slice(roleRequestStart).some(r=>r.path==='/api/capacity/water/bootstrap'||r.path.startsWith('/api/cabinet-power/')),false,'home does not fetch unused dashboard data');
     if(category==='duty'&&level==='L4'){
-      await rolePage.getByRole('navigation',{name:'常用操作'}).getByRole('button',{name:'水耗管理'}).click();await rolePage.locator('.water-page').waitFor();
+      await rolePage.getByRole('navigation',{name:'常用操作'}).getByRole('button',{name:'水耗管理'}).click();await rolePage.locator('.v2-water').waitFor();
       assert.match(rolePage.url(),/water-management/);
-      await rolePage.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).waitFor();
+      await rolePage.getByRole('button',{name:'返回工作台',exact:true}).waitFor();
       await rolePage.getByRole('navigation',{name:'值班常用业务'}).getByRole('button',{name:'风险管理'}).click();try{await rolePage.locator('.guard-page').waitFor();}catch(error){await rolePage.screenshot({path:path.join(output,'duty-risk-failure.png'),fullPage:true});console.log('DUTY',rolePage.url(),(await rolePage.locator('body').innerText()).slice(0,2200));throw error;}assert.equal(await rolePage.locator('.guard-page .landing-view').count(),0,'building opens directly');assert(requests.some(r=>r.path==='/api/critical-guard/tasks'&&r.params.scope==='A'));
       await rolePage.getByRole('navigation',{name:'值班常用业务'}).getByRole('button',{name:'演练管理'}).click();await rolePage.locator('.drill-page').waitFor();
       await rolePage.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await rolePage.getByRole('heading',{name:title,exact:true}).waitFor();

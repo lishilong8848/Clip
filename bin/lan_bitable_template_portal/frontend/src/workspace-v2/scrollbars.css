@@ -1,0 +1,12 @@
+.workspace-v2 { --v2-scroll-thumb: #a7b2bf; --v2-scroll-hover: #78899e; }
+.workspace-v2, .workspace-v2 * { scrollbar-width: thin; scrollbar-color: var(--v2-scroll-thumb) transparent; }
+.workspace-v2 .v2-shell>.v2-sidebar { scrollbar-color: var(--v2-scroll-thumb) transparent; }
+.workspace-v2 :is(.v2-widget-body,.lighthouse .thread,.lighthouse .plan-form) { scrollbar-color: var(--v2-scroll-thumb) transparent; }
+.workspace-v2 ::-webkit-scrollbar { width: 9px; height: 9px; }
+.workspace-v2 ::-webkit-scrollbar-track, .workspace-v2 ::-webkit-scrollbar-corner { background: transparent; }
+.workspace-v2 ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: var(--v2-scroll-thumb); background-clip: padding-box; }
+.workspace-v2 ::-webkit-scrollbar-thumb:hover { background-color: var(--v2-scroll-hover); }
+.workspace-v2 .n-scrollbar { --n-scrollbar-color: #a7b2bf99 !important; --n-scrollbar-color-hover: #78899ecc !important; --n-scrollbar-width: 7px !important; --n-scrollbar-height: 7px !important; --n-scrollbar-border-radius: 8px !important; }
+@media (forced-colors: active) {
+  .workspace-v2, .workspace-v2 * { scrollbar-width: auto; scrollbar-color: auto; }
+}
