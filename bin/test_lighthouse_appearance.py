@@ -44,7 +44,7 @@ class AppearanceTests(unittest.TestCase):
     def assert_defaults(self, appearance):
         self.assertEqual(appearance, DEFAULT_APPEARANCE)
         self.assertEqual(appearance["color"], "encre")
-        self.assertEqual(appearance["shape"], "cercle")
+        self.assertEqual(appearance["shape"], "weather-lighthouse")
         self.assertEqual(appearance["expression"], "neutre")
         self.assertEqual(appearance["state"], "idle")
         self.assertEqual(appearance["size"], 56)

@@ -29,7 +29,7 @@ let serial = 0;
 const raf = new Set();
 globalThis.requestAnimationFrame = () => { raf.add(++serial); return serial; };
 globalThis.cancelAnimationFrame = id => raf.delete(id);
-const { outputFiles } = await build({ entryPoints: ['src/vendor/bloub/entry.ts'], bundle: true, write: false, format: 'cjs', platform: 'node' });
+const { outputFiles } = await build({ entryPoints: ['src/vendor/bloub/entry.ts'], bundle: true, write: false, format: 'cjs', platform: 'node', loader: { '.svg': 'text', '.css': 'empty' } });
 const compiled = new Module('bot-rendering-fixture.cjs');
 compiled._compile(outputFiles[0].text, 'bot-rendering-fixture.cjs');
 const { BloubBot } = compiled.exports;

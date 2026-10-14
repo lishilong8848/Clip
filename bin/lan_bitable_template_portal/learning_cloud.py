@@ -33,6 +33,8 @@ BANK_TABLES = {
     "supplemental": "tbl1x3DulQ3nFluq",
 }
 BANK_VIEWS = {"supplemental": "vew6IeZZgN"}
+SHARING_TABLE_ID = "tblQevBJ9knFaBNh"
+SHARING_FIELDS = {name: 1 for name in ("会议名称", "题目", "选项", "答案", "备注", "学练配置", "会议纪要链接")}
 META_FIELD = "学练配置"
 MATERIAL_FIELD = "学练资料"
 ENTITY_TABLE_NAME = "画像学练数据"
@@ -151,6 +153,7 @@ class LearningCloud:
         )
         self._root = f"{API_ROOT}/bitable/v1/apps/{APP_TOKEN}"
         self._schema_ready = False
+        self._sharing_schema_ready = False
         self._source_fields = {}
         self._entity_table_id = None
         self._table_create_uncertain = False
@@ -402,6 +405,54 @@ class LearningCloud:
                 fields[year_name] = value
             record = self._write_record(BANK_TABLES[bank], fields, operation_id, qid, rid)
         return {**q, "id": qid, "record_id": record["record_id"]}
+
+    def save_sharing_question(self, batch, question, operation_id):
+        self._require_write()
+        _nonempty(operation_id, "operation_id")
+        from .learning_sharing import QUESTION_TYPES, validate_questions
+
+        if not isinstance(batch, dict) or batch.get('status') not in {'published', 'closed'} or not isinstance(question, dict):
+            raise LearningCloudError('只能将已发布的纪要题目同步到题库')
+        bid = _identifier(batch.get('id'), 'batch.id', r'[0-9a-f]{32}')
+        checked = validate_questions(batch.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'))
+        q = next((item for item in checked if item['id'] == question.get('id')), None)
+        if q is None or q != question:
+            raise LearningCloudError('题库任务与已发布题目快照不一致，未写入')
+        identity = f"sharing:{bid}:{q['id']}"
+        metadata = {'source': 'meeting-sharing', 'sync_id': identity, 'batch_id': bid, 'question_id': q['id'], 'type': q['type']}
+        fields = {
+            '会议名称': _checked_text(_nonempty(batch.get('title'), 'title'), '会议名称'),
+            '题目': q['stem'],
+            '答案': q['reference_answer'] if q['type'] == 'interview' else '、'.join(chr(65 + i) for i in q['correct']),
+            '备注': f"题型：{QUESTION_TYPES[q['type']]}\n解析：{q['explanation']}\n纪要依据：{q['evidence']}",
+            '会议纪要链接': _checked_text(_nonempty(batch.get('url'), 'url'), '会议纪要链接'),
+            META_FIELD: _json_text(metadata, META_FIELD),
+        }
+        if q['options']:
+            fields['选项'] = '\n'.join(f'{chr(65 + i)}. {option}' for i, option in enumerate(q['options']))
+        with self._lock:
+            if not self._sharing_schema_ready:
+                self._check_fields(self._fields(SHARING_TABLE_ID), SHARING_FIELDS, required=True)
+                self._sharing_schema_ready = True
+            rows = self._list_all(f'tables/{SHARING_TABLE_ID}/records/search', {'filter': {
+                'conjunction': 'and', 'conditions': [{'field_name': META_FIELD, 'operator': 'contains', 'value': [f'"{identity}"']}],
+            }})
+            if len(rows) > 1:
+                raise LearningCloudError('该纪要题目存在多条入库记录，请核验；未重复新增')
+            if rows:
+                record = rows[0]
+                if not _same_fields(fields, record.get('fields')) or (not q['options'] and record.get('fields', {}).get('选项')):
+                    raise LearningCloudError('已入库题目与发布快照不一致，请核验；未覆盖或重复新增')
+            else:
+                data = self._request('POST', f'tables/{SHARING_TABLE_ID}/records', {'fields': fields},
+                                     {'client_token': _client_token('record', SHARING_TABLE_ID, identity)})
+                record = data.get('record') or {}
+                if not _same_fields(fields, record.get('fields')):
+                    raise LearningCloudWriteUncertain('题库写入内容尚未核验，下次将查询原题确认；未重复新增')
+            rid = record.get('record_id')
+            if not isinstance(rid, str) or not re.fullmatch(r'rec[A-Za-z0-9]+', rid):
+                raise LearningCloudWriteUncertain('题库写入响应缺少记录ID，将核验原题后重试')
+            return rid
 
     def upsert_entity(self, kind, key, payload, operation_id):
         self._require_write()

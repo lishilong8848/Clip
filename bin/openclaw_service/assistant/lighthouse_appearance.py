@@ -5,6 +5,7 @@ configuration and clear-chat operations.  The authenticated actor id is the
 only identity source and is never taken from the client payload.
 """
 import copy
+import re
 
 from .lighthouse_ai import AssistantError
 
@@ -19,6 +20,7 @@ SHAPES = frozenset({
     "cercle", "galet", "squircle", "capsule", "triangle", "hexagone",
     "nuage", "goutte",
     "swirl-pile", "heart", "star", "flower", "diamond", "shield",
+    "weather-lighthouse",
 })
 
 EXPRESSIONS = frozenset({
@@ -35,13 +37,14 @@ STATES = frozenset({
 
 DEFAULT_APPEARANCE = {
     "color": "encre",
-    "shape": "cercle",
+    "shape": "weather-lighthouse",
     "expression": "neutre",
     "state": "idle",
     "size": 56,
     "animated": True,
     "follow": False,
     "snap_back": True,
+    "weather_city": "南通",
 }
 
 FIELDS = frozenset(DEFAULT_APPEARANCE)
@@ -62,6 +65,8 @@ def _valid_value(key, value):
         return isinstance(value, str) and value in _ENUM_FIELDS[key]
     if key == "size":
         return type(value) is int and 40 <= value <= 200
+    if key == "weather_city":
+        return isinstance(value, str) and bool(re.fullmatch(r"[\u4e00-\u9fff]{2,16}", value))
     if key in ("animated", "follow", "snap_back"):
         return type(value) is bool
     return False
@@ -86,6 +91,9 @@ def _validate_payload(payload):
         elif key == "size":
             if type(value) is not int or not (40 <= value <= 200):
                 raise AssistantError("外观尺寸必须为 40 到 200 之间的整数。")
+        elif key == "weather_city":
+            if not _valid_value(key, value):
+                raise AssistantError("天气城市请填写 2 到 16 个汉字的城市名称。")
         elif key in ("animated", "follow", "snap_back"):
             if type(value) is not bool:
                 raise AssistantError("外观开关必须为布尔值。")

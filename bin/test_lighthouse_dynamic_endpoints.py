@@ -43,6 +43,96 @@ from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: 
 # 每个 covered/excluded 条目用 method_paths 逐条列(方法, 归一路径),避免方法×路径叉乘。
 KNOWN_DYNAMIC_BINDINGS = [
     dict(
+        source="lan_bitable_template_portal/frontend/src/components/LearningSharing.vue",
+        line=37, kind="excluded",
+        method_paths=[("GET", "/api/learning/sharing"), ("GET", "/api/learning/sharing/{param}")],
+        window=4, needles=['id ? `/sharing/${id}` : `/sharing?page=${page.value}`'],
+        note="分享会批次列表/详情均经 requestLearning 访问;保持学练管理端点的原生排除边界。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/components/LearningSharing.vue",
+        line=55, kind="excluded",
+        method_paths=[("PUT", "/api/learning/sharing/{param}"),
+                      ("POST", "/api/learning/sharing/{param}/publish"),
+                      ("POST", "/api/learning/sharing/{param}/retry"),
+                      ("POST", "/api/learning/sharing/{param}/close"),
+                      ("POST", "/api/learning/sharing/{param}/retry-delivery")],
+        window=4, needles=["`/sharing/${id}${action === 'save' ? '' : '/' + action}`",
+                           "action === 'save' ? 'PUT' : 'POST'"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/components/LearningSharing.vue",
+            definition_marker='<div class="sharing-buttons">',
+            definition_needles=["mutate('save')", "mutate('retry')", "ask('publish')", "ask('close')", "ask('retry-delivery')"],
+        ),
+        note="保存使用 PUT,其余四项按钮动作使用 POST;源码限定了动作集合,均为被排除的学练办理。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeChangeConfirmations.vue",
+        line=31, kind="covered",
+        method_paths=[("POST", "/api/change-confirmations/{param}/screenshot")],
+        window=6, needles=["requestJson(base(item)+'/screenshot',", "const base=(i:Dict)=>'/api/change-confirmations/'", "method:'POST'"],
+        note="新版变更截图上传由 base(item) 绑定真实目标记录,命中原截图接口。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeChangeConfirmations.vue",
+        line=32, kind="covered",
+        method_paths=[("POST", "/api/change-confirmations/{param}/confirm")],
+        window=6, needles=["requestJson(base(item)+'/confirm',", "const base=(i:Dict)=>'/api/change-confirmations/'", "method:'POST'"],
+        note="新版变更确认复用目标记录的原 confirm 接口。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeChangeConfirmations.vue",
+        line=33, kind="covered",
+        method_paths=[("DELETE", "/api/change-confirmations/{param}/screenshot")],
+        window=6, needles=["requestJson(base(item)+'/screenshot?'+", "const base=(i:Dict)=>'/api/change-confirmations/'", "method:'DELETE'"],
+        note="新版删除确认截图复用原 DELETE 接口;图片选择参数属于查询串。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeSopManager.vue",
+        line=21, kind="covered",
+        method_paths=[("GET", "/api/polling-sops/{param}/attachments/{param}")],
+        window=4, needles=["downloadFile(attachmentPath(file))"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeSopManager.vue",
+            definition_marker="const attachmentPath=",
+            definition_needles=["'/api/polling-sops/'", "encodeURIComponent(draft.value!.sop_id)", "'/attachments/'", "encodeURIComponent(file.attachment_id)"],
+        ),
+        note="SOP 模板附件下载,不是工单执行;attachmentPath 定义确证两个标识组成的原接口。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeSopManager.vue",
+        line=51, kind="covered",
+        method_paths=[("POST", "/api/polling-sops"), ("PUT", "/api/polling-sops/{param}")],
+        window=4, needles=["requestJson('/api/polling-sops'+(d.sop_id", "method:d.sop_id?'PUT':'POST'"],
+        note="新版 SOP 新建 POST、修改 PUT 分支均命中原业务目录。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeSopManager.vue",
+        line=54, kind="covered",
+        method_paths=[("DELETE", "/api/polling-sops/{param}/attachments/{param}")],
+        window=4, needles=["requestJson(attachmentPath(file)+'?expected_version='", "const attachmentPath=", "'/attachments/'", "method:'DELETE'"],
+        note="新版 SOP 附件删除复用原接口及 expected_version,不是工单步骤办理。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/WaterWorkspace.vue",
+        line=192, kind="covered",
+        method_paths=[("POST", "/api/capacity/water/records"), ("PATCH", "/api/capacity/water/records/{param}")],
+        window=6, needles=["requestJson(task.path,{method:task.method", "pendingSave={path:'/api/capacity/water/records'", "method:recordId.value?'PATCH':'POST'", "const task=pendingSave"],
+        note="task 来自当前页面唯一构造的 pendingSave;新建 POST、修改 PATCH,重试保持原路径和操作标识。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/OverviewPanel.vue",
+        line=46, kind="unresolved", method_paths=[], window=4,
+        needles=["requestJson(path+'?'+new URLSearchParams(params)", "const get=(path:string"],
+        note="新版工作台局部 GET 包装;实际调用端点在 WRAPPER_REVIEW 逐项复核。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/version.ts",
+        line=10, kind="static_asset", method_paths=[], window=12,
+        needles=["requestJson(base+'entry.json'", "const base=WORKSPACE_ENTRY.slice", "'/assets/workspace-v2/index.html'"],
+        note="预加载的是新版静态资源 entry.json,不是业务 API;保留审计记录,不加入助手业务目录。",
+    ),
+    dict(
         source="lan_bitable_template_portal/frontend/src/components/LighthouseArtifactPreview.vue",
         line=58, kind="excluded",
         method_paths=[("GET", "/api/assistant/files/{param}")],
@@ -286,14 +376,14 @@ KNOWN_DYNAMIC_BINDINGS = [
 
 
 # ---------------------------------------------------------------------------
-# 12 个 remaining wrapper callsite 的人工复核:真实调用者→具体端点分类
+# wrapper callsite 的人工复核:真实调用者→具体端点分类
 # ---------------------------------------------------------------------------
 # 这些是 run_audit 无法穿透的 transport/帮助函数(portalRequest/post/getJson/
 # submit/pollingApi/fetchLiteRefreshJson/liteFetchThenRefresh/表单 action)。
 # 我们不能把它们标为 missing API;正确做法是:追踪其真实调用者传入的具体端点,
 # 逐个确认在 native 目录中存在(covered)或被原生排除(excluded)。凡“既不在目录
 # 又未被排除”的具体端点即 concrete allowed endpoint gap —— 审计必须显式报告;
-# 经人工复核,当前 12 个 wrapper 的全部真实调用端点均落到 covered/excluded,
+# 经人工复核,这些 wrapper 的全部真实调用端点均落到 covered/excluded,
 # **无 allowed endpoint gap**。
 #
 # callers 条目为 dict:
@@ -303,6 +393,28 @@ KNOWN_DYNAMIC_BINDINGS = [
 #   caller_source       —— 调用者所在文件,缺省时为 wrapper 所在 source
 # 测试先用 marker 断言端点确实出现在真实源码(再对 native 目录 + _route_excluded 分类)。
 WRAPPER_REVIEW = [
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/OverviewPanel.vue",
+        line=46, label="新版工作台 get(path, params) 包装", anchor="const get=(path:string",
+        callers=[
+            dict(method="GET", path="/api/plan-convergence/maintenance/records", caller_line=53,
+                 marker="get('/api/plan-convergence/'+kind+'/records')"),
+            dict(method="GET", path="/api/plan-convergence/change/records", caller_line=53,
+                 marker="for(const kind of ['maintenance','change'])"),
+            dict(method="GET", path="/api/learning/bootstrap", caller_line=69,
+                 marker="get('/api/learning/bootstrap')"),
+            dict(method="GET", path="/api/learning/profile", caller_line=73,
+                 marker="get('/api/learning/profile',query)"),
+            dict(method="GET", path="/api/engineer/mop/bootstrap", caller_line=83,
+                 marker="get('/api/engineer/mop/bootstrap'"),
+            dict(method="GET", path="/api/capacity/water/bootstrap", caller_line=91,
+                 marker="get('/api/capacity/water/bootstrap'"),
+            dict(method="GET", path="/api/drills", caller_line=105, marker="get('/api/drills'"),
+            dict(method="GET", path="/api/critical-guard/tasks", caller_line=110, marker="get('/api/critical-guard/tasks'"),
+            dict(method="GET", path="/api/cabinet-power/batches", caller_line=118, marker="get('/api/cabinet-power/batches'"),
+        ],
+        note="七类工作台的读取逐项核对;学练受保护查询保持 excluded,其他具体端点均在原生目录。",
+    ),
     dict(
         source="lan_bitable_template_portal/frontend/src/App.vue",
         line=552, label="portalRequest(path, options) 传输包装",
@@ -372,6 +484,7 @@ WRAPPER_REVIEW = [
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergenceRules.vue",
         line=316, label="postJson(path, body) 包装",
         anchor="async function postJson(path",
+        signature='requestJson(path, { method: "POST"',
         callers=[dict(method="POST", path="/api/plan-convergence/rulesets", caller_line=438,
                       marker='postJson("/api/plan-convergence/rulesets"')],
         note="新建规则集在目录,无 gap",
@@ -380,6 +493,7 @@ WRAPPER_REVIEW = [
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergenceRules.vue",
         line=320, label="putJson(path, body) 包装",
         anchor="async function putJson(path",
+        signature='requestJson(path, { method: "PUT"',
         callers=[dict(method="PUT", path="/api/plan-convergence/rulesets/{param}", caller_line=471,
                       marker="putJson(`/api/plan-convergence/rulesets/${currentSetId.value}`")],
         note="更新规则集在目录,无 gap",
@@ -388,6 +502,7 @@ WRAPPER_REVIEW = [
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergenceRules.vue",
         line=324, label="deleteJson(path) 包装",
         anchor="async function deleteJson(path",
+        signature='requestJson(path, { method: "DELETE"',
         callers=[dict(method="DELETE", path="/api/plan-convergence/rulesets/{param}", caller_line=494,
                       marker="deleteJson(`/api/plan-convergence/rulesets/${id}`)")],
         note="删除规则集在目录,无 gap",
@@ -615,7 +730,11 @@ class DynamicEndpointAuditTests(unittest.TestCase):
         unresolved 记录,且全体 unresolved 记录被恰好认领一次(双射),不再依赖绝对行号。
         """
         unresolved = [r for r in self.audit_records if r["status"] == "unresolved"]
-        self.assertEqual(len(unresolved), len(self.bindings))
+        known_keys = {(r["source"], r["line"]) for r in self.binding_record if r}
+        unreviewed = [f"{r['source']}:{r['line']} ({r['raw_path']})" for r in unresolved
+                      if (r['source'], r['line']) not in known_keys]
+        self.assertEqual(len(unresolved), len(self.bindings),
+                         "动态调用复核清单需要更新;未复核调用:\n" + "\n".join(unreviewed))
         unresolved_keys = {(r["source"], r["line"]) for r in unresolved}
         claimed = set()
         for b in self.bindings:
@@ -733,15 +852,36 @@ class DynamicEndpointAuditTests(unittest.TestCase):
             self.assertIn(needle, ctx,
                           f"liteFragmentUrl 定义上下文应含 {needle}\n  near line 7367")
 
+    def test_dynamic_path_definitions_exist_in_real_source(self):
+        for binding in self.bindings:
+            ref = binding.get('definition_ref')
+            if not ref:
+                continue
+            source = _file_text(ref['source'])
+            index = source.find(ref['definition_marker'])
+            self.assertGreaterEqual(index, 0, f"动态调用定义未找到: {ref}")
+            for needle in ref['definition_needles']:
+                self.assertIn(needle, source[index:index + 4000], f"动态调用定义缺少证据: {needle}")
+
+    def test_static_resource_manifest_is_not_a_business_endpoint(self):
+        resources = [b for b in self.bindings if b['kind'] == 'static_asset']
+        self.assertEqual(len(resources), 1)
+        manifest = resources[0]
+        self.assertEqual(manifest['method_paths'], [])
+        source = _file_text(manifest['source'])
+        self.assertIn("export const WORKSPACE_ENTRY = '/assets/workspace-v2/index.html'", source)
+        self.assertIn("const base=WORKSPACE_ENTRY.slice(0,WORKSPACE_ENTRY.lastIndexOf('/')+1)", source)
+        self.assertIn("requestJson(base+'entry.json'", source)
+
     def test_honest_unresolved_are_still_reported_unresolved(self):
         """unresolved(包装/动态/页面路由)必须保持审计如实标 unresolved,绝不臆断 covered。
 
-        run_audit 把 12 个 wrapper/动态调用点标为 unresolved(它无法穿透 transport);
+        run_audit 把 wrapper/动态调用点标为 unresolved(它无法穿透 transport);
         即便我们追踪真实调用者拿到了具体端点,也不能把 wrapper 函数本身改成 covered。
         """
         unresolved_bindings = [b for b in self.bindings if b["kind"] == "unresolved"]
-        self.assertEqual(len(unresolved_bindings), 12,
-                         "当前 12 个 remaining wrapper callsite 必须保持 honest unresolved")
+        self.assertEqual(len(unresolved_bindings), len(WRAPPER_REVIEW),
+                         "每个 unresolved 包装调用都必须有真实调用者复核")
         for b in unresolved_bindings:
             rec = self._binding_record(b)
             self.assertIsNotNone(
@@ -762,18 +902,24 @@ class DynamicEndpointAuditTests(unittest.TestCase):
                 f"{b['source']} 应在 run_audit 记录,不得静默丢弃({b['kind']})\n"
                 f"  needles={b['needles']}")
 
-    def test_12_wrapper_review_anchors_exist_in_real_source(self):
-        """12 个 wrapper 复核条目:anchor 标记必须真实存在于对应源码(防伪造/防漂移)。"""
-        self.assertEqual(len(WRAPPER_REVIEW), 12, "必须恰好复核 12 个 remaining wrapper callsite")
+    def test_wrapper_review_anchors_exist_in_real_source(self):
+        """wrapper 复核条目与 unresolved 调用一一对应,anchor 必须来自真实源码。"""
+        records = _resolve_binding_records(self.audit_records, [dict(w, needles=[w['anchor']]) for w in WRAPPER_REVIEW])
+        self.assertTrue(all(records), "wrapper 复核未能唯一定位到审计调用")
+        reviewed_keys = {(r['source'], r['line']) for r in records if r}
+        expected_keys = {(self._binding_record(b)['source'], self._binding_record(b)['line'])
+                         for b in self.bindings if b['kind'] == 'unresolved'}
+        self.assertEqual(len(reviewed_keys), len(WRAPPER_REVIEW), "wrapper 复核重复认领同一调用")
+        self.assertEqual(reviewed_keys, expected_keys, "wrapper 复核漏项或额外认领了其他调用")
         for w in WRAPPER_REVIEW:
             text = _file_text(w["source"])
             self.assertIn(w["anchor"], text,
                           f"wrapper 复核 anchor 未找到 {w['source']} anchor={w['anchor']!r}")
 
-    def test_12_wrapper_real_callers_have_no_allowed_endpoint_gaps(self):
-        """Review the 12 wrapper callsites against their real callers:报告 concrete allowed endpoint gaps。
+    def test_wrapper_real_callers_have_no_allowed_endpoint_gaps(self):
+        """Review wrapper callsites against their real callers:报告 concrete allowed endpoint gaps。
 
-        逐个验收 12 个 wrapper 的真实调用者端点:必须落在 native 目录(covered)或被
+        逐个验收 wrapper 的真实调用者端点:必须落在 native 目录(covered)或被
         _route_excluded 排除(excluded)。若某端点“既不在目录又未被排除”,即为
         concrete allowed endpoint gap,此处必须显式暴露(失败),绝不当成 wrapper 的
         missing API。当前人工复核结论:全部 covered/excluded,无 allowed endpoint gap。
@@ -800,13 +946,13 @@ class DynamicEndpointAuditTests(unittest.TestCase):
                     gaps.append((w["source"], w["line"], method, path, cs, c["caller_line"]))
         self.assertEqual(
             uncovered_markers, [],
-            "12 个 wrapper 声称的真实调用端点缺少源码 marker 证据(可能被替换/伪造):\n"
+            "wrapper 声称的真实调用端点缺少源码 marker 证据(可能被替换/伪造):\n"
             + "\n".join(
                 f"  {ws}:{wl} [{m}] {p}  caller@{cs}:{cl}  marker={marker!r}"
                 for ws, wl, m, p, cs, cl, marker in uncovered_markers))
         self.assertEqual(
             gaps, [],
-            "12 个 wrapper 的真实调用端出现 allowed endpoint gap(既不在目录也未被排除):\n"
+            "wrapper 的真实调用端出现 allowed endpoint gap(既不在目录也未被排除):\n"
             + "\n".join(f"  {s}:{l} [{m}] {p}  <- caller@{cs}:{cl}"
                         for s, l, m, p, cs, cl in gaps))
         self.assertGreaterEqual(covered_n, 1, "wrapper 复核应至少有一条 covered 端点")
@@ -862,12 +1008,14 @@ def main():
     covered = [b for b in KNOWN_DYNAMIC_BINDINGS if b["kind"] == "covered"]
     excluded = [b for b in KNOWN_DYNAMIC_BINDINGS if b["kind"] == "excluded"]
     unresolved = [b for b in KNOWN_DYNAMIC_BINDINGS if b["kind"] == "unresolved"]
+    static_assets = [b for b in KNOWN_DYNAMIC_BINDINGS if b["kind"] == "static_asset"]
     lines = []
     lines.append(f"=== 动态端点审计(有界人工复核):{len(KNOWN_DYNAMIC_BINDINGS)} 个 static-unresolved vs native 目录 ===")
     lines.append(f"run_audit unresolved 总数: {res['summary']['unresolved']}")
     lines.append(f"已确证 covered(命中 native 目录并可给源码证据)   : {len(covered)} 条")
     lines.append(f"已确证 excluded(learning/SOP执行等原生排除能力)  : {len(excluded)} 条")
     lines.append(f"保持 unresolved(包装/动态/页面路由,诚实留待人工): {len(unresolved)} 条")
+    lines.append(f"静态资源(非业务 API,不进入助手目录)            : {len(static_assets)} 条")
     lines.append("")
     lines.append("--- covered(可 tie 到已知方法/路径:native 目录存在)---")
     for b in covered:
@@ -882,8 +1030,10 @@ def main():
     lines.append("--- 保持 unresolved(诚实)---")
     for b in unresolved:
         lines.append(f"  {b['source']}:{b['line']}\n        <- {b['note']}")
+    for b in static_assets:
+        lines.append(f"  [static_asset] {b['source']}:{b['line']}\n        <- {b['note']}")
     lines.append("")
-    lines.append("=== 12 个 remaining wrapper callsite:真实调用者端点复核(concrete allowed endpoint gaps)===")
+    lines.append(f"=== {len(WRAPPER_REVIEW)} 个 wrapper callsite:真实调用者端点复核(concrete allowed endpoint gaps)===")
     total_gaps = 0
     for w in WRAPPER_REVIEW:
         if not w["callers"]:
@@ -908,7 +1058,7 @@ def main():
         lines.append(f"        <- {w['note']}")
     lines.append("")
     if total_gaps == 0:
-        lines.append("结论:12 个 wrapper 的真实调用者端点全部 covered 或 excluded,"
+        lines.append(f"结论:{len(WRAPPER_REVIEW)} 个 wrapper 的真实调用者端点全部 covered 或 excluded,"
                      "**无 concrete allowed endpoint gap**;wrapper 函数本身不标 missing API。")
     else:
         lines.append(f"结论:发现 {total_gaps} 个 concrete allowed endpoint gap(见上方 GAP),必须处理。")

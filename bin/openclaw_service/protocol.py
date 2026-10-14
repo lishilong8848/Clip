@@ -127,15 +127,30 @@ def protect_state_directory(state):
     root.mkdir(parents=True, exist_ok=True)
     resolved_root = root.resolve()
     paths = [root]
+    model_links = []
+    cache = resolved_root / 'knowledge_base/models'
+    def model_link(path):
+        # Hugging Face snapshots link to owned model blobs; never follow a link for ACL writes.
+        try:
+            return (path.is_relative_to(cache) and path.is_symlink() and not path.is_junction()
+                    and path.resolve(strict=True).is_relative_to(cache) and path.is_file())
+        except (OSError, RuntimeError):
+            return False
     for directory, names, files in os.walk(root, followlinks=False):
         for name in (*names, *files):
             path = Path(directory) / name
+            if model_link(path):
+                model_links.append(path)
+                continue
             reject_link(path)
             if not path.resolve().is_relative_to(resolved_root):
                 raise ServiceError('助手数据目录路径无效，未修改目录权限。', code='unsafe_state_directory')
             paths.append(path)
     if os.name != 'nt':
         return
+    for path in model_links:
+        if not model_link(path):
+            raise ServiceError('助手模型缓存链接已变化，未修改目录权限。', code='unsafe_state_directory')
     import win32api
     import win32con
     import win32security

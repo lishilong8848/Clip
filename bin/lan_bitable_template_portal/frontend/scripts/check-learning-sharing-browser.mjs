@@ -8,7 +8,7 @@ import { chromium } from 'playwright';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../../output/playwright/learning-sharing');
 await mkdir(output, { recursive: true });
-const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false } });
+const server = await preview({ root, logLevel: 'error', build: { outDir: process.env.CLIPFLOW_SHARING_PREVIEW_DIR || 'dist' }, preview: { host: '127.0.0.1', port: 0, strictPort: false } });
 const base = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 const questions = Array.from({length:20}, (_,i) => ({id:`q${i+1}`,type:i%2?'multiple':'single',stem:`第${i+1}个知识点：机组轮巡发现流量告警，应如何核验实际流量与运行参数？`,options:['核验运行参数及现场实际状态','持续重复复位设备','跳过现场核验直接认定误报','按已审批流程处置'],correct:i%2?[0,3]:[0],explanation:'仅依据纪要的处置原则，现场操作仍须执行已批准的规程。',evidence:'核查实际流量及运行状态，单次复位无效后停机排查，不反复启机。'}));
@@ -38,11 +38,11 @@ try {
       if(p==='/api/scope-overview')return ok({scopes:{}});
       if(p==='/api/learning/bootstrap')return ok({is_admin:actor==='admin',can_answer:true,can_view_buildings:actor==='admin',self_person:{id:'p1',name:'测试人员甲',scopes:['A']},self_scope:'A',scopes:[{value:'A',label:'A楼'}],settings:{enabled:true},sync:{status:'ready',pending:0},today:'2026-10-14'});
       if(p==='/api/learning/sharing') {
-        if(method==='POST'){ created++;return ok({id:batch.id}); }
+        if(method==='POST'){ assert.deepEqual(request.postDataJSON().question_types,['single','multiple']);created++;return ok({id:batch.id}); }
         return ok({items:[batch],page:1,total:1});
       }
       if(p===`/api/learning/sharing/${batch.id}`) {
-        if(method==='PUT'){ batch.questions=request.postDataJSON().questions;batch.version++; }
+        if(method==='PUT'){ const payload=request.postDataJSON();batch.questions=payload.questions;batch.participants.forEach(p=>p.exempted=payload.excluded_open_ids.includes(p.open_id));batch.total=batch.participants.filter(p=>!p.exempted).length;batch.version++; }
         return ok(actor==='admin'?batch:{...batch,questions:batch.questions.slice(0,5).map(({correct,explanation,evidence,...q})=>q),participants:batch.participants.slice(0,1),total:1});
       }
       if(p.endsWith('/publish')){ published++;batch.status='published';batch.version++;return ok({id:batch.id}); }
@@ -52,14 +52,17 @@ try {
     await page.goto(base+entry);
     await page.getByRole('heading',{name:'分享会练习',exact:true}).waitFor();
     await page.getByLabel('飞书纪要链接',{exact:true}).fill('https://vnet.feishu.cn/docx/Fixture');
+    await page.getByRole('checkbox',{name:'多选题',exact:true}).check();
     await page.getByRole('button',{name:'读取纪要并生成题目',exact:true}).click();
     await page.getByRole('heading',{name:batch.title,exact:true}).waitFor();
     assert.equal(created,1);assert.equal(published,0);
+    await page.getByRole('checkbox',{name:'参加答题：测试人员乙',exact:true}).uncheck();
+    await page.getByText('参会 2 人 · 参加答题 1 人 · 本次不做 1 人',{exact:true}).waitFor();
     await page.locator('#sharing-q1').fill('修改后的题干：出现流量告警后，首先应核对什么？');
     assert.equal(await page.getByRole('button',{name:'核对后发布给参会人',exact:true}).isDisabled(),true);
-    await page.getByRole('button',{name:'保存题目',exact:true}).click();
+    await page.getByRole('button',{name:'保存题目与名单',exact:true}).click();
     await page.getByRole('button',{name:'核对后发布给参会人',exact:true}).click();
-    const dialog=page.getByRole('dialog');await dialog.waitFor();assert.equal(published,0);
+    const dialog=page.getByRole('dialog');await dialog.waitFor();assert.equal(published,0);assert.match(await dialog.innerText(),/向1位参会人/);
     await dialog.getByRole('button',{name:'取消',exact:true}).click();assert.equal(published,0);
     await page.locator('.confirm-backdrop').waitFor({state:'detached'});
     await page.screenshot({path:path.join(output,`draft-${v2?'v2':'old'}-${width}.png`),fullPage:true});

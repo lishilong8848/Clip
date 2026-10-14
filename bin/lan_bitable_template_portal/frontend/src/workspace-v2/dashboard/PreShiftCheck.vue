@@ -3,7 +3,7 @@
     <div class="v2-check-toolbar" data-v2-navigation>
       <NSelect v-if="state?.can_manage" :value="scope" :options="scopeOptions" :disabled="busy || dirty" aria-label="检查楼栋" @update:value="changeScope" />
       <span v-else>{{ scope === '110' ? '110站' : scope + '楼' }}</span>
-      <div><NButton v-if="state?.can_manage" size="small" secondary @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
+      <div><NButton v-if="state?.can_manage" size="small" secondary :disabled="busy || dirty" @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
     </div>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NSkeleton v-if="!state && loading" text :repeat="4" />
@@ -34,11 +34,12 @@
         </form>
       </template>
       <NEmpty v-else :description="!state.definition.items.length?'尚未配置班前检查清单':!state.roster_ready?'正在准备当天排班':'当前没有已发布的本楼班前检查'" size="small" />
+      <ol v-if="!task && state.definition.items.length" class="v2-check-preview"><li v-for="item in state.definition.items" :key="item.id">{{ item.text }}</li></ol>
       <NAlert v-if="state.roster_error" type="warning" :bordered="false">{{ state.roster_error }}</NAlert>
       <p v-if="!task && state.definition.items.length" class="v2-check-times">白班 08:50 · 夜班 17:50</p>
     </template>
     <NModal v-model:show="editing" preset="card" title="班前检查清单" class="v2-check-editor" :mask-closable="false" :closable="!saving" :close-on-esc="!saving">
-      <p class="v2-check-edit-note">{{ scope }}楼 · 修改用于尚未发布的班次，已发布和已提交的清单保持原样。</p>
+      <p class="v2-check-edit-note">{{ scope }}楼 · 保存后立即更新未提交的班次；已提交和历史清单保持原样。</p>
       <NAlert v-if="editError" type="error" :bordered="false">{{ editError }}</NAlert>
       <div v-for="(item,index) in items" :key="item.id" class="v2-check-edit-row" data-v2-navigation>
         <label :for="'check-edit-'+item.id">{{ index+1 }}</label><NInput v-model:value="item.text" :maxlength="200" :disabled="saving" :input-props="{id:'check-edit-'+item.id,'aria-label':'检查项'+(index+1)}" placeholder="检查内容" />
@@ -72,7 +73,7 @@ function setNote(id:string,note:string){if(!task.value)return;error.value='';con
 function dateLabel(value:string){return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 async function load(force=false){
   if(disposed||loading.value&&!force)return;controller?.abort();const read=new AbortController();controller=read;loading.value=true;
-  try{const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:'no-store'});if(disposed||read.signal.aborted)return;if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');state.value=result;error.value='';if(!selectedId.value||!result.tasks.some((t:Dict)=>t.id===selectedId.value))selectedId.value=result.tasks[0]?.id||'';for(const row of result.tasks)if(row.submitted)delete drafts.value[row.id];}
+  try{const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:'no-store'});if(disposed||read.signal.aborted)return;if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');for(const id of Object.keys(drafts.value)){const next=result.tasks.find((t:Dict)=>t.id===id),previous=state.value?.tasks.find((t:Dict)=>t.id===id);if(!next||next.submitted||previous?.definition_version!==next.definition_version)delete drafts.value[id];}state.value=result;error.value='';if(!selectedId.value||!result.tasks.some((t:Dict)=>t.id===selectedId.value))selectedId.value=result.tasks[0]?.id||'';}
   catch(e){if(!disposed&&!read.signal.aborted)error.value=e instanceof Error?e.message:'班前检查读取失败，请重试。';}finally{if(controller===read)loading.value=false;}
 }
 function changeScope(value:string){if(dirty.value||busy.value)return;scope.value=value;selectedId.value='';state.value=undefined;void load(true);}
@@ -80,7 +81,7 @@ function edit(){items.value=(state.value?.definition.items||[]).map((item:Dict)=
 async function saveDefinition(){
   if(items.value.some(item=>!item.text.trim())){editError.value='请填写检查内容，或删除空白项。';return;}
   saving.value=true;editError.value='';
-  try{await requestJson('/api/pre-shift-checks/definition?scope='+encodeURIComponent(scope.value),{method:'PUT',body:JSON.stringify({version:version.value,items:items.value})});editing.value=false;message.success('检查清单已保存');await load(true);}catch(e){editError.value=e instanceof Error?e.message:'保存失败，请重试。';}finally{saving.value=false;}
+  try{await requestJson('/api/pre-shift-checks/definition?scope='+encodeURIComponent(scope.value),{method:'PUT',body:JSON.stringify({version:version.value,items:items.value})});editing.value=false;message.success('检查清单已保存');window.dispatchEvent(new Event('clipflow-business-changed'));await load(true);}catch(e){editError.value=e instanceof Error?e.message:'保存失败，请重试。';}finally{saving.value=false;}
 }
 async function submit(){
   if(!task.value||!task.value.can_submit||busy.value)return;
@@ -90,11 +91,12 @@ async function submit(){
 }
 const removeGuard=registerNavigationGuard((_target,proceed)=>{if(busy.value||saving.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
 function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||busy.value||saving.value||editing.value){event.preventDefault();event.returnValue='';}}
-function refresh(){if(!document.hidden&&!busy.value&&!editing.value)void load();}
+function refresh(){if(!document.hidden&&!busy.value&&!saving.value&&!editing.value)void load();}
 onMounted(()=>{void load();timer=setInterval(refresh,30000);window.addEventListener('clipflow-business-changed',refresh);window.addEventListener('beforeunload',beforeUnload);document.addEventListener('visibilitychange',refresh);});
 watch(()=>props.user.open_id,()=>{drafts.value={};state.value=undefined;});
 onBeforeUnmount(()=>{disposed=true;controller?.abort();if(timer)clearInterval(timer);removeGuard();window.removeEventListener('clipflow-business-changed',refresh);window.removeEventListener('beforeunload',beforeUnload);document.removeEventListener('visibilitychange',refresh);});
 </script>
 <style>
+.v2-check-preview{margin:0;padding-left:24px;line-height:1.8;color:#53636e}
 .v2-shift-check{display:flex;flex-direction:column;gap:12px;min-height:0;font-size:14px}.v2-check-toolbar,.v2-check-toolbar>div,.v2-check-shifts,.v2-check-status,.v2-check-form>footer,.v2-check-editor-actions{display:flex;align-items:center;gap:8px}.v2-check-toolbar{justify-content:space-between}.v2-check-toolbar>.n-select{max-width:140px}.v2-check-shifts{flex-wrap:wrap}.v2-check-status{padding:10px 12px;background:#eef4ff;color:#2457a7;border-radius:8px}.v2-check-status.is-complete{background:#edf7f0;color:#267047}.v2-check-status>div{flex:1;min-width:0}.v2-check-status strong,.v2-check-status small{display:block}.v2-check-status small{margin-top:3px;color:#586577;font-size:12px;overflow-wrap:anywhere}.v2-check-sync,.v2-check-times{font-size:12px;color:#53636e;line-height:1.6}.v2-check-items{display:flex;flex-direction:column}.v2-check-item{border:0;border-bottom:1px solid #e8ecf0;margin:0;padding:12px 0;min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}.v2-check-item legend{float:left;display:block;padding:0;overflow-wrap:anywhere;line-height:1.6}.v2-check-item legend span{display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;margin-right:8px;border-radius:50%;background:#f0f3f6;color:#637184;font-size:12px}.v2-check-note{grid-column:1/-1}.v2-check-note label{display:block;margin-bottom:5px;font-size:12px;color:#98482c}.v2-check-form>footer{justify-content:space-between;padding:12px 0;background:#fff}.v2-check-form>footer>span{font-size:12px;color:#5a6a7b}.v2-check-editor.n-card{width:min(650px,calc(100vw - 24px));max-height:85dvh}.v2-check-editor .n-card-content{overflow-y:auto}.v2-check-edit-note{font-size:13px;color:#647487;line-height:1.6;margin:0 0 16px}.v2-check-edit-row{display:grid;grid-template-columns:20px minmax(0,1fr) 36px;gap:8px;align-items:center;margin:10px 0}.v2-check-editor-actions{justify-content:flex-end}.v2-check-note-enter-active,.v2-check-note-leave-active{transition:opacity 180ms ease-out,transform 180ms ease-out}.v2-check-note-enter-from,.v2-check-note-leave-to{opacity:0;transform:translateY(-5px)}@media(max-width:760px){.v2-check-item{grid-template-columns:1fr}.v2-check-item .n-radio-button{min-height:40px;display:inline-flex;align-items:center}.v2-check-item .n-radio-group{justify-self:end}.v2-check-toolbar .n-button{min-height:40px}}@media(prefers-reduced-motion:reduce){.v2-check-note-enter-active,.v2-check-note-leave-active{transition:opacity 100ms}}
 </style>

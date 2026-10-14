@@ -7,7 +7,7 @@ from contextlib import closing
 from urllib.parse import quote
 
 from . import learning as core
-from .learning_reminders import reminder_card
+from .learning_reminders import duty_recipients, reminder_card
 
 WEEKLY_CHAT_ID = 'oc_3bc648b9b761f24a65366a9b04b32eb2'
 WEEKLY_SUPERVISOR_SCOPES = tuple('ABCDE')
@@ -107,9 +107,9 @@ def weekly_stats(service, start, end, conn, scope=None):
     return rows
 
 
-def enqueue_weekly(service, current):
+def enqueue_weekly(service, current, duties):
     monday = current.date() - dt.timedelta(days=current.weekday())
-    due = dt.datetime.combine(monday, dt.time(9), core.TZ)
+    due = dt.datetime.combine(monday, dt.time.min, core.TZ)
     if current < due:
         return
     start = (monday - dt.timedelta(days=7)).isoformat()
@@ -127,8 +127,12 @@ def enqueue_weekly(service, current):
         expiry = (due + dt.timedelta(days=7)).timestamp()
         base = {'date': start, 'end': end, 'status': 'pending', 'due_at': current.timestamp(), 'expires_at': expiry}
         job_count = 0
+        targets = recipients(people)
         for person in people:
             if not person.get('active'):
+                continue
+            target = targets.get(person['id'])
+            if duties is not None and target and target not in duties:
                 continue
             key = identity + ':' + person['id']
             job_count += 1
@@ -265,8 +269,9 @@ def make_card(job, url, paper=None, record=None):
 def send_due(service, current):
     current = current.astimezone(core.TZ) if current.tzinfo else current.replace(tzinfo=core.TZ)
     settings = service.settings()
+    duties = duty_recipients(service)
     if settings['weekly_report_enabled']:
-        enqueue_weekly(service, current)
+        enqueue_weekly(service, current, duties)
     with closing(service._connect()) as conn:
         jobs = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='engagement' AND json_extract(payload,'$.status')='pending' AND json_extract(payload,'$.due_at')<=? ORDER BY json_extract(payload,'$.due_at'),key LIMIT 10", (current.timestamp(),))]
     if not jobs:
@@ -300,6 +305,8 @@ def send_due(service, current):
             job['status'] = 'skipped_completed'
         elif job.get('person_id') and person and not person.get('active'):
             job['status'] = 'inactive'
+        elif job['kind'] in {'weekly', 'timeout'} and duties is not None and targets.get(job.get('person_id')) and targets[job['person_id']] not in duties:
+            job['status'] = 'skipped_role'
         else:
             if job['kind'] == 'weekly_summary' and url:
                 if job.get('audience') == 'group':
@@ -307,12 +314,13 @@ def send_due(service, current):
                 else:
                     recipients_for_job = managers.get(job['scope'], [])
             else:
-                target = targets.get(job.get('person_id'))
+                target = targets.get(job.get('person_id')) if duties is not None else None
                 recipients_for_job = [target] if target else []
             job['due_at'] = current.timestamp() + 300
             if not recipients_for_job or not url:
                 job['error'] = ('学练入口地址尚未就绪' if not url else
-                    f"{job['scope']}楼未找到有效主管飞书身份" if job.get('scope') else '未找到唯一的个人飞书身份')
+                    f"{job['scope']}楼未找到有效主管飞书身份" if job.get('scope') else
+                    '本地人员岗位目录暂未就绪' if duties is None else '未找到唯一的个人飞书身份')
                 service._last_error = job['error'] + '，提醒已保留等待重试。'
             else:
                 card = None

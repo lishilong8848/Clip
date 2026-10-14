@@ -202,6 +202,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/resources/assistant_tools/mermaid.min.js"),
     Path("bin/resources/assistant_tools/MERMAID-LICENSE.txt"),
     Path("bin/lan_bitable_template_portal/lighthouse_routes.py"),
+    Path("bin/lan_bitable_template_portal/lighthouse_icon_weather.py"),
     Path("bin/lan_bitable_template_portal/lighthouse_bridge.py"),
     Path("bin/openclaw_service/assistant/openclaw/runtime.json"),
     Path("bin/openclaw_service/assistant/openclaw/native-paths.mjs"),
@@ -1744,6 +1745,7 @@ def _run_packaging_preflight_tests() -> None:
     )
     py_targets.extend(sorted((PROJECT_ROOT / "bin/openclaw_service").rglob("*.py")))
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_bridge.py")
+    py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_icon_weather.py")
     py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))
 
     if py_targets:
@@ -1801,7 +1803,7 @@ def _run_packaging_preflight_tests() -> None:
         [test_python, "-m", "unittest",
          "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
-         "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
+         "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
          "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",

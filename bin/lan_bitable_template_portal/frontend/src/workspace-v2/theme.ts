@@ -1,4 +1,5 @@
 import type { GlobalThemeOverrides } from 'naive-ui';
+export const DEFAULT_NAV_COLOR = '#2364d2';
 // UI/UX Pro Max: restrained enterprise surfaces, compact data and semantic accents.
 export const theme: GlobalThemeOverrides = {
   common: { primaryColor: '#0071e3', primaryColorHover: '#0063c7', primaryColorPressed: '#0055aa', primaryColorSuppl: '#0071e3',

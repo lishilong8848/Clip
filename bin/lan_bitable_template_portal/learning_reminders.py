@@ -2,6 +2,7 @@
 import datetime as dt
 import re
 import time
+from collections import Counter
 from uuid import NAMESPACE_URL, uuid5
 
 APP_TOKEN = 'KdCZbSL5CaTErKsFwFucddA5nYd'
@@ -9,11 +10,38 @@ TABLE_ID = 'tblRV9KeWFh9xCkm'
 VIEW_ID = 'vew6jLlGzq'
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
+ROSTER_VERSION = 2
 
 
 def shift_times(settings):
     return {'白': settings.get('publish_time') or SHIFT_TIMES['白'],
             '夜': settings.get('night_publish_time') or SHIFT_TIMES['夜']}
+
+
+def duty_recipients(service):
+    """Eligible personal recipients from the local HR snapshot; None means not ready."""
+    from .account_policy import categorize_position
+    from .learning_personal import _login_directory, _hr_active, _hr_learning_scopes
+    try:
+        directory, valid = _login_directory(service)
+    except Exception:
+        return None
+    if not valid:
+        return None
+    from .portal_service import BUILDING_OPEN_ID_MAP
+    owners = Counter(oid for row in directory.values() for oid in set(row.get('login_ids') or []))
+    shared = set(BUILDING_OPEN_ID_MAP.values())
+    targets = set()
+    for row in directory.values():
+        category = categorize_position(row.get('position'))
+        if category == 'other':
+            category = categorize_position(' '.join(row.get('assignments') or []))
+        if not _hr_active(row) or not _hr_learning_scopes(row) or category not in {'operator', 'shift_leader'}:
+            continue
+        targets.update(oid for oid in row.get('login_ids') or []
+                       if isinstance(oid, str) and re.fullmatch(r'ou_[A-Za-z0-9]+', oid)
+                       and owners[oid] == 1 and oid not in shared)
+    return targets
 
 
 def read_roster(service, day):
@@ -36,6 +64,11 @@ def read_roster(service, day):
                 raise ValueError('学练排班视图中排班日期无效，未发送。') from None
             if roster_day != day:
                 continue
+            scope = str(fields.get('机楼') or '').strip().removesuffix('楼').removesuffix('站')
+            if scope == '110':
+                continue
+            if scope not in tuple('ABCDEH'):
+                raise ValueError('学练排班楼栋不明确，未使用不完整名单发送。')
             users = fields.get('人员') or {}
             users = users.get('users', []) if isinstance(users, dict) else users
             if not isinstance(users, list):
@@ -46,7 +79,7 @@ def read_roster(service, day):
                     raise ValueError('学练排班人员缺少有效 OpenID，未使用不完整名单发送。')
                 shift = fields['班次']
                 people[(shift, open_id)] = {'open_id': open_id, 'shift': shift,
-                                           'name': str(user.get('name') or '')}
+                                           'scope': scope, 'name': str(user.get('name') or '')}
         if not data['has_more']:
             return list(people.values())
         cursor = data.get('page_token')
@@ -56,13 +89,16 @@ def read_roster(service, day):
     raise ValueError('学练排班视图分页未完成，未发送。')
 
 
-def enqueue_shift_reminders(service, current):
+def enqueue_shift_reminders(service, current, targets):
     times = shift_times(service.settings())
     if not service._shift_roster_reader or current.strftime('%H:%M') < min(times.values()):
         return
+    if targets is None:
+        service._last_error = '本地人员岗位目录暂未就绪，个人学练提醒等待核对后发送。'
+        return
     day = current.date().isoformat()
     snapshot = service._get('local', 'shift_roster') or {}
-    if snapshot.get('date') != day:
+    if snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION:
         retry = service._get('local', 'shift_roster_retry') or {}
         if retry.get('date') == day and retry.get('retry_at', 0) > time.time():
             return
@@ -73,11 +109,13 @@ def enqueue_shift_reminders(service, current):
                 service._put('local', 'shift_roster_retry', {'date': day, 'retry_at': time.time() + 300}, conn, False)
             service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
             return
-        snapshot = {'date': day, 'people': people}
+        snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION}
         with service.transaction() as conn:
             service._put('local', 'shift_roster', snapshot, conn, False)
     with service.transaction() as conn:
         for person in snapshot['people']:
+            if person['open_id'] not in targets or person.get('scope') not in tuple('ABCDEH'):
+                continue
             if current.strftime('%H:%M') < times[person['shift']]:
                 continue
             key = f"shift:{day}:{person['shift']}:{person['open_id']}"
@@ -86,6 +124,8 @@ def enqueue_shift_reminders(service, current):
             service._put('notification', key, {'id': key, 'kind': 'shift', 'scope': '', 'date': day,
                 'open_id': person['open_id'], 'shift': person['shift'], 'status': 'pending',
                 'message': f"【画像学练】{day} {person['shift']}班\n请登录本人的灯塔账号，进入今日学练完成答题。"}, conn)
+    return {(person['shift'], person['open_id']) for person in snapshot['people']
+            if person.get('scope') in tuple('ABCDEH')}
 
 
 def reminder_card(message, url):

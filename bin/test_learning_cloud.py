@@ -99,7 +99,8 @@ class FakeFeishu:
                     val = record["fields"].get(condition["field_name"])
                     if isinstance(val, list):
                         val = "".join(x["text"] for x in val)
-                    if val != condition["value"][0]:
+                    expected = condition['value'][0]
+                    if not (expected in (val or '') if condition['operator'] == 'contains' else val == expected):
                         return False
                 return True
             return self.page([r for r in records if matches(r)], request)
@@ -168,6 +169,79 @@ class LearningCloudTests(unittest.TestCase):
         }
         q.update(changes)
         return q
+
+    def sharing_batch(self):
+        from bin.test_learning_sharing import SOURCE, URL, typed_questions
+        self.fake.fields[cloud.SHARING_TABLE_ID] = [{'field_name': n, 'type': t} for n, t in cloud.SHARING_FIELDS.items()]
+        self.fake.records[cloud.SHARING_TABLE_ID] = []
+        return {'id': '1' * 32, 'status': 'published', 'title': '测试纪要', 'url': URL,
+                'question_types': ['single', 'multiple', 'interview'], 'source': {'text': SOURCE},
+                'questions': typed_questions(['single', 'multiple', 'interview'], 5)}
+
+    def test_sharing_bank_three_types_and_idempotency_without_schema_writes(self):
+        batch = self.sharing_batch()
+        for q in batch['questions']:
+            rid = self.remote.save_sharing_question(batch, q, 'job-' + q['id'])
+            self.assertEqual(self.new_remote().save_sharing_question(batch, q, 'job-' + q['id']), rid)
+        records = self.fake.records[cloud.SHARING_TABLE_ID]
+        self.assertEqual(len(records), 5)
+        self.assertEqual(len(self.fake.mutations()), 5)
+        for row, q in zip(records, batch['questions']):
+            fields = row['fields']
+            self.assertEqual(fields['会议名称'], batch['title'])
+            self.assertEqual(fields['会议纪要链接'], batch['url'])
+            metadata = json.loads(fields[cloud.META_FIELD])
+            self.assertEqual(metadata['type'], q['type'])
+            self.assertNotIn('participants', metadata)
+            if q['type'] == 'interview':
+                self.assertNotIn('选项', fields)
+                self.assertEqual(fields['答案'], q['reference_answer'])
+            else:
+                self.assertEqual(fields['答案'], '、'.join(chr(65 + i) for i in q['correct']))
+                self.assertIn('A. ', fields['选项'])
+        tokens = [c[2]['client_token'] for c in self.fake.mutations()]
+        self.assertTrue(all(uuid.UUID(token).version == 4 for token in tokens))
+        self.assertEqual(len(set(tokens)), 5)
+
+    def test_sharing_bank_recovers_committed_write_after_response_loss(self):
+        batch = self.sharing_batch(); q = batch['questions'][0]
+        def fail(request, response):
+            if request.method == 'POST' and request.url.path.endswith('/records'):
+                raise httpx.ReadTimeout('offline unknown outcome')
+        self.fake.after = fail
+        with self.assertRaises(cloud.LearningCloudWriteUncertain):
+            self.remote.save_sharing_question(batch, q, 'original-job')
+        self.assertEqual(len(self.fake.records[cloud.SHARING_TABLE_ID]), 1)
+        self.fake.after = None
+        self.fake.calls.clear()
+        rid = self.new_remote().save_sharing_question(batch, q, 'original-job')
+        self.assertEqual(rid, 'recNew1')
+        self.assertFalse(self.fake.mutations())
+
+    def test_sharing_bank_refuses_changed_or_duplicate_remote_question(self):
+        batch = self.sharing_batch(); q = batch['questions'][0]
+        self.remote.save_sharing_question(batch, q, 'job')
+        record = self.fake.records[cloud.SHARING_TABLE_ID][0]
+        record['fields']['题目'] = '人工修改后的题目'
+        self.fake.calls.clear()
+        with self.assertRaisesRegex(cloud.LearningCloudError, '不一致'):
+            self.remote.save_sharing_question(batch, q, 'job')
+        self.assertFalse(self.fake.mutations())
+        self.fake.records[cloud.SHARING_TABLE_ID].append(copy.deepcopy(record))
+        with self.assertRaisesRegex(cloud.LearningCloudError, '多条'):
+            self.remote.save_sharing_question(batch, q, 'job')
+        self.assertFalse(self.fake.mutations())
+
+    def test_sharing_bank_rejects_unpublished_foreign_question_and_wrong_schema(self):
+        batch = self.sharing_batch(); q = batch['questions'][0]
+        for value, item in (({**batch, 'status': 'draft'}, q), (batch, {**q, 'id': 'q99'})):
+            with self.assertRaises(cloud.LearningCloudError): self.remote.save_sharing_question(value, item, 'job')
+        self.assertFalse(self.fake.calls)
+        self.fake.fields[cloud.SHARING_TABLE_ID][0]['type'] = 2
+        with self.assertRaisesRegex(cloud.LearningCloudError, '类型错误'):
+            self.remote.save_sharing_question(batch, q, 'job')
+        self.assertFalse(self.fake.mutations())
+        with self.assertRaises(cloud.LearningCloudError): self.new_remote(enabled=False).save_sharing_question(batch, q, 'job')
 
     def test_disabled_initialization_and_writes_do_not_touch_http_or_credentials(self):
         remote = self.new_remote(enabled=False)

@@ -17,6 +17,8 @@ from .lighthouse_bridge import PortalAuthority, actor_for
 
 
 def install_lighthouse_routes(app, controller, runtime):
+    from .lighthouse_icon_weather import install_icon_weather
+    install_icon_weather(app, controller, runtime)
     client, authority = None, None
     lock = asyncio.Lock()
     preparation = None
@@ -84,13 +86,13 @@ def install_lighthouse_routes(app, controller, runtime):
             raise AssistantError('后台推荐标签未完成。', 503)
         return result['data']
 
-    async def generate_sharing_questions(owner, source, previous, count):
+    async def generate_sharing_questions(owner, source, previous, count, question_types=None):
         current, _ = await ready()
         http = await current.http_client()
         response = await http.post(f"http://127.0.0.1:{current.descriptor['port']}/generate-sharing-questions",
             headers={'Authorization': 'Bearer ' + current.key}, timeout=100,
             json={'instance': current.instance, 'lease': current.lease, 'owner': owner,
-                  'source': source, 'previous': previous, 'count': count})
+                  'source': source, 'previous': previous, 'count': count, 'question_types': question_types})
         result = response.json()
         if not result.get('ok'):
             raise AssistantError(str(result.get('error') or '分享会出题未完成，请核对本人模型配置及纪要内容后重试。')[:500], 503)

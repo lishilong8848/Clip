@@ -1,5 +1,5 @@
-import {createApp,h,ref} from 'vue';
-import {installActionMotion,trackButtonRequest} from '../../src/workspace-v2/actionMotion';
+import {createApp,h,nextTick,ref} from 'vue';
+import {installActionMotion,trackButtonRequest,trackButtonPresentation} from '../../src/workspace-v2/actionMotion';
 import {followBottom,shouldFollow} from '../../src/workspace-v2/chatMotion';
 import AnimatedReply from '../../src/workspace-v2/AnimatedReply.vue';
 import PasswordStrength from '../../src/workspace-v2/PasswordStrength.vue';
@@ -14,6 +14,7 @@ document.documentElement.classList.add('workspace-v2');
 installActionMotion();
 const text=ref('');
 const finished=ref(false),saving=ref(false);
+const drawer=ref(false);
 const password=ref('fixture-only'),newPassword=ref(''),passwordError=ref(''),active=ref('home');
 const chartItems=ref([{label:'10/01',value:2},{label:'10/02',value:6},{label:'10/03',value:3}]);
 const test=window as any;
@@ -24,6 +25,8 @@ test.changeChart=()=>chartItems.value=[{label:'10/01',value:8},{label:'10/02',va
 createApp({setup:()=>{usePasswordFeedback(passwordError,[password]);return()=>h('div',{},[
   h('button',{id:'save',style:'width:180px;height:40px;',onClick:()=>{test.clicked++;void trackButtonRequest(new Promise((resolve,reject)=>{test.resolve=resolve;test.reject=reject;})).catch(()=>{});}},'保存变更'),
   h('button',{id:'dynamic-save',disabled:saving.value||finished.value,style:'width:180px;height:40px;',onClick:()=>{saving.value=true;void trackButtonRequest(new Promise(resolve=>{test.resolveDynamic=()=>{finished.value=true;saving.value=false;resolve({ok:true});};}));}},finished.value?'已完成':saving.value?'正在处理':'完成后禁用'),
+  h('button',{id:'open-drawer',style:'width:180px;height:40px;',onClick:()=>{drawer.value=true;trackButtonPresentation(nextTick());void trackButtonRequest(new Promise(resolve=>test.finishDrawerRead=resolve));}},'打开机柜详情'),
+  drawer.value?h('section',{id:'drawer-fixture'},'详情已打开，历史加载中'):null,
   h('label',{},[h('input',{id:'toggle',type:'checkbox'}),'勾选项目']),
   h('label',{},[h('input',{id:'binary',type:'checkbox','data-v2-binary':''}),'二选一设置']),
   h('input',{id:'personnel-password',type:'password',value:password.value,onInput:(e:Event)=>password.value=(e.target as HTMLInputElement).value}),

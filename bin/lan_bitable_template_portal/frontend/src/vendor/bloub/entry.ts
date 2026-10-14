@@ -18,6 +18,8 @@ import { STATE_BY_ID, type StateId } from './engine/states'
 import { SEQUENCE } from './engine/states'
 import { lookTarget } from './gaze'
 import { springStep } from './engine/math'
+import { WeatherLighthouse } from './weatherLighthouse'
+import type { WeatherScene } from '../../botWeather'
 
 export type { StateId } from './engine/states'
 
@@ -80,6 +82,8 @@ export class BloubBot {
   private motionUntil = 0
   private greeting = false
   private scene: SVGGElement
+  private weatherLighthouse?: WeatherLighthouse
+  private weatherScene: WeatherScene = { weather: 'unknown', phase: 'day', x: 260, y: 200, title: '雾屿灯塔' }
   private motion = {
     lift: [0, 0], scale: [1, 0], roll: [0, 0], stretch: [0, 0],
   }
@@ -332,6 +336,7 @@ export class BloubBot {
     this.svg.addEventListener('click', this.fnClickReact)
     this.svg.addEventListener('pointerenter', this.fnHover)
     this.svg.addEventListener('pointerleave', this.fnHoverEnd)
+    this.setShape(this.opts.shape)
     this.render(this.frame)
     this.raf = requestAnimationFrame(this.fnTick)
   }
@@ -363,6 +368,7 @@ export class BloubBot {
   /** Suspend rendering while the page is hidden. */
   setActive(active: boolean) {
     if (this.disposed) return
+    this.weatherLighthouse?.setActive(active && this.opts.shape === 'weather-lighthouse', this.reducedMotion)
     if (!active) {
       this.active = false
       if (this.dragging) { this.clickBlocked = true; this.fnUp() }
@@ -381,7 +387,7 @@ export class BloubBot {
   }
 
   /** Keep eye feedback and transitions, without decorative bouncing or tilting. */
-  setReducedMotion(value: boolean) { this.reducedMotion = value }
+  setReducedMotion(value: boolean) { this.reducedMotion = value; this.weatherLighthouse?.setActive(this.active && this.opts.shape === 'weather-lighthouse', value) }
 
   /** 跳到某个状态（跨状态有 morph 过渡）；frozen 设备下自动从该状态继续播放 */
   setState(id: StateId) {
@@ -426,6 +432,19 @@ export class BloubBot {
     this.opts.shape = id
     this.shapeRadii = SHAPE_BY_ID.get(id)?.radii ?? null
     this.engine.setShape(this.shapeRadii, this.clock)
+    this.svg.style.overflow = id === 'weather-lighthouse' ? 'visible' : ''
+    if (id === 'weather-lighthouse' && !this.weatherLighthouse) this.weatherLighthouse = new WeatherLighthouse(this.scene, this.uid)
+    for (const layer of Array.from(this.scene.children)) layer.setAttribute('display', layer === this.weatherLighthouse?.root
+      ? id === 'weather-lighthouse' ? '' : 'none' : id === 'weather-lighthouse' ? 'none' : '')
+    if (this.weatherLighthouse) {
+      this.weatherLighthouse.setWeather(this.weatherScene)
+      this.weatherLighthouse.setActive(this.active && id === 'weather-lighthouse', this.reducedMotion)
+    }
+  }
+
+  setWeather(scene: WeatherScene) {
+    this.weatherScene = scene; this.weatherLighthouse?.setWeather(scene)
+    if (this.opts.shape === 'weather-lighthouse') this.svg.setAttribute('aria-label', scene.title)
   }
 
   /** 设置休息表情（neutre/colere/heureux...） */
@@ -519,8 +538,9 @@ export class BloubBot {
   }
 
   private clampShift() {
+    const top = this.opts.shape === 'weather-lighthouse' ? 12 + this.opts.size * .3 : 12
     this.dragShiftX = Math.min(Math.max(this.homeX + this.dragShiftX, 12), Math.max(12, window.innerWidth - this.opts.size - 12)) - this.homeX
-    this.dragShiftY = Math.min(Math.max(this.homeY + this.dragShiftY, 12), Math.max(12, window.innerHeight - this.opts.size - 12)) - this.homeY
+    this.dragShiftY = Math.min(Math.max(this.homeY + this.dragShiftY, top), Math.max(top, window.innerHeight - this.opts.size - 12)) - this.homeY
   }
 
   /** 释放：停止动画并移除 DOM */
@@ -683,6 +703,7 @@ export class BloubBot {
   }
 
   private render(f: BotFrame) {
+    if (this.opts.shape === 'weather-lighthouse' && this.weatherLighthouse) { this.weatherLighthouse.render(f); return }
     const vb = DEMI_VIEWBOX
 
     // --- mask（身体白色 + 眼睛黑色洞 + 通知凹口）---

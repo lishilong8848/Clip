@@ -40,6 +40,10 @@ class EngagementTests(unittest.TestCase):
             for p in self.service._all('person', conn):
                 p['login_ids'] = ['ou_' + p['id']]
                 self.service._put('person', p['id'], p, conn, False)
+        self.personal_hr = {p['id']: {'scopes': p['scopes'], 'selectable': True,
+            'position': '值班员', 'login_ids': p['login_ids']} for p in self.service._all('person')}
+        self.hr = {'people': copy.deepcopy(self.personal_hr)}
+        self.service._login_people_reader = lambda: self.hr
 
     def start(self, paper):
         return self.dispatch('paper.start', {'id': paper['id'], 'person_id': paper['person_id']}, self.self_actor(paper['person_id']))
@@ -82,7 +86,7 @@ class EngagementTests(unittest.TestCase):
         self.assertIn('14题未提交', json.dumps(self.sender.calls[0][1], ensure_ascii=False))
         self.send(CURRENT + dt.timedelta(hours=2, minutes=1))
         self.assertEqual(len(self.sender.calls), 1)
-        self.service = learning.LearningService(self.root, self.cloud, self.sender, get_portal_url=lambda: 'http://portal.test:18766')
+        self.service = learning.LearningService(self.root, self.cloud, self.sender, get_portal_url=lambda: 'http://portal.test:18766', get_login_people=lambda: self.hr)
         self.send(CURRENT + dt.timedelta(hours=2, minutes=6))
         self.send(CURRENT + dt.timedelta(days=1))
         self.assertEqual(len(self.sender.calls), 2)
@@ -151,12 +155,55 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual(len(self.sender.calls), before)
 
     def test_week_boundary_and_no_old_backfill(self):
-        self.weekly(CURRENT.replace(hour=8, minute=59))
-        self.assertFalse(self.sender.calls)
+        self.weekly(CURRENT.replace(hour=0, minute=0))
+        self.assertIsNotNone(self.service._get('engagement', 'week:2026-09-21:summary:group'))
         self.weekly(dt.datetime(2027, 1, 5, 9, tzinfo=learning.TZ))
         report = self.service._get('engagement', 'week:2026-12-28:summary:group')
         self.assertEqual(report['end'], '2027-01-03')
-        self.assertEqual(len([j for j in self.service._all('engagement') if j['kind'] == 'weekly_batch']), 1)
+        self.assertEqual(len([j for j in self.service._all('engagement') if j['kind'] == 'weekly_batch']), 2)
+
+    def test_finished_week_sends_at_monday_midnight_beijing(self):
+        paper = self.claim()
+        self.answer(paper)
+        sunday = dt.datetime(2026, 10, 4, 23, 59, 59, tzinfo=learning.TZ)
+        self.weekly(sunday)
+        self.assertIsNone(self.service._get('engagement', 'week:2026-09-28:summary:group'))
+        self.weekly((sunday + dt.timedelta(seconds=1)).astimezone(dt.timezone.utc))
+        summary = self.service._get('engagement', 'week:2026-09-28:summary:group')
+        self.assertEqual((summary['date'], summary['end'], summary['items'][0]['answered']), ('2026-09-28', '2026-10-04', 1))
+        self.assertEqual(summary['status'], 'sent')
+
+    def test_personal_reports_only_duty_roles_but_summary_keeps_every_participant(self):
+        self.hr['people']['p1']['position'] = '工程师'
+        self.hr['people']['p2']['position'] = '值班长'
+        self.hr['people']['p3']['position'] = '经理'
+        for pid in ('p1', 'p2', 'p3'):
+            self.answer(self.claim(pid))
+        self.weekly()
+        personal = {target for target, _, key in self.sender.calls if ':summary:' not in key}
+        self.assertEqual(personal, {'ou_p2', 'ou_p4', 'ou_p5', 'ou_p6'})
+        group = self.service._get('engagement', 'week:2026-09-28:summary:group')
+        self.assertEqual({p['person_id'] for p in group['items']}, {'p1', 'p2', 'p3'})
+
+    def test_pending_timeout_and_weekly_recheck_changed_role_before_retry(self):
+        paper = self.claim(); self.start(paper)
+        self.sender.fail_once = True
+        self.send(CURRENT + dt.timedelta(hours=2))
+        self.hr['people']['p1']['position'] = '工程师'
+        self.send(CURRENT + dt.timedelta(hours=2, minutes=6))
+        self.assertEqual(self.service._get('engagement', 'timeout:' + paper['id'])['status'], 'skipped_role')
+        self.assertEqual(len(self.sender.calls), 1)
+        self.hr['people']['p1']['position'] = '值班员'
+        self.weekly()
+        with self.service.transaction() as conn:
+            job = self.service._get('engagement', 'week:2026-09-28:p1', conn)
+            job.update(status='pending', sent_to=[])
+            self.service._put('engagement', job['id'], job, conn)
+        self.hr['people']['p1']['position'] = '工程师'
+        self.sender.calls.clear()
+        self.send(CURRENT + dt.timedelta(days=7, minutes=6))
+        self.assertEqual(self.service._get('engagement', job['id'])['status'], 'skipped_role')
+        self.assertNotIn('ou_p1', [target for target, _, _ in self.sender.calls])
 
     def test_weekly_later_practice_counts_in_its_week_and_invalid_excluded(self):
         p = self.claim(); result = self.answer(p, wrong=True)
@@ -375,8 +422,8 @@ class EngagementTests(unittest.TestCase):
         self.assertIn('还有1题未提交', json.dumps(card, ensure_ascii=False))
 
     def manager_directory(self, rows):
-        self.hr = {'people': {rid: {'scopes': ['A'], 'selectable': True, 'inactive': False,
-            'position': '主管', 'login_ids': ['ou_' + rid], **values} for rid, values in rows.items()}}
+        self.hr = {'people': {**copy.deepcopy(self.personal_hr), **{rid: {'scopes': ['A'], 'selectable': True, 'inactive': False,
+            'position': '主管', 'login_ids': ['ou_' + rid], **values} for rid, values in rows.items()}}}
         self.service._login_people_reader = lambda: self.hr
 
     def test_supervisors_use_local_roles_unique_identity_and_own_scope(self):
@@ -440,15 +487,17 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual(len(second_keys), 2)
         self.assertEqual(second_keys[0], second_keys[1])
 
-    def test_unavailable_directory_does_not_block_group_or_people_and_recovers_locally(self):
+    def test_unavailable_directory_does_not_block_group_and_recovers_locally(self):
         self.service._login_people_reader = lambda: (_ for _ in ()).throw(OSError('local busy'))
         self.weekly()
         self.assertIn(engagement.WEEKLY_CHAT_ID, [target for target, _, _ in self.sender.calls])
+        self.assertFalse(any(':summary:' not in key for _, _, key in self.sender.calls))
         self.assertEqual(self.service._get('engagement', 'week:2026-09-28:summary:A')['status'], 'pending')
         self.manager_directory({'found': {}})
         self.send(CURRENT + dt.timedelta(days=7, minutes=6))
         self.assertEqual(sum(target == 'ou_found' for target, _, _ in self.sender.calls), 1)
         self.assertEqual(sum(target == engagement.WEEKLY_CHAT_ID for target, _, _ in self.sender.calls), 1)
+        self.assertIn('ou_p1', [target for target, _, _ in self.sender.calls])
 
     def test_personal_pie_uses_first_choices_only_and_handles_zero_scores(self):
         for correct, wrong in ((7, 3), (10, 0), (0, 10)):

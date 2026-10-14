@@ -7,6 +7,12 @@ export function setReadCacheIdentity(identity: string): void {
 }
 export type Dict = Record<string, any>;
 
+export const NETWORK_ERROR_MESSAGE = '暂时无法连接服务，请检查网络连接后重试。';
+function readableError(message: string): string {
+  return /^(?:TypeError:\s*)?(?:Failed to fetch|fetch failed|Load failed|Network request failed|NetworkError(?: when attempting to fetch resource)?)[.!]?$/i.test(message.trim())
+    ? NETWORK_ERROR_MESSAGE : message;
+}
+
 export type ApiClientHooks = {
   onOnline?: () => void;
   onOffline?: (message: string, error: unknown) => void;
@@ -55,7 +61,7 @@ export class ApiError extends Error {
       offline?: boolean;
     } = {},
   ) {
-    super(message);
+    super(readableError(message));
     this.name = "ApiError";
     this.status = options.status ?? 0;
     this.payload = options.payload || {};
@@ -223,7 +229,7 @@ async function requestResponseJson(
       throw new ApiError(message, { status: response.status, payload, authRequired: true });
     }
     if (response.status >= 500) {
-      hooks.onServerError?.(String(payload.error || "服务异常，稍后会自动重试。"), response, payload);
+      hooks.onServerError?.(readableError(String(payload.error || "服务异常，稍后会自动重试。")), response, payload);
     }
     if (!response.ok || payload.ok === false) {
       throw new ApiError(String(payload.error || `HTTP ${response.status}`), { status: response.status, payload });
@@ -238,10 +244,9 @@ async function requestResponseJson(
       throw new ApiError(requestSignal.timedOut() ? "请求超时，请稍后重试。" : "请求已取消。");
     }
     if (error instanceof ApiError) throw error;
-    const message = error instanceof Error && error.message ? error.message : "服务连接中断";
-    hooks.onOffline?.("服务连接中断，已保留当前页面数据。", error);
+    hooks.onOffline?.(NETWORK_ERROR_MESSAGE, error);
     window.dispatchEvent(new Event("clipflow-api-offline"));
-    throw new ApiError(message, { offline: true });
+    throw new ApiError(NETWORK_ERROR_MESSAGE, { offline: true });
   } finally {
     requestSignal.cleanup();
   }
@@ -283,6 +288,11 @@ export async function downloadFile(path: string, options: ApiRequestOptions = {}
   } catch (error) {
     if (requestSignal.signal.aborted) {
       throw new ApiError(requestSignal.timedOut() ? "文件生成或下载超时，请稍后重试。" : "下载已取消。");
+    }
+    if (!(error instanceof ApiError) && error instanceof Error &&
+        (error instanceof TypeError || readableError(error.message) === NETWORK_ERROR_MESSAGE)) {
+      window.dispatchEvent(new Event("clipflow-api-offline"));
+      throw new ApiError(NETWORK_ERROR_MESSAGE, { offline: true });
     }
     throw error;
   } finally {
@@ -455,7 +465,7 @@ export async function uploadJson(path: string, body: FormData, options: UploadJs
           return;
         }
         if (xhr.status >= 500) {
-          hooks.onServerError?.(String(payload.error || "服务异常，请稍后重试。"), null as unknown as Response, payload);
+          hooks.onServerError?.(readableError(String(payload.error || "服务异常，请稍后重试。")), null as unknown as Response, payload);
         }
         const okStatus = xhr.status >= 200 && xhr.status < 300;
         if (!okStatus || payload.ok === false) {
@@ -476,9 +486,9 @@ export async function uploadJson(path: string, body: FormData, options: UploadJs
           reject(new ApiError(timedOut ? "上传超时，网络较慢或文件过大，请稍后重试。" : "上传已取消。"));
           return;
         }
-        hooks.onOffline?.("服务连接中断，已保留当前页面数据。", new Error("network error"));
+        hooks.onOffline?.(NETWORK_ERROR_MESSAGE, new Error("network error"));
         window.dispatchEvent(new Event("clipflow-api-offline"));
-        reject(new ApiError("服务连接中断", { offline: true }));
+        reject(new ApiError(NETWORK_ERROR_MESSAGE, { offline: true }));
       };
       xhr.ontimeout = () => {
         timedOut = true;

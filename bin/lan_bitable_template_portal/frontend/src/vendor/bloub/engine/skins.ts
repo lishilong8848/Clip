@@ -39,6 +39,7 @@ export type ShapeId =
   | 'flower'
   | 'diamond'
   | 'shield'
+  | 'weather-lighthouse'
 
 export interface BotShape {
   id: ShapeId

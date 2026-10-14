@@ -4,7 +4,7 @@
       <VnetBackButton v-if="scope || !readOnly" :to="scope ? '/cabinet-power' : '/?entry=capacity'" />
       <div class="heading-title"><h1>{{ scope ? scope + '楼机柜上下电' : '机柜上下电' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>
       <div class="actions">
-        <button v-if="!readOnly" :disabled="loading || busy || bootstrapActive || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive }" />刷新</button>
+        <button v-if="!readOnly" :disabled="loading || busy || bootstrapActive || bootstrapReading || bootstrapStarting || allExportBusy" @click="refresh"><RefreshCw :size="16" :class="{ spin: loading || busy || bootstrapActive || bootstrapReading || bootstrapStarting }" />刷新</button>
         <button v-if="isAdmin" :disabled="serverStorageLoading" @click="loadServerStorage"><HardDrive :size="16" /><LoadingIndicator v-if="serverStorageLoading">读取缓存中</LoadingIndicator><template v-else>本地缓存</template></button>
         <button v-if="!readOnly" @click="navigate(batchCreateUrl)"><Files :size="16" />批量登记</button>
         <button v-if="!readOnly" @click="openTodoBatches"><ClipboardList :size="16" />上下电待办<span v-if="batchPendingCount > 0" class="count-badge">{{ batchPendingCount }}</span><span v-else-if="batchPendingCount < 0" class="count-badge" title="待办数量读取失败">!</span></button>
@@ -17,6 +17,8 @@
       </div>
     </header>
     <div v-if="error" class="notice danger" role="alert">{{ error }}<button @click="error = ''" aria-label="关闭错误"><X :size="16" /></button></div>
+    <div v-if="bootstrapConnectionError" class="notice danger" role="alert"><span>{{ bootstrapConnectionError }}</span><button :disabled="bootstrapReading || bootstrapStarting" @click="pollBootstrap()">重新连接</button></div>
+    <div v-else-if="(bootstrapReading || bootstrapStarting) && !bootstrap.status" class="notice" role="status"><Loader2 class="spin" :size="18" />正在读取本地资料状态…</div>
     <div v-if="batchStatusError || pendingWritesError" class="notice danger" role="alert"><span>{{ [batchStatusError,pendingWritesError].filter(Boolean).join('；') }}</span><button @click="loadBatchCount(); loadPending()">重试读取</button></div>
     <div v-if="bootstrapVisible" class="notice bootstrap-notice" :class="{ danger: bootstrapFailed }" role="status" aria-live="polite">
       <Loader2 v-if="bootstrapActive" class="spin" :size="18" />
@@ -25,7 +27,7 @@
         <progress :value="bootstrap.ready || 0" :max="bootstrap.total || 5">{{ bootstrap.ready || 0 }}/{{ bootstrap.total || 5 }}</progress>
         <div class="bootstrap-buildings"><span v-for="item in bootstrap.buildings || []" :key="item.scope" :class="'status-' + item.status" :title="item.error || ''">{{ item.scope }}楼 {{ bootstrapStatusLabel(item.status) }}</span></div>
       </div>
-      <button v-if="bootstrapHasFailures" :disabled="bootstrapActive" @click="startBootstrap(true)">重试初始化</button>
+      <button v-if="bootstrapHasFailures" :disabled="bootstrapActive || bootstrapStarting" @click="startBootstrap(true)">重试初始化</button>
     </div>
     <div v-if="loading && !bootstrapActive" class="notice" role="status"><Loader2 class="spin" :size="18" />正在读取台账…</div>
     <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ startingJob ? (startingKind === 'exports' ? '正在准备导出数据…' : '正在启动同步…') : job.kind === 'export' ? exportPhaseLabel(job.phase) : '正在同步飞书…' }}</div>
@@ -269,6 +271,7 @@ const storageFailed = () => { storageWarning.value = '浏览器无法保存恢�
 const taskStorage = resilientStorage('localStorage', storageFailed);
 const draftStorage = resilientStorage('sessionStorage', storageFailed);
 const overview = ref<Dict>({}), buildings = ref<Dict[]>([]), loading = ref(false), error = ref(''), message = ref(''), bootstrap = ref<Dict>({});
+const bootstrapConnectionError = ref(''), bootstrapReading = ref(false), bootstrapStarting = ref(false);
 const batchPendingCount = ref(0);
 const batchStatusError = ref(''), pendingWritesError = ref('');
 const batchCreateUrl = computed(() => `/cabinet-power/batches?${new URLSearchParams({ ...(props.scope ? { scope:props.scope } : {}), mode:'new', origin:'cabinet' })}`);
@@ -278,7 +281,7 @@ const bootstrapTarget = computed(() => props.scope ? (bootstrap.value.buildings 
 const bootstrapTargetReady = computed(() => props.scope ? bootstrapTarget.value?.status === 'succeeded' : bootstrap.value.status === 'succeeded');
 const bootstrapHasFailures = computed(() => Number(bootstrap.value.failed || 0) > 0);
 const bootstrapFailed = computed(() => ['failed','partial'].includes(String(bootstrap.value.status || '')) && !bootstrapTargetReady.value);
-const bootstrapVisible = computed(() => bootstrapActive.value || ['failed','partial'].includes(String(bootstrap.value.status || '')));
+const bootstrapVisible = computed(() => !bootstrapConnectionError.value && (bootstrapActive.value || ['failed','partial'].includes(String(bootstrap.value.status || ''))));
 const bootstrapMessage = computed(() => {
   if (bootstrapActive.value) return `正在从多维表初始化本地资料，已完成 ${bootstrap.value.ready || 0}/${bootstrap.value.total || 5} 栋`;
   const failures = (bootstrap.value.buildings || []).filter((item: Dict) => item.status === 'failed').map((item: Dict) => `${item.scope}楼：${item.error || '拉取失败'}`);
@@ -326,48 +329,55 @@ const scheduleVisible = (callback: () => void, delay: number) => window.setTimeo
 const cancelled = (exc: any) => String(exc?.message || '').includes('已取消');
 function fail(exc: any): void { error.value = exc?.message || '读取失败，请重试'; }
 async function applyBootstrap(data: Dict): Promise<void> {
+  if (disposed) return;
+  if (!Array.isArray(data.buildings) || !['idle','pending','running','succeeded','failed','partial'].includes(data.status)) throw new Error('本地资料状态暂不可用，请稍后重新连接。');
   bootstrap.value = data;
-  if (error.value.includes('初始化状态暂未读取到')) error.value = '';
+  bootstrapConnectionError.value = '';
   if (props.scope && bootstrapTargetReady.value && !initialDataLoaded) { await load(); initialDataLoaded = Boolean(overview.value.rooms); }
-  if (!props.scope && Number(data.ready || 0) !== loadedReadyCount) { await load(); loadedReadyCount = Number(data.ready || 0); initialDataLoaded = loadedReadyCount > 0; }
+  if (!props.scope && Number(data.ready || 0) !== loadedReadyCount) { if (await load()) { loadedReadyCount = Number(data.ready || 0); initialDataLoaded = loadedReadyCount > 0; } }
   if (bootstrapActive.value && !disposed) bootstrapTimer = scheduleVisible(pollBootstrap,1000);
 }
-async function pollBootstrap(): Promise<void> {
-  if (disposed) return;
-  try { await applyBootstrap(await read('bootstrap',{},15000)); }
-  catch { error.value = '初始化状态暂未读取到，后台仍在继续拉取…'; if (!disposed) bootstrapTimer = scheduleVisible(pollBootstrap,4000); }
+async function pollBootstrap(startMissing = false): Promise<void> {
+  if (disposed || bootstrapReading.value || bootstrapStarting.value) return;
+  window.clearTimeout(bootstrapTimer); bootstrapReading.value = true;
+  try {
+    const data = await read('bootstrap',{},15000);
+    await applyBootstrap(data);
+    // A failed read never means the local data is missing, and must not start a write.
+    if (!disposed && startMissing && data.buildings.some((item: Dict) => item.status === 'idle')) await startBootstrap();
+  }
+  catch (exc: any) { if (!disposed) { bootstrapConnectionError.value = exc?.message || '本地资料状态暂不可用，请稍后重新连接。'; bootstrapTimer = scheduleVisible(pollBootstrap,4000); } }
+  finally { bootstrapReading.value = false; }
 }
 async function startBootstrap(retryFailed = false): Promise<void> {
-  if (bootstrapActive.value) return;
-  error.value = ''; bootstrap.value = { status:'starting', total:5, ready:0, buildings:['A','B','C','D','E'].map(scope => ({ scope, status:'pending' })) };
+  if (disposed || bootstrapActive.value || bootstrapStarting.value || !bootstrap.value.buildings?.length) return;
+  window.clearTimeout(bootstrapTimer); bootstrapStarting.value = true; bootstrapConnectionError.value = '';
   try { await applyBootstrap(await write('bootstrap',{ retry_failed:retryFailed })); }
   catch (exc: any) {
-    if (exc?.status === 404) {
-      const buildings = (bootstrap.value.buildings || ['A','B','C','D','E'].map(scope => ({ scope }))).map((item: Dict) => item.status === 'succeeded' ? item : ({ ...item, status:'failed', error:'后台未加载初始化接口' }));
-      const ready = buildings.filter((item: Dict) => item.status === 'succeeded').length;
-      bootstrap.value = { ...bootstrap.value, status:ready ? 'partial' : 'failed', total:5, completed:5, ready, failed:5-ready, buildings };
-      error.value = '当前后台仍是旧版本，未加载机柜初始化接口。请彻底退出程序后重新启动；若仍出现此提示，请结束占用 18766 端口的旧后台进程。';
-      return;
+    if (!disposed) {
+      bootstrapConnectionError.value = exc?.message || '初始化请求结果暂未确认，请稍后重新连接。';
+      if (!exc?.status || exc.status >= 500) bootstrapTimer = scheduleVisible(pollBootstrap,4000);
     }
-    bootstrap.value = { ...bootstrap.value, status:'running' };
-    error.value = '初始化请求暂未返回，后台仍在继续拉取…';
-    if (!disposed) bootstrapTimer = scheduleVisible(pollBootstrap,2000);
   }
+  finally { bootstrapStarting.value = false; }
 }
-async function load(): Promise<void> {
+async function load(): Promise<boolean> {
   loading.value = true;
   try {
-    if (!props.scope) { buildings.value = (await read('buildings')).buildings; error.value = ''; return; }
-    overview.value = await read('overview',{summary:'1'});
+    if (!props.scope) { buildings.value = (await read('buildings')).buildings; error.value = ''; return true; }
+    const next = await read('overview',{summary:'1'});
+    if (next.version === overview.value.version) next.racks = overview.value.racks;
+    overview.value = next;
     if (!query.sheet) query.sheet = overview.value.sheet_formats?.[0]?.sheet || '';
     error.value = ''; loading.value = false; racksLoading.value = true;
     const racks = await read('racks');
     if (racks.version === overview.value.version) overview.value.racks = racks.items || [];
-  } catch (exc) { fail(exc); }
+    return true;
+  } catch (exc) { fail(exc); return false; }
   finally { loading.value = false; racksLoading.value = false; }
 }
 async function loadBatchCount(): Promise<void> { try { batchPendingCount.value = Number((await read('batches',{page_size:'1',status:'todo',...(props.scope?{scope:props.scope}:{})})).pending_count || 0); batchStatusError.value=''; } catch { batchPendingCount.value=-1; batchStatusError.value='上下电待办数量读取失败，当前数量未知'; } }
-usePageReadRefresh(url => ['/api/cabinet-power/buildings','/api/cabinet-power/overview','/api/cabinet-power/racks'].includes(url.pathname) && (url.searchParams.get('scope') || '') === props.scope, load, () => !loading.value && !disposed && !saving.value && !editorOpen.value);
+usePageReadRefresh(url => ['/api/cabinet-power/buildings','/api/cabinet-power/overview','/api/cabinet-power/racks'].includes(url.pathname) && (url.searchParams.get('scope') || '') === props.scope, async () => { await load(); }, () => !loading.value && !disposed && !saving.value && !editorOpen.value);
 const job = ref<Dict>({}), exported = ref<Dict>({}), startingJob = ref(false), startingKind = ref(''), pendingExportRequest = ref('');
 const pendingWrites = ref<Dict[]>([]), exportList = ref<Dict[]>([]), exportListOpen = ref(false), exportHistoryLoading = ref(false), exportPage = ref(1), exportTotal = ref(0), cleanupTarget = ref<Dict | null>(null);
 const exportPageCount = computed(() => Math.max(1,Math.ceil(exportTotal.value/20)));
@@ -472,7 +482,7 @@ async function resumeAllExports(): Promise<void> {
     await pollAllExports();
   } catch (exc) { fail(exc); allExportStatus.value = 'checking'; allExportBusy.value = false; }
 }
-async function refresh(): Promise<void> { invalidateReadCache(); if (!initialDataLoaded || bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
+async function refresh(): Promise<void> { invalidateReadCache(); if (bootstrapConnectionError.value || !initialDataLoaded) await pollBootstrap(true); else if (bootstrapHasFailures.value) await startBootstrap(true); else if (props.scope) await startJob('refresh'); else await load(); }
 const query = reactive({ q: '', room: '', direction: '', from: '', to: '', sheet: '' }), onlyIssues = ref(false), records = ref<Dict>({}), recordsLoading = ref(false);
 const activeFormat = computed(() => overview.value.sheet_formats?.find((f: Dict) => f.sheet === query.sheet));
 const moveOverview = ref<Dict>({}), moveLoading = ref(false);
@@ -740,7 +750,7 @@ onMounted(async () => {
   }
   if (props.readOnly) { await load(); return; }
   if (!props.scope) restoreAllExports();
-  await startBootstrap(); if (disposed) return;
+  await pollBootstrap(true); if (disposed) return;
   void loadBatchCount();
   await loadPending(); if (disposed) return;
   const uploadId = taskStorage.getItem(saveStorageKey);

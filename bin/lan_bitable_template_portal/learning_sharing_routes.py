@@ -9,7 +9,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from .learning import LearningError, now, stamp
-from .learning_sharing import SharingExercises, exercise_card, key, read_source, validate_questions, weekly_card
+from .learning_sharing import SharingExercises, exercise_card, key, question_mix, read_source, validate_questions, weekly_card
 
 
 class SharingRuntime:
@@ -21,6 +21,7 @@ class SharingRuntime:
         self.closing = False
         self.active_batch = ''
         self.restore_checked = False
+        self.question_bank = None
 
     def service(self):
         if self.core is None:
@@ -79,14 +80,16 @@ class SharingRuntime:
                 scopes = match.get('scopes') or []
                 person.update(person_id=match.get('id') or 'feishu:' + person['open_id'], scope=scopes[0] if len(scopes) == 1 else '')
             total = max(5, min(40, ((len(source['text']) + 2999) // 3000) * 5))
+            types = batch.get('question_types') or ['single', 'multiple']
+            mix = question_mix(total, types)
             questions = []
             generate = getattr(self.runtime, 'generate_sharing_questions', None)
             if not callable(generate): raise LearningError('模型出题服务尚未就绪。', 503)
             for offset in range(0, total, 5):
                 if self.closing: return
                 await asyncio.to_thread(self.update_batch, batch['id'], progress=f'正在生成题目 {offset}/{total}')
-                questions.extend(await generate(batch['owner'], source['text'], [q['stem'] for q in questions], min(5, total - offset)))
-            questions = validate_questions(questions, source['text'])
+                questions.extend(await generate(batch['owner'], source['text'], [q['stem'] for q in questions], min(5, total - offset), question_types=mix[offset:offset + 5]))
+            questions = validate_questions(questions, source['text'], types)
             await asyncio.to_thread(self.update_batch, batch['id'], status='draft', progress='', title=source['title'],
                                     source=source, participants=source['participants'], questions=questions, error='')
         except asyncio.CancelledError:
@@ -104,7 +107,7 @@ class SharingRuntime:
         with closing(self.service().learning._connect()) as conn:
             if kind == 'sharing_batch':
                 return [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind=? AND json_extract(payload,'$.status')='queued' ORDER BY updated LIMIT ?", (kind, limit))]
-            return [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind=? AND json_extract(payload,'$.status')='pending' AND json_extract(payload,'$.due_at')<=? ORDER BY updated LIMIT ?", (kind, now().timestamp(), limit))]
+            return [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind=? AND json_extract(payload,'$.status')='pending' AND json_extract(payload,'$.due_at')<=? ORDER BY (json_extract(payload,'$.kind')='bank'), updated LIMIT ?", (kind, now().timestamp(), limit))]
 
     async def send(self, job):
         from .portal_service import external_real_write_guard
@@ -122,7 +125,21 @@ class SharingRuntime:
                 guard = external_real_write_guard()
                 if not guard.get('real_write_allowed') or guard.get('mock_external'):
                     raise LearningError('当前环境未允许真实消息发送。', 403)
-                if job['kind'] == 'weekly':
+                if job['kind'] == 'bank':
+                    question = next((q for q in batch['questions'] if q['id'] == job.get('question_id')), None)
+                    if batch['status'] not in {'published', 'closed'} or question is None:
+                        raise LearningError('题库入库任务不对应已发布题目，请核对原批次。', 409)
+                    def upload():
+                        from .learning_cloud import LearningCloud, LearningCloudError
+                        if self.question_bank is None:
+                            self.question_bank = LearningCloud(enabled=True)
+                        try:
+                            return self.question_bank.save_sharing_question(batch, question, job['id'])
+                        except LearningCloudError as exc:
+                            raise LearningError(str(exc), 503) from exc
+                    job['record_id'] = await asyncio.to_thread(upload)
+                    mid = ''
+                elif job['kind'] == 'weekly':
                     url = core.learning.portal_url()
                     if not url: raise LearningError('学练入口尚未配置。')
                     result = await asyncio.to_thread(core.learning._send, WEEKLY_CHAT_ID, weekly_card(job, batch, url), job['id'])
@@ -150,7 +167,8 @@ class SharingRuntime:
             job['failures'] += 1
             job.update(status='failed' if job['failures'] >= 5 else 'pending',
                        due_at=now().timestamp() + min(600, 30 * 2 ** job['failures']),
-                       error=str(exc)[:500] if isinstance(exc, LearningError) else '消息发送结果未确认，将用原任务标识核验重试。')
+                       error=str(exc)[:500] if isinstance(exc, LearningError) else
+                       '题库入库暂未确认，将核验原题后重试；已发答题卡不重发。' if job['kind'] == 'bank' else '消息发送结果未确认，将用原任务标识核验重试。')
         with core.learning.transaction() as conn:
             core.learning._put('sharing_delivery', job['id'], job, conn)
             if attempt:
@@ -184,6 +202,10 @@ class SharingRuntime:
                     for job in jobs:
                         if self.closing: break
                         await self.send(job)
+                        if job['kind'] == 'bank':
+                            # Recheck new answer-card jobs between individual bank uploads.
+                            self.wake.set()
+                            break
                     if len(jobs) == 5:
                         await asyncio.sleep(0.5)
                         self.wake.set()
@@ -210,6 +232,8 @@ class SharingRuntime:
         for task in (self.worker, self.generation):
             if task: task.cancel()
         await asyncio.gather(*(t for t in (self.worker, self.generation) if t), return_exceptions=True)
+        if self.question_bank:
+            await asyncio.to_thread(self.question_bank.close)
 
 
 def install(app, controller, runtime, get_learning, identity, read_json, check_origin, error_response):
@@ -231,7 +255,7 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                 payload = await read_json(request)
                 core.learning._admin(actor)
                 if not bid:
-                    data = await asyncio.to_thread(core.create, payload.get('url'), payload.get('operation_id'), actor)
+                    data = await asyncio.to_thread(core.create, payload.get('url'), payload.get('operation_id'), actor, payload.get('question_types'))
                 elif request.method == 'PUT':
                     data = await asyncio.to_thread(core.edit, bid, payload, actor)
                 else:

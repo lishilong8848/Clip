@@ -8,7 +8,7 @@ import { adaptBrowserReferences } from './scripts/workspace-build-adapter.mjs';
 // @ts-ignore isolated SFC adaptation is validated by the workspace event tests.
 import { adaptEventPeriodPage } from './scripts/workspace-event-adapter.mjs';
 // @ts-ignore V2-only presentation adapter, covered by browser tests.
-import { adaptCabinetBatchPage } from './scripts/workspace-cabinet-adapter.mjs';
+import { adaptCabinetBatchPage, adaptCabinetPage } from './scripts/workspace-cabinet-adapter.mjs';
 // @ts-ignore marks binary settings only, never selection groups.
 import { markBinaryControls, adaptPasswordLogin, fuseLearningCharts } from './scripts/workspace-controls-adapter.mjs';
 // @ts-ignore V2-only response adaptation; the legacy client source stays unchanged.
@@ -19,6 +19,8 @@ import { markFeedbackAlerts } from './scripts/workspace-feedback-adapter.mjs';
 import { adaptRepairController, controllerBindings } from './scripts/workspace-repair-adapter.mjs';
 // @ts-ignore V2-only learning presentation; API and grading stay in the existing controller.
 import { adaptLearningPage } from './scripts/workspace-learning-adapter.mjs';
+// @ts-ignore V2-only filter placement; original form bindings and legacy views stay intact.
+import { adaptPageFilters } from './scripts/workspace-filters-adapter.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/');
 const outputDir=process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?resolve(root,process.env.CLIPFLOW_WORKSPACE_BUILD_DIR):resolve(root,'dist/assets/workspace-v2');
 if(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR&&!outputDir.startsWith(resolve(root,'../../../output')+'/')&&!outputDir.startsWith(resolve(root,'../../../output')+'\\'))throw new Error('Workspace preview output must stay in project output');
@@ -47,9 +49,11 @@ export default defineConfig({
       if(path===root+'src/components/RepairFollowupPanel.vue')result=adaptRepairController(result,'followup',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairFollowups.vue'),'utf8')));
       if(path===root+'src/components/EventManagementPage.vue')result=adaptEventPeriodPage(result);
       if(path===root+'src/components/CabinetPowerBatchPage.vue')result=adaptCabinetBatchPage(result);
+      if(path===root+'src/components/CabinetPowerPage.vue')result=adaptCabinetPage(result);
       if(path===root+'src/components/PersonnelPasswordLogin.vue')result=adaptPasswordLogin(result);
       if(path===root+'src/components/LearningDashboard.vue')result=fuseLearningCharts(result);
       if(path===root+'src/components/LighthouseNoticeSop.vue')result=adaptNoticeSopControls(result);
+      result=adaptPageFilters(result,path);
       result=markBinaryControls(result);
       result=markFeedbackAlerts(result);
       if(result!==code)return {code:result,map:null};

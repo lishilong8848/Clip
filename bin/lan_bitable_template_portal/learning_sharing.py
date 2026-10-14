@@ -13,6 +13,41 @@ from contextlib import closing
 from .learning import LearningError, TZ, now, stamp
 
 KINDS = {'sharing_batch', 'sharing_attempt', 'sharing_delivery'}
+QUESTION_TYPES = {'single': '单选题', 'multiple': '多选题', 'interview': '问答题'}
+
+
+def selected_types(values):
+    if (not isinstance(values, list) or not values or len(values) > 3
+            or any(not isinstance(value, str) or value not in QUESTION_TYPES for value in values)
+            or len(set(values)) != len(values)):
+        raise LearningError('请至少选择一种题型：单选、多选或问答。')
+    return [kind for kind in QUESTION_TYPES if kind in values]
+
+
+def question_mix(count, types):
+    kinds = selected_types(types)
+    if type(count) is not int or not len(kinds) <= count <= 40:
+        raise LearningError('题量不足以覆盖所选题型。')
+    weights = {'single': 6, 'multiple': 3, 'interview': 1}
+    total = sum(weights[kind] for kind in kinds)
+    raw = {kind: count * weights[kind] / total for kind in kinds}
+    amounts = {kind: max(1, int(raw[kind])) for kind in kinds}
+    while sum(amounts.values()) < count:
+        amounts[max(kinds, key=lambda kind: raw[kind] - amounts[kind])] += 1
+    while sum(amounts.values()) > count:
+        amounts[max((kind for kind in kinds if amounts[kind] > 1), key=lambda kind: amounts[kind] - raw[kind])] -= 1
+    return [kind for kind in kinds for _ in range(amounts[kind])]
+
+
+def sample_questions(questions, rng):
+    kinds = [kind for kind in QUESTION_TYPES if any(q['type'] == kind for q in questions)]
+    mix = question_mix(5, kinds)
+    chosen = []
+    for kind in kinds:
+        pool = [q['id'] for q in questions if q['type'] == kind]
+        chosen.extend(rng.sample(pool, min(len(pool), mix.count(kind))))
+    chosen.extend(rng.sample([q['id'] for q in questions if q['id'] not in chosen], 5 - len(chosen)))
+    return chosen
 
 
 def key(*parts):
@@ -27,9 +62,10 @@ def normalized(value):
     return re.sub(r'\W+', '', value).lower()
 
 
-def validate_questions(questions, source):
+def validate_questions(questions, source, types=None):
     if not isinstance(questions, list) or not 5 <= len(questions) <= 40:
-        raise LearningError('每批须有5至40道有纪要依据的选择题；内容不足时请补充纪要，不凑题。')
+        raise LearningError('每批须有5至40道有纪要依据的题目；内容不足时请补充纪要，不凑题。')
+    allowed = selected_types(types) if types is not None else list(QUESTION_TYPES)
     result, seen = [], set()
     for index, q in enumerate(questions):
         if not isinstance(q, dict):
@@ -48,6 +84,14 @@ def validate_questions(questions, source):
         seen.add(identity)
         options = q.get('options')
         correct = q.get('correct')
+        if q.get('type') == 'interview':
+            reference = q.get('reference_answer')
+            if not isinstance(reference, str) or not reference.strip() or len(reference) > 1000 or options not in (None, []) or correct not in (None, []):
+                raise LearningError(f'第{index + 1}道问答题需填写参考答案（最多1000字），不能有选择题选项。')
+            if 'interview' not in allowed:
+                raise LearningError('生成题型不符合本批选择，请重新生成或核对题目。')
+            result.append({**values, 'id': f'q{index + 1}', 'type': 'interview', 'options': [], 'correct': [], 'reference_answer': reference.strip()})
+            continue
         if (not isinstance(options, list) or not 2 <= len(options) <= 6
                 or any(not isinstance(o, str) or not o.strip() or len(o) > 300 for o in options)
                 or len({normalized(o) for o in options}) != len(options)):
@@ -55,8 +99,12 @@ def validate_questions(questions, source):
         if (not isinstance(correct, list) or not correct or len(set(str(v) for v in correct)) != len(correct)
                 or any(type(v) is not int or not 0 <= v < len(options) for v in correct)):
             raise LearningError(f'第{index + 1}题的正确选项无效。')
-        result.append({**values, 'id': f'q{index + 1}', 'options': [o.strip() for o in options],
-                       'correct': sorted(correct), 'type': 'single' if len(correct) == 1 else 'multiple'})
+        kind = 'single' if len(correct) == 1 else 'multiple'
+        if kind not in allowed or q.get('type', kind) != kind:
+            raise LearningError(f'第{index + 1}题的题型与正确选项数量或所选题型不一致。')
+        result.append({**values, 'id': f'q{index + 1}', 'options': [o.strip() for o in options], 'correct': sorted(correct), 'type': kind})
+    if types is not None and {q['type'] for q in result} != set(allowed):
+        raise LearningError('题目未包含所有已选题型，请补充题目后再发布。')
     return result
 
 
@@ -130,6 +178,11 @@ def read_source(portal, url):
             'text': raw, 'participants': list(people.values()), 'read_at': stamp()}
 
 
+def assigned_participants(batch):
+    excluded = set(batch.get('excluded_open_ids') or [])
+    return [person for person in batch.get('participants', []) if person['open_id'] not in excluded]
+
+
 class SharingExercises:
     def __init__(self, learning):
         self.learning = learning
@@ -145,8 +198,9 @@ class SharingExercises:
             raise LearningError('分享会批次不存在。', 404)
         return value
 
-    def create(self, url, operation_id, actor):
+    def create(self, url, operation_id, actor, question_types=None):
         self.learning._admin(actor)
+        types = selected_types(question_types if question_types is not None else ['single'])
         from openclaw_service.assistant.lighthouse_documents import document_url
         target = document_url(url)
         if not target or not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', operation_id):
@@ -155,14 +209,14 @@ class SharingExercises:
         with self.learning.transaction() as conn:
             prior = self.learning._get('sharing_batch', identity, conn)
             if prior:
-                if prior['url'] != target:
+                if prior['url'] != target or prior.get('question_types', ['single']) != types:
                     raise LearningError('重复提交的链接已变化，请刷新。', 409)
                 return {'id': identity}
             active = conn.execute("SELECT count(*) FROM documents WHERE kind='sharing_batch' AND json_extract(payload,'$.status') IN ('queued','generating')").fetchone()[0]
             if active >= 3:
                 raise LearningError('已有纪要正在生成，请等待完成后再提交。', 429)
             batch = {'id': identity, 'url': target, 'title': '正在读取纪要', 'status': 'queued', 'version': 1,
-                     'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': [], 'participants': []}
+                     'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': [], 'participants': [], 'question_types': types}
             self.learning._put('sharing_batch', identity, batch, conn)
             self.learning._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
         return {'id': identity}
@@ -187,16 +241,22 @@ class SharingExercises:
         all_attempts = self.attempts(identity)
         attempts = [p for p in all_attempts if self.permitted(actor, p)]
         values = {p['open_id']: p for p in attempts}
+        question_by_id = {q['id']: q for q in batch['questions']}
+        excluded = set(batch.get('excluded_open_ids') or [])
         participants = [{k: p.get(k, '') for k in ('name', 'person_id', 'scope', 'open_id')} | {
+            'exempted': p['open_id'] in excluded,
             'submitted_at': values.get(p['open_id'], {}).get('submitted_at', ''),
             'correct': values.get(p['open_id'], {}).get('correct'),
+            'choice_count': sum(question_by_id.get(qid, {}).get('type') in {'single', 'multiple'} for qid in values.get(p['open_id'], {}).get('question_ids', [])),
             'delivery_error': values.get(p['open_id'], {}).get('delivery_error', ''),
             'delivery_status': values.get(p['open_id'], {}).get('delivery_status', 'pending'),
         } for p in participants]
         result = {k: batch.get(k, '') for k in ('id', 'title', 'url', 'status', 'version', 'created_at', 'published_at', 'error', 'progress')}
         result.update(participants=participants, question_count=len(batch['questions']),
-                      completed=sum(bool(p['submitted_at']) for p in participants), total=len(participants))
-        if (batch['status'] in {'published', 'closed'} and len(all_attempts) != len(batch['participants'])
+                      completed=sum(bool(p['submitted_at']) for p in participants if not p['exempted']),
+                      total=sum(not p['exempted'] for p in participants), attendee_total=len(participants))
+        result['question_types'] = batch.get('question_types') or [kind for kind in QUESTION_TYPES if any(q['type'] == kind for q in batch['questions'])]
+        if (batch['status'] in {'published', 'closed'} and len(all_attempts) != len(assigned_participants(batch))
                 or batch['status'] == 'draft' and all_attempts):
             result['error'] = '历史分配恢复不完整，已暂停此批提醒与汇总；请同步恢复，不能重新抽题代替。'
         if actor.get('is_admin'):
@@ -207,7 +267,7 @@ class SharingExercises:
             result['questions'] = [copy.deepcopy(q) for q in batch['questions'] if mine and q['id'] in mine['question_ids']]
             for q in result['questions']:
                 if not mine.get('submitted_at'):
-                    for name in ('correct', 'explanation', 'evidence'): q.pop(name, None)
+                    for name in ('correct', 'reference_answer', 'explanation', 'evidence'): q.pop(name, None)
                 else:
                     q['selected'] = mine['answers'][q['id']]
         if actor.get('is_admin'):
@@ -215,6 +275,11 @@ class SharingExercises:
             with closing(self.learning._connect()) as conn:
                 notices = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=? AND json_extract(payload,'$.kind')='weekly' ORDER BY updated DESC LIMIT 10", (identity,))]
             result['weekly_reports'] = [{k: row.get(k) for k in ('date', 'end', 'part', 'parts', 'status', 'error', 'sent_at')} for row in notices]
+            with closing(self.learning._connect()) as conn:
+                uploads = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=? AND json_extract(payload,'$.kind')='bank'", (identity,))]
+            result['bank_sync'] = {'total': len(uploads), 'synced': sum(row['status'] == 'sent' for row in uploads),
+                                  'failed': sum(row['status'] == 'failed' for row in uploads),
+                                  'error': next((row.get('error', '') for row in uploads if row.get('error') and row['status'] != 'sent'), '')}
         return result
 
     def listing(self, actor, page=1):
@@ -244,7 +309,13 @@ class SharingExercises:
                 raise LearningError('批次已变化，请刷新后核对。', 409)
             if batch['status'] != 'draft':
                 raise LearningError('只有待核对草稿可修改，已发布题目保持原快照。', 409)
-            batch['questions'] = validate_questions(payload.get('questions'), batch['source']['text'])
+            excluded = payload.get('excluded_open_ids', batch.get('excluded_open_ids', []))
+            known = {person['open_id'] for person in batch['participants']}
+            if (not isinstance(excluded, list) or any(not isinstance(oid, str) or oid not in known for oid in excluded)
+                    or len(set(excluded)) != len(excluded)):
+                raise LearningError('免做人员必须从本批参会名单选择，且不能重复。')
+            batch['questions'] = validate_questions(payload.get('questions'), batch['source']['text'], batch.get('question_types'))
+            batch['excluded_open_ids'] = excluded
             batch['version'] += 1
             batch.update(edited_by=actor['id'], edited_at=stamp())
             self.learning._put('sharing_batch', identity, batch, conn)
@@ -268,21 +339,25 @@ class SharingExercises:
                 raise LearningError('仅可发布当前版本的已核对草稿。', 409)
             if self.attempts(identity, conn):
                 raise LearningError('此批已有分配记录但发布状态尚未恢复完整，禁止重新抽题；请先恢复同步。', 409)
-            questions = validate_questions(batch['questions'], batch['source']['text'])
-            if not batch['participants']: raise LearningError('没有可验证的参会人。')
+            questions = validate_questions(batch['questions'], batch['source']['text'], batch.get('question_types'))
+            participants = assigned_participants(batch)
+            if not participants: raise LearningError('请至少保留一位参会人参加答题。')
             rng = random.SystemRandom()
-            for person in batch['participants']:
+            for person in participants:
                 aid = key(identity, person['open_id'])
                 attempt = {**person, 'id': aid, 'batch_id': identity, 'date': batch['date'], 'app_id': app_id,
-                           'question_ids': rng.sample([q['id'] for q in questions], 5), 'ticket': secrets.token_urlsafe(32),
+                           'question_ids': sample_questions(questions, rng), 'ticket': secrets.token_urlsafe(32),
                            'answers': {}, 'correct': None, 'submitted_at': '', 'delivery_status': 'pending'}
                 source_questions = {q['id']: q for q in questions}
-                completed = {**attempt, 'correct': 5, 'answers': {qid: source_questions[qid]['correct'] for qid in attempt['question_ids']}}
+                completed = {**attempt, 'correct': sum(source_questions[qid]['type'] != 'interview' for qid in attempt['question_ids']),
+                             'answers': {qid: ('答' * 1000 if source_questions[qid]['type'] == 'interview' else source_questions[qid]['correct']) for qid in attempt['question_ids']}}
                 for card in (exercise_card({**batch, 'questions': questions}, attempt), exercise_card({**batch, 'questions': questions}, completed, result=True)):
                     if len(json.dumps(card, ensure_ascii=False).encode()) > 28000:
                         raise LearningError('题目或解析过长，超过飞书5题卡片大小限制；请缩短后重新发布，尚未发送。')
                 self.learning._put('sharing_attempt', aid, attempt, conn)
                 self.enqueue(conn, 'paper', 'paper:' + aid, batch_id=identity, attempt_id=aid)
+            for question in questions:
+                self.enqueue(conn, 'bank', f"bank:{identity}:{question['id']}", batch_id=identity, question_id=question['id'])
             batch.update(status='published', questions=questions, version=batch['version'] + 1,
                          published_at=stamp(), published_by=actor['id'], app_id=app_id)
             self.learning._put('sharing_batch', identity, batch, conn)
@@ -306,8 +381,15 @@ class SharingExercises:
                 raise LearningError('请完成全部5道题后再提交。')
             questions = {q['id']: q for q in batch['questions']}
             answers, correct = {}, 0
+            choice_count = 0
             for qid in attempt['question_ids']:
                 q, raw = questions[qid], fields[qid]
+                if q['type'] == 'interview':
+                    if not isinstance(raw, str) or not raw.strip() or len(raw) > 1000:
+                        raise LearningError('请填写问答题答案，每题1至1000字。')
+                    answers[qid] = raw.strip()
+                    continue
+                choice_count += 1
                 if isinstance(raw, str): raw = [raw]
                 if not isinstance(raw, list) or not raw or any(not isinstance(v, str) or v not in [str(i) for i in range(len(q['options']))] for v in raw):
                     raise LearningError('答案选项无效，请重新选择。')
@@ -318,18 +400,19 @@ class SharingExercises:
             attempt.update(answers=answers, correct=correct, submitted_at=stamp(), submitted_by=operator['union_id'])
             self.learning._put('sharing_attempt', aid, attempt, conn)
             self.enqueue(conn, 'result', 'result:' + aid, batch_id=batch['id'], attempt_id=aid)
-        return {'ok': True, 'toast': f'已完成，答对{correct}/5题；正确答案将发送给你。'}
+        score = f'选择题答对{correct}/{choice_count}题；' if choice_count else ''
+        return {'ok': True, 'toast': f'已完成，{score}参考答案将发送给你。'}
 
     def schedule(self, current):
         day = current.date().isoformat()
         monday = current.date() - dt.timedelta(days=current.weekday())
         start, end = (monday - dt.timedelta(days=7)).isoformat(), (monday - dt.timedelta(days=1)).isoformat()
-        weekly_due = current >= dt.datetime.combine(monday, dt.time(9), TZ)
+        weekly_due = current >= dt.datetime.combine(monday, dt.time.min, TZ)
         with self.learning.transaction() as conn:
             batches = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_batch' AND json_extract(payload,'$.status') IN ('published','closed')")]
             for batch in batches:
                 attempts = self.attempts(batch['id'], conn)
-                if len(attempts) != len(batch['participants']):
+                if len(attempts) != len(assigned_participants(batch)):
                     continue
                 if batch['status'] == 'published' and current.strftime('%H:%M') >= '13:00':
                     for item in attempts:
@@ -341,10 +424,12 @@ class SharingExercises:
                              or start <= batch.get('closed_at', '')[:10] <= end
                              or any(start <= p['submitted_at'][:10] <= end for p in attempts))):
                     snapshot = []
+                    by_id = {q['id']: q for q in batch['questions']}
                     for p in attempts:
                         answered = bool(p['submitted_at'] and p['submitted_at'][:10] <= end)
                         snapshot.append({'name': p['name'], 'person_id': p['person_id'], 'answered': 5 if answered else 0,
-                            'choices': 5 if answered else 0, 'correct': p['correct'] if answered else 0,
+                            'choices': sum(by_id[qid]['type'] != 'interview' for qid in p['question_ids']) if answered else 0,
+                            'correct': p['correct'] if answered else 0,
                             'practice': 0, 'papers': 1 if answered else 0, 'scopes': [p['scope']] if p['scope'] else []})
                     for index in range(0, len(snapshot), 50):
                         part, parts = index // 50 + 1, (len(snapshot) + 49) // 50
@@ -355,14 +440,28 @@ class SharingExercises:
 def exercise_card(batch, attempt, *, reminder=False, result=False):
     title = ('分享会练习 · 答题结果' if result else '分享会练习 · 未完成提醒' if reminder else '分享会练习 · 5道题')
     elements = [{'tag': 'div', 'text': plain(batch['title'])}, {'tag': 'div', 'text': plain(attempt['name'] + (' · 已完成' if result else ' · 请完成以下5道题'))}]
-    if result: elements.append({'tag': 'div', 'text': plain(f"正确 {attempt['correct']}/5 题 · 正确率 {attempt['correct'] * 20}%")})
     form = []
     questions = {q['id']: q for q in batch['questions']}
+    choices = sum(questions[qid]['type'] != 'interview' for qid in attempt['question_ids'])
+    if result:
+        score = f"选择题正确 {attempt['correct']}/{choices} 题 · 正确率 {attempt['correct'] * 100 / choices:g}%" if choices else '本次为问答题，不计算正确率。'
+        if choices < 5:
+            score += f'\n问答题 {5 - choices} 题已记录，请对照参考答案复习，不计入选择题正确率。'
+        elements.append({'tag': 'div', 'text': plain(score)})
     for index, qid in enumerate(attempt['question_ids']):
         q = questions[qid]
-        heading = f"{index + 1}. {'单选' if q['type'] == 'single' else '多选'} · {q['stem']}"
+        heading = f"{index + 1}. {QUESTION_TYPES[q['type']]} · {q['stem']}"
         target = elements if result else form
         target.append({'tag': 'div', 'text': plain(heading)})
+        if q['type'] == 'interview':
+            if result:
+                raw = attempt['answers'][qid]
+                answer = raw[:200] + ('…（完整作答已保存）' if len(raw) > 200 else '')
+                target.append({'tag': 'div', 'text': plain('你的作答：' + answer + '\n参考答案：' + q['reference_answer'] + '\n' + q['explanation'] + '\n纪要依据：' + q['evidence'])})
+            else:
+                target.append({'tag': 'input', 'name': qid, 'input_type': 'multiline_text', 'rows': 3,
+                               'max_length': 1000, 'required': True, 'placeholder': plain('请输入文字答案，最多1000字')})
+            continue
         target.append({'tag': 'div', 'text': plain('\n'.join(f'{chr(65 + i)}. {text}' for i, text in enumerate(q['options'])))})
         if result:
             target.append({'tag': 'div', 'text': plain('你的选择：' + '、'.join(chr(65 + i) for i in attempt['answers'][qid])
@@ -383,7 +482,10 @@ def weekly_card(job, batch, url):
     card = summary_card({**job, 'scope': ''}, url)
     card['header']['title']['content'] = '分享会练习 · 每周汇总'
     count = sum(bool(p['answered']) for p in job['items'])
-    card['elements'].insert(0, {'tag': 'div', 'text': plain(batch['title'] + f"\n参会 {len(job['items'])} 人 · 已答 {count} 人 · 未答 {len(job['items']) - count} 人")})
+    attendance = f"参会 {len(job['items'])} 人"
+    if batch.get('excluded_open_ids'):
+        attendance = f"参会 {len(batch['participants'])} 人 · 需答 {len(assigned_participants(batch))} 人 · 免做 {len(batch['excluded_open_ids'])} 人"
+    card['elements'].insert(0, {'tag': 'div', 'text': plain(batch['title'] + f"\n{attendance} · 已答 {count} 人 · 未答 {len(job['items']) - count} 人")})
     card['elements'][2]['fields'][0]['text']['content'] = f"**分配人数**\n{len(job['items'])} 人"
     grouping = f"第{job['part']}/{job['parts']}组，以下统计仅计本组。" if job.get('parts', 1) > 1 else ''
     card['elements'][-2] = {'tag': 'note', 'elements': [plain(grouping + f"截至{job['end']}的本批累计首答成绩；未提交显示为未答，不计入平均正确率，不混入每日15题统计。") ]}

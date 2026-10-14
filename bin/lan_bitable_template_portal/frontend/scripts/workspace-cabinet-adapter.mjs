@@ -28,3 +28,11 @@ export function adaptCabinetBatchPage(source) {
   replace("'识别并创建待办' }}<span v-if=\"!uploading && textRows.length\">", "'确认并创建待办' }}<span v-if=\"!uploading && textRows.length\">");
   return code;
 }
+
+export function adaptCabinetPage(source) {
+  let code=source.replaceAll('\r\n','\n');
+  const anchor='const seq = ++historySequence; void focusModal();';
+  if(code.split(anchor).length!==2)throw new Error('Cabinet drawer motion contract changed');
+  code=code.replace('<script setup lang="ts">','<script setup lang="ts">\nimport { trackButtonPresentation } from "../workspace-v2/actionMotion";');
+  return code.replace(anchor,anchor+'\n  trackButtonPresentation(nextTick());');
+}

@@ -642,9 +642,10 @@ class LearningService:
         payload = {k: v for k, v in value.items() if not k.startswith("_")}
         operation_id = f"learning:{kind}:{key}:{revision}"
         if kind == 'sharing_batch' and payload.get('status') in {'published', 'closed'}:
+            from .learning_sharing import assigned_participants
             with closing(self._connect()) as conn:
                 count, dirty = conn.execute("SELECT COUNT(*),COALESCE(SUM(dirty),0) FROM documents WHERE kind='sharing_attempt' AND json_extract(payload,'$.batch_id')=?", (key,)).fetchone()
-            if count != len(payload.get('participants', [])) or dirty:
+            if count != len(assigned_participants(payload)) or dirty:
                 return False
         if kind == 'sharing_delivery':
             batch = self._get('sharing_batch', payload.get('batch_id', ''))
@@ -721,11 +722,12 @@ class LearningService:
             self._send_notifications(current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ))
 
     def _send_notifications(self, current):
-        from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times
+        from .learning_reminders import duty_recipients, enqueue_shift_reminders, reminder_card, shift_times
         settings = self.settings()
         if not settings['enabled']:
             return
-        enqueue_shift_reminders(self, current)
+        targets = duty_recipients(self)
+        assignments = enqueue_shift_reminders(self, current, targets)
         date = current.date().isoformat()
         link = None
         with self.transaction() as conn:
@@ -748,6 +750,15 @@ class LearningService:
                 notification["status"] = "cancelled"
             elif notification.get("date") != date:
                 notification["status"] = "expired"
+            elif notification['kind'] == 'shift' and targets is None:
+                self._last_error = '本地人员岗位目录暂未就绪，个人学练提醒等待核对后发送。'
+                continue
+            elif notification['kind'] == 'shift' and notification.get('open_id') not in targets:
+                notification['status'] = 'skipped_role'
+            elif notification['kind'] == 'shift' and assignments is None:
+                continue
+            elif notification['kind'] == 'shift' and (notification.get('shift'), notification.get('open_id')) not in assignments:
+                notification['status'] = 'skipped_roster'
             elif notification["kind"] == "correction" and not self._correction_matches(notification, paper):
                 notification["status"] = "superseded"
             else:

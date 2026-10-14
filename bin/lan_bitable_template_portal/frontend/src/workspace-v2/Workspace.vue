@@ -1,13 +1,14 @@
 <template>
   <NConfigProvider :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
-      <div class="v2-shell" :class="{ 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
+      <div class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode" class="v2-header">
           <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
           <div id="page-back-slot" />
           <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
+            <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" @change="navColor=$event" />
             <NButton v-if="loggedIn || !checking && !publicLink" data-v2-navigation size="small" secondary :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" :style="!loggedIn ? {minHeight:'44px'} : undefined" @click="requestVersion(switchLegacy)">切换旧版</NButton>
             <NButton v-if="loggedIn && user.role !== 'guest'" data-v2-navigation quaternary class="v2-person" aria-label="打开个人页面" title="个人信息与设置" @click="navigate('/?view=my')"><UserRound :size="17" /><span>{{ user.name }}</span></NButton>
             <NButton v-else-if="loggedIn" quaternary aria-label="退出登录" @click="logout"><LogOut :size="17" /></NButton>
@@ -16,9 +17,10 @@
         <div v-if="printMode" id="page-back-slot" hidden />
         <SidebarNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" @select="selectMenu" />
         <main class="v2-main">
-          <div v-if="loggedIn && !publicLink && !printMode && route.pathname !== '/workbench-lite' && scopes.length > 1 && scopeSelectable && !['my','permission'].includes(view)" class="v2-context">
-            <span>业务范围</span>
-            <NSelect class="v2-scope-select" :value="currentScope" :options="businessScopes" size="small" aria-label="当前楼栋" @update:value="changeScope" />
+          <div v-if="loggedIn && !publicLink && !printMode && !['my','permission'].includes(view)" id="workspace-page-filters" class="v2-page-filters" role="region" aria-label="页面筛选与搜索">
+            <label v-if="route.pathname !== '/workbench-lite' && scopes.length > 1 && scopeSelectable" class="v2-context">
+              <span>楼栋</span><NSelect class="v2-scope-select" :value="currentScope" :options="businessScopes" size="small" aria-label="当前楼栋" @update:value="changeScope" />
+            </label>
           </div>
           <NAlert v-if="authError" type="error" :bordered="false" class="v2-alert">{{ authError }} <NButton text type="primary" @click="loadAuth">重新读取</NButton></NAlert>
           <NAlert v-if="operationError" type="error" :bordered="false" closable role="alert" class="v2-alert" @close="operationError=''">{{ operationError }}</NAlert>
@@ -66,7 +68,8 @@ import { modules, moduleIcons, navigationModules, moduleForRoute, moduleUrl, NOT
 import { personaFor } from './persona';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate } from './navigation';
-import { theme } from './theme';
+import { DEFAULT_NAV_COLOR,theme } from './theme';
+import NavThemePicker from './NavThemePicker.vue';
 import OverviewPanel from './OverviewPanel.vue';
 import MobileNavigation from './MobileNavigation.vue';
 import SidebarNavigation from './SidebarNavigation.vue';
@@ -86,7 +89,7 @@ const NoticeSopManager = lazy(() => import('./NoticeSopManager.vue'));
 const AuthPanels = lazy(() => import('../components/AuthPanels.vue'));
 const pages: Record<string, any> = {
   event: lazy(() => import('../components/EventManagementPage.vue')),
-  engineer_mop: lazy(() => import('../components/EngineerMopPage.vue')),
+  engineer_mop: lazy(() => import('./MopWorkspace.vue')),
   repair_management: lazy(() => import('./RepairWorkspace.vue')),
   repair_status: lazy(() => import('./RepairWorkspace.vue')),
   learning: lazy(() => import('../components/LearningPage.vue')),
@@ -107,6 +110,7 @@ const pages: Record<string, any> = {
 };
 const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), user = ref<Dict>({}), scopes = ref<{value:string;label:string}[]>([]), authError = ref(''), loginUrl = ref('/api/auth/login'), collapsed = ref(false);
 const operationError=ref(''),logoutBusy=ref(false);
+const navColor=ref(DEFAULT_NAV_COLOR);
 let disposed = false, timer = 0, checkingAuth = false;
 const lifetime = new AbortController();
 const watermarkDay=beijingDate();

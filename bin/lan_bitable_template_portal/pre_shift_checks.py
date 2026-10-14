@@ -117,11 +117,13 @@ class CheckService:
                 raise CheckError('每条检查项需填写1至200字。')
             seen.add(key)
             result.append({'id': key, 'text': text.strip()})
+        current = now()
         with self.connection(True) as conn:
             if self.definition(scope, conn)['version'] != version:
                 raise CheckError('清单已被其他管理人员修改，请重新读取。', 409)
             conn.execute('INSERT OR REPLACE INTO definitions VALUES(?,?,?,?,?)',
-                         (scope, version + 1, dump(result), actor['id'], now().isoformat()))
+                         (scope, version + 1, dump(result), actor['id'], current.isoformat()))
+            self.prepare_local(conn, current, [scope])
         self.wake.set()
         return {'version': version + 1, 'items': result}
 
@@ -130,9 +132,12 @@ class CheckService:
         current = current or now()
         day = current.date().isoformat()
         with self.connection() as conn:
+            definition = self.definition(scope, conn)
             tasks = []
-            for row in conn.execute('SELECT * FROM tasks WHERE scope=? AND (day=? OR (deadline>? AND due<=?)) ORDER BY due DESC',
+            for row in conn.execute("SELECT * FROM tasks WHERE scope=? AND (submitted!='' OR items!='[]') AND (day=? OR (deadline>? AND due<=?)) ORDER BY due DESC",
                                     (scope, day, current.timestamp(), current.timestamp())):
+                if not row['submitted'] and not definition['items']:
+                    continue
                 task = dict(row)
                 for key in ('items', 'people'):
                     task[key] = json.loads(task[key])
@@ -148,7 +153,7 @@ class CheckService:
             if roster_error.startswith('{'):
                 roster_error = json.loads(roster_error).get(scope, '')
             return {'scope': scope, 'scopes': scopes_for(actor), 'can_manage': can_manage(actor),
-                    'definition': self.definition(scope, conn), 'tasks': tasks,
+                    'definition': definition, 'tasks': tasks,
                     'roster_ready': roster_ready, 'roster_error': roster_error or self.last_error,
                     'server_time': current.isoformat()}
 
@@ -169,6 +174,9 @@ class CheckService:
             if row['submitted']:
                 # Lost responses and concurrent submissions never replace the first result.
                 return {'completed': True, 'already_completed': True, 'actor_name': row['actor_name']}
+            definition = self.definition(row['scope'], conn)
+            if not definition['items'] or row['definition_version'] != definition['version']:
+                raise CheckError('清单已更新或已清空，请重新读取。', 409)
             if not self.can_submit(actor, row, current):
                 raise CheckError('仅本班排班人员或本楼值班账号可在班次内提交。', 403)
             if type(version) is not int or version != row['definition_version']:
@@ -217,24 +225,30 @@ class CheckService:
                                  (day, '', current.timestamp() + 300, (str(exc) if isinstance(exc, CheckError) else '排班读取未完成。') + '5分钟后重试；不会按不完整名单推送。'))
                 return
         with self.connection(True) as conn:
-            cached = conn.execute('SELECT people FROM rosters WHERE day=?', (day,)).fetchone()
-            if not cached or not cached['people']:
-                return
-            people = json.loads(cached['people'])
-            for scope in configured:
-                definition = self.definition(scope, conn)
-                if not definition['items']:
+            self.prepare_local(conn, current, configured)
+
+    def prepare_local(self, conn, current, scopes):
+        # Editing updates open checks atomically; submitted and past shifts keep their snapshot.
+        day = current.date().isoformat()
+        cached = conn.execute('SELECT people FROM rosters WHERE day=?', (day,)).fetchone()
+        people = json.loads(cached['people']) if cached and cached['people'] else []
+        for scope in scopes:
+            definition = self.definition(scope, conn)
+            items = dump(definition['items'])
+            conn.execute("UPDATE tasks SET definition_version=?,items=? WHERE scope=? AND submitted='' AND deadline>? AND (definition_version!=? OR items!=?)",
+                         (definition['version'], items, scope, current.timestamp(), definition['version'], items))
+            if not definition['items']:
+                continue
+            for shift in ('白', '夜'):
+                due, deadline = windows(day, shift)
+                if not due <= current < deadline:
                     continue
-                for shift in ('白', '夜'):
-                    due, deadline = windows(day, shift)
-                    if not due <= current < deadline:
-                        continue
-                    assigned = [p for p in people if p['scope'] == scope and p['shift'] == shift]
-                    if len(assigned) != 2:
-                        continue
-                    conn.execute('INSERT OR IGNORE INTO tasks(id,day,scope,shift,due,deadline,definition_version,items,people) VALUES(?,?,?,?,?,?,?,?,?)',
-                                 (f'{day}:{scope}:{shift}', day, scope, shift, due.timestamp(), deadline.timestamp(),
-                                  definition['version'], dump(definition['items']), dump(assigned)))
+                assigned = [p for p in people if p['scope'] == scope and p['shift'] == shift]
+                if len(assigned) != 2:
+                    continue
+                conn.execute('INSERT OR IGNORE INTO tasks(id,day,scope,shift,due,deadline,definition_version,items,people) VALUES(?,?,?,?,?,?,?,?,?)',
+                             (f'{day}:{scope}:{shift}', day, scope, shift, due.timestamp(), deadline.timestamp(),
+                              definition['version'], items, dump(assigned)))
 
     def notify(self, current):
         if not self.sender or not self.portal_url:
@@ -244,7 +258,7 @@ class CheckService:
             self.last_error = '班前检查访问地址未配置，暂未推送。'
             return
         with self.connection() as conn:
-            tasks = [dict(row) for row in conn.execute("SELECT * FROM tasks WHERE submitted='' AND due<=? AND deadline>?", (current.timestamp(), current.timestamp()))]
+            tasks = [dict(row) for row in conn.execute("SELECT * FROM tasks WHERE submitted='' AND items!='[]' AND scope IN (SELECT scope FROM definitions WHERE items!='[]') AND due<=? AND deadline>?", (current.timestamp(), current.timestamp()))]
         for task in tasks:
             slot = int((current.timestamp() - task['due']) // 7200)
             for person in json.loads(task['people']):
@@ -252,7 +266,8 @@ class CheckService:
                     return
                 key = f"{task['id']}:{slot}:{person['open_id']}"
                 with self.connection(True) as conn:
-                    if conn.execute('SELECT submitted FROM tasks WHERE id=?', (task['id'],)).fetchone()['submitted']:
+                    latest = conn.execute('SELECT submitted,items FROM tasks WHERE id=?', (task['id'],)).fetchone()
+                    if latest['submitted'] or latest['items'] == '[]':
                         break
                     row = conn.execute('SELECT * FROM deliveries WHERE id=?', (key,)).fetchone()
                     if row and (row['sent'] or row['lease'] > current.timestamp()):

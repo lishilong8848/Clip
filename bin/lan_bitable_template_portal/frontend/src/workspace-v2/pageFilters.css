@@ -1,0 +1,12 @@
+.workspace-v2 #workspace-page-filters{display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;min-width:0;margin:14px 0 18px;padding:12px 14px;background:#fff;border:1px solid var(--v2-border);border-radius:8px}
+.workspace-v2 #workspace-page-filters:empty{display:none}
+.workspace-v2 #workspace-page-filters .v2-context{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-height:0;margin:0;border:0;flex:none}
+.workspace-v2 #workspace-page-filters .v2-scope-select,.workspace-v2 #workspace-page-filters .water-scope{width:148px}
+.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters,.filter-bar,.toolbar,.kb-toolbar,.event-list-tools,.pc-list-filters,.date-toolbar,.filters){display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;flex:1;min-width:0;margin:0;padding:0;border:0;background:transparent}
+.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters)>.n-input{width:300px;flex:1;min-width:180px;max-width:440px}
+.workspace-v2 #workspace-page-filters :is(.v2-notice-filters,.v2-sop-filters)>.n-select{width:148px;flex:none}
+.workspace-v2 #workspace-page-filters :is(input[type=search],.search-field,.kb-search,.search-input,.water-search){min-width:160px;width:300px;max-width:100%;margin:0}
+.workspace-v2 #workspace-page-filters :is(.water-filter-main,.water-date-filter,.water-filter-extra){display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}
+.workspace-v2 #workspace-page-filters .event-list-tools{margin-left:0}
+.workspace-v2 #workspace-page-filters .water-filter-extra{flex-basis:100%}
+@media(max-width:760px){.workspace-v2 #workspace-page-filters{gap:8px;padding:10px;margin:10px 0 12px}.workspace-v2 #workspace-page-filters :is(.v2-scope-select,.water-scope){width:125px}.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters){flex-basis:100%}.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters)>.n-input{flex-basis:100%;width:100%;min-width:0;max-width:none}}

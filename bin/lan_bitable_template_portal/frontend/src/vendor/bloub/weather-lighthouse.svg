@@ -1,0 +1,50 @@
+<!-- Tower geometry adapted from the supplied 雾屿灯塔.html; no script or remote asset. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="190 60 380 380">
+  <defs>
+    <clipPath id="eyeBounds"><rect x="352" y="127" width="56" height="36" rx="3"/></clipPath>
+    <linearGradient id="tower"><stop class="wl-tower-start" stop-color="#dce5ee"/><stop class="wl-tower-mid" offset=".48" stop-color="#f8fbfd"/><stop class="wl-tower-end" offset="1" stop-color="#c7d4e2"/></linearGradient>
+    <linearGradient id="enamel" x2="1" y2="1"><stop class="wl-enamel-start" stop-color="#6288c4"/><stop class="wl-enamel-mid" offset=".38" stop-color="#35548c"/><stop class="wl-enamel-end" offset=".72" stop-color="#20365f"/><stop offset="1" stop-color="#152544"/></linearGradient>
+    <linearGradient id="redBand"><stop class="wl-band-start" stop-color="#d95d43"/><stop class="wl-band-mid" offset=".45" stop-color="#ff9068"/><stop class="wl-band-end" offset="1" stop-color="#c94f38"/></linearGradient>
+    <linearGradient id="glass" x2="1" y2="1"><stop stop-color="#4d6fa3"/><stop offset=".45" stop-color="#2e4a79"/><stop offset="1" stop-color="#1a2c50"/></linearGradient>
+    <linearGradient id="litGlass" x2="1" y2="1"><stop stop-color="#fff5c7"/><stop offset=".48" stop-color="#ffd05f"/><stop offset="1" stop-color="#ed8b3d"/></linearGradient>
+    <linearGradient id="beamLeft" gradientUnits="userSpaceOnUse" x1="370" y1="147" x2="190" y2="112"><stop stop-color="#fff5cf" stop-opacity=".86"/><stop offset=".42" stop-color="#ffc84c" stop-opacity=".48"/><stop offset="1" stop-color="#ff9f35" stop-opacity=".08"/></linearGradient>
+    <linearGradient id="beamRight" gradientUnits="userSpaceOnUse" x1="390" y1="147" x2="570" y2="112"><stop stop-color="#fff5cf" stop-opacity=".86"/><stop offset=".42" stop-color="#ffc84c" stop-opacity=".48"/><stop offset="1" stop-color="#65eaff" stop-opacity=".1"/></linearGradient>
+    <radialGradient id="sunCore"><stop stop-color="#fffdf0"/><stop offset=".48" stop-color="#ffe8a5"/><stop offset="1" stop-color="#ef9251"/></radialGradient>
+    <linearGradient id="mist"><stop stop-color="#dceaf2" stop-opacity="0"/><stop offset=".3" stop-color="#dceaf2" stop-opacity=".5"/><stop offset=".7" stop-color="#dceaf2" stop-opacity=".5"/><stop offset="1" stop-color="#dceaf2" stop-opacity="0"/></linearGradient>
+  </defs>
+  <g class="wl-stars" fill="#e5ce79"><path d="m240 107 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm275 76 3-8 3 8 8 3-8 3-3 8-3-8-8-3z"/><circle cx="280" cy="157" r="2"/><circle cx="490" cy="128" r="2"/><circle cx="542" cy="238" r="2"/><circle cx="235" cy="244" r="1.7"/></g>
+  <g class="wl-sun"><circle class="wl-aura" r="26" fill="#ffc45f" opacity=".14"/><circle class="wl-crown" r="23" fill="none" stroke="#efc375" stroke-width="1.4" stroke-dasharray="1 5"/><circle r="17" fill="url(#sunCore)" stroke="#fff1c4"/><ellipse cx="-4" cy="-5" rx="6.4" ry="4.6" fill="#fffdf1" opacity=".38"/></g>
+  <g class="wl-moon"><circle r="17" fill="#f7f0d4"/><path d="M4-16a17 17 0 0 0 0 32A17 17 0 0 1 4-16" fill="#a4b0a7" opacity=".7"/><circle class="wl-glint" cx="-7" cy="-4" r="2" fill="#d7d4bd"/></g>
+  <g class="wl-companion" fill="#e5ce79"><path d="m-32-12 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm65-8 2-6 2 6 6 2-6 2-2 6-2-6-6-2z"/></g>
+  <g class="wl-clouds" fill="#b6ccd9">
+    <g transform="translate(236 180) scale(1.15)"><path class="wl-drift" d="M14 43c-10 0-14-6-14-13 0-8 7-14 16-14 3-10 12-16 23-16 12 0 22 8 24 19 12-3 23 5 23 16 0 7-5 12-15 12z"/></g>
+    <g transform="translate(452 238) scale(.9)"><path class="wl-drift wl-drift-late" d="M14 43c-10 0-14-6-14-13 0-8 7-14 16-14 3-10 12-16 23-16 12 0 22 8 24 19 12-3 23 5 23 16 0 7-5 12-15 12z"/></g>
+  </g>
+  <g transform="translate(380 370) scale(1.18 1.12) translate(-380 -370)"><g class="wl-beams"><path d="M370 147 194 83Q185 119 194 164Z" fill="url(#beamLeft)"/><path d="M390 147 566 83Q575 119 566 164Z" fill="url(#beamRight)"/></g></g>
+  <g class="wl-assembly" transform="translate(380 370) scale(1.18 1.12) translate(-380 -370)">
+  <g class="wl-tower" transform="translate(380 0) scale(1.24 1) translate(-380 0)" stroke-linejoin="round">
+    <path data-bot-hit="" d="M338 350 352 169H408L422 350Z" fill="url(#tower)" stroke="#eaf1f7" stroke-width="4"/>
+    <path d="M345 238H415L418 278H342Z" fill="url(#redBand)" stroke="#b04434" stroke-width="2"/>
+    <path data-bot-hit="" d="M341 350H419L425 370H335Z" fill="url(#enamel)" stroke="#cfe2f7" stroke-width="4"/>
+    <path d="M359 287H377V301H359ZM383 287H401V301H383Z" fill="#1c3357"/>
+    <path d="M369 311H391V350H369Z" fill="#16294a" stroke="#b9d4f0" stroke-width="2"/>
+    <path data-bot-hit="" d="M348 169 380 138 412 169Z" fill="url(#redBand)" stroke="#ffc09a" stroke-width="3"/>
+    <rect data-bot-hit="" x="350" y="119" width="60" height="51" rx="8" fill="url(#enamel)" stroke="#cfe2f7" stroke-width="4"/>
+    <rect x="357" y="126" width="46" height="37" rx="3" fill="url(#glass)" stroke="#ffe9b8" stroke-width="2"/>
+    <rect class="wl-lamp" x="357" y="126" width="46" height="37" rx="3" fill="url(#litGlass)"/>
+    <path data-bot-hit="" d="M360 119Q380 99 400 119Z" fill="url(#enamel)" stroke="#b9d4f0" stroke-width="3"/>
+    <path data-bot-hit="" d="M373 101V87Q380 79 387 87V101Z" fill="url(#enamel)" stroke="#b9d4f0" stroke-width="3"/>
+    <circle data-bot-hit="" cx="380" cy="77" r="12" fill="url(#enamel)" stroke="#b9d4f0" stroke-width="3"/>
+  </g>
+  <g clip-path="url(#eyeBounds)"><g class="wl-eyes" transform="translate(380 145) scale(.38)" fill="#fdf6e0" stroke="#20365f" stroke-width="1"><path/><path/></g></g>
+  </g>
+  <g class="wl-waves" fill="none" stroke-linecap="round">
+    <path class="wl-swell" d="M340 367Q311 361 284 368T229 368T190 367M570 367Q539 360 510 368T452 368T420 367" stroke="#58b7dd" stroke-width="5"/>
+    <path class="wl-ripple" d="M334 383Q306 378 278 384T221 384M439 383Q467 378 495 384T551 384" stroke="#a8ddf2" stroke-width="3" opacity=".82"/>
+    <path class="wl-water-trace" d="M295 397Q323 393 350 397T405 397T461 397" stroke="#a8ddf2" stroke-width="1.7" opacity=".45"/>
+  </g>
+  <g class="wl-rain" stroke="#79b7d1" stroke-width="3" stroke-linecap="round"/>
+  <g class="wl-snow" fill="#b8d8e8"/>
+  <g class="wl-fog" fill="url(#mist)"><path class="wl-drift" d="M195 261Q270 240 345 261t200 0v25H195Z"/><path class="wl-drift wl-drift-late" d="M195 325Q300 306 410 325t150 0v25H195Z"/></g>
+  <g class="wl-storm" fill="#e9b946"><path d="m274 244-12 24h13l-7 22 29-32h-15l9-14z"/></g>
+</svg>

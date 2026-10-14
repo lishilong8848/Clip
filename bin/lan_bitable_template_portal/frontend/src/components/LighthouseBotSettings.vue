@@ -5,12 +5,13 @@
         <form ref="dialog" class="bot-settings" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" @submit.prevent="save">
           <header><h2 id="bot-settings-title">图标设置</h2><button type="button" class="close" aria-label="关闭图标设置" :disabled="saving" @click="close"><X :size="18" /></button></header>
           <div class="settings-body">
-            <div class="preview"><LighthouseBot :appearance="draft" /></div>
+            <div class="preview" :class="{ 'weather-preview': draft.shape === 'weather-lighthouse' }"><LighthouseBot :appearance="draft" /></div>
             <fieldset class="colors"><legend>颜色</legend><div>
               <button v-for="[id, label, color] in BOT_COLORS" :key="id" type="button" class="swatch" :aria-label="label" :title="label" :aria-pressed="draft.color === id" :style="{ '--swatch': color }" :disabled="saving" @click="draft.color = id"><Check v-if="draft.color === id" :size="15" /></button>
             </div></fieldset>
             <div class="fields">
               <label>形状<select v-model="draft.shape" aria-label="形状" :disabled="saving"><option v-for="[id, label] in BOT_SHAPES" :key="id" :value="id">{{ label }}</option></select></label>
+              <label v-if="draft.shape === 'weather-lighthouse'" class="weather-city">天气城市<input v-model.trim="draft.weather_city" aria-label="天气城市" required pattern="[一-鿿]{2,16}" maxlength="16" :disabled="saving" placeholder="南通" /></label>
             </div>
             <label class="size">尺寸 <output>{{ draft.size }} px</output><input v-model.number="draft.size" aria-label="尺寸" type="range" min="40" max="200" step="1" :disabled="saving" /></label>
             <div class="switches">
@@ -87,11 +88,13 @@ header, footer { display: flex; align-items: center; gap: 8px; padding: 14px 18p
 header { justify-content: space-between; border-bottom: 1px solid #e4eae5; }h2 { margin: 0; font-size: 16px; }
 .settings-body { padding: 0 18px 18px; overflow-y: auto; overscroll-behavior: contain; }.preview { height: 224px; display: grid; place-items: center; }
 fieldset { padding: 0; margin: 0 0 16px; border: 0; }legend { margin-bottom: 10px; }.colors > div { display: grid; grid-template-columns: repeat(12, 1fr); gap: 6px; }
+.preview.weather-preview { height: 300px; padding-top: 40px; box-sizing: border-box; }
 button { border: 1px solid #cdd8d0; background: #fff; color: inherit; border-radius: 6px; min-height: 34px; padding: 6px 12px; font: inherit; display: inline-flex; align-items: center; justify-content: center; gap: 5px; cursor: pointer; }
 button:disabled, input:disabled, select:disabled { opacity: .5; cursor: not-allowed; }button:hover:not(:disabled) { background: #edf4f0; }.close { padding: 6px; border: 0; }
 .swatch { min-height: 0; width: 100%; aspect-ratio: 1; padding: 0; border-radius: 50%; background: var(--swatch); color: #fff; box-shadow: inset 0 0 0 1px #0002; border: 0; }.swatch:hover:not(:disabled) { background: var(--swatch); }.swatch[aria-pressed=true] { outline: 2px solid #397554; outline-offset: 2px; }.swatch:last-child { color: #27342d; }
 .fields label { display: grid; gap: 6px; }
 select { width: 100%; min-width: 0; border: 1px solid #cdd8d0; border-radius: 6px; background: #fff; color: inherit; font: inherit; padding: 8px; }
+.weather-city { margin-top: 12px; }.weather-city input { width: 100%; box-sizing: border-box; border: 1px solid var(--lh-border-strong, #cdd8d0); border-radius: 6px; background: var(--lh-surface-subtle, #fff); color: inherit; font: inherit; padding: 8px; }
 .size { margin: 16px 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }.size output { margin-left: auto; font-size: 12px; color: #526b5d; }.size input { width: 100%; margin: 0; accent-color: #397554; }
 .switches { display: grid; gap: 12px; }.switches label { display: flex; gap: 8px; align-items: center; }.switches input { margin: 0; width: 16px; height: 16px; accent-color: #397554; }
 footer { border-top: 1px solid #e4eae5; }.reset { margin-right: auto; font-size: 12px; padding: 6px 8px; }.save { background: #397554; color: #fff; border-color: #397554; }.save:hover:not(:disabled) { background: #2b6042; }.error { color: #a12d2d; font-size: 13px; margin-bottom: 0; overflow-wrap: anywhere; }

@@ -124,8 +124,8 @@
         <h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label>
         <label v-if="settingsForm.reminder_enabled" class="time-field">提醒时间<input v-model="settingsForm.reminder_time" type="time" required :disabled="busy" /></label>
         <h2>个人提醒与回顾</h2>
-        <label class="checkbox-label"><input v-model="settingsForm.timeout_reminder_enabled" type="checkbox" :disabled="busy" />开始作答满2小时未完成，提醒本人一次</label>
-        <label class="checkbox-label"><input v-model="settingsForm.weekly_report_enabled" type="checkbox" :disabled="busy" />每周一09:00发送个人回顾；A至E楼主管收到本楼汇总，学练群收到全楼汇总</label>
+        <label class="checkbox-label"><input v-model="settingsForm.timeout_reminder_enabled" type="checkbox" :disabled="busy" />值班员、值班长开始作答满2小时未完成，提醒本人一次</label>
+        <label class="checkbox-label"><input v-model="settingsForm.weekly_report_enabled" type="checkbox" :disabled="busy" />每周结束后（周一00:00）发送：值班员、值班长收到个人回顾；A至E楼主管收到本楼汇总，学练群收到全楼汇总</label>
         <footer class="actions"><button class="primary" :disabled="busy || loading"><Save :size="16" />保存设置</button></footer>
       </form>
     </template>

@@ -12,7 +12,11 @@ class ShiftReminderTests(TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.reader = Mock(return_value=[{'open_id': 'ou_night', 'shift': '夜'}, {'open_id': 'ou_external', 'shift': '白'}])
+        self.reader = Mock(return_value=[{'open_id': 'ou_night', 'shift': '夜', 'scope': 'A'}, {'open_id': 'ou_external', 'shift': '白', 'scope': 'A'}])
+        self.people = {'people': {
+            'night': {'scopes': ['A'], 'selectable': True, 'position': '值班长', 'login_ids': ['ou_night']},
+            'external': {'scopes': ['A'], 'selectable': True, 'position': '值班员', 'login_ids': ['ou_external']},
+        }}
         self.sender = Mock(return_value=(True, '', []))
         self.service = self.make_service()
         with self.service.transaction() as conn:
@@ -20,7 +24,8 @@ class ShiftReminderTests(TestCase):
 
     def make_service(self):
         return learning.LearningService(root=self.tmp.name, cloud=FakeCloud(), send_message=self.sender,
-            get_shift_roster=self.reader, get_portal_url=lambda: 'http://portal.test:18766')
+            get_shift_roster=self.reader, get_portal_url=lambda: 'http://portal.test:18766',
+            get_login_people=lambda: self.people)
 
     def run_at(self, hour, day=10):
         self.service.send_notifications(dt.datetime(2026, 10, day, hour, tzinfo=learning.TZ))
@@ -70,6 +75,56 @@ class ShiftReminderTests(TestCase):
         self.reader.assert_not_called()
         self.sender.assert_not_called()
 
+    def test_only_current_duty_roles_receive_and_cached_roster_is_rechecked(self):
+        self.people['people'].update({
+            'engineer': {'scopes': ['A'], 'selectable': True, 'position': '工程师', 'login_ids': ['ou_engineer']},
+            'supervisor': {'scopes': ['A'], 'selectable': True, 'position': '主管', 'login_ids': ['ou_supervisor']},
+        })
+        self.reader.return_value += [{'open_id': oid, 'shift': '白', 'scope': 'A'} for oid in ('ou_engineer', 'ou_supervisor')]
+        self.run_at(13)
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
+        self.people['people']['night']['position'] = '工程师'
+        with self.service.transaction() as conn:
+            key = 'shift:2026-10-10:夜:ou_night'
+            self.service._put('notification', key, {'id': key, 'kind': 'shift', 'shift': '夜',
+                'scope': '', 'date': '2026-10-10', 'open_id': 'ou_night', 'status': 'pending'}, conn)
+        self.run_at(20)
+        self.assertEqual(self.service._get('notification', key)['status'], 'skipped_role')
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
+        self.reader.assert_called_once()
+
+    def test_missing_local_role_directory_defers_until_recovered(self):
+        saved = self.people
+        self.people = {}
+        self.run_at(20)
+        self.reader.assert_not_called()
+        self.sender.assert_not_called()
+        self.people = saved
+        self.run_at(20)
+        self.assertEqual(self.sender.call_count, 2)
+
+    def test_old_pending_person_not_in_today_roster_does_not_receive(self):
+        self.people['people']['resting'] = {'scopes': ['A'], 'selectable': True, 'position': '值班员', 'login_ids': ['ou_resting']}
+        key = 'shift:2026-10-10:白:ou_resting'
+        with self.service.transaction() as conn:
+            self.service._put('notification', key, {'id': key, 'kind': 'shift', 'shift': '白',
+                'scope': '', 'date': '2026-10-10', 'open_id': 'ou_resting', 'status': 'pending'}, conn)
+        self.run_at(13)
+        self.assertEqual(self.service._get('notification', key)['status'], 'skipped_roster')
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
+
+    def test_duty_policy_rejects_shared_inactive_ambiguous_and_other_roles(self):
+        self.people['people'].update({
+            'fallback': {'scopes': ['B'], 'selectable': True, 'assignments': ['值班长'], 'login_ids': ['ou_fallback']},
+            'left': {'scopes': ['A'], 'selectable': True, 'inactive': True, 'position': '值班员', 'login_ids': ['ou_left']},
+            'station': {'scopes': ['110'], 'selectable': True, 'position': '值班长', 'login_ids': ['ou_station']},
+            'manager': {'scopes': ['H'], 'selectable': True, 'position': '经理', 'login_ids': ['ou_manager']},
+            'shared': {'scopes': ['A'], 'selectable': True, 'position': '值班员', 'login_ids': ['ou_duty']},
+            'duplicate': {'scopes': ['A'], 'selectable': True, 'position': '工程师', 'login_ids': ['ou_external']},
+        })
+        with patch('lan_bitable_template_portal.portal_service.BUILDING_OPEN_ID_MAP', {'A': 'ou_duty'}):
+            self.assertEqual(reminders.duty_recipients(self.service), {'ou_night', 'ou_fallback'})
+
     def test_old_pending_night_waits_until_new_time(self):
         key = 'shift:2026-10-10:夜:ou_night'
         with self.service.transaction() as conn:
@@ -111,15 +166,17 @@ class ShiftReminderTests(TestCase):
 
     def test_roster_view_pagination_dates_exclusions_and_external_users(self):
         timestamp = int(dt.datetime(2026, 10, 10, tzinfo=learning.TZ).timestamp()*1000)
-        def row(group='A班', shift='夜', oid='ou_test', day=timestamp):
-            return {'fields': {'班组': group, '班次': shift, '排班日期': day, '人员': {'users': [{'id': oid}]}}}
+        def row(group='A班', shift='夜', oid='ou_test', day=timestamp, scope='A楼'):
+            return {'fields': {'班组': group, '班次': shift, '排班日期': day, '机楼': scope, '人员': {'users': [{'id': oid}]}}}
         service = Mock()
         service._request_json.side_effect = [
-            {'code': 0, 'data': {'items': [row(), row('长白'), row('110站'), row(day=timestamp-86400000)], 'has_more': True, 'page_token': 'next'}},
-            {'code': 0, 'data': {'items': [row(), row(shift='白', oid='ou_external')], 'has_more': False}},
+            {'code': 0, 'data': {'items': [row(), row('长白', oid='ou_longday'), row('110站'), row(day=timestamp-86400000), row(shift='休'), row(scope='110站', oid='ou_station')], 'has_more': True, 'page_token': 'next'}},
+            {'code': 0, 'data': {'items': [row(), row(shift='白', oid='ou_external'), row(scope='H楼', oid='ou_H')], 'has_more': False}},
         ]
         self.assertEqual(reminders.read_roster(service, '2026-10-10'), [
-            {'open_id': 'ou_test', 'shift': '夜', 'name': ''}, {'open_id': 'ou_external', 'shift': '白', 'name': ''}])
+            {'open_id': 'ou_test', 'shift': '夜', 'scope': 'A', 'name': ''},
+            {'open_id': 'ou_external', 'shift': '白', 'scope': 'A', 'name': ''},
+            {'open_id': 'ou_H', 'shift': '夜', 'scope': 'H', 'name': ''}])
         self.assertEqual(service._request_json.call_args.kwargs['params']['view_id'], reminders.VIEW_ID)
         service._request_json.side_effect = None
         service._request_json.return_value = {'code': 0, 'data': {'items': [row()], 'has_more': True}}

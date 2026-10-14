@@ -31,14 +31,16 @@ try {
     const url = new URL(route.request().url());
     assert.equal(route.request().method(), 'GET', 'no real business writes');
     let data = {};
+    if (url.pathname === '/api/auth/status') data = { logged_in: true, user: { open_id: 'hit-fixture', modules: ['assistant', 'knowledge', 'maintenance'] } };
     if (url.pathname.endsWith('/appearance')) data = { color: 'encre', size: 200, shape, snap_back: false };
     if (url.pathname.endsWith('/conversation')) data = { enabled: true, configured: true, turns: [], busy: false };
     if (url.pathname.endsWith('/knowledge')) data = { total: 1, items: [{ id: 'fixture-doc', name: '测试公司手册.txt', status: 'ready' }], settings: { mode: 'local_faiss', ready: true, vectors: 12 } };
     await route.fulfill({ json: { ok: true, data } });
   });
-  for (shape of ['cercle', 'galet', 'squircle', 'capsule', 'triangle', 'hexagone', 'nuage', 'goutte', 'swirl-pile', 'heart', 'star', 'flower', 'diamond', 'shield']) {
+  for (shape of ['cercle', 'galet', 'squircle', 'capsule', 'triangle', 'hexagone', 'nuage', 'goutte', 'swirl-pile', 'heart', 'star', 'flower', 'diamond', 'shield', 'weather-lighthouse']) {
     await page.goto(base);
-    await page.locator('.assistant-launcher [data-bot-hit]').waitFor();
+    await page.locator('.assistant-launcher').waitFor();
+    await page.waitForFunction(() => !!document.querySelector('.assistant-launcher svg'));
     await page.waitForTimeout(650);
     await page.evaluate(() => {
       window.underClicks = 0;
@@ -49,12 +51,16 @@ try {
       document.body.prepend(under);
     });
     const sampled = await page.evaluate(() => {
-      const body = document.querySelector('.assistant-launcher [data-bot-hit]');
+      const weatherNode = document.querySelector('.assistant-launcher .weather-lighthouse');
+      const weather = weatherNode && getComputedStyle(weatherNode).display !== 'none' ? weatherNode : null;
+      const bodies = weather ? [...weather.querySelectorAll('[data-bot-hit]')] : [document.querySelector('.assistant-launcher [data-bot-hit]')];
       const rect = document.querySelector('.assistant-launcher svg').getBoundingClientRect();
-      const inverse = body.getScreenCTM().inverse();
       const outside = [], inside = [], wrong = [];
       for (let x = rect.left + 3; x < rect.right; x += 7) for (let y = rect.top + 3; y < rect.bottom; y += 7) {
-        const expected = body.isPointInFill(new DOMPoint(x, y).matrixTransform(inverse));
+        const expected = bodies.some(body => {
+          const local = new DOMPoint(x, y).matrixTransform(body.getScreenCTM().inverse());
+          return body.isPointInFill(local) || (weather && body.isPointInStroke(local));
+        });
         const actual = !!document.elementFromPoint(x, y)?.closest('.assistant-launcher');
         if (actual !== expected) wrong.push({ x, y, expected, actual });
         (expected ? inside : outside).push({ x, y });
@@ -94,7 +100,7 @@ try {
   await page.getByRole('button', { name: '图标设置', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: '图标设置' });
   await dialog.waitFor();
-  assert.equal(await dialog.locator('select option').count(), 14);
+  assert.equal(await dialog.locator('select option').count(), 15);
   await dialog.getByRole('button', { name: '蓝色', exact: true }).click();
   await page.waitForTimeout(100);
   const blue = await dialog.evaluate(el => getComputedStyle(el).backgroundColor);
@@ -108,5 +114,5 @@ try {
   await dialog.screenshot({ path: path.join(output, 'settings-dialog.png') });
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ ok: true, shapes: 14, screenshots: output, checks: 'SVG shape hit-testing, transparent pass-through, open/close, drag, keyboard' }));
+  console.log(JSON.stringify({ ok: true, shapes: 15, screenshots: output, checks: 'SVG shape hit-testing, transparent pass-through, open/close, drag, keyboard' }));
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }

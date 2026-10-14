@@ -1,5 +1,5 @@
 <template>
-  <span ref="host" class="lighthouse-bot" :class="{ interactive, arriving: interactive && !resumed }" :style="{ width: appearance.size + 'px', height: appearance.size + 'px' }" :data-bot-mood="mood" :data-animation-active="active" :data-motion-resumed="resumed" aria-hidden="true">
+  <span ref="host" class="lighthouse-bot" :class="{ interactive, arriving: interactive && !resumed }" :style="{ width: appearance.size + 'px', height: appearance.size + 'px' }" :title="appearance.shape === 'weather-lighthouse' ? weatherTitle : undefined" :data-bot-mood="mood" :data-animation-active="active" :data-motion-resumed="resumed" aria-hidden="true">
     <span v-if="!ready" class="bot-fallback"><i /><i /></span>
   </span>
 </template>
@@ -9,6 +9,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BloubBot } from '../vendor/bloub/entry';
 import type { StateId } from '../vendor/bloub/engine/states';
 import type { BotAppearance, BotMood } from '../botAppearance';
+import { readIconWeather, weatherScene, weatherClock, type IconWeather } from '../botWeather';
 
 const props = withDefaults(defineProps<{ appearance: BotAppearance; interactive?: boolean; position?: { x: number; y: number } | null; mood?: BotMood; visible?: boolean; motionKey?: string }>(), { interactive: false, position: null, mood: 'idle', visible: true, motionKey: '' });
 const emit = defineEmits<{ moved: [position: { x: number; y: number }] }>();
@@ -23,6 +24,29 @@ const active = computed(() => props.visible && pageVisible.value && windowFocuse
 const IDLE_CYCLE: StateId[] = ['idle', 'wink', 'wide', 'play', 'orbit', 'swirl', 'burst', 'comet', 'egg', 'hexagon'];
 const QUIET_CYCLE: StateId[] = ['idle', 'wink', 'wide'];
 let lastUrl = window.location.href;
+const weatherTitle = ref('雾屿灯塔');
+let weatherTimer: number | undefined, weatherGeneration = 0;
+let weather: IconWeather = { available: false, city: props.appearance.weather_city || '南通' };
+function drawWeather(): void {
+  const scene = weatherScene(weather, weatherClock(weather)); bot?.setWeather(scene); weatherTitle.value = scene.title;
+}
+async function refreshWeather(generation: number): Promise<void> {
+  if (disposed || generation !== weatherGeneration || !active.value || props.appearance.shape !== 'weather-lighthouse') return;
+  const value = await readIconWeather(props.appearance.weather_city || '南通');
+  if (disposed || generation !== weatherGeneration) return;
+  weather = value; drawWeather();
+  weatherTimer = window.setTimeout(() => { void refreshWeather(generation); }, 1000);
+}
+function scheduleWeather(): void {
+  window.clearTimeout(weatherTimer); const generation = ++weatherGeneration;
+  const city = props.appearance.weather_city || '南通';
+  if (weather.city !== city) weather = { available: false, city };
+  if (!active.value || props.appearance.shape !== 'weather-lighthouse') return;
+  drawWeather();
+  if (/^[\u4e00-\u9fff]{2,16}$/.test(weather.city)) {
+    weatherTimer = window.setTimeout(() => { void refreshWeather(generation); }, 450);
+  }
+}
 function activate(): void {
   bot?.setReducedMotion(reducedMotion.value);
   bot?.setFollow(active.value && props.interactive);
@@ -33,7 +57,7 @@ function setMood(): void {
   const expression = { idle: 'neutre', engaged: 'curieux', thinking: 'attentif', success: 'heureux', error: 'confus' };
   const state: Record<BotMood, StateId> = { idle: 'idle', engaged: 'idle', thinking: 'thinking', success: 'notify', error: 'alert' };
   bot.setExpression(expression[props.mood]);
-  if (props.mood === 'idle') bot.setCycle(reducedMotion.value ? QUIET_CYCLE : IDLE_CYCLE, true);
+  if (props.mood === 'idle') bot.setCycle(reducedMotion.value || props.appearance.shape === 'weather-lighthouse' ? QUIET_CYCLE : IDLE_CYCLE, true);
   else { bot.pause(); bot.setState(state[props.mood]); }
   activate();
 }
@@ -51,13 +75,15 @@ async function reposition(animate = true): Promise<void> {
   if (disposed || !bot || !host.value || !props.interactive) return;
   const anchor = (host.value.closest('.lighthouse-launcher') || host.value).getBoundingClientRect();
   const base = !props.appearance.snap_back && props.position ? props.position : { x: anchor.left, y: anchor.top };
-  const position = { x: Math.max(12, Math.min(base.x, window.innerWidth - props.appearance.size - 12)), y: Math.max(12, Math.min(base.y, window.innerHeight - props.appearance.size - 12)) };
+  const top = props.appearance.shape === 'weather-lighthouse' ? 12 + props.appearance.size * .3 : 12;
+  const position = { x: Math.max(12, Math.min(base.x, window.innerWidth - props.appearance.size - 12)), y: Math.max(top, Math.min(base.y, window.innerHeight - props.appearance.size - 12)) };
   if (animate) bot.moveTo(position); else bot.setPosition(position);
 }
 watch(() => props.appearance, update, { deep: true });
+watch(() => [props.appearance.shape, props.appearance.weather_city], () => { setMood(); scheduleWeather(); });
 watch(() => props.mood, setMood);
 watch(reducedMotion, setMood);
-watch(active, value => { activate(); if (value) void reposition(false); });
+watch(active, value => { activate(); scheduleWeather(); if (value) void reposition(false); });
 watch(() => [props.position, props.appearance.size, props.appearance.snap_back], () => { void reposition(); }, { deep: true });
 function onResize(): void { void reposition(false); }
 function saveMotion(): void {
@@ -92,6 +118,7 @@ onMounted(() => {
   } catch { /* Ignore an expired or invalid animation handoff. */ }
   if (!resumed.value && props.interactive) bot.greet();
   ready.value = true;
+  scheduleWeather();
   void reposition(false);
   document.addEventListener('visibilitychange', visibility);
   reduced.addEventListener('change', visibility);
@@ -108,6 +135,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   saveMotion();
   disposed = true;
+  ++weatherGeneration; window.clearTimeout(weatherTimer);
   document.removeEventListener('visibilitychange', visibility);
   reduced.removeEventListener('change', visibility);
   window.removeEventListener('resize', onResize);

@@ -1,7 +1,7 @@
 import { h, render } from 'vue';
 import { Check, LoaderCircle, X } from 'lucide-vue-next';
 
-type Action = { button:HTMLButtonElement; feedback:HTMLElement; started:number; pending:number; observed:boolean; succeeded:boolean; failed:boolean; waiting:boolean; timer:number; finished:boolean };
+type Action = { button:HTMLButtonElement; feedback:HTMLElement; started:number; pending:number; observed:boolean; succeeded:boolean; failed:boolean; waiting:boolean; timer:number; finished:boolean; presentation?:boolean; minimum:number };
 const actions=new Map<HTMLButtonElement,Action>(),jobs=new Map<string,Action>();
 let current:Action|undefined;
 const reduced=()=>window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -17,7 +17,7 @@ function settle(action:Action){
   if(!action.button.isConnected){clear(action);return;}
   // Vue can replace a text-only button's children when its loading label changes.
   if(action.feedback.parentElement!==action.button)action.button.append(action.feedback);
-  const remaining=action.failed?0:1200-(performance.now()-action.started);
+  const remaining=action.failed?0:action.minimum-(performance.now()-action.started);
   if(remaining>0||action.pending||action.waiting||action.button.getAttribute('aria-busy')==='true'){
     action.timer=window.setTimeout(()=>settle(action),Math.max(100,remaining));return;
   }
@@ -39,8 +39,14 @@ function result(action:Action,value:any){
 function observe(action:Action){action.observed=true;action.pending++;}
 function completeRequest(action:Action){action.pending--;if(action.failed&&action.button.dataset.v2Action){window.clearTimeout(action.timer);settle(action);}}
 export function trackButtonRequest<T>(promise:Promise<T>):Promise<T>{
-  const owner=current;if(owner)observe(owner);
+  const owner=current?.presentation?undefined:current;if(owner)observe(owner);
   return promise.then(data=>{const task=jobs.get(String((data as any)?.job_id||''));if(task)result(task,data);if(owner)result(owner,data);return data;},error=>{if(owner)owner.failed=true;throw error;}).finally(()=>{if(owner)completeRequest(owner);});
+}
+export function trackButtonPresentation(promise:Promise<unknown>):void{
+  const owner=current;if(!owner)return;
+  // Opening a drawer completes at render; its data reads keep their own loading feedback.
+  owner.presentation=true;owner.minimum=300;observe(owner);
+  void promise.then(()=>result(owner,{ok:true}),()=>{owner.failed=true;}).finally(()=>completeRequest(owner));
 }
 export function installActionMotion(doc:Document=document):()=>void{
   const changed=(event:Event)=>{const input=event.target as HTMLInputElement;if(input?.type==='checkbox'&&!input.disabled)input.dataset.v2Toggled='true';};
@@ -67,7 +73,7 @@ export function installActionMotion(doc:Document=document):()=>void{
     if(button.type==='submit'&&button.form&&!button.form.noValidate&&!button.form.checkValidity())return;
     if(actions.has(button)){event.preventDefault();event.stopImmediatePropagation();return;}
     const feedback=doc.createElement('span');feedback.className='v2-action-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-label','处理中');
-    const action:Action={button,feedback,started:performance.now(),pending:0,observed:false,succeeded:false,failed:false,waiting:false,timer:0,finished:false};
+    const action:Action={button,feedback,started:performance.now(),pending:0,observed:false,succeeded:false,failed:false,waiting:false,timer:0,finished:false,minimum:1200};
     actions.set(button,action);current=action;
     button.style.setProperty('--v2-action-size',Math.max(28,Math.min(48,button.getBoundingClientRect().height))+'px');
     // Defer decoration until the original click handlers have inspected the target.

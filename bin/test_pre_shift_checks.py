@@ -117,11 +117,68 @@ class CheckTests(unittest.TestCase):
         with self.assertRaises(CheckError):
             self.service.save_definition(supervisor, 'B', 0, [])
         self.service.prepare(self.current)
-        self.service.save_definition(supervisor, 'A', 1, [{'id': 'new', 'text': '新的测试项'}])
+        self.submit()
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=self.current):
+            self.service.save_definition(supervisor, 'A', 1, [{'id': 'new', 'text': '新的测试项'}])
         with self.assertRaises(CheckError):
             self.service.save_definition(self.admin, 'A', 1, [])
         self.assertEqual(len(self.service.state(self.worker, 'A', self.current)['tasks'][0]['items']), 2)
-        self.submit()
+        self.assertTrue(self.submit()['already_completed'])
+
+    def test_open_check_updates_immediately_and_stale_draft_cannot_submit(self):
+        self.service.prepare(self.current)
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=self.current):
+            self.service.save_definition(self.admin, 'A', 1, [{'id': 'new', 'text': '新的测试项'}])
+        task = self.service.state(self.worker, 'A', self.current)['tasks'][0]
+        self.assertEqual(task['items'], [{'id': 'new', 'text': '新的测试项'}])
+        self.assertEqual(task['definition_version'], 2)
+        with self.assertRaises(CheckError) as error:
+            self.submit()
+        self.assertEqual(error.exception.status, 409)
+        self.roster.assert_called_once()
+        self.sender.assert_not_called()
+
+    def test_clear_hides_pending_and_add_uses_cached_roster_without_worker_tick(self):
+        self.service.tick(self.current)
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=self.current):
+            self.service.save_definition(self.admin, 'A', 1, [])
+            self.assertEqual(self.service.state(self.worker, 'A', self.current)['tasks'], [])
+            self.service.notify(self.current + dt.timedelta(hours=2))
+            self.assertEqual(self.sender.call_count, 2)
+            self.service.save_definition(self.admin, 'A', 2, [{'id': 'new', 'text': '恢复测试项'}])
+        task = self.service.state(self.worker, 'A', self.current)['tasks'][0]
+        self.assertEqual(task['definition_version'], 3)
+        self.assertEqual(task['items'][0]['text'], '恢复测试项')
+        self.roster.assert_called_once()
+
+    def test_first_definition_creates_task_immediately_with_cached_roster(self):
+        with self.service.connection(True) as conn:
+            people = [{**p, 'scope': 'B'} for p in self.roster.return_value['people']]
+            conn.execute('INSERT INTO rosters(day,people) VALUES(?,?)', (DAY, json.dumps(people)))
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=self.current):
+            self.service.save_definition(self.admin, 'B', 0, [{'id': 'b', 'text': 'B楼测试项'}])
+        state = self.service.state({**self.worker, 'home_scope': 'B'}, 'B', self.current)
+        self.assertEqual(state['tasks'][0]['items'][0]['text'], 'B楼测试项')
+        self.roster.assert_not_called()
+
+    def test_past_shift_keeps_unsubmitted_snapshot_after_edit(self):
+        self.service.prepare(self.current)
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=at('2026-10-15T09:00:00')):
+            self.service.save_definition(self.admin, 'A', 1, [])
+        with self.service.connection() as conn:
+            row = conn.execute('SELECT * FROM tasks WHERE id=?', (DAY + ':A:白',)).fetchone()
+        self.assertEqual(len(json.loads(row['items'])), 2)
+
+    def test_pre_upgrade_cleared_definition_hides_stale_pending_snapshot(self):
+        self.service.prepare(self.current)
+        with self.service.connection(True) as conn:
+            conn.execute("UPDATE definitions SET items='[]' WHERE scope='A'")
+        self.assertEqual(self.service.state(self.worker, 'A', self.current)['tasks'], [])
+        with self.assertRaises(CheckError) as error:
+            self.submit()
+        self.assertEqual(error.exception.status, 409)
+        self.service.notify(self.current)
+        self.sender.assert_not_called()
 
     def test_cloud_failure_does_not_lose_submission_or_restart_reminders(self):
         self.service.tick(self.current)

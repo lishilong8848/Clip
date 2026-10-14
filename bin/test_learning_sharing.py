@@ -3,6 +3,8 @@ import asyncio
 import copy
 import datetime as dt
 import json
+import itertools
+import random
 import sys
 import tempfile
 import unittest
@@ -29,6 +31,16 @@ def questions(count=20):
              'evidence': '运行参数核验后发现冷却水压差水流开关内部细小水流孔脏堵'} for i in range(count)]
 
 
+def typed_questions(types, count=20):
+    values = questions(count)
+    for q, kind in zip(values, sharing.question_mix(count, types)):
+        q['type'] = kind
+        q['correct'] = [0] if kind == 'single' else [0, 2]
+        if kind == 'interview':
+            q.update(options=[], correct=[], reference_answer='按审批流程核验水流孔脏堵，交获准人员处理。')
+    return sharing.validate_questions(values, SOURCE, types)
+
+
 class SharingTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(); self.addCleanup(self.folder.cleanup)
@@ -37,10 +49,10 @@ class SharingTests(unittest.TestCase):
         self.core = sharing.SharingExercises(self.learning)
         self.clock = patch.object(sharing, 'now', return_value=TODAY); self.clock.start(); self.addCleanup(self.clock.stop)
         self.stamp = patch.object(sharing, 'stamp', return_value=TODAY.isoformat(timespec='seconds')); self.stamp.start(); self.addCleanup(self.stamp.stop)
-        self.bid = self.core.create(URL, 'operation-fixture-01', ADMIN)['id']
+        self.bid = self.core.create(URL, 'operation-fixture-01', ADMIN, ['single', 'multiple'])['id']
         with self.learning.transaction() as conn:
             batch = self.core.batch(self.bid, conn)
-            batch.update(title='冷机故障分享会', status='draft', source={'text': SOURCE}, questions=questions(),
+            batch.update(title='冷机故障分享会', status='draft', source={'text': SOURCE}, questions=sharing.validate_questions(questions(), SOURCE),
                          participants=[{'name': f'人员{i}', 'open_id': f'ou_person{i}', 'union_id': f'on_person{i}', 'person_id': f'p{i}', 'scope': 'A' if i == 0 else 'B'} for i in range(3)])
             self.learning._put('sharing_batch', self.bid, batch, conn)
 
@@ -50,12 +62,12 @@ class SharingTests(unittest.TestCase):
     def submit(self, attempt, **kwargs):
         batch = self.core.batch(self.bid)
         qs = {q['id']: q for q in batch['questions']}
-        fields = {qid: [str(i) for i in reversed(qs[qid]['correct'])] for qid in attempt['question_ids']}
+        fields = {qid: '已核验，按审批流程处理。' if qs[qid]['type'] == 'interview' else [str(i) for i in reversed(qs[qid]['correct'])] for qid in attempt['question_ids']}
         return self.core.submit({'attempt_id': attempt['id'], 'ticket': attempt['ticket']}, kwargs.get('fields', fields),
             {'union_id': kwargs.get('uid', attempt['union_id'])}, kwargs.get('app_id', 'cli_bot'), kwargs.get('allowed', lambda oid: True))
 
     def test_create_idempotency_and_admin_gate(self):
-        self.assertEqual(self.core.create(URL, 'operation-fixture-01', ADMIN)['id'], self.bid)
+        self.assertEqual(self.core.create(URL, 'operation-fixture-01', ADMIN, ['single', 'multiple'])['id'], self.bid)
         with self.assertRaises(LearningError): self.core.create(URL, 'operation-fixture-01', {'id': 'ou_person0'})
         with self.assertRaises(LearningError): self.core.create('http://localhost/docx/Test', 'operation-fixture-02', ADMIN)
 
@@ -91,13 +103,72 @@ class SharingTests(unittest.TestCase):
         with self.assertRaises(LearningError): self.core.publish(self.bid, 99, ADMIN, 'cli_bot')
         with self.assertRaises(LearningError): self.core.publish(self.bid, 1, ADMIN, '')
 
+    def test_exempt_attendee_is_kept_but_not_assigned_reminded_or_counted(self):
+        detail = self.core.edit(self.bid, {'version': 1, 'questions': questions(), 'excluded_open_ids': ['ou_person1']}, ADMIN)
+        self.assertEqual((detail['attendee_total'], detail['total']), (3, 2))
+        self.assertTrue(next(p for p in detail['participants'] if p['open_id'] == 'ou_person1')['exempted'])
+        self.core.publish(self.bid, detail['version'], ADMIN, 'cli_bot')
+        self.assertEqual({p['open_id'] for p in self.core.attempts(self.bid)}, {'ou_person0', 'ou_person2'})
+        self.assertEqual(len([j for j in self.learning._all('sharing_delivery') if j['kind'] == 'paper']), 2)
+        self.assertFalse(self.core.detail(self.bid, ADMIN)['error'])
+        exempted = self.core.detail(self.bid, {'id': 'ou_person1'})
+        self.assertEqual((exempted['total'], exempted['questions']), (0, []))
+        self.core.schedule(TODAY.replace(hour=13))
+        self.assertEqual(len([j for j in self.learning._all('sharing_delivery') if j['kind'] == 'reminder']), 2)
+        self.submit(self.core.attempts(self.bid)[0])
+        self.core.schedule(dt.datetime(2026, 10, 19, 0, tzinfo=TZ))
+        job = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly')
+        self.assertEqual(len(job['items']), 2)
+        text = json.dumps(sharing.weekly_card(job, self.core.batch(self.bid), 'http://portal.test'), ensure_ascii=False)
+        self.assertIn('参会 3 人 · 需答 2 人 · 免做 1 人', text)
+        self.assertNotIn('人员1', text)
+        with self.assertRaises(LearningError):
+            self.core.edit(self.bid, {'version': self.core.batch(self.bid)['version'], 'questions': questions(), 'excluded_open_ids': []}, ADMIN)
+
+    def test_exemptions_validate_membership_version_admin_and_empty_assignment(self):
+        for excluded in ('ou_person0', ['ou_unknown'], ['ou_person0', 'ou_person0'], [None], [{}]):
+            with self.subTest(excluded=excluded), self.assertRaises(LearningError):
+                self.core.edit(self.bid, {'version': 1, 'questions': questions(), 'excluded_open_ids': excluded}, ADMIN)
+        with self.assertRaises(LearningError):
+            self.core.edit(self.bid, {'version': 1, 'questions': questions(), 'excluded_open_ids': ['ou_person0']}, {'id': 'ou_person0'})
+        with self.assertRaises(LearningError):
+            self.core.edit(self.bid, {'version': 0, 'questions': questions(), 'excluded_open_ids': ['ou_person0']}, ADMIN)
+        detail = self.core.edit(self.bid, {'version': 1, 'questions': questions(), 'excluded_open_ids': [f'ou_person{i}' for i in range(3)]}, ADMIN)
+        with self.assertRaisesRegex(LearningError, '至少保留一位'):
+            self.core.publish(self.bid, detail['version'], ADMIN, 'cli_bot')
+        self.assertEqual(self.core.attempts(self.bid), [])
+        self.assertEqual(self.learning._all('sharing_delivery'), [])
+
+    def test_exemptions_roundtrip_and_cloud_marker_count_only_assignments(self):
+        detail = self.core.edit(self.bid, {'version': 1, 'questions': questions(), 'excluded_open_ids': ['ou_person1']}, ADMIN)
+        self.core.publish(self.bid, detail['version'], ADMIN, 'cli_bot')
+        batch = self.learning._get('sharing_batch', self.bid)
+        self.learning._cloud = Mock()
+        self.assertFalse(self.learning._sync_document(('sharing_batch', self.bid, batch['_revision'])))
+        with self.learning.transaction() as conn:
+            for item in self.core.attempts(self.bid, conn):
+                self.learning._put('sharing_attempt', item['id'], item, conn, False)
+        self.learning._sync_document(('sharing_batch', self.bid, batch['_revision']))
+        self.learning._cloud.upsert_entity.assert_called_once()
+        entities = [{'kind': kind, 'key': value['id'], 'payload': value}
+                    for kind in sharing.KINDS for value in self.learning._all(kind)]
+        with tempfile.TemporaryDirectory() as restored_root:
+            recovered = LearningService(restored_root, cloud=SimpleNamespace(load_entities=lambda: entities))
+            recovered.restore()
+            core = sharing.SharingExercises(recovered)
+            self.assertEqual((core.detail(self.bid, ADMIN)['total'], core.detail(self.bid, ADMIN)['error']), (2, ''))
+            self.assertEqual(core.batch(self.bid)['excluded_open_ids'], ['ou_person1'])
+            core.schedule(TODAY.replace(hour=13))
+            self.assertEqual(len([j for j in recovered._all('sharing_delivery') if j['kind'] == 'reminder']), 2)
+
     def test_concurrent_publish_and_restart_keep_same_five(self):
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda _: self.publish(), range(8)))
         attempts = self.core.attempts(self.bid)
         self.assertEqual(len(attempts), 3)
         self.assertTrue(all(len(set(a['question_ids'])) == 5 for a in attempts))
-        self.assertEqual(len(self.learning._all('sharing_delivery')), 3)
+        self.assertEqual(len([j for j in self.learning._all('sharing_delivery') if j['kind'] == 'paper']), 3)
+        self.assertEqual(len([j for j in self.learning._all('sharing_delivery') if j['kind'] == 'bank']), 20)
         restored = sharing.SharingExercises(LearningService(self.folder.name))
         self.assertEqual(attempts, restored.attempts(self.bid))
         self.assertFalse(self.learning._all('paper'))
@@ -246,6 +317,87 @@ class SharingTests(unittest.TestCase):
         model.complete.return_value = '{bad json'
         with self.assertRaises(ValueError): generate(model, {'source': SOURCE, 'previous': [], 'count': 5})
 
+    def test_all_type_combinations_and_weighted_personal_papers(self):
+        for size in range(1, 4):
+            for types in itertools.combinations(sharing.QUESTION_TYPES, size):
+                types = list(types)
+                for count in (5, 10, 20, 40):
+                    with self.subTest(types=types, count=count):
+                        qs = typed_questions(types, count)
+                        self.assertEqual({q['type'] for q in qs}, set(types))
+                        selected = sharing.sample_questions(qs, random.Random(1))
+                        self.assertEqual(len(set(selected)), 5)
+                        self.assertEqual({q['type'] for q in qs if q['id'] in selected}, set(types))
+        mix = sharing.question_mix(20, list(sharing.QUESTION_TYPES))
+        self.assertEqual([mix.count(k) for k in sharing.QUESTION_TYPES], [12, 6, 2])
+
+    def test_question_type_input_and_reference_validation(self):
+        for values in ([], None, 'single', ['single', 'single'], ['unknown'], [{}]):
+            with self.subTest(values=values), self.assertRaises(LearningError): sharing.selected_types(values)
+        qs = typed_questions(['interview'], 5)
+        for bad in ('', '答' * 1001, []):
+            invalid = copy.deepcopy(qs); invalid[0]['reference_answer'] = bad
+            with self.assertRaises(LearningError): sharing.validate_questions(invalid, SOURCE, ['interview'])
+        with self.assertRaises(LearningError): sharing.validate_questions(qs, SOURCE, ['single'])
+        with self.assertRaises(LearningError): sharing.validate_questions(qs, SOURCE, ['single', 'interview'])
+        with self.assertRaises(LearningError): self.core.create(URL, 'operation-fixture-01', ADMIN, ['interview'])
+
+    def test_new_batches_default_single_and_legacy_drafts_remain_publishable(self):
+        bid = self.core.create(URL, 'default-type-operation', ADMIN)['id']
+        self.assertEqual(self.core.batch(bid)['question_types'], ['single'])
+        with self.learning.transaction() as conn:
+            batch = self.core.batch(self.bid, conn); batch.pop('question_types')
+            self.learning._put('sharing_batch', self.bid, batch, conn)
+        self.publish()
+        self.assertEqual(len(self.core.attempts(self.bid)), 3)
+        self.assertEqual(self.core.detail(self.bid, ADMIN)['question_types'], ['single', 'multiple'])
+
+    def test_mixed_and_all_text_cards_keep_answers_without_fabricating_grades(self):
+        for types, choice_count in ((list(sharing.QUESTION_TYPES), 4), (['interview'], 0)):
+            with self.subTest(types=types):
+                bid = self.core.create(URL, 'new-batch-' + '-'.join(types), ADMIN, types)['id']
+                batch = self.core.batch(self.bid)
+                batch.update(id=bid, question_types=types, questions=typed_questions(types), version=1)
+                with self.learning.transaction() as conn: self.learning._put('sharing_batch', bid, batch, conn)
+                self.core.publish(bid, 1, ADMIN, 'cli_bot')
+                batch = self.core.batch(bid); attempt = self.core.attempts(bid)[0]
+                qmap = {q['id']: q for q in batch['questions']}
+                form = sharing.exercise_card(batch, attempt)['body']['elements'][-1]['elements']
+                self.assertEqual(len([e for e in form if e['tag'] == 'input']), 5 - choice_count)
+                hidden = self.core.detail(bid, {'id': attempt['open_id']})['questions']
+                self.assertTrue(all('reference_answer' not in q for q in hidden))
+                raw = '先按审批流程核验。' * 50
+                fields = {qid: raw if qmap[qid]['type'] == 'interview' else [str(i) for i in reversed(qmap[qid]['correct'])] for qid in attempt['question_ids']}
+                text_id = next(qid for qid in attempt['question_ids'] if qmap[qid]['type'] == 'interview')
+                for invalid in (' ', '答' * 1001, ['0']):
+                    with self.assertRaises(LearningError):
+                        self.core.submit({'attempt_id': attempt['id'], 'ticket': attempt['ticket']}, {**fields, text_id: invalid},
+                                         {'union_id': attempt['union_id']}, 'cli_bot', lambda _: True)
+                response = self.core.submit({'attempt_id': attempt['id'], 'ticket': attempt['ticket']}, fields,
+                                           {'union_id': attempt['union_id']}, 'cli_bot', lambda _: True)
+                self.assertTrue(response['ok'])
+                saved = self.learning._get('sharing_attempt', attempt['id'])
+                self.assertEqual(saved['correct'], choice_count)
+                self.assertEqual(saved['answers'][text_id], raw)
+                card = json.dumps(sharing.exercise_card(batch, saved, result=True), ensure_ascii=False)
+                self.assertIn('参考答案', card)
+                self.assertIn('不计入选择题正确率', card)
+                self.assertIn('完整作答已保存', card)
+                self.core.schedule(dt.datetime(2026, 10, 19, tzinfo=TZ))
+                weekly = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly' and j['batch_id'] == bid)
+                self.assertEqual(sum(p['choices'] for p in weekly['items']), choice_count)
+                self.assertEqual(sum(p['answered'] for p in weekly['items']), 5)
+                sync = self.core.detail(bid, ADMIN)['bank_sync']
+                self.assertEqual(sync, {'total': 20, 'synced': 0, 'failed': 0, 'error': ''})
+
+    def test_model_obeys_each_requested_type_and_rejects_mismatch(self):
+        qs = typed_questions(list(sharing.QUESTION_TYPES), 5)
+        payload = {'source': SOURCE, 'previous': [], 'count': 5, 'question_types': [q['type'] for q in qs]}
+        model = Mock(); model.complete.return_value = json.dumps({'questions': qs})
+        self.assertEqual(generate(model, payload)['questions'], qs)
+        model.complete.return_value = json.dumps({'questions': questions(5)})
+        with self.assertRaises(ValueError): generate(model, payload)
+
 
 class SourceTests(unittest.TestCase):
     def portal(self, *, repeated=False, changed=False):
@@ -275,14 +427,89 @@ class SourceTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_answer_results_take_priority_over_older_bank_uploads(self):
+        setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
+        setup.publish(); setup.submit(setup.core.attempts(setup.bid)[0])
+        with setup.learning.transaction() as conn:
+            for job in setup.learning._all('sharing_delivery', conn):
+                if job['kind'] == 'paper':
+                    job['status'] = 'sent'; setup.learning._put('sharing_delivery', job['id'], job, conn)
+        worker = SharingRuntime(SimpleNamespace(), lambda: setup.learning); worker.core = setup.core
+        with patch('lan_bitable_template_portal.learning_sharing_routes.now', return_value=TODAY):
+            jobs = worker.pending('sharing_delivery', 5)
+        self.assertEqual(jobs[0]['kind'], 'result')
+        self.assertTrue(all(job['kind'] == 'bank' for job in jobs[1:]))
+
+    async def test_bank_retry_does_not_send_cards_and_persists_record_receipt(self):
+        setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
+        setup.publish()
+        jobs = setup.learning._all('sharing_delivery')
+        paper_jobs = [j for j in jobs if j['kind'] == 'paper']
+        bank_job = next(j for j in jobs if j['kind'] == 'bank')
+        worker = SharingRuntime(SimpleNamespace(), lambda: setup.learning); worker.core = setup.core
+        worker.bot = Mock(side_effect=AssertionError('Bank sync must not send messages'))
+        from lan_bitable_template_portal.learning_cloud import LearningCloudWriteUncertain
+        worker.question_bank = Mock()
+        worker.question_bank.save_sharing_question.side_effect = [LearningCloudWriteUncertain('写入结果未知'), 'recSaved']
+        guard = SimpleNamespace(external_real_write_guard=lambda: {'real_write_allowed': True})
+        with patch.dict(sys.modules, {'lan_bitable_template_portal.portal_service': guard}):
+            await worker.send(bank_job)
+            current = setup.learning._get('sharing_delivery', bank_job['id'])
+            self.assertEqual(current['status'], 'pending')
+            self.assertEqual(current['failures'], 1)
+            self.assertIn('写入结果未知', setup.core.detail(setup.bid, ADMIN)['bank_sync']['error'])
+            worker.update_batch(setup.bid, status='closed')
+            await worker.send(current)
+        receipt = setup.learning._get('sharing_delivery', bank_job['id'])
+        self.assertEqual((receipt['status'], receipt['record_id']), ('sent', 'recSaved'))
+        self.assertEqual([c.args[-1] for c in worker.question_bank.save_sharing_question.call_args_list], [bank_job['id']] * 2)
+        self.assertEqual([j for j in setup.learning._all('sharing_delivery') if j['kind'] == 'paper'], paper_jobs)
+        self.assertEqual(setup.core.detail(setup.bid, ADMIN)['bank_sync']['synced'], 1)
+        await worker.close(); worker.question_bank.close.assert_called_once()
+
+    async def test_bank_guard_blocks_remote_write(self):
+        setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
+        setup.publish()
+        worker = SharingRuntime(SimpleNamespace(), lambda: setup.learning); worker.core = setup.core
+        worker.question_bank = Mock()
+        guard = SimpleNamespace(external_real_write_guard=lambda: {'real_write_allowed': False})
+        job = next(j for j in setup.learning._all('sharing_delivery') if j['kind'] == 'bank')
+        with patch.dict(sys.modules, {'lan_bitable_template_portal.portal_service': guard}): await worker.send(job)
+        worker.question_bank.save_sharing_question.assert_not_called()
+        self.assertEqual(setup.learning._get('sharing_delivery', job['id'])['status'], 'pending')
+
+    async def test_meeting_questions_reach_non_duty_attendees_only(self):
+        setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
+        setup.learning._login_people_reader = lambda: {'people': {
+            str(i): {'scopes': ['A'], 'selectable': True, 'position': '工程师', 'login_ids': [f'ou_person{i}']}
+            for i in range(4)}}
+        setup.publish()
+        post = AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_fixture'}}))
+        bot = SimpleNamespace(config={'app_id': 'cli_bot'}, messenger=SimpleNamespace(
+            client=AsyncMock(return_value=SimpleNamespace(post=post)), headers=AsyncMock(return_value={})))
+        worker = SharingRuntime(SimpleNamespace(feishu_assistant_channel=bot), lambda: setup.learning)
+        worker.core = setup.core; worker.allowed = lambda _: True
+        guard = SimpleNamespace(BUILDING_OPEN_ID_MAP={}, external_real_write_guard=lambda: {'real_write_allowed': True})
+        with patch.dict(sys.modules, {'lan_bitable_template_portal.portal_service': guard}):
+            from lan_bitable_template_portal.learning_reminders import duty_recipients
+            self.assertEqual(duty_recipients(setup.learning), set())
+            for job in setup.learning._all('sharing_delivery'):
+                if job['kind'] != 'paper': continue
+                await worker.send(job)
+        self.assertEqual({call.kwargs['json']['receive_id'] for call in post.await_args_list},
+                         {'on_person0', 'on_person1', 'on_person2'})
+        self.assertTrue(all(job['status'] == 'sent' for job in setup.learning._all('sharing_delivery') if job['kind'] == 'paper'))
+
     async def test_generation_scales_from_five_to_forty_questions(self):
         setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
         for text, expected in ((SOURCE, 5), (SOURCE + '补充内容' * 800, 10), (SOURCE + '补' * (24000 - len(SOURCE)), 40)):
             with self.subTest(expected=expected):
-                async def generate_questions(owner, source, previous, count):
+                async def generate_questions(owner, source, previous, count, question_types):
                     self.assertEqual(owner, ADMIN['id'])
                     self.assertEqual(source, text)
-                    return questions(expected)[len(previous):len(previous) + count]
+                    values = typed_questions(['single', 'multiple'], expected)[len(previous):len(previous) + count]
+                    self.assertEqual([q['type'] for q in values], question_types)
+                    return values
                 generate_mock = AsyncMock(side_effect=generate_questions)
                 worker = SharingRuntime(SimpleNamespace(service=object(), generate_sharing_questions=generate_mock), lambda: setup.learning)
                 worker.core = setup.core
@@ -327,7 +554,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         setup.publish()
         learning, core = setup.learning, setup.core
         attempt = core.attempts(setup.bid)[0]
-        job = next(j for j in learning._all('sharing_delivery') if j['attempt_id'] == attempt['id'])
+        job = next(j for j in learning._all('sharing_delivery') if j.get('attempt_id') == attempt['id'])
         calls = []
         async def send(url, **kwargs):
             calls.append(kwargs)
@@ -384,6 +611,25 @@ class SharingRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post(base + '/publish', json={'version': 1}).status_code, 200)
         self.assertEqual(len(self.fixture.core.attempts(self.fixture.bid)), 3)
         self.assertEqual(self.client.get(base).json()['data']['question_count'], 20)
+
+    def test_create_types_and_bank_retry_leave_sent_cards_untouched(self):
+        root = '/api/learning/sharing'
+        payload = {'url': URL, 'operation_id': 'new-type-operation-01', 'question_types': ['multiple', 'interview']}
+        response = self.client.post(root, json=payload)
+        self.assertEqual(response.status_code, 200)
+        bid = response.json()['data']['id']
+        self.assertEqual(self.fixture.core.batch(bid)['question_types'], payload['question_types'])
+        self.assertEqual(self.client.post(root, json={**payload, 'operation_id': 'invalid-type-operation', 'question_types': []}).status_code, 400)
+        self.fixture.publish()
+        with self.fixture.learning.transaction() as conn:
+            for job in self.fixture.learning._all('sharing_delivery', conn):
+                job.update(status='failed' if job['kind'] == 'bank' else 'sent', failures=5)
+                self.fixture.learning._put('sharing_delivery', job['id'], job, conn)
+        response = self.client.post(root + '/' + self.fixture.bid + '/retry-delivery', json={'version': 2})
+        self.assertEqual(response.status_code, 200)
+        jobs = self.fixture.learning._all('sharing_delivery')
+        self.assertTrue(all(j['status'] == 'sent' for j in jobs if j['kind'] == 'paper'))
+        self.assertTrue(all(j['status'] == 'pending' and j['failures'] == 0 for j in jobs if j['kind'] == 'bank'))
 
 
 if __name__ == '__main__': unittest.main()

@@ -120,6 +120,44 @@ class ProtocolTests(unittest.TestCase):
                     protect_state_directory(root)
             changed.assert_not_called()
 
+    def test_state_acl_accepts_internal_model_snapshot_files_without_touching_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'state'
+            model = root / 'knowledge_base/models/models--fixture'
+            blob = model / 'blobs/content'
+            snapshot = model / 'snapshots/version/config.json'
+            blob.parent.mkdir(parents=True)
+            snapshot.parent.mkdir(parents=True)
+            blob.write_bytes(b'model fixture')
+            try:
+                snapshot.symlink_to(Path('../../blobs/content'))
+            except OSError:
+                self.skipTest('file symlinks unavailable')
+            import win32security
+            with patch('win32security.SetNamedSecurityInfo', wraps=win32security.SetNamedSecurityInfo) as changed:
+                protect_state_directory(root)
+            self.assertNotIn(str(snapshot), [call.args[0] for call in changed.call_args_list])
+            self.assertEqual(snapshot.read_bytes(), b'model fixture')
+            snapshot.unlink()
+
+    def test_state_acl_rejects_external_or_broken_model_links_before_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'state'
+            snapshot = root / 'knowledge_base/models/snapshot/config.json'
+            snapshot.parent.mkdir(parents=True)
+            outside = Path(directory) / 'private.txt'
+            outside.write_bytes(b'external fixture')
+            for target in (outside, snapshot.parent / 'missing'):
+                try:
+                    snapshot.symlink_to(target)
+                except OSError:
+                    self.skipTest('file symlinks unavailable')
+                with patch('win32security.SetNamedSecurityInfo') as changed:
+                    with self.assertRaises(ServiceError):
+                        protect_state_directory(root)
+                    changed.assert_not_called()
+                snapshot.unlink()
+
     def test_cli_refuses_to_start_when_parent_process_unavailable(self):
         # Replaces the removed manual BAT observer contract: the unified entry
         # refuses to start when the watchdog reports no usable parent process.

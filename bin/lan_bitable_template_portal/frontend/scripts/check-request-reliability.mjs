@@ -21,7 +21,7 @@ globalThis.window = {
   location: { pathname: "/test", search: "", href: "http://localhost/test", assign: () => {}, reload: () => events.push("reload") },
 };
 globalThis.document = { body: { style: { overflow: "scroll" } } };
-const { requestJson, requestBinaryJson } = await loadSource("api/client.ts");
+const { requestJson, requestBinaryJson, downloadFile, uploadJson, ApiError, NETWORK_ERROR_MESSAGE } = await loadSource("api/client.ts");
 const { resilientStorage } = await loadSource("browserStorage.ts");
 const { acquireModal } = await loadSource("modalState.ts");
 const { requestPageReload, registerNavigationGuard } = await loadSource("navigation.ts");
@@ -119,6 +119,32 @@ const server = createServer((req, res) => {
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
 try {
+  const nativeFetch = globalThis.fetch;
+  try {
+    for (const text of ['Failed to fetch', 'NetworkError when attempting to fetch resource.', 'Load failed']) {
+      globalThis.fetch = async () => { throw new TypeError(text); };
+      for (const request of [() => requestJson(url), () => requestBinaryJson(url, 'fixture'), () => downloadFile(url)]) {
+        await assert.rejects(request(), error => error instanceof ApiError && error.offline && error.message === NETWORK_ERROR_MESSAGE);
+      }
+      assert.equal(new ApiError(text, {status:503}).message, NETWORK_ERROR_MESSAGE);
+    }
+    assert.equal(new ApiError('请上传现场照片', {status:400}).message, '请上传现场照片');
+    let shown = '';
+    globalThis.fetch = async () => new Response(JSON.stringify({ok:false,error:'Failed to fetch'}), {status:503,headers:{'Content-Type':'application/json'}});
+    await assert.rejects(requestJson(url, {}, {onServerError:message => shown=message}), error => error.message === NETWORK_ERROR_MESSAGE && error.status === 503);
+    assert.equal(shown, NETWORK_ERROR_MESSAGE);
+  } finally { globalThis.fetch = nativeFetch; }
+  const nativeXhr = globalThis.XMLHttpRequest;
+  try {
+    globalThis.XMLHttpRequest = class {
+      open() {}
+      send() { queueMicrotask(() => this.onerror()); }
+      abort() { this.onabort?.(); }
+    };
+    let shown = '';
+    await assert.rejects(uploadJson(url, new FormData(), {hooks:{onOffline:message => shown=message}}), error => error instanceof ApiError && error.offline && error.message === NETWORK_ERROR_MESSAGE);
+    assert.equal(shown, NETWORK_ERROR_MESSAGE);
+  } finally { globalThis.XMLHttpRequest = nativeXhr; }
   assert.deepEqual(await requestJson(url), { id: 1 });
   assert.deepEqual(await requestJson(url + "/empty"), {});
   for (const route of ["/bad", "/array", "/null"]) {
