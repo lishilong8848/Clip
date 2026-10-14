@@ -650,6 +650,8 @@ def claim_practice(service, actor, payload):
                  'questions': questions, 'shortage': shortage, 'notify': False}
         service._put('paper', identity, paper, conn)
         service._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
+        from .learning_engagement import mark_started
+        mark_started(service, paper, conn)
     return service.public_paper(paper, actor)
 
 

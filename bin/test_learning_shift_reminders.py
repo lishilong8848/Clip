@@ -136,3 +136,30 @@ class ShiftReminderTests(TestCase):
             self.assertEqual(send.call_args, first)
             self.assertEqual(first.args, (card, ['ou_A']))
             self.assertTrue(first.kwargs['message_uuid'])
+
+    def test_group_sender_reuses_uuid_and_real_write_guard(self):
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}) as guard, \
+             patch('upload_event_module.services.robot_webhook.send_interactive_to_chat_id', return_value=(True, 'ok')) as send:
+            card = reminders.reminder_card('周报', 'http://portal.test/learning')
+            reminders.send_reminder('oc_group', card, 'week:group')
+            first = send.call_args
+            reminders.send_reminder('oc_group', card, 'week:group')
+            self.assertEqual(send.call_args, first)
+            self.assertEqual(first.args, (card, 'oc_group'))
+            self.assertTrue(first.kwargs['message_uuid'])
+            send.reset_mock()
+            guard.return_value = {'real_write_allowed': False}
+            self.assertFalse(reminders.send_reminder('oc_group', card, 'week:group')[0])
+            guard.return_value = {'mock_external': True}
+            self.assertTrue(reminders.send_reminder('oc_group', card, 'week:group')[0])
+            send.assert_not_called()
+
+    def test_group_transport_passes_uuid_to_feishu_and_old_call_still_works(self):
+        from upload_event_module.services import robot_webhook
+        with patch.object(robot_webhook, '_get_tenant_access_token', return_value=('fixture', '')), \
+             patch.object(robot_webhook, '_send_interactive_to_receive_id', return_value=(True, 'ok')) as send:
+            card = reminders.reminder_card('周报', 'http://portal.test/learning')
+            robot_webhook.send_interactive_to_chat_id(card, 'oc_group', message_uuid='stable')
+            self.assertEqual(send.call_args.kwargs, {'receive_id_type': 'chat_id', 'message_uuid': 'stable'})
+            robot_webhook.send_interactive_to_chat_id(card, 'oc_group')
+            self.assertEqual(send.call_args.kwargs['message_uuid'], '')

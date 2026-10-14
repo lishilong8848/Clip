@@ -93,7 +93,7 @@ try {
     const body = req.headers()["content-type"]?.includes("json") ? req.postDataJSON() : null;
     requests.push({ p, method, body, query: Object.fromEntries(url.searchParams) });
     const ok = data => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, data }) });
-    if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: "self-user", name: "测试用户", role: "user" }, scope_options: scopesValue.slice(0, 1) });
+    if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: "self-user", name: "测试用户", role: "user", modules: ['learning'] }, scope_options: scopesValue.slice(0, 1) });
     if (p === "/api/scope-overview") return ok({ scopes: {} });
     if (p === "/api/assistant/appearance") return ok({ enabled: false });
     if (p === "/api/handover-links") return ok({ links: {} });
@@ -115,6 +115,12 @@ try {
       }
       if (!papers.has(body.person_id)) papers.set(body.person_id, makePaper(body.person_id));
       return ok(publicPaper(papers.get(body.person_id)));
+    }
+    if (/^\/api\/learning\/papers\/paper-[^/]+\/start$/.test(p) && method === 'POST') {
+      const paper = allPapers().find(paper => paper.id === p.split('/').at(-2));
+      assert.equal(body.person_id, paper.person_id);
+      paper.started_at ||= today + 'T09:00:00';
+      return ok(publicPaper(paper));
     }
     const paperAnswer = p.match(/^\/api\/learning\/papers\/paper-[^/]+\/answer$/);
     if (paperAnswer && method === "POST") {
@@ -154,7 +160,12 @@ try {
         distribution:[{label:'80-99%', count:1}], people:id ? [] : people });
     }
     if (p === "/api/learning/settings") return ok({ enabled: true });
-    if (p === '/api/learning/questions' || p === '/api/learning/review' || p === '/api/learning/issues') return ok({ items: [], total: 0, page: 1 });
+    if (p === '/api/learning/review') {
+      assert.equal(url.searchParams.get('kind'), 'mistakes');
+      const paper = paperFor(url.searchParams.get('person_id'));
+      return ok({ items: [{paper_id: paper.id, date: today, scope: paper.scope, question: paper.questions[0], mistake_count: 2, last_wrong_at: today + 'T08:30:00'}], total: 1, page: 1 });
+    }
+    if (p === '/api/learning/questions' || p === '/api/learning/issues') return ok({ items: [], total: 0, page: 1 });
     if (p === "/api/learning/export") return route.fulfill({ status: 200, contentType: "text/csv; charset=utf-8", body: "date,scope\n" });
     unexpected.push(`${method} ${p}`);
     return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ ok: false, error: "unexpected" }) });
@@ -167,6 +178,9 @@ try {
 
   // ---- S1 picker view readonly + no claim, back direct + selector works (admin overview) ----
   currentActor = actors.admin;
+  await page.goto(`${base}/learning?view=overview&from=2026-09-28&to=2026-10-04`);
+  await page.getByRole('heading', {name: '全员学习汇总', exact: true}).waitFor();
+  assert.ok(requests.some(r => r.p === '/api/learning/profile' && r.query.from === '2026-09-28' && r.query.to === '2026-10-04'), 'weekly card keeps the report period when opening people details');
   await page.goto(`${base}/learning?view=overview&scope=A`);
   await page.getByRole("button", { name: "选择人员", exact: true }).waitFor();
 
@@ -258,7 +272,10 @@ try {
   await page.goto(`${base}/learning?view=practice`);
   const answerBtn = page.getByRole("button", { name: "确认作答", exact: true });
   await answerBtn.waitFor();
+  const startedRequest = page.waitForRequest(request => request.url().endsWith('/start'));
   await page.locator(".options label").first().click();
+  await startedRequest;
+  assert.equal(requests.filter(r => r.p.endsWith('/start')).length, 1, 'first answer input starts exactly one server timer');
   let release;
   answerGate = new Promise(resolve => { release = resolve; });
   await answerBtn.click();
@@ -305,6 +322,17 @@ try {
     assert.equal(paperFor('admin-self').questions[0].attempt.correct, false);
   }
   await page.screenshot({ path: path.join(output, 'practice-latest-result.png'), fullPage: true, animations: 'disabled' });
+
+  // Weekly and timeout cards deep-link to the same self-only learning page.
+  await page.goto(`${base}/learning?view=practice&tab=review`);
+  await page.getByText('累计答错 2 次', {exact: false}).waitFor();
+  await page.screenshot({path: path.join(output, 'mistake-collection.png'), fullPage: true, animations: 'disabled'});
+  await page.getByRole('button', {name: '复习', exact: true}).click();
+  await page.locator('.attempt-records').first().waitFor();
+  await page.locator('.learning-page .loading-line').waitFor({state: 'hidden'});
+  await page.screenshot({path: path.join(output, 'mistake-review.png'), fullPage: true, animations: 'disabled'});
+  await page.goto(`${base}/learning?view=practice&paper_id=paper-admin-self`);
+  await page.locator('.attempt-records').first().waitFor();
 
   if (width < 700) {
     const fits = async name => {

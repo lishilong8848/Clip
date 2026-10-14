@@ -3,6 +3,7 @@ import { Activity, BookOpen, Bot, CircleAlert, ClipboardList, Droplets, Library,
 export type ModuleEntry = { id: string; label: string; group: string; path: string; icon: string };
 export const moduleIcons = { event: CircleAlert, notice: ClipboardList, wrench: Wrench, shield: ShieldCheck, task: ClipboardList, server: Server, water: Droplets, scan: ScanLine, activity: Activity, book: BookOpen, library: Library, link: Link, signature: Signature, assistant: Bot, settings: Settings };
 export const NOTICE_IDS = ['maintenance', 'change', 'repair', 'polling', 'adjust', 'power'];
+export const SOP_IDS = ['maintenance', 'polling', 'adjust'];
 export const modules: ModuleEntry[] = [
   { id: 'event', label: '事件管理', group: '运行管理', path: '/?mode=events&detail=1', icon: 'event' },
   ...['维保通告', '变更通告', '检修通告', '设备轮巡', '设备调整', '上下电通告'].map((label, i) => ({ id: NOTICE_IDS[i], label, group: '通告办理', path: '/workbench-lite?work_type=' + NOTICE_IDS[i], icon: 'notice' })),
@@ -29,14 +30,15 @@ export function navigationModules(permitted: string[]): ModuleEntry[] {
     if(!permitted.includes(item.id)||item.id==='assistant')return [];
     if(!NOTICE_IDS.includes(item.id))return [item];
     if(item.id!==notices[0])return [];
-    return [{id:'notices',label:'通告办理',group:'运行管理',path:'/workbench-lite?work_type='+(notices.length===1?notices[0]:'all'),icon:'notice'}];
+    return [{id:'notices',label:'通告办理',group:'运行管理',path:'/workbench-lite?work_type='+(notices.length===1?notices[0]:'all'),icon:'notice'},
+      ...(SOP_IDS.some(id=>permitted.includes(id))?[{id:'sops',label:'SOP 步骤编辑',group:'运行管理',path:'/?view=sops',icon:'task'}]:[])];
   });
 }
 export function moduleForRoute(url: URL): string {
   if (url.pathname === '/workbench-lite') return url.searchParams.get('work_type') || 'maintenance';
   if (url.pathname === '/') {
     if (url.searchParams.get('mode') === 'events') return 'event';
-    if (['handover', 'assistant'].includes(url.searchParams.get('view') || '')) return url.searchParams.get('view')!;
+    if (['handover', 'assistant', 'sops'].includes(url.searchParams.get('view') || '')) return url.searchParams.get('view')!;
     return '';
   }
   if (url.pathname === '/repair-status') return 'repair_management';

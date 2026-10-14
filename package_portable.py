@@ -1686,6 +1686,9 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_cloud.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_routes.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_sharing.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_sharing_routes.py",
+        PROJECT_ROOT / "bin" / "openclaw_service" / "assistant" / "lighthouse_sharing.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_ai.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_sources.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "lighthouse_routes.py",
@@ -1796,8 +1799,8 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
-         "bin.test_learning", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
+         "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
+         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",

@@ -61,6 +61,7 @@ class LearningRouteTests(unittest.TestCase):
         )
         self.factory = Mock(side_effect=lambda **kwargs: (record("init", kwargs) or self.service))
         modules = {
+            "lan_bitable_template_portal.learning_sharing_routes": SimpleNamespace(install=Mock()),
             "lan_bitable_template_portal.learning": SimpleNamespace(LearningError=LearningError, LearningService=self.factory),
             "lan_bitable_template_portal.portal_service": SimpleNamespace(
                 BUILDING_OPEN_ID_MAP={scope: "building-" + scope for scope in (*"ABCDEH", "110")}
@@ -467,6 +468,8 @@ class LearningSourceContractTests(unittest.TestCase):
             self.assertEqual(dispatch("papers.list", who=actor, query={"scope": ""})["total"], 1)
             dispatch("history", query={"scope": ""})
             dispatch("paper.get", {"id": "paper-H"}, actor)
+            started = dispatch("paper.start", {"id": "paper-H", "person_id": "person-H"}, actor)
+            self.assertTrue(started['started_at'])
             paper = dispatch("paper.reveal", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "kind": "hint"}, actor)
             paper = dispatch("paper.notes", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "note": "Note", "favorite": True, "version": paper["version"]}, actor)
             dispatch("paper.answer", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "version": paper["version"], "operation_id": "contract-answer", "option_ids": ["o2"]}, actor)

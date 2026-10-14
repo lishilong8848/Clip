@@ -10,7 +10,7 @@ const other={...user,open_id:'test-bob'};
 const storage=new Map();
 globalThis.localStorage={getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,value)};
 const base=defaults(user);
-assert.equal(Math.max(...base.widgets.map(w=>w.y+w.h)),6,'role default uses a compact six-row work surface');
+assert.equal(Math.max(...base.widgets.map(w=>w.y+w.h)),11,'checklist occupies five rows above the existing six-row work surface');
 const randomUUID=globalThis.crypto.randomUUID;
 globalThis.crypto.randomUUID=undefined;
 assert.match(widget('notices',user).id,/^[a-f0-9]{32}$/,'LAN HTTP must not require secure-context randomUUID');
@@ -29,6 +29,14 @@ for(const role of ['L0','L1','L2','L3','L4'])assert(defaults({...user,level:role
 assert.equal(defaults({...user,level:'L4',category:'operator',modules:['maintenance']}).widgets.find(w=>w.kind==='tasks').title,'待处理事项','building work is not labelled as personal ownership');
 const malicious={version:1,widgets:[{...widget('notices',user),scope:'E',w:999,h:-1,x:900,title:'<script>x</script>'},{...widget('tasks',user),module:'accounts'},null]};
 const clean=sanitize(malicious,user,['A']);assert.equal(clean.widgets.length,1);assert.equal(clean.widgets[0].scope,'current');assert.equal(clean.widgets[0].w,12);assert.equal(clean.widgets[0].x,0);assert.equal(clean.widgets[0].h,3);
+for(const category of ['operator','shift_leader','duty']){
+  const person={...user,level:category==='duty'?'L1':'L4',category,home_scope:'A'};
+  assert.equal(sanitize({version:1,widgets:[]},person,['A']).widgets.filter(w=>w.kind==='pre_shift').length,1,'required checklist survives older or empty layouts');
+  const check=widget('pre_shift',person);
+  assert.equal(sanitize({version:1,widgets:[check,{...check,id:'another'}]},person,['A']).widgets.length,1,'only one checklist widget per board');
+}
+assert.equal(allowedKind('pre_shift',{...user,role:'guest'}),false);
+assert.equal(allowedKind('pre_shift',{...user,level:'L4',category:'engineer'}),false);
 assert.equal(sanitize(base,{...user,modules:[]},['A']).widgets.length,0,'revoked modules cannot render from saved layout');
 let raw=saveLayout(user,['A'],base,null);
 assert.deepEqual(readLayout(user,['A']).layout,base);

@@ -26,7 +26,7 @@ QUOTAS = {"written": 8, "duty": 1, "professional": 1, "supplemental": 5}
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 100 * 1024 * 1024
-DEFAULT_SETTINGS = {"enabled": False, "publish_time": "13:00", "night_publish_time": "20:00", "reminder_enabled": False, "reminder_time": "17:00", "portal_url": ""}
+DEFAULT_SETTINGS = {"enabled": False, "publish_time": "13:00", "night_publish_time": "20:00", "reminder_enabled": False, "reminder_time": "17:00", "portal_url": "", "timeout_reminder_enabled": True, "weekly_report_enabled": True}
 ISSUE_STATES = {"pending", "processing", "needs_info", "resolved", "no_change", "withdrawn"}
 RATINGS = {"部分掌握", "需复习"}
 
@@ -200,8 +200,9 @@ class LearningService:
         self._last_tick = 0.0
         if self.db.exists():
             with closing(sqlite3.connect(self.db)) as source:
-                if source.execute('PRAGMA user_version').fetchone()[0] < 2:
-                    backup = self.root / 'backups' / 'learning-before-personal.sqlite3'
+                if source.execute('PRAGMA user_version').fetchone()[0] < 4:
+                    name = 'learning-before-personal.sqlite3' if source.execute('PRAGMA user_version').fetchone()[0] < 2 else 'learning-before-weekly.sqlite3'
+                    backup = self.root / 'backups' / name
                     backup.parent.mkdir(exist_ok=True)
                     if not backup.exists():
                         temporary = backup.with_suffix('.tmp')
@@ -224,9 +225,17 @@ class LearningService:
             conn.execute('CREATE TABLE IF NOT EXISTS learning_results(paper_id TEXT, question_id TEXT, person_id TEXT, scope TEXT, day TEXT, bank TEXT, type TEXT, topic TEXT, stem TEXT, correct INTEGER, assisted INTEGER, needs_review INTEGER, invalid INTEGER, practice_count INTEGER, submitted_at TEXT, self_rating TEXT, PRIMARY KEY(paper_id,question_id))')
             conn.execute('CREATE INDEX IF NOT EXISTS learning_results_person ON learning_results(person_id,day)')
             conn.execute('CREATE INDEX IF NOT EXISTS learning_results_scope ON learning_results(scope,day)')
+            result_columns = {row[1] for row in conn.execute('PRAGMA table_info(learning_results)')}
+            for name, definition in (('family_id', "TEXT NOT NULL DEFAULT ''"), ('wrong_count', 'INTEGER NOT NULL DEFAULT 0'), ('last_wrong_at', "TEXT NOT NULL DEFAULT ''")):
+                if name not in result_columns:
+                    conn.execute(f'ALTER TABLE learning_results ADD COLUMN {name} {definition}')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_results_day ON learning_results(day,person_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_mistakes_person ON learning_results(person_id,last_wrong_at) WHERE wrong_count>0 AND invalid=0')
+            conn.execute("CREATE INDEX IF NOT EXISTS learning_engagement_due ON documents(json_extract(payload,'$.status'),json_extract(payload,'$.due_at')) WHERE kind='engagement'")
             conn.execute('CREATE TABLE IF NOT EXISTS learning_practice(paper_id TEXT, question_id TEXT, operation_id TEXT, person_id TEXT, scope TEXT, day TEXT, PRIMARY KEY(paper_id,question_id,operation_id))')
             conn.execute('CREATE INDEX IF NOT EXISTS learning_practice_person ON learning_practice(person_id,day)')
             conn.execute('CREATE INDEX IF NOT EXISTS learning_practice_scope ON learning_practice(scope,day)')
+            conn.execute('CREATE INDEX IF NOT EXISTS learning_practice_day ON learning_practice(day,person_id)')
             if conn.execute('PRAGMA user_version').fetchone()[0] < 2:
                 conn.execute("UPDATE documents SET person_id=COALESCE(json_extract(payload,'$.person_id'),''),scope=COALESCE(json_extract(payload,'$.scope'),''),day=COALESCE(json_extract(payload,'$.date'),'')")
                 for paper in self._all('paper', conn):
@@ -237,6 +246,10 @@ class LearningService:
                 conn.execute('PRAGMA user_version=3')
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_paper_identity ON documents(person_id,day) WHERE kind='paper' AND person_id<>'' AND COALESCE(json_extract(payload,'$.mode'),'daily')<>'practice'")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS learning_reserve_claim ON documents(person_id,day) WHERE kind='reserve' AND person_id<>''")
+            if conn.execute('PRAGMA user_version').fetchone()[0] < 4:
+                for paper in self._all('paper', conn):
+                    self._index_paper(paper, conn)
+                conn.execute('PRAGMA user_version=4')
             conn.commit()
 
     def _connect(self):
@@ -330,11 +343,13 @@ class LearningService:
                 if not q.get('invalid'):
                     for n, attempt in enumerate(entry.get('practice', [])):
                         conn.execute('INSERT OR IGNORE INTO learning_practice VALUES(?,?,?,?,?,?)', (paper['id'], q['id'], attempt.get('operation_id') or str(n), person, paper['scope'], attempt['submitted_at'][:10]))
-                conn.execute('INSERT INTO learning_results VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
+                wrong = [attempt for attempt in [a, *entry.get('practice', [])] if attempt.get('correct') is False]
+                conn.execute('INSERT INTO learning_results VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
                     paper['id'], q['id'], person, paper['scope'], a['submitted_at'][:10], q['bank'], q['type'],
                     q.get('topic') or q.get('specialty') or '未分类', q['stem'], a.get('correct'), bool(a.get('assisted')),
                     bool(entry.get('needs_review')), bool(q.get('invalid')), len(entry.get('practice', [])), a['submitted_at'],
-                    (entry.get('practice') or [a])[-1].get('self_rating', '')))
+                    (entry.get('practice') or [a])[-1].get('self_rating', ''), q['family_id'], len(wrong),
+                    max((attempt['submitted_at'] for attempt in wrong), default='')))
 
     @staticmethod
     def _publication_key(date):
@@ -431,6 +446,15 @@ class LearningService:
                 and not self._get("publication", self._publication_key(date)))
 
     def tick(self, current=None):
+        try:
+            self._tick(current)
+        finally:
+            if self._restored:
+                from .learning_engagement import send_due
+                with self._notification_lock:
+                    send_due(self, current or now())
+
+    def _tick(self, current=None):
         current = current or now()
         settings = self.settings()
         manual_mode = bool(self._get("local", "manual_publish")) or bool((self._get('local', 'self_practice_sync') or {}).get('enabled'))
@@ -498,7 +522,7 @@ class LearningService:
         with self.transaction() as conn:
             for item in entities:
                 kind, key, value = item.get("kind"), item.get("key"), item.get("payload")
-                if kind not in {"person", "reserve", "paper", "record", "issue", "settings", "publication", "notification", "audit", "attachment"} or not isinstance(value, dict):
+                if kind not in {"person", "reserve", "paper", "record", "issue", "settings", "publication", "notification", "engagement", "audit", "attachment", "sharing_batch", "sharing_attempt", "sharing_delivery"} or not isinstance(value, dict):
                     continue
                 if self._get(kind, key, conn) is None:
                     self._put(kind, key, value, conn, False)
@@ -518,6 +542,8 @@ class LearningService:
                 if record and self._reconcile_grades(paper, record):
                     record["version"] += 1
                     self._put("record", paper["id"], record, conn)
+                from .learning_engagement import ensure_timeout
+                ensure_timeout(self, paper, conn)
             for reserve in self._all("reserve", conn):
                 if reserve.get("person_id") and not self._get("paper", reserve.get("paper_id", ""), conn):
                     raise LearningError("个人题单云端恢复尚不完整，暂不分配新题，请稍后重试。", 503)
@@ -615,6 +641,21 @@ class LearningService:
             return
         payload = {k: v for k, v in value.items() if not k.startswith("_")}
         operation_id = f"learning:{kind}:{key}:{revision}"
+        if kind == 'sharing_batch' and payload.get('status') in {'published', 'closed'}:
+            with closing(self._connect()) as conn:
+                count, dirty = conn.execute("SELECT COUNT(*),COALESCE(SUM(dirty),0) FROM documents WHERE kind='sharing_attempt' AND json_extract(payload,'$.batch_id')=?", (key,)).fetchone()
+            if count != len(payload.get('participants', [])) or dirty:
+                return False
+        if kind == 'sharing_delivery':
+            batch = self._get('sharing_batch', payload.get('batch_id', ''))
+            attempt = self._get('sharing_attempt', payload.get('attempt_id', '')) if payload.get('attempt_id') else None
+            if not batch or batch['_dirty'] or payload.get('attempt_id') and (not attempt or attempt['_dirty']):
+                return False
+        if kind == 'engagement' and payload.get('kind') == 'weekly_batch':
+            with closing(self._connect()) as conn:
+                count, dirty = conn.execute("SELECT COUNT(*),COALESCE(SUM(dirty),0) FROM documents WHERE kind='engagement' AND key>=? AND key<?", (key + ':', key + ';')).fetchone()
+            if count < payload['job_count'] or dirty:
+                return False
         if kind == "publication" and any((self._get("paper", pid) or {}).get("_dirty", True) for pid in payload.get("paper_ids", [])):
             return False
         if kind == "publication" and any((self._get("reserve", rid) or {}).get("_dirty", True) for rid in payload.get("reserve_ids", [])):
@@ -935,6 +976,7 @@ class LearningService:
         result = {k: paper[k] for k in ("id", "date", "scope", "shortage", "created_at")}
         result.update(person_id=paper.get("person_id", ""), person=paper.get("person"), legacy=not bool(paper.get("person_id")))
         result['mode'] = paper.get('mode', 'daily')
+        result['started_at'] = paper.get('started_at', '')
         result.update({"version": record.get("version", 0), "status": "completed" if self._completed(paper, record) else "pending", "completed_at": record.get("completed_at", ""),
                        "sync_pending": bool(paper.get("_dirty") or record.get("_dirty")), "questions": []})
         for q in paper["questions"]:
@@ -960,6 +1002,10 @@ class LearningService:
             paper = self._paper(payload.get("id"), actor, conn, write=True)
             if payload.get("person_id") != paper.get("person_id"):
                 raise LearningError("答题人员已变化，请重新打开当前人员题单。", 409)
+            if action == 'start':
+                from .learning_engagement import mark_started
+                mark_started(self, paper, conn)
+                return self.public_paper(paper, actor)
             qid = payload.get("question_id")
             q = next((q for q in paper["questions"] if q["id"] == qid), None)
             if not q:
@@ -1013,6 +1059,8 @@ class LearningService:
                 else:
                     entry["attempt"] = answer
                 entry["needs_review"] = False
+                from .learning_engagement import mark_started
+                mark_started(self, paper, conn)
             elif action == "reveal":
                 kind = payload.get("kind", "answer")
                 if kind not in {"answer", "analysis", "hint"}:
@@ -1091,8 +1139,11 @@ class LearningService:
         if not learner_pid:
             raise LearningError("请选择人员。", 400)
         learner = person(self, learner_pid)
+        scope = access['scope'] if actor.get('shared_account') else ''
+        if query.get('kind') == 'mistakes':
+            return self.mistakes(actor, query, learner['id'], scope)
         result = []
-        for paper in reversed(self._documents("paper", scope=access['scope'], person_id=learner["id"])):
+        for paper in reversed(self._documents("paper", scope=scope, person_id=learner["id"])):
             if paper.get("deleted_at"):
                 continue
             public = self.public_paper(paper, actor)
@@ -1113,6 +1164,35 @@ class LearningService:
                 if include:
                     result.append({"paper_id": paper["id"], "date": paper["date"], "scope": paper["scope"], "question": q})
         return self._page(result, query)
+
+    def mistakes(self, actor, query, person_id, scope):
+        clauses, args = ['person_id=?', 'wrong_count>0', 'invalid=0', "type<>'interview'"], [person_id]
+        for column, value in (('scope', scope), ('bank', query.get('bank'))):
+            if value:
+                clauses.append(column + '=?'); args.append(value)
+        if query.get('search'):
+            clauses.append('instr(lower(stem || topic),lower(?))>0'); args.append(query['search'])
+        sql = ' FROM learning_results WHERE ' + ' AND '.join(clauses)
+        with closing(self._connect()) as conn:
+            total = conn.execute('SELECT COUNT(DISTINCT family_id)' + sql, args).fetchone()[0]
+            try:
+                size = max(1, min(100, int(query.get('page_size', 20))))
+                page = max(1, min(max(1, (total + size - 1) // size), int(query.get('page', 1))))
+            except (TypeError, ValueError):
+                raise LearningError('无效分页参数')
+            ranked = 'SELECT *,SUM(wrong_count) OVER(PARTITION BY family_id) AS mistakes,ROW_NUMBER() OVER(PARTITION BY family_id ORDER BY last_wrong_at DESC,paper_id DESC,question_id) AS rank' + sql
+            rows = conn.execute('SELECT * FROM (' + ranked + ') WHERE rank=1 ORDER BY last_wrong_at DESC,paper_id DESC,question_id LIMIT ? OFFSET ?', [*args, size, (page - 1) * size]).fetchall()
+            items, papers = [], {}
+            for row in rows:
+                pid = row['paper_id']
+                if pid not in papers:
+                    paper = self._paper(pid, actor, conn)
+                    papers[pid] = self.public_paper(paper, actor, self._get('record', pid, conn) or {})
+                public = papers[pid]
+                question = next(q for q in public['questions'] if q['id'] == row['question_id'])
+                items.append({'paper_id': pid, 'date': public['date'], 'scope': public['scope'], 'question': question,
+                    'mistake_count': row['mistakes'], 'last_wrong_at': row['last_wrong_at']})
+        return {'items': items, 'total': total, 'page': page, 'page_size': size}
 
     def attempt_history(self, actor, query):
         """Flat, paginated actual submission history for the authorized person.
@@ -1668,7 +1748,7 @@ class LearningService:
             return self.public_paper(self._paper(identity, actor), actor)
         if action == "paper.delete":
             return self.delete_paper(identity, actor)
-        if action in {"paper.answer", "paper.reveal", "paper.notes"}:
+        if action in {"paper.start", "paper.answer", "paper.reveal", "paper.notes"}:
             return self.paper_action(action.split(".")[1], payload, actor)
         if action == "review":
             return self.review(actor, query)
@@ -1722,7 +1802,7 @@ class LearningService:
         if action == "settings.save":
             settings = self.settings()
             was_enabled = settings["enabled"]
-            for flag in ("enabled", "reminder_enabled"):
+            for flag in ("enabled", "reminder_enabled", "timeout_reminder_enabled", "weekly_report_enabled"):
                 if flag in payload:
                     if not isinstance(payload[flag], bool):
                         raise LearningError("启用设置必须为布尔值")

@@ -129,7 +129,7 @@ async function load(){
   }catch(e:any){if(!controller.signal.aborted){error.value=e.message||'读取失败，不能判断为零';note.value=ready.value?'保留上次读取的数据':'';}}
   finally{if(abort===controller)loading.value=false;}
 }
-watch(()=>[props.scope,props.kind,props.personal],()=>{abort?.abort();ready.value=false;rows.value=[];stats.value=[];error.value='';if(visible)void load();});
+watch(()=>[props.scope,props.kind,props.personal],()=>{abort?.abort();ready.value=false;rows.value=[];stats.value=[];progress.value=null;chartItems.value=[];chartIncomplete.value=false;note.value='';error.value='';if(visible)void load();});
 function changed(){if(visible)void load();}
 onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&!ready.value&&!loading.value)void load();},{rootMargin:'80px'});if(element.value)observer.observe(element.value);window.addEventListener('clipflow-business-changed',changed);});
 onBeforeUnmount(()=>{disposed=true;abort?.abort();observer?.disconnect();window.removeEventListener('clipflow-business-changed',changed);motion.removeEventListener('change',motionChanged);});

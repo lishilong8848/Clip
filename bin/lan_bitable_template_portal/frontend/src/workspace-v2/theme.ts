@@ -1,7 +1,7 @@
 import type { GlobalThemeOverrides } from 'naive-ui';
 // UI/UX Pro Max: restrained enterprise surfaces, compact data and semantic accents.
 export const theme: GlobalThemeOverrides = {
-  common: { primaryColor: '#087b69', primaryColorHover: '#096958', primaryColorPressed: '#085748', primaryColorSuppl: '#087b69',
+  common: { primaryColor: '#0071e3', primaryColorHover: '#0063c7', primaryColorPressed: '#0055aa', primaryColorSuppl: '#0071e3',
     infoColor: '#1762cf', successColor: '#13836c', warningColor: '#af650d', errorColor: '#c93d4c',
     cubicBezierEaseInOut:'cubic-bezier(.4,0,.2,1)', cubicBezierEaseOut:'cubic-bezier(.22,.61,.36,1)', cubicBezierEaseIn:'cubic-bezier(.55,0,1,.45)',
     borderRadius: '8px', borderRadiusSmall: '4px', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',

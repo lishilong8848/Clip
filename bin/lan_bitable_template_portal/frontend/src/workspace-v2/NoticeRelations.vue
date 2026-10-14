@@ -1,0 +1,28 @@
+<template>
+  <NCollapse :default-expanded-names="needsVerification?['relations']:[]"><NCollapseItem title="关联核验" name="relations">
+    <div class="v2-notice-tools"><NButton :disabled="locked||busy" :loading="loading" @click="lookup('target')">查找目标通告</NButton><NButton v-if="form.values.work_type==='repair'" :disabled="locked||busy||!hasIdentity" :loading="loading" @click="lookup('event')">关联事件与维修项目</NButton></div>
+    <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert>
+    <form v-if="mode" class="v2-notice-binding" @submit.prevent="lookup(mode)"><NInput v-model:value="search" clearable :placeholder="mode==='event'?'搜索故障或设备':'筛选目标通告名称'" :input-props="{'aria-label':'搜索关联记录'}" /><NButton attr-type="submit" :disabled="busy" :loading="loading">查找</NButton></form>
+    <NRadioGroup v-if="mode" v-model:value="selected" :disabled="locked||busy" class="v2-notice-candidates" aria-label="关联候选">
+      <NRadio v-for="item in visible.slice((page-1)*5,page*5)" :key="candidateId(item)" :value="candidateId(item)"><strong>{{ item.title||item.project_title||item.event_title||'未命名记录' }}</strong><small>{{ [item.building,item.status||item.event_status,item.start_time||item.occurrence_time,item.match_reason].filter(Boolean).join(' · ') }}</small></NRadio>
+    </NRadioGroup>
+    <NEmpty v-if="mode&&!loading&&!visible.length&&!error" description="未找到符合条件的记录" />
+    <div v-if="mode&&visible.length" class="v2-notice-list-footer"><NPagination v-model:page="page" :page-size="5" :item-count="visible.length" simple /><NButton :disabled="!selected||locked" :loading="busy" @click="confirm">核对并保存关联</NButton></div>
+  </NCollapseItem></NCollapse>
+</template>
+<script setup lang="ts">
+import {computed,onBeforeUnmount,ref} from 'vue';
+import {NAlert,NButton,NCollapse,NCollapseItem,NEmpty,NInput,NPagination,NRadio,NRadioGroup,useDialog} from 'naive-ui';
+import {requestJson,type Dict} from './client';
+import type {NoticeForm} from './noticeForm';
+const props=defineProps<{form:NoticeForm;locked:boolean;needsVerification?:boolean}>(),emit=defineEmits<{bound:[result:Dict];busy:[value:boolean]}>(),dialog=useDialog();
+const mode=ref(''),search=ref(''),selected=ref(''),items=ref<Dict[]>([]),loading=ref(false),busy=ref(false),error=ref(''),page=ref(1);
+const hasIdentity=computed(()=>props.form.values.source_record_id||props.form.values.active_item_id||props.form.values.target_record_id);
+const visible=computed(()=>mode.value==='event'?items.value:items.value.filter(i=>String(i.title||'').includes(search.value)));
+const candidateId=(i:Dict)=>String(mode.value==='event'?i.repair_management_record_id:i.target_record_id||i.record_id||'');
+let controller:AbortController|undefined;
+async function lookup(next:string){if(busy.value||props.locked)return;controller?.abort();const c=new AbortController();controller=c;mode.value=next;selected.value='';items.value=[];page.value=1;loading.value=true;error.value='';const v=props.form.values;try{const data=next==='event'?await requestJson('/api/workbench/repair-event-candidates?'+new URLSearchParams({scope:v.scope,q:search.value,limit:'100'}),{signal:c.signal,cache:'no-store'}):await requestJson('/api/notice-target-candidates',{method:'POST',signal:c.signal,body:JSON.stringify({scope:v.scope,lookup_context:props.form.detailMode==='ongoing'?'target_table':'planned_target_table',work_type:v.work_type,title:v.title,start_time:v.start_time,end_time:v.end_time,action:'update',content:v.content,reason:v.reason,impact:v.impact,progress:v.progress})});if(c.signal.aborted)return;items.value=(next==='event'?data.records||[]:data.candidates||[]).filter((i:Dict)=>candidateId(i));if(data.warnings?.length)error.value=data.warnings.join('；');if(data.total>items.value.length)error.value+=' 当前仅显示前'+items.value.length+'条，请输入名称缩小范围。';}catch(e){if(!c.signal.aborted)error.value=(e as Error).message;}finally{if(controller===c)loading.value=false;}}
+function confirm(){const item=items.value.find(i=>candidateId(i)===selected.value);if(!item||busy.value||props.locked)return;dialog.warning({title:'确认保存关联',content:'将关联“'+(item.title||item.project_title||item.event_title)+'”，并重新读取通告。当前未保存的填写将重置，请先核对。',positiveText:'确认关联并重新读取',negativeText:'返回',onPositiveClick:async()=>{busy.value=true;emit('busy',true);error.value='';const v=props.form.values;try{const result=mode.value==='event'?await requestJson('/api/workbench/repair-event-bind',{method:'POST',body:JSON.stringify({scope:v.scope,source_record_id:v.repair_management_record_id||v.source_record_id||'',event_record_id:item.event_record_id,candidate_project_record_id:item.repair_management_record_id,active_item_id:v.active_item_id||'',target_record_id:v.target_record_id||''})}):await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:props.form.detailMode==='ongoing'?'ongoing':'planned',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id||item.active_item_id||'',source_record_id:v.source_record_id||'',target_record_id:candidateId(item),record_id:candidateId(item),title:v.title||item.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time,status:item.status||''})});emit('busy',false);emit('bound',result);}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;emit('busy',false);}}});}
+onBeforeUnmount(()=>controller?.abort());
+</script>
+<style>.v2-notice-candidates{display:grid;gap:0;margin:12px 0}.v2-notice-candidates .n-radio{width:100%;padding:12px 0;border-bottom:1px solid var(--v2-border)}.v2-notice-candidates strong{display:block;font-weight:550}.v2-notice-candidates small{display:block;color:var(--v2-muted);margin-top:4px}</style>

@@ -11,6 +11,8 @@ import { adaptEventPeriodPage } from './scripts/workspace-event-adapter.mjs';
 import { adaptCabinetBatchPage } from './scripts/workspace-cabinet-adapter.mjs';
 // @ts-ignore marks binary settings only, never selection groups.
 import { markBinaryControls, adaptPasswordLogin, fuseLearningCharts } from './scripts/workspace-controls-adapter.mjs';
+// @ts-ignore V2-only response adaptation; the legacy client source stays unchanged.
+import { adaptNoticeParserClient } from './scripts/workspace-notice-adapter.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/');
 let generated=new Set<string>();
 export default defineConfig({
@@ -28,6 +30,7 @@ export default defineConfig({
     load(id){if(id.startsWith('\0workspace-public:'))return 'export default '+JSON.stringify(id.slice('\0workspace-public:'.length));},
     transform(code,id){
       const path=id.replace(/\\/g,'/');
+      if(path===root+'src/api/client.ts')return {code:adaptNoticeParserClient(code),map:null};
       if(!path.startsWith(root+'src/')||!path.endsWith('.vue'))return;
       let result=code;
       if(path===root+'src/components/EventManagementPage.vue')result=adaptEventPeriodPage(result);

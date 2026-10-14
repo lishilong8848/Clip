@@ -773,10 +773,6 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
         "end_row": max(item["row"] for item in steps),
         **{key: _column_name(int(value[1])) for key, value in headers.items()},
     }
-    required = ("machine_room", "drill_date", "drill_name", "participants", "commander", "participant_signatures", "recorder_signature")
-    missing = [key for key in required if not mapping.get(key)]
-    if missing:
-        raise DrillError(f"工作表“{sheet.get('name')}”缺少必要标签：{', '.join(missing)}")
     predicted_target = _cell_target(mapping["predicted_total"]) if mapping.get("predicted_total") else ""
     scenario_target = _cell_target(mapping["scenario"]) if mapping.get("scenario") else ""
     return {
@@ -881,6 +877,11 @@ def detect_drill_configuration(workbook: dict[str, Any]) -> dict[str, Any]:
     if record["name"] == assessment["name"]:
         raise DrillError("演练记录表和评估表不能选择同一个工作表。")
     record_config = _detect_record_configuration(record)
+    # Manual configuration can supply missing labels without discarding detected steps.
+    required = ("machine_room", "drill_date", "drill_name", "participants", "commander", "participant_signatures", "recorder_signature")
+    missing = [key for key in required if not record_config["mapping"].get(key)]
+    if missing:
+        raise DrillError(f"工作表“{record.get('name')}”缺少必要标签：{', '.join(missing)}")
     assessment_config = _detect_assessment_configuration(assessment)
     return {
         "record_sheet": record["name"],
@@ -910,9 +911,11 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         raise DrillError("演练记录表和评估表必须选择两个不同的工作表。")
     record = _find_sheet(workbook, record_sheet)
     assessment = _find_sheet(workbook, assessment_sheet)
+    record_detection_error = ""
     try:
         detected_record = _detect_record_configuration(record)
-    except DrillError:
+    except DrillError as exc:
+        record_detection_error = str(exc)
         detected_record = {"mapping": {}, "steps": []}
     try:
         detected_assessment = _detect_assessment_configuration(assessment)
@@ -955,18 +958,32 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         value = supplied_step_mapping.get(key)
         if value not in (None, ""):
             step_mapping[key] = value
-    for key in ("header_row", "start_row", "end_row"):
+    row_labels = {"header_row": "表头行", "start_row": "起始行", "end_row": "结束行"}
+    missing_rows = [label for key, label in row_labels.items() if step_mapping.get(key) in (None, "")]
+    if missing_rows:
+        raise DrillError(
+            f"{record_detection_error}请在“步骤表格映射”中填写{'、'.join(missing_rows)}，行号以 Excel 工作表为准。"
+        )
+    for key, label in row_labels.items():
+        value = step_mapping[key]
         try:
-            step_mapping[key] = int(step_mapping.get(key) or 0)
-        except (TypeError, ValueError) as exc:
-            raise DrillError("步骤表头或起止行配置无效。") from exc
+            number = int(value)
+            if isinstance(value, bool) or (not isinstance(value, str) and value != number):
+                raise ValueError
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DrillError(f"步骤{label}必须为整数，当前为 {value!r}。") from exc
+        step_mapping[key] = number
     if (
         step_mapping["header_row"] < 1
         or step_mapping["start_row"] <= step_mapping["header_row"]
         or step_mapping["end_row"] < step_mapping["start_row"]
         or step_mapping["end_row"] > DRILL_MAX_SOURCE_ROWS
     ):
-        raise DrillError("步骤表头和起止行顺序无效。")
+        raise DrillError(
+            f"步骤表头和起止行顺序无效：表头行 {step_mapping['header_row']}，"
+            f"起始行 {step_mapping['start_row']}，结束行 {step_mapping['end_row']}。"
+            f"请在“步骤表格映射”中按 Excel 行号填写：1 ≤ 表头行 < 起始行 ≤ 结束行 ≤ {DRILL_MAX_SOURCE_ROWS}。"
+        )
     for key in (
         "location_col",
         "content_col",
@@ -2703,6 +2720,7 @@ class DrillManagementService:
                 raise DrillConflictError("该演练已有楼栋执行数据，不能再修改模板配置。")
             workbook = _parse_workbook(self._source_path(definition))
             definition["configuration"] = _validate_configuration(workbook, configuration)
+            definition["detection_error"] = ""
             definition["version"] = int(definition.get("version") or 0) + 1
             definition["status"] = "draft"
             definition["updated_at"] = _now_text()
@@ -2717,6 +2735,7 @@ class DrillManagementService:
                 raise DrillConflictError("演练配置已被修改，请刷新后重试。")
             workbook = _parse_workbook(self._source_path(definition))
             definition["configuration"] = _validate_configuration(workbook, definition.get("configuration") or {})
+            definition["detection_error"] = ""
             definition["status"] = "published"
             definition["version"] = int(definition.get("version") or 0) + 1
             definition["updated_at"] = _now_text()

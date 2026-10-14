@@ -33,6 +33,7 @@ ROUTES = {
     "papers/claim": {"POST": "paper.claim"},
     "papers/{id}": {"GET": "paper.get", "DELETE": "paper.delete"},
     "papers/{id}/answer": {"POST": "paper.answer"},
+    "papers/{id}/start": {"POST": "paper.start"},
     "papers/{id}/reveal": {"POST": "paper.reveal"},
     "papers/{id}/notes": {"POST": "paper.notes"},
     "history": {"GET": "history"},
@@ -343,3 +344,5 @@ def install_learning_routes(app, controller, runtime):
         app.add_api_route("/api/learning/" + path, endpoint, methods=list(methods), name="learning_" + path.replace("/", "_"))
     for path in ("/learning", "/learning/"):
         app.add_api_route(path, page, methods=["GET"], include_in_schema=False)
+    from .learning_sharing_routes import install as install_sharing
+    install_sharing(app, controller, runtime, get_service, identity, read_json, check_origin, error_response)

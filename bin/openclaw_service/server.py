@@ -364,6 +364,13 @@ def build_app(host, *, request_stop=lambda _: None):
             elif action == 'recommend-notice-tags':
                 host.current_lease(payload)
                 data = await host.backend_hooks['recommend_notice_tags'](payload)
+            elif action == 'generate-sharing-questions':
+                host.current_lease(payload)
+                from .assistant.lighthouse_ai import AssistantError
+                try:
+                    data = await host.backend_hooks['generate_sharing_questions'](payload)
+                except AssistantError as exc:
+                    raise ServiceError(str(exc), exc.status, 'sharing_generation_failed') from None
             elif action == 'acquire':
                 data = await host.acquire(payload)
             elif action == 'begin-run':

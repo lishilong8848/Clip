@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {build} from 'esbuild';
+import {fileURLToPath} from 'node:url';
+globalThis.window=Object.assign(new EventTarget(),{location:new URL('http://fixture.local/assets/workspace-v2/index.html')});
+window.history={pushState(_a,_b,url){window.location=new URL(url);},replaceState(_a,_b,url){window.location=new URL(url);}};
+const result=await build({entryPoints:[fileURLToPath(new URL('../src/workspace-v2/navigation.ts',import.meta.url))],bundle:true,write:false,format:'esm'});
+const {navigate,registerNavigationGuard}=await import('data:text/javascript;base64,'+Buffer.from(result.outputFiles[0].text).toString('base64'));
+let calls=[],resume;
+const first=registerNavigationGuard(()=>{calls.push('draft');return false;});
+const second=registerNavigationGuard(()=>{calls.push('idle');return true;});
+navigate('/learning');assert.deepEqual(calls,['idle','draft']);assert(!window.location.search.includes('learning'));
+second();const third=registerNavigationGuard((_target,proceed)=>{calls.push('confirm');resume=proceed;return false;});
+calls=[];navigate('/learning');assert.deepEqual(calls,['confirm']);resume();assert.deepEqual(calls,['confirm','draft']);assert(!window.location.search.includes('learning'));
+first();resume();assert(window.location.search.includes('learning'),'resume must still honor remaining guards');third();
+const blocked=registerNavigationGuard(()=>false);navigate('/cabinet-power');assert(window.location.search.includes('learning'));blocked();navigate('/cabinet-power');assert(window.location.search.includes('cabinet-power'));
+console.log('PASS: stacked navigation guards, deferred confirmation and guard cleanup.');

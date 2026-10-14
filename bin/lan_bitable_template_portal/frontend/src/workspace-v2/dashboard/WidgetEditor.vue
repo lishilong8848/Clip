@@ -5,7 +5,7 @@
       <div class="v2-widget-form-grid">
         <NFormItem v-if="presentationOptions(draft.kind).length>1" label="组件样式"><NSelect v-model:value="draft.presentation" :options="presentationOptions(draft.kind)" /></NFormItem>
         <NFormItem v-if="draft.kind==='tasks'" label="待办业务"><NSelect v-model:value="draft.module" :options="taskOptions(user)" filterable /></NFormItem>
-        <NFormItem v-if="!['shortcuts','learning'].includes(draft.kind)" label="楼栋范围"><NSelect v-model:value="draft.scope" :options="[{value:'current',label:'跟随工作台楼栋'},...scopes]" /></NFormItem>
+        <NFormItem v-if="!['shortcuts','learning','pre_shift'].includes(draft.kind)" label="楼栋范围"><NSelect v-model:value="draft.scope" :options="[{value:'current',label:'跟随工作台楼栋'},...scopes]" /></NFormItem>
         <NFormItem label="组件宽度"><NSelect v-model:value="draft.w" :options="[{label:'紧凑 · 1/3',value:4},{label:'标准 · 1/2',value:6},{label:'宽幅 · 2/3',value:8},{label:'整行',value:12}]" /></NFormItem>
         <NFormItem label="组件高度"><NSelect v-model:value="draft.h" :options="[{label:'紧凑',value:3},{label:'标准',value:5},{label:'加高',value:7},{label:'超高',value:9}]" /></NFormItem>
         <NFormItem v-if="draft.kind==='notices'" label="统计口径"><NSelect v-model:value="draft.metric" :options="[{label:'当前进行中',value:'ongoing'},{label:'本月待发计划',value:'pending'}]" /></NFormItem>

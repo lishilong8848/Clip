@@ -67,6 +67,7 @@ def install_lighthouse_routes(app, controller, runtime):
 
     from .feishu_assistant import install_feishu_assistant
     feishu_channel = install_feishu_assistant(app, controller, runtime, ready)
+    runtime.feishu_assistant_channel = feishu_channel
     app.add_event_handler('startup', startup)
     app.add_event_handler('shutdown', shutdown)
 
@@ -82,6 +83,20 @@ def install_lighthouse_routes(app, controller, runtime):
         if not result.get('ok'):
             raise AssistantError('后台推荐标签未完成。', 503)
         return result['data']
+
+    async def generate_sharing_questions(owner, source, previous, count):
+        current, _ = await ready()
+        http = await current.http_client()
+        response = await http.post(f"http://127.0.0.1:{current.descriptor['port']}/generate-sharing-questions",
+            headers={'Authorization': 'Bearer ' + current.key}, timeout=100,
+            json={'instance': current.instance, 'lease': current.lease, 'owner': owner,
+                  'source': source, 'previous': previous, 'count': count})
+        result = response.json()
+        if not result.get('ok'):
+            raise AssistantError(str(result.get('error') or '分享会出题未完成，请核对本人模型配置及纪要内容后重试。')[:500], 503)
+        return result['data']['questions']
+
+    runtime.generate_sharing_questions = generate_sharing_questions
 
     def failure(exc):
         return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status,

@@ -737,6 +737,8 @@ class FastAPIPortalController:
         install_cabinet_power_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.learning_routes import install_learning_routes
         install_learning_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.pre_shift_routes import install_pre_shift_routes
+        install_pre_shift_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes

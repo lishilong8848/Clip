@@ -524,6 +524,12 @@ class FeishuAssistant:
                 self.bot_id = data["bot_id"]
                 print("[ClipFlow][FeishuAssistant] 消息接收器已准备，正在连接飞书；等待消息事件", flush=True)
             else:
+                action_value = ((data.get('event') or {}).get('action') or {}).get('value') or {}
+                if isinstance(action_value, dict) and action_value.get('kind') == 'sharing_exercise':
+                    sharing = getattr(self.runtime, 'sharing_exercises', None)
+                    if sharing is None:
+                        return JSONResponse({'ok': False, 'toast': '分享会学练服务暂不可用，请稍后重试。'})
+                    return JSONResponse(await sharing.callback(data, self.config['app_id']))
                 from .feishu_assistant_questions import parse_question_event
                 from .feishu_notice_cards import parse_card_event
                 from .permission_review_cards import parse_event as parse_permission_event

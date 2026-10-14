@@ -23,6 +23,7 @@ def install_assistant_routes(app, host):
     closing = False
     pending_warmups = {}
     tagging_pool = None
+    sharing_slot = asyncio.Semaphore(1)
     knowledge = None
     knowledge_lock = threading.Lock()
     extensions = None
@@ -61,6 +62,14 @@ def install_assistant_routes(app, host):
             model = current.model.for_actor(owner) if owner else current.model
             return recommend(model, notices)
         return await asyncio.get_running_loop().run_in_executor(tagging_pool, work)
+
+    async def generate_sharing_questions(payload):
+        from .lighthouse_sharing import generate
+        owner = payload.get('owner')
+        if not isinstance(owner, str) or not owner or len(owner) > 128 or closing:
+            raise AssistantError('分享会出题身份无效。')
+        async with sharing_slot:
+            return await asyncio.to_thread(generate, get_service().model.for_actor(owner), payload)
 
     def get_service():
         nonlocal service
@@ -512,4 +521,4 @@ def install_assistant_routes(app, host):
         if streams is not None and getattr(streams.engine, 'bridge', None):
             streams.engine.bridge.active.clear()
     return {'startup': startup, 'shutdown': shutdown, 'disconnect': disconnect, 'get_streams': get_streams,
-            'recommend_notice_tags': recommend_notice_tags}
+            'recommend_notice_tags': recommend_notice_tags, 'generate_sharing_questions': generate_sharing_questions}

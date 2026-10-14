@@ -48,6 +48,7 @@ def main():
             # Acknowledge only after the portal's durable inbox has accepted the event.
             result = local.post(args.callback, headers=headers, content=lark.JSON.marshal(data).encode("utf-8"))
             result.raise_for_status()
+            return result.json()
 
         from lark_oapi.event.callback.model.p2_card_action_trigger import (
             CallBackToast, P2CardActionTriggerResponse,
@@ -58,15 +59,15 @@ def main():
             response = P2CardActionTriggerResponse()
             toast = CallBackToast()
             try:
-                received(data)
+                result = received(data)
             except Exception as exc:  # pragma: no cover - durable inbox re-accepts via dedup
                 print("[ClipFlow][FeishuAssistant] 卡片回调入库暂不可用: " + type(exc).__name__, flush=True)
                 toast.type = "error"
                 toast.content = "暂未接收，请稍后重试"
                 response.toast = toast
                 return response
-            toast.type = "info"
-            toast.content = "已收到，正在处理"
+            toast.type = "info" if result.get('ok', True) else "error"
+            toast.content = str(result.get('toast') or "已收到，正在处理")[:180]
             response.toast = toast
             return response
 

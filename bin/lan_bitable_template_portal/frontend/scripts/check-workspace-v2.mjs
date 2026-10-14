@@ -32,6 +32,8 @@ const errors = [], requests = [], writes = [];
 let user = { open_id:'ou_v2_fixture', name:'验收管理员', role:'admin', level:'L1', category:'manager', modules:['event','maintenance','change','repair','polling','adjust','power','repair_management','learning','signatures','accounts','water','cabinet','daily','drills','critical_guard','plan_convergence','links','knowledge','engineer_mop','life_guide','handover'] };
 let scopes = [{value:'ALL',label:'全部授权楼栋'}, ...['A','B','C','D','E','H','110'].map(value=>({value,label:value==='110'?'110站':value+'楼'}))];
 let loggedIn = true, failOverview = false, failTasks = false;
+let noticeFailure='';
+const expectedNoticeErrors=new Set();
 let assistantTurn=null;
 let permissionApplication=null,permissionNotifications=0;
 const fullModules=[...user.modules];
@@ -39,27 +41,33 @@ const overview = Object.fromEntries(scopes.map(({value},i)=>[value, { event_tota
   maintenance_pending:i?12:72,maintenance_ongoing:i?2:12,change_pending:i?2:12,change_ongoing:i?1:6,
   repair_pending:2,repair_ongoing:1,polling_pending:1,polling_ongoing:0,adjust_pending:1,adjust_ongoing:0,power_pending:0,power_ongoing:0,
   ongoing_titles:[],ongoing_title_count:i?4:19 }]));
-const native = `<!doctype html><html><head><title>隔离通告表单</title></head><body><div class="workspace"><h2>维保通告</h2><label>通告内容<input id="body" /></label><button id="submit">发送开始通告</button><p id="result"></p></div><script>
-let dirty=false; document.querySelector('#body').oninput=()=>dirty=true;window.isLiteNavigationDirty=()=>dirty;window.prepareLiteNavigation=async()=>{document.querySelector('#result').textContent='请先处理未保存内容';return !dirty};
-document.querySelector('#submit').onclick=async()=>{const r=await fetch('/api/workbench-actions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start',scope:'A',work_type:'maintenance',patch:{content:document.querySelector('#body').value}})});document.querySelector('#result').textContent=(await r.json()).data.message;dirty=false;};</script></body></html>`;
+const noticeFields = `<form id="lite-notice-form"><input name="scope" type="hidden" value="A"><input name="work_type" type="hidden" value="maintenance"><input name="notice_type" type="hidden" value="维保通告"><input name="source_record_id" type="hidden" value="plan_fixture"><input name="building_codes" type="checkbox" value="A" checked><label><span>名称</span><input name="title" required value="隔离测试通告"></label><label><span>通告内容</span><textarea name="content" required></textarea></label><button name="submit_action" value="start">发送开始</button></form>`;
 async function context() {
   const context=await browser.newContext({ viewport:{width:1440,height:1000},reducedMotion:process.argv.includes('--no-motion')?'reduce':'no-preference' });
   await context.route('**/*',async route=>{
     const req=route.request(),url=new URL(req.url());
     if(url.origin!==origin && !['data:','blob:'].includes(url.protocol))return route.abort();
-    if(url.pathname==='/workbench-lite'||url.pathname.startsWith('/polling-work-order'))return route.fulfill({contentType:'text/html',body:native});
+    if(url.pathname==='/workbench-lite'||url.pathname.startsWith('/polling-work-order'))throw new Error('V2 must not load a legacy document');
     if(!url.pathname.startsWith('/api/'))return route.continue();
     requests.push({path:url.pathname,params:Object.fromEntries(url.searchParams),method:req.method()});
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/auth/status')return ok({logged_in:loggedIn,user:loggedIn?user:{},scope_options:loggedIn?scopes:[],login_url:'/api/auth/login?next='+encodeURIComponent(url.searchParams.get('next')||'/')});
+    if(url.pathname==='/api/pre-shift-checks')return ok({scopes:['A'],scope:'A',can_manage:['L0','L1','L3'].includes(user.level),definition:{version:0,items:[]},tasks:[],roster_ready:false,roster_error:''});
     if(url.pathname==='/api/auth/logout'){loggedIn=false;return ok({});}
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'v2-isolated'}});
+    if(url.pathname==='/api/workbench/lite-detail')return ok({fragments:{detail:noticeFields}});
+    if(url.pathname==='/api/jobs/job_fixture')return ok({job_id:'job_fixture',phase:'success',message:'已提交原业务任务'});
     if(url.pathname==='/api/scope-overview')return failOverview?route.fulfill({status:503,json:{ok:false,error:'测试资料读取失败'}}):ok({scopes:overview,source_snapshot_ready:true,last_loaded_at:'2026-10-12 08:00'});
     if(url.pathname==='/api/workbench')return failTasks?route.fulfill({status:503,json:{ok:false,error:'测试待办读取失败'}}):ok({records:[{record_id:'plan_fixture',title:'A楼冷水机组月度维护',work_type:'maintenance',source_progress:'未开始',status:'未开始',scope:'A',start_time:'2026-10-12 09:00',display_fields:{'计划开始维护时间':'2026-10-12 09:00','计划结束维护时间':'2026-10-15 18:30'}},{record_id:'ended_fixture',title:'已结束验收通告',source_progress:'已结束'},{record_id:'source_active_fixture',title:'重复的进行中计划',source_progress:'进行中'}],ongoing:[{active_item_id:'active_fixture',source_record_id:'source_active_fixture',title:'A楼BA系统资料维护',work_type:'maintenance',status:'开始',scope:'A',start_time:'2026-10-12 08:30',end_time:'2026-10-12 18:30'}],stats:{},record_type_counts:{maintenance:1},records_pagination:{total_pages:1,total:3},ongoing_pagination:{total_pages:1,total:1}});
     if(url.pathname==='/api/history-summary')return ok({days:[{date:'2026-10-12',items:[{record_id:'history_fixture',title:'A楼BA系统资料维护',work_type:'maintenance',status:'开始'}]}]});
     if(url.pathname==='/api/repair-management/status')return ok({records:[],total:0,stats:{total:0,without_followup:0,in_progress:0,completed_total:0}});
     if(url.pathname==='/api/repair-management/stream')return route.fulfill({status:204,body:''});
-    if(url.pathname==='/api/workbench-actions'){writes.push(req.postDataJSON());return ok({job_id:'job_fixture',message:'已提交原业务任务'});}
+    if(url.pathname==='/api/workbench-actions'){
+      writes.push(req.postDataJSON());
+      if(noticeFailure==='unmatched'){noticeFailure='';expectedNoticeErrors.add('Failed to load resource: the server responded with a status of 409 (Conflict)');return route.fulfill({status:409,json:{ok:false,error:'计划收敛未匹配',error_code:'confirmation_required',details:{kind:'plan_convergence_unmatched',confirmation:{fixture:true}}}});}
+      if(noticeFailure==='network'){noticeFailure='';expectedNoticeErrors.add('Failed to load resource: net::ERR_FAILED');return route.abort('failed');}
+      return ok({job_id:'job_fixture',message:'已提交原业务任务'});
+    }
     if(url.pathname==='/api/auth/accounts')return ok({items:[],scope_options:scopes,module_options:[],policy:{level:'L1',modules:user.modules,can_manage_accounts:true}});
     if(url.pathname==='/api/auth/permissions')return ok({users:[],scope_options:scopes});
     if(url.pathname==='/api/auth/permission-approvers')return ok({items:[{open_id:'ou_admin_approval_fixture',name:'指定审批管理员'}]});
@@ -95,6 +103,7 @@ async function context() {
     page.on('pageerror',err=>{errors.push({url:page.url(),message:err.message,stack:err.stack});console.log('PAGE ERROR',err.message);});
     page.on('console',message=>{
       if(message.type()!=='error'||message.text().includes('503 (Service Unavailable)'))return;
+      if(message.location().url.startsWith(origin+'/api/workbench-actions')&&expectedNoticeErrors.delete(message.text()))return;
       // The legacy login request is cancelled by the expected full-page return to V2.
       const url=new URL(page.url());
       if(url.pathname==='/'&&url.searchParams.get('auth_notice')==='cancelled'&&message.text().startsWith('ApiError: Failed to fetch'))return;
@@ -129,7 +138,7 @@ try {
   const handleRow=page.locator('.v2-task-row').filter({hasText:'A楼BA系统资料维护'});
   assert.equal(await handleRow.locator('button').count(),0,'a work row is one keyboard-operable action, not nested buttons');
   await handleRow.locator('.v2-task-action').click();
-  await page.frameLocator('iframe').getByRole('heading',{name:'维保通告'}).waitFor();
+  await page.locator('.v2-notice-editor').waitFor();
   assert.match(page.url(),/active_item_id=active_fixture/,'workbench action opens the existing notice form for the exact record');
   await page.goto(origin+entry);await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.getByText('A楼冷水机组月度维护',{exact:true}).waitFor();
@@ -194,23 +203,47 @@ try {
   await page.getByRole('menuitem',{name:'事件管理',exact:true}).click();await page.locator('.v2-event-charts').waitFor();
   await page.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=maintenance');
-  const frame=page.frameLocator('iframe');
-  await frame.getByRole('heading',{name:'维保通告'}).waitFor();
-  await frame.getByLabel('通告内容').fill('隔离验收，不发送真实通告');
-  await page.getByRole('menuitem',{name:'个人工作台'}).click();
-  await frame.getByText('请先处理未保存内容').waitFor();
+  await page.locator('.v2-notice-open').first().click();
+  await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('隔离验收，不发送真实通告');
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+  await page.getByText('当前填写尚未保存',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'继续填写',exact:true}).click();
   assert.match(page.url(),/workbench-lite/);
-  await frame.getByRole('button',{name:'发送开始通告'}).click();
-  await frame.getByText('已提交原业务任务').waitFor();
-  await frame.locator('#body').evaluate(el=>el.dataset.fixtureRetained='yes');
+  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();
+  assert.equal(writes.length,0,'preview must not submit');
+  await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
+  await page.getByText('已提交原业务任务',{exact:true}).waitFor();
   assert.equal(writes.length,1);assert.equal(writes[0].action,'start');assert.equal(writes[0].scope,'A');
+  assert.equal(writes[0].patch.content,'隔离验收，不发送真实通告');
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+  noticeFailure='unmatched';
+  await page.getByRole('button',{name:'新建通告',exact:true}).click();await page.getByText('手填维保通告',{exact:true}).click();
+  await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('第一次填写');
+  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
+  await page.getByRole('button',{name:'返回核对',exact:true}).click();
+  await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('取消确认后更正的内容');
+  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
+  await page.getByText('已提交原业务任务',{exact:true}).waitFor();
+  assert.equal(writes.at(-1).patch.content,'取消确认后更正的内容','cancelled confirmation must not retain the old frozen payload');
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+  noticeFailure='network';
+  await page.getByRole('button',{name:'新建通告',exact:true}).click();await page.getByText('手填维保通告',{exact:true}).click();
+  await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('网络中断后原样重试');
+  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
+  await page.getByRole('button',{name:'重试原提交',exact:true}).waitFor();
+  assert(await page.getByRole('textbox',{name:'通告内容',exact:true}).isDisabled(),'unknown write result locks the original payload');
+  const previous=structuredClone(writes.at(-1));
+  await page.getByRole('button',{name:'重试原提交',exact:true}).click();await page.getByText('已提交原业务任务',{exact:true}).waitFor();
+  assert.deepEqual(writes.at(-1),previous,'retry keeps both original operation ID and fields');
+  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
   await page.getByRole('menuitem',{name:'个人工作台'}).click();
   await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   assert.match(await page.locator('.v2-scope-select').innerText(),/A楼/,'returning home preserves chosen building');
   await page.getByRole('menuitem',{name:'风险与重保',exact:true}).click();await page.locator('.guard-page').waitFor();assert.match(page.url(),/scope=A/);assert.equal(await page.locator('.guard-page .landing-view').count(),0);
   await page.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.evaluate(()=>{const link=document.createElement('a');link.href='/workbench-lite?scope=A&work_type=maintenance';document.body.append(link);link.click();link.remove();});
-  await page.frameLocator('iframe').locator('#body[data-fixture-retained=yes]').waitFor();
+  await page.locator('.v2-notice-entry').first().waitFor();
+  assert.equal(await page.locator('iframe').count(),0,'returning uses the new Vue notice page');
   await page.getByRole('menuitem',{name:'个人工作台'}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.locator('.v2-scope-select').click();await page.locator('.n-base-select-option').getByText('全部楼栋',{exact:true}).click();
   await page.getByRole('menuitem',{name:'水耗管理',exact:true}).click();
@@ -301,9 +334,9 @@ try {
   await member.locator('.verify-box').getByText('申请已通过',{exact:true}).waitFor({timeout:15000});
   await member.screenshot({path:path.join(output,'permission-approval.png'),fullPage:true});
   permissionApplication=null;
-  await member.getByRole('menuitem',{name:'通告办理',exact:true}).click();await member.frameLocator('iframe').getByRole('heading',{name:'维保通告'}).waitFor();assert.match(member.url(),/work_type=maintenance/,'single notice grant opens that type directly');
+  await member.getByRole('menuitem',{name:'通告办理',exact:true}).click();await member.locator('.v2-notices').waitFor();assert.match(member.url(),/work_type=maintenance/,'single notice grant opens that type directly');
   await member.goto(origin+entry+'?__page=/workbench-lite&scope=E');await member.getByText('没有该功能权限',{exact:true}).waitFor();
-  await member.goto(origin+entry+'?__page=/workbench-lite&scope=A');await member.frameLocator('iframe').getByRole('heading',{name:'维保通告'}).waitFor();user={...user,modules:[]};await member.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));await member.getByText('没有该功能权限',{exact:true}).waitFor();assert.equal(await member.locator('iframe').count(),0,'withdrawn module unmounted');
+  await member.goto(origin+entry+'?__page=/workbench-lite&scope=A');await member.locator('.v2-notices').waitFor();user={...user,modules:[]};await member.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));await member.getByText('没有该功能权限',{exact:true}).waitFor();assert.equal(await member.locator('.v2-notices').count(),0,'withdrawn module unmounted');
   await ordinary.close();
 
   user={open_id:'ou_assistant_fixture',name:'会话验收',role:'building',level:'L4',category:'operator',modules:['assistant']};scopes=[{value:'A',label:'A楼'}];

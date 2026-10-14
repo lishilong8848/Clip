@@ -33,6 +33,7 @@ from lan_bitable_template_portal.drill_management import (  # noqa: E402
     _verify_generated_workbook,
     _derived_values,
     _validate_execution,
+    _validate_configuration,
     build_time_chain,
     detect_drill_configuration,
     drill_signature_layout,
@@ -273,6 +274,69 @@ def _duplicate_workbook_part(source: bytes) -> bytes:
 
 
 class DrillManagementTests(unittest.TestCase):
+    def test_manual_label_mapping_keeps_detected_step_rows(self) -> None:
+        source = _replace_zip_part(
+            _fixture_xlsx(), "xl/worksheets/sheet1.xml",
+            lambda content: content.replace("总指挥人".encode(), "现场指挥".encode()),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(
+                LanPortalStateStore(Path(temporary) / "state.sqlite3"),
+                data_root=Path(temporary) / "drills",
+            )
+            definition = service.create_definition(
+                name="手动补充映射", year=2026, month=10,
+                file_name="test.xlsx", source=source,
+            )
+            self.assertIn("commander", definition["detection_error"])
+            saved = service.save_configuration(
+                definition["drill_id"],
+                {"record_sheet": "本月记录", "assessment_sheet": "评估表",
+                 "mapping": {"commander": "C8:E8"}},
+                expected_version=definition["version"],
+            )
+            self.assertEqual(saved["configuration"]["mapping"]["steps"]["header_row"], 12)
+            self.assertEqual([s["row"] for s in saved["configuration"]["steps"]], [13, 14, 15])
+            published = service.publish(saved["drill_id"], expected_version=saved["version"])
+            self.assertEqual(published["status"], "published")
+            self.assertEqual(published["detection_error"], "")
+
+    def test_step_range_failure_explains_missing_header_instead_of_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "template.xlsx"
+            path.write_bytes(_fixture_xlsx())
+            workbook = _parse_workbook(path)
+        workbook["sheets"][0]["cells"]["D12"] = "未识别的标题"
+        with self.assertRaisesRegex(DrillError, "未识别到完整.*步骤表头"):
+            _validate_configuration(workbook, {
+                "record_sheet": "本月记录", "assessment_sheet": "评估表",
+            })
+
+    def test_invalid_step_ranges_are_rejected_without_overwriting_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(
+                LanPortalStateStore(Path(temporary) / "state.sqlite3"),
+                data_root=Path(temporary) / "drills",
+            )
+            definition = service.create_definition(
+                name="行号校验", year=2026, month=10,
+                file_name="test.xlsx", source=_fixture_xlsx(),
+            )
+            cases = [
+                ({"header_row": 13, "start_row": 13, "end_row": 15}, "表头行.*13.*起始行.*13.*结束行.*15"),
+                ({"header_row": 12, "start_row": 15, "end_row": 13}, "表头行.*12.*起始行.*15.*结束行.*13"),
+                ({"start_row": 13.5}, "起始行.*整数"),
+                ({"end_row": 501}, "500"),
+            ]
+            for rows, message in cases:
+                with self.subTest(rows=rows), self.assertRaisesRegex(DrillError, message):
+                    service.save_configuration(definition["drill_id"], {
+                        "record_sheet": "本月记录", "assessment_sheet": "评估表",
+                        "mapping": {"steps": rows},
+                    }, expected_version=definition["version"])
+                self.assertEqual(service.get_definition(definition["drill_id"])["version"], definition["version"])
+                self.assertEqual(service.get_definition(definition["drill_id"])["configuration"]["mapping"]["steps"], definition["configuration"]["mapping"]["steps"])
+
     def test_evaluator_is_independent_and_only_generated_file_contains_signature(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")

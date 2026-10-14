@@ -10,6 +10,7 @@ import './cabinetBatch.css';
 import './dashboard/dashboard.css';
 import './motionBlocks.css';
 import './vipboard.css';
+import './feedback.css';
 import { installActionMotion } from './actionMotion';
 import { installLinkNavigation } from './navigation';
 document.documentElement.classList.add('workspace-v2');

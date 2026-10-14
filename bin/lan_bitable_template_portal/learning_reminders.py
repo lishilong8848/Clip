@@ -98,13 +98,16 @@ def reminder_card(message, url):
 
 def send_reminder(recipient, card, identity):
     from .portal_service import BUILDING_OPEN_ID_MAP, external_real_write_guard
-    from upload_event_module.services.robot_webhook import send_interactive_to_open_ids
+    from upload_event_module.services.robot_webhook import send_interactive_to_open_ids, send_interactive_to_chat_id
     open_id = BUILDING_OPEN_ID_MAP.get(recipient, recipient)
-    if not re.fullmatch(r'ou_[A-Za-z0-9]+', open_id):
+    if not re.fullmatch(r'(?:ou|oc)_[A-Za-z0-9]+', open_id):
         raise ValueError('学习提醒接收人无效。')
     guard = external_real_write_guard()
     if guard.get('mock_external'):
         return True, 'mock external send skipped', []
     if not guard.get('real_write_allowed'):
         return False, guard.get('reason') or '真实外部写入未确认。', []
-    return send_interactive_to_open_ids(card, [open_id], message_uuid=str(uuid5(NAMESPACE_URL, identity)))
+    message_uuid = str(uuid5(NAMESPACE_URL, identity))
+    if open_id.startswith('oc_'):
+        return send_interactive_to_chat_id(card, open_id, message_uuid=message_uuid)
+    return send_interactive_to_open_ids(card, [open_id], message_uuid=message_uuid)

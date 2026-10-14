@@ -15,6 +15,8 @@
     "smoke": "python ../../tools/frontend_runtime_smoke.py",
     "typecheck": "vue-tsc --noEmit",
     "check:vipboard": "node scripts/check-workspace-vipboard.mjs",
+    "check:pre-shift": "node scripts/check-workspace-layout.mjs && node scripts/check-pre-shift-browser.mjs",
+    "check:workspace-notices": "node scripts/check-workspace-navigation.mjs && node scripts/check-workspace-notices.mjs && node scripts/check-workspace-notice-tools.mjs && node scripts/check-workspace-work-orders.mjs",
     "check:workspace-v2": "node scripts/check-workspace-layout.mjs && node scripts/check-workspace-controls.mjs && node scripts/check-workspace-requests.mjs && node scripts/check-workspace-v2.mjs && node scripts/check-workspace-motion.mjs && node scripts/check-workspace-events-cabinet.mjs && node scripts/check-workspace-auth.mjs"
   },
   "dependencies": {

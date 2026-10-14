@@ -6,7 +6,6 @@ const pagePaths = new Set(['/', '/admin/settings', '/admin/history-memory', '/si
   '/critical-guard', '/cabinet-power', '/cabinet-power/batches', '/drill-management', '/drill-management/print',
   '/workbench-lite', '/polling-work-order', '/polling-work-order/steps']);
 type NavigationGuard=(target:string,proceed:()=>void)=>boolean;
-let guard:NavigationGuard|null=null;
 const guards=new Set<NavigationGuard>();
 let stable = window.location.href;
 for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
@@ -26,15 +25,26 @@ export function destination(target: string | URL): string {
   }
   return url.href;
 }
-export function registerNavigationGuard(value: typeof guard): () => void {
-  if(value)guards.add(value);guard=value;stable=window.location.href;
-  return()=>{if(value)guards.delete(value);const live=[...guards];guard=live[live.length-1]||null;};
+export function registerNavigationGuard(value: NavigationGuard|null): () => void {
+  if(value)guards.add(value);stable=window.location.href;
+  return()=>{if(value)guards.delete(value);};
+}
+function allowNavigation(target:string,proceed:()=>void):boolean {
+  const pending=[...guards].reverse();
+  function check(index:number):boolean {
+    for(let i=index;i<pending.length;i++){
+      const guard=pending[i]!;
+      if(guards.has(guard)&&!guard(target,()=>{if(check(i+1))proceed();}))return false;
+    }
+    return true;
+  }
+  return check(0);
 }
 export function toAbsoluteUrl(target: string | URL): string { return logicalUrl(new URL(target, window.location.origin).href).href; }
 export function navigate(target: string | URL, options: NavigateOptions = {}): void {
   const logical = toAbsoluteUrl(target);
   const proceed = () => navigate(target, { ...options, bypassGuard: true });
-  if (!options.bypassGuard && guard && !guard(logical, proceed)) return;
+  if (!options.bypassGuard && !allowNavigation(logical, proceed)) return;
   const next = options.legacy ? new URL(target, window.location.origin).href : destination(target);
   if (options.hard || !isWorkspacePage(target)) { window.location.assign(next); return; }
   if (next === window.location.href) return;
@@ -52,12 +62,12 @@ export function navigateBack(fallback = '/', hardFallback = false) {
 export function replaceRoute(target: string | URL) { navigate(target, { replace: true }); }
 export function requestPageReload(confirm: (proceed: () => void) => void) {
   const proceed = () => window.location.reload();
-  if (!guard) confirm(proceed); else if (guard(toAbsoluteUrl(window.location.href), proceed)) proceed();
+  if (!guards.size) confirm(proceed); else if (allowNavigation(toAbsoluteUrl(window.location.href), proceed)) proceed();
 }
 window.addEventListener('popstate', event => {
   const next = window.location.href;
-  if (!guard || next === stable) { stable = next; return; }
-  if (guard(toAbsoluteUrl(next), () => navigate(next, { replace: true, bypassGuard: true }))) { stable = next; return; }
+  if (!guards.size || next === stable) { stable = next; return; }
+  if (allowNavigation(toAbsoluteUrl(next), () => navigate(next, { replace: true, bypassGuard: true }))) { stable = next; return; }
   event.stopImmediatePropagation(); window.history.pushState({}, '', stable);
 }, true);
 

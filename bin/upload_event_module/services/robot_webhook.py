@@ -387,7 +387,7 @@ def send_interactive_to_open_ids(
 
 
 def send_interactive_to_chat_id(
-    card: dict[str, Any], chat_id: str
+    card: dict[str, Any], chat_id: str, *, message_uuid: str = ""
 ) -> Tuple[bool, str]:
     """按 chat_id 发送飞书交互卡片。"""
     chat_id = str(chat_id or "").strip()
@@ -403,6 +403,7 @@ def send_interactive_to_chat_id(
         chat_id,
         card,
         receive_id_type="chat_id",
+        message_uuid=message_uuid,
     )
     if ok:
         log_info(f"群交互卡片发送成功: chat_id={chat_id}")
