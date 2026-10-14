@@ -16,7 +16,7 @@ from .lighthouse_sources import MODULE_HELP, SCOPES, codes, record_codes
 from .lighthouse_queries import COUNT, DETAIL, PENDING, EventQuery, PortalOperation, all_pending_modules, business_domains, collect_events, current_pending_query, date_window, effective_question, event_reply, read_only_question, semantic_context
 from .lighthouse_queries import collect_notice_sends, notice_sends_reply, sent_notice_question
 from .lighthouse_queries import past_action_question, query_result_state
-from .lighthouse_basics import calculate as calculate_value, CalculationError, calculation_request, date_time as time_value, time_request, public_capability_request, current_user_request
+from .lighthouse_basics import calculate as calculate_value, CalculationError, calculation_request, date_time as time_value, time_request, public_capability_request, current_user_request, assistant_capability_request
 from .lighthouse_message_delivery import MESSAGE_INTENT, feishu_delivery_requested
 
 
@@ -502,6 +502,24 @@ class LighthouseModel:
             employee_no = safe_text(str(current.get('employee_no') or '')).strip()
             answer = f"当前登录人：**{name}**（{role}）。"
             answer += f"\n\n工号：{employee_no}。" if employee_no else "\n\n当前登录信息未提供工号，不作推测。"
+            await emit('text', {'delta': answer})
+            return {'answer': answer, 'sources': []}
+
+        if not warm_only and not turn.get('file_ids') and assistant_capability_request(question):
+            current = await current_actor()
+            from .lighthouse_ai import model_capabilities
+            tools_enabled = model_capabilities(turn.get('_profile') or {})['tool_calls']
+            lines = ['我是灯塔助手，可以帮你：', '- 一般问答、写作润色、翻译、代码示例和资料整理。']
+            if tools_enabled and self.public_sources:
+                lines.append('- 查询天气、搜索公开资料；实时结果以实际查询到的来源为准。')
+            if tools_enabled and set(current.get('modules', [])) - {'assistant', 'knowledge'}:
+                lines.append('- 查询你已获授权的灯塔业务，准备可填写的业务表单，确认后通过原业务流程办理。')
+            if tools_enabled and 'knowledge' in current.get('modules', []):
+                lines.append('- 输入 /公司知识库 后查询公司资料，并整理摘要。')
+            if not tools_enabled:
+                lines.append('当前模型未启用工具调用，联网查询和业务办理需先开启工具调用。')
+            lines.append('你可以直接告诉我要处理什么；需要补充信息时我会继续询问。')
+            answer = '\n'.join(lines)
             await emit('text', {'delta': answer})
             return {'answer': answer, 'sources': []}
 

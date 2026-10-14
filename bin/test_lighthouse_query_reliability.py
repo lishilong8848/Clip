@@ -14,7 +14,7 @@ from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 
 from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog
 from lan_bitable_template_portal.lighthouse_model import (
-    GENERAL_INSTRUCTIONS, INSTRUCTIONS, LighthouseModel, discover_for_question,
+    GENERAL_INSTRUCTIONS, LighthouseModel, discover_for_question,
     instructions_for_question, public_catalog,
 )
 from lan_bitable_template_portal.lighthouse_queries import past_action_question, query_result_state, read_only_question
@@ -93,8 +93,10 @@ class QueryContractTests(unittest.TestCase):
             with self.subTest(text=text):
                 result = instructions_for_question(text)
                 self.assertEqual(result, GENERAL_INSTRUCTIONS)
-                self.assertNotIn("command_format", result)
-                self.assertLess(len(result), len(INSTRUCTIONS) / 5)
+                for business_marker in ("command_format", "notice_sends", "POST /api/workbench-actions", "维修单填写", "演练填报", "重保填报"):
+                    self.assertNotIn(business_marker, result)
+                # General tool guidance needs a budget independent of business manual size.
+                self.assertLessEqual(len(result), 3500)
                 self.assertIn("不要因为问题不属于灯塔业务而拒绝", result)
                 self.assertIn("不能编造温度", result)
         self.assertIn("notice_sends", instructions_for_question("今天发了几条通告"))

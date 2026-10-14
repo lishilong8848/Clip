@@ -7,17 +7,15 @@
     </div>
     <NMenu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="filtered" :value="selected" :indent="18" @update:value="choose" />
     <div v-if="query&&!filtered.length" class="v2-nav-empty" role="status"><SearchX :size="22" /><span>未找到相关功能</span><NButton text @click="query=''">清除搜索</NButton></div>
-    <div class="v2-nav-footer">
-      <NButton data-v2-navigation quaternary :circle="collapsed" :class="{'is-current':selected==='my'}" aria-label="导航个人设置" :title="name+' · 个人设置'" @click="$emit('personal')"><UserRound :size="19" /><span v-if="!collapsed"><strong>{{ name }}</strong><small>{{ scopeLabel }}</small></span><ChevronRight v-if="!collapsed" :size="15" /></NButton>
-    </div>
+
   </aside>
 </template>
 <script setup lang="ts">
 import { computed,nextTick,ref,watch } from 'vue';
 import { NButton,NInput,NMenu,type InputInst,type MenuOption } from 'naive-ui';
-import { ChevronRight,PanelLeftClose,PanelLeftOpen,Search,SearchX,UserRound } from 'lucide-vue-next';
-const props=defineProps<{collapsed:boolean;options:MenuOption[];selected:string;name:string;scopeLabel:string}>();
-const emit=defineEmits<{'update:collapsed':[value:boolean];select:[value:string];personal:[]}>();
+import { PanelLeftClose,PanelLeftOpen,Search,SearchX } from 'lucide-vue-next';
+const props=defineProps<{collapsed:boolean;options:MenuOption[];selected:string}>();
+const emit=defineEmits<{'update:collapsed':[value:boolean];select:[value:string]}>();
 const query=ref(''),input=ref<InputInst>(),sidebar=ref<HTMLElement>();
 const inputTheme={color:'#34413c',colorFocus:'#34413c',border:'1px solid #48584f',borderHover:'1px solid #8db5a1',borderFocus:'1px solid #8db5a1',textColor:'#edf6f0',placeholderColor:'#b1c0b6',caretColor:'#edf6f0',borderRadius:'6px'};
 const itemCount=computed(()=>props.options.reduce((n,item)=>n+(item.type==='group'?(item.children?.length||0):1),0));
@@ -40,15 +38,15 @@ watch(()=>props.selected,async()=>{
   const root=sidebar.value,active=root?.querySelector<HTMLElement>('.n-menu-item-content--selected');
   if(!root||!active)return;
   const rect=root.getBoundingClientRect(),item=active.getBoundingClientRect(),head=root.querySelector('.v2-nav-head')?.clientHeight||0;
-  if(item.top<rect.top+head||item.bottom>rect.bottom-66)root.scrollTo({top:root.scrollTop+item.top-rect.top-head-12,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
+  if(item.top<rect.top+head||item.bottom>rect.bottom-12)root.scrollTo({top:root.scrollTop+item.top-rect.top-head-12,behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
 });
 </script>
 <style>
 @media(min-width:761px){.workspace-v2 .v2-shell{--nav-width:232px}.workspace-v2 .v2-shell.is-collapsed{--nav-width:64px}.workspace-v2 .v2-sidebar-improved{transition:width 200ms ease-out;background:#26332e;scrollbar-color:#526f5f transparent}.workspace-v2 .v2-main{transition:margin-left 200ms ease-out}}
-.v2-nav-head{position:sticky;top:0;z-index:3;background:#26332e;padding:10px 12px 14px;border-bottom:1px solid #ffffff0c;flex:none}.v2-nav-heading{display:flex;align-items:center;justify-content:space-between;min-height:32px;margin-bottom:8px}.v2-nav-heading>span{display:flex;align-items:center;gap:9px;font-size:12px;color:#b8c9bd}.v2-nav-heading small{font-size:11px;color:#b8c9bd;background:#ffffff0b;border-radius:4px;padding:1px 5px;font-variant-numeric:tabular-nums}.v2-nav-heading .n-button,.v2-nav-search-toggle{width:32px;height:32px;flex:none}.v2-nav-search .n-input__prefix{color:#adbdaf}.v2-nav-search .n-base-clear{color:#d1ded5}.v2-nav-footer{position:sticky;bottom:0;z-index:3;margin-top:auto;padding:10px 12px;background:#26332e;border-top:1px solid #ffffff12;flex:none}.v2-nav-footer>.n-button{height:46px;width:100%;padding:4px 7px;text-align:left}.v2-nav-footer .n-button__content{display:flex;width:100%;gap:9px;min-width:0}.v2-nav-footer span{display:grid;flex:1;min-width:0;gap:3px}.v2-nav-footer strong{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis}.v2-nav-footer small{font-size:11px;color:#aabdb0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.v2-nav-empty{display:grid;gap:10px;justify-items:center;color:#b8c9bd;font-size:12px;padding:30px 10px}
+.v2-nav-head{position:sticky;top:0;z-index:3;background:#26332e;padding:10px 12px 14px;border-bottom:1px solid #ffffff0c;flex:none}.v2-nav-heading{display:flex;align-items:center;justify-content:space-between;min-height:32px;margin-bottom:8px}.v2-nav-heading>span{display:flex;align-items:center;gap:9px;font-size:12px;color:#b8c9bd}.v2-nav-heading small{font-size:11px;color:#b8c9bd;background:#ffffff0b;border-radius:4px;padding:1px 5px;font-variant-numeric:tabular-nums}.v2-nav-heading .n-button,.v2-nav-search-toggle{width:32px;height:32px;flex:none}.v2-nav-search .n-input__prefix{color:#adbdaf}.v2-nav-search .n-base-clear{color:#d1ded5}.v2-nav-empty{display:grid;gap:10px;justify-items:center;color:#b8c9bd;font-size:12px;padding:30px 10px}
 .workspace-v2 .v2-sidebar-improved .n-menu{margin-top:8px;margin-bottom:12px}.workspace-v2 .v2-sidebar-improved .n-menu-item{height:38px;margin-top:3px}.workspace-v2 .v2-sidebar-improved .n-menu-item-content{border-radius:6px;font-size:13px}.workspace-v2 .v2-sidebar-improved .n-menu-item-content__icon{margin-right:11px!important}.workspace-v2 .v2-sidebar-improved .n-menu-item-group-title{font-size:11px;height:31px;line-height:31px;padding-left:20px!important;margin-top:9px;color:#afc1b4!important}.workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected::after{left:0;top:8px;bottom:8px;width:3px;background:#a6e1bd}.workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected::before{background:#385c4a!important}.workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected .n-menu-item-content-header{font-weight:600}
-.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .v2-nav-head{padding:10px 16px}.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .v2-nav-footer{padding:10px 10px}.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .v2-nav-footer>.n-button{width:44px;height:44px;padding:0}.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .v2-nav-footer .n-button__content{justify-content:center}
+.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .v2-nav-head{padding:10px 16px}
 @media(min-width:761px) and (max-width:1150px){.workspace-v2 .v2-sidebar-improved[data-collapsed="false"] .n-menu-item-content-header{display:inline}.workspace-v2 .v2-sidebar-improved[data-collapsed="false"] .n-menu-item-group-title{display:block}.workspace-v2 .v2-sidebar-improved[data-collapsed="false"] .n-menu-item-content{padding-left:18px!important}}
 @media(prefers-reduced-motion:reduce){.workspace-v2 .v2-sidebar-improved,.workspace-v2 .v2-main{transition:none}}
-.v2-nav-footer>.n-button.is-current{background:#385c4a}
+
 </style>

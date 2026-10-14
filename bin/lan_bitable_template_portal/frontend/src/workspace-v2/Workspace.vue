@@ -1,6 +1,6 @@
 <template>
   <NConfigProvider :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
-    <NMessageProvider><NDialogProvider>
+    <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
       <div class="v2-shell" :class="{ 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode" class="v2-header">
@@ -14,7 +14,7 @@
           </div>
         </header>
         <div v-if="printMode" id="page-back-slot" hidden />
-        <SidebarNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" :name="String(user.name||'当前账号')" :scope-label="scopeLabel" @select="selectMenu" @personal="navigate('/?view=my')" />
+        <SidebarNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" @select="selectMenu" />
         <main class="v2-main">
           <div v-if="loggedIn && !publicLink && !printMode && route.pathname !== '/workbench-lite' && scopes.length > 1 && scopeSelectable && !['my','permission'].includes(view)" class="v2-context">
             <span>业务范围</span>
@@ -87,8 +87,8 @@ const AuthPanels = lazy(() => import('../components/AuthPanels.vue'));
 const pages: Record<string, any> = {
   event: lazy(() => import('../components/EventManagementPage.vue')),
   engineer_mop: lazy(() => import('../components/EngineerMopPage.vue')),
-  repair_management: lazy(() => import('../components/RepairManagementPage.vue')),
-  repair_status: lazy(() => import('../components/RepairStatusPage.vue')),
+  repair_management: lazy(() => import('./RepairWorkspace.vue')),
+  repair_status: lazy(() => import('./RepairWorkspace.vue')),
   learning: lazy(() => import('../components/LearningPage.vue')),
   plan_convergence: lazy(() => import('../components/PlanConvergencePage.vue')),
   life_guide: lazy(() => import('../components/LifeGuidePage.vue')),
@@ -176,7 +176,8 @@ const componentProps = computed(() => {
   const common = { scope:currentScope.value, scopeOptions:scopes.value, isAdmin:admin, checking:false, loggedIn:loggedIn.value, loginUrl:loginUrl.value };
   switch(componentName.value) {
     case 'event': return {...common, refreshNonce:0};
-    case 'repair_management': return {...common, canDelete:user.value.can_delete_business === true, focusRecordId:p.get('record_id') || ''};
+    case 'repair_status':
+    case 'repair_management': return {...common, userId:String(user.value.open_id || ''), canDelete:user.value.can_delete_business === true, focusRecordId:p.get('record_id') || ''};
     case 'learning': return {...common, scope:p.get('scope') || '', personId:p.get('person_id') || '', userId:String(user.value.open_id || '')};
     case 'critical_guard': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, user:user.value, adminMode:admin && (p.get('mode') === 'admin'||['ALL','CAMPUS'].includes(currentScope.value))};
     case 'drills': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, currentUser:user.value, adminMode:admin && (p.get('mode') === 'admin'||['ALL','CAMPUS'].includes(currentScope.value)), printMode:printMode.value};

@@ -491,7 +491,6 @@ class TempBundleTests(unittest.TestCase):
         import json
         import subprocess
         import sys as _sys
-        import time as _time
         secret = "sk-LIVE-test-secret-1234567890"
         phone = "13800138000"
         giant = "x" * (40 * 1024)
@@ -504,26 +503,27 @@ class TempBundleTests(unittest.TestCase):
             _build_bundle(folder, BUILTIN_REG, workbuddy=wb,
                           files={"workbuddy/wb-long/SKILL.md": body})
             code = (
-                "import json,sys\n"
+                "import json,sys,time\n"
                 "from pathlib import Path\n"
                 "import lan_bitable_template_portal.lighthouse_skills as skills\n"
                 "skills.ROOT = Path(sys.argv[1])\n"
+                "started = time.perf_counter()\n"
                 "out = skills.read('wb-long')\n"
+                "elapsed = time.perf_counter() - started\n"
                 "print(json.dumps({'omitted': out['omitted_long_lines'], "
-                "'content': out['content']}))"
+                "'content': out['content'], 'elapsed': elapsed}))"
             )
             env = dict(os.environ)
             env["PYTHONPATH"] = os.pathsep.join(
                 [str(Path(__file__).resolve().parent),
                  env.get("PYTHONPATH", "")])
-            start = _time.monotonic()
+            # Keep the read budget separate from interpreter startup under parallel packaging.
             proc = subprocess.run(
                 [_sys.executable, "-c", code, str(folder)],
-                capture_output=True, text=True, timeout=2, env=env)
-            elapsed = _time.monotonic() - start
-            self.assertLess(elapsed, 2.0, "regression read exceeded 2s")
+                capture_output=True, text=True, timeout=30, env=env)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             payload = json.loads(proc.stdout)
+            self.assertLess(payload["elapsed"], 2.0, "regression read exceeded 2s")
             self.assertEqual(payload["omitted"], 2)
             content = payload["content"]
             self.assertIn(skills._OMITTED_MARKER, content)

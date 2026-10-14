@@ -113,3 +113,10 @@ def public_capability_request(question):
         r'(?:(?:请)?(?:简单|简要)(?:说明|回答)[?？。!！\s]*)?'
         r'|can\s+you\s+(?:browse\s+(?:the\s+)?web|search\s+(?:the\s+)?internet)[?。!\s]*',
         question.strip(), re.I))
+
+
+def assistant_capability_request(question):
+    return bool(re.fullmatch(
+        r'(?:请问\s*)?(?:你|灯塔助手|助手|小塔)(?:都|现在|目前)?(?:会|能|可以)(?:做什么|干什么|帮我做什么)'
+        r'|(?:你|灯塔助手|助手|小塔)(?:都有|有|支持)哪些(?:功能|能力)'
+        r'|what\s+can\s+you\s+do', question.strip().rstrip('?？。!！ \n'), re.I))

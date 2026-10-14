@@ -12,6 +12,6 @@ const collapsed=ref(false),selected=ref('home'),options=ref([{key:'home',label:'
 fixture.chartFixture={items,view,failed,loading,mounted,selection:[],collapsed,selected,options};
 createApp({setup:()=>()=>h(NConfigProvider,{},()=>h('div',{class:['v2-shell',collapsed.value?'is-collapsed':'']},[
   h('header',{class:'v2-header'},'灯塔 · 组件验收'),
-  h(SidebarNavigation,{collapsed:collapsed.value,options:options.value,selected:selected.value,name:'组件验收人员',scopeLabel:'A楼','onUpdate:collapsed':(v:boolean)=>collapsed.value=v,onSelect:(v:string)=>selected.value=v}),
+  h(SidebarNavigation,{collapsed:collapsed.value,options:options.value,selected:selected.value,'onUpdate:collapsed':(v:boolean)=>collapsed.value=v,onSelect:(v:string)=>selected.value=v}),
   h('main',{class:'v2-main',style:'padding-top:20px'},mounted.value?[h(MotionChart,{title:'业务分布',items:items.value,view:view.value,failed:failed.value,loading:loading.value,onSelect:(item:unknown)=>fixture.chartFixture.selection.push(item)})]:[]),
 ]))}).mount('#app');

@@ -1,6 +1,6 @@
 import type { Dict } from './client';
 
-export type NoticeField = { key:string; label:string; group:string; type:string; required:boolean; readonly:boolean; options:{label:string;value:string}[]; hint:string };
+export type NoticeField = { key:string; label:string; group:string; type:string; required:boolean; readonly:boolean; options:{label:string;value:string}[]; hint:string; min?:number; max?:number; step?:number };
 export type NoticeForm = { values:Dict; fields:NoticeField[]; actions:string[]; initialAction:string; detailMode:string; canDelete:boolean; photoRequired:boolean; photos:Dict[]; aliPhotos:Dict[]; sop:boolean; groupId:string; sopLinks:{label:string;url:string}[]; sourceOptions:{label:string;value:string}[] };
 export const endProgress = '工作已完成，设备运行正常，请知晓！';
 const patchKeys = new Set(`manual manual_id scope source_month action work_type notice_type operation_id manual_binding_choice manual_binding_required active_item_id source_record_id target_record_id record_id repair_management_record_id source_work_type converted_from_work_type converted_to_work_type sync_maintenance_target paired_maintenance_target_record_id paired_maintenance_original_title paired_maintenance_actual_start_time building buildings building_code building_codes title name specialty maintenance_cycle execution_party level start_time end_time actual_action_time response_time location content reason impact progress repair_device repair_fault fault_type repair_mode discovery symptom solution spare_parts fault_time expected_time cabinet quantity device status site_photo_count site_photos extra_images ali_confirmation_images polling_work_order_exempt polling_sop_id polling_sop_version polling_run_count polling_runs polling_operator_record_id polling_reviewer_record_id mop_status zhihang_record_id lan_zhihang_record_id zhihang_involved`.split(' '));
@@ -32,7 +32,8 @@ export function parseNoticeForm(html:string):NoticeForm {
     if(list)for(const option of doc.getElementById(list)?.querySelectorAll('option')||[])options.push({label:option.value,value:option.value});
     fields.push({key,label:text,group:control.closest('.form-section')?.querySelector('header strong')?.textContent||'发送信息',
       type:control.tagName==='TEXTAREA'?'textarea':control.type,required:control.required||control.dataset.requiredUpload==='1',
-      readonly:control.hasAttribute('readonly')||control.disabled,options,hint:label?.querySelector('small')?.textContent||''});
+      readonly:control.hasAttribute('readonly')||control.disabled,options,hint:label?.querySelector('small')?.textContent||'',
+      ...Object.fromEntries(['min','max','step'].flatMap(key=>{const value=control.getAttribute(key);return value!==null&&value!==''&&Number.isFinite(Number(value))?[[key,Number(value)]]:[];}))});
   }
   const json=(selector:string,attribute:string):Dict[]=>{try{const value=JSON.parse(form.querySelector(selector)?.getAttribute(attribute)||'[]');return Array.isArray(value)?value:[];}catch{return [];}};
   const source=form.querySelector<HTMLSelectElement>('select[name=source_record_id]');
@@ -58,7 +59,7 @@ const previewKeys:Record<string,string[]>={
 };
 export function noticePreview(form:NoticeForm,action:string):string {
   const v=form.values, labels:Record<string,string>={title:['polling','repair'].includes(v.work_type)?'标题':'名称',__range:'时间',location:v.work_type==='repair'?'地点':'位置',progress:v.work_type==='repair'?'完成情况':'进度',end_time:'发现故障时间',start_time:'期望完成时间',reason:v.work_type==='repair'?'故障原因（事件发生原因）':'原因',solution:'解决方案（事件解决措施）',discovery:'故障发现方式'};
-  const value=(key:string)=>String(v[key]||'').trim().replace('T',' ');
+  const value=(key:string)=>{const text=String(v[key]??'').trim();return ['start_time','end_time','actual_action_time','response_time'].includes(key)?text.replace('T',' '):text;};
   return [`【${v.notice_type}】状态：${{start:'开始',update:'更新',end:'结束'}[action]||''}`,...(previewKeys[v.work_type]||[]).map(key=>`【${labels[key]||form.fields.find(f=>f.key===key)?.label||key}】${key==='__range'?[value('start_time'),value('end_time')].filter(Boolean).join('~'):value(key)}`)].join('\n');
 }
 export function beijingMinute():string {return new Date(Date.now()+8*3600000).toISOString().slice(0,16).replace('T',' ');}

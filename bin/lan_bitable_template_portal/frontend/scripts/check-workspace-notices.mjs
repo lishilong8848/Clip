@@ -94,7 +94,7 @@ try {
     assert(fields.includes('title'));
     const literal=fixtures[kind].html.match(/const previewTemplates = (\{[\s\S]*?\n    \});/)[1];
     const template=runInNewContext('('+literal+')',{}, {timeout:100})[kind];
-    const value=key=>String(expected[key]||'').trim().replace('T',' ');
+    const value=key=>{const text=String(expected[key]??'').trim();return ['start_time','end_time','actual_action_time','response_time'].includes(key)?text.replace('T',' '):text;};
     const heading=kind==='power'&&['上电通告','下电通告'].includes(expected.notice_type)?expected.notice_type:template.heading;
     const expectedPreview=[`【${heading}】状态：${view==='plan'?'开始':'更新'}`,...template.fields.map(([label,key])=>`【${label}】${key==='__range'?[value('start_time'),value('end_time')].filter(Boolean).join('~'):value(key)}`)].join('\n');
     assert.equal(preview,expectedPreview,kind+' preview preserves existing labels, order and time formatting');
@@ -122,6 +122,14 @@ try {
     await page.waitForTimeout(350);
     const footerBox=await page.locator('.v2-notice-editor-footer').boundingBox();
     assert(footerBox.y+footerBox.height<=page.viewportSize().height+1,'editor actions must remain inside the viewport');
+    await page.setViewportSize({width:1366,height:768});
+    const otherFields=page.getByRole('button',{name:'展开其它字段',exact:true});if(await otherFields.count())await otherFields.click();
+    await page.waitForTimeout(100);
+    const fit=await page.locator('.v2-notice-handling>.n-card-content').evaluate(el=>({height:el.clientHeight,scroll:el.scrollHeight}));
+    assert(fit.scroll<=fit.height+2,kind+' expanded editor must fit the screen without outer scrolling: '+JSON.stringify(fit));
+    const bounds=await page.locator('.v2-notice-page-fields .v2-notice-field-grid').boundingBox();
+    const actions=await page.locator('.v2-notice-editor-footer').boundingBox();assert(bounds.y+bounds.height<=actions.y+2,kind+' fields must not overlap actions');
+    assert.equal(await page.locator('.v2-notice-page-fields .n-pagination').count(),0,'notice fields never paginate');
     await page.screenshot({ path: path.join(output, `form-${kind}.png`), fullPage: true });
     await page.locator('.v2-notice-editor-footer').getByRole('button', { name: '关闭', exact: true }).click();
     await page.locator('.v2-notice-editor').waitFor({ state: 'detached' });

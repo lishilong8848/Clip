@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 
 from bin import test_lighthouse_stream as fixtures
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
-from openclaw_service.assistant.lighthouse_basics import calculate, CalculationError, date_time, calculation_request, time_request, public_capability_request, current_user_request
+from openclaw_service.assistant.lighthouse_basics import calculate, CalculationError, date_time, calculation_request, time_request, public_capability_request, current_user_request, assistant_capability_request
 from openclaw_service.assistant.lighthouse_model import LighthouseModel, equipment_knowledge_question, instructions_for_question
 from openclaw_service.assistant.lighthouse_ai import is_business_query
 from openclaw_service.assistant.lighthouse_ai import AssistantError, CustomModel
@@ -64,6 +64,31 @@ class CalculationTests(unittest.TestCase):
 
 
 class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capability_intro_is_fast_permission_aware_and_safe_for_feishu(self):
+        from lan_bitable_template_portal.feishu_assistant import _reply_text
+        @asynccontextmanager
+        async def forbidden(*_):
+            raise AssertionError('Capability intro must not wait for the model')
+            yield
+        engine = LighthouseModel(self.portal, model_factory=forbidden, public_sources=Mock())
+        for question in ('你会做什么？', '你能帮我做什么', '小塔有哪些功能', 'What can you do?'):
+            for modules in (['assistant'], ['assistant', 'maintenance', 'knowledge']):
+                current = {**self.actor, 'modules': modules}
+                emit = AsyncMock()
+                answer = await engine.answer(current, {'question': question, '_profile': self.model.profile()},
+                    [], self.request, emit, AsyncMock(return_value=current), {})
+                self.assertTrue(assistant_capability_request(question))
+                self.assertIn('问答', answer['answer'])
+                self.assertIn('天气', answer['answer'])
+                self.assertEqual('业务表单' in answer['answer'], 'maintenance' in modules)
+                self.assertEqual('/公司知识库' in answer['answer'], 'knowledge' in modules)
+                self.assertNotIn('未取得', _reply_text(answer['answer']))
+                self.assertEqual(answer['sources'], [])
+                emit.assert_awaited_once()
+        for question in ('你会做什么？请发送通告', '你能帮我发E楼通告吗', '会做什么菜'):
+            self.assertFalse(assistant_capability_request(question))
+        self.assertEqual(self.reads, [])
+
     async def test_identity_uses_fresh_session_not_model_or_poisoned_history(self):
         @asynccontextmanager
         async def forbidden(*_):

@@ -170,7 +170,7 @@ class PermissionCards:
             await asyncio.to_thread(self.update, request_id, notification_status="failed", notification_error=str(exc) if isinstance(exc, AssistantError) else "飞书通知失败，申请仍可在网页审批。")
 
     async def handle(self, message):
-        user = await asyncio.to_thread(self.bot._user, message["union_id"])
+        user = await self.bot._resolve_user(message)
         value = message["review"]
         auth = self.bot.runtime.auth_manager
         def decide():

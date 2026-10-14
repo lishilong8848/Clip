@@ -8,10 +8,10 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from lan_bitable_template_portal.feishu_assistant import FeishuAssistant, FeishuMessenger, Inbox, parse_message
+from lan_bitable_template_portal.feishu_assistant import FeishuAssistant, FeishuMessenger, Inbox, parse_message, _reply_text
 from openclaw_service.assistant.lighthouse_ai import LighthouseAssistant, AssistantError
 from lan_bitable_template_portal.lighthouse_bridge import actor_for
 from starlette.requests import Request
@@ -274,6 +274,99 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(user["open_id"], "ou_Original")
         self.runtime.auth_manager._open_id_explicitly_disabled=lambda _:True
         with self.assertRaises(AssistantError): self.channel._user("on_user")
+
+    def sender_directory(self, people):
+        import time
+        snapshot = {'loaded_at': time.time(), 'people': {person['id']: person for person in people}}
+        self.runtime.auth_manager._account_directory_provider = lambda: snapshot
+        self.runtime.auth_manager.directory_person = lambda identity: next(
+            (person for person in snapshot['people'].values() if identity in person['login_ids']), {})
+        self.channel.config = {'app_id': 'cliTest'}
+        return snapshot
+
+    async def test_known_sender_open_id_reuses_portal_account_without_union_or_network(self):
+        person = {'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Person'], 'selectable': True}
+        self.sender_directory([person])
+        self.channel._user = Mock(side_effect=AssertionError('Exact identity needs no union lookup'))
+        self.channel.messenger = SimpleNamespace(sender_name=AsyncMock())
+        message = parse_message(event(), 'cliTest', 'ouBot')
+        message['union_id'] = ''
+        user = await self.channel._resolve_user(message)
+        self.assertEqual(user['open_id'], 'ou_Person')
+        self.channel.messenger.sender_name.assert_not_awaited()
+
+    async def test_unique_feishu_name_binds_once_and_survives_restart_and_chat_change(self):
+        person = {'id': 'recA', 'name': '王彦博', 'employee_no': '12345',
+                  'login_ids': ['ou_Web'], 'selectable': True}
+        self.sender_directory([person])
+        self.channel._user = Mock(side_effect=AssistantError('unmapped', 403, category='feishu_identity_unmapped'))
+        self.channel.messenger = SimpleNamespace(sender_name=AsyncMock(return_value='王彦博'))
+        message = parse_message(event(content='我叫别的人'), 'cliTest', 'ouBot')
+        user = await self.channel._resolve_user(message)
+        self.assertEqual(user['open_id'], 'ou_Web')
+        self.assertEqual(user['employee_no'], '12345')
+        restarted = FeishuAssistant(self.controller, self.runtime, AsyncMock())
+        restarted.config = dict(self.channel.config)
+        restarted._user = Mock(side_effect=AssertionError('Cached relation must avoid network'))
+        other_room = {**message, 'chat_id': 'oc_Other', 'chat_type': 'group'}
+        self.assertEqual(await restarted._resolve_user(other_room), user)
+        self.channel.messenger.sender_name.assert_awaited_once()
+        self.assertEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Other'}),
+                         LighthouseAssistant._key({'id': 'ou_Web'}))
+        self.runtime.auth_manager._open_id_explicitly_disabled = lambda _: True
+        with self.assertRaisesRegex(AssistantError, '停用'):
+            await restarted._resolve_user(other_room)
+
+    async def test_name_fallback_rejects_duplicates_departure_and_identity_conflicts(self):
+        message = parse_message(event(), 'cliTest', 'ouBot')
+        person = {'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Web'], 'selectable': True}
+        for people in ([person, {**person, 'id': 'recB', 'login_ids': ['ou_Other']}],
+                       [{**person, 'inactive': True}], [{**person, 'selectable': False}],
+                       [{**person, 'login_ids': ['ou_Web', 'ou_Other']}]):
+            with self.subTest(people=people):
+                self.sender_directory(people)
+                with self.assertRaises(AssistantError):
+                    self.channel._sender_user(message, name='王彦博')
+                self.assertFalse(self.store.get_document('feishu_assistant_sender', 'cliTest:ou_Person'))
+        self.sender_directory([person, {**person, 'id': 'recOld', 'inactive': True, 'login_ids': ['ou_Old']}])
+        self.assertEqual(self.channel._sender_user(message, name='王彦博')['open_id'], 'ou_Web')
+
+    async def test_name_bindings_are_scoped_to_bot_application_and_cannot_follow_a_reused_record(self):
+        message = parse_message(event(), 'cliTest', 'ouBot')
+        person = {'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Web'], 'selectable': True}
+        snapshot = self.sender_directory([person])
+        self.channel._sender_user(message, name='王彦博')
+        self.channel.config['app_id'] = 'cliOther'
+        self.assertIsNone(self.channel._sender_user(message))
+        self.channel.config['app_id'] = 'cliTest'
+        snapshot['people'] = {'recOther': {**person, 'id': 'recOther'}}
+        with self.assertRaisesRegex(AssistantError, '记录发生变化'):
+            self.channel._sender_user(message)
+
+    async def test_sender_name_uses_api_identity_and_external_group_pagination(self):
+        messenger = FeishuMessenger({})
+        messenger.headers = AsyncMock(return_value={})
+        client = SimpleNamespace(get=AsyncMock(side_effect=[
+            SimpleNamespace(json=lambda: {'code': 41050}),
+            SimpleNamespace(json=lambda: {'code': 0, 'data': {'items': [
+                {'member_id_type': 'open_id', 'member_id': 'ou_Other', 'name': '不能使用的姓名'}],
+                'has_more': True, 'page_token': 'next'}}),
+            SimpleNamespace(json=lambda: {'code': 0, 'data': {'items': [
+                {'member_id_type': 'open_id', 'member_id': 'ou_Person', 'name': '王彦博'}], 'has_more': False}})]))
+        messenger.client = AsyncMock(return_value=client)
+        message = parse_message(event(chat_type='group', content='我叫李世龙'), 'cliTest', 'ouBot')
+        self.assertEqual(await messenger.sender_name(message), '王彦博')
+        self.assertEqual(client.get.call_args.kwargs['params']['page_token'], 'next')
+        client.get = AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 41050}))
+        with self.assertRaisesRegex(AssistantError, '读取人员或群成员'):
+            await messenger.sender_name({**message, 'chat_type': 'p2p'})
+
+    async def test_filtered_reply_keeps_an_explicit_notice_instead_of_claiming_no_answer(self):
+        text = _reply_text('不能提供身份证号或家庭住址。')
+        self.assertIn('受保护内容', text)
+        self.assertEqual(_reply_text(text), text)
+        self.assertIn('暂未生成回答', _reply_text('  '))
+        self.assertEqual(_reply_text('可以帮你整理资料。'), '可以帮你整理资料。')
 
     async def test_actor_uses_original_permission_and_channel_is_server_state_only(self):
         auth = SimpleNamespace(session_scopes=lambda _: ["D"], is_admin=lambda _:False, account_profile=lambda _: {"modules": ["assistant"]})

@@ -12,8 +12,16 @@ import { adaptCabinetBatchPage } from './scripts/workspace-cabinet-adapter.mjs';
 // @ts-ignore marks binary settings only, never selection groups.
 import { markBinaryControls, adaptPasswordLogin, fuseLearningCharts } from './scripts/workspace-controls-adapter.mjs';
 // @ts-ignore V2-only response adaptation; the legacy client source stays unchanged.
-import { adaptNoticeParserClient } from './scripts/workspace-notice-adapter.mjs';
+import { adaptNoticeParserClient,adaptNoticeSopControls } from './scripts/workspace-notice-adapter.mjs';
+// @ts-ignore V2-only alert metadata; source components and business states stay unchanged.
+import { markFeedbackAlerts } from './scripts/workspace-feedback-adapter.mjs';
+// @ts-ignore build-only controller reuse is checked with compiler and browser fixtures.
+import { adaptRepairController, controllerBindings } from './scripts/workspace-repair-adapter.mjs';
+// @ts-ignore V2-only learning presentation; API and grading stay in the existing controller.
+import { adaptLearningPage } from './scripts/workspace-learning-adapter.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/');
+const outputDir=process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?resolve(root,process.env.CLIPFLOW_WORKSPACE_BUILD_DIR):resolve(root,'dist/assets/workspace-v2');
+if(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR&&!outputDir.startsWith(resolve(root,'../../../output')+'/')&&!outputDir.startsWith(resolve(root,'../../../output')+'\\'))throw new Error('Workspace preview output must stay in project output');
 let generated=new Set<string>();
 export default defineConfig({
   root, publicDir:false, base: '/assets/workspace-v2/',
@@ -21,6 +29,7 @@ export default defineConfig({
   plugins: [{
     name: 'workspace-business-imports', enforce: 'pre',
     resolveId(source, importer) {
+      if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/WaterManagementPage.vue')) return root + 'src/workspace-v2/WaterWorkspace.vue';
       if (/^\/assets\/[\w.-]+\.(?:png|svg|webp|jpg|gif)$/.test(source) && existsSync(join(root,'public',source))) return '\0workspace-public:' + source;
       if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/LighthouseReply.vue') && !importer.includes('/workspace-v2/')) return root + 'src/workspace-v2/AnimatedReply.vue';
       if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/LighthouseBot.vue') && !importer.includes('/workspace-v2/')) return root + 'src/workspace-v2/CompactBot.vue';
@@ -33,11 +42,16 @@ export default defineConfig({
       if(path===root+'src/api/client.ts')return {code:adaptNoticeParserClient(code),map:null};
       if(!path.startsWith(root+'src/')||!path.endsWith('.vue'))return;
       let result=code;
+      if(path===root+'src/components/LearningPage.vue')result=adaptLearningPage(result);
+      if(path===root+'src/components/RepairManagementPage.vue')result=adaptRepairController(result,'management',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairWorkspace.vue'),'utf8')));
+      if(path===root+'src/components/RepairFollowupPanel.vue')result=adaptRepairController(result,'followup',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairFollowups.vue'),'utf8')));
       if(path===root+'src/components/EventManagementPage.vue')result=adaptEventPeriodPage(result);
       if(path===root+'src/components/CabinetPowerBatchPage.vue')result=adaptCabinetBatchPage(result);
       if(path===root+'src/components/PersonnelPasswordLogin.vue')result=adaptPasswordLogin(result);
       if(path===root+'src/components/LearningDashboard.vue')result=fuseLearningCharts(result);
+      if(path===root+'src/components/LighthouseNoticeSop.vue')result=adaptNoticeSopControls(result);
       result=markBinaryControls(result);
+      result=markFeedbackAlerts(result);
       if(result!==code)return {code:result,map:null};
     },
   }, vue(), {
@@ -57,11 +71,11 @@ export default defineConfig({
       generated=new Set(Object.keys(bundle));
     },
     writeBundle(options){
-      const expected=resolve(root,'dist/assets/workspace-v2');
+      const expected=outputDir;
       if(resolve(options.dir||'')!==expected)throw new Error('Unexpected workspace output directory');
       for(const name of readdirSync(expected))if(/^(?:app|part|res)-[\w-]+\.(?:js|css)$/.test(name)&&!generated.has(name))unlinkSync(join(expected,name));
     },
   }],
-  build: { outDir: 'dist/assets/workspace-v2', emptyOutDir: true, cssCodeSplit: false,
+  build: { outDir: outputDir, emptyOutDir: true, cssCodeSplit: false,
     rollupOptions: { input: root + 'src/workspace-v2/main.ts', output: { entryFileNames: 'app-[hash].js', chunkFileNames: 'part-[hash].js', assetFileNames: 'res-[hash][extname]' } } },
 });

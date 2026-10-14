@@ -22,7 +22,7 @@ class PermissionReviewTests(levels.AccountLevelTests):
         self.controller = SimpleNamespace(_clear_read_cache=Mock(), _notify_permission_review_result=Mock())
         self.bot = SimpleNamespace(runtime=SimpleNamespace(auth_manager=self.h.auth, state_store=self.h.auth._state_store, service=self.h.service),
             controller=self.controller, messenger=None,
-            _user=lambda uid: {"open_id": LI_SHILONG_OPEN_ID, "name": "审批管理员", "union_id": uid})
+            _resolve_user=AsyncMock(return_value={"open_id": LI_SHILONG_OPEN_ID, "name": "审批管理员"}))
         self.cards = PermissionCards(self.bot)
 
     def application(self):
@@ -95,10 +95,10 @@ class PermissionReviewTests(levels.AccountLevelTests):
     def test_forwarded_forged_and_superseded_cards_cannot_grant(self):
         data = self.application()
         message = self.message(data)
-        self.bot._user = lambda uid: {"open_id":"ou_fixtureHM1", "name":"另一管理员"}
+        self.bot._resolve_user = AsyncMock(return_value={"open_id":"ou_fixtureHM1", "name":"另一管理员"})
         with self.assertRaises(AssistantError):
             asyncio.run(self.cards.handle(message))
-        self.bot._user = lambda uid: {"open_id":LI_SHILONG_OPEN_ID, "name":"管理员"}
+        self.bot._resolve_user = AsyncMock(return_value={"open_id":LI_SHILONG_OPEN_ID, "name":"管理员"})
         forged = copy.deepcopy(message);forged["review"]["token"] = "x" * 43
         with self.assertRaises(AssistantError):
             asyncio.run(self.cards.handle(forged))

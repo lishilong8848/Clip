@@ -1,5 +1,5 @@
 <template>
-  <NCard :bordered="false" class="v2-notice-editor v2-sop-manager is-page" title="SOP 与工单模板">
+  <NCard :bordered="false" class="v2-notice-editor v2-sop-manager is-page" title="SOP 与工单模板" data-v2-inline-feedback>
     <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert>
     <div class="v2-sop-layout">
       <aside><NSelect :value="scope" :options="scopes" aria-label="SOP楼栋" :disabled="busy" @update:value="v=>leave(()=>{scope=v;draft=null;load()})" /><NSelect :value="kind" :options="types" aria-label="SOP类型" :disabled="busy" @update:value="v=>leave(()=>{kind=v;draft=null;load()})" /><NInput v-model:value="search" clearable placeholder="查找SOP" :input-props="{'aria-label':'查找SOP'}" />
