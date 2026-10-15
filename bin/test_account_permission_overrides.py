@@ -1,9 +1,11 @@
 """Permission-override upgrade tests for account level/role/module/scope editing."""
 import copy
+from unittest.mock import patch
 
 from .test_personnel_password_login import _TempDirTestCase, PersonnelLoginHarness, _page, _user
 from lan_bitable_template_portal.account_management import AccountManagement
 from lan_bitable_template_portal.account_policy import MODULE_IDS, default_modules, resolve_access_change
+from lan_bitable_template_portal.account_policy import PolicyViolation
 from lan_bitable_template_portal.personnel_password_login import PasswordLoginError
 from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID
 from lan_bitable_template_portal.portal_service import PortalError
@@ -47,7 +49,7 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
         self.manager.update({"changes": [
             self.override_change("AE", level="L1")
-        ]}, self.actor("HM1"))  # HM1 is an L1 manager
+        ]}, {"open_id":LI_SHILONG_OPEN_ID})
         profile = auth.account_profile("ou_fixtureAE")
         self.assertEqual(profile["level"], "L1")
         self.assertEqual(set(profile["scope_rules"]), set(admin))
@@ -60,10 +62,10 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         # Historical pre-upgrade snapshot preserved.
         self.assertEqual(self.h.auth._state_store.get_document("account_management", "permissions_before_upgrade"), before)
 
-    def test_l1_can_downgrade_l1_to_l4_restoring_limited_scope_and_modules(self):
+    def test_l0_can_downgrade_l1_to_l4_restoring_limited_scope_and_modules(self):
         auth = self.h.auth
-        self.manager.update({"changes": [self.override_change("AE", level="L1")]}, self.actor("HM1"))
-        self.manager.update({"changes": [self.override_change("AE", level="L4")]}, self.actor("HM1"))
+        self.manager.update({"changes": [self.override_change("AE", level="L1")]}, {"open_id":LI_SHILONG_OPEN_ID})
+        self.manager.update({"changes": [self.override_change("AE", level="L4")]}, {"open_id":LI_SHILONG_OPEN_ID})
         profile = auth.account_profile("ou_fixtureAE")
         self.assertEqual(profile["level"], "L4")
         self.assertEqual(set(profile["scope_rules"]), {"A"})
@@ -93,6 +95,47 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
             self.manager.update({"changes": [self.override_change("BE", enabled=False)]}, self.actor("AS"))
         self.assertEqual(self.h.auth._load_permissions_locked(), before)
         self.assertTrue(self.h.auth._open_id_explicitly_disabled("ou_fixtureBE") is False)
+
+    def test_unknown_scope_and_implicit_outside_scope_are_rejected(self):
+        auth=self.h.auth
+        with self.assertRaises(PolicyViolation):
+            resolve_access_change(auth.account_profile(LI_SHILONG_OPEN_ID),auth.account_profile('ou_fixtureAO'),scopes=['A','NOT_A_BUILDING'])
+        target={**auth.account_profile('ou_fixtureAO'),'scope_rules':['A','B']}
+        with self.assertRaises(PolicyViolation):
+            resolve_access_change(auth.account_profile('ou_fixtureAS'),target,modules=['learning'])
+
+    def test_password_rechecks_actor_after_directory_fetch(self):
+        original=self.h.login.record
+        def fetched(rid):
+            row=original(rid)
+            payload=self.h.auth._load_permissions_locked()
+            payload['users']['ou_fixtureHM1']['enabled']=False
+            self.h.auth._save_permissions_locked(payload)
+            return row
+        with patch.object(self.h.login,'record',side_effect=fetched),patch.object(self.h.login,'save_password') as save:
+            with self.assertRaises(PasswordLoginError):
+                self.manager.password('recAO',{'new_password':'A-test-pass123!','confirm_password':'A-test-pass123!'},self.actor('HM1'))
+            save.assert_not_called()
+
+    def test_delete_rechecks_target_level_inside_write_lock(self):
+        item=self.item('AO');original=self.manager.check
+        def changed(actor,target,action):
+            result=original(actor,target,action)
+            payload=self.h.auth._load_permissions_locked()
+            payload['users']['ou_fixtureAO'].update(access_version=1,level='L1',category='manager',modules=list(MODULE_IDS))
+            self.h.auth._save_permissions_locked(payload)
+            return result
+        with patch.object(self.manager,'check',side_effect=changed),self.assertRaises(PasswordLoginError):
+            self.manager.delete('recAO',{'revision':item['revision']},self.actor('HM1'))
+        self.assertTrue(self.h.auth._permission_user('ou_fixtureAO')['enabled'])
+
+    def test_audit_redacts_peer_and_other_building_changes(self):
+        self.h.auth._state_store.record_business_operation_audit(domain='accounts',action='permissions',status='success',
+            metadata={'changes':[{'open_id':'ou_fixtureAO','name':'A人员'},{'open_id':'ou_fixtureHM2','name':'同级经理'},{'open_id':'ou_fixtureBE','name':'B人员'}]})
+        l1=self.manager.audit(self.actor('HM1'))
+        self.assertEqual([row['open_id'] for row in l1[0]['metadata']['changes']],['ou_fixtureAO','ou_fixtureBE'])
+        l3=self.manager.audit(self.actor('AS'))
+        self.assertEqual([row['open_id'] for row in l3[0]['metadata']['changes']],['ou_fixtureAO'])
 
     def test_legacy_dirty_grants_never_become_new_authority(self):
         auth = self.h.auth
@@ -159,18 +202,17 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         self.assertIn("category_options", listing)
         self.assertTrue(listing["module_options"])
         levels = {opt["value"] for opt in listing["level_options"]}
-        self.assertIn("L1", levels)
+        self.assertNotIn("L1", levels)
         self.assertIn("L4", levels)
         for item in listing["items"]:
             self.assertIn("modules", item)
             self.assertIn("can_edit_access", item)
-        # L2's options are capped at L2 (edit-only, no escalation) and
-        # categories reduced to engineer.
+        # L2 remains base-edit only; no assignable access levels.
         l2_listing = self.manager.accounts(actor=self.actor("HE1"))
-        self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, {"L2"})
+        self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, set())
         self.assertEqual({opt["value"] for opt in l2_listing["category_options"]}, {"engineer"})
         # L2 can base-edit engineers but can_edit_access is False (no override UI).
-        self.assertTrue(all(item["can_edit"] for item in l2_listing["items"]))
+        self.assertTrue(all(item["can_edit"] for item in l2_listing["items"] if not item['is_self']))
         self.assertTrue(all(item["can_edit_access"] is False for item in l2_listing["items"]))
 
     def test_l4_cannot_receive_accounts_module(self):
@@ -178,6 +220,44 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
             self.manager.update({"changes": [
                 self.override_change("AE", level="L4", modules=["maintenance", "accounts"])
             ]}, self.actor("HM1"))
+
+    def test_same_level_and_higher_accounts_are_not_editable_through_any_entry(self):
+        actor=self.actor('HM1');before=copy.deepcopy(self.h.auth._load_permissions_locked())
+        for target in ('HM2','HM1'):
+            with self.assertRaises(PasswordLoginError):
+                self.manager.update({'changes':[self.override_change(target,enabled=False)]},actor)
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes':[self.override_change('AE',level='L1')]},actor)
+        with self.assertRaises(PortalError):
+            self.h.auth.upsert_permission_user(open_id='ou_fixtureHM2',role='admin',scopes=self.h.auth._admin_scopes(),enabled=False,updated_by=actor['open_id'])
+        listing=self.manager.accounts(actor=actor)
+        self.assertNotIn('ou_fixtureHM2',{item['open_id'] for item in listing['items']})
+        mine=next(item for item in listing['items'] if item['is_self'])
+        self.assertFalse(mine['can_edit_access']);self.assertFalse(mine['can_edit'])
+        self.assertEqual(self.h.auth._load_permissions_locked(),before)
+
+    def test_self_access_request_requires_superior_and_preserves_proposed_scope(self):
+        auth=self.h.auth;person='ou_fixtureAE';superior='ou_fixtureAS'
+        access={'level':'L4','category':'engineer','scopes':['A'],'modules':['maintenance','learning']}
+        self.assertIn(superior,auth.permission_approver_ids(person))
+        self.assertNotIn('ou_fixtureBE',auth.permission_approver_ids(person))
+        result=auth.create_permission_request(open_id=person,name='测试AE',scopes=['A'],reason='测试申请',approver_open_id=superior,requested_access=access)
+        before=copy.deepcopy(auth._load_permissions_locked())
+        with self.assertRaises(PortalError):auth.approve_permission_request(result['request_id'],updated_by=person)
+        self.assertEqual(auth._load_permissions_locked(),before)
+        auth.approve_permission_request(result['request_id'],updated_by=superior)
+        self.assertEqual(auth.account_profile(person)['modules'],['maintenance','learning'])
+        self.assertEqual(auth.account_profile(person)['scope_rules'],['A'])
+
+    def test_pending_access_request_never_overwrites_newer_permission_edit(self):
+        auth=self.h.auth
+        result=auth.create_permission_request(open_id='ou_fixtureAE',name='测试AE',reason='隔离申请',approver_open_id='ou_fixtureHM1',
+            requested_access={'level':'L3','category':'supervisor','scopes':['A'],'modules':['maintenance']})
+        self.manager.update({'changes':[self.override_change('AE',modules=['learning'])]},self.actor('HM1'))
+        before=copy.deepcopy(auth._load_permissions_locked())
+        with self.assertRaisesRegex(PortalError,'权限已变化'):
+            auth.approve_permission_request(result['request_id'],updated_by='ou_fixtureHM1')
+        self.assertEqual(auth._load_permissions_locked(),before)
 
     def test_persistence_survives_cache_reload(self):
         self.manager.update({"changes": [self.override_change("AE", level="L2", modules=["engineer_mop"])]}, self.actor("HM1"))
@@ -279,13 +359,13 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         self.assertEqual(self.h.auth._load_permissions_locked(), before)
 
     def test_disabled_manager_loses_modules_and_guest_still_has_cabinet(self):
-        self.manager.update({"changes": [self.override_change("HM2", enabled=False)]}, self.actor("HM1"))
+        self.manager.update({"changes": [self.override_change("HM2", enabled=False)]}, {"open_id":LI_SHILONG_OPEN_ID})
         self.assertEqual(self.h.auth.account_profile("ou_fixtureHM2")["modules"], [])
         guest = {"role": "guest", "user": {"open_id": "guest_fixture"}}
         self.assertEqual(self.h.auth.public_user(guest)["modules"], ["cabinet"])
 
     def test_assignable_l1_honors_checked_modules_without_losing_business_level(self):
-        self.manager.update({"changes": [self.override_change("AE", level="L1", modules=["maintenance"])]}, self.actor("HM1"))
+        self.manager.update({"changes": [self.override_change("AE", level="L1", modules=["maintenance"])]}, {"open_id":LI_SHILONG_OPEN_ID})
         profile = self.h.auth.account_profile("ou_fixtureAE")
         self.assertEqual(profile["level"], "L1")
         self.assertEqual(profile["modules"], ["maintenance"])
@@ -295,7 +375,7 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         self.assertEqual(self.h.auth.account_profile("ou_fixtureAE")["modules"], ["maintenance"])
 
     def test_restricted_manager_cannot_grant_unowned_defaults_by_omitting_modules(self):
-        self.manager.update({"changes": [self.override_change("AE", level="L1", modules=["accounts", "maintenance"])]}, self.actor("HM1"))
+        self.manager.update({"changes": [self.override_change("AE", level="L1", modules=["accounts", "maintenance"])]}, {"open_id":LI_SHILONG_OPEN_ID})
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
         with self.assertRaises(PasswordLoginError):
             self.manager.update({"changes": [self.override_change("BE", level="L1")]}, self.actor("AE"))

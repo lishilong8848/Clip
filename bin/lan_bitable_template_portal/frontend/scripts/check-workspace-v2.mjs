@@ -70,10 +70,10 @@ async function context() {
     }
     if(url.pathname==='/api/auth/accounts')return ok({items:[],scope_options:scopes,module_options:[],policy:{level:'L1',modules:user.modules,can_manage_accounts:true}});
     if(url.pathname==='/api/auth/permissions')return ok({users:[],scope_options:scopes});
-    if(url.pathname==='/api/auth/permission-approvers')return ok({items:[{open_id:'ou_admin_approval_fixture',name:'指定审批管理员'}]});
+    if(url.pathname==='/api/auth/permission-approvers')return ok({items:[{open_id:'ou_admin_approval_fixture',name:'指定审批管理员',level:'L1',scopes:['A','B'],modules:['maintenance'],level_options:[{value:'L4',label:'L4 普通账号'}],category_options:[{value:'operator',label:'值班员'}]}],current:{level:'L4',category:'operator',scope_rules:['A'],modules:['maintenance']},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}],module_options:[{value:'maintenance',label:'维保通告'}]});
     if(url.pathname==='/api/auth/permission-requests/current')return ok({request:permissionApplication||{}});
     if(url.pathname==='/api/auth/permission-requests'&&req.method()==='POST'){
-      const input=req.postDataJSON();assert.equal(input.approver_open_id,'ou_admin_approval_fixture');assert.deepEqual(input.scopes,['B']);
+      const input=req.postDataJSON();assert.equal(input.approver_open_id,'ou_admin_approval_fixture');assert.deepEqual(input.scopes,['A','B']);assert.equal(input.requested_access.level,'L4');
       permissionApplication={...input,request_id:'permission_fixture_request',requested_scopes:input.scopes,status:'pending',notification_status:'failed',notification_error:'隔离测试：飞书暂不可用'};
       return ok({request:permissionApplication});
     }
@@ -282,6 +282,8 @@ try {
       await page.setViewportSize({width,height:width<700?844:960});
       await page.screenshot({path:path.join(output,`module${name}-${width}.png`),fullPage:true});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,`${target} overflow at ${width}`);
+      const header=await page.locator('.v2-header').boundingBox(),surface=await page.locator(selector).boundingBox();
+      assert(surface.y>=header.y+header.height-1,`${target} content must not start underneath the main header at ${width}`);
     }
   }
   await ctx.close();
@@ -325,17 +327,17 @@ try {
   await member.getByText('验收成员',{exact:true}).last().waitFor();
   assert.equal(await member.locator('#personnel-name, #personnel-reset-name').count(),0);
   await member.goto(origin+entry+'?view=permission');
-  await member.getByText('选择审批人',{exact:true}).waitFor();
-  await member.getByRole('checkbox',{name:'B楼',exact:true}).check();
-  assert.equal(await member.getByRole('button',{name:'提交给管理员',exact:true}).isDisabled(),true,'an approver is mandatory');
-  await member.locator('.permission-approver .n-select').click();await member.locator('.n-base-select-option').getByText('指定审批管理员',{exact:true}).click();
-  await member.getByRole('button',{name:'提交给管理员',exact:true}).click();
-  await member.getByRole('button',{name:'重试飞书通知',exact:true}).waitFor();
-  await member.reload();await member.getByRole('button',{name:'重试飞书通知',exact:true}).waitFor();
+  await member.getByRole('heading',{name:'本人权限申请',exact:true}).waitFor();
+  assert.equal(await member.getByRole('button',{name:'提交并发送飞书审批',exact:true}).isDisabled(),true,'an approver is mandatory');
+  await member.getByLabel('上级审批人',{exact:true}).click();await member.locator('.n-base-select-option').getByText('指定审批管理员 · L1',{exact:true}).click();
+  await member.getByRole('checkbox',{name:'B楼',exact:true}).check();await member.getByRole('textbox',{name:'申请原因',exact:true}).fill('跨楼协作');
+  await member.getByRole('button',{name:'提交并发送飞书审批',exact:true}).click();
+  await member.getByRole('button',{name:'重试发送审批表单',exact:true}).waitFor();
+  await member.reload();await member.getByRole('button',{name:'重试发送审批表单',exact:true}).waitFor();
   assert.equal(await member.getByRole('checkbox',{name:'B楼',exact:true}).isChecked(),true,'application restores after reload');
-  await member.getByRole('button',{name:'重试飞书通知',exact:true}).click();assert.equal(permissionNotifications,1);
+  await member.getByRole('button',{name:'重试发送审批表单',exact:true}).click();assert.equal(permissionNotifications,1);
   permissionApplication.status='approved';
-  await member.locator('.verify-box').getByText('申请已通过',{exact:true}).waitFor({timeout:15000});
+  await member.getByText(/已通过，权限已生效/).waitFor({timeout:15000});
   await member.screenshot({path:path.join(output,'permission-approval.png'),fullPage:true});
   permissionApplication=null;
   await member.getByRole('menuitem',{name:'通告办理',exact:true}).click();await member.locator('.v2-notices').waitFor();assert.match(member.url(),/work_type=maintenance/,'single notice grant opens that type directly');

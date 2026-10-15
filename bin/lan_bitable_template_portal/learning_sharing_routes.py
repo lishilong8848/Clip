@@ -22,6 +22,9 @@ class SharingRuntime:
         self.active_batch = ''
         self.restore_checked = False
         self.question_bank = None
+        self.delivery_lock = asyncio.Lock()
+        self.active_delivery_batch = ''
+        self.deleting_batches = set()
 
     def service(self):
         if self.core is None:
@@ -62,14 +65,18 @@ class SharingRuntime:
     def update_batch(self, identity, **fields):
         core = self.service()
         with core.learning.transaction() as conn:
-            batch = core.batch(identity, conn)
+            batch = core.learning._get('sharing_batch', identity, conn)
+            if not batch or batch.get('status') == 'deleted':
+                return False
             batch.update(fields)
             core.learning._put('sharing_batch', identity, batch, conn)
+            return True
 
     async def generate(self, batch):
         core = self.service()
         try:
-            await asyncio.to_thread(self.update_batch, batch['id'], status='generating', error='', progress='正在读取完整纪要和参会人')
+            if not await asyncio.to_thread(self.update_batch, batch['id'], status='generating', error='', progress='正在读取完整纪要和参会人'):
+                return
             source = await asyncio.to_thread(read_source, self.runtime.service, batch['url'])
             people = await asyncio.to_thread(core.learning._all, 'person')
             for person in source['participants']:
@@ -79,16 +86,24 @@ class SharingRuntime:
                 match = matches[0] if matches else {}
                 scopes = match.get('scopes') or []
                 person.update(person_id=match.get('id') or 'feishu:' + person['open_id'], scope=scopes[0] if len(scopes) == 1 else '')
-            total = max(5, min(40, ((len(source['text']) + 2999) // 3000) * 5))
+            total = 40
             types = batch.get('question_types') or ['single', 'multiple']
             mix = question_mix(total, types)
+            first = question_mix(5, types)
+            for kind in first:
+                mix.remove(kind)
+            mix = first + mix
             questions = []
             generate = getattr(self.runtime, 'generate_sharing_questions', None)
             if not callable(generate): raise LearningError('模型出题服务尚未就绪。', 503)
             for offset in range(0, total, 5):
                 if self.closing: return
-                await asyncio.to_thread(self.update_batch, batch['id'], progress=f'正在生成题目 {offset}/{total}')
-                questions.extend(await generate(batch['owner'], source['text'], [q['stem'] for q in questions], min(5, total - offset), question_types=mix[offset:offset + 5]))
+                if not await asyncio.to_thread(self.update_batch, batch['id'], progress=f'已生成{len(questions)}题，继续核对未覆盖知识点（最多{total}题）'):
+                    return
+                additional = await generate(batch['owner'], source['text'], [q['stem'] for q in questions], min(5, total - offset), question_types=mix[offset:offset + 5])
+                questions.extend(additional)
+                if len(additional) < 5:
+                    break
             questions = validate_questions(questions, source['text'], types)
             await asyncio.to_thread(self.update_batch, batch['id'], status='draft', progress='', title=source['title'],
                                     source=source, participants=source['participants'], questions=questions, error='')
@@ -110,10 +125,22 @@ class SharingRuntime:
             return [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind=? AND json_extract(payload,'$.status')='pending' AND json_extract(payload,'$.due_at')<=? ORDER BY (json_extract(payload,'$.kind')='bank'), updated LIMIT ?", (kind, now().timestamp(), limit))]
 
     async def send(self, job):
+        async with self.delivery_lock:
+            if job['batch_id'] in self.deleting_batches:
+                return
+            self.active_delivery_batch = job['batch_id']
+            try:
+                await self._send(job)
+            finally:
+                self.active_delivery_batch = ''
+
+    async def _send(self, job):
         from .portal_service import external_real_write_guard
         from .learning_engagement import WEEKLY_CHAT_ID
         core = self.service()
-        batch = await asyncio.to_thread(core.batch, job['batch_id'])
+        batch = await asyncio.to_thread(core.learning._get, 'sharing_batch', job['batch_id'])
+        if not batch or batch.get('status') == 'deleted':
+            return
         attempt = await asyncio.to_thread(core.learning._get, 'sharing_attempt', job.get('attempt_id', ''))
         skipped = bool(job['kind'] in {'paper', 'reminder'} and (batch['status'] != 'published' or not attempt or attempt['submitted_at']))
         skipped |= (job['kind'] == 'reminder' and job.get('date') != now().date().isoformat())
@@ -256,6 +283,16 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                 core.learning._admin(actor)
                 if not bid:
                     data = await asyncio.to_thread(core.create, payload.get('url'), payload.get('operation_id'), actor, payload.get('question_types'))
+                elif request.method == 'POST' and request.path_params.get('action') == 'delete':
+                    if feature.active_delivery_batch == bid or bid in feature.deleting_batches:
+                        raise LearningError('后台正在处理发送或入库任务，请稍后再删除；已上传题目不会删除。', 409)
+                    feature.deleting_batches.add(bid)
+                    try:
+                        data = await asyncio.to_thread(core.delete, bid, payload.get('version'), actor)
+                    finally:
+                        feature.deleting_batches.discard(bid)
+                    if feature.active_batch == bid and feature.generation and not feature.generation.done():
+                        feature.generation.cancel()
                 elif request.method == 'PUT':
                     data = await asyncio.to_thread(core.edit, bid, payload, actor)
                 else:

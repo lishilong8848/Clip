@@ -78,7 +78,7 @@ class PermissionReviewTests(levels.AccountLevelTests):
         with self.assertRaisesRegex(AssistantError, "过期"):
             asyncio.run(self.cards.handle(self.message(data)))
         data = self.application()
-        with patch.object(self.h.auth, "admin_open_ids", return_value=[]), self.assertRaises(AssistantError):
+        with patch.object(self.h.auth, "can_review_permission_request", return_value=False), self.assertRaises(AssistantError):
             asyncio.run(self.cards.handle(self.message(data)))
         self.assertEqual(self.h.auth.scopes_for_open_id("ou_fixtureAO"), ["A"])
 
@@ -145,6 +145,61 @@ class PermissionReviewTests(levels.AccountLevelTests):
         self.assertEqual(first.kwargs["json"]["receive_id"], "on_Review")
         self.assertEqual(first.kwargs["json"]["uuid"], second.kwargs["json"]["uuid"])
 
+    def test_supervisor_card_applies_exact_self_access_request(self):
+        data=self.h.auth.create_permission_request(open_id='ou_fixtureAO',name='测试AO',reason='隔离权限申请',approver_open_id='ou_fixtureAS',
+            requested_access={'level':'L4','category':'operator','scopes':['A'],'modules':['learning','maintenance']})
+        self.bot._resolve_user=AsyncMock(return_value={'open_id':'ou_fixtureAS','name':'A楼主管'})
+        rendered=str(card(self.cards.request(data['request_id'])))
+        self.assertIn('目标级别：L4',rendered);self.assertIn('申请模块',rendered)
+        result=asyncio.run(self.cards.handle(self.message(data)))
+        self.assertIn('已通过',result['text'])
+        self.assertEqual(self.h.auth.account_profile('ou_fixtureAO')['modules'],['learning','maintenance'])
+
+    def test_rich_request_rejects_scope_tampering_and_disabled_applicant(self):
+        auth=self.h.auth
+        data=auth.create_permission_request(open_id='ou_fixtureAO',name='测试AO',approver_open_id=LI_SHILONG_OPEN_ID,
+            requested_access={'level':'L4','category':'operator','scopes':['A'],'modules':['learning']})
+        before=copy.deepcopy(auth._load_permissions_locked())
+        with self.assertRaisesRegex(PortalError,'完整权限'):
+            auth.approve_permission_request(data['request_id'],scopes=['B'],updated_by=LI_SHILONG_OPEN_ID)
+        self.assertEqual(auth._load_permissions_locked(),before)
+        before['users']['ou_fixtureAO']['enabled']=False
+        auth._save_permissions_locked(before)
+        with self.assertRaises(PortalError):
+            auth.approve_permission_request(data['request_id'],updated_by=LI_SHILONG_OPEN_ID)
+
+    def test_expired_request_is_not_presented_as_pending(self):
+        data=self.application()
+        self.cards.update(data['request_id'],expires_at_ts=1)
+        current=self.h.auth.get_current_permission_request('ou_fixtureAO',data['request_id'])
+        self.assertEqual(current['status'],'expired')
+        self.assertEqual(self.h.auth.list_permission_requests_for_admin(status='pending',reviewer_id=LI_SHILONG_OPEN_ID),[])
+
+    def test_supervisor_web_review_is_scoped_and_audited(self):
+        auth=self.h.auth
+        auth._sessions['supervisor-test']={'user':{'open_id':'ou_fixtureAS'},'role':'building','allowed_scopes':['A'],'expires_at':9999999999}
+        own=auth.create_permission_request(open_id='ou_fixtureAO',name='测试AO',approver_open_id='ou_fixtureAS',
+            requested_access={'level':'L4','category':'operator','scopes':['A'],'modules':['learning']})
+        other=auth.create_permission_request(open_id='ou_fixtureBE',scopes=['A'],approver_open_id=LI_SHILONG_OPEN_ID)
+        with patch.object(PortalRuntime,'auth_manager',auth),patch.object(PortalRuntime,'state_store',auth._state_store):
+            controller=FastAPIPortalController(host='127.0.0.1',port=18766)
+            client=TestClient(controller._build_app())
+            self.addCleanup(client.close)
+            with patch.object(controller._permission_cards,'enqueue_update'):
+                headers={'Cookie':f'{AUTH_COOKIE_NAME}=supervisor-test'}
+                listing=client.get('/api/auth/permission-requests/admin?limit=1',headers=headers)
+                self.assertEqual(listing.status_code,200,listing.text)
+                self.assertEqual([item['request_id'] for item in listing.json()['data']['items']],[own['request_id']])
+                denied=client.post('/api/auth/permission-requests/'+other['request_id']+'/approve',headers=headers,json={})
+                self.assertGreaterEqual(denied.status_code,400)
+                with patch.object(controller,'_queue_permission_review_result',return_value={'ok':True,'queued':True}):
+                    approved=client.post('/api/auth/permission-requests/'+own['request_id']+'/approve',headers=headers,json={})
+                self.assertEqual(approved.status_code,200,approved.text)
+                self.assertNotIn('permissions',approved.json()['data'])
+        self.assertEqual(auth.account_profile('ou_fixtureAO')['modules'],['learning'])
+        audit=auth._state_store.list_business_operation_audits(domain='accounts',limit=20)
+        self.assertTrue(any(row.get('metadata',{}).get('request_id')==own['request_id'] for row in audit))
+
     def test_actual_request_and_web_review_routes_share_state(self):
         auth = self.h.auth
         for token, oid in (("requester-test", "ou_fixtureAO"), ("reviewer-test", "ou_fixtureHM1")):
@@ -164,11 +219,47 @@ class PermissionReviewTests(levels.AccountLevelTests):
             data = response.json()["data"]["request"]
             enqueue.assert_called_once_with(data["request_id"])
             self.assertNotIn("review_card_token", data)
+            peer = auth.create_permission_request(open_id="ou_fixtureHM2", name="同级经理", approver_open_id=LI_SHILONG_OPEN_ID,
+                requested_access={"level":"L1", "category":"manager", "scopes":["ALL"], "modules":["maintenance"]})
+            listing = client.get("/api/auth/permission-requests/admin", headers=reviewer)
+            self.assertEqual(listing.status_code, 200, listing.text)
+            visible_ids = [item["request_id"] for item in listing.json()["data"]["items"]]
+            self.assertIn(data["request_id"], visible_ids)
+            self.assertNotIn(peer["request_id"], visible_ids)
+            legacy=client.get('/api/auth/permissions',headers=reviewer)
+            self.assertEqual(legacy.status_code,200,legacy.text)
+            visible_accounts=[item['open_id'] for item in legacy.json()['data']['users']]
+            self.assertIn('ou_fixtureAO',visible_accounts)
+            self.assertNotIn('ou_fixtureHM2',visible_accounts)
+            self.assertNotIn(LI_SHILONG_OPEN_ID,visible_accounts)
             path = "/api/auth/permission-requests/" + data["request_id"] + "/approve"
             self.assertEqual(client.post(path, headers=requester, json={}).status_code, 403)
-            with patch.object(controller, "_notify_permission_review_result", return_value={"ok":True}):
+            cross_origin=client.post(path,headers={**reviewer,'Origin':'https://other.invalid'},json={})
+            self.assertEqual(cross_origin.status_code,403)
+            self.assertEqual(auth.get_current_permission_request('ou_fixtureAO',data['request_id'])['status'],'pending')
+            with patch.object(controller, "_queue_permission_review_result", return_value={"ok":True,"queued":True}):
                 approved = client.post(path, headers=reviewer, json={})
             self.assertEqual(approved.status_code, 200, approved.text)
             current = client.get("/api/auth/permission-requests/current", headers=requester, params={"request_id":data["request_id"]})
             self.assertEqual(current.json()["data"]["request"]["status"], "approved")
             self.assertEqual(set(auth.scopes_for_open_id("ou_fixtureAO")), {"A","B"})
+            requested={'level':'L2','category':'engineer','scopes':['A'],'modules':['maintenance']}
+            with patch.object(controller._permission_cards, 'enqueue'):
+                response=client.post('/api/auth/permission-requests',headers=requester,json={'scopes':['A'],'reason':'申请变更权限','approver_open_id':LI_SHILONG_OPEN_ID,'requested_access':requested})
+            self.assertEqual(response.status_code,200,response.text)
+            application=response.json()['data']['request']
+            self.assertEqual(application['requested_access']['modules'],['maintenance'])
+            with patch.object(controller,'_queue_permission_review_result',return_value={'ok':True,'queued':True}):
+                approved=client.post('/api/auth/permission-requests/'+application['request_id']+'/approve',headers=reviewer,json={})
+            self.assertEqual(approved.status_code,200,approved.text)
+            self.assertEqual(auth.account_profile('ou_fixtureAO')['level'],'L2')
+
+    def test_result_notification_is_queued_without_blocking_approval(self):
+        controller=FastAPIPortalController.__new__(FastAPIPortalController)
+        controller._permission_cards=SimpleNamespace(enqueue_update=Mock())
+        controller._submit_background=Mock(return_value=True)
+        controller._notify_permission_review_result=Mock()
+        result=controller._queue_permission_review_result({'request_id':'fixture'},approved=True,actor_name='隔离测试')
+        self.assertTrue(result['queued'])
+        controller._notify_permission_review_result.assert_not_called()
+        controller._permission_cards.enqueue_update.assert_called_once_with('fixture')

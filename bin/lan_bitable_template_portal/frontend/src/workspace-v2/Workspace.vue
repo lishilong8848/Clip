@@ -26,8 +26,9 @@
           <NAlert v-if="operationError" type="error" :bordered="false" closable role="alert" class="v2-alert" @close="operationError=''">{{ operationError }}</NAlert>
           <div v-if="checking" class="v2-loading"><NSpin size="medium" /><span>正在检查登录状态</span></div>
           <NResult v-else-if="denied" status="403" title="没有该功能权限" description="当前账号未获授此功能，请申请权限或联系管理员。"><template #footer><NButton @click="navigate('/')">返回工作台</NButton><NButton type="primary" @click="navigate('/?view=permission')">申请权限</NButton></template></NResult>
-          <NResult v-else-if="loggedIn && unsupportedScope" status="info" :title="scopeLabel + '尚未接入此业务'" description="原业务目前仅支持 A–E 楼，未使用其他楼栋的数据代替。"><template #footer><NButton @click="navigate('/')">返回工作台</NButton></template></NResult>
-          <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || permissionPage || !scopes.length && !['learning','knowledge'].includes(activeModule))"
+          <NResult v-else-if="loggedIn && unsupportedScope" status="info" :title="scopeLabel + '尚未接入此业务'" description="原业务目前仅支持 A–E 楼，未使用其他楼栋的数据代替。"><template #footer><NButton v-if="user.role === 'admin' && ['drills','critical_guard'].includes(activeModule)" type="primary" @click="navigate(route.pathname+'?mode=admin')"><Settings :size="16" />管理员入口</NButton><NButton @click="navigate('/')">返回工作台</NButton></template></NResult>
+          <AccessRequest v-else-if="loggedIn && permissionPage" :key="String(user.open_id)" :user="user" @back="navigate('/?view=my')" @changed="loadAuth" />
+          <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge'].includes(activeModule))"
             :checking="false" :logged-in="loggedIn" :user="user" :login-url="loginUrl" :busy="permissionBusy" :request="permission" :requestable-scopes="requestableScopes" :password-settings="passwordPage" :show-back="loggedIn" :title="permissionPage?'申请楼栋权限':''" @back="navigate('/')" @update-request="Object.assign(permission, $event)" @submit="submitPermission" @confirm="submitPermission" />
           <template v-else>
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
@@ -98,6 +99,7 @@ const WorkOrderWorkspace = lazy(() => import('./WorkOrderWorkspace.vue'));
 const NoticeWorkspace = lazy(() => import('./NoticeWorkspace.vue'));
 const NoticeSopManager = lazy(() => import('./NoticeSopManager.vue'));
 const AuthPanels = lazy(() => import('../components/AuthPanels.vue'));
+const AccessRequest = lazy(() => import('./AccessRequest.vue'));
 const pages: Record<string, any> = {
   event: lazy(() => import('../components/EventManagementPage.vue')),
   engineer_mop: lazy(() => import('./MopWorkspace.vue')),
@@ -147,7 +149,8 @@ watch([route,identityKey,loggedIn,checking],()=>{
   if(noticeView.value?.identity!==identityKey.value || !loggedIn.value)noticeView.value=null;
   if(noticeActive.value)noticeView.value={identity:identityKey.value,url:route.value.pathname+route.value.search};
 },{flush:'sync'});
-const unsupportedScope=computed(()=>['critical_guard','drills','cabinet'].includes(activeModule.value)&&['H','110'].includes(currentScope.value));
+const moduleAdminMode=computed(()=>user.value.role==='admin'&&['critical_guard','drills'].includes(activeModule.value)&&(route.value.searchParams.get('mode')==='admin'||['ALL','CAMPUS'].includes(currentScope.value)));
+const unsupportedScope=computed(()=>!moduleAdminMode.value&&['critical_guard','drills','cabinet'].includes(activeModule.value)&&['H','110'].includes(currentScope.value));
 const scopeLabel = computed(() => scopes.value.find(s => s.value === currentScope.value)?.label || currentScope.value);
 const businessScopes = computed(()=>scopes.value.map(s=>({...s,label:s.value==='ALL'?'全部楼栋':s.label})));
 const scopeSelectable = computed(() => !['sops','learning', 'accounts', 'signatures', 'links', 'knowledge', 'assistant', 'life_guide', 'plan_convergence', 'daily', 'engineer_mop'].includes(activeModule.value) && !(activeModule.value==='water'&&!['ALL','CAMPUS'].includes(currentScope.value)) && !printMode.value);
@@ -170,7 +173,7 @@ const dutyActive = computed(() => NOTICE_IDS.includes(activeModule.value) || act
 const showDutyTabs = computed(() => personaFor(user.value) === 'duty' && !publicLink.value && !printMode.value && ['notices','water','drills','critical_guard'].includes(dutyActive.value));
 function selectMenu(key: string) { const module = permittedModules.value.find(m => m.id === key); navigate(module ? moduleUrl(module, currentScope.value) : '/?view=' + key); }
 function returnFromSop(context:{scope:string;work_type:string}){navigate('/workbench-lite?'+new URLSearchParams(context));}
-function changeScope(scope: string) { const url = logicalUrl(); url.searchParams.set('scope', scope); navigate(url); }
+function changeScope(scope: string) { const url = logicalUrl(); url.searchParams.set('scope', scope); if(['drills','critical_guard'].includes(activeModule.value))url.searchParams.delete('mode'); navigate(url); }
 function selectAdminTab(tab: string) { navigate('/admin/settings?tab=' + encodeURIComponent(tab), {replace:true}); }
 function openAssistant() { window.dispatchEvent(new CustomEvent('clipflow:assistant-open')); const trigger = document.querySelector<HTMLButtonElement>('[aria-label="打开灯塔助手"]'); trigger?.click(); }
 function switchLegacy() { navigate(loggedIn.value ? '/?frontend=legacy' : loginVersionUrl('legacy'), {hard:true,legacy:true}); }
@@ -185,10 +188,12 @@ async function onStatus(text: string) {
 const componentName = computed(() => route.value.pathname === '/repair-status' ? 'repair_status' : route.value.pathname === '/cabinet-power/batches' ? 'cabinet_batch' : route.value.pathname === '/signature' ? 'signature' : route.value.pathname === '/admin/history-memory' ? 'history' : activeModule.value);
 const activeComponent = computed(() => pages[componentName.value]);
 watch(()=>route.value.pathname+':'+(componentName.value||view.value),()=>{
+  // The workspace, not the document, owns PC scrolling. A new page starts at its header.
+  void nextTick(()=>{document.querySelector('.v2-main')?.scrollTo({top:0,behavior:'instant'});window.scrollTo({top:0,behavior:'instant'});});
   if(window.matchMedia('(min-width:761px)').matches&&!window.matchMedia('(prefers-reduced-motion: reduce)').matches)
     requestAnimationFrame(()=>document.querySelector('.v2-main')?.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}));
 },{flush:'post'});
-const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (activeModule.value === 'learning' ? route.value.search : currentScope.value) + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : ''));
+const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (activeModule.value === 'learning' ? route.value.search : currentScope.value) + (['drills','critical_guard'].includes(activeModule.value)?':'+moduleAdminMode.value:'') + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : ''));
 const componentProps = computed(() => {
   const p = route.value.searchParams, admin = user.value.role === 'admin';
   const common = { scope:currentScope.value, scopeOptions:scopes.value, isAdmin:admin, checking:false, loggedIn:loggedIn.value, loginUrl:loginUrl.value };
@@ -197,8 +202,8 @@ const componentProps = computed(() => {
     case 'repair_status':
     case 'repair_management': return {...common, userId:String(user.value.open_id || ''), canDelete:user.value.can_delete_business === true, focusRecordId:p.get('record_id') || ''};
     case 'learning': return {...common, scope:p.get('scope') || '', personId:p.get('person_id') || '', userId:String(user.value.open_id || '')};
-    case 'critical_guard': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, user:user.value, adminMode:admin && (p.get('mode') === 'admin'||['ALL','CAMPUS'].includes(currentScope.value))};
-    case 'drills': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, currentUser:user.value, adminMode:admin && (p.get('mode') === 'admin'||['ALL','CAMPUS'].includes(currentScope.value)), printMode:printMode.value};
+    case 'critical_guard': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, user:user.value, adminMode:moduleAdminMode.value};
+    case 'drills': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, currentUser:user.value, adminMode:moduleAdminMode.value, printMode:printMode.value};
     case 'cabinet': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, userId:String(user.value.open_id || ''), readOnly:user.value.role === 'guest', canDelete:user.value.can_delete_business === true};
     case 'cabinet_batch': return {...common, userId:String(user.value.open_id || '')};
     case 'signature': return {defaultScope:currentScope.value};

@@ -50,7 +50,8 @@ try{
   await shot('profile');await shellGeometry();
   await page.getByRole('button',{name:'账号与设置',exact:true}).click();await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
   await shot('accounts');await shellGeometry();
-  const nav=await page.locator('.admin-workspace-tabs').boundingBox(),content=await page.locator('.admin-settings-content').boundingBox();
+  assert.equal(await page.locator('.admin-workspace-tabs').count(),0,'settings has no second navigation');
+  const nav=await page.locator('.v2-settings-picker').boundingBox(),content=await page.locator('.admin-settings-content').boundingBox();
   assert(nav.y+nav.height<=content.y+1,'admin sections are above the account table, not a second sidebar');
   assert(Math.abs(nav.x-content.x)<=1,'admin sections and account list align');
   const main=page.locator('.v2-main');
@@ -72,6 +73,13 @@ try{
   await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();await shot('profile-mobile');
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
   await page.setViewportSize({width:1440,height:900});
+  await page.goto(entry+'?__page=/admin/settings');await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
+  await main.evaluate(el=>el.scrollTo({top:500,behavior:'instant'}));
+  assert(await main.evaluate(el=>el.scrollTop>0));
+  await page.getByRole('button',{name:'打开个人页面',exact:true}).click();await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
+  await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop===0);
+  const profileHeading=await page.getByRole('heading',{name:user.name,exact:true}).boundingBox(),topHeader=await page.locator('.v2-header').boundingBox();
+  assert(profileHeading.y>=topHeader.y+topHeader.height,'switching modules never inherits the prior scroll offset');
   await page.goto(entry+'?__page=/plan-convergence');await page.getByText('A楼冷机检修屏蔽',{exact:true}).waitFor();
   await shot('plan-review');await shellGeometry();
   const filters=page.locator('#workspace-page-filters');

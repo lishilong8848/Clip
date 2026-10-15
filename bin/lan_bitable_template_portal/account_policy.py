@@ -69,15 +69,16 @@ def default_modules(level):
 def _grantable_levels(actor_level):
     """Levels the actor may themselves assign to a target.
 
-    L0/L1 hand out the full L1-L4 range; L2 is edit-only and may only manage an
-    already-L2 engineer (same level, no escalation); L3 only manages own-building
-    L4 accounts and must never grant a peer supervisor (role conflict).
+    L0 may grant L1-L4; L1 grants only L2-L4. L2 keeps base-edit authority but
+    cannot grant access. L3 may configure L4 inside its managed building scope.
     """
     rank = level_rank(actor_level)
-    if rank <= 1:
+    if rank == 0:
         return {"L1", "L2", "L3", "L4"}
+    if rank == 1:
+        return {"L2", "L3", "L4"}
     if rank == 2:
-        return {"L2"}
+        return set()
     if rank == 3:
         return {"L4"}
     return set()
@@ -103,6 +104,10 @@ def category_options_for(actor_level):
 def account_allowed(profile, target, action):
     if action not in {"view", "edit", "delete"} or not profile.get("can_manage_accounts"):
         return False
+    if target.get('is_self'):
+        return action == 'view'
+    if level_rank(target.get('level')) <= level_rank(profile.get('level')):
+        return False
     if action != "view" and (target.get("locked") or target.get("blocked_reason")):
         return False
     if action == "delete" and (target.get("kind") == "duty" or target.get("category") == "duty"):
@@ -117,7 +122,8 @@ def account_allowed(profile, target, action):
     # L3 manages only own-building L4 accounts; peers (supervisors) stay out of reach.
     return (profile["level"] == "L3" and target.get("category") in MANAGED_CATEGORIES
             and target.get("level") == "L4"
-            and target.get("own_scopes") == [profile.get("home_scope")])
+            and bool(target.get("own_scopes"))
+            and set(target["own_scopes"]).issubset(set(profile.get("scope_rules") or [profile.get("home_scope")])))
 
 
 def resolve_access_change(actor, target, *, level=None, category=None, scopes=None, modules=None):
@@ -133,6 +139,8 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
     actor_modules = set(actor.get("modules") or [])
     target_level = str(target.get("level") or "").strip()
     target_home = str(target.get("home_scope") or "").strip()
+    if level_rank(target_level) <= level_rank(actor_level):
+        raise PolicyViolation("不能修改同级或更高级账号，请由其上级审批。", 403)
 
     # Fixed super-user can never be re-granted through the management API.
     if target_level == "L0" or (target.get("home_scope") == "H" and target.get("category") == "duty"):
@@ -146,10 +154,7 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
         raise PolicyViolation("无效的管理级别。", 400)
     if resolved_level not in _grantable_levels(actor_level):
         raise PolicyViolation("不能将账号设置到超出自身可授予的级别。", 403)
-    # L2 may only do same-level management and L3 only own-building L4 accounts,
-    # so the target must already sit at the level the actor is allowed to grant.
-    if actor_level == "L2" and target_level != "L2":
-        raise PolicyViolation("L2 只能在同级工程师范围内管理，不能更改其管理级别。", 403)
+    # Supervisors configure only lower-level accounts inside their managed scope.
     if actor_level == "L3" and target_level != "L4":
         raise PolicyViolation("L3 只能管理本楼栋的 L4 基础账号。", 403)
 
@@ -185,17 +190,18 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
         incoming = set(str(scope).strip() for scope in scopes)
         if incoming.isdisjoint(actor_scopes | {"ALL"}):
             raise PolicyViolation("不能授予超过自身可管辖范围的楼栋。", 403)
-        if not incoming.issubset(actor_scopes) and "ALL" not in actor_scopes:
+        if not incoming.issubset(actor_scopes):
             raise PolicyViolation("不能授予超过自身可管辖范围的楼栋。", 403)
         if "ALL" in incoming and resolved_level not in {"L0", "L1"}:
             raise PolicyViolation("普通级别不能授予全楼栋权限。", 403)
         if actor_level not in {"L0", "L1"}:
-            # L2/L3 must stay inside their own managed building.
-            if target_home and incoming != {target_home}:
-                raise PolicyViolation("非超级级别只能在本人所属楼栋内授权。", 403)
-            if not incoming.issubset({target_home}):
-                raise PolicyViolation("非超级级别只能在本人所属楼栋内授权。", 403)
+            if not incoming.issubset(actor_scopes):
+                raise PolicyViolation("只能授予本人管理范围内的楼栋。", 403)
         resolved_scopes = [str(scope).strip() for scope in scopes]
+    if resolved_level == 'L1':
+        resolved_scopes = sorted(actor_scopes)
+    if not set(resolved_scopes).issubset(actor_scopes):
+        raise PolicyViolation("目标账号现有楼栋超出本人管理范围，请由更高权限人员处理。", 403)
 
     # Desired modules. When omitted, keep the current explicit modules unless the
     # level is changing. ``modules == []`` is a deliberate full revocation and is

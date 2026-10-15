@@ -27,12 +27,13 @@
 .workspace-v2 .v2-main .admin-card>header { padding-bottom: 16px; }
 .workspace-v2 .v2-main .admin-settings-layout { grid-template-columns: minmax(0,1fr); padding-top: 16px; gap: 16px; }
 .workspace-v2 .v2-main .admin-settings-content { padding: 0; background: transparent; border: 0; }
-.workspace-v2 .v2-main .admin-workspace-tabs { position: static; display: flex; flex-wrap: wrap; gap: 8px; }
-.workspace-v2 .v2-main .admin-workspace-tabs>button { width: auto; min-width: 144px; }
-.workspace-v2 .v2-main .admin-workspace-tabs .other-toggle { margin: 0; padding: 10px 12px; border: 1px solid var(--v2-border); border-radius: 6px; }
-.workspace-v2 .v2-main .admin-workspace-tabs .other-settings { flex-basis: 100%; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); padding: 10px 0; border-bottom: 1px solid var(--v2-border); }
+.workspace-v2 .v2-module-admin { margin-left: auto; flex-shrink: 0; }
+.workspace-v2 .v2-module-admin .n-button__content { gap: 6px; }
 .workspace-v2 .accounts { gap: 14px; }
-.workspace-v2 .accounts .filters { display: grid; grid-template-columns: minmax(200px,1fr) repeat(3,auto); gap: 12px; }
+.workspace-v2 .accounts .filters { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 10px; }
+.workspace-v2 .accounts .filters .search { grid-column: 1/-1; }
+.v2-account-scope { display:flex; gap:12px 20px; flex-wrap:wrap; padding:14px 0; border-block:1px solid var(--v2-border); font-size:13px; }
+.v2-account-scope span { color:var(--v2-muted); }
 .workspace-v2 .accounts .filters label { min-width: 0; }
 .workspace-v2 .accounts .filters label>span { white-space: nowrap; }
 .workspace-v2 .accounts .filters .search { background: #fff; }
@@ -57,8 +58,10 @@
   .workspace-v2 .v2-profile-actions>.n-button { height: 44px; padding-inline: 10px; }
   .workspace-v2 .v2-profile-actions .n-button__content { gap: 6px; }
   .workspace-v2 .v2-profile-access { padding: 20px 0 0; border-left: 0; border-top: 1px solid var(--v2-border); }
-  .workspace-v2 .v2-main .admin-workspace-tabs .other-settings { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .workspace-v2 .accounts .filters { gap: 8px; }
+  .workspace-v2 .accounts .filters { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .workspace-v2 .accounts .filters label:not(.search) { display: grid; gap: 5px; }
   .workspace-v2 .account-header>.muted { flex-basis: 100%; order: 1; }
 }
+.workspace-v2 .admin-settings-layout.accounts-only .account-header>strong{display:none}
+.workspace-v2 .admin-settings-layout.accounts-only .account-header>.muted{margin-right:auto}

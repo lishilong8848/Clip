@@ -71,6 +71,29 @@ class SharingTests(unittest.TestCase):
         with self.assertRaises(LearningError): self.core.create(URL, 'operation-fixture-01', {'id': 'ou_person0'})
         with self.assertRaises(LearningError): self.core.create('http://localhost/docx/Test', 'operation-fixture-02', ADMIN)
 
+    def test_delete_hides_batch_stops_jobs_and_preserves_uploaded_bank_receipts(self):
+        self.publish()
+        jobs = self.learning._all('sharing_delivery')
+        sent = next(job for job in jobs if job['kind'] == 'bank')
+        sent.update(status='sent', record_id='recExistingQuestion')
+        with self.learning.transaction() as conn:
+            self.learning._put('sharing_delivery', sent['id'], sent, conn)
+        sent = self.learning._get('sharing_delivery', sent['id'])
+        version = self.core.batch(self.bid)['version']
+        with self.assertRaises(LearningError): self.core.delete(self.bid, version, {'id':'ou_member'})
+        with self.assertRaises(LearningError): self.core.delete(self.bid, version - 1, ADMIN)
+        self.core.delete(self.bid, version, ADMIN)
+        self.assertEqual(self.core.listing(ADMIN)['total'], 0)
+        with self.assertRaises(LearningError): self.core.detail(self.bid, ADMIN)
+        self.assertEqual(self.learning._get('sharing_delivery', sent['id']), sent)
+        self.assertTrue(all(j['status'] in {'sent','skipped'} for j in self.learning._all('sharing_delivery')))
+        self.core.schedule(TODAY.replace(hour=13))
+        self.assertEqual(len(self.learning._all('sharing_delivery')), len(jobs))
+        self.assertTrue(self.core.delete(self.bid, version, ADMIN)['deleted'])
+        worker = SharingRuntime(SimpleNamespace(), lambda:self.learning); worker.core = self.core
+        self.assertFalse(worker.update_batch(self.bid, status='draft'))
+        self.assertEqual(self.learning._get('sharing_batch', self.bid)['status'], 'deleted')
+
     def test_question_contracts(self):
         for mutation in ('too_few', 'too_many', 'duplicate', 'evidence', 'correct', 'duplicate_options', 'empty'):
             with self.subTest(mutation=mutation):
@@ -500,15 +523,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                          {'on_person0', 'on_person1', 'on_person2'})
         self.assertTrue(all(job['status'] == 'sent' for job in setup.learning._all('sharing_delivery') if job['kind'] == 'paper'))
 
-    async def test_generation_scales_from_five_to_forty_questions(self):
+    async def test_generation_exhausts_grounded_content_instead_of_fixing_short_minutes_to_five(self):
         setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
-        for text, expected in ((SOURCE, 5), (SOURCE + '补充内容' * 800, 10), (SOURCE + '补' * (24000 - len(SOURCE)), 40)):
+        for text, expected in ((SOURCE, 5), (SOURCE, 8), (SOURCE + '补' * (24000 - len(SOURCE)), 40)):
             with self.subTest(expected=expected):
                 async def generate_questions(owner, source, previous, count, question_types):
                     self.assertEqual(owner, ADMIN['id'])
                     self.assertEqual(source, text)
-                    values = typed_questions(['single', 'multiple'], expected)[len(previous):len(previous) + count]
-                    self.assertEqual([q['type'] for q in values], question_types)
+                    values = questions(expected)[len(previous):len(previous) + count]
+                    for q, kind in zip(values, question_types):
+                        q.update(type=kind, correct=[0] if kind == 'single' else [0,2])
                     return values
                 generate_mock = AsyncMock(side_effect=generate_questions)
                 worker = SharingRuntime(SimpleNamespace(service=object(), generate_sharing_questions=generate_mock), lambda: setup.learning)
@@ -519,7 +543,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 batch = setup.core.batch(setup.bid)
                 self.assertEqual(batch['status'], 'draft', batch.get('error'))
                 self.assertEqual(len(batch['questions']), expected)
-                self.assertEqual(generate_mock.await_count, expected // 5)
+                self.assertEqual(generate_mock.await_count, min(8, expected // 5 + 1))
                 self.assertEqual(setup.learning._all('sharing_attempt'), [])
                 self.assertEqual(setup.learning._all('sharing_delivery'), [])
 

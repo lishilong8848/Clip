@@ -28,7 +28,7 @@ from contextlib import suppress
 from collections import deque
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import parse_qs, quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -731,8 +731,28 @@ class FastAPIPortalController:
                 )
         return submitted
 
+    def _queue_permission_review_result(self, permission_request, **kwargs):
+        cards = getattr(self, '_permission_cards', None)
+        if cards:
+            cards.enqueue_update(str(permission_request.get('request_id') or ''))
+        submitted = self._submit_background('PermissionReviewNotify', lambda: self._notify_permission_review_result(permission_request, **kwargs))
+        return {'ok':bool(submitted), 'queued':bool(submitted), 'message':'结果通知已排队' if submitted else '结果通知未排队，审批已生效'}
+
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="ClipFlow LAN Backend")
+
+        @app.middleware('http')
+        async def permission_write_origin(request: Request, call_next):
+            if request.method not in {'GET', 'HEAD', 'OPTIONS'} and request.url.path.startswith('/api/auth/permission'):
+                source = request.headers.get('origin') or request.headers.get('referer')
+                try:
+                    origin, base = urlsplit(source or ''), urlsplit(self._request_base_url(request))
+                except ValueError:
+                    return JSONResponse({'ok':False, 'error':'权限操作来源无效。'}, status_code=403)
+                if request.headers.get('sec-fetch-site') == 'cross-site' or (source and (origin.scheme, origin.netloc.lower()) != (base.scheme, base.netloc.lower())):
+                    return JSONResponse({'ok':False, 'error':'不允许跨来源提交或审批权限。'}, status_code=403)
+            return await call_next(request)
+
         from lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
         install_cabinet_power_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.learning_routes import install_learning_routes
@@ -5812,7 +5832,7 @@ class FastAPIPortalController:
             if admin_response is not None:
                 return admin_response
             try:
-                data = PortalRuntime.auth_manager.get_permissions_payload()
+                data = PortalRuntime.auth_manager.management_permissions_payload((session.get('user') or {}).get('open_id'))
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=500)
@@ -5832,6 +5852,9 @@ class FastAPIPortalController:
                     force_refresh=bool(refresh),
                     query=q,
                 )
+                actor_id = (session.get('user') or {}).get('open_id')
+                data['items'] = [item for item in data.get('items', []) if PortalRuntime.auth_manager.can_manage_account(actor_id, item.get('open_id'))]
+                data.update(total=len(data['items']), returned=len(data['items']), selectable_total=sum(bool(item.get('selectable')) for item in data['items']))
                 permissions = PortalRuntime.auth_manager.get_permissions_payload()
                 permission_by_open_id = {
                     str(item.get("open_id") or "").strip(): item
@@ -5877,13 +5900,14 @@ class FastAPIPortalController:
             status: str = "pending",
             limit: int = 100,
         ):
-            admin_response, session = self._require_admin_response(request)
+            admin_response, session = self._require_permission_reviewer_response(request)
             if admin_response is not None:
                 return admin_response
             try:
-                items = PortalRuntime.auth_manager.list_permission_requests_for_admin(
+                items = await asyncio.to_thread(PortalRuntime.auth_manager.list_permission_requests_for_admin,
                     status=status,
                     limit=limit,
+                    reviewer_id=(session.get('user') or {}).get('open_id') or '',
                 )
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
@@ -5891,7 +5915,7 @@ class FastAPIPortalController:
 
         @app.post("/api/auth/permission-requests/bulk-approve")
         async def bulk_approve_permission_requests(request: Request):
-            admin_response, session = self._require_admin_response(request)
+            admin_response, session = self._require_permission_reviewer_response(request)
             if admin_response is not None:
                 return admin_response
             try:
@@ -5913,12 +5937,12 @@ class FastAPIPortalController:
                 failed: list[dict] = []
                 for request_id in dict.fromkeys(request_ids):
                     try:
-                        result = PortalRuntime.auth_manager.approve_permission_request(
+                        result = await asyncio.to_thread(PortalRuntime.auth_manager.approve_permission_request,
                             request_id,
                             scopes=scopes_by_request_id.get(request_id) or [],
                             updated_by=actor_open_id,
                         )
-                        notice = self._notify_permission_review_result(
+                        notice = self._queue_permission_review_result(
                             result.get("request") or {},
                             approved=True,
                             actor_name=actor_name,
@@ -5939,7 +5963,7 @@ class FastAPIPortalController:
 
         @app.post("/api/auth/permission-requests/bulk-reject")
         async def bulk_reject_permission_requests(request: Request):
-            admin_response, session = self._require_admin_response(request)
+            admin_response, session = self._require_permission_reviewer_response(request)
             if admin_response is not None:
                 return admin_response
             try:
@@ -5961,12 +5985,12 @@ class FastAPIPortalController:
                 reason = str(payload.get("reason") or "").strip()
                 for request_id in dict.fromkeys(request_ids):
                     try:
-                        item = PortalRuntime.auth_manager.reject_permission_request(
+                        item = await asyncio.to_thread(PortalRuntime.auth_manager.reject_permission_request,
                             request_id,
                             reason=reason,
                             updated_by=actor_open_id,
                         )
-                        notice = self._notify_permission_review_result(
+                        notice = self._queue_permission_review_result(
                             item,
                             approved=False,
                             actor_name=actor_name,
@@ -5988,7 +6012,7 @@ class FastAPIPortalController:
 
         @app.post("/api/auth/permission-requests/{request_id}/approve")
         async def approve_permission_request(request_id: str, request: Request):
-            admin_response, session = self._require_admin_response(request)
+            admin_response, session = self._require_permission_reviewer_response(request)
             if admin_response is not None:
                 return admin_response
             try:
@@ -5997,12 +6021,12 @@ class FastAPIPortalController:
                 ).to_payload()
                 actor = session.get("user") if isinstance(session.get("user"), dict) else {}
                 actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
-                result = PortalRuntime.auth_manager.approve_permission_request(
+                result = await asyncio.to_thread(PortalRuntime.auth_manager.approve_permission_request,
                     request_id,
                     scopes=payload.get("scopes") or [],
                     updated_by=str(actor.get("open_id") or ""),
                 )
-                notice = self._notify_permission_review_result(
+                notice = self._queue_permission_review_result(
                     result.get("request") or {},
                     approved=True,
                     actor_name=actor_name,
@@ -6013,7 +6037,6 @@ class FastAPIPortalController:
                     session,
                     {
                         "request": result.get("request") or {},
-                        "permissions": result.get("permissions") or {},
                         "notification": notice,
                     },
                 )
@@ -6022,7 +6045,7 @@ class FastAPIPortalController:
 
         @app.post("/api/auth/permission-requests/{request_id}/reject")
         async def reject_permission_request(request_id: str, request: Request):
-            admin_response, session = self._require_admin_response(request)
+            admin_response, session = self._require_permission_reviewer_response(request)
             if admin_response is not None:
                 return admin_response
             try:
@@ -6031,12 +6054,12 @@ class FastAPIPortalController:
                 ).to_payload()
                 actor = session.get("user") if isinstance(session.get("user"), dict) else {}
                 actor_name = str(actor.get("name") or actor.get("en_name") or "管理员")
-                item = PortalRuntime.auth_manager.reject_permission_request(
+                item = await asyncio.to_thread(PortalRuntime.auth_manager.reject_permission_request,
                     request_id,
                     reason=str(payload.get("reason") or ""),
                     updated_by=str(actor.get("open_id") or ""),
                 )
-                notice = self._notify_permission_review_result(
+                notice = self._queue_permission_review_result(
                     item,
                     approved=False,
                     actor_name=actor_name,
@@ -8144,6 +8167,7 @@ class FastAPIPortalController:
                     scopes=payload.get("scopes") or [],
                     reason=str(payload.get("reason") or ""),
                     approver_open_id=str(payload.get("approver_open_id") or ""),
+                    requested_access=payload.get("requested_access"),
                 )
                 if data.get("approver_open_id"):
                     cards = getattr(self, "_permission_cards", None)
@@ -8236,6 +8260,7 @@ class FastAPIPortalController:
                     notify_message = "已加入飞书通知队列"
                 else:
                     notify_message = "无权限变更通知"
+                data = PortalRuntime.auth_manager.management_permissions_payload(actor.get('open_id'))
                 data["changed_open_ids"] = changed_open_ids
                 data["notification"] = {
                     "ok": True,
@@ -8293,7 +8318,7 @@ class FastAPIPortalController:
                     request,
                     session,
                     {
-                        "permissions": data,
+                        "permissions": PortalRuntime.auth_manager.management_permissions_payload(actor.get('open_id')),
                         "items": items,
                         "failed": resolved.get("failed") or [],
                         "changed_count": len(changed_open_ids),
@@ -8368,7 +8393,7 @@ class FastAPIPortalController:
                 return self._json_ok(
                     request,
                     session,
-                    {"permissions": permissions, "removed": removed},
+                    {"permissions": PortalRuntime.auth_manager.management_permissions_payload(actor_open_id), "removed": removed},
                 )
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -10608,6 +10633,15 @@ class FastAPIPortalController:
             PortalAuthManager.auth_retry_cookie_header(active=False),
         )
         return response
+
+    def _require_permission_reviewer_response(self, request: Request) -> tuple[JSONResponse | None, dict]:
+        session = self._current_session(request)
+        if session is None:
+            return self._auth_required_response(), {}
+        profile = PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))
+        if not profile["can_manage_accounts"] or profile["level"] not in {"L0", "L1", "L3"}:
+            return JSONResponse({"ok": False, "error": "当前账号没有权限审批资格。"}, status_code=403), session
+        return None, session
 
     def _require_admin_response(self, request: Request) -> tuple[JSONResponse | None, dict]:
         session = self._current_session(request)

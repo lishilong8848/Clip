@@ -27,7 +27,8 @@ def generate(model, payload):
         'evidence必须逐字摘录纪要中8至800字的连续原文，支持正确答案；explanation说明依据。'
         '只返回JSON对象：{"questions":[{"type":"single","stem":"题干","options":["选项"],"correct":[0],'
         '"reference_answer":"问答题参考答案，选择题留空","explanation":"解析","evidence":"原文"}]}。题干最多500字，每项最多300字，解析最多600字。'
-        '不能和已出题列表重复或仅换问法。材料不足时返回不足数量，绝不为了达到数量捏造事实。'
+        'count是本轮题量上限，不是整批题目数。尽量覆盖纪要中尚未考查的不同知识点，多生成有价值的题目。'
+        '不能和已出题列表重复或仅换问法。没有更多独立知识点时返回空数组；材料不足时返回不足数量，绝不为了达到数量捏造事实。'
     )
     raw = model.complete([{'role': 'system', 'content': instruction}, {'role': 'user', 'content': json.dumps(
         {'count': count, 'question_types': types, 'previous_question_stems': previous, 'meeting_text': source}, ensure_ascii=False)}],
@@ -37,8 +38,8 @@ def generate(model, payload):
         values = json.loads(text).get('questions')
     except (ValueError, AttributeError):
         raise AssistantError('模型未返回完整题目结构，请重试或补充纪要。', 502) from None
-    if not isinstance(values, list) or len(values) != count:
-        raise AssistantError('纪要未能生成足够的有依据题目；请补充分享内容后重试，不凑足题量。', 422)
+    if not isinstance(values, list) or len(values) > count:
+        raise AssistantError('模型返回题目数量或格式无效，请重试。', 422)
     if types is not None and any(not isinstance(q, dict) or q.get('type') != kind for q, kind in zip(values, types)):
         raise AssistantError('模型生成的题型与所选分配不一致，请重新生成。', 422)
     return {'questions': values}

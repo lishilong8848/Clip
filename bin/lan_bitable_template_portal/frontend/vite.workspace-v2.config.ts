@@ -19,6 +19,10 @@ import { markFeedbackAlerts } from './scripts/workspace-feedback-adapter.mjs';
 import { adaptRepairController, controllerBindings } from './scripts/workspace-repair-adapter.mjs';
 // @ts-ignore V2-only learning presentation; API and grading stay in the existing controller.
 import { adaptLearningPage } from './scripts/workspace-learning-adapter.mjs';
+// @ts-ignore V2-only sharing layout, retaining the existing data controller.
+import { adaptLearningSharing } from './scripts/workspace-sharing-adapter.mjs';
+// @ts-ignore build-only admin navigation presentation, original permissions are preserved.
+import { adaptAccounts, adaptAdminAccountLoading, adaptModuleAdminEntry } from './scripts/workspace-admin-adapter.mjs';
 // @ts-ignore V2-only filter placement; original form bindings and legacy views stay intact.
 import { adaptPageFilters } from './scripts/workspace-filters-adapter.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/');
@@ -31,6 +35,7 @@ export default defineConfig({
   plugins: [{
     name: 'workspace-business-imports', enforce: 'pre',
     resolveId(source, importer) {
+      if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/AdminWorkspaceChrome.vue')) return root + 'src/workspace-v2/AdminSettingsPicker.vue';
       if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/WaterManagementPage.vue')) return root + 'src/workspace-v2/WaterWorkspace.vue';
       if (/^\/assets\/[\w.-]+\.(?:png|svg|webp|jpg|gif)$/.test(source) && existsSync(join(root,'public',source))) return '\0workspace-public:' + source;
       if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/LighthouseReply.vue') && !importer.includes('/workspace-v2/')) return root + 'src/workspace-v2/AnimatedReply.vue';
@@ -45,6 +50,10 @@ export default defineConfig({
       if(!path.startsWith(root+'src/')||!path.endsWith('.vue'))return;
       let result=code;
       if(path===root+'src/components/LearningPage.vue')result=adaptLearningPage(result);
+      if(path===root+'src/components/LearningSharing.vue')result=adaptLearningSharing(result);
+      result=adaptModuleAdminEntry(result,path);
+      if(path===root+'src/components/AdminAccounts.vue')result=adaptAccounts(result);
+      if(path===root+'src/components/AdminTools.vue')result=adaptAdminAccountLoading(result);
       if(path===root+'src/components/RepairManagementPage.vue')result=adaptRepairController(result,'management',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairWorkspace.vue'),'utf8')));
       if(path===root+'src/components/RepairFollowupPanel.vue')result=adaptRepairController(result,'followup',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairFollowups.vue'),'utf8')));
       if(path===root+'src/components/EventManagementPage.vue')result=adaptEventPeriodPage(result);

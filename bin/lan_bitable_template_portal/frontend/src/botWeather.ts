@@ -45,8 +45,8 @@ export function weatherScene(value: IconWeather, now = Date.now() / 1000): Weath
   const descriptions = (fresh ? value.description || '' : '').split('转');
   const description = phase === 'night' || phase === 'dusk' ? descriptions[descriptions.length - 1]! : descriptions[0]!;
   const weather = /雷/.test(description) ? 'storm' : /雪/.test(description) ? 'snow' : /雨/.test(description) ? 'rain'
-    : /雾|霾|沙尘/.test(description) ? 'fog' : /云|阴/.test(description) ? 'cloudy' : /晴/.test(description) ? 'clear' : 'unknown';
-  const label: Record<string, string> = { clear: '晴', cloudy: '多云', fog: '雾', storm: '雷雨', snow: '雪', rain: '雨', unknown: '天气暂不可用' };
+    : /雾|霾|沙尘/.test(description) ? 'fog' : /大风|强风|疾风/.test(description) ? 'wind' : /云|阴/.test(description) ? 'cloudy' : /晴/.test(description) ? 'clear' : 'unknown';
+  const label: Record<string, string> = { clear: '晴', cloudy: '多云', fog: '雾', storm: '雷雨', snow: '雪', rain: '雨', wind: '大风', unknown: '天气暂不可用' };
   return { weather, phase, x: 380 - Math.cos(angle) * 158, y: 258 - Math.sin(angle) * 258,
     moonX: 380 - Math.cos(moonAngle) * 158, moonY: 258 - Math.sin(moonAngle) * 258, rotation: nightProgress * 180,
     title: `${value.city} · ${fresh ? '今日预报：' + (value.description || label[weather]) : label.unknown}${fresh && Number.isFinite(value.minimum) && Number.isFinite(value.maximum) ? ' · ' + value.minimum + '～' + value.maximum + '℃' : ''} · ${phase === 'night' ? '夜间' : phase === 'dawn' ? '清晨' : phase === 'dusk' ? '傍晚' : '白天'}` };

@@ -55,6 +55,15 @@ def card(data):
                 {"tag": "div", "text": plain("申请原因：" + str(data.get("reason") or "未填写"))},
                 {"tag": "div", "text": plain("提交时间：" + str(data.get("created_at") or ""))}]
     status = data.get("status")
+    access = data.get('requested_access')
+    if isinstance(access, dict):
+        from .account_policy import MODULE_OPTIONS, CATEGORY_OPTIONS
+        module_labels = {item['value']:item['label'] for item in MODULE_OPTIONS}
+        category_labels = {item['value']:item['label'] for item in CATEGORY_OPTIONS}
+        elements[2:2] = [
+            {'tag':'div','text':plain('目标级别：'+str(access.get('level') or '')+' · 岗位：'+category_labels.get(access.get('category'),str(access.get('category') or '')))},
+            {'tag':'div','text':plain('申请模块：'+'、'.join(module_labels.get(v,v) for v in access.get('modules',[])))}]
+        elements.append({'tag':'div','text':plain('通过后以上述完整权限生效，未选择的模块不授权。')})
     if status == "pending":
         buttons = []
         for action, title, style in (("approve", "通过申请", "primary"), ("reject", "拒绝申请", "danger")):
@@ -139,7 +148,7 @@ class PermissionCards:
                 return
             if data.get("expires_at_ts") and time.time() >= float(data["expires_at_ts"]):
                 raise AssistantError("申请已过期，请重新提交。", 400)
-            if data["approver_open_id"] not in await asyncio.to_thread(self.bot.runtime.auth_manager.admin_open_ids):
+            if not await asyncio.to_thread(self.bot.runtime.auth_manager.can_review_permission_request, data['open_id'], data['approver_open_id']):
                 raise AssistantError("所选审批人的管理员权限已变化，请选择其他审批人重新申请。", 400)
             from .portal_service import external_real_write_guard
             if not external_real_write_guard()["real_write_allowed"]:
@@ -176,7 +185,7 @@ class PermissionCards:
         def decide():
             with auth._lock:
                 data = self.request(value["request_id"])
-                if not data or not hmac.compare_digest(str(data.get("review_card_token") or ""), value["token"]) or data.get("approver_open_id") != user["open_id"] or user["open_id"] not in auth.admin_open_ids():
+                if not data or not hmac.compare_digest(str(data.get("review_card_token") or ""), value["token"]) or data.get("approver_open_id") != user["open_id"] or not auth.can_review_permission_request(data.get('open_id'), user['open_id']):
                     raise AssistantError("只有所选且仍具备管理员权限的审批人能处理该卡片；其他管理员可在网页审批。", 403)
                 if data.get("review_message_id") and data["review_message_id"] != message["reply_to_message_id"]:
                     raise AssistantError("审批卡片标识不一致，未更改权限。", 403)
@@ -190,9 +199,10 @@ class PermissionCards:
                         auth.reject_permission_request(data["request_id"], reason=value["reason"], updated_by=user["open_id"])
                 return self.request(data["request_id"]), applied
         from .portal_service import PortalError
+        from .account_policy import PolicyViolation
         try:
             data, applied = await asyncio.to_thread(decide)
-        except PortalError as exc:
+        except (PortalError, PolicyViolation) as exc:
             raise AssistantError(str(exc), 409) from exc
         self.bot.controller._clear_read_cache(("auth_status",))
         await self.update_card(data)
@@ -238,9 +248,20 @@ def install(app, bot):
             return bot.controller._auth_required_response()
         def options():
             auth = bot.runtime.auth_manager
-            ids = set(auth.admin_open_ids())
-            return [{"open_id": row["open_id"], "name": row["name"] or "管理员"} for row in auth.get_permissions_payload()["users"] if row["open_id"] in ids and row["enabled"]]
-        return bot.controller._json_ok(request, session, {"items": await asyncio.to_thread(options)})
+            from .account_policy import MODULE_OPTIONS, category_options_for, level_options_for
+            oid = (session.get('user') or {}).get('open_id')
+            ids = set(auth.permission_approver_ids(oid))
+            items = []
+            for row in auth.get_permissions_payload()['users']:
+                if row['open_id'] not in ids or not row['enabled']: continue
+                profile = auth.account_profile(row['open_id'])
+                items.append({'open_id':row['open_id'], 'name':row['name'] or '上级审批人', 'level':profile['level'],
+                    'scopes':profile['scope_rules'], 'modules':profile['modules'],
+                    'level_options':level_options_for(profile['level']), 'category_options':category_options_for(profile['level'])})
+            items.sort(key=lambda item:(-int(item['level'][1:]), item['name']))
+            return {'items':items, 'current':auth.account_profile(oid), 'module_options':list(MODULE_OPTIONS),
+                    'scope_options':auth.get_permissions_payload()['scope_options']}
+        return bot.controller._json_ok(request, session, await asyncio.to_thread(options))
     @app.post("/api/auth/permission-requests/{request_id}/notify")
     async def retry_notify(request_id: str, request: Request):
         session = bot.controller._current_session(request)

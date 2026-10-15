@@ -12432,7 +12432,7 @@ class LanPortalStateStore:
         return payload if isinstance(payload, dict) else None
 
     def list_permission_requests(
-        self, *, status: str = "pending", limit: int = 100
+        self, *, status: str = "pending", limit: int = 100, open_ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
         if not self.db_path.exists():
             return []
@@ -12443,6 +12443,14 @@ class LanPortalStateStore:
         if status and status.lower() != "all":
             where = "WHERE status = ?"
             params.append(status)
+            if status == "pending":
+                where += " AND (expires_at <= 0 OR expires_at > ?)"
+                params.append(time.time())
+        if open_ids is not None:
+            if not open_ids:
+                return []
+            where += (" AND " if where else "WHERE ") + "open_id IN (" + ",".join("?" for _ in open_ids) + ")"
+            params.extend(open_ids)
         params.append(limit)
         with self._lock:
             with closing(self._connect()) as conn:

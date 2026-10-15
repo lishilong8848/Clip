@@ -87,6 +87,16 @@ try {
  await dialog.waitFor({state:'detached'});
  await page.waitForFunction(()=>document.querySelector('.lighthouse-launcher .weather-lighthouse')?.dataset.phase==='night');
  await page.waitForTimeout(900);
+ const variation=await page.locator('.lighthouse-launcher .weather-lighthouse').evaluate(root=>{
+   const star=root.querySelector('.wl-star'),cloud=root.querySelector('.wl-cloud-flight'),wave=root.querySelector('.wl-swell');
+   const before=[star.outerHTML,cloud.outerHTML,wave.outerHTML];
+   for(const node of [star,cloud,wave])node.dispatchEvent(new AnimationEvent('animationiteration',{bubbles:true}));
+   return {changed:[star.outerHTML,cloud.outerHTML,wave.outerHTML].map((value,i)=>value!==before[i]),stars:root.querySelectorAll('.wl-star').length,clouds:root.querySelectorAll('.wl-cloud-flight').length,
+     durations:[...root.querySelectorAll('.wl-cloud-flight')].map(node=>getComputedStyle(node).animationDuration),
+     direction:getComputedStyle(cloud).animationName};
+ });
+ assert.deepEqual(variation.changed,[true,true,true],'stars, clouds and swells vary at cycle boundaries');
+ assert.equal(variation.stars,9);assert.equal(variation.clouds,4);assert.equal(new Set(variation.durations).size,4);assert.equal(variation.direction,'wl-cloud-travel');
  const nightColor=await page.locator('.lighthouse-launcher .wl-tower-mid').evaluate(el=>getComputedStyle(el).stopColor);
  assert.notEqual(nightColor,dayColor,'night tower is dimmed without costly SVG filters');
  assert.notEqual(await page.locator('.lighthouse-launcher .wl-swell').evaluate(el=>getComputedStyle(el).stroke),dayWater,'night water is dimmed too');

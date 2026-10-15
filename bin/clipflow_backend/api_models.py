@@ -298,6 +298,7 @@ class PermissionRequestCreate(APIModel):
     scopes: list[str] = Field(default_factory=list)
     reason: str = ""
     approver_open_id: str = Field(default="", max_length=100)
+    requested_access: dict[str, Any] | None = None
 
 
 class PermissionRequestConfirm(APIModel):
@@ -311,7 +312,7 @@ class PermissionRequestReviewRequest(APIModel):
 
 
 class PermissionRequestBulkReviewRequest(APIModel):
-    request_ids: list[str] = Field(default_factory=list)
+    request_ids: list[str] = Field(min_length=1, max_length=200)
     scopes_by_request_id: dict[str, list[str]] = Field(default_factory=dict)
     reason: str = ""
 

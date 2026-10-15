@@ -111,6 +111,7 @@ class AccountManagement:
             item["scopes"] = target["scope_rules"]
             item["modules"] = list(target["modules"])
             item["role"] = target.get("role") or ("admin" if target["level"] in {"L0", "L1"} else "building")
+            item['is_self'] = bool(actor and item['open_id'] == actor.get('open_id'))
             item["can_edit"] = not profile or account_allowed(profile, item, "edit")
             item["can_edit_access"] = bool(item["can_edit"]) and self._access_editable(profile, item)
             item["can_delete"] = bool(profile and account_allowed(profile, item, "delete") and item["open_id"] != actor.get("open_id"))
@@ -124,7 +125,7 @@ class AccountManagement:
                         item.pop(key, None)
         options = permissions["scope_options"]
         if profile and profile["level"] == "L3":
-            options = [option for option in options if option["value"] == profile["home_scope"]]
+            options = [option for option in options if option["value"] in profile['scope_rules']]
         level_options = level_options_for(profile["level"]) if profile else copy.deepcopy(LEVEL_OPTIONS)
         category_options = category_options_for(profile["level"]) if profile else copy.deepcopy(CATEGORY_OPTIONS)
         return {"items": sorted(items, key=lambda x: (x["kind"] != "duty", x["name"], x["id"])),
@@ -138,13 +139,13 @@ class AccountManagement:
         """Whether the acting profile may edit the item's access override.
 
         Fixed H duty and L0 accounts are never editable, the enabled toggle is
-        governed separately by ``can_edit`` (kept as before). L2 may only manage
-        an already-L2 engineer and L3 only own-building L4 accounts.
+        governed separately by ``can_edit``. L2 remains base-edit only and L3
+        may configure L4 accounts inside its current managed building scope.
         """
         if profile is None:
             return False
         target_level = str(item.get("level") or "")
-        if target_level == "L0":
+        if target_level == "L0" or item.get('is_self'):
             return False
         if item.get("category") == "duty" and list(item.get("own_scopes") or []) == ["H"]:
             return False  # fixed H duty
@@ -162,6 +163,7 @@ class AccountManagement:
         profile = self.auth.account_profile(actor.get("open_id"))
         target = self.auth.account_profile(item.get("open_id"))
         current = {**item, "category": target["category"], "level": target["level"],
+                   "is_self": item.get('open_id') == actor.get('open_id'),
                    "own_scopes": [target["home_scope"]] if target["home_scope"] else [],
                    "role": "admin" if target["level"] in {"L0", "L1"} else "building"}
         if not account_allowed(profile, current, action):
@@ -332,6 +334,8 @@ class AccountManagement:
                 actor_open_id=actor.get("open_id", ""), actor_name=actor.get("name", ""),
                 target_record_id=rid, metadata={"name": person["name"]})
             try:
+                with self.auth._lock:
+                    self.check(actor, item, "edit")
                 directory.save_password(rid, new, allow_disabled=True)
             except Exception:
                 self.store.record_business_operation_audit(audit_id=audit["audit_id"], status="failed", error="密码保存未完成，未记录密码内容")
@@ -349,6 +353,7 @@ class AccountManagement:
         if item["open_id"] == actor.get("open_id"):
             raise PasswordLoginError("不能删除自己的账号权限。", 403)
         with self.auth._lock:
+            self.check(actor, item, "delete")
             previous = self.auth._load_permissions_locked()
             following = copy.deepcopy(previous)
             users = following.setdefault("users", {})
@@ -364,6 +369,29 @@ class AccountManagement:
             self.auth._save_permissions_locked(following)
             self.store.record_business_operation_audit(audit_id=audit["audit_id"], status="success")
         return {"deleted": True, "history_preserved": True}
+
+    def audit(self, actor):
+        profile = self.auth.account_profile(actor.get("open_id"))
+        if not profile["can_view_accounts"]:
+            raise PasswordLoginError("当前级别不能查看人员变更记录。", 403)
+        rows = self.store.list_business_operation_audits(domain="accounts", limit=100)
+        if profile["level"] == "L0":
+            return rows
+        visible = self.accounts(actor=actor)["items"]
+        ids = {item["id"] for item in visible}
+        oids = {item["open_id"] for item in visible}
+        result = []
+        for row in rows:
+            data = copy.deepcopy(row)
+            metadata = data.get("metadata") or {}
+            if "changes" in metadata:
+                metadata["changes"] = [change for change in metadata["changes"] if change.get("open_id") in oids]
+                if not metadata["changes"]:
+                    continue
+            elif data.get("target_record_id") not in ids and metadata.get("target_open_id") not in oids:
+                continue
+            result.append(data)
+        return result
 
 
 def install_account_management(app, controller, runtime, get_directory):
@@ -383,11 +411,7 @@ def install_account_management(app, controller, runtime, get_directory):
             manager = AccountManagement(await asyncio.to_thread(get_directory))
             if request.method == "GET":
                 if operation == "audit":
-                    if profile["level"] == "L2":
-                        raise PasswordLoginError("当前级别不能查看人员变更记录。", 403)
-                    rows = await asyncio.to_thread(runtime.state_store.list_business_operation_audits, domain="accounts", limit=100)
-                    if profile["level"] == "L3":
-                        rows = [row for row in rows if row.get("actor_open_id") == actor.get("open_id")]
+                    rows = await asyncio.to_thread(manager.audit, actor)
                     return response({"items": rows})
                 return response(await asyncio.to_thread(manager.accounts, request.query_params.get("refresh") == "true", actor))
             origin = urlsplit(request.headers.get("origin") or request.headers.get("referer") or "")

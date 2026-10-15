@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .test_personnel_password_login import _TempDirTestCase, PersonnelLoginHarness, _page, _user
 from lan_bitable_template_portal.account_management import AccountManagement, install_account_management
-from lan_bitable_template_portal.account_policy import account_allowed, business_delete_denial
+from lan_bitable_template_portal.account_policy import MODULE_IDS, account_allowed, business_delete_denial
 from lan_bitable_template_portal.personnel_password_login import PasswordLoginError
 from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID
 from lan_bitable_template_portal.portal_service import PortalError
@@ -48,6 +48,11 @@ class AccountLevelTests(_TempDirTestCase):
     def test_levels_and_latest_scope_rules_ignore_old_cross_building_admin_grants(self):
         auth = self.h.auth
         self.assertEqual(auth.account_profile(LI_SHILONG_OPEN_ID)["level"], "L0")
+        root = auth.account_profile(LI_SHILONG_OPEN_ID)
+        self.assertEqual(set(root["modules"]), MODULE_IDS)
+        self.assertEqual(root["scope_rules"], auth._admin_scopes())
+        self.assertTrue(root["can_manage_accounts"])
+        self.assertTrue(root["can_delete_business"])
         for rid, level, scopes in (("HM1", "L1", auth._admin_scopes()), ("HM2", "L1", auth._admin_scopes()),
                                    ("HE1", "L2", ["H"]), ("AS", "L3", ["A"]), ("AE", "L4", ["A"])):
             oid = self.actor(rid)["open_id"]
@@ -69,11 +74,11 @@ class AccountLevelTests(_TempDirTestCase):
         listing = self.manager.accounts(actor=actor)
         self.assertEqual({item["category"] for item in listing["items"]}, {"engineer"})
         for item in listing["items"]:
-            self.assertTrue(item["can_edit"])
+            self.assertEqual(item["can_edit"], not item['is_self'])
             self.assertFalse(item["can_delete"])
             self.assertNotIn("last_login", item)
             self.assertNotIn("employee_no", item)
-            self.assertFalse(account_allowed(listing["policy"], item, "view"))
+            self.assertEqual(account_allowed(listing["policy"], item, "view"), item['is_self'])
         self.manager.update({"changes": [self.change("AE", enabled=False)]}, actor)
         self.assertTrue(self.h.auth._open_id_explicitly_disabled("ou_fixtureAE"))
         for rid in ("AO", "AS", "HM1"):
@@ -102,7 +107,7 @@ class AccountLevelTests(_TempDirTestCase):
     def test_supervisor_building_isolation_and_atomic_mixed_batch(self):
         listing = self.manager.accounts(actor=self.actor("AS"))
         self.assertEqual({tuple(item["own_scopes"]) for item in listing["items"]}, {("A",)})
-        self.assertEqual({item["category"] for item in listing["items"]}, {"engineer", "operator", "duty"})
+        self.assertEqual({item["category"] for item in listing["items"] if not item['is_self']}, {"engineer", "operator", "duty"})
         before = self.h.auth._load_permissions_locked()
         with self.assertRaises(PasswordLoginError):
             self.manager.update({"changes": [self.change("AE", enabled=False), self.change("BE", enabled=False)]}, self.actor("AS"))

@@ -34,7 +34,7 @@ export function adaptLearningPage(source) {
     <div><strong>{{ learner ? learner.name : scopeLabel + '学习汇总' }}</strong><span v-if="learner">{{learner.employee_no ? '工号 ' + learner.employee_no : ''}}{{viewMode==='practice' ? ' · 本人答题' : ''}}</span></div>
     <NButton v-if="viewMode==='overview' && canViewBuildings" size="small" secondary data-v2-navigation :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
   </div>`);
-  code = replaceNode(code, has('tabs'), `<nav v-if="ready" class="tabs v2-learning-tabs" aria-label="学练页面" data-v2-navigation><NButton v-for="item in v2PrimaryTabs" :key="item.id" :type="tab===item.id?'primary':'default'" :quaternary="tab!==item.id" :aria-current="tab===item.id?'page':undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="16" />{{item.label}}</NButton></nav>`);
+  code = replaceNode(code, has('tabs'), `<nav v-if="ready && tab !== 'sharing'" class="tabs v2-learning-tabs" aria-label="学练页面" data-v2-navigation><NButton v-for="item in v2PrimaryTabs" :key="item.id" :type="tab===item.id?'primary':'default'" :quaternary="tab!==item.id" :aria-current="tab===item.id?'page':undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="16" />{{item.label}}</NButton></nav>`);
   code = replaceNode(code, node => node.tag === 'div' && has('toolbar')(node) && node.loc.source.includes('studyMode'), `<div class="toolbar v2-learning-studybar" data-v2-navigation>
     <div v-if="reading && tab!=='today'" class="actions"><NButton secondary :disabled="busy" @click="saveDraft(); reading=false; loadView()"><ChevronLeft :size="16" />返回{{tab==='review'?'复习列表':'学习历史'}}</NButton><span>{{paper?.date}} · {{paper?.scope}}楼</span></div>
     <template v-else>
@@ -81,7 +81,7 @@ export function adaptLearningPage(source) {
   return modernizeControls(code);
 }
 
-function modernizeControls(source) {
+export function modernizeControls(source) {
   const { descriptor }=parse(source), edits=[];
   function visit(node,inForm=false){
     if(node.type===1){

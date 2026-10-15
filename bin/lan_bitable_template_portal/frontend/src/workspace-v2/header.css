@@ -9,6 +9,7 @@
   --v2-nav-side-bottom: color-mix(in srgb, var(--v2-nav-color) 5%, white);
   --v2-nav-text: color-mix(in srgb, var(--v2-nav-color) 25%, #18212c);
   --v2-nav-active: color-mix(in srgb, var(--v2-nav-color) 19%, white);
+  --v2-content-sticky-top: 0px;
 }
 /* Header and both scroll regions share grid tracks instead of separate offsets. */
 @media (min-width: 761px) {
@@ -41,7 +42,16 @@
     width: 100%;
     transition: none;
     overflow-y: auto;
+    scroll-padding-top: 16px;
   }
+}
+.workspace-v2 .v2-shell:not(.is-print):not(.is-auth) > .v2-main { padding-top: 16px; }
+.workspace-v2 .v2-main > #workspace-page-filters { margin-top: 0; }
+.workspace-v2 .v2-main > :is(.guard-page,.drill-page,.learning-page,.daily-page,.kb-page,.signature-management,.history-memory) { padding-top: 0; }
+.workspace-v2 .v2-main :is(h1,h2,h3,[id]) { scroll-margin-top: calc(var(--v2-content-sticky-top) + 16px); }
+@media(max-width:760px) {
+  .workspace-v2 .v2-shell { --v2-content-sticky-top: var(--head-height); }
+  .workspace-v2 .v2-shell:not(.is-print):not(.is-auth) > .v2-main { padding-top: 10px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .workspace-v2 .v2-shell:not(.is-print) { transition: none; }

@@ -194,9 +194,29 @@ class SharingExercises:
 
     def batch(self, identity, conn=None):
         value = self.learning._get('sharing_batch', identity, conn)
-        if not value:
+        if not value or value.get('status') == 'deleted':
             raise LearningError('分享会批次不存在。', 404)
         return value
+
+    def delete(self, identity, version, actor):
+        self.learning._admin(actor)
+        with self.learning.transaction() as conn:
+            batch = self.learning._get('sharing_batch', identity, conn)
+            if not batch:
+                raise LearningError('分享会批次不存在。', 404)
+            if batch.get('status') == 'deleted':
+                return {'id': identity, 'deleted': True}
+            if version != batch['version']:
+                raise LearningError('批次已变化，请刷新后再删除。', 409)
+            # Keep the tombstone and delivery receipts for restore/idempotency; never delete bank records.
+            batch.update(status='deleted', deleted_at=stamp(), deleted_by=actor['id'], version=batch['version'] + 1, progress='')
+            self.learning._put('sharing_batch', identity, batch, conn)
+            for row in conn.execute("SELECT key,payload FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=?", (identity,)).fetchall():
+                job = json.loads(row[1])
+                if job['status'] in {'pending', 'failed'}:
+                    job.update(status='skipped', error='批次已删除，停止后续任务；已上传题目保留。')
+                    self.learning._put('sharing_delivery', row[0], job, conn)
+        return {'id': identity, 'deleted': True}
 
     def create(self, url, operation_id, actor, question_types=None):
         self.learning._admin(actor)
@@ -285,7 +305,7 @@ class SharingExercises:
     def listing(self, actor, page=1):
         try: page = max(1, min(10000, int(page)))
         except (TypeError, ValueError): raise LearningError('页码无效。') from None
-        where, args = "kind='sharing_batch'", []
+        where, args = "kind='sharing_batch' AND COALESCE(json_extract(payload,'$.status'),'')!='deleted'", []
         if not actor.get('is_admin'):
             where += " AND json_extract(payload,'$.status') IN ('published','closed') AND EXISTS (SELECT 1 FROM json_each(documents.payload,'$.participants') p WHERE "
             if actor.get('shared_account') and actor.get('scope'):
