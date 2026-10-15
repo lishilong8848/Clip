@@ -9,6 +9,8 @@ PROJECT = Path(__file__).resolve().parents[2]
 DATA = PROJECT / 'bin/data/public_access'
 CONFIG = DATA / 'config.json'
 SPEC = Path(__file__).with_name('frpc-distribution.json')
+DEPLOYMENT = Path(__file__).with_name('deployment.json')
+DISABLED = DATA / 'autostart-disabled.json'
 
 
 def atomic_json(path, value):
@@ -35,7 +37,10 @@ class Settings:
         path = Path(path)
         if not path.is_file():
             return cls()
-        value = json.loads(path.read_text(encoding='utf-8-sig'))
+        return cls.from_value(json.loads(path.read_text(encoding='utf-8-sig')))
+
+    @classmethod
+    def from_value(cls, value):
         if not isinstance(value, dict) or set(value) - set(cls.__dataclass_fields__):
             raise ValueError('公网配置字段无效。')
         config = cls(**value)
@@ -53,7 +58,7 @@ class Settings:
             config.validate_enabled()
         return config
 
-    def validate_enabled(self):
+    def validate_enabled(self, *, require_token=True):
         url = urlsplit(self.public_url)
         if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment \
                 or url.path not in ('', '/') or url.port not in (None, 443):
@@ -61,7 +66,7 @@ class Settings:
         if not re.fullmatch(r'[A-Za-z0-9.-]+', url.hostname) or '.' not in url.hostname \
                 or url.hostname in {'127.0.0.1', 'localhost'}:
             raise ValueError('公网域名无效。')
-        if not re.fullmatch(r'[A-Za-z0-9.:-]+', self.server_addr) or not self.token.strip():
+        if not re.fullmatch(r'[A-Za-z0-9.:-]+', self.server_addr) or require_token and not self.token.strip():
             raise ValueError('公网服务器或认证令牌尚未配置。')
 
     @property

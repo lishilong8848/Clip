@@ -74,6 +74,18 @@ KNOWN_DYNAMIC_BINDINGS = [
         note="新版变更截图上传由 base(item) 绑定真实目标记录,命中原截图接口。",
     ),
     dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/dashboard/CheckAttachments.vue",
+        line=38, kind="covered",
+        method_paths=[("DELETE", "/api/pre-shift-checks/files/{param}")],
+        window=3, needles=["await requestJson(url(file),{method:'DELETE'})"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/dashboard/CheckAttachments.vue",
+            definition_marker="function url(file:Dict)",
+            definition_needles=["'/api/pre-shift-checks/files/'", "encodeURIComponent(file.id)"],
+        ),
+        note="班前检查附件删除复用已注册 DELETE 路由；后端校验上传人、楼栋及提交状态，保留用户确认。",
+    ),
+    dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeChangeConfirmations.vue",
         line=32, kind="covered",
         method_paths=[("POST", "/api/change-confirmations/{param}/confirm")],

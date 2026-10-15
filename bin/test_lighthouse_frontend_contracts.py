@@ -3,7 +3,7 @@
 
 只读审查,不启动服务、不调用真实业务。用与 bin/test_lighthouse_api.py
 中 ``_native_route_catalog`` 相同的 AST 注册办法从
-``clipflow_backend/main.py`` 与三个 ``ROUTES`` 文件重建 FastAPI 目录,然后
+``clipflow_backend/main.py``、班前检查路由与三个 ``ROUTES`` 文件重建 FastAPI 目录,然后
 逐条核对前端(``lan_bitable_template_portal/frontend/src``)已核实的业务API
 与方法、动态路径、multipart/raw/json 传输格式是否存在于目录中。
 
@@ -92,7 +92,7 @@ def _make_signature_stub(node):
 
 
 def build_native_catalog():
-    """复刻 _native_route_catalog:AST 读取 main.py 装饰器 + 三个 ROUTES 文件。
+    """复刻 _native_route_catalog:AST 读取已挂载路由的装饰器 + 三个 ROUTES 文件。
 
     与 test_lighthouse_api 的空实现占位不同,这里从 AST 重建每个路由函数的
     参数/注解/File/Form 默认(正文换成 raise),让 ``_route_multipart``/
@@ -113,25 +113,26 @@ def build_native_catalog():
     # 模型名经 lighthouse_api._resolve_model 的 clipflow_backend.api_models 兜底解析。
     real_source: dict[tuple, str] = {}
 
-    tree = ast.parse(MAIN_PY.read_text(encoding="utf-8-sig"))
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+    for route_file in (MAIN_PY, PORTAL_DIR / "pre_shift_routes.py"):
+        tree = ast.parse(route_file.read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            method = decorator.func.attr
-            if method not in {"get", "post", "put", "patch", "delete", "api_route"} or not decorator.args:
-                continue
-            path = ast.literal_eval(decorator.args[0])
-            if not path.startswith("/api/"):
-                continue
-            if method != "api_route":
-                methods = [method.upper()]
-            else:
-                methods = next(ast.literal_eval(kw.value) for kw in decorator.keywords if kw.arg == "methods")
-            real_source[(path, frozenset(methods))] = textwrap.dedent(ast.unparse(node)).strip()
-            app.add_api_route(path, _make_signature_stub(node) or _dummy_endpoint, methods=methods)
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not isinstance(decorator.func, ast.Attribute):
+                    continue
+                method = decorator.func.attr
+                if method not in {"get", "post", "put", "patch", "delete", "api_route"} or not decorator.args:
+                    continue
+                path = ast.literal_eval(decorator.args[0])
+                if not path.startswith("/api/"):
+                    continue
+                if method != "api_route":
+                    methods = [method.upper()]
+                else:
+                    methods = next(ast.literal_eval(kw.value) for kw in decorator.keywords if kw.arg == "methods")
+                real_source[(path, frozenset(methods))] = textwrap.dedent(ast.unparse(node)).strip()
+                app.add_api_route(path, _make_signature_stub(node) or _dummy_endpoint, methods=methods)
 
     for filename, prefix in (("learning_routes.py", "learning"),
                              ("plan_convergence_routes.py", "plan-convergence"),

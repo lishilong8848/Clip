@@ -4,17 +4,20 @@ import secrets
 
 
 def attach(app, controller):
-    from .config import Settings
+    from .config import DISABLED
+    from .provisioning import local_host, read_deployment
     try:
-        settings = Settings.read()
-        if not settings.enabled:
+        if DISABLED.is_file():
+            return app, None
+        profile, settings = read_deployment()
+        if not local_host(profile['deployment_host']):
             return app, None
         if settings.ingress_port == controller.bound_port:
             raise ValueError('公网隔离入口不能与局域网业务端口相同。')
         from .ingress import PublicGuard
         from .supervisor import PublicAccess
         token = secrets.token_urlsafe(32)
-        manager = PublicAccess(settings, controller.get_url(), token)
+        manager = PublicAccess(settings, controller.get_url(), token, deployment=profile)
         return PublicGuard(app, token, settings, controller._current_session), manager
     except Exception as exc:
         # Invalid optional config must not prevent the LAN app from starting.

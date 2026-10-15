@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew the dedicated ClipFlow HTTPS certificate
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+Nice=10
+TimeoutStartSec=15min
+ExecStart=/bin/sh /opt/clipflow-public/acme/acme.sh --cron --home /opt/clipflow-public/acme --config-home /opt/clipflow-public/acme-state --cert-home /opt/clipflow-public/acme-certs

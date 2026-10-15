@@ -277,9 +277,15 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertGreater(len(run.call_args_list), 5)
         self.assertTrue(all(call.args[0][0] == str(python) for call in run.call_args_list))
         self.assertTrue(all(call.kwargs['env']['PYTHONNOUSERSITE'] == '1' for call in run.call_args_list))
-        compile_call = run.call_args_list[0]
-        self.assertEqual(compile_call.args[0][1], '-c')
-        self.assertIn('cfile=', compile_call.args[0][2])
+        manifest_calls = [call for call in run.call_args_list
+                          if call.args[0][1] == '-c' and "component='frpc'" in call.args[0][2]]
+        self.assertEqual(len(manifest_calls), 1)
+        self.assertTrue(manifest_calls[0].kwargs['check'])
+        self.assertEqual(manifest_calls[0].kwargs['cwd'], package_portable.PROJECT_ROOT)
+        compile_calls = [call for call in run.call_args_list
+                         if call.args[0][1] == '-c' and 'cfile=' in call.args[0][2]]
+        self.assertEqual(len(compile_calls), 1)
+        compile_call = compile_calls[0]
         self.assertNotIn('PYTHONPYCACHEPREFIX', compile_call.kwargs.get('env', {}))
 
     def test_build_uses_project_python_even_when_launched_from_system_python(self) -> None:

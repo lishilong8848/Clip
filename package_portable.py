@@ -192,6 +192,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("启动程序.bat"),
     Path("bin/refactored_main.py"),
     Path("bin/public_access/frpc-distribution.json"),
+    Path("bin/public_access/deployment.json"),
     Path("bin/openclaw_service/__main__.py"),
     Path("bin/openclaw_service/launcher.py"),
     Path("bin/openclaw_service/client.py"),
@@ -824,6 +825,8 @@ def write_patch_meta(
 
     ui_changed: bool = False,
 
+    restart_required: bool = False,
+
     force_ui_update: bool = False,
 
     required_packages: list[str] | None = None,
@@ -862,7 +865,7 @@ def write_patch_meta(
 
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
 
-        "restart_required": bool(ui_changed),
+        "restart_required": bool(ui_changed or restart_required),
 
         "include_venv": include_venv,
 
@@ -1675,8 +1678,9 @@ def _run_packaging_preflight_tests() -> None:
     subprocess.run([test_python, '-c',
         "import json,sys;sys.path.insert(0,'bin');from public_access.config import SPEC;"
         "from openclaw_service.assistant.lighthouse_distribution import validate_spec;"
-        "validate_spec(json.loads(SPEC.read_text(encoding='utf-8')),component='frpc')"],
-        cwd=PROJECT_ROOT, check=True)
+        "validate_spec(json.loads(SPEC.read_text(encoding='utf-8')),component='frpc');"
+        "from public_access.provisioning import read_deployment;read_deployment()"],
+        cwd=PROJECT_ROOT, check=True, env={**os.environ, 'PYTHONNOUSERSITE': '1'})
 
     _assert_project_iterator_excludes_runtime_data()
     _cleanup_vue_dist_assets()
@@ -3039,6 +3043,8 @@ def build_patch(
 
     forced_py = 0
 
+    public_restart = False
+
     current_files = _iter_project_files(PROJECT_ROOT, exclude_venv=exclude_venv)
 
     # Ship the complete runtime, even when this machine's baseline was updated.
@@ -3047,6 +3053,9 @@ def build_patch(
         rel = src.relative_to(PROJECT_ROOT)
         if rel.is_relative_to(IMPORTED_SKILLS_DIR):
             continue
+        if rel.parts[:2] == ("bin", "public_access") and rel.suffix in {".py", ".json"}:
+            # A full patch may reach an older client than this machine's baseline.
+            public_restart = True
         if rel.suffix.lower() == ".py":
             forced_py += 1
         if rel in baseline_files:
@@ -3083,6 +3092,9 @@ def build_patch(
 
             # Installed clients retain the previous entry's hashed resources.
             if rel not in current_set and not is_frontend_asset(rel):
+
+                if rel.parts[:2] == ("bin", "public_access") and rel.suffix in {".py", ".json"}:
+                    public_restart = True
 
                 deleted += 1
 
@@ -3185,6 +3197,8 @@ def build_patch(
         target_ui_version=target_ui_version,
 
         ui_changed=ui_changed,
+
+        restart_required=public_restart,
 
         force_ui_update=force_ui_update,
 

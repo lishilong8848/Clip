@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from public_access.config import CONFIG, DATA, Settings, atomic_json
+from public_access.config import CONFIG, DATA, DISABLED, Settings, atomic_json
 
 
 def main():
@@ -22,6 +22,20 @@ def main():
     parser.add_argument('--status', action='store_true')
     parser.add_argument('--prepare', action='store_true', help='Download and verify FRPC without opening a tunnel.')
     args = parser.parse_args()
+    if (args.enable or args.disable) and not (args.import_frpc or args.public_url or args.prepare or args.status):
+        if args.enable:
+            if not args.confirm_server_ready:
+                raise ValueError('Verify server HTTPS, private FRPS port and OAuth callback before enabling.')
+            from public_access.provisioning import read_deployment
+            read_deployment()
+            DISABLED.unlink(missing_ok=True)
+        else:
+            atomic_json(DISABLED, {'disabled': True})
+        print('Designated-host public autostart %s. Applies on next portal start; other hosts cannot start the tunnel.' %
+              ('enabled' if args.enable else 'disabled'))
+        return
+    if args.disable:
+        atomic_json(DISABLED, {'disabled': True})
     if args.prepare:
         import tempfile
         from public_access.distribution import install, verify_binary
@@ -63,6 +77,8 @@ def main():
         atomic_json(candidate, value)
         Settings.read(candidate)
         candidate.replace(CONFIG)
+        if args.enable:
+            DISABLED.unlink(missing_ok=True)
     finally:
         candidate.unlink(missing_ok=True)
     print('Public access configuration saved; enabled=%s. Applies on next portal start. Credentials not displayed.' % value['enabled'])

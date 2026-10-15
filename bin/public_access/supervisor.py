@@ -16,9 +16,10 @@ BACKOFF = (5, 15, 30, 60)
 
 
 class PublicAccess:
-    def __init__(self, settings, upstream, token, *, data=DATA, spec_path=SPEC):
+    def __init__(self, settings, upstream, token, *, data=DATA, spec_path=SPEC, deployment=None):
         self.settings, self.upstream, self.token = settings, upstream, token
         self.data, self.spec_path = data, spec_path
+        self.deployment = deployment
         self.stop_event = threading.Event()
         self.thread = self.child = self.server = None
         self.lock = threading.Lock()
@@ -93,6 +94,7 @@ class PublicAccess:
         sock = None
         handler = None
         server_thread = None
+        config_written = False
         try:
             from upload_event_module.services.process_lifetime import lower_current_thread_priority, register_child_process
             lower_current_thread_priority(background_io=True)
@@ -105,22 +107,47 @@ class PublicAccess:
             if os.name == 'nt':
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             sock.bind(('127.0.0.1', self.settings.ingress_port))
+            if self.deployment is not None:
+                from .provisioning import provision
+                attempt = 0
+                while not self.stop_event.is_set():
+                    try:
+                        self.status('provisioning', '正在后台核验正式机公网凭据；局域网不受影响')
+                        self.settings = provision(self.deployment, self.data, cancelled=self.stop_event.is_set)
+                        break
+                    except Exception as exc:
+                        if self.stop_event.is_set():
+                            return
+                        self.status('provision_retry', '公网凭据准备未完成，将退避重试 | error=' + type(exc).__name__)
+                        if self.stop_event.wait(BACKOFF[min(attempt, len(BACKOFF) - 1)]):
+                            return
+                        attempt += 1
+                if self.stop_event.is_set():
+                    return
             root = self.data / 'frpc'
             self.status('preparing', '正在后台准备公网组件；局域网已独立运行')
             old_binary, old_spec = previous(root)
-            try:
-                binary, spec = install(root, spec_path=self.spec_path, cancelled=self.stop_event.is_set)
-            except Exception:
-                if self.stop_event.is_set():
-                    return
-                if not old_binary:
-                    raise
-                binary, spec = old_binary, old_spec
-                self.status('fallback', '公网组件更新未完成，继续使用已验证旧版本')
+            attempt = 0
+            while not self.stop_event.is_set():
+                try:
+                    binary, spec = install(root, spec_path=self.spec_path, cancelled=self.stop_event.is_set)
+                    break
+                except Exception as exc:
+                    if self.stop_event.is_set():
+                        return
+                    if old_binary:
+                        binary, spec = old_binary, old_spec
+                        self.status('fallback', '公网组件更新未完成，继续使用已验证旧版本')
+                        break
+                    self.status('install_retry', '公网组件下载未完成，将退避重试；局域网不受影响 | error=' + type(exc).__name__)
+                    if self.stop_event.wait(BACKOFF[min(attempt, len(BACKOFF) - 1)]):
+                        return
+                    attempt += 1
             if self.stop_event.is_set():
                 return
             config_file = self.data / 'frpc.generated.json'
             atomic_json(config_file, self.settings.frpc_config())
+            config_written = True
             try:
                 verify_binary(binary, spec, config_file)
             except Exception:
@@ -200,5 +227,11 @@ class PublicAccess:
             if handler:
                 self.logger.removeHandler(handler)
                 handler.close()
+            # FRPC needs a plaintext runtime config, but it need not survive shutdown.
+            try:
+                if config_written:
+                    (self.data / 'frpc.generated.json').unlink(missing_ok=True)
+            except OSError:
+                pass
             if was_stopping:
                 self.status('stopped', '公网组件已停止')

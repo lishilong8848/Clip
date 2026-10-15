@@ -1,13 +1,17 @@
 """Public tunnel isolation tests: no real server, credentials or business writes."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
+import hashlib
 import json
+import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 import zipfile
@@ -191,15 +195,43 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigAndDistributionTests(unittest.TestCase):
+    def test_full_public_runtime_patch_requires_restart_even_with_current_baseline(self):
+        import package_portable as package
+        for mode in ('added', 'changed', 'deleted', 'unchanged'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                project, baseline = root / 'project', root / 'baseline'
+                for folder in (project, baseline):
+                    (folder / 'bin/public_access').mkdir(parents=True)
+                relative = Path('bin/public_access/supervisor.py')
+                if mode != 'deleted':
+                    (project / relative).write_text('VERSION = 2\n', encoding='utf-8')
+                if mode != 'added':
+                    (baseline / relative).write_text(
+                        'VERSION = 2\n' if mode == 'unchanged' else 'VERSION = 1\n', encoding='utf-8')
+                with patch.object(package, 'PROJECT_ROOT', project), \
+                     patch.object(package, 'BUILD_DIR', root / 'build'), \
+                     patch.object(package, '_include_frontend_generation', return_value=0), \
+                     patch.object(package, '_include_assistant_skills', return_value=0):
+                    package.build_patch(root / 'dist', baseline, 'fixture')
+                meta = json.loads((root / 'build/fixture_patch_only/bin/patch_meta.json').read_text(encoding='utf-8'))
+                self.assertFalse(meta['ui_changed'])
+                self.assertTrue(meta['restart_required'])
+
     def test_disabled_does_not_start_or_download(self):
         app = make_app()
-        with patch('public_access.config.Settings.read', return_value=Settings()), patch('public_access.supervisor.PublicAccess') as manager:
+        with patch('public_access.config.DISABLED') as disabled, patch('public_access.provisioning.read_deployment') as read, \
+                patch('public_access.supervisor.PublicAccess') as manager:
+            disabled.is_file.return_value = True
             self.assertEqual(attach(app, Mock()), (app, None))
             manager.assert_not_called()
+            read.assert_not_called()
 
     def test_invalid_config_cannot_break_lan_startup(self):
         app = make_app()
-        with patch('public_access.config.Settings.read', side_effect=ValueError('invalid')):
+        with patch('public_access.config.DISABLED') as disabled, \
+                patch('public_access.provisioning.read_deployment', side_effect=ValueError('invalid')):
+            disabled.is_file.return_value = False
             self.assertEqual(attach(app, Mock()), (app, None))
 
     def test_generated_config_cannot_forward_to_portal_directly(self):
@@ -283,6 +315,30 @@ class ConfigAndDistributionTests(unittest.TestCase):
                 popen.assert_not_called()
             self.assertEqual(manager.state, 'stopped')
 
+    def test_first_component_download_failure_retries_without_starting_a_tunnel(self):
+        with tempfile.TemporaryDirectory() as temp, socket.socket() as reserve:
+            reserve.bind(('127.0.0.1', 0))
+            port = reserve.getsockname()[1]
+            reserve.close()
+            manager = PublicAccess(replace(SETTINGS, ingress_port=port),
+                'http://127.0.0.1:18766', SECRET, data=Path(temp))
+            attempts = []
+            def install(*args, **kwargs):
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise OSError('offline')
+                manager.stop()
+                return Path(temp) / 'frpc.exe', {'version': 'fixture'}
+            with patch('public_access.supervisor.previous', return_value=(None, None)), \
+                    patch('public_access.supervisor.install', side_effect=install), \
+                    patch.object(manager.stop_event, 'wait', return_value=False) as wait, \
+                    patch('public_access.supervisor.subprocess.Popen') as spawn:
+                manager._run()
+                self.assertEqual(len(attempts), 2)
+                wait.assert_called_once_with(5)
+                spawn.assert_not_called()
+                self.assertEqual(manager.state, 'stopped')
+
     def test_background_start_is_single_and_stop_only_terminates_owned_child(self):
         manager = PublicAccess(SETTINGS, 'http://127.0.0.1:18766', SECRET)
         with patch('public_access.supervisor.threading.Thread') as thread:
@@ -294,12 +350,63 @@ class ConfigAndDistributionTests(unittest.TestCase):
         manager.child.terminate.assert_called_once()
         self.assertEqual(BACKOFF, (5, 15, 30, 60))
 
+    def test_background_stop_reaps_child_and_closes_ingress(self):
+        real_popen = subprocess.Popen
+        children = []
+        with tempfile.TemporaryDirectory() as temp, socket.socket() as reserve:
+            reserve.bind(('127.0.0.1', 0))
+            port = reserve.getsockname()[1]
+            reserve.close()
+            manager = PublicAccess(replace(SETTINGS, ingress_port=port),
+                                   'http://127.0.0.1:18766', SECRET, data=Path(temp))
+
+            def spawn(args, **kwargs):
+                child = real_popen([sys.executable, '-u', '-c',
+                    "import time; print('start proxy success [clipflow-public]', flush=True); time.sleep(30)"], **kwargs)
+                children.append(child)
+                return child
+
+            with patch('public_access.supervisor.previous', return_value=(None, None)), \
+                 patch('public_access.supervisor.install', return_value=(Path(temp) / 'frpc.exe', {'version': 'fixture'})), \
+                 patch('public_access.supervisor.verify_binary'), \
+                 patch('public_access.supervisor.subprocess.Popen', side_effect=spawn), \
+                 patch('upload_event_module.services.process_lifetime.register_child_process', return_value=True):
+                try:
+                    manager.start()
+                    worker = manager.thread
+                    manager.start()
+                    self.assertIs(manager.thread, worker)
+                    deadline = time.monotonic() + 8
+                    while manager.state != 'connected' and worker.is_alive() and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    self.assertEqual(manager.state, 'connected')
+                    self.assertEqual(len(children), 1)
+                    self.assertIsNone(children[0].poll())
+                    manager.stop()
+                    worker.join(8)
+                    self.assertFalse(worker.is_alive())
+                    self.assertIsNotNone(children[0].poll())
+                    self.assertEqual(manager.state, 'stopped')
+                    with socket.socket() as probe:
+                        probe.settimeout(.2)
+                        self.assertNotEqual(probe.connect_ex(('127.0.0.1', port)), 0)
+                finally:
+                    manager.stop()
+                    if manager.thread:
+                        manager.thread.join(8)
+                    for child in children:
+                        if child.poll() is None:
+                            child.kill()
+                            child.wait(timeout=3)
+
     def test_occupied_ingress_port_does_not_download_or_spawn(self):
         with tempfile.TemporaryDirectory() as temp, socket.socket() as occupied:
             occupied.bind(('127.0.0.1', 0))
             occupied.listen()
             manager = PublicAccess(replace(SETTINGS, ingress_port=occupied.getsockname()[1]),
                                    'http://127.0.0.1:18766', SECRET, data=Path(temp))
+            config = Path(temp) / 'frpc.generated.json'
+            config.write_text('owned by the running instance', encoding='utf-8')
             with patch('public_access.supervisor.install') as installer, \
                     patch('public_access.supervisor.subprocess.Popen') as popen:
                 manager._run()
@@ -307,6 +414,7 @@ class ConfigAndDistributionTests(unittest.TestCase):
                 popen.assert_not_called()
             self.assertEqual(manager.state, 'failed')
             self.assertGreater(occupied.getsockname()[1], 0)
+            self.assertEqual(config.read_text(encoding='utf-8'), 'owned by the running instance')
 
     def test_corrupt_executable_is_not_reused(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -319,6 +427,221 @@ class ConfigAndDistributionTests(unittest.TestCase):
             self.assertIsNone(installed(folder / 'runtime', spec))
             binary, _ = install(folder / 'runtime', spec_path=folder / 'spec.json', mirror_factory=lambda: mirror)
             self.assertEqual(checksum(binary), spec['files']['frpc.exe'])
+
+
+class ProvisioningTests(unittest.TestCase):
+    def profile(self):
+        from openclaw_service.assistant.lighthouse_distribution import BASE, TABLE
+        value = {'format': 1, 'deployment_host': '192.168.224.130', 'settings': asdict(SETTINGS)}
+        content = json.dumps(value, sort_keys=True).encode('utf-8')
+        digest = hashlib.sha256(content).hexdigest()
+        public = asdict(SETTINGS)
+        public.pop('token')
+        return {'format': 1, 'deployment_host': value['deployment_host'], 'settings': public,
+                'credential': {'format': 1, 'component': 'public_access_profile', 'version': digest,
+                    'platform': 'windows_amd64', 'base': BASE, 'table': TABLE,
+                    'sha256': digest, 'size': len(content), 'parts': [{'index': 1,
+                        'size': len(content), 'sha256': digest, 'record_id': 'rec-fixture', 'file_token': 'fixture'}]}}, content
+
+    def test_manifest_validates_and_contains_no_token(self):
+        from public_access.provisioning import read_deployment
+        profile, _ = self.profile()
+        with tempfile.TemporaryDirectory() as temp:
+            file = Path(temp) / 'deployment.json'
+            atomic_json(file, profile)
+            loaded, settings = read_deployment(file)
+            self.assertEqual(loaded, profile)
+            self.assertEqual(settings.token, '')
+            self.assertTrue(settings.enabled)
+            for invalid in ({**profile, 'deployment_host': '127.0.0.1'},
+                            {**profile, 'settings': {**profile['settings'], 'token': 'do-not-ship'}},
+                            {**profile, 'credential': {**profile['credential'], 'size': 8193}}):
+                atomic_json(file, invalid)
+                with self.assertRaises(Exception):
+                    read_deployment(file)
+
+    def test_local_interface_binding_never_connects_to_remote_host(self):
+        from public_access.provisioning import local_host
+        with patch('public_access.provisioning.socket.socket') as factory:
+            probe = factory.return_value.__enter__.return_value
+            probe.bind.side_effect = OSError('not assigned locally')
+            self.assertFalse(local_host('192.168.224.130'))
+            probe.bind.assert_called_once_with(('192.168.224.130', 0))
+            probe.connect.assert_not_called()
+            probe.bind.side_effect = None
+            self.assertTrue(local_host('192.168.224.130'))
+
+    def test_other_hosts_ignore_even_an_enabled_copied_config(self):
+        from public_access.provisioning import provision
+        profile, _ = self.profile()
+        app = make_app()
+        with patch('public_access.config.DISABLED') as disabled, \
+                patch('public_access.provisioning.read_deployment', return_value=(profile, SETTINGS)), \
+                patch('public_access.provisioning.local_host', return_value=False), \
+                patch('public_access.config.Settings.read', return_value=SETTINGS), \
+                patch('public_access.supervisor.PublicAccess') as manager:
+            disabled.is_file.return_value = False
+            self.assertEqual(attach(app, Mock()), (app, None))
+            manager.assert_not_called()
+            factory = Mock()
+            with self.assertRaises(ValueError):
+                provision(profile, mirror_factory=factory)
+            factory.assert_not_called()
+
+    def test_formal_host_attaches_without_a_cloud_request_or_reading_old_config(self):
+        profile, _ = self.profile()
+        app = make_app()
+        controller = Mock(bound_port=18766)
+        controller.get_url.return_value = 'http://127.0.0.1:18766'
+        with patch('public_access.config.DISABLED') as disabled, \
+                patch('public_access.provisioning.read_deployment', return_value=(profile, SETTINGS)), \
+                patch('public_access.provisioning.local_host', return_value=True), \
+                patch('public_access.config.Settings.read') as old_config, \
+                patch('public_access.provisioning.provision') as download:
+            disabled.is_file.return_value = False
+            guard, manager = attach(app, controller)
+            self.assertIsInstance(guard, PublicGuard)
+            self.assertIsNone(manager.thread)
+            self.assertEqual(manager.deployment, profile)
+            old_config.assert_not_called()
+            download.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows DPAPI cache')
+    def test_empty_host_downloads_once_then_uses_encrypted_verified_cache(self):
+        from public_access.provisioning import provision
+        profile, content = self.profile()
+        mirror = Mock()
+        mirror.download_part.side_effect = lambda part, path: path.write_bytes(content)
+        factory = Mock(return_value=mirror)
+        with tempfile.TemporaryDirectory() as temp, patch('public_access.provisioning.local_host', return_value=True):
+            root = Path(temp) / 'private'
+            self.assertEqual(provision(profile, root, mirror_factory=factory), SETTINGS)
+            self.assertEqual(provision(profile, root, mirror_factory=factory), SETTINGS)
+            factory.assert_called_once()
+            mirror.close.assert_called_once()
+            saved = (root / 'deployment-credential.json').read_text(encoding='utf-8')
+            self.assertNotIn(SETTINGS.token, saved)
+            self.assertEqual(list(root.glob('credential-*')), [])
+            # Updates preserve the runtime cache; a changed profile must not reuse old credentials.
+            changed = json.loads(json.dumps(profile))
+            changed['credential']['sha256'] = '0' * 64
+            mirror.download_part.side_effect = OSError('offline')
+            with self.assertRaises(OSError):
+                provision(changed, root, mirror_factory=factory)
+            self.assertEqual((root / 'deployment-credential.json').read_text(encoding='utf-8'), saved)
+
+    def test_corrupt_or_wrong_host_payload_is_never_cached(self):
+        from public_access.provisioning import provision, decode_credential
+        profile, content = self.profile()
+        with self.assertRaises(ValueError):
+            decode_credential(content + b'changed', profile)
+        wrong = json.loads(content)
+        wrong['deployment_host'] = '192.168.224.122'
+        raw = json.dumps(wrong).encode()
+        changed = {**profile, 'credential': {**profile['credential'], 'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}}
+        with self.assertRaises(ValueError):
+            decode_credential(raw, changed)
+        mirror = Mock()
+        mirror.download_part.side_effect = lambda part, path: path.write_bytes(b'corrupt')
+        with tempfile.TemporaryDirectory() as temp, patch('public_access.provisioning.local_host', return_value=True), \
+                patch('openclaw_service.protocol.protect_state_directory'):
+            with self.assertRaises(ValueError):
+                provision(profile, Path(temp), mirror_factory=lambda: mirror)
+            self.assertFalse((Path(temp) / 'deployment-credential.json').exists())
+            self.assertEqual(list(Path(temp).glob('credential-*')), [])
+            mirror.close.assert_called_once()
+
+    def test_cancelled_provision_does_not_download(self):
+        from public_access.provisioning import provision
+        profile, _ = self.profile()
+        factory = Mock()
+        with patch('public_access.provisioning.local_host', return_value=True), self.assertRaises(InterruptedError):
+            provision(profile, mirror_factory=factory, cancelled=lambda: True)
+        factory.assert_not_called()
+
+    def test_provision_failure_waits_and_shutdown_does_not_spawn(self):
+        profile, _ = self.profile()
+        with tempfile.TemporaryDirectory() as temp, socket.socket() as reserve:
+            reserve.bind(('127.0.0.1', 0))
+            port = reserve.getsockname()[1]
+            reserve.close()
+            manager = PublicAccess(replace(SETTINGS, ingress_port=port),
+                'http://127.0.0.1:18766', SECRET, data=Path(temp), deployment=profile)
+            with patch('public_access.provisioning.provision', side_effect=OSError('offline')), \
+                    patch('public_access.supervisor.install') as installer, \
+                    patch('public_access.supervisor.subprocess.Popen') as spawn:
+                try:
+                    manager.start()
+                    deadline = time.monotonic() + 3
+                    while manager.state != 'provision_retry' and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertEqual(manager.state, 'provision_retry')
+                    manager.stop()
+                    manager.thread.join(3)
+                    self.assertFalse(manager.thread.is_alive())
+                    self.assertEqual(manager.state, 'stopped')
+                    installer.assert_not_called()
+                    spawn.assert_not_called()
+                finally:
+                    manager.stop()
+                    manager.thread.join(3)
+
+    def test_publisher_reuses_mirror_and_keeps_secret_out_of_manifest_and_fields(self):
+        from bin.test_lighthouse_distribution import FakeFeishuClient
+        from openclaw_service.assistant.lighthouse_distribution import FeishuRuntimeMirror
+        from tools import publish_public_access_profile as publisher
+        client = FakeFeishuClient()
+        uploaded = []
+        def upload(*args, **kwargs):
+            uploaded.append(Path(kwargs['file_path']).read_bytes())
+            return {'code': 0, 'data': {'file_token': 'fileFixture'}}
+        client.request_file_json = upload
+        mirror = FeishuRuntimeMirror(client=client, headers={})
+        with tempfile.TemporaryDirectory() as temp, patch('openclaw_service.protocol.protect_state_directory'):
+            root = Path(temp)
+            config, output = root / 'config.json', root / 'deployment.json'
+            atomic_json(config, asdict(SETTINGS))
+            def download(part, target):
+                target.write_bytes(uploaded[0])
+            mirror.download_part = download
+            with patch.object(publisher, 'DATA', root / 'private'):
+                first = publisher.publish('192.168.224.130', config_path=config, output=output, mirror_factory=lambda: mirror)
+                self.assertNotIn(SETTINGS.token, output.read_text(encoding='utf-8'))
+                second = publisher.publish('192.168.224.130', config_path=config, output=output, mirror_factory=lambda: mirror)
+                self.assertEqual(first, second)
+                self.assertEqual(len(uploaded), 1)
+                self.assertEqual(len(client.records), 1)
+                self.assertNotIn(SETTINGS.token, json.dumps(client.records))
+                self.assertIn(SETTINGS.token, uploaded[0].decode())
+                self.assertEqual(list((root / 'private').glob('publish-profile-*')), [])
+                previous = output.read_bytes()
+                mirror.download_part = lambda part, target: target.write_bytes(b'corrupt')
+                with self.assertRaises(ValueError):
+                    publisher.publish('192.168.224.130', config_path=config, output=output, mirror_factory=lambda: mirror)
+                self.assertEqual(output.read_bytes(), previous)
+
+    def test_update_excludes_credential_cache_and_includes_public_manifest(self):
+        import package_portable as package
+        self.assertIn(Path('bin/public_access/deployment.json'), package.FORCE_PATCH_INCLUDE_FILES)
+        for name in ('deployment-credential.json', 'profile-upload-journal.json', 'autostart-disabled.json'):
+            self.assertTrue(package._is_runtime_data_path(
+                package.PROJECT_ROOT / 'bin/data/public_access' / name, package.PROJECT_ROOT))
+
+    def test_disable_then_enable_does_not_require_a_plaintext_local_config(self):
+        from tools import configure_public_access as configure
+        profile, _ = self.profile()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(configure, 'DISABLED', root / 'disabled.json'), \
+                    patch.object(configure, 'CONFIG', root / 'missing-config.json'), \
+                    patch('public_access.provisioning.read_deployment', return_value=(profile, SETTINGS)), \
+                    patch.object(sys, 'argv', ['configure', '--disable']):
+                configure.main()
+                self.assertTrue(configure.DISABLED.is_file())
+                with patch.object(sys, 'argv', ['configure', '--enable', '--confirm-server-ready']):
+                    configure.main()
+                self.assertFalse(configure.DISABLED.exists())
+                self.assertFalse(configure.CONFIG.exists())
 
 
 class LoopbackFlowTests(unittest.TestCase):
