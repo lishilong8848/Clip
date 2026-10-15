@@ -1,0 +1,10 @@
+[Unit]
+Description=Finish the ClipFlow domain migration after the next portal update
+
+[Timer]
+OnBootSec=20s
+OnUnitInactiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

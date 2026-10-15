@@ -1334,7 +1334,7 @@ class FastAPIPortalController:
                     next_path=next_path,
                 )
             except PortalError as exc:
-                return self._html_message(500, "飞书登录未启用", str(exc))
+                return self._html_message(500, "飞书登录未启用", PortalAuthManager.public_login_error(exc))
             return Response(
                 status_code=302,
                 headers={"Location": login_url},
@@ -2831,6 +2831,7 @@ class FastAPIPortalController:
                     actor=str(user.get("open_id") or ""),
                     is_admin=bool(session and PortalRuntime.auth_manager.is_admin(session)),
                     base_url=self._request_base_url(request), send_text=_send_text_to_open_ids_guarded,
+                    auth=PortalRuntime.auth_manager,
                 )
                 if isinstance(data, tuple):
                     return Response(content=data[0], media_type=data[1], headers={"Cache-Control": "private, no-store"})
@@ -10248,7 +10249,9 @@ class FastAPIPortalController:
                     "etag": f'"{etag}"',
                     "content_type": "text/html; charset=utf-8"
                     if html
-                    else (mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"),
+                    else ({".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                           ".json": "application/json", ".html": "text/html; charset=utf-8"}.get(resolved.suffix.lower())
+                          or mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"),
                     "last_access": now,
                 }
                 if len(content) <= int(getattr(self, "_static_cache_max_entry_bytes", 0) or 0):
@@ -10257,7 +10260,8 @@ class FastAPIPortalController:
         headers = {
             "Content-Type": str(entry.get("content_type") or "application/octet-stream"),
             "ETag": str(entry.get("etag") or ""),
-            "Cache-Control": "no-store" if html else "no-cache" if resolved.name == "page-navigation.css" else "public, max-age=86400",
+            "Cache-Control": "no-store" if html or resolved.suffix.lower() == ".html" or resolved.name == "entry.json"
+                             else "no-cache" if resolved.name == "page-navigation.css" else "public, max-age=86400",
         }
         if str(request.headers.get("if-none-match") or "").strip() == headers["ETag"]:
             return Response(status_code=304, headers=headers)
@@ -10605,7 +10609,7 @@ class FastAPIPortalController:
     def _auth_failure_page(message: str) -> Response:
         import html
 
-        safe_message = html.escape(str(message or "飞书授权未完成。"))
+        safe_message = html.escape(PortalAuthManager.public_login_error(message))
         body = f"""<!doctype html>
 <html lang="zh-CN">
 <head>

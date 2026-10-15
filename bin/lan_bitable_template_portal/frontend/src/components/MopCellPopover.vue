@@ -2,11 +2,21 @@
   <div
     v-if="mode !== 'none'"
     class="floating-cell-popover"
-    :class="popoverClass"
-    :style="style"
+    :class="[popoverClass, { 'mobile-cell-editor': mobile }]"
+    :style="mobile ? mobileStyle : style"
+    role="group"
+    :aria-label="mobile ? '填写单元格' : label"
     @mousedown.stop
     @click.stop
+    @keydown.esc.stop.prevent="emit('cancel')"
   >
+    <header v-if="mobile" class="mobile-editor-head">
+      <div>
+        <strong>{{ label || '表格填写' }}</strong>
+        <p v-if="context" :title="context">{{ context }}</p>
+      </div>
+      <button type="button" class="mobile-editor-close" aria-label="收起填写面板" title="收起填写面板" @click="emit('cancel')"><X :size="20" /></button>
+    </header>
     <template v-if="mode === 'checkbox'">
       <span class="popover-label">{{ label }}</span>
       <div class="popover-actions compact-actions">
@@ -14,6 +24,7 @@
           v-for="option in checkboxOptions"
           :key="option.value || option.label"
           :class="{ active: checkboxValue === option.value }"
+          :aria-pressed="checkboxValue === option.value"
           @click.stop="emit('select-checkbox', option.value)"
         >
           {{ option.label }}
@@ -25,6 +36,7 @@
       <span class="popover-label">{{ label }}</span>
       <input
         :value="dateTime"
+        :aria-label="label || '填写时间'"
         type="datetime-local"
         step="3600"
         @input="emit('update:dateTime', ($event.target as HTMLInputElement).value)"
@@ -47,13 +59,14 @@
       </div>
       <textarea
         :value="rawValue"
+        :aria-label="label || '单元格内容'"
         @input="emit('update:rawValue', ($event.target as HTMLTextAreaElement).value)"
       ></textarea>
       <div class="popover-actions raw-actions">
         <button type="button" @click.stop="emit('copy')">复制</button>
         <button type="button" class="primary-action" @click.stop="emit('paste')">粘贴</button>
         <button type="button" @click.stop="emit('restore')">还原</button>
-        <button type="button" class="quiet-action" @click.stop="emit('cancel')">取消</button>
+        <button v-if="!mobile" type="button" class="quiet-action" @click.stop="emit('cancel')">取消</button>
       </div>
     </template>
 
@@ -66,11 +79,17 @@
         <button type="button" class="quiet-action" @click.stop="emit('cancel')">取消</button>
       </div>
     </template>
+    <footer v-if="mobile" class="mobile-editor-navigation">
+      <button type="button" :disabled="!hasPrevious" @click="emit('previous')"><ChevronLeft :size="18" />上一格</button>
+      <button type="button" :disabled="!hasNext" @click="emit('next')">下一格<ChevronRight :size="18" /></button>
+      <button type="button" class="primary-action" @click="emit('cancel')">完成填写</button>
+    </footer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { ChevronLeft, ChevronRight, X } from "lucide-vue-next";
 
 export type MopCellPopoverMode = "none" | "checkbox" | "field-time" | "field-completion" | "raw" | "selection";
 
@@ -83,6 +102,10 @@ const props = defineProps<{
   dateTime?: string;
   rawValue?: string;
   selectedCount?: number;
+  mobile?: boolean;
+  context?: string;
+  hasPrevious?: boolean;
+  hasNext?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -95,7 +118,39 @@ const emit = defineEmits<{
   paste: [];
   restore: [];
   cancel: [];
+  previous: [];
+  next: [];
 }>();
+
+const mobileStyle = ref<Record<string, string>>({});
+let viewportFrame = 0;
+function updateViewport(): void {
+  viewportFrame = 0;
+  const viewport = window.visualViewport;
+  const height = viewport?.height ?? window.innerHeight;
+  const offset = Math.max(0, window.innerHeight - height - (viewport?.offsetTop ?? 0));
+  mobileStyle.value = { bottom: `${offset}px`, maxHeight: `${Math.max(0, height - 16)}px` };
+}
+function scheduleViewport(): void {
+  if (!viewportFrame) viewportFrame = requestAnimationFrame(updateViewport);
+}
+function stopViewport(): void {
+  window.visualViewport?.removeEventListener('resize', scheduleViewport);
+  window.visualViewport?.removeEventListener('scroll', scheduleViewport);
+  window.removeEventListener('resize', scheduleViewport);
+  cancelAnimationFrame(viewportFrame);
+  viewportFrame = 0;
+}
+watch(() => props.mobile, (mobile) => {
+  stopViewport();
+  if (!mobile) return;
+  updateViewport();
+  // Keep the editor above the software keyboard without scrolling the document on each keystroke.
+  window.visualViewport?.addEventListener('resize', scheduleViewport);
+  window.visualViewport?.addEventListener('scroll', scheduleViewport);
+  window.addEventListener('resize', scheduleViewport);
+}, { immediate: true });
+onBeforeUnmount(stopViewport);
 
 const popoverClass = computed(() => ({
   "floating-cell-fill": props.mode === "checkbox",
@@ -322,5 +377,42 @@ const popoverClass = computed(() => ({
     flex: 1 1 100%;
     max-width: none;
   }
+}
+
+.mobile-cell-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  left: 0;
+  right: 0;
+  top: auto;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  padding: 12px max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  border-radius: 8px 8px 0 0;
+  background: #fff;
+  box-shadow: 0 -8px 32px #0f172a24;
+  backdrop-filter: none;
+  font-family: inherit;
+}
+.mobile-editor-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.mobile-editor-head > div { min-width: 0; }
+.mobile-editor-head strong { font-size: 15px; font-weight: 650; line-height: 1.5; }
+.mobile-editor-head p { margin: 4px 0 0; font-size: 13px; color: #475569; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mobile-cell-editor > .popover-label, .mobile-cell-editor > .raw-popover-head { display: none; }
+.mobile-cell-editor input, .mobile-cell-editor textarea { width: 100%; min-width: 0; max-width: 100%; height: auto; min-height: 48px; border-radius: 6px; font-size: 16px; font-weight: 400; padding: 10px 12px; }
+.mobile-cell-editor textarea { min-height: 92px; max-height: 150px; resize: vertical; }
+.mobile-cell-editor :is(input, textarea, button):focus-visible { outline: 2px solid #1e63ff; outline-offset: 2px; }
+.mobile-cell-editor .popover-actions { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
+.mobile-cell-editor button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 44px; min-height: 44px; border-radius: 6px; padding: 8px 12px; font: inherit; font-size: 14px; font-weight: 600; transition: background-color 160ms ease; }
+.mobile-cell-editor .popover-actions button { flex: 1 1 auto; }
+.mobile-cell-editor .mobile-editor-close { flex: 0 0 44px; padding: 0; background: #f1f5f9; color: #334155; }
+.mobile-editor-navigation { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+.mobile-cell-editor button:disabled { opacity: .4; cursor: default; background: #f1f5f9; color: #64748b; }
+@media (prefers-reduced-motion: reduce) {
+  .mobile-cell-editor button { transition: none; }
 }
 </style>

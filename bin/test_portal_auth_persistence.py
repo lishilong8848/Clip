@@ -64,13 +64,33 @@ class PortalAuthPersistenceTests(unittest.TestCase):
         self.assertEqual(PortalAuthManager._normalize_next_path('/?login=password'), '/')
         self.assertEqual(PortalAuthManager._normalize_next_path('/learning?code=fixture&state=fixture&scope=A#today'), '/learning?scope=A#today')
 
-    def test_oauth_failure_offers_password_entry_and_escapes_error(self):
+    def test_oauth_failure_offers_password_entry_without_internal_error(self):
         from clipflow_backend.main import FastAPIPortalController
         body = FastAPIPortalController._auth_failure_page('<script>fixture</script>').body.decode('utf-8')
         self.assertIn('href="/?login=password"', body)
         self.assertIn('返回登录页', body)
-        self.assertIn('&lt;script&gt;fixture&lt;/script&gt;', body)
+        self.assertNotIn('fixture', body)
         self.assertNotIn('<script>fixture</script>', body)
+        for detail in ('app_secret=fixture-secret', 'phone=13900001111', 'identity_number=00000020000101234X',
+                       'access_token=fixture-token', 'cli_fixture-app'):
+            self.assertNotIn(detail, FastAPIPortalController._auth_failure_page(detail).body.decode('utf-8'))
+        self.assertIn('登录状态已过期，请重新扫码。', FastAPIPortalController._auth_failure_page('登录状态已过期，请重新扫码。').body.decode('utf-8'))
+
+    def test_anonymous_status_does_not_expose_user_or_oauth_configuration(self):
+        with auth_test_directory() as tmp, patch(
+            'lan_bitable_template_portal.portal_auth.get_data_file_path', side_effect=lambda name: str(Path(tmp) / name)
+        ):
+            manager = PortalAuthManager()
+            with patch.object(manager, 'configured', return_value=True), patch.object(
+                manager, 'public_user', side_effect=AssertionError('anonymous status must not fetch a user')
+            ):
+                status = manager.public_status(None, redirect_uri='https://private.example/api/auth/feishu/callback')
+            self.assertIsNone(status['user'])
+            self.assertEqual(status['allowed_scopes'], [])
+            self.assertEqual(status['scope_options'], [])
+            self.assertEqual(status['login_url'], '/api/auth/login?next=%2F')
+            for key in ('redirect_uri', 'app_id', 'app_secret', 'open_id', 'access_token', 'phone', 'identity_number'):
+                self.assertNotIn(key, status)
 
     def test_oauth_state_survives_restart_and_is_consumed_once(self):
         with auth_test_directory() as tmp:

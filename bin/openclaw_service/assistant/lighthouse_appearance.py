@@ -20,7 +20,7 @@ SHAPES = frozenset({
     "cercle", "galet", "squircle", "capsule", "triangle", "hexagone",
     "nuage", "goutte",
     "swirl-pile", "heart", "star", "flower", "diamond", "shield",
-    "weather-lighthouse",
+    "weather-lighthouse", "weather-lighthouse-mini",
 })
 
 EXPRESSIONS = frozenset({

@@ -13,7 +13,7 @@ import { BotEngine, type BotFrame } from './engine/engine'
 import { NOTIF_BLUE } from './engine/decor'
 import { EXPRESSION_BY_ID } from './engine/expressions'
 import { DEMI_VIEWBOX, RAYON } from './engine/repere'
-import { COLOR_BY_ID, DEFAULT_COLOR, DEFAULT_SHAPE, SHAPE_BY_ID, mixHex } from './engine/skins'
+import { COLOR_BY_ID, DEFAULT_COLOR, DEFAULT_SHAPE, SHAPE_BY_ID, mixHex, isWeatherShape } from './engine/skins'
 import { STATE_BY_ID, type StateId } from './engine/states'
 import { SEQUENCE } from './engine/states'
 import { lookTarget } from './gaze'
@@ -368,7 +368,7 @@ export class BloubBot {
   /** Suspend rendering while the page is hidden. */
   setActive(active: boolean) {
     if (this.disposed) return
-    this.weatherLighthouse?.setActive(active && this.opts.shape === 'weather-lighthouse', this.reducedMotion)
+    this.weatherLighthouse?.setActive(active && isWeatherShape(this.opts.shape), this.reducedMotion)
     if (!active) {
       this.active = false
       if (this.dragging) { this.clickBlocked = true; this.fnUp() }
@@ -387,7 +387,7 @@ export class BloubBot {
   }
 
   /** Keep eye feedback and transitions, without decorative bouncing or tilting. */
-  setReducedMotion(value: boolean) { this.reducedMotion = value; this.weatherLighthouse?.setActive(this.active && this.opts.shape === 'weather-lighthouse', value) }
+  setReducedMotion(value: boolean) { this.reducedMotion = value; this.weatherLighthouse?.setActive(this.active && isWeatherShape(this.opts.shape), value) }
 
   /** 跳到某个状态（跨状态有 morph 过渡）；frozen 设备下自动从该状态继续播放 */
   setState(id: StateId) {
@@ -432,19 +432,23 @@ export class BloubBot {
     this.opts.shape = id
     this.shapeRadii = SHAPE_BY_ID.get(id)?.radii ?? null
     this.engine.setShape(this.shapeRadii, this.clock)
-    this.svg.style.overflow = id === 'weather-lighthouse' ? 'visible' : ''
-    if (id === 'weather-lighthouse' && !this.weatherLighthouse) this.weatherLighthouse = new WeatherLighthouse(this.scene, this.uid)
+    const weatherShape = isWeatherShape(id), mini = id === 'weather-lighthouse-mini'
+    this.svg.style.overflow = weatherShape ? 'visible' : ''
+    if (weatherShape && (!this.weatherLighthouse || this.weatherLighthouse.mini !== mini)) {
+      this.weatherLighthouse?.destroy()
+      this.weatherLighthouse = new WeatherLighthouse(this.scene, this.uid, mini)
+    }
     for (const layer of Array.from(this.scene.children)) layer.setAttribute('display', layer === this.weatherLighthouse?.root
-      ? id === 'weather-lighthouse' ? '' : 'none' : id === 'weather-lighthouse' ? 'none' : '')
+      ? weatherShape ? '' : 'none' : weatherShape ? 'none' : '')
     if (this.weatherLighthouse) {
       this.weatherLighthouse.setWeather(this.weatherScene)
-      this.weatherLighthouse.setActive(this.active && id === 'weather-lighthouse', this.reducedMotion)
+      this.weatherLighthouse.setActive(this.active && weatherShape, this.reducedMotion)
     }
   }
 
   setWeather(scene: WeatherScene) {
     this.weatherScene = scene; this.weatherLighthouse?.setWeather(scene)
-    if (this.opts.shape === 'weather-lighthouse') this.svg.setAttribute('aria-label', scene.title)
+    if (isWeatherShape(this.opts.shape)) this.svg.setAttribute('aria-label', scene.title)
   }
 
   /** 设置休息表情（neutre/colere/heureux...） */
@@ -538,7 +542,7 @@ export class BloubBot {
   }
 
   private clampShift() {
-    const top = this.opts.shape === 'weather-lighthouse' ? 12 + this.opts.size * .3 : 12
+    const top = isWeatherShape(this.opts.shape) ? 12 + this.opts.size * .3 : 12
     this.dragShiftX = Math.min(Math.max(this.homeX + this.dragShiftX, 12), Math.max(12, window.innerWidth - this.opts.size - 12)) - this.homeX
     this.dragShiftY = Math.min(Math.max(this.homeY + this.dragShiftY, top), Math.max(top, window.innerHeight - this.opts.size - 12)) - this.homeY
   }
@@ -703,7 +707,7 @@ export class BloubBot {
   }
 
   private render(f: BotFrame) {
-    if (this.opts.shape === 'weather-lighthouse' && this.weatherLighthouse) { this.weatherLighthouse.render(f); return }
+    if (isWeatherShape(this.opts.shape) && this.weatherLighthouse) { this.weatherLighthouse.render(f); return }
     const vb = DEMI_VIEWBOX
 
     // --- mask（身体白色 + 眼睛黑色洞 + 通知凹口）---

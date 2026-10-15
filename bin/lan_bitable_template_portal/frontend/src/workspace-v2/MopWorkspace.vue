@@ -188,4 +188,12 @@ async function followSelection(event: MouseEvent) {
 @media (prefers-reduced-motion: reduce) {
   .v2-mop-workspace :deep(:is(.notice-row, .mop-row, .local-mop-upload)) { transition: none; }
 }
+@media (max-width: 720px) {
+  .v2-mop-workspace :deep(.preview-scroll:has(.mop-mobile-form)) { min-height: 0; max-height: none; overflow: visible; }
+  .v2-mop-workspace :deep(.mop-mobile-form :is(input, select, textarea)) { min-height: 44px; font-size: 16px; }
+  .v2-mop-workspace :deep(.preview-head) { display: grid; grid-template-columns: auto minmax(0, 1fr); }
+  .v2-mop-workspace :deep(.preview-title) { min-width: 0; }
+  .v2-mop-workspace :deep(.preview-title strong) { font-size: 14px; }
+  .v2-mop-workspace :deep(.preview-title p) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 </style>

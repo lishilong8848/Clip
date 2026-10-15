@@ -49,8 +49,8 @@ class FakeService:
         self.manager = SignatureManagement(self)
         self.d = self.manager.d
 
-    def add(self, rid, name="测试人员", *, source="staff", signature=True, origin="", aliases=None, employee_no="", account_nature="VNET"):
-        fields = {"姓名" if source == "staff" else "员工姓名": name, "楼栋": "E楼", "员工工号": employee_no,
+    def add(self, rid, name="测试人员", *, source="staff", signature=True, origin="", aliases=None, employee_no="", account_nature="VNET", open_id="ou-person", building="E楼"):
+        fields = {"姓名" if source == "staff" else "员工姓名": name, "楼栋": building, "员工工号": employee_no, "fixture_open_id": open_id,
                   ORIGIN_FIELD: origin, ALIASES_FIELD: "\n".join(aliases or [])}
         if source == "staff":
             fields["账号性质"] = account_nature
@@ -83,7 +83,7 @@ class FakeService:
                 "signature_count": len(attachments), "signature_version": attachments[0]["file_token"] if attachments else "",
                 "signature_requires_resign": bool(attachments and not fields.get("密钥")), "portable_signature": bool(fields.get("密钥")),
                 "origin_staff_record_id": fields.get(ORIGIN_FIELD, ""), "historical_record_ids": fields.get(ALIASES_FIELD, "").split(),
-                "raw_fields": copy.deepcopy(fields), "open_id": "ou-person" if source == "staff" else "",
+                "raw_fields": copy.deepcopy(fields), "open_id": fields.get("fixture_open_id", "ou-person") if source == "staff" else "",
                 "account_nature": account_nature,
                 "can_receive_message": bool(source == "staff" and account_nature == "VNET")})
         setattr(self, cache_name, {"loaded_ts": time.time(), "people": people})
@@ -182,6 +182,13 @@ class SignatureManagementTests(unittest.TestCase):
         self.messages = []
         self.sender = Mock(side_effect=lambda text, ids: (self.messages.append((text, ids)) or True, "", []))
         self.sequence = 0
+        self.auth = SimpleNamespace(
+            account_profile=lambda oid: {'level': 'L0' if oid == 'ou-admin' else 'L4',
+                'category': 'manager' if oid == 'ou-admin' else 'operator', 'home_scope': 'E',
+                'role': 'admin' if oid == 'ou-admin' else 'building',
+                'scope_rules': list('ABCDEH') + ['110'], 'modules': ['signatures', 'accounts'],
+                'can_manage_accounts': oid == 'ou-admin'},
+            directory_block_reason=lambda oid: '')
 
     def request(self, *, source="staff", rid="recStaff", recipient="", sender=None, operation_id=None):
         self.sequence += 1
@@ -492,7 +499,7 @@ class SignatureManagementTests(unittest.TestCase):
                 staff.reset_mock()
                 external.reset_mock()
                 result = dispatch(self.m, "GET", "preview", {"source": source, "record_id": record_id},
-                                  actor="ou-admin", is_admin=True)
+                                  actor="ou-admin", is_admin=True, auth=self.auth)
                 self.assertEqual(result, (content, "image/png"))
                 reader.assert_called_once_with(record_id=record_id)
                 other.assert_not_called()
@@ -510,7 +517,7 @@ class SignatureManagementTests(unittest.TestCase):
                                     ({"source": "other", "record_id": "recStaff"}, 400),
                                     ({"source": "staff", "record_id": "../recStaff"}, 400)):
                 with self.subTest(payload=payload), self.assertRaises(SignatureManagementError) as error:
-                    dispatch(self.m, "GET", "preview", payload, actor="ou-admin", is_admin=True)
+                    dispatch(self.m, "GET", "preview", payload, actor="ou-admin", is_admin=True, auth=self.auth)
                 self.assertEqual(error.exception.status, status)
             staff.assert_not_called()
             external.assert_not_called()
@@ -524,12 +531,14 @@ class SignatureManagementTests(unittest.TestCase):
         content = signature_bytes()
         with (patch.object(PortalRuntime.service, "_signature_management", self.m, create=True),
               patch.object(controller, "_current_session") as session,
+              patch.object(PortalRuntime.auth_manager, "account_profile", side_effect=self.auth.account_profile),
+              patch.object(PortalRuntime.auth_manager, "directory_block_reason", return_value=''),
               patch.object(self.s, "signature_image_bytes", return_value=(content, "image/png")) as reader):
             client = TestClient(controller._build_app())
             url = "/api/signatures/management/preview?source=staff&record_id=recStaff"
             session.return_value = None
             self.assertEqual(client.get(url).status_code, 401)
-            session.return_value = {"user": {"open_id": "ou-person"}, "role": "engineer"}
+            session.return_value = {"user": {"open_id": "ou-other"}, "role": "engineer"}
             self.assertEqual(client.get(url).status_code, 403)
             reader.assert_not_called()
             session.return_value = {"user": {"open_id": "ou-admin"}, "role": "admin"}

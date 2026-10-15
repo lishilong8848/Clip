@@ -40,6 +40,11 @@ export type ShapeId =
   | 'diamond'
   | 'shield'
   | 'weather-lighthouse'
+  | 'weather-lighthouse-mini'
+
+export function isWeatherShape(id: string): boolean {
+  return id === 'weather-lighthouse' || id === 'weather-lighthouse-mini'
+}
 
 export interface BotShape {
   id: ShapeId

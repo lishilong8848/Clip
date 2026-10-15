@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import { mopMobileFields } from '../src/mopMobileFields.ts';
+
+const rows = Array.from({ length: 24 }, () => Array<string>(7).fill(''));
+rows[8] = ['维护涉及位置：', '', '', '', '维护开始时间：', '年 月 日 时', ''];
+rows[10] = ['检查项', '工具类型', '工具名称', '使用数量', '检查结果', '备注', ''];
+rows[11] = ['工具检查', '维护工具', '手电筒', '1', '□正常 □异常', '', ''];
+rows[17] = ['设备/编号', '维护项', '维护内容', '', '维护结果', '数据记录', '备注'];
+rows[18] = ['RT-CT-1', '状态检查', '按指导书检查', '', '□正常 □异常', '温度： ℃', ''];
+rows[23] = ['备注：仅在指定窗口内操作', '', '', '', '', '', ''];
+const merge = (row: number, col: number) => {
+  if (row === 8 && col === 0) return { colspan: 2 };
+  if (row === 8 && col === 1 || row === 11 && col === 6) return { hidden: true };
+  return {};
+};
+const sheet = { rows, checkbox_cells: [{ row: 3, col: 1 }, { row: 11, col: 4 }, { row: 18, col: 4 }] };
+const result = mopMobileFields(sheet, (_row, col) => col !== 4 && col !== 5, merge);
+assert.deepEqual(result.common[0], { row: 8, col: 2, label: '维护涉及位置', prefix: '' });
+assert.equal(result.common[1].prefix, '备注：');
+assert.equal(result.checks.length, 2, 'No bulk-editing pre-row-10 choices');
+assert.equal(result.checks[0].fields.length, 0, 'Protected/merged cells are not exposed');
+const editable = mopMobileFields(sheet, () => true, merge);
+assert.deepEqual(editable.checks[0].fields.map(field => field.col), [5]);
+assert.deepEqual(editable.checks[1].fields.map(field => field.col), [5, 6], 'Each section uses its own header; remarks must not overwrite data records');
+assert.deepEqual(editable.checks[1].fields.map(field => field.label), ['数据记录', '备注']);
+assert.equal(editable.checks[1].title, 'RT-CT-1 · 状态检查');
+assert.deepEqual(mopMobileFields({ ...sheet, is_cover: true }, () => true, merge), { common: [], checks: [] });
+const unknown = mopMobileFields({ rows: [['操作后备注中记录结果'], ['', '', '']], checkbox_cells: [] }, () => true, () => ({}));
+assert.deepEqual(unknown, { common: [], checks: [] }, 'Instruction text is not a field');
+console.log('PASS: explicit position/remark fields, merged cells, protected cells, changing remark/data columns, row-10 boundary, cover and unknown templates.');

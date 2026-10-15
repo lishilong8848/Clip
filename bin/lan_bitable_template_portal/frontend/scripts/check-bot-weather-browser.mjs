@@ -7,7 +7,9 @@ import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const output = path.resolve(root, '../../../output/playwright/weather-lighthouse');
+const mini = process.argv.includes('--mini');
+const shape = mini ? 'weather-lighthouse-mini' : 'weather-lighthouse';
+const output = path.resolve(root, '../../../output/playwright', shape);
 await mkdir(output, { recursive: true });
 const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{margin:0;background:#edf1f6;font:14px sans-serif}#under{position:fixed;inset:0;width:100%;height:100%;border:0;background:transparent}.lighthouse-launcher{position:fixed;right:24px;bottom:24px;border:0;padding:0;background:none;pointer-events:none}.chat{position:fixed;right:200px;bottom:24px;width:400px;padding:24px;background:white}#preview{position:absolute;left:24px;top:24px;padding:50px 24px 24px}</style>
@@ -15,7 +17,7 @@ const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content
 import {createApp,h,ref} from 'vue';import Bot from '/src/components/LighthouseBot.vue';
 import Settings from '/src/components/LighthouseBotSettings.vue';import UiTransition from '/src/components/UiTransition.vue';
 import {DEFAULT_BOT} from '/src/botAppearance.ts';import {weatherScene} from '/src/botWeather.ts';
-const appearance=ref({...DEFAULT_BOT,shape:'weather-lighthouse',size:144}),shown=ref(true),open=ref(false),settings=ref(false),retained=ref(null);
+const appearance=ref({...DEFAULT_BOT,shape:${JSON.stringify(shape)},size:144}),shown=ref(true),open=ref(false),settings=ref(false),retained=ref(null);
 window.fixture={appearance,shown,open,settings,weatherScene,set:patch=>Object.assign(appearance.value,patch)};
 window.underClicks=0;
 createApp({render(){return h('main',[
@@ -55,11 +57,11 @@ try {
  assert.equal(calls.length,1,'clock animation never bypasses weather cache');
  const dayColor=await page.locator('.lighthouse-launcher .wl-tower-mid').evaluate(el=>getComputedStyle(el).stopColor);
  const dayWater=await page.locator('.lighthouse-launcher .wl-swell').evaluate(el=>getComputedStyle(el).stroke);
- const waveDurations=await page.locator('.lighthouse-launcher .wl-waves path').evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).animationDuration));
+ const waveDurations=await page.locator('.lighthouse-launcher .wl-waves path').evaluateAll(nodes=>nodes.map(node=>node.getAnimations()[0]?.effect.getTiming().duration));
  assert.equal(new Set(waveDurations).size,3,'water layers have independently varied rhythms');
- const waterBefore=await page.locator('.lighthouse-launcher .wl-swell').evaluate(el=>getComputedStyle(el).transform);
+ const waterBefore=await page.locator('.lighthouse-launcher .wl-swell').evaluate((el,mini)=>mini?getComputedStyle(el).d:getComputedStyle(el).transform,mini);
  await page.waitForTimeout(350);
- assert.notEqual(await page.locator('.lighthouse-launcher .wl-swell').evaluate(el=>getComputedStyle(el).transform),waterBefore,'water gently ripples');
+ assert.notEqual(await page.locator('.lighthouse-launcher .wl-swell').evaluate((el,mini)=>mini?getComputedStyle(el).d:getComputedStyle(el).transform,mini),waterBefore,'water gently ripples');
  const allIds=await page.locator('svg [id]').evaluateAll(nodes=>nodes.map(node=>node.id));
  assert.equal(new Set(allIds).size,allIds.length,'SVG gradient ids are unique across instances');
  const before=await page.locator('.lighthouse-launcher .wl-eyes').innerHTML();
@@ -80,8 +82,21 @@ try {
  await page.mouse.click(box.x+4,box.y+4);assert.equal(await page.evaluate(()=>window.underClicks),1);
  await page.mouse.click(box.x+box.width/2,box.y+box.height/2);await page.locator('.chat').waitFor();
  assert(await page.locator('.lighthouse-launcher .wl-tower').isVisible(),'icon remains when chat opens');
+ if(mini){
+   const removedRegion=await page.locator('.lighthouse-launcher .wl-tower').evaluate(node=>{
+     const point=new DOMPoint(380,320).matrixTransform(node.getScreenCTM());
+     return document.elementFromPoint(point.x,point.y)?.id;
+   });
+   assert.equal(removedRegion,'under','clipped lower tower does not intercept page clicks');
+ }
  await page.locator('#settings').click();
  const dialog=page.getByRole('dialog',{name:'图标设置'});await dialog.waitFor();
+ if(mini){
+   await dialog.getByLabel('形状',{exact:true}).selectOption('weather-lighthouse');
+   assert.equal(await dialog.locator('.weather-lighthouse-mini').count(),0,'original remains a separate shape');
+   await dialog.getByLabel('形状',{exact:true}).selectOption(shape);
+   await dialog.locator('.weather-lighthouse-mini').waitFor();
+ }
  await dialog.getByLabel('天气城市',{exact:true}).fill('上海');
  await dialog.getByRole('button',{name:'保存',exact:true}).click();
  await dialog.waitFor({state:'detached'});
@@ -95,8 +110,20 @@ try {
      durations:[...root.querySelectorAll('.wl-cloud-flight')].map(node=>getComputedStyle(node).animationDuration),
      direction:getComputedStyle(cloud).animationName};
  });
- assert.deepEqual(variation.changed,[true,true,true],'stars, clouds and swells vary at cycle boundaries');
+ assert.deepEqual(variation.changed,[true,true,!mini],'mini wave shapes stay continuous across cycle boundaries');
  assert.equal(variation.stars,9);assert.equal(variation.clouds,4);assert.equal(new Set(variation.durations).size,4);assert.equal(variation.direction,'wl-cloud-travel');
+ if(mini){
+   const directions=await page.locator('.lighthouse-launcher .wl-cloud-flight').evaluateAll(nodes=>nodes.map(node=>{
+     const animation=node.getAnimations()[0],timing=animation.effect.getTiming(),duration=Number(timing.duration);
+     animation.pause();animation.currentTime=Number(timing.delay)+duration*1.25;
+     const from=node.getBoundingClientRect().x;
+     animation.currentTime=Number(timing.delay)+duration*1.65;
+     const delta=node.getBoundingClientRect().x-from;
+     animation.play();return {delta,direction:getComputedStyle(node).animationDirection};
+   }));
+   assert(directions.some(item=>item.direction==='normal')&&directions.some(item=>item.direction==='reverse'),'cloud layers include both travel directions');
+   assert(directions.every(item=>item.direction==='normal'?item.delta>20:item.delta< -20),'clouds really move in their assigned direction');
+ }
  const nightColor=await page.locator('.lighthouse-launcher .wl-tower-mid').evaluate(el=>getComputedStyle(el).stopColor);
  assert.notEqual(nightColor,dayColor,'night tower is dimmed without costly SVG filters');
  assert.notEqual(await page.locator('.lighthouse-launcher .wl-swell').evaluate(el=>getComputedStyle(el).stroke),dayWater,'night water is dimmed too');
@@ -131,6 +158,7 @@ try {
   return [window.fixture.weatherScene(data,start+12*3600),window.fixture.weatherScene({...data,fetched_at:start+21*3600},start+21*3600),window.fixture.weatherScene(data,start+86400+12*3600)];
  });
  assert.deepEqual(checks.map(value=>value.weather),['clear','rain','unknown']);assert.equal(checks[1].phase,'night');
+ assert.equal(checks[2].phase,'day','yesterday solar times must not turn today noon into night');
  const trajectory=await page.evaluate(()=>{
    const start=Date.UTC(2026,9,14)/1000-8*3600;
    return [7,12,17].map(hour=>window.fixture.weatherScene({available:false,city:'南通',sunrise:start+6*3600,sunset:start+18*3600},start+hour*3600));
@@ -172,9 +200,23 @@ try {
  }));
  assert.equal(art.waves,null,'only the tower is enlarged, not the waves');
  assert.match(art.assembly,/scale\(1.18 1.12\)/);
+ if(mini){
+   assert.match(art.assembly,/^translate\(0 102\)/,'mini tower sits on the preserved waterline');
+   const crop=await page.locator('#preview .wl-tower').getAttribute('clip-path');
+   assert.match(crop,/miniTowerBounds/);
+ }
  await page.locator('#preview').screenshot({path:path.join(output,'lighthouse-day.png')});
  await page.setViewportSize({width:390,height:844});await page.evaluate(()=>window.fixture.set({size:56}));await page.waitForTimeout(200);
  assert.equal(Math.round((await page.locator('.lighthouse-launcher').boundingBox()).width),56);
+ if(mini){
+   const waterMotion=await page.locator('.lighthouse-launcher .wl-swell').evaluate(node=>{
+     const animation=node.getAnimations()[0],timing=animation.effect.getTiming(),duration=Number(timing.duration);
+     animation.pause();
+     const positions=[0,.3,.7].map(t=>{animation.currentTime=Number(timing.delay)+(1+t)*duration;return getComputedStyle(node).d;});
+     animation.play();return positions;
+   });
+   assert.equal(new Set(waterMotion).size,3,'wave crests travel instead of shifting a rigid line');
+ }
  assert.deepEqual(errors,[]);
  console.log(JSON.stringify({ok:true,calls:calls.length,checks:'day/night, Chinese forecast, no foreign queries, shared cache, independent SVGs, settings save, eyes, drag, transparent clicks, hidden/reduced motion, mobile sizing',screenshots:output}));
 } finally {await browser.close();await server.close();}

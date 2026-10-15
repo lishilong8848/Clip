@@ -248,7 +248,7 @@ class SignatureManagement:
             self._schema_ready = True
             return metas
 
-    def people(self, payload) -> dict:
+    def people(self, payload, *, access=None) -> dict:
         data = self.directory(refresh=bool(payload.get("refresh")))
         source, status, scope = _text(payload.get("source")), _text(payload.get("status")), _text(payload.get("scope")).upper()
         message_capable = str(payload.get("message_capable") or "").strip().lower() in {"1", "true", "yes"}
@@ -265,6 +265,10 @@ class SignatureManagement:
             for person in data[source]
             if f"{source}:{person.get('record_id')}" in visible_keys
         ]
+        if access:
+            access.bind(data)
+            rows = [access.decorate(row) for row in rows
+                    if access.allowed(row, 'view') or access.allowed(row, 'request')]
         raw_by_key = {
             f"{source}:{person.get('record_id')}": person
             for source in ("staff", "external")
@@ -273,6 +277,8 @@ class SignatureManagement:
         latest = {r["key"]: r["payload"] for r in self.store.list_documents(PERSON_NS)}
         request_by_id = {r["key"]: r["payload"] for r in self.store.list_documents(REQUEST_NS)}
         for row in rows:
+            if row.get('invite_only'):
+                continue
             effective = data["resolved"].get(row["person_key"], row)
             row["effective_person_key"] = effective["person_key"]
             row["effective_source"] = effective["source"]
@@ -284,10 +290,12 @@ class SignatureManagement:
             request = request_by_id.get(request_id) if request_id else None
             row["request"] = self._public_request(request) if request else None
         counts = {state: sum(p["signature_status"] == state for p in rows) for state in ("signed", "unsigned", "resign")}
+        scopes = sorted({scope for row in rows for scope in self.s._building_codes_from_value(row.get('building'))})
         rows = [p for p in rows if
                 (not source or source == "all" or p["source"] == source) and
                 (not status or status == "all" or p["signature_status"] == status) and
-                (not message_capable or (p["source"] == "staff" and p.get("can_receive_message"))) and
+                (not message_capable or (p["source"] == "staff" and p.get("can_receive_message")
+                                        and str(p.get('account_nature') or '').strip().upper() == 'VNET')) and
                 (not scope or scope == "ALL" or scope in self.s._building_codes_from_value(p.get("building"))) and
                 (not query_terms or all(
                     term in re.sub(
@@ -304,9 +312,11 @@ class SignatureManagement:
         page_size = max(1, min(500, int(payload.get("page_size") or 50)))
         return {"people": rows[(page - 1) * page_size:page * page_size], "count": len(rows), "page": page,
                 "page_size": page_size, "counts": counts, "sources": data["sources"],
+                "can_manage_directory": bool(access and access.global_manager),
+                "scope_options": [{"value": scope, "label": '110站' if scope == '110' else scope + '楼'} for scope in scopes],
                 "recipients": [
                     {"value": b, "label": "110站值班账号" if b == "110" else f"{b}楼值班账号"}
-                    for b in ("A", "B", "C", "D", "E", "H", "110")
+                    for b in (access.scopes if access else ("A", "B", "C", "D", "E", "H", "110"))
                 ]}
 
     def refresh(self) -> dict:
@@ -409,11 +419,11 @@ class SignatureManagement:
             public["status"] = "expired"
         return public
 
-    def send(self, payload, *, actor: str, base_url: str, send_text) -> dict:
+    def send(self, payload, *, actor: str, base_url: str, send_text, local=False, direct_open_id="") -> dict:
         operation_id = _id(payload.get("operation_id"))
         source, rid = _text(payload.get("source")), _id(payload.get("record_id"))
         recipient = _text(payload.get("recipient"))
-        fingerprint = _hash([source, rid, recipient, actor])
+        fingerprint = _hash([source, rid, recipient, actor] + (['local'] if local else []))
         with ExitStack() as locks:
             locks.enter_context(self.lock(f"{source}:{rid}"))
             prior = self.store.get_document(REQUEST_NS, operation_id)
@@ -443,12 +453,12 @@ class SignatureManagement:
                 recipient_label = "110站值班账号" if duty_code == "110" else f"{duty_code}楼值班账号"
             else:
                 open_id = (
-                    person.get("open_id")
-                    if source == "staff" and person.get("can_receive_message")
+                    direct_open_id or person.get("open_id")
+                    if direct_open_id or source == "staff" and person.get("can_receive_message")
                     else ""
                 )
                 recipient_label = person.get("name")
-            if not open_id:
+            if not open_id and not local:
                 return {"status": "recipient_required", "failure_kind": "bot_unavailable",
                         "error": "该人员的账号性质不是VNET，不能直接发送；请选择VNET人员或值班账号代收。"}
             fields = self._fields(target["source"], target["record_id"])
@@ -474,9 +484,14 @@ class SignatureManagement:
                 self.store.put_document(PERSON_NS, key, {"request_id": operation_id})
             public_base = self.s._signature_public_base_url(scope=target.get("building") or "ALL", request_base_url=base_url)
             link = public_base + "/signature?" + urlencode({"request_id": operation_id}) + "#" + urlencode({"token": token["token"]})
+            if local:
+                request.update(status='ready', recipient_label='本人在线签名')
+                self.store.put_document(REQUEST_NS, operation_id, request)
+                return {**self._public_request(request), 'link_url': '/signature?' + urlencode({'request_id': operation_id})
+                        + '#' + urlencode({'token': token['token']})}
             message = "\n".join(["【人员签名】请完成手写签名", f"签名人员：{target['name']}",
                 f"楼栋：{target.get('building') or '未填写'}", f"接收：{recipient_label}",
-                "请交由本人完成签名。链接有效期24小时，保存一次后失效。", "请连接本单位局域网后打开：", link])
+                "请交由本人完成签名。链接有效期24小时，保存一次后失效。", "请打开以下链接：", link])
             try:
                 ok, error, results = send_text(message, [open_id])
                 request.update(status="sent" if ok else "send_failed", error="" if ok else str(error),
@@ -783,35 +798,64 @@ class SignatureManagement:
             return {"status": "completed", "keep_record_id": keep, "deleted_ids": journal["deleted_ids"]}
 
 
-def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, base_url="", send_text=None):
+def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, base_url="", send_text=None, auth=None):
     """Both HTTP servers use exactly the same authorization/operation boundary."""
-    allowed = {"GET": {"people", "request", "duplicates", "preview"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate"}}
+    allowed = {"GET": {"people", "request", "duplicates", "preview", "account"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate", "self-start"}}
     if operation not in allowed.get(method, set()):
         raise SignatureManagementError("接口不存在。", 404)
     if operation not in {"request", "submit"} and not actor:
         raise SignatureManagementError("请先登录。", 401)
-    if operation == "preview":
-        if not is_admin:
-            raise SignatureManagementError("只有管理员可以查看签名字迹。", 403)
-        return manager.preview(payload)
-    if operation in {"duplicates", "merge", "associate", "migrate"} and not is_admin:
-        raise SignatureManagementError("只有管理员可以核对、关联或清理人员。", 403)
-    if operation == "people":
-        return manager.people(payload)
-    if operation == "refresh":
-        return manager.refresh()
     if operation == "request":
         return manager.session(payload)
     if operation == "submit":
         return manager.submit(payload)
+    if auth is None:
+        raise SignatureManagementError('无法核验当前账号的人员管理权限。', 403)
+    from .signature_access import SignatureAccess
+    access = SignatureAccess(manager, auth, actor)
+    if operation == 'account':
+        return access.account(payload.get('open_id'))
+    if operation == 'self-start':
+        if payload:
+            raise SignatureManagementError('本人签名不接受指定他人身份。', 400)
+        import uuid
+        result = access.account()
+        person = result['person']
+        if not person or not person['is_self'] or not person['can_request']:
+            raise SignatureManagementError(result['reason'] or '未能核验本人签名身份。', 409)
+        return manager.send({'source': person['source'], 'record_id': person['record_id'],
+            'operation_id': uuid.uuid4().hex}, actor=actor, base_url=base_url, send_text=None, local=True)
+    if operation == 'preview':
+        access.require(payload.get('source'), payload.get('record_id'), 'view')
+        return manager.preview(payload)
+    if operation in {'people', 'refresh'}:
+        return manager.people({**payload, **({'refresh': True} if operation == 'refresh' else {})}, access=access)
+    if operation in {'duplicates', 'merge', 'associate', 'migrate'} and not access.global_manager:
+        raise SignatureManagementError('只有全楼管理员可以核对、关联或清理人员。', 403)
     if operation == "temporary":
+        access.temporary(payload)
         return manager._new_temporary(payload, _id(payload.get("operation_id")), actor)
     if operation == "requests":
-        return manager.send(payload, actor=actor, base_url=base_url, send_text=send_text)
+        person = access.require(payload.get('source'), payload.get('record_id'), 'request')
+        if payload.get('recipient') and not access.allowed(person, 'edit'):
+            raise SignatureManagementError('向上级发起的签名邀请只能发送给该人员本人，不能选择代收人。', 403)
+        access.recipient(payload.get('recipient'))
+        target = access.target(person) or {}
+        return manager.send(payload, actor=actor, base_url=base_url, send_text=send_text,
+                            direct_open_id=target.get('open_id', ''))
     if operation == "duplicates":
-        return manager.duplicates()
+        data = manager.duplicates()
+        data['groups'] = [{**group, 'people': [access.decorate(person) for person in group['people']]}
+                          for group in data['groups'] if all(access.allowed(person, 'edit') for person in group['people'])]
+        return data
     if operation == "associate":
+        access.require('staff', payload.get('staff_record_id'), 'edit')
+        access.require('external', payload.get('record_id'), 'edit')
         return manager.associate(payload)
     if operation == "migrate":
+        if access.profile.get('level') != 'L0':
+            raise SignatureManagementError('跨人员签名迁移仅限超级管理员。', 403)
         return manager.migrate_linked_signatures(actor)
+    for rid in payload.get('record_ids') or []:
+        access.require('external', rid, 'edit')
     return manager.merge(payload, actor)

@@ -2743,12 +2743,15 @@ class PortalRuntime:
         if not resolved.is_file():
             return self._send_json(404, {"ok": False, "error": "Not Found"})
         body = resolved.read_bytes()
-        content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+        content_type = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                        ".json": "application/json", ".html": "text/html; charset=utf-8"}.get(resolved.suffix.lower()) \
+            or mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
         self._write_response(
             HTTPStatus.OK,
             {
                 "Content-Type": content_type,
-                "Cache-Control": "no-cache" if resolved.name == "page-navigation.css" else "public, max-age=86400",
+                "Cache-Control": "no-store" if resolved.suffix.lower() == ".html" or resolved.name == "entry.json"
+                                 else "no-cache" if resolved.name == "page-navigation.css" else "public, max-age=86400",
             },
             body,
         )
@@ -2870,7 +2873,7 @@ class PortalRuntime:
                 redirect_uri=redirect_uri,
             )
         except PortalError as exc:
-            self._send_html_message(400, "飞书登录失败", str(exc))
+            self._send_html_message(400, "飞书登录失败", PortalAuthManager.public_login_error(exc))
             return True
         self._send_redirect(
             next_path or sanitized,
@@ -4170,6 +4173,7 @@ class PortalRuntime:
                 actor=str(((session or {}).get("user") or {}).get("open_id") or ""),
                 is_admin=bool(session and PortalRuntime.auth_manager.is_admin(session)),
                 base_url=self._request_base_url(), send_text=_send_text_to_open_ids_guarded,
+                auth=PortalRuntime.auth_manager,
             )
             if isinstance(result, tuple):
                 return self._write_response(200, {"Content-Type": result[1], "Cache-Control": "private, no-store"}, result[0])
@@ -4369,7 +4373,7 @@ class PortalRuntime:
                     next_path=next_path,
                 )
             except PortalError as exc:
-                return self._send_html_message(500, "飞书登录未启用", str(exc))
+                return self._send_html_message(500, "飞书登录未启用", PortalAuthManager.public_login_error(exc))
             return self._send_redirect(login_url)
         if parsed.path == "/api/auth/feishu/callback":
             qs = parse_qs(parsed.query)
@@ -4383,7 +4387,7 @@ class PortalRuntime:
                     redirect_uri=redirect_uri,
                 )
             except PortalError as exc:
-                return self._send_html_message(400, "飞书登录失败", str(exc))
+                return self._send_html_message(400, "飞书登录失败", PortalAuthManager.public_login_error(exc))
             return self._send_redirect(
                 next_path,
                 set_cookie=PortalRuntime.auth_manager.cookie_header(session_id),

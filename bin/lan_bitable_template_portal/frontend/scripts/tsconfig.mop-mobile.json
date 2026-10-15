@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [
+    "../src/components/EngineerMopPage.vue",
+    "../src/components/MopSheetPreviewTable.vue",
+    "../src/components/MopCellPopover.vue",
+    "../src/components/MopMobileFillForm.vue",
+    "../src/workspace-v2/MopWorkspace.vue",
+    "../src/mopMobileFields.ts"
+  ]
+}

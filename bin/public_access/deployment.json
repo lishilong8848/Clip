@@ -3,7 +3,7 @@
   "deployment_host": "192.168.224.130",
   "settings": {
     "enabled": true,
-    "public_url": "https://dengta.sjhl.online",
+    "public_url": "https://dt.sjhl.online",
     "server_addr": "182.254.244.136",
     "server_port": 7000,
     "remote_port": 6100,
@@ -13,20 +13,20 @@
   "credential": {
     "format": 1,
     "component": "public_access_profile",
-    "version": "d1d4344b5ecfd930f28b63d2a1650a30aa984b4ec9682e7ae34d12be73f300ac",
+    "version": "414a60a2355337800a9809c9c8bdfbf2e3d19536f4d549ad86c0c62bd7e5526c",
     "platform": "windows_amd64",
     "base": "H7DLbpdQiaIw4ssg5sCcSoGMn5M",
     "table": "tblUECEItaUpOWvd",
-    "sha256": "d1d4344b5ecfd930f28b63d2a1650a30aa984b4ec9682e7ae34d12be73f300ac",
-    "size": 279,
+    "sha256": "414a60a2355337800a9809c9c8bdfbf2e3d19536f4d549ad86c0c62bd7e5526c",
+    "size": 275,
     "parts": [
       {
         "index": 1,
-        "size": 279,
-        "sha256": "d1d4344b5ecfd930f28b63d2a1650a30aa984b4ec9682e7ae34d12be73f300ac",
+        "size": 275,
+        "sha256": "414a60a2355337800a9809c9c8bdfbf2e3d19536f4d549ad86c0c62bd7e5526c",
         "name": "clipflow-public-profile.json",
-        "record_id": "reczz28NYqWIJCcC",
-        "file_token": "Zva6bTp5qovgqvxrqnUcc5vQnIb"
+        "record_id": "reczz28NbQlP3dKV",
+        "file_token": "PO6WbpZX5ojAD7xCZN4cK5MJnlb"
       }
     ]
   }

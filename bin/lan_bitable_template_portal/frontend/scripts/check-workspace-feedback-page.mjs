@@ -35,7 +35,7 @@ try{
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'toast-fixture'}});
     if(url.pathname==='/api/auth/status')return ok({logged_in:loggedIn,user:loggedIn?{open_id:'ou_toast_fixture',name:'提示验收',role:'admin',level:'L1',modules:['maintenance']}: {},scope_options:loggedIn?[{value:'A',label:'A楼'}]:[],login_url:'/api/auth/login'});
-    if(url.pathname==='/api/auth/password/people')return ok({items:[{id:'rec_toast_fixture',name:'提示验收',building:'A楼',employee_no:'fixture',account_nature:'外部',login_method:'password',selectable:true,needs_setup:false}]});
+    if(url.pathname==='/api/auth/password/people')return ok({items:[{id:'rec_toast_fixture',name:'提示验收',employee_no:'fixture',can_reset_password:true,login_method:'password',selectable:true,needs_setup:false}]});
     if(req.method()!=='GET'){
       writes.push(url.pathname);
       assert.equal(url.pathname,'/api/auth/password/login','no real business operation is submitted');
@@ -57,7 +57,7 @@ try{
   assert.match(await loginAlert.innerText(),/请先选择姓名/);
   assert.deepEqual(writes,[]);
   await page.locator('#personnel-name-select').fill('提示验收');
-  await page.getByRole('option',{name:'提示验收 · A楼 · fixture',exact:true}).click();
+  await page.getByRole('option',{name:'提示验收 · fixture',exact:true}).click();
   await page.locator('#personnel-password').fill('fixtureWrong1');
   await page.locator('.pwd-form button[type=submit]').click();
   await page.waitForFunction(()=>{const input=document.querySelector('#personnel-password');return input===document.activeElement&&input.selectionEnd-input.selectionStart===13;});

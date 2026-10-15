@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -96,11 +98,17 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.json()['marker'])
 
     async def test_internal_routes_denied_even_for_logged_in_admin(self):
-        for path in ('/api/qt/events', '/api/backend/shutdown', '/api/auth/guest'):
+        for path in ('/api/qt/events', '/api/backend/shutdown'):
             response = await self.client.post(path, headers={'Origin': SETTINGS.public_url})
             self.assertEqual(response.status_code, 403, path)
         self.assertEqual((await self.client.get('/api/unreviewed-module')).status_code, 403)
         self.assertEqual((await self.client.get('/openapi.json')).status_code, 403)
+
+    async def test_anonymous_guest_entry_retains_same_origin_requirement(self):
+        self.session = None
+        self.assertEqual((await self.client.post('/api/auth/guest', headers={'Origin': SETTINGS.public_url})).status_code, 200)
+        self.assertEqual((await self.client.post('/api/auth/guest')).status_code, 403)
+        self.assertEqual((await self.client.post('/api/auth/guest', headers={'Origin': 'https://evil.example'})).status_code, 403)
 
     async def test_lan_request_bypasses_only_public_policy(self):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.guard), base_url='http://test') as lan:
@@ -195,6 +203,42 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ConfigAndDistributionTests(unittest.TestCase):
+    def test_update_bundles_health_runtime_and_retains_local_incident_state(self):
+        import shutil
+        import package_portable as package
+        from frontend_assets import patch_deletions
+        runtime = [path.relative_to(package.PROJECT_ROOT) for path in (BIN / 'public_access').iterdir()
+                   if path.suffix in {'.py', '.json'}]
+        runtime += [Path(name) for name in (
+            'bin/tools/check_public_access.py', 'bin/clipflow_backend/main.py',
+            'bin/lan_bitable_template_portal/portal_service.py',
+            'bin/refactored_main.py', '启动程序.bat')]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project, installed = root / 'project', root / 'installed'
+            for relative in runtime:
+                target = project / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(package.PROJECT_ROOT / relative, target)
+            shutil.copytree(project, installed)
+            state = Path('bin/data/public_access/health.json')
+            atomic_json(project / state, {'incident_id': 'developer-must-not-ship'})
+            atomic_json(installed / state, {'incident_id': 'ongoing-outage', 'notified': ['fixture-li', 'fixture-h']})
+            before = (installed / state).read_bytes()
+            with patch.object(package, 'PROJECT_ROOT', project), patch.object(package, 'BUILD_DIR', root / 'build'):
+                package.build_patch(root / 'unused', installed, 'health-update')
+            payload = root / 'build/health-update_patch_only'
+            meta = json.loads((payload / 'bin/patch_meta.json').read_text(encoding='utf-8'))
+            self.assertTrue(meta['restart_required'])
+            self.assertFalse((payload / state).exists())
+            for relative in runtime:
+                self.assertEqual((payload / relative).read_bytes(), (project / relative).read_bytes())
+                self.assertEqual(meta['file_sha256'][relative.as_posix()], checksum(payload / relative))
+            removed = patch_deletions(installed, payload, [])
+            self.assertNotIn(state, removed)
+            shutil.copytree(payload, installed, dirs_exist_ok=True)
+            self.assertEqual((installed / state).read_bytes(), before)
+
     def test_full_public_runtime_patch_requires_restart_even_with_current_baseline(self):
         import package_portable as package
         for mode in ('added', 'changed', 'deleted', 'unchanged'):
@@ -349,6 +393,28 @@ class ConfigAndDistributionTests(unittest.TestCase):
         manager.stop()
         manager.child.terminate.assert_called_once()
         self.assertEqual(BACKOFF, (5, 15, 30, 60))
+
+    def test_health_monitor_survives_frpc_worker_failure_until_portal_stop(self):
+        with tempfile.TemporaryDirectory() as temp, socket.socket() as reserve:
+            reserve.bind(('127.0.0.1', 0))
+            port = reserve.getsockname()[1]
+            reserve.close()
+            settings = replace(SETTINGS, ingress_port=port)
+            manager = PublicAccess(settings, 'http://127.0.0.1:18766', SECRET, data=Path(temp),
+                deployment={'deployment_host': '192.168.224.130'})
+            with patch('public_access.health.Monitor') as monitor, \
+                    patch('public_access.provisioning.provision', return_value=settings), \
+                    patch('public_access.supervisor.previous', return_value=(None, None)), \
+                    patch('public_access.supervisor.install', return_value=(Path(temp) / 'frpc.exe', {})), \
+                    patch('public_access.supervisor.verify_binary', side_effect=ValueError('invalid binary')):
+                manager.start()
+                manager.thread.join(4)
+                self.assertFalse(manager.thread.is_alive())
+                self.assertEqual(manager.state, 'failed')
+                monitor.return_value.start.assert_called_once()
+                monitor.return_value.stop.assert_not_called()
+                manager.stop()
+                monitor.return_value.stop.assert_called_once()
 
     def test_background_stop_reaps_child_and_closes_ingress(self):
         real_popen = subprocess.Popen
@@ -623,9 +689,11 @@ class ProvisioningTests(unittest.TestCase):
     def test_update_excludes_credential_cache_and_includes_public_manifest(self):
         import package_portable as package
         self.assertIn(Path('bin/public_access/deployment.json'), package.FORCE_PATCH_INCLUDE_FILES)
-        for name in ('deployment-credential.json', 'profile-upload-journal.json', 'autostart-disabled.json'):
+        for name in ('deployment-credential.json', 'profile-upload-journal.json', 'autostart-disabled.json', 'health.json'):
             self.assertTrue(package._is_runtime_data_path(
                 package.PROJECT_ROOT / 'bin/data/public_access' / name, package.PROJECT_ROOT))
+        self.assertFalse(package._is_development_only_path(
+            package.PROJECT_ROOT / 'bin/tools/check_public_access.py', package.PROJECT_ROOT))
 
     def test_disable_then_enable_does_not_require_a_plaintext_local_config(self):
         from tools import configure_public_access as configure
@@ -642,6 +710,58 @@ class ProvisioningTests(unittest.TestCase):
                     configure.main()
                 self.assertFalse(configure.DISABLED.exists())
                 self.assertFalse(configure.CONFIG.exists())
+
+
+class PublicDomainCutoverTests(unittest.TestCase):
+    def test_cutover_waits_rolls_back_and_finishes_once(self):
+        bash = shutil.which('bash') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else '')
+        if not bash or not Path(bash).is_file():
+            self.skipTest('Bash is required for the isolated server-script check.')
+        source = (BIN / 'public_access/server/cutover-to-dt.sh').read_text(encoding='utf-8')
+        for scenario in ('offline', 'wrong_service', 'nginx_failure', 'ready'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                base, sites = root / 'public', root / 'sites'
+                (base / 'deployment').mkdir(parents=True)
+                sites.mkdir()
+                for domain in ('dt', 'dengta'):
+                    (sites / f'{domain}.sjhl.online.conf').write_text(f'old-{domain}')
+                    (base / 'deployment' / f'{domain}-https.conf').write_text(f'new-{domain}')
+                calls = root / 'systemctl.log'
+                failed = root / 'nginx-failed'
+                script = source.replace('base=/opt/clipflow-public', 'base=' + shlex.quote(base.as_posix())).replace(
+                    'sites=/www/server/panel/vhost/nginx', 'sites=' + shlex.quote(sites.as_posix()))
+                fake_commands = '''
+PATH=/usr/bin:/bin:$PATH
+flock() { return 0; }
+openssl() { return 0; }
+curl() {
+    [[ "$SCENARIO" != offline ]] || return 22
+    if [[ "$SCENARIO" == wrong_service ]]; then printf wrong; else printf '%s' '{"ok":true,"service":"clipflow_backend"}'; fi
+}
+nginx() {
+    if [[ "$SCENARIO" == nginx_failure && "$1" == -t && ! -f "$FAILED" ]]; then
+        touch "$FAILED"
+        return 1
+    fi
+    return 0
+}
+systemctl() { printf '%s\\n' "$*" >> "$CALLS"; }
+'''
+                env = {**os.environ, 'SCENARIO': scenario, 'FAILED': failed.as_posix(), 'CALLS': calls.as_posix()}
+                result = subprocess.run([bash, '-c', fake_commands + script], env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 1 if scenario == 'nginx_failure' else 0, result.stderr)
+                for domain in ('dt', 'dengta'):
+                    self.assertEqual((sites / f'{domain}.sjhl.online.conf').read_text(),
+                        ('new-' if scenario == 'ready' else 'old-') + domain)
+                self.assertEqual((base / 'domain-dt-active').exists(), scenario == 'ready')
+                self.assertEqual(calls.exists(), scenario == 'ready')
+                if scenario == 'ready':
+                    self.assertIn('disable --now clipflow-domain-cutover.timer', calls.read_text())
+                    env['SCENARIO'] = 'offline'
+                    again = subprocess.run([bash, '-c', fake_commands + script], env=env, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(again.returncode, 0, again.stderr)
+                    self.assertEqual(len(list((base / 'backups').iterdir())), 1)
 
 
 class LoopbackFlowTests(unittest.TestCase):

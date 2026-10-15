@@ -1,19 +1,19 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-domain=dengta.sjhl.online
+domain=dt.sjhl.online
 base=/opt/clipflow-public
 source_dir="$base/deployment"
 site="/www/server/panel/vhost/nginx/$domain.conf"
 
 [[ $EUID == 0 ]] || { echo 'Run this script as root in the server terminal.'; exit 1; }
-for file in dengta-https.conf clipflow-cert-renew.service clipflow-cert-renew.timer; do
+for file in dt-https.conf clipflow-cert-renew.service clipflow-cert-renew.timer; do
     test -s "$source_dir/$file"
 done
 test -s "$site"
 test -s "$base/acme/acme.sh"
-test -s "$base/tls/privkey.pem"
-openssl x509 -in "$base/tls/fullchain.pem" -noout -checkend 0 -checkhost "$domain"
+test -s "$base/tls/dt/privkey.pem"
+openssl x509 -in "$base/tls/dt/fullchain.pem" -noout -checkend 0 -checkhost "$domain"
 systemctl is-active --quiet firewalld
 [[ $(firewall-cmd --get-zone-of-interface=eth0) == public ]]
 nginx -t
@@ -34,7 +34,7 @@ for mode in runtime permanent; do
 done
 
 install -d -m 0700 "$base/backups"
-backup="$base/backups/dengta-before-https.$(date +%Y%m%d%H%M%S).conf"
+backup="$base/backups/dt-before-https.$(date +%Y%m%d%H%M%S).conf"
 cp -a "$site" "$backup"
 restore_site() {
     status=$?
@@ -46,8 +46,8 @@ restore_site() {
 }
 trap restore_site ERR
 
-chmod 600 "$base/tls/privkey.pem"
-install -m 0644 "$source_dir/dengta-https.conf" "$site"
+chmod 600 "$base/tls/dt/privkey.pem"
+install -m 0644 "$source_dir/dt-https.conf" "$site"
 nginx -t
 nginx -s reload
 install -m 0644 "$source_dir/clipflow-cert-renew.service" "$source_dir/clipflow-cert-renew.timer" /etc/systemd/system/

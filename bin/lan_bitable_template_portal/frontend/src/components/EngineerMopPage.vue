@@ -33,7 +33,7 @@
 
       <MopFlowSteps v-if="!previewMode" :steps="mopFlowSteps" />
 
-      <section v-if="previewMode && preview" class="mop-preview-page">
+      <section v-if="previewMode && preview" class="mop-preview-page" :class="`mobile-page-${mopMobileStep}`">
         <MopPreviewHeader
           :title="previewTitle"
           :notice-title="selectedNotice?.title || ''"
@@ -42,6 +42,10 @@
           :completion-items="mopCompletionItems"
           @back="backToBinding"
         />
+        <nav ref="mopMobileStepsRef" class="mop-mobile-steps" aria-label="维护单填写步骤">
+          <button type="button" data-v2-navigation :aria-current="mopMobileStep === 'details' ? 'step' : undefined" :disabled="mopFillSaving || mopUploadSaving || mopResetting" @click="setMopMobileStep('details')"><UsersRound :size="18" /><span>人员与时间</span></button>
+          <button type="button" data-v2-navigation :aria-current="mopMobileStep === 'checks' ? 'step' : undefined" :disabled="mopFillSaving || mopUploadSaving || mopResetting" @click="setMopMobileStep('checks')"><ClipboardCheck :size="18" /><span>检查与备注</span></button>
+        </nav>
         <MopSheetStatusPanel
           :local-file="preview.local_file || null"
           :active-sheet="activeSheet || null"
@@ -206,6 +210,7 @@
         >
           <MopSheetPreviewTable
             :active-sheet="activeSheet || null"
+            :mobile-step="mopMobileStep"
             :column-indexes="activeSheetColumnIndexes"
             :bulk-count="bulkFillCheckboxCells.length"
             :filled-count="mopFilledCount"
@@ -236,6 +241,10 @@
             :cell-override-value="cellOverrideValue"
             @mark-all-normal="markAllCheckboxes('normal')"
             @cell-mousedown="startMopCellSelection"
+            @cell-activate="activateMopCell"
+            @edit-raw="setEditableCellValue"
+            @edit-checkbox="setMobileMopCheckbox"
+            @edit-field="(field, value) => mopEditing.setMaintenanceValue(maintenanceKey(field), value)"
             @cell-enter="extendMopCellSelection"
             @select-checkbox="setActiveCheckboxState"
             @update:date-time="mopFillDateTime = $event"
@@ -248,7 +257,11 @@
             @cancel="clearMopCellSelection"
           />
         </div>
+        <div v-if="mopMobileStep === 'details'" class="mop-mobile-continue">
+          <button type="button" data-v2-navigation :disabled="mopFillSaving || mopUploadSaving || mopResetting" @click="setMopMobileStep('checks')">继续：检查与备注<ArrowRight :size="18" /></button>
+        </div>
         <MopUploadFooter
+          data-v2-inline-feedback
           :items="mopUploadFooterItems"
           :uploaded-at-text="signedMopUploadedAtText"
           :saving="mopUploadSaving"
@@ -306,6 +319,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { ArrowRight, ClipboardCheck, UsersRound } from 'lucide-vue-next';
 import type { Dict } from "../api/client";
 import {
   bindEngineerMop,
@@ -444,6 +458,8 @@ const noticeStatusFilter = ref("");
 const mopSearch = ref("");
 const preview = ref<Dict | null>(null);
 const previewMode = ref(false);
+const mopMobileStep = ref<'details' | 'checks'>('details');
+const mopMobileStepsRef = ref<HTMLElement | null>(null);
 const activeSheetName = ref("");
 const signatureRole = ref<MopSignatureRole>("implementer");
 const signatureSearch = ref("");
@@ -1256,6 +1272,15 @@ function clearMopCellSelection(): void {
   mopCellSelection.clear();
 }
 
+async function setMopMobileStep(step: 'details' | 'checks'): Promise<void> {
+  if (mopFillSaving.value || mopUploadSaving.value || mopResetting.value) return;
+  closeSignatureManager();
+  clearMopCellSelection();
+  mopMobileStep.value = step;
+  await nextTick();
+  mopMobileStepsRef.value?.scrollIntoView({ block: 'start', behavior: 'auto' });
+}
+
 function activateMopCell(rowIndex: number, colIndex: number): void {
   const signatureRoleForCell = signatureRoleAtCell(rowIndex, colIndex);
   if (signatureRoleForCell) {
@@ -1277,6 +1302,11 @@ function activateMopCell(rowIndex: number, colIndex: number): void {
 
 function setCheckboxState(cell: Dict, state: string): void {
   mopEditing.setCheckbox(checkboxKey(cell), state);
+}
+
+function setMobileMopCheckbox(row: number, col: number, value: string): void {
+  const cell = checkboxCellAt(row, col);
+  if (cell) setCheckboxState(cell, value);
 }
 
 function checkboxCellAt(rowIndex: number, colIndex: number): Dict | null {
@@ -2645,7 +2675,11 @@ async function startMopPreview(): Promise<void> {
     } else if (!sheets.some((sheet: Dict) => sheet.name === activeSheetName.value)) {
       activeSheetName.value = String(sheets[0]?.name || "");
     }
+    if (window.matchMedia('(max-width: 720px)').matches && sheets.find((sheet: Dict) => sheet.name === activeSheetName.value)?.is_cover) {
+      activeSheetName.value = String(sheets.find((sheet: Dict) => !sheet.is_cover)?.name || activeSheetName.value);
+    }
     const appliedMemoryCount = applyMopFillMemory(data.fill_memory);
+    mopMobileStep.value = 'details';
     previewMode.value = true;
     claimMopEditSession();
     if (appliedMemoryCount) {
@@ -3615,7 +3649,64 @@ watch(() => props.scopeOptions, (items) => {
   }
 }
 
+.mop-mobile-steps, .mop-mobile-continue { display: none; }
+
 @media (max-width: 720px) {
+  .mop-mobile-steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 4px; border: 1px solid #d8e5f7; border-radius: 8px; background: #fff; scroll-margin-top: calc(var(--head-height, 0px) + 12px); }
+  .mop-mobile-steps button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; border: 0; border-radius: 6px; padding: 8px; background: transparent; color: #475569; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: background-color 180ms ease, color 180ms ease; }
+  .mop-mobile-steps button[aria-current="step"] { background: #eaf3ff; color: #1d4ed8; }
+  .mop-mobile-continue { display: block; }
+  .mop-mobile-continue button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 46px; border: 0; border-radius: 6px; background: #1d65d8; color: #fff; padding: 10px 12px; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .mop-mobile-steps button:disabled, .mop-mobile-continue button:disabled { opacity: .5; cursor: default; }
+  .mop-mobile-steps button:focus-visible, .mop-mobile-continue button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+  .mop-preview-page.mobile-page-checks .mop-sign-panel:not(.manager-open), .mop-preview-page.mobile-page-details :deep(.floating-upload-box) { display: none; }
+  .engineer-mop.preview-open { padding: 8px; box-sizing: border-box; min-width: 0; }
+  .mop-preview-page :deep(*) { box-sizing: border-box; }
+
+  .mop-preview-page { min-height: 0; gap: 8px; --mop-upload-footer-safe-space: 0px; }
+
+  .mop-preview-page :deep(.preview-head) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+  }
+  .mop-preview-page :deep(.preview-title) { min-width: 0; }
+  .mop-preview-page :deep(.preview-title strong) { font-size: 14px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+  .mop-preview-page :deep(.preview-title p) { font-size: 12px; }
+  .mop-preview-page :deep(.preview-head-status), .mop-preview-page :deep(.mop-file-status) { display: none; }
+  .mop-preview-page .mop-sign-panel:not(.manager-open) { display: block; padding: 8px; }
+  .mop-preview-page .mop-sign-panel:not(.manager-open) .sign-panel-head { display: none; }
+  .mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.signature-role-summary) { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.signature-role-summary button) { display: grid; gap: 6px; padding: 8px; border-radius: 6px; }
+  .mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-title-row span) { font-size: 13px; }
+  .mop-preview-page .mop-sign-panel:not(.manager-open) :deep(.role-state-row strong) { font-size: 12px; }
+  .mop-preview-page :deep(.sheet-tabs button) { min-height: 44px; font-size: 14px; }
+
+  .mop-preview-page .preview-scroll {
+    min-width: 0;
+    width: 100%;
+    min-height: 280px;
+    max-height: 56dvh;
+    overflow: auto;
+    border-radius: 8px;
+    padding-bottom: 0;
+    overscroll-behavior: auto;
+  }
+  .mop-preview-page .preview-scroll:has(.mop-mobile-form) { max-height: none; min-height: 0; overflow: visible; }
+  .mop-preview-page :deep(.table-fill-toolbar) { position: sticky; left: 0; top: auto; box-sizing: border-box; width: 100%; padding: 8px; }
+  .mop-preview-page :deep(.table-fill-toolbar-row) { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .mop-preview-page :deep(.table-fill-title span) { display: none; }
+  .mop-preview-page :deep(.table-fill-actions) { flex-wrap: wrap; gap: 8px; }
+  .mop-preview-page :deep(.table-fill-actions button) { min-height: 44px; }
+  .mop-preview-page :deep(.floating-upload-compact) { grid-template-columns: minmax(0, 1fr) auto; }
+  .mop-preview-page :deep(.floating-upload-summary) { grid-column: 1; grid-row: 2; justify-content: flex-start; }
+  .mop-preview-page :deep(.detail-toggle) { grid-column: 2; grid-row: 1 / 3; min-height: 44px; }
+  .mop-preview-page :deep(.floating-upload-action-row) { display: grid; grid-template-columns: 1fr 1.4fr; gap: 8px; }
+  .mop-preview-page :deep(.floating-upload-action-row button) { min-width: 0; min-height: 44px; padding-inline: 8px; }
+  .mop-preview-page :deep(.floating-uploaded-at) { grid-column: 1 / -1; }
+
   .mop-preview-page .mop-sign-panel.manager-open {
     inset: 8px;
     border-radius: 18px;

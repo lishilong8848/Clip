@@ -1,0 +1,10 @@
+[Unit]
+Description=Switch ClipFlow to dt after the designated host updates
+After=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+Nice=10
+TimeoutStartSec=20s
+ExecStart=/bin/bash /opt/clipflow-public/deployment/cutover-to-dt.sh

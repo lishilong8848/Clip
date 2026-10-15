@@ -1,6 +1,9 @@
 <!-- Tower geometry adapted from the supplied 雾屿灯塔.html; no script or remote asset. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="190 60 380 380">
   <defs>
+    <clipPath id="miniTowerBounds"><rect x="0" y="0" width="760" height="279"/></clipPath>
+    <clipPath id="miniSkyBounds"><rect x="160" y="-60" width="440" height="425"/></clipPath>
+    <linearGradient id="miniCloud" x2="0" y2="1"><stop class="wl-cloud-start" stop-color="#eef5fa"/><stop class="wl-cloud-mid" offset=".48" stop-color="#cddfe9"/><stop class="wl-cloud-end" offset="1" stop-color="#9dbbd0"/></linearGradient>
     <clipPath id="eyeBounds"><rect x="352" y="127" width="56" height="36" rx="3"/></clipPath>
     <linearGradient id="tower"><stop class="wl-tower-start" stop-color="#dce5ee"/><stop class="wl-tower-mid" offset=".48" stop-color="#f8fbfd"/><stop class="wl-tower-end" offset="1" stop-color="#c7d4e2"/></linearGradient>
     <linearGradient id="enamel" x2="1" y2="1"><stop class="wl-enamel-start" stop-color="#6288c4"/><stop class="wl-enamel-mid" offset=".38" stop-color="#35548c"/><stop class="wl-enamel-end" offset=".72" stop-color="#20365f"/><stop offset="1" stop-color="#152544"/></linearGradient>
@@ -9,7 +12,7 @@
     <linearGradient id="litGlass" x2="1" y2="1"><stop stop-color="#fff5c7"/><stop offset=".48" stop-color="#ffd05f"/><stop offset="1" stop-color="#ed8b3d"/></linearGradient>
     <linearGradient id="beamLeft" gradientUnits="userSpaceOnUse" x1="370" y1="147" x2="190" y2="112"><stop stop-color="#fff5cf" stop-opacity=".86"/><stop offset=".42" stop-color="#ffc84c" stop-opacity=".48"/><stop offset="1" stop-color="#ff9f35" stop-opacity=".08"/></linearGradient>
     <linearGradient id="beamRight" gradientUnits="userSpaceOnUse" x1="390" y1="147" x2="570" y2="112"><stop stop-color="#fff5cf" stop-opacity=".86"/><stop offset=".42" stop-color="#ffc84c" stop-opacity=".48"/><stop offset="1" stop-color="#65eaff" stop-opacity=".1"/></linearGradient>
-    <radialGradient id="sunCore"><stop stop-color="#fffdf0"/><stop offset=".48" stop-color="#ffe8a5"/><stop offset="1" stop-color="#ef9251"/></radialGradient>
+    <radialGradient id="sunCore"><stop class="wl-sun-start" stop-color="#fffdf0"/><stop class="wl-sun-mid" offset=".48" stop-color="#ffe8a5"/><stop class="wl-sun-end" offset="1" stop-color="#ef9251"/></radialGradient>
     <linearGradient id="mist"><stop stop-color="#dceaf2" stop-opacity="0"/><stop offset=".3" stop-color="#dceaf2" stop-opacity=".5"/><stop offset=".7" stop-color="#dceaf2" stop-opacity=".5"/><stop offset="1" stop-color="#dceaf2" stop-opacity="0"/></linearGradient>
   </defs>
   <g class="wl-stars" fill="#e5ce79"><path d="m240 107 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm275 76 3-8 3 8 8 3-8 3-3 8-3-8-8-3z"/><circle cx="280" cy="157" r="2"/><circle cx="490" cy="128" r="2"/><circle cx="542" cy="238" r="2"/><circle cx="235" cy="244" r="1.7"/></g>

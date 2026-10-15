@@ -5,13 +5,13 @@
         <form ref="dialog" class="bot-settings" role="dialog" aria-modal="true" aria-labelledby="bot-settings-title" @submit.prevent="save">
           <header><h2 id="bot-settings-title">图标设置</h2><button type="button" class="close" aria-label="关闭图标设置" :disabled="saving" @click="close"><X :size="18" /></button></header>
           <div class="settings-body">
-            <div class="preview" :class="{ 'weather-preview': draft.shape === 'weather-lighthouse' }"><LighthouseBot :appearance="draft" /></div>
+            <div class="preview" :class="{ 'weather-preview': isWeatherShape(draft.shape) }"><LighthouseBot :appearance="draft" /></div>
             <fieldset class="colors"><legend>颜色</legend><div>
               <button v-for="[id, label, color] in BOT_COLORS" :key="id" type="button" class="swatch" :aria-label="label" :title="label" :aria-pressed="draft.color === id" :style="{ '--swatch': color }" :disabled="saving" @click="draft.color = id"><Check v-if="draft.color === id" :size="15" /></button>
             </div></fieldset>
             <div class="fields">
               <label>形状<select v-model="draft.shape" aria-label="形状" :disabled="saving"><option v-for="[id, label] in BOT_SHAPES" :key="id" :value="id">{{ label }}</option></select></label>
-              <label v-if="draft.shape === 'weather-lighthouse'" class="weather-city">天气城市<input v-model.trim="draft.weather_city" aria-label="天气城市" required pattern="[一-鿿]{2,16}" maxlength="16" :disabled="saving" placeholder="南通" /></label>
+              <label v-if="isWeatherShape(draft.shape)" class="weather-city">天气城市<input v-model.trim="draft.weather_city" aria-label="天气城市" required pattern="[一-鿿]{2,16}" maxlength="16" :disabled="saving" placeholder="南通" /></label>
             </div>
             <label class="size">尺寸 <output>{{ draft.size }} px</output><input v-model.number="draft.size" aria-label="尺寸" type="range" min="40" max="200" step="1" :disabled="saving" /></label>
             <div class="switches">
@@ -34,6 +34,7 @@ import { acquireModal } from '../modalState';
 import { inheritedControlTheme } from '../controlTheme';
 import { BOT_COLORS, BOT_SHAPES, DEFAULT_BOT, normalizeBot, type BotAppearance } from '../botAppearance';
 import LighthouseBot from './LighthouseBot.vue';
+import { isWeatherShape } from '../vendor/bloub/engine/skins';
 
 const props = withDefaults(defineProps<{ open: boolean; appearance: BotAppearance; target?: string | HTMLElement; themeSource?: HTMLElement | null }>(), { target: 'body' });
 const emit = defineEmits<{ close: []; saved: [value: BotAppearance]; preview: [value: BotAppearance] }>();

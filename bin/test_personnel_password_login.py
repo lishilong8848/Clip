@@ -318,13 +318,14 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         with patch.object(ppl.time, 'time', return_value=1000):
             self.assertEqual(self.harness.login.people()['items'], [])
         with patch.object(ppl.time, 'time', return_value=1301):
-            self.assertEqual(self.harness.login.people()['items'][0]['account_nature'], '外部账号')
+            self.assertTrue(self.harness.login.people()['items'][0]['can_reset_password'])
         with patch.object(ppl.time, 'time', return_value=1602):
             self.assertEqual(self.harness.login.people()['items'], [])
 
     def test_public_directory_is_paginated_cached_and_strips_password_fields(self):
         rows = [
             {"record_id": "recA", "fields": {"姓名": "张三", "机楼/专业": "A楼",
+                                             "手机号": "13900001111", "身份证号": IDENTITY_NUMBER,
                                              PASSWORD_FIELD: BOOTSTRAP,
                                              "员工姓名": _user("张三", "ou_fixture1")}},
             {"record_id": "recB", "fields": {"姓名": "李四", "机楼/专业": "H楼",
@@ -344,7 +345,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         for item in first["items"]:
             self.assertEqual(
                 set(item),
-                {"id", "name", "employee_no", "building", "selectable", "disabled_reason", "needs_setup", "account_nature", "login_method"},
+                {"id", "name", "employee_no", "selectable", "needs_setup", "login_method", "can_reset_password"},
             )
             for forbidden in ("password", PASSWORD_FIELD, "password_revision", "open_id", "openid",
                               "stored", "scopes", "login_ids", ppl.IDENTITY_FIELD, "identity"):
@@ -353,10 +354,43 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         self.assertEqual(first["items"][1]["id"], "recB")
         self.assertTrue(first["items"][0]["selectable"])
         self.assertTrue(first["items"][1]["selectable"])
+        for secret in ("13900001111", IDENTITY_NUMBER, "ou_fixture1", "fakesalt", BOOTSTRAP):
+            self.assertNotIn(secret, json.dumps(first))
         # cached: a second call must NOT hit the (now empty) directory page queue.
         second = self.harness.login.people()
         self.assertEqual(self.harness.service._request_payload_calls, 2)
         self.assertEqual(second["items"], first["items"])
+
+    def test_public_directory_reset_flag_preserves_external_only_rule(self):
+        from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP
+        rows = []
+        for rid, nature, oid in (
+            ("recExternal", "外部账号", "ou_fixtureExt"),
+            ("recInternal", "VNET", "ou_fixtureVnet"),
+            ("recUnknown", "", "ou_fixtureUnknown"),
+            ("recDuty", "外部账号", BUILDING_OPEN_ID_MAP["A"]),
+        ):
+            rows.append({"record_id": rid, "fields": {"姓名": rid, "账号性质": nature,
+                "机楼/专业": "A楼", "员工姓名": _user(rid, oid)}})
+        self.harness.service._pages = [_page(rows)]
+        listed = {item["id"]: item for item in self.harness.login.people()["items"]}
+        self.assertTrue(listed["recExternal"]["can_reset_password"])
+        for rid in ("recInternal", "recUnknown", "recDuty"):
+            self.assertFalse(listed[rid]["can_reset_password"])
+        for rid in ("recInternal", "recDuty"):
+            self.assertEqual(listed[rid]["login_method"], "feishu")
+
+    def test_anonymous_projection_does_not_forward_cached_extra_fields(self):
+        self.harness.service._pages = [_page([{"record_id": "recA", "fields": {
+            "姓名": "张三", "机楼/专业": "A楼", "员工姓名": _user("张三", "ou_fixture1")}}])]
+        self.harness.login.people()
+        # A future cache migration must not silently expand the public contract.
+        self.harness.login.snapshot["people"]["recA"].update({
+            "phone": "private-phone", "identity_number": "private-identity",
+            "app_secret": "private-secret", "disabled_reason": "private-diagnostic"})
+        encoded = json.dumps(self.harness.login.people())
+        for private in ("private-phone", "private-identity", "private-secret", "private-diagnostic"):
+            self.assertNotIn(private, encoded)
 
     def test_duplicate_record_id_across_pages_is_rejected(self):
         row = {"record_id": "recDup", "fields": {"姓名": "重复", "机楼/专业": "E楼"}}
@@ -1108,7 +1142,8 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         listed = {item["id"]: item for item in result["items"]}
         self.assertFalse(listed["recOne"]["selectable"])
         self.assertFalse(listed["recTwo"]["selectable"])
-        self.assertIn("多人使用同一OpenID", listed["recOne"]["disabled_reason"])
+        self.assertNotIn("disabled_reason", listed["recOne"])
+        self.assertIn("多人使用同一OpenID", self.harness.login.snapshot["people"]["recOne"]["disabled_reason"])
 
         # Attempt a login for the duplicated row: even though a stale cache may
         # attempt to remember it, it must be denied before any write.
@@ -1981,6 +2016,40 @@ class PersonnelPasswordRouteTests(_TempDirTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIs(response.json()["ok"], True)
         self.assertNotIn("set-cookie", {k.lower(): v for k, v in response.headers.items()})
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_anonymous_accounts_and_app_settings_are_not_readable(self):
+        self._build()
+        from lan_bitable_template_portal.feishu_assistant_settings import install_feishu_assistant_settings
+        install_feishu_assistant_settings(self.app, SimpleNamespace(_current_session=lambda r: None),
+            SimpleNamespace(auth_manager=self.auth), SimpleNamespace())
+
+        async def run():
+            async with self._client() as client:
+                for path in ("/api/auth/accounts", "/api/auth/accounts/audit", "/api/assistant/feishu-settings"):
+                    response = await client.get(path)
+                    self.assertEqual(response.status_code, 401, path)
+                    self.assertEqual(response.headers["cache-control"], "no-store")
+                    self.assertNotIn("data", response.json())
+        self._run(run())
+        self.assertEqual(self.service._request_payload_calls, 0)
+
+    def test_anonymous_login_errors_do_not_echo_backend_details(self):
+        self._build()
+
+        async def run():
+            async with self._client() as client:
+                for path in ("/api/auth/password/people", "/api/auth/password/login", "/api/auth/password/reset"):
+                    with patch.object(PersonnelPasswordLogin, "people", side_effect=RuntimeError("private-phone private-identity private-secret")):
+                        if path.endswith("/people"):
+                            response = await client.get(path)
+                        else:
+                            response = await client.post(path, json={"person_id": "recA", "password": BOOTSTRAP} if path.endswith("/login")
+                                else {"person_id": "recA", "identity_number": IDENTITY_NUMBER}, headers={"Origin": "http://testserver"})
+                        self.assertEqual(response.status_code, 503, path)
+                        self.assertNotIn("private-", response.text)
+                        self.assertEqual(response.headers["cache-control"], "no-store")
+        self._run(run())
 
     def test_csrf_origin_guard(self):
         self._build()

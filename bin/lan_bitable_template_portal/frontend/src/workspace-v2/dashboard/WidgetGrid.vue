@@ -39,7 +39,8 @@ const geometry=(w:T):GridStackWidget=>({id:w.id,x:w.x,y:w.y,w:w.w,h:w.h,minW:w.m
 async function sync(){
   await nextTick();if(!grid||disposed)return;syncing=true;grid.batchUpdate();
   const ids=new Set(props.items.map(w=>w.id));
-  for(const el of grid.getGridItems())if(!ids.has(el.gridstackNode?.id||''))grid.removeWidget(el,false,false);
+  // Vue may already detach a removed panel when reduced motion skips its leave animation.
+  for(const node of [...grid.engine.nodes])if(!ids.has(node.id||'')&&node.el)grid.removeWidget(node.el,false,false);
   for(const el of host.value!.querySelectorAll<GridItemHTMLElement>('.grid-stack-item')){
     const item=props.items.find(w=>w.id===el.dataset.widgetId);if(item&&!el.gridstackNode)grid.makeWidget(el,geometry(item));
   }

@@ -11,6 +11,11 @@ export async function checkCustomization(page,output){
   await page.getByRole('button',{name:'移除常用办理',exact:true}).click();
   await page.locator('.v2-widget[aria-label="常用办理"]').waitFor({state:'detached'});
   assert.equal(await grid.locator('.grid-stack-item').count(),count-1);
+  await page.waitForFunction(()=>{
+    const grid=document.querySelector('.v2-widget-grid');
+    const ids=[...grid.querySelectorAll(':scope>.grid-stack-item')].map(el=>el.dataset.widgetId);
+    return grid.gridstack.engine.nodes.length===ids.length&&grid.gridstack.engine.nodes.every(node=>ids.includes(node.id));
+  });
   await page.waitForFunction(()=>document.querySelector('.v2-widget[aria-label="收敛核对 · 需关注"]').parentElement.getAttribute('gs-y')===document.querySelector('.v2-widget[aria-label="待处理事项"]').parentElement.getAttribute('gs-y'));
   await page.getByRole('menuitem',{name:'事件管理',exact:true}).click();
   await page.getByText('布局尚未保存',{exact:true}).waitFor();

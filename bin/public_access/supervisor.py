@@ -22,6 +22,7 @@ class PublicAccess:
         self.deployment = deployment
         self.stop_event = threading.Event()
         self.thread = self.child = self.server = None
+        self.health = None
         self.lock = threading.Lock()
         self.state = ''
         self.logger = logging.getLogger('clipflow.public_access.' + token[:8])
@@ -44,11 +45,25 @@ class PublicAccess:
         with self.lock:
             if self.thread is not None:
                 return
+            if self.deployment is not None:
+                from .health import Monitor
+                self.health = Monitor(self.deployment['deployment_host'], self.settings.origin, data=self.data)
+                try:
+                    self.health.start()
+                except Exception as exc:
+                    self.health.stop()
+                    self.health = None
+                    self.logger.warning('Public health monitor did not start: %s', type(exc).__name__)
             self.thread = threading.Thread(target=self._run, name='ClipFlowPublicAccess', daemon=True)
             self.thread.start()
 
     def stop(self):
         self.stop_event.set()
+        if self.health:
+            self.health.stop()
+        self._stop_proxy()
+
+    def _stop_proxy(self):
         if self.server:
             self.server.should_exit = True
         child = self.child
@@ -213,7 +228,8 @@ class PublicAccess:
                 self.status('failed', '公网组件未启动，局域网不受影响 | error=' + type(exc).__name__)
         finally:
             was_stopping = self.stop_event.is_set()
-            self.stop()
+            self.stop_event.set()
+            self._stop_proxy()
             if self.child:
                 try:
                     self.child.wait(timeout=2)

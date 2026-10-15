@@ -20,7 +20,7 @@ try{
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'auth-motion-fixture'}});
     if(url.pathname==='/api/auth/status')return ok({logged_in:loggedIn,user:loggedIn?{open_id:'ou_auth_fixture',personnel_record_id:'rec_auth_fixture',name:'登录验收',login_method:'password',role:'user',level:'L4',modules:['learning']}: {},scope_options:loggedIn?[{value:'A',label:'A楼'}]:[],login_url:'/api/auth/login'});
-    if(url.pathname==='/api/auth/password/people')return ok({items:[{id:'rec_auth_fixture',name:'登录验收',building:'A楼',employee_no:'fixture',account_nature:'外部',login_method:'password',selectable:true,needs_setup:false}]});
+    if(url.pathname==='/api/auth/password/people')return ok({items:[{id:'rec_auth_fixture',name:'登录验收',employee_no:'fixture',can_reset_password:true,login_method:'password',selectable:true,needs_setup:false}]});
     if(request.method()==='POST'){
       assert(['/api/auth/password/login','/api/auth/password/change'].includes(url.pathname),`unexpected write ${url.pathname}`);
       writes.push(url.pathname);pending=route;return;
@@ -29,7 +29,7 @@ try{
   });
   const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
   const submit=()=>page.locator('.pwd-form button[type=submit]');
-  async function choose(){await page.locator('#personnel-name-select').fill('登录验收');await page.getByRole('option',{name:'登录验收 · A楼 · fixture',exact:true}).click();}
+  async function choose(){await page.locator('#personnel-name-select').fill('登录验收');await page.getByRole('option',{name:'登录验收 · fixture',exact:true}).click();}
   async function answerFailure(){assert(pending,'a real form request was captured');const route=pending;pending=undefined;await route.fulfill({status:401,json:{ok:false,error:'姓名或密码不正确'}});}
   await page.goto(origin+entry+'?login=password');await submit().waitFor();
   await page.evaluate(()=>{window.invalidMotion=[];new MutationObserver(records=>{for(const r of records)if(r.target.matches('.pwd-form button[type=submit]')&&r.target.dataset.v2Action)window.invalidMotion.push(r.target.dataset.v2Action);}).observe(document.body,{subtree:true,attributes:true,attributeFilter:['data-v2-action']});});

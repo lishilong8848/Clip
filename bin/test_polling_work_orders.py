@@ -344,7 +344,8 @@ class PollingWorkOrderTests(unittest.TestCase):
                     target_record_id=target, work_type="polling", fields=fields,
                 ), "")
 
-    def test_workbench_delay_status_is_read_only_and_scope_checked(self) -> None:
+    @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={'role': 'user', 'scopes': ['A'], 'modules': ['maintenance', 'polling', 'adjust']})
+    def test_workbench_delay_status_is_read_only_and_scope_checked(self, _profile) -> None:
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         client = TestClient(controller._build_app())
         manager = MagicMock()
@@ -699,7 +700,8 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(service.get_sop(sop["sop_id"]), before)
             self.assertIsNone(service.state_store.get_document("polling_sop", "next_sop_12345"))
 
-    def test_manual_refresh_requires_login_and_scope_permission(self):
+    @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={'role': 'user', 'scopes': ['A'], 'modules': ['maintenance', 'polling', 'adjust']})
+    def test_manual_refresh_requires_login_and_scope_permission(self, _profile):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         client = TestClient(controller._build_app())
         manager = MagicMock()
@@ -2451,7 +2453,8 @@ const navigator={},setLiteStatus=text=>message=text;
             finally:
                 PortalRuntime.state_store = previous_store
 
-    def test_resend_links_checks_scope_and_never_returns_capabilities(self) -> None:
+    @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={'role': 'user', 'scopes': ['E'], 'modules': ['maintenance', 'polling', 'adjust']})
+    def test_resend_links_checks_scope_and_never_returns_capabilities(self, _profile) -> None:
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         client = TestClient(controller._build_app())
         manager = MagicMock()

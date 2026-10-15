@@ -172,7 +172,8 @@ class PersonnelPasswordLogin:
     def people(self):
         from .portal_auth import BUILDING_OPEN_ID_MAP
         snapshot = self.directory()
-        keys = ("id", "name", "employee_no", "building", "selectable", "disabled_reason", "needs_setup", "account_nature")
+        # This directory is anonymous: expose only chooser identity and UI flags.
+        keys = ("id", "name", "employee_no", "selectable", "needs_setup")
         items = []
         for person in snapshot.get("people", {}).values():
             if person["inactive"]:
@@ -180,9 +181,10 @@ class PersonnelPasswordLogin:
             item = {key: person[key] for key in keys}
             item["login_method"] = "feishu" if person["account_nature"].upper() == "VNET" or any(oid in BUILDING_OPEN_ID_MAP.values() for oid in person["login_ids"]) else "password"
             if any(self.auth._open_id_explicitly_disabled(oid) for oid in person["login_ids"]):
-                item.update(selectable=False, disabled_reason=item["disabled_reason"] or "当前账号已停用")
+                item["selectable"] = False
+            item["can_reset_password"] = bool(person["account_nature"] and item["login_method"] == "password" and item["selectable"])
             items.append(item)
-        return {"items": sorted(items, key=lambda item: (item["name"], item["building"], item["id"])), "loaded_at": snapshot.get("loaded_at")}
+        return {"items": sorted(items, key=lambda item: (item["name"], item["employee_no"], item["id"])), "loaded_at": snapshot.get("loaded_at")}
 
     def permission_people(self, *, force_refresh=False, query=""):
         snapshot = self.directory(force=force_refresh)

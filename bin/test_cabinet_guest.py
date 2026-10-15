@@ -63,6 +63,7 @@ class CabinetGuestTests(unittest.TestCase):
             return JSONResponse({'ok': True}, headers={'Set-Cookie': self.auth.clear_cookie_header()})
 
         @self.app.get('/api/repair-management')
+        @self.app.get('/api/assistant/pending')
         async def private_business():
             raise AssertionError('guest must not enter another business handler')
 
@@ -182,6 +183,33 @@ class CabinetGuestTests(unittest.TestCase):
         self.assertNotIn('set-cookie', response.headers)
         create.assert_not_called()
         self.assertTrue(self.auth.is_admin(self.auth.get_session('employee-session')))
+
+    def test_public_guest_can_read_and_export_one_building_but_cannot_mutate(self):
+        from public_access.config import Settings
+        from public_access.ingress import PublicGuard, MARKER
+        settings = Settings(public_url='https://portal.example.com')
+        guarded = PublicGuard(self.app, 'fixture-ingress', settings, self.controller._current_session)
+        with TestClient(guarded, base_url=settings.public_url, follow_redirects=False,
+                client=('127.0.0.1', 1),
+                headers={MARKER.decode(): 'fixture-ingress', 'Origin': settings.public_url}) as public:
+            self.assertEqual(public.get('/api/cabinet-power/overview?scope=E').status_code, 401)
+            login = public.post('/api/auth/guest')
+            self.assertEqual(login.status_code, 303)
+            self.assertIn('; Secure', login.headers['set-cookie'])
+            self.assertEqual(public.get('/api/auth/status').json()['user']['role'], 'guest')
+            for path in ('buildings', 'overview', 'rooms', 'racks', 'operations', 'rooms/201/layout', 'export-history'):
+                result = public.get('/api/cabinet-power/' + path, params={'scope': 'E'})
+                self.assertEqual(result.status_code, 200, result.text)
+            result = public.post('/api/cabinet-power/exports', json={'scope': 'E', 'upload': True})
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual(public.get('/api/cabinet-power/exports/export1/download').content, b'export-fixture')
+            for method, path in (('POST', '/api/cabinet-power/export-batches'), ('POST', '/api/cabinet-power/refresh'),
+                    ('PATCH', '/api/cabinet-power/rack-power'), ('POST', '/api/cabinet-power/exports/export1/upload'),
+                    ('GET', '/api/repair-management'), ('GET', '/api/assistant/pending')):
+                self.assertEqual(public.request(method, path, json={'scope': 'E'}).status_code, 403, path)
+            self.assertEqual(public.post('/api/cabinet-power/exports', json={'scope': 'ALL'}).status_code, 403)
+            self.service.upload_export.assert_not_called()
+            self.service.start_export_batch.assert_not_called()
 
 
 if __name__ == '__main__':

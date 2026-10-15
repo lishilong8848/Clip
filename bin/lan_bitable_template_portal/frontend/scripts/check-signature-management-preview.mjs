@@ -10,6 +10,7 @@ const output = path.resolve(root, '../../../output/playwright/signature-manageme
 await mkdir(output, { recursive: true });
 const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+const entry = process.argv.includes('--workspace') ? '/assets/workspace-v2/index.html?__page=/signature-management' : '/signature-management';
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 page.setDefaultTimeout(12000);
@@ -64,12 +65,17 @@ await page.route('**/api/**', async route => {
   if (req.method() === 'POST') apiPosts.push([req.method(), pathname, req.postDataJSON?.() || null]);
   const ok = data => route.fulfill({ json: { ok: true, data } });
   if (pathname === '/api/auth/status') return ok({
-    logged_in: true, user: { open_id: 'signature-fixture', role, name: role === 'admin' ? '管理员' : '普通用户' },
+    logged_in: true, user: { open_id: 'signature-fixture', role, modules:['signatures'], name: role === 'admin' ? '管理员' : '普通用户' },
     scope_options: [{ value: 'A', label: 'A楼' }], login_url: '/api/auth/login',
   });
   if (pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-signature' } });
-  if (pathname === '/api/signatures/management/people') return ok({ people, sources: { staff: { ok: true, loaded_at: 1791510000 }, external: { ok: true, loaded_at: 1791510000 } }, counts: { signed: 2, unsigned: 1, resign: 0 }, count: people.length });
-  if (pathname === '/api/signatures/management/duplicates') return ok({ groups: duplicateGroups });
+  if (pathname === '/api/signatures/management/people') {
+    const rows=people.map(p=>({...p,can_preview:role==='admin',can_request:role==='admin'}));
+    if(role==='user')rows.push({person_key:'staff:recBoss',record_id:'recBoss',name:'验收上级',source:'staff',building:'H楼',position:'经理',signature_status:'restricted',invite_only:true,can_request:true,can_preview:false,can_receive_message:true});
+    return ok({people:rows,can_manage_directory:role==='admin',scope_options:[{value:'A',label:'A楼'},{value:'H',label:'H楼'}],recipients:[{value:'A',label:'A楼值班账号'}],sources:{staff:{ok:true,loaded_at:1791510000},external:{ok:true,loaded_at:1791510000}},counts:{signed:2,unsigned:1,resign:0},count:rows.length});
+  }
+  if(pathname==='/api/signatures/management/requests')return ok({status:'sent',recipient_label:'验收上级'});
+  if (pathname === '/api/signatures/management/duplicates') return ok({ groups: duplicateGroups.map(group=>({...group,people:group.people.map(p=>({...p,can_preview:true,can_request:true}))})) });
   return ok({});
 });
 
@@ -89,7 +95,7 @@ async function openPreviewAndCheckLoaded(expectedPreviewCount) {
 
 try {
   // ---- Admin flow ----
-  await page.goto(origin + '/signature-management');
+  await page.goto(origin + entry);
   await page.getByText('张三', { exact: true }).first().waitFor();
   assert.equal(previewRequests.length, 0, 'no signature preview requests during initial list load');
   assert.equal(await page.getByRole('button', { name: '查看签名', exact: true }).count(), 2, 'admin sees preview for each signed person');
@@ -183,11 +189,24 @@ try {
   // ---- Normal user flow (fresh navigation resets app auth state) ----
   const previewCountBeforeUserNav = previewRequests.length;
   role = 'user';
-  await page.goto(origin + '/signature-management');
+  await page.goto(origin + entry);
   await page.getByText('张三', { exact: true }).first().waitFor();
   assert.equal(await page.getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'normal user gets no preview controls');
   assert.equal(previewRequests.length, previewCountBeforeUserNav, 'normal user triggers no additional signature image requests');
   assert.equal(await page.locator('.preview-area img').count(), 0, 'normal user renders no preview image');
+  const superior=page.locator('.person-card').filter({hasText:'验收上级'});
+  await superior.getByRole('button',{name:'发送签名邀请',exact:true}).click();
+  const invite=page.getByRole('dialog',{name:'发送签名链接',exact:true});await invite.waitFor();
+  assert.equal(await invite.getByRole('button',{name:/发送给本人/}).count(),1);
+  assert.equal(await invite.getByRole('group',{name:'值班账号代收'}).count(),0);
+  assert.equal(await invite.getByPlaceholder('搜索姓名、工号、岗位或楼栋').count(),0);
+  assert.equal(apiPosts.length,0,'opening an upward invitation only previews');
+  await invite.getByRole('button',{name:'发送链接',exact:true}).click();
+  await invite.waitFor({state:'hidden'});
+  assert.equal(apiPosts.length,1);
+  assert.equal(apiPosts[0][2].record_id,'recBoss');
+  assert.equal(apiPosts[0][2].recipient,'');
+  await page.getByText('签名链接已发送至验收上级，等待本人签名。',{exact:true}).waitFor();
   await page.screenshot({ path: path.join(output, 'normal-user-no-preview.png'), fullPage: true });
 
   console.log(JSON.stringify({ ok: true, screenshots: output, checks: 'admin no initial preview requests, unsigned rows expose no preview controls/images, synthetic 200x80 preview with visible naturalWidth and aspect, modal close clears DOM, submit on preview form does not POST, re-sign opens send form for correct person without POST, retry on failed read with distinct cache-busters, duplicate-row preview without merge toggle, normal user no preview controls/images and no extra requests, full + narrow(1280x800) desktop screenshots' }));

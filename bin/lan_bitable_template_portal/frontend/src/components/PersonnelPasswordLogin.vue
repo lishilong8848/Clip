@@ -35,7 +35,7 @@
           @update:model-value="selectPerson" />
       </label>
 
-      <p v-if="selectedPerson" class="hint" role="status">{{ selectedPerson.name }} · {{ selectedPerson.building || '所属楼栋待核对' }} · {{ selectedPerson.login_method === 'feishu' || selectedPerson.account_nature?.toUpperCase() === 'VNET' ? '飞书登录' : '姓名密码登录' }}</p>
+      <p v-if="selectedPerson" class="hint" role="status">{{ optionLabel(selectedPerson) }} · {{ selectedPerson.login_method === 'feishu' ? '飞书登录' : '姓名密码登录' }}</p>
       <p v-if="!requiresPasswordChange && (!selectedPerson || selectedPerson.needs_setup)" class="hint first-hint" role="status">
         <KeyRound :size="14" aria-hidden="true" />
         首次登录密码为本人身份证号后6位，验证后须立即修改
@@ -263,12 +263,10 @@ type Person = {
   id: string;
   name: string;
   employee_no?: string;
-  building?: string;
   selectable?: boolean;
-  disabled_reason?: string;
   needs_setup?: boolean;
-  account_nature?: string;
   login_method?: string;
+  can_reset_password?: boolean;
 };
 
 type VerifyStatus = "idle" | "checking" | "passed" | "failed";
@@ -366,14 +364,14 @@ const canSubmitChange = computed(() =>
 );
 
 function optionLabel(item: Person): string {
-  const label = [item.name, item.building, item.employee_no]
+  const label = [item.name, item.employee_no]
     .filter((part): part is string => Boolean(part && String(part).trim()))
     .join(" · ");
-  return item.selectable === false ? `${label}（${item.disabled_reason || "无权限"}）` : label;
+  return item.selectable === false ? `${label}（暂不可登录）` : label;
 }
 
 const availablePeople = computed(() => people.value.filter(item => item.selectable !== false
-  && (mode.value !== 'reset' || (!!item.account_nature && item.account_nature.toUpperCase() !== 'VNET' && item.login_method !== 'feishu'))));
+  && (mode.value !== 'reset' || item.can_reset_password === true)));
 const personChoices = computed(() => availablePeople.value.map((item, index, all) => {
   const label = optionLabel(item);
   return { id: item.id, label: all.filter(other => optionLabel(other) === label).length > 1 ? `${label}（同名 ${index + 1}）` : label };
@@ -386,7 +384,7 @@ function selectPerson(value: string): void {
   if (id === selectedId.value) return;
   selectedId.value = id;
   onSelectionChange();
-  if (mode.value === 'login' && (selectedPerson.value?.login_method === 'feishu' || selectedPerson.value?.account_nature?.toUpperCase() === 'VNET')) {
+  if (mode.value === 'login' && selectedPerson.value?.login_method === 'feishu') {
     // Keep password as the return preference so browser Back does not restart OAuth.
     rememberLoginMethod('password');
     navigateHard(`/api/auth/login?next=${encodeURIComponent(currentUrlPath())}`);
@@ -533,7 +531,7 @@ function enterResetMode(): void {
     personSearch.value = changeUserName.value;
   } else {
     // Not logged-in forget flow: external personnel remain selectable.
-    if (!selectedPerson.value?.account_nature || selectedPerson.value.account_nature.toUpperCase() === 'VNET' || selectedPerson.value.login_method === 'feishu') { selectedId.value = ''; personSearch.value = ''; }
+    if (selectedPerson.value?.can_reset_password !== true) { selectedId.value = ''; personSearch.value = ''; }
     if (!peopleLoaded.value) void fetchPeople();
   }
 }
@@ -560,7 +558,7 @@ async function fetchPeople(): Promise<void> {
     peopleLoaded.value = true;
     if (selectedId.value) {
       const selected = personChoices.value.find(item => item.id === selectedId.value);
-      if (!selected || selectedPerson.value?.login_method === 'feishu' || selectedPerson.value?.account_nature?.toUpperCase() === 'VNET') {
+      if (!selected || selectedPerson.value?.login_method === 'feishu') {
         selectedId.value = ''; personSearch.value = ''; clearVerify(); clearAllSecrets();
       } else personSearch.value = selected.label;
     }

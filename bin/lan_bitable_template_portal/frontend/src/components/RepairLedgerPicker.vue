@@ -16,6 +16,8 @@
       </button>
     </template>
     <template #filters>
+      <div :class="{'ledger-compact-filters':compactMobile,'is-expanded':filtersOpen}">
+      <button v-if="compactMobile" type="button" class="ledger-filter-toggle" data-v2-navigation :aria-expanded="filtersOpen" @click="filtersOpen=!filtersOpen"><ListFilter :size="16" aria-hidden="true" />{{filtersOpen?'收起筛选':'筛选设备'}}<span v-if="filterCount">{{filterCount}} 项</span><ChevronDown :size="16" :class="{'is-open':filtersOpen}" aria-hidden="true" /></button>
       <div class="ledger-filters">
         <label v-for="field in filterFields" :key="field">
           <span>{{ field }}</span>
@@ -27,19 +29,20 @@
           <FilterX :size="18" aria-hidden="true" />
         </button>
       </div>
+      </div>
     </template>
   </RecordPickerDialog>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
-import { FilterX, RefreshCw } from 'lucide-vue-next';
+import { ChevronDown, FilterX, ListFilter, RefreshCw } from 'lucide-vue-next';
 import { requestJson } from '../api/client';
 import type { LooseDict } from '../types';
 import RecordPickerDialog from './RecordPickerDialog.vue';
 import VnetSelect from './VnetSelect.vue';
 
-const props = defineProps<{ open: boolean; scope: string; selectedIds: string[]; selectedRecords: LooseDict[] }>();
+const props = defineProps<{ open: boolean; scope: string; selectedIds: string[]; selectedRecords: LooseDict[]; compactMobile?: boolean }>();
 const emit = defineEmits<{ close: []; confirm: [ids: string[], records: LooseDict[]] }>();
 const filterFields = ['机楼', '系统名称', '大设备类型', '设备名称'];
 const columnFields = ['设备编号', ...filterFields, '产品其它参数', '品牌', '安装位置', '型号', '设备类型标识', '容量'];
@@ -52,6 +55,8 @@ const knownRecords = new Map<string, LooseDict>();
 let abort: AbortController | undefined, refreshAbort: AbortController | undefined;
 let poll: ReturnType<typeof setTimeout> | undefined, generation = 0;
 const hasFilters = computed(() => Object.values(filters).some(Boolean));
+const filtersOpen = ref(false);
+const filterCount = computed(() => Object.values(filters).filter(Boolean).length);
 const statusMessage = computed(() => error.value || (refreshing.value
   ? ready.value ? '正在更新设备台账，仍可选择已缓存的设备。' : '正在初始化设备台账，完成后自动显示。'
   : !ready.value && !loading.value ? '设备台账尚未就绪，请刷新重试。' : ''));
@@ -101,6 +106,7 @@ watch(() => [props.open, props.scope], () => {
   stop();
   if (!props.open) return;
   knownRecords.clear(); for (const item of props.selectedRecords) knownRecords.set(String(item.record_id), item);
+  filtersOpen.value = false;
   records.value = []; query.value = ''; options.value = {}; total.value = 0;
   for (const field of filterFields) filters[field] = '';
   void load(1);
@@ -115,5 +121,14 @@ onBeforeUnmount(stop);
 .ledger-refresh { white-space: nowrap; padding: 0 12px; }
 .ledger-refresh:disabled, .ledger-reset:disabled { opacity: .5; cursor: default; }
 .spinning { animation: ledger-spin 1s linear infinite; }
+.ledger-filter-toggle{display:none}
+@media(max-width:760px){
+  .ledger-compact-filters .ledger-filter-toggle{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;padding:8px 10px;border:1px solid #dce3e7;border-radius:6px;background:#fff;color:#245b96;font:inherit;font-size:14px;cursor:pointer}
+  .ledger-filter-toggle svg:last-child{margin-left:auto;transition:transform 160ms ease-out}.ledger-filter-toggle .is-open{transform:rotate(180deg)}
+  .ledger-compact-filters:not(.is-expanded) .ledger-filters{display:none}
+  .ledger-compact-filters .ledger-filters{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;padding-top:10px}
+  .ledger-compact-filters .ledger-reset{min-height:44px;justify-self:end;min-width:44px;grid-column:2}
+}
+@media(prefers-reduced-motion:reduce){.ledger-filter-toggle svg{transition:none!important}}
 @keyframes ledger-spin { to { transform: rotate(360deg); } }
 </style>

@@ -229,6 +229,7 @@ IMPORTED_SKILLS_DIR = Path("bin/openclaw_service/assistant/openclaw/skills/workb
 RUNTIME_TOOL_FILES = {
 
     Path("bin") / "tools" / "mock_lan_portal_pressure.py",
+    Path("bin") / "tools" / "check_public_access.py",
 
 }
 
@@ -1817,6 +1818,7 @@ def _run_packaging_preflight_tests() -> None:
     _run_preflight_check(
         [test_python, "-m", "unittest",
          "bin.test_public_access",
+         "bin.test_public_health", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",

@@ -102,5 +102,6 @@ export default defineConfig({
     },
   }],
   build: { outDir: outputDir, emptyOutDir: true, cssCodeSplit: false,
-    rollupOptions: { input: root + 'src/workspace-v2/main.ts', output: { entryFileNames: 'app-[hash].js', chunkFileNames: 'part-[hash].js', assetFileNames: 'res-[hash][extname]' } } },
+    // Fresh names prevent older installers from pruning this generation on their first upgrade.
+    rollupOptions: { input: root + 'src/workspace-v2/main.ts', output: { entryFileNames: 'app-v2-[hash].js', chunkFileNames: 'part-v2-[hash].js', assetFileNames: 'res-v2-[hash][extname]' } } },
 });

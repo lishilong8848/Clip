@@ -38752,6 +38752,15 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "",
         request_base_url: str = "",
     ) -> str:
+        from public_access.links import preferred_base
+        return preferred_base(self._signature_lan_base_url(scope=scope, request_base_url=request_base_url))
+
+    def _signature_lan_base_url(
+        self,
+        *,
+        scope: str = "",
+        request_base_url: str = "",
+    ) -> str:
         """Build the public portal URL used in signature links.
 
         The configured handover LAN address is used as the public host,

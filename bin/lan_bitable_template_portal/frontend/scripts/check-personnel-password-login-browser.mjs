@@ -34,14 +34,14 @@ let malformedResetVerify = false;
 let resetServerError503 = false;
 
 const people = [
-  { id: 'recZhangsanA', name: '张三', employee_no: 'EMP-1001', building: 'A楼', selectable: true, needs_setup: true },
-  { id: 'recZhangsanB', name: '张三', employee_no: 'EMP-1002', building: 'B楼', selectable: true, needs_setup: false },
-  { id: 'recLisi', name: '李四', employee_no: 'EMP-2001', building: 'A楼', selectable: false, disabled_reason: '已离职', needs_setup: false },
-  { id: 'recWangwu', name: '王五', employee_no: 'EMP-3001', building: 'C楼', selectable: true, needs_setup: true },
+  { id: 'recZhangsanA', name: '张三', employee_no: 'EMP-1001', selectable: true, needs_setup: true },
+  { id: 'recZhangsanB', name: '张三', employee_no: 'EMP-1002', selectable: true, needs_setup: false },
+  { id: 'recLisi', name: '李四', employee_no: 'EMP-2001', selectable: false, needs_setup: false },
+  { id: 'recWangwu', name: '王五', employee_no: 'EMP-3001', selectable: true, needs_setup: true },
 ];
 // Mutable server-side view (used to reflect needs_setup=false after a successful reset).
-const peopleDb = people.map(p => ({ account_nature: '外部账号', ...p }));
-peopleDb.push({ id: 'recInternal', name: '内部人员', employee_no: 'EMP-4001', building: 'D楼', selectable: true, needs_setup: false, account_nature: 'VNET' });
+const peopleDb = people.map(p => ({ login_method: 'password', can_reset_password: p.selectable, ...p }));
+peopleDb.push({ id: 'recInternal', name: '内部人员', employee_no: 'EMP-4001', selectable: true, needs_setup: false, login_method: 'feishu', can_reset_password: false });
 
 const loginJson = ({ person_id, password: pass, new_password, next }) => {
   const body = { person_id, password: pass, next };
@@ -160,7 +160,7 @@ await page.route('**/api/**', async route => {
 try {
   const labelFor = id => {
     const p = peopleDb.find(item => item.id === id);
-    return p ? [p.name, p.building, p.employee_no].filter(Boolean).join(' · ') : '';
+    return p ? [p.name, p.employee_no].filter(Boolean).join(' · ') : '';
   };
   function personPicker(selector) {
     const field = page.locator(selector);
@@ -229,9 +229,9 @@ try {
   await select().click();
   const options = page.getByRole('option');
   assert.equal(await options.count(), 4, 'three external people and one internal person');
-  assert.equal(await page.getByRole('option', { name: '张三 · A楼 · EMP-1001' }).count(), 1);
-  assert.equal(await page.getByRole('option', { name: '张三 · B楼 · EMP-1002' }).count(), 1);
-  assert.equal(await page.getByRole('option', { name: '王五 · C楼 · EMP-3001' }).count(), 1);
+  assert.equal(await page.getByRole('option', { name: '张三 · EMP-1001' }).count(), 1);
+  assert.equal(await page.getByRole('option', { name: '张三 · EMP-1002' }).count(), 1);
+  assert.equal(await page.getByRole('option', { name: '王五 · EMP-3001' }).count(), 1);
   assert.equal(await page.getByRole('option', { name: /李四/ }).count(), 0, 'departed people are not selectable');
   await page.screenshot({ path: path.join(output, '01-dropdown.png'), fullPage: true, animations: 'disabled' });
 
@@ -256,7 +256,7 @@ try {
   const originalPeopleCount = peopleDb.length;
   peopleDb.push(...Array.from({ length: 60 }, (_, index) => ({
     id: `recMobile${index}`, name: `测试人员${index}`, employee_no: `TEST-${index}`,
-    building: 'A楼', selectable: true, needs_setup: false, account_nature: '外部账号',
+    selectable: true, needs_setup: false, login_method: 'password', can_reset_password: true,
   })));
   async function assertPickerBounds() {
     await page.waitForFunction(() => {
@@ -301,7 +301,7 @@ try {
     await assertPickerBounds();
     await select().fill('测试人员59');
     await assertPickerBounds();
-    await page.getByRole('option', { name: '测试人员59 · A楼 · TEST-59', exact: true }).click();
+    await page.getByRole('option', { name: '测试人员59 · TEST-59', exact: true }).click();
     await page.locator('#personnel-password').fill('fixture-password');
     await page.getByRole('button', { name: '清空姓名', exact: true }).click();
     assert.equal(await select().inputValue(), '');
@@ -623,7 +623,7 @@ try {
 
   // --- Block D: valid Feishu admin enters normally, no password form or personnel-password API ---
   feishuAuthStatus = {
-    user: { open_id: 'ou_feishu_admin', name: '李四', login_method: 'feishu', role: 'admin' },
+    user: { open_id: 'ou_feishu_admin', name: '李四', login_method: 'feishu', role: 'admin', modules: ['accounts'] },
     scopeOptions: [{ value: 'A', label: 'A楼' }],
   };
   peoplePosts.length = 0;
@@ -828,16 +828,17 @@ try {
   assert.equal(loginPosts.length, loginChangeBase + 1, '修改密码成功后需重新登录');
   await page.screenshot({ path: path.join(output, '23-change-reauth.png'), fullPage: true, animations: 'disabled' });
 
-  // --- Block G4: 忘记密码 from change mode switches to forgot-flow (name + ID) ---
+  // --- Block G4: forgot-password from change keeps the authenticated person fixed ---
   changeAuthUser = { open_id: 'ou_pwd_change', name: '张三', login_method: 'password', personnel_record_id: 'recZhangsanA' };
   peoplePosts.length = 0;
   try {
     await page.goto(origin + '/?account=password');
     await page.locator('#personnel-current-password').waitFor();
     await page.getByRole('button', { name: '忘记密码', exact: true }).click();
-    await page.locator('#personnel-reset-name').waitFor();
-    await page.locator('#personnel-reset-name').waitFor();
-    assert.equal(peoplePosts.length > 0, true, '从修改密码进入忘记密码应加载人员列表');
+    await page.locator('#personnel-identity-number').waitFor();
+    assert.equal(await page.locator('#personnel-reset-name').count(), 0, '已登录人员不应重新选择身份');
+    assert.equal(await page.locator('.current-account strong').textContent(), '张三');
+    assert.equal(peoplePosts.length, 0, '本人重置不需要读取其他人员列表');
     assert.equal(await page.getByRole('button', { name: '返回修改密码', exact: true }).count(), 1, '从修改密码进入忘记密码应提供返回修改密码');
     assert.equal(await page.locator('#personnel-identity-number').count(), 1, '忘记密码表单应显示身份证号');
     await page.getByRole('button', { name: '返回修改密码', exact: true }).click();
@@ -861,11 +862,10 @@ try {
     await page.locator('#personnel-change-new-password').fill('newpass9876');
     await page.locator('#personnel-change-confirm-password').fill('newpass9876');
     await page.getByRole('button', { name: '忘记密码', exact: true }).click();
-    await page.locator('#personnel-reset-name').waitFor();
+    await page.locator('#personnel-identity-number').waitFor();
     assert.equal(await page.locator('#personnel-current-password').count(), 0, '忘记密码后应离开修改密码表单');
     assert.equal(await page.locator('#personnel-change-new-password').count(), 0, '忘记密码后应清除修改密码新密码输入');
     assert.equal(await page.locator('#personnel-change-confirm-password').count(), 0, '忘记密码后应清除修改密码确认输入');
-    await resetSelect().selectOption('recZhangsanA');
     await identity().fill(validIdentity);
     await page.locator('[data-verify-status="passed"]').waitFor();
     await page.locator('#personnel-reset-new-password').fill('resetSecret99');
@@ -1114,7 +1114,7 @@ try {
   await select().waitFor();
   await page.clock.install();
   await openForm();
-  peopleDb.push({ id: 'recNew', name: '新增外部', employee_no: 'EMP-5001', building: 'A楼', account_nature: '外部账号', selectable: true });
+  peopleDb.push({ id: 'recNew', name: '新增外部', employee_no: 'EMP-5001', login_method: 'password', can_reset_password: true, selectable: true });
   await page.clock.runFor(61000);
   await select().fill('新增外部');
   await page.getByRole('option', { name: /新增外部/ }).waitFor();

@@ -11,10 +11,10 @@
         <button v-if="loggedIn" class="btn hero-ghost" :disabled="loading" @click="load(true)">
           <RefreshCw :size="16" :class="{ spin: loading }" />刷新签名
         </button>
-        <button v-if="loggedIn" class="btn hero-primary" @click="openCreate">
+        <button v-if="loggedIn && canManageDirectory" class="btn hero-primary" @click="openCreate">
           <Plus :size="16" />新增临时人员
         </button>
-        <button v-if="loggedIn && isAdmin" class="btn hero-ghost" :disabled="duplicateBusy" @click="loadDuplicates">
+        <button v-if="loggedIn && canManageDirectory" class="btn hero-ghost" :disabled="duplicateBusy" @click="loadDuplicates">
           <UsersRound :size="16" />重复人员核对
         </button>
       </div>
@@ -60,7 +60,7 @@
           </label>
           <label><span>楼栋</span><select v-model="scope"><option value="">全部楼栋</option><option v-for="b in buildings" :key="b" :value="b">{{ buildingLabel(b) }}</option></select></label>
           <label><span>人员来源</span><select v-model="source"><option value="">全部人员</option><option value="staff">正式人员</option><option value="external">临时人员</option></select></label>
-          <label><span>签名状态</span><select v-model="status"><option value="">全部状态</option><option value="unsigned">未签名</option><option value="signed">已有签名</option><option value="resign">需重新签名</option></select></label>
+          <label><span>签名状态</span><select v-model="status"><option value="">全部状态</option><option value="unsigned">未签名</option><option value="signed">已有签名</option><option value="resign">需重新签名</option><option value="restricted">可邀请的上级</option></select></label>
           <button v-if="hasFilters" type="button" class="btn clear-filter" @click="clearFilters"><X :size="15" />清除筛选</button>
         </div>
 
@@ -84,18 +84,20 @@
             <div class="person-tags">
               <span :class="person.source === 'staff' ? 'source-staff' : 'source-temp'">{{ person.source === 'staff' ? '正式人员' : '临时人员' }}</span>
               <span v-if="person.position || person.specialty">{{ person.position || person.specialty }}</span>
-              <span v-if="person.source === 'staff'">{{ person.account_nature || '账号性质未填写' }}</span>
+              <span v-if="person.source === 'staff' && !person.invite_only">{{ person.account_nature || '账号性质未填写' }}</span>
               <span v-if="person.source === 'staff'" :class="person.can_receive_message ? 'message-ready' : 'message-relay'">{{ person.can_receive_message ? '可直接收消息' : '需代收消息' }}</span>
               <span v-if="person.origin_staff_record_id">已关联正式人员</span>
             </div>
             <div class="signature-state">
               <div class="state-title" :class="{ good: person.has_signature, warning: person.signature_status === 'resign' }">
                 <CheckCircle2 v-if="person.has_signature" :size="16" />
+                <UsersRound v-else-if="person.invite_only" :size="16" />
                 <CircleAlert v-else :size="16" />{{ stateLabel(person.signature_status) }}
               </div>
               <small v-if="person.signature_reason">{{ person.signature_reason }}</small>
               <small v-if="person.effective_has_signature">默认使用{{ person.effective_source === 'staff' ? '正式表' : '临时表' }}签名</small>
-              <small v-if="person.has_signature" class="protected-signature"><ShieldCheck :size="13" />签名内容仅供管理员在网页预览，普通用户不可见</small>
+              <small v-if="person.invite_only" class="protected-signature"><ShieldCheck :size="13" />可邀请本人签名，不开放签名字迹及历史</small>
+              <small v-else-if="person.has_signature" class="protected-signature"><ShieldCheck :size="13" />签名由本人保存，按人员管理权限预览</small>
             </div>
             <div v-if="person.request" class="request-state">
               <span><Link2 :size="14" />{{ requestLabel(person.request.status) }}</span>
@@ -104,9 +106,9 @@
               <small v-if="person.request.error" class="error">{{ person.request.error }}</small>
             </div>
             <div class="row-actions">
-              <button v-if="isAdmin && person.has_signature" type="button" class="btn preview-btn" @click="openPreview(person)"><Eye :size="14" />查看签名</button>
-              <button type="button" class="btn blue" @click="openSend(person)">{{ person.has_signature ? '重新签名' : '发送签名链接' }}</button>
-              <button v-if="isAdmin && person.source === 'external'" type="button" class="btn" @click="openAssociate(person)">关联正式人员</button>
+              <button v-if="person.can_preview && person.has_signature" type="button" class="btn preview-btn" @click="openPreview(person)"><Eye :size="14" />查看签名</button>
+              <button v-if="person.can_request" type="button" class="btn blue" @click="openSend(person)">{{ person.invite_only ? '发送签名邀请' : person.has_signature ? '重新签名' : '发送签名链接' }}</button>
+              <button v-if="canManageDirectory && person.can_request && !person.invite_only && person.source === 'external'" type="button" class="btn" @click="openAssociate(person)">关联正式人员</button>
             </div>
           </article>
         </div>
@@ -128,7 +130,7 @@
               <span>{{ person.name }}　{{ person.employee_no || '无工号' }}　{{ person.building }}　{{ person.record_id }}</span>
             </label>
             <span v-if="person.has_signature" class="protected-signature"><ShieldCheck :size="13" />已有签名</span>
-            <button v-if="isAdmin && person.has_signature" type="button" class="btn preview-btn" @click="openPreview(person)"><Eye :size="14" />查看签名</button>
+            <button v-if="person.can_preview && person.has_signature" type="button" class="btn preview-btn" @click="openPreview(person)"><Eye :size="14" />查看签名</button>
           </div>
           <div class="duplicate-options">
             <label><span>保留人员记录</span><select v-model="group.keep"><option v-for="p in group.people" :key="p.record_id" :value="p.record_id">{{ p.record_id }}</option></select></label>
@@ -185,31 +187,31 @@
         </template>
         <template v-else>
           <div class="selected-summary"><span class="avatar">{{ personInitial(selectedPerson || {}) }}</span><div><small>签名人员</small><strong>{{ selectedPerson?.name }}　{{ selectedPerson?.building }}</strong></div></div>
-          <p v-if="selectedPerson?.source === 'staff' && !selectedPerson?.can_receive_message" class="hint warning-hint">账号性质为“{{ selectedPerson?.account_nature || '未填写' }}”，不能直接发送飞书消息，请选择代收方式。签名仍保存到该正式人员记录。</p>
-          <button v-if="selectedPerson?.source === 'staff' && selectedPerson?.can_receive_message" type="button" class="recipient-direct" :class="{ selected: recipient === 'direct' }" @click="recipient = 'direct'">
-            <span><strong>发送给本人</strong><small>使用该人员的 VNET 账号接收</small></span><CheckCircle2 v-if="recipient === 'direct'" :size="18" />
+          <p v-if="!selectedPerson?.can_receive_message" class="hint warning-hint">该人员未关联可用接收账号，请选择同一管理范围内的代收方式。</p>
+          <button v-if="selectedPerson?.can_receive_message" type="button" class="recipient-direct" :class="{ selected: recipient === 'direct' }" @click="recipient = 'direct'">
+            <span><strong>发送给本人</strong><small>使用已关联的飞书账号接收</small></span><CheckCircle2 v-if="recipient === 'direct'" :size="18" />
           </button>
-          <div class="recipient-section">
+          <div v-if="!selectedPerson?.invite_only" class="recipient-section">
             <strong>值班账号代收（置顶）</strong>
             <div class="recipient-pinned" role="group" aria-label="值班账号代收">
-              <button v-for="b in buildings" :key="b" type="button" :class="{ selected: recipient === `duty:${b}` }" @click="recipient = `duty:${b}`">{{ buildingLabel(b) }}</button>
+              <button v-for="b in relayBuildings" :key="b" type="button" :class="{ selected: recipient === `duty:${b}` }" @click="recipient = `duty:${b}`">{{ buildingLabel(b) }}</button>
             </div>
           </div>
-          <label><span>其他 VNET 人员代收</span><div class="search-input"><Search :size="17" /><input v-model="relayQuery" type="search" autocomplete="off" placeholder="搜索姓名、工号、岗位或楼栋" /><button v-if="relayQuery" type="button" aria-label="清空代收人员搜索" @click="relayQuery = ''"><X :size="16" /></button></div></label>
-          <div class="staff-results" aria-live="polite">
+          <label v-if="!selectedPerson?.invite_only"><span>其他 VNET 人员代收</span><div class="search-input"><Search :size="17" /><input v-model="relayQuery" type="search" autocomplete="off" placeholder="搜索姓名、工号、岗位或楼栋" /><button v-if="relayQuery" type="button" aria-label="清空代收人员搜索" @click="relayQuery = ''"><X :size="16" /></button></div></label>
+          <div v-if="!selectedPerson?.invite_only" class="staff-results" aria-live="polite">
             <div v-if="relayLoading" class="staff-state"><RefreshCw :size="17" class="spin" />正在读取 VNET 人员…</div>
             <div v-else-if="!relayPeople.length" class="staff-state">没有匹配的可接收人员。</div>
             <button v-for="person in relayPeople" :key="person.record_id" type="button" :class="{ selected: recipient === `staff:${person.record_id}` }" @click="recipient = `staff:${person.record_id}`">
               <span class="avatar small">{{ personInitial(person) }}</span><span><strong>{{ person.name }}</strong><small>{{ person.employee_no || '无工号' }}　{{ person.building || '楼栋未填写' }}　{{ person.position || '' }}</small></span><CheckCircle2 v-if="recipient === `staff:${person.record_id}`" :size="18" />
             </button>
           </div>
-          <p class="hint">链接24小时有效，请在局域网内交由本人完成手写签名；重新发送后旧链接失效。</p>
+          <p class="hint">链接24小时有效，请交由本人完成手写签名；重新发送后旧链接失效，原签名保留至本人保存新签名。</p>
         </template>
         <p v-if="modalError" class="notice error" role="alert"><CircleAlert :size="17" />{{ modalError }}</p>
         <footer>
           <template v-if="modal === 'preview'">
             <button type="button" class="btn" @click="closeModal">关闭</button>
-            <button type="button" class="btn blue" @click="switchPreviewToSend">重新签名</button>
+            <button v-if="selectedPerson?.can_request" type="button" class="btn blue" @click="switchPreviewToSend">重新签名</button>
           </template>
           <template v-else>
             <button type="button" class="btn" :disabled="sending" @click="closeModal">取消</button>
@@ -233,7 +235,7 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import { requestJson, type Dict } from "../api/client";
 
 const props = defineProps<{ checking: boolean; loggedIn: boolean; loginUrl: string; isAdmin: boolean }>();
-const buildings = ["A", "B", "C", "D", "E", "H", "110"];
+const buildings = ref<string[]>([]), relayBuildings = ref<string[]>([]), canManageDirectory = ref(false);
 const people = ref<Dict[]>([]), sources = ref<Dict>({}), counts = ref<Dict>({});
 const query = ref(""), source = ref(""), status = ref(""), scope = ref(""), page = ref(1), count = ref(0);
 const loading = ref(false), notice = ref(""), noticeError = ref(false);
@@ -265,7 +267,7 @@ const dialogAriaLabel = computed(() => {
   if (modal.value === "preview") return `签名预览 · ${selectedPerson.value?.name || "人员"}`;
   return "发送签名链接";
 });
-const canPreview = computed(() => props.isAdmin && props.loggedIn && Boolean(selectedPerson.value?.has_signature && selectedPerson.value?.record_id));
+const canPreview = computed(() => props.loggedIn && Boolean(selectedPerson.value?.can_preview && selectedPerson.value?.has_signature && selectedPerson.value?.record_id));
 const filterDirectory = (rows: Dict[], value: string) => {
   const terms = value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return rows;
@@ -280,8 +282,8 @@ const relayPeople = computed(() => filterDirectory(relayDirectory.value, relayQu
 
 function buildingLabel(value: string) { return value === "110" ? "110站" : `${value}楼`; }
 function dateText(value: number) { return value ? new Date(value * 1000).toLocaleString("zh-CN") : "尚未加载"; }
-function stateLabel(value: string) { return ({ signed: "已有可用签名", unsigned: "未签名", resign: "需重新签名" } as Dict)[value] || value; }
-function requestLabel(value: string) { return ({ sent: "待本人签名", sending: "消息发送中", saving: "保存待核验", completed: "签名已保存", send_failed: "发送失败", send_unknown: "发送结果待核验", revoked: "链接已撤销", expired: "链接已过期" } as Dict)[value] || value; }
+function stateLabel(value: string) { return ({ signed: "已有可用签名", unsigned: "未签名", resign: "需重新签名", restricted: "上级人员 · 可发送签名邀请" } as Dict)[value] || value; }
+function requestLabel(value: string) { return ({ ready: "待本人在线签名", sent: "待本人签名", sending: "消息发送中", saving: "保存待核验", completed: "签名已保存", send_failed: "发送失败", send_unknown: "发送结果待核验", revoked: "链接已撤销", expired: "链接已过期" } as Dict)[value] || value; }
 function personInitial(person: Dict) { return String(person.name || person.employee_no || "?").trim().slice(0, 1).toUpperCase() || "?"; }
 function clearFilters() { query.value = ""; source.value = ""; status.value = ""; scope.value = ""; }
 
@@ -295,6 +297,9 @@ async function load(refresh = false) {
     const data = await requestJson("/api/signatures/management/people?" + params, { cache: "no-store" });
     if (n !== seq || disposed) return;
     people.value = data.people || []; sources.value = data.sources || {}; counts.value = data.counts || {}; count.value = data.count || 0;
+    relayBuildings.value = (data.recipients || []).map((item: Dict) => String(item.value));
+    buildings.value = (data.scope_options || data.recipients || []).map((item: Dict) => String(item.value));
+    canManageDirectory.value = data.can_manage_directory === true;
     if (refresh) { noticeError.value = Object.values(sources.value).some((s: any) => !s.ok); notice.value = noticeError.value ? "部分人员表刷新失败，当前保留最近一次成功数据。" : "两张人员表的签名状态已刷新。"; }
   } catch (error: any) { if (n === seq) { noticeError.value = true; notice.value = error.message || "读取失败，已保留原列表。"; } }
   finally {
@@ -308,7 +313,7 @@ async function showModal(kind: string) { modal.value = kind; modalError.value = 
 function closeModal() { if (!sending.value) { clearPreview(); dialog.value?.close(); modal.value = ""; } }
 function openCreate() { draft.value = { name: "", building: "", employee_no: "", specialty: "" }; void showModal("create"); }
 function openPreview(person: Dict) {
-  if (!props.loggedIn || !props.isAdmin || !person.has_signature || !person.record_id) return;
+  if (!props.loggedIn || !person.can_preview || !person.has_signature || !person.record_id) return;
   selectedPerson.value = person;
   loadPreview();
   void showModal("preview");
@@ -326,13 +331,13 @@ function loadPreview() {
   previewSrc.value = "/api/signatures/management/preview?" + params.toString();
 }
 function previewLoaded(event: Event) {
-  if (modal.value !== "preview" || !props.loggedIn || !props.isAdmin) return;
+  if (modal.value !== "preview" || !canPreview.value) return;
   const img = event.currentTarget as HTMLImageElement;
   if (img.src !== new URL(previewSrc.value, document.baseURI).href) return;
   previewLoading.value = false; previewError.value = "";
 }
 function previewFailed(event: Event) {
-  if (modal.value !== "preview" || !props.loggedIn || !props.isAdmin) return;
+  if (modal.value !== "preview" || !canPreview.value) return;
   const img = event.currentTarget as HTMLImageElement;
   if (img.src !== new URL(previewSrc.value, document.baseURI).href) return;
   previewLoading.value = false; previewError.value = "签名图片读取失败，请重试。";
@@ -343,11 +348,12 @@ function switchPreviewToSend() {
   if (selectedPerson.value) openSend(selectedPerson.value);
 }
 function openSend(person: Dict) {
+  if (!person.can_request) return;
   selectedPerson.value = person;
-  recipient.value = person.source === "staff" && person.can_receive_message ? "direct" : "";
+  recipient.value = person.can_receive_message ? "direct" : "";
   relayQuery.value = ""; relayDirectory.value = [];
   void showModal("send");
-  void searchRelayPeople();
+  if (!person.invite_only) void searchRelayPeople();
 }
 function openAssociate(person: Dict) { selectedPerson.value = person; staffId.value = ""; samePerson.value = false; staffQuery.value = person.name; staffDirectory.value = []; void showModal("associate"); void searchStaff(); }
 
@@ -433,8 +439,8 @@ watch([query, source, status, scope], () => { page.value = 1; if (searchTimer) c
 watch(page, () => void load());
 watch(recipient, () => { operationId.value = uuid(); });
 watch(() => props.loggedIn, value => { if (value) void load(); }, { immediate: true });
-watch([() => props.loggedIn, () => props.isAdmin], ([loggedIn, admin]) => {
-  if (!loggedIn || !admin) {
+watch(() => props.loggedIn, loggedIn => {
+  if (!loggedIn) {
     clearPreview();
     if (modal.value === "preview") { dialog.value?.close(); modal.value = ""; }
   }

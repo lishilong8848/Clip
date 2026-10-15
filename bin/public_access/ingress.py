@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 MARKER = b'x-clipflow-public-ingress'
 HOP = {b'connection', b'keep-alive', b'proxy-authenticate', b'proxy-authorization',
        b'te', b'trailer', b'transfer-encoding', b'upgrade'}
-DENIED = ('/api/qt/', '/api/backend/', '/api/auth/guest', '/api/assistant/feishu-event',
+DENIED = ('/api/qt/', '/api/backend/', '/api/assistant/feishu-event',
           '/api/notice-cards/', '/docs', '/redoc', '/openapi.json')
 API_ROOTS = frozenset(('auth assistant admin bootstrap scope-overview records workbench '
     'workbench-actions maintenance-actions maintenance-refresh change-refresh repair-refresh '
@@ -25,9 +25,11 @@ ANONYMOUS = {
     ('GET', '/api/auth/status'), ('GET', '/api/auth/login'), ('GET', '/api/auth/feishu/callback'),
     ('GET', '/api/auth/password/people'), ('POST', '/api/auth/password/login'),
     ('POST', '/api/auth/password/reset'), ('GET', '/api/auth/logout'), ('POST', '/api/auth/logout'),
+    ('POST', '/api/auth/guest'),
 }
 # These original endpoints verify their own scoped, expiring link tokens.
 SIGNED = {
+    ('GET', '/api/signatures/management/request'), ('POST', '/api/signatures/management/submit'),
     ('GET', '/api/signatures/people'),
     ('GET', '/api/signatures/usage-confirm'), ('POST', '/api/signatures/usage-confirm'),
     ('GET', '/api/signatures/temporary/session'), ('POST', '/api/signatures/temporary/save'),
@@ -103,7 +105,9 @@ class PublicGuard:
         session = await asyncio.to_thread(self.session_reader, Request(scope)) if needs_session else None
         if isinstance(session, dict) and session.get('role') == 'guest' and path.startswith('/api/') \
                 and (method, path) not in ANONYMOUS:
-            return await reject(scope, receive, send, 403, '公网入口不开放机柜访客数据。')
+            from lan_bitable_template_portal.cabinet_guest import cabinet_guest_api_allowed
+            if not cabinet_guest_api_allowed(method, path):
+                return await reject(scope, receive, send, 403, '访客仅可查看机柜数据和导出单楼文件。')
         signed_photo = method == 'GET' and path.startswith('/api/polling-work-orders/photos/')
         if path.startswith('/api/') and (method, path) not in ANONYMOUS | SIGNED and not signed_photo and not session:
             return await reject(scope, receive, send, 401, '请先登录灯塔。')

@@ -56,6 +56,14 @@ class AppearanceTests(unittest.TestCase):
         store = self.make_store()
         self.assert_defaults(read_appearance(store, "user-a"))
 
+    def test_mini_lighthouse_is_independent_and_does_not_replace_default(self):
+        store = self.make_store()
+        save_appearance(store, "user-a", {"shape": "weather-lighthouse-mini", "weather_city": "南通"})
+        self.assertEqual(read_appearance(store, "user-a")["shape"], "weather-lighthouse-mini")
+        self.assertEqual(read_appearance(store, "user-b")["shape"], "weather-lighthouse")
+        save_appearance(store, "user-a", {"shape": "weather-lighthouse"})
+        self.assertEqual(read_appearance(store, "user-a")["shape"], "weather-lighthouse")
+
     def test_defaults_are_independent_copies(self):
         store = self.make_store()
         first = read_appearance(store, "user-a")

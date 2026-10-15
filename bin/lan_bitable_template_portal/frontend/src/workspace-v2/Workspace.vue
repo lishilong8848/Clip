@@ -49,6 +49,7 @@
                 </section>
                 <section class="v2-profile-access" aria-label="功能权限"><h2><ShieldCheck :size="17" />功能权限<NTag size="small" :bordered="false">{{ granted.length }} 项</NTag></h2><div v-for="group in profileGroups" :key="group.name" class="v2-profile-group"><h3>{{ group.name }}</h3><div class="v2-profile-modules"><NTag v-for="item in group.items" :key="item.id" size="small" :bordered="false">{{ item.label }}</NTag></div></div><NEmpty v-if="!granted.length" description="暂无已授权功能" /></section>
               </div>
+              <AccountSignature v-if="granted.includes('signatures')" :key="identityKey" class="v2-my-signatures" />
             </section>
             <section v-else-if="view === 'handover' && route.pathname === '/'" class="v2-links"><h2>交接班审核</h2><PageCanvas page="handover" label="交接班审核" :blocks="[{id:'reviews',title:'楼栋审核',w:12,h:5,minW:4,minH:4}]"><template #reviews><NSpin :show="handoverLoading"><div class="v2-feature-grid"><NButton v-for="(url, scope) in handovers" :key="scope" tag="a" :href="String(url)" target="_blank" rel="noopener noreferrer">{{ scope }}楼审核</NButton></div><NEmpty v-if="!handoverLoading && !Object.keys(handovers).length" description="暂无可用审核入口" /></NSpin></template></PageCanvas></section>
             <section v-else-if="view === 'assistant' && route.pathname === '/'" class="v2-links"><h2>灯塔助手</h2><NButton type="primary" @click="openAssistant">打开会话</NButton></section>
@@ -90,6 +91,7 @@ function animateMobilePage(direction:number){
 }
 import { LighthouseAssistant } from '../lighthouseEntry';
 import AsyncPageState from '../components/AsyncPageState.vue';
+import AccountSignature from '../components/AccountSignature.vue';
 const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, loadingComponent: AsyncPageState, errorComponent: AsyncPageState, delay: 100, timeout: 30000 });
 const HomePage = lazy(() => import('./HomePage.vue'));
 const PageCanvas = lazy(() => import('./PageCanvas.vue'));
@@ -257,3 +259,7 @@ watch([view,loggedIn,identityKey],async(_value,_old,onCleanup)=>{
 onMounted(()=>{void loadAuth();window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',refreshAuth);window.addEventListener('workspace-permissions-stale',refreshAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
 </script>
+<style scoped>
+.v2-my-signatures { margin-top: 28px; }
+@media (max-width: 760px) { .v2-my-signatures { margin-top: 20px; } }
+</style>

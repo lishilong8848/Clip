@@ -19,6 +19,7 @@ export const BOT_COLORS = [
 ] as const;
 export const BOT_SHAPES = [
   ['weather-lighthouse', '雾屿灯塔'],
+  ['weather-lighthouse-mini', '雾屿灯塔 mini'],
   ['cercle', '圆形'], ['galet', '鹅卵石'], ['squircle', '圆角方形'], ['capsule', '胶囊'],
   ['triangle', '三角形'], ['hexagone', '六边形'], ['nuage', '云朵'], ['goutte', '水滴'],
   ['swirl-pile', '卷尖便便'], ['heart', '爱心'], ['star', '星星'],

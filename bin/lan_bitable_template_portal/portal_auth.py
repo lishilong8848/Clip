@@ -1374,8 +1374,20 @@ class PortalAuthManager:
             "directory_warning": "人员目录暂时无法读取，请稍后重试或联系管理员；未使用旧跨楼权限。" if directory_missing and directory_failed else "",
             "default_scope": self.default_scope(session),
             "login_url": f"/api/auth/login?{urlencode({'next': self._normalize_next_path(next_path)})}",
-            "redirect_uri": str(redirect_uri or "").strip(),
+            **({"redirect_uri": str(redirect_uri or "").strip()} if logged_in else {}),
         }
+
+    @staticmethod
+    def public_login_error(error: object) -> str:
+        # Never render arbitrary provider/HTTP errors on an anonymous page.
+        message = str(error)
+        if message in {
+            "登录状态已失效，请重新扫码。", "登录状态已过期，请重新扫码。",
+            "登录回调地址与发起地址不一致。", "飞书登录回调缺少 code 或 state。",
+            "当前账号已停用或人员身份待核对，请联系管理员。",
+        }:
+            return message
+        return "飞书登录暂未完成，请返回登录页重试；若仍无法登录，请联系管理员。"
 
     def public_user(self, session: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(session, dict):
