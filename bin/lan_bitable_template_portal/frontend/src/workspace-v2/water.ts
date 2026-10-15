@@ -6,7 +6,7 @@ export type WaterPhoto = { localId: string; uploadId: string; name: string; prev
 export type WaterFilters = { range: string; month: string; startDate: string; endDate: string; meter: string; frequency: string; shift: string; query: string };
 export const waterScopes = new Set([...'ABCDEH']);
 export function waterNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  if (value === null || value === undefined || typeof value === 'string' && !value.trim() || typeof value === 'boolean') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -41,8 +41,9 @@ export function waterPhotoCount(row: Dict): number | null {
   if (Array.isArray(row.photos)) return row.photos.length;
   return waterNumber(row.photo_count);
 }
-export function waterRecordState(row: Dict): { label: string; type: 'warning' | 'success' | 'default' } {
-  if (waterNumber(row.meter_value) === null) return { label: '待补读数', type: 'warning' };
+export function waterRecordState(row: Dict): { label: string; type: 'info' | 'error' | 'warning' | 'success' | 'default'; title?: string } {
+  if (waterNumber(row.meter_value) === null) return { label: '未记录', type: 'info' };
+  if (row.large_change?.requires_confirmation === true) return { label: '变化较大', type: 'error', title: row.large_change.baseline_zero ? '上期读数为零，本次读数变化需核查' : `较上期读数变化 ${waterNumberText(row.large_change.ratio_percent, 1)}%，超过现有阈值` };
   if (waterPhotoCount(row) === 0) return { label: '待补照片', type: 'warning' };
   if (waterPhotoCount(row) === null) return { label: '照片待核验', type: 'default' };
   return { label: '已记录', type: 'success' };

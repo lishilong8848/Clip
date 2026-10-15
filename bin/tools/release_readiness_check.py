@@ -204,7 +204,7 @@ def check_requests_usage() -> tuple[bool, list[str]]:
         for node in ast.walk(ast.parse(text.lstrip("\ufeff"))):
             forbidden = isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "requests" for alias in node.names)
             if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "requests":
-                forbidden = not (node.module == "requests.exceptions" and all(alias.name in {"Timeout", "ReadTimeout", "ConnectionError"} for alias in node.names))
+                forbidden = not (node.module == "requests.exceptions" and all(alias.name in {"Timeout", "ReadTimeout", "ConnectionError", "ChunkedEncodingError", "HTTPError"} for alias in node.names))
             if forbidden:
                 offenders.append(normalized)
                 break

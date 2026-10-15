@@ -68,7 +68,7 @@ onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onB
     <NCheckboxGroup v-else v-model:value="row.review_scopes" :disabled="busy||action==='reject'"><NCheckbox v-for="scope in scopes.filter(item=>row.requested_scopes.includes(item.value))" :key="scope.value" :value="scope.value">{{scope.label}}</NCheckbox></NCheckboxGroup>
    </section>
    <label v-if="action==='reject'" class="v2-review-reason">拒绝原因<NInput v-model:value="reason" type="textarea" :disabled="busy" :maxlength="500" :autosize="{minRows:2,maxRows:4}" :input-props="{'aria-label':'拒绝原因'}"/></label>
-   <template #footer><div class="v2-review-buttons"><NButton :disabled="busy" @click="close">取消</NButton><NButton :type="action==='approve'?'primary':'error'" :disabled="uncertain||busy" :loading="busy" @click="submit"><Check v-if="action==='approve'" :size="16"/><X v-else :size="16"/>{{action==='approve'?'确认批准':'确认拒绝'}}</NButton></div></template>
+   <template #footer><div class="v2-review-buttons"><NButton :disabled="busy" @click="close">取消</NButton><NButton :type="action==='approve'?'primary':'error'" :disabled="uncertain||busy" :loading="busy" data-v2-submit @click="submit"><Check v-if="action==='approve'" :size="16"/><X v-else :size="16"/>{{action==='approve'?'确认批准':'确认拒绝'}}</NButton></div></template>
   </NModal>
  </section>
 </template>

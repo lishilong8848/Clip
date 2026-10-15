@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import hashlib
+from http.client import IncompleteRead
 import io
 import json
 import os
@@ -118,12 +119,14 @@ class TransportSafetyTests(unittest.TestCase):
                 return True
 
             with patch.object(portable_packaging, "GITEE_RAW_MAX_BYTES", 1024), \
+                    patch.object(portable_packaging, "_publish_patch_to_feishu") as mirror, \
                     patch.object(portable_packaging, "_upload_patch_to_gitee", side_effect=upload) as push, \
                     patch.object(portable_packaging, "_verify_published_patch") as verify:
                 portable_packaging._publish_patch(archive, manifest_path, manifest,
                     repo_url="https://gitee.com/owner/repo.git", branch="master", subdir="", manifest_repo_path="latest.json")
             self.assertNotEqual(old_hash, manifest["zip_sha256"])
             push.assert_called_once()
+            mirror.assert_called_once()
             verify.assert_called_once()
             self.assertFalse(manifest_path.with_suffix(".json.tmp").exists())
 
@@ -175,7 +178,7 @@ class TransportSafetyTests(unittest.TestCase):
     def test_published_url_and_size_must_match_before_zip_verification(self):
         manifest = {"target_patch_version": 467, "zip_name": "patch.zip", "zip_size": 5,
                     "zip_url": "https://example.invalid/patch.zip", "zip_sha256": hashlib.sha256(b"patch").hexdigest()}
-        for key, value in (("zip_url", "https://example.invalid/stale.zip"), ("zip_size", 6)):
+        for key, value in (("zip_url", "https://example.invalid/stale.zip"), ("zip_size", 6), ("feishu_patch", {"stale": True})):
             remote = dict(manifest, **{key: value})
             with self.subTest(key=key), patch("urllib.request.urlopen", side_effect=lambda *a, **k: io.BytesIO(json.dumps(remote).encode())) as get, \
                     patch("time.sleep"):
@@ -348,6 +351,45 @@ class TransportSafetyTests(unittest.TestCase):
                     branch="master", manifest_path="updates/latest_patch.json"
                 )
 
+    def test_published_download_retries_incomplete_manifest_and_archive_from_start(self):
+        content = b'complete-patch-content'
+        manifest = {'target_patch_version': 472, 'zip_name': 'patch.zip',
+                    'zip_url': 'https://example.invalid/patch.zip',
+                    'zip_sha256': hashlib.sha256(content).hexdigest(), 'zip_size': len(content)}
+        for stage in ('manifest', 'archive'):
+            with self.subTest(stage=stage):
+                broken = MagicMock()
+                broken.__enter__.return_value = broken
+                broken.read.side_effect = ([IncompleteRead(b'{"zip_', 40)] if stage == 'manifest'
+                                           else [content[:4], IncompleteRead(b'interrupted', 100)])
+                responses = ([broken] if stage == 'manifest'
+                             else [io.BytesIO(json.dumps(manifest).encode()), broken])
+                responses += [io.BytesIO(json.dumps(manifest).encode()), io.BytesIO(content)]
+                with patch('urllib.request.urlopen', side_effect=responses) as get, patch('time.sleep') as sleep:
+                    portable_packaging._verify_published_patch(manifest, repo_url='https://example.invalid/repo.git',
+                                                              branch='master', manifest_path='latest.json')
+                self.assertEqual(get.call_count, len(responses))
+                sleep.assert_called_once_with(5)
+                broken.__exit__.assert_called_once()
+
+    def test_published_incomplete_download_never_reports_success_after_retry_limit(self):
+        manifest = {'target_patch_version': 472, 'zip_name': 'patch.zip',
+                    'zip_url': 'https://example.invalid/patch.zip',
+                    'zip_sha256': hashlib.sha256(b'patch').hexdigest(), 'zip_size': 5}
+        def response(request, **kwargs):
+            if request.full_url != manifest['zip_url']:
+                return io.BytesIO(json.dumps(manifest).encode())
+            broken = MagicMock()
+            broken.__enter__.return_value = broken
+            broken.read.side_effect = IncompleteRead(b'partial', 10)
+            return broken
+        with patch('urllib.request.urlopen', side_effect=response) as get, patch('time.sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, '下载核验失败.*补丁文件.*IncompleteRead'):
+                portable_packaging._verify_published_patch(manifest, repo_url='https://example.invalid/repo.git',
+                                                          branch='master', manifest_path='latest.json')
+        self.assertEqual(get.call_count, 20)
+        self.assertEqual(sleep.call_count, 9)
+
     def test_public_download_denial_fails_promptly_with_stage_and_reason(self):
         manifest = {'target_patch_version': 453, 'zip_name': 'patch.zip',
                     'zip_url': 'https://example.invalid/patch.zip',
@@ -464,7 +506,7 @@ class TransportSafetyTests(unittest.TestCase):
             manifest = {"zip_url": "https://example.invalid/patch.zip?version=2", "zip_sha256": hashlib.sha256(b"new").hexdigest(), "zip_size": 3}
             for chunks in [[b"bad"], [b"too long"], [b"n"]]:
                 response.iter_content.return_value = iter(chunks)
-                with patch("requests.get", return_value=response), self.assertRaises(RuntimeError):
+                with patch("requests.get", return_value=response), patch("time.sleep"), self.assertRaises(RuntimeError):
                     updater._download_zip(manifest)
                 self.assertEqual(target.read_bytes(), b"previous")
                 self.assertEqual(list(updater.data_dir.glob("*.part")), [])
@@ -480,6 +522,81 @@ class TransportSafetyTests(unittest.TestCase):
                 self.assertEqual(updater._download_zip(manifest), target.resolve())
             self.assertEqual(target.read_bytes(), b"new")
             self.assertEqual(list(updater.data_dir.glob("*.part")), [])
+
+    def test_client_download_resumes_or_restarts_after_interrupted_response(self):
+        from requests.exceptions import ReadTimeout, ChunkedEncodingError
+        content = b'new-patch'
+        manifest = {'zip_url': 'https://example.invalid/patch.zip', 'zip_name': 'patch.zip',
+                    'zip_size': len(content), 'zip_sha256': hashlib.sha256(content).hexdigest()}
+        for status in (200, 206):
+            for error in (None, ReadTimeout('timeout'), ChunkedEncodingError('interrupted')):
+                with self.subTest(status=status, error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
+                    updater = RemotePatchUpdater(Path(tmp), Path(tmp) / 'data', '')
+                    first, second = MagicMock(), MagicMock()
+                    first.__enter__.return_value, second.__enter__.return_value = first, second
+                    first.status_code, second.status_code = 200, status
+                    def interrupted():
+                        yield content[:3]
+                        if error is not None:
+                            raise error
+                    first.iter_content.return_value = interrupted()
+                    second.headers = {'Content-Range': 'bytes 3-8/9'} if status == 206 else {}
+                    second.iter_content.return_value = iter([content[3:] if status == 206 else content])
+                    with patch('requests.get', side_effect=[first, second]) as get, patch('time.sleep') as sleep:
+                        result = updater._download_zip(manifest)
+                    self.assertEqual(result.read_bytes(), content)
+                    self.assertEqual(get.call_args_list[1].kwargs['headers']['Range'], 'bytes=3-')
+                    self.assertEqual(get.call_args_list[1].kwargs['timeout'], (10, 120))
+                    self.assertEqual(get.call_args_list[1].kwargs['headers']['Accept-Encoding'], 'identity')
+                    sleep.assert_called_once_with(2)
+                    self.assertEqual(list(updater.data_dir.glob('*.part')), [])
+
+    def test_client_download_rejects_wrong_resume_range_without_touching_previous_zip(self):
+        from requests.exceptions import ReadTimeout
+        manifest = {'zip_url': 'https://example.invalid/patch.zip', 'zip_size': 9,
+                    'zip_sha256': hashlib.sha256(b'new-patch').hexdigest()}
+        for header in ('bytes 0-8/9', 'bytes 3-8/10', 'bytes 3-10/9', 'invalid'):
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as tmp:
+                updater = RemotePatchUpdater(Path(tmp), Path(tmp) / 'data', '')
+                target = updater.data_dir / 'patch.zip'
+                target.write_bytes(b'previous')
+                first, second = MagicMock(), MagicMock()
+                first.__enter__.return_value, second.__enter__.return_value = first, second
+                first.status_code, second.status_code = 200, 206
+                def interrupted():
+                    yield b'new'
+                    raise ReadTimeout('timeout')
+                first.iter_content.return_value = interrupted()
+                second.headers = {'Content-Range': header}
+                with patch('requests.get', side_effect=[first, second]) as get, patch('time.sleep'):
+                    with self.assertRaisesRegex(RuntimeError, '补丁续传'):
+                        updater._download_zip(manifest)
+                self.assertEqual(get.call_count, 2)
+                second.iter_content.assert_not_called()
+                self.assertEqual(target.read_bytes(), b'previous')
+                self.assertEqual(list(updater.data_dir.glob('*.part')), [])
+
+    def test_client_download_has_bounded_retries_and_no_retry_for_denied_download(self):
+        from requests.exceptions import ReadTimeout, HTTPError
+        manifest = {'zip_url': 'https://example.invalid/patch.zip', 'zip_size': 9,
+                    'zip_sha256': hashlib.sha256(b'new-patch').hexdigest()}
+        with tempfile.TemporaryDirectory() as tmp:
+            updater = RemotePatchUpdater(Path(tmp), Path(tmp) / 'data', '')
+            target = updater.data_dir / 'patch.zip'
+            target.write_bytes(b'previous')
+            with patch('requests.get', side_effect=ReadTimeout('timeout')) as get, patch('time.sleep') as sleep:
+                with self.assertRaisesRegex(RuntimeError, '连续3次下载未完成'):
+                    updater._download_zip(manifest)
+                self.assertEqual(get.call_count, 3)
+                self.assertEqual(sleep.call_count, 2)
+            denied = SimpleNamespace(status_code=403, url=manifest['zip_url'])
+            with patch('requests.get', side_effect=HTTPError(response=denied)) as get, patch('time.sleep') as sleep:
+                with self.assertRaises(HTTPError):
+                    updater._download_zip(manifest)
+                self.assertEqual(get.call_count, 1)
+                sleep.assert_not_called()
+            self.assertEqual(target.read_bytes(), b'previous')
+            self.assertEqual(list(updater.data_dir.glob('*.part')), [])
 
     def test_frontend_generations_and_patch_rollback(self):
         methods = {"_apply_patch_worker", "_collect_patch_files", "_parse_deleted_files", "_is_runtime_data_patch_path", "_copy_with_retry", "_delete_with_retry", "_backup_patch_targets", "_rollback_patch", "_sha256_file"}

@@ -18,7 +18,7 @@ for(const file of ['EventManagementPage','CabinetPowerPage','DrillManagementPage
 }
 const cabinet=await readFile(path.join(root,'src/components/CabinetPowerPage.vue'),'utf8');
 assert(!cabinet.includes('trackButtonPresentation'),'legacy drawer behavior is unchanged');
-assert(adaptCabinetPage(cabinet).includes('trackButtonPresentation(nextTick())'));
+assert(!adaptCabinetPage(cabinet).includes('trackButtonPresentation'),'opening rack details no longer uses submission feedback');
 const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[],queries=[],writes=[];
 let page,active=0,maximum=0,scopes=['A','B'];
@@ -63,14 +63,13 @@ try{
   await page.emulateMedia({reducedMotion:'no-preference'});await page.goto(entry+'?__page=/cabinet-power&scope=A');
   await page.getByRole('button',{name:'原始平面图',exact:true}).click();await filters.getByRole('textbox',{name:'搜索平面图',exact:true}).waitFor();
   const cell=page.locator('.map-cell').filter({hasText:'A01'});await cell.waitFor();
-  const beforeBox=await cell.boundingBox(),started=Date.now();await cell.click();
+  const beforeBox=await cell.boundingBox();await cell.click();
   await page.getByRole('dialog',{name:'机柜完整历史',exact:true}).waitFor();
-  await page.waitForFunction(()=>document.querySelector('.map-cell[data-v2-action="success"]'));
-  assert(Date.now()-started<1100,'actual rack button completes when the drawer opens, not when history arrives');
+  assert.equal(await cell.getAttribute('data-v2-action'),null,'opening rack details keeps lightweight selected feedback');
   assert.equal(await cell.evaluate(el=>getComputedStyle(el).position),'absolute','button feedback must preserve the floor plan coordinate system');
   const afterBox=await cell.boundingBox();assert(Math.abs(afterBox.x-beforeBox.x)<1&&Math.abs(afterBox.y-beforeBox.y)<1,'rack does not jump when feedback appears');
   assert.equal(await cell.getAttribute('aria-pressed'),'true','the opened rack remains visibly selected');
-  const feedbackBox=await cell.locator('.v2-action-feedback svg').boundingBox();assert(feedbackBox.width<=afterBox.width&&feedbackBox.height<=afterBox.height,'feedback fits a scaled rack');
+  assert.equal(await cell.locator('.v2-action-feedback').count(),0,'rack contents remain readable instead of turning into a checkmark');
   assert.equal(typeof historyReply,'function');await historyReply();await page.getByRole('button',{name:'关闭历史',exact:true}).click();
   assert.equal(await cell.getAttribute('aria-pressed'),'false');
   await page.waitForFunction(()=>!document.querySelector('.map-cell[data-v2-action]'));await page.emulateMedia({reducedMotion:'reduce'});

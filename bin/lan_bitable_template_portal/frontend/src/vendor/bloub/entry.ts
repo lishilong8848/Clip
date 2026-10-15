@@ -46,6 +46,7 @@ export interface BloubOptions {
   draggable?: boolean
   /** 拖到新位置后回到原位（true=回弹，false=留在原地），默认 true */
   snapBack?: boolean
+  viewportTop?: number
   onDragEnd?: (position: { x: number; y: number }, moved: boolean) => void
   dragTarget?: HTMLElement
 }
@@ -53,7 +54,7 @@ export interface BloubOptions {
 export class BloubBot {
   private svg: SVGSVGElement
   private engine: BotEngine
-  private opts: Required<Omit<BloubOptions, 'cycle' | 'onDragEnd' | 'dragTarget'>> & { cycle: StateId[] }
+  private opts: Required<Omit<BloubOptions, 'cycle' | 'onDragEnd' | 'dragTarget' | 'viewportTop'>> & Pick<BloubOptions, 'viewportTop'> & { cycle: StateId[] }
   private onDragEnd: BloubOptions['onDragEnd']
   private dragTarget: HTMLElement | undefined
   private frame: BotFrame
@@ -238,7 +239,8 @@ export class BloubBot {
       follow: options.follow ?? false,
       reactOnClick: options.reactOnClick ?? true,
       draggable: options.draggable ?? true,
-      snapBack: options.snapBack ?? true
+      snapBack: options.snapBack ?? true,
+      viewportTop: options.viewportTop
     }
     this.playing = this.opts.autoplay
     this.ink = COLOR_BY_ID.get(this.opts.color)?.hex ?? '#0a0a0c'
@@ -541,8 +543,16 @@ export class BloubBot {
     return true
   }
 
+  get topBoundary() {
+    return this.opts.viewportTop ?? (isWeatherShape(this.opts.shape) ? 12 + this.opts.size * .3 : 12)
+  }
+
+  setTopBoundary(value: number | undefined) {
+    this.opts.viewportTop = value
+  }
+
   private clampShift() {
-    const top = isWeatherShape(this.opts.shape) ? 12 + this.opts.size * .3 : 12
+    const top = this.topBoundary
     this.dragShiftX = Math.min(Math.max(this.homeX + this.dragShiftX, 12), Math.max(12, window.innerWidth - this.opts.size - 12)) - this.homeX
     this.dragShiftY = Math.min(Math.max(this.homeY + this.dragShiftY, top), Math.max(top, window.innerHeight - this.opts.size - 12)) - this.homeY
   }

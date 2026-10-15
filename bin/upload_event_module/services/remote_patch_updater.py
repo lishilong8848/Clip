@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -128,22 +129,66 @@ class RemotePatchUpdater:
             raise RuntimeError("remote manifest contains an unsafe zip path")
         expected_sha256 = (manifest.get("zip_sha256") or "").strip().lower()
         expected_size = self._safe_int(manifest.get("zip_size"), 0)
+        if manifest.get("feishu_patch"):
+            try:
+                from .patch_mirror import download_patch
+                logging.info("优先从飞书多维表下载补丁。")
+                return download_patch(manifest, target_zip)
+            except Exception as exc:
+                logging.warning("飞书补丁下载未完成，转用 Gitee 备用源：%s", type(exc).__name__)
         temporary = None
         try:
             digest = hashlib.sha256()
             size = 0
             with tempfile.NamedTemporaryFile(dir=root, prefix=".download-", suffix=".part", delete=False) as stream:
                 temporary = Path(stream.name)
-                with requests.get(zip_url, stream=True, timeout=(5, 60)) as resp:
-                    resp.raise_for_status()
-                    for chunk in resp.iter_content(chunk_size=1024 * 512):
-                        if not chunk:
-                            continue
-                        size += len(chunk)
-                        if expected_size > 0 and size > expected_size:
-                            raise RuntimeError("zip size mismatch")
-                        stream.write(chunk)
-                        digest.update(chunk)
+                for attempt in range(3):
+                    if expected_size > 0 and size == expected_size and expected_sha256 \
+                            and digest.hexdigest() == expected_sha256:
+                        break
+                    headers = {"Accept-Encoding": "identity"}
+                    if size:
+                        headers["Range"] = f"bytes={size}-"
+                    logging.info("补丁下载：第 %s/3 次，已接收 %.2f MiB", attempt + 1, size / 1024 / 1024)
+                    try:
+                        with requests.get(zip_url, headers=headers, stream=True, timeout=(10, 120)) as resp:
+                            resp.raise_for_status()
+                            range_end = None
+                            if resp.status_code == 206:
+                                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", resp.headers.get("Content-Range", ""))
+                                if not match:
+                                    raise RuntimeError("补丁续传响应无效，请重新检查更新。")
+                                start, range_end, total = map(int, match.groups())
+                                if start != size or not start <= range_end < total \
+                                        or expected_size > 0 and total != expected_size:
+                                    raise RuntimeError("补丁续传位置或大小不一致，请重新检查更新。")
+                            else:
+                                # A server may ignore Range; never append a full response to a partial file.
+                                stream.seek(0)
+                                stream.truncate()
+                                size, digest = 0, hashlib.sha256()
+                            for chunk in resp.iter_content(chunk_size=128 * 1024):
+                                if not chunk:
+                                    continue
+                                size += len(chunk)
+                                if expected_size > 0 and size > expected_size \
+                                        or range_end is not None and size > range_end + 1:
+                                    raise RuntimeError("zip size mismatch")
+                                stream.write(chunk)
+                                digest.update(chunk)
+                            if expected_size > 0 and size < expected_size \
+                                    or range_end is not None and size < range_end + 1:
+                                raise requests.exceptions.ChunkedEncodingError("补丁未下载完整")
+                        break
+                    except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError,
+                            requests.HTTPError) as exc:
+                        if isinstance(exc, requests.HTTPError) and exc.response is not None \
+                                and exc.response.status_code not in {408, 429, 500, 502, 503, 504}:
+                            raise
+                        logging.warning("补丁下载中断（%s/3），已接收 %.2f MiB：%s", attempt + 1, size / 1024 / 1024, exc)
+                        if attempt == 2:
+                            raise RuntimeError("补丁连续3次下载未完成，请稍后重新检查更新；现有程序未更改。") from exc
+                        time.sleep(2 * (attempt + 1))
                 stream.flush()
                 os.fsync(stream.fileno())
             if expected_sha256 and digest.hexdigest() != expected_sha256:

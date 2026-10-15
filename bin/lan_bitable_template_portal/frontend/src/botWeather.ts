@@ -45,9 +45,12 @@ export function weatherScene(value: IconWeather, now = Date.now() / 1000): Weath
   const angle = Math.PI * dayProgress, moonAngle = Math.PI * nightProgress;
   const descriptions = (fresh ? value.description || '' : '').split('转');
   const description = phase === 'night' || phase === 'dusk' ? descriptions[descriptions.length - 1]! : descriptions[0]!;
-  const weather = /雷/.test(description) ? 'storm' : /雪/.test(description) ? 'snow' : /雨/.test(description) ? 'rain'
-    : /雾|霾|沙尘/.test(description) ? 'fog' : /大风|强风|疾风/.test(description) ? 'wind' : /云|阴/.test(description) ? 'cloudy' : /晴/.test(description) ? 'clear' : 'unknown';
-  const label: Record<string, string> = { clear: '晴', cloudy: '多云', fog: '雾', storm: '雷雨', snow: '雪', rain: '雨', wind: '大风', unknown: '天气暂不可用' };
+  const hotForecast = fresh && phase !== 'night' && Number.isFinite(value.maximum) && value.maximum! >= 35 && /晴|云/.test(description);
+  const weather = /台风|热带风暴/.test(description) ? 'typhoon' : /雷/.test(description) ? 'storm'
+    : /雪/.test(description) ? 'snow' : /暴雨|大雨/.test(description) ? 'heavy-rain' : /雨/.test(description) ? 'rain'
+    : /雾|霾|沙尘/.test(description) ? 'fog' : /大风|强风|疾风/.test(description) ? 'wind'
+    : /高温|酷热|炎热/.test(description) || hotForecast ? 'heat' : /云/.test(description) ? 'cloudy' : /阴/.test(description) ? 'overcast' : /晴/.test(description) ? 'clear' : 'unknown';
+  const label: Record<string, string> = { clear: '晴', cloudy: '多云', overcast: '阴', fog: '雾', storm: '雷雨', snow: '雪', rain: '雨', 'heavy-rain': '大雨', wind: '大风', typhoon: '台风', heat: '高温', unknown: '天气暂不可用' };
   const lunar = lunarMoon(now);
   return { weather, phase, x: 380 - Math.cos(angle) * 158, y: 258 - Math.sin(angle) * 258,
     lunarDay: lunar?.day, lunarPhase: lunar?.phase,

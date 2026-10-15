@@ -713,6 +713,17 @@ class ProvisioningTests(unittest.TestCase):
 
 
 class PublicDomainCutoverTests(unittest.TestCase):
+    def test_retired_domain_closes_business_entry_without_redirect(self):
+        server = BIN / 'public_access/server'
+        for name in ('dengta-http.conf', 'dengta-https.conf'):
+            source = (server / name).read_text(encoding='utf-8')
+            self.assertIn('server_name dengta.sjhl.online;', source)
+            self.assertIn('location / { return 410; }', source)
+            self.assertNotRegex(source, r'return\s+30[1278]\s')
+        active = (server / 'dt-https.conf').read_text(encoding='utf-8')
+        self.assertIn('server_name dt.sjhl.online;', active)
+        self.assertIn('proxy_pass http://127.0.0.1:6100;', active)
+
     def test_cutover_waits_rolls_back_and_finishes_once(self):
         bash = shutil.which('bash') or ('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else '')
         if not bash or not Path(bash).is_file():

@@ -12,13 +12,18 @@
     <linearGradient id="litGlass" x2="1" y2="1"><stop stop-color="#fff5c7"/><stop offset=".48" stop-color="#ffd05f"/><stop offset="1" stop-color="#ed8b3d"/></linearGradient>
     <linearGradient id="beamLeft" gradientUnits="userSpaceOnUse" x1="370" y1="147" x2="190" y2="112"><stop stop-color="#fff5cf" stop-opacity=".86"/><stop offset=".42" stop-color="#ffc84c" stop-opacity=".48"/><stop offset="1" stop-color="#ff9f35" stop-opacity=".08"/></linearGradient>
     <linearGradient id="beamRight" gradientUnits="userSpaceOnUse" x1="390" y1="147" x2="570" y2="112"><stop stop-color="#fff5cf" stop-opacity=".86"/><stop offset=".42" stop-color="#ffc84c" stop-opacity=".48"/><stop offset="1" stop-color="#65eaff" stop-opacity=".1"/></linearGradient>
-    <radialGradient id="sunCore"><stop class="wl-sun-start" stop-color="#fffdf0"/><stop class="wl-sun-mid" offset=".48" stop-color="#ffe8a5"/><stop class="wl-sun-end" offset="1" stop-color="#ef9251"/></radialGradient>
+    <radialGradient id="sunCore" cx=".35" cy=".3" r=".75"><stop class="wl-sun-start" stop-color="#fff3bd"/><stop class="wl-sun-mid" offset=".55" stop-color="#ffdb78"/><stop class="wl-sun-end" offset="1" stop-color="#efb34d"/></radialGradient>
+    <radialGradient id="sunGlow"><stop class="wl-sun-aura" stop-color="#f9cc67" stop-opacity=".3"/><stop class="wl-sun-aura" offset=".55" stop-color="#f9cc67" stop-opacity=".16"/><stop class="wl-sun-aura" offset="1" stop-color="#f9cc67" stop-opacity="0"/></radialGradient>
+    <linearGradient id="waterFade"><stop stop-color="#fff" stop-opacity="0"/><stop offset=".08" stop-color="#fff" stop-opacity=".25"/><stop offset=".2" stop-color="#fff"/><stop offset=".8" stop-color="#fff"/><stop offset=".92" stop-color="#fff" stop-opacity=".25"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <mask id="waterEdges" maskContentUnits="objectBoundingBox" x="-.1" y="-2" width="1.2" height="5"><rect x="0" y="-2" width="1" height="5" fill="url(#waterFade)"/></mask>
     <linearGradient id="mist"><stop stop-color="#dceaf2" stop-opacity="0"/><stop offset=".3" stop-color="#dceaf2" stop-opacity=".5"/><stop offset=".7" stop-color="#dceaf2" stop-opacity=".5"/><stop offset="1" stop-color="#dceaf2" stop-opacity="0"/></linearGradient>
   </defs>
   <g class="wl-stars" fill="#e5ce79"><path d="m240 107 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm275 76 3-8 3 8 8 3-8 3-3 8-3-8-8-3z"/><circle cx="280" cy="157" r="2"/><circle cx="490" cy="128" r="2"/><circle cx="542" cy="238" r="2"/><circle cx="235" cy="244" r="1.7"/></g>
-  <g class="wl-sun"><circle class="wl-aura" r="26" fill="#f8df9c"/><circle class="wl-crown" r="23" fill="none" stroke="#efc375" stroke-width="1.4" stroke-dasharray="1 5"/><circle r="17" fill="url(#sunCore)" stroke="#fff1c4"/><ellipse cx="-4" cy="-5" rx="6.4" ry="4.6" fill="#fffdf1"/></g>
+  <g class="wl-sun"><circle class="wl-aura" r="32" fill="url(#sunGlow)"/><path class="wl-crown" d="M0-22V-26M0 22V26M-22 0H-26M22 0H26M-16-16-18.5-18.5M16-16 18.5-18.5M16 16 18.5 18.5M-16 16-18.5 18.5" fill="none" stroke="#eebc57" stroke-width="2" stroke-linecap="round"/><circle r="16.5" fill="url(#sunCore)"/></g>
   <g class="wl-moon"><circle r="17" fill="#f7f0d4"/><path d="M4-16a17 17 0 0 0 0 32A17 17 0 0 1 4-16" fill="#a4b0a7"/><circle class="wl-glint" cx="-7" cy="-4" r="2" fill="#d7d4bd"/></g>
   <g class="wl-companion" fill="#e5ce79"><path d="m-32-12 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm65-8 2-6 2 6 6 2-6 2-2 6-2-6-6-2z"/></g>
+  <g class="wl-heat" fill="none" stroke="#d4a46d" stroke-width="2.2" stroke-linecap="round"/>
+  <g class="wl-typhoon" transform="translate(278 175)" fill="none" stroke="#7296ae" stroke-width="3.5" stroke-linecap="round"><g class="wl-cyclone"><path d="M-4-9C8-18 26-7 23 7C20 25-3 33-19 25M4 9C-8 18-26 7-23-7C-20-25 3-33 19-25"/><circle r="4"/></g></g>
   <g class="wl-clouds" fill="#b6ccd9">
     <g transform="translate(236 180) scale(1.15)"><path class="wl-drift" d="M14 43c-10 0-14-6-14-13 0-8 7-14 16-14 3-10 12-16 23-16 12 0 22 8 24 19 12-3 23 5 23 16 0 7-5 12-15 12z"/></g>
     <g transform="translate(452 238) scale(.9)"><path class="wl-drift wl-drift-late" d="M14 43c-10 0-14-6-14-13 0-8 7-14 16-14 3-10 12-16 23-16 12 0 22 8 24 19 12-3 23 5 23 16 0 7-5 12-15 12z"/></g>
@@ -42,9 +47,9 @@
   <g clip-path="url(#eyeBounds)"><g class="wl-eyes" transform="translate(380 145) scale(.38)" fill="#fdf6e0" stroke="#20365f" stroke-width="1"><path/><path/></g></g>
   </g>
   <g class="wl-waves" fill="none" stroke-linecap="round">
-    <path class="wl-swell" d="M340 367Q311 361 284 368T229 368T190 367M570 367Q539 360 510 368T452 368T420 367" stroke="#58b7dd" stroke-width="5"/>
-    <path class="wl-ripple" d="M334 383Q306 378 278 384T221 384M439 383Q467 378 495 384T551 384" stroke="#a8ddf2" stroke-width="3" opacity=".82"/>
-    <path class="wl-water-trace" d="M295 397Q323 393 350 397T405 397T461 397" stroke="#a8ddf2" stroke-width="1.7" opacity=".45"/>
+    <path class="wl-swell" mask="url(#waterEdges)" d="M340 367Q311 361 284 368T229 368T190 367M570 367Q539 360 510 368T452 368T420 367" stroke="#58b7dd" stroke-width="5"/>
+    <path class="wl-ripple" mask="url(#waterEdges)" d="M334 383Q306 378 278 384T221 384M439 383Q467 378 495 384T551 384" stroke="#a8ddf2" stroke-width="3" opacity=".82"/>
+    <path class="wl-water-trace" mask="url(#waterEdges)" d="M295 397Q323 393 350 397T405 397T461 397" stroke="#a8ddf2" stroke-width="1.7" opacity=".45"/>
   </g>
   <g class="wl-rain" stroke="#79b7d1" stroke-width="3" stroke-linecap="round"/>
   <g class="wl-snow" fill="#b8d8e8"/>

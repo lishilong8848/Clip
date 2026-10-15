@@ -35,6 +35,7 @@ try {
   await context.route(base + '/api/**', async route => {
     const url = new URL(route.request().url()), pathname = url.pathname, method = route.request().method();
     const fulfill = (data, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(status >= 400 ? { ok: false, error: data } : { ok: true, data }) });
+    if (pathname === '/api/auth/status') return fulfill({ logged_in: true, user: { open_id: 'command-fixture', name: '测试账号', modules: ['assistant'] } });
     if (pathname.endsWith('/appearance')) { if (method === 'PUT') appearance = route.request().postDataJSON(); return fulfill(appearance); }
     if (pathname.endsWith('/conversation')) return fulfill({ turns, conversation_id: 'command-conversation', configured: true, enabled: true, can_manage_settings: true, model_name: '测试模型', models: [{ name: '测试模型' }], busy: false });
     if (pathname.endsWith('/commands')) {

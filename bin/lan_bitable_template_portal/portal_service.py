@@ -18851,6 +18851,10 @@ class MaintenancePortalService(RepairOperationsMixin):
             limit=page_size,
             offset=(page - 1) * page_size,
         )
+        for record in result.get("records", []):
+            record["large_change"] = self._water_meter_change(
+                record.pop("previous_meter_value", None), record.get("meter_value"),
+            )
         result.update(
             {
                 "scope": scope_code,

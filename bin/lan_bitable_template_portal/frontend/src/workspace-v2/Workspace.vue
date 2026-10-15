@@ -1,5 +1,5 @@
 <template>
-  <NConfigProvider :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
+  <NConfigProvider :theme="nightMode && !printMode && !printing ? darkTheme : null" :theme-overrides="nightMode && !printMode && !printing ? nightTheme : theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
       <div class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
@@ -70,7 +70,7 @@
 </template>
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue';
-import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, dateZhCN, zhCN } from 'naive-ui';
+import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
 import { Activity, Building2, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
@@ -78,7 +78,7 @@ import { modules, moduleIcons, navigationModules, moduleForRoute, moduleUrl, NOT
 import { personaFor } from './persona';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate, navigateBack } from './navigation';
-import { DEFAULT_NAV_COLOR,theme } from './theme';
+import { DEFAULT_NAV_COLOR,theme,nightTheme,nightMode,loadNightMode } from './theme';
 import NavThemePicker from './NavThemePicker.vue';
 import MobileNavigation from './MobileNavigation.vue';
 import SidebarNavigation from './SidebarNavigation.vue';
@@ -124,6 +124,11 @@ const pages: Record<string, any> = {
 const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), user = ref<Dict>({}), scopes = ref<{value:string;label:string}[]>([]), authError = ref(''), loginUrl = ref('/api/auth/login'), collapsed = ref(false);
 const operationError=ref(''),logoutBusy=ref(false);
 const navColor=ref(DEFAULT_NAV_COLOR);
+watch(()=>String(user.value.open_id||''),loadNightMode,{immediate:true,flush:'sync'});
+const printMedia=window.matchMedia('print'),printing=ref(printMedia.matches);
+const syncPrinting=()=>{printing.value=printMedia.matches;};
+onMounted(()=>printMedia.addEventListener('change',syncPrinting));
+onBeforeUnmount(()=>printMedia.removeEventListener('change',syncPrinting));
 let disposed = false, timer = 0, checkingAuth = false;
 let authRead:AbortController|undefined;
 function cancelAuth(){authRead?.abort();authRead=undefined;checkingAuth=false;window.clearTimeout(timer);}
@@ -140,7 +145,9 @@ const publicLink = computed(() => route.value.pathname.startsWith('/polling-work
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(activeModule.value)) || !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
 const previousScope=ref({identity:'',value:''});
-const currentScope = computed(() => route.value.searchParams.get('scope') || (previousScope.value.identity===user.value.open_id && scopes.value.some(s=>s.value===previousScope.value.value)?previousScope.value.value:(scopes.value.some(s => s.value === 'ALL') ? 'ALL' : scopes.value[0]?.value || '')));
+const authDefaultScope=ref('');
+const noticeDefaultScope=computed(()=>scopes.value.some(s=>s.value==='ALL')?'ALL':scopes.value.some(s=>s.value===authDefaultScope.value)?authDefaultScope.value:scopes.value[0]?.value||'');
+const currentScope = computed(() => route.value.searchParams.get('scope') || (route.value.pathname==='/workbench-lite'?noticeDefaultScope.value:previousScope.value.identity===user.value.open_id && scopes.value.some(s=>s.value===previousScope.value.value)?previousScope.value.value:(scopes.value.some(s => s.value === 'ALL') ? 'ALL' : scopes.value[0]?.value || '')));
 provide(pageContext,{user:computed(()=>user.value),scopes:computed(()=>scopes.value.map(scope=>scope.value)),scope:currentScope,module:computed(()=>NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value)});
 watch([route,identityKey],()=>{const value=route.value.searchParams.get('scope');if(user.value.open_id&&value&&scopes.value.some(s=>s.value===value))previousScope.value={identity:user.value.open_id,value};},{flush:'sync'});
 const noticeActive = computed(() => loggedIn.value && !checking.value && !denied.value && route.value.pathname === '/workbench-lite');
@@ -167,7 +174,7 @@ const menuOptions = computed(() => [
 ]);
 const mobileTabs = [{value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},{value:'my',label:'我的',icon:UserRound}];
 const dutyTabs = computed(() => [
-  ...(NOTICE_IDS.some(id => granted.value.includes(id)) ? [{id:'notices',label:'通告处理',icon:ClipboardList,url:'/workbench-lite?work_type=all&scope='+currentScope.value}] : []),
+  ...(NOTICE_IDS.some(id => granted.value.includes(id)) ? [{id:'notices',label:'通告处理',icon:ClipboardList,url:'/workbench-lite?work_type=all'}] : []),
   ...[{id:'water',label:'水耗处理',icon:Droplets},{id:'drills',label:'演练管理',icon:Activity},{id:'critical_guard',label:'风险管理',icon:ShieldCheck}].filter(tab => granted.value.includes(tab.id)).map(tab => ({...tab,url:moduleUrl(modules.find(m=>m.id===tab.id)!,currentScope.value)})),
 ]);
 const dutyActive = computed(() => NOTICE_IDS.includes(activeModule.value) || activeModule.value === 'all' ? 'notices' : activeModule.value);
@@ -221,7 +228,7 @@ async function loadAuth() {
   try {
     const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search + window.location.hash), {signal:controller.signal, cache:'no-store',timeoutMs:15000});
     if (disposed || controller.signal.aborted || authRead!==controller) return;
-    loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; loginUrl.value = data.login_url || '/api/auth/login';
+    loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; authDefaultScope.value = String(data.default_scope||''); loginUrl.value = data.login_url || '/api/auth/login';
     setModulePermissions(granted.value); setReadCacheIdentity(identityKey.value); authError.value = data.directory_warning || '';
     if (loggedIn.value && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
     if (user.value.role === 'guest' && route.value.pathname !== '/cabinet-power') navigate('/cabinet-power', {replace:true,bypassGuard:true});

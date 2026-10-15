@@ -3,7 +3,14 @@ import {readFileSync} from 'node:fs';
 import {parse,compileScript} from '@vue/compiler-sfc';
 import {adaptEventPeriodPage} from './workspace-event-adapter.mjs';
 import {adaptCabinetBatchPage} from './workspace-cabinet-adapter.mjs';
-import {adaptPasswordLogin,markBinaryControls,fuseLearningCharts} from './workspace-controls-adapter.mjs';
+import {adaptPasswordLogin,markBinaryControls,fuseLearningCharts,portalFloatingControls} from './workspace-controls-adapter.mjs';
+const floating='<template><NModal><NSelect /><NDatePicker /><NTimePicker /><NPopover /><NSelect to="#host" /><NSelect :to="false" /><NSelect v-bind="props" /><NSelect v-bind:[key]="target" /><dialog><NSelect /></dialog></NModal></template>';
+const portalled=portalFloatingControls(floating);
+assert.equal((portalled.match(/:to="true"/g)||[]).length,4);
+assert.match(portalled,/<NSelect to="#host"/);
+assert.match(portalled,/<NSelect :to="false"/);
+assert.match(portalled,/<dialog><NSelect \/><\/dialog>/);
+assert.equal(portalFloatingControls(portalled),portalled,'floating-layer adaptation must be idempotent');
 for(const [file,adapt] of [['EventManagementPage',adaptEventPeriodPage],['CabinetPowerBatchPage',adaptCabinetBatchPage],['PersonnelPasswordLogin',adaptPasswordLogin],['LearningDashboard',fuseLearningCharts]]){
   compileScript(parse(adapt(readFileSync(new URL('../src/components/'+file+'.vue',import.meta.url),'utf8'))).descriptor,{id:file});
 }

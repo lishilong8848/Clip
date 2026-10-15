@@ -53,6 +53,17 @@ class AppearanceRouteTests(unittest.TestCase):
             self.assertEqual(client.get("/api/assistant/appearance").json()["data"]["shape"], "goutte")
             self.assertEqual(client.get("/api/assistant/appearance").json()["data"]["size"], 200)
 
+    def test_upgrade_resets_legacy_shape_once_without_losing_preferences(self):
+        self.store.put_document(NAMESPACE, "user-a", {"shape": "cercle", "size": 120, "color": "rose", "snap_back": False})
+        data = self.client.get("/api/assistant/appearance").json()["data"]
+        self.assertEqual(data["shape"], "weather-lighthouse-mini")
+        self.assertEqual((data["size"], data["color"], data["snap_back"]), (120, "rose", False))
+        self.assertNotIn("_shape_reset", data)
+        self.assertEqual(self.client.put("/api/assistant/appearance", json={"shape": "nuage"}).status_code, 200)
+        self.runtime.state_store = LanPortalStateStore(db_path=self.path)
+        with self.app_client() as client:
+            self.assertEqual(client.get("/api/assistant/appearance").json()["data"]["shape"], "nuage")
+
     def test_forged_identity_invalid_values_and_oversized_bodies_do_not_write(self):
         for payload in ({"actor_id": "user-b"}, {"color": "url(https://example.com)"}, {"snap_back": 1}, {"size": True}):
             self.assertEqual(self.client.put("/api/assistant/appearance", json=payload).status_code, 400)

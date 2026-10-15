@@ -13,7 +13,7 @@ const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 const context=await browser.newContext({viewport:{width:1440,height:900}});
 const errors=[];
-let botAppearance={};
+let botAppearance={}, appearanceUnavailable=false;
 const user={open_id:'shell-fixture',name:'界面验收管理员',role:'admin',level:'L1',category:'manager',login_method:'password',modules:['accounts','plan_convergence','maintenance','change','repair','polling','adjust','power','signatures','learning','knowledge','links']};
 const scopes=['A','B','C','D','E','H','110'].map(value=>({value,label:value==='110'?'110站':value+'楼'}));
 await context.route('**/*',route=>{
@@ -29,11 +29,12 @@ await context.route('**/*',route=>{
   if(/^\/api\/plan-convergence\/(maintenance|change)\/records$/.test(url.pathname))return ok([{record_id:'fixture-notice',name:'A楼冷机检修',building:'A楼',status:'开始',check_status:'pending'}]);
   if(url.pathname==='/api/auth/accounts')return ok({items:Array.from({length:18},(_,i)=>({id:'person-'+i,name:'验收人员'+i,employee_no:'TEST'+i,kind:i%2?'external':'vnet',category:'engineer',position:'电气工程师',own_scopes:['A'],scopes:['A'],modules:['maintenance'],level:'L4',role:'user',enabled:true,can_edit:true,can_edit_access:true,can_delete:false,can_set_password:true})),scope_options:scopes,category_options:[{value:'engineer',label:'工程师'}],module_options:[],policy:{level:'L1',modules:user.modules}});
   if(url.pathname==='/api/auth/permissions')return ok({users:[],scope_options:scopes});
-  if(url.pathname==='/api/assistant/appearance')return ok(botAppearance);
+  if(url.pathname==='/api/assistant/appearance')return appearanceUnavailable ? route.fulfill({status:503,json:{ok:false,error:'isolated offline fixture'}}) : ok(botAppearance);
   return ok({items:[],records:[],users:[],scopes:[],settings:{},stats:{}});
 });
 const page=await context.newPage();page.setDefaultTimeout(12000);page.on('pageerror',e=>errors.push(e.message));
 const entry=origin+'/assets/workspace-v2/index.html';
+const main=page.locator('.v2-main');
 const shot=async name=>{await page.waitForTimeout(250);await page.screenshot({path:path.join(output,name+'.png'),animations:'disabled'});};
 async function shellGeometry(){
   const rects=await page.evaluate(()=>{
@@ -46,6 +47,7 @@ async function shellGeometry(){
   assert(Math.abs(rects.main.bottom-rects.height)<=1,'content scroll region ends at viewport');
 }
 try{
+  if(!process.argv.includes('--bot-only')){
   await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
   await shot('profile');await shellGeometry();
   await page.getByRole('button',{name:'账号与设置',exact:true}).click();await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
@@ -54,7 +56,6 @@ try{
   const nav=await page.locator('.v2-settings-picker').boundingBox(),content=await page.locator('.admin-settings-content').boundingBox();
   assert(nav.y+nav.height<=content.y+1,'admin sections are above the account table, not a second sidebar');
   assert(Math.abs(nav.x-content.x)<=1,'admin sections and account list align');
-  const main=page.locator('.v2-main');
   await page.mouse.move(1100,650);await page.mouse.wheel(0,400);await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop>100);
   await shellGeometry();assert.equal(await page.evaluate(()=>window.scrollY),0,'desktop scrolling never moves the header');
   const before=await main.evaluate(el=>el.scrollTop);
@@ -103,16 +104,28 @@ try{
   await filters.getByRole('searchbox').fill('');
   await page.getByRole('button',{name:'规则配置',exact:true}).click();
   assert.equal(await filters.getByRole('searchbox').count(),0,'review controls are not shown on rules');
+  }else{
+    await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
+  }
   await page.setViewportSize({width:1440,height:900});
-  user.modules.push('assistant');await page.goto(entry+'?view=my');
-  await page.locator('.lighthouse-bot .weather-lighthouse').first().waitFor();
-  assert(await page.locator('.lighthouse-bot').first().getAttribute('title'),'new-account default is the weather lighthouse');
+  user.modules.push('assistant');appearanceUnavailable=true;
+  await page.evaluate(()=>localStorage.setItem('lighthouse_appearance:shell-fixture',JSON.stringify({shape:'cercle',color:'bleu',size:120,snap_back:false,weather_city:'石家庄'})));
+  await page.goto(entry+'?view=my');
+  await page.locator('.lighthouse-bot .weather-lighthouse-mini').first().waitFor();
+  assert.equal(Math.round((await page.locator('.assistant-launcher').boundingBox()).width),120,'reset keeps the existing icon size even before the service responds');
+  assert.equal(await page.locator('.lighthouse').evaluate(el=>getComputedStyle(el).getPropertyValue('--bot-color').trim()),'#3b93f0','reset does not erase the chat theme');
+  appearanceUnavailable=false;botAppearance={shape:'weather-lighthouse-mini',color:'bleu',size:120,snap_back:false,weather_city:'石家庄'};
+  await page.reload();await page.waitForFunction(()=>JSON.parse(localStorage.getItem('lighthouse_appearance:shell-fixture')||'{}')._shape_reset==='mini-20261015');
   botAppearance={shape:'nuage'};await page.reload();
   await page.waitForFunction(()=>JSON.parse(localStorage.getItem('lighthouse_appearance:shell-fixture')||'{}').shape==='nuage');
   assert.equal(await page.locator('.lighthouse-bot .weather-lighthouse:visible').count(),0,'explicit personal shapes are not overwritten');
+  appearanceUnavailable=true;await page.reload();await page.locator('.assistant-launcher svg').waitFor();
+  assert.equal(await page.locator('.lighthouse-bot .weather-lighthouse:visible').count(),0,'new personal choice survives reload while appearance service is unavailable');
+  user.open_id='shell-other';await page.reload();await page.locator('.lighthouse-bot .weather-lighthouse-mini').first().waitFor();
+  assert.equal(Math.round((await page.locator('.assistant-launcher').boundingBox()).width),56,'new account does not inherit another account settings');
   assert.equal(await main.evaluate(el=>getComputedStyle(el).scrollbarWidth),'thin');
   await page.emulateMedia({forcedColors:'active'});
   assert.equal(await main.evaluate(el=>getComputedStyle(el).scrollbarWidth),'auto','high-contrast mode keeps native scrollbars');
   assert.deepEqual(errors,[]);
-  console.log('PASS: shared header/sidebar geometry during collapse, independent wheel scrolling, account layout, current-tab plan search, responsive widths, default lighthouse/personal shape preservation and accessible scrollbars. All requests isolated.');
+  console.log('PASS: '+(process.argv.includes('--bot-only')?'':'shell layout, responsive filters, ')+'default mini, legacy cache reset, preserved preferences, later shape choices, account isolation and accessible scrollbars. All requests isolated.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

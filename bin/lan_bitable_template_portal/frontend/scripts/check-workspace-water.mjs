@@ -15,6 +15,12 @@ const helper = await bundle({ entryPoints: [path.join(root, 'src/workspace-v2/wa
 const water = await import('data:text/javascript;base64,' + Buffer.from(helper.outputFiles[0].text).toString('base64'));
 assert.equal(water.waterNumber(null), null);
 assert.equal(water.waterNumber(''), null);
+assert.equal(water.waterNumber('   '), null);
+assert.equal(water.waterRecordState({meter_value:null,photo_count:0}).label,'未记录');
+assert.equal(water.waterRecordState({meter_value:0,photo_count:1}).label,'已记录','zero is a valid recorded reading');
+assert.equal(water.waterRecordState({meter_value:200,photo_count:1,large_change:{requires_confirmation:false}}).label,'已记录','frontend does not recalculate or guess the threshold');
+assert.equal(water.waterRecordState({meter_value:200,photo_count:0,large_change:{requires_confirmation:true,ratio_percent:100}}).type,'error','large changes stay visible even when a photo is missing');
+assert.equal(water.waterRecordState({meter_value:200,photo_count:1}).label,'已记录','missing comparison data is not invented as abnormal');
 assert.equal(water.waterNumberText(undefined), '—');
 assert.equal(water.waterNumberText(0), '0');
 assert.equal(water.validWaterDate('2026-02-30'), false);
@@ -119,7 +125,7 @@ async function fixture(options = {}) {
     if (url.pathname.startsWith('/api/capacity/water/records/')) {
       const row = records.find(row => url.pathname.endsWith(row.record_id));
       if (state.partialDetail) return ok({ ...row, version: 'original-version' });
-      return ok({ ...row, version: 'original-version', previous_date_text: water.waterDay(-1), previous_value_text: '1175', yoy_ratio: 0.05, photos: row.photo_count ? [{ image_id: 'water-photo-1', name: '水表现场.png' }] : [], edit_policy: { is_admin: state.admin, can_edit: state.admin || options.allowEdit, remaining_edits: state.admin ? null : options.allowEdit ? 2 : 0 } });
+      return ok({ ...row, version: state.recordVersion ?? 'original-version', previous_date_text: water.waterDay(-1), previous_value_text: '1175', yoy_ratio: 0.05, photos: row.photo_count ? [{ image_id: 'water-photo-1', name: '水表现场.png' }] : [], edit_policy: { is_admin: state.admin, can_edit: state.admin || options.allowEdit, remaining_edits: state.admin ? null : options.allowEdit ? 2 : 0 } });
     }
     if (url.pathname.startsWith('/api/capacity/water/images/')) return route.fulfill({ contentType: 'image/png', body: png });
     if (request.method() !== 'GET') throw new Error('Unexpected fixture write ' + url.pathname);
@@ -143,6 +149,7 @@ try {
   const overview=await fixture({overview:true,scope:'ALL'});
   await overview.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).waitFor();
   await overview.page.locator('.water-overview .v2-chart-canvas svg').waitFor();
+  assert.equal(await overview.page.getByRole('button',{name:'自定义布局',exact:true}).count(),0,'water overview has no custom layout');
   assert.match(await overview.page.locator('.water-overview-metrics').innerText(),/145/);
   assert.equal(await overview.page.getByRole('button',{name:'查看H楼水耗记录',exact:true}).count(),0,'unexpected response buildings never expand permission');
   assert(!requests.slice(requestStart).some(r=>r.path==='/api/capacity/water/records'),'overview must not load record pages');
@@ -181,6 +188,20 @@ try {
     await capture(layout.page,'desktop-table-'+width);
   }
   await layout.ctx.close();
+
+  const colors=await fixture({records:[records[0],{...records[0],record_id:'water-blank',meter:'未填写水表',meter_value:null,photo_count:0},{...records[0],record_id:'water-alert',meter:'需核查水表',meter_value:200,large_change:{requires_confirmation:true,ratio_percent:100}}]});
+  await colors.page.getByText('变化较大',{exact:true}).waitFor();
+  for(const width of [1440,390]){
+    await colors.page.setViewportSize({width,height:900});
+    const selector=width>760?'.water-record-table tbody .n-data-table-tr':'.water-mobile-record';
+    await colors.page.locator(selector+'.water-row-error').waitFor();
+    const backgrounds=await colors.page.locator(selector).evaluateAll(rows=>rows.map(row=>getComputedStyle(row.querySelector('td')||row).backgroundColor));
+    assert.equal(new Set(backgrounds).size,3,'recorded, unrecorded and abnormal records have distinct backgrounds');
+    assert.equal(await colors.page.getByText('未记录',{exact:true}).count(),1);
+    assert.equal(await colors.page.getByText('变化较大',{exact:true}).count(),1);
+    await capture(colors.page,'status-colors-'+width);
+  }
+  await colors.ctx.close();
   console.log('Checking independent read and unknown data states');
   const failed = await fixture({ failBoot: true, failList: true });
   await failed.page.getByText('水耗记录暂不可用', { exact: true }).waitFor();
@@ -201,6 +222,19 @@ try {
   await incomplete.page.getByRole('button', { name: '重新读取记录', exact: true }).click();
   await incomplete.page.getByLabel('本次水表读数', { exact: true }).waitFor();
   await incomplete.ctx.close();
+
+  const unversioned = await fixture({ recordVersion: '', admin: false, allowEdit: true });
+  await openFirst(unversioned.page);
+  assert.equal(await unversioned.page.getByRole('button',{name:'自定义布局',exact:true}).count(),0,'water records have no custom layout');
+  await unversioned.page.getByLabel('本次水表读数', { exact: true }).fill('1300');
+  await unversioned.page.getByLabel('添加水表照片', { exact: true }).setInputFiles({ name: 'fixture.png', mimeType: 'image/png', buffer: png });
+  await unversioned.page.getByText('待保存', { exact: true }).waitFor();
+  await unversioned.page.getByRole('button', { name: '保存记录', exact: true }).click();
+  await unversioned.page.locator('.water-notice').filter({ hasText: '已保存' }).waitFor();
+  assert.equal(unversioned.state.posts[0].expected_version, '', 'an unavailable upstream version is preserved, never invented');
+  assert.deepEqual(unversioned.state.posts[0].retained_image_ids, ['water-photo-1']);
+  assert.deepEqual(unversioned.state.posts[0].upload_ids, ['water-upload-1']);
+  await unversioned.ctx.close();
 
   const initial = await fixture({ snapshotReady: false, snapshotVersion: undefined, refreshing: true, clock: true });
   await initial.page.getByText('等待首次数据同步', { exact: true }).waitFor();

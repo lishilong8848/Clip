@@ -1826,7 +1826,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
          "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",
-         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
+         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_news", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
          "bin.test_lighthouse_document_tools",
          "bin.test_lighthouse_office_tools",
          "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
@@ -1893,7 +1893,7 @@ def _run_packaging_preflight_tests() -> None:
     log("重保管理专项测试通过。")
 
     _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest"],
+        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest"],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -2693,6 +2693,23 @@ def _load_existing_patch() -> tuple[Path, Path, dict]:
     return patch_zip, manifest_path, manifest
 
 
+def _publish_patch_to_feishu(patch_zip: Path, manifest_path: Path, manifest: dict) -> None:
+    if str(BIN_DIR) not in sys.path:
+        sys.path.insert(0, str(BIN_DIR))
+    from upload_event_module.services.patch_mirror import publish_patch
+    log("正在上传飞书补丁镜像并回读校验。")
+    spec = publish_patch(patch_zip, manifest, BUILD_DIR / 'feishu_patch_upload_journal.json')
+    updated = dict(manifest, feishu_patch=spec)
+    temporary = manifest_path.with_suffix('.json.tmp')
+    try:
+        temporary.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.replace(manifest_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    manifest.update(updated)
+    log("飞书补丁上传并下载核验通过；新版本优先使用飞书，Gitee 作为备用。")
+
+
 def _publish_patch(
     patch_zip: Path, manifest_path: Path, manifest: dict, *,
     repo_url: str, branch: str, subdir: str, manifest_repo_path: str,
@@ -2723,6 +2740,7 @@ def _publish_patch(
                 "完整补丁高压缩后仍超过 Gitee 匿名下载的保守体积上限，已停止推送，未发布新的更新清单。"
                 "本地完整补丁已保留；请使用支持匿名下载的发布渠道，不要向用户分发 Gitee 登录凭据。"
             )
+    _publish_patch_to_feishu(patch_zip, manifest_path, manifest)
     if not _upload_patch_to_gitee(
         patch_zip, manifest_path, repo_url=repo_url, branch=branch,
         subdir=subdir, manifest_repo_path=manifest_repo_path,
@@ -2734,6 +2752,7 @@ def _publish_patch(
 
 
 def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manifest_path: str) -> None:
+    from http.client import HTTPException
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
@@ -2760,6 +2779,7 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
                 or published.get("zip_name") != manifest["zip_name"]
                 or published.get("zip_size") != expected_size
                 or published.get("zip_url") != manifest["zip_url"]
+                or published.get("feishu_patch") != manifest.get("feishu_patch")
             ):
                 raise RuntimeError("远端清单尚未更新到本次补丁")
             hasher = hashlib.sha256()
@@ -2791,7 +2811,7 @@ def _verify_published_patch(manifest: dict, *, repo_url: str, branch: str, manif
             log(f"下载核验暂未通过（{attempt + 1}/10）：{last_error}")
             if attempt < 9:
                 time.sleep(5)
-        except (URLError, OSError, ValueError, RuntimeError) as exc:
+        except (HTTPException, URLError, OSError, ValueError, RuntimeError) as exc:
             last_error = f"{stage}：{exc}"
             log(f"下载核验暂未通过（{attempt + 1}/10）：{last_error}")
             if attempt < 9:

@@ -25,6 +25,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Any, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
@@ -37,6 +38,7 @@ TZ = dt.timezone(dt.timedelta(hours=8))
 SHANGHAI_TZ = "Asia/Shanghai"
 BING_RSS_URL = "https://www.bing.com/search?format=rss&q={q}"
 MWMBL_URL = "https://api.mwmbl.org/search/?s={q}"
+NEWS_RSS_URLS = ("https://www.chinanews.com.cn/rss/importnews.xml", "https://www.chinanews.com.cn/rss/scroll-news.xml")
 CUSTOM_METEO_GEO = "https://customer-api.open-meteo.com/v1/search"
 CUSTOM_METEO_FORECAST = "https://customer-api.open-meteo.com/v1/forecast"
 CUSTOM_KEY_ENV = "OPEN_METEO_CUSTOMER_KEY"
@@ -372,6 +374,7 @@ def public_search_query(query: str, question: str) -> str:
             query = re.sub(r'和|与|、', ' ', comparison[1]).strip()
             if '最新' in requested:
                 query += ' 最新'
+    query = re.sub(r'^(?:(?:请|帮我|给我|麻烦|查询|搜索|查一下|查查|看看|看一下|了解一下|一下)\s*)+', '', query).strip()
     _ensure_public_query(query, requested)
     return query
 
@@ -517,9 +520,18 @@ def _parse_rss_results(raw: bytes) -> list[dict[str, Any]]:
         link = _rss_text(item, ("link", "guid"))
         url = _verified_public_url(link) if link else None
         if url:
-            results.append({"url": url,
+            row = {"url": url,
                             "title": _rss_text(item, ("title",)) or "",
-                            "snippet": _rss_text(item, ("description", "summary")) or ""})
+                            "snippet": _rss_text(item, ("description", "summary")) or ""}
+            published = _rss_text(item, ("pubDate",))
+            if published:
+                try:
+                    stamp = parsedate_to_datetime(published)
+                    if stamp.tzinfo is not None:
+                        row["published_at"] = stamp.astimezone(TZ).isoformat(timespec="seconds")
+                except (ValueError, TypeError, OverflowError):
+                    pass
+            results.append(row)
     seen, output = set(), []
     for row in results:
         if row["url"] in seen:
@@ -579,6 +591,26 @@ def _relevant_search_results(rows, query):
         if sum(term in haystack for term in anchors) >= minimum:
             ranked.append((score, row))
     return [row for _, row in sorted(ranked, key=lambda pair: pair[0], reverse=True)[:MAX_RESULTS]]
+
+
+def _current_news_request(question):
+    return bool(re.search(r'新闻|要闻|资讯|热搜', question) and re.search(r'今天|今日|最新|热点|热门|实时|热搜', question)
+        and not re.search(r'昨天|前天|去年|上周|上月|历史|\d{4}[-年/]|是什么|什么意思|定义', question))
+
+
+def _current_news_results(rows, query, question, queried_at):
+    now = dt.datetime.fromisoformat(queried_at).astimezone(TZ)
+    rows = [row for row in rows if row.get('published_at')
+        and (stamp := dt.datetime.fromisoformat(row['published_at'])).date() == now.date()
+        and stamp <= now + dt.timedelta(minutes=5)]
+    # Feed entries need not literally say "hot news"; retain any real topic or site constraints.
+    topic = re.sub(r'查询|查一下|搜索|看看|看一下|请问|帮我|给我|一下|今天|今日|最新|实时|热点|热门|热搜|新闻|要闻|资讯|有哪些|有什么|怎么样|全部|所有|[的呢吧？?，,。\s]', '', question)
+    if topic:
+        rows = _relevant_search_results(rows, topic)
+    site = re.search(r'\bsite:([a-z0-9.-]+)', query, re.I)
+    if site:
+        rows = _relevant_search_results(rows, site[0])
+    return rows[:MAX_RESULTS]
 
 
 def _fnum(value: Any) -> Optional[float]:
@@ -973,6 +1005,7 @@ class PublicSources:
         queried_at = _now_iso()
         deadline = asyncio.get_running_loop().time() + self._timeout
         failures, empty, navigation = [], None, {}
+        news = _current_news_request(question)
         attempts = [(BING_RSS_URL, query, _parse_rss_results), (MWMBL_URL, query, _parse_mwmbl_results)]
         site = re.search(r'\bsite:([a-z0-9.-]+)', query, re.I)
         if site:
@@ -1001,7 +1034,8 @@ class PublicSources:
                         return url, parse(await _read_bounded(response, '搜索'))
 
         # Hedge slow primary reads; broaden only after both precise sources fail.
-        for batch in (attempts[:2], attempts[2:]):
+        batches = ([[(url, query, _parse_rss_results) for url in NEWS_RSS_URLS]] if news else []) + [attempts[:2], attempts[2:]]
+        for batch in batches:
             tasks = [asyncio.create_task(fetch(attempt, .25 if index == 1 else 0))
                      for index, attempt in enumerate(batch)]
             try:
@@ -1009,7 +1043,7 @@ class PublicSources:
                     try:
                         url, rows = await completed
                         # Broader retrieval must still satisfy the original topic/site.
-                        results = _relevant_search_results(rows, query)
+                        results = _current_news_results(rows, query, question, queried_at) if url in NEWS_RSS_URLS else _relevant_search_results(rows, query)
                         if site and not results:
                             from .lighthouse_public_page import page_url
                             for row in rows:
@@ -1023,6 +1057,8 @@ class PublicSources:
                         value = {'ok': True, 'source': 'public_search', 'sourceURL': url,
                                  'queried_at': queried_at, 'unavailable': False,
                                  'empty': not results, 'count': len(results), 'results': results}
+                        if url in NEWS_RSS_URLS:
+                            value.update(source='public_news', note='按北京时间核对发布时间的今日要闻，不代表全网热度排名。')
                         if results:
                             return value
                         indexes = [row for row in navigation.values() if re.search(r'/contents(?:\.html)?$', row['link'])]

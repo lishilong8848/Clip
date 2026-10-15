@@ -246,6 +246,7 @@ class ReleaseReadinessTests(unittest.TestCase):
             ('def query(requests):\n    requests.append(1)\n', True),
             ('# requests.get(url)\ntext = "import requests"\n', True),
             ('from requests.exceptions import Timeout, ReadTimeout, ConnectionError\n', True),
+            ('from requests.exceptions import ChunkedEncodingError, HTTPError\n', True),
             ('import requests\nrequests.get("https://example.invalid")\n', False),
             ('import requests as network\n', False),
             ('from requests import Session as SessionFactory\n', False),

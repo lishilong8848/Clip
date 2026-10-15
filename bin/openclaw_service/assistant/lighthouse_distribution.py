@@ -16,6 +16,7 @@ from .lighthouse_startup_log import emit as startup_log
 
 BASE = 'H7DLbpdQiaIw4ssg5sCcSoGMn5M'
 TABLE = 'tblUECEItaUpOWvd'
+PATCH_TABLE = 'tblhc8hUnGsjiNRY'
 API = 'https://open.feishu.cn/open-apis/bitable/v1/apps/' + BASE + '/tables/' + TABLE
 PART_BYTES = 14 * 1024 * 1024
 INSTALL_LOCK = threading.Lock()
@@ -26,7 +27,12 @@ OMITTED = {'node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe'}
 
 
 def validate_spec(spec, *, published=True, component='runtime'):
-    if component == 'frpc':
+    if component == 'portal_patch':
+        version_ok = isinstance(spec, dict) and spec.get('component') == component \
+            and isinstance(spec.get('version'), str) and 0 < len(spec['version']) <= 120 \
+            and spec.get('platform') == 'windows_amd64'
+        max_size = 1024 ** 3
+    elif component == 'frpc':
         version_ok = isinstance(spec, dict) and spec.get('component') == 'frpc' \
             and isinstance(spec.get('version'), str) and re.fullmatch(r'\d+\.\d+\.\d+', spec['version']) \
             and spec.get('platform') == 'windows_amd64'
@@ -51,7 +57,8 @@ def validate_spec(spec, *, published=True, component='runtime'):
         max_size = 1024 ** 3
     integer = lambda value: type(value) is int
     digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value)
-    if not isinstance(spec, dict) or spec.get('format') != 1 or spec.get('base') != BASE or spec.get('table') != TABLE \
+    table = PATCH_TABLE if component == 'portal_patch' else TABLE
+    if not isinstance(spec, dict) or spec.get('format') != 1 or spec.get('base') != BASE or spec.get('table') != table \
             or not version_ok \
             or not digest(spec.get('sha256')) or not integer(spec.get('size')) or not 0 < spec['size'] <= max_size \
             or not isinstance(spec.get('parts'), list) or not 1 <= len(spec['parts']) <= 74:
@@ -112,8 +119,12 @@ def create_archive(runtime, output):
 
 
 class FeishuRuntimeMirror:
-    """This adapter cannot address any other app/table, or delete records."""
-    def __init__(self, *, client=None, headers=None):
+    """Only the designated dependency and patch tables are allowed; no record deletion."""
+    def __init__(self, *, client=None, headers=None, table=TABLE):
+        if table not in {TABLE, PATCH_TABLE}:
+            raise AssistantError('未授权的分发表。', 403)
+        self.table = table
+        self.api = 'https://open.feishu.cn/open-apis/bitable/v1/apps/' + BASE + '/tables/' + table
         if client is None:
             from upload_event_module.services.feishu_token_manager import FeishuTokenError, token_manager
             from upload_event_module.services.http_client import FeishuHttpClient
@@ -129,7 +140,7 @@ class FeishuRuntimeMirror:
         self._download_client = None
 
     def request(self, method, suffix='', **kwargs):
-        value = self.client.request_json(method, API + suffix, headers=self.headers, **kwargs)
+        value = self.client.request_json(method, self.api + suffix, headers=self.headers, **kwargs)
         if value.get('code') != 0:
             raise AssistantError('依赖镜像请求未完成（code=' + str(value.get('code')) + '）。', 503)
         return value.get('data') or {}
@@ -154,6 +165,9 @@ class FeishuRuntimeMirror:
 
     def publish(self, spec, folder, journal, *, component='runtime'):
         validate_spec(spec, published=False, component=component)
+        if spec['table'] != self.table:
+            raise AssistantError('分发组件与目标表不一致。', 409)
+        portal_patch = component == 'portal_patch'
         model = component == 'knowledge_model'
         frpc = component == 'frpc'
         profile = component == 'public_access_profile'
@@ -180,10 +194,10 @@ class FeishuRuntimeMirror:
                 entry['file_token'] = response['data']['file_token']
                 save()
             fields = {'文本': 'Lighthouse-' + spec['version'] + '-' + str(part['index']),
-                '组件名称': '灯塔公网部署凭据（受限）' if profile else '公网客户端 FRPC' if frpc else '知识库模型 bge-small-zh-v1.5' if model else '灯塔助手运行环境', '版本': spec['version'], '平台': 'ONNX CPU' if model else 'Windows x64',
+                '组件名称': '灯塔完整更新补丁' if portal_patch else '灯塔公网部署凭据（受限）' if profile else '公网客户端 FRPC' if frpc else '知识库模型 bge-small-zh-v1.5' if model else '灯塔助手运行环境', '版本': spec['version'], '平台': 'ONNX CPU' if model else 'Windows x64',
                 '安装包': [{'file_token': entry['file_token']}], '分片序号': part['index'], '分片总数': len(spec['parts']),
                 '分片SHA256': part['sha256'], '整包SHA256': spec['sha256'], '文件大小': part['size'], '启用': True,
-                '更新说明': ('仅限指定正式部署机使用。附件包含隧道认证信息，请限制表格及附件读取权限，不得分享或转发。' if profile else '仅含 FRPC 及许可证，不含服务器配置、认证令牌或业务数据。' if frpc else '仅含 BGE 中文嵌入模型及分词器，不含公司文档、账号或凭证。' if model
+                '更新说明': ('完整程序补丁；按分片顺序合并，核对整包大小和SHA256后才可安装。更新保留用户数据与配置。' if portal_patch else '仅限指定正式部署机使用。附件包含隧道认证信息，请限制表格及附件读取权限，不得分享或转发。' if profile else '仅含 FRPC 及许可证，不含服务器配置、认证令牌或业务数据。' if frpc else '仅含 BGE 中文嵌入模型及分词器，不含公司文档、账号或凭证。' if model
                              else '仅含固定 Node/OpenClaw 依赖，不含账号、凭证、会话或业务数据。')}
             if not entry.get('record_id'):
                 result = self.request('POST', '/records', params={'client_token': entry['client_token']}, json_payload={'fields': fields})

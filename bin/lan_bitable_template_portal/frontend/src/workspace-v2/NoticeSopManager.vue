@@ -19,7 +19,7 @@
           <NButton v-if="editing" text :disabled="busy||step.repeat_rules.length>=10" @click="step.repeat_rules.push({rule_id:createRepairOperationId('rule'),from_step_id:step.step_id,to_step_id:step.step_id,count:1})">添加循环（总遍数含首次）</NButton>
         </section>
         <NButton v-if="editing" :disabled="busy||draft.steps.length>=200" @click="draft.steps.push(newStep())"><Plus :size="16" />添加步骤</NButton>
-        <section class="v2-notice-field-section"><h2>SOP 附件</h2><NAlert v-if="!draft.attachments?.length" type="warning" :bordered="false">需先保存步骤，再上传附件，才能用于生成工单。</NAlert><div v-for="file in draft.attachments||[]" :key="file.attachment_id" class="v2-sop-file"><NButton text @click="downloadFile(attachmentPath(file)).catch(e=>error=e.message)">{{ file.file_name || file.name }}</NButton><NButton v-if="editing" :disabled="busy||dirty" quaternary circle aria-label="删除SOP附件" @click="deleteFile(file)"><Trash2 :size="16" /></NButton></div><label v-if="editing" class="v2-notice-upload"><Upload :size="18" /><span>{{ busy?'正在处理…':'添加附件（单个20MB以内）' }}</span><input type="file" multiple :disabled="busy||dirty||!draft.sop_id" aria-label="添加SOP附件" @change="upload" /></label></section>
+        <section class="v2-notice-field-section"><h2>SOP 附件</h2><NAlert v-if="!draft.attachments?.length" type="warning" :bordered="false">需先保存步骤，再上传附件，才能用于生成工单。</NAlert><div v-for="file in draft.attachments||[]" :key="file.attachment_id" class="v2-sop-file"><NButton text @click="downloadFile(attachmentPath(file)).catch(e=>error=e.message)">{{ file.file_name || file.name }}</NButton><NButton v-if="editing" :disabled="busy||dirty" quaternary circle aria-label="删除SOP附件" @click="deleteFile(file)"><Trash2 :size="16" /></NButton></div><label v-if="editing" class="v2-notice-upload"><Upload :size="18" /><span>{{ busy?(uploadStatus||'正在处理…'):'添加附件（单个及累计200MB以内）' }}</span><input type="file" multiple :disabled="busy||dirty||!draft.sop_id" aria-label="添加SOP附件" @change="upload" /></label></section>
       </NForm><NEmpty v-else description="选择或新建SOP" />
     </div>
     <template #header-extra><div class="v2-sop-actions"><NButton v-if="editing&&draft?.sop_id&&canDelete" type="error" quaternary circle :disabled="busy" title="删除SOP" aria-label="删除SOP" @click="remove"><Trash2 :size="17" /></NButton><NButton v-if="draft" :disabled="busy" data-v2-navigation @click="close"><template #icon><ArrowLeft :size="16" /></template>返回SOP列表</NButton><NButton v-if="draft&&!editing" type="primary" :disabled="busy||loading" @click="editing=true"><PencilLine :size="16" />修改</NButton><template v-if="editing"><NButton :disabled="busy" @click="cancelEdit">取消修改</NButton><NButton type="primary" :loading="busy" :disabled="!draft||!dirty||uncertain" @click="confirmSave"><template #icon><Save :size="16" /></template>保存SOP</NButton></template></div></template>
@@ -29,7 +29,7 @@
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
 import {NAlert,NButton,NCard,NCheckbox,NEmpty,NForm,NFormItem,NInput,NInputNumber,NSelect,NSpin,useDialog,useMessage} from 'naive-ui';
 import {ArrowLeft,PencilLine,Plus,Save,Trash2,Upload,X} from 'lucide-vue-next';
-import {ApiError,requestJson,downloadFile,type Dict} from './client';
+import {ApiError,requestJson,uploadJson,downloadFile,type Dict} from './client';
 import {registerNavigationGuard} from './navigation';
 import {createRepairOperationId} from '../repairManagementUtils';
 import {trackButtonRequest} from './actionMotion';
@@ -42,6 +42,7 @@ const scopeName=(value:string)=>props.scopes.find(s=>s.value===value)?.label||va
 const typeName=(value:string)=>props.types.find(t=>t.value===value)?.label||value;
 const items=ref<Dict[]>([]),draft=ref<Dict|null>(null),baseline=ref(''),originalType=ref(''),loading=ref(false),busy=ref(false),error=ref(''),search=ref(''),uncertain=ref(false);
 const editing=ref(false);
+const uploadStatus=ref('');
 const dirty=computed(()=>!!draft.value&&JSON.stringify(draft.value)!==baseline.value),visible=computed(()=>items.value.filter(s=>String(s.name).includes(search.value)));
 let read:AbortController|undefined;
 const cache=new Map<string,Dict[]>();
@@ -70,7 +71,24 @@ function confirmSave(){if(busy.value||uncertain.value)return;if(draft.value?.sop
 function save(){if(!editing.value)return;return trackButtonRequest(saveNow());}
 async function saveNow(){if(!editing.value||!draft.value||busy.value)return {ok:false};error.value='';if(!props.scopes.some(s=>s.value===draft.value!.scope)){error.value='请选择有权限的具体楼栋。';return {ok:false};}if(!draft.value.name?.trim()||!draft.value.steps.length||draft.value.steps.some((s:Dict)=>!s.content?.trim())){error.value='请填写SOP名称和每一步操作内容。';return {ok:false};}busy.value=true;try{const d=draft.value;const saved=await requestJson('/api/polling-sops'+(d.sop_id?'/'+encodeURIComponent(d.sop_id):''),{method:d.sop_id?'PUT':'POST',body:JSON.stringify({sop_id:d.sop_id,scope:d.scope,work_type:d.work_type,name:d.name,expected_version:d.version,steps:d.steps})});select(saved);cache.clear();emit('changed');message.success('SOP已保存');busy.value=false;void load();return saved;}catch(e){error.value=(e as Error).message;if(!(e instanceof ApiError)||!e.status||e.status>=500){uncertain.value=true;error.value+=' 保存结果尚未确认，请重新读取列表核验原SOP，不要重复新建。';}return {ok:false};}finally{busy.value=false;}}
 const attachmentPath=(file:Dict)=>'/api/polling-sops/'+encodeURIComponent(draft.value!.sop_id)+'/attachments/'+encodeURIComponent(file.attachment_id);
-async function upload(event:Event){const input=event.target as HTMLInputElement,files=[...input.files||[]];input.value='';if(!editing.value||busy.value||dirty.value||!draft.value?.sop_id)return;busy.value=true;error.value='';try{for(const file of files){if(file.size>20*1024*1024)throw new Error('附件需在20MB以内。');const body=new FormData();body.append('file',file);body.append('expected_version',String(draft.value!.version));select(await requestJson('/api/polling-sops/'+encodeURIComponent(draft.value!.sop_id)+'/attachments',{method:'POST',body}),true);emit('changed');}}catch(e){error.value=(e as Error).message;}finally{busy.value=false;}}
+async function upload(event:Event){
+  const input=event.target as HTMLInputElement,files=[...input.files||[]];input.value='';
+  if(!files.length||!editing.value||busy.value||dirty.value||!draft.value?.sop_id)return;
+  const existing=draft.value.attachments||[],maxBytes=200*1024*1024;
+  if(files.some(file=>!file.size||file.size>maxBytes)){error.value='请选择非空且不超过200MB的附件。';return;}
+  if(existing.length+files.length>10){error.value='每个SOP最多上传10个附件。';return;}
+  if([...existing,...files].reduce((sum,file)=>sum+Number(file.size||0),0)>maxBytes){error.value='SOP附件总大小不能超过200MB。';return;}
+  busy.value=true;error.value='';
+  try{
+    for(const file of files){
+      uploadStatus.value='正在上传 '+file.name+'…';
+      const body=new FormData();body.append('file',file);body.append('expected_version',String(draft.value!.version));
+      select(await uploadJson('/api/polling-sops/'+encodeURIComponent(draft.value!.sop_id)+'/attachments',body,{
+        onProgress:({loaded,total})=>{uploadStatus.value=loaded>=total?'正在保存附件…':'正在上传 '+Math.round(loaded/total*100)+'%';}
+      }),true);emit('changed');
+    }
+  }catch(e){error.value=(e as Error).message;}finally{uploadStatus.value='';busy.value=false;}
+}
 function deleteFile(file:Dict){if(!editing.value||busy.value)return;dialog.warning({title:'删除此附件？',content:file.file_name||file.name,positiveText:'确认删除',negativeText:'取消',onPositiveClick:async()=>{busy.value=true;try{select(await requestJson(attachmentPath(file)+'?expected_version='+draft.value!.version,{method:'DELETE'}),true);emit('changed');}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;}}});}
 function remove(){if(!editing.value||busy.value||!props.canDelete)return;const d=draft.value!;dialog.error({title:'删除SOP',content:d.name,positiveText:'确认删除',negativeText:'取消',onPositiveClick:async()=>{busy.value=true;try{await requestJson('/api/polling-sops/'+encodeURIComponent(d.sop_id)+'?expected_version='+d.version,{method:'DELETE'});draft.value=null;editing.value=false;cache.clear();emit('changed');busy.value=false;void load();}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;}}});}
 const stop=registerNavigationGuard((_url,proceed)=>{if(busy.value){message.warning('正在保存SOP，请等待结果');return false;}if(dirty.value){leave(proceed);return false;}return true;});

@@ -4,7 +4,7 @@ import {createRequire} from 'node:module';
 import {build} from 'esbuild';
 import {parse,compileTemplate} from '@vue/compiler-sfc';
 import ts from 'typescript';
-import {adaptPageLayouts} from './workspace-page-layout-adapter.mjs';
+import {adaptPageLayouts,pageLayoutPlans} from './workspace-page-layout-adapter.mjs';
 import {adaptEmbeddedNavigation} from './workspace-embedded-adapter.mjs';
 
 const result=await build({stdin:{contents:"export * from './src/workspace-v2/pageLayout';export * from './src/workspace-v2/dashboard/layout';",resolveDir:process.cwd(),loader:'ts'},bundle:true,platform:'node',format:'cjs',write:false});
@@ -32,17 +32,18 @@ assert.equal(restored.items.length,2,'missing business forms are restored');asse
 assert.equal(sanitizePageLayout({version:1,items:[widget('water',user)]},blocks,user,['A'],'event').items.length,2,'only compatible optional widgets are restored');
 
 function handlers(source){const values=[];function visit(node){for(const prop of node.props||[])if(prop.type===7&&['on','model'].includes(prop.name))values.push([prop.name,prop.arg?.content,prop.exp?.content].join('|'));for(const child of node.children||[])visit(child);}visit(parse(source).descriptor.template.ast);return values.sort();}
-let adapted=0;
+const adapted=[];
 for(const dir of ['src/components','src/workspace-v2'])for(const file of (await readdir(dir)).filter(name=>name.endsWith('.vue'))){
   const filename=process.cwd().replaceAll('\\','/')+'/'+dir+'/'+file,source=await readFile(filename,'utf8'),layout=adaptPageLayouts(source,filename),embedded=adaptEmbeddedNavigation(layout,filename);
-  if(source!==layout){assert.deepEqual(handlers(layout),handlers(source),file+' keeps original handlers and value bindings');adapted++;}
+  if(['WaterWorkspace.vue','WaterOverview.vue'].includes(file))assert.equal(layout,source,'water pages use their fixed task layout, not a custom canvas');
+  if(source!==layout){assert.deepEqual(handlers(layout),handlers(source),file+' keeps original handlers and value bindings');adapted.push(file);}
   const {descriptor,errors}=parse(embedded);assert.deepEqual(errors,[],file);
   assert.deepEqual(compileTemplate({id:file,filename,source:descriptor.template.content}).errors,[],file+' template compiles');
   const script=descriptor.scriptSetup?.content;if(script)assert.deepEqual(ts.createSourceFile(filename+'.ts',script,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS).parseDiagnostics,[],file+' script parses');
   assert.equal(adaptPageLayouts(layout,filename),layout,file+' layout adaptation is idempotent');
   assert.equal(adaptEmbeddedNavigation(embedded,filename),embedded,file+' route adaptation is idempotent');
 }
-assert(adapted>=18);
+assert.deepEqual(adapted.sort(),Object.keys(pageLayoutPlans).sort(),'every configured business page retains its layout and bindings');
 const scoped=adaptEmbeddedNavigation('<template><div /></template><script setup lang="ts">import {navigate,navigateBack} from "./navigation";const query=window.location.search;function show(){window.history.replaceState({},"","/water-management");navigate("/water-management");navigateBack();}</script>','/src/workspace-v2/WaterWorkspace.vue');
 assert.match(scoped,/useEmbeddedBrowser\(\)/);assert.match(scoped,/useEmbeddedBack/);assert(!scoped.includes('window.location.search'));
-console.log(`PASS: complete module permissions, uniqueness, sizes, account/page isolation, compatible widgets, restored forms; ${adapted} layout templates retain original bindings.`);
+console.log(`PASS: complete module permissions, uniqueness, sizes, account/page isolation, compatible widgets, restored forms; ${adapted.length} layout templates retain original bindings.`);

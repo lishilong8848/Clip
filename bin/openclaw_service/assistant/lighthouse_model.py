@@ -1159,7 +1159,8 @@ class LighthouseModel:
                         public_search_results[key] = value
                     for row in value.get('results', []):
                         if (row['url'], row['title'], row['snippet']) in fresh_results:
-                            add_source(row['title'], {'snippet': row['snippet'], 'queried_at': value['queried_at'], 'external_untrusted': True}, row['url'])
+                            add_source(row['title'], {'snippet': row['snippet'], 'queried_at': value['queried_at'],
+                                **({'published_at': row['published_at']} if row.get('published_at') else {}), 'external_untrusted': True}, row['url'])
                     if not value.get('ok'):
                         query_failures.append(value.get('note') or '公开搜索暂不可用。')
                     elif value.get('empty'):

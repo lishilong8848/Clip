@@ -32,15 +32,20 @@ await context.route('**/*',async route=>{
   if(url.pathname==='/api/jobs/isolated-job')return ok({job_id:'isolated-job',phase:'success'});
   if(url.pathname==='/api/capacity/water/bootstrap')return ok({scope:url.searchParams.get('scope')||'A',options:{meters:[],frequencies:['日'],shifts:['白','夜']},permissions:{can_create:true},summary:{},snapshot:{exists:true}});
   if(url.pathname==='/api/capacity/water/records')return ok({records:Array.from({length:50},(_,i)=>({record_id:'water-'+i,meter:'测试水表',frequency:'日',shift:'白',statistic_date:'2026-10-15',meter_value:100+i,computed_usage:1,photo_count:1})),total:50,snapshot:{exists:true}});
-  if(url.pathname==='/api/events/monthly')return ok({records:[],snapshot_exists:true});
-  if(url.pathname==='/api/link-directory')return ok({can_edit:true,items:Array.from({length:20},(_,i)=>({id:'link-'+i,name:'业务链接'+(i+1),category:'业务',purpose:'测试说明',url:'https://example.com/item/'+i,sort_order:i+1}))});
+  if(url.pathname==='/api/events/monthly')return ok({records:Array.from({length:18},(_,i)=>({record_id:'event-'+i,title:'待处理事件'+(i+1),status:'处理中',building:'A楼'})),snapshot_exists:true});
+  if(url.pathname==='/api/link-directory')return ok({can_edit:true,items:Array.from({length:30},(_,i)=>({id:'link-'+i,name:'业务链接'+(i+1),category:'业务',purpose:'测试说明',url:'https://example.com/item/'+i,sort_order:i+1}))});
   return ok({items:[],records:[],total:0,groups:[],scopes:[],settings:{},permissions:{},stats:{},people:[],fields:[],summary:{},snapshot:{exists:true}});
 });
 const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
 const widget=kind=>page.locator(`[data-widget-kind="module"]:has(>.v2-widget[aria-label="${kind==='notices'?'通告办理':'水耗管理'}"])`);
 async function resizeModule(width,height,title='通告办理'){await page.getByRole('button',{name:'自定义工作台',exact:true}).click();await page.getByRole('button',{name:'编辑'+title,exact:true}).click();const editor=page.locator('.v2-widget-editor');await editor.locator('.n-form-item').filter({hasText:'组件宽度'}).locator('.n-select').click();await page.locator('.n-base-select-option').getByText(width,{exact:true}).click();await editor.locator('.n-form-item').filter({hasText:'组件高度'}).locator('.n-select').click();await page.locator('.n-base-select-option').getByText(height,{exact:true}).click();await editor.getByRole('button',{name:'应用设置',exact:true}).click();await page.getByRole('button',{name:'保存布局',exact:true}).click();}
 try{
-  await page.goto(entry);await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
+  await page.goto(entry);
+  const tasks=page.locator('.v2-widget[aria-label="待处理事项"]');
+  await tasks.getByText('待处理事件18',{exact:true}).waitFor();
+  assert.equal(await tasks.locator('.n-list-item:visible').count(),18,'task widgets retain all loaded records, not only the first few');
+  await tasks.getByText('待处理事件18',{exact:true}).scrollIntoViewIfNeeded();
+  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
   for(const name of ['通告办理','水耗管理']){await page.getByRole('button',{name:'添加组件',exact:true}).click();await page.locator('.v2-library-item').filter({hasText:name+' · 完整模块'}).click();await page.locator('.v2-widget-editor').getByRole('button',{name:'应用设置',exact:true}).click();}
   await page.getByRole('button',{name:'保存布局',exact:true}).click();await widget('notices').scrollIntoViewIfNeeded();
   await widget('notices').locator('.v2-notice-entry').first().waitFor();
@@ -50,11 +55,11 @@ try{
   const originalURL=page.url(),before=reads.filter(url=>url.startsWith('/api/workbench?')).length;
   await resizeModule('紧凑 · 1/3','紧凑');await widget('notices').scrollIntoViewIfNeeded();
   await page.waitForFunction(()=>document.querySelector('[data-module-widget="notices"]').closest('.v2-responsive-body').dataset.capacity==='compact');
-  const small=await widget('notices').locator('.v2-notice-entry:visible').count();assert(small>=3&&small<40);
+  const small=await widget('notices').locator('.v2-notice-entry:visible').count();assert.equal(small,40,'compact module keeps both native pages of records');
+  await widget('notices').locator('.v2-notice-entry').last().scrollIntoViewIfNeeded();
   await page.screenshot({path:path.join(output,'compact.png')});
   await resizeModule('整行','完整工作区');await widget('notices').scrollIntoViewIfNeeded();
-  await page.waitForFunction(small=>document.querySelectorAll('[data-module-widget="notices"] .v2-notice-entry:not([data-v2-capacity-hidden])').length>=small,small);
-  await page.waitForTimeout(400);const large=await widget('notices').locator('.v2-notice-entry:visible').count();assert(large>small,'larger module displays more records');
+  await page.waitForTimeout(400);const large=await widget('notices').locator('.v2-notice-entry:visible').count();assert.equal(large,small,'resizing never removes business records');
   assert.equal(reads.filter(url=>url.startsWith('/api/workbench?')).length,before,'resizing does not reload the business controller');
   const kindSelect=widget('notices').locator('.v2-notice-kind-tabs');
   if(await kindSelect.count())await kindSelect.getByRole('tab',{name:/维保/}).click();
@@ -80,17 +85,26 @@ try{
   await widget('water').scrollIntoViewIfNeeded();await widget('water').getByRole('button',{name:'新增录入',exact:true}).click();await widget('water').getByRole('textbox',{name:'本次水表读数',exact:true}).fill('123.4');
   await page.getByRole('button',{name:'自定义工作台',exact:true}).click();await page.getByRole('button',{name:'移除水耗管理',exact:true}).click();await page.getByText('放弃未保存的水耗填写？',{exact:true}).waitFor();await page.getByRole('button',{name:'继续填写',exact:true}).click();assert.equal(await widget('water').count(),1,'removing a dirty module requires the original form guard');await page.locator('.v2-dashboard-actions').getByRole('button',{name:'取消',exact:true}).click();assert.equal(await widget('water').getByRole('textbox',{name:'本次水表读数',exact:true}).inputValue(),'123.4','layout cancel preserves the mounted business draft');
   await widget('water').getByRole('button',{name:'关闭水耗编辑',exact:true}).click();await page.getByRole('button',{name:'放弃并离开',exact:true}).click();
-  await resizeModule('紧凑 · 1/3','紧凑','水耗管理');await widget('water').scrollIntoViewIfNeeded();await page.waitForTimeout(250);const waterSmall={rows:await widget('water').locator('tbody tr:visible').count(),cols:await widget('water').locator('thead th:visible').count()};assert.equal(waterSmall.cols,4);await resizeModule('整行','完整工作区','水耗管理');await widget('water').scrollIntoViewIfNeeded();await page.waitForTimeout(250);assert(await widget('water').locator('tbody tr:visible').count()>waterSmall.rows);assert(await widget('water').locator('thead th:visible').count()>waterSmall.cols,'native business tables expose additional fields as they grow');
+  await resizeModule('紧凑 · 1/3','紧凑','水耗管理');await widget('water').scrollIntoViewIfNeeded();await page.waitForTimeout(250);
+  const waterSmall={rows:await widget('water').locator('tbody tr:visible').count(),cols:await widget('water').locator('thead th:visible').count()};
+  assert.equal(waterSmall.rows,50,'compact water module preserves the native 50-record page');assert(waterSmall.cols>4,'compact tables keep all business columns');
+  await widget('water').locator('tbody tr').last().scrollIntoViewIfNeeded();
+  await resizeModule('整行','完整工作区','水耗管理');await widget('water').scrollIntoViewIfNeeded();await page.waitForTimeout(250);
+  assert.equal(await widget('water').locator('tbody tr:visible').count(),waterSmall.rows);assert.equal(await widget('water').locator('thead th:visible').count(),waterSmall.cols);
+  assert.equal(await page.locator('[data-v2-capacity-hidden],[data-v2-capacity-column],.v2-visible-count').count(),0);
   for(const width of [1920,1366,390]){await page.setViewportSize({width,height:1000});await widget('notices').scrollIntoViewIfNeeded();await page.waitForTimeout(200);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'no page overflow at '+width);await page.screenshot({path:path.join(output,'modules-'+width+'.png')});}
   await page.setViewportSize({width:1024,height:900});await page.goto(entry+'?__page=/link-directory');await page.locator('.link-table tbody tr').first().waitFor();
   async function sizeTable(width,height){await page.getByRole('button',{name:'自定义多维表导航布局',exact:true}).click();await page.getByRole('button',{name:'设置链接目录',exact:true}).click();const settings=page.locator('.v2-page-layout-library');await settings.locator('.n-form-item').filter({hasText:'宽度'}).locator('.n-select').click();await page.locator('.n-base-select-option').getByText(width,{exact:true}).click();await settings.locator('.n-form-item').filter({hasText:'高度'}).locator('.n-select').click();await page.locator('.n-base-select-option').getByText(height,{exact:true}).click();await settings.getByRole('button',{name:'完成设置',exact:true}).click();await page.getByRole('button',{name:'保存布局',exact:true}).click();}
   await sizeTable('6 / 12 列','256 像素');await page.waitForTimeout(300);const tableSmall={rows:await page.locator('.link-table tbody tr:visible').count(),cols:await page.locator('.link-table th:visible').count()};
-  assert.equal(tableSmall.rows,3);assert.equal(tableSmall.cols,4);assert.equal(await page.locator('.link-table tbody tr:visible').first().getByRole('button',{name:'编辑链接',exact:true}).count(),1,'compact tables retain row actions');
-  const nextRow=await page.locator('.link-table tbody tr').nth(3).getAttribute('data-link-id');await page.getByRole('button',{name:'下一组',exact:true}).click();assert.equal(await page.locator('.link-table tbody tr:visible').first().getAttribute('data-link-id'),nextRow);await page.getByRole('button',{name:'回到首组',exact:true}).click();
-  await sizeTable('整行','896 像素');await page.waitForTimeout(300);assert(await page.locator('.link-table tbody tr:visible').count()>tableSmall.rows);assert(await page.locator('.link-table th:visible').count()>tableSmall.cols);
+  assert.equal(tableSmall.rows,25);assert.equal(tableSmall.cols,await page.locator('.link-table th').count());assert.equal(await page.locator('.link-table tbody tr:visible').last().getByRole('button',{name:'编辑链接',exact:true}).count(),1,'compact tables retain row actions');
+  await page.locator('.link-table tbody tr').last().getByRole('button',{name:'编辑链接',exact:true}).scrollIntoViewIfNeeded();
+  assert.equal(await page.getByRole('button',{name:'下一组',exact:true}).count(),0,'only business pagination remains');
+  await page.getByRole('navigation',{name:'链接列表分页'}).getByRole('button',{name:'下一页',exact:true}).click();assert.equal(await page.locator('.link-table tbody tr:visible').count(),5);
+  await page.getByRole('navigation',{name:'链接列表分页'}).getByRole('button',{name:'上一页',exact:true}).click();
+  await sizeTable('整行','896 像素');await page.waitForTimeout(300);assert.equal(await page.locator('.link-table tbody tr:visible').count(),tableSmall.rows);assert.equal(await page.locator('.link-table th:visible').count(),tableSmall.cols);
   await page.reload();await page.locator('.link-table tbody tr').first().waitFor();assert.equal(await page.locator('[data-page-layout="links"] [data-widget-id="block_links"]').getAttribute('gs-h'),'14','page layout is restored');await page.screenshot({path:path.join(output,'responsive-table.png')});
   await page.goto(entry);
   user.modules=['event'];await page.reload();await page.getByRole('button',{name:'自定义工作台',exact:true}).waitFor();assert.equal(await widget('notices').count()+await widget('water').count(),0,'revoked modules are removed');
-  assert.deepEqual(errors,[]);console.log(`PASS: add full modules, native forms, responsive records (${small} -> ${large}), no resize refetch, original start/update/end API, local filters/routes, duplicate prevention, reload, permissions, desktop/mobile.`);
+  assert.deepEqual(errors,[]);console.log('PASS: full modules retain all rows and columns on resize, native pagination/scroll, no resize refetch, original start/update/end API, draft protection, local filters/routes, reload, permissions, desktop/mobile.');
 }catch(error){await page.screenshot({path:path.join(output,'failure.png')});console.error(errors,await page.locator('.v2-notice-editor').allInnerTexts());throw error;}
 finally{await browser.close();await server.close();}

@@ -45,14 +45,14 @@ function consume(flight:Flight,signal?:AbortSignal|null):Promise<Dict>{
   });
 }
 export function requestJson(path: string, options: ApiRequestOptions = {}, hooks: ApiClientHooks = {}): Promise<Dict> {
-  if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase()) || path.startsWith('/api/assistant/') || path.startsWith('/api/auth/')) return trackButtonRequest(checkedRequest(path, options, hooks));
+  if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase()) || path.startsWith('/api/assistant/') || path.startsWith('/api/auth/')) return trackButtonRequest(checkedRequest(path, options, hooks),options.method||'GET');
   if(options.signal?.aborted)return Promise.reject(new DOMException('请求已取消。','AbortError'));
   const url=new URL(path,location.origin);url.searchParams.sort();
   if(quickReads.has(url.pathname)&&(options.fresh||options.cache==='reload'))invalidateReadCache();
   const stamp=readCacheGeneration(),key='workspace-read:'+stamp+':'+url.pathname+url.search;
-  if(url.origin!==location.origin||!quickReads.has(url.pathname)||options.method&&options.method.toUpperCase()!=='GET'||options.fresh||['refresh','force','prefetch'].some(key=>url.searchParams.has(key))||['reload','no-store'].includes(options.cache||'')||options.credentials==='omit'||options.headers||Object.keys(hooks).length)return trackButtonRequest(queued(path,options,hooks));
+  if(url.origin!==location.origin||!quickReads.has(url.pathname)||options.method&&options.method.toUpperCase()!=='GET'||options.fresh||['refresh','force','prefetch'].some(key=>url.searchParams.has(key))||['reload','no-store'].includes(options.cache||'')||options.credentials==='omit'||options.headers||Object.keys(hooks).length)return trackButtonRequest(queued(path,options,hooks),options.method||'GET');
   const hit=cachedRead(key);
-  if(hit&&Date.now()-hit.at<30000)return trackButtonRequest(Promise.resolve(hit.data.value));
+  if(hit&&Date.now()-hit.at<30000)return trackButtonRequest(Promise.resolve(hit.data.value),'GET');
   let flight=flights.get(key);
   if(!flight||flight.controller.signal.aborted){
     const controller=new AbortController();
@@ -62,5 +62,5 @@ export function requestJson(path: string, options: ApiRequestOptions = {}, hooks
     }).finally(()=>{if(flights.get(key)?.controller===controller)flights.delete(key);})};
     flights.set(key,flight);
   }
-  return trackButtonRequest(consume(flight,options.signal));
+  return trackButtonRequest(consume(flight,options.signal),'GET');
 }

@@ -29,6 +29,11 @@ export class WeatherLighthouse {
       node.style.setProperty('--wl-cloud-scale', this.random(.65, 1.1).toFixed(2));
       node.style.setProperty('--wl-cloud-opacity', (this.mini ? this.random(.72, .95) : this.random(.45, .8)).toFixed(2));
       if (this.mini) node.style.animationDirection = Math.random() < .5 ? 'normal' : 'reverse';
+    } else if (node.classList.contains('wl-heat-wisp')) {
+      node.style.setProperty('--wl-heat-x', this.random(220, 535).toFixed(1) + 'px');
+      node.style.setProperty('--wl-heat-y', this.random(270, 335).toFixed(1) + 'px');
+      node.style.setProperty('--wl-heat-width', this.random(.65, 1.4).toFixed(2));
+      node.style.setProperty('--wl-heat-height', this.random(.7, 1.2).toFixed(2));
     } else if (node.closest('.wl-waves')) {
       if (this.mini) return;
       node.style.setProperty('--wl-swell', this.random(.8, 4).toFixed(2) + 'px');
@@ -42,7 +47,7 @@ export class WeatherLighthouse {
   constructor(parent: SVGGElement, uid: string, readonly mini = false) {
     const svg = new DOMParser().parseFromString(artwork, 'image/svg+xml').documentElement;
     for (const node of svg.querySelectorAll('[id]')) node.id = uid + '-' + node.id;
-    for (const node of svg.querySelectorAll('[fill],[clip-path]')) for (const name of ['fill', 'clip-path']) {
+    for (const node of svg.querySelectorAll('[fill],[clip-path],[mask]')) for (const name of ['fill', 'clip-path', 'mask']) {
       if (node.hasAttribute(name)) node.setAttribute(name, node.getAttribute(name)!.replace(/url\(#([^)]*)\)/g, `url(#${uid}-$1)`));
     }
     this.root = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -113,6 +118,15 @@ export class WeatherLighthouse {
     this.root.insertBefore(wind, clouds);
     const lightning = this.root.querySelector<SVGElement>('.wl-storm path')!;
     lightning.style.animationDuration = this.random(8, 14) + 's'; lightning.style.animationDelay = '-3s';
+    const heat = this.root.querySelector('.wl-heat')!;
+    for (let i = 0; i < 4; i++) {
+      const wisp = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      wisp.setAttribute('d', 'M0 0C-14-10 14-21 0-32S-7-49 0-60');
+      wisp.classList.add('wl-heat-wisp'); this.vary(wisp);
+      const duration = this.random(4, 7);
+      wisp.style.animationDuration = duration + 's'; wisp.style.animationDelay = -(i / 4) * duration + 's';
+      heat.append(wisp);
+    }
     this.root.querySelectorAll<SVGElement>('.wl-waves path').forEach((wave, index) => {
       if (mini) {
         const animation = wave.animate(waterFrames(index, Math.random()), {

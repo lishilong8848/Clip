@@ -5,7 +5,7 @@
       <NButton v-if="collapsed" data-v2-navigation quaternary circle class="v2-nav-search-toggle" aria-label="搜索功能" title="搜索功能" @click="expandSearch"><Search :size="18" /></NButton>
       <NInput v-else ref="input" v-model:value="query" class="v2-nav-search" :theme-overrides="inputTheme" clearable size="small" placeholder="搜索功能" :input-props="{'aria-label':'搜索功能'}" @keydown.esc="query=''" @keydown.enter="chooseOnly"><template #prefix><Search :size="15" /></template></NInput>
     </div>
-    <NMenu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="filtered" :value="selected" :indent="18" @update:value="choose" />
+    <NMenu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="filtered" :value="selected" :indent="18" :node-props="menuNodeProps" @update:value="choose" />
     <div v-if="query&&!filtered.length" class="v2-nav-empty" role="status"><SearchX :size="22" /><span>未找到相关功能</span><NButton text @click="query=''">清除搜索</NButton></div>
 
   </aside>
@@ -32,6 +32,7 @@ const filtered=computed<MenuOption[]>(()=>{
 });
 async function expandSearch(){emit('update:collapsed',false);await nextTick();input.value?.focus();}
 function choose(value:string){emit('select',value);}
+function menuNodeProps(option:MenuOption){return {'aria-label':typeof option.label==='string'?option.label:undefined};}
 function chooseOnly(){const choices=filtered.value.flatMap(item=>item.type==='group'?item.children||[]:[item]);if(choices.length===1&&choices[0]?.key)choose(String(choices[0].key));}
 watch(()=>props.selected,async()=>{
   query.value='';await nextTick();
@@ -46,6 +47,9 @@ watch(()=>props.selected,async()=>{
 .v2-nav-head{position:sticky;top:0;z-index:3;background:#26332e;padding:10px 12px 14px;border-bottom:1px solid #ffffff0c;flex:none}.v2-nav-heading{display:flex;align-items:center;justify-content:space-between;min-height:32px;margin-bottom:8px}.v2-nav-heading>span{display:flex;align-items:center;gap:9px;font-size:12px;color:#b8c9bd}.v2-nav-heading small{font-size:11px;color:#b8c9bd;background:#ffffff0b;border-radius:4px;padding:1px 5px;font-variant-numeric:tabular-nums}.v2-nav-heading .n-button,.v2-nav-search-toggle{width:32px;height:32px;flex:none}.v2-nav-search .n-input__prefix{color:#adbdaf}.v2-nav-search .n-base-clear{color:#d1ded5}.v2-nav-empty{display:grid;gap:10px;justify-items:center;color:#b8c9bd;font-size:12px;padding:30px 10px}
 .workspace-v2 .v2-sidebar-improved .n-menu{margin-top:8px;margin-bottom:12px}.workspace-v2 .v2-sidebar-improved .n-menu-item{height:38px;margin-top:3px}.workspace-v2 .v2-sidebar-improved .n-menu-item-content{border-radius:6px;font-size:13px}.workspace-v2 .v2-sidebar-improved .n-menu-item-content__icon{margin-right:11px!important}.workspace-v2 .v2-sidebar-improved .n-menu-item-group-title{font-size:11px;height:31px;line-height:31px;padding-left:20px!important;margin-top:9px;color:#afc1b4!important}.workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected::after{left:0;top:8px;bottom:8px;width:3px;background:#a6e1bd}.workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected::before{background:#385c4a!important}.workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected .n-menu-item-content-header{font-weight:600}
 .workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .v2-nav-head{padding:10px 16px}
+.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] :is(.n-menu-item-group-title,.n-menu-item-content-header,.n-menu-item-content__arrow){display:none}
+.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .n-menu-item-content{display:flex;padding-inline:0!important;justify-content:center}
+.workspace-v2 .v2-sidebar-improved[data-collapsed="true"] .n-menu-item-content__icon{margin:0!important}
 @media(min-width:761px) and (max-width:1150px){.workspace-v2 .v2-sidebar-improved[data-collapsed="false"] .n-menu-item-content-header{display:inline}.workspace-v2 .v2-sidebar-improved[data-collapsed="false"] .n-menu-item-group-title{display:block}.workspace-v2 .v2-sidebar-improved[data-collapsed="false"] .n-menu-item-content{padding-left:18px!important}}
 @media(prefers-reduced-motion:reduce){.workspace-v2 .v2-sidebar-improved,.workspace-v2 .v2-main{transition:none}}
 

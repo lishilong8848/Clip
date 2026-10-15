@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import {chromium} from 'playwright';
 import {preview} from 'vite';
 import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('..',import.meta.url));
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 const browser=await chromium.launch({headless:true}),errors=[],writes=[];
 const initial=()=>({group_id:'group_fixture',title:'隔离测试工单',role:'operator',role_label:'操作人',assigned_person:{name:'测试操作人'},work_type:'maintenance',state:'active',version:1,current_run_index:0,can_release_selection:false,can_rollback_previous:false,work_orders:[{run_index:1,label:'设备维护',completed_steps:0,step_count:1,selectable:true,state:'available'}],steps:[]});

@@ -13,12 +13,14 @@ import os
 import re
 import secrets
 import shutil
+import tempfile
 import threading
 import time
 import uuid
 import zipfile
+import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import quote, urlsplit
 
 from upload_event_module.utils import get_data_file_path
@@ -42,9 +44,9 @@ POLLING_UNITS = tuple(f"{index}#" for index in range(1, 7))
 POLLING_UNIT_GROUPS = (POLLING_UNITS[:3], POLLING_UNITS[3:])
 POLLING_SOP_SCOPES = frozenset({"110", "A", "B", "C", "D", "E", "H"})
 POLLING_H_DUTY_RECORD_ID = "h_duty_account"
-POLLING_SOP_MAX_FILE_BYTES = 20 * 1024 * 1024
+POLLING_SOP_MAX_FILE_BYTES = 200 * 1024 * 1024
 POLLING_SOP_MAX_FILES = 10
-POLLING_SOP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
+POLLING_SOP_MAX_TOTAL_BYTES = 200 * 1024 * 1024
 POLLING_SOP_MAX_STEPS = 30
 POLLING_WORK_ORDER_MAX_EXPANDED_STEPS = 100
 POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
@@ -349,6 +351,11 @@ class PollingSopCloudStore:
         return result
 
     def upload_attachment(self, path: Path, file_name: str) -> str:
+        size = path.stat().st_size
+        if not 0 < size <= POLLING_SOP_MAX_FILE_BYTES:
+            raise PortalError("SOP 单个附件须非空且不能超过 200MB。")
+        if size > 20 * 1024 * 1024:
+            return self._upload_attachment_parts(path, file_name, size)
         payload = self.client.request_file_json(
             "POST",
             "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
@@ -362,7 +369,46 @@ class PollingSopCloudStore:
             raise PortalError(f"SOP附件上传失败：{payload.get('msg') or '未返回文件标识'}")
         return str(payload["data"]["file_token"])
 
-    def download_attachment(self, attachment: dict) -> bytes:
+    def _upload_attachment_parts(self, path: Path, file_name: str, size: int) -> str:
+        root = "https://open.feishu.cn/open-apis/drive/v1/medias/"
+        headers = {"Authorization": "Bearer " + self._token()}
+
+        def checked(payload):
+            if int(payload.get("code") or 0):
+                raise PortalError(f"SOP附件分片上传失败：{payload.get('msg') or '未知错误'}")
+            return payload.get("data") or {}
+
+        prepared = checked(self.client.request_json("POST", root + "upload_prepare", headers=headers,
+            json_payload={"file_name": file_name, "parent_type": "bitable_file",
+                          "parent_node": POLLING_SOP_APP_TOKEN, "size": size}, retries=0))
+        upload_id = prepared.get("upload_id")
+        block_size, block_num = prepared.get("block_size"), prepared.get("block_num")
+        if not isinstance(upload_id, str) or not upload_id or type(block_size) is not int \
+                or not 0 < block_size <= 16 * 1024 * 1024 or type(block_num) is not int \
+                or block_num != (size + block_size - 1) // block_size:
+            raise PortalError("SOP附件分片上传参数无效，已停止上传。")
+        # Reuse the pooled multipart client; only one bounded part is held in memory.
+        with path.open("rb") as source, tempfile.TemporaryDirectory(prefix="sop-parts-", dir=path.parent) as temp:
+            part_path = Path(temp) / "part.bin"
+            for seq in range(block_num):
+                part = source.read(min(block_size, size - seq * block_size))
+                if len(part) != min(block_size, size - seq * block_size):
+                    raise PortalError("SOP附件内容已变化，分片不足，未完成上传。")
+                part_path.write_bytes(part)
+                checked(self.client.request_file_json("POST", root + "upload_part", headers=headers,
+                    data={"upload_id": upload_id, "seq": str(seq), "size": str(len(part)),
+                          "checksum": str(zlib.adler32(part) & 0xFFFFFFFF)},
+                    file_path=str(part_path), file_name="part.bin", retries=1))
+            if source.read(1):
+                raise PortalError("SOP附件内容已变化，未完成上传。")
+        finished = checked(self.client.request_json("POST", root + "upload_finish", headers=headers,
+            json_payload={"upload_id": upload_id, "block_num": block_num}, retries=0))
+        file_token = str(finished.get("file_token") or "").strip()
+        if not file_token:
+            raise PortalError("SOP附件分片上传完成但未返回文件标识。")
+        return file_token
+
+    def download_attachment(self, attachment: dict, destination: Path | None = None) -> bytes | None:
         file_token = str(attachment.get("file_token") or "").strip()
         if not file_token:
             raise PortalError("SOP附件缺少有效的飞书文件标识。")
@@ -375,10 +421,14 @@ class PollingSopCloudStore:
                 or not parsed.path.startswith("/open-apis/drive/v1/medias/")
             ):
                 raise PortalError("SOP附件下载地址无效。")
+        url = download_url or "https://open.feishu.cn/open-apis/drive/v1/medias/" + quote(file_token, safe="") + "/download"
+        if destination is not None:
+            self.client.download_to_file(url, destination, headers={"Authorization": "Bearer " + self._token()},
+                                         max_bytes=POLLING_SOP_MAX_FILE_BYTES)
+            return None
         content, _ = self.client.request_bytes(
             "GET",
-            download_url
-            or "https://open.feishu.cn/open-apis/drive/v1/medias/" + quote(file_token, safe="") + "/download",
+            url,
             headers={"Authorization": "Bearer " + self._token()},
             retries=1,
             max_bytes=POLLING_SOP_MAX_FILE_BYTES,
@@ -486,10 +536,10 @@ class PollingWorkOrderService:
             except (TypeError, ValueError) as exc:
                 raise PortalError("SOP 云端附件大小无效。") from exc
             if size < 0 or size > POLLING_SOP_MAX_FILE_BYTES:
-                raise PortalError("SOP 云端单个附件不能超过 20MB。")
+                raise PortalError("SOP 云端单个附件不能超过 200MB。")
             total_size += size
             if total_size > POLLING_SOP_MAX_TOTAL_BYTES:
-                raise PortalError("SOP 云端附件总大小不能超过 100MB。")
+                raise PortalError("SOP 云端附件总大小不能超过 200MB。")
             digest = str(attachment.get("sha256") or "").strip().lower()
             if digest and not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise PortalError("SOP 云端附件校验值无效。")
@@ -1133,18 +1183,20 @@ class PollingWorkOrderService:
             return path
         if not self.cloud or not str(attachment.get("file_token") or "").strip():
             raise PortalNotFoundError("SOP 附件文件不存在。")
-        content = self.cloud.download_attachment(attachment)
-        if len(content) > POLLING_SOP_MAX_FILE_BYTES:
-            raise PortalError("SOP 单个附件不能超过 20MB。")
         expected_hash = str(attachment.get("sha256") or "")
-        if expected_hash and hashlib.sha256(content).hexdigest() != expected_hash:
-            raise PortalError("SOP 附件下载后校验失败。")
         directory.mkdir(parents=True, exist_ok=True)
         if not path.is_relative_to(directory) or path == directory:
             path = (directory / f"{attachment.get('attachment_id')}_{_safe_file_name(attachment.get('name'))}").resolve()
         temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_bytes(content)
-        os.replace(temporary, path)
+        try:
+            self.cloud.download_attachment(attachment, destination=temporary)
+            if temporary.stat().st_size > POLLING_SOP_MAX_FILE_BYTES:
+                raise PortalError("SOP 单个附件不能超过 200MB。")
+            if expected_hash and _file_sha256(temporary) != expected_hash:
+                raise PortalError("SOP 附件下载后校验失败。")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
         attachment["path"] = str(path)
         self.state_store.put_document(POLLING_SOP_NAMESPACE, str(sop.get("sop_id") or ""), sop)
         return path
@@ -1154,15 +1206,13 @@ class PollingWorkOrderService:
         sop_id: str,
         *,
         file_name: str,
-        content: bytes,
+        content: bytes | BinaryIO,
         expected_version: int,
         actor_open_id: str = "",
     ) -> dict:
-        content = bytes(content or b"")
         if not content:
             raise PortalError("SOP 附件内容为空。")
-        if len(content) > POLLING_SOP_MAX_FILE_BYTES:
-            raise PortalError("SOP 单个附件不能超过 20MB。")
+        source = io.BytesIO(content) if isinstance(content, (bytes, bytearray)) else content
         with self._lock:
             local = self.state_store.get_document(POLLING_SOP_NAMESPACE, sop_id) or {}
             sop = self.get_sop(sop_id, public=False, refresh=bool(self.cloud and local.get("_cloud_record_id")))
@@ -1171,8 +1221,7 @@ class PollingWorkOrderService:
             attachments = list(sop.get("attachments") or [])
             if len(attachments) >= POLLING_SOP_MAX_FILES:
                 raise PortalError(f"每个 SOP 最多上传 {POLLING_SOP_MAX_FILES} 个附件。")
-            if sum(int(item.get("size") or 0) for item in attachments) + len(content) > POLLING_SOP_MAX_TOTAL_BYTES:
-                raise PortalError("SOP 附件总大小不能超过 100MB。")
+            existing_bytes = sum(int(item.get("size") or 0) for item in attachments)
             attachment_id = uuid.uuid4().hex
             safe_name = _safe_file_name(file_name)
             directory = self._sop_directory(sop_id)
@@ -1181,13 +1230,27 @@ class PollingWorkOrderService:
             if not path.is_relative_to(directory):
                 raise PortalError("SOP 附件路径无效。")
             temporary = path.with_suffix(path.suffix + ".tmp")
-            temporary.write_bytes(content)
-            os.replace(temporary, path)
+            size, digest = 0, hashlib.sha256()
+            try:
+                with temporary.open("wb") as target:
+                    while chunk := source.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > POLLING_SOP_MAX_FILE_BYTES:
+                            raise PortalError("SOP 单个附件不能超过 200MB。")
+                        if size + existing_bytes > POLLING_SOP_MAX_TOTAL_BYTES:
+                            raise PortalError("SOP 附件总大小不能超过 200MB。")
+                        target.write(chunk)
+                        digest.update(chunk)
+                if not size:
+                    raise PortalError("SOP 附件内容为空。")
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
             attachment = {
                 "attachment_id": attachment_id,
                 "name": safe_name,
-                "size": len(content),
-                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": size,
+                "sha256": digest.hexdigest(),
                 "path": str(path),
                 "created_at": self._now_text(),
                 "created_by": str(actor_open_id or ""),
@@ -1217,6 +1280,10 @@ class PollingWorkOrderService:
         return self._public_sop(sop)
 
     def get_sop_attachment(self, sop_id: str, attachment_id: str) -> tuple[bytes, str]:
+        path, name = self.get_sop_attachment_path(sop_id, attachment_id)
+        return path.read_bytes(), name
+
+    def get_sop_attachment_path(self, sop_id: str, attachment_id: str) -> tuple[Path, str]:
         sop = self.get_sop(sop_id, public=False)
         attachment = next(
             (
@@ -1229,7 +1296,7 @@ class PollingWorkOrderService:
         if not attachment:
             raise PortalNotFoundError("SOP 附件不存在。")
         path = self._ensure_local_attachment(sop, attachment)
-        return path.read_bytes(), str(attachment.get("name") or path.name)
+        return path, str(attachment.get("name") or path.name)
 
     def delete_sop_attachment(
         self,

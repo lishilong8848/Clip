@@ -1,5 +1,5 @@
 <template>
-  <NCollapse :default-expanded-names="needsVerification?['relations']:[]"><NCollapseItem title="关联核验" name="relations">
+  <section aria-label="关联核验"><h2>关联核验</h2>
     <div class="v2-notice-tools"><NButton :disabled="locked||busy" :loading="loading" @click="lookup('target')">查找目标通告</NButton><NButton v-if="form.values.work_type==='repair'" :disabled="locked||busy||!hasIdentity" :loading="loading" @click="lookup('event')">关联事件与维修项目</NButton></div>
     <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert>
     <form v-if="mode" class="v2-notice-binding" @submit.prevent="lookup(mode)"><NInput v-model:value="search" clearable :placeholder="mode==='event'?'搜索故障或设备':'筛选目标通告名称'" :input-props="{'aria-label':'搜索关联记录'}" /><NButton attr-type="submit" :disabled="busy" :loading="loading">查找</NButton></form>
@@ -7,15 +7,15 @@
       <NRadio v-for="item in visible.slice((page-1)*5,page*5)" :key="candidateId(item)" :value="candidateId(item)"><strong>{{ item.title||item.project_title||item.event_title||'未命名记录' }}</strong><small>{{ [item.building,item.status||item.event_status,item.start_time||item.occurrence_time,item.match_reason].filter(Boolean).join(' · ') }}</small></NRadio>
     </NRadioGroup>
     <NEmpty v-if="mode&&!loading&&!visible.length&&!error" description="未找到符合条件的记录" />
-    <div v-if="mode&&visible.length" class="v2-notice-list-footer"><NPagination v-model:page="page" :page-size="5" :item-count="visible.length" simple /><NButton :disabled="!selected||locked" :loading="busy" @click="confirm">核对并保存关联</NButton></div>
-  </NCollapseItem></NCollapse>
+    <div v-if="mode&&visible.length" class="v2-notice-list-footer"><NPagination v-model:page="page" :page-size="5" :item-count="visible.length" simple /><NButton :disabled="!selected||locked" :loading="busy" data-v2-submit @click="confirm">核对并保存关联</NButton></div>
+  </section>
 </template>
 <script setup lang="ts">
 import {computed,onBeforeUnmount,ref} from 'vue';
-import {NAlert,NButton,NCollapse,NCollapseItem,NEmpty,NInput,NPagination,NRadio,NRadioGroup,useDialog} from 'naive-ui';
+import {NAlert,NButton,NEmpty,NInput,NPagination,NRadio,NRadioGroup,useDialog} from 'naive-ui';
 import {requestJson,type Dict} from './client';
 import type {NoticeForm} from './noticeForm';
-const props=defineProps<{form:NoticeForm;locked:boolean;needsVerification?:boolean}>(),emit=defineEmits<{bound:[result:Dict];busy:[value:boolean]}>(),dialog=useDialog();
+const props=defineProps<{form:NoticeForm;locked:boolean}>(),emit=defineEmits<{bound:[result:Dict];busy:[value:boolean]}>(),dialog=useDialog();
 const mode=ref(''),search=ref(''),selected=ref(''),items=ref<Dict[]>([]),loading=ref(false),busy=ref(false),error=ref(''),page=ref(1);
 const hasIdentity=computed(()=>props.form.values.source_record_id||props.form.values.active_item_id||props.form.values.target_record_id);
 const visible=computed(()=>mode.value==='event'?items.value:items.value.filter(i=>String(i.title||'').includes(search.value)));

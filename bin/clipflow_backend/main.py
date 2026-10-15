@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
+from lan_bitable_template_portal.polling_work_orders import POLLING_SOP_MAX_FILE_BYTES
 
 from clipflow_backend.preflight import (
     build_backend_preflight_report as _build_backend_preflight_report,
@@ -6231,13 +6232,14 @@ class FastAPIPortalController:
                 self._authorized_scope_or_error(
                     session, existing_sop.get("scope") or ""
                 )
-                content = await file.read(20 * 1024 * 1024 + 1)
+                if file.size is not None and file.size > POLLING_SOP_MAX_FILE_BYTES:
+                    raise PortalError("SOP 单个附件不能超过 200MB。")
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 item = await asyncio.to_thread(
                     PortalRuntime.polling_work_orders().add_sop_attachment,
                     sop_id,
                     file_name=str(file.filename or "attachment.bin"),
-                    content=content,
+                    content=file.file,
                     expected_version=expected_version,
                     actor_open_id=str(user.get("open_id") or ""),
                 )
@@ -6265,13 +6267,13 @@ class FastAPIPortalController:
                 self._authorized_scope_or_error(
                     session, existing_sop.get("scope") or ""
                 )
-                content, file_name = await asyncio.to_thread(
-                    PortalRuntime.polling_work_orders().get_sop_attachment,
+                path, file_name = await asyncio.to_thread(
+                    PortalRuntime.polling_work_orders().get_sop_attachment_path,
                     sop_id,
                     attachment_id,
                 )
-                return Response(
-                    content=content,
+                return FileResponse(
+                    path=path,
                     media_type="application/octet-stream",
                     headers={
                         "Cache-Control": "private, no-store",

@@ -21,6 +21,7 @@ import { NButton,NEmpty,NSkeleton,NRadioGroup,NRadioButton } from 'naive-ui';
 import { ChevronRight } from 'lucide-vue-next';
 import type { EChartsType } from 'echarts/core';
 import { chartOption,chartPalette,isCircular,isTrend,type ChartItem,type ChartView } from './vipboard';
+import { nightMode } from './theme';
 const props=withDefaults(defineProps<{title:string;caption?:string;items:ChartItem[];loading?:boolean;failed?:boolean;trend?:boolean;view?:ChartView;unit?:string}>(),{unit:'条'});
 const emit=defineEmits<{select:[item:ChartItem,index:number]}>();
 const host=ref<HTMLDivElement>(),kind=ref<ChartView>(props.view||'bar'),pressed=ref(false),endPoint=ref<number[]|null>(null);
@@ -34,7 +35,7 @@ const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
 function update(){
   endPoint.value=null;
   if(!chart||unavailable.value)return;
-  try{chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value),{replaceMerge:['series','xAxis','yAxis','dataZoom'],lazyUpdate:true});engineFailed.value=false;}
+  try{chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value),{replaceMerge:['series','xAxis','yAxis','dataZoom'],lazyUpdate:true});engineFailed.value=false;}
   catch{engineFailed.value=true;}
 }
 function updateEnd(){
@@ -64,7 +65,7 @@ function move(event:PointerEvent){
 }
 function release(){if(!pressed.value)return;pressed.value=false;chart?.dispatchAction({type:'hideTip'});}
 function visibility(){visible.value=inViewport&&!document.hidden;update();}
-watch(()=>[props.items,props.loading,props.failed,props.unit,kind.value],update,{deep:true});
+watch(()=>[props.items,props.loading,props.failed,props.unit,kind.value,nightMode.value],update,{deep:true});
 watch(()=>props.view,value=>{if(value)kind.value=value;});
 onMounted(()=>{observer=new IntersectionObserver(entries=>{inViewport=entries.some(e=>e.isIntersecting);visibility();if(inViewport)void initialize();},{rootMargin:'80px'});if(host.value)observer.observe(host.value);reduced.addEventListener('change',update);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;observer?.disconnect();resize?.disconnect();cancelAnimationFrame(frame);reduced.removeEventListener('change',update);document.removeEventListener('visibilitychange',visibility);chart?.dispose();});

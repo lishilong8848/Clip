@@ -10,6 +10,7 @@ import re
 from .lighthouse_ai import AssistantError
 
 NAMESPACE = "lighthouse_appearance"
+SHAPE_RESET = "mini-20261015"
 
 COLORS = frozenset({
     "encre", "creme", "brun", "rouge", "orange", "ambre", "vert",
@@ -37,7 +38,7 @@ STATES = frozenset({
 
 DEFAULT_APPEARANCE = {
     "color": "encre",
-    "shape": "weather-lighthouse",
+    "shape": "weather-lighthouse-mini",
     "expression": "neutre",
     "state": "idle",
     "size": 56,
@@ -106,7 +107,11 @@ def read_appearance(store, actor_id):
     if not _valid_actor(actor_id):
         raise AssistantError("缺少登录身份，无法读取外观设置。", 403)
     stored = store.get_document(NAMESPACE, actor_id)
-    return _normalize(stored)
+    current = _normalize(stored)
+    # Apply this release's reset without writing on reads or scanning all accounts.
+    if not isinstance(stored, dict) or stored.get("_shape_reset") != SHAPE_RESET:
+        current["shape"] = DEFAULT_APPEARANCE["shape"]
+    return current
 
 
 def save_appearance(store, actor_id, payload):
@@ -123,5 +128,5 @@ def save_appearance(store, actor_id, payload):
     current = read_appearance(store, actor_id)
     current.update(copy.deepcopy(payload))
     # Writes must persist before returning; store exceptions are not swallowed.
-    store.put_document(NAMESPACE, actor_id, current)
+    store.put_document(NAMESPACE, actor_id, {**current, "_shape_reset": SHAPE_RESET})
     return copy.deepcopy(current)

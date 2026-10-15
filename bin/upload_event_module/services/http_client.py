@@ -11,6 +11,7 @@ import time
 import weakref
 from types import SimpleNamespace
 from http.cookiejar import DefaultCookiePolicy
+from pathlib import Path
 from typing import Any
 
 import certifi
@@ -253,6 +254,9 @@ class FeishuHttpClient:
                     response.raise_for_status()
                     raise FeishuHTTPError("接口返回不是 JSON 对象", category="business")
                 if isinstance(payload, dict):
+                    if str(payload.get("code")) == "99991400" and attempt < retry_count:
+                        time.sleep(self._retry_delay(response, attempt))
+                        continue
                     if response.status_code >= 400 and int(payload.get("code") or 0) == 0:
                         response.raise_for_status()
                     return payload
@@ -277,6 +281,42 @@ class FeishuHttpClient:
                     raise
                 raise FeishuHTTPError(last_error, category="network") from exc
         raise FeishuHTTPError(last_error or "HTTP 上传失败", category="network")
+
+    def download_to_file(self, url: str, file_path: str | Path, *, headers=None, max_bytes: int) -> int:
+        """Download to caller-owned staging storage without buffering the response."""
+        import httpx
+
+        target = Path(file_path)
+        for attempt in range(2):
+            try:
+                with self._client_for_request().stream("GET", url, headers=headers) as response:
+                    if response.status_code in RETRY_STATUS_CODES and not attempt:
+                        time.sleep(self._retry_delay(response, attempt))
+                        continue
+                    response.raise_for_status()
+                    length = response.headers.get("content-length")
+                    if length and int(length) > max_bytes:
+                        raise FeishuHTTPError("下载文件过大，已停止下载。", category="business")
+                    size = 0
+                    with target.open("wb") as output:
+                        for chunk in response.iter_bytes(1024 * 1024):
+                            size += len(chunk)
+                            if size > max_bytes:
+                                raise FeishuHTTPError("下载文件过大，已停止下载。", category="business")
+                            output.write(chunk)
+                    return size
+            except Exception as exc:
+                target.unlink(missing_ok=True)
+                if isinstance(exc, httpx.HTTPStatusError):
+                    raise FeishuHTTPError(str(exc), category=classify_feishu_error(
+                        status_code=exc.response.status_code)) from exc
+                if isinstance(exc, FeishuHTTPError):
+                    raise
+                if not attempt and isinstance(exc, httpx.TransportError):
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                raise FeishuHTTPError("文件下载未完成，请稍后重试。", category="network") from exc
+        raise FeishuHTTPError("文件下载未完成，请稍后重试。", category="network")
 
     def request_bytes(
         self,

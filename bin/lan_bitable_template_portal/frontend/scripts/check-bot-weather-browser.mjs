@@ -17,13 +17,16 @@ const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content
 import {createApp,h,ref} from 'vue';import Bot from '/src/components/LighthouseBot.vue';
 import Settings from '/src/components/LighthouseBotSettings.vue';import UiTransition from '/src/components/UiTransition.vue';
 import {DEFAULT_BOT} from '/src/botAppearance.ts';import {weatherScene} from '/src/botWeather.ts';
+import {installActionMotion,trackButtonRequest} from '/src/workspace-v2/actionMotion.ts';
+import '/src/workspace-v2/interactions.css';
+installActionMotion();
 const appearance=ref({...DEFAULT_BOT,shape:${JSON.stringify(shape)},size:144}),shown=ref(true),open=ref(false),settings=ref(false),retained=ref(null);
 window.fixture={appearance,shown,open,settings,weatherScene,set:patch=>Object.assign(appearance.value,patch)};
 window.underClicks=0;
 createApp({render(){return h('main',[
  h('button',{id:'under',onClick:()=>window.underClicks++},'底层页面'),
  h('div',{id:'preview'},h(Bot,{appearance:appearance.value,visible:shown.value})),
- h('button',{class:'lighthouse-launcher',onClick:()=>open.value=!open.value},h(Bot,{appearance:appearance.value,interactive:true,visible:shown.value,position:retained.value,onMoved:p=>retained.value=p})),
+ h('button',{class:'lighthouse-launcher assistant-launcher',onClick:()=>{open.value=!open.value;void trackButtonRequest(new Promise(resolve=>setTimeout(()=>resolve({ok:true}),250)));}},h(Bot,{appearance:appearance.value,interactive:true,visible:shown.value,position:retained.value,onMoved:p=>retained.value=p})),
  open.value?h('section',{class:'chat'},[h('h2','灯塔助手'),h('button',{id:'settings',onClick:()=>settings.value=true},'图标设置'),h('button',{id:'close',onClick:()=>open.value=false},'关闭')]):null,
  h(Settings,{open:settings.value,appearance:appearance.value,onClose:()=>settings.value=false,onSaved:a=>appearance.value=a})
  ])}}).component('UiTransition',UiTransition).mount('#app');
@@ -80,7 +83,19 @@ try {
  }
  const box=await page.locator('.lighthouse-launcher').boundingBox();
  await page.mouse.click(box.x+4,box.y+4);assert.equal(await page.evaluate(()=>window.underClicks),1);
+ await page.locator('.lighthouse-launcher').evaluate(button=>{
+   window.launcherActions=[];
+   new MutationObserver(records=>{for(const record of records)if(record.attributeName==='data-v2-action')window.launcherActions.push(button.getAttribute('data-v2-action'));}).observe(button,{attributes:true});
+ });
  await page.mouse.click(box.x+box.width/2,box.y+box.height/2);await page.locator('.chat').waitFor();
+ await page.waitForTimeout(400);
+ assert.equal(await page.locator('.lighthouse-launcher').getAttribute('data-v2-action'),null,'opening the assistant must not use the submit-button morph');
+ assert.equal(await page.locator('.lighthouse-launcher .v2-action-feedback').count(),0,'no loading ring or success check overlays the lighthouse');
+ assert.equal(await page.locator('.lighthouse-launcher').evaluate(button=>getComputedStyle(button).clipPath),'none','lighthouse artwork must not be cropped into the submit circle');
+ await page.locator('.lighthouse-launcher').focus();await page.keyboard.press('Space');await page.locator('.chat').waitFor({state:'detached'});
+ await page.keyboard.press('Enter');await page.locator('.chat').waitFor();
+ await page.waitForTimeout(1300);
+ assert.deepEqual(await page.evaluate(()=>window.launcherActions),[],'pointer and keyboard toggles never enter any stage of submit motion');
  assert(await page.locator('.lighthouse-launcher .wl-tower').isVisible(),'icon remains when chat opens');
  if(mini){
    const removedRegion=await page.locator('.lighthouse-launcher .wl-tower').evaluate(node=>{

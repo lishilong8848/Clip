@@ -1,4 +1,4 @@
-<template><LegacyBot v-bind="$attrs" :appearance="shown" :position="placed" @moved="$emit('moved',$event)" /></template>
+<template><LegacyBot v-bind="$attrs" :appearance="shown" :position="placed" :viewport-top="shown.shape==='weather-lighthouse-mini'?12-shown.size*.2:12" @moved="$emit('moved',$event)" /></template>
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import LegacyBot from '../components/LighthouseBot.vue';

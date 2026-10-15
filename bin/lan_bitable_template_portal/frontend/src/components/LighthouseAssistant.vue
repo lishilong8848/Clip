@@ -172,13 +172,11 @@
               </div>
               <div class="message-row assistant">
                 <div class="answer">
-                  <div class="answer-heading"><Bot :size="15" aria-hidden="true" /><span>灯塔助手</span><span v-if="turn.status === 'pending'" class="answer-state"><Loader2 :size="12" class="spin" />回答中</span></div>
-                  <details v-if="(turn.process || []).length" class="process">
+                  <div class="answer-heading"><Bot :size="15" aria-hidden="true" /><span>灯塔助手</span></div>
+                  <details v-if="turn.status !== 'pending' && (turn.process || []).length" class="process">
                     <summary>
                       <ChevronRight :size="13" class="process-chevron" aria-hidden="true" />
-                      <Loader2 v-if="turn.status === 'pending'" :size="13" class="spin" />
                       <strong>处理过程</strong>
-                      <span v-if="turn.status === 'pending' && processLatest(turn)" class="process-latest">{{ processLatest(turn) }}</span>
                     </summary>
                     <ol class="process-rows">
                       <li v-for="(item, i) in turn.process || []" :key="i" :class="{ current: turn.status === 'pending' && i === (turn.process || []).length - 1 }">
@@ -186,11 +184,10 @@
                       </li>
                     </ol>
                   </details>
-                  <LighthouseReply v-if="turn.answer && turn.plan?.status !== 'failed'" :text="turn.answer" />
-                  <p v-else-if="turn.status === 'pending' && !(turn.process || []).length" class="pending"><Loader2 :size="15" class="spin" />{{ pendingText(turn) }}</p>
-                  <p v-else-if="turn.status === 'superseded'" class="muted">已结合补充信息继续处理</p>
-                  <p v-else-if="turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
-                  <p v-if="turn.status === 'pending' && turn.answer && !(turn.process || []).length" class="pending"><Loader2 :size="14" class="spin" />{{ pendingText(turn) }}</p>
+                  <div v-if="turn.status === 'pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span><span>正在思考</span></div>
+                  <LighthouseReply v-if="(turn.answer || turn.status === 'pending') && turn.plan?.status !== 'failed'" :text="turn.answer || ''" />
+                  <p v-if="!turn.answer && turn.status === 'superseded'" class="muted">已结合补充信息继续处理</p>
+                  <p v-else-if="!turn.answer && turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
                   <p v-if="turn.answer && ['stopped', 'failed'].includes(turn.status)" class="muted">{{ turn.error || '回答未完成' }}</p>
                   <div v-if="turn.output_files?.length" class="message-files output-files"><div v-for="file in turn.output_files" :key="file.id" class="output-file"><button type="button" :aria-label="'预览 ' + file.name" @click="openArtifact(file)"><FileText :size="18" /><span>{{ file.name }}</span></button><a :href="safeAttachmentUrl(file.url)" download :aria-label="'下载 ' + file.name" title="下载文件"><Download :size="16" /></a></div></div>
                   <LighthouseDownloads :items="turn.downloads" />
@@ -357,7 +354,7 @@ import { readAssistantDraft, writeAssistantDraft, planDraftValues } from '../lig
 const LighthouseSkills = defineAsyncComponent({ loader: () => import('./LighthouseSkills.vue'), loadingComponent: LoadingIndicator, delay: 0 });
 const LighthouseNoticePanel = defineAsyncComponent(() => import('./LighthouseNoticePanel.vue'));
 const LighthouseKnowledge = defineAsyncComponent({ loader: () => import('./LighthouseKnowledge.vue'), loadingComponent: LoadingIndicator, delay: 0 });
-import { BOT_COLORS, normalizeBot, type BotAppearance, type BotMood } from '../botAppearance';
+import { BOT_COLORS, BOT_SHAPE_RESET, DEFAULT_BOT, normalizeBot, type BotAppearance, type BotMood } from '../botAppearance';
 const structuredFieldsReady = ref(false);
 const LighthouseStructuredField = defineAsyncComponent({
   loader: () => import('./LighthouseStructuredField.vue').then(module => { structuredFieldsReady.value = true; return module; }),
@@ -377,7 +374,12 @@ let appearanceController: AbortController | undefined;
 function appearanceKey(): string { return 'lighthouse_appearance:' + props.userId; }
 function readAppearanceCache(): unknown {
   if (!props.userId) return null;
-  try { return JSON.parse(window.localStorage.getItem(appearanceKey()) || 'null'); } catch { return null; }
+  try {
+    const cached = JSON.parse(window.localStorage.getItem(appearanceKey()) || 'null');
+    const value = normalizeBot(cached);
+    if (cached?._shape_reset !== BOT_SHAPE_RESET) value.shape = DEFAULT_BOT.shape;
+    return value;
+  } catch { return null; }
 }
 function saveBotPosition(position: { x: number; y: number }): void {
   botPosition.value = position;
@@ -390,7 +392,7 @@ function saveAppearance(value: BotAppearance, resetPosition = true): void {
     try { window.localStorage.removeItem(shapeKey('launcher')); } catch { /* private mode */ }
   }
   appearance.value = value;
-  if (props.userId) try { window.localStorage.setItem(appearanceKey(), JSON.stringify(value)); } catch { /* private mode */ }
+  if (props.userId) try { window.localStorage.setItem(appearanceKey(), JSON.stringify({ ...value, _shape_reset: BOT_SHAPE_RESET })); } catch { /* private mode */ }
 }
 async function loadAppearance(): Promise<void> {
   if (!props.userId) return;
@@ -819,21 +821,6 @@ function scrollBottom(): void {
 function onThreadScroll(): void { if (isNearBottom()) hasNewContent.value = false; }
 function isNearBottom(): boolean {
   return !thread.value || thread.value.scrollHeight - thread.value.scrollTop - thread.value.clientHeight < 80;
-}
-function pendingText(turn: Dict): string {
-  const phase = String(state.value.phase || '');
-  if (phase === 'agent_planning') return '正在理解问题并准备处理…';
-  if (phase === 'agent_querying') return '正在查询业务资料…';
-  if (phase === 'compressing') return '正在压缩上下文…';
-  if (phase === 'searching') return '正在查询资料并回答…';
-  if (phase === 'answering') return '正在生成回答…';
-  return phase || '正在回答…';
-}
-function processLatest(turn: Dict): string {
-  const rows = Array.isArray(turn?.process) ? turn.process : [];
-  if (!rows.length) return '';
-  const last = rows[rows.length - 1];
-  return String(last?.label || '');
 }
 function replaceState(result: Dict): void {
   const previousTurns = new Map<string, Dict>((state.value.turns || []).map((turn: Dict) => [turn.operation_id, turn]));
@@ -2760,7 +2747,12 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .process summary .process-chevron { color: var(--lh-faint-muted); transition: transform .15s ease; }
 .process[open] summary .process-chevron { transform: rotate(90deg); }
 .process summary strong { color: var(--lh-charcoal-strong); font-size: 12px; }
-.process-latest { color: var(--lh-accent); overflow-wrap: anywhere; }
+.assistant-thinking { display: flex; align-items: center; gap: 10px; min-height: 42px; padding-block: 8px; color: var(--lh-muted); font-size: 13px; }
+.thinking-dots { display: inline-flex; align-items: center; gap: 5px; height: 18px; }
+.thinking-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--lh-accent); animation: lh-thinking-hop 1.2s ease-in-out infinite; }
+.thinking-dots i:nth-child(2) { animation-delay: 140ms; }.thinking-dots i:nth-child(3) { animation-delay: 280ms; }
+@keyframes lh-thinking-hop { 0%,70%,100% { transform: translateY(0); opacity: .45; } 35% { transform: translateY(-4px); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .thinking-dots i { animation: none; opacity: .8; } }
 .process-rows { margin: 8px 0 2px; padding-left: 18px; display: grid; gap: 5px; }
 .process-rows li { position: relative; padding-left: 4px; color: var(--lh-muted); line-height: 1.6; }
 .process-dot { position: absolute; left: -13px; top: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--lh-border-strong); }

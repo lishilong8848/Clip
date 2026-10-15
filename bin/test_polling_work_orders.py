@@ -14,6 +14,7 @@ import time
 import unittest
 import uuid
 import zipfile
+import zlib
 import copy
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -79,7 +80,10 @@ class _FakePollingSopCloud:
         self.sops[sop["sop_id"]] = saved
         return copy.deepcopy(saved)
 
-    def download_attachment(self, attachment: dict) -> bytes:
+    def download_attachment(self, attachment: dict, destination=None) -> bytes | None:
+        if destination is not None:
+            Path(destination).write_bytes(self.content)
+            return None
         return self.content
 
     def upload_attachment(self, path: Path, file_name: str) -> str:
@@ -91,6 +95,172 @@ class _FakePollingSopCloud:
 
 
 class PollingWorkOrderTests(unittest.TestCase):
+    def test_sop_stream_accepts_200mb_and_rejects_one_extra_byte_without_partial_record(self):
+        from lan_bitable_template_portal.polling_work_orders import POLLING_SOP_MAX_FILE_BYTES
+
+        class GeneratedFile:
+            def __init__(self, remaining):
+                self.remaining, self.largest_read = remaining, 0
+
+            def read(self, size):
+                self.largest_read = max(self.largest_read, size)
+                count = min(size, self.remaining)
+                self.remaining -= count
+                return b'x' * count
+
+        self.assertEqual(POLLING_SOP_MAX_FILE_BYTES, 200 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = LanPortalStateStore(root / 'state.sqlite3')
+            try:
+                service = PollingWorkOrderService(store)
+                service.sop_root = root / 'sops'
+                def create(name):
+                    return service.save_sop({'name': name, 'scope': 'A', 'work_type': 'maintenance',
+                        'steps': [{'content': '检查', 'operator_required': True}]})
+                sop = create('大附件')
+                stream = GeneratedFile(POLLING_SOP_MAX_FILE_BYTES)
+                saved = service.add_sop_attachment(sop['sop_id'], file_name='large.bin', content=stream,
+                    expected_version=sop['version'])
+                attachment = saved['attachments'][0]
+                path, _ = service.get_sop_attachment_path(sop['sop_id'], attachment['attachment_id'])
+                self.assertEqual(path.stat().st_size, POLLING_SOP_MAX_FILE_BYTES)
+                self.assertEqual(attachment['size'], POLLING_SOP_MAX_FILE_BYTES)
+                self.assertLessEqual(stream.largest_read, 1024 * 1024)
+                with self.assertRaisesRegex(Exception, '总大小不能超过 200MB'):
+                    service.add_sop_attachment(sop['sop_id'], file_name='extra.bin', content=b'x',
+                        expected_version=saved['version'])
+                self.assertEqual(service.get_sop(sop['sop_id'])['version'], saved['version'])
+
+                other = create('超限附件')
+                with self.assertRaisesRegex(Exception, '单个附件不能超过 200MB'):
+                    service.add_sop_attachment(other['sop_id'], file_name='oversize.bin',
+                        content=GeneratedFile(POLLING_SOP_MAX_FILE_BYTES + 1), expected_version=other['version'])
+                self.assertEqual(service.get_sop(other['sop_id'])['attachments'], [])
+                self.assertEqual(list(service._sop_directory(other['sop_id']).iterdir()), [])
+            finally:
+                store.shutdown_write_worker()
+
+    def test_sop_cloud_uses_tenant_pooled_parts_and_never_finishes_failed_upload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'large.bin'
+            with path.open('wb') as output:
+                output.truncate(21 * 1024 * 1024 + 17)
+            cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+            cloud._token = MagicMock(return_value='fixture-tenant')
+            cloud.client = MagicMock()
+            block_size = 4 * 1024 * 1024
+            count = (path.stat().st_size + block_size - 1) // block_size
+            parts = []
+            def upload_part(method, url, **kwargs):
+                self.assertTrue(url.endswith('/upload_part'))
+                self.assertEqual(kwargs['headers'], {'Authorization': 'Bearer fixture-tenant'})
+                content = Path(kwargs['file_path']).read_bytes()
+                self.assertLessEqual(len(content), block_size)
+                self.assertEqual(kwargs['data']['seq'], str(len(parts)))
+                self.assertEqual(kwargs['data']['checksum'], str(zlib.adler32(content) & 0xffffffff))
+                parts.append(len(content))
+                return {'code': 0}
+            cloud.client.request_file_json.side_effect = upload_part
+            def json_call(method, url, **kwargs):
+                self.assertEqual(kwargs['headers'], {'Authorization': 'Bearer fixture-tenant'})
+                if url.endswith('/upload_prepare'):
+                    self.assertEqual(kwargs['json_payload']['size'], path.stat().st_size)
+                    return {'code': 0, 'data': {'upload_id': 'fixture-upload', 'block_size': block_size, 'block_num': count}}
+                self.assertTrue(url.endswith('/upload_finish'))
+                self.assertEqual(len(parts), count)
+                return {'code': 0, 'data': {'file_token': 'fixture-file-token'}}
+            cloud.client.request_json.side_effect = json_call
+            self.assertEqual(cloud.upload_attachment(path, 'large.bin'), 'fixture-file-token')
+            self.assertEqual(sum(parts), path.stat().st_size)
+            self.assertEqual(list(Path(temp).glob('sop-parts-*')), [])
+            cloud.client.request_json.reset_mock()
+            cloud.client.request_file_json.side_effect = lambda *a, **k: {'code': 1061001, 'msg': 'fixture failure'}
+            with self.assertRaisesRegex(Exception, '分片上传失败'):
+                cloud.upload_attachment(path, 'large.bin')
+            self.assertEqual(cloud.client.request_json.call_count, 1, 'failed parts never finalize')
+            self.assertEqual(list(Path(temp).glob('sop-parts-*')), [])
+
+    def test_sop_cloud_keeps_small_upload_and_rejects_invalid_part_parameters(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'file.bin'
+            path.write_bytes(b'file')
+            cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+            cloud._token = MagicMock(return_value='fixture-tenant')
+            cloud.client = MagicMock()
+            cloud.client.request_file_json.return_value = {'code': 0, 'data': {'file_token': 'fixture-file'}}
+            self.assertEqual(cloud.upload_attachment(path, 'file.bin'), 'fixture-file')
+            self.assertTrue(cloud.client.request_file_json.call_args.args[1].endswith('/upload_all'))
+            with path.open('wb') as output:
+                output.truncate(21 * 1024 * 1024)
+            cloud.client.request_file_json.reset_mock()
+            cloud.client.request_json.return_value = {'code': 0, 'data': {'upload_id': 'fixture',
+                'block_size': 4 * 1024 * 1024, 'block_num': 1}}
+            with self.assertRaisesRegex(Exception, '分片上传参数无效'):
+                cloud.upload_attachment(path, 'file.bin')
+            cloud.client.request_file_json.assert_not_called()
+
+    def test_sop_stream_download_is_bounded_and_cleans_failed_staging(self):
+        import httpx
+        from upload_event_module.services.http_client import FeishuHttpClient, FeishuHTTPError
+
+        class Chunks(httpx.SyncByteStream):
+            def __iter__(self):
+                for _ in range(3):
+                    yield b'x' * 1024 * 1024
+
+        client = FeishuHttpClient(retries=0)
+        transport = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Chunks())))
+        with tempfile.TemporaryDirectory() as temp, patch.object(client, '_client_for_request', return_value=transport):
+            try:
+                target = Path(temp) / 'download.tmp'
+                self.assertEqual(client.download_to_file('https://fixture.invalid/file', target, max_bytes=3*1024*1024), 3*1024*1024)
+                self.assertEqual(target.stat().st_size, 3*1024*1024)
+                with self.assertRaises(FeishuHTTPError):
+                    client.download_to_file('https://fixture.invalid/file', target, max_bytes=2*1024*1024)
+                self.assertFalse(target.exists())
+            finally:
+                transport.close()
+                client.close()
+
+    @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={
+        'role': 'user', 'scopes': ['A'], 'modules': ['maintenance', 'polling', 'adjust']})
+    def test_sop_api_streams_attachment_over_old_limit_and_preserves_access_checks(self, _profile):
+        controller = FastAPIPortalController(host='127.0.0.1', port=18766)
+        client = TestClient(controller._build_app())
+        manager = MagicMock()
+        manager.get_sop.return_value = {'sop_id': 'fixture_sop', 'scope': 'A', 'version': 1}
+        size = 21 * 1024 * 1024
+        def save(sop_id, *, content, **kwargs):
+            self.assertEqual(sop_id, 'fixture_sop')
+            self.assertTrue(hasattr(content, 'read'), 'API must pass the upload spool, not full bytes')
+            self.assertEqual(kwargs['expected_version'], 1)
+            self.assertEqual(kwargs['actor_open_id'], 'ou_a')
+            self.assertEqual(content.seek(0, os.SEEK_END), size)
+            return {'sop_id': sop_id, 'version': 2}
+        manager.add_sop_attachment.side_effect = save
+        try:
+            with tempfile.TemporaryDirectory() as temp, \
+                    patch.object(PortalRuntime, 'polling_work_orders', return_value=manager), \
+                    patch.object(controller, '_current_session', return_value={'user': {'open_id': 'ou_a'}}), \
+                    patch.object(controller, '_authorized_scope_or_error', return_value='A'):
+                response = client.post('/api/polling-sops/fixture_sop/attachments',
+                    data={'expected_version': '1'}, files={'file': ('large.bin', b'x' * size)})
+                self.assertEqual(response.status_code, 200, response.text)
+                manager.add_sop_attachment.assert_called_once()
+                target = Path(temp) / 'attachment.bin'
+                target.write_bytes(b'fixture content')
+                manager.get_sop_attachment_path.return_value = (target, '附件.bin')
+                response = client.get('/api/polling-sops/fixture_sop/attachments/fixture_file')
+                self.assertEqual(response.content, b'fixture content')
+                self.assertEqual(response.headers['cache-control'], 'private, no-store')
+                manager.get_sop_attachment.assert_not_called()
+                with patch.object(controller, '_authorized_scope_or_error', side_effect=portal_server.PortalError('无权访问 A 楼')):
+                    self.assertNotEqual(client.get('/api/polling-sops/fixture_sop/attachments/fixture_file').status_code, 200)
+                self.assertEqual(manager.get_sop_attachment_path.call_count, 1)
+        finally:
+            client.close()
+
     def test_idle_reminder_scan_does_not_reread_inactive_or_not_due_groups(self):
         with tempfile.TemporaryDirectory() as temp:
             store = LanPortalStateStore(Path(temp) / 'state.sqlite3')
@@ -1845,7 +2015,7 @@ const navigator={},setLiteStatus=text=>message=text;
         self.assertIn("openPollingSopDeleteConfirm(sop,del)", html)
         self.assertIn("setPollingSopFeedback(`已保存：${saved.name}`)", html)
         self.assertNotIn("confirm('确认删除该 SOP", html)
-        self.assertIn("本地附件（必填）", html)
+        self.assertIn("本地附件（必填，单个及累计200MB以内）", html)
         self.assertIn("点击选择或将附件拖到这里", html)
         self.assertIn("drop.ondrop", html)
         self.assertIn("function pollingBindPersonSearch", html)

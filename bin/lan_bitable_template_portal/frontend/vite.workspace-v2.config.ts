@@ -10,7 +10,7 @@ import { adaptEventPeriodPage } from './scripts/workspace-event-adapter.mjs';
 // @ts-ignore V2-only presentation adapter, covered by browser tests.
 import { adaptCabinetBatchPage, adaptCabinetPage } from './scripts/workspace-cabinet-adapter.mjs';
 // @ts-ignore marks binary settings only, never selection groups.
-import { markBinaryControls, adaptPasswordLogin, fuseLearningCharts } from './scripts/workspace-controls-adapter.mjs';
+import { markBinaryControls, adaptPasswordLogin, fuseLearningCharts, portalFloatingControls } from './scripts/workspace-controls-adapter.mjs';
 // @ts-ignore V2-only response adaptation; the legacy client source stays unchanged.
 import { adaptNoticeParserClient,adaptNoticeSopControls } from './scripts/workspace-notice-adapter.mjs';
 // @ts-ignore V2-only alert metadata; source components and business states stay unchanged.
@@ -27,14 +27,19 @@ import { adaptAccounts, adaptAdminAccountLoading, adaptModuleAdminEntry } from '
 import { adaptPageFilters } from './scripts/workspace-filters-adapter.mjs';
 // @ts-ignore V2-only layout slots preserve the existing business controllers.
 import { adaptPageLayouts } from './scripts/workspace-page-layout-adapter.mjs';
+// @ts-ignore V2-only drill and guide presentation, covered by isolated browser checks.
+import { adaptDrillPresentation } from './scripts/workspace-drill-adapter.mjs';
 // @ts-ignore scopes reused module navigation when mounted as a dashboard component.
 import { adaptEmbeddedNavigation } from './scripts/workspace-embedded-adapter.mjs';
+// @ts-ignore compile-time night palette leaves the legacy build untouched.
+import workspaceNightTheme from './scripts/workspace-night-theme.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/');
 const outputDir=process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?resolve(root,process.env.CLIPFLOW_WORKSPACE_BUILD_DIR):resolve(root,'dist/assets/workspace-v2');
 if(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR&&!outputDir.startsWith(resolve(root,'../../../output')+'/')&&!outputDir.startsWith(resolve(root,'../../../output')+'\\'))throw new Error('Workspace preview output must stay in project output');
 let generated=new Set<string>();
 export default defineConfig({
   root, publicDir:false, base: '/assets/workspace-v2/',
+  css:{postcss:{plugins:[workspaceNightTheme()]}},
   preview: { proxy: { '/api': 'http://127.0.0.1:18766', '/workbench-lite': 'http://127.0.0.1:18766', '/sop-work-order': 'http://127.0.0.1:18766' } },
   plugins: [{
     name: 'workspace-business-imports', enforce: 'pre',
@@ -62,6 +67,7 @@ export default defineConfig({
       if(path===root+'src/components/AdminTools.vue')result=result.replace('<button type="button" class="btn ghost" @click="$emit(\'close\')"><ArrowLeft :size="17" />返回首页</button>', '');
       if(path===root+'src/components/LearningSharing.vue')result=adaptLearningSharing(result);
       result=adaptModuleAdminEntry(result,path);
+      result=adaptDrillPresentation(result,path);
       if(path===root+'src/components/AdminAccounts.vue')result=adaptAccounts(result);
       if(path===root+'src/components/AdminTools.vue')result=adaptAdminAccountLoading(result);
       if(path===root+'src/components/RepairManagementPage.vue')result=adaptRepairController(result,'management',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairWorkspace.vue'),'utf8')));
@@ -77,6 +83,7 @@ export default defineConfig({
       result=adaptEmbeddedNavigation(result,path);
       result=markBinaryControls(result);
       result=markFeedbackAlerts(result);
+      result=portalFloatingControls(result);
       if(result!==code)return {code:result,map:null};
     },
   }, vue(), {

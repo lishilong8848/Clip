@@ -7,7 +7,7 @@
           <button v-if="editing" class="v2-widget-drag" data-v2-navigation type="button" :aria-label="'拖动'+item.title" :title="'拖动'+item.title"><GripVertical :size="16" /></button>
           <h2><slot name="title" :item="item">{{ item.title }}</slot></h2><slot name="tools" :item="item" />
         </header>
-        <WidgetViewport :editing="editing" :adaptive="adaptive||item.kind==='module'"><slot :item="item" /></WidgetViewport>
+        <WidgetViewport :editing="editing"><slot :item="item" /></WidgetViewport>
       </section>
     </div>
     </TransitionGroup>

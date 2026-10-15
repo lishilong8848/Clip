@@ -18,6 +18,12 @@ export function noticeListCycle(row: Dict): string {
   return cycle ? '周期 ' + cycle : row.work_type === 'maintenance' ? '周期未填' : '';
 }
 
+export function noticeListSpecialty(row: Dict): string {
+  const fields = row.display_fields || {};
+  return [row.specialty, fields['专业类别'], fields['专业'], fields['所属专业']]
+    .map(value => String(value ?? '').trim()).find(Boolean) || '';
+}
+
 export function noticePlanWindow(row: Dict): { start: string; end: string } {
   const fields = row.display_fields || {};
   const first = (...values: unknown[]) => values.map(value => String(value ?? '').trim()).find(Boolean) || '';

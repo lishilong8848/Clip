@@ -47,7 +47,7 @@
         <NButton quaternary circle :disabled="saving" :aria-label="'删除检查项'+(index+1)" @click="items.splice(index,1)"><Trash2 :size="17" /></NButton>
       </div><CheckFrequency v-model="item.frequency" :disabled="saving" /></section>
       <NButton data-v2-navigation dashed :disabled="saving || items.length>=50" @click="items.push({id:randomHexId(),text:'',frequency:defaultFrequency()})"><template #icon><Plus :size="16" /></template>添加检查项</NButton>
-      <template #footer><div class="v2-check-editor-actions"><NButton :disabled="saving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving" @click="saveDefinition">保存清单</NButton></div></template>
+      <template #footer><div class="v2-check-editor-actions"><NButton :disabled="saving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving" data-v2-submit @click="saveDefinition">保存清单</NButton></div></template>
     </NModal>
   </section>
 </template>

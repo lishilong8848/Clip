@@ -5925,8 +5925,20 @@ class LanPortalStateStore:
                 ).fetchone()
                 rows = conn.execute(
                     f"""
-                    SELECT payload_json
-                    FROM water_consumption_records
+                    SELECT payload_json,
+                        (SELECT previous.meter_value
+                         FROM water_consumption_records AS previous
+                         WHERE previous.scope_code=current.scope_code
+                           AND previous.meter=current.meter AND current.meter<>''
+                           AND previous.frequency=current.frequency AND current.frequency<>''
+                           AND previous.shift_name=current.shift_name AND current.shift_name<>''
+                           AND previous.statistic_date_key<>''
+                           AND previous.statistic_date_key<current.statistic_date_key
+                           AND previous.meter_value IS NOT NULL
+                         ORDER BY previous.statistic_date_ms DESC,
+                                  previous.source_updated_at DESC, previous.record_id DESC
+                         LIMIT 1) AS previous_meter_value
+                    FROM water_consumption_records AS current
                     WHERE {where_sql}
                     ORDER BY statistic_date_ms DESC, record_id DESC
                     LIMIT ? OFFSET ?
@@ -5937,6 +5949,7 @@ class LanPortalStateStore:
         for row in rows:
             payload = self._loads(str(row["payload_json"] or ""), {})
             if isinstance(payload, dict):
+                payload["previous_meter_value"] = row["previous_meter_value"]
                 records.append(payload)
         total = int(total_row["count"] or 0) if total_row else 0
         return {

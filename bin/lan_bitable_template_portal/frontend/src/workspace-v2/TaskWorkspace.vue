@@ -60,7 +60,7 @@ const compact=ref(window.innerWidth<800);
 const taskKind=ref(''), taskLoading=ref(false), taskError=ref(''), rows=ref<Dict[]>([]), taskNote=ref('');
 const emptyText=ref('当前分类暂无待处理事项');
 const widgetCapacity=useCapacity();
-const visibleRows=computed(()=>props.brief?rows.value.filter(row=>taskKind.value==='learning'||dueLabel(row)||/异常|失败|待核对/.test(row.status)).slice(0,3):props.embedded?rows.value.slice(0,widgetCapacity.value.rows):rows.value);
+const visibleRows=computed(()=>props.brief?rows.value.filter(row=>taskKind.value==='learning'||dueLabel(row)||/异常|失败|待核对/.test(row.status)).slice(0,3):rows.value);
 let taskAbort:AbortController|undefined, disposed=false;
 const cache=new Map<string,{at:number;value:Dict}>();
 const noticeTypes=computed(()=>modules.filter(m=>NOTICE_IDS.includes(m.id)&&permitted.value.includes(m.id)));
@@ -131,7 +131,7 @@ async function loadTasks(){
     if(NOTICE_IDS.includes(kind)){
       const active=items(data.ongoing);const linked=new Set(active.flatMap((r:Dict)=>[r.source_record_id,r.record_id,r.active_item_id].filter(Boolean)));
       const pending=items(data.records).filter((r:Dict)=>{const status=text(r.source_progress||r.source_status||r.work_summary?.status||r.status||r.display_fields?.['维护实施状态']||r.display_fields?.['变更进度']);return !linked.has(r.record_id)&&!(/已结束|正常结束|延期结束|闭环|已完成|作废|删除/.test(status)&&!status.includes('未结束'));});
-      rows.value=[...toRows(active,kind,true),...toRows(pending,kind)].slice(0,60);taskNote.value=`已读取 ${rows.value.length} 条，显示数量随组件尺寸调整`;
+      rows.value=[...toRows(active,kind,true),...toRows(pending,kind)].slice(0,60);taskNote.value=`已读取 ${rows.value.length} 条`;
     } else if(kind==='learning'){
       const total=count(data.today_summary?.assigned),done=count(data.today_summary?.task_answered);
       if(total && done!==null && done<total)rows.value=[{key:'self-learning',title:'今日学练',status:done?'答题中':'未开始',scope:data.self_scope,time:`已答 ${done} / ${total} 题`,progress:null,url:'/learning?view=practice'}];

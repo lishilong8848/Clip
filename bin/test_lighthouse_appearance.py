@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lan_bitable_template_portal.lighthouse_ai import AssistantError
 from lan_bitable_template_portal.lighthouse_appearance import (
-    COLORS, DEFAULT_APPEARANCE, EXPRESSIONS, NAMESPACE, SHAPES, STATES,
+    COLORS, DEFAULT_APPEARANCE, EXPRESSIONS, NAMESPACE, SHAPE_RESET, SHAPES, STATES,
     read_appearance, save_appearance,
 )
 
@@ -44,7 +44,7 @@ class AppearanceTests(unittest.TestCase):
     def assert_defaults(self, appearance):
         self.assertEqual(appearance, DEFAULT_APPEARANCE)
         self.assertEqual(appearance["color"], "encre")
-        self.assertEqual(appearance["shape"], "weather-lighthouse")
+        self.assertEqual(appearance["shape"], "weather-lighthouse-mini")
         self.assertEqual(appearance["expression"], "neutre")
         self.assertEqual(appearance["state"], "idle")
         self.assertEqual(appearance["size"], 56)
@@ -56,13 +56,38 @@ class AppearanceTests(unittest.TestCase):
         store = self.make_store()
         self.assert_defaults(read_appearance(store, "user-a"))
 
-    def test_mini_lighthouse_is_independent_and_does_not_replace_default(self):
+    def test_frontend_reset_matches_backend_release(self):
+        source = (Path(__file__).parent / "lan_bitable_template_portal/frontend/src/botAppearance.ts").read_text(encoding="utf-8")
+        self.assertIn(f"BOT_SHAPE_RESET = '{SHAPE_RESET}'", source)
+        self.assertIn(f"shape: '{DEFAULT_APPEARANCE['shape']}'", source)
+
+    def test_mini_default_still_allows_original_lighthouse(self):
         store = self.make_store()
         save_appearance(store, "user-a", {"shape": "weather-lighthouse-mini", "weather_city": "南通"})
         self.assertEqual(read_appearance(store, "user-a")["shape"], "weather-lighthouse-mini")
-        self.assertEqual(read_appearance(store, "user-b")["shape"], "weather-lighthouse")
+        self.assertEqual(read_appearance(store, "user-b")["shape"], "weather-lighthouse-mini")
         save_appearance(store, "user-a", {"shape": "weather-lighthouse"})
         self.assertEqual(read_appearance(store, "user-a")["shape"], "weather-lighthouse")
+
+    def test_release_reset_preserves_other_preferences_and_later_choices(self):
+        store = AssertionStore()
+        for actor, shape in (("user-a", "nuage"), ("user-b", "weather-lighthouse")):
+            store.docs[(NAMESPACE, actor)] = {**DEFAULT_APPEARANCE, "shape": shape,
+                "color": "bleu", "size": 120, "snap_back": False, "weather_city": "石家庄"}
+        for actor in ("user-a", "user-b"):
+            expected = {**store.docs[(NAMESPACE, actor)], "shape": "weather-lighthouse-mini"}
+            self.assertEqual(read_appearance(store, actor), expected)
+            self.assertEqual(read_appearance(store, actor), expected)
+        self.assertEqual(store.put_calls, [], "reads must not write or overwrite a concurrent save")
+        saved = save_appearance(store, "user-a", {"shape": "heart"})
+        self.assertEqual(store.docs[(NAMESPACE, "user-a")]["_shape_reset"], SHAPE_RESET)
+        self.assertNotIn("_shape_reset", saved)
+        reloaded = MemoryStore()
+        reloaded.docs = store.docs
+        self.assertEqual(read_appearance(reloaded, "user-a"), saved)
+        self.assertEqual(read_appearance(reloaded, "user-b")["shape"], "weather-lighthouse-mini")
+        save_appearance(reloaded, "user-b", {"size": 88})
+        self.assertEqual(read_appearance(reloaded, "user-b")["shape"], "weather-lighthouse-mini")
 
     def test_defaults_are_independent_copies(self):
         store = self.make_store()
@@ -141,6 +166,7 @@ class AppearanceTests(unittest.TestCase):
             {"actor_id": "user-a"},
             {"open_id": "ou_123"},
             {"unknown": "x"},
+            {"_shape_reset": SHAPE_RESET},
             {"color": "gris", "open_id": "ou_1"},
             {"color": "gris", "actor_id": "u_a", "size": 60},
         ]

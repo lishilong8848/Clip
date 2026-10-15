@@ -42,7 +42,7 @@ export function miniLighting(scene: WeatherScene): Record<string, string> {
     'enamel-end': mixHex('#152544', shade, .2),
     'band-start': mixHex(band, lit, .3), 'band-mid': band, 'band-end': mixHex(band, shade, .45),
     'cloud-start': cloudTop, 'cloud-mid': mixHex(cloudTop, cloudBottom, .4), 'cloud-end': cloudBottom,
-    'sun-start': color(5), 'sun-mid': mixHex(color(5), color(6), .45), 'sun-end': color(6),
+    'sun-start': mixHex(color(5), color(6), .18), 'sun-mid': mixHex(color(5), color(6), .58), 'sun-end': color(6),
     'sun-aura': mixHex(color(5), color(6), .55),
     'water-front': mixHex('#2f687f', mixHex('#58b7dd', cloudBottom, .35), daylight),
     'water-back': mixHex('#48647f', mixHex('#a8ddf2', cloudTop, .3), daylight),
@@ -55,6 +55,7 @@ export function waterFrames(layer: number, seed: number): Keyframe[] {
   const amplitude = [10, 7, 4.5][layer]!;
   const phase = seed * Math.PI * 2, direction = layer % 2 ? -1 : 1;
   const waveNumber = Math.PI * 2 / (110 + layer * 24);
+  const start = 190 + layer * 12, end = 570 - layer * 12, segment = (end - start) / 20;
   const pathAt = (t: number) => {
     const swell = amplitude * (.8 + .2 * Math.sin(Math.PI * 2 * t + phase));
     const wave = (x: number) => {
@@ -63,11 +64,12 @@ export function waterFrames(layer: number, seed: number): Keyframe[] {
       return { y: baseline + swell * (Math.sin(a) + .32 * Math.sin(b)),
         slope: swell * waveNumber * (Math.cos(a) + .32 * .57 * Math.cos(b)) };
     };
-    let path = 'M190 ' + wave(190).y.toFixed(2);
+    let path = `M${start} ` + wave(start).y.toFixed(2);
     // Cubic slopes make traveling crests smooth without a per-frame JavaScript loop.
-    for (let x = 190; x < 570; x += 19) {
-      const from = wave(x), to = wave(x + 19), step = 19 / 3;
-      path += `C${(x + step).toFixed(2)} ${(from.y + from.slope * step).toFixed(2)} ${(x + 19 - step).toFixed(2)} ${(to.y - to.slope * step).toFixed(2)} ${x + 19} ${to.y.toFixed(2)}`;
+    for (let i = 0; i < 20; i++) {
+      const x = start + i * segment, next = x + segment;
+      const from = wave(x), to = wave(next), step = segment / 3;
+      path += `C${(x + step).toFixed(2)} ${(from.y + from.slope * step).toFixed(2)} ${(next - step).toFixed(2)} ${(to.y - to.slope * step).toFixed(2)} ${next.toFixed(2)} ${to.y.toFixed(2)}`;
     }
     return `path("${path}")`;
   };

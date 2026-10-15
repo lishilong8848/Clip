@@ -12,6 +12,7 @@ import {NButton,NEmpty,NSkeleton} from 'naive-ui';
 import {ChevronRight} from 'lucide-vue-next';
 import type {EChartsType} from 'echarts/core';
 import {chartOption} from './vipboard';
+import {nightMode} from './theme';
 type Point={label:string;value:number|null};
 const props=defineProps<{items:Point[];unit:string;percentage?:boolean;loading?:boolean}>();
 const emit=defineEmits<{select:[item:Point]}>();
@@ -20,7 +21,7 @@ let chart:EChartsType|undefined,resize:ResizeObserver|undefined,visible:Intersec
 const reduced=matchMedia('(prefers-reduced-motion:reduce)');
 function update(){
   if(!chart)return;
-  const base=chartOption(props.items.map(row=>({...row,value:row.value??0})),'line',props.unit,(host.value?.clientWidth||0)<440,!reduced.matches&&!document.hidden) as any;
+  const base=chartOption(props.items.map(row=>({...row,value:row.value??0})),'line',props.unit,(host.value?.clientWidth||0)<440,!reduced.matches&&!document.hidden,nightMode.value) as any;
   // Null grades are gaps, never invented zero-percent results.
   base.series[0].data=props.items.map(row=>row.value);base.series[0].connectNulls=false;
   base.series[0].showSymbol=true;base.series[0].animationDuration=1000;
@@ -42,7 +43,7 @@ function move(event:PointerEvent){
 function start(event:PointerEvent){if(props.loading||!chart||!host.value)return;const box=host.value.getBoundingClientRect();if(!chart.containPixel({gridIndex:0},[event.clientX-box.left,event.clientY-box.top]))return;down=[event.clientX,event.clientY];dragged=false;pressed=true;host.value.setPointerCapture(event.pointerId);move(event);}
 function release(event?:PointerEvent){const row=props.items[selected];if(pressed&&!dragged&&event?.type==='pointerup'&&row?.value!==null&&row&&!props.loading)emit('select',row);pressed=false;chart?.dispatchAction({type:'hideTip'});}
 function key(event:KeyboardEvent){if(!chart||props.loading)return;if(['ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();selected=Math.max(0,Math.min(props.items.length-1,selected+(event.key==='ArrowLeft'?-1:1)));chart.dispatchAction({type:'showTip',seriesIndex:0,dataIndex:selected});}else if(event.key==='Enter'){const row=props.items[selected];if(row&&row.value!==null)emit('select',row);}else if(event.key==='Escape')release();}
-watch(()=>[props.items,props.unit,props.percentage,props.loading],update,{deep:true});
+watch(()=>[props.items,props.unit,props.percentage,props.loading,nightMode.value],update,{deep:true});
 onMounted(()=>{visible=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting))void initialize();});if(host.value)visible.observe(host.value);reduced.addEventListener('change',update);});
 onBeforeUnmount(()=>{disposed=true;visible?.disconnect();resize?.disconnect();cancelAnimationFrame(frame);reduced.removeEventListener('change',update);chart?.dispose();});
 </script>

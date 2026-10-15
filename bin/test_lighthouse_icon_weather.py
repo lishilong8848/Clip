@@ -154,7 +154,7 @@ class WeatherValidationTests(unittest.TestCase):
         save_appearance(store, 'one', {'shape': 'weather-lighthouse', 'weather_city': '石家庄'})
         self.assertEqual(read_appearance(store, 'one')['weather_city'], '石家庄')
         self.assertEqual(read_appearance(store, 'two')['weather_city'], '南通')
-        self.assertEqual(read_appearance(store, 'two')['shape'], 'weather-lighthouse')
+        self.assertEqual(read_appearance(store, 'two')['shape'], 'weather-lighthouse-mini')
         save_appearance(store, 'two', {'shape': 'cercle'})
         self.assertEqual(read_appearance(store, 'two')['shape'], 'cercle', 'explicit personal shapes are retained')
 

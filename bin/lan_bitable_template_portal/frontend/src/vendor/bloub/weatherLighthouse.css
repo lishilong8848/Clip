@@ -13,6 +13,16 @@
 .weather-lighthouse[data-phase=night] .wl-companion { visibility: visible; }
 .weather-lighthouse[data-phase=night] .wl-beams, .weather-lighthouse[data-phase=night] .wl-lamp { opacity: 1; }
 .weather-lighthouse[data-phase=dawn] .wl-lamp, .weather-lighthouse[data-phase=dusk] .wl-lamp { opacity: .65; }
+.weather-lighthouse .wl-heat, .weather-lighthouse .wl-typhoon { opacity:0; transition:opacity 350ms ease; }
+.weather-lighthouse[data-weather=heat]:not([data-phase=night]) .wl-sun { visibility:visible; }
+.weather-lighthouse[data-weather=heat] .wl-heat, .weather-lighthouse[data-weather=typhoon] .wl-typhoon,
+.weather-lighthouse:is([data-weather=overcast],[data-weather=heavy-rain],[data-weather=typhoon]) .wl-clouds,
+.weather-lighthouse:is([data-weather=heavy-rain],[data-weather=typhoon]) .wl-rain { opacity:1; }
+.weather-lighthouse:is([data-weather=overcast],[data-weather=rain],[data-weather=heavy-rain],[data-weather=storm],[data-weather=snow],[data-weather=fog],[data-weather=typhoon]) :is(.wl-moon,.wl-stars,.wl-companion) { visibility:hidden; }
+.weather-lighthouse .wl-heat-wisp { animation:wl-heat-rise 5s ease-in-out infinite; opacity:0; }
+.weather-lighthouse .wl-cyclone { transform-origin:0 0; animation:wl-crown 9s linear infinite; }
+.weather-lighthouse:is([data-weather=heavy-rain],[data-weather=typhoon]) .wl-rain { transform:skewX(-10deg); stroke-width:3.5; }
+.weather-lighthouse[data-weather=typhoon] .wl-wind { opacity:.8; }
 .weather-lighthouse .wl-beams { transform-origin: 380px 145px; animation: wl-sweep 7s ease-in-out infinite alternate; }
 .weather-lighthouse .wl-stars > * { animation: wl-star-twinkle 7s ease-in-out infinite; opacity:1; transform-box:fill-box; transform-origin:center; }
 .weather-lighthouse .wl-cloud-flight { animation: wl-cloud-travel 28s linear infinite; opacity:0; }
@@ -23,7 +33,7 @@
 .weather-lighthouse .wl-stars { transform-origin: 380px 250px; }
 .weather-lighthouse .wl-companion path { animation: wl-twinkle 4s ease-in-out infinite alternate; }
 .weather-lighthouse .wl-aura { transform-origin: 0 0; animation: wl-breathe 4s ease-in-out infinite alternate; }
-.weather-lighthouse .wl-crown { transform-origin: 0 0; animation: wl-crown 20s linear infinite; }
+.weather-lighthouse .wl-crown { transform-origin: 0 0; animation: wl-crown 48s linear infinite; }
 .weather-lighthouse .wl-glint { animation: wl-twinkle 5s ease-in-out infinite alternate; }
 .weather-lighthouse .wl-drift { animation: wl-drift 9s ease-in-out infinite alternate; }
 .weather-lighthouse .wl-drift-late { animation-delay: -4s; }
@@ -51,14 +61,15 @@
 .weather-lighthouse .wl-snow circle { animation: wl-snow 3s ease-in-out infinite; }
 .weather-lighthouse[data-active=false] *, .weather-lighthouse[data-reduced=true] * { animation-play-state: paused !important; }
 .weather-lighthouse[data-active=false] * { transition: none !important; }
-.weather-lighthouse:not([data-weather=clear]) .wl-aura, .weather-lighthouse:not([data-weather=clear]) .wl-crown,
+.weather-lighthouse:not([data-weather=clear]):not([data-weather=heat]) .wl-aura, .weather-lighthouse:not([data-weather=clear]):not([data-weather=heat]) .wl-crown,
 .weather-lighthouse:not([data-phase=night]) .wl-glint, .weather-lighthouse:not([data-phase=night]) .wl-companion path { animation-play-state: paused; }
 .weather-lighthouse[data-phase=night] .wl-aura, .weather-lighthouse[data-phase=night] .wl-crown,
 .weather-lighthouse:not([data-weather=fog]) .wl-fog .wl-drift,
-.weather-lighthouse:not([data-weather=cloudy]):not([data-weather=rain]):not([data-weather=snow]):not([data-weather=storm]) .wl-cloud-flight { animation-play-state: paused; }
-.weather-lighthouse:not([data-weather=wind]):not([data-weather=storm]) .wl-wind path,
+.weather-lighthouse:not([data-weather=cloudy]):not([data-weather=overcast]):not([data-weather=rain]):not([data-weather=heavy-rain]):not([data-weather=snow]):not([data-weather=storm]):not([data-weather=typhoon]) .wl-cloud-flight { animation-play-state: paused; }
+.weather-lighthouse:not([data-weather=wind]):not([data-weather=storm]):not([data-weather=typhoon]) .wl-wind path,
 .weather-lighthouse:not([data-weather=storm]) .wl-storm path { animation-play-state:paused; }
-.weather-lighthouse[data-weather]:not([data-weather=rain]):not([data-weather=storm]) .wl-rain path,
+.weather-lighthouse:not([data-weather=heat]) .wl-heat-wisp, .weather-lighthouse:not([data-weather=typhoon]) .wl-cyclone { animation-play-state:paused; }
+.weather-lighthouse[data-weather]:not([data-weather=rain]):not([data-weather=heavy-rain]):not([data-weather=storm]):not([data-weather=typhoon]) .wl-rain path,
 .weather-lighthouse[data-weather]:not([data-weather=snow]) .wl-snow circle,
 .weather-lighthouse:not([data-phase=night]) .wl-beams, .weather-lighthouse:not([data-phase=night]) .wl-stars > * { animation-play-state: paused; }
 @keyframes wl-sweep { from { transform: rotate(-12deg); } to { transform: rotate(12deg); } }
@@ -74,10 +85,12 @@
 @keyframes wl-ripple { 0%,100%{transform:translate(0,0) scaleY(1)} 40%{transform:translate(-4px,var(--wl-swell)) scaleY(var(--wl-wave-height))} 75%{transform:translate(3px,calc(-1 * var(--wl-swell))) scaleY(.92)} }
 @keyframes wl-rain { from { transform: translate(3px, -20px); opacity: 0; } 20%, 70% { opacity: .8; } to { transform: translate(-5px, 30px); opacity: 0; } }
 @keyframes wl-snow { from { transform: translate(-5px, -15px); opacity: 0; } 25%, 65% { opacity: 1; } to { transform: translate(8px, 30px); opacity: 0; } }
+@keyframes wl-heat-rise { 0%{transform:translate(var(--wl-heat-x),var(--wl-heat-y)) scale(var(--wl-heat-width),var(--wl-heat-height));opacity:0} 30%,55%{opacity:.5} 100%{transform:translate(calc(var(--wl-heat-x) + 10px),calc(var(--wl-heat-y) - 48px)) scale(calc(var(--wl-heat-width) * 1.2),calc(var(--wl-heat-height) * 1.15));opacity:0} }
 .weather-lighthouse-mini .wl-waves path { animation: none; }
 .weather-lighthouse-mini :is(.wl-sun,.wl-moon), .weather-lighthouse-mini :is(.wl-sun,.wl-moon) > * { opacity:1; fill-opacity:1; stroke-opacity:1; }
 .weather-lighthouse-mini .wl-sun-face { transform:scale(var(--wl-mini-sun-size,1)); transform-origin:0 0; transition:transform 1200ms ease; }
-.weather-lighthouse-mini .wl-sun .wl-aura { fill:var(--wl-mini-sun-aura,#f9cc67); transition:fill 1200ms ease; }
+.weather-lighthouse-mini .wl-sun-aura { stop-color:var(--wl-mini-sun-aura,#f9cc67); }
+.weather-lighthouse-mini .wl-crown { stroke:var(--wl-mini-sun-end,#efb94d); transition:stroke 1200ms ease; }
 .weather-lighthouse-mini[data-phase] .wl-tower-start { stop-color:var(--wl-mini-tower-start); }
 .weather-lighthouse-mini[data-phase] .wl-tower-mid { stop-color:var(--wl-mini-tower-mid); }
 .weather-lighthouse-mini[data-phase] .wl-tower-end { stop-color:var(--wl-mini-tower-end); }

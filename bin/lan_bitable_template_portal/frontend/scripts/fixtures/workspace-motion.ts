@@ -1,5 +1,5 @@
-import {createApp,h,nextTick,ref} from 'vue';
-import {installActionMotion,trackButtonRequest,trackButtonPresentation} from '../../src/workspace-v2/actionMotion';
+import {createApp,h,ref} from 'vue';
+import {installActionMotion,trackButtonRequest} from '../../src/workspace-v2/actionMotion';
 import {followBottom,shouldFollow} from '../../src/workspace-v2/chatMotion';
 import AnimatedReply from '../../src/workspace-v2/AnimatedReply.vue';
 import PasswordStrength from '../../src/workspace-v2/PasswordStrength.vue';
@@ -19,13 +19,15 @@ const password=ref('fixture-only'),newPassword=ref(''),passwordError=ref(''),act
 const chartItems=ref([{label:'10/01',value:2},{label:'10/02',value:6},{label:'10/03',value:3}]);
 const test=window as any;
 test.clicked=0;
-test.finishJob=(value:unknown)=>trackButtonRequest(Promise.resolve(value));
+test.finishJob=(value:unknown)=>trackButtonRequest(Promise.resolve(value),'GET');
 test.text=(value:string)=>text.value=value;
 test.changeChart=()=>chartItems.value=[{label:'10/01',value:8},{label:'10/02',value:4},{label:'10/03',value:5},{label:'10/04',value:2}];
 createApp({setup:()=>{usePasswordFeedback(passwordError,[password]);return()=>h('div',{},[
-  h('button',{id:'save',style:'width:180px;height:40px;',onClick:()=>{test.clicked++;void trackButtonRequest(new Promise((resolve,reject)=>{test.resolve=resolve;test.reject=reject;})).catch(()=>{});}},'保存变更'),
-  h('button',{id:'dynamic-save',disabled:saving.value||finished.value,style:'width:180px;height:40px;',onClick:()=>{saving.value=true;void trackButtonRequest(new Promise(resolve=>{test.resolveDynamic=()=>{finished.value=true;saving.value=false;resolve({ok:true});};}));}},finished.value?'已完成':saving.value?'正在处理':'完成后禁用'),
-  h('button',{id:'open-drawer',style:'width:180px;height:40px;',onClick:()=>{drawer.value=true;trackButtonPresentation(nextTick());void trackButtonRequest(new Promise(resolve=>test.finishDrawerRead=resolve));}},'打开机柜详情'),
+  h('button',{id:'save','data-v2-submit':'',style:'width:180px;height:40px;',onClick:()=>{test.clicked++;void trackButtonRequest(new Promise((resolve,reject)=>{test.resolve=resolve;test.reject=reject;})).catch(()=>{});}},'保存变更'),
+  h('button',{id:'dynamic-save','data-v2-submit':'',disabled:saving.value||finished.value,style:'width:180px;height:40px;',onClick:()=>{saving.value=true;void trackButtonRequest(new Promise(resolve=>{test.resolveDynamic=()=>{finished.value=true;saving.value=false;resolve({ok:true});};}));}},finished.value?'已完成':saving.value?'正在处理':'完成后禁用'),
+  h('button',{id:'open-drawer',style:'width:180px;height:40px;',onClick:()=>{drawer.value=true;void trackButtonRequest(new Promise(resolve=>test.finishDrawerRead=resolve),'GET');}},'打开机柜详情'),
+  h('button',{id:'preview',onClick:()=>{void trackButtonRequest(Promise.resolve({ok:true}));}},'生成预览'),
+  h('form',{onSubmit:(e:Event)=>{e.preventDefault();void trackButtonRequest(new Promise(resolve=>test.finishSearch=resolve),'GET');}},[h('button',{id:'search',type:'submit'},'查询')]),
   drawer.value?h('section',{id:'drawer-fixture'},'详情已打开，历史加载中'):null,
   h('label',{},[h('input',{id:'toggle',type:'checkbox'}),'勾选项目']),
   h('label',{},[h('input',{id:'binary',type:'checkbox','data-v2-binary':''}),'二选一设置']),
@@ -35,7 +37,7 @@ createApp({setup:()=>{usePasswordFeedback(passwordError,[password]);return()=>h(
   h('form',{},[h('input',{required:true,'aria-label':'必填'}),h('button',{type:'submit',id:'invalid'},'提交必填表单')]),
   h('form',{novalidate:true,onSubmit:(e:Event)=>e.preventDefault()},[h('button',{type:'submit',id:'client-invalid'},'未通过业务校验')]),
   h('div',{class:'thread',style:'height:180px;overflow:auto;width:360px;max-width:90vw;margin-top:30px;border:1px solid #aaa'},[
-    h('article',{class:'turn is-pending'},[h('div',{class:'answer'},[h('div',{class:'answer-heading'},'灯塔助手'),text.value?h(AnimatedReply,{text:text.value}):null])]),
+    h('article',{class:'turn is-pending'},[h('div',{class:'answer'},[h('div',{class:'answer-heading'},'灯塔助手'),h(AnimatedReply,{text:text.value})])]),
   ]),
   h('div',{id:'motion-chart',style:'max-width:700px;margin:32px auto'},[h(MotionChart,{title:'图表验收',trend:true,items:chartItems.value,onSelect:(_item:unknown,index:number)=>test.chartSelection=index})]),
   h('div',{id:'learning-chart',style:'max-width:700px;margin:32px auto'},[h(LearningDashboard,{data:{summary:{answered:4,attempt_count:4},today_summary:{},trend:[{date:'2026-10-01',people:2,accuracy:50}],people:[]}})]),

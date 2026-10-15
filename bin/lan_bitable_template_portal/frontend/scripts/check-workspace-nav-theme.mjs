@@ -37,8 +37,10 @@ try{
   const assertHeaderSeam=async()=>{
     const header=page.locator('.v2-header'),sidebar=page.locator('.v2-sidebar');
     const box=await header.boundingBox(),brand=await page.locator('.v2-brand').boundingBox();
+    assert.equal(Math.round(box.height),page.viewportSize().width>760?60:56,'compact header height');
     assert(Math.abs(brand.y+brand.height/2-(box.y+box.height/2))<=1,'brand is vertically centered without the old fade padding');
-    assert.equal(await header.evaluate(el=>getComputedStyle(el,'::after').content),'none','no fade strip over differently colored sidebar and content');
+    const fade=await header.evaluate(el=>{const style=getComputedStyle(el,'::after');return {height:style.height,mask:style.maskImage,pointer:style.pointerEvents};});
+    assert.equal(fade.height,'14px');assert.match(fade.mask,/linear-gradient/);assert.equal(fade.pointer,'none','bottom fade never blocks the header or content');
     if(await sidebar.isVisible()){
       const side=await sidebar.boundingBox(),head=await page.locator('.v2-nav-head').boundingBox(),main=await page.locator('.v2-main').boundingBox();
       assert(Math.abs(box.y+box.height-side.y)<=1,'sidebar starts exactly at header bottom');
@@ -96,6 +98,12 @@ try{
       await page.getByRole('button',{name:'收起导航',exact:true}).click();await page.waitForTimeout(250);
       assert.equal(Math.round((await sidebar.boundingBox()).width),64,'collapsed navigation is consistent');
       assert(!await sidebar.evaluate(el=>el.scrollWidth>el.clientWidth+1),'collapsed controls fit sidebar');
+      assert.equal(await sidebar.locator('.n-menu-item-group-title:visible').count(),0,'collapsed navigation must not wrap group titles between icons');
+      const iconCenters=await sidebar.locator('.n-menu-item-content__icon').evaluateAll(items=>items.map(el=>{const r=el.getBoundingClientRect();return r.x+r.width/2;}));
+      assert(iconCenters.length>0&&iconCenters.every(x=>Math.abs(x-sideBox.x-32)<=1),'collapsed icons remain centered');
+      await sidebar.locator('.n-menu-item-content').first().hover();
+      await page.locator('.n-tooltip').filter({hasText:'个人工作台'}).waitFor();
+      await page.getByRole('heading',{name:'界面验收人员',exact:true}).hover();
       await assertHeaderSeam();
       await page.screenshot({path:path.join(output,'theme-collapsed-'+width+'.png')});
       await page.getByRole('button',{name:'展开导航',exact:true}).click();await page.waitForTimeout(250);

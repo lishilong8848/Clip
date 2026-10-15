@@ -1,0 +1,31 @@
+@media screen and (forced-colors: none) {
+  html.workspace-v2[data-v2-theme=dark] {
+    color-scheme:dark;
+    --v2-bg:#16191d;--v2-ink:#edf0f4;--v2-muted:#bec5cf;--v2-border:#414952;--v2-blue:#83baff;
+    --v2-scroll-thumb:#596575;--v2-scroll-hover:#8895a6;
+    --cf-text:#edf0f4;--cf-muted:#bec5cf;--cf-surface:#202429;--cf-surface-soft:#252a31;--cf-border:#414952;
+    --cf-brand-blue:#83baff;--cf-danger:#f38f99;--cf-warning:#efbd70;--cf-success:#65cda9;
+  }
+  html.workspace-v2[data-v2-theme=dark] :is(.v2-shell,.v2-shell.is-collapsed) {
+    --v2-nav-top:color-mix(in srgb,var(--v2-nav-color) 20%,#12161c);
+    --v2-nav-bottom:color-mix(in srgb,var(--v2-nav-color) 12%,#12161c);
+    --v2-nav-side:color-mix(in srgb,var(--v2-nav-color) 7%,#202429);
+    --v2-nav-side-bottom:#1d2126;
+    --v2-nav-text:#e2eaf4;
+    --v2-nav-active:color-mix(in srgb,var(--v2-nav-color) 25%,#29313c);
+  }
+  html.workspace-v2[data-v2-theme=dark] .v2-theme-picker { color:var(--v2-ink); }
+  html.workspace-v2[data-v2-theme=dark] .v2-theme-picker>p { color:#efbd70; }
+  html.workspace-v2[data-v2-theme=dark] .v2-theme-swatches>button[aria-pressed=true] { box-shadow:0 0 0 2px #292e35,0 0 0 4px #a4cfff; }
+  html.workspace-v2[data-v2-theme=dark] .v2-shell>.v2-sidebar .v2-nav-search {
+    --n-color:#191e25!important;--n-color-focus:#222a34!important;--n-text-color:#edf0f4!important;
+    --n-placeholder-color:#aeb9c8!important;--n-caret-color:#83baff!important;
+  }
+  html.workspace-v2[data-v2-theme=dark] :is(input,textarea,select) { color-scheme:dark; }
+  html.workspace-v2[data-v2-theme=dark] :is(.signature-pad,.signature-canvas,.print-sheet) { color-scheme:light; background:#fff;color:#17202c; }
+  html.workspace-v2[data-v2-theme=dark] .v2-watermark { opacity:.035; }
+}
+@media print {
+  html.workspace-v2[data-v2-theme=dark] { color-scheme:light;--v2-ink:#1d1d1f;--v2-muted:#636366;--v2-bg:#fff;--v2-border:#dedee3; }
+  html.workspace-v2[data-v2-theme=dark] :is(.v2-chart-canvas,.v2-learning-trend) svg text { fill:#24312e!important; }
+}

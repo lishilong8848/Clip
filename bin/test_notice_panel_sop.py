@@ -71,6 +71,10 @@ class FakeAuth:
             return "building"
         return self.user_roles.get(str(oid or ""), "admin")
 
+    def account_profile(self, oid):
+        return {"role": self.role_for_open_id(oid), "scopes": self.scopes_for_open_id(oid),
+                "modules": [] if oid in self.disabled else list(panel.NOTICE_MODULES)}
+
     def _open_id_explicitly_disabled(self, oid):
         return oid in self.disabled
 

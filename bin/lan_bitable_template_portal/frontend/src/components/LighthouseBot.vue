@@ -12,7 +12,7 @@ import { isWeatherShape } from '../vendor/bloub/engine/skins';
 import type { BotAppearance, BotMood } from '../botAppearance';
 import { readIconWeather, weatherScene, weatherClock, type IconWeather } from '../botWeather';
 
-const props = withDefaults(defineProps<{ appearance: BotAppearance; interactive?: boolean; position?: { x: number; y: number } | null; mood?: BotMood; visible?: boolean; motionKey?: string }>(), { interactive: false, position: null, mood: 'idle', visible: true, motionKey: '' });
+const props = withDefaults(defineProps<{ appearance: BotAppearance; interactive?: boolean; position?: { x: number; y: number } | null; mood?: BotMood; visible?: boolean; motionKey?: string; viewportTop?: number }>(), { interactive: false, position: null, mood: 'idle', visible: true, motionKey: '' });
 const emit = defineEmits<{ moved: [position: { x: number; y: number }] }>();
 const host = ref<HTMLElement | null>(null), ready = ref(false), resumed = ref(false);
 let bot: BloubBot | undefined, disposed = false;
@@ -76,11 +76,12 @@ async function reposition(animate = true): Promise<void> {
   if (disposed || !bot || !host.value || !props.interactive) return;
   const anchor = (host.value.closest('.lighthouse-launcher') || host.value).getBoundingClientRect();
   const base = !props.appearance.snap_back && props.position ? props.position : { x: anchor.left, y: anchor.top };
-  const top = isWeatherShape(props.appearance.shape) ? 12 + props.appearance.size * .3 : 12;
+  const top = bot.topBoundary;
   const position = { x: Math.max(12, Math.min(base.x, window.innerWidth - props.appearance.size - 12)), y: Math.max(top, Math.min(base.y, window.innerHeight - props.appearance.size - 12)) };
   if (animate) bot.moveTo(position); else bot.setPosition(position);
 }
 watch(() => props.appearance, update, { deep: true });
+watch(() => props.viewportTop, value => { bot?.setTopBoundary(value); void reposition(); });
 watch(() => [props.appearance.shape, props.appearance.weather_city], () => { setMood(); scheduleWeather(); });
 watch(() => props.mood, setMood);
 watch(reducedMotion, setMood);
@@ -106,6 +107,7 @@ onMounted(() => {
     size: value.size, color: value.color, shape: value.shape, expression: 'neutre',
     paper: '#ffffff', autoplay: true, cycle: IDLE_CYCLE, draggable: props.interactive, reactOnClick: props.interactive,
     snapBack: value.snap_back,
+    viewportTop: props.viewportTop,
     dragTarget: props.interactive ? host.value.parentElement ?? undefined : undefined,
     onDragEnd: (position, moved) => { if (!moved) return; if (!props.appearance.snap_back) emit('moved', position); void reposition(); },
   });

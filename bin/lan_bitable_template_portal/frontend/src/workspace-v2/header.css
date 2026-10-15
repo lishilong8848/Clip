@@ -1,7 +1,7 @@
 /* The same accent drives a dark header and a lighter, readable sidebar. */
 .workspace-v2 .v2-shell,
 .workspace-v2 .v2-shell.is-collapsed {
-  --head-height: 74px;
+  --head-height: 60px;
   --v2-nav-color: #2364d2;
   --v2-nav-top: color-mix(in srgb, var(--v2-nav-color) 36%, #0c1523);
   --v2-nav-bottom: color-mix(in srgb, var(--v2-nav-color) 22%, #0c1523);
@@ -64,8 +64,19 @@
   isolation: isolate;
   background: linear-gradient(115deg, var(--v2-nav-top), var(--v2-nav-bottom));
   color: #f4f8ff;
-  border-bottom-color: #ffffff1f;
+  border-bottom-color: transparent;
   box-shadow: none;
+}
+.workspace-v2 .v2-header::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 14px;
+  z-index: -1;
+  pointer-events: none;
+  /* Fade into each column's own surface without covering its controls. */
+  background: linear-gradient(90deg, var(--v2-nav-side) var(--nav-width, 0px), var(--v2-bg) 0);
+  mask-image: linear-gradient(transparent, #0000000a 20%, #00000029 40%, #00000061 60%, #000000b3 80%, #000000e6 90%, #000);
 }
 .workspace-v2 .v2-header::before {
   content: "";
@@ -146,8 +157,9 @@
 .workspace-v2 .v2-shell > .v2-sidebar :is(.n-input__prefix,.n-base-clear) { color: #627080; }
 .workspace-v2 .v2-shell > .v2-sidebar :focus-visible { outline: 2px solid var(--v2-nav-text); outline-offset: 2px; }
 @media (max-width: 760px) {
+  .workspace-v2 .v2-header::after { background: var(--v2-bg); }
   .workspace-v2 .v2-shell,
-  .workspace-v2 .v2-shell.is-collapsed { --head-height: 68px; }
+  .workspace-v2 .v2-shell.is-collapsed { --head-height: 56px; }
   .workspace-v2 .v2-header { gap: 10px; }
   .workspace-v2 .v2-header .v2-brand { gap: 10px; }
   .workspace-v2 .v2-header .v2-brand img { width: 68px; height: 27px; padding: 0; }

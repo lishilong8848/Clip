@@ -1,4 +1,7 @@
 button[data-v2-action-position="relative"]{position:relative}
+.workspace-v2 :is(.n-button,.btn,button.map-cell):not([data-v2-action]){transition:scale 160ms ease-out,background-color 160ms ease-out,border-color 160ms ease-out}
+.workspace-v2 :is(.n-button,.btn,button.map-cell):not([data-v2-action]):not(:disabled):not([aria-disabled="true"]):active{scale:.98}
+@media(prefers-reduced-motion:reduce){.workspace-v2 :is(.n-button,.btn,button.map-cell):not([data-v2-action]){transition:none;scale:1!important}}
 button[data-v2-action]{isolation:isolate;overflow:hidden!important;clip-path:inset(0 0 round 6px);transition:clip-path 300ms ease-in-out,background-color 300ms ease-in-out!important}
 button[data-v2-action="pending"],button[data-v2-action="success"],button[data-v2-action="error"]{color:transparent!important;clip-path:inset(max(0px,calc((100% - var(--v2-action-size))/2)) max(0px,calc((100% - var(--v2-action-size))/2)) round 100px)}
 button[data-v2-action]>:not(.v2-action-feedback){opacity:0!important;transition:opacity 120ms ease!important}
@@ -11,8 +14,6 @@ button[data-v2-action="error"]{background:#bd3c48!important;border-color:transpa
 .v2-action-feedback{position:absolute!important;left:50%;top:50%;transform:translate(-50%,-50%);display:grid;place-items:center;width:26px;height:26px;color:#087f74;pointer-events:none}
 .workspace-v2 button.map-cell:active{filter:brightness(.85)}
 .workspace-v2 button.map-cell.v2-rack-selected{outline:3px solid #0071e3;outline-offset:2px;z-index:2;box-shadow:0 0 0 4px #ffffffa6}
-.workspace-v2 .map-cell>.v2-action-feedback{width:min(26px,100%);height:min(26px,100%)}
-.workspace-v2 .map-cell>.v2-action-feedback>svg{width:80%;height:80%}
 [data-v2-action="pending"]>.v2-action-feedback>svg{animation:v2-button-spin .8s linear infinite}
 [data-v2-action="success"]>.v2-action-feedback,[data-v2-action="error"]>.v2-action-feedback{color:white}
 [data-v2-action="success"]>.v2-action-feedback>svg{stroke-dasharray:36;stroke-dashoffset:36;animation:v2-check-draw .28s ease-out forwards}

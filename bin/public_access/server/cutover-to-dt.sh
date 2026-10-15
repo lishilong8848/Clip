@@ -40,4 +40,4 @@ nginx -s reload
 touch "$base/domain-dt-active"
 trap - ERR
 systemctl disable --now clipflow-domain-cutover.timer
-echo 'dt.sjhl.online is active; the old domain redirects to it.'
+echo 'dt.sjhl.online is active; the old portal domain is retired (HTTP 410).'

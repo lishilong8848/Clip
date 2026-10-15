@@ -31,11 +31,8 @@ export function adaptCabinetBatchPage(source) {
 
 export function adaptCabinetPage(source) {
   let code=source.replaceAll('\r\n','\n');
-  const anchor='const seq = ++historySequence; void focusModal();';
-  if(code.split(anchor).length!==2)throw new Error('Cabinet drawer motion contract changed');
-  code=code.replace('<script setup lang="ts">','<script setup lang="ts">\nimport { trackButtonPresentation } from "../workspace-v2/actionMotion";');
   const selected=':class="{ found: cell.rack && mapSearch.toUpperCase() === cell.rack }"';
   if(code.split(selected).length!==2)throw new Error('Cabinet map selection contract changed');
   code=code.replace(selected,':class="{ found: cell.rack && mapSearch.toUpperCase() === cell.rack, \'v2-rack-selected\': cell.rack && historyOpen && historyRoom === currentRoom && historyRack === cell.rack }" :aria-pressed="cell.rack ? historyOpen && historyRoom === currentRoom && historyRack === cell.rack : undefined"');
-  return code.replace(anchor,anchor+'\n  trackButtonPresentation(nextTick());');
+  return code;
 }

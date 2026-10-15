@@ -39,7 +39,7 @@ finally:test.tmp.cleanup()
 assert.equal(generated.status, 0, generated.stderr);
 const fixtures = JSON.parse(generated.stdout);
 const helper=await build({entryPoints:[path.join(root,'src/workspace-v2/noticeForm.ts')],bundle:true,write:false,format:'iife',globalName:'noticeTest'});
-const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
+const server = await preview({ root, ...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}), logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 const errors = [], writes = [], oldPages = [], entry = '/assets/workspace-v2/index.html';
@@ -106,7 +106,7 @@ try {
     for (const width of index === 0 ? [1440,1920,360,390,430] : [1366]) {
       await page.setViewportSize({ width, height: width < 700 ? 844 : 1000 });
       await page.screenshot({ path: path.join(output, `${process.argv.includes('--baseline') ? 'before' : 'after'}-${kind}-${width}.png`), fullPage: true });
-      assert.equal(await page.locator('.v2-notice-list:visible').first().evaluate(el => el.getBoundingClientRect().top < (innerWidth < 700 ? 500 : 380)), true, 'tasks appear in the first viewport');
+      assert.equal(await page.locator('.v2-notice-list:visible .v2-notice-entry').first().evaluate(el => {const box=el.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight-(innerWidth<=760?80:0);}), true, 'the first task is fully visible without scrolling');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
       assert.equal(await page.locator('.v2-context').count(),0,'building selection stays in the notice toolbar');
       if(width>760){const columns=await page.locator('.v2-notice-section').evaluateAll(els=>els.map(el=>el.getBoundingClientRect().toJSON()));assert.equal(columns.length,2);assert(Math.abs(columns[0].top-columns[1].top)<2);assert(columns[1].left>=columns[0].right,'planned and ongoing appear side by side');}
@@ -127,12 +127,16 @@ try {
     const footerBox=await page.locator('.v2-notice-editor-footer').boundingBox();
     assert(footerBox.y+footerBox.height<=page.viewportSize().height+1,'editor actions must remain inside the viewport');
     await page.setViewportSize({width:1366,height:768});
-    const otherFields=page.getByRole('button',{name:'展开其它字段',exact:true});if(await otherFields.count())await otherFields.click();
+    assert.equal(await page.getByRole('button',{name:'展开其它字段',exact:true}).count(),0,'all notice fields are shown directly');
+    assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0,'editing does not require switching sections');
     await page.waitForTimeout(100);
-    const fit=await page.locator('.v2-notice-handling>.n-card-content').evaluate(el=>({height:el.clientHeight,scroll:el.scrollHeight}));
-    assert(fit.scroll<=fit.height+2,kind+' expanded editor must fit the screen without outer scrolling: '+JSON.stringify(fit));
-    const bounds=await page.locator('.v2-notice-page-fields .v2-notice-field-grid').boundingBox();
-    const actions=await page.locator('.v2-notice-editor-footer').boundingBox();assert(bounds.y+bounds.height<=actions.y+2,kind+' fields must not overlap actions');
+    const body=page.locator('.v2-notice-handling>.n-card-content');
+    assert.equal(await body.evaluate(el=>getComputedStyle(el).overflowY),'auto','one body scrolls through all notice information');
+    const bounds=await body.boundingBox();
+    const actions=await page.locator('.v2-notice-editor-footer').boundingBox();assert(bounds.y+bounds.height<=actions.y+2,kind+' scrolling body stays above fixed actions');
+    await page.locator('[data-notice-section=relations]').scrollIntoViewIfNeeded();
+    assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible(),'related-record tools are immediately accessible on the same page');
+    await body.evaluate(el=>el.scrollTo({top:0}));
     assert.equal(await page.locator('.v2-notice-page-fields .n-pagination').count(),0,'notice fields never paginate');
     await page.screenshot({ path: path.join(output, `form-${kind}.png`), fullPage: true });
     await page.locator('.v2-notice-editor-footer').getByRole('button', { name: '关闭', exact: true }).click();

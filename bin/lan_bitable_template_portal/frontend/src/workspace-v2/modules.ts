@@ -50,7 +50,8 @@ export function moduleForRoute(url: URL): string {
 }
 export function moduleUrl(module: ModuleEntry, scope: string): string {
   const url = new URL(module.path, window.location.origin);
-  if (!['accounts', 'assistant', 'knowledge', 'links', 'life_guide', 'signatures', 'handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
+  // The generic notice entry uses its authorized default, not another module's last filter.
+  if (!['notices', 'accounts', 'assistant', 'knowledge', 'links', 'life_guide', 'signatures', 'handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
   return url.pathname + url.search;
 }
 export function beijingDate(): string {

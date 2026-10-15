@@ -1,7 +1,7 @@
 import { h, render } from 'vue';
 import { Check, LoaderCircle, X } from 'lucide-vue-next';
 
-type Action = { button:HTMLButtonElement; feedback:HTMLElement; started:number; pending:number; observed:boolean; succeeded:boolean; failed:boolean; waiting:boolean; timer:number; finished:boolean; presentation?:boolean; minimum:number };
+type Action = { button:HTMLButtonElement; feedback:HTMLElement; started:number; pending:number; observed:boolean; succeeded:boolean; failed:boolean; waiting:boolean; timer:number; finished:boolean; minimum:number };
 const actions=new Map<HTMLButtonElement,Action>(),jobs=new Map<string,Action>();
 let current:Action|undefined;
 const reduced=()=>window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -39,15 +39,9 @@ function result(action:Action,value:any){
 }
 function observe(action:Action){action.observed=true;action.pending++;}
 function completeRequest(action:Action){action.pending--;if(action.failed&&action.button.dataset.v2Action){window.clearTimeout(action.timer);settle(action);}}
-export function trackButtonRequest<T>(promise:Promise<T>):Promise<T>{
-  const owner=current?.presentation?undefined:current;if(owner)observe(owner);
+export function trackButtonRequest<T>(promise:Promise<T>,method='POST'):Promise<T>{
+  const owner=['GET','HEAD','OPTIONS'].includes(method.toUpperCase())?undefined:current;if(owner)observe(owner);
   return promise.then(data=>{const task=jobs.get(String((data as any)?.job_id||''));if(task)result(task,data);if(owner)result(owner,data);return data;},error=>{if(owner)owner.failed=true;throw error;}).finally(()=>{if(owner)completeRequest(owner);});
-}
-export function trackButtonPresentation(promise:Promise<unknown>):void{
-  const owner=current;if(!owner)return;
-  // Opening a drawer completes at render; its data reads keep their own loading feedback.
-  owner.presentation=true;owner.minimum=300;observe(owner);
-  void promise.then(()=>result(owner,{ok:true}),()=>{owner.failed=true;}).finally(()=>completeRequest(owner));
 }
 export function installActionMotion(doc:Document=document):()=>void{
   const changed=(event:Event)=>{const input=event.target as HTMLInputElement;if(input?.type==='checkbox'&&!input.disabled)input.dataset.v2Toggled='true';};
@@ -56,7 +50,8 @@ export function installActionMotion(doc:Document=document):()=>void{
   if(nativeRequest&&view){
     // Observe the existing iframe transport; request URLs, bodies and responses are unchanged.
     view.fetch=function(...args:Parameters<typeof fetch>){
-      const owner=current;if(owner)observe(owner);
+      const method=args[1]?.method||(args[0] instanceof view.Request?args[0].method:'GET');
+      const owner=['GET','HEAD','OPTIONS'].includes(method.toUpperCase())?undefined:current;if(owner)observe(owner);
       return nativeRequest.apply(view,args).then(response=>{
         if(owner&&!response.ok)owner.failed=true;
         if(response.headers.get('content-type')?.includes('application/json')&&(owner||jobs.size)){
@@ -70,7 +65,9 @@ export function installActionMotion(doc:Document=document):()=>void{
     const check=(event.target as Element)?.closest?.('[role=checkbox]') as HTMLElement|null;
     if(check&&check.getAttribute('aria-disabled')!=='true')check.dataset.v2Toggled='true';
     const button=(event.target as Element)?.closest?.('button') as HTMLButtonElement|null;
-    if(!button||button.disabled||button.getAttribute('aria-disabled')==='true'||button.closest('[role=checkbox],[role=switch],[data-v2-navigation],.login-tabs,.pwd-form')||reduced())return;
+    if(!button||button.disabled||button.getAttribute('aria-disabled')==='true'||button.closest('[role=checkbox],[role=switch],[data-v2-navigation],.login-tabs,.pwd-form,.assistant-launcher,.lighthouse-launcher')||reduced())return;
+    // Only final submissions opt in; navigation, selection and reads keep their own feedback.
+    if(!button.hasAttribute('data-v2-submit')&&!(button.type==='submit'&&button.form))return;
     if(button.type==='submit'&&button.form&&!button.form.noValidate&&!button.form.checkValidity())return;
     if(actions.has(button)){event.preventDefault();event.stopImmediatePropagation();return;}
     const feedback=doc.createElement('span');feedback.className='v2-action-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-label','处理中');

@@ -353,6 +353,34 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def test_list_warning_uses_existing_threshold_and_local_previous_period(self) -> None:
+        cases = [(100, 150, False), (100, 150.1, True), (100, 50, False),
+                 (100, 49.9, True), (0, 1, True), (0, 0, False),
+                 (100, None, False), (None, 200, False)]
+        rows = []
+        for index, (old, new, _) in enumerate(cases):
+            meter = f"水表{index}"
+            rows.extend([
+                _record(f"rec_previous_{index}", "A", "2026-09-30", meter=meter, meter_value=old),
+                _record(f"rec_current_{index}", "A", "2026-10-15", meter=meter, meter_value=new),
+                _record(f"rec_other_building_{index}", "B", "2026-10-14", meter=meter, meter_value=999),
+                _record(f"rec_other_shift_{index}", "A", "2026-10-14", meter=meter, shift="夜", meter_value=999),
+                _record(f"rec_other_frequency_{index}", "A", "2026-10-14", meter=meter, frequency="月", meter_value=999),
+            ])
+        self.store.replace_water_consumption_snapshot(app_token="app", table_id="table", fields=[], options={}, records=rows)
+        self.service.ensure_water_consumption_snapshot = Mock()
+        self.service.water_consumption_refresh_running = Mock(return_value=False)
+        result = self.service.list_water_consumption_records(scope="A", start_date="2026-10-15", end_date="2026-10-15")
+        self.assertEqual(result["total"], len(cases))
+        by_id = {row["record_id"]: row for row in result["records"]}
+        for index, (old, new, expected) in enumerate(cases):
+            row = by_id[f"rec_current_{index}"]
+            self.assertEqual(row["large_change"]["requires_confirmation"], expected)
+            self.assertEqual(row["large_change"]["old_value"], old)
+            self.assertEqual(row["large_change"]["new_value"], new)
+            self.assertNotIn("large_change", self.store.get_water_consumption_record(row["record_id"]))
+        self.service._water_consumption_fields.assert_not_called()
+
     def test_create_writes_uploaded_photo_token_once_and_replays(self) -> None:
         self.service._water_upload_staged_images = Mock(
             return_value=(["photo-token-1"], ["upload-1"])

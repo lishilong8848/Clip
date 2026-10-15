@@ -1,5 +1,22 @@
 import { parse } from '@vue/compiler-sfc';
 
+export function portalFloatingControls(source) {
+  const controls=new Set(['NSelect','NTreeSelect','NCascader','NAutoComplete','NDatePicker','NTimePicker','NColorPicker','NDropdown','NPopover','NPopconfirm','NTooltip']);
+  if(!Array.from(controls).some(tag=>source.includes('<'+tag)))return source;
+  const {descriptor}=parse(source),edits=[];
+  function visit(node,inNativeDialog=false){
+    inNativeDialog ||= node.tag==='dialog';
+    if(node.type===1&&controls.has(node.tag)&&!inNativeDialog&&!node.props.some(p=>p.type===6&&p.name==='to'||p.type===7&&p.name==='bind'&&(!p.arg||!p.arg.isStatic||p.arg.content==='to'))){
+      edits.push(node.loc.start.offset+1+node.tag.length);
+    }
+    for(const child of node.children||[])visit(child,inNativeDialog);
+  }
+  visit(descriptor.template?.ast||{});
+  // Naive UI otherwise mounts menus inside the modal card's clipping boundary.
+  for(const offset of edits.sort((a,b)=>b-a))source=source.slice(0,offset)+' :to="true"'+source.slice(offset);
+  return source;
+}
+
 export function markBinaryControls(source) {
   if(!source.includes('checkbox'))return source;
   const {descriptor}=parse(source),edits=[];

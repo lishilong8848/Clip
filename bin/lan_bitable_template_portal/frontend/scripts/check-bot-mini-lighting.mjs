@@ -20,7 +20,7 @@ import {miniLighting,moonPath} from '/src/vendor/bloub/weatherLighthouseMini.ts'
 import {lunarMoon} from '/src/lunarMoon.ts';
 const start=Date.UTC(2026,9,15)/1000-8*3600;
 function scene(hour){const now=start+hour*3600;return weatherScene({available:true,city:'南通',description:'多云',date:'2026-10-15',fetched_at:now,sunrise:start+6*3600,sunset:start+18*3600},now);}
-window.fixture={bots:[],scene,miniLighting,moonPath,lunarMoon};
+window.fixture={bots:[],scene,miniLighting,moonPath,lunarMoon,BloubBot,weatherScene};
 for(const [hour,title,time] of [[3,'凌晨','03:00'],[6.2,'日出','06:12'],[12,'白天','12:00'],[17.75,'日落','17:45'],[18.6,'暮色','18:36'],[22,'夜晚','22:00']]){
  const item=document.createElement('article');item.dataset.hour=hour;
  const host=document.createElement('div');host.className='scene';item.append(host);
@@ -130,6 +130,25 @@ try {
   assert.equal(geometry[0].d, geometry[4].d, 'wave loop joins without a jump');
   assert(Math.max(...geometry.map(sample => sample.points[0])) - Math.min(...geometry.map(sample => sample.points[0])) > 6, 'wave heights visibly rise and fall');
   assert.notEqual((geometry[1].points[0] - geometry[0].points[0]).toFixed(2), (geometry[1].points[1] - geometry[0].points[1]).toFixed(2), 'crests propagate instead of translating a rigid line');
+  const fadedEdges = await page.locator('.weather-lighthouse-mini').first().evaluate(async root => {
+    const result = [];
+    for (const wave of root.querySelectorAll('.wl-waves path')) {
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('width', '380'); svg.setAttribute('height', '90'); svg.setAttribute('viewBox', '190 330 380 90');
+      svg.append(root.querySelector('defs').cloneNode(true));
+      const copy = wave.cloneNode(true), style = getComputedStyle(wave), box = wave.getBBox();
+      copy.style.d = style.d; copy.style.animation = 'none'; copy.setAttribute('fill', 'none'); copy.setAttribute('stroke', '#000');
+      svg.append(copy);
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type:'image/svg+xml'}));
+      const image = new Image(); image.src = url; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = 380; canvas.height = 90;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0); URL.revokeObjectURL(url);
+      const alpha = x => Math.max(...Array.from({length:90}, (_, y) => ctx.getImageData(Math.round(x - 190), y, 1, 1).data[3]));
+      result.push({left:alpha(box.x + 1),right:alpha(box.x + box.width - 1),center:alpha(380)});
+    }
+    return result;
+  });
+  assert(fadedEdges.every(edge => edge.center > 20 && edge.left < edge.center * .15 && edge.right < edge.center * .15), 'every wave fades at both its own ends, without disappearing in the middle: ' + JSON.stringify(fadedEdges));
   const continuous = await page.evaluate(() => [6, 18, 24].map(hour => {
     const before = window.fixture.miniLighting(window.fixture.scene(hour - 1 / 3600));
     const after = window.fixture.miniLighting(window.fixture.scene(hour + 1 / 3600));
@@ -157,7 +176,70 @@ try {
   assert.equal(await wave.evaluate(el => getComputedStyle(el).d), reduced, 'reduced motion keeps a still water surface');
   await page.evaluate(() => window.fixture.bots.forEach(bot => bot.destroy()));
   assert.equal(await page.locator('.weather-lighthouse-mini').count(), 0);
+  const types = await page.evaluate(() => {
+    window.fixture.bots = [];
+    document.querySelector('h1').textContent = '雾屿灯塔 mini · 天气样式';
+    document.querySelector('#moon-gallery').remove();
+    const main = document.querySelector('main'); main.replaceChildren(); main.style.gridTemplateColumns = 'repeat(4, 230px)';
+    const base = Date.UTC(2026,9,15) / 1000 - 8 * 3600;
+    const types = [];
+    for (const [description, hour, title] of [['晴',12,'晴 · 白天'],['多云',10,'多云'],['阴',10,'阴'],['雾',10,'雾'],['大风',10,'风'],['小雨',10,'小雨'],['暴雨',10,'大雨'],['雷阵雨',10,'雷电'],['雪',10,'雪'],['台风',10,'台风'],['高温晴热',10,'高温 · 蒸腾纹影'],['晴',22,'晴 · 夜晚']]) {
+      const now = base + hour * 3600;
+      const scene = window.fixture.weatherScene({available:true,city:'南通',description,date:'2026-10-15',fetched_at:now,sunrise:base+6*3600,sunset:base+18*3600}, now);
+      types.push(scene.weather);
+      const item = document.createElement('article'), host = document.createElement('div'), label = document.createElement('p');
+      host.className = 'scene'; label.textContent = title; item.append(host, label); main.append(item);
+      const bot = new window.fixture.BloubBot(host,{shape:'weather-lighthouse-mini',size:168,autoplay:false,draggable:false,reactOnClick:false});
+      bot.setWeather(scene); bot.setActive(true); window.fixture.bots.push(bot);
+    }
+    const now = base + 10*3600;
+    types.push(window.fixture.weatherScene({available:true,city:'南通',description:'台风',date:'2026-10-14',fetched_at:now-86400},now).weather);
+    return types;
+  });
+  assert.deepEqual(types, ['clear','cloudy','overcast','fog','wind','rain','heavy-rain','storm','snow','typhoon','heat','clear','unknown'], 'weather follows fresh descriptions; strong wind is not a typhoon and stale data is not displayed');
+  const heatForecasts = await page.evaluate(() => {
+    const base=Date.UTC(2026,9,15)/1000-8*3600;
+    return [[12,'晴',35],[12,'多云',34],[22,'晴',38],[12,'雷阵雨',38]].map(([hour,description,maximum])=>{
+      const now=base+hour*3600;
+      return window.fixture.weatherScene({available:true,city:'南通',description,maximum,date:'2026-10-15',fetched_at:now},now).weather;
+    });
+  });
+  assert.deepEqual(heatForecasts,['heat','cloudy','clear','storm'],'daytime hot forecast produces heat; daytime maximum is not treated as nighttime temperature, nor does it hide thunderstorms');
+  await page.setViewportSize({width:1004,height:820}); await page.waitForTimeout(1400);
+  const heat = page.locator('[data-weather=heat] .wl-heat-wisp');
+  const heatBefore = await heat.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).transform));
+  await page.waitForTimeout(250);
+  assert.notDeepEqual(await heat.evaluateAll(nodes => nodes.map(node => getComputedStyle(node).transform)), heatBefore, 'heat wisps rise independently');
+  const randomHeat = await heat.evaluateAll(nodes => nodes.map(node => [node.style.getPropertyValue('--wl-heat-x'),node.style.animationDuration,node.style.animationDelay]));
+  assert.equal(new Set(randomHeat.map(value=>value[0])).size,4);
+  assert.equal(new Set(randomHeat.map(value=>value[1])).size,4);
+  const resetHeat = await heat.first().evaluate(node => {
+    const before = node.style.getPropertyValue('--wl-heat-x');
+    node.dispatchEvent(new AnimationEvent('animationiteration',{bubbles:true}));
+    return before !== node.style.getPropertyValue('--wl-heat-x');
+  });
+  assert(resetHeat, 'heat locations change only at invisible cycle boundaries');
+  const visibility = await page.locator('.weather-lighthouse-mini').evaluateAll(roots => roots.map(root => {
+    const style = selector => getComputedStyle(root.querySelector(selector));
+    return {weather:root.dataset.weather, sun:style('.wl-sun').visibility, clouds:style('.wl-clouds').opacity,
+      heat:style('.wl-heat').opacity, cyclone:style('.wl-typhoon').opacity, rain:style('.wl-rain').opacity,
+      heatRun:style('.wl-heat-wisp').animationPlayState, cycloneRun:style('.wl-cyclone').animationPlayState};
+  }));
+  assert(visibility.every(v => (v.heatRun === 'running') === (v.weather === 'heat') && (v.cycloneRun === 'running') === (v.weather === 'typhoon')), 'hidden weather effects do not keep animating');
+  assert.equal(visibility[2].sun,'hidden'); assert.equal(visibility[2].clouds,'1');
+  assert.equal(visibility[9].cyclone,'1'); assert.equal(visibility[9].rain,'1'); assert.equal(visibility[10].heat,'1');
+  // Capture the lightning during its lit phase, not its deliberately quiet interval.
+  await page.locator('[data-weather=storm] .wl-storm path').evaluate(node => {
+    const animation = node.getAnimations()[0], timing = animation.effect.getTiming();
+    animation.pause(); animation.currentTime = Number(timing.delay) + Number(timing.duration) * .84;
+  });
+  await page.screenshot({path:path.join(output,'weather-styles.png'),fullPage:true});
+  await page.evaluate(() => window.fixture.bots.forEach(bot => bot.setActive(false)));
+  assert.equal(await heat.first().evaluate(node=>getComputedStyle(node).animationPlayState),'paused');
+  await page.evaluate(() => window.fixture.bots.forEach(bot => {bot.setReducedMotion(true);bot.setActive(true);}));
+  assert.equal(await heat.first().evaluate(node=>getComputedStyle(node).animationPlayState),'paused');
+  await page.evaluate(() => window.fixture.bots.forEach(bot => bot.destroy()));
   assert.deepEqual(errors, []);
   assert.deepEqual(requests, [], 'rendering adds no business or weather requests');
-  console.log('PASS: lunar calendar/phase/cache, directed sunlight, six lighting periods, continuous colors, gradient clouds, opaque sun/moon, traveling waves, pause/reduced motion and cleanup.');
+  console.log('PASS: mini lighting, lunar phases, solar colors, wave edge pixels, weather gallery, randomized rising heat wisps, pause/reduced motion and cleanup.');
 } finally { await browser.close(); await server.close(); }

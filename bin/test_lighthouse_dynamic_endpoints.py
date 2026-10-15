@@ -120,9 +120,14 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeSopManager.vue",
-        line=54, kind="covered",
+        line=92, kind="covered",
         method_paths=[("DELETE", "/api/polling-sops/{param}/attachments/{param}")],
-        window=4, needles=["requestJson(attachmentPath(file)+'?expected_version='", "const attachmentPath=", "'/attachments/'", "method:'DELETE'"],
+        window=4, needles=["requestJson(attachmentPath(file)+'?expected_version='", "method:'DELETE'"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeSopManager.vue",
+            definition_marker="const attachmentPath=",
+            definition_needles=["'/api/polling-sops/'", "encodeURIComponent(draft.value!.sop_id)", "'/attachments/'", "encodeURIComponent(file.attachment_id)"],
+        ),
         note="新版 SOP 附件删除复用原接口及 expected_version,不是工单步骤办理。",
     ),
     dict(
