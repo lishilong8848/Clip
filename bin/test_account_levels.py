@@ -265,7 +265,7 @@ class AccountLevelTests(_TempDirTestCase):
             return {"restored": undo_id}
         async def exercise():
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
-                for action, code in (("start", 200), ("update", 200), ("end", 200), ("delete", 403)):
+                for action, code in (("start", 200), ("update", 200), ("end", 200), ("delete", 200)):
                     response = await client.post("/api/workbench-actions", json={"action": action, "scope": "A"})
                     self.assertEqual(response.status_code, code, response.text)
                     if code == 200:
@@ -281,6 +281,108 @@ class AccountLevelTests(_TempDirTestCase):
                 with patch.object(runtime.state_store, "get_notice_undo_action", return_value={"action_type": "update"}):
                     response = await client.post("/api/notice-undo/fixture/apply")
                     self.assertEqual(response.status_code, 200, response.text)
+        asyncio.run(exercise())
+
+    def test_notice_deletion_matches_handling_grants_without_global_delete_rights(self):
+        from lan_bitable_template_portal.account_policy import notice_delete_allowed
+        from lan_bitable_template_portal.module_access import NOTICE_MODULES
+        from lan_bitable_template_portal.workbench_lite import render_workbench_lite, extract_workbench_lite_fragments
+        for kind in NOTICE_MODULES:
+            for oid in (self.actor("AO")["open_id"], self.actor("AE")["open_id"], BUILDING_OPEN_ID_MAP["A"]):
+                profile = self.h.auth.account_profile(oid)
+                self.assertFalse(profile["can_delete_business"])
+                self.assertTrue(notice_delete_allowed(profile, kind))
+            row = {"active_item_id": "active-fixture", "target_record_id": "rec-fixture", "work_type": kind,
+                   "building_codes": ["A"], "title": "A楼隔离测试", "status": "开始"}
+            for modules, expected in (([kind], True), ([], False), (["event"], False)):
+                page = render_workbench_lite(payload={"ongoing": [row]},
+                    session={"user": self.actor("AO"), "role": "building", "can_delete_business": False, "allowed_modules": modules},
+                    scope="A", work_type=kind, active_item_id="active-fixture")
+                self.assertEqual('data-ongoing-delete-mode="remote"' in extract_workbench_lite_fragments(page)["detail"], expected)
+                self.assertEqual(notice_delete_allowed({"modules": modules, "scope_rules": ["A"]}, kind), expected)
+        self.assertFalse(notice_delete_allowed({"modules": list(NOTICE_MODULES), "scope_rules": []}, "maintenance"))
+        self.assertFalse(notice_delete_allowed(self.h.auth.account_profile(self.actor("AO")["open_id"]), "event"))
+
+    def test_notice_delete_endpoint_checks_login_scope_module_and_resolved_target(self):
+        import ast
+        from pathlib import Path
+        from clipflow_backend.main import FastAPIPortalController
+        from clipflow_backend.api_models import OngoingDeleteRequest
+        from lan_bitable_template_portal.identity_utils import normalize_notice_identity_payload
+        from lan_bitable_template_portal.module_access import module_denial
+
+        def current_session(request):
+            who = request.headers.get("x-fixture-user", "AO")
+            return {"user": self.actor(who)} if who != "anonymous" else None
+
+        def scope_check(session, scope):
+            if not self.h.auth.scope_allowed(session, scope):
+                raise PortalError("无权操作此楼栋")
+            return scope
+
+        def validate(payload, *, scope):
+            if payload.get("target_record_id") == "rec-other-floor":
+                raise PortalError("当前账号无权删除该楼栋的进行中通告。")
+            if payload.get("target_record_id") == "rec-other-module":
+                payload["work_type"] = "change"
+            if payload.get("target_record_id") == "rec-event":
+                payload["work_type"] = "event"
+
+        controller = SimpleNamespace(_current_session=current_session,
+            _read_json_request=FastAPIPortalController._read_json_request,
+            _authorized_scope_or_error=scope_check,
+            _auth_required_response=lambda: JSONResponse({"ok": False}, status_code=401),
+            _portal_error_response=lambda exc, **_: JSONResponse({"ok": False, "error": str(exc)}, status_code=403),
+            _json_ok=lambda request, session, data: JSONResponse({"ok": True, "data": data}),
+            _record_deletion_audit=Mock(), _deletion_business_type=lambda _: "维保", _deletion_scope=lambda _, scope: scope,
+            _deletion_record_name=lambda _: "隔离测试", _clear_read_cache=Mock(), _notify_qt_active_streams=Mock())
+        async def read_model(request, model):
+            return SimpleNamespace(to_payload=lambda: request.state.payload)
+        controller._read_model_request = read_model
+        execute = Mock(return_value={"ok": True, "remote_deleted": True, "local_cleanup_completed": True, "record_id": "rec-fixture"})
+        runtime = SimpleNamespace(auth_manager=self.h.auth, state_store=self.h.auth._state_store,
+            service=SimpleNamespace(validate_ongoing_delete_item=validate), execute_local_delete_active_item=execute,
+            clear_payload_cache=Mock())
+        source = Path(__file__).parent / "clipflow_backend/main.py"
+        node = copy.deepcopy(next(n for n in ast.walk(ast.parse(source.read_text(encoding="utf-8-sig")))
+                                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "ongoing_items_delete"))
+        node.decorator_list = []
+        namespace = {"self": controller, "Request": Request, "JSONResponse": JSONResponse, "Any": object,
+                     "asyncio": asyncio, "PortalRuntime": runtime, "OngoingDeleteRequest": OngoingDeleteRequest,
+                     "normalize_notice_identity_payload": normalize_notice_identity_payload}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), namespace)
+        app = FastAPI()
+        @app.middleware("http")
+        async def guard(request, call_next):
+            request.state.payload = await controller._read_json_request(request)
+            for policy in (module_denial, business_delete_denial):
+                denied = await policy(request, controller, runtime)
+                if denied is not None:
+                    return denied
+            return await call_next(request)
+        app.add_api_route("/api/ongoing-items/delete", namespace["ongoing_items_delete"], methods=["POST"])
+        permissions = self.h.auth._load_permissions_locked()
+        permissions["users"][self.actor("AO")["open_id"]].update(module_access_version=1, modules=["maintenance", "event"])
+        self.h.auth._save_permissions_locked(permissions)
+        async def exercise():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
+                for who, scope, kind, target, code in (
+                    ("AO", "A", "maintenance", "rec-fixture", 200),
+                    ("AO", "B", "maintenance", "rec-fixture", 403),
+                    ("AO", "A", "change", "rec-fixture", 403),
+                    ("AO", "A", "maintenance", "rec-other-floor", 403),
+                    ("AO", "A", "maintenance", "rec-other-module", 403),
+                    ("AO", "A", "maintenance", "rec-event", 403),
+                    ("anonymous", "A", "maintenance", "rec-fixture", 401)):
+                    before = execute.call_count
+                    response = await client.post("/api/ongoing-items/delete", headers={"x-fixture-user": who},
+                        json={"scope": scope, "work_type": kind, "target_record_id": target, "active_item_id": "active-fixture"})
+                    self.assertEqual(response.status_code, code, response.text)
+                    self.assertEqual(execute.call_count - before, int(code == 200))
+                permissions["users"][self.actor("AO")["open_id"]]["enabled"] = False
+                self.h.auth._save_permissions_locked(permissions)
+                denied = await client.post("/api/ongoing-items/delete", json={"scope": "A", "work_type": "maintenance"})
+                self.assertEqual(denied.status_code, 403, denied.text)
         asyncio.run(exercise())
 
     def test_cabinet_patch_and_retry_cannot_bypass_delete_whitelist(self):

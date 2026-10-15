@@ -47,7 +47,7 @@ for(const [file,adapt] of [['EventManagementPage.vue',adaptEventPeriodPage],['Ca
   if(file.startsWith('Event'))assert.match(result,/for \(const month of eventRange.value.months\)/);
   else {assert.match(result,/createMode = ref\('text'\)/);assert.match(source,/createMode = ref\('pdf'\)/);}
 }
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 const entry=origin+'/assets/workspace-v2/index.html';
 const browser=await chromium.launch({headless:true});

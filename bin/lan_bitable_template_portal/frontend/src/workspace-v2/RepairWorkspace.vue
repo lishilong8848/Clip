@@ -1,6 +1,6 @@
 <template>
   <RepairController v-bind="props" v-slot="{controller:r}">
-    <section class="repair-management-page v2-repair-workspace" data-v2-inline-feedback :style="{'--repair-row-height':r.v2RowHeight+'px'}" :class="{'has-detail':r.projectDrawerOpen,'repair-status-page':statusEntry}">
+    <section class="repair-management-page v2-repair-workspace" data-v2-inline-feedback :class="{'has-detail':r.projectDrawerOpen,'repair-status-page':statusEntry}">
       <header class="v2-repair-heading"><div><h1>检修办理</h1><p>维修项目与跟进</p></div><div class="v2-repair-actions">
         <NButton data-v2-navigation :disabled="r.loading||r.v2Writing" :loading="r.loading" @click="r.v2RefreshView"><RefreshCw :size="16" />刷新显示</NButton>
         <NDropdown trigger="click" :options="moreOptions" @select="value=>more(value,r)"><NButton data-v2-navigation aria-label="更多检修操作" :disabled="r.v2Writing"><Ellipsis :size="18" /></NButton></NDropdown>
@@ -19,20 +19,20 @@
       <NAlert v-else-if="r.repairHealthVisible" :type="r.repairHealthFailedCount?'warning':'info'" :bordered="false">{{r.repairHealthText}}<NButton text data-v2-navigation @click="r.openFailureCenter">查看任务</NButton><NButton v-if="r.repairHealthRepairableCount&&r.repairHealth?.can_repair" text :loading="r.integrityRepairing" @click="r.repairIntegrity">修复关联</NButton></NAlert>
       <NAlert v-if="r.messageText && !r.projectDrawerOpen && !r.v2RecordError" :type="tone(r.messageTone)" :bordered="false" role="status">{{r.messageText}}</NAlert>
       <div class="v2-repair-body">
-        <section class="v2-repair-list" aria-label="维修项目列表">
+        <section ref="listElement" class="v2-repair-list" aria-label="维修项目列表">
           <div v-if="r.loading && r.records.length" class="v2-repair-refreshing" role="status"><NSpin :size="15" />正在读取“{{r.v2StateLabel}}”，暂显示原列表</div>
-          <div :ref="r.v2SetRecordList" class="record-list" :aria-busy="r.loading">
+          <div class="record-list" :aria-busy="r.loading">
             <div v-if="r.loading&&!r.records.length" class="v2-repair-skeleton"><NSkeleton v-for="i in 5" :key="i" height="90px" :sharp="false" /></div>
             <NEmpty v-else-if="!r.records.length" :description="r.v2RecordError?'列表暂不可用，请重试':r.recordEmptyText" />
-            <div v-else class="record-virtual-spacer" :style="{height:r.recordVirtualTotalSize+'px'}">
-              <article v-for="row in r.virtualRecordRows" :key="r.recordVirtualKey(row)" class="record-row" :class="{active:r.selectedRecord?.record_id===r.recordAt(row.index).record_id,completed:r.repairRecordIsCompleted(r.recordAt(row.index)),'is-loading':r.loading}" :style="{transform:`translateY(${row.start}px)`}" tabindex="0" role="button" :aria-label="'打开维修项目：'+r.recordAt(row.index).title" @click="r.requestSelectRecord(r.recordAt(row.index),'followups')" @keydown.enter.prevent="r.requestSelectRecord(r.recordAt(row.index),'followups')" @keydown.space.prevent="r.requestSelectRecord(r.recordAt(row.index),'followups')">
-                <div class="v2-repair-row-copy"><strong :title="r.recordAt(row.index).title">{{r.recordAt(row.index).title || '未命名维修项目'}}</strong><div class="v2-repair-row-meta"><span>{{r.recordBuildingLabel(r.recordAt(row.index))}}</span><span>{{r.v2SpecialtyLabel(r.recordAt(row.index))}}</span><span><Clock3 :size="12" />{{r.recordFaultTimeLabel(r.recordAt(row.index))}}</span></div></div>
-                <div class="v2-repair-row-state"><NTag size="small" :bordered="false" :type="r.repairRecordStateLocked(r.recordAt(row.index))?'warning':r.repairRecordIsCompleted(r.recordAt(row.index))?'success':'info'">{{r.repairRecordStateLocked(r.recordAt(row.index))?'状态待核验':r.recordAt(row.index).workflow||'状态未填写'}}</NTag><div class="v2-repair-row-progress"><NProgress v-if="r.v2ProgressKnown(r.recordAt(row.index))" type="line" :height="4" :percentage="r.recordProgressPercent(r.recordAt(row.index))" :show-indicator="false" /><small>{{r.v2ProgressKnown(r.recordAt(row.index))?r.recordProgressPercent(r.recordAt(row.index))+'%':'进度待核验'}}</small></div></div>
-                <NButton data-v2-navigation secondary type="primary" size="small" class="record-followup-button" :disabled="r.loading||r.v2Writing" @click.stop="r.requestSelectRecord(r.recordAt(row.index),'followups')"><MessageSquarePlus :size="15" /><span>跟进 {{r.recordAt(row.index).followup_count ?? '—'}}</span></NButton>
+            <div v-else class="record-page-list">
+              <article v-for="record in r.records" :key="record.record_id" class="record-row" :class="{active:r.selectedRecord?.record_id===record.record_id,completed:r.repairRecordIsCompleted(record),'is-loading':r.loading}" tabindex="0" role="button" :aria-label="'打开维修项目：'+record.title" @click="r.requestSelectRecord(record,'followups')" @keydown.enter.prevent="r.requestSelectRecord(record,'followups')" @keydown.space.prevent="r.requestSelectRecord(record,'followups')">
+                <div class="v2-repair-row-copy"><strong :title="record.title">{{record.title || '未命名维修项目'}}</strong><div class="v2-repair-row-meta"><span>{{r.recordBuildingLabel(record)}}</span><span>{{r.v2SpecialtyLabel(record)}}</span><span><Clock3 :size="12" />{{r.recordFaultTimeLabel(record)}}</span></div></div>
+                <div class="v2-repair-row-state"><NTag size="small" :bordered="false" :type="r.repairRecordStateLocked(record)?'warning':r.repairRecordIsCompleted(record)?'success':'info'">{{r.repairRecordStateLocked(record)?'状态待核验':record.workflow||'状态未填写'}}</NTag><div class="v2-repair-row-progress"><NProgress v-if="r.v2ProgressKnown(record)" type="line" :height="4" :percentage="r.recordProgressPercent(record)" :show-indicator="false" /><small>{{r.v2ProgressKnown(record)?r.recordProgressPercent(record)+'%':'进度待核验'}}</small></div></div>
+                <NButton data-v2-navigation secondary type="primary" size="small" class="record-followup-button" :disabled="r.loading||r.v2Writing" @click.stop="r.requestSelectRecord(record,'followups')"><MessageSquarePlus :size="15" /><span>跟进 {{record.followup_count ?? '—'}}</span></NButton>
               </article>
             </div>
           </div>
-          <footer class="v2-repair-pager"><span v-if="r.v2RecordsReady">{{r.total}} 项</span><NPagination :page="r.recordPage" :page-count="r.recordPageCount" :disabled="r.loading||r.v2Writing" :page-slot="5" @update:page="value=>r.changeRecordPage(value-r.recordPage)" /></footer>
+          <footer class="v2-repair-pager"><span v-if="r.v2RecordsReady">{{r.total}} 项</span><NPagination :page="r.recordPage" :page-count="r.recordPageCount" :disabled="r.loading||r.v2Writing" :page-slot="5" @update:page="value=>changePage(r,value)" /></footer>
         </section>
         <Transition name="v2-repair-detail">
           <section v-if="r.projectDrawerOpen" :ref="r.v2SetDetail" class="repair-project-drawer v2-repair-detail" tabindex="-1" role="region" aria-labelledby="repair-detail-title" @keydown="r.handleProjectDrawerKeydown">
@@ -77,7 +77,7 @@
   </RepairController>
 </template>
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed,ref } from 'vue';
 import { NAlert,NButton,NCollapse,NCollapseItem,NDropdown,NEmpty,NInput,NPagination,NProgress,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTag } from 'naive-ui';
 import { Clock3,Ellipsis,FileText,MessageSquarePlus,Plus,RefreshCw,Save,Search,X } from 'lucide-vue-next';
 import RepairController from '../components/RepairManagementPage.vue';
@@ -95,6 +95,8 @@ const props=defineProps<{scope:string;scopeOptions:ScopeOption[];focusRecordId?:
 defineOptions({inheritAttrs:false});
 const noticeAllowed=computed(()=>canUseModule('repair'));
 const statusEntry=computed(()=>logicalUrl().pathname==='/repair-status');
+const listElement=ref<HTMLElement|null>(null);
+function changePage(r:any,value:number){r.changeRecordPage(value-r.recordPage);listElement.value?.scrollIntoView({block:'start',behavior:'auto'});}
 const moreOptions=[{key:'tasks',label:'任务中心'},{key:'sync',label:'同步飞书数据'}];
 const tone=(value:string)=>value==='failed'?'error':value==='warning'?'warning':'success';
 function expanded(value:unknown){return Array.isArray(value)&&value.length>0;}

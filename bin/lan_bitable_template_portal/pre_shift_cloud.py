@@ -10,7 +10,8 @@ APP_TOKEN = 'MliKbC3fXa8PXrsndKscmxjdn1g'
 TABLE_ID = 'tbloxEhpBIIW3Joq'
 SCHEMA = {'文本': 1, '检查标识': 1, '楼栋': 1, '检查日期': 5, '班次': 1, '提交人员': 1,
           '提交人员OpenID': 1, '提交时间': 5, '检查项数': 2, '无异常项数': 2,
-          '异常项数': 2, '检查明细': 1, '异常备注': 1, '清单版本': 1}
+          '异常项数': 2, '检查明细': 1, '异常备注': 1, '清单版本': 1,
+          '检查附件': 17, '交接班照片': 17}
 
 
 def read_roster(service, day):
@@ -67,6 +68,7 @@ class CheckCloud:
     def __init__(self, service):
         self.service = service
         self.schema_ready = False
+        self.on_file_token = None  # callable(file_id, token) to persist locally
 
     def request(self, method, path, body=None, params=None):
         from .portal_service import TOKEN_ERROR_CODES, external_real_write_guard, refresh_feishu_token
@@ -88,6 +90,15 @@ class CheckCloud:
                 raise CheckError(f"班前检查飞书请求未成功：code={payload['code']}")
             return payload['data']
         raise CheckError('飞书授权暂不可用。')
+
+    def _guard_real_write(self):
+        try:
+            from .portal_service import external_real_write_guard
+            guard = external_real_write_guard()
+            if not guard.get('real_write_allowed'):
+                raise CheckError(guard.get('reason') or '未允许飞书写入。')
+        except ImportError:
+            raise CheckError('未允许飞书写入。') from None
 
     def all(self, path, body=None):
         items, cursor, seen = [], '', set()
@@ -114,26 +125,78 @@ class CheckCloud:
                 self.request('POST', 'fields', {'field_name': name, 'type': kind})
         self.schema_ready = True
 
+    def _upload_files(self, tasks):
+        """Upload locally-staged attachments to bitable, reuse persisted tokens."""
+        tokens, seen, todo = {}, set(), []
+        for task in tasks:
+            for ref in task.get('_files', []):
+                file_id = ref['file_id']
+                if file_id in seen:
+                    continue
+                seen.add(file_id)
+                if ref.get('token'):
+                    tokens[file_id] = ref['token']
+                else:
+                    todo.append(ref)
+        if not todo:
+            return tokens
+        self._guard_real_write()
+        for ref in todo:
+            token = self.service._upload_bitable_file(
+                file_path=ref['path'], file_name=ref['name'], app_token=APP_TOKEN)
+            if not isinstance(token, str) or not token:
+                raise CheckError('附件上传未返回有效file_token。')
+            if self.on_file_token:
+                self.on_file_token(ref['file_id'], token)
+            tokens[ref['file_id']] = token
+        return tokens
+
+    def _file_ref(self, token, name, is_image):
+        # Bitable attachment write contract accepts only the file_token; name/type
+        # are read-only metadata (MIME types are not represented here). File names
+        # still appear in the 检查明细 text built by the caller.
+        return {'file_token': token}
+
     def upsert(self, key, tasks, record_id=''):
         if not self.schema_ready:
             self.ensure_schema()
         first = tasks[0]
+        tokens = self._upload_files(tasks)
+        checksum_files, handover_files, seen_handover = [], [], set()
         lines, abnormal, count = [], [], 0
         for task in tasks:
+            files_by_item = {}
+            for ref in task.get('_files', []):
+                token = tokens.get(ref['file_id'])
+                if token is None:
+                    continue
+                if ref['kind'] == 'handover':
+                    shift_key = ref.get('shift') or ''
+                    if shift_key not in seen_handover:
+                        seen_handover.add(shift_key)
+                        handover_files.append(self._file_ref(token, ref['name'], ref['is_image']))
+                else:
+                    checksum_files.append(self._file_ref(token, ref['name'], ref['is_image']))
+                    files_by_item.setdefault(ref['item_id'], []).append(ref['name'])
             lines.append(task['shift'] + '班 · ' + task['submitted'])
             for index, answer in enumerate(json.loads(task['answers']), 1):
                 count += 1
                 label = '异常' if answer['status'] == 'abnormal' else '无异常'
                 line = f"{index}. {answer['text']}：{label}" + (f"；{answer['note']}" if answer['note'] else '')
+                attached = files_by_item.get(answer['id'])
+                if attached:
+                    line += '（附件：' + '、'.join(attached) + '）'
                 lines.append(line)
                 if answer['status'] == 'abnormal':
                     abnormal.append(task['shift'] + '班 · ' + line)
-        fields = {'文本': f"{first['day']} {first['scope']}楼 {first['actor_name']} 班前检查", '检查标识': key, '楼栋': first['scope'], '检查日期': int(dt.datetime.combine(dt.date.fromisoformat(first['day']), dt.time(), TZ).timestamp() * 1000),
-            '班次': '、'.join(t['shift'] for t in tasks), '提交人员': first['actor_name'], '提交人员OpenID': first['actor_id'],
-            '提交时间': max(int(dt.datetime.fromisoformat(t['submitted']).timestamp() * 1000) for t in tasks),
-            '检查项数': count, '无异常项数': count - len(abnormal), '异常项数': len(abnormal),
-            '检查明细': '\n'.join(lines), '异常备注': '\n'.join(abnormal),
-            '清单版本': '、'.join(f"{t['shift']}班 v{t['definition_version']}" for t in tasks)}
+        fields = {'文本': f"{first['day']} {first['scope']}楼 {first['actor_name']} 班前检查", '检查标识': key, '楼栋': first['scope'],
+                  '检查日期': int(dt.datetime.combine(dt.date.fromisoformat(first['day']), dt.time(), TZ).timestamp() * 1000),
+                  '班次': '、'.join(t['shift'] for t in tasks), '提交人员': first['actor_name'], '提交人员OpenID': first['actor_id'],
+                  '提交时间': max(int(dt.datetime.fromisoformat(t['submitted']).timestamp() * 1000) for t in tasks),
+                  '检查项数': count, '无异常项数': count - len(abnormal), '异常项数': len(abnormal),
+                  '检查明细': '\n'.join(lines), '异常备注': '\n'.join(abnormal),
+                  '清单版本': '、'.join(f"{t['shift']}班 v{t['definition_version']}" for t in tasks),
+                  '检查附件': checksum_files, '交接班照片': handover_files}
         if not record_id:
             records = self.all('records/search', {'filter': {'conjunction': 'and', 'conditions': [
                 {'field_name': '检查标识', 'operator': 'is', 'value': [key]}]}})

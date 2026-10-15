@@ -4,7 +4,7 @@ import { personaFor } from '../persona';
 import { randomHexId } from '../../browserStorage';
 import { chartViews,type ChartView } from '../vipboard';
 
-export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift' | 'notice_actions' | 'repair_actions';
+export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift' | 'notice_actions' | 'repair_actions' | 'module';
 export type Widget = {
   id:string; kind:WidgetKind; title:string; module:string; scope:string;
   display:ChartView|'number'; period:'week'|'month'; metric:'ongoing'|'pending';
@@ -13,6 +13,7 @@ export type Widget = {
 };
 export type Layout = {version:1; widgets:Widget[]};
 export const catalog = [
+  {kind:'module',title:'完整业务模块',description:'在工作台直接使用业务列表、填写表单和原有操作',icon:'PanelsTopLeft'},
   {kind:'pre_shift',title:'班前检查',description:'本班检查清单、异常备注及提交状态',icon:'ClipboardList'},
   {kind:'tasks',title:'业务待办',description:'未开始、进行中与需关注事项',icon:'ClipboardList'},
   {kind:'shortcuts',title:'常用操作',description:'直接进入常用业务办理',icon:'LayoutGrid'},
@@ -48,14 +49,15 @@ const taskIds=[...NOTICE_IDS,'event','repair_management','daily','plan_convergen
 export function taskOptions(user:Dict){return modules.filter(m=>taskIds.includes(m.id)&&(user.modules||[]).includes(m.id)).map(m=>({value:m.id,label:m.label}));}
 export function allowedKind(kind:WidgetKind,user:Dict){
   const granted:string[]=user.modules||[];
+  if(kind==='module')return user.role!=='guest'&&navigationModules(granted).length>0;
   if(kind==='pre_shift')return user.role!=='guest'&&granted.length>0&&(mandatoryCheck(user)||['L0','L1'].includes(user.level)||['supervisor','manager'].includes(user.category));
   if(kind==='notice_actions')return user.role!=='guest'&&NOTICE_IDS.some(id=>granted.includes(id));
   if(kind==='repair_actions')return user.role!=='guest'&&granted.includes('repair_management');
   return kind==='shortcuts'?navigationModules(granted).length>0:kind==='tasks'?taskOptions(user).length>0:kind==='notices'?NOTICE_IDS.some(id=>granted.includes(id)):granted.includes(kind==='events'?'event':kind);
 }
 export function widget(kind:WidgetKind,user:Dict,overrides:Partial<Widget>={}):Widget{
-  const module=kind==='repair_actions'?'repair_management':kind==='notice_actions'?NOTICE_IDS.find(id=>(user.modules||[]).includes(id))||'':taskOptions(user)[0]?.value||'';
-  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:6,h:5,...overrides};
+  const module=kind==='module'?navigationModules(user.modules||[])[0]?.id||'':kind==='repair_actions'?'repair_management':kind==='notice_actions'?NOTICE_IDS.find(id=>(user.modules||[]).includes(id))||'':taskOptions(user)[0]?.value||'';
+  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:kind==='module'?12:6,h:kind==='module'?12:5,...overrides};
 }
 export function mandatoryCheck(user:Dict){return user.role!=='guest'&&['operator','shift_leader','duty'].includes(user.category);}
 function withChecks(widgets:Widget[],user:Dict,initial=false){
@@ -63,7 +65,7 @@ function withChecks(widgets:Widget[],user:Dict,initial=false){
     widgets=widgets.map(item=>({...item,y:item.y+5}));
     widgets.unshift(widget('pre_shift',user,{id:'pre_shift_required',x:0,y:0,w:12,h:5}));
   }
-  return {version:1 as const,widgets};
+  return {version:1 as const,widgets:widgets.slice(0,16)};
 }
 export function defaults(user:Dict):Layout{
   const role=personaFor(user),granted:string[]=user.modules||[];
@@ -83,15 +85,16 @@ export function sanitize(value:unknown,user:Dict,scopes:string[]):Layout{
   if(!value||typeof value!=='object'||(value as Dict).version!==1||!Array.isArray((value as Dict).widgets))return defaults(user);
   const seen=new Set<string>(),granted=taskOptions(user).map(item=>item.value),links=navigationModules(user.modules||[]).map(m=>m.id);
   const widgets:Widget[]=[];
-  for(const item of (value as Layout).widgets){
+  for(const item of (value as Layout).widgets.slice(0,16)){
     if(!item||!catalog.some(c=>c.kind===item.kind)||!allowedKind(item.kind,user)||typeof item.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(item.id)||seen.has(item.id))continue;
     if(item.kind==='tasks'&&!granted.includes(item.module))continue;
     if(item.kind==='notice_actions'&&(!NOTICE_IDS.includes(item.module)||!granted.includes(item.module)))continue;
     if(item.kind==='repair_actions'&&item.module!=='repair_management')continue;
     if(item.kind==='pre_shift'&&widgets.some(w=>w.kind==='pre_shift'))continue;
-    seen.add(item.id);const w=integer(item.w,6,3,12);
+    if(item.kind==='module'&&(!links.includes(item.module)||widgets.some(w=>w.kind==='module'&&w.module===item.module)))continue;
+    seen.add(item.id);const w=integer(item.w,6,item.kind==='module'?4:3,12);
     const presentation=presentationOptions(item.kind).some(p=>p.value===item.presentation)?item.presentation:'default';
-    widgets.push({id:item.id,kind:item.kind,title:typeof item.title==='string'?item.title.trim().slice(0,40):catalog.find(c=>c.kind===item.kind)!.title,module:granted.includes(item.module)?item.module:'',scope:scopes.includes(item.scope)?item.scope:'current',display:displayOptions(item.kind).some(option=>option.value===item.display)?item.display:'bar',period:item.period==='month'?'month':'week',metric:item.metric==='pending'?'pending':'ongoing',presentation,links:Array.isArray(item.links)?[...new Set(item.links.filter(id=>links.includes(id)))]:[],x:integer(item.x,0,0,12-w),y:integer(item.y,0,0,1000),w,h:integer(item.h,5,3,12)});
+    widgets.push({id:item.id,kind:item.kind,title:typeof item.title==='string'?item.title.trim().slice(0,40):catalog.find(c=>c.kind===item.kind)!.title,module:(item.kind==='module'?links:granted).includes(item.module)?item.module:'',scope:scopes.includes(item.scope)?item.scope:'current',display:displayOptions(item.kind).some(option=>option.value===item.display)?item.display:'bar',period:item.period==='month'?'month':'week',metric:item.metric==='pending'?'pending':'ongoing',presentation,links:Array.isArray(item.links)?[...new Set(item.links.filter(id=>links.includes(id)))]:[],x:integer(item.x,0,0,12-w),y:integer(item.y,0,0,1000),w,h:integer(item.h,item.kind==='module'?12:5,item.kind==='module'?6:3,item.kind==='module'?30:12)});
   }
   return withChecks(widgets,user);
 }

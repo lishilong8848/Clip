@@ -51,7 +51,7 @@ def main():
             return result.json()
 
         from lark_oapi.event.callback.model.p2_card_action_trigger import (
-            CallBackToast, P2CardActionTriggerResponse,
+            CallBackToast, CallBackCard, P2CardActionTriggerResponse,
         )
 
         def card_action_triggered(data):
@@ -69,6 +69,8 @@ def main():
             toast.type = "info" if result.get('ok', True) else "error"
             toast.content = str(result.get('toast') or "已收到，正在处理")[:180]
             response.toast = toast
+            if result.get('ok') and isinstance(result.get('card'), dict):
+                response.card = CallBackCard({'type': 'raw', 'data': result['card']})
             return response
 
         handler = (lark.EventDispatcherHandler.builder("", "")

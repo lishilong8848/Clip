@@ -19,8 +19,10 @@
     <div v-if="!layout.widgets.length" class="v2-dashboard-empty"><LayoutGrid :size="36" /><h2>把常用业务放在这里</h2><NButton data-v2-navigation type="primary" @click="edit();library=true"><template #icon><Plus :size="17" /></template>添加第一个组件</NButton></div>
     <NModal v-model:show="library" preset="card" title="添加组件" class="v2-widget-library" :bordered="false">
       <NInput v-model:value="librarySearch" clearable placeholder="搜索业务或组件样式" :input-props="{'aria-label':'搜索组件'}" class="v2-library-search" />
+      <template v-if="fullModules.length"><h3 class="v2-library-subtitle">完整业务模块</h3><div class="v2-library-grid" data-v2-navigation><NButton v-for="entry in fullModules" :key="entry.id" class="v2-library-item" @click="add('module',{module:entry.id,title:entry.label})"><component :is="moduleIcons[entry.icon as keyof typeof moduleIcons]" :size="26" /><span><strong>{{entry.label}} · 完整模块</strong><small>完整列表、填写及办理操作</small></span><Plus :size="17" /></NButton></div></template>
+      <h3 v-if="available.length" class="v2-library-subtitle">快捷与摘要组件</h3>
       <div class="v2-library-grid" data-v2-navigation><NButton v-for="entry in available" :key="entry.kind" class="v2-library-item" @click="add(entry.kind)"><component :is="icons[entry.icon]" :size="26" /><span><strong>{{ entry.title }}</strong><small>{{ entry.description }}</small></span><Plus :size="17" /></NButton></div>
-      <NEmpty v-if="!available.length&&!availableTemplates.length&&!availableCharts.length" :description="librarySearch?'未找到匹配组件':'暂无已授权组件'" />
+      <NEmpty v-if="!available.length&&!availableTemplates.length&&!availableCharts.length&&!fullModules.length" :description="librarySearch?'未找到匹配组件':'暂无已授权组件'" />
       <template v-if="availableTemplates.length"><h3 class="v2-library-subtitle">更多展示方式</h3><div class="v2-library-grid" data-v2-navigation><NButton v-for="entry in availableTemplates" :key="entry.id" class="v2-library-item v2-motion-template" @click="add(entry.kind,{title:entry.title,presentation:entry.presentation})"><component :is="icons[entry.icon]" :size="26" /><span><strong>{{ entry.title }}</strong><small>{{ entry.description }}</small></span><Plus :size="17" /></NButton></div></template>
       <template v-if="availableCharts.length"><h3 class="v2-library-subtitle">图表模板</h3><div class="v2-chart-template-grid" data-v2-navigation><NButton v-for="entry in availableCharts" :key="entry.id" class="v2-chart-template" @click="add(entry.kind,{title:entry.title,presentation:entry.presentation,display:entry.display,h:6})"><TemplatePreview :kind="entry.preview" /><span class="v2-template-copy"><strong>{{ entry.title }}</strong><Plus :size="16" /><small>{{ entry.description }}</small></span></NButton></div></template>
     </NModal>
@@ -32,9 +34,9 @@ import { computed,onBeforeUnmount,ref } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,useDialog,useMessage } from 'naive-ui';
 import { ArrowDown,ArrowUp,BookOpen,ChartColumn,ChartNoAxesCombined,Check,CircleCheck,ClipboardList,Droplets,GripVertical,LayoutGrid,ListTree,PanelsTopLeft,Plus,RefreshCw,RotateCcw,Settings2,SlidersHorizontal,Wrench,X } from 'lucide-vue-next';
 import type { Dict } from './client';
-import { beijingDate } from './modules';
+import { beijingDate,moduleIcons,navigationModules } from './modules';
 import { personaFor,personaTitles } from './persona';
-import { registerNavigationGuard } from './navigation';
+import { registerNavigationGuard,requestEmbeddedChange } from './navigation';
 import TaskWorkspace from './TaskWorkspace.vue';
 import WidgetGrid from './dashboard/WidgetGrid.vue';
 import WidgetView from './dashboard/WidgetView.vue';
@@ -56,21 +58,23 @@ const today=beijingDate(),icons={ClipboardList,LayoutGrid,ChartNoAxesCombined,Ch
 const scopeLabel=computed(()=>props.scopes.find(s=>s.value===props.scope)?.label||props.scope);
 const librarySearch=ref('');
 const matches=(entry:{title:string;description:string})=>(entry.title+entry.description).toLowerCase().includes(librarySearch.value.trim().toLowerCase());
-const available=computed(()=>catalog.filter(c=>allowedKind(c.kind,props.user)&&matches(c)&&(c.kind!=='pre_shift'||!layout.value.widgets.some(w=>w.kind==='pre_shift'))));
+const available=computed(()=>catalog.filter(c=>c.kind!=='module'&&allowedKind(c.kind,props.user)&&matches(c)&&(c.kind!=='pre_shift'||!layout.value.widgets.some(w=>w.kind==='pre_shift'))));
+const fullModules=computed(()=>allowedKind('module',props.user)?navigationModules(props.user.modules||[]).filter(entry=>!layout.value.widgets.some(item=>item.kind==='module'&&item.module===entry.id)&&(entry.label+'完整业务模块').includes(librarySearch.value.trim())):[]);
 const availableTemplates=computed(()=>motionTemplates.filter(c=>allowedKind(c.kind,props.user)&&matches(c)));
 const availableCharts=computed(()=>chartTemplates.filter(c=>allowedKind(c.kind,props.user)&&matches(c)));
 const ordered=()=>[...layout.value.widgets].sort((a,b)=>a.y-b.y||a.x-b.x);
 const isFirst=(item:Widget)=>ordered()[0]?.id===item.id;
 const isLast=(item:Widget)=>{const items=ordered();return items[items.length-1]?.id===item.id;};
 function releaseGuard(){removeGuard?.();removeGuard=undefined;}
-function edit(){editing.value=true;releaseGuard();removeGuard=registerNavigationGuard((_target,proceed)=>{if(JSON.stringify(layout.value)===saved)return true;dialog.warning({title:'布局尚未保存',content:'离开将放弃本次组件调整。',positiveText:'放弃并离开',negativeText:'继续编辑',onPositiveClick:()=>{cancel();proceed();}});return false;});}
+function edit(){if(document.querySelector('[role="dialog"][aria-modal="true"],.n-modal-container .n-card')){message.warning('请先完成当前弹窗中的填写。');return;}editing.value=true;releaseGuard();removeGuard=registerNavigationGuard((_target,proceed)=>{if(JSON.stringify(layout.value)===saved)return true;dialog.warning({title:'布局尚未保存',content:'离开将放弃本次组件调整。',positiveText:'放弃并离开',negativeText:'继续编辑',onPositiveClick:()=>{cancel();proceed();}});return false;});}
 function cancel(){layout.value=JSON.parse(saved);editing.value=false;selected.value=null;library.value=false;error.value='';releaseGuard();}
-function reload(){const next=readLayout(props.user,props.scopes.map(s=>s.value));layout.value=next.layout;saved=JSON.stringify(next.layout);raw=next.raw;error.value=next.error;editing.value=false;releaseGuard();}
+function reload(){if(protectedContent())return;requestEmbeddedChange('*',()=>{const next=readLayout(props.user,props.scopes.map(s=>s.value));layout.value=next.layout;saved=JSON.stringify(next.layout);raw=next.raw;error.value=next.error;editing.value=false;releaseGuard();});}
 function save(){try{raw=saveLayout(props.user,props.scopes.map(s=>s.value),layout.value,raw);saved=JSON.stringify(layout.value);editing.value=false;error.value='';releaseGuard();message.success('个人工作台已保存');}catch(e){error.value=e instanceof Error?e.message:'无法保存到当前浏览器，请检查存储空间。';}}
-function restore(){dialog.warning({title:'恢复角色默认布局',content:'仅重置工作台组件，不会删除业务记录。保存布局后生效。',positiveText:'恢复默认',negativeText:'取消',onPositiveClick:()=>{layout.value=defaults(props.user);}});}
-function add(kind:WidgetKind,style:Partial<Widget>={}){const bottom=Math.max(0,...layout.value.widgets.map(w=>w.y+w.h));const next=widget(kind,props.user,{y:bottom,...style});layout.value.widgets.push(next);library.value=false;selected.value=next;}
-function remove(item:Widget){if(item.kind==='pre_shift'&&mandatoryCheck(props.user))return;layout.value.widgets=layout.value.widgets.filter(w=>w.id!==item.id);message.info('组件已移除，取消编辑可恢复');}
-function apply(item:Widget){layout.value.widgets=layout.value.widgets.map(w=>w.id===item.id?item:w);selected.value=null;}
+function protectedContent(){if(!document.querySelector('.v2-dashboard [data-v2-layout-protected="true"]'))return false;message.warning('请先完成当前班前检查的填写或上传，再调整组件。');return true;}
+function restore(){if(protectedContent())return;dialog.warning({title:'恢复角色默认布局',content:'仅重置工作台组件，不会删除业务记录。保存布局后生效。',positiveText:'恢复默认',negativeText:'取消',onPositiveClick:()=>{requestEmbeddedChange('*',()=>{layout.value=defaults(props.user);});}});}
+function add(kind:WidgetKind,style:Partial<Widget>={}){if(layout.value.widgets.length>=16){message.warning('每页最多保留16个组件，请先移除不常用组件。');return;}if(kind==='module'&&layout.value.widgets.some(item=>item.kind==='module'&&item.module===style.module)){message.warning('本工作台已经添加这个模块。');return;}const bottom=Math.max(0,...layout.value.widgets.map(w=>w.y+w.h));const next=widget(kind,props.user,{y:bottom,...style});layout.value.widgets.push(next);library.value=false;selected.value=next;}
+function remove(item:Widget){if(item.kind==='pre_shift'&&(mandatoryCheck(props.user)||protectedContent()))return;const commit=()=>{layout.value.widgets=layout.value.widgets.filter(w=>w.id!==item.id);message.info('组件已移除，取消编辑可恢复');};if(item.kind==='module')requestEmbeddedChange(item.id,commit);else commit();}
+function apply(item:Widget){if(item.kind==='module'&&layout.value.widgets.some(row=>row.id!==item.id&&row.kind==='module'&&row.module===item.module)){message.warning('本工作台已经添加这个模块。');return;}const previous=layout.value.widgets.find(row=>row.id===item.id);const commit=()=>{layout.value.widgets=layout.value.widgets.map(w=>w.id===item.id?item:w);selected.value=null;};if(previous?.kind==='module'&&(previous.module!==item.module||previous.scope!==item.scope))requestEmbeddedChange(item.id,commit);else commit();}
 function move(item:Widget,direction:number){const items=ordered(),index=items.findIndex(w=>w.id===item.id),other=items[index+direction];if(!other)return;layout.value.widgets=layout.value.widgets.map(w=>w.id===item.id?{...w,x:Math.min(other.x,12-w.w),y:other.y}:w.id===other.id?{...w,x:Math.min(item.x,12-w.w),y:item.y}:w);}
 function setPositions(items:Widget[]){if(editing.value)layout.value.widgets=items;}
 function refresh(){window.dispatchEvent(new Event('clipflow-business-changed'));}

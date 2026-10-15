@@ -1,7 +1,7 @@
 import { eventI2OrHigher, eventI3Level, eventRecordId, eventUnderRepair } from '../eventManagementUtils';
 import type { LooseDict } from '../types';
 
-export type EventPeriod = 'week' | 'month' | 'history';
+export type EventPeriod = 'week' | 'month' | 'history' | 'custom';
 const DAY = 86400000, OFFSET = 8 * 3600000;
 export function beijingDate(time = Date.now()): string {
   return new Date(time + OFFSET).toISOString().slice(0, 10);
@@ -15,7 +15,7 @@ export function occurrenceTimestamp(value: unknown): number {
   if (date.getUTCFullYear() !== +y || date.getUTCMonth() !== +m - 1 || date.getUTCDate() !== +d || +h > 23 || +min > 59 || +sec > 59) return NaN;
   return Date.parse(`${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}T${h.padStart(2, '0')}:${min.padStart(2, '0')}:${sec.padStart(2, '0')}${zone}`);
 }
-export function eventPeriodRange(period: EventPeriod, month = '', now = Date.now()) {
+export function eventPeriodRange(period: EventPeriod, month = '', now = Date.now(), dates?: [string, string]) {
   const today = beijingDate(now), currentMonth = today.slice(0, 7);
   const selected = period === 'history' && /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : currentMonth;
   const [year, m] = selected.split('-').map(Number);
@@ -27,20 +27,37 @@ export function eventPeriodRange(period: EventPeriod, month = '', now = Date.now
     start = day - ((weekday + 6) % 7) * DAY;
     end = start + 7 * DAY;
   }
+  let error = '';
+  if (period === 'custom') {
+    const [from, to] = dates || [currentMonth + '-01', today];
+    start = /^\d{4}-\d{2}-\d{2}$/.test(from) ? occurrenceTimestamp(from) : NaN;
+    end = /^\d{4}-\d{2}-\d{2}$/.test(to) ? occurrenceTimestamp(to) + DAY : NaN;
+    if (!Number.isFinite(start) || !Number.isFinite(end)) error = '请选择有效的开始日期和结束日期。';
+    else if (end <= start) error = '开始日期不能晚于结束日期。';
+    else if (end - start > 366 * DAY) error = '单次最多查询366天，请缩小日期区间。';
+  }
+  if (error) return { start: 0, end: 0, months: [] as string[], label: '自定义', caption: '自定义日期待确认', error };
   const first = beijingDate(start), last = beijingDate(end - 1);
-  const months = [...new Set([first.slice(0, 7), last.slice(0, 7)])];
-  return { start, end, months, label: period === 'week' ? '本周' : period === 'month' ? '本月' : `${year}年${m}月`,
-    caption: `${first.replace(/-/g, '.')} - ${last.replace(/-/g, '.')}` };
+  const months: string[] = [];
+  const [firstYear, firstMonth] = first.slice(0, 7).split('-').map(Number);
+  for (let cursor = Date.UTC(firstYear!, firstMonth! - 1, 1) - OFFSET; cursor < end;) {
+    months.push(beijingDate(cursor).slice(0, 7));
+    const date = new Date(cursor + OFFSET);
+    cursor = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1) - OFFSET;
+  }
+  return { start, end, months, label: period === 'week' ? '本周' : period === 'month' ? '本月' : period === 'custom' ? '自定义' : `${year}年${m}月`,
+    caption: `${first.replace(/-/g, '.')} - ${last.replace(/-/g, '.')}`, error };
 }
 export type EventRange = ReturnType<typeof eventPeriodRange>;
 export function eventTrend(records: LooseDict[], range: EventRange) {
-  const step = DAY;
+  const step = Math.max(1, Math.ceil((range.end - range.start) / DAY / 62)) * DAY;
   const bins: Array<{label:string;value:number;start:number;end:number}> = [];
   for(let start=range.start; start<range.end; start+=step) {
     const end=Math.min(start+step,range.end), first=beijingDate(start).slice(5).replace('-', '/');
-    bins.push({label:first,value:0,start,end});
+    const label = step === DAY ? first : first + '至' + beijingDate(end - 1).slice(5).replace('-', '/');
+    bins.push({label,value:0,start,end});
   }
-  for(const item of records){const time=occurrenceTimestamp(item.occurrence_time);const bin=bins.find(item=>time>=item.start&&time<item.end);if(bin)bin.value++;}
+  for(const item of records){const time=occurrenceTimestamp(item.occurrence_time);if(time>=range.start&&time<range.end){const bin=bins[Math.floor((time-range.start)/step)];if(bin)bin.value++;}}
   return bins;
 }
 export function eventPeriodStats(records: LooseDict[]) {

@@ -240,6 +240,20 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
     }
 
 
+def notice_delete_allowed(profile, work_type):
+    from .module_access import NOTICE_MODULES
+    return work_type in NOTICE_MODULES and work_type in profile.get("modules", []) and bool(profile.get("scope_rules"))
+
+
+def require_notice_delete(auth, session, work_type):
+    from .module_access import require_module
+    from .portal_service import PortalError
+    require_module(auth, session, work_type)
+    profile = auth.account_profile((session.get("user") or {}).get("open_id"))
+    if not notice_delete_allowed(profile, work_type) and not profile["can_delete_business"]:
+        raise PortalError("当前账号无权删除该业务记录。")
+
+
 async def business_delete_denial(request, controller, runtime):
     """Shared-record deletion whitelist, also used by assistant's ASGI API calls."""
     import asyncio
@@ -247,9 +261,11 @@ async def business_delete_denial(request, controller, runtime):
     from fastapi.responses import JSONResponse
 
     path = request.url.path
+    notice_work_type = ""
     # Local conversation/draft attachments are not deletion of business records.
     personal = (path.startswith("/api/assistant/") or path == "/api/workbench/draft"
                 or path.startswith(("/api/notice-images/", "/api/notice-attachments/"))
+                or re.fullmatch(r"/api/pre-shift-checks/files/[a-f0-9]{32}", path)
                 or re.fullmatch(r"/api/change-confirmations/[^/]+/screenshot", path))
     deleting = request.method == "DELETE" and path.startswith("/api/") and not personal
     deleting = deleting or (request.method == "POST" and bool(re.search(r"/(?:delete|remove)(?:/|$)", path)))
@@ -257,12 +273,14 @@ async def business_delete_denial(request, controller, runtime):
     if request.method == "POST" and undo_match:
         undo = await asyncio.to_thread(runtime.state_store.get_notice_undo_action, undo_match[1]) or {}
         deleting = undo.get("action_type") == "start"
-    if request.method == "POST" and path in {"/api/workbench-actions", "/api/maintenance-actions"}:
+    if request.method == "POST" and path in {"/api/workbench-actions", "/api/maintenance-actions", "/api/ongoing-items/delete"}:
         try:
             payload = await controller._read_json_request(request, max_bytes=1024 * 1024)
         except (ValueError, TypeError):
             return JSONResponse({"ok": False, "error": "通告参数无效。"}, status_code=400)
-        deleting = isinstance(payload, dict) and str(payload.get("action", "")).startswith(("delete", "remove"))
+        deleting = path == "/api/ongoing-items/delete" or isinstance(payload, dict) and str(payload.get("action", "")).startswith(("delete", "remove"))
+        if deleting and isinstance(payload, dict):
+            notice_work_type = str(payload.get("work_type") or "maintenance").strip()
     if not deleting:
         return None
     session = await asyncio.to_thread(controller._current_session, request)
@@ -270,6 +288,8 @@ async def business_delete_denial(request, controller, runtime):
         return JSONResponse({"ok": False, "error": "请先登录。"}, status_code=401)
     user = session.get("user") or {}
     profile = await asyncio.to_thread(runtime.auth_manager.account_profile, user.get("open_id"))
+    if notice_delete_allowed(profile, notice_work_type):
+        return None  # Notice handling grants deletion; the endpoint still checks the actual target and scope.
     if profile["can_delete_business"]:
         return None  # Original endpoint still validates the actual record, owner and building.
     await asyncio.to_thread(runtime.state_store.record_business_operation_audit,

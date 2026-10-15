@@ -1,19 +1,20 @@
 .weather-lighthouse .wl-clouds, .weather-lighthouse .wl-rain, .weather-lighthouse .wl-snow, .weather-lighthouse .wl-fog, .weather-lighthouse .wl-storm,
-.weather-lighthouse .wl-stars, .weather-lighthouse .wl-beams, .weather-lighthouse .wl-lamp, .weather-lighthouse .wl-moon, .weather-lighthouse .wl-sun, .weather-lighthouse .wl-companion { opacity: 0; transition: opacity 350ms ease; }
-.weather-lighthouse .wl-sun, .weather-lighthouse .wl-moon, .weather-lighthouse .wl-companion, .weather-lighthouse .wl-stars { transition: opacity 350ms ease, transform 1.1s linear; }
-.weather-lighthouse[data-weather=clear] .wl-sun { opacity: 1; }
-.weather-lighthouse[data-weather=cloudy] .wl-sun { opacity: .4; }
+.weather-lighthouse .wl-beams, .weather-lighthouse .wl-lamp { opacity: 0; transition: opacity 350ms ease; }
+.weather-lighthouse .wl-sun, .weather-lighthouse .wl-moon, .weather-lighthouse .wl-companion, .weather-lighthouse .wl-stars { opacity: 1; visibility: hidden; transition: transform 1.1s linear; }
+.weather-lighthouse[data-weather=clear] .wl-sun,
+.weather-lighthouse[data-weather=cloudy] .wl-sun { visibility: visible; }
 .weather-lighthouse[data-weather=cloudy] .wl-clouds, .weather-lighthouse[data-weather=rain] .wl-clouds,
 .weather-lighthouse[data-weather=snow] .wl-clouds, .weather-lighthouse[data-weather=storm] .wl-clouds,
 .weather-lighthouse[data-weather=rain] .wl-rain, .weather-lighthouse[data-weather=storm] .wl-rain,
 .weather-lighthouse[data-weather=storm] .wl-storm, .weather-lighthouse[data-weather=snow] .wl-snow,
 .weather-lighthouse[data-weather=fog] .wl-fog { opacity: 1; }
-.weather-lighthouse[data-phase=night] .wl-sun { opacity: 0; }
+.weather-lighthouse[data-phase=night] .wl-sun { visibility: hidden; }
 .weather-lighthouse[data-phase=night] .wl-moon, .weather-lighthouse[data-phase=night] .wl-stars,
-.weather-lighthouse[data-phase=night] .wl-beams, .weather-lighthouse[data-phase=night] .wl-lamp, .weather-lighthouse[data-phase=night] .wl-companion { opacity: 1; }
+.weather-lighthouse[data-phase=night] .wl-companion { visibility: visible; }
+.weather-lighthouse[data-phase=night] .wl-beams, .weather-lighthouse[data-phase=night] .wl-lamp { opacity: 1; }
 .weather-lighthouse[data-phase=dawn] .wl-lamp, .weather-lighthouse[data-phase=dusk] .wl-lamp { opacity: .65; }
 .weather-lighthouse .wl-beams { transform-origin: 380px 145px; animation: wl-sweep 7s ease-in-out infinite alternate; }
-.weather-lighthouse .wl-stars > * { animation: wl-star-twinkle 7s ease-in-out infinite; opacity:0; }
+.weather-lighthouse .wl-stars > * { animation: wl-star-twinkle 7s ease-in-out infinite; opacity:1; transform-box:fill-box; transform-origin:center; }
 .weather-lighthouse .wl-cloud-flight { animation: wl-cloud-travel 28s linear infinite; opacity:0; }
 .weather-lighthouse .wl-storm path { animation: wl-lightning 10s ease-in-out infinite; opacity:0; }
 .weather-lighthouse .wl-wind { fill:none;stroke:#91b6ca;stroke-width:2.5;stroke-linecap:round;opacity:0;transition:opacity 350ms ease; }
@@ -61,11 +62,11 @@
 .weather-lighthouse[data-weather]:not([data-weather=snow]) .wl-snow circle,
 .weather-lighthouse:not([data-phase=night]) .wl-beams, .weather-lighthouse:not([data-phase=night]) .wl-stars > * { animation-play-state: paused; }
 @keyframes wl-sweep { from { transform: rotate(-12deg); } to { transform: rotate(12deg); } }
-@keyframes wl-breathe { from { transform: scale(.96); opacity: .12; } to { transform: scale(1.05); opacity: .22; } }
+@keyframes wl-breathe { from { transform: scale(.96); } to { transform: scale(1.05); } }
 @keyframes wl-crown { to { transform: rotate(360deg); } }
-@keyframes wl-twinkle { 50% { opacity: .5; } }
+@keyframes wl-twinkle { 50% { fill: #fff0b0; } }
 @keyframes wl-drift { from { transform: translateX(-8px); } to { transform: translateX(8px); } }
-@keyframes wl-star-twinkle { 0%,100%{opacity:0} 25%{opacity:.15} 55%{opacity:var(--wl-brightness,.8)} 75%{opacity:.25} }
+@keyframes wl-star-twinkle { 0%,100%{transform:scale(0);fill:#b6a05d} 25%,75%{transform:scale(.8);fill:#e5ce79} 55%{transform:scale(1);fill:hsl(47 70% calc(64% + var(--wl-brightness,.8) * 26%))} }
 @keyframes wl-cloud-travel { 0%{transform:translate(115px,var(--wl-cloud-y)) scale(var(--wl-cloud-scale));opacity:0} 16%,78%{opacity:var(--wl-cloud-opacity,.7)} 100%{transform:translate(570px,var(--wl-cloud-y)) scale(var(--wl-cloud-scale));opacity:0} }
 @keyframes wl-lightning { 0%,78%,91%,100%{opacity:0} 82%,86%{opacity:.8} }
 @keyframes wl-gust { 0%,100%{transform:translateX(-25px);opacity:0} 35%{opacity:.5} 80%{transform:translateX(110px);opacity:0} }
@@ -73,6 +74,6 @@
 @keyframes wl-ripple { 0%,100%{transform:translate(0,0) scaleY(1)} 40%{transform:translate(-4px,var(--wl-swell)) scaleY(var(--wl-wave-height))} 75%{transform:translate(3px,calc(-1 * var(--wl-swell))) scaleY(.92)} }
 @keyframes wl-rain { from { transform: translate(3px, -20px); opacity: 0; } 20%, 70% { opacity: .8; } to { transform: translate(-5px, 30px); opacity: 0; } }
 @keyframes wl-snow { from { transform: translate(-5px, -15px); opacity: 0; } 25%, 65% { opacity: 1; } to { transform: translate(8px, 30px); opacity: 0; } }
-.weather-lighthouse[data-reduced=true] .wl-star { opacity:.6; }
+.weather-lighthouse[data-reduced=true] .wl-star { animation:none; opacity:1; }
 .weather-lighthouse[data-reduced=true] .wl-storm path { opacity:.6; }
-@media (prefers-reduced-motion: reduce) { .weather-lighthouse * { animation: none !important; transition-duration: 100ms !important; } .weather-lighthouse .wl-star,.weather-lighthouse .wl-storm path{opacity:.6}.weather-lighthouse .wl-cloud-flight{transform:translate(240px,var(--wl-cloud-y)) scale(var(--wl-cloud-scale));opacity:.6} }
+@media (prefers-reduced-motion: reduce) { .weather-lighthouse * { animation: none !important; transition-duration: 100ms !important; } .weather-lighthouse .wl-star{opacity:1}.weather-lighthouse .wl-storm path{opacity:.6}.weather-lighthouse .wl-cloud-flight{transform:translate(240px,var(--wl-cloud-y)) scale(var(--wl-cloud-scale));opacity:.6} }

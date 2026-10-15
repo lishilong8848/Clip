@@ -18,10 +18,56 @@ const containers = {
   'LearningPage.vue': ['toolbar'],
 };
 
+const localFilters = {
+  'MetricWidget.vue': ['v2-metric-toolbar'],
+  'PreShiftCheck.vue': ['v2-check-toolbar'],
+  'EventPeriodFilter.vue': ['v2-event-period'],
+  'NoticeWorkspace.vue': ['v2-notice-types', 'v2-notice-mobile-tabs'],
+  'RepairWorkspace.vue': ['v2-repair-state-row'],
+  'RepairFollowups.vue': ['v2-repair-history-search'],
+  'PermissionReview.vue': ['v2-review-filters'],
+  'AdminAccounts.vue': ['filters'],
+  'AdminPermissionUsers.vue': ['permission-user-search'],
+  'AdminPermissionDirectory.vue': ['directory-toolbar'],
+  'MopNoticeList.vue': ['filters'],
+  'CabinetPowerBatchPage.vue': ['text-toolbar', 'filters', 'filter-bar'],
+  'DrillManagementPage.vue': ['building-toolbar'],
+  'LearningDashboard.vue': ['table-head', 'segments'],
+  'RecordPickerDialog.vue': ['record-picker-toolbar', 'record-picker-filters'],
+  'RepairLedgerPicker.vue': ['ledger-filters'],
+  'RepairPeoplePicker.vue': ['repair-people-search'],
+  'LighthouseNoticePanel.vue': ['notice-filters'],
+  'LighthouseKnowledge.vue': ['lk-search'],
+  'LighthouseSkills.vue': ['skill-filters'],
+  'LighthouseTools.vue': ['extension-toolbar'],
+};
+
+function markFilterStyles(source, file, allowed) {
+  const names = [...allowed, ...(localFilters[file] || [])], edits = [];
+  const { descriptor } = parse(source);
+  function visit(node) {
+    const classes = (node.props?.find(p => p.type === 6 && p.name === 'class')?.value?.content || '').split(/\s+/);
+    const hasMark = node.props?.some(p => p.type === 6 && p.name === 'data-v2-filter');
+    const eligible = file !== 'LearningPage.vue' || node.tag === 'form';
+    if (node.type === 1 && eligible && classes.some(c => names.includes(c)) && !hasMark) {
+      edits.push([node.loc.start.offset + 1 + node.tag.length, ' data-v2-filter']);
+    }
+    if (node.type === 1 && node.tag === 'input' && node.props?.some(p => p.type === 6 &&
+        (p.name === 'type' && p.value?.content === 'search' || p.name === 'placeholder' && /^(搜索|查找|筛选)/.test(p.value?.content || '')))) {
+      if (!node.props.some(p=>p.type===6&&p.name==='data-v2-filter-control')) edits.push([node.loc.start.offset + 1 + node.tag.length, ' data-v2-filter-control']);
+    }
+    for (const child of node.children || []) visit(child);
+  }
+  visit(descriptor.template?.ast || {});
+  for (const [offset, attribute] of edits.sort((a,b)=>b[0]-a[0])) source = source.slice(0,offset) + attribute + source.slice(offset);
+  return source;
+}
+
 export function adaptPageFilters(source, filename) {
   const file = filename.replaceAll('\\', '/').split('/').pop();
-  const allowed = containers[file];
-  if (!allowed) return source;
+  if (file === 'VnetSelect.vue' && !source.includes(':data-v2-filter-menu=')) source = source.replace('class="vnet-select-menu"', 'class="vnet-select-menu" :data-v2-filter-menu="rootRef?.closest(\'[data-v2-filter], #workspace-page-filters\') ? \'\' : undefined"');
+  const allowed = containers[file] || [];
+  if (!allowed.length && !localFilters[file]) return markFilterStyles(source, file, allowed);
   if (file === 'PlanConvergencePage.vue') {
     source = source.replace('<button v-for="item in tabs"', '<button data-v2-navigation v-for="item in tabs"');
   }
@@ -51,5 +97,5 @@ export function adaptPageFilters(source, filename) {
   visit(descriptor.template?.ast || {});
   for (const [start, end, text] of edits.sort((a, b) => b[0] - a[0])) source = source.slice(0, start) + text + source.slice(end);
   if (edits.length) source = source.replace('<script setup lang="ts">', '<script setup lang="ts">\nimport { pageFilterTarget as __v2FilterTarget } from "../workspace-v2/pageFilters";');
-  return source;
+  return markFilterStyles(source, file, allowed);
 }

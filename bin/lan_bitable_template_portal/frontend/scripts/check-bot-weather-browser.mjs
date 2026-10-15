@@ -145,7 +145,27 @@ try {
  await page.evaluate(()=>window.fixture.set({weather_city:'南通',size:200}));await page.waitForTimeout(650);
  await page.waitForFunction(()=>document.querySelector('#preview .weather-lighthouse')?.dataset.weather==='clear');
  await page.waitForTimeout(1000);
- assert.equal(await page.locator('#preview .wl-stars').evaluate(el=>getComputedStyle(el).opacity),'0','stars fade away in daytime');
+ assert.equal(await page.locator('#preview .wl-stars').evaluate(el=>getComputedStyle(el).visibility),'hidden','stars are hidden in daytime');
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ const celestial=await page.locator('#preview .weather-lighthouse').evaluate(root=>{
+   const original={weather:root.dataset.weather,phase:root.dataset.phase},samples=[];
+   for(const [weather,phase] of [['clear','day'],['cloudy','day'],['clear','night']]){
+     root.dataset.weather=weather;root.dataset.phase=phase;
+     const groups=[...root.querySelectorAll('.wl-sun,.wl-moon,.wl-stars,.wl-companion')];
+     for(const group of groups)for(const node of [group,...group.querySelectorAll('*')]){
+       for(const progress of [0,.25,.55,.75,.99]){
+         for(const animation of node.getAnimations()){
+           animation.pause();animation.currentTime=Number(animation.effect.getTiming().duration)*progress;
+         }
+         const style=getComputedStyle(node);samples.push({opacity:style.opacity,fill:style.fillOpacity,stroke:style.strokeOpacity});
+       }
+     }
+     samples.push({phase,sun:getComputedStyle(root.querySelector('.wl-sun')).visibility,moon:getComputedStyle(root.querySelector('.wl-moon')).visibility});
+   }
+   Object.assign(root.dataset,original);return samples;
+ });
+ assert(celestial.filter(sample=>'opacity' in sample).every(sample=>sample.opacity==='1'&&sample.fill==='1'&&sample.stroke==='1'),'celestial groups and painted details stay opaque');
+ assert.deepEqual(celestial.filter(sample=>'phase' in sample).map(sample=>[sample.phase,sample.sun,sample.moon]),[['day','visible','hidden'],['day','visible','hidden'],['night','hidden','visible']]);
  const art=await page.locator('#preview .weather-lighthouse').evaluate(root=>({
    assembly:root.querySelector('.wl-assembly').getAttribute('transform'),waves:root.querySelector('.wl-waves').getAttribute('transform'),
    title:root.closest('.lighthouse-bot').title,weather:root.dataset.weather,phase:root.dataset.phase,

@@ -1,0 +1,50 @@
+/* Paged content uses the work area; bounded lists hand the wheel back at their edges. */
+@media screen {
+  .workspace-v2 .v2-main > :is(.admin-shell,.drill-page) {
+    min-height: 0;
+  }
+  .workspace-v2 .v2-main :is(.sharing-table,.permission-list) {
+    height: auto;
+    max-height: none;
+    overflow: auto;
+  }
+  .workspace-v2 .v2-main :is(
+    .table-wrap,.pc-table-wrap,.sheet-table-wrap,.step-table-wrap,.sheet-table-shell,
+    .notice-list,.mop-candidate-list,.preview-scroll,.drill-list,.task-list,.pc-records,
+    .permission-list,.scope-checks,.kb-sections,.kb-groups-list,.kb-upload-list,
+    .issue-scroll,.people-options,.cand-list,.draft-list,.v2-repair-history,.water-editor-body
+  ) {
+    overscroll-behavior-y: auto;
+    scroll-padding-block: 12px;
+  }
+
+  /* Only the modal body scrolls. Headers and submit controls remain reachable. */
+  .workspace-v2 .n-modal.n-card {
+    overflow: hidden;
+    min-height: 0;
+  }
+  .workspace-v2 .n-modal.n-card > .n-card-content {
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scroll-padding-block: 12px;
+  }
+  .workspace-v2 :is(.pc-dialog-body,.pc-modal-scroll,.modal-scroll,.n-modal>.n-card-content) :is(.table-wrap,.pc-table-wrap,.sharing-table) {
+    height: auto;
+    max-height: none;
+    overscroll-behavior-y: auto;
+  }
+  .workspace-v2 :is(.pc-dialog-body,.pc-modal-scroll,.modal-scroll,.editor-body) :is(.scope-checks,.cand-list,.people-options) {
+    overscroll-behavior-y: auto;
+  }
+  .workspace-v2 :is(.pc-dialog-body,.pc-modal-scroll,.modal-scroll,.drawer-body,.editor-body) {
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+    scroll-padding-block: 12px;
+  }
+
+  /* Existing modal ownership locks body; the desktop work area is a separate scroller. */
+  .workspace-v2 body[style*="overflow: hidden"] .v2-shell:not(.is-print) > .v2-main {
+    overflow-y: hidden;
+  }
+}

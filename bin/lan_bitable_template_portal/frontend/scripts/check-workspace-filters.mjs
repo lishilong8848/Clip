@@ -19,7 +19,7 @@ for(const file of ['EventManagementPage','CabinetPowerPage','DrillManagementPage
 const cabinet=await readFile(path.join(root,'src/components/CabinetPowerPage.vue'),'utf8');
 assert(!cabinet.includes('trackButtonPresentation'),'legacy drawer behavior is unchanged');
 assert(adaptCabinetPage(cabinet).includes('trackButtonPresentation(nextTick())'));
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[],queries=[],writes=[];
 let page,active=0,maximum=0,scopes=['A','B'];
 let historyReply;

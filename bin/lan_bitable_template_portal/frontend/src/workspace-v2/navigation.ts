@@ -1,4 +1,6 @@
 import { logicalUrl, workspaceUrl, WORKSPACE_ENTRY } from './version';
+import { moduleForRoute, modules, NOTICE_IDS } from './modules';
+import { currentEmbedded } from './embeddedContext';
 export type NavigateOptions = { replace?: boolean; hard?: boolean; bypassGuard?: boolean; legacy?: boolean };
 const pagePaths = new Set(['/', '/admin/settings', '/admin/history-memory', '/signature', '/signature-management',
   '/engineer/mop', '/repair-management', '/repair-status', '/learning', '/plan-convergence', '/life-guide',
@@ -7,6 +9,7 @@ const pagePaths = new Set(['/', '/admin/settings', '/admin/history-memory', '/si
   '/workbench-lite', '/polling-work-order', '/polling-work-order/steps']);
 type NavigationGuard=(target:string,proceed:()=>void)=>boolean;
 const guards=new Set<NavigationGuard>();
+const guardOwners=new Map<NavigationGuard,string>();
 let stable = window.location.href;
 for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
   const transition = (event as Event & { viewTransition?: { ready: Promise<void> } }).viewTransition;
@@ -26,11 +29,11 @@ export function destination(target: string | URL): string {
   return url.href;
 }
 export function registerNavigationGuard(value: NavigationGuard|null): () => void {
-  if(value)guards.add(value);stable=window.location.href;
-  return()=>{if(value)guards.delete(value);};
+  if(value){guards.add(value);const owner=currentEmbedded()?.id;if(owner)guardOwners.set(value,owner);}stable=window.location.href;
+  return()=>{if(value){guards.delete(value);guardOwners.delete(value);}};
 }
-function allowNavigation(target:string,proceed:()=>void):boolean {
-  const pending=[...guards].reverse();
+function allowNavigation(target:string,proceed:()=>void,owner?:string):boolean {
+  const pending=[...guards].filter(guard=>owner===undefined?true:owner==='*'?guardOwners.has(guard):guardOwners.get(guard)===owner).reverse();
   function check(index:number):boolean {
     for(let i=index;i<pending.length;i++){
       const guard=pending[i]!;
@@ -40,6 +43,7 @@ function allowNavigation(target:string,proceed:()=>void):boolean {
   }
   return check(0);
 }
+export function requestEmbeddedChange(owner:string,proceed:()=>void){if(allowNavigation(toAbsoluteUrl(window.location.href),proceed,owner))proceed();}
 export function toAbsoluteUrl(target: string | URL): string { return logicalUrl(new URL(target, window.location.origin).href).href; }
 export function navigate(target: string | URL, options: NavigateOptions = {}): void {
   const logical = toAbsoluteUrl(target);
@@ -53,11 +57,29 @@ export function navigate(target: string | URL, options: NavigateOptions = {}): v
   window.dispatchEvent(new Event('popstate'));
 }
 export function navigateHard(target: string | URL) { navigate(target, { hard: true }); }
+export function moduleKey(url:URL):string {
+  const key=moduleForRoute(url);
+  if(NOTICE_IDS.includes(key)||key==='all')return 'notices';
+  if(url.pathname.startsWith('/polling-work-order'))return 'work-order';
+  if(url.pathname==='/'&&(url.searchParams.get('account')==='password'||['my','permission'].includes(url.searchParams.get('view')||'')))return 'personal';
+  return key;
+}
+export function moduleBackTarget(fallback='/',current=logicalUrl()):string|null {
+  const key=moduleKey(current);if(!key)return null;
+  let target=logicalUrl(new URL(fallback,current.origin).href);
+  if(target.origin!==current.origin||moduleKey(target)!==key){
+    const root=key==='notices'?'/workbench-lite':key==='personal'?'/?view=my':key==='sops'?'/?view=sops':key==='work-order'?'/polling-work-order':modules.find(m=>m.id===key)?.path;
+    if(!root)return null;target=new URL(root,current.origin);
+    if(key==='event')target.searchParams.delete('detail');
+  }
+  for(const name of ['scope',...(key==='notices'?['work_type','month']:[]),...(key==='work-order'?['token']:[])]){
+    if(!target.searchParams.has(name)&&current.searchParams.has(name))target.searchParams.set(name,current.searchParams.get(name)!);
+  }
+  return target.href===current.href?null:target.pathname+target.search+target.hash;
+}
 export function navigateBack(fallback = '/', hardFallback = false) {
-  const target=new URL(fallback,window.location.origin);
-  // V2 opens building data directly, so the old building-selector return would loop.
-  if(target.origin===window.location.origin && target.pathname===logicalUrl().pathname && !target.search && ['/drill-management','/critical-guard','/cabinet-power'].includes(target.pathname))fallback='/';
-  navigate(fallback, { replace: !hardFallback, hard: hardFallback });
+  const target=moduleBackTarget(fallback);
+  if(target)navigate(target, { replace: !hardFallback, hard: hardFallback });
 }
 export function replaceRoute(target: string | URL) { navigate(target, { replace: true }); }
 export function requestPageReload(confirm: (proceed: () => void) => void) {

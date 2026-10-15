@@ -21,8 +21,6 @@ const v2FollowupApi = ref<any>(null);
 const v2AppliedState = ref('未完成'), v2Stats = ref<LooseDict | null>(null), v2StatsError = ref('');
 const v2StatsLoading = ref(false), v2StatsAt = ref('');
 let v2StatsAbort: AbortController | undefined;
-const v2NarrowMedia = window.matchMedia('(max-width:600px)');
-function v2MeasureRows(): void { v2RowHeight.value=projectDrawerOpen.value||v2NarrowMedia.matches?104:88;void nextTick(()=>recordVirtualizer.value.measure()); }
 const v2Writing = computed(() => saving.value || v2FollowupBusy.value || v2FollowupApi.value?.action.busy || reconcilingRemote.value || integrityRepairSubmitting.value);
 const v2StateLabel = computed(() => recordStateOptions.find(item => item.value === recordState.value)?.label || '未完成');
 function v2ProgressKnown(record: LooseDict): boolean {
@@ -52,7 +50,6 @@ async function v2RefreshView(): Promise<void> {
   clearRecordResponseCache(); clearRecordDetailCache();
   await Promise.all([loadRecords(true), v2LoadStats()]);
 }
-function v2SetRecordList(element: unknown): void { recordListRef.value = element as HTMLElement | null; }
 function v2SetDetail(element: unknown): void { projectDrawerRef.value = element as HTMLElement | null; }
 function v2Discard(): void { hasUnsavedChanges.value = false; followupHasUnsavedChanges.value = false; }
 const v2StopGuard = registerNavigationGuard((_target, proceed) => {
@@ -65,8 +62,8 @@ function v2BeforeUnload(event: BeforeUnloadEvent): void {
   if (hasAnyUnsavedChanges.value || v2Writing.value) {event.preventDefault();event.returnValue='';}
 }
 watch(v2FollowupBusy, value => { if(!value && serverUpdatePending.value && !hasAnyUnsavedChanges.value)scheduleRepairStreamRefresh(); });
-onMounted(()=>{void v2LoadStats();window.addEventListener('beforeunload',v2BeforeUnload);v2NarrowMedia.addEventListener('change',v2MeasureRows);});
-onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();window.removeEventListener('beforeunload',v2BeforeUnload);v2NarrowMedia.removeEventListener('change',v2MeasureRows);});
+onMounted(()=>{void v2LoadStats();window.addEventListener('beforeunload',v2BeforeUnload);});
+onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();window.removeEventListener('beforeunload',v2BeforeUnload);});
 `;
 
 const followupExtras = `
@@ -114,8 +111,6 @@ export function adaptRepairController(source, kind, exposedNames) {
     script = changeOnce(script, 'const recordState = ref<RecordStateFilter>("all");', 'const recordState = ref<RecordStateFilter>(props.focusRecordId ? "all" : "active");');
     if(script.split('loadRecordDetailAndOpen(focused);').length!==4)throw new Error('Repair focus entry contract changed');
     script = script.replaceAll('loadRecordDetailAndOpen(focused);','loadRecordDetailAndOpen(focused, new URLSearchParams(window.location.search).get("workspace_tab") === "followups" ? "followups" : "project");');
-    script = changeOnce(script,'const recordListRef = ref<HTMLElement | null>(null);','const recordListRef = ref<HTMLElement | null>(null);\nconst v2RowHeight=ref(window.matchMedia("(max-width:600px)").matches?104:88);');
-    script = changeOnce(script, 'estimateSize: () => 78,', 'estimateSize: () => v2RowHeight.value,');
     script = changeOnce(script, '`project:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`', '`project:${props.userId}:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`');
     script = changeOnce(script, '}, () => `project:${props.scope}`);', '});');
     script = changeOnce(script,'    && hasWritableDraft.value','    && hasWritableDraft.value\n    && !projectConflict.value\n    && (!submission.pending.value || submission.status.value === "failed")');
@@ -137,7 +132,7 @@ export function adaptRepairController(source, kind, exposedNames) {
     const watcher = `watch(projectDrawerOpen, (open) => {`;
     const start = script.indexOf(watcher), end = script.indexOf('\n});', start);
     if(start<0||end<start)throw new Error('Repair detail lifecycle changed');
-    script = script.slice(0,start) + `watch(projectDrawerOpen, open => {\n  v2MeasureRows();\n  if(open){projectDrawerReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;focusProjectDrawer();}\n  else clearSyncStatusTimer();\n});` + script.slice(end+'\n});'.length);
+    script = script.slice(0,start) + `watch(projectDrawerOpen, open => {\n  if(open){projectDrawerReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;focusProjectDrawer();}\n  else clearSyncStatusTimer();\n});` + script.slice(end+'\n});'.length);
     script = editFunction(script, 'loadRecords', body => {
       let value=changeOnce(body,'  loading.value = true;',"  loading.value = true;v2RecordError.value='';");
       value=changeOnce(value,'    records.value = Array.isArray(payload.records) ? payload.records : [];',"    records.value = Array.isArray(payload.records) ? payload.records : [];\n    v2RecordsReady.value=true;v2AppliedState.value=v2StateLabel.value;");

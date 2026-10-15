@@ -191,6 +191,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin") / "upload_event_module" / "services" / "process_lifetime.py",
     Path("启动程序.bat"),
     Path("bin/refactored_main.py"),
+    Path("bin/public_access/frpc-distribution.json"),
     Path("bin/openclaw_service/__main__.py"),
     Path("bin/openclaw_service/launcher.py"),
     Path("bin/openclaw_service/client.py"),
@@ -1671,6 +1672,12 @@ def _run_packaging_preflight_tests() -> None:
     test_python = str(_find_build_python() or sys.executable)
     log(f"测试解释器: {test_python}")
 
+    subprocess.run([test_python, '-c',
+        "import json,sys;sys.path.insert(0,'bin');from public_access.config import SPEC;"
+        "from openclaw_service.assistant.lighthouse_distribution import validate_spec;"
+        "validate_spec(json.loads(SPEC.read_text(encoding='utf-8')),component='frpc')"],
+        cwd=PROJECT_ROOT, check=True)
+
     _assert_project_iterator_excludes_runtime_data()
     _cleanup_vue_dist_assets()
 
@@ -1805,6 +1812,8 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest",
+         "bin.test_public_access",
+         "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",

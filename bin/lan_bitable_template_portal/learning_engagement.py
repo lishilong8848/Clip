@@ -141,7 +141,9 @@ def enqueue_weekly(service, current, duties):
                     'name': person.get('name', ''), 'stats': stats.get(person['id'], {})}, conn)
         directory = {p['id']: p for p in people}
         reports = [('group', '', stats)]
-        reports.extend((scope, scope, weekly_stats(service, start, end, conn, scope)) for scope in WEEKLY_SUPERVISOR_SCOPES)
+        by_building = {scope: [{**item, 'name': directory.get(pid, {}).get('name', '人员信息待核对')}
+                              for pid, item in weekly_stats(service, start, end, conn, scope).items()] for scope in 'ABCDEH'}
+        reports.extend((scope, scope, {row['person_id']: row for row in by_building[scope]}) for scope in WEEKLY_SUPERVISOR_SCOPES)
         for audience, scope, values in reports:
             participants = [{**item, 'name': directory.get(pid, {}).get('name', '人员信息待核对'),
                 'employee_no': directory.get(pid, {}).get('employee_no', '')} for pid, item in values.items()]
@@ -151,6 +153,9 @@ def enqueue_weekly(service, current, duties):
             if not service._get('engagement', key, conn):
                 service._put('engagement', key, {**base, 'id': key, 'kind': 'weekly_summary', 'audience': audience,
                     'scope': scope, 'items': participants, 'part': 1, 'parts': 1, 'participants': len(participants)}, conn)
+                report = service._get('engagement', key, conn)
+                report['buildings'] = {scope: by_building[scope]} if scope else by_building
+                service._put('engagement', key, report, conn)
         service._put('engagement', identity, {'id': identity, 'date': start, 'kind': 'weekly_batch', 'job_count': job_count, 'status': 'prepared'}, conn)
         service._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
 
@@ -159,14 +164,21 @@ def rate(value):
     return '—' if value is None else f'{value:g}%'
 
 
+def weekly_score(item):
+    return round(item['correct'] * 100 / item['choices'], 1) if item['choices'] else None
+
+
+def weekly_score_key(item):
+    score = weekly_score(item)
+    return score is None, score or 0, item.get('name', ''), item.get('person_id', '')
+
+
 def summary_card(job, url):
-    items = job['items']
+    items = sorted(job['items'], key=weekly_score_key)
     answered = sum(item['answered'] for item in items)
-    practice = sum(item['practice'] for item in items)
     # Average people equally, not their rounded percentages or question counts.
     scores = [item['correct'] * 100 / item['choices'] for item in items if item['choices']]
     average = round(sum(scores) / len(scores), 1) if scores else None
-    error_rate = round(sum(100 - score for score in scores) / len(scores), 1) if scores else None
     mean_count = f'{answered / len(items):.1f}' if items else '—'
     metrics = [('参与人数', f'{len(items)} 人'), ('首次答题总数', f'{answered} 题'),
                ('人均答题数', f'{mean_count} 题'), ('平均正确率', rate(average))]
@@ -177,7 +189,7 @@ def summary_card(job, url):
     button['actions'][0]['text']['content'] = '查看本周人员明细'
     elements = [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': f"{job['date']} 至 {job['end']}"}},
         {'tag': 'div', 'fields': [{'is_short': True, 'text': {'tag': 'lark_md', 'content': f'**{label}**\n{value}'}} for label, value in metrics]},
-        {'tag': 'div', 'text': {'tag': 'plain_text', 'content': f'复习 {practice} 次 · 平均错误率 {rate(error_rate)}'}}]
+        {'tag': 'div', 'text': {'tag': 'plain_text', 'content': f'选择题答对 {sum(item["correct"] for item in items)} 题'}}]
     if scores:
         labels = [f'{percent}%' for percent in range(101)]
         counts = [0] * 101
@@ -203,21 +215,20 @@ def summary_card(job, url):
     if items:
         details = []
         for item in items:
-            correct = item['correct'] * 100 / item['choices'] if item['choices'] else None
-            details.append({'name': item.get('name') or '人员信息待核对', 'papers': str(item.get('papers', '—')),
-                'answered': item['answered'], 'accuracy': rate(round(correct, 1)) if correct is not None else '—',
-                'error_rate': rate(round(100 - correct, 1)) if correct is not None else '—'})
+            score = weekly_score(item)
+            details.append({'name': item.get('name') or '人员信息待核对', 'correct': item['correct'],
+                'answered': item['answered'], 'accuracy': rate(score),
+                'score': f'{score:g}' if score is not None else '暂无评分'})
         elements.extend([{'tag': 'div', 'text': {'tag': 'lark_md', 'content': f'**本周人员明细 · {len(items)}人**'}},
             {'tag': 'table', 'page_size': 10, 'row_height': 'low', 'freeze_first_column': True,
                 'header_style': {'text_align': 'center', 'text_size': 'normal', 'background_style': 'grey', 'bold': True, 'lines': 2},
                 'columns': [{'name': key, 'display_name': label, 'data_type': kind, 'width': width,
                     'horizontal_align': 'left' if key == 'name' else 'center', 'vertical_align': 'center'}
-                    for key, label, kind, width in [('name', '姓名', 'text', '24%'), ('papers', '答题次数', 'text', '19%'),
-                        ('answered', '答题数量', 'number', '19%'), ('accuracy', '正确率', 'text', '19%'), ('error_rate', '错误率', 'text', '19%')]],
+                    for key, label, kind, width in [('name', '姓名', 'text', '24%'), ('answered', '答题数量', 'number', '19%'),
+                        ('correct', '答对数量', 'number', '19%'), ('accuracy', '正确率', 'text', '19%'), ('score', '评分', 'text', '19%')]],
                 'rows': details}])
-    explanation = f'正确率、错误率按有选择题成绩的 {len(scores)} 人等权平均，仅计首次作答；问答及复习不计入。'
-    explanation += ' 次数为本周有作答的题单数，题数为首次提交数量，复习另计。'
-    explanation += ' 曲线按1个百分点分组，100%单列。'
+    explanation = f'正确率按有选择题成绩的 {len(scores)} 人等权平均，仅计首次作答；问答及复习不计入。'
+    explanation += ' 自动评分＝选择题首答正确数÷首答题数×100，按评分升序，无成绩置后。曲线按1个百分点分组，100%单列。'
     if job.get('parts', 1) > 1:
         explanation = f"历史分组 {job['part']}/{job['parts']}：以上仅统计本组 {len(items)} 人。" + explanation
     elements.extend([{'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': explanation}]}, button])
@@ -330,9 +341,13 @@ def send_due(service, current):
                         continue
                     identity = job['id'] + ':' + target if job.get('scope') else job['id']
                     try:
-                        if card is None:
-                            card = make_card(job, url, paper, record)
-                        result = service._send(target, card, identity)
+                        interactive = getattr(service, '_weekly_card_sender', None)
+                        if job['kind'] == 'weekly_summary' and callable(interactive):
+                            result = interactive(job, target, identity)
+                        else:
+                            if card is None:
+                                card = make_card(job, url, paper, record)
+                            result = service._send(target, card, identity)
                         ok = result[0] if isinstance(result, tuple) else bool(result)
                     except Exception:
                         ok = False

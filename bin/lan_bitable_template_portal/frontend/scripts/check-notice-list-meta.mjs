@@ -1,0 +1,28 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+
+const compiled = await build({ entryPoints: ['src/workspace-v2/noticeListMeta.ts'], bundle: true, write: false, format: 'esm' });
+const { noticeListStatus: status, noticeListCycle: cycle, noticePlanWindow: window } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
+const row = { work_type: 'maintenance', source_progress: '未开始', status: '开始', maintenance_cycle: '半年' };
+assert.equal(status(row, 'planned').label, '未开始');
+assert.equal(status(row, 'ongoing').label, '进行中');
+assert.equal(status({ ...row, status: '更新' }, 'ongoing').label, '进行中');
+assert.deepEqual(status({ ...row, error: '上传失败' }, 'ongoing'), { label: '发送失败', tone: 'error' });
+assert.equal(status({ ...row, phase: 'failed' }, 'ongoing').label, '发送失败');
+assert.equal(status({ ...row, status: '待处理' }, 'ongoing').label, '需处理');
+assert.equal(status({ ...row, source_progress: '已结束' }, 'planned').label, '已结束');
+assert.equal(cycle(row), '周期 半年');
+assert.equal(cycle({ ...row, display_fields: { '维护周期': '每月' } }), '周期 半年');
+assert.equal(cycle({ work_type: 'maintenance', display_fields: { '维护周期': '每月' } }), '周期 每月');
+assert.equal(cycle({ work_type: 'maintenance', display_fields: { '维保周期': '季度' } }), '周期 季度');
+assert.equal(cycle({ work_type: 'maintenance', maintenance_cycle: ' ', display_fields: { '维护周期': '年度' } }), '周期 年度');
+assert.equal(cycle({ work_type: 'maintenance', maintenance_cycle: '/' }), '周期 /');
+assert.equal(cycle({ work_type: 'maintenance' }), '周期未填');
+assert.equal(cycle({ work_type: 'change' }), '');
+assert.equal(row.source_progress, '未开始', 'display helpers never mutate source records');
+assert.deepEqual(window({ display_fields: { '计划开始维护时间': '2026-10-15T09:30', '计划结束维护时间': '2026-10-16T18:30:00' } }), { start: '2026-10-15 09:30', end: '2026-10-16 18:30' });
+assert.deepEqual(window({ work_type: 'change', display_fields: { '变更开始日期（阿里）': '2026-10-01', '计划开始时间': '2026-10-02', '变更结束日期（阿里）': '2026-10-31' } }), { start: '2026-10-01', end: '2026-10-31' });
+assert.deepEqual(window({ plan_start: '2026-10-15T09:00' }), { start: '2026-10-15 09:00', end: '' });
+assert.deepEqual(window({ display_fields: { '计划结束时间': '2026-10-31' } }), { start: '', end: '2026-10-31' });
+assert.deepEqual(window({ start_time: '2026-10-15T09:30', updated_at: '2026-10-15T10:00', memory: { start_time: '2026-09-01' } }), { start: '', end: '' });
+console.log('PASS: 21 notice metadata checks; plan windows never use send times or remembered drafts.');

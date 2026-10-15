@@ -10,7 +10,7 @@ import { adaptRepairController, controllerBindings } from './workspace-repair-ad
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../output/playwright/workspace-repairs');
-const build=process.argv.includes('--isolated')?path.resolve(root,'../../../output/repair-v2-review'):path.resolve(root,'dist');
+const build=process.env.CLIPFLOW_REPAIR_PREVIEW_ROOT?path.resolve(process.env.CLIPFLOW_REPAIR_PREVIEW_ROOT):process.argv.includes('--isolated')?path.resolve(root,'../../../output/repair-v2-review'):path.resolve(root,'dist');
 await mkdir(output,{recursive:true});
 for(const [kind,legacy,view] of [['management','RepairManagementPage','RepairWorkspace'],['followup','RepairFollowupPanel','RepairFollowups']]){
   const original=readFileSync(path.join(root,'src/components',legacy+'.vue'),'utf8');
@@ -93,7 +93,7 @@ async function noOverflow(page){assert.equal(await page.evaluate(()=>document.do
 try{
   let page=await newPage();
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
-  assert.ok(await page.locator('.record-row').count()<30,'project list remains virtualized');
+  assert.equal(await page.locator('.record-row').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
   await openFirst(page);await noOverflow(page);
   assert.equal(await detail(page).getByRole('button',{name:'检修通告',exact:true}).count(),1,'notice access independent of delete permission');
   assert.equal(await detail(page).getByRole('button',{name:'删除'}).count(),0);

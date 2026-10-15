@@ -1,6 +1,6 @@
 import ts from 'typescript';
 
-export function adaptBrowserReferences(code, filename, adapterPath) {
+export function adaptBrowserReferences(code, filename, adapterPath, embedded=false) {
   const component=filename.replaceAll('\\', '/').split('?')[0];
   const eventPage=component.endsWith('/EventManagementPage.vue');
   if (!eventPage&&!/\b(?:location|history|open)\b/.test(code)) return null;
@@ -13,11 +13,8 @@ export function adaptBrowserReferences(code, filename, adapterPath) {
   const replacements = [];
   const aliases = { location: '__v2Location', history: '__v2History', open: '__v2Open' };
   const chat = component.endsWith('/LighthouseAssistant.vue');
-  let chatUsed = false, eventBackUsed=false;
+  let chatUsed = false;
   function visit(node) {
-    if(eventPage&&ts.isFunctionDeclaration(node)&&node.name?.text==='returnToOverview'&&node.body){
-      replacements.push([node.body.getStart(tree),node.body.end,"{ __v2ReturnHome('/'); }"]);eventBackUsed=true;return;
-    }
     if(eventPage&&ts.isStringLiteral(node)&&node.text==='事件态势与楼栋入口'){
       replacements.push([node.getStart(tree),node.end,JSON.stringify('事件管理')]);return;
     }
@@ -43,6 +40,6 @@ export function adaptBrowserReferences(code, filename, adapterPath) {
   let result = code;
   for (const [start, end, value] of replacements.sort((a, b) => b[0] - a[0])) result = result.slice(0, start) + value + result.slice(end);
   const chatImport=chatUsed?`import { shouldFollow as __v2ShouldFollow, followBottom as __v2FollowBottom } from ${JSON.stringify(adapterPath.replace(/browser\.ts$/, 'chatMotion.ts'))};\n`:'';
-  const eventImport=eventBackUsed?`import { navigate as __v2ReturnHome } from ${JSON.stringify(adapterPath.replace(/browser\.ts$/, 'navigation.ts'))};\n`:'';
-  return eventImport + chatImport + `import { workspaceLocation as __v2Location, workspaceHistory as __v2History, workspaceOpen as __v2Open } from ${JSON.stringify(adapterPath)};\n` + result;
+  const browserImport=embedded?`import {useEmbeddedBrowser} from ${JSON.stringify(adapterPath.replace(/browser\.ts$/, 'embeddedContext.ts'))};\nimport {workspaceOpen as __v2Open} from ${JSON.stringify(adapterPath)};\nconst {location:__v2Location,history:__v2History}=useEmbeddedBrowser();\n`:`import { workspaceLocation as __v2Location, workspaceHistory as __v2History, workspaceOpen as __v2Open } from ${JSON.stringify(adapterPath)};\n`;
+  return chatImport + browserImport + result;
 }

@@ -7220,6 +7220,8 @@ class FastAPIPortalController:
                     user.get("name") or user.get("en_name") or ""
                 )
                 PortalRuntime.service.validate_ongoing_delete_item(payload, scope=scope)
+                from lan_bitable_template_portal.account_policy import require_notice_delete
+                require_notice_delete(PortalRuntime.auth_manager, session, str(payload.get("work_type") or "maintenance"))
                 delete_result = await asyncio.to_thread(
                     PortalRuntime.execute_local_delete_active_item,
                     {"data_dict": payload},
@@ -13884,8 +13886,10 @@ class FastAPIPortalController:
         stage_started_at = time.perf_counter()
         self._app = self._build_app()
         app_ms = (time.perf_counter() - stage_started_at) * 1000.0
+        from public_access import attach as attach_public_access
+        asgi_app, self._public_access = attach_public_access(self._app, self)
         config = uvicorn.Config(
-            self._app,
+            asgi_app,
             host=self.host,
             port=bound_port,
             log_level="warning",
@@ -13916,6 +13920,11 @@ class FastAPIPortalController:
         )
         self._start_scheduler()
         self._start_polling_relay_worker()
+        if self._public_access is not None:
+            try:
+                self._public_access.start()
+            except Exception as exc:
+                log_warning(f"公网后台启动失败，局域网不受影响: {type(exc).__name__}")
         log_info(
             "FastAPI门户已启动: "
             f"public={self.get_url()} "
@@ -13933,6 +13942,9 @@ class FastAPIPortalController:
 
     def stop(self) -> None:
         self._stopping_event.set()
+        public_access = getattr(self, '_public_access', None)
+        if public_access is not None:
+            public_access.stop()
         panel = getattr(self, "_notice_panel", None)
         if panel is not None:
             panel.close()

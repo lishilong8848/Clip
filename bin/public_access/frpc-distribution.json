@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "component": "frpc",
+  "version": "0.71.0",
+  "platform": "windows_amd64",
+  "base": "H7DLbpdQiaIw4ssg5sCcSoGMn5M",
+  "table": "tblUECEItaUpOWvd",
+  "files": {
+    "frpc.exe": "c9c59f9bb99561405b81d68f688384aec49369df10489044315292b0eaac957a",
+    "LICENSE": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+  },
+  "sha256": "72f56e6c538721305470db7290b085b687dc8cc95f60f3363352db3bb9e159ba",
+  "size": 6325520,
+  "parts": [
+    {
+      "index": 1,
+      "size": 6325520,
+      "name": "frpc-windows-amd64.zip.001",
+      "sha256": "72f56e6c538721305470db7290b085b687dc8cc95f60f3363352db3bb9e159ba",
+      "record_id": "reczz28NVc5plB1I",
+      "file_token": "AlIWbouVCoa3bCxoLzYcbhuhnkb"
+    }
+  ]
+}

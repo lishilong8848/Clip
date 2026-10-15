@@ -1,4 +1,4 @@
-import { destination, navigate } from './navigation';
+import { destination, navigate, navigateBack } from './navigation';
 import { logicalUrl } from './version';
 
 // Only the independent build imports these adapters; browser globals and legacy files are never patched.
@@ -24,7 +24,7 @@ export const workspaceHistory = {
   get state() { return window.history.state; },
   pushState(data: unknown, unused: string, url?: string | URL | null) { window.history.pushState(data, unused, url == null ? url : destination(url)); },
   replaceState(data: unknown, unused: string, url?: string | URL | null) { window.history.replaceState(data, unused, url == null ? url : destination(url)); },
-  back() { window.history.back(); }, forward() { window.history.forward(); }, go(delta?: number) { window.history.go(delta); },
+  back() { navigateBack(); }, forward() { window.history.forward(); }, go(delta?: number) { if(delta&&delta<0)navigateBack();else window.history.go(delta); },
 };
 export function workspaceOpen(url?: string | URL, target?: string, features?: string): Window | null {
   return window.open(url ? destination(url) : url, target, features);

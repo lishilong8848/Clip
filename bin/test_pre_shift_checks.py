@@ -31,6 +31,9 @@ class CheckTests(unittest.TestCase):
         self.cloud = Mock()
         self.cloud.upsert.return_value = 'rec_test'
         self.service = CheckService(self.temp.name, roster=self.roster, cloud=self.cloud, sender=self.sender, portal_url=lambda: 'http://portal:18766')
+        clock = patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=at(DAY + 'T08:50:00'))
+        clock.start()
+        self.addCleanup(clock.stop)
         self.service.save_definition(self.admin, 'A', 0, [{'id': 'x', 'text': '检查测试项一'}, {'id': 'y', 'text': '检查测试项二'}])
         self.current = at(DAY + 'T08:50:00')
         self.answers = [{'id': 'x', 'status': 'normal', 'note': ''}, {'id': 'y', 'status': 'abnormal', 'note': '测试异常说明'}]
@@ -280,6 +283,64 @@ class CheckTests(unittest.TestCase):
 
 
 class RouteTests(unittest.TestCase):
+    def test_streamed_files_ownership_dedup_download_and_mid_upload_revocation(self):
+        import asyncio
+        import httpx
+        from fastapi import FastAPI
+        from lan_bitable_template_portal import pre_shift_routes
+        from lan_bitable_template_portal.account_policy import business_delete_denial
+        current = at(DAY + 'T09:00:00')
+        user = {'open_id': 'ou_one', 'name': '上传人', 'home_scope': 'A', 'scope_rules': ['A'],
+                'category': 'operator', 'modules': ['maintenance'], 'level': 'L4', 'can_delete_business': False}
+        async def body(request, **kwargs): return await request.json()
+        controller = SimpleNamespace(_current_session=lambda _: {'user': user}, _read_json_request=body,
+                                     _request_base_url=lambda _: 'http://fixture')
+        runtime = SimpleNamespace(service=Mock(), auth_manager=SimpleNamespace(public_user=lambda _: user,
+            account_profile=lambda _: user), state_store=SimpleNamespace(record_business_operation_audit=Mock()))
+        with tempfile.TemporaryDirectory() as root, patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=current):
+            service = CheckService(root, roster=lambda _: {'people': [{'scope': 'A', 'shift': '白', 'open_id': x, 'name': x} for x in ('ou_one', 'ou_two')]})
+            service.save_definition({'id': 'admin', 'level': 'L1', 'scope_rules': ['ALL']}, 'A', 0, [{'id': 'x', 'text': '文件检查'}])
+            service.prepare(current)
+            app = FastAPI()
+            with patch.object(pre_shift_routes, 'CheckService', return_value=service):
+                pre_shift_routes.install_pre_shift_routes(app, controller, runtime)
+                @app.middleware('http')
+                async def deletion_guard(request, call_next):
+                    result = await business_delete_denial(request, controller, runtime)
+                    return result if result is not None else await call_next(request)
+                async def exercise():
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://fixture') as client:
+                        params = {'task_id': DAY + ':A:白', 'item_id': 'x', 'kind': 'item', 'name': '检查文件.txt'}
+                        response = await client.post('/api/pre-shift-checks/files', params=params, content=b'first text')
+                        self.assertEqual(response.status_code, 200, response.text)
+                        file = response.json()['data']
+                        again = await client.post('/api/pre-shift-checks/files', params=params, content=b'first text')
+                        self.assertEqual(again.json()['data']['id'], file['id'])
+                        self.assertFalse(list(service.staging_dir.iterdir()))
+                        download = await client.get(file['url'])
+                        self.assertEqual(download.content, b'first text')
+                        self.assertIn('filename*=', download.headers['content-disposition'])
+                        self.assertEqual(download.headers['x-content-type-options'], 'nosniff')
+                        user.update(home_scope='B', scope_rules=['B'])
+                        self.assertEqual((await client.get(file['url'])).status_code, 403)
+                        user.update(home_scope='A', scope_rules=['A'], open_id='ou_two')
+                        self.assertEqual((await client.delete(file['url'])).status_code, 403)
+                        user['open_id'] = 'ou_one'
+                        denied = await client.delete(file['url'], headers={'origin': 'http://evil.test'})
+                        self.assertEqual(denied.status_code, 403)
+                        self.assertEqual((await client.delete(file['url'])).status_code, 200)
+                        self.assertEqual((await client.get(file['url'])).status_code, 404)
+                        async def stream():
+                            yield b'part one'
+                            user['modules'] = []
+                            yield b'part two'
+                        revoked = await client.post('/api/pre-shift-checks/files', params=params, content=stream())
+                        self.assertEqual(revoked.status_code, 403, revoked.text)
+                        self.assertFalse(list(service.staging_dir.iterdir()))
+                        with service.connection() as conn:
+                            self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0], 0)
+                asyncio.run(exercise())
+
     def test_session_scope_csrf_and_actor_are_server_derived(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient

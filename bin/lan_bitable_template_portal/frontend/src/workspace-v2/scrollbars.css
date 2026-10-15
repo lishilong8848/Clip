@@ -1,3 +1,4 @@
+@import './scrollLayout.css';
 .workspace-v2 { --v2-scroll-thumb: #a7b2bf; --v2-scroll-hover: #78899e; }
 .workspace-v2, .workspace-v2 * { scrollbar-width: thin; scrollbar-color: var(--v2-scroll-thumb) transparent; }
 .workspace-v2 .v2-shell>.v2-sidebar { scrollbar-color: var(--v2-scroll-thumb) transparent; }

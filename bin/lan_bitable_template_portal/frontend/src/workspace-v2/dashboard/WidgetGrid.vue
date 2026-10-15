@@ -1,5 +1,5 @@
 <template>
-  <div ref="host" class="grid-stack v2-widget-grid" :class="{'is-editing':editing}" aria-label="个人工作台组件">
+  <div ref="host" class="grid-stack v2-widget-grid" :class="{'is-editing':editing}" :aria-label="label">
     <TransitionGroup :css="false" @enter="enter" @leave="leave">
     <div v-for="item in items" :key="item.id" class="grid-stack-item" :style="{'--widget-order':item.y*12+item.x}" :gs-id="item.id" :data-widget-id="item.id" :data-widget-kind="item.kind">
       <section class="grid-stack-item-content v2-widget" :aria-label="item.title">
@@ -7,20 +7,21 @@
           <button v-if="editing" class="v2-widget-drag" data-v2-navigation type="button" :aria-label="'拖动'+item.title" :title="'拖动'+item.title"><GripVertical :size="16" /></button>
           <h2><slot name="title" :item="item">{{ item.title }}</slot></h2><slot name="tools" :item="item" />
         </header>
-        <div class="v2-widget-body"><slot :item="item" /></div>
+        <WidgetViewport :editing="editing" :adaptive="adaptive||item.kind==='module'"><slot :item="item" /></WidgetViewport>
       </section>
     </div>
     </TransitionGroup>
   </div>
 </template>
-<script setup lang="ts">
+<script setup lang="ts" generic="T extends Widget & {minW?:number;minH?:number}">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { GridStack, type GridItemHTMLElement, type GridStackWidget } from 'gridstack';
 import { GripVertical } from 'lucide-vue-next';
 import 'gridstack/dist/gridstack.min.css';
 import type { Widget } from './layout';
-const props=defineProps<{items:Widget[];editing:boolean}>();
-const emit=defineEmits<{layout:[items:Widget[]]}>();
+import WidgetViewport from '../WidgetViewport.vue';
+const props=withDefaults(defineProps<{items:T[];editing:boolean;cellHeight?:number;label?:string;adaptive?:boolean}>(),{cellHeight:80,label:'个人工作台组件',adaptive:false});
+const emit=defineEmits<{layout:[items:T[]]}>();
 const host=ref<HTMLElement>();
 let grid:GridStack|null=null,syncing=false,disposed=false;
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -34,7 +35,7 @@ function transition(el:Element,done:()=>void,leaving:boolean){
 }
 function enter(el:Element,done:()=>void){transition(el,done,false);}
 function leave(el:Element,done:()=>void){transition(el,done,true);}
-const geometry=(w:Widget):GridStackWidget=>({id:w.id,x:w.x,y:w.y,w:w.w,h:w.h,minW:3,minH:3,maxH:12});
+const geometry=(w:T):GridStackWidget=>({id:w.id,x:w.x,y:w.y,w:w.w,h:w.h,minW:w.minW||(w.kind==='module'?4:3),minH:w.minH||(w.kind==='module'?6:3),maxH:props.adaptive||w.kind==='module'?30:12});
 async function sync(){
   await nextTick();if(!grid||disposed)return;syncing=true;grid.batchUpdate();
   const ids=new Set(props.items.map(w=>w.id));
@@ -54,10 +55,10 @@ function changed(){
 function motion(){grid?.setAnimation(!reduced.matches);}
 async function controls(){await nextTick();grid?.setStatic(!props.editing||mobile.matches);for(const el of grid?.getGridItems()||[])grid?.refreshDragHandles(el);}
 onMounted(()=>{
-  grid=GridStack.init({column:12,mode:'compact',cellHeight:80,margin:8,animate:!reduced.matches,staticGrid:!props.editing||mobile.matches,handle:'.v2-widget-drag',draggable:{scroll:true},resizable:{handles:'se'},alwaysShowResizeHandle:true},host.value!);
+  grid=GridStack.init({column:12,mode:'compact',cellHeight:props.cellHeight,margin:8,animate:!reduced.matches,staticGrid:!props.editing||mobile.matches,handle:'.v2-widget-drag',draggable:{scroll:true},resizable:{handles:'se'},alwaysShowResizeHandle:true},host.value!);
   void sync();grid?.on('change',changed);grid?.on('dragstop resizestop',()=>queueMicrotask(changed));reduced.addEventListener('change',motion);mobile.addEventListener('change',controls);
 });
-watch(()=>props.items,()=>void sync(),{deep:true});
+watch(()=>JSON.stringify(props.items.map(item=>[item.id,item.x,item.y,item.w,item.h,item.minW,item.minH])),()=>void sync());
 watch(()=>props.editing,controls);
 onBeforeUnmount(()=>{disposed=true;reduced.removeEventListener('change',motion);mobile.removeEventListener('change',controls);grid?.destroy(false);grid=null;});
 </script>

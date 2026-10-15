@@ -6,9 +6,10 @@
         <NFormItem v-if="presentationOptions(draft.kind).length>1" label="组件样式"><NSelect v-model:value="draft.presentation" :options="presentationOptions(draft.kind)" /></NFormItem>
         <NFormItem v-if="draft.kind==='tasks'" label="待办业务"><NSelect v-model:value="draft.module" :options="taskOptions(user)" filterable /></NFormItem>
         <NFormItem v-if="draft.kind==='notice_actions'" label="默认通告分类"><NSelect v-model:value="draft.module" :options="taskOptions(user).filter(item=>NOTICE_IDS.includes(item.value))" /></NFormItem>
+        <NFormItem v-if="draft.kind==='module'" label="完整业务模块"><NSelect v-model:value="draft.module" :options="navigationModules(user.modules||[]).map(item=>({value:item.id,label:item.label}))" filterable /></NFormItem>
         <NFormItem v-if="!['shortcuts','learning','pre_shift'].includes(draft.kind)" label="楼栋范围"><NSelect v-model:value="draft.scope" :options="[{value:'current',label:'跟随工作台楼栋'},...scopes]" /></NFormItem>
         <NFormItem label="组件宽度"><NSelect v-model:value="draft.w" :options="[{label:'紧凑 · 1/3',value:4},{label:'标准 · 1/2',value:6},{label:'宽幅 · 2/3',value:8},{label:'整行',value:12}]" /></NFormItem>
-        <NFormItem label="组件高度"><NSelect v-model:value="draft.h" :options="[{label:'紧凑',value:3},{label:'标准',value:5},{label:'加高',value:7},{label:'超高',value:9}]" /></NFormItem>
+        <NFormItem label="组件高度"><NSelect v-model:value="draft.h" :options="draft.kind==='module'?[{label:'紧凑',value:6},{label:'常规',value:10},{label:'标准',value:12},{label:'完整工作区',value:14},{label:'加高工作区',value:18},{label:'超高工作区',value:24},{label:'最大工作区',value:30}]:[{label:'紧凑',value:3},{label:'标准',value:5},{label:'加高',value:7},{label:'超高',value:9}]" /></NFormItem>
         <NFormItem v-if="draft.kind==='notices'" label="统计口径"><NSelect v-model:value="draft.metric" :options="[{label:'当前进行中',value:'ongoing'},{label:'本月待发计划',value:'pending'}]" /></NFormItem>
         <NFormItem v-if="draft.kind==='events'" label="时间范围"><NSelect v-model:value="draft.period" :options="[{label:'本周',value:'week'},{label:'本月',value:'month'}]" /></NFormItem>
         <NFormItem v-if="['events','notices'].includes(draft.kind)" label="展示方式"><NSelect v-model:value="draft.display" :options="displayOptions(draft.kind)" /></NFormItem>

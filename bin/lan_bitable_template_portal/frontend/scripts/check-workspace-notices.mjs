@@ -28,7 +28,7 @@ try:
             'work_type':kind,'scope':'A','building_codes':['A'],'status':'开始','site_photo_count':1} for i in range(6)]
         rows[0]['title']='EA118机房A楼制冷单元及二次泵控制系统年度'+label+'（第三阶段设备状态核验与恢复）'
         ongoing[0]['title']='EA118机房A楼配电系统与电池组'+label+'（多设备联合处理及运行状态核验）'
-        args=dict(payload={'records':rows,'ongoing':ongoing},session={'is_admin':True,'user':{'name':'隔离测试'}},scope='A',work_type=kind,month='10月',scope_options=[{'value':'A','label':'A楼'}])
+        args=dict(payload={'records':rows,'ongoing':ongoing},session={'role':'building','can_delete_business':False,'allowed_modules':list(VALID_STARTS),'user':{'name':'隔离测试'}},scope='A',work_type=kind,month='10月',scope_options=[{'value':'A','label':'A楼'}])
         html=render_workbench_lite(**args)
         detail=extract_workbench_lite_fragments(render_workbench_lite(**args,active_item_id=ongoing[0]['active_item_id']))['detail']
         plan=extract_workbench_lite_fragments(render_workbench_lite(**args,record_id=rows[0]['record_id']))['detail']
@@ -54,7 +54,7 @@ try {
     if (url.pathname === '/workbench-lite') { oldPages.push(req.url()); return route.fulfill({ contentType: 'text/html', body: data.html }); }
     if (!url.pathname.startsWith('/api/')) return route.continue();
     const ok = data => route.fulfill({ json: { ok: true, data } });
-    if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'ou_notice_fixture', name: '测试管理员', role: 'admin', level: 'L1', category: 'manager', modules: [...Object.keys(fixtures), 'accounts'] }, scope_options: [{ value: 'A', label: 'A楼' },{value:'B',label:'B楼'}] });
+    if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'ou_notice_fixture', name: '测试值班员', role: 'building', level: 'L4', category: 'operator', can_delete_business: false, modules: Object.keys(fixtures) }, scope_options: [{ value: 'A', label: 'A楼' }] });
     if (url.pathname === '/api/auth/logout') return failLogout ? route.fulfill({ status: 503, json: { ok: false, error: '退出暂时失败，请重试' } }) : ok({});
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-notice-ui' } });
     if (url.pathname === '/api/workbench') return ok(data.payload);
@@ -116,6 +116,10 @@ try {
     try{await page.locator('.v2-notice-editor .v2-notice-field-grid').first().waitFor({timeout:10000});}
     catch(e){await page.screenshot({path:path.join(output,'form-error.png'),fullPage:true});console.error(errors,await page.locator('.v2-notice-editor').innerText());throw e;}
     assert.equal(await page.locator('.v2-notice-editor-footer').isVisible(), true);
+    await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'删除通告',exact:true}).click();
+    await page.getByRole('button',{name:'确认删除',exact:true}).waitFor();
+    assert.equal(writes.length,0,'opening deletion confirmation must not delete');
+    await page.getByRole('button',{name:'取消',exact:true}).click();
     assert.equal(await page.locator('#lite-notice-form').count(), 0, 'old form HTML is metadata only, never mounted');
     assert.equal(await page.locator('.v2-notice-editor input[aria-label="名称"],.v2-notice-editor input[aria-label="标题"]').count() > 0, true);
     assert.equal(await page.locator('.v2-notice-upload input[aria-label="添加现场照片"]').count(),['maintenance','change','repair'].includes(kind)?1:0);

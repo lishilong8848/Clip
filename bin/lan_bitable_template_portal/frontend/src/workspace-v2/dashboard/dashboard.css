@@ -86,6 +86,8 @@
 @media print{.workspace-v2 .v2-shell>.v2-main{height:auto!important;overflow:visible!important}.workspace-v2 .v2-shell{height:auto!important;overflow:visible!important}}
 @media(prefers-reduced-motion:reduce){.v2-task-row,.v2-task-arrow{transition:none!important}.v2-task-row:active,.v2-task-row:hover .v2-task-arrow{transform:none}}
 .v2-widget-body{container-type:inline-size}
+/* GridStack's lazy-loaded default must not add a second scroller around the body. */
+@media(min-width:761px){.workspace-v2 .v2-widget-grid>.grid-stack-item>.grid-stack-item-content{overflow:clip}}
 .v2-task-row .n-button__content{grid-template-columns:minmax(0,1fr) auto auto}
 .v2-task-state{display:grid;gap:6px;justify-items:start}.v2-task-state small{font-size:12px;color:var(--v2-muted);font-variant-numeric:tabular-nums}
 @container(min-width:600px){.v2-mobile-tasks .v2-task-row{min-height:62px;padding-block:8px}.v2-task-row .n-button__content{gap:20px}.v2-task-state{min-width:92px}.v2-task-action{min-width:52px}}

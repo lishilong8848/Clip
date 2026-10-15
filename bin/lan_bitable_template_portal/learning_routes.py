@@ -92,9 +92,15 @@ def install_learning_routes(app, controller, runtime):
                                           get_portal_url=lambda: runtime.service._critical_guard_public_base_url())
                 controller._learning = service
                 runtime.learning_service = service
+                service._weekly_card_sender = weekly_cards.send_from_worker
         return service
 
+    from .learning_weekly_cards import WeeklyCards
+    weekly_cards = WeeklyCards(runtime, get_service)
+    runtime.learning_weekly_cards = weekly_cards
+
     async def startup():
+        weekly_cards.loop = asyncio.get_running_loop()
         await asyncio.to_thread(lambda: get_service().start())
 
     async def shutdown():

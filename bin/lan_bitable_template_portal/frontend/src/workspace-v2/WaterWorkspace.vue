@@ -1,12 +1,14 @@
 <template>
   <section class="v2-water" aria-label="水耗管理">
     <header class="water-toolbar">
-      <div class="water-title"><NButton data-v2-navigation quaternary circle aria-label="返回工作台" @click="navigate('/')"><ArrowLeft :size="19" /></NButton><h1>水耗管理</h1><NSelect :value="scope" :options="availableScopes" :disabled="busy" class="water-scope" aria-label="水耗楼栋" @update:value="switchScope" /></div>
-      <div class="water-toolbar-actions"><span class="water-updated">{{ snapshotText }}</span><NButton :loading="refreshing" :disabled="refreshing || busy" @click="refreshData"><RefreshCw :size="15" />刷新数据</NButton><NButton v-if="canCreate" data-v2-navigation type="primary" :disabled="busy" @click="leaveEditing(openCreate)"><Plus :size="16" />新增录入</NButton></div>
+      <div class="water-title"><h1>水耗管理</h1><NSelect :value="showOverview?props.scope:scope" :options="scopeChoices" :disabled="busy" class="water-scope" aria-label="水耗楼栋" @update:value="switchScope" /></div>
+      <div v-if="!showOverview" class="water-toolbar-actions"><span class="water-updated">{{ snapshotText }}</span><NButton :loading="refreshing" :disabled="refreshing || busy" @click="refreshData"><RefreshCw :size="15" />刷新数据</NButton><NButton v-if="canCreate" data-v2-navigation type="primary" :disabled="busy" @click="leaveEditing(openCreate)"><Plus :size="16" />新增录入</NButton></div>
     </header>
-    <div class="water-month-summary" :aria-busy="bootstrapLoading"><span>{{ bootstrap.month || waterDay().slice(0,7) }} · 本月</span><span>记录 <strong>{{ waterNumberText(summary.record_count,0) }}</strong></span><span>耗水量 <strong>{{ waterNumberText(summary.total_usage,2) }}</strong> t</span><span>有照片 <strong>{{ waterNumberText(summary.photo_records,0) }}</strong></span><NButton v-if="bootstrapError" data-v2-navigation text type="error" @click="loadBootstrap(true)">基础数据读取失败，重试</NButton></div>
+    <nav class="water-view-tabs" aria-label="水耗视图"><NButton data-v2-navigation :type="showOverview?'primary':'default'" :secondary="!showOverview" :aria-pressed="showOverview" @click="setView('overview')">水耗汇总</NButton><NButton data-v2-navigation :type="!showOverview?'primary':'default'" :secondary="showOverview" :aria-pressed="!showOverview" :disabled="!availableScopes.length" @click="setView('records')">记录办理</NButton></nav>
+    <WaterOverview v-if="showOverview" :scope="props.scope" :scope-options="props.scopeOptions" @open="setView('records',$event)" />
+    <div v-else class="water-query-summary"><span>{{ queryLabel() }}</span><NButton v-if="bootstrapError" data-v2-navigation text type="error" @click="loadBootstrap(true)">基础数据读取失败，重试</NButton></div>
     <div v-if="notice.text" class="water-notice" :class="'water-tone-'+notice.tone" aria-live="polite"><CheckCircle2 v-if="notice.tone==='success'" :size="17" /><CircleAlert v-else :size="17" /><span>{{ notice.text }}</span><NButton data-v2-navigation quaternary circle aria-label="收起水耗提示" @click="notice.text=''"><X :size="14" /></NButton></div>
-    <div class="water-work-area" :class="{'has-editor':editorOpen&&!mobile}">
+    <div v-if="!showOverview" class="water-work-area" :class="{'has-editor':editorOpen&&!mobile}">
       <section class="water-records-area" aria-label="水耗记录">
         <div class="water-filter-main">
           <NRadioGroup v-model:value="filters.range" size="small" aria-label="水耗日期范围"><NRadioButton v-for="range in ranges" :key="range" :value="range">{{ range }}</NRadioButton></NRadioGroup>
@@ -36,7 +38,7 @@
           <div v-else-if="!recordsReady" class="water-initial water-empty"><CircleAlert :size="30" /><strong>{{ !scope ? '当前范围未接入水耗管理' : recordsError ? '水耗记录暂不可用' : filterError ? '请完善日期筛选' : '等待首次数据同步' }}</strong><span>{{ !scope ? '请选择已授权的 A、B、C、D、E、H 楼。' : '尚未取得完整数据。' }}</span></div>
           <template v-else>
             <div v-if="recordsLoading" class="water-list-updating"><NSpin :size="13" />正在更新记录</div>
-            <NDataTable v-if="!mobile" :columns="columns" :data="visibleRecords" :row-key="rowKey" :row-props="rowProps" :scroll-x="660" :bordered="false" :single-line="false" size="small" :max-height="tableHeight" />
+            <NDataTable v-if="!mobile" class="water-record-table" :columns="columns" :data="visibleRecords" :row-key="rowKey" :row-props="rowProps" :scroll-x="840" table-layout="fixed" :bordered="false" :single-line="true" size="small" :max-height="tableHeight" />
             <div v-else class="water-mobile-records"><NEmpty v-if="!visibleRecords.length" :description="emptyText" /><button v-for="row in visibleRecords" :key="row.record_id" type="button" data-v2-navigation class="water-mobile-record" :class="{selected:row.record_id===recordId}" :disabled="busy || recordsStale" @click="openRecord(row.record_id)"><div><strong>{{ row.meter || '水表未填写' }}</strong><NTag :type="waterRecordState(row).type" size="small" :bordered="false">{{ waterRecordState(row).label }}</NTag></div><span>{{ row.statistic_date || '日期未填写' }} · {{ row.frequency || '—' }} · {{ row.shift || '—' }}班</span><dl><div><dt>读数</dt><dd>{{ waterNumberText(row.meter_value) }}</dd></div><div><dt>耗水量</dt><dd>{{ waterNumberText(row.corrected_usage ?? row.computed_usage) }} <small>t</small></dd></div><div><dt>照片</dt><dd>{{ waterPhotoCount(row) ?? '—' }} <small>张</small></dd></div></dl></button></div>
           </template>
         </div>
@@ -52,22 +54,26 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NCard, NDataTable, NDatePicker, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NModal, NPagination, NRadioButton, NRadioGroup, NSelect, NSkeleton, NSpin, NTag, useDialog, type DataTableColumns } from 'naive-ui';
-import { ArrowLeft, ChartNoAxesCombined, CheckCircle2, CircleAlert, Download, Plus, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-vue-next';
+import { ChartNoAxesCombined, CheckCircle2, CircleAlert, Download, Plus, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-vue-next';
 import { ApiError, requestBinaryJson, requestJson, type Dict } from './client';
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { navigate, registerNavigationGuard } from './navigation';
 import { isAssistantEvent } from '../modalState';
 import { trackButtonRequest } from './actionMotion';
 import WaterRecordEditor from './WaterRecordEditor.vue';
+import WaterOverview from './WaterOverview.vue';
+import { logicalUrl } from './version';
 import { validWaterDate, waterDay, waterImageMime, waterNumber, waterNumberText, waterPhotoCount, waterQuery, waterRecordState, waterScopes, waterTrend, type WaterDraft, type WaterFilters, type WaterPhoto } from './water';
 const MotionChart=defineAsyncComponent(()=>import('./MotionChart.vue'));
-const props=defineProps<{scope:string;scopeOptions:{value:string;label:string}[]}>();
+const props=defineProps<{scope:string;scopeOptions:{value:string;label:string}[];initialView?:string}>();
 const emit=defineEmits<{'switch-scope':[scope:string];status:[message:string]}>();
 const dialog=useDialog();
 const scope=computed(()=>waterScopes.has(props.scope)?props.scope:'');
 const availableScopes=computed(()=>props.scopeOptions.filter(item=>waterScopes.has(item.value)));
+const showOverview=computed(()=>props.initialView!=='records'||!scope.value);
+const scopeChoices=computed(()=>showOverview.value?props.scopeOptions.filter(item=>waterScopes.has(item.value)||['ALL','CAMPUS'].includes(item.value)):availableScopes.value);
 const bootstrap=ref<Dict>({}),bootstrapLoading=ref(false),bootstrapError=ref(''),refreshing=ref(false);
-const summary=computed(()=>bootstrap.value.snapshot?.exists===false?{}:bootstrap.value.summary||{}),canCreate=computed(()=>bootstrap.value.permissions?.can_create===true);
+const canCreate=computed(()=>bootstrap.value.permissions?.can_create===true);
 const records=ref<Dict[]>([]),recordsReady=ref(false),recordsLoading=ref(false),recordsError=ref(''),filterError=ref(''),total=ref(0),page=ref(1),loadedQuery=ref(''),loadedQueryLabel=ref(''),queryDay=ref(waterDay());
 const ranges=['近3天','本月','全部时间','自定义日期'];
 const filters=reactive<WaterFilters>({range:'近3天',month:waterDay().slice(0,7),startDate:waterDay(-2),endDate:waterDay(),meter:'',frequency:'',shift:'',query:''});
@@ -99,13 +105,13 @@ const snapshotText=computed(()=>{const s=bootstrap.value.snapshot||{};if(refresh
 const ratio=(v:unknown)=>waterNumber(v)===null?'—':waterNumberText(Number(v)*100,1)+'%';
 function filterOptions(key:string,label:string){return [{label,value:''},...(bootstrap.value.options?.[key]||[]).map((value:string)=>({label:value,value}))];}
 const columns:DataTableColumns<Dict>=[
-  {title:'日期',key:'statistic_date',width:100,render:row=>row.statistic_date||'—'},
-  {title:'水表',key:'meter',minWidth:130,render:row=>h(NButton,{text:true,'data-v2-navigation':'',disabled:busy.value||recordsStale.value,'aria-label':'填写'+(row.meter||'水表')+row.statistic_date,onClick:()=>openRecord(row.record_id)},{default:()=>row.meter||'未填写'})},
-  {title:'频次 / 班次',key:'frequency',width:90,render:row=>`${row.frequency||'—'} / ${row.shift||'—'}`},
-  {title:'水表读数',key:'meter_value',width:100,align:'right',render:row=>waterNumberText(row.meter_value)},
-  {title:'耗水量 / t',key:'usage',width:95,align:'right',render:row=>waterNumberText(row.corrected_usage??row.computed_usage)},
-  {title:'状态',key:'status',width:100,render:row=>h(NTag,{size:'small',bordered:false,type:waterRecordState(row).type},{default:()=>waterRecordState(row).label})},
-  {title:'照片',key:'photo_count',width:60,align:'right',render:row=>waterPhotoCount(row)===null?'—':waterPhotoCount(row)+'张'},
+  {title:'日期',key:'statistic_date',width:'13%',className:'water-date-cell',render:row=>row.statistic_date||'—'},
+  {title:'水表',key:'meter',width:'26%',className:'water-meter-cell',render:row=>{const label=String(row.meter||'').trim()||'水表未填写';return h(NButton,{text:true,'data-v2-navigation':'',class:'water-meter-link',title:label,disabled:busy.value||recordsStale.value,'aria-label':'填写'+label+row.statistic_date,onClick:()=>openRecord(row.record_id)},{default:()=>label});}},
+  {title:'频次 / 班次',key:'frequency',width:'12%',align:'center',className:'water-frequency-cell',render:row=>`${row.frequency||'—'} / ${row.shift||'—'}`},
+  {title:'水表读数',key:'meter_value',width:'15%',align:'right',className:'water-number-cell',render:row=>waterNumberText(row.meter_value)},
+  {title:'耗水量 / t',key:'usage',width:'14%',align:'right',className:'water-number-cell',render:row=>waterNumberText(row.corrected_usage??row.computed_usage)},
+  {title:'状态',key:'status',width:'12%',align:'center',className:'water-state-cell',render:row=>h(NTag,{size:'small',bordered:false,type:waterRecordState(row).type},{default:()=>waterRecordState(row).label})},
+  {title:'照片',key:'photo_count',width:'8%',align:'center',className:'water-photo-cell',render:row=>waterPhotoCount(row)===null?'—':waterPhotoCount(row)+' 张'},
 ];
 function rowProps(row:Dict){return {class:row.record_id===recordId.value?'water-row-selected':'',onClick:(event:MouseEvent)=>{if(!(event.target as Element)?.closest('button,a')&&!busy.value&&!recordsStale.value)void openRecord(row.record_id);}};}
 const rowKey=(row:Dict)=>row.record_id;
@@ -119,7 +125,7 @@ const lifetime=new AbortController();
 function signalError(error:unknown){return error instanceof Error?error.message:'数据读取失败，请重试。';}
 function queryLabel(){return [filters.range==='本月'?filters.month:filters.range==='自定义日期'?`${filters.startDate} 至 ${filters.endDate}`:filters.range,filters.meter||'全部水表',filters.frequency,filters.shift&&filters.shift+'班',filters.query].filter(Boolean).join(' · ');}
 async function loadBootstrap(fresh=false){
-  if(!scope.value||disposed)return;bootstrapRead?.abort();const c=new AbortController();bootstrapRead=c;const generation=++bootstrapGeneration;bootstrapLoading.value=true;
+  if(showOverview.value||!scope.value||disposed)return;bootstrapRead?.abort();const c=new AbortController();bootstrapRead=c;const generation=++bootstrapGeneration;bootstrapLoading.value=true;
   const previousVersion=bootstrap.value.snapshot?.snapshot_version;
   const params=new URLSearchParams({scope:scope.value});if(fresh)params.set('force','1');
   try{const data=await requestJson('/api/capacity/water/bootstrap?'+params,{signal:c.signal});if(c.signal.aborted||disposed||generation!==bootstrapGeneration)return;
@@ -131,7 +137,7 @@ async function loadBootstrap(fresh=false){
   finally{if(generation===bootstrapGeneration)bootstrapLoading.value=false;}
 }
 async function loadRecords(fresh=false){
-  listRead?.abort();const generation=++listGeneration;if(!scope.value||disposed)return;queryDay.value=waterDay();
+  listRead?.abort();const generation=++listGeneration;if(showOverview.value||!scope.value||disposed)return;queryDay.value=waterDay();
   let query:URLSearchParams;try{query=waterQuery(scope.value,filters,page.value,queryDay.value);filterError.value='';}catch(error){filterError.value=signalError(error);recordsLoading.value=false;return;}
   const signature=query.toString(),label=queryLabel(),c=new AbortController();listRead=c;recordsLoading.value=true;recordsError.value='';
   const requestParams=new URLSearchParams(query);if(fresh)requestParams.set('force','1');
@@ -155,7 +161,12 @@ function leaveEditing(proceed:()=>void){
   if(dirty.value){dialog.warning({title:'放弃未保存的水耗填写？',content:'本次读数和未保存照片将被丢弃。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:proceed});}else proceed();
 }
 const removeGuard=registerNavigationGuard((_url,proceed)=>{if(busy.value||dirty.value||uncertain.value){leaveEditing(proceed);return false;}return true;});
-function switchScope(value:string){if(waterScopes.has(value)&&value!==scope.value)leaveEditing(()=>{closeEditor();emit('switch-scope',value);});}
+function switchScope(value:string){if(scopeChoices.value.some(item=>item.value===value)&&value!==props.scope)leaveEditing(()=>{closeEditor();emit('switch-scope',value);});}
+function setView(view:'overview'|'records',building=scope.value||availableScopes.value[0]?.value){
+  if(view==='overview'&&showOverview.value||view==='records'&&!showOverview.value&&building===scope.value)return;
+  if(view==='records'&&!availableScopes.value.some(item=>item.value===building))return;
+  leaveEditing(()=>{closeEditor();notice.text='';const url=logicalUrl();url.searchParams.set('water_view',view);if(view==='records'&&building)url.searchParams.set('scope',building);navigate(url);});
+}
 function clearPhotos(){for(const photo of photos.value)URL.revokeObjectURL(photo.previewUrl);photos.value=[];}
 function resetEditor(){clearPhotos();retained.value=[];detail.value={};editorError.value='';for(const key of Object.keys(errors))delete errors[key];operation='';pendingSave=null;uncertain.value=false;abnormalOpen.value=false;abnormalNote.value='';Object.assign(form,{meter:'',frequency:'',shift:'',statisticDate:waterDay(),meterValue:null,correctedUsage:null,expectedVersion:''});baseline.value=draftStamp();}
 function closeEditor(){detailRead?.abort();detailGeneration++;editorOpen.value=false;editorLoading.value=false;recordId.value='';resetEditor();}
@@ -226,7 +237,8 @@ watch(()=>[filters.range,filters.month,filters.startDate,filters.endDate,filters
   try{waterQuery(scope.value,filters);filterError.value='';}catch(error){filterError.value=signalError(error);return;}
   filterTimer=window.setTimeout(()=>{void loadRecords();},250);
 },{flush:'sync'});
-usePageReadRefresh(url=>url.pathname.startsWith('/api/capacity/water/')&&url.searchParams.get('scope')===scope.value,async()=>{await Promise.all([loadBootstrap(),loadRecords()]);},()=>!busy.value&&!dirty.value&&!editorLoading.value&&!bootstrapLoading.value&&!recordsLoading.value&&!uncertain.value);
+usePageReadRefresh(url=>url.pathname.startsWith('/api/capacity/water/')&&url.searchParams.get('scope')===scope.value,async()=>{await Promise.all([loadBootstrap(),loadRecords()]);},()=>!showOverview.value&&!busy.value&&!dirty.value&&!editorLoading.value&&!bootstrapLoading.value&&!recordsLoading.value&&!uncertain.value);
+watch(showOverview,overview=>{if(overview){bootstrapRead?.abort();listRead?.abort();clearTimeout(pollTimer);}else void Promise.all([loadBootstrap(),loadRecords()]);});
 function viewport(){mobile.value=media.matches;height.value=innerHeight;}
 function visibility(){clearTimeout(pollTimer);if(!document.hidden){if(queryDay.value!==waterDay())void loadRecords();if(refreshing.value)void loadBootstrap(true);else if(!bootstrap.value.snapshot?.exists&&!bootstrapLoading.value)void loadBootstrap();}}
 function unload(event:BeforeUnloadEvent){if(busy.value||dirty.value||uncertain.value){event.preventDefault();event.returnValue='';}}
@@ -235,6 +247,7 @@ onMounted(()=>{void Promise.all([loadBootstrap(),loadRecords()]);media.addEventL
 onBeforeUnmount(()=>{disposed=true;bootstrapRead?.abort();listRead?.abort();detailRead?.abort();lifetime.abort();clearTimeout(filterTimer);clearTimeout(pollTimer);clearPhotos();removeGuard();media.removeEventListener('change',viewport);window.removeEventListener('resize',viewport);window.removeEventListener('beforeunload',unload);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('keydown',escape);});
 </script>
 <style scoped>
+.water-view-tabs{display:flex;gap:8px;padding-bottom:12px;border-bottom:1px solid var(--v2-border)}.water-view-tabs>.n-button{height:34px;min-width:92px}.water-query-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;color:var(--v2-muted);font-size:12px;line-height:1.5}.water-record-table :deep(.n-data-table-th){white-space:nowrap;font-size:12px;padding:10px 12px}.water-record-table :deep(.n-data-table-td){padding:12px;font-size:13px;line-height:1.5}.water-record-table :deep(.water-date-cell),.water-record-table :deep(.water-number-cell),.water-record-table :deep(.water-frequency-cell),.water-record-table :deep(.water-photo-cell){white-space:nowrap;font-variant-numeric:tabular-nums}.water-record-table :deep(.water-meter-link){display:block;max-width:100%;height:auto;min-height:24px;text-align:left;color:var(--v2-ink);font-weight:500}.water-record-table :deep(.water-meter-link .n-button__content){display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;overflow-wrap:anywhere;line-height:1.5}.water-record-table :deep(.water-state-cell .n-tag){font-size:12px}.water-record-table :deep(.n-data-table-tr:hover .water-meter-link){color:var(--v2-blue)}
 .v2-water{padding:14px 0 0;color:var(--v2-ink);min-width:0}.water-toolbar,.water-title,.water-toolbar-actions{display:flex;align-items:center;gap:10px}.water-toolbar{justify-content:space-between;flex-wrap:wrap;margin-bottom:12px}.water-title h1{font-size:20px!important;line-height:1.3;white-space:nowrap;margin:0}.water-scope{width:100px}.water-updated{font-size:11px;color:var(--v2-muted)}.water-month-summary{display:flex;gap:18px;align-items:center;flex-wrap:wrap;color:var(--v2-muted);font-size:12px;padding:8px 0 15px}.water-month-summary strong{color:var(--v2-ink);font-weight:600;font-variant-numeric:tabular-nums;margin-left:4px}.water-notice{display:flex;align-items:center;gap:8px;min-height:38px;padding:6px 10px;margin-bottom:12px;background:#edf8f3;color:#277457;border-radius:6px;font-size:12px}.water-notice.warning{background:#fff7e8;color:#996720}.water-notice>span{flex:1;line-height:1.6}.water-work-area{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:stretch;min-width:0}.water-work-area.has-editor{grid-template-columns:minmax(0,1fr) 390px}.water-records-area{min-width:0;background:#fff;border:1px solid var(--v2-border);border-radius:8px;overflow:hidden}.water-filter-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:14px 14px 10px}.water-filter-main>.n-radio-group{margin-right:auto}.water-date-filter{display:flex;gap:8px;align-items:center;padding:0 14px 10px}.water-date-filter .n-date-picker{width:160px}.water-date-filter>span{font-size:12px;color:var(--v2-muted)}.water-search{margin:0 14px 12px;width:calc(100% - 28px)}.water-filter-extra{display:grid;grid-template-columns:minmax(130px,1.6fr) minmax(100px,1fr) minmax(90px,1fr) auto;gap:10px;align-items:end;padding:2px 14px 12px}.water-filter-extra>label{min-width:0}.water-filter-extra>label>span{display:block;font-size:11px;color:var(--v2-muted);margin-bottom:5px}.water-read-error{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0;padding:10px 14px;color:#a93b46;background:#fff3f3;font-size:12px;line-height:1.6}.water-stale{margin:0;padding:8px 14px;color:#976b20;background:#fff8e9;font-size:11px;line-height:1.6}.water-list-head{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-block:1px solid var(--v2-border);gap:12px;background:#f9fafb}.water-list-head>span{font-size:11px;color:var(--v2-muted)}.water-attention{width:152px}.water-list-content{position:relative;min-height:300px}.water-list-content :deep(.n-button__content){white-space:normal;overflow-wrap:anywhere;text-align:left}.water-list-content :deep(.n-data-table-td){font-variant-numeric:tabular-nums}.water-list-content :deep(.water-row-selected td){background:#eef5ff!important}.water-list-content :deep(.n-data-table-tr){cursor:pointer}.water-list-updating{position:absolute;right:14px;top:7px;z-index:3;display:flex;align-items:center;gap:7px;padding:5px 9px;border-radius:5px;background:#eff5ff;font-size:11px;color:#376eac}.water-list-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 14px;border-top:1px solid var(--v2-border);font-size:11px;color:var(--v2-muted)}.water-initial{display:grid;gap:8px;padding:14px}.water-empty{align-content:center;justify-items:center;min-height:300px;gap:12px}.water-empty strong{font-size:14px;color:var(--v2-ink)}.water-empty>span{font-size:12px;color:var(--v2-muted)}.water-idle{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:30px;border-left:1px solid var(--v2-border);color:var(--v2-muted);text-align:center}.water-idle h2{font-size:16px;color:var(--v2-ink);margin:14px 0 0}.water-idle p{font-size:12px;line-height:1.8;max-width:220px}.water-work-area>:deep(.water-editor){height:calc(100dvh - 178px);min-height:520px;max-height:850px}.water-trend{padding:14px;border-bottom:1px solid var(--v2-border)}.water-trend p{font-size:11px;color:var(--v2-muted);margin:8px 0 0}.water-abnormal{width:min(520px,calc(100vw - 24px));max-height:calc(100dvh - 40px);overflow:auto}.water-abnormal>p{font-size:13px;line-height:1.6}.water-abnormal-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:16px 0}.water-abnormal-values dt{font-size:11px;color:var(--v2-muted)}.water-abnormal-values dd{margin:5px 0 0;font-size:14px;font-variant-numeric:tabular-nums}.water-modal-actions{display:flex;justify-content:flex-end;gap:8px}.water-lightbox{width:min(960px,calc(100vw - 24px));max-height:90dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:#fff;border-radius:8px;padding:12px;gap:12px}.water-lightbox header{display:flex;align-items:center;justify-content:space-between;gap:16px}.water-lightbox header strong{font-size:13px;overflow-wrap:anywhere}.water-lightbox img{max-height:calc(90dvh - 120px);max-width:100%;object-fit:contain;justify-self:center}.water-lightbox footer{display:flex;justify-content:flex-end}.water-filter-enter-active,.water-filter-leave-active{transition:opacity 180ms,transform 180ms}.water-filter-enter-from,.water-filter-leave-to{opacity:0;transform:translateY(-6px)}
 .water-work-area:not(.has-editor){display:block}
 .water-records-area{align-self:start}.water-list-content{min-height:180px}

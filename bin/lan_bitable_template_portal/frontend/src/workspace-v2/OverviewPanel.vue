@@ -92,8 +92,8 @@ async function load(){
       const sum=(key:string)=>{const values=data.map(item=>count(item.data.summary?.[key]));return values.some(v=>v===null)?null:Number(values.reduce<number>((total,v)=>total+(v??0),0).toFixed(2));};
       nextStats=[{label:'本月记录',value:sum('record_count')},{label:'本月耗水量 / t',value:sum('total_usage')},{label:'有照片记录',value:sum('photo_records')}];
       incomplete=data.some(item=>count(item.data.summary?.total_usage)===null);
-      nextChart=data.map(item=>({label:item.label,value:count(item.data.summary?.total_usage)??0,url:'/water-management?scope='+item.scope}));
-      if(data.length>1)nextRows=data.map(item=>({id:item.scope,title:item.label+'水耗',status:`${count(item.data.summary?.record_count)??'—'}条 · ${count(item.data.summary?.total_usage)??'—'} t`,url:'/water-management?scope='+item.scope}));
+      nextChart=data.map(item=>({label:item.label,value:count(item.data.summary?.total_usage)??0,url:'/water-management?water_view=records&scope='+item.scope}));
+      if(data.length>1)nextRows=data.map(item=>({id:item.scope,title:item.label+'水耗',status:`${count(item.data.summary?.record_count)??'—'}条 · ${count(item.data.summary?.total_usage)??'—'} t`,url:'/water-management?water_view=records&scope='+item.scope}));
       const latest=Math.max(...data.map(item=>Number(item.data.summary?.latest_date_ms)||0));
       nextEmpty=latest?'最近统计 '+new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai'}).format(new Date(latest)):'暂无统计日期';
       nextNote='沿用水耗管理统计口径 · 仅汇总授权楼栋';

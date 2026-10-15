@@ -5124,9 +5124,12 @@ class PortalRuntime:
         if parsed.path in {"/api/maintenance-actions", "/api/workbench-actions"}:
             try:
                 payload = self._read_json_body()
-                if str(payload.get("action", "")).startswith(("delete", "remove")) and not PortalRuntime.auth_manager.account_profile(
-                        (session.get("user") or {}).get("open_id"))["can_delete_business"]:
-                    raise PortalError("仅超级管理员或本楼栋主管可删除业务记录。")
+                from .account_policy import require_notice_delete
+                from .module_access import require_module
+                work_type = str(payload.get("work_type") or "maintenance").strip()
+                require_module(PortalRuntime.auth_manager, session, work_type)
+                if str(payload.get("action", "")).startswith(("delete", "remove")):
+                    require_notice_delete(PortalRuntime.auth_manager, session, work_type)
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
                 )
@@ -5210,8 +5213,6 @@ class PortalRuntime:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/ongoing-items/delete":
             try:
-                if not PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))["can_delete_business"]:
-                    raise PortalError("仅超级管理员或本楼栋主管可删除业务记录。")
                 payload = self._read_json_body()
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
@@ -5224,6 +5225,8 @@ class PortalRuntime:
                     or ""
                 )
                 self.service.validate_ongoing_delete_item(payload, scope=scope)
+                from .account_policy import require_notice_delete
+                require_notice_delete(PortalRuntime.auth_manager, session, str(payload.get("work_type") or "maintenance").strip())
                 callback = PortalRuntime.ongoing_delete_callback
                 if callback is None:
                     return self._send_json(

@@ -324,7 +324,8 @@ class EngagementTests(unittest.TestCase):
         card = engagement.make_card(job, 'http://portal.test')
         metrics = [field['text']['content'] for field in card['elements'][1]['fields']]
         self.assertEqual(metrics, ['**参与人数**\n3 人', '**首次答题总数**\n15 题', '**人均答题数**\n5.0 题', '**平均正确率**\n95%'])
-        self.assertIn('平均错误率 5%', card['elements'][2]['text']['content'])
+        self.assertIn('选择题答对 10 题', card['elements'][2]['text']['content'])
+        self.assertNotIn('错误率', json.dumps(card, ensure_ascii=False))
         chart = next(element for element in card['elements'] if element['tag'] == 'chart')
         values = chart['chart_spec']['data']['values']
         self.assertEqual(len(values), 101)
@@ -337,16 +338,30 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual((chart['chart_spec']['dataZoom'][0]['start'], chart['chart_spec']['dataZoom'][0]['end']), (0, 1))
         self.assertEqual(card['elements'][-1]['actions'][0]['url'], 'http://portal.test/learning?view=overview&from=2026-10-05&to=2026-10-11')
         table = next(element for element in card['elements'] if element['tag'] == 'table')
-        self.assertEqual([column['display_name'] for column in table['columns']], ['姓名', '答题次数', '答题数量', '正确率', '错误率'])
-        self.assertEqual(table['rows'][0], {'name': '第一人', 'papers': '—', 'answered': 10, 'accuracy': '90%', 'error_rate': '10%'})
+        self.assertEqual([column['display_name'] for column in table['columns']], ['姓名', '答题数量', '答对数量', '正确率', '评分'])
+        self.assertEqual(table['rows'][0], {'name': '第一人', 'correct': 9, 'answered': 10, 'accuracy': '90%', 'score': '90'})
         self.assertEqual(table['rows'][2]['accuracy'], '—')
+        self.assertEqual(table['rows'][2]['score'], '暂无评分')
         self.assertLess(card['elements'].index(chart), card['elements'].index(table))
+
+    def test_summary_auto_scores_and_sorts_before_paginating_without_mutating_source(self):
+        items = [
+            {'name': '全对', 'answered': 3, 'choices': 3, 'correct': 3, 'score': 0},
+            {'name': '仅问答', 'answered': 8, 'choices': 0, 'correct': 0, 'score': 100},
+            {'name': '全错', 'answered': 5, 'choices': 5, 'correct': 0},
+            {'name': '部分正确', 'answered': 3, 'choices': 3, 'correct': 2},
+        ]
+        card = engagement.summary_card({'date': '2026-10-05', 'end': '2026-10-11', 'items': items}, 'http://portal.test')
+        table = next(e for e in card['elements'] if e['tag'] == 'table')
+        self.assertEqual([r['name'] for r in table['rows']], ['全错', '部分正确', '全对', '仅问答'])
+        self.assertEqual([r['score'] for r in table['rows']], ['0', '66.7', '100', '暂无评分'])
+        self.assertEqual(items[0]['score'], 0)
 
     def test_summary_empty_and_ungraded_never_shows_fake_zero_accuracy(self):
         for items in ([], [{'answered': 3, 'practice': 1, 'choices': 0, 'correct': 0}]):
             card = engagement.make_card({'kind': 'weekly_summary', 'date': '2026-10-05', 'end': '2026-10-11', 'items': items}, 'http://portal.test')
             self.assertEqual(card['elements'][1]['fields'][3]['text']['content'], '**平均正确率**\n—')
-            self.assertIn('平均错误率 —', card['elements'][2]['text']['content'])
+            self.assertNotIn('错误率', json.dumps(card, ensure_ascii=False))
             self.assertEqual(sum(e['tag'] == 'chart' for e in card['elements']), 0)
 
     def test_summary_distribution_uses_unrounded_rates_and_boundary_counts(self):
@@ -568,6 +583,30 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual((group['items'][0]['scopes'], group['items'][0]['answered']), (['H'], 1))
         self.assertTrue(all(not job['items'] for job in reports if job['audience'] != 'group'))
         self.assertTrue(any(target == 'ou_p1' and ':summary:' not in key for target, _, key in self.sender.calls))
+
+    def test_weekly_automatic_delivery_uses_interactive_cards_only_for_the_configured_audiences(self):
+        self.manager_directory({**{scope: {'scopes': [scope]} for scope in 'ABCDE'},
+                                'H': {'scopes': ['H'], 'position': '主管'}})
+        self.answer(self.claim())
+        deliveries = []
+        def interactive(job, target, identity):
+            deliveries.append((copy.deepcopy(job), target, identity))
+            return True
+        self.service._weekly_card_sender = interactive
+        self.weekly()
+        self.assertEqual({target for _, target, _ in deliveries},
+                         {engagement.WEEKLY_CHAT_ID, 'ou_A', 'ou_B', 'ou_C', 'ou_D', 'ou_E'})
+        self.assertEqual(len(deliveries), 6)
+        for job, target, _ in deliveries:
+            self.assertEqual(job['kind'], 'weekly_summary')
+            if target == engagement.WEEKLY_CHAT_ID:
+                self.assertEqual(set(job['buildings']), set('ABCDEH'))
+            else:
+                self.assertEqual(set(job['buildings']), {job['scope']})
+                self.assertEqual(target, 'ou_' + job['scope'])
+        self.assertFalse(any(':summary:' in identity for _, _, identity in self.sender.calls))
+        self.send(CURRENT + dt.timedelta(days=7, minutes=6))
+        self.assertEqual(len(deliveries), 6, 'already delivered weekly cards must not be resent')
 
     def test_retired_pending_summary_recipients_cancel_after_restart(self):
         self.weekly()

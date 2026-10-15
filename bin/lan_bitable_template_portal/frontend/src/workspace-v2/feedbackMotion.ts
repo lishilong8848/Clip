@@ -135,6 +135,8 @@ export function installFeedbackMotion() {
     if(offset>=pending.length)offset=0;
     const visible=pending.slice(offset,offset+3);
     let bottom=innerWidth<=760?82:20;
+    const noticeFooter=document.querySelector<HTMLElement>('.v2-notice-editor-footer');
+    if(noticeFooter?.getClientRects().length)bottom=Math.max(bottom,innerHeight-noticeFooter.getBoundingClientRect().top+12);
     const more=pending.length>visible.length||recalled.length>0;
     counter.hidden=!more;
     if(more){

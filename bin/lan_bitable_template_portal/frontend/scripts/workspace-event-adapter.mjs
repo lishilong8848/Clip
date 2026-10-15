@@ -10,10 +10,11 @@ export function adaptEventPeriodPage(source) {
   }
   replace('import EventStatsCards from "./EventStatsCards.vue";', 'import EventStatsCards from "../workspace-v2/EventMetrics.vue";\nimport EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";\nimport { NSkeleton } from "naive-ui";\nimport { beijingDate, occurrenceTimestamp, eventPeriodRange, mergeEventMonths, eventPeriodStats, type EventPeriod } from "../workspace-v2/eventPeriod";');
   replace('const selectedMonth = ref(currentLocalMonth());', `const eventQuery = new URLSearchParams(window.location.search);
-const eventPeriod = ref<EventPeriod>(['week','history'].includes(eventQuery.get('period') || '') ? eventQuery.get('period') as EventPeriod : 'month');
+const eventPeriod = ref<EventPeriod>(['week','history','custom'].includes(eventQuery.get('period') || '') ? eventQuery.get('period') as EventPeriod : 'month');
 const selectedMonth = ref(/^\\d{4}-(0[1-9]|1[0-2])$/.test(eventQuery.get('event_month') || '') ? eventQuery.get('event_month')! : beijingDate().slice(0,7));
 const eventNow = ref(Date.now());
-const eventRange = computed(() => eventPeriodRange(eventPeriod.value, selectedMonth.value, eventNow.value));
+const eventDates = ref<[string,string]>([eventQuery.get('event_start') || beijingDate().slice(0,7)+'-01', eventQuery.get('event_end') || beijingDate()]);
+const eventRange = computed(() => eventPeriodRange(eventPeriod.value, selectedMonth.value, eventNow.value, eventDates.value));
 const chartDate = ref<{start:number;end:number;label:string}|null>(null);
 const stateFilter = ref(eventQuery.get('event_state')==='processing'?'processing':'');
 const eventDetailsOpen = ref(Boolean(eventQuery.get('event_state') || eventQuery.get('record_id')));
@@ -24,7 +25,7 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
             <span>月份</span>
             <input v-model="selectedMonth" type="month" :disabled="loading || refreshing" />
           </label>`, '');
-  replace('      <MessageBanner v-if="errorText"', '      <EventPeriodFilter v-model="eventPeriod" v-model:month="selectedMonth" :range="eventRange" :disabled="refreshing || eventTransferBusy" />\n      <MessageBanner v-if="errorText"');
+  replace('      <MessageBanner v-if="errorText"', '      <EventPeriodFilter v-model="eventPeriod" v-model:month="selectedMonth" v-model:dates="eventDates" :range="eventRange" :disabled="refreshing || eventTransferBusy" />\n      <MessageBanner v-if="errorText"');
   replace('<EventStatsCards :cards="statCards"', '<EventStatsCards :cards="statCards" :loading="loading" :failed="Boolean(errorText) || configMissing"');
   replace('import EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";', 'import EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";\nimport EventCharts from "../workspace-v2/EventCharts.vue";');
   replace('function clearFilters(): void {', 'function clearFilters(): void {\n  chartDate.value = null; stateFilter.value = "";');
@@ -61,11 +62,13 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
   replace('{ label: "月份", value: selectedMonth.value || "当前月", active: true }', '{ label: "时间", value: chartDate.value?.label || eventRange.value.caption, active: true }');
   replace('month: selectedMonth.value,\n        record_id: recordId', 'month: beijingDate(occurrenceTimestamp(selectedEvent.value?.occurrence_time)).slice(0,7),\n        record_id: recordId');
   replace('url.searchParams.get(\'month\') === selectedMonth.value', "eventRange.value.months.includes(url.searchParams.get('month') || '')");
-  replace('() => [props.scope, selectedMonth.value]', '() => [props.scope, selectedMonth.value, eventPeriod.value]');
+  replace('() => [props.scope, selectedMonth.value]', '() => [props.scope, selectedMonth.value, eventPeriod.value, ...eventDates.value]');
   replace('    buildingFilter.value = "";\n    const normalizedScope', `    clearFilters();
     const periodUrl = new URL(window.location.href);
     periodUrl.searchParams.set('period', eventPeriod.value);
     periodUrl.searchParams.set('event_month', selectedMonth.value);
+    if(eventPeriod.value==='custom'){periodUrl.searchParams.set('event_start',eventDates.value[0]);periodUrl.searchParams.set('event_end',eventDates.value[1]);}
+    else{periodUrl.searchParams.delete('event_start');periodUrl.searchParams.delete('event_end');}
     window.history.replaceState({}, '', periodUrl.toString());
     const normalizedScope`);
   replace('if (detailRequested.value && BUILDING_SCOPE_CODES.includes(normalizedScope))', 'if (detailRequested.value && normalizedScope)');
@@ -107,10 +110,15 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
     }`,
     loadMonthlyEvents: `{
       const range = eventRange.value;
-      const payloads = await Promise.all(range.months.map(month => {
-        const params = new URLSearchParams({ scope, month, date_field: 'occurrence_time' });
-        return requestJson('/api/events/monthly?' + params.toString(), { signal });
-      }));
+      if(range.error)throw new Error(range.error);
+      const payloads: LooseDict[] = [];
+      for(let offset=0;offset<range.months.length;offset+=3){
+        if(signal?.aborted || loadVersion!==eventLoadVersion)return;
+        payloads.push(...await Promise.all(range.months.slice(offset,offset+3).map(month=>{
+          const params = new URLSearchParams({ scope, month, date_field: 'occurrence_time' });
+          return requestJson('/api/events/monthly?' + params.toString(), { signal });
+        })));
+      }
       if (loadVersion !== eventLoadVersion || signal?.aborted) return;
       const payload = mergeEventMonths(payloads, range);
       events.value = payload.records; stats.value = payload.stats;

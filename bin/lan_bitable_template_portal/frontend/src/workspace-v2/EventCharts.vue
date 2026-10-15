@@ -2,8 +2,8 @@
   <div class="v2-event-charts">
     <MotionChart title="事件分布" :caption="range.label + ' · 件'" unit="件" :items="dimension==='date'?trend:levels" :loading="loading" :failed="failed" :trend="dimension==='date'" :view="dimension==='date'?'bar':'donut'"
       @select="item=>dimension==='date'?$emit('date',Number(item.start),Number(item.end),item.label):$emit('level',item.label)">
-      <template #actions><NRadioGroup v-model:value="dimension" size="small" aria-label="事件统计维度">
-        <NRadioButton value="date">按天</NRadioButton><NRadioButton value="level">按等级</NRadioButton>
+      <template #actions><NRadioGroup data-v2-filter v-model:value="dimension" size="small" aria-label="事件统计维度">
+        <NRadioButton value="date">{{ (range.end-range.start)/86400000>62?'按时段':'按天' }}</NRadioButton><NRadioButton value="level">按等级</NRadioButton>
       </NRadioGroup></template>
     </MotionChart>
   </div>

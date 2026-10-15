@@ -13,8 +13,8 @@
     <linearGradient id="mist"><stop stop-color="#dceaf2" stop-opacity="0"/><stop offset=".3" stop-color="#dceaf2" stop-opacity=".5"/><stop offset=".7" stop-color="#dceaf2" stop-opacity=".5"/><stop offset="1" stop-color="#dceaf2" stop-opacity="0"/></linearGradient>
   </defs>
   <g class="wl-stars" fill="#e5ce79"><path d="m240 107 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm275 76 3-8 3 8 8 3-8 3-3 8-3-8-8-3z"/><circle cx="280" cy="157" r="2"/><circle cx="490" cy="128" r="2"/><circle cx="542" cy="238" r="2"/><circle cx="235" cy="244" r="1.7"/></g>
-  <g class="wl-sun"><circle class="wl-aura" r="26" fill="#ffc45f" opacity=".14"/><circle class="wl-crown" r="23" fill="none" stroke="#efc375" stroke-width="1.4" stroke-dasharray="1 5"/><circle r="17" fill="url(#sunCore)" stroke="#fff1c4"/><ellipse cx="-4" cy="-5" rx="6.4" ry="4.6" fill="#fffdf1" opacity=".38"/></g>
-  <g class="wl-moon"><circle r="17" fill="#f7f0d4"/><path d="M4-16a17 17 0 0 0 0 32A17 17 0 0 1 4-16" fill="#a4b0a7" opacity=".7"/><circle class="wl-glint" cx="-7" cy="-4" r="2" fill="#d7d4bd"/></g>
+  <g class="wl-sun"><circle class="wl-aura" r="26" fill="#f8df9c"/><circle class="wl-crown" r="23" fill="none" stroke="#efc375" stroke-width="1.4" stroke-dasharray="1 5"/><circle r="17" fill="url(#sunCore)" stroke="#fff1c4"/><ellipse cx="-4" cy="-5" rx="6.4" ry="4.6" fill="#fffdf1"/></g>
+  <g class="wl-moon"><circle r="17" fill="#f7f0d4"/><path d="M4-16a17 17 0 0 0 0 32A17 17 0 0 1 4-16" fill="#a4b0a7"/><circle class="wl-glint" cx="-7" cy="-4" r="2" fill="#d7d4bd"/></g>
   <g class="wl-companion" fill="#e5ce79"><path d="m-32-12 3-8 3 8 8 3-8 3-3 8-3-8-8-3zm65-8 2-6 2 6 6 2-6 2-2 6-2-6-6-2z"/></g>
   <g class="wl-clouds" fill="#b6ccd9">
     <g transform="translate(236 180) scale(1.15)"><path class="wl-drift" d="M14 43c-10 0-14-6-14-13 0-8 7-14 16-14 3-10 12-16 23-16 12 0 22 8 24 19 12-3 23 5 23 16 0 7-5 12-15 12z"/></g>

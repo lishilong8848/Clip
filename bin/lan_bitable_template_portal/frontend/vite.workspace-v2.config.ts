@@ -25,6 +25,10 @@ import { adaptLearningSharing } from './scripts/workspace-sharing-adapter.mjs';
 import { adaptAccounts, adaptAdminAccountLoading, adaptModuleAdminEntry } from './scripts/workspace-admin-adapter.mjs';
 // @ts-ignore V2-only filter placement; original form bindings and legacy views stay intact.
 import { adaptPageFilters } from './scripts/workspace-filters-adapter.mjs';
+// @ts-ignore V2-only layout slots preserve the existing business controllers.
+import { adaptPageLayouts } from './scripts/workspace-page-layout-adapter.mjs';
+// @ts-ignore scopes reused module navigation when mounted as a dashboard component.
+import { adaptEmbeddedNavigation } from './scripts/workspace-embedded-adapter.mjs';
 const root = fileURLToPath(new URL('.', import.meta.url)).replace(/\\/g, '/');
 const outputDir=process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?resolve(root,process.env.CLIPFLOW_WORKSPACE_BUILD_DIR):resolve(root,'dist/assets/workspace-v2');
 if(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR&&!outputDir.startsWith(resolve(root,'../../../output')+'/')&&!outputDir.startsWith(resolve(root,'../../../output')+'\\'))throw new Error('Workspace preview output must stay in project output');
@@ -35,6 +39,7 @@ export default defineConfig({
   plugins: [{
     name: 'workspace-business-imports', enforce: 'pre',
     resolveId(source, importer) {
+      if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/VnetBackButton.vue')) return root + 'src/workspace-v2/ModuleBackButton.vue';
       if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/AdminWorkspaceChrome.vue')) return root + 'src/workspace-v2/AdminSettingsPicker.vue';
       if (importer?.replace(/\\/g, '/').startsWith(root + 'src/') && source.endsWith('/WaterManagementPage.vue')) return root + 'src/workspace-v2/WaterWorkspace.vue';
       if (/^\/assets\/[\w.-]+\.(?:png|svg|webp|jpg|gif)$/.test(source) && existsSync(join(root,'public',source))) return '\0workspace-public:' + source;
@@ -50,6 +55,11 @@ export default defineConfig({
       if(!path.startsWith(root+'src/')||!path.endsWith('.vue'))return;
       let result=code;
       if(path===root+'src/components/LearningPage.vue')result=adaptLearningPage(result);
+      if(path===root+'src/components/LearningPage.vue')result=result.replace('<VnetBackButton :to="undefined"', '<VnetBackButton :within-module="viewMode === \'overview\' && !!learner" :to="undefined"');
+      if(path===root+'src/components/EventManagementPage.vue')result=result.replace('<VnetBackButton v-if="showingDetails"', '<VnetBackButton within-module v-if="showingDetails"');
+      if(['MopPreviewHeader.vue','RepairStatusPage.vue','AuthPanels.vue'].some(name=>path===root+'src/components/'+name))result=result.replaceAll('<VnetBackButton ', '<VnetBackButton within-module ');
+      if(path===root+'src/components/AuthPanels.vue')result=result.replace('title="返回首页"', 'title="返回个人页面"');
+      if(path===root+'src/components/AdminTools.vue')result=result.replace('<button type="button" class="btn ghost" @click="$emit(\'close\')"><ArrowLeft :size="17" />返回首页</button>', '');
       if(path===root+'src/components/LearningSharing.vue')result=adaptLearningSharing(result);
       result=adaptModuleAdminEntry(result,path);
       if(path===root+'src/components/AdminAccounts.vue')result=adaptAccounts(result);
@@ -63,6 +73,8 @@ export default defineConfig({
       if(path===root+'src/components/LearningDashboard.vue')result=fuseLearningCharts(result);
       if(path===root+'src/components/LighthouseNoticeSop.vue')result=adaptNoticeSopControls(result);
       result=adaptPageFilters(result,path);
+      result=adaptPageLayouts(result,path);
+      result=adaptEmbeddedNavigation(result,path);
       result=markBinaryControls(result);
       result=markFeedbackAlerts(result);
       if(result!==code)return {code:result,map:null};

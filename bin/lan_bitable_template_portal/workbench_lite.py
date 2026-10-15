@@ -2645,7 +2645,7 @@ def render_workbench_lite(
     prefill_action: str = "",
     prefill_context_id: str = "",
 ) -> str:
-    from .module_access import MODULE_IDS, filter_workbench
+    from .module_access import MODULE_IDS, NOTICE_MODULES, filter_workbench
     module_grants = set(session.get("allowed_modules", MODULE_IDS))
     payload = filter_workbench(payload, module_grants)
     notice_undos = [item for item in (notice_undos or []) if _item_work_type(item) in module_grants]
@@ -2835,6 +2835,7 @@ def render_workbench_lite(
     user = session.get("user") if isinstance(session.get("user"), dict) else {}
     is_admin_session = bool(session.get("is_admin")) or str(session.get("role") or "").strip().lower() == "admin"
     can_delete_business = bool(session.get("can_delete_business", is_admin_session))
+    can_delete_notice = detail_work in NOTICE_MODULES & module_grants
     can_manage_change_confirmations = bool(
         session.get("can_manage_change_confirmations")
     ) and "change" in module_grants
@@ -3618,7 +3619,7 @@ def render_workbench_lite(
                 </form>
               </div>
             </section>
-            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, can_delete=can_delete_business, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
+            {_detail_form(record=selected_record, ongoing_item=selected_ongoing, scope=scope, work_type=detail_work, manual=manual or bool(parsed_draft), source_month=selected_month, parsed_draft=parsed_draft, parsed_action=parsed_action, source_link_options=source_options, is_admin=is_admin_session, can_delete=can_delete_notice, prefill_draft=prefill_draft, prefill_source_record_id=prefill_source_record_id, prefill_target_record_id=prefill_target_record_id, prefill_action=prefill_action, prefill_context_id=prefill_context_id)}
             <section id="lite-alert-tags" class="notice-alert-tags" aria-live="polite" hidden></section>
           </div>
         </section>

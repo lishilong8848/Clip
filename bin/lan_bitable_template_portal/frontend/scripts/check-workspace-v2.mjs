@@ -20,7 +20,7 @@ assert.match(adapted, /__v2Open/);
 const shadowed=adaptBrowserReferences(`const history=ref([]); const location={name:'local'}; function f(window){return window.location.name + history.value + location.name;} window.history.back();`,'shadow.ts','/browser.ts');
 assert.match(shadowed,/history.value/);assert.match(shadowed,/location.name/);assert.match(shadowed,/window.location.name/);assert.match(shadowed,/__v2History.back/);
 const chatAdapter=adaptBrowserReferences('function isNearBottom(){return thread.value.scrollTop<80;} function scrollBottom(){target.scrollTop=target.scrollHeight;} const path=location.pathname;','/components/LighthouseAssistant.vue?vue&type=script&setup=true&lang.ts','/browser.ts');assert.match(chatAdapter,/__v2ShouldFollow/);assert.match(chatAdapter,/__v2FollowBottom/);
-const eventAdapter=adaptBrowserReferences('function returnToOverview(){ loadEvents(); } const title="事件态势与楼栋入口";','/components/EventManagementPage.vue','/browser.ts');assert.match(eventAdapter,/__v2ReturnHome\('\/'\)/);assert.match(eventAdapter,/"事件管理"/);assert.doesNotMatch(eventAdapter,/loadEvents\(\)/);
+const eventAdapter=adaptBrowserReferences('function returnToOverview(){ loadEvents(); } const title="事件态势与楼栋入口";','/components/EventManagementPage.vue','/browser.ts');assert.doesNotMatch(eventAdapter,/__v2ReturnHome/);assert.match(eventAdapter,/"事件管理"/);assert.match(eventAdapter,/loadEvents\(\)/);
 const manifest = JSON.parse(await readFile(path.join(root, 'dist/assets/workspace-v2/entry.json'), 'utf8'));
 assert.match(manifest.entry, /^app-.*\.js$/);
 for (const name of [manifest.entry, ...manifest.css]) await readFile(path.join(root, 'dist/assets/workspace-v2', name));
@@ -89,6 +89,7 @@ async function context() {
     if(url.pathname==='/api/cabinet-power/buildings')return ok({buildings:'ABCDE'.split('').map(scope=>({scope,bootstrap_status:'succeeded',counts:{total:100,formal:70,test:10,off:20,unknown:0},record_count:8,inventory_only:0}))});
     if(url.pathname==='/api/cabinet-power/overview')return ok({version:'fixture',counts:{total:100,formal:70,test:10,off:20,unknown:0},rooms:[],racks:[],issues:[],record_count:8,sheet_formats:[]});
     if(url.pathname==='/api/capacity/water/bootstrap')return ok({summary:{record_count:3,total_usage:72,photo_records:3},snapshot:{},meters:[]});
+    if(url.pathname==='/api/capacity/water/buildings')return ok({snapshot:{exists:true},scopes:['A','B','C','D','E','H'].map(value=>({value,month_total_usage:72,month_record_count:3})),month:'2026-10'});
     if(/^\/api\/plan-convergence\/(maintenance|change)\/records$/.test(url.pathname))return ok([]);
     if(url.pathname==='/api/link-directory')return ok({items:[],total:0,can_manage:true});
     if(url.pathname==='/api/plan-convergence/bootstrap')return ok({blocks:{items:[],loaded_at:0},settings:{},rules:[],configured:false});
@@ -196,7 +197,7 @@ try {
   assert.equal(await page.locator('.v2-functions').getByRole('button',{name:'灯塔助手',exact:true}).count(),0);
   for(const width of [360,390,430,1440]){await page.setViewportSize({width,height:width<700?844:1000});await page.screenshot({path:path.join(output,`functions-${width}.png`),fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,`functions overflow at ${width}`);}
   await page.locator('.v2-functions').getByRole('button',{name:'风险与重保',exact:true}).focus();await page.keyboard.press('Enter');await page.locator('.guard-page').waitFor();assert.equal(await page.locator('.guard-page .landing-view').count(),0);
-  await page.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.setViewportSize({width:1440,height:1000});
   await page.getByRole('button',{name:'切换旧版',exact:true}).click();
   await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();
@@ -205,7 +206,7 @@ try {
   await page.getByRole('button',{name:'切换新版',exact:true}).click();
   await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.getByRole('menuitem',{name:'事件管理',exact:true}).click();await page.locator('.v2-event-charts').waitFor();
-  await page.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=maintenance');
   await page.locator('.v2-notice-open').first().click();
   await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('隔离验收，不发送真实通告');
@@ -244,14 +245,14 @@ try {
   await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   assert.match(await page.locator('.v2-scope-select').innerText(),/A楼/,'returning home preserves chosen building');
   await page.getByRole('menuitem',{name:'风险与重保',exact:true}).click();await page.locator('.guard-page').waitFor();assert.match(page.url(),/scope=A/);assert.equal(await page.locator('.guard-page .landing-view').count(),0);
-  await page.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.evaluate(()=>{const link=document.createElement('a');link.href='/workbench-lite?scope=A&work_type=maintenance';document.body.append(link);link.click();link.remove();});
   await page.locator('.v2-notice-entry').first().waitFor();
   assert.equal(await page.locator('iframe').count(),0,'returning uses the new Vue notice page');
   await page.getByRole('menuitem',{name:'个人工作台'}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.locator('.v2-scope-select').click();await page.locator('.n-base-select-option').getByText('全部楼栋',{exact:true}).click();
   await page.getByRole('menuitem',{name:'水耗管理',exact:true}).click();
-  await page.getByText('本月耗水量 / t',{exact:true}).waitFor();
+  await page.locator('.water-overview-metrics').getByText('本月耗水量',{exact:true}).waitFor();
   assert.equal(requests.some(r=>r.path==='/api/capacity/water/bootstrap'&&['ALL','CAMPUS'].includes(r.params.scope)),false,'global water reads authorized building endpoints');
   await page.evaluate(()=>{const link=document.createElement('a');link.href='/?scope=A';document.body.append(link);link.click();link.remove();});await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   await page.getByRole('menuitem',{name:'个人工作台'}).click();assert.match(await page.locator('.v2-scope-select').innerText(),/A楼/);
@@ -303,10 +304,10 @@ try {
     if(category==='duty'&&level==='L4'){
       await rolePage.getByRole('navigation',{name:'常用操作'}).getByRole('button',{name:'水耗管理'}).click();await rolePage.locator('.v2-water').waitFor();
       assert.match(rolePage.url(),/water-management/);
-      await rolePage.getByRole('button',{name:'返回工作台',exact:true}).waitFor();
+      assert.equal(await rolePage.getByRole('button',{name:'返回工作台',exact:true}).count(),0);
       await rolePage.getByRole('navigation',{name:'值班常用业务'}).getByRole('button',{name:'风险管理'}).click();try{await rolePage.locator('.guard-page').waitFor();}catch(error){await rolePage.screenshot({path:path.join(output,'duty-risk-failure.png'),fullPage:true});console.log('DUTY',rolePage.url(),(await rolePage.locator('body').innerText()).slice(0,2200));throw error;}assert.equal(await rolePage.locator('.guard-page .landing-view').count(),0,'building opens directly');assert(requests.some(r=>r.path==='/api/critical-guard/tasks'&&r.params.scope==='A'));
       await rolePage.getByRole('navigation',{name:'值班常用业务'}).getByRole('button',{name:'演练管理'}).click();await rolePage.locator('.drill-page').waitFor();
-      await rolePage.locator('#page-back-slot').getByRole('button',{name:'返回',exact:true}).click();await rolePage.getByRole('heading',{name:title,exact:true}).waitFor();
+      assert.equal(await rolePage.locator('#page-back-slot').count(),0);await rolePage.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await rolePage.getByRole('heading',{name:title,exact:true}).waitFor();
     }
     if(category==='duty'&&level==='L1')assert.equal(await rolePage.getByRole('navigation',{name:'值班常用业务'}).count(),0);
     if(category==='supervisor'){await rolePage.getByRole('navigation',{name:'常用操作'}).getByRole('button',{name:'计划收敛审查'}).click();await rolePage.locator('.pc-page').waitFor();}

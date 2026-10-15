@@ -22,7 +22,7 @@
         <section class="v2-notice-field-section"><h2>SOP 附件</h2><NAlert v-if="!draft.attachments?.length" type="warning" :bordered="false">需先保存步骤，再上传附件，才能用于生成工单。</NAlert><div v-for="file in draft.attachments||[]" :key="file.attachment_id" class="v2-sop-file"><NButton text @click="downloadFile(attachmentPath(file)).catch(e=>error=e.message)">{{ file.file_name || file.name }}</NButton><NButton v-if="editing" :disabled="busy||dirty" quaternary circle aria-label="删除SOP附件" @click="deleteFile(file)"><Trash2 :size="16" /></NButton></div><label v-if="editing" class="v2-notice-upload"><Upload :size="18" /><span>{{ busy?'正在处理…':'添加附件（单个20MB以内）' }}</span><input type="file" multiple :disabled="busy||dirty||!draft.sop_id" aria-label="添加SOP附件" @change="upload" /></label></section>
       </NForm><NEmpty v-else description="选择或新建SOP" />
     </div>
-    <template #header-extra><div class="v2-sop-actions"><NButton v-if="editing&&draft?.sop_id&&canDelete" type="error" quaternary circle :disabled="busy" title="删除SOP" aria-label="删除SOP" @click="remove"><Trash2 :size="17" /></NButton><NButton :disabled="busy" data-v2-navigation @click="close"><template #icon><ArrowLeft :size="16" /></template>返回通告办理</NButton><NButton v-if="draft&&!editing" type="primary" :disabled="busy||loading" @click="editing=true"><PencilLine :size="16" />修改</NButton><template v-if="editing"><NButton :disabled="busy" @click="cancelEdit">取消修改</NButton><NButton type="primary" :loading="busy" :disabled="!draft||!dirty||uncertain" @click="confirmSave"><template #icon><Save :size="16" /></template>保存SOP</NButton></template></div></template>
+    <template #header-extra><div class="v2-sop-actions"><NButton v-if="editing&&draft?.sop_id&&canDelete" type="error" quaternary circle :disabled="busy" title="删除SOP" aria-label="删除SOP" @click="remove"><Trash2 :size="17" /></NButton><NButton v-if="draft" :disabled="busy" data-v2-navigation @click="close"><template #icon><ArrowLeft :size="16" /></template>返回SOP列表</NButton><NButton v-if="draft&&!editing" type="primary" :disabled="busy||loading" @click="editing=true"><PencilLine :size="16" />修改</NButton><template v-if="editing"><NButton :disabled="busy" @click="cancelEdit">取消修改</NButton><NButton type="primary" :loading="busy" :disabled="!draft||!dirty||uncertain" @click="confirmSave"><template #icon><Save :size="16" /></template>保存SOP</NButton></template></div></template>
   </NCard>
 </template>
 <script setup lang="ts">
@@ -34,7 +34,7 @@ import {registerNavigationGuard} from './navigation';
 import {createRepairOperationId} from '../repairManagementUtils';
 import {trackButtonRequest} from './actionMotion';
 const props=defineProps<{initialScope:string;initialType:string;scopes:{value:string;label:string}[];types:{value:string;label:string}[];canDelete:boolean}>();
-const emit=defineEmits<{close:[context:{scope:string;work_type:string}];changed:[]}>(),dialog=useDialog(),message=useMessage();
+const emit=defineEmits<{changed:[]}>(),dialog=useDialog(),message=useMessage();
 const scope=ref('ALL'),kind=ref('all');
 const scopeChoices=computed(()=>[{value:'ALL',label:'全部可访问楼栋'},...props.scopes]);
 const typeChoices=computed(()=>[{value:'all',label:'全部通告类型'},...props.types]);
@@ -50,7 +50,7 @@ function select(item:Dict,edit=false){editing.value=edit;draft.value=JSON.parse(
 function create(){select({sop_id:'',scope:scope.value==='ALL'?(props.scopes.length===1?props.scopes[0].value:''):scope.value,work_type:kind.value==='all'?(props.types.find(t=>t.value===props.initialType)?.value||props.types[0]?.value||'maintenance'):kind.value,name:'',version:0,steps:[newStep()],attachments:[]},true);baseline.value='';}
 function leave(fn:()=>void){if(busy.value)return;if(dirty.value){dialog.warning({title:'放弃未保存的SOP修改？',positiveText:'放弃修改',negativeText:'继续编辑',onPositiveClick:fn});}else fn();}
 function cancelEdit(){leave(()=>{if(draft.value?.sop_id)select(JSON.parse(baseline.value));else{draft.value=null;editing.value=false;}});}
-function close(){if(!busy.value)emit('close',{scope:scope.value==='ALL'?(props.scopes.some(s=>s.value===props.initialScope)?props.initialScope:props.scopes[0]?.value||''):scope.value,work_type:kind.value==='all'?(draft.value?.work_type||props.types[0]?.value||'maintenance'):kind.value});}
+function close(){leave(()=>{draft.value=null;editing.value=false;baseline.value='';});}
 async function load(){
   if(busy.value||!scope.value)return;read?.abort();const c=new AbortController();read=c;loading.value=true;error.value='';items.value=[];
   const targets=(scope.value==='ALL'?props.scopes:props.scopes.filter(s=>s.value===scope.value)).flatMap(s=>(kind.value==='all'?props.types:props.types.filter(t=>t.value===kind.value)).map(t=>({scope:s.value,work_type:t.value})));
