@@ -1,4 +1,5 @@
 import json
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,7 +44,10 @@ def _get_tenant_access_token(*, force_refresh: bool = False) -> Tuple[str, str]:
 
 
 def _is_token_error_result(result: dict[str, Any]) -> bool:
-    code = int(result.get("code") or 0)
+    try:
+        code = int(result.get("code") or 0)
+    except (TypeError, ValueError, OverflowError):
+        code = -1
     msg = str(result.get("msg") or "").lower()
     return code in TOKEN_ERROR_CODES or "token" in msg or "access_token" in msg
 
@@ -239,7 +243,10 @@ def _send_interactive_to_receive_id(
     *,
     receive_id_type: str,
     message_uuid: str = "",
+    receipt: dict[str, Any] | None = None,
 ) -> Tuple[bool, str]:
+    if receipt is not None:
+        receipt.clear()
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
         "Authorization": f"Bearer {tenant_access_token}",
@@ -276,8 +283,20 @@ def _send_interactive_to_receive_id(
                 json_payload=payload,
                 retries=2,
             )
-        if result.get("code", 0) != 0:
-            return False, result.get("msg", "unknown error")
+        if type(result.get("code")) is not int:
+            return False, "飞书响应缺少有效错误码，发送结果未确认"
+        if result["code"] != 0:
+            return False, f"{result['code']} - {result.get('msg') or 'unknown error'}"
+        data = result.get("data")
+        if not isinstance(data, dict) or not all(
+            isinstance(data.get(field), str) and re.fullmatch(pattern, data[field])
+            for field, pattern in (("message_id", r"om_[A-Za-z0-9]+"), ("chat_id", r"oc_[A-Za-z0-9]+"))
+        ):
+            return False, "飞书响应缺少有效消息ID或会话ID，发送结果未确认"
+        if receipt is not None:
+            receipt.update(message_id=data["message_id"], chat_id=data["chat_id"],
+                           sender_app_id=str(config.app_id), message_uuid=payload["uuid"],
+                           accepted_at=time.time())
         return True, "ok"
     except FeishuHTTPError as exc:
         return False, str(exc)
@@ -356,18 +375,23 @@ def send_interactive_to_open_ids(
         return False, err, []
     results: List[Dict[str, Any]] = []
     for open_id in recipients:
+        receipt: dict[str, Any] = {}
         ok, message = _send_interactive_to_receive_id(
             token,
             open_id,
             card,
             receive_id_type="open_id",
-            message_uuid=message_uuid,
+            # Keep singleton UUIDs compatible with retries queued before an update.
+            message_uuid=(str(uuid.uuid5(uuid.NAMESPACE_URL, message_uuid + ':' + open_id))
+                          if message_uuid and len(recipients) > 1 else message_uuid),
+            receipt=receipt,
         )
         results.append(
             {
                 "open_id": open_id,
                 "ok": ok,
                 "message": message,
+                **receipt,
                 "failure_kind": (
                     "bot_unavailable"
                     if not ok and "no availability" in str(message or "").lower()

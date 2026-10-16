@@ -766,7 +766,12 @@ class DownloadRedirectTests(unittest.TestCase):
                     patch.object(http_client, 'verified_tls_context', return_value=context) as tls:
                 for index in range(2):
                     mirror.download_part(self._part(), Path(tmp) / str(index))
-                create.assert_called_once_with(timeout=60, follow_redirects=False, verify=context)
+                create.assert_called_once()
+                options = create.call_args.kwargs
+                self.assertIs(options['trust_env'], False)
+                self.assertIs(options['verify'], context)
+                self.assertIs(options['follow_redirects'], False)
+                self.assertEqual(options['timeout'].as_dict(), {'connect': 10, 'read': 90, 'write': 30, 'pool': 10})
                 tls.assert_called_once()
                 self.assertFalse(client.closed)
                 mirror.close()

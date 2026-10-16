@@ -252,6 +252,25 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("必须填写", response.json()["error"])
         self.assertEqual(self.snapshot(), before)
 
+    async def test_login_app_cannot_be_enabled_as_form_callback_app(self):
+        self.set_admin({'user': 'admin'})
+        before = self.snapshot()
+        response = await self.client.post(ROUTE, headers={'origin': BASE}, json={
+            'app_id': 'cli_a9d1c9fe9d381cee', 'enabled': True,
+            'app_secret': 'fixture-secret', 'revision': self.revision()})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('专用应用', response.json()['error'])
+        self.assertEqual(self.snapshot(), before)
+
+    async def test_misconfigured_login_app_can_still_be_disabled(self):
+        self.set_admin({'user': 'admin'})
+        self.seed_config(make_active('cli_a9d1c9fe9d381cee'))
+        response = await self.client.post(ROUTE, headers={'origin': BASE}, json={
+            'app_id': 'cli_a9d1c9fe9d381cee', 'enabled': False,
+            'app_secret': '', 'revision': self.revision()})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(self.file_content()['enabled'])
+
     async def test_revision_conflict_returns_409_without_writes(self):
         self.set_admin({"user": "admin"})
         before = self.snapshot()
@@ -473,6 +492,16 @@ class FeishuAssistantStartTests(unittest.IsolatedAsyncioTestCase):
         start_worker.assert_awaited_once()
         run.assert_called_once()
         messenger.assert_called_once_with(config)
+
+    async def test_wrong_app_saved_by_old_version_starts_no_worker_or_messenger(self):
+        config = make_active('cli_a9d1c9fe9d381cee')
+        guard, start_worker, run, unprotect, messenger = await self._run_start(config)
+        guard.assert_not_called()
+        start_worker.assert_not_called()
+        run.assert_not_called()
+        unprotect.assert_not_called()
+        messenger.assert_not_called()
+        self.assertIsNone(self.assistant.inbox)
 
     async def test_isolated_start_uses_app_hash_inbox(self):
         app_id = "cli_iso"

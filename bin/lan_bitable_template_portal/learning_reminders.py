@@ -2,7 +2,7 @@
 import datetime as dt
 import re
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from uuid import NAMESPACE_URL, uuid5
 
 APP_TOKEN = 'KdCZbSL5CaTErKsFwFucddA5nYd'
@@ -10,7 +10,7 @@ TABLE_ID = 'tblRV9KeWFh9xCkm'
 VIEW_ID = 'vew6jLlGzq'
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
-ROSTER_VERSION = 2
+ROSTER_VERSION = 3
 
 
 def shift_times(settings):
@@ -45,6 +45,8 @@ def duty_recipients(service):
 
 
 def read_roster(service, day):
+    from .learning import text
+
     people, cursor, seen = {}, '', set()
     for _ in range(20):
         result = service._request_json('records', app_token=APP_TOKEN, table_id=TABLE_ID,
@@ -55,7 +57,7 @@ def read_roster(service, day):
             raise ValueError('学练排班视图读取不完整，未使用部分名单发送。')
         for row in data['items']:
             fields = row.get('fields') or {}
-            if fields.get('班组') in {'长白', '110站'} or fields.get('班次') not in SHIFT_TIMES:
+            if text(fields.get('班组')).strip() in {'长白', '110站'} or fields.get('班次') not in SHIFT_TIMES:
                 continue
             value = fields.get('排班日期')
             try:
@@ -73,13 +75,26 @@ def read_roster(service, day):
             users = users.get('users', []) if isinstance(users, dict) else users
             if not isinstance(users, list):
                 raise ValueError('学练排班视图中人员字段格式无效。')
+            names = list(dict.fromkeys(name for name in re.split(r'[\s,，、;；/]+', text(fields.get('人员（文本）')).strip()) if name))
+            if not names:
+                raise ValueError('学练排班缺少人员（文本）名单，未按不完整人员字段发送。')
+            linked = defaultdict(set)
             for user in users:
-                open_id = str(user.get('id') or user.get('open_id') or '') if isinstance(user, dict) else ''
-                if not re.fullmatch(r'ou_[A-Za-z0-9]+', open_id):
-                    raise ValueError('学练排班人员缺少有效 OpenID，未使用不完整名单发送。')
+                if not isinstance(user, dict):
+                    continue
+                open_id = str(user.get('id') or user.get('open_id') or '')
+                if re.fullmatch(r'ou_[A-Za-z0-9]+', open_id):
+                    linked[str(user.get('name') or '').strip()].add(open_id)
+            for name in names:
                 shift = fields['班次']
-                people[(shift, open_id)] = {'open_id': open_id, 'shift': shift,
-                                           'scope': scope, 'name': str(user.get('name') or '')}
+                ids = linked[name]
+                person = {'open_id': next(iter(ids)) if len(ids) == 1 else '',
+                          'shift': shift, 'scope': scope, 'name': name}
+                key = (shift, scope, name)
+                previous = people.get(key)
+                if previous and previous['open_id'] != person['open_id']:
+                    person['open_id'] = ''
+                people[key] = person
         if not data['has_more']:
             return list(people.values())
         cursor = data.get('page_token')
@@ -89,12 +104,47 @@ def read_roster(service, day):
     raise ValueError('学练排班视图分页未完成，未发送。')
 
 
-def enqueue_shift_reminders(service, current, targets):
+def resolve_roster(people, directory):
+    """Use exact names and unique live identities, never substitute a linked stranger."""
+    from .learning_personal import _hr_active, _hr_learning_scopes
+    from .portal_service import BUILDING_OPEN_ID_MAP
+
+    owners = Counter(oid for row in directory.values() for oid in set(row.get('login_ids') or []))
+    shared = set(BUILDING_OPEN_ID_MAP.values())
+    names = defaultdict(list)
+    for row in directory.values():
+        names[str(row.get('name') or '').strip()].append(row)
+    resolved, warnings = {}, []
+    for person in people:
+        candidates = names[person['name']]
+        linked = [row for row in candidates if person['open_id'] and person['open_id'] in (row.get('login_ids') or [])]
+        candidates = [row for row in linked or candidates
+                      if _hr_active(row) and _hr_learning_scopes(row) == [person['scope']]]
+        ids = []
+        if len(candidates) == 1:
+            ids = [oid for oid in candidates[0].get('login_ids') or []
+                   if isinstance(oid, str) and re.fullmatch(r'ou_[A-Za-z0-9]+', oid)
+                   and owners[oid] == 1 and oid not in shared]
+        open_id = person['open_id'] if person['open_id'] in ids else ids[0] if len(ids) == 1 else ''
+        if not open_id:
+            warnings.append(f"{person['scope']}楼{person['shift']}班 {person['name']}：未找到唯一的在岗人员飞书身份")
+            continue
+        resolved[(person['shift'], open_id)] = {**person, 'open_id': open_id}
+    return list(resolved.values()), warnings
+
+
+def enqueue_shift_reminders(service, current):
+    from .learning_personal import _login_directory
+
     times = shift_times(service.settings())
     if not service._shift_roster_reader or current.strftime('%H:%M') < min(times.values()):
         return
-    if targets is None:
-        service._last_error = '本地人员岗位目录暂未就绪，个人学练提醒等待核对后发送。'
+    try:
+        directory, valid = _login_directory(service)
+    except Exception:
+        directory, valid = {}, False
+    if not valid:
+        service._last_error = '本地人员目录暂未就绪，个人学练提醒等待核对后发送。'
         return
     day = current.date().isoformat()
     snapshot = service._get('local', 'shift_roster') or {}
@@ -112,20 +162,21 @@ def enqueue_shift_reminders(service, current, targets):
         snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION}
         with service.transaction() as conn:
             service._put('local', 'shift_roster', snapshot, conn, False)
+    people, warnings = resolve_roster(snapshot['people'], directory)
+    if warnings:
+        service._last_error = '学练排班待核对：' + '；'.join(warnings)
     with service.transaction() as conn:
-        for person in snapshot['people']:
-            if person['open_id'] not in targets or person.get('scope') not in tuple('ABCDEH'):
-                continue
+        for person in people:
             if current.strftime('%H:%M') < times[person['shift']]:
                 continue
             key = f"shift:{day}:{person['shift']}:{person['open_id']}"
-            if service._get('notification', key, conn):
+            existing = service._get('notification', key, conn)
+            if existing and existing.get('status') not in {'skipped_role', 'skipped_roster'}:
                 continue
             service._put('notification', key, {'id': key, 'kind': 'shift', 'scope': '', 'date': day,
                 'open_id': person['open_id'], 'shift': person['shift'], 'status': 'pending',
                 'message': f"【画像学练】{day} {person['shift']}班\n请登录本人的灯塔账号，进入今日学练完成答题。"}, conn)
-    return {(person['shift'], person['open_id']) for person in snapshot['people']
-            if person.get('scope') in tuple('ABCDEH')}
+    return {(person['shift'], person['open_id']) for person in people}
 
 
 def reminder_card(message, url):

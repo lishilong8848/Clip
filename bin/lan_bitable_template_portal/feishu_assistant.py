@@ -342,6 +342,8 @@ class FeishuMessenger:
         self.config, self.http, self.token, self.expires = config, None, "", 0
         self.lock = asyncio.Lock()
         self.http_lock = asyncio.Lock()
+        self.directory_lock = asyncio.Lock()
+        self.directory_records, self.directory_expires = {}, 0
 
     async def client(self):
         async with self.http_lock:
@@ -373,6 +375,62 @@ class FeishuMessenger:
         data = response.json()
         if data.get('code') != 0:
             raise AssistantError('敲键盘表情未发送，飞书返回码：' + str(data.get('code')), 503)
+
+    async def sender_record(self, message):
+        """Resolve app-scoped OpenIDs through the same HR record as portal login."""
+        from .portal_service import (MaintenancePortalService, PERMISSION_DIRECTORY_APP_TOKEN,
+                                     PERMISSION_DIRECTORY_TABLE_ID)
+        import httpx
+        sender = str(message.get('sender_id') or '')
+        if not re.fullmatch(r'ou_[A-Za-z0-9]+', sender):
+            raise AssistantError('飞书消息缺少有效的发送人标识。', 403)
+        async with self.directory_lock:
+            if time.monotonic() >= self.directory_expires:
+                records, seen_rows, token, seen_tokens = {}, set(), '', set()
+                client, headers = await self.client(), await self.headers()
+                try:
+                    for _ in range(20):
+                        response = await client.post(
+                            f'https://open.feishu.cn/open-apis/bitable/v1/apps/{PERMISSION_DIRECTORY_APP_TOKEN}'
+                            f'/tables/{PERMISSION_DIRECTORY_TABLE_ID}/records/search', headers=headers,
+                            params={'user_id_type': 'open_id', 'page_size': 500,
+                                    **({'page_token': token} if token else {})},
+                            json={'field_names': ['员工姓名', '离职/异动情况']}, timeout=8)
+                        payload = response.json()
+                        page = payload.get('data') or {}
+                        if payload.get('code') != 0 or not isinstance(page.get('items'), list) or not isinstance(page.get('has_more'), bool):
+                            raise ValueError('incomplete personnel page')
+                        for row in page['items']:
+                            rid = str(row.get('record_id') or '')
+                            if not re.fullmatch(r'rec[A-Za-z0-9]+', rid) or rid in seen_rows:
+                                raise ValueError('invalid personnel record')
+                            seen_rows.add(rid)
+                            fields = row.get('fields') or {}
+                            if MaintenancePortalService._signature_person_inactive(fields.get('离职/异动情况')):
+                                continue
+                            users = fields.get('员工姓名') or []
+                            if isinstance(users, list) and len(users) != 1:
+                                continue
+                            identity = MaintenancePortalService._signature_user_info(users).get('open_id', '')
+                            if re.fullmatch(r'ou_[A-Za-z0-9]+', identity):
+                                records.setdefault(identity, set()).add(rid)
+                        if not page['has_more']:
+                            break
+                        token = str(page.get('page_token') or '')
+                        if not token or token in seen_tokens:
+                            raise ValueError('incomplete personnel pagination')
+                        seen_tokens.add(token)
+                    else:
+                        raise ValueError('personnel pagination limit')
+                except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+                    raise AssistantError('飞书智能体暂未完整读取人员关联，请稍后重试；若持续失败，请管理员检查智能体读取人员表的权限。',
+                                         503, category='feishu_sender_directory_unavailable') from exc
+                # Publish only a complete snapshot; concurrent senders share one read.
+                self.directory_records, self.directory_expires = records, time.monotonic() + 300
+            matches = self.directory_records.get(sender, set())
+            if len(matches) > 1:
+                raise AssistantError('人员表存在重复的飞书账号关联，请管理员核对；未使用其他人的账号。', 403)
+            return next(iter(matches), None)
 
     async def sender_name(self, message):
         """Read the actual sender's name, never a name supplied in chat text."""
@@ -539,6 +597,8 @@ class FeishuAssistant:
         try:
             self.config = await asyncio.to_thread(lambda: json.loads(self.config_path.read_text(encoding="utf-8")))
             if not self.config.get("enabled"): return
+            from .feishu_assistant_settings import validate_app_id
+            validate_app_id(self.config.get('app_id'))
             from .portal_service import external_real_write_guard
             if not external_real_write_guard()["real_write_allowed"]: return
             self.secret = unprotect_key(self.config["bridge_cipher"])
@@ -551,7 +611,7 @@ class FeishuAssistant:
             self.runner = asyncio.create_task(self._run())
             print("[ClipFlow][FeishuAssistant] 飞书智能体正在后台建立消息长连接，不影响其他业务", flush=True)
         except Exception as exc:
-            logging.warning("Feishu assistant initialization failed: %s", type(exc).__name__)
+            logging.error("Feishu assistant initialization failed: %s", str(exc) if isinstance(exc, AssistantError) else type(exc).__name__)
 
     async def receive(self, request):
         token = request.headers.get("authorization", "")
@@ -628,7 +688,7 @@ class FeishuAssistant:
         if user != cached: store.put_document("feishu_assistant_identity", union_id, user)
         return user
 
-    def _sender_user(self, message, *, name=None):
+    def _sender_user(self, message, *, name=None, record_id=None):
         store, auth = self.runtime.state_store, self.runtime.auth_manager
         sender = str(message.get('sender_id') or '')
         if not re.fullmatch(r'ou_[A-Za-z0-9]+', sender):
@@ -645,7 +705,7 @@ class FeishuAssistant:
                 person = lookup(identity)
                 if not person or person.get('id') != binding.get('record_id'):
                     raise AssistantError('已关联的人员记录发生变化，请管理员核对账号关联。', 403)
-            elif name is not None:
+            elif name is not None or record_id is not None:
                 provider = getattr(auth, '_account_directory_provider', None)
                 snapshot = provider() if provider else {}
                 if time.time() - float(snapshot.get('loaded_at') or 0) >= 300:
@@ -656,8 +716,11 @@ class FeishuAssistant:
                 if not snapshot.get('loaded_at'):
                     raise AssistantError('灯塔人员目录暂未就绪，请稍后重试。', 503)
                 people = [item for item in snapshot.get('people', {}).values()
-                          if not item.get('inactive') and str(item.get('name') or '').strip() == name.strip()]
+                          if not item.get('inactive') and (item.get('id') == record_id if record_id is not None
+                              else str(item.get('name') or '').strip() == name.strip())]
                 if len(people) != 1:
+                    if record_id is not None:
+                        raise AssistantError('对应的灯塔人员记录已失效或尚未同步，请管理员核对人员目录。', 403)
                     raise AssistantError('灯塔在岗目录存在重名，无法确定对应账号，请管理员核对。' if people
                                          else '灯塔在岗目录未找到与你的飞书姓名一致的人员，请管理员核对人员姓名。', 403)
                 person = people[0]
@@ -668,7 +731,8 @@ class FeishuAssistant:
                 if not person.get('selectable') or auth._open_id_explicitly_disabled(identity):
                     raise AssistantError('当前灯塔账号已停用或人员身份待核对。', 403)
                 store.put_document('feishu_assistant_sender', key, {'open_id': identity,
-                    'record_id': person['id'], 'name': person['name'], 'matched_by': 'name'})
+                    'record_id': person['id'], 'name': person['name'],
+                    'matched_by': 'record_id' if record_id is not None else 'name'})
             else:
                 return None
         if not person.get('selectable') or person.get('inactive') or auth._open_id_explicitly_disabled(identity):
@@ -679,12 +743,27 @@ class FeishuAssistant:
         user = await asyncio.to_thread(self._sender_user, message)
         if user:
             return user
+        directory_error = None
+        try:
+            record_id = await self.messenger.sender_record(message)
+        except AssistantError as exc:
+            if exc.category != 'feishu_sender_directory_unavailable':
+                raise
+            directory_error = exc
+        else:
+            if record_id:
+                return await asyncio.to_thread(self._sender_user, message, record_id=record_id)
         try:
             return await asyncio.to_thread(self._user, str(message.get('union_id') or ''))
         except AssistantError as exc:
             if exc.category != 'feishu_identity_unmapped':
                 raise
-        name = await self.messenger.sender_name(message)
+        try:
+            name = await self.messenger.sender_name(message)
+        except AssistantError:
+            if directory_error:
+                raise directory_error
+            raise
         return await asyncio.to_thread(self._sender_user, message, name=name)
 
     def _session(self, user):

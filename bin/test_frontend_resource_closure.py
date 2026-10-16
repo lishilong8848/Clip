@@ -41,6 +41,17 @@ def _v2(root: Path, *, index: str | None = None, manifest: dict | None = None,
 
 
 class V2FrontendClosureTests(unittest.TestCase):
+    def test_first_v2_update_ignores_overlay_directory_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, overlay = Path(tmp) / 'old-client', Path(tmp) / 'patch'
+            root.mkdir()
+            _v2(overlay, index='<script>const base="/assets/workspace-v2/";</script>',
+                manifest={'entry': 'app-new.js', 'css': []}, files={'app-new.js': '// current'})
+            found = referenced_assets(root, overlay)
+            self.assertIn(V2_DIR / 'app-new.js', found)
+            self.assertNotIn(V2_DIR, found)
+            self.assertEqual(patch_deletions(root, overlay, []), [])
+
     def test_v2_closure_tracks_index_manifest_nested_chunks_and_css(self):
         """Chunk imports resolve from their containing directory, not assets root."""
         with tempfile.TemporaryDirectory() as tmp:

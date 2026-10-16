@@ -77,6 +77,73 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(keys[1], keys[4])
 
 
+class SenderDirectoryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.messenger = FeishuMessenger({'app_id': 'cliAgent'})
+        self.messenger.headers = AsyncMock(return_value={'Authorization': 'Bearer fixture'})
+        self.http = SimpleNamespace(post=AsyncMock())
+        self.messenger.client = AsyncMock(return_value=self.http)
+
+    @staticmethod
+    def page(items, **pagination):
+        return SimpleNamespace(json=lambda: {'code': 0, 'data': {'items': items, 'has_more': False, **pagination}})
+
+    @staticmethod
+    def person(rid='recZheng', identity='ou_AgentZheng', *, inactive=False):
+        return {'record_id': rid, 'fields': {'员工姓名': [{'id': identity}], '离职/异动情况': inactive}}
+
+    async def test_full_pagination_is_shared_across_concurrent_senders_without_sensitive_fields(self):
+        self.http.post.side_effect = [self.page([self.person()], has_more=True, page_token='next'),
+                                      self.page([self.person('recOther', 'ou_Other')])]
+        results = await asyncio.gather(*(self.messenger.sender_record({'sender_id': identity}) for identity in
+            ['ou_AgentZheng', 'ou_Other', 'ou_AgentZheng', 'ou_Unknown']))
+        self.assertEqual(results, ['recZheng', 'recOther', 'recZheng', None])
+        self.assertEqual(self.http.post.await_count, 2)
+        first, second = self.http.post.call_args_list
+        self.assertEqual(first.kwargs['params']['user_id_type'], 'open_id')
+        self.assertEqual(second.kwargs['params']['page_token'], 'next')
+        self.assertEqual(first.kwargs['json'], {'field_names': ['员工姓名', '离职/异动情况']})
+        self.assertNotIn('view_id', first.kwargs['json'])
+        self.messenger.headers.assert_awaited_once()
+
+    async def test_partial_pages_errors_and_timeout_never_cache_a_match(self):
+        import httpx
+        first = self.page([self.person()], has_more=True, page_token='next')
+        broken = [self.page([], has_more=True, page_token='next'), self.page([self.person()]),
+                  SimpleNamespace(json=lambda: {'code': 99991672}),
+                  SimpleNamespace(json=lambda: {'code': 0, 'data': {'items': []}}),
+                  httpx.ReadTimeout('fixture')]
+        for failure in broken:
+            with self.subTest(failure=type(failure).__name__):
+                self.http.post.side_effect = [first, failure]
+                with self.assertRaises(AssistantError) as caught:
+                    await self.messenger.sender_record({'sender_id': 'ou_AgentZheng'})
+                self.assertEqual(caught.exception.category, 'feishu_sender_directory_unavailable')
+                self.assertEqual(self.messenger.directory_records, {})
+                self.assertEqual(self.messenger.directory_expires, 0)
+        self.http.post.side_effect = [self.page([self.person()])]
+        self.assertEqual(await self.messenger.sender_record({'sender_id': 'ou_AgentZheng'}), 'recZheng')
+
+    async def test_duplicate_accounts_fail_closed_and_inactive_records_cannot_bind(self):
+        self.http.post.return_value = self.page([self.person(), self.person('recDuplicate')])
+        with self.assertRaisesRegex(AssistantError, '重复'):
+            await self.messenger.sender_record({'sender_id': 'ou_AgentZheng'})
+        self.messenger.directory_expires = 0
+        self.http.post.return_value = self.page([self.person(inactive=True), self.person('recActive')])
+        self.assertEqual(await self.messenger.sender_record({'sender_id': 'ou_AgentZheng'}), 'recActive')
+        self.messenger.directory_expires = 0
+        self.http.post.return_value = self.page([self.person(inactive=True)])
+        self.assertIsNone(await self.messenger.sender_record({'sender_id': 'ou_AgentZheng'}))
+
+    async def test_multi_person_rows_are_not_mapped_to_first_persons_portal_identity(self):
+        row = self.person()
+        row['fields']['员工姓名'].append({'id': 'ou_Another'})
+        self.http.post.return_value = self.page([row])
+        for identity in ['ou_AgentZheng', 'ou_Another']:
+            self.assertIsNone(await self.messenger.sender_record({'sender_id': identity}))
+        self.assertEqual(self.http.post.await_count, 1)
+
+
 class InboxTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
@@ -300,7 +367,8 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
                   'login_ids': ['ou_Web'], 'selectable': True}
         self.sender_directory([person])
         self.channel._user = Mock(side_effect=AssistantError('unmapped', 403, category='feishu_identity_unmapped'))
-        self.channel.messenger = SimpleNamespace(sender_name=AsyncMock(return_value='王彦博'))
+        self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value=None),
+                                                sender_name=AsyncMock(return_value='王彦博'))
         message = parse_message(event(content='我叫别的人'), 'cliTest', 'ouBot')
         user = await self.channel._resolve_user(message)
         self.assertEqual(user['open_id'], 'ou_Web')
@@ -330,6 +398,93 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.store.get_document('feishu_assistant_sender', 'cliTest:ou_Person'))
         self.sender_directory([person, {**person, 'id': 'recOld', 'inactive': True, 'login_ids': ['ou_Old']}])
         self.assertEqual(self.channel._sender_user(message, name='王彦博')['open_id'], 'ou_Web')
+
+    async def test_hr_record_resolves_other_app_sender_without_contact_name_and_reuses_web_context(self):
+        person = {'id': 'recZheng', 'name': '郑帅', 'login_ids': ['ou_WebZheng'], 'selectable': True}
+        self.sender_directory([person, {**person, 'id': 'recNamesake', 'login_ids': ['ou_Other']}])
+        self.channel._user = Mock(side_effect=AssertionError('HR identity needs no contact permission'))
+        self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value='recZheng'),
+            sender_name=AsyncMock(side_effect=AssertionError('Name is not required')))
+        message = parse_message(event(chat_type='group', content='今天的热点新闻有哪些'), 'cliTest', 'ouBot')
+        user = await self.channel._resolve_user(message)
+        self.assertEqual(user['open_id'], 'ou_WebZheng')
+        self.assertEqual(user['name'], '郑帅')
+        binding = self.store.get_document('feishu_assistant_sender', 'cliTest:ou_Person')
+        self.assertEqual(binding['matched_by'], 'record_id')
+        restarted = FeishuAssistant(self.controller, self.runtime, AsyncMock())
+        restarted.config = dict(self.channel.config)
+        self.assertEqual(await restarted._resolve_user({**message, 'chat_type': 'p2p', 'chat_id': 'oc_Other'}), user)
+        self.assertEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Chat'}),
+                         LighthouseAssistant._key({'id': 'ou_WebZheng'}))
+        self.channel.messenger.sender_name.assert_not_awaited()
+        self.runtime.auth_manager._open_id_explicitly_disabled = lambda _: True
+        with self.assertRaisesRegex(AssistantError, '停用'):
+            await restarted._resolve_user(message)
+
+    async def test_record_mapping_rejects_invalid_local_person_instead_of_name_fallback(self):
+        person = {'id': 'recZheng', 'name': '郑帅', 'login_ids': ['ou_WebZheng'], 'selectable': True}
+        message = parse_message(event(), 'cliTest', 'ouBot')
+        for people in ([], [{**person, 'inactive': True}], [{**person, 'selectable': False}],
+                       [{**person, 'login_ids': ['ou_WebZheng', 'ou_Other']}],
+                       [{**person, 'login_ids': []}]):
+            with self.subTest(people=people):
+                self.sender_directory(people)
+                self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value='recZheng'),
+                    sender_name=AsyncMock())
+                with self.assertRaises(AssistantError):
+                    await self.channel._resolve_user(message)
+                self.channel.messenger.sender_name.assert_not_awaited()
+                self.assertFalse(self.store.get_document('feishu_assistant_sender', 'cliTest:ou_Person'))
+
+    async def test_record_binding_refreshes_stale_directory(self):
+        snapshot = self.sender_directory([])
+        snapshot['loaded_at'] = 0
+        person = {'id': 'recNew', 'name': '新人员', 'login_ids': ['ou_Person'], 'selectable': True}
+        def refresh():
+            import time
+            snapshot.update(loaded_at=time.time(), people={person['id']: person})
+        self.runtime.auth_manager._account_directory_loader = Mock(side_effect=refresh)
+        self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value='recNew'))
+        user = await self.channel._resolve_user(parse_message(event(), 'cliTest', 'ouBot'))
+        self.assertEqual(user['name'], '新人员')
+        self.channel.messenger.sender_record.assert_awaited_once()
+        self.runtime.auth_manager._account_directory_loader.assert_called_once()
+
+    async def test_existing_sender_binding_survives_hr_network_outage_without_extra_reads(self):
+        person = {'id': 'recKnown', 'name': '已关联人员', 'login_ids': ['ou_Web'], 'selectable': True}
+        snapshot = self.sender_directory([person])
+        message = parse_message(event(), 'cliTest', 'ouBot')
+        self.channel._sender_user(message, record_id='recKnown')
+        snapshot['loaded_at'] = 0
+        self.runtime.auth_manager._account_directory_loader = Mock(side_effect=OSError('offline'))
+        self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(), sender_name=AsyncMock())
+        self.assertEqual((await self.channel._resolve_user(message))['open_id'], 'ou_Web')
+        self.channel.messenger.sender_record.assert_not_awaited()
+        self.runtime.auth_manager._account_directory_loader.assert_not_called()
+
+    async def test_fixed_accounts_without_hr_person_preserve_union_identity_fallback(self):
+        self.sender_directory([])
+        self.runtime.auth_manager._account_directory_loader = Mock(side_effect=OSError('offline'))
+        expected = {'open_id': 'ou_DutyH', 'name': 'H楼值班账号'}
+        self.channel._user = Mock(return_value=expected)
+        self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value=None), sender_name=AsyncMock())
+        self.assertEqual(await self.channel._resolve_user(parse_message(event(), 'cliTest', 'ouBot')), expected)
+        self.channel.messenger.sender_name.assert_not_awaited()
+        self.runtime.auth_manager._account_directory_loader.assert_not_called()
+
+    async def test_directory_read_failure_retains_name_fallback_and_reports_real_failure(self):
+        self.sender_directory([{'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Web'], 'selectable': True}])
+        self.channel._user = Mock(side_effect=AssistantError('unmapped', 403, category='feishu_identity_unmapped'))
+        failure = AssistantError('人员关联暂未完整读取', 503, category='feishu_sender_directory_unavailable')
+        self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(side_effect=failure),
+                                                sender_name=AsyncMock(return_value='王彦博'))
+        message = parse_message(event(), 'cliTest', 'ouBot')
+        self.assertEqual((await self.channel._resolve_user(message))['open_id'], 'ou_Web')
+        self.store.delete_document('feishu_assistant_sender', 'cliTest:ou_Person')
+        self.channel.messenger.sender_name = AsyncMock(side_effect=AssistantError('未提供姓名', 403))
+        with self.assertRaises(AssistantError) as caught:
+            await self.channel._resolve_user(message)
+        self.assertEqual(caught.exception.category, 'feishu_sender_directory_unavailable')
 
     async def test_name_bindings_are_scoped_to_bot_application_and_cannot_follow_a_reused_record(self):
         message = parse_message(event(), 'cliTest', 'ouBot')

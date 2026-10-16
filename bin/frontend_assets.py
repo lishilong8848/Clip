@@ -152,7 +152,7 @@ def _v2_closure(source, *, strict: bool) -> set[Path]:
 def referenced_assets(root: Path, overlay: Path | None = None, *, strict: bool = True) -> set[Path]:
     def source(relative):
         candidate = overlay / relative if overlay is not None else root / relative
-        return candidate if candidate.is_file() else root / relative
+        return candidate if candidate.exists() else root / relative
 
     found: set[Path] = set()
 

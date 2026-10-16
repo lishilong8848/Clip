@@ -227,7 +227,10 @@ class FeishuRuntimeMirror:
         import httpx
         from upload_event_module.services.http_client import verified_tls_context
         if self._download_client is None:
-            self._download_client = httpx.Client(timeout=60, follow_redirects=False, verify=verified_tls_context())
+            # Feishu attachments must not inherit an unrelated system proxy.
+            self._download_client = httpx.Client(
+                timeout=httpx.Timeout(connect=10, read=90, write=30, pool=10),
+                trust_env=False, follow_redirects=False, verify=verified_tls_context())
         for attempt in range(4):
             # Never forward the API bearer to an attachment CDN.
             headers = self.headers if urlsplit(url).netloc == 'open.feishu.cn' else {}

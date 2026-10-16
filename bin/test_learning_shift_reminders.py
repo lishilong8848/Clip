@@ -12,10 +12,11 @@ class ShiftReminderTests(TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.reader = Mock(return_value=[{'open_id': 'ou_night', 'shift': '夜', 'scope': 'A'}, {'open_id': 'ou_external', 'shift': '白', 'scope': 'A'}])
+        self.reader = Mock(return_value=[{'open_id': 'ou_night', 'shift': '夜', 'scope': 'A', 'name': '夜班人员'},
+                                         {'open_id': 'ou_external', 'shift': '白', 'scope': 'A', 'name': '外部人员'}])
         self.people = {'people': {
-            'night': {'scopes': ['A'], 'selectable': True, 'position': '值班长', 'login_ids': ['ou_night']},
-            'external': {'scopes': ['A'], 'selectable': True, 'position': '值班员', 'login_ids': ['ou_external']},
+            'night': {'name': '夜班人员', 'scopes': ['A'], 'selectable': True, 'position': '值班长', 'login_ids': ['ou_night']},
+            'external': {'name': '外部人员', 'scopes': ['A'], 'selectable': True, 'position': '值班员', 'login_ids': ['ou_external']},
         }}
         self.sender = Mock(return_value=(True, '', []))
         self.service = self.make_service()
@@ -57,6 +58,60 @@ class ShiftReminderTests(TestCase):
         self.assertEqual(self.sender.call_args_list[0].args[2], self.sender.call_args_list[2].args[2])
         self.reader.assert_called_once()
 
+    def test_delivery_receipt_is_persisted_and_survives_restart(self):
+        receipt = {'open_id': 'ou_external', 'ok': True, 'sender_app_id': 'cli_fixture',
+                   'message_id': 'om_fixture', 'chat_id': 'oc_fixture', 'message_uuid': 'stable', 'accepted_at': 1000}
+        self.sender.return_value = (True, 'ok', [receipt])
+        self.run_at(13)
+        key = 'shift:2026-10-10:白:ou_external'
+        saved = self.service._get('notification', key)
+        self.assertEqual(saved['status'], 'sent')
+        self.assertEqual(saved['delivery'], [receipt])
+        self.assertTrue(saved['sent_at'])
+        self.service = self.make_service()
+        self.run_at(13)
+        self.sender.assert_called_once()
+        self.assertEqual(self.service._get('notification', key)['delivery'], [receipt])
+
+    def test_incomplete_send_result_stays_pending_and_later_receipt_is_saved(self):
+        self.sender.return_value = (False, '发送结果未确认', [{'open_id': 'ou_external', 'ok': False}])
+        with patch.object(learning.time, 'time', return_value=1000):
+            self.run_at(13)
+        key = 'shift:2026-10-10:白:ou_external'
+        self.assertEqual(self.service._get('notification', key)['status'], 'pending')
+        self.assertNotIn('sent_at', self.service._get('notification', key))
+        receipt = {'open_id': 'ou_external', 'ok': True, 'message_id': 'om_retry', 'chat_id': 'oc_retry'}
+        self.sender.return_value = (True, 'ok', [receipt])
+        self.service = self.make_service()
+        with patch.object(learning.time, 'time', return_value=1301):
+            self.run_at(13)
+        self.assertEqual(self.sender.call_args_list[0].args[2], self.sender.call_args_list[1].args[2])
+        self.assertEqual(self.service._get('notification', key)['delivery'], [receipt])
+
+    def test_real_card_adapter_requires_receipt_before_marking_sent(self):
+        from upload_event_module.services import robot_webhook
+        self.service._sender = None
+        key = 'shift:2026-10-10:白:ou_external'
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}), \
+             patch.object(robot_webhook, '_get_tenant_access_token', return_value=('fixture', '')), \
+             patch.object(robot_webhook, '_request_json', side_effect=[{'code': 0},
+                 {'code': 0, 'data': {'message_id': 'om_realreceipt', 'chat_id': 'oc_private'}}]) as transport:
+            with patch.object(learning.time, 'time', return_value=1000):
+                self.run_at(13)
+            first = self.service._get('notification', key)
+            self.assertEqual(first['status'], 'pending')
+            self.assertIn('未确认', first['error'])
+            self.assertNotIn('sent_at', first)
+            with patch.object(learning.time, 'time', return_value=1301):
+                self.run_at(13)
+        saved = self.service._get('notification', key)
+        self.assertEqual(saved['status'], 'sent')
+        self.assertEqual(saved['delivery'][0]['open_id'], 'ou_external')
+        self.assertEqual(saved['delivery'][0]['message_id'], 'om_realreceipt')
+        self.assertEqual(saved['delivery'][0]['chat_id'], 'oc_private')
+        self.assertEqual(transport.call_args_list[0].kwargs['json_payload']['uuid'],
+                         transport.call_args_list[1].kwargs['json_payload']['uuid'])
+
     def test_reader_failure_keeps_building_reminder_and_retries_later(self):
         self.reader.side_effect = ValueError('incomplete')
         with self.service.transaction() as conn:
@@ -75,22 +130,53 @@ class ShiftReminderTests(TestCase):
         self.reader.assert_not_called()
         self.sender.assert_not_called()
 
-    def test_only_current_duty_roles_receive_and_cached_roster_is_rechecked(self):
+    def test_roster_not_position_decides_recipients_and_cached_identity_is_rechecked(self):
         self.people['people'].update({
-            'engineer': {'scopes': ['A'], 'selectable': True, 'position': '工程师', 'login_ids': ['ou_engineer']},
-            'supervisor': {'scopes': ['A'], 'selectable': True, 'position': '主管', 'login_ids': ['ou_supervisor']},
+            'engineer': {'name': '人员甲', 'scopes': ['A'], 'selectable': True, 'position': '工程师', 'login_ids': ['ou_engineer']},
+            'blank': {'name': '人员乙', 'scopes': ['A'], 'selectable': True, 'position': '', 'login_ids': ['ou_blank']},
         })
-        self.reader.return_value += [{'open_id': oid, 'shift': '白', 'scope': 'A'} for oid in ('ou_engineer', 'ou_supervisor')]
+        self.reader.return_value += [{'open_id': oid, 'shift': '白', 'scope': 'A', 'name': name}
+                                    for oid, name in (('ou_engineer', '人员甲'), ('ou_blank', '人员乙'))]
         self.run_at(13)
-        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
-        self.people['people']['night']['position'] = '工程师'
+        self.assertCountEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external', 'ou_engineer', 'ou_blank'])
+        self.people['people']['night']['inactive'] = True
         with self.service.transaction() as conn:
             key = 'shift:2026-10-10:夜:ou_night'
             self.service._put('notification', key, {'id': key, 'kind': 'shift', 'shift': '夜',
                 'scope': '', 'date': '2026-10-10', 'open_id': 'ou_night', 'status': 'pending'}, conn)
         self.run_at(20)
-        self.assertEqual(self.service._get('notification', key)['status'], 'skipped_role')
-        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external'])
+        self.assertEqual(self.service._get('notification', key)['status'], 'skipped_roster')
+        self.assertCountEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external', 'ou_engineer', 'ou_blank'])
+        self.reader.assert_called_once()
+
+    def test_upgrade_reloads_text_roster_and_recovers_skipped_without_resending_sent(self):
+        self.reader.return_value.append({'open_id': '', 'shift': '白', 'scope': 'A', 'name': '漏填人员'})
+        self.people['people']['missing'] = {'name': '漏填人员', 'scopes': ['A'], 'selectable': True,
+                                           'position': '', 'login_ids': ['ou_missing']}
+        with self.service.transaction() as conn:
+            self.service._put('local', 'shift_roster', {'date': '2026-10-10', 'version': 2,
+                'people': self.reader.return_value[:2]}, conn, False)
+            for oid, status in (('ou_external', 'sent'), ('ou_missing', 'skipped_role')):
+                key = 'shift:2026-10-10:白:' + oid
+                self.service._put('notification', key, {'id': key, 'kind': 'shift', 'shift': '白',
+                    'scope': '', 'date': '2026-10-10', 'open_id': oid, 'status': status}, conn)
+        self.run_at(13)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_missing'])
+        self.assertEqual(self.service._get('local', 'shift_roster')['version'], reminders.ROSTER_VERSION)
+        self.service = self.make_service()
+        self.run_at(13)
+        self.sender.assert_called_once()
+        self.reader.assert_called_once()
+
+    def test_unresolved_name_does_not_block_others_and_recovers_from_local_directory(self):
+        self.reader.return_value.append({'open_id': '', 'shift': '白', 'scope': 'A', 'name': '漏填人员'})
+        self.run_at(13)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_external'])
+        self.assertIn('漏填人员', self.service._last_error)
+        self.people['people']['missing'] = {'name': '漏填人员', 'scopes': ['A'], 'selectable': True,
+                                           'login_ids': ['ou_missing']}
+        self.run_at(13)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_external', 'ou_missing'])
         self.reader.assert_called_once()
 
     def test_missing_local_role_directory_defers_until_recovered(self):
@@ -145,6 +231,28 @@ class ShiftReminderTests(TestCase):
         self.assertTrue(settings['reminder_enabled'])
         self.assertEqual(settings['reminder_time'], '18:00')
 
+    def test_legacy_eight_am_night_default_moves_to_twenty_without_resetting_flags(self):
+        with self.service.transaction() as conn:
+            self.service._put('settings', 'main', {'enabled': True, 'publish_time': '13:00',
+                'night_publish_time': '08:00', 'reminder_enabled': True, 'reminder_time': '18:00'}, conn, False)
+        self.service = self.make_service()
+        settings = self.service.settings()
+        self.assertEqual((settings['publish_time'], settings['night_publish_time']), ('13:00', '20:00'))
+        self.assertTrue(settings['enabled'])
+        self.assertTrue(settings['reminder_enabled'])
+        self.assertEqual(settings['reminder_time'], '18:00')
+        self.run_at(8)
+        self.sender.assert_not_called()
+        self.run_at(13)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_external'])
+        self.run_at(20)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_external', 'ou_night'])
+
+    def test_newly_saved_explicit_night_time_is_not_repeatedly_migrated(self):
+        self.service.dispatch('settings.save', {'night_publish_time': '08:00'}, {'id': 'fixture-admin', 'is_admin': True}, {})
+        self.service = self.make_service()
+        self.assertEqual(self.service.settings()['night_publish_time'], '08:00')
+
     def test_configured_shift_times_apply_to_both_people_and_cached_roster(self):
         with self.service.transaction() as conn:
             self.service._put('settings', 'main', {**learning.DEFAULT_SETTINGS, 'enabled': True,
@@ -167,16 +275,17 @@ class ShiftReminderTests(TestCase):
     def test_roster_view_pagination_dates_exclusions_and_external_users(self):
         timestamp = int(dt.datetime(2026, 10, 10, tzinfo=learning.TZ).timestamp()*1000)
         def row(group='A班', shift='夜', oid='ou_test', day=timestamp, scope='A楼'):
-            return {'fields': {'班组': group, '班次': shift, '排班日期': day, '机楼': scope, '人员': {'users': [{'id': oid}]}}}
+            return {'fields': {'班组': group, '班次': shift, '排班日期': day, '机楼': scope,
+                               '人员（文本）': [{'text': oid}], '人员': {'users': [{'id': oid, 'name': oid}]}}}
         service = Mock()
         service._request_json.side_effect = [
             {'code': 0, 'data': {'items': [row(), row('长白', oid='ou_longday'), row('110站'), row(day=timestamp-86400000), row(shift='休'), row(scope='110站', oid='ou_station')], 'has_more': True, 'page_token': 'next'}},
             {'code': 0, 'data': {'items': [row(), row(shift='白', oid='ou_external'), row(scope='H楼', oid='ou_H')], 'has_more': False}},
         ]
         self.assertEqual(reminders.read_roster(service, '2026-10-10'), [
-            {'open_id': 'ou_test', 'shift': '夜', 'scope': 'A', 'name': ''},
-            {'open_id': 'ou_external', 'shift': '白', 'scope': 'A', 'name': ''},
-            {'open_id': 'ou_H', 'shift': '夜', 'scope': 'H', 'name': ''}])
+            {'open_id': 'ou_test', 'shift': '夜', 'scope': 'A', 'name': 'ou_test'},
+            {'open_id': 'ou_external', 'shift': '白', 'scope': 'A', 'name': 'ou_external'},
+            {'open_id': 'ou_H', 'shift': '夜', 'scope': 'H', 'name': 'ou_H'}])
         self.assertEqual(service._request_json.call_args.kwargs['params']['view_id'], reminders.VIEW_ID)
         service._request_json.side_effect = None
         service._request_json.return_value = {'code': 0, 'data': {'items': [row()], 'has_more': True}}

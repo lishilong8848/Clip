@@ -25,6 +25,11 @@ def read_config(path):
     return data, hashlib.sha256(raw).hexdigest()
 
 
+def validate_app_id(app_id):
+    if app_id == 'cli_a9d1c9fe9d381cee':
+        raise AssistantError('表单交互与长连接必须使用飞书智能体专用应用，不能使用灯塔登录和业务数据应用。')
+
+
 def public_config(path, active):
     config, revision = read_config(path)
     return {"app_id": str(config.get("app_id") or ""), "enabled": config.get("enabled") is True,
@@ -47,6 +52,8 @@ def save_config(path, payload, active):
     if type(payload.get("enabled")) is not bool:
         raise AssistantError("启用状态必须为开关。")
     app_id, secret = app_id.strip(), secret.strip()
+    if payload['enabled']:
+        validate_app_id(app_id)
     changed_app = app_id != config.get("app_id")
     if not secret and (changed_app or not config.get("secret_cipher")):
         raise AssistantError("首次配置或更换 App ID 时必须填写对应的 App Secret。")

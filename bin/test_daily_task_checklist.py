@@ -534,7 +534,7 @@ class DailyTaskChecklistTests(unittest.TestCase):
         ), patch.object(
             robot_webhook,
             "_request_json",
-            return_value={"code": 0},
+            return_value={"code": 0, "data": {"message_id": "om_fixture", "chat_id": "oc_fixture"}},
         ) as request_json:
             ok, _message, _results = robot_webhook.send_interactive_to_open_ids(
                 {"header": {}, "elements": []},

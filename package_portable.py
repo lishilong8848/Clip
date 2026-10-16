@@ -1688,6 +1688,7 @@ def _run_packaging_preflight_tests() -> None:
 
     py_targets = [
         PROJECT_ROOT / "bin" / "refactored_main.py",
+        PROJECT_ROOT / "bin" / "frontend_assets.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "main.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "preflight.py",
         PROJECT_ROOT / "bin" / "clipflow_backend" / "process_controller.py",
@@ -1701,6 +1702,10 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "signature_print.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "repair_operations.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_reminders.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "feishu_assistant.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "feishu_assistant_settings.py",
+        PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "robot_webhook.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_cloud.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_routes.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_sharing.py",
@@ -1820,11 +1825,13 @@ def _run_packaging_preflight_tests() -> None:
     _run_preflight_check(
         [test_python, "-m", "unittest",
          "bin.test_public_access",
+         "bin.test_robot_webhook",
+         "bin.test_learning_update_flow",
          "bin.test_workspace_layouts",
          "bin.test_public_health", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
-         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
+         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
@@ -2702,7 +2709,13 @@ def _publish_patch_to_feishu(patch_zip: Path, manifest_path: Path, manifest: dic
         sys.path.insert(0, str(BIN_DIR))
     from upload_event_module.services.patch_mirror import publish_patch
     log("正在上传飞书补丁镜像并回读校验。")
-    spec = publish_patch(patch_zip, manifest, BUILD_DIR / 'feishu_patch_upload_journal.json')
+    try:
+        spec = publish_patch(patch_zip, manifest, BUILD_DIR / 'feishu_patch_upload_journal.json')
+    except Exception:
+        log("飞书补丁上传或下载核验未完成，尚未推送本次 Gitee 更新清单。"
+            "本地 ZIP 和上传进度已保留；可运行 package_portable.py --retry-upload 继续核验，"
+            "无需重新打包，不会因重试重复创建已记录的飞书分片。")
+        raise
     updated = dict(manifest, feishu_patch=spec)
     temporary = manifest_path.with_suffix('.json.tmp')
     try:

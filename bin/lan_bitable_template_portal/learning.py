@@ -26,7 +26,7 @@ QUOTAS = {"written": 8, "duty": 1, "professional": 1, "supplemental": 5}
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_FILE = 20 * 1024 * 1024
 MAX_TOTAL = 100 * 1024 * 1024
-DEFAULT_SETTINGS = {"enabled": False, "publish_time": "13:00", "night_publish_time": "20:00", "reminder_enabled": False, "reminder_time": "17:00", "portal_url": "", "timeout_reminder_enabled": True, "weekly_report_enabled": True}
+DEFAULT_SETTINGS = {"enabled": False, "publish_time": "13:00", "night_publish_time": "20:00", "reminder_enabled": False, "reminder_time": "17:00", "portal_url": "", "timeout_reminder_enabled": True, "weekly_report_enabled": True, "shift_times_version": 1}
 ISSUE_STATES = {"pending", "processing", "needs_info", "resolved", "no_change", "withdrawn"}
 RATINGS = {"部分掌握", "需复习"}
 
@@ -366,6 +366,8 @@ class LearningService:
         stored = {k: v for k, v in (self._get("settings", "main") or {}).items() if not k.startswith("_")}
         if "night_publish_time" not in stored:
             stored.update(publish_time="13:00", night_publish_time="20:00")
+        elif not stored.get('shift_times_version') and stored.get('publish_time') == '13:00' and stored['night_publish_time'] == '08:00':
+            stored['night_publish_time'] = '20:00'
         result = {**DEFAULT_SETTINGS, **stored}
         for field in ("publish_time", "night_publish_time"):
             if not isinstance(result[field], str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", result[field]):
@@ -722,12 +724,11 @@ class LearningService:
             self._send_notifications(current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ))
 
     def _send_notifications(self, current):
-        from .learning_reminders import duty_recipients, enqueue_shift_reminders, reminder_card, shift_times
+        from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times
         settings = self.settings()
         if not settings['enabled']:
             return
-        targets = duty_recipients(self)
-        assignments = enqueue_shift_reminders(self, current, targets)
+        assignments = enqueue_shift_reminders(self, current)
         date = current.date().isoformat()
         link = None
         with self.transaction() as conn:
@@ -750,11 +751,6 @@ class LearningService:
                 notification["status"] = "cancelled"
             elif notification.get("date") != date:
                 notification["status"] = "expired"
-            elif notification['kind'] == 'shift' and targets is None:
-                self._last_error = '本地人员岗位目录暂未就绪，个人学练提醒等待核对后发送。'
-                continue
-            elif notification['kind'] == 'shift' and notification.get('open_id') not in targets:
-                notification['status'] = 'skipped_role'
             elif notification['kind'] == 'shift' and assignments is None:
                 continue
             elif notification['kind'] == 'shift' and (notification.get('shift'), notification.get('open_id')) not in assignments:
@@ -791,9 +787,16 @@ class LearningService:
                     except Exception:
                         result = (False, '学习提醒发送失败，后台稍后重试。')
                     ok = result[0] if isinstance(result, tuple) else bool(result)
+                    if isinstance(result, tuple) and len(result) > 2 and isinstance(result[2], list):
+                        notification['delivery'] = result[2]
                     notification["status"] = "sent" if ok else "pending"
+                    if ok:
+                        notification['sent_at'] = stamp()
                     notification["error"] = "" if ok else str(result[1] if isinstance(result, tuple) else "消息发送失败")
                     notification["retry_at"] = time.time() + 300
+                    logging.getLogger(__name__).log(logging.INFO if ok else logging.ERROR,
+                        '学练提醒发送结果 id=%s status=%s delivery=%s error=%s',
+                        notification['id'], notification['status'], notification.get('delivery', []), notification['error'])
             with self.transaction() as conn:
                 self._put("notification", notification["id"], notification, conn)
 

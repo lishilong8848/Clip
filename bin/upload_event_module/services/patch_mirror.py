@@ -38,17 +38,24 @@ def download_patch(manifest, target, *, mirror_factory=FeishuRuntimeMirror):
                             if downloaded.stat().st_size != part['size'] or checksum(downloaded) != part['sha256']:
                                 raise ValueError('飞书补丁分片校验失败。')
                             break
-                        except Exception:
+                        except Exception as exc:
+                            received = downloaded.stat().st_size if downloaded.exists() else 0
+                            logging.warning('飞书补丁分片下载未完成（%s/3）：分片 %s/%s，已接收 %.2f/%.2f MiB，原因=%s%s',
+                                            attempt + 1, part['index'], len(spec['parts']),
+                                            received / 1024 ** 2, part['size'] / 1024 ** 2,
+                                            type(exc).__name__, '，稍后重试' if attempt < 2 else '，保留原补丁')
                             downloaded.unlink(missing_ok=True)
                             if attempt == 2:
                                 raise
                             time.sleep(2 * (attempt + 1))
+                    logging.info('飞书补丁分片校验通过：%s/%s', part['index'], len(spec['parts']))
                     with downloaded.open('rb') as source:
                         shutil.copyfileobj(source, output, 1024 * 1024)
                     downloaded.unlink()
             if assembled.stat().st_size != spec['size'] or checksum(assembled) != spec['sha256']:
                 raise ValueError('飞书补丁整包校验失败。')
             assembled.replace(target)
+            logging.info('飞书补丁整包大小及 SHA256 校验通过')
     finally:
         mirror.close()
     return target
