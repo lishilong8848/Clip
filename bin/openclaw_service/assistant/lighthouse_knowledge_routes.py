@@ -127,12 +127,12 @@ def install_knowledge_routes(app, authorize, get_knowledge):
                 elif action == 'settings':
                     data = await asyncio.to_thread(service.settings, actor) if request.method == 'GET' else await asyncio.to_thread(service.save_settings, actor, payload)
                 elif action == 'groups':
-                    data = await asyncio.to_thread(service.groups, actor) if request.method == 'GET' else await asyncio.to_thread(service.create_group, actor, payload.get('name'))
+                    data = await asyncio.to_thread(service.groups, actor) if request.method == 'GET' else await asyncio.to_thread(service.create_group, actor, payload.get('name'), payload.get('parent_id'))
                 elif action.startswith('groups/'):
                     parts = action.split('/')
                     group_id = parts[1]
                     if len(parts) == 2:
-                        data = await asyncio.to_thread(service.rename_group, actor, group_id, payload.get('name')) if request.method == 'PATCH' else await asyncio.to_thread(service.delete_group, actor, group_id)
+                        data = await asyncio.to_thread(service.rename_group, actor, group_id, payload.get('name'), **({'parent_id': payload['parent_id']} if 'parent_id' in payload else {})) if request.method == 'PATCH' else await asyncio.to_thread(service.delete_group, actor, group_id)
                     elif len(parts) == 3 and parts[2] == 'documents':
                         document_ids = payload.get('document_ids')
                         data = await asyncio.to_thread(service.set_documents_group, actor, group_id, document_ids) if request.method == 'PUT' else await asyncio.to_thread(service.remove_documents_group, actor, group_id, document_ids)

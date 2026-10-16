@@ -14,7 +14,7 @@ const containers = {
   'LinkDirectoryPage.vue': ['toolbar'],
   'SignatureManagementPage.vue': ['filters'],
   'HistoryMemoryPage.vue': ['filters'],
-  'PlanConvergencePage.vue': ['pc-list-filters', 'pc-toolbar'],
+  'PlanConvergencePage.vue': ['pc-list-filters', 'pc-toolbar', 'v2-plan-record-head'],
   'LearningPage.vue': ['toolbar'],
 };
 
@@ -65,37 +65,26 @@ function markFilterStyles(source, file, allowed) {
 
 export function adaptPageFilters(source, filename) {
   const file = filename.replaceAll('\\', '/').split('/').pop();
-  if (file === 'VnetSelect.vue' && !source.includes(':data-v2-filter-menu=')) source = source.replace('class="vnet-select-menu"', 'class="vnet-select-menu" :data-v2-filter-menu="rootRef?.closest(\'[data-v2-filter], #workspace-page-filters\') ? \'\' : undefined"');
   const allowed = containers[file] || [];
-  if (!allowed.length && !localFilters[file]) return markFilterStyles(source, file, allowed);
-  if (file === 'PlanConvergencePage.vue') {
-    source = source.replace('<button v-for="item in tabs"', '<button data-v2-navigation v-for="item in tabs"');
-  }
+  if (file === 'PlanConvergencePage.vue') source = source.replace('<button v-for="item in tabs"', '<button data-v2-navigation v-for="item in tabs"');
   const { descriptor } = parse(source), edits = [];
-  const hasSearch = node => node.props?.some(p => p.type === 6 && p.name === 'type' && p.value?.content === 'search') || node.children?.some(hasSearch);
+  const anchors={'HomePage.vue':'v2-dashboard-heading','TaskWorkspace.vue':'v2-section-title','RepairWorkspace.vue':'v2-repair-filters','EventManagementPage.vue':'event-command-head','CabinetPowerPage.vue':'page-heading','CabinetPowerBatchPage.vue':'page-heading','CriticalGuardPage.vue':'guard-page__header'};
+  let scopeAdded=false;
   function visit(node, overlay = false) {
     const classes = (node.props?.find(p => p.type === 6 && p.name === 'class')?.value?.content || '').split(/\s+/);
     overlay ||= ['NModal', 'NDrawer', 'dialog'].includes(node.tag) || classes.some(c => ['scrim', 'modal-backdrop', 'modal-layer', 'overlay'].includes(c));
-    const eligible = (file !== 'LearningPage.vue' || node.tag === 'form')
-      && (!classes.includes('pc-toolbar') || hasSearch(node));
-    if (file === 'DrillManagementPage.vue' && classes.includes('building-toolbar')) {
-      for (const child of node.children || []) {
-        if (child.type === 1 && child.tag === 'label') edits.push([child.loc.start.offset, child.loc.end.offset, `<Teleport :to="__v2FilterTarget() || 'body'" :disabled="!__v2FilterTarget()">${child.loc.source}</Teleport>`]);
-      }
-      return;
+    if(!overlay&&!scopeAdded&&classes.includes(anchors[file])){
+      const end=Math.max(node.tag.length+1,...node.props.map(p=>p.loc.end.offset-node.loc.start.offset));
+      const offset=node.loc.start.offset+node.loc.source.indexOf('>',end)+1;
+      edits.push([offset,offset,file==='TaskWorkspace.vue'?'<WorkspaceScopePicker v-if="!embedded" />':'<WorkspaceScopePicker />']);scopeAdded=true;
     }
-    if (node.type === 1 && !overlay && eligible && classes.some(c => allowed.includes(c))) {
-      const active = file === 'NoticeWorkspace.vue' ? ' v-if="active"'
-        : file === 'PlanConvergencePage.vue' && classes.includes('pc-list-filters') ? ' v-if="tab === \'review\'"' : '';
-      const content = file === 'PlanConvergencePage.vue'
-        ? node.loc.source.replace('class="', 'class="v2-plan-filters ') : node.loc.source;
-      edits.push([node.loc.start.offset, node.loc.end.offset, `<Teleport${active} :to="__v2FilterTarget() || 'body'" :disabled="!__v2FilterTarget()">${content}</Teleport>`]);
-      return;
+    if(node.tag==='h1'&&!overlay&&!node.props.some(p=>p.name==='data-v2-module-title')&&(['CabinetPowerPage.vue','CriticalGuardPage.vue','DrillManagementPage.vue','DailyTaskChecklistPage.vue','AdminTools.vue'].includes(file)||/^(?:画像学练|检修办理|水耗管理|机柜管理|演练管理|风险与重保|重保管理|共享知识库|多维表导航|签名管理|统一签名管理|每日任务|历史记忆|计划收敛审查|账号与权限|管理员设置|通告办理|个人工作台)$/.test(node.children?.map(n=>n.content||'').join('').trim())||node.loc.source.includes('personaTitles'))){
+      edits.push([node.loc.start.offset+3,node.loc.start.offset+3,' data-v2-module-title']);
     }
     for (const child of node.children || []) visit(child, overlay);
   }
   visit(descriptor.template?.ast || {});
   for (const [start, end, text] of edits.sort((a, b) => b[0] - a[0])) source = source.slice(0, start) + text + source.slice(end);
-  if (edits.length) source = source.replace('<script setup lang="ts">', '<script setup lang="ts">\nimport { pageFilterTarget as __v2FilterTarget } from "../workspace-v2/pageFilters";');
+  if(scopeAdded)source=source.replace('<script setup lang="ts">','<script setup lang="ts">\nimport WorkspaceScopePicker from "../workspace-v2/ScopePicker.vue";');
   return markFilterStyles(source, file, allowed);
 }

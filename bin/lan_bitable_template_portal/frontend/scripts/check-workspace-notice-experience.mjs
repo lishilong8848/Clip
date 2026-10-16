@@ -72,7 +72,7 @@ try{
  const open=async()=>{await page.locator('[data-list=planned]').getByRole('button',{name:'开始',exact:true}).click();await page.getByRole('textbox',{name:'名称',exact:true}).waitFor();assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0);assert(await page.getByRole('textbox',{name:'原因',exact:true}).isVisible());assert(await page.locator('[data-notice-section=memory]').isVisible());assert(await page.locator('[data-notice-section=photos]').isVisible());assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible());await scrollSection('推荐填写');};
  await goto();
  await page.getByLabel('计划月份',{exact:true}).click();await page.locator('.n-base-select-option').getByText('11月',{exact:true}).click();
- assert.match(await page.locator('.v2-notice-heading').innerText(),/10月计划/);assert.match(await page.locator('[data-list=planned]').innerText(),/10月计划/);
+ assert.equal(await page.locator('.v2-notice-heading h1').isVisible(),false,'navigation already names this module');assert.match(await page.locator('[data-list=planned]').innerText(),/10月计划/);
  await page.getByRole('button',{name:'筛选',exact:true}).click();await page.locator('[data-list=planned]').getByText('11月计划',{exact:true}).waitFor();
  await goto();await open();await page.getByRole('button',{name:'采用这组空白项',exact:true}).waitFor();
  await page.screenshot({path:path.join(output,'cross-building-recommendations.png'),fullPage:true});

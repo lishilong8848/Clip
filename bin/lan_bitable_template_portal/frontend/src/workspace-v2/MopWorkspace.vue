@@ -37,6 +37,7 @@ async function followSelection(event: MouseEvent) {
 .v2-mop-workspace :deep(.page-back-row:not(:has(button, a))) { display: none; }
 .v2-mop-workspace :deep(.mop-head) { padding: 4px 0 14px; background: transparent; border: 0; border-bottom: 1px solid var(--mop-line); border-radius: 0; box-shadow: none; backdrop-filter: none; }
 .v2-mop-workspace :deep(.mop-head strong) { color: var(--mop-ink); font-size: 23px; font-weight: 650; }
+.v2-mop-workspace :deep(.scope-select) { white-space: nowrap; flex-shrink: 0; }
 .v2-mop-workspace :deep(:is(button, input, select)) { font-family: inherit; letter-spacing: 0; }
 .v2-mop-workspace :deep(:is(.btn, .refresh-mini, input, select)) { min-height: 36px; border-radius: 6px; font-size: 13px; font-weight: 500; }
 .v2-mop-workspace :deep(:is(input, select)) { min-width: 0; max-width: 100%; background: #fff; border-color: var(--mop-line); }
@@ -48,6 +49,7 @@ async function followSelection(event: MouseEvent) {
 .v2-mop-workspace > :deep(.mop-flow-steps) { background: transparent; border: 0; padding: 0; box-shadow: none; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .v2-mop-workspace > :deep(.mop-flow-steps article) { padding: 6px 0; border: 0; border-radius: 0; background: transparent; grid-template-columns: 26px minmax(0, 1fr); box-shadow: none; }
 .v2-mop-workspace > :deep(.mop-flow-steps article b) { width: 26px; height: 26px; border-radius: 50%; font-size: 12px; font-weight: 600; }
+.v2-mop-workspace > :deep(.mop-flow-steps article.done b) { background:#087758;color:#fff; }
 .v2-mop-workspace > :deep(.mop-flow-steps article strong) { font-size: 13px; font-weight: 550; color: var(--mop-ink); }
 .v2-mop-workspace > :deep(.mop-flow-steps article small) { font-size: 12px; font-weight: 400; color: var(--mop-muted); }
 .v2-mop-workspace :deep(.mop-summary) { display: flex; flex-wrap: wrap; gap: 8px 22px; padding: 9px 0 12px; border-bottom: 1px solid var(--mop-line); }
@@ -70,6 +72,7 @@ async function followSelection(event: MouseEvent) {
 .v2-mop-workspace :deep(.notice-row::before) { display: none; }
 .v2-mop-workspace :deep(.notice-row strong) { margin-top: 5px; line-height: 1.55; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
 .v2-mop-workspace :deep(:is(.notice-row small, .notice-mop-tags em)) { font-size: 12px; font-weight: 400; line-height: 1.5; }
+.v2-mop-workspace :deep(.notice-row small),.v2-mop-workspace :deep(.preview-title p),.v2-mop-workspace :deep(.detect-summary span.muted) { color:var(--mop-muted); }
 .v2-mop-workspace :deep(.notice-mop-tags em) { border: 0; padding: 2px 5px; border-radius: 4px; }
 .v2-mop-workspace :deep(.row-status) { min-height: 20px; border-radius: 4px; font-weight: 500; padding: 2px 6px; }
 .v2-mop-workspace :deep(.empty-box) { min-height: 170px; border: 0; border-radius: 0; background: transparent; font-weight: 400; }
@@ -118,7 +121,7 @@ async function followSelection(event: MouseEvent) {
 .v2-mop-workspace :deep(.mop-sign-panel:not(.manager-open)) { padding: 8px 10px; }
 .v2-mop-workspace :deep(.mop-sign-panel:not(.manager-open)::before) { display: none; }
 .v2-mop-workspace :deep(.sheet-tabs button) { border: 0; border-radius: 4px; min-height: 34px; font-size: 13px; font-weight: 500; background: transparent; }
-.v2-mop-workspace :deep(.sheet-tabs button.active) { color: var(--mop-accent); background: #eaf3ff; box-shadow: none; }
+.v2-mop-workspace :deep(.sheet-tabs button.active) { color: var(--v2-blue); background: #eaf3ff; box-shadow: none; }
 .v2-mop-workspace :deep(.table-fill-toolbar) { padding: 6px 8px; background: #fff; box-shadow: none; backdrop-filter: none; }
 .v2-mop-workspace :deep(.table-fill-title strong) { padding: 0; background: none; color: var(--mop-ink); font-weight: 600; }
 .v2-mop-workspace :deep(.table-fill-title span) { font-weight: 400; }

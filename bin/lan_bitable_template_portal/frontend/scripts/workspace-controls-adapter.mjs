@@ -1,5 +1,37 @@
 import { parse } from '@vue/compiler-sfc';
 
+// Keep native form bindings and business handlers; only adapt presentation in V2.
+export function adaptMotionControls(source) {
+  const {descriptor}=parse(source),edits=[];
+  let progress=false,range=false;
+  function visit(node){
+    if(node.type===1&&node.props.some(p=>p.type===6&&p.name==='class'&&p.value?.content==='kb-upload-progress')){
+      const value=node.props.find(p=>p.type===7&&p.name==='bind'&&p.arg?.content==='aria-valuenow');
+      if(!value?.exp)throw new Error('Knowledge upload progress contract changed');
+      progress=true;
+      const condition=node.props.find(p=>p.type===7&&p.name==='if')?.loc.source||'';
+      edits.push([node.loc.start.offset,node.loc.end.offset,`<MotionProgressV2 ${condition} class="v2-upload-progress" :value="${value.exp.content}" :max="100" aria-label="文件上传进度" />`]);
+      return;
+    }
+    if(node.type===1&&node.tag==='progress'){
+      progress=true;
+      edits.push([node.loc.start.offset,node.loc.end.offset,node.loc.source.replace(/^<progress\b/,'<MotionProgressV2').replace(/<\/progress>$/,'</MotionProgressV2>')]);
+      return;
+    }
+    if(node.type===1&&node.tag==='input'&&node.props.some(p=>p.type===6&&p.name==='type'&&p.value?.content==='range')&&!node.props.some(p=>p.type===7&&p.name==='motion-range')){
+      range=true;edits.push([node.loc.start.offset+6,node.loc.start.offset+6,' v-motion-range']);
+    }
+    for(const child of node.children||[])visit(child);
+  }
+  visit(descriptor.template?.ast||{});
+  if(!edits.length)return source;
+  if(!descriptor.scriptSetup)throw new Error('Motion controls require a setup script');
+  const imports=(progress?'\nimport MotionProgressV2 from "../workspace-v2/MotionProgress.vue";':'')+(range?'\nimport {vMotionRange} from "../workspace-v2/motionRange";':'');
+  edits.push([descriptor.scriptSetup.loc.start.offset,descriptor.scriptSetup.loc.start.offset,imports]);
+  for(const [start,end,value] of edits.sort((a,b)=>b[0]-a[0]))source=source.slice(0,start)+value+source.slice(end);
+  return source;
+}
+
 export function portalFloatingControls(source) {
   const controls=new Set(['NSelect','NTreeSelect','NCascader','NAutoComplete','NDatePicker','NTimePicker','NColorPicker','NDropdown','NPopover','NPopconfirm','NTooltip']);
   if(!Array.from(controls).some(tag=>source.includes('<'+tag)))return source;

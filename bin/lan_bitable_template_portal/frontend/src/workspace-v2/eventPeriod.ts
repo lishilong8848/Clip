@@ -49,8 +49,13 @@ export function eventPeriodRange(period: EventPeriod, month = '', now = Date.now
     caption: `${first.replace(/-/g, '.')} - ${last.replace(/-/g, '.')}`, error };
 }
 export type EventRange = ReturnType<typeof eventPeriodRange>;
-export function eventTrend(records: LooseDict[], range: EventRange) {
-  const step = Math.max(1, Math.ceil((range.end - range.start) / DAY / 62)) * DAY;
+export function eventCalendarRange(period: 'week'|'month'|'year', now = Date.now()) {
+  const today=beijingDate(now);
+  const first=period==='year'?today.slice(0,4)+'-01-01':beijingDate(eventPeriodRange(period,'',now).start);
+  return eventPeriodRange('custom','',now,[first,today]);
+}
+export function eventTrend(records: LooseDict[], range: EventRange, daily = false) {
+  const step = (daily ? 1 : Math.max(1, Math.ceil((range.end - range.start) / DAY / 62))) * DAY;
   const bins: Array<{label:string;value:number;start:number;end:number}> = [];
   for(let start=range.start; start<range.end; start+=step) {
     const end=Math.min(start+step,range.end), first=beijingDate(start).slice(5).replace('-', '/');

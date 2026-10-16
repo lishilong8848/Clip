@@ -153,14 +153,27 @@ def extract_text(content, suffix):
         return safe_document("\n".join("".join(p.itertext()) for p in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p")))
     from openpyxl import load_workbook
     workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-    lines = []
+    lines, characters = [], 0
     try:
         for sheet in workbook.worksheets:
+            sheet.reset_dimensions()
             lines.append("工作表：" + sheet.title)
+            characters += len(lines[-1]) + 1
+            populated_rows = 0
             for index, row in enumerate(sheet.iter_rows(values_only=True)):
-                if index >= 5000 or sum(map(len, lines)) >= 100000 or any(value is not None for value in row[80:]):
+                if index >= 100000:
+                    raise AssistantError("表格行范围过大，请删除多余空行后重试；原文件仍可下载。", 413)
+                populated = [i for i, value in enumerate(row) if value is not None and str(value).strip()]
+                if not populated:
+                    continue
+                populated_rows += 1
+                if populated_rows > 5000 or populated[-1] >= 80:
                     raise AssistantError("表格文字超过读取上限，请拆分后上传；原文件仍可下载。", 413)
-                lines.append("\t".join("" if value is None else str(value) for value in row[:80]))
+                line = "\t".join("" if value is None else str(value) for value in row[:populated[-1] + 1])
+                characters += len(line) + 1
+                if characters > 100000:
+                    raise AssistantError("表格文字超过读取上限，请拆分后上传；原文件仍可下载。", 413)
+                lines.append(line)
         return safe_document("\n".join(lines))
     finally:
         workbook.close()

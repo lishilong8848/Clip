@@ -11,7 +11,7 @@
         <NFormItem label="组件宽度"><NSelect v-model:value="draft.w" :options="[{label:'紧凑 · 1/3',value:4},{label:'标准 · 1/2',value:6},{label:'宽幅 · 2/3',value:8},{label:'整行',value:12}]" /></NFormItem>
         <NFormItem label="组件高度"><NSelect v-model:value="draft.h" :options="draft.kind==='module'?[{label:'紧凑',value:6},{label:'常规',value:10},{label:'标准',value:12},{label:'完整工作区',value:14},{label:'加高工作区',value:18},{label:'超高工作区',value:24},{label:'最大工作区',value:30}]:[{label:'紧凑',value:3},{label:'标准',value:5},{label:'加高',value:7},{label:'超高',value:9}]" /></NFormItem>
         <NFormItem v-if="draft.kind==='notices'" label="统计口径"><NSelect v-model:value="draft.metric" :options="[{label:'当前进行中',value:'ongoing'},{label:'本月待发计划',value:'pending'}]" /></NFormItem>
-        <NFormItem v-if="draft.kind==='events'" label="时间范围"><NSelect v-model:value="draft.period" :options="[{label:'本周',value:'week'},{label:'本月',value:'month'}]" /></NFormItem>
+        <NFormItem v-if="draft.kind==='events'" label="时间范围"><NSelect v-model:value="draft.period" :options="[{label:'本周',value:'week'},{label:'本月',value:'month'},...(draft.display==='calendar'?[{label:'本年',value:'year'}]:[])]" /></NFormItem>
         <NFormItem v-if="['events','notices'].includes(draft.kind)" label="展示方式"><NSelect v-model:value="draft.display" :options="displayOptions(draft.kind)" /></NFormItem>
       </div>
       <NFormItem v-if="draft.kind==='shortcuts'" label="常用功能"><NSelect v-model:value="draft.links" multiple :options="navigationModules(user.modules||[]).map(m=>({label:m.label,value:m.id}))" filterable /></NFormItem>
@@ -30,5 +30,6 @@ const props=defineProps<{value:Widget|null;user:Dict;scopes:{value:string;label:
 const emit=defineEmits<{close:[];apply:[value:Widget]}>();
 const draft=ref<Widget|null>(null),error=ref('');
 watch(()=>props.value,value=>{draft.value=value?JSON.parse(JSON.stringify(value)):null;error.value='';},{immediate:true});
+watch(()=>draft.value?.display,value=>{if(draft.value&&value!=='calendar'&&draft.value.period==='year')draft.value.period='month';});
 function submit(){if(!draft.value)return;if(!draft.value.title.trim()){error.value='请填写组件名称。';return;}emit('apply',{...draft.value,x:Math.min(draft.value.x,12-draft.value.w)});}
 </script>

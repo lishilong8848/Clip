@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as tmp:
  service=DrillManagementService(LanPortalStateStore(Path(tmp)/'state.sqlite3'),data_root=Path(tmp)/'drills')
  definition=service.create_definition(name='可选评估验收',year=2026,month=10,file_name='fixture.xlsx',source=_fixture_xlsx(with_evaluator=True))
  definition=service.publish(definition['drill_id'],expected_version=definition['version'])
- people=[{'record_id':'p1','name':'指挥人','has_signature':True,'building':'A'},{'record_id':'p2','name':'评估人','has_signature':True,'building':'A'}]
+ people=[{'record_id':'p1','name':'指挥人','has_signature':True,'building':'A'},{'record_id':'p2','name':'评估人','has_signature':True,'building':'H'},{'record_id':'external:p3','name':'跨楼签名人','source':'external','has_signature':True,'building':'B'},{'record_id':'p4','name':'未签名人员','has_signature':False,'building':'C'}]
  execution=service.save_execution(definition['drill_id'],'A',{'drill_date':'2026-10-13','first_start_time':'09:00','commander':people[0],'participants':[people[0]],'step_signers':{str(s['row']):['p1'] for s in definition['configuration']['steps']}},expected_version=0)
  print(json.dumps({'definition':definition,'execution':execution,'people':people,'preview':service.preview_model(definition['drill_id'],'A','assessment')},ensure_ascii=False))
 `],{cwd:project,encoding:'utf8',env:{...process.env,PYTHONIOENCODING:'utf-8'}}));
@@ -57,8 +57,22 @@ try{
     assert.deepEqual(execution.evaluator,{});assert.equal(execution.signature_time,'2026-10-13T10:15');assert.equal(execution.evaluation_time,'');
     await page.reload();await page.locator('#drill-evaluator').waitFor();assert.equal(await times.first().inputValue(),'2026-10-13T10:15');assert.equal(await times.nth(1).inputValue(),'');
     await times.first().fill('');await page.getByRole('button',{name:'生成并归档',exact:true}).click();
-    await page.getByText('已提交生成任务，完成后会自动同步飞书。',{exact:true}).waitFor();assert.equal(generated,2);assert.equal(execution.signature_time,'');assert.deepEqual(errors,[]);
+    await page.getByText('已提交生成任务，完成后会自动同步飞书。',{exact:true}).waitFor();assert.equal(generated,2);assert.equal(execution.signature_time,'');
+    await page.getByRole('button',{name:'演练记录表',exact:true}).click();
+    await page.locator('.people-options').getByText('跨楼签名人',{exact:true}).waitFor();
+    const row=fixture.definition.configuration.steps[1].row;
+    await page.locator(`#drill-step-${row}-1`).click();
+    await page.getByRole('option').filter({hasText:'跨楼签名人'}).click();
+    await page.locator('.selected-people').getByText('跨楼签名人',{exact:false}).first().waitFor();
+    await page.getByRole('button',{name:'保存草稿',exact:true}).click();await page.getByText('演练草稿已保存',{exact:true}).waitFor();
+    assert.equal(execution.step_signers[String(row)][0],'external:p3');
+    assert(execution.participants.some(person=>person.record_id==='external:p3'));
+    await page.reload();await page.getByRole('button',{name:'演练记录表',exact:true}).click();await page.locator(`#drill-step-${row}-1`).waitFor();
+    assert.match(await page.locator(`#drill-step-${row}-1`).innerText(),/跨楼签名人/,'跨楼签名保存后刷新仍保留');
+    await page.locator(`#drill-step-${row}-1`).click();await page.getByRole('option').filter({hasText:'未签名人员'}).click();
+    assert(await page.getByRole('button',{name:'生成并归档',exact:true}).isDisabled(),'缺签名仍禁止生成');
+    assert.deepEqual(errors,[]);
     await context.close();
   }
-  console.log('PASS: desktop/mobile review fields optional; select/clear does not fill times; blank generate, save and reload retain independent values. Isolated APIs only.');
+  console.log('PASS: desktop/mobile optional review fields; all-building and external step signatures auto-enroll, persist and reload; missing signature still blocks generation. Isolated APIs only.');
 }finally{await browser.close();await server.close();}

@@ -2,40 +2,23 @@
   <aside ref="sidebar" class="v2-sidebar v2-sidebar-improved" :data-collapsed="collapsed" aria-label="功能导航">
     <div class="v2-nav-head">
       <div class="v2-nav-heading"><span v-if="!collapsed">工作导航 <small>{{ itemCount }}</small></span><NButton data-v2-navigation quaternary circle :aria-label="collapsed?'展开导航':'收起导航'" :title="collapsed?'展开导航':'收起导航'" :aria-expanded="!collapsed" @click="$emit('update:collapsed',!collapsed)"><PanelLeftOpen v-if="collapsed" :size="18" /><PanelLeftClose v-else :size="18" /></NButton></div>
-      <NButton v-if="collapsed" data-v2-navigation quaternary circle class="v2-nav-search-toggle" aria-label="搜索功能" title="搜索功能" @click="expandSearch"><Search :size="18" /></NButton>
-      <NInput v-else ref="input" v-model:value="query" class="v2-nav-search" :theme-overrides="inputTheme" clearable size="small" placeholder="搜索功能" :input-props="{'aria-label':'搜索功能'}" @keydown.esc="query=''" @keydown.enter="chooseOnly"><template #prefix><Search :size="15" /></template></NInput>
     </div>
-    <NMenu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="filtered" :value="selected" :indent="18" :node-props="menuNodeProps" @update:value="choose" />
-    <div v-if="query&&!filtered.length" class="v2-nav-empty" role="status"><SearchX :size="22" /><span>未找到相关功能</span><NButton text @click="query=''">清除搜索</NButton></div>
+    <NMenu :collapsed="collapsed" :collapsed-width="64" :collapsed-icon-size="20" :options="options" :value="selected" :indent="18" :node-props="menuNodeProps" @update:value="choose" />
 
   </aside>
 </template>
 <script setup lang="ts">
 import { computed,nextTick,ref,watch } from 'vue';
-import { NButton,NInput,NMenu,type InputInst,type MenuOption } from 'naive-ui';
-import { PanelLeftClose,PanelLeftOpen,Search,SearchX } from 'lucide-vue-next';
+import { NButton,NMenu,type MenuOption } from 'naive-ui';
+import { PanelLeftClose,PanelLeftOpen } from 'lucide-vue-next';
 const props=defineProps<{collapsed:boolean;options:MenuOption[];selected:string}>();
 const emit=defineEmits<{'update:collapsed':[value:boolean];select:[value:string]}>();
-const query=ref(''),input=ref<InputInst>(),sidebar=ref<HTMLElement>();
-const inputTheme={color:'#34413c',colorFocus:'#34413c',border:'1px solid #48584f',borderHover:'1px solid #8db5a1',borderFocus:'1px solid #8db5a1',textColor:'#edf6f0',placeholderColor:'#b1c0b6',caretColor:'#edf6f0',borderRadius:'6px'};
+const sidebar=ref<HTMLElement>();
 const itemCount=computed(()=>props.options.reduce((n,item)=>n+(item.type==='group'?(item.children?.length||0):1),0));
-const filtered=computed<MenuOption[]>(()=>{
-  const word=query.value.trim().toLocaleLowerCase();if(!word)return props.options;
-  return props.options.flatMap(item=>{
-    if(item.type==='group'){
-      const groupMatch=String(item.label||'').toLocaleLowerCase().includes(word);
-      const children=item.children?.filter(child=>groupMatch||String(child.label||'').toLocaleLowerCase().includes(word))||[];
-      return children.length?[{...item,children}]:[];
-    }
-    return String(item.label||'').toLocaleLowerCase().includes(word)?[item]:[];
-  });
-});
-async function expandSearch(){emit('update:collapsed',false);await nextTick();input.value?.focus();}
 function choose(value:string){emit('select',value);}
 function menuNodeProps(option:MenuOption){return {'aria-label':typeof option.label==='string'?option.label:undefined};}
-function chooseOnly(){const choices=filtered.value.flatMap(item=>item.type==='group'?item.children||[]:[item]);if(choices.length===1&&choices[0]?.key)choose(String(choices[0].key));}
 watch(()=>props.selected,async()=>{
-  query.value='';await nextTick();
+  await nextTick();
   const root=sidebar.value,active=root?.querySelector<HTMLElement>('.n-menu-item-content--selected');
   if(!root||!active)return;
   const rect=root.getBoundingClientRect(),item=active.getBoundingClientRect(),head=root.querySelector('.v2-nav-head')?.clientHeight||0;

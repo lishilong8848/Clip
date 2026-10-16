@@ -32,7 +32,7 @@
         <div v-if="recordsError" class="water-read-error" aria-live="polite"><span>{{ recordsError }}{{ recordsReady?'；以下保留上次读取的数据。':'' }}</span><NButton @click="loadRecords(true)">重试读取</NButton></div>
         <p v-if="recordsStale && recordsReady" class="water-stale">显示上次查询：{{ loadedQueryLabel }}。当前筛选尚未取得新结果。</p>
         <div class="water-list-head"><span>{{ !recordsReady ? '记录列表' : `共 ${total} 条` }}<template v-if="recordsReady"> · 第 {{ page }} / {{ totalPages }} 页</template></span><NSelect v-model:value="attention" :options="attentionOptions" size="small" class="water-attention" aria-label="本页记录状态" /></div>
-        <div v-if="trendOpen" class="water-trend"><MotionChart title="本页日统计水耗" :caption="`${loadedQueryLabel} · ${records.length} 条记录${trend.missing?' · 部分耗水量未取得':''}`" :items="trend.items" :loading="recordsLoading" :failed="recordsStale || !!recordsError || trend.missing>0" trend view="bar" unit="t" @select="drillDay" /><p>按本页日统计记录汇总；修正值优先，不包含周、月统计。</p></div>
+        <div v-if="trendOpen" class="water-trend"><MotionChart title="本页日统计水耗" :caption="`${loadedQueryLabel} · ${records.length} 条记录${trend.missing?' · 部分耗水量未取得':''}`" :items="trend.items" :loading="recordsLoading" :failed="recordsStale || !!recordsError || trend.missing>0" trend view="area" unit="t" @select="drillDay" /><p>按本页日统计记录汇总；修正值优先，不包含周、月统计。</p></div>
         <div class="water-list-content" :aria-busy="recordsLoading">
           <div v-if="!recordsReady && recordsLoading" class="water-initial"><NSkeleton v-for="i in 7" :key="i" height="40px" /></div>
           <div v-else-if="!recordsReady" class="water-initial water-empty"><CircleAlert :size="30" /><strong>{{ !scope ? '当前范围未接入水耗管理' : recordsError ? '水耗记录暂不可用' : filterError ? '请完善日期筛选' : '等待首次数据同步' }}</strong><span>{{ !scope ? '请选择已授权的 A、B、C、D、E、H 楼。' : '尚未取得完整数据。' }}</span></div>
@@ -75,8 +75,8 @@ const scopeChoices=computed(()=>showOverview.value?props.scopeOptions.filter(ite
 const bootstrap=ref<Dict>({}),bootstrapLoading=ref(false),bootstrapError=ref(''),refreshing=ref(false);
 const canCreate=computed(()=>bootstrap.value.permissions?.can_create===true);
 const records=ref<Dict[]>([]),recordsReady=ref(false),recordsLoading=ref(false),recordsError=ref(''),filterError=ref(''),total=ref(0),page=ref(1),loadedQuery=ref(''),loadedQueryLabel=ref(''),queryDay=ref(waterDay());
-const ranges=['近3天','本月','全部时间','自定义日期'];
-const filters=reactive<WaterFilters>({range:'近3天',month:waterDay().slice(0,7),startDate:waterDay(-2),endDate:waterDay(),meter:'',frequency:'',shift:'',query:''});
+const ranges=['近30天','近3天','本月','全部时间','自定义日期'];
+const filters=reactive<WaterFilters>({range:'近30天',month:waterDay().slice(0,7),startDate:waterDay(-29),endDate:waterDay(),meter:'',frequency:'',shift:'',query:''});
 const advancedOpen=ref(false),trendOpen=ref(false),attention=ref('');
 const attentionOptions=[{label:'本页全部记录',value:''},{label:'本页未记录',value:'未记录'},{label:'本页变化较大',value:'变化较大'},{label:'本页待补照片',value:'待补照片'}];
 const advancedCount=computed(()=>[filters.meter,filters.frequency,filters.shift].filter(Boolean).length);

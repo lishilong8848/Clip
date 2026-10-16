@@ -12,8 +12,8 @@ const guards=new Set<NavigationGuard>();
 const guardOwners=new Map<NavigationGuard,string>();
 let stable = window.location.href;
 for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
-  const transition = (event as Event & { viewTransition?: { ready: Promise<void> } }).viewTransition;
-  void transition?.ready.catch(() => undefined);
+  const transition = (event as Event & { viewTransition?: Partial<Record<'ready'|'finished'|'updateCallbackDone',Promise<void>>> }).viewTransition;
+  for(const state of ['ready','finished','updateCallbackDone'] as const)void transition?.[state]?.catch(() => undefined);
 });
 export function isWorkspacePage(target: string | URL): boolean {
   const url = new URL(target, window.location.origin);

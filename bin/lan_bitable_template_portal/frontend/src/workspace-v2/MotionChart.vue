@@ -1,7 +1,7 @@
 <template>
   <section class="v2-motion-chart" :aria-label="title || '业务图表'" :aria-busy="loading">
     <header v-if="title || caption || trend || $slots.actions"><h3 v-if="title">{{ title }}</h3><span>{{ caption }}</span><slot name="actions" /><NRadioGroup v-if="trend" v-model:value="kind" size="small" aria-label="图表类型"><NRadioButton value="bar">柱状图</NRadioButton><NRadioButton value="line">折线图</NRadioButton><NRadioButton value="area">面积图</NRadioButton></NRadioGroup></header>
-    <div class="v2-chart-surface">
+    <div class="v2-chart-surface" :class="{'is-calendar':kind==='calendar','is-long-calendar':kind==='calendar'&&items.length>62}">
       <div ref="host" class="v2-chart-canvas" :class="{muted:unavailable}" role="img" :aria-hidden="unavailable" :aria-label="accessibleLabel" @pointerdown="scrub" @pointermove="move" @pointerup="release" @pointercancel="release" @pointerleave="release" />
       <span v-if="visible && isTrend(kind) && endPoint && !pressed && !unavailable && !engineFailed" class="v2-chart-end" :style="{left:endPoint[0]+'px',top:endPoint[1]+'px'}" aria-hidden="true" />
       <div v-if="!unavailable && !engineFailed && kind==='donut'" class="v2-chart-total" aria-hidden="true"><strong>{{ total.toLocaleString('zh-CN') }}</strong><span>合计 · {{ unit }}</span></div>
@@ -9,9 +9,10 @@
       <NEmpty v-else-if="failed || invalid || engineFailed || !items.length" class="v2-chart-overlay" :description="failed || invalid ? '数据暂不可用' : engineFailed ? '图表暂不可用，请查看数据明细' : '暂无数据'" size="small" />
       <p v-else-if="isCircular(kind) && total===0" class="v2-chart-overlay v2-chart-zero">当前合计 0 {{ unit }}</p>
     </div>
-    <details v-if="!loading&&!failed&&!invalid&&items.length" class="v2-chart-data" :open="engineFailed || narrow && isCircular(kind)">
-      <summary>数据明细 <span>{{ items.length }} 项</span></summary>
-      <div class="v2-chart-details" aria-label="图表明细"><NButton v-for="(item,index) in items" :key="String(item.key??item.label)+index" data-v2-navigation text @click="$emit('select',item,index)"><i :style="{background:chartPalette[index%chartPalette.length]}" aria-hidden="true" /><span>{{ item.label }}</span><strong>{{ item.value.toLocaleString('zh-CN') }} {{ unit }}</strong><ChevronRight :size="14" /></NButton></div>
+    <div v-if="kind==='calendar'&&!unavailable&&!engineFailed" class="v2-calendar-scale" :aria-label="'每日数量：0 至 '+maximum+' '+unit"><span>0</span><i :style="{background:'linear-gradient(90deg,'+calendarColors(nightMode).join(',')+')'}" aria-hidden="true" /><span>{{ maximum }} {{ unit }}</span></div>
+    <details v-if="!loading&&!failed&&!invalid&&items.length" class="v2-chart-data" :open="dataOpen || engineFailed || narrow && isCircular(kind)" @toggle="dataOpen=($event.target as HTMLDetailsElement).open">
+      <summary>数据明细 <span>{{ items.length }} {{ kind==='calendar'?'天':'项' }}</span></summary>
+      <div v-if="kind!=='calendar'||dataOpen||engineFailed" class="v2-chart-details" aria-label="图表明细"><NButton v-for="(item,index) in items" :key="String(item.key??item.label)+index" data-v2-navigation text @click="$emit('select',item,index)"><i :style="{background:chartPalette[index%chartPalette.length]}" aria-hidden="true" /><span>{{ item.label }}</span><strong>{{ item.value.toLocaleString('zh-CN') }} {{ unit }}</strong><ChevronRight :size="14" /></NButton></div>
     </details>
   </section>
 </template>
@@ -20,22 +21,23 @@ import { computed,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import { NButton,NEmpty,NSkeleton,NRadioGroup,NRadioButton } from 'naive-ui';
 import { ChevronRight } from 'lucide-vue-next';
 import type { EChartsType } from 'echarts/core';
-import { chartOption,chartPalette,isCircular,isTrend,type ChartItem,type ChartView } from './vipboard';
+import { chartOption,chartPalette,calendarColors,isCircular,isTrend,type ChartItem,type ChartView } from './vipboard';
 import { nightMode } from './theme';
 const props=withDefaults(defineProps<{title:string;caption?:string;items:ChartItem[];loading?:boolean;failed?:boolean;trend?:boolean;view?:ChartView;unit?:string}>(),{unit:'条'});
 const emit=defineEmits<{select:[item:ChartItem,index:number]}>();
 const host=ref<HTMLDivElement>(),kind=ref<ChartView>(props.view||'bar'),pressed=ref(false),endPoint=ref<number[]|null>(null);
-const engineFailed=ref(false),visible=ref(false),narrow=ref(false);
+const engineFailed=ref(false),visible=ref(false),narrow=ref(false),dataOpen=ref(false);
 const invalid=computed(()=>props.items.some(item=>!Number.isFinite(item.value)||item.value<0));
 const unavailable=computed(()=>Boolean(props.loading||props.failed||invalid.value||!props.items.length));
 const total=computed(()=>invalid.value?0:props.items.reduce((sum,item)=>sum+item.value,0));
+const maximum=computed(()=>invalid.value?0:Math.max(0,...props.items.map(item=>item.value)));
 const accessibleLabel=computed(()=>props.items.map(item=>`${item.label} ${item.value} ${props.unit}`).join('，'));
 let chart:EChartsType|undefined,resize:ResizeObserver|undefined,observer:IntersectionObserver|undefined,disposed=false,initializing=false,frame=0,inViewport=false;
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
 function update(){
   endPoint.value=null;
   if(!chart||unavailable.value)return;
-  try{chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value),{replaceMerge:['series','xAxis','yAxis','dataZoom'],lazyUpdate:true});engineFailed.value=false;}
+  try{chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value),{replaceMerge:['series','xAxis','yAxis','dataZoom','calendar','visualMap'],lazyUpdate:true});engineFailed.value=false;}
   catch{engineFailed.value=true;}
 }
 function updateEnd(){
@@ -71,6 +73,7 @@ onMounted(()=>{observer=new IntersectionObserver(entries=>{inViewport=entries.so
 onBeforeUnmount(()=>{disposed=true;observer?.disconnect();resize?.disconnect();cancelAnimationFrame(frame);reduced.removeEventListener('change',update);document.removeEventListener('visibilitychange',visibility);chart?.dispose();});
 </script>
 <style scoped>
+.v2-chart-surface.is-calendar{height:216px;overflow-x:auto;overflow-y:hidden}.is-calendar .v2-chart-canvas{height:200px;touch-action:auto}.is-long-calendar .v2-chart-canvas{min-width:760px}.v2-calendar-scale{display:flex;align-items:center;justify-content:center;gap:8px;font-size:11px;color:var(--v2-muted,#63746b)}.v2-calendar-scale i{display:block;width:100px;height:8px;border-radius:3px}
 .v2-motion-chart{min-width:0;color:#294237}.v2-motion-chart header{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px}.v2-motion-chart h3{font-size:15px;font-weight:600;margin:0}.v2-motion-chart header>span{font-size:12px;color:#63746b;margin-right:auto}
 .v2-chart-surface{position:relative;height:230px;min-width:0}.v2-chart-canvas{height:100%;width:100%;touch-action:pan-y;transition:opacity 180ms}.v2-chart-canvas.muted{opacity:0;pointer-events:none}.v2-chart-overlay{position:absolute;inset:12px;display:flex;align-items:center;justify-content:center}.v2-chart-overlay>.n-skeleton{width:100%}.v2-chart-zero{background:#ffffffd9;color:#63746b;font-size:13px;pointer-events:none}
 .v2-chart-total{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:grid;text-align:center;pointer-events:none;max-width:35%}.v2-chart-total strong{font-size:24px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.v2-chart-total span{font-size:11px;color:#63746b;margin-top:2px}

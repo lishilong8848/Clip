@@ -31,8 +31,36 @@ export function adaptCabinetBatchPage(source) {
 
 export function adaptCabinetPage(source) {
   let code=source.replaceAll('\r\n','\n');
+  code=code.replace('<script setup lang="ts">','<script setup lang="ts">\nimport {cabinetPalette as v2CabinetPalette} from "../workspace-v2/cabinetPalette";\nimport {nightMode as v2CabinetNight} from "../workspace-v2/theme";');
+  // V2-only compact status summary: original counts/state actions and rack palette stay untouched.
+  const rateSummary =
+    '\n// Compact cabinet status summary: powered = formal + test (or the backend powered field).\n' +
+    'const v2CabinetPowered = computed(() => { const c = overview.value.counts || {}; return Number(c.powered ?? Number(c.formal || 0) + Number(c.test || 0)); });\n' +
+    'const v2CabinetTotal = computed(() => Number((overview.value.counts || {}).total || 0));\n' +
+    'function v2CabinetRateText(counts: Dict): string { const c = counts || {}; const powered = Number(c.powered ?? Number(c.formal || 0) + Number(c.test || 0)); const total = Number(c.total || 0); return total > 0 ? (powered / total * 100).toFixed(1) + \'%\' : \'—\'; }\n' +
+    'const v2CabinetRate = computed(() => v2CabinetRateText(overview.value.counts));\n';
+  code=code.replace('import {nightMode as v2CabinetNight} from "../workspace-v2/theme";', 'import {nightMode as v2CabinetNight} from "../workspace-v2/theme";' + rateSummary);
+  const palette="background: cell.color || s.fill || 'transparent', color: cell.rack && cell.state === 'formal' ? '#fff' : s.font_color || '#1e293b',";
+  if(!code.includes(palette))throw new Error('Cabinet map palette contract changed');
+  code=code.replace(palette,'...v2CabinetPalette(cell,v2CabinetNight.value),');
   const selected=':class="{ found: cell.rack && mapSearch.toUpperCase() === cell.rack }"';
   if(code.split(selected).length!==2)throw new Error('Cabinet map selection contract changed');
   code=code.replace(selected,':class="{ found: cell.rack && mapSearch.toUpperCase() === cell.rack, \'v2-rack-selected\': cell.rack && historyOpen && historyRoom === currentRoom && historyRack === cell.rack }" :aria-pressed="cell.rack ? historyOpen && historyRoom === currentRoom && historyRack === cell.rack : undefined"');
+  const metricsBefore =
+    '      <section class="metrics">\n' +
+    '        <div v-for="item in metricItems" :key="item.key" :class="item.key"><button class="metric-link" :aria-label="\'查看\' + item.label + \'机柜\'" @click="showStateRacks(item.key)"><span>{{ item.label }}</span><strong>{{ overview.counts[item.key] }}</strong></button></div>\n' +
+    '      </section>';
+  if(code.split(metricsBefore).length!==2)throw new Error('Cabinet status summary contract changed');
+  code=code.replace(metricsBefore,
+    '      <section class="metrics v2-cabinet-status" aria-label="机柜状态汇总">\n' +
+    '        <div class="v2-cabinet-rate" role="group" :aria-label="\'上电率 \' + v2CabinetRate + \'（已上电 \' + v2CabinetPowered + \' / 总数 \' + v2CabinetTotal + \'）\'" :title="\'已上电 \' + v2CabinetPowered + \' / 总数 \' + v2CabinetTotal + \'（\' + v2CabinetRate + \'）\'">\n' +
+    '          <span class="v2-cabinet-rate-label">上电率</span>\n' +
+    '          <strong class="v2-cabinet-rate-value" aria-hidden="true">{{ v2CabinetRate }}</strong>\n' +
+    '        </div>\n' +
+    '        <div class="v2-cabinet-counts" role="group" aria-label="各状态机柜数量">\n' +
+    '          <button v-for="item in metricItems" :key="item.key" class="v2-cabinet-count" :class="\'v2-count-\' + item.key" :aria-label="\'查看\' + item.label + \'机柜\'" @click="showStateRacks(item.key)"><span class="v2-cabinet-count-label">{{ item.label }}</span><strong class="v2-cabinet-count-value">{{ overview.counts[item.key] }}</strong></button>\n' +
+    '        </div>\n' +
+    '      </section>');
+  code += '\n<style scoped src="../workspace-v2/cabinetStatus.css"></style>\n';
   return code;
 }

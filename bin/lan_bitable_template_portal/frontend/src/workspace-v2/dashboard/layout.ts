@@ -7,7 +7,7 @@ import { chartViews,type ChartView } from '../vipboard';
 export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift' | 'notice_actions' | 'repair_actions' | 'module';
 export type Widget = {
   id:string; kind:WidgetKind; title:string; module:string; scope:string;
-  display:ChartView|'number'; period:'week'|'month'; metric:'ongoing'|'pending';
+  display:ChartView|'number'; period:'week'|'month'|'year'; metric:'ongoing'|'pending';
   presentation:'default'|'timeline'|'progress'|'metrics'|'chart';
   links:string[]; x:number; y:number; w:number; h:number;
 };
@@ -35,11 +35,12 @@ export const chartTemplates = [
   {id:'notice-pie',kind:'notices',title:'通告分类饼图',description:'查看各类型进行中或待发计划构成',display:'pie',presentation:'default',preview:'pie'},
   {id:'event-area',kind:'events',title:'事件面积趋势',description:'本周或本月逐日变化，点击查看当天事件',display:'area',presentation:'default',preview:'area'},
   {id:'event-line',kind:'events',title:'事件折线趋势',description:'沿时间轴查看事件数量变化',display:'line',presentation:'default',preview:'line'},
+  {id:'event-calendar',kind:'events',title:'事件日历热力图',description:'按日期查看真实事件数量，点击日期查看事件明细',display:'calendar',presentation:'default',preview:'calendar'},
   {id:'water-bars',kind:'water',title:'楼栋水耗对比',description:'以吨为单位比较授权楼栋本月水耗',display:'horizontal',presentation:'chart',preview:'horizontal'},
   {id:'learning-donut',kind:'learning',title:'今日答题构成',description:'本人已答与未答，仅统计已领取题单',display:'donut',presentation:'chart',preview:'donut'},
 ] as const;
 export function displayOptions(kind:WidgetKind){
-  const allowed=kind==='events'?['bar','line','area']:['bar','horizontal','donut','pie'];
+  const allowed=kind==='events'?['bar','line','area','calendar']:['bar','horizontal','donut','pie'];
   return [...chartViews.filter(view=>allowed.includes(view.value)),{value:'number',label:'指标数值'}];
 }
 export function presentationOptions(kind:WidgetKind){
@@ -57,7 +58,7 @@ export function allowedKind(kind:WidgetKind,user:Dict){
 }
 export function widget(kind:WidgetKind,user:Dict,overrides:Partial<Widget>={}):Widget{
   const module=kind==='module'?navigationModules(user.modules||[])[0]?.id||'':kind==='repair_actions'?'repair_management':kind==='notice_actions'?NOTICE_IDS.find(id=>(user.modules||[]).includes(id))||'':taskOptions(user)[0]?.value||'';
-  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:kind==='module'?12:6,h:kind==='module'?12:5,...overrides};
+  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:kind==='events'&&overrides.display==='calendar'?'year':'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:kind==='module'?12:6,h:kind==='module'?12:5,...overrides};
 }
 export function mandatoryCheck(user:Dict){return user.role!=='guest'&&['operator','shift_leader','duty'].includes(user.category);}
 function withChecks(widgets:Widget[],user:Dict,initial=false){
@@ -94,18 +95,15 @@ export function sanitize(value:unknown,user:Dict,scopes:string[]):Layout{
     if(item.kind==='module'&&(!links.includes(item.module)||widgets.some(w=>w.kind==='module'&&w.module===item.module)))continue;
     seen.add(item.id);const w=integer(item.w,6,item.kind==='module'?4:3,12);
     const presentation=presentationOptions(item.kind).some(p=>p.value===item.presentation)?item.presentation:'default';
-    widgets.push({id:item.id,kind:item.kind,title:typeof item.title==='string'?item.title.trim().slice(0,40):catalog.find(c=>c.kind===item.kind)!.title,module:(item.kind==='module'?links:granted).includes(item.module)?item.module:'',scope:scopes.includes(item.scope)?item.scope:'current',display:displayOptions(item.kind).some(option=>option.value===item.display)?item.display:'bar',period:item.period==='month'?'month':'week',metric:item.metric==='pending'?'pending':'ongoing',presentation,links:Array.isArray(item.links)?[...new Set(item.links.filter(id=>links.includes(id)))]:[],x:integer(item.x,0,0,12-w),y:integer(item.y,0,0,1000),w,h:integer(item.h,item.kind==='module'?12:5,item.kind==='module'?6:3,item.kind==='module'?30:12)});
+    widgets.push({id:item.id,kind:item.kind,title:typeof item.title==='string'?item.title.trim().slice(0,40):catalog.find(c=>c.kind===item.kind)!.title,module:(item.kind==='module'?links:granted).includes(item.module)?item.module:'',scope:scopes.includes(item.scope)?item.scope:'current',display:displayOptions(item.kind).some(option=>option.value===item.display)?item.display:'bar',period:item.period==='year'&&item.kind==='events'&&item.display==='calendar'?'year':item.period==='month'||item.period==='year'?'month':'week',metric:item.metric==='pending'?'pending':'ongoing',presentation,links:Array.isArray(item.links)?[...new Set(item.links.filter(id=>links.includes(id)))]:[],x:integer(item.x,0,0,12-w),y:integer(item.y,0,0,1000),w,h:integer(item.h,item.kind==='module'?12:5,item.kind==='module'?6:3,item.kind==='module'?30:12)});
   }
   return withChecks(widgets,user);
 }
+export function reorderWidgets<T extends Widget>(items:readonly T[],id:string,direction:number):T[]{
+  const ordered=[...items].sort((a,b)=>a.y-b.y||a.x-b.x),index=ordered.findIndex(item=>item.id===id),other=index+direction;
+  if(index<0||other<0||other>=ordered.length)return [...items];
+  [ordered[index],ordered[other]]=[ordered[other]!,ordered[index]!];
+  let x=0,y=0,height=0;
+  return ordered.map(item=>{if(x+item.w>12){x=0;y+=height;height=0;}const next={...item,x,y};x+=item.w;height=Math.max(height,item.h);return next;});
+}
 export function layoutKey(user:Dict){return 'clipflow:workspace-layout:v1:'+String(user.union_id||user.open_id||'');}
-export function readLayout(user:Dict,scopes:string[]):{layout:Layout;raw:string|null;error:string}{
-  let raw:string|null=null;
-  try{raw=localStorage.getItem(layoutKey(user));return {layout:raw?sanitize(JSON.parse(raw),user,scopes):defaults(user),raw,error:''};}
-  catch{return {layout:defaults(user),raw,error:'未能读取已保存布局，当前使用角色默认布局。'};}
-}
-export function saveLayout(user:Dict,scopes:string[],value:Layout,expected:string|null){
-  if(localStorage.getItem(layoutKey(user))!==expected)throw new Error('另一个页面已修改布局。请先重新读取，避免覆盖那边的修改。');
-  const raw=JSON.stringify(sanitize(value,user,scopes));
-  localStorage.setItem(layoutKey(user),raw);return raw;
-}

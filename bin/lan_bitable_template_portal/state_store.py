@@ -8368,6 +8368,33 @@ class LanPortalStateStore:
         payload = self._loads(str(row["payload_json"] or ""), {})
         return payload if isinstance(payload, dict) else None
 
+    def get_workspace_layout(self, owner: str, device: str, page: str) -> dict[str, Any]:
+        key = self._json([owner, device, page])
+        return self.get_document("workspace_layout", key) or {"revision": 0, "value": None}
+
+    def save_workspace_layout(
+        self, owner: str, device: str, page: str, value: dict[str, Any], expected: int
+    ) -> dict[str, Any]:
+        from .portal_service import PortalConflictError
+
+        key = self._json([owner, device, page])
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._get_legacy_json_document_locked(conn, "workspace_layout", key) or {"revision": 0}
+            # A lost save response can be retried without overwriting another device.
+            if current.get("value") == value:
+                return current
+            if current["revision"] != expected:
+                raise PortalConflictError("另一台设备或页面已修改布局，请重新读取后再调整。")
+            result = {"revision": expected + 1, "value": value, "updated_at": time.time()}
+            conn.execute(
+                "INSERT OR REPLACE INTO json_documents(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)",
+                ("workspace_layout", key, self._json(result), result["updated_at"]),
+            )
+            conn.commit()
+            return result
+
     def put_document(
         self, namespace: str, key: str, payload: dict[str, Any] | None
     ) -> None:

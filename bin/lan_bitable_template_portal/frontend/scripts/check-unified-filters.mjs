@@ -21,9 +21,9 @@ for(const dir of ['src/components','src/workspace-v2','src/workspace-v2/dashboar
   assert.deepEqual([...errors,...template.errors],[],file+' compiles');marked++;
 }
 assert(marked>=40);
-assert(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR,'Use an isolated V2 build.');
+
 const output=path.resolve('../../../output/playwright/unified-filters');await mkdir(output,{recursive:true});
-const server=await preview({configFile:'vite.workspace-v2.config.ts',logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
+const server=await preview({...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:'vite.workspace-v2.config.ts'}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`,entry=origin+'/assets/workspace-v2/index.html';
 const browser=await chromium.launch({headless:true}),errors=[],writes=[];
 let page;
@@ -50,7 +50,7 @@ try{
   page=await ctx.newPage();page.on('pageerror',error=>errors.push(error.message));
   const cases=[
     ['notice','?__page=/workbench-lite&scope=A&work_type=maintenance','.v2-notice-filters .n-input'],
-    ['sop','?view=sops&scope=A','.v2-sop-filters .n-input'],
+    ['sop','?view=sops&scope=A','.v2-sop-layout .n-input'],
     ['repair','?__page=/repair-management&scope=A','.v2-repair-filters .n-input'],
     ['event','?__page=/&mode=events&detail=1&scope=A&period=custom&event_start=2026-10-01&event_end=2026-10-15','.event-list-tools input[type=search]'],
     ['knowledge','?__page=/knowledge-base','.kb-search'],
@@ -61,14 +61,14 @@ try{
   for(const [name,query,searchSelector] of cases){
     await page.goto(entry+query);
     if(name==='event')await page.getByRole('button',{name:'展开事件明细',exact:true}).click();
-    const search=page.locator('#workspace-page-filters '+searchSelector).first();await search.waitFor();
+    const search=page.locator('.v2-main '+searchSelector).first();await search.waitFor();
     for(const width of [1440,390]){
       await page.setViewportSize({width,height:1000});
       const dimensions=await search.evaluate(el=>({height:el.getBoundingClientRect().height,radius:getComputedStyle(el).borderRadius}));
       assert(Math.abs(dimensions.height-(width<700?44:36))<1,name+' search height '+JSON.stringify(dimensions));
       assert.equal(dimensions.radius,'6px',name+' search radius');
       if(['knowledge','links'].includes(name))assert.equal(await search.locator('input').evaluate(el=>getComputedStyle(el).borderTopWidth),'0px',name+' search has one border only');
-      const controls=await page.locator('#workspace-page-filters select,#workspace-page-filters .n-base-selection').evaluateAll(els=>els.filter(el=>el.getBoundingClientRect().height).map(el=>({height:el.getBoundingClientRect().height,radius:getComputedStyle(el).borderRadius})));
+      const controls=await page.locator('[data-v2-filter] .n-base-selection').evaluateAll(els=>els.filter(el=>el.getBoundingClientRect().height).map(el=>({height:el.getBoundingClientRect().height,radius:getComputedStyle(el).borderRadius})));
       for(const control of controls){assert(Math.abs(control.height-(width<700?44:36))<1,name+' select height '+JSON.stringify(control));assert.equal(control.radius,'6px',name+' select radius');}
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,name+' page overflow '+width);
       await page.screenshot({path:path.join(output,`${name}-${width}.png`)});
@@ -76,10 +76,10 @@ try{
     const input=search.locator('input').first();
     if(await input.count())await input.fill('测试查询');else await search.fill('测试查询');
     if(name==='convergence'){
-      await page.locator('#workspace-page-filters .vnet-select-trigger').click();
-      await page.locator('.vnet-select-menu[data-v2-filter-menu]').waitFor();
-      await page.getByRole('option',{name:'屏蔽中',exact:true}).click();
-      assert.match(await page.locator('#workspace-page-filters .vnet-select-trigger').innerText(),/屏蔽中/);
+      await page.getByRole('combobox',{name:'屏蔽状态',exact:true}).click();
+      await page.locator('.v2-single-select-menu').waitFor();
+      await page.locator('.n-base-select-option').getByText('屏蔽中',{exact:true}).click();
+      assert.match(await page.getByRole('combobox',{name:'屏蔽状态',exact:true}).innerText(),/屏蔽中/);
     }
   }
   assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);

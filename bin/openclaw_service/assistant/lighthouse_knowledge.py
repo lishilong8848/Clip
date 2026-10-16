@@ -47,6 +47,7 @@ _EMBED_BATCH = 8
 _MAX_ACTIVE_CHUNKS = 100_000
 _MEMORY_BUDGET = 2 * 1024 * 1024 * 1024
 _MAX_BACKUP_SECONDS = 20.0
+_UNCHANGED_PARENT = object()
 
 _CREDENTIAL = re.compile(r'(?:api[_ -]?key|password|authorization|access[_ -]?token|密钥|口令|密码)\s*[:：=]\s*\S{6,}', re.I)
 _COMPANY = re.compile(r'知识库|公司(?:的)?(?:内部|资料|文件|文档|制度|规定|规范|流程|政策|要求|标准|报销|请假|假期|福利|考勤|出差|差旅|休假|年假|规章|审批|培训)|(?:本公司|我们公司|咱们公司|公司里|公司内|本单位|单位内部)|员工手册|内部(?:制度|规定|资料|流程|文档)', re.I)
@@ -278,6 +279,14 @@ class KnowledgeBase:
                 document_id TEXT PRIMARY KEY,group_id TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS doc_group_members_group ON doc_group_members(group_id);
         ''')
+        # Additive folder-tree migration: nested folders are groups whose parent_id
+        # points at another group.  Existing flat groups keep parent_id NULL and remain
+        # roots, so the API and all existing consumers stay compatible.  Referential
+        # integrity and cycle rejection are enforced in the service layer.
+        group_columns = {row[1] for row in db.execute('PRAGMA table_info(knowledge_groups)')}
+        if 'parent_id' not in group_columns:
+            db.execute('ALTER TABLE knowledge_groups ADD COLUMN parent_id TEXT')
+        db.execute('CREATE INDEX IF NOT EXISTS knowledge_groups_parent ON knowledge_groups(parent_id)')
         db.execute("UPDATE documents SET status='queued' WHERE status='indexing' AND deleted=0")
 
         prior = self._get_config(db)
@@ -870,38 +879,92 @@ class KnowledgeBase:
     # ------------------------------------------------------------------ groups
     def _group_row(self, actor, row):
         return {'id': row['id'], 'name': row['name'], 'owner_name': row['owner_name'],
+                'parent_id': row['parent_id'] if 'parent_id' in row.keys() else None,
                 'created_at': row['created_at'], 'count': row['count'],
                 'can_manage': bool(actor.get('is_admin') or row['owner'] == actor['id'])}
 
+    def _normalize_parent(self, db, parent_id, *, exclude=None):
+        """Validate and normalize an optional folder parent.
+
+        ``''``/``root``/``ungrouped``/``0`` all mean "root folder" (NULL).
+        Returns the normalized parent id or ``None`` for root.  Rejects a
+        missing parent (404) and, when ``exclude`` is set, the parent being the
+        moved folder itself or one of its descendants (cycle, 409).
+        """
+        if parent_id in (None, ''):
+            return None
+        text = str(parent_id).strip()
+        if text in ('', 'root', 'ungrouped', '0'):
+            return None
+        if len(text) > 64:
+            raise AssistantError('上级文件夹编号无效。')
+        if not db.execute('SELECT 1 FROM knowledge_groups WHERE id=?', (text,)).fetchone():
+            raise AssistantError('上级文件夹不存在。', 404)
+        if exclude and text == exclude:
+            raise AssistantError('文件夹不能移动到自身或其子文件夹内，否则会形成循环。', 409)
+        if exclude:
+            descendants = self._descendant_ids(db, exclude)
+            if text in descendants:
+                raise AssistantError('文件夹不能移动到自身或其子文件夹内，否则会形成循环。', 409)
+        return text
+
+    def _descendant_ids(self, db, group_id):
+        """Iteratively collect every descendant folder id (cycle-safe, no recursion)."""
+        seen = set()
+        frontier = [group_id]
+        while frontier:
+            current = frontier.pop()
+            for row in db.execute('SELECT id FROM knowledge_groups WHERE parent_id=?', (current,)):
+                child = row['id']
+                if child not in seen:
+                    seen.add(child)
+                    frontier.append(child)
+        return seen
+
     def groups(self, actor):
-        """List all organizational groups with their current (non-deleted) file counts."""
+        """List all organizational groups with their current (non-deleted) file counts.
+
+        The flat list is deliberately kept (existing APIs/tests depend on it); the
+        ``parent_id`` field lets callers build a nested folder tree while existing
+        flat groups (parent_id NULL) remain roots.
+        """
         check_actor(actor)
         with self.connect() as db:
             rows = db.execute('''
-                SELECT g.id, g.name, g.owner, g.owner_name, g.created_at,
+                SELECT g.id, g.name, g.owner, g.owner_name, g.parent_id, g.created_at,
                        (SELECT count(*) FROM doc_group_members m
                         JOIN documents d ON d.id=m.document_id
                         WHERE m.group_id=g.id AND d.deleted=0) AS count
                 FROM knowledge_groups g ORDER BY g.created_at, g.id''').fetchall()
         return {'groups': [self._group_row(actor, row) for row in rows], 'total': len(rows)}
 
-    def create_group(self, actor, name):
-        """Create a new organizational group (any signed-in user can create)."""
+    def create_group(self, actor, name, parent_id=None):
+        """Create a new organizational group/folder (any signed-in user can create).
+
+        ``parent_id`` is optional: when omitted the group becomes a root folder;
+        when provided it must reference an existing group (missing parent -> 404).
+        """
         check_actor(actor)
         name = _validate_group_name(name)
         gid = uuid.uuid4().hex
         stamp = time.time()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            normalized = self._normalize_parent(db, parent_id)
             if db.execute('SELECT 1 FROM knowledge_groups WHERE lower(name)=lower(?)', (name,)).fetchone():
                 raise AssistantError('已存在同名分组。', 409)
-            db.execute('INSERT INTO knowledge_groups(id,name,owner,owner_name,created_at) VALUES(?,?,?,?,?)',
-                       (gid, name, actor['id'], safe_text(actor.get('name') or '用户', limit=100), stamp))
-            row = db.execute('SELECT id,name,owner,owner_name,created_at,0 AS count FROM knowledge_groups WHERE id=?', (gid,)).fetchone()
+            db.execute('INSERT INTO knowledge_groups(id,name,owner,owner_name,parent_id,created_at) VALUES(?,?,?,?,?,?)',
+                       (gid, name, actor['id'], safe_text(actor.get('name') or '用户', limit=100), normalized, stamp))
+            row = db.execute('SELECT id,name,owner,owner_name,parent_id,created_at,0 AS count FROM knowledge_groups WHERE id=?', (gid,)).fetchone()
         return self._group_row(actor, row)
 
-    def rename_group(self, actor, group_id, name):
-        """Rename a group (creator or admin only)."""
+    def rename_group(self, actor, group_id, name, parent_id=_UNCHANGED_PARENT):
+        """Rename a group/folder (creator or admin only) or move it in the tree.
+
+        ``parent_id`` (optional) is the new parent folder; passing it moves the
+        folder.  Cycles (moving a folder under itself or a descendant) and missing
+        parents are rejected server-side.
+        """
         check_actor(actor)
         name = _validate_group_name(name)
         group_id = str(group_id or '').strip()
@@ -914,15 +977,25 @@ class KnowledgeBase:
                 raise AssistantError('分组不存在。', 404)
             if not actor.get('is_admin') and row['owner'] != actor['id']:
                 raise AssistantError('仅分组创建者或管理员可管理该分组。', 403)
+            # Older callers rename only; omission must not move a nested folder.
+            normalized = self._normalize_parent(db, row['parent_id'] if parent_id is _UNCHANGED_PARENT else parent_id, exclude=group_id)
             if db.execute('SELECT 1 FROM knowledge_groups WHERE id<>? AND lower(name)=lower(?)', (group_id, name)).fetchone():
                 raise AssistantError('已存在同名分组。', 409)
-            db.execute('UPDATE knowledge_groups SET name=? WHERE id=?', (name, group_id))
+            if normalized == row['parent_id']:
+                db.execute('UPDATE knowledge_groups SET name=? WHERE id=?', (name, group_id))
+            else:
+                db.execute('UPDATE knowledge_groups SET name=?,parent_id=? WHERE id=?', (name, normalized, group_id))
             count = db.execute('SELECT count(*) FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE m.group_id=? AND d.deleted=0', (group_id,)).fetchone()[0]
-            row = db.execute('SELECT id,name,owner,owner_name,created_at FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
+            row = db.execute('SELECT id,name,owner,owner_name,parent_id,created_at FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
         return self._group_row(actor, dict(row, count=count))
 
     def delete_group(self, actor, group_id):
-        """Delete a group; member files return to ungrouped (files/index untouched)."""
+        """Delete a group/folder.
+
+        Member files return to ungrouped (files/index untouched).  Child folders are
+        reparented to the removed folder's own parent, so deleting a folder never
+        silently deletes its children or the files inside them.
+        """
         check_actor(actor)
         group_id = str(group_id or '').strip()
         if not group_id or len(group_id) > 64:
@@ -934,6 +1007,10 @@ class KnowledgeBase:
                 raise AssistantError('分组不存在。', 404)
             if not actor.get('is_admin') and row['owner'] != actor['id']:
                 raise AssistantError('仅分组创建者或管理员可管理该分组。', 403)
+            parent = row['parent_id']
+            # Reparent direct child folders to this folder's own parent.
+            db.execute('UPDATE knowledge_groups SET parent_id=? WHERE parent_id=?', (parent, group_id))
+            # Files in this folder return to ungrouped; files/index untouched.
             db.execute('DELETE FROM doc_group_members WHERE group_id=?', (group_id,))
             db.execute('DELETE FROM knowledge_groups WHERE id=?', (group_id,))
         return {'deleted': True}

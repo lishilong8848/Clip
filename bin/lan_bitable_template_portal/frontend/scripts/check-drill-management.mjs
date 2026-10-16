@@ -80,7 +80,8 @@ const directory = Array.from({ length: 602 }, (_, index) => ({
 }));
 const people = ref(directory);
 const peopleSearch = ref("");
-const peopleExpanded = ref(false);
+assert(page.includes('const peopleExpanded = ref(true);'), '默认开放全部签名人员');
+const peopleExpanded = ref(true);
 const context = {
   computed, people, peopleSearch, peopleExpanded, activeScope: ref("E"), commanderId: ref(""),
   personBelongsToScope: (person, scope) => person.building === scope,
@@ -94,18 +95,59 @@ const context = {
 const selectors = page.slice(page.indexOf("const currentBuildingPeople ="), page.indexOf("const missingSignaturePeople ="));
 const evaluate = new Function(...Object.keys(context), `${ts.transpile(selectors)}\nreturn { filteredPeople, commanderPeople };`);
 const { filteredPeople, commanderPeople } = evaluate(...Object.values(context));
-assert.equal(filteredPeople.value.length, 2, "默认只展示本楼人员");
+assert.equal(filteredPeople.value.length, 602, "默认展示全部人员，本楼人员优先");
+assert.equal(filteredPeople.value[0].building, 'E');
 assert.equal(commanderPeople.value.length, 602, "指挥人下拉搜索必须覆盖全部人员");
 peopleSearch.value = "job-601";
 assert.equal(filteredPeople.value[0]?.record_id, "person-601", "可搜索跨楼栋且位于第500条之后的人员");
 assert.equal(commanderPeople.value.length, 602, "参演人员搜索不能缩小指挥人候选");
 peopleSearch.value = "";
+peopleExpanded.value = false;
+assert.equal(filteredPeople.value.length, 2, "仍可手动仅看本楼人员");
 peopleExpanded.value = true;
 assert.equal(filteredPeople.value.length, 602, "展开后不得截断其他人员");
 people.value = [...directory, { record_id: "external:temporary-1", name: "临时参演人", building: "A", employee_no: "temporary-job" }];
 peopleSearch.value = "临时参演人";
 assert.deepEqual(filteredPeople.value.map(person => person.record_id), ["external:temporary-1"], "跨楼栋临时签名人员可搜索");
 assert(commanderPeople.value.some(person => person.record_id === "external:temporary-1"), "临时签名人员也可选为指挥人");
+
+const signingExecution = ref({participants:[directory[0]],step_signers:{14:['person-0','']}});
+const signerNotices=[];
+let dirtyCount=0;
+const signingContext={
+  ...context,commanderPeople,execution:signingExecution,
+  participantIds:computed(()=>signingExecution.value.participants.map(p=>p.record_id)),
+  selectedParticipants:computed(()=>signingExecution.value.participants),
+  blankStepSignerOption:'留空（事后签名）',arrayFrom:value=>Array.isArray(value)?value:[],
+  personFromOptionLabel:label=>people.value.find(person=>person.record_id===label),
+  compactPerson:person=>({record_id:person.record_id,name:person.name}),
+  markDirty:()=>dirtyCount++,setNotice:text=>signerNotices.push(text),
+  isEccStep:()=>false,
+};
+const signerFunctions=page.slice(page.indexOf('const stepSignerOptions ='),page.indexOf('function isEccStep('));
+const signing=new Function(...Object.keys(signingContext),`${ts.transpile(signerFunctions)};return {stepSignerOptionLabels,updateStepSigner};`)(...Object.values(signingContext));
+assert(signing.stepSignerOptionLabels(14,1).includes('person-601'),'步骤签名可直接选择尚未参演的跨楼人员');
+assert(signing.stepSignerOptionLabels(14,1).includes('external:temporary-1'),'步骤签名覆盖外部签名人员');
+assert(!signing.stepSignerOptionLabels(14,1).includes('person-0'),'同一步的其他签名位不可重复选人');
+signing.updateStepSigner({row:14},1,'external:temporary-1');
+assert.equal(signingExecution.value.step_signers[14][1],'external:temporary-1');
+assert.equal(signingExecution.value.participants[1].record_id,'external:temporary-1','自动补入参演名单供原后端生成签名');
+signing.updateStepSigner({row:14},1,'external:temporary-1');
+assert.equal(signingExecution.value.participants.length,2,'重复选择不重复添加参演人');
+signing.updateStepSigner({row:14},1,'person-0');
+assert.match(signerNotices.pop(),/不能重复/);
+assert.equal(signingExecution.value.step_signers[14][1],'external:temporary-1');
+signingExecution.value.participants=[...directory.slice(0,9),people.value.at(-1)];
+const before=JSON.stringify(signingExecution.value),beforeDirty=dirtyCount;
+signing.updateStepSigner({row:14},1,'person-601');
+assert.match(signerNotices.pop(),/已满 10 人/);
+assert.equal(JSON.stringify(signingExecution.value),before,'名额已满时不得半更新签名或截掉原参演人员');
+assert.equal(dirtyCount,beforeDirty);
+signing.updateStepSigner({row:14},1,'person-8');
+assert.equal(signingExecution.value.step_signers[14][1],'person-8','名额已满仍可选已有参演人');
+signing.updateStepSigner({row:14},1,'留空（事后签名）');
+assert.equal(signingExecution.value.step_signers[14][1],'');
+assert.equal(signingExecution.value.participants.length,10,'清空步骤签名不擅自删除参演名单');
 
 const execution = ref({drill_date:'2026-09-29',first_start_time:'09:00',evaluator:{},signature_time:'',evaluation_time:''});
 const validationContext={execution,commanderId:ref('p1'),hasReviewMapping:ref(true),evaluatorId:ref(''),participantIds:ref(['p1']),executionSteps:ref([]),missingSignaturePeople:ref([])};

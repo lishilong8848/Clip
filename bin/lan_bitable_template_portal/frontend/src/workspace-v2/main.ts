@@ -14,6 +14,7 @@ import './feedback.css';
 import './feedbackToasts.css';
 import './pageFilters.css';
 import './pageLayout.css';
+import './compactWorkspaces.css';
 import './header.css';
 import './account.css';
 import './scrollbars.css';

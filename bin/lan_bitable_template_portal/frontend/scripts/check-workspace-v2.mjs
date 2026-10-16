@@ -6,6 +6,7 @@ import { chromium } from 'playwright';
 import { preview } from 'vite';
 import { adaptBrowserReferences } from './workspace-build-adapter.mjs';
 import { checkCustomization } from './check-workspace-custom-flow.mjs';
+import {layoutApiFixture} from './layout-api-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../../output/playwright/workspace-v2');
@@ -29,6 +30,7 @@ const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const entry = '/assets/workspace-v2/index.html';
 const browser = await chromium.launch({ headless: true });
 const errors = [], requests = [], writes = [];
+const layouts=layoutApiFixture();
 let user = { open_id:'ou_v2_fixture', name:'验收管理员', role:'admin', level:'L1', category:'manager', modules:['event','maintenance','change','repair','polling','adjust','power','repair_management','learning','signatures','accounts','water','cabinet','daily','drills','critical_guard','plan_convergence','links','knowledge','engineer_mop','life_guide','handover'] };
 let scopes = [{value:'ALL',label:'全部授权楼栋'}, ...['A','B','C','D','E','H','110'].map(value=>({value,label:value==='110'?'110站':value+'楼'}))];
 let loggedIn = true, failOverview = false, failTasks = false;
@@ -49,6 +51,7 @@ async function context() {
     if(url.origin!==origin && !['data:','blob:'].includes(url.protocol))return route.abort();
     if(url.pathname==='/workbench-lite'||url.pathname.startsWith('/polling-work-order'))throw new Error('V2 must not load a legacy document');
     if(!url.pathname.startsWith('/api/'))return route.continue();
+    if(await layouts.handle(route,user.open_id))return;
     requests.push({path:url.pathname,params:Object.fromEntries(url.searchParams),method:req.method()});
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/auth/status')return ok({logged_in:loggedIn,user:loggedIn?user:{},scope_options:loggedIn?scopes:[],login_url:'/api/auth/login?next='+encodeURIComponent(url.searchParams.get('next')||'/')});
@@ -123,10 +126,10 @@ try {
   await page.locator('link[data-workspace-preload][rel="modulepreload"]').waitFor({state:'attached'});
   assert.equal(await page.locator('link[data-workspace-preload][rel="stylesheet"]').count(),0,'preparing V2 must not apply V2 styles to the old page');
   await page.getByRole('button',{name:'切换新版',exact:true}).click();
-  await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.locator('.v2-dashboard').waitFor();
   const originalUser=user;user={...user,open_id:'ou_second_person_fixture',name:'另一名验收人员'};
   await page.goto(origin+'/');await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();assert.equal(new URL(page.url()).pathname,'/','version preference must not cross accounts');user=originalUser;
-  await page.goto(origin+'/');await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.goto(origin+'/');await page.locator('.v2-dashboard').waitFor();
   await page.getByText('A楼BA系统资料维护',{exact:true}).first().waitFor();
   assert.equal(new URL(page.url()).pathname,entry);
   assert.equal(await page.evaluate(()=>localStorage.getItem('clipflow:frontend-version:ou_v2_fixture')),'workspace');
@@ -141,7 +144,7 @@ try {
   await handleRow.locator('.v2-task-action').click();
   await page.locator('.v2-notice-editor').waitFor();
   assert.match(page.url(),/active_item_id=active_fixture/,'workbench action opens the existing notice form for the exact record');
-  await page.goto(origin+entry);await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.goto(origin+entry);await page.locator('.v2-dashboard').waitFor();
   await page.getByText('A楼冷水机组月度维护',{exact:true}).waitFor();
   const refreshStart=requests.length;await page.getByRole('button',{name:'刷新工作台',exact:true}).click();
   await page.getByText('A楼冷水机组月度维护',{exact:true}).waitFor();
@@ -166,13 +169,13 @@ try {
   }
   assert.equal(await page.locator('.v2-task-action').getByText('办理',{exact:true}).count(),0,'mobile home is attention-first, not a duplicate handling queue');
   await page.locator('.v2-widget[aria-label="待处理事项"]').getByRole('button',{name:'查看待办',exact:true}).click();
-  await page.getByRole('heading',{name:'待处理事项',exact:true}).waitFor();
+  await page.locator('.v2-home:not(.v2-task-embedded)').waitFor();
   await page.locator('.v2-task-row').filter({hasText:'A楼冷水机组月度维护'}).waitFor();
   assert.equal(await page.locator('.v2-mobile-brief').count(),0,'mobile tasks does not duplicate overview data');
   assert(await page.locator('.v2-task-action').getByText('办理',{exact:true}).count()>0);
   await page.screenshot({path:path.join(output,'tasks-mobile.png'),fullPage:true});
-  await page.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
-  try{await checkCustomization(page,output);}catch(error){
+  await page.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await page.locator('.v2-dashboard').waitFor();
+  try{await checkCustomization(page,output,layouts);}catch(error){
     await page.screenshot({path:path.join(output,'customization-failure.png'),fullPage:true});
     console.error('Customization geometry:',await page.locator('.grid-stack-item').evaluateAll(items=>items.map(el=>({id:el.dataset.widgetId,attributes:[...el.attributes].filter(a=>a.name.startsWith('gs-')).map(a=>[a.name,a.value]),node:el.gridstackNode&&{x:el.gridstackNode.x,y:el.gridstackNode.y,w:el.gridstackNode.w,h:el.gridstackNode.h,minH:el.gridstackNode.minH},box:{top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom}}))));
     throw error;
@@ -187,7 +190,7 @@ try {
   await page.locator('.n-message').first().waitFor({state:'hidden'});
   await page.screenshot({path:path.join(output,'profile-desktop.png'),fullPage:true});
   await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(output,'profile-mobile.png'),fullPage:true});
-  await page.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await page.locator('.v2-dashboard').waitFor();
   assert.equal(await page.locator('.v2-widget-scope:visible').count(),0,'mobile hides repeated scope labels');
   await page.setViewportSize({width:430,height:844});
   await page.locator('.v2-mobile-nav').getByRole('button',{name:'功能',exact:true}).click();
@@ -197,16 +200,16 @@ try {
   assert.equal(await page.locator('.v2-functions').getByRole('button',{name:'灯塔助手',exact:true}).count(),0);
   for(const width of [360,390,430,1440]){await page.setViewportSize({width,height:width<700?844:1000});await page.screenshot({path:path.join(output,`functions-${width}.png`),fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,`functions overflow at ${width}`);}
   await page.locator('.v2-functions').getByRole('button',{name:'风险与重保',exact:true}).focus();await page.keyboard.press('Enter');await page.locator('.guard-page').waitFor();assert.equal(await page.locator('.guard-page .landing-view').count(),0);
-  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.locator('.v2-dashboard').waitFor();
   await page.setViewportSize({width:1440,height:1000});
   await page.getByRole('button',{name:'切换旧版',exact:true}).click();
   await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();
   assert.equal(new URL(page.url()).pathname,'/');
   assert.equal(await page.locator('.v2-shell').count(),0);
   await page.getByRole('button',{name:'切换新版',exact:true}).click();
-  await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.locator('.v2-dashboard').waitFor();
   await page.getByRole('menuitem',{name:'事件管理',exact:true}).click();await page.locator('.v2-event-charts').waitFor();
-  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.locator('.v2-dashboard').waitFor();
   await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=maintenance');
   await page.locator('.v2-notice-open').first().click();
   await page.getByRole('textbox',{name:'通告内容',exact:true}).fill('隔离验收，不发送真实通告');
@@ -242,21 +245,21 @@ try {
   assert.deepEqual(writes.at(-1),previous,'retry keeps both original operation ID and fields');
   await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'返回列表',exact:true}).click();
   await page.getByRole('menuitem',{name:'个人工作台'}).click();
-  await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
-  assert.match(await page.locator('.v2-scope-select').innerText(),/A楼/,'returning home preserves chosen building');
+  await page.locator('.v2-dashboard').waitFor();
+  assert.match(await page.locator('.v2-dashboard-heading .v2-local-scope').innerText(),/全部楼栋/,'notice A-building navigation must not replace the workbench scope');
   await page.getByRole('menuitem',{name:'风险与重保',exact:true}).click();await page.locator('.guard-page').waitFor();assert.match(page.url(),/scope=A/);assert.equal(await page.locator('.guard-page .landing-view').count(),0);
-  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.locator('.v2-dashboard').waitFor();
   await page.evaluate(()=>{const link=document.createElement('a');link.href='/workbench-lite?scope=A&work_type=maintenance';document.body.append(link);link.click();link.remove();});
   await page.locator('.v2-notice-entry').first().waitFor();
   assert.equal(await page.locator('iframe').count(),0,'returning uses the new Vue notice page');
-  await page.getByRole('menuitem',{name:'个人工作台'}).click();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
-  await page.locator('.v2-scope-select').click();await page.locator('.n-base-select-option').getByText('全部楼栋',{exact:true}).click();
+  await page.getByRole('menuitem',{name:'个人工作台'}).click();await page.locator('.v2-dashboard').waitFor();
+  await page.locator('.v2-local-scope').click();await page.locator('.n-base-select-option').getByText('全部楼栋',{exact:true}).click();
   await page.getByRole('menuitem',{name:'水耗管理',exact:true}).click();
-  await page.locator('.water-overview-metrics').getByText('本月耗水量',{exact:true}).waitFor();
+  await page.locator('.water-overview-metrics').getByText('近30天日统计耗水量',{exact:true}).waitFor();
   assert.equal(requests.some(r=>r.path==='/api/capacity/water/bootstrap'&&['ALL','CAMPUS'].includes(r.params.scope)),false,'global water reads authorized building endpoints');
-  await page.evaluate(()=>{const link=document.createElement('a');link.href='/?scope=A';document.body.append(link);link.click();link.remove();});await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
-  await page.getByRole('menuitem',{name:'个人工作台'}).click();assert.match(await page.locator('.v2-scope-select').innerText(),/A楼/);
-  user={...user,open_id:'ou_scope_isolation_fixture',name:'范围隔离验收'};await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));await page.locator('.v2-person').getByText('范围隔离验收',{exact:true}).waitFor();assert.match(await page.locator('.v2-scope-select').innerText(),/全部楼栋/,'scope memory does not cross accounts');
+  await page.evaluate(()=>{const link=document.createElement('a');link.href='/?scope=A';document.body.append(link);link.click();link.remove();});await page.locator('.v2-dashboard').waitFor();
+  await page.getByRole('menuitem',{name:'个人工作台'}).click();assert.match(await page.locator('.v2-local-scope').innerText(),/A楼/);
+  user={...user,open_id:'ou_scope_isolation_fixture',name:'范围隔离验收'};await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));await page.locator('.v2-person').getByText('范围隔离验收',{exact:true}).waitFor();assert.match(await page.locator('.v2-local-scope').innerText(),/全部楼栋/,'scope memory does not cross accounts');
   user=originalUser;await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));await page.locator('.v2-person').getByText(originalUser.name,{exact:true}).waitFor();
   await page.locator('.v2-widget[aria-label="待处理事项"] .v2-task-filter').click();await page.locator('.v2-widget[aria-label="待处理事项"] .v2-task-filter input').fill('机柜');await page.locator('.n-base-select-option').getByText('机柜管理',{exact:true}).click();
   await page.locator('.v2-widget[aria-label="待处理事项"]').getByRole('button',{name:'查看完整列表',exact:true}).click();await page.waitForURL('**__page=%2Fcabinet-power%2Fbatches**');await page.locator('.batch-page').waitFor();assert.match(page.url(),/status=todo/,'cabinet pending list opens pending batches directly');
@@ -270,7 +273,7 @@ try {
     ['/critical-guard', '.guard-page'], ['/drill-management', '.drill-page'],
     ['/learning?view=overview', '.learning-page'], ['/plan-convergence', '.pc-page'],
     ['/knowledge-base', '.kb-page'], ['/link-directory', '.link-directory-page'],
-    ['/signature-management', '.signature-management'], ['/admin/history-memory', '.history-memory'],
+    ['/signature-management', '.signature-management'], ['/admin/history-memory', '.v2-history'],
   ];
   for (const [target,selector] of modulePages) {
     const url=new URL(target,origin), params=new URLSearchParams(url.search);params.set('__page',url.pathname);
@@ -296,7 +299,7 @@ try {
     scopes=['L0','L1'].includes(level)?[{value:'ALL',label:'全部授权楼栋'},...['A','B','C','D','E','H'].map(value=>({value,label:value+'楼'}))]:[{value:'A',label:'A楼'}];
     const roleContext=await context(),rolePage=await roleContext.newPage();
     const roleRequestStart=requests.length;
-    await rolePage.goto(origin+entry);await rolePage.getByRole('heading',{name:title,exact:true}).waitFor();
+    await rolePage.goto(origin+entry);await rolePage.locator('.v2-dashboard').waitFor();
     assert.equal(await rolePage.locator('.v2-metrics,.v2-charts,.v2-business-overviews,.v2-inline-stats').count(),0);
     if(category==='operator')await rolePage.getByText('已答 6 / 15 题',{exact:true}).waitFor();
     for(const width of [1440,390]){await rolePage.setViewportSize({width,height:width<700?844:1000});await rolePage.screenshot({path:path.join(output,`role-${level}-${category}-${width}.png`),fullPage:true});assert.equal(await rolePage.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);}
@@ -307,7 +310,7 @@ try {
       assert.equal(await rolePage.getByRole('button',{name:'返回工作台',exact:true}).count(),0);
       await rolePage.getByRole('navigation',{name:'值班常用业务'}).getByRole('button',{name:'风险管理'}).click();try{await rolePage.locator('.guard-page').waitFor();}catch(error){await rolePage.screenshot({path:path.join(output,'duty-risk-failure.png'),fullPage:true});console.log('DUTY',rolePage.url(),(await rolePage.locator('body').innerText()).slice(0,2200));throw error;}assert.equal(await rolePage.locator('.guard-page .landing-view').count(),0,'building opens directly');assert(requests.some(r=>r.path==='/api/critical-guard/tasks'&&r.params.scope==='A'));
       await rolePage.getByRole('navigation',{name:'值班常用业务'}).getByRole('button',{name:'演练管理'}).click();await rolePage.locator('.drill-page').waitFor();
-      assert.equal(await rolePage.locator('#page-back-slot').count(),0);await rolePage.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await rolePage.getByRole('heading',{name:title,exact:true}).waitFor();
+      assert.equal(await rolePage.locator('#page-back-slot').count(),0);await rolePage.locator('.v2-mobile-nav').getByRole('button',{name:'首页',exact:true}).click();await rolePage.locator('.v2-dashboard').waitFor();
     }
     if(category==='duty'&&level==='L1')assert.equal(await rolePage.getByRole('navigation',{name:'值班常用业务'}).count(),0);
     if(category==='supervisor'){await rolePage.getByRole('navigation',{name:'常用操作'}).getByRole('button',{name:'计划收敛审查'}).click();await rolePage.locator('.pc-page').waitFor();}

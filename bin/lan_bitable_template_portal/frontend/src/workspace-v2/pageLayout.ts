@@ -6,7 +6,7 @@ export type PageBlock = {id:string;title:string;w?:number;h?:number;minW?:number
 export type PageWidget = Widget & {builtin?:boolean;minW?:number;minH?:number};
 export type PageLayout = {version:1;items:PageWidget[]};
 export const PAGE_WIDGET_LIMIT=16;
-export const pageContext:InjectionKey<{user:ComputedRef<Dict>;scopes:ComputedRef<string[]>;scope:ComputedRef<string>;module:ComputedRef<string>}> = Symbol('page-layout');
+export const pageContext:InjectionKey<{user:ComputedRef<Dict>;scopes:ComputedRef<string[]>;scope:ComputedRef<string>;module:ComputedRef<string>;changeScope?:(scope:string)=>void}> = Symbol('page-layout');
 export type Capacity={width:number;height:number;rows:number;columns:number;compact:boolean};
 export const capacityContext:InjectionKey<ComputedRef<Capacity>>=Symbol('widget-capacity');
 export function useCapacity(){return inject(capacityContext,computed(()=>capacity(800,480)));}
@@ -46,6 +46,6 @@ export function sanitizePageLayout(value:unknown,blocks:PageBlock[],user:Dict,sc
     seen.add(raw.id);
   }
   // New business sections and required forms stay available after an upgrade.
-  for(const block of blocks){const item=defaults.get('block_'+block.id)!;if(!seen.has(item.id)&&(block.required!==false||!(value as Dict).hidden?.includes(block.id)))items.push({...item,y:Math.max(0,...items.map(row=>row.y+row.h))});}
+  for(const block of blocks){const item=defaults.get('block_'+block.id)!;if(!seen.has(item.id)&&block.required!==false)items.push({...item,y:Math.max(0,...items.map(row=>row.y+row.h))});}
   return {version:1,items:items.slice(0,Math.max(PAGE_WIDGET_LIMIT,blocks.length))};
 }

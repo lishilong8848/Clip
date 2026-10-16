@@ -671,7 +671,7 @@ const uploadInput = ref<HTMLInputElement | null>(null);
 const dirty = ref(false);
 const conflict = ref(false);
 const peopleSearch = ref("");
-const peopleExpanded = ref(false);
+const peopleExpanded = ref(true);
 const lastSavedAt = ref("");
 const deleteTarget = ref<Dict | null>(null);
 const discardPrompt = ref<DiscardPrompt | null>(null);
@@ -806,7 +806,7 @@ const commanderPersonOptionLabels = computed(() => commanderPeople.value.map(per
 const filteredPeople = computed(() => {
   const source = peopleSearch.value
     ? searchedPeople.value
-    : peopleExpanded.value ? people.value : currentBuildingPeople.value;
+    : peopleExpanded.value ? commanderPeople.value : currentBuildingPeople.value;
   return source;
 });
 const missingSignaturePeople = computed(() => uniquePeople([
@@ -1221,6 +1221,9 @@ function removeParticipant(person: Dict): void {
   markDirty();
 }
 
+const stepSignerOptions = computed(() => uniquePeople([...selectedParticipants.value, ...commanderPeople.value])
+  .map((person) => ({ id: personId(person), label: personOptionLabelFromPerson(person) })));
+
 function stepSignerIds(row: unknown): string[] {
   if (!execution.value) return [];
   return arrayFrom(execution.value.step_signers?.[String(row)]).map((item) => String(item || ""));
@@ -1230,9 +1233,9 @@ function stepSignerOptionLabels(row: unknown, slot: number): string[] {
   const ids = stepSignerIds(row);
   const current = String(ids[slot] || "");
   const occupied = new Set(ids.filter((id, index) => index !== slot && id));
-  return [blankStepSignerOption, ...selectedParticipants.value
-    .filter((person) => personId(person) === current || !occupied.has(personId(person)))
-    .map(personOptionLabelFromPerson)];
+  return [blankStepSignerOption, ...stepSignerOptions.value
+    .filter((option) => option.id === current || !occupied.has(option.id))
+    .map((option) => option.label)];
 }
 
 function updateStepSigner(step: Dict, slot: number, label: string): void {
@@ -1255,6 +1258,13 @@ function updateStepSigner(step: Dict, slot: number, label: string): void {
   if (ids.some((value, index) => index !== slot && value === id)) {
     setNotice("同一步骤不能重复选择同一人。", "warning");
     return;
+  }
+  if (!participantIds.value.includes(id)) {
+    if (participantIds.value.length >= 10) {
+      setNotice("参演人员已满 10 人，请先移除不参与本次演练的人员，再选择签名。", "warning");
+      return;
+    }
+    execution.value.participants.push(compactPerson(person));
   }
   ids[slot] = id;
   execution.value.step_signers[String(step.row)] = ids;

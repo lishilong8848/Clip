@@ -3,6 +3,7 @@ import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {preview} from 'vite';
 import {chromium} from 'playwright';
+import {layoutApiFixture} from './layout-api-fixture.mjs';
 
 assert(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR,'Use an isolated build; never send test business requests to a live service.');
 const output=path.resolve('../../../output/playwright/module-widgets');await mkdir(output,{recursive:true});
@@ -14,10 +15,12 @@ const user={open_id:'module-widget-test',name:'隔离测试人员',role:'buildin
 const plan=Array.from({length:20},(_,i)=>({record_id:'plan-'+i,title:'A楼计划维护'+(i+1),work_type:'maintenance',building:'A楼',source_progress:'未开始',cycle:'月度',start_time:'2026-10-15 09:30',end_time:'2026-10-15 18:30'}));
 const active=Array.from({length:20},(_,i)=>({active_item_id:'active-'+i,record_id:'rec-'+i,target_record_id:'rec-'+i,title:'A楼进行中维护'+(i+1),work_type:'maintenance',scope:'A',status:'开始'}));
 let draft=null;
+const layouts=layoutApiFixture();
 await context.route('**/*',async route=>{
   const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();
   if(url.pathname==='/assets/vnet-logo.png')return route.fulfill({path:path.resolve('public/assets/vnet-logo.png'),contentType:'image/png'});
   if(!url.pathname.startsWith('/api/'))return route.continue();
+  if(await layouts.handle(route,user.open_id))return;
   const ok=data=>route.fulfill({json:{ok:true,data}});
   if(req.method()!=='GET')writes.push({path:url.pathname,method:req.method(),body:req.postDataJSON()});else reads.push(url.pathname+url.search);
   if(url.pathname==='/api/auth/status')return ok({logged_in:true,user,scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});

@@ -38171,6 +38171,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         operator_open_id: str = "",
         limit: int = 80,
         refresh: bool = False,
+        all_people: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope or "ALL")
         query_text = re.sub(r"\s+", "", str(query or "")).lower()
@@ -38215,7 +38216,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             for person in people
             if matches_query(person)
         ]
-        limited = filtered[: max(1, min(500, int(limit or 80)))]
+        limited = filtered if all_people else filtered[: max(1, min(500, int(limit or 80)))]
         if operator_open_id:
             for person in limited:
                 signer_record_id = str(person.get("record_id") or "").strip()
@@ -38393,6 +38394,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         notice_key: str = "",
         limit: int = 80,
         refresh: bool = False,
+        all_people: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope or "ALL")
         query_text = re.sub(r"\s+", "", str(query or "")).lower()
@@ -38424,14 +38426,15 @@ class MaintenancePortalService(RepairOperationsMixin):
             for person in people
             if matches_query(person)
             and (
-                not self._building_codes_from_value(person.get("building"))
+                all_people
+                or not self._building_codes_from_value(person.get("building"))
                 or self._scope_matches_buildings(
                     scope,
                     self._building_codes_from_value(person.get("building")),
                 )
             )
         ]
-        limited = filtered[: max(1, min(500, int(limit or 80)))]
+        limited = filtered if all_people else filtered[: max(1, min(500, int(limit or 80)))]
         for person in limited:
             person.pop("signature_file_token", None)
         if str(notice_key or "").strip().startswith("critical_guard:"):
@@ -41424,11 +41427,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             person = external_people.get(record_id)
             if not person:
                 raise PortalError("其他人员签名记录不存在，请重新选择。")
-            building_codes = self._building_codes_from_value(person.get("building"))
-            if building_codes and not self._scope_matches_buildings(
-                normalized_scope, building_codes
-            ):
-                raise PortalError("其他人员签名不属于当前楼栋，请重新选择。")
+            # 已入统一目录的外部签名可跨楼复用；临时会话仍绑定楼栋、任务和创建人。
 
     def _mop_signature_people_for_upload(
         self,

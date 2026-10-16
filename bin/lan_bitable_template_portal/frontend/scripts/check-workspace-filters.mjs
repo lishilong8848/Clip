@@ -6,6 +6,8 @@ import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc';
 import { preview } from 'vite';
 import { chromium } from 'playwright';
 import { adaptPageFilters } from './workspace-filters-adapter.mjs';
+const embeddedTasks=adaptPageFilters('<template><div class="v2-section-title"></div></template><script setup lang="ts">const embedded=true;</script>','TaskWorkspace.vue');
+assert.match(embeddedTasks,/<WorkspaceScopePicker v-if="!embedded"/,'embedded widgets must not add another global building selector');
 import { adaptCabinetPage } from './workspace-cabinet-adapter.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 for(const file of ['EventManagementPage','CabinetPowerPage','DrillManagementPage','DailyTaskChecklistPage','KnowledgeBasePage','LinkDirectoryPage','SignatureManagementPage','HistoryMemoryPage','PlanConvergencePage','LearningPage','MopPageHeader']){
@@ -52,13 +54,13 @@ try{
   const entry=origin+'/assets/workspace-v2/index.html';
   await page.goto(entry+'?view=sops');await page.locator('.v2-sop-item').filter({hasText:'B楼轮巡模板'}).waitFor();
   assert.equal(await page.locator('.v2-sop-item').count(),2);assert.equal(queries.length,6);assert(maximum<=3,'all-building reads use the existing bounded request queue');
-  const filters=page.locator('#workspace-page-filters');assert.equal(await filters.getByLabel('SOP楼栋',{exact:true}).count(),1);assert.equal(await filters.getByRole('textbox',{name:'查找SOP',exact:true}).count(),1);
+  const filters=page.locator('.v2-main');assert.equal(await page.locator('#workspace-page-filters').count(),0);assert.equal(await filters.getByLabel('SOP楼栋',{exact:true}).count(),1);assert.equal(await filters.getByRole('textbox',{name:'查找SOP',exact:true}).count(),1);
   await filters.getByLabel('SOP楼栋',{exact:true}).click();await page.locator('.n-base-select-option').getByText('B楼',{exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.v2-sop-item').length===1);assert.equal(queries.length,6,'switching building reuses local reads');await filters.getByLabel('SOP楼栋',{exact:true}).click();await page.locator('.n-base-select-option').getByText('全部可访问楼栋',{exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('.v2-sop-item').length===2);
   await filters.getByRole('textbox',{name:'查找SOP',exact:true}).fill('B楼');assert.equal(await page.locator('.v2-sop-item').count(),1);await filters.getByRole('textbox',{name:'查找SOP',exact:true}).fill('');
   await page.locator('.v2-sop-item').filter({hasText:'B楼轮巡模板'}).click();assert(await page.getByRole('textbox',{name:'步骤1内容',exact:true}).isDisabled());assert(await page.getByRole('checkbox',{name:'操作照片',exact:true}).isDisabled());assert.equal(writes.length,0);
   await page.getByRole('button',{name:'修改',exact:true}).click();await page.getByRole('textbox',{name:'步骤1内容',exact:true}).fill('修改后的测试内容');await page.getByRole('button',{name:'保存SOP',exact:true}).click();await page.getByText('SOP已保存',{exact:true}).waitFor();assert.equal(writes.length,1);assert(await page.getByRole('textbox',{name:'步骤1内容',exact:true}).isDisabled());
   for(const width of [1440,390]){await page.setViewportSize({width,height:width<700?844:900});await page.waitForTimeout(200);assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));assert((await filters.boundingBox()).x<width*.3);}
-  await page.setViewportSize({width:1440,height:900});await page.goto(entry+'?__page=/link-directory');await filters.getByRole('searchbox',{name:'按名称、用途或分类搜索',exact:true}).waitFor();assert.equal(await page.locator('.link-directory .toolbar').count(),0,'link search moves to the same filter region');
+  await page.setViewportSize({width:1440,height:900});await page.goto(entry+'?__page=/link-directory');await filters.getByRole('searchbox',{name:'按名称、用途或分类搜索',exact:true}).waitFor();assert.equal(await page.locator('.link-directory-page .toolbar').count(),1,'link search stays next to its business list');
   await page.goto(entry+'?__page=/knowledge-base');await filters.getByRole('searchbox',{name:'搜索知识库',exact:true}).waitFor();
   await page.emulateMedia({reducedMotion:'no-preference'});await page.goto(entry+'?__page=/cabinet-power&scope=A');
   await page.getByRole('button',{name:'原始平面图',exact:true}).click();await filters.getByRole('textbox',{name:'搜索平面图',exact:true}).waitFor();
@@ -78,5 +80,5 @@ try{
   assert.equal(await cell.getAttribute('data-v2-action'),null);await historyReply();await page.getByRole('button',{name:'关闭历史',exact:true}).click();
   scopes=['A'];templates=templates.slice(0,1);await page.goto(entry+'?view=sops');await page.locator('.v2-sop-item').filter({hasText:'A楼维保模板'}).waitFor();assert.equal(await page.locator('.v2-sop-item').count(),1,'ALL does not expand a single-building account');
   assert.deepEqual(errors,[]);const output=path.resolve(root,'../../../output/playwright/workspace-filters');await mkdir(output,{recursive:true});await page.screenshot({path:path.join(output,'sop-all.png'),fullPage:true});
-  console.log('PASS: V2-only filter relocation, valid templates, all-authorized SOPs/types, 3-read limit, correct building on edits, search placement, PC/mobile. All writes mocked.');
+  console.log('PASS: V2-only local filters, valid templates, all-authorized SOPs/types, 3-read limit, correct building on edits, search placement, PC/mobile. All writes mocked.');
 }catch(error){if(page){const output=path.resolve(root,'../../../output/playwright/workspace-filters');await mkdir(output,{recursive:true});await page.screenshot({path:path.join(output,'failure.png'),fullPage:true});console.error(await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(el=>el.getBoundingClientRect().right>innerWidth+1).slice(0,15).map(el=>({tag:el.tagName,class:el.className,right:el.getBoundingClientRect().right}))),errors);}throw error;}finally{await browser.close();await server.close();}

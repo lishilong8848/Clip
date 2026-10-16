@@ -105,6 +105,12 @@ async function fixture(options = {}) {
       return ok({ scope: 'A', month: day.slice(0, 7), summary: { record_count: 2, total_usage: 55, photo_records: 1 }, options: { meters: ['A楼生活水表', 'A楼冷却补水表'], frequencies: ['日', '周', '月'], shifts: ['白', '夜'] }, snapshot: { exists: state.snapshotReady, snapshot_version: state.snapshotVersion, refreshing: state.refreshing, refreshed_at: 1791940000 }, permissions: { is_admin: state.admin, can_create: state.admin } });
     }
     if (url.pathname === '/api/capacity/water/records' && request.method() === 'GET') {
+      if(url.searchParams.get('page_size')==='200'){
+        if(state.failOverview)return fail('汇总暂不可用');
+        assert.equal(url.searchParams.get('start_date'),water.waterDay(-29));assert.equal(url.searchParams.get('end_date'),day);assert.equal(url.searchParams.get('frequency'),'日');
+        const data=url.searchParams.get('scope')==='B'?[{...records[0],record_id:'water-b',meter:'B楼水表',computed_usage:90}]:records;
+        return ok({records:data,total:data.length,snapshot:{exists:state.snapshotReady}});
+      }
       const gate = state.readGate; if (gate) { state.readGate = null; await gate.promise; }
       if (state.failList) return fail('记录读取暂不可用');
       const data = !state.snapshotReady || url.searchParams.get('scope') === 'B' ? [] : (state.records || records);
@@ -152,7 +158,7 @@ try {
   assert.equal(await overview.page.getByRole('button',{name:'自定义布局',exact:true}).count(),0,'water overview has no custom layout');
   assert.match(await overview.page.locator('.water-overview-metrics').innerText(),/145/);
   assert.equal(await overview.page.getByRole('button',{name:'查看H楼水耗记录',exact:true}).count(),0,'unexpected response buildings never expand permission');
-  assert(!requests.slice(requestStart).some(r=>r.path==='/api/capacity/water/records'),'overview must not load record pages');
+  assert(requests.slice(requestStart).filter(r=>r.path==='/api/capacity/water/records').every(r=>r.params.start_date===water.waterDay(-29)&&r.params.end_date===day&&['A','B'].includes(r.params.scope)),'overview only reads authorized recent daily records');
   assert.equal(await overview.page.getByLabel('搜索水耗记录',{exact:true}).count(),0,'record filters stay hidden on overview, including teleports');
   await capture(overview.page,'desktop-overview');
   await overview.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).click();

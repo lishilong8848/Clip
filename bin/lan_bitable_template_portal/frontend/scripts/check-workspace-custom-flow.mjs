@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
-export async function checkCustomization(page,output){
+export async function checkCustomization(page,output,layouts){
+  // Seed a distinct phone fixture for responsive template checks; sync isolation is tested separately.
+  const phoneFixture=()=>layouts.records.set('ou_v2_fixture:/api/workspace-layouts/mobile/workspace',structuredClone(layouts.records.get('ou_v2_fixture:/api/workspace-layouts/desktop/workspace')));
   await page.setViewportSize({width:1440,height:1000});
   await page.evaluate(()=>window.scrollTo(0,0));
   const grid=page.locator('.v2-widget-grid'),count=await grid.locator('.grid-stack-item').count();
@@ -38,9 +40,9 @@ export async function checkCustomization(page,output){
   assert.equal(await chart.locator('xpath=..').getAttribute('gs-w'),'12');
   await page.getByRole('button',{name:'保存布局',exact:true}).click();
   await page.getByRole('button',{name:'自定义工作台',exact:true}).waitFor();
-  const saved=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:ou_v2_fixture')));
+  const saved=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:account-layout:v1:ou_v2_fixture:desktop:workspace')).value);
   assert.equal(saved.widgets.length,count+1);assert.equal(saved.widgets.find(w=>w.title==='我的通告分布').display,'donut');
-  await page.reload();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.reload();await page.locator('.v2-dashboard').waitFor();
   await chart.scrollIntoViewIfNeeded();await chart.locator('.v2-chart-canvas svg path').first().waitFor();
   assert.equal(await grid.locator('.grid-stack-item').count(),count+1,'layout survives reload');
   const key=await chart.locator('xpath=..').getAttribute('data-widget-id');
@@ -53,7 +55,7 @@ export async function checkCustomization(page,output){
   await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2,box.y+box.height/2+95,{steps:12});await page.mouse.up();
   await page.waitForFunction(({key,before})=>Number(document.querySelector(`[data-widget-id="${key}"]`).getAttribute('gs-h'))>before,{key,before});
   await page.getByRole('button',{name:'保存布局',exact:true}).click();
-  const afterResize=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:ou_v2_fixture')));
+  const afterResize=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:account-layout:v1:ou_v2_fixture:desktop:workspace')).value);
   assert(afterResize.widgets.find(w=>w.id===key).h>before,'resize is persisted');
   await page.getByRole('button',{name:'自定义工作台',exact:true}).click();await chart.scrollIntoViewIfNeeded();
   await resize.hover();
@@ -61,7 +63,7 @@ export async function checkCustomization(page,output){
   await page.mouse.move(shrinkBox.x+shrinkBox.width/2,shrinkBox.y+shrinkBox.height/2);await page.mouse.down();await page.mouse.move(shrinkBox.x+shrinkBox.width/2,shrinkBox.y-350,{steps:15});await page.mouse.up();
   await page.waitForFunction(key=>Number(document.querySelector(`[data-widget-id="${key}"]`).getAttribute('gs-h'))===3,key);
   await page.getByRole('button',{name:'保存布局',exact:true}).click();
-  assert.equal(await page.evaluate(key=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:ou_v2_fixture')).widgets.find(w=>w.id===key).h,key),3,'minimum size is saved even when the grid omits default dimensions');
+  assert.equal(await page.evaluate(key=>JSON.parse(localStorage.getItem('clipflow:account-layout:v1:ou_v2_fixture:desktop:workspace')).value.widgets.find(w=>w.id===key).h,key),3,'minimum size is saved even when the grid omits default dimensions');
   await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
   await page.evaluate(()=>window.scrollTo(0,0));
   const quick=page.locator('.grid-stack-item[data-widget-kind="shortcuts"]'),dragKey=await quick.getAttribute('data-widget-id');
@@ -72,13 +74,13 @@ export async function checkCustomization(page,output){
   await page.mouse.up();
   await page.waitForFunction(({key,oldY})=>Number(document.querySelector(`[data-widget-id="${key}"]`).getAttribute('gs-y'))!==oldY,{key:dragKey,oldY});
   await page.getByRole('button',{name:'保存布局',exact:true}).click();
-  const packed=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:ou_v2_fixture')).widgets);
+  const packed=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:account-layout:v1:ou_v2_fixture:desktop:workspace')).value.widgets);
   for(const a of packed)for(const b of packed)if(a.id!==b.id)assert(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y,'automatic packing must not overlap components');
-  await page.setViewportSize({width:390,height:844});
+  phoneFixture();await page.setViewportSize({width:390,height:844});
   await page.locator('.v2-edit-banner').waitFor({state:'hidden'});
   await page.locator('.n-message').first().waitFor({state:'hidden'});
   await page.waitForFunction(()=>[...document.querySelectorAll('.grid-stack-item')].every(el=>{const b=el.getBoundingClientRect();return b.left>=-1&&b.right<=innerWidth+1;}));
-  assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:ou_v2_fixture')).widgets),packed,'responsive arrangement does not replace the saved desktop layout');
+  assert.deepEqual(await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:account-layout:v1:ou_v2_fixture:desktop:workspace')).value.widgets),packed,'responsive arrangement does not replace the saved desktop layout');
   const blankSpace=await page.locator('.v2-widget-body').evaluateAll(items=>items.map(el=>el.clientHeight-el.firstElementChild.getBoundingClientRect().height));
   assert(blankSpace.every(value=>value<30),'mobile panels use content height rather than desktop blank space');
   await page.screenshot({path:path.join(output,'custom-dashboard-mobile.png'),fullPage:true});
@@ -117,8 +119,9 @@ export async function checkCustomization(page,output){
     if(name==='水耗指标卡'){await panel.locator('.v2-metric-tiles').waitFor();assert.equal(await panel.locator('.v2-metric-tiles>.n-button').count(),3);assert.equal(await panel.locator('button button').count(),0);}
   }
   await page.getByRole('button',{name:'保存布局',exact:true}).click();
-  await page.reload();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.reload();await page.locator('.v2-dashboard').waitFor();
   assert.equal(await page.locator('.v2-widget').count(),count+3,'motion template selection persists');
+  phoneFixture();
   for(const width of [1440,390]){
     await page.setViewportSize({width,height:width<700?844:1000});
     const panel=page.locator('.v2-widget[aria-label="学练进度环"]');await panel.scrollIntoViewIfNeeded();await panel.getByText('40%',{exact:true}).waitFor();
@@ -137,8 +140,9 @@ export async function checkCustomization(page,output){
     await editor.getByRole('button',{name:'应用设置',exact:true}).click();await editor.waitFor({state:'hidden'});
     const panel=page.locator(`.v2-widget[aria-label="${name}"]`);await panel.scrollIntoViewIfNeeded();await panel.locator('.v2-chart-canvas svg').first().waitFor();
   }
-  await page.getByRole('button',{name:'保存布局',exact:true}).click();await page.reload();await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
+  await page.getByRole('button',{name:'保存布局',exact:true}).click();await page.reload();await page.locator('.v2-dashboard').waitFor();
   assert.equal(await page.locator('.v2-widget').count(),count+7,'all chart templates persist across reload');
+  phoneFixture();
   for(const width of [1440,390]){
     await page.setViewportSize({width,height:1000});
     for(const name of ['通告占比环','通告横向对比','通告分类饼图','事件面积趋势','事件折线趋势','楼栋水耗对比','今日答题构成']){

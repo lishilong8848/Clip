@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync,readdirSync} from 'node:fs';
 import {parse,compileScript} from '@vue/compiler-sfc';
 import {adaptEventPeriodPage} from './workspace-event-adapter.mjs';
 import {adaptCabinetBatchPage} from './workspace-cabinet-adapter.mjs';
-import {adaptPasswordLogin,markBinaryControls,fuseLearningCharts,portalFloatingControls} from './workspace-controls-adapter.mjs';
+import {adaptPasswordLogin,markBinaryControls,fuseLearningCharts,portalFloatingControls,adaptMotionControls} from './workspace-controls-adapter.mjs';
 const floating='<template><NModal><NSelect /><NDatePicker /><NTimePicker /><NPopover /><NSelect to="#host" /><NSelect :to="false" /><NSelect v-bind="props" /><NSelect v-bind:[key]="target" /><dialog><NSelect /></dialog></NModal></template>';
 const portalled=portalFloatingControls(floating);
 assert.equal((portalled.match(/:to="true"/g)||[]).length,4);
@@ -21,4 +21,16 @@ assert.match(binary,/<input type="checkbox" v-model="selected"/);
 const learning=readFileSync(new URL('../src/components/LearningPage.vue',import.meta.url),'utf8');
 assert.match(learning,/夜班题单发布时间<input v-model="settingsForm.night_publish_time"/);
 assert.match(learning,/night_publish_time: settingsForm.night_publish_time/);
+let motionCount=0;
+for(const dir of ['components','workspace-v2'])for(const file of readdirSync(new URL('../src/'+dir+'/',import.meta.url))){
+  if(!file.endsWith('.vue'))continue;
+  const original=readFileSync(new URL('../src/'+dir+'/'+file,import.meta.url),'utf8'),adapted=adaptMotionControls(original);
+  if(original===adapted)continue;
+  motionCount++;
+  assert.equal(adaptMotionControls(adapted),adapted,'motion adapter must be idempotent');
+  compileScript(parse(adapted).descriptor,{id:file,inlineTemplate:true});
+  assert.doesNotMatch(parse(adapted).descriptor.template.content,/<progress\b/);
+}
+assert(motionCount>=5,'cabinet, learning and slider controls are covered');
+console.log(`PASS: ${motionCount} real Vue views preserve bindings with V2 progress/range adaptation.`);
 console.log('PASS: V2-only event/cabinet/password adapters; binary settings exclude multi-select and immediate actions; both shift settings are submitted.');

@@ -4282,6 +4282,7 @@ class PortalRuntime:
                 ):
                     return self._send_json(403, {"ok": False, "error": "签名链接无效或已过期。"})
                 data = self.service.signature_people(
+                    all_people=str((qs.get("all_people") or [""])[0]).lower() in {"1", "true", "yes"},
                     scope=(qs.get("scope") or [""])[0],
                     query=(qs.get("q") or [""])[0],
                     record_id=record_id,
@@ -4343,6 +4344,7 @@ class PortalRuntime:
                     (qs.get("scope") or ["ALL"])[0],
                 )
                 data = self.service.temporary_signature_people(
+                    all_people=str((qs.get("all_people") or [""])[0]).lower() in {"1", "true", "yes"},
                     scope=scope,
                     query=(qs.get("q") or [""])[0],
                     notice_key=(qs.get("notice_key") or [""])[0],

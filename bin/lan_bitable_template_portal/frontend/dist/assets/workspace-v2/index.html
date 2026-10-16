@@ -4,7 +4,8 @@
 <body><div id="app"><div class="entry-loading" role="status" aria-live="polite"><span class="entry-spinner"></span><strong id="entry-status">正在打开新版工作台</strong><button id="entry-retry" type="button" hidden>重新加载新版</button><a href="/?frontend=legacy">返回旧版</a></div></div>
 <script>
   window.addEventListener('unhandledrejection', event => {
-    if (event.reason instanceof DOMException && event.reason.name === 'AbortError' && event.reason.message === 'Transition was skipped') event.preventDefault();
+    const reason = event.reason;
+    if (reason instanceof DOMException && ((reason.name === 'AbortError' && reason.message === 'Transition was skipped') || (reason.name === 'InvalidStateError' && /Transition was aborted.*ViewTransition opt-in disabled/i.test(reason.message)))) event.preventDefault();
   });
   for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
     if (event.viewTransition) { event.viewTransition.ready.catch(() => {}); event.viewTransition.finished.catch(() => {}); }

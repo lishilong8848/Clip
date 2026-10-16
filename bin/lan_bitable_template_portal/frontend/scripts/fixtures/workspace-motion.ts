@@ -10,6 +10,7 @@ import {usePasswordFeedback} from '../../src/workspace-v2/passwordFeedback';
 import {Home,ClipboardList,Grid2X2,UserRound} from 'lucide-vue-next';
 import '../../src/workspace-v2/interactions.css';
 import '../../src/workspace-v2/workspace.css';
+import '../../src/workspace-v2/motionBlocks.css';
 document.documentElement.classList.add('workspace-v2');
 installActionMotion();
 const text=ref('');

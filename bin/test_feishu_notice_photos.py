@@ -329,6 +329,19 @@ class PhotoOutputAndContractTests(unittest.TestCase):
 # Finding 3: auto-attach only for real images when expected/mentioned
 # ---------------------------------------------------------------------------
 class AutoAttachGateTests(unittest.TestCase):
+    def test_photo_analysis_is_not_consumed_by_an_open_notice_form(self):
+        for question in ('现场照片，请分析设备运行情况', '看看这张截图有什么内容', '请总结这张照片', '帮我看这张截图的报错'):
+            with self.subTest(question=question):
+                bot = FakeBotForAssistant()
+                self.addCleanup(bot.tmpdir.cleanup)
+                plan = base_plan(fields=[photo_field('site', value=[])])
+                msg = image_message(question=question)
+                reply = asyncio.run(files.handle_files(bot, msg, {'r':1}, ACTOR, conversation_with(plan)))
+                self.assertIn(files.CONFIRM_READ, reply['text'])
+                self.assertFalse(any(call[1] == 'PATCH' for call in bot.calls))
+                owner, _, _ = files._identity(ACTOR, msg)
+                self.assertEqual(bot.runtime.state_store.get_document(files.NAMESPACE, owner)['question'], question)
+
     def test_ordinary_file_never_attached_as_photo(self):
         bot = FakeBotForAssistant()
         plan = base_plan(fields=[photo_field("site", value=[])])

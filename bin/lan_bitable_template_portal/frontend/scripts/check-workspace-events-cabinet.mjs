@@ -78,7 +78,7 @@ try{
       return ok({rows:body.sources.map(s=>({row_id:'row-'+s.id,text_id:s.id,text_row:1,scope:'A',room:'201',rack:'A01',rack_type:'服务器机柜',action:'上正式电',expected:'2026-10-01 10:00:00',actual:'2026-10-01 10:00:00',result:'成功',issues:[]}))});
     }
     if(url.pathname==='/api/cabinet-power/batches'&&req.method()==='POST'){writes.push(req.postDataJSON());created=true;return ok({batch_id:'isolated-batch'});}
-    if(url.pathname.includes('/api/cabinet-power/batches/isolated-batch'))return ok({batch:{batch_id:'isolated-batch',rows:[],scopes:['A'],status:'pending',stats:{total:1},images:[]},batch_id:'isolated-batch',rows:[],scopes:['A'],stats:{total:1},images:[]});
+    if(url.pathname.includes('/api/cabinet-power/batches/isolated-batch'))return ok({batch_id:'isolated-batch',rows:[],scopes:['A'],status:'recognizing',progress:{pages_done:2,pages_total:4},stats:{total:1},images:[]});
     return ok({records:[],items:[],scopes:{},stats:{},rows:[],batches:[],total:0,buildings:[],settings:{},data:{}});
   });
   page=await context.newPage();
@@ -115,10 +115,17 @@ try{
   assert.equal(await page.locator('.event-metric-dialog .event-row').count(),1);
   await page.locator('.event-metric-dialog').getByRole('button',{name:'关闭',exact:true}).click();
   await page.locator('.event-list-panel .event-row').filter({hasText:'跨月变压器告警'}).click();
+  const flow=page.locator('.event-drawer .v2-repair-flow');
+  assert.equal(await flow.locator('[data-flow-step]').count(),5);
+  assert.equal(await flow.locator('[data-flow-step="event"]').getAttribute('data-flow-status'),'process');
+  assert.equal(await flow.getByRole('button').count(),0,'no added repair entry without repair-management permission');
   await page.locator('.event-drawer').getByRole('button',{name:'标记转检修',exact:true}).click();
   await page.locator('.event-repair-actions strong').filter({hasText:'已转检修'}).waitFor();
   assert.equal(writes.at(-1).month,'2026-09','cross-month action retains occurrence month');
   assert.equal(writes.at(-1).record_id,'sep');
+  assert.equal(await flow.locator('[data-flow-step="event"]').getAttribute('data-flow-status'),'finish');
+  assert.equal(await flow.locator('[data-flow-step="project"]').getAttribute('data-flow-status'),'process','transfer does not claim a repair was created');
+  await flow.screenshot({path:path.join(output,'event-repair-flow.png')});
   await page.locator('.event-drawer').getByRole('button',{name:'关闭',exact:true}).click();
   await page.getByRole('button',{name:'刷新事件',exact:true}).click();
   await page.locator('.event-command-actions .source-refresh:not(:disabled)').waitFor();
@@ -194,6 +201,13 @@ try{
   await page.getByRole('button',{name:/确认并创建待办/}).click();
   await page.getByRole('heading',{name:'上下电待办详情',exact:true}).waitFor();
   assert(created);assert.equal(writes.at(-1).source,'text');assert.equal(writes.at(-1).rows[0].room,'202');
+  await page.locator('.progress-copy .v2-motion-progress[aria-valuenow="50"]').waitFor();
+  assert.equal(await page.locator('.progress-copy .v2-progress-value').innerText(),'50%','production cabinet progress uses real API values');
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:900});await page.waitForTimeout(300);
+    await page.screenshot({path:path.join(output,`cabinet-motion-progress-${width}.png`),fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'cabinet progress stays in its container');
+  }
   await context.close();assert.deepEqual(errors,[]);
   console.log('PASS: Beijing week/month/year boundaries, period counts+list+drawer, aggregate/building scope, stale response guard, missing snapshot/error states, 6 viewports, original cross-month actions; cabinet paste default, single recognition, edits, mode switch, draft restore and original create API. Isolated data only.');
 }catch(error){

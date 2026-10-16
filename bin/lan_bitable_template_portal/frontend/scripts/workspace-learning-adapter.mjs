@@ -19,21 +19,22 @@ export function adaptLearningPage(source) {
   let code = source.replaceAll('\r\n', '\n');
   code = code.replace('<section class="learning-page"','<section class="learning-page" :data-v2-learning-tab="tab"');
   code = replaceNode(code, has('page-head'), `<header class="page-head v2-learning-head">
-    <div class="heading"><VnetBackButton :to="undefined" :disabled="busy" @click="handleBack" /><BookOpen :size="21" /><h1>画像学练</h1></div>
-    <div class="actions" data-v2-navigation>
+    <div class="v2-learning-identity-tabs" data-v2-navigation>
+      <VnetBackButton :to="undefined" :disabled="busy" @click="handleBack" />
+      <strong v-if="ready">{{learner?learner.name:scopeLabel+'学习汇总'}}</strong>
       <NRadioGroup v-if="ready && canViewBuildings && boot.can_answer" :value="viewMode" size="small" aria-label="答题与画像" :disabled="busy" @update:value="value => value === 'practice' ? goPractice() : goOverview()"><NRadioButton value="practice">我的答题</NRadioButton><NRadioButton value="overview">楼栋画像</NRadioButton></NRadioGroup>
+      <NButton v-if="ready && viewMode==='overview' && canViewBuildings" size="small" text :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
+    </div>
+    <div class="actions" data-v2-navigation>
       <NDropdown v-if="ready && v2AuxOptions.length" :options="v2AuxOptions" @select="v2OpenSection"><NButton secondary size="small" :disabled="busy">{{ v2AuxTitle }}<ChevronDown :size="14" /></NButton></NDropdown>
-      <NButton quaternary circle :disabled="busy || loading" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshView"><RefreshCw :size="17" :class="{spin:loading}" /></NButton>
+      <span :data-v2-layout-tools="tab==='profile'?'learning-profile':'learning-practice'" class="v2-toolbar-end"></span>
     </div>
   </header>`);
   code = replaceNode(code, has('building-tabs'), `<div v-if="ready && tab !== 'sharing' && viewMode === 'overview' && !learner && canViewBuildings" class="v2-learning-building" data-v2-navigation>
     <NRadioGroup v-if="!v2Mobile" :value="scope" aria-label="学练楼栋" :disabled="busy" @update:value="v2Building"><NRadioButton v-for="building in overviewScopes" :key="building.value" :value="building.value">{{building.label}}</NRadioButton></NRadioGroup>
     <NSelect v-else :value="scope" :options="overviewScopes" aria-label="学练楼栋" :disabled="busy" @update:value="v2Building" />
   </div>`);
-  code = replaceNode(code, has('learner-strip'), `<div v-if="ready && tab !== 'sharing'" class="learner-strip v2-learning-person">
-    <div><strong>{{ learner ? learner.name : scopeLabel + '学习汇总' }}</strong><span v-if="learner">{{learner.employee_no ? '工号 ' + learner.employee_no : ''}}{{viewMode==='practice' ? ' · 本人答题' : ''}}</span></div>
-    <NButton v-if="viewMode==='overview' && canViewBuildings" size="small" secondary data-v2-navigation :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
-  </div>`);
+  code = replaceNode(code, has('learner-strip'), '');
   code = replaceNode(code, has('tabs'), `<nav v-if="ready && tab !== 'sharing'" class="tabs v2-learning-tabs" aria-label="学练页面" data-v2-navigation><NButton v-for="item in v2PrimaryTabs" :key="item.id" :type="tab===item.id?'primary':'default'" :quaternary="tab!==item.id" :aria-current="tab===item.id?'page':undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="16" />{{item.label}}</NButton></nav>`);
   code = replaceNode(code, node => node.tag === 'div' && has('toolbar')(node) && node.loc.source.includes('studyMode'), `<div class="toolbar v2-learning-studybar" data-v2-navigation>
     <div v-if="reading && tab!=='today'" class="actions"><NButton secondary :disabled="busy" @click="saveDraft(); reading=false; loadView()"><ChevronLeft :size="16" />返回{{tab==='review'?'复习列表':'学习历史'}}</NButton><span>{{paper?.date}} · {{paper?.scope}}楼</span></div>

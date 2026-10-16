@@ -43,7 +43,7 @@ function decorate(animate:boolean){
       offset+=part.length;
       if(animate&&offset>revealed){
         const span=document.createElement('span');span.textContent=part;span.hidden=true;
-        if(words++<600)span.className='v2-word';
+        if(words++<600)span.className='v2-word cword';
         fragment.append(span);queue.push({node:span,end:offset});
       }else{lastVisible=document.createTextNode(part);fragment.append(lastVisible);}
     }
@@ -64,7 +64,7 @@ onMounted(()=>{
     if(entry){
       const next=entry.contentRect.height,from=animation?.playState==='running'?host.value.getBoundingClientRect().height:height;
       height=next;animation?.cancel();
-      if(!reduced.matches&&from>0&&next>from)animation=host.value.animate([{height:from+'px',overflow:'hidden'},{height:next+'px',overflow:'hidden'}],{duration:180,easing:'ease-out'});
+      if(!reduced.matches&&from>0&&next>from)animation=host.value.animate([{height:from+'px',overflow:'hidden'},{height:next+'px',overflow:'hidden'}],{duration:250,easing:'cubic-bezier(.16,1,.3,1)'});
     }
     const thread=host.value.closest<HTMLElement>('.thread');if(thread)followBottom(thread);
   });

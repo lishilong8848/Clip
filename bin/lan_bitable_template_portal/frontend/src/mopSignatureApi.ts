@@ -21,6 +21,7 @@ export type SignaturePeopleQuery = {
   noticeKey?: string;
   refresh?: boolean;
   limit?: number;
+  allPeople?: boolean;
 };
 
 function appendCommonSignatureQuery(url: URLSearchParams, query: SignaturePeopleQuery): void {
@@ -29,6 +30,7 @@ function appendCommonSignatureQuery(url: URLSearchParams, query: SignaturePeople
   if (query.recordId?.trim()) url.set("record_id", query.recordId.trim());
   if (query.noticeKey?.trim()) url.set("notice_key", query.noticeKey.trim());
   if (query.refresh) url.set("refresh", "1");
+  if (query.allPeople) url.set("all_people", "1");
   url.set("limit", String(query.limit || 60));
 }
 

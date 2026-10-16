@@ -18,12 +18,12 @@ function select(value: AdminTabKey) { if (props.tabs.some(item => item.key === v
     <label for="v2-settings-category"><Settings2 :size="17" />设置分类</label>
     <NSelect :value="activeTab" :options="options" :input-props="{id:'v2-settings-category'}" aria-label="设置分类" @update:value="select" />
     <NTag v-if="selected?.badge" size="small" :bordered="false">{{selected.badge}}</NTag>
-    <NButton v-if="!advancedVisible" size="small" quaternary @click="emit('toggle-advanced')"><Wrench :size="15" />高级诊断</NButton>
+    <div class="v2-settings-actions"><NButton size="small" quaternary :aria-pressed="advancedVisible" @click="emit('toggle-advanced')"><Wrench :size="15" />{{advancedVisible?'收起诊断':'高级诊断'}}</NButton><slot name="admin-tools" /></div>
   </div>
 </template>
 <style scoped>
 .v2-settings-picker{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--v2-border);padding:4px 0 14px}
 label{display:flex;gap:7px;align-items:center;font-size:13px;color:var(--v2-muted)}
-.n-select{width:240px;max-width:100%}.n-button{margin-left:auto}.n-button :deep(.n-button__content){gap:6px}
+.n-select{width:240px;max-width:100%}.v2-settings-actions{margin-left:auto;display:flex;align-items:center;flex-wrap:wrap;gap:8px}.n-button :deep(.n-button__content){gap:6px}
 @media(max-width:600px){.n-select{width:calc(100% - 90px)}.n-button{margin-left:0}}
 </style>

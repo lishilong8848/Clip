@@ -519,7 +519,7 @@ def _explicit_photo_intent(question):
     photo field.
     """
     q = str(question or "")
-    if re.search(r"识图|识别|OCR|ocr|图片", q):
+    if re.search(r"识图|识别|OCR|ocr|图片|分析|总结|解释|解析|翻译|对比|比较|看看|看一下|看下|帮我看|有什么|什么内容|是什么|为什么|报错", q):
         return False
     return bool(re.search(r"现场照片|补照片|照片|资料截图|截图|阿里|补现场|现场", q))
 

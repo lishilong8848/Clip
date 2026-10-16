@@ -15,11 +15,6 @@
         </header>
         <SidebarNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" @select="selectMenu" />
         <main class="v2-main">
-          <div v-if="loggedIn && !publicLink && !printMode && !['my','permission'].includes(view)" id="workspace-page-filters" class="v2-page-filters" role="region" aria-label="页面筛选与搜索">
-            <label v-if="route.pathname !== '/workbench-lite' && scopes.length > 1 && scopeSelectable" class="v2-context">
-              <span>楼栋</span><NSelect class="v2-scope-select" :value="currentScope" :options="businessScopes" size="small" aria-label="当前楼栋" @update:value="changeScope" />
-            </label>
-          </div>
           <NAlert v-if="authError" type="error" :bordered="false" class="v2-alert">{{ authError }} <NButton text type="primary" @click="loadAuth">重新读取</NButton></NAlert>
           <NAlert v-if="operationError" type="error" :bordered="false" closable role="alert" class="v2-alert" @close="operationError=''">{{ operationError }}</NAlert>
           <div v-if="checking" class="v2-loading"><NSpin size="medium" /><span>正在检查登录状态</span></div>
@@ -32,7 +27,7 @@
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
               <NButton v-for="tab in dutyTabs" :key="tab.id" :type="dutyActive === tab.id ? 'primary' : 'default'" :secondary="dutyActive !== tab.id" @click="navigate(tab.url)"><component :is="tab.icon" :size="18" />{{ tab.label }}</NButton>
             </nav>
-            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :view="view" :initial-kind="route.searchParams.get('kind')||undefined" @open="navigate($event)" />
+            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :view="view" :initial-kind="route.searchParams.get('kind')||undefined" @open="openWorkspaceModule($event)" />
             <section v-else-if="view === 'my' && route.pathname === '/'" class="v2-my">
               <header class="v2-profile-heading"><NAvatar :size="48" :style="{background:'var(--v2-nav-active)',color:'var(--v2-nav-text)'}"><UserRound :size="25" /></NAvatar><div><h1>{{ user.name }}</h1><p>个人信息与设置</p></div></header>
               <div class="v2-profile-layout">
@@ -56,7 +51,7 @@
             <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)&&granted.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
             <WorkOrderWorkspace v-else-if="route.pathname.startsWith('/polling-work-order')" :key="route.pathname+route.search" :url="route.pathname + route.search + route.hash" />
             <template v-else-if="route.pathname === '/workbench-lite'" />
-            <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="componentProps" @switch-scope="changeScope" @status="onStatus" @close="navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
+            <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="componentProps" @switch-scope="changeScope" @status="onStatus" @close="activeModule==='accounts'?navigate('/?view=my'):navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
             <NResult v-else status="404" title="没有找到此页面" description="请从功能导航选择要使用的模块。" />
             <NoticeWorkspace v-if="noticeView" v-show="noticeActive" :key="noticeView.identity" :url="noticeView.url" :active="noticeActive" :scope="currentScope" :scopes="scopes" :user="user" />
           </template>
@@ -84,6 +79,7 @@ import MobileNavigation from './MobileNavigation.vue';
 import SidebarNavigation from './SidebarNavigation.vue';
 import {useAuthVersionGuard} from './authVersionGuard';
 import { pageContext } from './pageLayout';
+import {moduleScope,scopeFamily,scopeOwner,readScopeMemory,saveScopeMemory} from './scopeMemory';
 const {busy:versionBusy,confirming:confirmVersion,request:requestVersion,confirm:finishVersion}=useAuthVersionGuard();
 function animateMobilePage(direction:number){
   if(!window.matchMedia('(max-width:760px)').matches||window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
@@ -144,12 +140,14 @@ const homeViews = ['home', 'tasks', 'functions'];
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(activeModule.value)) || !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
-const previousScope=ref({identity:'',value:''});
+const rememberedScopes=ref<Record<string,string>>({});
+watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');
 const noticeDefaultScope=computed(()=>scopes.value.some(s=>s.value==='ALL')?'ALL':scopes.value.some(s=>s.value===authDefaultScope.value)?authDefaultScope.value:scopes.value[0]?.value||'');
-const currentScope = computed(() => route.value.searchParams.get('scope') || (route.value.pathname==='/workbench-lite'?noticeDefaultScope.value:previousScope.value.identity===user.value.open_id && scopes.value.some(s=>s.value===previousScope.value.value)?previousScope.value.value:(scopes.value.some(s => s.value === 'ALL') ? 'ALL' : scopes.value[0]?.value || '')));
-provide(pageContext,{user:computed(()=>user.value),scopes:computed(()=>scopes.value.map(scope=>scope.value)),scope:currentScope,module:computed(()=>NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value)});
-watch([route,identityKey],()=>{const value=route.value.searchParams.get('scope');if(user.value.open_id&&value&&scopes.value.some(s=>s.value===value))previousScope.value={identity:user.value.open_id,value};},{flush:'sync'});
+function scopeFor(module:string){return moduleScope(module,scopes.value,rememberedScopes.value[scopeFamily(module)]||'',scopeFamily(module)==='notices'?noticeDefaultScope.value:authDefaultScope.value);}
+const currentScope = computed(() => route.value.searchParams.get('scope') || scopeFor(activeModule.value));
+provide(pageContext,{user:computed(()=>user.value),scopes:computed(()=>scopes.value.map(scope=>scope.value)),scope:currentScope,module:computed(()=>NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value),changeScope});
+watch([route,identityKey],()=>{const value=route.value.searchParams.get('scope');if(scopeOwner(user.value)&&value&&scopes.value.some(s=>s.value===value)){rememberedScopes.value={...rememberedScopes.value,[scopeFamily(activeModule.value)]:value};saveScopeMemory(user.value,rememberedScopes.value);}},{flush:'sync'});
 const noticeActive = computed(() => loggedIn.value && !checking.value && !denied.value && route.value.pathname === '/workbench-lite');
 const noticeView = ref<{identity:string;url:string}|null>(null);
 // Keep the V2 workspace warm; permission/account changes discard its private state.
@@ -160,8 +158,6 @@ watch([route,identityKey,loggedIn,checking],()=>{
 const moduleAdminMode=computed(()=>user.value.role==='admin'&&['critical_guard','drills'].includes(activeModule.value)&&(route.value.searchParams.get('mode')==='admin'||['ALL','CAMPUS'].includes(currentScope.value)));
 const unsupportedScope=computed(()=>!moduleAdminMode.value&&['critical_guard','drills','cabinet'].includes(activeModule.value)&&['H','110'].includes(currentScope.value));
 const scopeLabel = computed(() => scopes.value.find(s => s.value === currentScope.value)?.label || currentScope.value);
-const businessScopes = computed(()=>scopes.value.map(s=>({...s,label:s.value==='ALL'?'全部楼栋':s.label})));
-const scopeSelectable = computed(() => !['sops','learning', 'accounts', 'signatures', 'links', 'knowledge', 'assistant', 'life_guide', 'plan_convergence', 'daily', 'engineer_mop', 'water'].includes(activeModule.value) && !printMode.value);
 const passwordPage = computed(() => loggedIn.value && route.value.searchParams.get('account') === 'password' && user.value.login_method === 'password');
 const permissionPage = computed(() => view.value === 'permission');
 const levelLabel = computed(() => ({ L0:'超级管理员',L1:'全楼管理员',L2:'工程师',L3:'楼栋主管',L4:'成员' }[String(user.value.level)] || '成员'));
@@ -175,11 +171,17 @@ const menuOptions = computed(() => [
 const mobileTabs = [{value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},{value:'my',label:'我的',icon:UserRound}];
 const dutyTabs = computed(() => [
   ...(NOTICE_IDS.some(id => granted.value.includes(id)) ? [{id:'notices',label:'通告处理',icon:ClipboardList,url:'/workbench-lite?work_type=all'}] : []),
-  ...[{id:'water',label:'水耗处理',icon:Droplets},{id:'drills',label:'演练管理',icon:Activity},{id:'critical_guard',label:'风险管理',icon:ShieldCheck}].filter(tab => granted.value.includes(tab.id)).map(tab => ({...tab,url:moduleUrl(modules.find(m=>m.id===tab.id)!,currentScope.value)})),
+  ...[{id:'water',label:'水耗处理',icon:Droplets},{id:'drills',label:'演练管理',icon:Activity},{id:'critical_guard',label:'风险管理',icon:ShieldCheck}].filter(tab => granted.value.includes(tab.id)).map(tab => ({...tab,url:moduleUrl(modules.find(m=>m.id===tab.id)!,scopeFor(tab.id))})),
 ]);
 const dutyActive = computed(() => NOTICE_IDS.includes(activeModule.value) || activeModule.value === 'all' ? 'notices' : activeModule.value);
 const showDutyTabs = computed(() => personaFor(user.value) === 'duty' && !publicLink.value && !printMode.value && ['notices','water','drills','critical_guard'].includes(dutyActive.value));
-function selectMenu(key: string) { const module = permittedModules.value.find(m => m.id === key); navigate(module ? moduleUrl(module, currentScope.value) : '/?view=' + key); }
+function selectMenu(key: string) { const module = permittedModules.value.find(m => m.id === key); navigate(module ? moduleUrl(module, scopeFor(module.id)) : '/?view=' + key); }
+function openWorkspaceModule(target:string){
+ const url=logicalUrl(new URL(target,location.origin).href),module=moduleForRoute(url);
+ const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','token'].some(key=>url.searchParams.has(key));
+ if(module&&!precise)url.searchParams.set('scope',scopeFor(module));
+ navigate(url);
+}
 
 function changeScope(scope: string) { const url = logicalUrl(); url.searchParams.set('scope', scope); if(['drills','critical_guard'].includes(activeModule.value))url.searchParams.delete('mode'); navigate(url); }
 function selectAdminTab(tab: string) { navigate('/admin/settings?tab=' + encodeURIComponent(tab), {replace:true}); }

@@ -1,3 +1,13 @@
+html.workspace-v2:not([data-v2-theme=dark]) { --v2-muted:#58665e;--cf-muted:#5c6b80; }
+html.workspace-v2:not([data-v2-theme=dark]) :is(
+  .v2-chart-data summary span,.v2-learning-definition,.v2-learning-people h2 small,.v2-learning-people td small,.v2-learning-people>footer,
+  .v2-learning-person-title>span,.v2-learning-person-values,.v2-learning-person-list details,
+  .link-directory-page .table-footer,.daily-page .summary-grid small,.daily-page .empty-state,
+  .guard-page .guard-page__header span,.guard-page .empty-inline,.drill-page .empty-inline,.drill-page .empty-panel>span,
+  .pc-page .pc-section-head small,.pc-page .pc-empty,.pc-page .pc-pager,
+  .cabinet-page .heading p,.batch-page .text-footer>span:first-child
+) { color:var(--v2-muted); }
+html.workspace-v2:not([data-v2-theme=dark]) .daily-page .category-tabs button.active b { color:#fff;background:#155bb8; }
 @media screen and (forced-colors: none) {
   html.workspace-v2[data-v2-theme=dark] {
     color-scheme:dark;
@@ -5,6 +15,7 @@
     --v2-scroll-thumb:#596575;--v2-scroll-hover:#8895a6;
     --cf-text:#edf0f4;--cf-muted:#bec5cf;--cf-surface:#202429;--cf-surface-soft:#252a31;--cf-border:#414952;
     --cf-brand-blue:#83baff;--cf-danger:#f38f99;--cf-warning:#efbd70;--cf-success:#65cda9;
+    --v2-on-accent:#14202a;
   }
   html.workspace-v2[data-v2-theme=dark] :is(.v2-shell,.v2-shell.is-collapsed) {
     --v2-nav-top:color-mix(in srgb,var(--v2-nav-color) 20%,#12161c);
@@ -24,6 +35,9 @@
   html.workspace-v2[data-v2-theme=dark] :is(input,textarea,select) { color-scheme:dark; }
   html.workspace-v2[data-v2-theme=dark] :is(.signature-pad,.signature-canvas,.print-sheet) { color-scheme:light; background:#fff;color:#17202c; }
   html.workspace-v2[data-v2-theme=dark] .v2-watermark { opacity:.035; }
+  html.workspace-v2[data-v2-theme=dark] :is(.v2-learning-head,.v2-learning-building,.v2-learning-studybar,.v2-learning-chart-head) .n-radio-button--checked .n-radio__label { color:#14202a; }
+  html.workspace-v2[data-v2-theme=dark] input[type=checkbox]:not([data-v2-binary]):not(.n-checkbox-input)::after { border-color:var(--mb-on-accent)!important; }
+  html.workspace-v2[data-v2-theme=dark] input[type=checkbox]:not([data-v2-binary]):not(.n-checkbox-input):indeterminate::after { background:var(--mb-on-accent)!important; }
 }
 @media print {
   html.workspace-v2[data-v2-theme=dark] { color-scheme:light;--v2-ink:#1d1d1f;--v2-muted:#636366;--v2-bg:#fff;--v2-border:#dedee3; }

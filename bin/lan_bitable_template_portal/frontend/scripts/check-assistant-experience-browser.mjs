@@ -69,6 +69,9 @@ try{
   const hiddenBefore=await answer.locator('.v2-word[hidden]').count();
   await page.waitForTimeout(250);
   assert(await answer.locator('.v2-word[hidden]').count()<hiddenBefore,'words progressively enter after a buffered answer arrives');
+  assert(await answer.locator('.v2-word.cword').count()>0,'reply uses Motion Blocks word groups');
+  const wordMotion=await answer.locator('.v2-word.cword').first().evaluate(node=>({duration:getComputedStyle(node).animationDuration,curve:getComputedStyle(node).animationTimingFunction}));
+  assert.equal(wordMotion.duration,'0.38s');assert.equal(wordMotion.curve,'cubic-bezier(0.16, 1, 0.3, 1)');
   assert.equal(await answer.locator('.assistant-thinking').count(),0);
   assert.equal(await answer.locator('.v2-reply-caret').count(),1);
   assert(await answer.locator('.v2-reply-caret').evaluate(node=>!node.previousElementSibling?.hasAttribute('hidden')),'caret follows the visible word');
@@ -82,6 +85,9 @@ try{
   await page.setViewportSize({width:390,height:844});await page.waitForTimeout(350);
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
   await page.screenshot({path:path.join(output,'reply-mobile.png')});
+  await page.getByRole('button',{name:'收起助手',exact:true}).click();
+  await page.locator('.assistant-shell').waitFor({state:'hidden'});
+  assert(!await page.evaluate(()=>document.elementFromPoint(innerWidth/2,innerHeight/2)?.closest('.lighthouse')),'closed mobile assistant must not intercept page clicks');
   assert.deepEqual(errors,[]);
   console.log('PASS: production V2 themed notice filters, single thinking indicator, buffered word reveal, cursor, rich formatting, follow-bottom and mobile viewport; synthetic APIs only.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

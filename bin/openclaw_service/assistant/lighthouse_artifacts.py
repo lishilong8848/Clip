@@ -20,6 +20,18 @@ PREVIEW_CHARS = 80000
 _WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='assistant-documents')
 
 
+def attachment_analysis_requested(question):
+    return bool(re.search(r'附件|文件|文档|表格|Excel|PDF|Word|PPT|CSV', question, re.I)
+        and re.search(r'分析|总结|对比|比较|核对|统计|汇总|提取|整理|读取|阅读|内容|多少|哪些|生成|导出|转换|转成|转为|改写', question)
+        and not re.search(r'写入|回填|导入|提交|绑定|(?:上传|更新).{0,20}(?:多维表|台账|系统|平台)|(?:发送|删除).{0,20}通告', question))
+
+
+def file_generation_requested(question):
+    return bool(re.search(r'生成|创建|制作|写(?:个|一个|一份)|做(?:个|一个|一份)|整理成|导出(?:为|成)?|另存为|保存为', question)
+        and re.search(r'文件|Word|Excel|PDF|PPT|PowerPoint|\.\s*(?:py|txt|md|csv|docx|xlsx|pptx|pdf)\b', question, re.I)
+        and not re.search(r'如何|怎么|怎样|为什么|教程|不要生成|不用生成|不需要文件|只(?:需|要)?(?:解释|说明)', question))
+
+
 async def document_task(function, *args, **kwargs):
     return await asyncio.get_running_loop().run_in_executor(_WORKERS, partial(function, *args, **kwargs))
 

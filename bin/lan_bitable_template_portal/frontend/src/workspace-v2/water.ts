@@ -24,6 +24,7 @@ export function validWaterDate(value: string): boolean {
 export function waterQuery(scope: string, filters: WaterFilters, page = 1, today = waterDay()): URLSearchParams {
   const params = new URLSearchParams({ scope, page: String(page), page_size: '50' });
   if (filters.range === '近3天') { params.set('start_date', new Date(Date.parse(today+'T00:00:00Z')-2*86400000).toISOString().slice(0,10)); params.set('end_date', today); }
+  if (filters.range === '近30天') { params.set('start_date', new Date(Date.parse(today+'T00:00:00Z')-29*86400000).toISOString().slice(0,10)); params.set('end_date', today); }
   if (filters.range === '本月') {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(filters.month)) throw new Error('请选择月份。');
     params.set('month', filters.month);

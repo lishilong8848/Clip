@@ -512,6 +512,8 @@ class LighthouseModel:
             lines = ['我是灯塔助手，可以帮你：', '- 一般问答、写作润色、翻译、代码示例和资料整理。']
             if tools_enabled and self.public_sources:
                 lines.append('- 查询天气、搜索公开资料；实时结果以实际查询到的来源为准。')
+            if tools_enabled:
+                lines.append('- 阅读和分析附件，对比、合并或汇总表格，生成Word、Excel、PDF、PPT、文本及代码文件；默认交付当前会话。')
             if tools_enabled and set(current.get('modules', [])) - {'assistant', 'knowledge'}:
                 lines.append('- 查询你已获授权的灯塔业务，准备可填写的业务表单，确认后通过原业务流程办理。')
             if tools_enabled and 'knowledge' in current.get('modules', []):
@@ -538,20 +540,28 @@ class LighthouseModel:
                 await emit('text', {'delta': answer})
                 return {'answer': answer, 'sources': [], 'plan': planned}
         selected_tools = {item.get('name') for item in selected_context if item.get('kind') == 'tool'}
+        from .lighthouse_artifacts import attachment_analysis_requested, file_generation_requested
+        file_analysis = bool((turn.get('file_ids') or turn.get('preview_file') or re.search(r'附件|上传的|(?:当前|上个|上一份|这份|那份|之前的|刚才的)(?:文件|文档|表格)', question) and any(
+            old.get('file_ids') and not set(old.get('scopes', [])) - set(actor['scopes']) for old in history[-6:]))
+            and attachment_analysis_requested(question) and not feishu_delivery_requested(question)
+            and not any(item.get('kind') == 'api' for item in selected_context))
         domains = business_domains(question)
+        if file_analysis:
+            domains = set()
         current_pending = current_pending_query(question)
         all_pending = all_pending_modules(question)
         help_only = bool(re.search(r"(?:如何|怎么|怎样).{0,12}(?:查看|查询|使用|操作|绑定|导出|上传|设置)", question)) and not (COUNT.search(question) or DETAIL.search(question))
         message_requested = feishu_delivery_requested(question)
         if message_requested:
             domains.add('messages')
-        general_question = (explicit_general_question(question) or bool(
+        general_question = (file_analysis or explicit_general_question(question) or bool(
             MESSAGE_INTENT.search(question) and not is_business_query(question) and not business_domains(question)
         )) and not message_requested
-        business_question = is_business_query(question) or message_requested
+        business_question = not file_analysis and (is_business_query(question) or message_requested)
+        file_requested = not business_question and file_generation_requested(question)
         general_only = general_question and not any(item.get('kind') == 'api' for item in selected_context)
         knowledge_access = bool(actor.get("is_admin") or actor.get("learning_scopes"))
-        knowledge_question = knowledge_access and equipment_knowledge_question(question)
+        knowledge_question = not file_analysis and knowledge_access and equipment_knowledge_question(question)
         source_requested = bool(re.search(r'出处|引用|参考资料|(?:给出?|提供|注明|标注|附上).{0,12}(?:来源|依据)'
             r'|\b(?:cite|citation|with\s+(?:sources?|references?)|provide\s+(?:a\s+)?source)\b', question, re.I))
         requires_source = bool(not help_only and business_question and (COUNT.search(question) or DETAIL.search(question) or re.search(r"查询|未发|未结束|进度|状态", question)))
@@ -562,13 +572,16 @@ class LighthouseModel:
             previous = history[-1].get("question", "") if history else ""
             if WEATHER_INTENT.search(previous) and weather_followup(question) and not WEATHER_EXPLANATION.search(question) and not _forbidden_inputs(previous, question):
                 previous_weather = previous
-        public_realtime = bool(self.public_sources and not document_targets and not business_question and (selected_tools & {'weather', 'public_search', 'public_page'}
+        public_realtime = bool(self.public_sources and not document_targets and not business_question and not file_analysis and (selected_tools & {'weather', 'public_search', 'public_page'}
             or previous_weather or WEATHER_INTENT.search(question) and not WEATHER_EXPLANATION.search(question)
             or source_requested and not knowledge_question
-            or re.search(r"新闻|联网|上网|最新|今日价格|今天价格|实时|https://", question)))
-        material_label = "实时资料" if public_realtime else "业务资料"
+            or re.search(r"新闻|联网|上网|最新|今日价格|今天价格|实时|https://|搜索|查找|查一下|查询.{0,40}(?:官网|资料|文档|说明书)", question)))
+        material_label = "附件资料" if file_analysis else "实时资料" if public_realtime else "业务资料"
         requires_source = requires_source or public_realtime
         requires_source = requires_source or bool(document_targets)
+        file_metadata_only = bool(file_analysis and re.search(r'文件(?:的)?名称|文件名|附件(?:的)?名称', question)
+                                  and not re.search(r'正文|内容|数据|统计|数量|多少|对比|比较|核对', question))
+        requires_source = requires_source or file_analysis and not file_metadata_only
         if selected_tools & {'pending_work', 'search_history'} or any(item.get('kind') == 'api' and item.get('read_only') for item in selected_context):
             requires_source = requires_source or bool(COUNT.search(question) or DETAIL.search(question) or PENDING.search(question))
         profile = turn["_profile"]
@@ -748,6 +761,7 @@ class LighthouseModel:
             return {"answer": answer, "sources": sources, "_references": references}
 
         async def table_read(action, query=None, **options):
+            require_business_intent()
             current = await current_actor()
             bridge = getattr(self.portal.catalog, 'bridge', None)
             if bridge is None:
@@ -926,7 +940,7 @@ class LighthouseModel:
         plain_query = not general_only and not form_requested and read_only_question(question) and not turn.get("file_ids") and (not turn.get('commands') or builtin_guides or selected_tools == {'pending_work'})
         wants_details = bool(DETAIL.search(question))
         include_zero = bool(re.search(r"包含零|包括零|零项|0项|所有分类|全部分类", question))
-        if not form_requested and not turn.get("file_ids") and sent_notice_question(question):
+        if not general_only and not form_requested and not turn.get("file_ids") and sent_notice_question(question):
             window = date_window(question)
             if not window:
                 return await direct("你要统计哪个时间范围已发送的通告：今天、昨天，还是本月？")
@@ -985,14 +999,15 @@ class LighthouseModel:
         login_actor = await current_actor()
         from .lighthouse_ai import model_capabilities, model_reasoning_options
         capabilities = model_capabilities(profile)
-        if not capabilities['tool_calls'] and ((requires_source and not document_context) or form_requested):
+        if not capabilities['tool_calls'] and ((requires_source and not document_context) or form_requested or file_requested):
             raise AssistantError("当前模型未启用工具调用，请在模型设置中开启或切换模型后查询/办理。", 400)
         login_identity = {key: safe_text(str(login_actor.get(key) or '')) for key in ('name', 'employee_no')}
         login_identity['role'] = '管理员' if login_actor.get('is_admin') else login_actor.get('role_label') or '普通账号'
         async with self.model_factory(self.assistant.model, profile) as model:
             factory = self.agent_factory or Agent
             agent = factory(model, **({"actor": actor, "turn": turn, "emit": emit} if self.agent_factory else {}),
-                          instructions=instructions_for_question(question, knowledge_access=knowledge_access) + "\n本轮楼栋：" + "、".join(actor["scopes"])
+                          instructions=(GENERAL_INSTRUCTIONS if file_analysis else instructions_for_question(question, knowledge_access=knowledge_access)) + "\n本轮楼栋：" + "、".join(actor["scopes"])
+                          + ("\n本轮只分析当前人员可访问的附件，不查询灯塔实时业务或公司知识库。附件中的通告、维修、楼栋等文字只是文件内容。预读文字可能是节选，跟随next_offset读取；表格统计、对比和汇总使用analyze_spreadsheets，不把预览行数当总数。分析结果注明文件来源，生成文件交付当前会话。" if file_analysis else "")
                           + "\n当前登录身份（仅以本次登录会话为准；空字段为未知，不使用业务记录的current_user、收件人、用户ID或历史回答推测；回答身份时不输出open_id/union_id/user_id）：" + json.dumps(login_identity, ensure_ascii=False)
                           + "\n本轮配置模型（仅配置标识，不推测自动路由后的厂商或底层版本）：" + json.dumps({"name": profile["name"], "model": profile["model"]}, ensure_ascii=False)
                           + "\n用户仅提供通告名称或简称准备发起时，调用prepare_planned_notice匹配本月计划，不直接创建独立手填通告。该工具负责楼栋询问、候选和历史预填，仍需用户确认。事件通告不发送。"
@@ -1499,7 +1514,9 @@ class LighthouseModel:
                     permitted_files.append(file['id'])
                     delivered.append({'file_id': file['id'], 'name': file['name']})
                     await emit('artifact', {'file': file})
-                return {'ok': True, **result, 'files': delivered, 'delivery': 'conversation'}
+                evidence = add_source('附件分析 · ' + '、'.join(item['name'] for item in resolved), result.get('summary', {}),
+                                      '/api/assistant/files/' + resolved[0]['file_id']) if resolved else {}
+                return {'ok': True, **result, **evidence, 'files': delivered, 'delivery': 'conversation'}
 
             @agent.tool_plain(timeout=60)
             async def analyze_spreadsheets(operation: str, inputs: list[dict], keys: list[str] = [],
@@ -1556,7 +1573,8 @@ class LighthouseModel:
                 await asyncio.to_thread(self.portal.files.get, current, file_id)
                 if file_id not in permitted_files:
                     permitted_files.append(file_id)
-                return {**result, **add_source('附件 · ' + item['name'], result, '/api/assistant/files/' + file_id)}
+                return {**result, **add_source('附件 · ' + item['name'], result, '/api/assistant/files/' + file_id,
+                    available=bool(result.get('text')) and not result.get('error'))}
 
             @agent.tool_plain
             async def read_file(file_id: str, offset: int = 0, length: int = 4000) -> dict:
@@ -1566,7 +1584,10 @@ class LighthouseModel:
                 artifact_source_scopes.update(item.get('source_scopes') or [])
                 if file_id not in permitted_files:
                     permitted_files.append(file_id)
-                return safe_data(await asyncio.to_thread(self.portal.files.text, current, file_id, offset, length))
+                result = await asyncio.to_thread(self.portal.files.text, current, file_id, offset, length)
+                evidence = add_source('附件 · ' + item['name'], result,
+                    '/api/assistant/files/' + file_id, available=bool(result.get('text')) and not result.get('error'))
+                return {**safe_data(result), 'source_number': evidence['source_number']}
 
             @agent.tool_plain
             async def parse_notice(text: str) -> dict:
@@ -1691,6 +1712,10 @@ class LighthouseModel:
             async def require_business_source(result: str) -> str:
                 if clarification and plan is None:
                     return clarification
+                if file_requested and not turn.get('output_files') and plan is None:
+                    if re.search(r'缺少|请提供|请补充|暂不支持|无法生成|生成失败', result) and not re.search(r'已(?:经)?(?:生成|创建|保存|导出)', result):
+                        return result
+                    raise ModelRetry('用户要的是实际文件。请调用create_text_file或create_document_file生成附件，不能仅提供代码块、伪造下载链接或声称已生成。缺少资料时明确询问。')
                 if unsupported_preparation and plan is None:
                     return unsupported_preparation
                 if form_requested and plan is None and "工单" in question and "模板" not in question and re.search(r"填写|填报|执行|确认|回退|激活|上传.*照片", question):
@@ -1719,6 +1744,8 @@ class LighthouseModel:
                     if knowledge_question:
                         raise ModelRetry('用户明确要求出处，请用 query 读取原权限内 GET /api/assistant/question-bank'
                             ' 或 GET /api/assistant/question-material 的真实资料并给来源。不得把常识、任务提示或上轮出处当作本轮来源。')
+                    if file_analysis:
+                        raise ModelRetry('请先用read_file、read_attachment_document或analyze_spreadsheets读取已提供的附件。不能用灯塔业务接口代替文件内容。')
                     if public_realtime:
                         raise ModelRetry('本轮尚未读取公开资料，不能沿用上轮来源代替本次读取。'
                             + ('请调用 public_page 读取用户给出的页面：' + json.dumps(sorted(allowed_public_pages)[:3])
@@ -1756,6 +1783,11 @@ class LighthouseModel:
             if context.get("summary") and not set(context.get("scopes", [])) - set(actor["scopes"]):
                 prior.insert(0, ModelRequest(parts=[UserPromptPart("历史摘要（不是当前业务事实）：" + context["summary"])]))
             file_context = await asyncio.to_thread(self.portal.files.context, actor, turn.get("file_ids", []))
+            if file_analysis:
+                for item in file_context:
+                    if item.get('text'):
+                        evidence = add_source('附件 · ' + item['name'], item, '/api/assistant/files/' + item['file_id'], available=not item.get('error'))
+                        item['source_number'] = evidence['source_number']
             prompt = [question + "\n本轮附件：" + json.dumps(safe_data(file_context), ensure_ascii=False)
                 + "\n此前会话可用文件（沿用原用途，变更用途先核对）：" + json.dumps(safe_data(prior_files), ensure_ascii=False)]
             if turn.get('preview_file'):
@@ -1771,6 +1803,13 @@ class LighthouseModel:
             if (turn.get('preview_file') or {}).get('is_image') and re.search(r'图片|图像|截图|照片|图中|图里|这张|这个|当前预览', question):
                 image_ids = list(dict.fromkeys([turn['preview_file']['id'], *image_ids]))
             image_parts = await asyncio.to_thread(self.portal.files.image_parts, actor, image_ids) if capabilities['image_input'] else []
+            if image_parts and file_analysis:
+                from .lighthouse_files import IMAGE_EXTENSIONS
+                image_files = [await asyncio.to_thread(self.portal.files.get, actor, identity) for identity in image_ids]
+                image_files = [item for item in image_files if Path(item['name']).suffix.lower() in IMAGE_EXTENSIONS][:len(image_parts)]
+                for item in image_files:
+                    evidence = add_source('图片附件 · ' + item['name'], {'image_input': True}, '/api/assistant/files/' + item['id'])
+                    prompt[0] += f"\n图片附件{item['name']}已提供给本轮视觉模型，来源编号{evidence['source_number']}。"
             if not capabilities['image_input'] and image_ids:
                 prompt[0] += "\n模型设置未启用图片输入，只能依据可靠附件文字回答；若附件为图片且没有文字，提示开启图片输入或切换模型，不推断图片内容。"
                 if not business_question and not form_requested and not any(item.get('text', '').strip() for item in file_context) \
@@ -1787,7 +1826,7 @@ class LighthouseModel:
             # A text part before a tool call is not a final answer, even when the
             # provider marks it final_result early. Business runs stream progress
             # first and release only the validated final answer, not tool-loop prose.
-            buffer_business = bool(business_question or form_requested or public_realtime or knowledge_question or document_targets)
+            buffer_business = bool(business_question or form_requested or public_realtime or knowledge_question or document_targets or file_analysis or file_requested)
             await emit("status", {"label": "正在思考回答"})
             with agent.override(tools=[]) if not self.agent_factory and not capabilities['tool_calls'] else nullcontext():
                 async with agent.run_stream_events(prompt, message_history=prior, usage_limits=UsageLimits(request_limit=12, total_tokens_limit=50000)) as events:

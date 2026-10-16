@@ -104,6 +104,21 @@ try{
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
   assert.equal(await page.locator('.record-row').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
   await openFirst(page);await noOverflow(page);
+  const flow=detail(page).getByRole('region',{name:'检修办理流程'});
+  assert.equal(await flow.locator('[data-flow-step]').count(),5);
+  assert.equal(await flow.locator('[data-flow-step="project"]').getAttribute('data-flow-status'),'finish');
+  assert.equal(await flow.locator('[data-flow-step="complete"]').getAttribute('data-flow-status'),'process');
+  assert.match(await flow.locator('[data-flow-step="event"]').innerText(),/转检修待核对/);
+  assert.match(await flow.locator('[data-flow-step="notice"]').innerText(),/发送状态需核对/);
+  await flow.scrollIntoViewIfNeeded();
+  const flowTitles=await flow.locator('.n-step-content-header__title').evaluateAll(nodes=>nodes.map(el=>({text:el.textContent,width:el.getBoundingClientRect().width,height:el.getBoundingClientRect().height,flex:getComputedStyle(el).flex})));
+  await flow.screenshot({path:path.join(output,'repair-flow-desktop.png')});
+  assert(flowTitles.every(title=>title.height<=44),'step titles must not collapse: '+JSON.stringify(flowTitles));
+  await flow.getByRole('button',{name:'查看或填写维修单',exact:true}).focus();await page.keyboard.press('Enter');
+  await detail(page).locator('.v2-repair-project-form:visible').waitFor();
+  await flow.getByRole('button',{name:'查看或填写跟进记录',exact:true}).click();
+  assert.equal(fixture.writes.length,0,'step navigation only switches the existing form');
+  await flow.screenshot({path:path.join(output,'repair-flow-desktop.png')});
   assert.equal(await detail(page).getByRole('button',{name:'检修通告',exact:true}).count(),1,'notice access independent of delete permission');
   assert.equal(await detail(page).getByRole('button',{name:'删除'}).count(),0);
   await page.screenshot({path:path.join(output,'pc-followup.png'),fullPage:true});
@@ -130,6 +145,9 @@ try{
   fixture.conflict=true;await detail(page).getByRole('textbox',{name:'备注',exact:true}).fill('当前填写应保留');await detail(page).getByRole('button',{name:'保存修改',exact:true}).click();await detail(page).locator('.n-alert').filter({hasText:'记录已由其他人修改，请核对最新版。'}).waitFor();assert.equal(await detail(page).getByRole('textbox',{name:'备注',exact:true}).inputValue(),'当前填写应保留');fixture.conflict=false;
   fixture.canDelete=false;fixture.failStats=true;page=await newPage(390);await page.getByText('数量暂不可用',{exact:false}).waitFor();assert.match(await page.locator('.v2-repair-state-row .n-radio-button').filter({hasText:'未完成'}).innerText(),/—/,'failed count not zero');fixture.failStats=false;await noOverflow(page);assert.equal(await page.locator('.v2-repair-row-state').first().isVisible(),true,'mobile keeps status');assert.equal(await page.locator('.v2-repair-row-progress').first().isVisible(),true,'mobile keeps progress');await page.screenshot({path:path.join(output,'mobile-list.png'),fullPage:true});await openFirst(page);await noOverflow(page);assert.equal(await page.locator('.v2-repair-list').isVisible(),false);await page.screenshot({path:path.join(output,'mobile-followup.png'),fullPage:true});
   page=await newPage(360);await openFirst(page);await noOverflow(page);
+  await detail(page).locator('.v2-repair-flow .n-steps--vertical').waitFor();
+  assert(await detail(page).locator('.v2-repair-flow .n-step-content-header__title').evaluateAll(nodes=>nodes.every(el=>el.getBoundingClientRect().height<=44)));
+  await detail(page).locator('.v2-repair-flow').screenshot({path:path.join(output,'repair-flow-mobile.png')});
   for(const width of [360,390,430]){
     page=await newPage(width);await openFirst(page);
     assert.equal(await page.locator('#workspace-page-filters').isVisible(),false,'mobile filling uses the screen instead of keeping list filters');

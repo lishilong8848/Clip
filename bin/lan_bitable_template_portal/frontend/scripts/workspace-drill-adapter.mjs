@@ -13,6 +13,17 @@ export function adaptDrillPresentation(source, filename) {
   const file = filename.replaceAll('\\', '/').split('/').pop();
   if (file === 'LifeGuidePage.vue') return source + '\n<style scoped src="../workspace-v2/lifeGuide.css"></style>\n';
   if (file !== 'DrillManagementPage.vue') return source;
+  source=replaceOnce(source,'uniquePeople([...selectedParticipants.value, ...commanderPeople.value])','uniquePeople(selectedParticipants.value)');
+  source=replaceOnce(source,`  if (!participantIds.value.includes(id)) {
+    if (participantIds.value.length >= 10) {
+      setNotice("参演人员已满 10 人，请先移除不参与本次演练的人员，再选择签名。", "warning");
+      return;
+    }
+    execution.value.participants.push(compactPerson(person));
+  }`,`  if (!participantIds.value.includes(id)) {
+    setNotice("请先在上方选择本次参演人员，再分配步骤执行人。", "warning");
+    return;
+  }`);
   const {descriptor} = parse(source), lists = [];
   function visit(node) {
     if (node.tag === 'aside' && node.props?.some(p => p.name === 'class' && p.value?.content === 'drill-list')) lists.push(node);

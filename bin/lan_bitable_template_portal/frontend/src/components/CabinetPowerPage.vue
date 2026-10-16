@@ -131,6 +131,8 @@
           <dl v-if="selectedRack?.latest_success" class="state-facts"><div><dt>最近成功操作</dt><dd>{{ selectedRack.latest_success.action }}{{ selectedRack.latest_success.baseline_correction ? '（平面图基线校正）' : '' }}</dd></div><div><dt>实际完成时间</dt><dd>{{ selectedRack.latest_success.actual || '未填写' }}</dd></div></dl>
           <div v-if="selectedRack && !readOnly" class="actions state-actions"><button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state === target || selectedRack.state === 'unknown'" @click="openStateSwitch(target)">{{ stateAction(target) }}</button></div>
           <p v-if="historyLoading" role="status"><LoadingIndicator>正在读取完整历史…</LoadingIndicator></p>
+          <div v-else-if="historyError" class="notice danger" role="alert"><span>{{ historyError }}</span><button :disabled="historyMoreLoading" @click="history.items?.length ? moreHistory() : openHistory(historyRoom, historyRack)">重试读取</button></div>
+          <p v-else-if="!history.items?.length" class="empty">该机柜暂无已登记的操作历史。</p>
           <article v-for="op in history.items || []" :key="op.record_id" class="history-record">
             <div class="section-title"><strong>{{ op.meta?.baseline_correction ? '平面图基线校正' : op.source || '飞书记录' }} {{ op.source_row ? '第 ' + op.source_row + ' 行' : '' }}</strong><button v-if="!readOnly && (!isResidualEmptyRecord(op) || canDelete)" class="link" @click="isResidualEmptyRecord(op) ? requestDeleteEmptyRecord(op) : openEditor(op)">{{ isResidualEmptyRecord(op) ? '删除空记录' : '编辑' }}</button></div>
             <p v-for="issue in op.issues" :key="issue" class="test-text">{{ issue }}</p>
@@ -138,7 +140,7 @@
             <p v-else>机柜资料已登记，尚无操作。</p>
             <details v-if="op.issues.length"><summary>原始操作内容</summary><div v-for="(group, i) in op.groups" :key="i" class="raw-group"><div><small>操作类型</small><pre>{{ group.action }}</pre></div><div><small>期望完成时间</small><pre>{{ group.expected || '未填写' }}</pre><small>实际完成时间</small><pre>{{ group.actual || '未填写' }}</pre></div></div></details>
           </article>
-          <button v-if="history.items?.length < history.total" @click="moreHistory">加载更多</button>
+          <button v-if="!historyError && history.items?.length < history.total" :disabled="historyMoreLoading" @click="moreHistory">{{ historyMoreLoading ? '正在读取…' : '加载更多' }}</button>
         </div>
       </section>
     </div>
@@ -528,9 +530,12 @@ const layoutCache = new Map<string,Dict>();
 watch(() => overview.value.version, (version, previous) => { if (previous && version !== previous) layoutCache.clear(); });
 const filteredRooms = computed(() => (overview.value.rooms || []).filter((r: Dict) => !mapSearch.value || (r.id + ' ' + r.name).includes(mapSearch.value) || (overview.value.racks || []).some((rack: Dict) => rack.room === r.id && rack.rack.includes(mapSearch.value.toUpperCase()))));
 async function selectRoom(id: string): Promise<void> {
-  if (!id) return; currentRoom.value = id; const cacheKey = `${overview.value.version || ''}:${id}`, cached = layoutCache.get(cacheKey); if (cached) { layout.value = cached; await nextTick(); fitMap(); return; }
-  mapAbort?.abort(); mapAbort = new AbortController(); layoutLoading.value = true; const seq = ++mapSequence;
-  try { const data = await read('rooms/' + id + '/layout',{},90000,mapAbort.signal); if (seq !== mapSequence) return; layoutCache.set(cacheKey,data); layout.value = data; layoutLoading.value = false; await nextTick(); fitMap(); } catch (exc) { if (!cancelled(exc)) fail(exc); } finally { if (seq === mapSequence) layoutLoading.value = false; }
+  if (!id) return;
+  mapAbort?.abort(); const seq = ++mapSequence; currentRoom.value = id;
+  const cacheKey = `${overview.value.version || ''}:${id}`, cached = layoutCache.get(cacheKey);
+  if (cached) { layout.value = cached; layoutLoading.value = false; await nextTick(); fitMap(); return; }
+  mapAbort = new AbortController(); layoutLoading.value = true; layout.value = {};
+  try { const data = await read('rooms/' + id + '/layout',{},90000,mapAbort.signal); if (disposed || seq !== mapSequence) return; layoutCache.set(cacheKey,data); layout.value = data; layoutLoading.value = false; await nextTick(); fitMap(); } catch (exc) { if (!disposed && seq === mapSequence && !cancelled(exc)) fail(exc); } finally { if (seq === mapSequence) layoutLoading.value = false; }
 }
 function fitMap(): void { if (viewport.value && layout.value.layout) zoom.value = Math.max(.25, Math.min(1.2, (viewport.value.clientWidth - 20) / layout.value.layout.width)); }
 function cellStyle(cell: Dict): Dict {
@@ -539,15 +544,25 @@ function cellStyle(cell: Dict): Dict {
   return { ...border, left: cell.x + 'px', top: cell.y + 'px', width: cell.width + 'px', height: cell.height + 'px', background: cell.color || s.fill || 'transparent', color: cell.rack && cell.state === 'formal' ? '#fff' : s.font_color || '#1e293b', fontSize: Math.max(9, (s.font_size || 10) * 4 / 3) + 'px', fontFamily: s.font_name || 'inherit', fontWeight: s.bold ? 700 : 400, whiteSpace: s.wrap_text ? 'pre-wrap' : 'pre' };
 }
 const historyOpen = ref(false), historyRoom = ref(''), historyRack = ref(''), history = ref<Dict>({}), historyLoading = ref(false);
+const historyError = ref(''), historyMoreLoading = ref(false);
+watch(historyOpen, open => { if (!open) { ++historySequence; historyAbort?.abort(); historyLoading.value = false; historyMoreLoading.value = false; } });
 const selectedRack = computed(() => history.value.rack_state || (overview.value.racks || []).find((r: Dict) => r.room === historyRoom.value && r.rack === historyRack.value));
 const sortedEvents = (events: Dict[]) => [...events].sort((a, b) => (b.actual || '').localeCompare(a.actual || ''));
 async function focusModal(): Promise<void> { await nextTick(); (document.querySelector('.cabinet-page .confirm-modal') || document.querySelector('.editor-layer .modal') || document.querySelector('.scrim .modal'))?.querySelector<HTMLElement>('button, input, select')?.focus(); }
 async function openHistory(room: string, rack: string): Promise<void> {
-  historyAbort?.abort(); historyAbort = new AbortController(); historyRoom.value = room; historyRack.value = rack; historyOpen.value = true; historyLoading.value = true; history.value = {}; const seq = ++historySequence; void focusModal();
-  try { const data = await read('operations', { room, rack, page: 1 },90000,historyAbort.signal); if (seq === historySequence) history.value = data; } catch (exc) { if (!cancelled(exc)) fail(exc); } finally { if (seq === historySequence) historyLoading.value = false; }
+  historyAbort?.abort(); historyAbort = new AbortController(); historyRoom.value = room; historyRack.value = rack; historyOpen.value = true; historyLoading.value = true; historyMoreLoading.value = false; historyError.value = ''; history.value = {}; const seq = ++historySequence; void focusModal();
+  try { const data = await read('operations', { room, rack, page: 1 },90000,historyAbort.signal); if (!disposed && seq === historySequence) history.value = data; } catch (exc: any) { if (!disposed && seq === historySequence && !cancelled(exc)) historyError.value = exc?.message || '读取失败，请重试'; } finally { if (seq === historySequence) historyLoading.value = false; }
 }
 function openRecordDetails(op: Dict): void { void openHistory(op.room,op.rack); }
-async function moreHistory(): Promise<void> { try { const data = await read('operations', { room: historyRoom.value, rack: historyRack.value, page: history.value.page + 1 }); history.value = { ...data, items: [...history.value.items, ...data.items] }; } catch (exc) { fail(exc); } }
+async function moreHistory(): Promise<void> {
+  if (!historyOpen.value || historyLoading.value || historyMoreLoading.value || !(history.value.items?.length < history.value.total)) return;
+  const seq = historySequence; historyMoreLoading.value = true; historyError.value = '';
+  try {
+    const data = await read('operations', { room: historyRoom.value, rack: historyRack.value, page: history.value.page + 1 },90000,historyAbort?.signal);
+    if (!disposed && seq === historySequence) history.value = { ...data, items: [...history.value.items, ...data.items] };
+  } catch (exc: any) { if (!disposed && seq === historySequence && !cancelled(exc)) historyError.value = exc?.message || '读取失败，请重试'; }
+  finally { if (seq === historySequence) historyMoreLoading.value = false; }
+}
 async function editIssue(id: string): Promise<void> {
   const issue = overview.value.issues.find((i: Dict) => i.record_id === id);
   if (!issue) return;

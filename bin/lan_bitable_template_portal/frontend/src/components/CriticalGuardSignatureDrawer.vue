@@ -340,6 +340,7 @@ async function loadCompanyPeople(refresh = false, silent = false): Promise<void>
   companyLoading.value = true;
   try {
     const data = await fetchSignaturePeople({
+      allPeople: true,
       scope: requestScope,
       q: requestQuery,
       noticeKey: requestContextKey,
@@ -420,6 +421,7 @@ async function loadExternalPeople(refresh = false): Promise<void> {
   const requestQuery = externalSearch.value;
   try {
     const data = await fetchExternalSignaturePeople({
+      allPeople: true,
       scope: requestScope,
       q: requestQuery,
       noticeKey: requestContextKey,

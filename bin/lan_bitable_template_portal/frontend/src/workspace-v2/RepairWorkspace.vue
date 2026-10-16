@@ -41,6 +41,7 @@
             <div class="project-drawer-body v2-repair-detail-body">
               <NSkeleton v-if="r.recordDetailLoading" text :repeat="8" />
               <template v-else>
+                <RepairFlowSteps context="project" :record="r.selectedRecord" :event="r.selectedEvent" :sync-status="r.projectSyncStatus?.status" :busy="r.v2Writing||r.prefillLoading" :actions="flowActions(r)" @select="action=>openFlowStep(action,r)" />
                 <NAlert v-if="r.selectedRecordReadOnly" type="warning" :bordered="false">{{r.selectedRecordStateLocked?'跟进状态尚未核验，当前只读。':'当前项目只读。'}}</NAlert>
                 <NAlert v-if="r.projectSyncStatus?.status==='pending'||r.projectSyncStatus?.status==='failed'" :type="r.projectSyncStatus.status==='failed'?'warning':'info'" :bordered="false"><NSpin v-if="r.projectSyncStatus.status==='pending'" :size="14" />{{r.projectSyncStatusText}}<NButton v-if="r.projectSyncStatus.status==='failed'" text :loading="r.syncRetrying" @click="r.retryProjectSync">重试同步</NButton></NAlert>
                 <NAlert v-if="r.submission.pending.value" :type="r.submission.status.value==='failed'?'error':'warning'" :bordered="false">{{r.submission.message.value}}<NButton text :disabled="r.submission.checking.value" @click="r.submission.check(true,true)">核验原任务</NButton></NAlert>
@@ -92,6 +93,8 @@ import RepairController from '../components/RepairManagementPage.vue';
 import RepairFollowups from './RepairFollowups.vue';
 import RepairField from './RepairField.vue';
 import RepairPeoplePicker from '../components/RepairPeoplePicker.vue';
+import RepairFlowSteps from './RepairFlowSteps.vue';
+import type { RepairFlowAction } from './repairFlow';
 import RepairTaskCenter from '../components/RepairTaskCenter.vue';
 import RecordPickerDialog from '../components/RecordPickerDialog.vue';
 import ConfirmDialog from './RepairConfirmation.vue';
@@ -112,4 +115,10 @@ function pendingCount(r:any){return stat(r,'total');}
 function more(key:string,r:any){if(key==='tasks')r.openFailureCenter();if(key==='sync')void r.refreshRepairSources();}
 function recordOptions(r:any){return [{key:'reset',label:'放弃本次修改'},...(props.canDelete&&r.editingRecordId?[{key:'delete',label:'删除维修项目'}]:[])];}
 function recordMore(key:string,r:any){if(key==='reset')r.requestResetDraft();if(key==='delete'&&props.canDelete)r.requestDeleteRecord();}
+function flowActions(r:any):RepairFlowAction[]{return ['event','project',...(r.editingRecordId?['followups','complete'] as RepairFlowAction[]:[]),...(r.editingRecordId&&noticeAllowed.value&&!r.selectedRecordReadOnly?['notice'] as RepairFlowAction[]:[])];}
+function openFlowStep(action:RepairFlowAction,r:any){
+  if(r.v2Writing||r.prefillLoading||!flowActions(r).includes(action))return;
+  if(action==='notice')r.requestOpenRepairNoticeWorkbench();
+  else r.openWorkspaceTab(action==='followups'||action==='complete'?'followups':'project');
+}
 </script>

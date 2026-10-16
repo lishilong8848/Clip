@@ -59,6 +59,17 @@ try{
     await page.setViewportSize({width,height:844});await check('L3',5);await check('L1',7);
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),'responsive table stays within its scroll region');
   }
+  await page.setViewportSize({width:1440,height:900});await levels.selectOption('');
+  await page.getByRole('tab',{name:'树形分组',exact:true}).click();
+  const tree=page.getByRole('tree',{name:'按权限级别与楼宇分组的账号树'});await tree.waitFor();
+  const level=tree.locator('.v2-tree-level').first(),branch=level.locator('xpath=..').locator(':scope > ul');
+  assert.equal(await branch.count(),1);await level.click();assert.equal(await branch.count(),0);assert.equal(await level.getAttribute('aria-expanded'),'false');
+  await level.click();assert.equal(await branch.count(),1);assert.equal(await level.getAttribute('aria-expanded'),'true');
+  const building=tree.locator('.v2-tree-building').first(),people=building.locator('xpath=..').locator(':scope > ul');
+  await building.click();assert.equal(await people.count(),0);await building.click();assert.equal(await people.count(),1);
+  const picker=page.locator('.v2-settings-picker');assert(await picker.locator('[data-v2-layout-tools="accounts"] button').isVisible());
+  await picker.getByRole('button',{name:'高级诊断',exact:true}).click();await page.waitForFunction(()=>new URL(location.href).searchParams.get('tab')==='pressure');
+  await page.getByRole('button',{name:'返回个人页面',exact:true}).click();await page.waitForFunction(()=>new URL(location.href).searchParams.get('view')==='my');
   assert.deepEqual(writes,[]);assert.deepEqual(errors,[]);
   console.log('PASS: L0 sees all L1/L2/L3 matches, preserved effective levels, search, native pagination, resized panels and mobile. No business writes.');
 }finally{await browser.close();await server.close();}

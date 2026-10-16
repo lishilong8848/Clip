@@ -4,11 +4,13 @@ export function adaptBrowserReferences(code, filename, adapterPath, embedded=fal
   const component=filename.replaceAll('\\', '/').split('?')[0];
   const eventPage=component.endsWith('/EventManagementPage.vue');
   if (!eventPage&&!/\b(?:location|history|open)\b/.test(code)) return null;
-  const tree = ts.createSourceFile(filename, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  // TypeScript skips .vue roots unless the virtual script has a supported extension.
+  const scriptFilename = filename + '.ts';
+  const tree = ts.createSourceFile(scriptFilename, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   // Bind the compiled module so local refs/imports named history or location stay untouched.
   const host = ts.createCompilerHost({ noLib: true, noResolve: true });
-  host.getSourceFile = name => name === filename ? tree : undefined;
-  const checker = ts.createProgram([filename], { noLib: true, noResolve: true }, host).getTypeChecker();
+  host.getSourceFile = name => name === scriptFilename ? tree : undefined;
+  const checker = ts.createProgram([scriptFilename], { noLib: true, noResolve: true }, host).getTypeChecker();
   const isGlobal = node => !checker.getSymbolAtLocation(node);
   const replacements = [];
   const aliases = { location: '__v2Location', history: '__v2History', open: '__v2Open' };

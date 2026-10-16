@@ -764,6 +764,8 @@ class FastAPIPortalController:
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
         install_link_directory_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.workspace_layout_routes import install_workspace_layout_routes
+        install_workspace_layout_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes
         recommend_notice_tags = install_lighthouse_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.notice_alert_tags import install_notice_alert_tag_routes
@@ -2859,6 +2861,7 @@ class FastAPIPortalController:
                         )
                 data = await asyncio.to_thread(
                     PortalRuntime.service.signature_people,
+                    all_people=str(request.query_params.get("all_people") or "").lower() in {"1", "true", "yes"},
                     scope=str(request.query_params.get("scope") or ""),
                     query=str(request.query_params.get("q") or ""),
                     record_id=record_id,
@@ -3121,6 +3124,7 @@ class FastAPIPortalController:
                 )
                 data = await asyncio.to_thread(
                     PortalRuntime.service.temporary_signature_people,
+                    all_people=str(request.query_params.get("all_people") or "").lower() in {"1", "true", "yes"},
                     scope=scope,
                     query=str(request.query_params.get("q") or ""),
                     notice_key=str(request.query_params.get("notice_key") or ""),

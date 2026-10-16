@@ -1,0 +1,388 @@
+/* V2-only presentation for the account settings tree and the signature page.
+   Loaded by AccountHierarchy.vue and (when the adapter needs it) injected into
+   the adapted SFCs. Uses the established workspace-v2 theme variables so both
+   light and dark palettes resolve automatically. */
+
+/* ------------------------------------------------------------------ */
+/* Account settings: external mode switch + embedded hierarchy tree    */
+/* ------------------------------------------------------------------ */
+.v2-account-mode-bar,.v2-account-hierarchy,.v2-admin-toolbar,.v2-settings-picker,.v2-signature-toolbar { --v2-text:var(--v2-ink);--v2-surface:var(--v2-bg); }
+.v2-account-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0 12px;
+}
+.v2-account-mode-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--v2-border);
+  border-radius: 999px;
+  background: var(--v2-surface);
+  color: var(--v2-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.v2-account-mode-bar button[aria-selected='true'] {
+  border-color: var(--v2-blue);
+  color: var(--v2-blue);
+  background: color-mix(in srgb, var(--v2-blue) 14%, transparent);
+}
+.v2-account-mode-bar button:hover:not([aria-selected='true']) {
+  border-color: var(--v2-muted);
+}
+
+.v2-account-hierarchy {
+  min-width: 0;
+  width: 100%;
+  font-size: 14px;
+  color: var(--v2-text);
+}
+.v2-account-mode-switch {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.v2-account-mode-switch button {
+  min-height: 30px;
+  padding: 4px 14px;
+  border: 1px solid var(--v2-border);
+  border-radius: 999px;
+  background: var(--v2-surface);
+  color: var(--v2-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.v2-account-mode-switch button[aria-selected='true'] {
+  border-color: var(--v2-blue);
+  color: var(--v2-blue);
+  background: color-mix(in srgb, var(--v2-blue) 14%, transparent);
+}
+
+/* Flat list */
+.v2-account-list {
+  display: grid;
+  gap: 8px;
+}
+.v2-account-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--v2-border);
+  border-radius: 10px;
+  background: var(--v2-surface);
+}
+.v2-account-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.v2-account-row-main strong {
+  font-size: 14px;
+}
+.v2-account-row-meta {
+  color: var(--v2-muted);
+  font-size: 12px;
+}
+.v2-account-row-level {
+  color: var(--v2-muted);
+  font-size: 12px;
+}
+.v2-account-row-scopes {
+  color: var(--v2-muted);
+  font-size: 12px;
+}
+.v2-account-manage {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-surface);
+  color: var(--v2-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.v2-account-manage:hover:not(:disabled) {
+  border-color: var(--v2-blue);
+  color: var(--v2-blue);
+}
+.v2-account-empty {
+  padding: 24px 12px;
+  color: var(--v2-muted);
+  text-align: center;
+  border: 1px dashed var(--v2-border);
+  border-radius: 10px;
+}
+
+/* Accessible tree */
+.v2-tree {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.v2-tree-children {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 4px 18px;
+  padding-left: 12px;
+  border-left: 1px solid var(--v2-border);
+  list-style: none;
+}
+.v2-tree button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  min-height: 34px;
+  padding: 5px 10px;
+}
+.v2-tree button:hover {
+  background: color-mix(in srgb, var(--v2-blue) 10%, transparent);
+  border-color: var(--v2-border);
+}
+.v2-tree-level {
+  font-weight: 600;
+}
+.v2-tree-building {
+  color: var(--v2-text);
+}
+.v2-tree-person {
+  color: var(--v2-text);
+}
+.v2-tree-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  flex: none;
+  color: var(--v2-muted);
+  transform: rotate(0deg);
+  transition: transform var(--v2-motion-fast, 0.16s);
+}
+.v2-tree button[aria-expanded='false'] .v2-tree-caret {
+  transform: rotate(-90deg);
+}
+.v2-tree-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-tree-count {
+  margin-left: auto;
+  flex: none;
+  color: var(--v2-muted);
+  font-size: 12px;
+}
+.v2-tree-person-name {
+  font-weight: 500;
+}
+.v2-tree-person-meta {
+  color: var(--v2-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v2-tree-person:hover .v2-tree-person-name {
+  color: var(--v2-blue);
+}
+
+/* ------------------------------------------------------------------ */
+/* AdminTools header toolbar (back + advanced diagnostics + anchor)    */
+/* ------------------------------------------------------------------ */
+.v2-admin-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 0 14px;
+  border-bottom: 1px solid var(--v2-border);
+}
+.v2-admin-toolbar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--v2-text);
+  margin-right: auto;
+}
+.v2-admin-toolbar-title .v2-admin-role-note {
+  color: var(--v2-muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+.v2-admin-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.v2-admin-toolbar-actions button,
+.v2-admin-toolbar-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-surface);
+  color: var(--v2-text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.v2-admin-toolbar-actions button:hover:not(:disabled) {
+  border-color: var(--v2-blue);
+  color: var(--v2-blue);
+}
+.v2-admin-toolbar-back {
+  text-decoration: none;
+}
+.v2-admin-toolbar-anchor {
+  min-height: 32px;
+}
+.v2-admin-advanced-toggle[aria-pressed='true'] {
+  border-color: var(--v2-blue);
+  color: var(--v2-blue);
+  background: color-mix(in srgb, var(--v2-blue) 14%, transparent);
+}
+
+/* Layout tools teleport targets (PageCanvas finds these by attribute). */
+[data-v2-layout-tools='accounts'],
+[data-v2-layout-tools='signatures'] {
+  flex: none;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ------------------------------------------------------------------ */
+/* Signature page: compact toolbar + summary, scrollable people rows   */
+/* ------------------------------------------------------------------ */
+.v2-signature-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 6px 0 14px;
+  border-bottom: 1px solid var(--v2-border);
+  margin-bottom: 12px;
+}
+.v2-signature-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-right: auto;
+}
+.v2-signature-title h2 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--v2-text);
+}
+.v2-signature-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  color: var(--v2-muted);
+  font-size: 13px;
+}
+.v2-signature-summary b {
+  color: var(--v2-text);
+  font-variant-numeric: tabular-nums;
+}
+.v2-signature-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.v2-signature-actions .btn,
+.v2-signature-actions .vnet-back-button,
+.v2-signature-actions a {
+  min-height: 32px;
+}
+.workspace-v2 .v2-signature-actions .btn.hero-ghost { color:var(--v2-ink)!important;background:transparent!important;border-color:var(--v2-border); }
+
+/* Keep the directory filters/header outside the independent people scroll. */
+.v2-directory-scroll .directory-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100dvh - 224px);
+}
+.v2-directory-scroll .directory-panel .source-status,
+.v2-directory-scroll .directory-panel .filters,
+.v2-directory-scroll .directory-panel .section-head,
+.v2-directory-scroll .directory-panel .loading-line,
+.v2-directory-scroll .directory-panel .pagination {
+  flex: none;
+}
+.v2-directory-scroll .directory-panel .people {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+@media (orientation: landscape) {
+  .v2-directory-scroll .directory-panel .people {
+    max-height: clamp(320px, 56dvh, 720px);
+  }
+}
+
+@media (max-width: 760px) {
+  .v2-account-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .v2-account-row-scopes {
+    grid-column: 1 / -1;
+  }
+  .v2-signature-toolbar {
+    gap: 10px;
+  }
+  .v2-signature-title {
+    width: 100%;
+  }
+  .v2-signature-actions {
+    width: 100%;
+  }
+  .v2-signature-actions .btn,
+  .v2-signature-actions a {
+    flex: 1 1 140px;
+  }
+  .v2-directory-scroll .directory-panel .people {
+    max-height: 55dvh;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-tree-caret {
+    transition: none;
+  }
+}

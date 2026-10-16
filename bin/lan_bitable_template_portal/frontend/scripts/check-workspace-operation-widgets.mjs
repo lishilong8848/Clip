@@ -4,6 +4,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {preview} from 'vite';
 import {chromium} from 'playwright';
+import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
 const output=path.resolve(root,'../../../output/playwright/operation-widgets');await mkdir(output,{recursive:true});
 const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
@@ -12,8 +13,10 @@ const user={open_id:'operation-fixture',name:'操作组件验收',level:'L4',rol
 const project={record_id:'repair-fixture',title:'A楼配电设备检修',building:'A楼',building_codes:['A'],workflow:'维修中',progress_percent:25,followup_count:2,followup_state_verified:true};
 const errors=[],reads=[];
 let noticeActionAvailable=true;
-await context.route('**/*',route=>{
+const layouts=layoutApiFixture();
+await context.route('**/*',async route=>{
   const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(!url.pathname.startsWith('/api/'))return route.continue();
+  if(await layouts.handle(route,user.open_id))return;
   assert.equal(req.method(),'GET','choosing a widget operation never sends or saves a notice');reads.push(url.pathname+url.search);
   const ok=data=>route.fulfill({json:{ok:true,data}});
   if(url.pathname==='/api/auth/status')return ok({logged_in:true,user,scope_options:[{value:'A',label:'A楼'}]});
@@ -46,7 +49,7 @@ try{
   await page.getByRole('button',{name:'保存布局',exact:true}).click();await page.reload();
   await notice().scrollIntoViewIfNeeded();await notice().getByRole('button',{name:'结束',exact:true}).waitFor();
   assert.equal(await notice().getByText('已结束计划',{exact:true}).count(),0);
-  const saved=await page.evaluate(()=>JSON.parse(localStorage.getItem('clipflow:workspace-layout:v1:operation-fixture')));
+  const saved=layouts.records.get('operation-fixture:/api/workspace-layouts/desktop/workspace').value;
   assert(saved.widgets.some(item=>item.kind==='notice_actions')&&saved.widgets.some(item=>item.kind==='repair_actions'));
   await page.screenshot({path:path.join(output,'notice-actions.png')});
   await notice().getByRole('button',{name:'结束',exact:true}).click();
@@ -65,7 +68,18 @@ try{
   await page.getByText(/该记录当前不能结束/).waitFor();
   assert.equal(await page.locator('.v2-notice-editor .n-radio-button--checked').count(),0,'no silent replacement when requested action is unavailable');
   for(const width of [1366,390]){
-    await page.setViewportSize({width,height:width<761?844:900});await page.goto(entry);await notice().scrollIntoViewIfNeeded();
+    await page.setViewportSize({width,height:width<761?844:900});await page.goto(entry);
+    if(width<761){
+      await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
+      for(const title of ['通告办理','维修跟进']){
+        await page.getByRole('button',{name:'添加组件',exact:true}).click();
+        await page.locator('.v2-library-item').filter({has:page.getByText(title,{exact:true})}).click();
+        await page.locator('.v2-widget-editor').getByRole('button',{name:'应用设置',exact:true}).click();
+      }
+      await page.getByRole('button',{name:'保存布局',exact:true}).click();
+      await page.waitForFunction(()=>!document.querySelector('.v2-edit-banner'));
+    }
+    await notice().scrollIntoViewIfNeeded();
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
     await page.screenshot({path:path.join(output,'widgets-'+width+'.png')});
   }

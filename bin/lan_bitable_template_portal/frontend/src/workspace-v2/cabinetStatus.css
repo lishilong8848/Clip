@@ -1,0 +1,95 @@
+/* V2-only compact cabinet status summary.
+   The adapted template keeps `metrics` (so the workspace page-layout adapter still
+   finds the cabinet summary block and can wrap it in a customizable PageCanvas).
+   These rules intentionally use `.v2-cabinet-status` / high-specificity selectors so
+   the legacy `.metrics` and `.metric-link` card styles are overridden into this
+   compact single-row presentation. Original counts, state actions and rack palette
+   stay untouched. */
+.metrics.v2-cabinet-status {
+  display: flex;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-bg);
+  color: var(--v2-ink);
+  /* Neutralise legacy card grid / tall metrics styling. */
+  grid: none;
+  grid-template-columns: none;
+}
+/* Legacy `.metrics strong` and `.metrics .formal/.test/.off/.unknown strong` set
+   large card numbers + semantic colors; the compact values win because they are
+   scoped to `.metrics.v2-cabinet-status` (higher specificity in the same component). */
+.metrics.v2-cabinet-status .v2-cabinet-rate,
+.metrics.v2-cabinet-status .v2-cabinet-counts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  /* Legacy `.metrics>div` set a tall column with right border and padding. */
+  flex-direction: row;
+}
+.metrics.v2-cabinet-status .v2-cabinet-rate {
+  flex: none;
+  gap: 7px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.metrics.v2-cabinet-status .v2-cabinet-rate-label { color: var(--v2-muted); font-size: 12px; }
+.metrics.v2-cabinet-status .v2-cabinet-rate-value {
+  color: var(--v2-blue);
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.metrics.v2-cabinet-status .v2-cabinet-counts {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  padding: 2px 0;
+}
+.metrics.v2-cabinet-status .v2-cabinet-count {
+  display: inline-flex;
+  align-items: baseline;
+  flex: none;
+  gap: 5px;
+  min-height: 32px;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  width: auto;
+}
+.metrics.v2-cabinet-status .v2-cabinet-count:hover:not(:disabled) {
+  border-color: var(--v2-border);
+  background: color-mix(in srgb, var(--v2-blue) 8%, transparent);
+}
+.metrics.v2-cabinet-status .v2-cabinet-count:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--v2-blue) 45%, transparent);
+  outline-offset: 2px;
+}
+.metrics.v2-cabinet-status .v2-cabinet-count-label { color: var(--v2-muted); font-size: 12px; }
+.metrics.v2-cabinet-status .v2-cabinet-count-value {
+  color: var(--v2-ink);
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 820px) {
+  .metrics.v2-cabinet-status {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .metrics.v2-cabinet-status .v2-cabinet-rate { grid-row: 1; white-space: normal; }
+  .metrics.v2-cabinet-status .v2-cabinet-counts { grid-row: 2; }
+  .metrics.v2-cabinet-status .v2-cabinet-count { min-height: 44px; }
+}

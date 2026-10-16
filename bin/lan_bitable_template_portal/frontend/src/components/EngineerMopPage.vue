@@ -2043,6 +2043,7 @@ async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<
   }
   try {
     const data = await fetchSignaturePeople({
+      allPeople: true,
       scope: scope.value,
       q: signatureSearch.value,
       noticeKey: signatureUsageNoticeKey.value,
@@ -2313,6 +2314,7 @@ async function loadExternalSignaturePeople(options: { silent?: boolean } = {}): 
   }
   try {
     const data = await fetchExternalSignaturePeople({
+      allPeople: true,
       scope: scope.value,
       q: externalSignatureSearch.value,
       refresh: !options.silent,
@@ -2375,6 +2377,7 @@ async function refreshSelectedFormalSignatures(): Promise<void> {
     return;
   }
   const data = await fetchSignaturePeople({
+    allPeople: true,
     scope: requestScope,
     noticeKey: requestNoticeKey,
     refresh: true,

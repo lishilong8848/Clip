@@ -1,34 +1,8 @@
-.workspace-v2 #workspace-page-filters{display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;min-width:0;margin:14px 0 18px;padding:12px 14px;background:#fff;border:1px solid var(--v2-border);border-radius:8px}
-.workspace-v2 #workspace-page-filters:empty{display:none}
-.workspace-v2 #workspace-page-filters .v2-context{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-height:0;margin:0;border:0;flex:none}
-.workspace-v2 #workspace-page-filters .v2-scope-select,.workspace-v2 #workspace-page-filters .water-scope{width:148px}
-.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters,.filter-bar,.toolbar,.kb-toolbar,.event-list-tools,.pc-list-filters,.date-toolbar,.filters){display:flex;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;flex:1;min-width:0;margin:0;padding:0;border:0;background:transparent}
-.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters)>.n-input{width:300px;flex:1;min-width:180px;max-width:440px}
-.workspace-v2 #workspace-page-filters :is(.v2-notice-filters,.v2-sop-filters)>.n-select{width:148px;flex:none}
-.workspace-v2 #workspace-page-filters :is(input[type=search],.search-field,.kb-search,.search-input,.water-search){min-width:160px;width:300px;max-width:100%;margin:0}
-.workspace-v2 #workspace-page-filters :is(.water-filter-main,.water-date-filter,.water-filter-extra){display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}
-.workspace-v2 #workspace-page-filters .event-list-tools{margin-left:0}
-.workspace-v2 #workspace-page-filters .water-filter-extra{flex-basis:100%}
-.workspace-v2 #workspace-page-filters:not(:has(*)){display:none}
-.workspace-v2 #workspace-page-filters .v2-plan-filters{display:flex;flex:1;flex-direction:row;align-items:center;justify-content:flex-start;flex-wrap:wrap;gap:10px;min-width:0;margin:0}
-.workspace-v2 #workspace-page-filters .v2-plan-filters>.pc-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}
-.workspace-v2 #workspace-page-filters .v2-plan-filters>.pc-actions:first-child{flex:1}
-.workspace-v2 #workspace-page-filters .v2-plan-filters input[type=search]{flex:1;min-width:180px;width:100%;max-width:440px}
-.workspace-v2 #workspace-page-filters .v2-plan-filters>.vnet-select{width:160px;flex:none}
 .workspace-v2 .v2-main>.pc-page{padding:0 0 24px}
-@media(max-width:760px){.workspace-v2 #workspace-page-filters{gap:8px;padding:10px;margin:10px 0 12px}.workspace-v2 #workspace-page-filters :is(.v2-scope-select,.water-scope){width:125px}.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters){flex-basis:100%}.workspace-v2 #workspace-page-filters :is(.v2-repair-filters,.v2-notice-filters,.v2-sop-filters)>.n-input{flex-basis:100%;width:100%;min-width:0;max-width:none}}
 @media(max-width:760px){
   .workspace-v2 .pc-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px}
   .workspace-v2 .pc-tabs button{min-width:0;padding:9px 3px;gap:4px;font-size:12px;white-space:nowrap}
   .workspace-v2 .pc-tabs button svg{width:15px;height:15px;flex:none}
-  .workspace-v2 #workspace-page-filters .v2-plan-filters>.pc-actions{flex-basis:100%}
-  .workspace-v2 #workspace-page-filters .v2-plan-filters input[type=search]{min-width:0;max-width:none;font-size:16px}
-  .workspace-v2 #workspace-page-filters .v2-plan-filters>.vnet-select{width:130px}
-  .workspace-v2 #workspace-page-filters .v2-notice-filters{display:grid;grid-template-columns:minmax(62px,.8fr) minmax(88px,1.2fr) auto;gap:6px}
-  .workspace-v2 #workspace-page-filters .v2-notice-filters.has-scopes{grid-template-columns:minmax(70px,.9fr) minmax(62px,.7fr) minmax(88px,1.2fr) auto}
-  .workspace-v2 #workspace-page-filters .v2-notice-filters>.n-input{grid-column:1/-1}
-  .workspace-v2 #workspace-page-filters .v2-notice-filters>.n-select{width:100%;min-width:0}
-  .workspace-v2 #workspace-page-filters .v2-notice-filters>.n-button{padding-inline:10px}
 }
 
 /* One control vocabulary for V2 filters; business-entry forms are not marked. */
@@ -53,7 +27,7 @@ html.workspace-v2{--filter-height:36px;--filter-radius:6px;--filter-font:14px;--
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) :is(.search,.kb-search,.notice-search,.search-input,.search-field,.text-search,.directory-search,.permission-user-search,.record-picker-toolbar>label)>svg{flex:none;width:16px;height:16px;color:var(--filter-muted)}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) .notice-select select{padding-right:26px}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) :is(input,textarea)::placeholder{color:var(--filter-muted);font-size:var(--filter-font);font-weight:400}
-.workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) :is(.n-input,.n-base-selection){
+.workspace-v2 .n-input[data-v2-filter],.workspace-v2 [data-v2-filter] :is(.n-input,.n-base-selection){
   --n-height:var(--filter-height)!important;--n-font-size:var(--filter-font)!important;--n-border-radius:var(--filter-radius)!important;
   --n-border:1px solid var(--filter-border)!important;--n-border-hover:1px solid var(--filter-hover)!important;--n-border-focus:1px solid var(--v2-blue)!important;
   --n-border-active:1px solid var(--v2-blue)!important;--n-color:var(--filter-bg)!important;--n-color-active:var(--filter-bg)!important;
@@ -61,7 +35,7 @@ html.workspace-v2{--filter-height:36px;--filter-radius:6px;--filter-font:14px;--
   --n-box-shadow-focus:0 0 0 2px #0071e31a!important;--n-box-shadow-active:0 0 0 2px #0071e31a!important;
   min-height:var(--filter-height);border-radius:var(--filter-radius);font-size:var(--filter-font);
 }
-.workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) .n-input:not(.n-input--textarea){height:var(--filter-height)}
+.workspace-v2 .n-input[data-v2-filter]:not(.n-input--textarea),.workspace-v2 [data-v2-filter] .n-input:not(.n-input--textarea){height:var(--filter-height)}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) .n-input__input-el{font-size:var(--filter-font)!important}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) .n-base-selection-label{height:var(--filter-height)}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) .n-button{
@@ -109,3 +83,14 @@ html.workspace-v2{--filter-height:36px;--filter-radius:6px;--filter-font:14px;--
   .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) .n-tabs-tab{font-size:13px}
 }
 @media(prefers-reduced-motion:reduce){.workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) :is(input,select,button,.n-tabs-capsule){transition-duration:0ms!important}}
+.workspace-v2 [data-v2-module-title]{display:none}
+.workspace-v2 :is(.v2-dashboard-heading,.v2-notice-heading,.v2-section-title,.page-head,.page-heading,.event-command-head){min-height:0;gap:10px;margin-top:0;padding-top:0}
+.workspace-v2 :is(.v2-dashboard-heading,.v2-notice-heading,.v2-section-title,.page-head,.page-heading,.event-command-head)>div:has(>[data-v2-module-title]):not(:has(button,input,select)){display:none}
+.workspace-v2 .v2-local-scope{margin-right:auto}
+.workspace-v2 [data-v2-filter] .v2-single-select{min-width:100px}
+.workspace-v2 .v2-notice-photo-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+.workspace-v2 .v2-notice-photo-columns>.v2-notice-field-section{min-width:0}
+.workspace-v2 .v2-notice-photo-columns>.v2-notice-field-section:only-child{grid-column:1/-1}
+.workspace-v2 .v2-notice-photo-columns h2{flex-wrap:wrap;gap:4px}
+.workspace-v2 .v2-notice-photo-columns .v2-notice-upload{min-width:0}
+@media(max-width:420px){.workspace-v2 .v2-notice-photo-columns{gap:8px}.workspace-v2 .v2-notice-photo-columns h2{font-size:13px}}

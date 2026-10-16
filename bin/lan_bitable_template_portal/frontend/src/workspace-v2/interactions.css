@@ -28,7 +28,6 @@ button[data-v2-action="error"]{background:#bd3c48!important;border-color:transpa
 .workspace-v2 input[data-v2-binary]:active::after{scale:1.16 .94}
 .workspace-v2 input[data-v2-binary]:disabled{opacity:.45;cursor:not-allowed}
 .workspace-v2 input[data-v2-binary]:focus-visible{outline:2px solid #087f74;outline-offset:3px}
-.workspace-v2 .n-switch{--n-rail-width:48px!important;--n-rail-height:28px!important;--n-button-width:22px!important;--n-button-height:22px!important;--n-button-width-pressed:30.8px!important}
 .workspace-v2 .n-switch__button{transition:transform 350ms cubic-bezier(.3,1.25,.5,1),width 350ms cubic-bezier(.3,1.25,.5,1),left 350ms cubic-bezier(.3,1.25,.5,1)!important}
 @keyframes v2-jelly-on{0%{transform:translateX(0) scaleX(1)}50%{transform:translateX(11px) scaleX(1.4) scaleY(.8)}80%{transform:translateX(21px) scaleX(.94)}100%{transform:translateX(20px) scaleX(1)}}
 @keyframes v2-jelly-off{0%{transform:translateX(20px)}50%{transform:translateX(9px) scaleX(1.4) scaleY(.8)}80%{transform:translateX(-1px) scaleX(.94)}100%{transform:translateX(0)}}

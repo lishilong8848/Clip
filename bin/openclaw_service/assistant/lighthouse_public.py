@@ -957,6 +957,9 @@ class PublicSources:
         self._pool = None
         self._pool_lock = asyncio.Lock()
         self._pages = {}
+        self._search_cache = {}
+        self._search_tasks = {}
+        self._search_waiters = {}
         self._weather_places = {}
         self._weather_places_at = 0
         self._weather_places_lock = asyncio.Lock()
@@ -983,6 +986,13 @@ class PublicSources:
                 await close()
 
     async def close(self):
+        pending = list(self._search_tasks.values())
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._search_tasks.clear()
+        self._search_waiters.clear()
+        self._search_cache.clear()
         async with self._pool_lock:
             if self._pool is not None:
                 await self._pool.aclose()
@@ -1002,6 +1012,46 @@ class PublicSources:
 
     async def search(self, query: str, question: str) -> dict[str, Any]:
         _ensure_public_query(query, question)
+        key = (query, question)
+        loop = asyncio.get_running_loop()
+        cached = self._search_cache.get(key)
+        ttl = 30 if _current_news_request(question) else 120
+        if cached and loop.time() - cached[0] < ttl and cached[1]['queried_at'][:10] == _now_iso()[:10]:
+            return {**deepcopy(cached[1]), 'cached': True, 'cache_age_seconds': round(loop.time() - cached[0], 1)}
+        task = self._search_tasks.get(key)
+        if task is None:
+            if len(self._search_tasks) >= 64:
+                return self._unavailable('public_search', '', _now_iso(), note='公开搜索当前繁忙，请稍后重试。')
+            async def retrieve():
+                try:
+                    value = await self._search_uncached(query, question)
+                    if value.get('ok') and value.get('results'):
+                        if len(self._search_cache) >= 64:
+                            self._search_cache.pop(next(iter(self._search_cache)))
+                        self._search_cache[key] = (loop.time(), deepcopy(value))
+                    return value
+                finally:
+                    if self._search_tasks.get(key) is asyncio.current_task():
+                        self._search_tasks.pop(key, None)
+            task = asyncio.create_task(retrieve())
+            self._search_tasks[key] = task
+        # Cancel unused lookups, but keep a shared request alive for its other callers.
+        self._search_waiters[task] = self._search_waiters.get(task, 0) + 1
+        try:
+            return deepcopy(await asyncio.shield(task))
+        finally:
+            remaining = self._search_waiters.get(task, 1) - 1
+            if remaining:
+                self._search_waiters[task] = remaining
+            else:
+                self._search_waiters.pop(task, None)
+                if not task.done():
+                    if self._search_tasks.get(key) is task:
+                        self._search_tasks.pop(key, None)
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    async def _search_uncached(self, query: str, question: str) -> dict[str, Any]:
         queried_at = _now_iso()
         deadline = asyncio.get_running_loop().time() + self._timeout
         failures, empty, navigation = [], None, {}

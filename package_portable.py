@@ -1741,6 +1741,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "workspace_layout_routes.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "cabinet_power_evidence.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "cabinet_power_text.py",
         PROJECT_ROOT / "bin" / "test_critical_guard.py",
@@ -1818,6 +1819,7 @@ def _run_packaging_preflight_tests() -> None:
     _run_preflight_check(
         [test_python, "-m", "unittest",
          "bin.test_public_access",
+         "bin.test_workspace_layouts",
          "bin.test_public_health", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
@@ -1829,6 +1831,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_news", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
          "bin.test_lighthouse_document_tools",
          "bin.test_lighthouse_office_tools",
+         "bin.test_lighthouse_general_tools",
          "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
          "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",
          "bin.test_lighthouse_mop_fields", "bin.test_lighthouse_mop_workflows", "bin.test_lighthouse_plan_workflows",

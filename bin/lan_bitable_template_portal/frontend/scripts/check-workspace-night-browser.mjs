@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-const preview=path.resolve(root,'../../../output/night-mode-preview');
+const preview=process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?path.resolve(root,process.env.CLIPFLOW_WORKSPACE_BUILD_DIR,'../..'):path.resolve(root,'../../../output/night-mode-preview');
 const output=path.resolve(root,'../../../output/playwright/workspace-night-mode');
 await mkdir(output,{recursive:true});
 const server=http.createServer(async(req,res)=>{
@@ -111,8 +111,20 @@ try{
   });
   await theme('light');await page.getByText('当前浏览器无法保存外观设置，刷新后可能恢复默认。',{exact:true}).waitFor();
   await page.evaluate(()=>{Storage.prototype.setItem=window.fixtureStorageSet;delete window.fixtureStorageSet;});
+  loggedIn=false;await page.goto(entry);await page.locator('.login-panel').waitFor();
+  await page.getByRole('tab',{name:'账号密码登录',exact:true}).click();await page.locator('#personnel-password').waitFor();
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:900});
+    for(const mode of ['dark','light']){
+      await theme(mode);await page.getByRole('button',{name:'导航配色',exact:true}).click();await page.getByRole('switch',{name:'夜间模式'}).waitFor({state:'hidden'});
+      const field=await paint('#personnel-password');assert(contrast(field.color,field.background)>=4.5,'password form text is legible in both themes');
+      assert.equal(light(field.background)<.1,mode==='dark');
+      assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+      await page.screenshot({path:path.join(output,`login-${mode}-${width}.png`)});
+    }
+  }
   await page.goto(origin+'/?frontend=legacy');await page.waitForTimeout(600);
   assert.equal(await page.locator('html').getAttribute('data-v2-theme'),null,'legacy entry never receives the theme');
   assert.deepEqual(errors,[]);
-  console.log('PASS: day/night toggle, contrast, per-account persistence, native/Naive UI surfaces, unsaved fields, mobile, print, reduced motion and legacy isolation. No business writes.');
+  console.log('PASS: day/night toggle, contrast, per-account persistence, native/Naive UI surfaces, unsaved fields, login, mobile, print, reduced motion and legacy isolation. No business writes.');
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
