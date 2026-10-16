@@ -1986,6 +1986,11 @@ class PortalAgent:
                 turn["plan"] = self.public_plan(plan, owner_actor)
                 if plan["status"] in {"completed", "failed", "cancelled", "submitted", "superseded"}:
                     turn["answer"] = {"completed": "操作已完成。", "failed": "操作未完成：" + plan.get("error", ""), "cancelled": "操作已取消。", "submitted": "操作已提交，后台仍在处理。", "superseded": "已由最新提交替代，旧任务不再重试。"}[plan["status"]]
+                    last_result = (plan.get("results") or [{}])[-1]
+                    job_result = last_result.get("job_result") or last_result
+                    job_data = job_result.get("_raw", job_result.get("data")) or {}
+                    if plan["status"] == "submitted" and (job_data.get("phase") or job_data.get("initial_phase")) == "event_waiting":
+                        turn["answer"] = str((job_data.get("event_wait") or {}).get("message") or "已排队，等待事件结束后自动发送。")
                 self.store.put_document("lighthouse_ai", self.assistant._key(owner_actor), state)
 
     def _save_chat(self, actor, state, *, finish=False):
@@ -3619,7 +3624,7 @@ class PortalAgent:
                 plan["results"][-1].update(ok=True, error="", job_result={"ok": True, "data": job})
                 self._save_plan(actor, plan)
                 return plan, False
-            if job.get("phase") in {"accepted", "queued", "qt_queued", "qt_displaying", "upload_queued", "upload_waiting", "uploading", "remote_intent", "remote_written", "sending_message", "message_sent"}:
+            if job.get("phase") in {"event_waiting", "accepted", "queued", "qt_queued", "qt_displaying", "upload_queued", "upload_waiting", "uploading", "remote_intent", "remote_written", "sending_message", "message_sent"}:
                 plan.update(status="submitted", error="", version=plan["version"] + 1)
                 plan["results"][-1].update(ok=True, error="", job_result={"ok": True, "data": job})
                 self._save_plan(actor, plan)
@@ -3966,6 +3971,11 @@ class PortalAgent:
                         if not done and plan["results"][-1].get("job_result") != job:
                             plan["results"][-1]["job_result"] = job
                             await self._durable_save(actor, plan)
+                        raw_job = job.get("_raw", job.get("data")) or {}
+                        if raw_job.get("phase") == "event_waiting":
+                            plan["error"] = ""
+                            await self._durable_save(actor, plan)
+                            return
                         if done:
                             plan["results"][-1]["job_result"] = job
                             plan["results"][-1].setdefault("_raw", copy.deepcopy(plan["results"][-1].get("data") or {})).update(job_result=job.get("_raw", job.get("data")))

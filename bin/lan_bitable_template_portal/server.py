@@ -6963,7 +6963,12 @@ class PortalRuntime:
         try:
             job = cls.service.get_job(job_id) or {}
         except Exception:
-            job = {}
+            logging.exception("任务状态读取失败，保留原队列: job_id=%s", job_id)
+            try:
+                cls.state_store.requeue_runtime_queue_item(queue_name, job_id, available_at=time.time() + 5)
+            except Exception:
+                logging.exception("任务状态等待原队列租约恢复: job_id=%s", job_id)
+            return False
         phase = str((job or {}).get("phase") or "").strip()
         if not job:
             try:
@@ -6976,6 +6981,9 @@ class PortalRuntime:
             except Exception:
                 pass
             return False
+        if queue_name == "qt_action" and job.get("execution_origin") == "qt_local" and job.get("qt_result"):
+            # Reconcile the saved outcome locally, even if a new event is active.
+            return True
         if queue_name == "qt_action" and phase in {"remote_intent", "uploading"}:
             try:
                 operation = cls._get_notice_remote_operation(
@@ -7007,6 +7015,15 @@ class PortalRuntime:
             except Exception:
                 pass
             return False
+        if queue_name == "qt_action":
+            try:
+                if cls._hold_for_active_event(job_id):
+                    return False
+            except Exception:
+                logging.exception("事件状态检查失败，通告保留原队列")
+                cls.state_store.requeue_runtime_queue_item(queue_name, job_id,
+                    available_at=time.time() + 5, error="事件状态暂不可用，等待恢复后核验")
+                return False
         depends_on_job_id = str((job or {}).get("depends_on_job_id") or "").strip()
         if depends_on_job_id and depends_on_job_id != job_id:
             try:
@@ -7172,6 +7189,12 @@ class PortalRuntime:
         except Exception as exc:
             logging.exception("通告任务执行异常: job_id=%s", job_id)
             try:
+                job = service.get_job(job_id) or {}
+                if job.get("execution_origin") == "qt_local" and job.get("qt_result"):
+                    state_store.requeue_runtime_queue_item(
+                        "qt_action", job_id, available_at=time.time() + 5, error=str(exc)
+                    )
+                    return
                 service.mark_job(job_id, phase="failed", error=str(exc))
             except Exception:
                 pass
@@ -7206,6 +7229,13 @@ class PortalRuntime:
                     generation != cls.action_worker_generation
                     or cls.action_worker_stop
                 ):
+                    continue
+                try:
+                    waiting = cls.state_store.list_runtime_queue_items("qt_action", statuses=("event_waiting",), limit=1)
+                    if waiting and cls.service.release_event_waiting_jobs():
+                        cls.action_queue_event.set()
+                except Exception:
+                    logging.exception("事件等待状态读取失败，保留队列，未自动放行")
                     continue
                 with cls.action_queue_lock:
                     if len(cls.action_running_job_ids) >= 4:
@@ -8694,6 +8724,12 @@ class PortalRuntime:
             try:
                 operation = cls._get_notice_remote_operation(operation_id) or {}
                 previous = operation.get("result") or {}
+                if previous.get("robot_notice_type") != "事件通告":
+                    from .event_priority import blockers
+                    if blockers(cls.state_store):
+                        cls.state_store.mark_outbox_event(task["id"], "pending",
+                            error="等待事件结束后发送", count_attempt=False)
+                        continue
                 if previous.get("robot_notice_type") != "事件通告" and operation_id.startswith("notice_action:"):
                     job = cls.state_store.get_document(STATE_NS_ACTION_JOB, operation_id.removeprefix("notice_action:")) or {}
                     if job.get("superseded_by_job_id"):
@@ -9294,6 +9330,10 @@ class PortalRuntime:
         if str((data or {}).get("notice_type") or "").strip() != "事件通告":
             return
         robot_result = robot_result if isinstance(robot_result, dict) else {}
+        if success and action_type in {"upload", "start", "update", "end"} and robot_result.get("remote_verified", True):
+            from .event_priority import record_result
+            record_result(cls.state_store, data, action_type, record_id)
+            cls.action_queue_event.set()
         try:
             cls.state_store.append_event_async(
                 "event_notice_operation_result",
@@ -9772,7 +9812,7 @@ class PortalRuntime:
             or "update"
         )
         queued_payload: dict[str, Any] = {}
-        if str(notice_type or "").strip() == "事件通告":
+        if str(notice_type or "").strip() == "事件通告" or data.get("_event_deferred_upload"):
             uploaded_text = str((data or {}).get("text") or "").strip()
             active_item_id = str((data or {}).get("active_item_id") or "").strip()
             for row in cls.state_store.list_qt_active_items(include_deleted=False):
@@ -9783,7 +9823,7 @@ class PortalRuntime:
                 )
                 if str(
                     current.get("notice_type") or row.get("notice_type") or ""
-                ).strip() != "事件通告":
+                ).strip() != notice_type:
                     continue
                 if active_item_id and str(
                     current.get("active_item_id") or row.get("active_item_id") or ""
@@ -9796,7 +9836,7 @@ class PortalRuntime:
                     continue
                 current_text = str(current.get("text") or "").strip()
                 if (
-                    bool(current.get("_has_unuploaded_changes"))
+                    bool(current.get("_has_unuploaded_changes") or current.get("_event_wait_job_id"))
                     and current_text
                     and re.sub(r"\s+", "", current_text)
                     != re.sub(r"\s+", "", uploaded_text)
@@ -10677,6 +10717,15 @@ class PortalRuntime:
                     job_id=undo_id, target_record_id=restored_record_id,
                 )
         event_payload = local_result.get("active_payload") if isinstance(local_result, dict) else {}
+        if notice_type == "事件通告":
+            from .event_priority import record_result
+            restored = (event_payload or {}).get("item", event_payload or {})
+            restored = restored.get("payload", restored)
+            record_result(cls.state_store, {**restored, "notice_type": notice_type},
+                          "delete" if action_type == "start" else "update", restored_record_id)
+            if target_record_id != restored_record_id:
+                record_result(cls.state_store, {"notice_type": notice_type}, "delete", target_record_id)
+            cls.action_queue_event.set()
         if isinstance(event_payload, dict) and event_payload:
             cls.state_store.enqueue_outbox_event(
                 "qt_action",
@@ -12482,7 +12531,31 @@ class PortalRuntime:
         return event_id
 
     @classmethod
-    def execute_local_notice_upload(cls, request_payload: dict) -> dict:
+    def execute_local_notice_upload(cls, request_payload: dict, *, _queued_job_id: str = "") -> dict:
+        from .event_priority import blockers, is_event
+        data = request_payload.get("data_dict") or {}
+        if not _queued_job_id and not is_event(data):
+            events = blockers(cls.state_store)
+            operation_id = request_payload.get("operation_id") or data.get("operation_id")
+            existing = cls.state_store.find_qt_event_wait_job(operation_id) if operation_id else None
+            if events or existing:
+                job = existing or cls.service.create_qt_event_wait_job(request_payload, events)
+                if job.get("qt_result") and job.get("phase") in {"success", "failed"}:
+                    result = job["qt_result"]
+                    can_resume = (job.get("phase") == "failed" and data.get("_event_wait_resume_job_id") == job["job_id"]
+                        and any(result.get(key) for key in ("needs_target_selection", "confirmation_required", "remote_written", "retry_same_operation")))
+                    if not can_resume:
+                        return copy.deepcopy(result)
+                    job = cls.service.resume_qt_event_wait_job(job["job_id"], request_payload, events)
+                cls.ensure_action_worker()
+                cls.action_queue_event.set()
+                return {"ok": False, "queued": True, "event_waiting": job.get("phase") == "event_waiting",
+                        "job_id": job["job_id"], "event_wait": job.get("event_wait") or {},
+                        "event_wait_attempt": int(job.get("event_wait_attempt") or 0),
+                        "record_id": data.get("record_id") or "", "message": "已排队，等待事件结束" if job.get("phase") == "event_waiting" else "原排队任务已继续，正在后台处理"}
+        if _queued_job_id:
+            request_payload = copy.deepcopy(request_payload)
+            request_payload["data_dict"]["_event_deferred_upload"] = True
         held = []
         token = _request_notice_locks.set(held)
         try:
@@ -14281,6 +14354,13 @@ class PortalRuntime:
                     reason="target_deleted",
                 )
             cls.delete_workbench_notice_drafts_for_target(target_record_id)
+            from .event_priority import record_result
+            deleted_payload = {"notice_type": notice_type, "work_type": work_type,
+                               "active_item_id": active_item_id, "source_record_id": source_record_id,
+                               "target_record_id": target_record_id}
+            record_result(cls.state_store, deleted_payload, "delete", target_record_id)
+            cls._cancel_waiting_notice(deleted_payload)
+            cls.action_queue_event.set()
         except Exception as exc:
             message = (
                 "目标多维记录已删除，但本地显示清理失败；"
@@ -14910,6 +14990,10 @@ class PortalRuntime:
         except Exception:
             identity_removed = False
         cls.delete_workbench_notice_drafts_for_target(target_record_id)
+        from .event_priority import record_result
+        record_result(cls.state_store, payload, "remove", target_record_id)
+        cls._cancel_waiting_notice(payload)
+        cls.action_queue_event.set()
         return {
             "ok": True,
             "message": "",
@@ -15021,10 +15105,122 @@ class PortalRuntime:
         }
 
     @classmethod
+    def _hold_for_active_event(cls, job_id: str) -> bool:
+        from .event_priority import blockers
+        events = blockers(cls.state_store)
+        return bool(events) and cls.service.hold_action_job_for_event(job_id, events)
+
+    @classmethod
+    def _cancel_waiting_notice(cls, payload: dict) -> None:
+        jobs = cls.state_store.list_documents(STATE_NS_ACTION_JOB)
+        if any(row["payload"].get("was_event_waiting") and row["payload"].get("phase") not in {"success", "failed", "cancelled"} for row in jobs):
+            cls.service.cancel_event_waiting_notice(payload)
+
+    @classmethod
+    def _process_qt_event_wait_job(cls, job_id: str, job: dict) -> None:
+        command = copy.deepcopy(job["qt_request"])
+        prior = cls.service.get_job(job.get("depends_on_job_id") or "") or {}
+        prior_result = prior.get("qt_result") or {}
+        if prior.get("phase") == "success" and prior_result.get("real_record_id"):
+            command["data_dict"].update(target_record_id=prior_result["real_record_id"],
+                record_version=prior_result.get("record_version") or "")
+        try:
+            cls.service.mark_job(job_id, phase="uploading")
+        except Exception:
+            logging.exception("排队通告执行状态保存失败，保留原任务: job_id=%s", job_id)
+            try:
+                cls.state_store.requeue_runtime_queue_item("qt_action", job_id, available_at=time.time() + 5)
+            except Exception:
+                logging.exception("排队通告等待原队列租约恢复: job_id=%s", job_id)
+            return
+        try:
+            result = cls.execute_local_notice_upload(command, _queued_job_id=job_id)
+        except Exception as exc:
+            result = {"ok": False, "message": str(exc),
+                      "record_id": (command.get("data_dict") or {}).get("record_id") or ""}
+        cls._finish_qt_event_wait_job(job_id, command, result)
+
+    @classmethod
+    def _finish_qt_event_wait_job(cls, job_id: str, command: dict, result: dict) -> None:
+        # Keep explicit user resumes from racing an older attempt's bookkeeping.
+        with cls.service._jobs_lock:
+            job = cls.service._jobs[job_id]
+            if job.get("qt_result"):
+                result = job["qt_result"]
+                command = job["qt_request"]
+            else:
+                job.update(qt_result=copy.deepcopy(result), qt_request=copy.deepcopy(command),
+                           qt_completion_pending=True, upload_finished_at=time.time())
+            terminal = {**job, "phase": "success" if result.get("ok") else "failed",
+                "qt_completion_pending": True,
+                "message_warning": "" if job.get("qt_completion_pending") else job.get("message_warning") or "",
+                "error": "" if result.get("ok") else result.get("message") or "上传未完成",
+                "record_id": result.get("real_record_id") or result.get("record_id") or "",
+                "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
+            terminal.update(cls.service.classify_job_error(terminal["error"]))
+            try:
+                # A terminal job and its Qt completion receipt commit together.
+                cls.state_store.enqueue_outbox_event("qt_action", {
+                    "kind": "notice_wait_result", "idempotency_key": f"event_wait:{job_id}:result:{int(job.get('event_wait_attempt') or 0)}",
+                    "payload": {"job_id": job_id, "attempt": int(job.get("event_wait_attempt") or 0), "command": command, "result": result},
+                }, documents={(STATE_NS_ACTION_JOB, job_id): terminal})
+                job.update(terminal)
+                if job.get("business_audit_id"):
+                    from .operation_audit import finish_business_audit
+                    audit = finish_business_audit(cls.state_store, job["business_audit_id"], success=bool(result.get("ok")),
+                        result=result, error=terminal["error"],
+                        remote_written=bool(result.get("ok") or result.get("remote_written")))
+                    if not audit:
+                        raise OSError("通告结果已保存，审计记录待恢复")
+                cls.state_store.put_action_job_with_queue({**job, "qt_completion_pending": False})
+                job["qt_completion_pending"] = False
+            except Exception:
+                logging.exception("排队通告结果记账待恢复，不重复发送: job_id=%s", job_id)
+                if job.get("phase") not in {"success", "failed"}:
+                    job.update(phase="upload_waiting", wait_reason="", message_warning="发送结果待本地确认，请勿重复提交。")
+                    try:
+                        cls.state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+                    except Exception:
+                        logging.exception("排队通告结果暂存失败，将按原操作标识恢复: job_id=%s", job_id)
+                try:
+                    cls.state_store.requeue_runtime_queue_item("qt_action", job_id, available_at=time.time() + 5)
+                except Exception:
+                    logging.exception("排队通告结果等待原队列租约恢复: job_id=%s", job_id)
+
+    @classmethod
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         remote_operation_id = f"notice_action:{job_id}"
         try:
             current_job = cls.service.get_job(job_id) or {}
+            if current_job.get("execution_origin") == "qt_local" and current_job.get("qt_result"):
+                cls._finish_qt_event_wait_job(job_id, current_job["qt_request"], current_job["qt_result"])
+                return
+            try:
+                held = cls._hold_for_active_event(job_id)
+            except Exception:
+                logging.exception("事件状态保存失败，保留原通告队列: job_id=%s", job_id)
+                try:
+                    cls.state_store.requeue_runtime_queue_item("qt_action", job_id, available_at=time.time() + 5)
+                except Exception:
+                    logging.exception("通告等待原队列租约恢复: job_id=%s", job_id)
+                return
+            if held:
+                return
+            if current_job.get("was_event_waiting"):
+                request = current_job.get("request") or {}
+                if request.get("_web_action_request"):
+                    session = {"user": {"open_id": request.get("_auth_open_id")}}
+                    from .module_access import require_module
+                    require_module(cls.auth_manager, session, request.get("work_type"))
+                    if not cls.auth_manager.scope_allowed(session, request.get("scope") or "ALL"):
+                        raise PortalError("排队期间楼栋权限已变化，请重新核对。")
+                dependency = current_job.get("depends_on_job_id") or ""
+                predecessor = cls.service.get_job(dependency) or {}
+                if dependency and (not predecessor or predecessor.get("phase") != "success"):
+                    raise PortalError("同一通告前序操作未成功，已停止自动执行，请核对原任务。")
+                if current_job.get("execution_origin") == "qt_local":
+                    cls._process_qt_event_wait_job(job_id, current_job)
+                    return
             if current_job.get("superseded_by_job_id"):
                 cls.state_store.mark_runtime_queue_item("qt_action", job_id, "failed", error="旧任务已被最新提交替代。")
                 return
@@ -15147,6 +15343,8 @@ class PortalRuntime:
                     message_signature=message_signature,
                 )
                 operation_request = cls._notice_remote_operation_request(prepared)
+                if cls._hold_for_active_event(job_id):
+                    return
                 operation_lock_key = str(
                     prepared.get("target_record_id")
                     or prepared.get("active_item_id")
@@ -15260,6 +15458,7 @@ class PortalRuntime:
                         )
                     elif reconcile_blocked or (
                         current_job.get("restart_recovered")
+                        and current_job.get("remote_intent")
                         and str(prepared.get("work_type") or "") != WORK_TYPE_EVENT
                     ):
                         ok = False
@@ -15762,6 +15961,8 @@ class PortalRuntime:
                         raise RuntimeError("进行中状态同步失败，且重试任务保存失败") from exc
                     cls.action_queue_event.set()
                     return
+            if cls._hold_for_active_event(job_id):
+                return
             message_delivery_uncertain = bool(
                 current_job.get("message_delivery_uncertain")
             )
@@ -16065,6 +16266,10 @@ class PortalRuntime:
             )
         except Exception as exc:
             operation = None
+            current = cls.service.get_job(job_id) or {}
+            if current.get("execution_origin") == "qt_local":
+                cls._finish_qt_event_wait_job(job_id, current["qt_request"], {"ok": False, "message": str(exc)})
+                return
             try:
                 operation = cls._get_notice_remote_operation(
                     remote_operation_id

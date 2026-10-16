@@ -1060,6 +1060,9 @@ class MainWindowRuntimeMixin:
 
     def handle_qt_shell_event(self, kind: str, payload: dict | None = None) -> dict:
         kind = str(kind or "").strip()
+        if kind == "notice_wait_result":
+            return self._enqueue_confirmed_active_mutation("notice_wait_result",
+                lambda: self._apply_event_wait_result(payload or {}))
         if kind == "clipboard_candidate":
             return {"ok": True, "ignored": True, "reason": "clipboard 解析由后端投影"}
         if kind == "dialog_request":

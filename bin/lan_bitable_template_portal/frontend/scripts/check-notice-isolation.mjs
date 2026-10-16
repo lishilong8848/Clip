@@ -23,7 +23,7 @@ const code = [
 const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage();
-  await page.setContent('<div class="notice-detail-overlay open"></div><form id="lite-notice-form"><input name="work_type" value="maintenance"><input name="target_record_id" value="rec-ba"><input name="source_record_id" value="rec-plan"><button name="submit_action">Send</button></form><section id="lite-alert-tags"></section>');
+  await page.setContent('<div class="notice-detail-overlay open"></div><form id="lite-notice-form"><input name="work_type" value="maintenance"><input name="target_record_id" value="rec-ba"><input name="source_record_id" value="rec-plan"><button name="submit_action">Send</button></form><section id="lite-alert-tags"></section><div id="lite-event-wait-dialog" hidden><p id="lite-event-wait-copy"></p><button id="lite-event-wait-close">知道了</button></div>');
   const result = await page.evaluate(async source => {
     const previewValue = (form, name) => form?.querySelector(`[name="${name}"]`)?.value || '';
     const noticeDrawerOverlay = () => document.querySelector('.notice-detail-overlay');
@@ -31,11 +31,14 @@ try {
     let litePageSuspended = false, status = '', errorText = '', patches = 0;
     const setLiteStatus = text => { status = text; };
     const showLiteError = text => { errorText = text; };
-    const sleep = () => Promise.resolve();
+    let simulatedTime = Date.now();
+    const sleep = milliseconds => { simulatedTime += milliseconds === 15000 ? 720000 : milliseconds; return Promise.resolve(); };
     const handleLiteAuthRequired = () => false;
     const applyJobPatch = () => { patches++; };
     const friendlyLiteMessage = text => text;
     const jobPhaseText = phase => phase;
+    const deleteSubmittedLiteDraft = async () => {};
+    const successfulNoticeActionText = () => 'success';
     const updateActionAvailability = () => {};
     const form = document.getElementById('lite-notice-form');
     const target = form.querySelector('[name="target_record_id"]');
@@ -67,9 +70,26 @@ try {
       checks.push(!form.classList.contains('is-submitting') && !form.querySelector('button').disabled);
       promoteSubmittedStartToOngoing({action:'start',target_record_id:'rec-ba',source_record_id:'rec-plan'});
       checks.push(target.value === 'rec-svg');
+      target.value = 'rec-ba';latestSubmittedJobId = 'job-wait';form.dataset.pendingActionJobId = 'job-wait';setFormSubmitBusy(form, true);
+      let reads = 0, unlocked = false, popupOnce = false;
+      const realNow = Date.now;Date.now = () => simulatedTime;
+      window.fetch = async () => {
+        reads++;
+        if (reads === 2) {
+          unlocked = !form.classList.contains('is-submitting') && !form.querySelector('button').hasAttribute('aria-busy');
+          document.getElementById('lite-event-wait-close').click();
+        }
+        if (reads === 3) popupOnce = document.getElementById('lite-event-wait-dialog').hidden;
+        return {ok:true,json:async()=>({ok:true,data:{job_id:'job-wait',phase:reads<3?'event_waiting':'success',event_wait:{message:'A楼事件，等待结束后发送'}}})};
+      };
+      const finished = await pollSubmittedJob('job-wait', '', {action:'start',target_record_id:'rec-ba',source_record_id:'rec-plan'});
+      Date.now = realNow;
+      if (!finished || reads < 3 || !unlocked || !popupOnce) throw new Error(JSON.stringify({finished,reads,unlocked,popupOnce,status,errorText}));
+      checks.push(finished && reads >= 3 && unlocked && popupOnce);
+      checks.push(document.getElementById('lite-event-wait-copy').textContent === 'A楼事件，等待结束后发送');
       return checks;
     })()`);
   }, code);
-  assert.deepEqual(result, [true, true, true, true, true, true]);
-  console.log('[pass] distinct target identity, stale tags/status isolation, new task ownership, busy reset, late start cannot replace another notice');
+  assert.deepEqual(result, [true, true, true, true, true, true, true, true]);
+  console.log('[pass] notice identity isolation, event-wait popup once, unlocked copy/edit and waiting over 10 minutes resumes without timeout');
 } finally { await browser.close(); }

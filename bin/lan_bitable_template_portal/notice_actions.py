@@ -110,6 +110,8 @@ async def submit_notice_action(controller, runtime, session, payload, *, card_su
         controller._clear_read_cache()
         runtime.enqueue_initial_message_or_upload_job(job_id)
     job = await asyncio.to_thread(runtime.service.get_job, job_id) or job
+    from .event_priority import public_job
+    job = public_job(job, runtime.auth_manager, session)
     return JSONResponse(
         {
             "ok": True,
@@ -117,6 +119,7 @@ async def submit_notice_action(controller, runtime, session, payload, *, card_su
                 "job_id": job_id,
                 "accepted_at": job.get("accepted_at") or 0,
                 "initial_phase": job.get("phase") or "accepted",
+                "event_wait": job.get("event_wait") or {},
                 "supersedes_job_ids": job.get("supersedes_job_ids") or [],
             },
         },

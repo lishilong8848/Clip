@@ -54,6 +54,8 @@ _EXCLUDED_PREFIXES = (
     "/api/auth",
     "/api/admin",
     "/api/notice-memory",
+    # Personal display preferences belong to the browser, not model business tools.
+    "/api/workspace-layouts/",
     "/api/signatures/management",
     "/api/backend/",
     "/api/backend",

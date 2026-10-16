@@ -11,7 +11,7 @@ assert(!source.includes('/workbench-lite/parse'),'legacy transport is unchanged'
 assert(adaptNoticeParserClient(source).includes('await response.text()'));
 assert.throws(()=>adaptNoticeParserClient('changed'),/contract changed/);
 const output=path.resolve(root,'../../../output/playwright/workspace-notices');await mkdir(output,{recursive:true});
-const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:4173}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),entry='/assets/workspace-v2/index.html?__page=/workbench-lite&scope=A&work_type=';
 const errors=[],writes=[];let page,user='fixture-manager',role='admin',target='rec-original',sops=[],changeState='missing_screenshot',canConfirm=true,sopVersion=0,groupState='',orphan=false;
 const escape=v=>String(v).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');

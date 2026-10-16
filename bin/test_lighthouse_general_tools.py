@@ -178,9 +178,9 @@ class PublicSearchReuseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PublicQueryError):
             await source.search('内部台账','内部台账')
         source._search_uncached.assert_awaited_once()
-        key=('Python documentation','搜索Python文档')
+        key=next(key for key in source._search_cache if key[:2] == ('Python documentation','搜索Python文档'))
         source._search_cache[key]=(asyncio.get_running_loop().time()-121,cached)
-        await source.search(*key)
+        await source.search(*key[:2])
         self.assertEqual(source._search_uncached.await_count,2)
 
     async def test_failed_search_is_not_cached(self):

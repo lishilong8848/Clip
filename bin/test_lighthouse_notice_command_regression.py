@@ -100,6 +100,7 @@ class _IsolatedService:
         # Real command expansion may consult the active store for update/end only.
         self.service._state_store = SimpleNamespace(
             list_qt_active_items=lambda include_deleted=False: [],
+            list_documents=lambda _namespace: [],
             resolve_notice_identity=lambda **_kwargs: None,
             put_documents=lambda _namespace, _documents: None,
         )

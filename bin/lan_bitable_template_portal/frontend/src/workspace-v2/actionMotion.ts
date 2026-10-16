@@ -30,8 +30,9 @@ function settle(action:Action){
 }
 function result(action:Action,value:any){
   if(action.finished)return;
+  if((value?.phase||value?.initial_phase)==='event_waiting'){clear(action);return;}
   if(value?.error||value?.ok===false||['failed','error','cancelled'].includes(value?.phase||value?.status))action.failed=true;
-  const phase=value?.phase||value?.status;
+  const phase=value?.phase||value?.initial_phase||value?.status;
   const id=value?.job_id;
   if(id&&!['success','succeeded','completed','failed','error','cancelled'].includes(phase)){
     jobs.set(String(id),action);action.waiting=true;
@@ -77,6 +78,7 @@ export function installActionMotion(doc:Document=document):()=>void{
     button.style.setProperty('--v2-action-size',Math.max(1,Math.min(48,button.clientHeight,button.clientWidth))+'px');
     // Defer decoration until the original click handlers have inspected the target.
     window.setTimeout(()=>{
+      if(action.finished)return;
       if(!button.isConnected||!action.observed){clear(action);return;}
       button.dataset.v2Action='preparing';button.append(feedback);render(h(LoaderCircle,{size:21}),feedback);
       // Establish the full-width clip before transitioning, instead of jumping from clip-path:none.

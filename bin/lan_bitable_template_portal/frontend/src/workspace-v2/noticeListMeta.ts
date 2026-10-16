@@ -1,5 +1,12 @@
 import type { Dict } from './client';
 
+export function noticeSourceMode(row: Dict): { label: string; tone: 'info' | 'warning'; bound: boolean } {
+  const source = String(row.source_record_id || '').trim();
+  const target = String(row.target_record_id || '').trim();
+  const bound = !!source && !/^(?:local_|manual:)/.test(source) && source !== target;
+  return { label: bound ? '源表事项' : '纯手填', tone: bound ? 'info' : 'warning', bound };
+}
+
 export function noticeListStatus(row: Dict, lane: string): { label: string; tone: 'default' | 'info' | 'warning' | 'error' } {
   if (lane !== 'ongoing') {
     return { label: String(row.source_progress || row.status_label || row.status || '未开始'), tone: 'default' };

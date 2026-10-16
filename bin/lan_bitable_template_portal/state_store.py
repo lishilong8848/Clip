@@ -3612,7 +3612,12 @@ class LanPortalStateStore:
                         """
                         SELECT COALESCE(SUM(size), 0) AS pending_bytes
                         FROM notice_upload_attachments
-                        WHERE expires_at >= ? AND used_at IS NULL
+                        WHERE (expires_at >= ? AND used_at IS NULL)
+                           OR EXISTS (
+                               SELECT 1 FROM notice_actions a
+                               WHERE json_extract(a.payload_json, '$.phase') NOT IN ('success', 'failed', 'cancelled')
+                                 AND instr(a.payload_json, notice_upload_attachments.upload_id) > 0
+                           )
                         """,
                         (now,),
                     ).fetchone()
@@ -3661,7 +3666,13 @@ class LanPortalStateStore:
                 if not row:
                     return None
                 if float(row["expires_at"] or 0) < time.time():
-                    return None
+                    pinned = conn.execute(
+                        """SELECT 1 FROM notice_actions WHERE
+                           json_extract(payload_json, '$.phase') NOT IN ('success', 'failed', 'cancelled')
+                           AND instr(payload_json, ?) > 0 LIMIT 1""", (upload_id,),
+                    ).fetchone()
+                    if not pinned:
+                        return None
                 payload = self._loads(str(row["payload_json"] or ""), {})
                 if not isinstance(payload, dict):
                     payload = {}
@@ -3752,8 +3763,13 @@ class LanPortalStateStore:
                 cursor = conn.execute(
                     """
                     DELETE FROM notice_upload_attachments
-                    WHERE expires_at < ?
-                       OR (used_at IS NOT NULL AND used_at < ?)
+                    WHERE (expires_at < ?
+                       OR (used_at IS NOT NULL AND used_at < ?))
+                      AND NOT EXISTS (
+                        SELECT 1 FROM notice_actions a
+                        WHERE json_extract(a.payload_json, '$.phase') NOT IN ('success', 'failed', 'cancelled')
+                          AND instr(a.payload_json, notice_upload_attachments.upload_id) > 0
+                      )
                     """,
                     (cutoff, used_cutoff),
                 )
@@ -8438,6 +8454,38 @@ class LanPortalStateStore:
                                 "INSERT OR REPLACE INTO json_documents(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)",
                                 (namespace, key, self._json(dict(payload)), time.time()),
                             )
+
+    def put_action_job_with_queue(self, job: dict[str, Any]) -> None:
+        """Save the job and its matching queue state in the same transaction."""
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                with conn:
+                    self._put_table_document_locked(conn, "notice_actions", job["job_id"], job)
+                    conn.execute(
+                        """INSERT INTO runtime_task_queue(queue_name, job_id, status, available_at,
+                               lease_until, attempts, last_error, payload_json, created_at, updated_at)
+                           VALUES ('qt_action', ?, ?, ?, 0, 0, '', '{}', ?, ?)
+                           ON CONFLICT(queue_name, job_id) DO UPDATE SET
+                               status=excluded.status, available_at=excluded.available_at,
+                               lease_until=0, updated_at=excluded.updated_at""",
+                        (job["job_id"], {"event_waiting": "event_waiting", "success": "done", "failed": "failed"}.get(job.get("phase"), "queued"),
+                         float(job.get("accepted_at") or time.time()), time.time(), time.time()),
+                    )
+
+    def find_qt_event_wait_job(self, operation_id: str) -> dict[str, Any] | None:
+        if not operation_id:
+            return None
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                row = conn.execute(
+                    """SELECT payload_json FROM notice_actions
+                       WHERE json_extract(payload_json, '$.execution_origin') = 'qt_local'
+                         AND json_extract(payload_json, '$.operation_id') = ? LIMIT 1""",
+                    (operation_id,),
+                ).fetchone()
+        return self._loads(row["payload_json"], {}) if row else None
 
     def delete_document(self, namespace: str, key: str) -> None:
         namespace = self._text(namespace)
@@ -13257,6 +13305,7 @@ class LanPortalStateStore:
         *,
         error: str = "",
         max_attempts: int = 3,
+        count_attempt: bool = True,
     ) -> dict[str, Any] | None:
         try:
             event_id = int(event_id or 0)
@@ -13283,7 +13332,7 @@ class LanPortalStateStore:
                     return None
                 attempts = int(current["attempts"] or 0)
                 final_status = status
-                if status == "pending":
+                if status == "pending" and count_attempt:
                     attempts += 1
                     if attempts >= max_attempts:
                         final_status = "failed"
@@ -14495,7 +14544,9 @@ class LanPortalStateStore:
                     )
                     VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
                     ON CONFLICT(queue_name, job_id) DO UPDATE SET
-                        status = excluded.status,
+                        status = CASE WHEN runtime_task_queue.status = 'event_waiting'
+                                           AND excluded.status = 'queued'
+                                      THEN runtime_task_queue.status ELSE excluded.status END,
                         available_at = excluded.available_at,
                         lease_until = 0,
                         last_error = excluded.last_error,

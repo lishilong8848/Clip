@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 
 const compiled = await build({ entryPoints: ['src/workspace-v2/noticeListMeta.ts'], bundle: true, write: false, format: 'esm' });
-const { noticeListStatus: status, noticeListCycle: cycle, noticeListSpecialty: specialty, noticePlanWindow: window } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
+const { noticeListStatus: status, noticeListCycle: cycle, noticeListSpecialty: specialty, noticePlanWindow: window, noticeSourceMode: source } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'));
+assert.deepEqual(source({source_record_id:'rec-plan',target_record_id:'rec-notice'}),{label:'源表事项',tone:'info',bound:true});
+assert.equal(source({record_id:'rec-plan',source_record_id:'rec-plan'}).label,'源表事项');
+assert.equal(source({target_record_id:'rec-notice'}).label,'纯手填');
+assert.equal(source({source_record_id:'rec-notice',target_record_id:'rec-notice'}).bound,false);
+assert.equal(source({source_record_id:'local_draft'}).bound,false);
 const row = { work_type: 'maintenance', source_progress: '未开始', status: '开始', maintenance_cycle: '半年' };
 assert.equal(status(row, 'planned').label, '未开始');
 assert.equal(status(row, 'ongoing').label, '进行中');

@@ -1235,7 +1235,7 @@ function planStatusLabel(status: string): string { return ({ needs_input: '待�
 function nativeTaskText(result: Dict): string {
   const job = result.job_result?.data || {};
   const phase = String(job.phase || job.status || '');
-  const labels: Dict = { accepted:'已受理', queued:'排队中', upload_queued:'等待上传', qt_queued:'等待执行', upload_waiting:'等待上传多维', remote_intent:'正在写入多维', uploading:'正在上传多维', remote_written:'多维已写入，正在同步页面', sending_message:'正在发送飞书消息', message_sent:'飞书消息已发送', success:'发送成功', succeeded:'已完成', failed:'操作未完成' };
+  const labels: Dict = { event_waiting:'已排队，等待事件结束', accepted:'已受理', queued:'排队中', upload_queued:'等待上传', qt_queued:'等待执行', upload_waiting:'等待上传多维', remote_intent:'正在写入多维', uploading:'正在上传多维', remote_written:'多维已写入，正在同步页面', sending_message:'正在发送飞书消息', message_sent:'飞书消息已发送', success:'发送成功', succeeded:'已完成', failed:'操作未完成' };
   const started = Number(job.upload_started_at || 0);
   const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - started));
   if (started > 0 && elapsed >= 30 && ['uploading', 'remote_intent'].includes(phase)) return `${labels[phase]}（已等待 ${Math.floor(elapsed / 60)}分${elapsed % 60}秒）`;
@@ -1247,6 +1247,8 @@ function planStatusText(plan: Dict): string {
 }
 function resultStatusText(result: Dict, plan: Dict): string {
   if (!result.ok) return result.error || '操作未完成';
+  const job=result.job_result?.data||result.data||{};
+  if((job.phase||job.initial_phase)==='event_waiting')return job.event_wait?.message||'已排队，等待事件结束后自动发送。';
   if (result.job_result) return nativeTaskText(result) || (plan.status === 'completed' ? '业务处理已完成' : '正在查询原任务状态');
   return result.status === 202 ? '已提交后台处理' : '接口已完成';
 }

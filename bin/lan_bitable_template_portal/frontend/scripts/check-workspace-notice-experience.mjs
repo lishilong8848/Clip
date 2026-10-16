@@ -27,7 +27,8 @@ assert(adapted.includes('function onPollingFrom')&&adapted.includes('setCustomVa
 const output=path.resolve(root,'../../../output/playwright/workspace-notices');await mkdir(output,{recursive:true});
 const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});let page;const errors=[],writes=[],uploads=[];
-let jobPhase='queued',prefillDelay=0,useSop=false,photoRequired=true;
+let jobPhase='queued',prefillDelay=0,useSop=false,photoRequired=true,waitingScenario=false,jobId='job-experience';
+const waitMessage='当前 A楼事件：隔离测试事件\n发生时间：2026-10-16 09:00；事件来源：动环；级别：I3；当前进度：处理中。\n当前通告已排队，将在所有已上传事件结束或删除后自动发送。\n提醒：A楼发生事件，钉钉群中不要发送其它非事件通告，保证钉钉群事件通告可读性。';
 const escape=v=>String(v).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
 const form=(ongoing=false)=>`<form id="lite-notice-form" data-action="${ongoing?'update':'start'}">
 ${Object.entries({scope:'E',work_type:'maintenance',notice_type:'维保通告',source_record_id:'plan-E',target_record_id:ongoing?'target-E':'',active_item_id:ongoing?'active-E':'',site_photo_count:0}).map(([k,v])=>`<input type="hidden" name="${k}" value="${v}">`).join('')}
@@ -58,10 +59,10 @@ try{
    return ok(route,{upload_id:'upload-'+name,file_name:name});
   }
   if(u.pathname==='/api/workbench-actions'){
-   const payload=req.postDataJSON();assert.equal(payload.source_record_id,'plan-E');assert.equal(payload.patch.reason,'本楼现场原因');assert.equal(payload.patch.content,'E楼BA资料核验');assert.equal(payload.patch.site_photos.length,2);
-   return ok(route,{job_id:'job-experience',phase:'queued'});
+   const payload=req.postDataJSON();assert.equal(payload.source_record_id,'plan-E');assert.equal(payload.patch.reason,'本楼现场原因');assert.equal(payload.patch.content,'E楼BA资料核验');if(!waitingScenario)assert.equal(payload.patch.site_photos.length,2);
+   return ok(route,waitingScenario?{job_id:jobId,initial_phase:'event_waiting',event_wait:{message:waitMessage}}:{job_id:jobId,phase:'queued'});
   }
-  if(u.pathname==='/api/jobs/job-experience')return ok(route,{job_id:'job-experience',phase:jobPhase});
+  if(u.pathname==='/api/jobs/'+jobId)return ok(route,{job_id:jobId,phase:jobPhase,event_wait:{message:waitMessage}});
   if(u.pathname==='/api/change-confirmations')return ok(route,{can_confirm:true,items:[{target_record_id:'change-A',building_codes:['A'],building:'A楼',title:'A楼不可混入',state:'missing_screenshot'},{target_record_id:'change-E',building_codes:['E'],building:'E楼',title:'E楼待确认',state:'missing_screenshot'}]});
   if(req.method()!=='GET')throw new Error('Unexpected isolated write: '+u.pathname);
   return ok(route,{items:[],records:[],settings:{},available:false});
@@ -69,7 +70,7 @@ try{
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.addInitScript(()=>sessionStorage.clear());
  const goto=async(kind='maintenance')=>{await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=E&month=10月&work_type='+kind);await page.locator('.v2-notice-entry').first().waitFor();};
  const scrollSection=label=>page.locator({'通告内容':'.v2-notice-page-fields','推荐填写':'[data-notice-section=memory]','照片':'[data-notice-section=photos]'}[label]).scrollIntoViewIfNeeded();
- const open=async()=>{await page.locator('[data-list=planned]').getByRole('button',{name:'开始',exact:true}).click();await page.getByRole('textbox',{name:'名称',exact:true}).waitFor();assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0);assert(await page.getByRole('textbox',{name:'原因',exact:true}).isVisible());assert(await page.locator('[data-notice-section=memory]').isVisible());assert(await page.locator('[data-notice-section=photos]').isVisible());assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible());await scrollSection('推荐填写');};
+ const open=async()=>{await page.locator('[data-list=planned]').getByRole('button',{name:'开始',exact:true}).click();await page.getByRole('textbox',{name:'名称',exact:true}).waitFor();assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0);assert(await page.getByRole('textbox',{name:'原因',exact:true}).isVisible());assert(await page.locator('[data-notice-section=memory]').isVisible());if(photoRequired)assert(await page.locator('[data-notice-section=photos]').isVisible());assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible());await scrollSection('推荐填写');};
  await goto();
  await page.getByLabel('计划月份',{exact:true}).click();await page.locator('.n-base-select-option').getByText('11月',{exact:true}).click();
  assert.equal(await page.locator('.v2-notice-heading h1').isVisible(),false,'navigation already names this module');assert.match(await page.locator('[data-list=planned]').innerText(),/10月计划/);
@@ -117,5 +118,25 @@ try{
  await page.getByRole('button',{name:'预览并确认结束',exact:true}).click();await page.getByRole('button',{name:'补充现场照片',exact:true}).click();
  const section=await page.locator('[data-notice-section=photos]').boundingBox();assert(section.y>0&&section.y<900,'missing-photo link locates the photo section');
  assert.equal(await page.getByLabel('发送前确认',{exact:true}).count(),0,'missing photo cannot submit');
- assert.deepEqual(errors,[]);console.log('PASS: recommendation/touched-field guards, missing-first form, applied filters, single-image retry, task results, building isolation, Naive SOP controls. All writes mocked.');
+ for(const width of [1440,390]){
+  await page.evaluate(()=>sessionStorage.clear());await page.setViewportSize({width,height:width===390?844:1000});
+  await page.emulateMedia({reducedMotion:'no-preference'});waitingScenario=true;photoRequired=false;jobPhase='event_waiting';jobId='job-wait-'+width;
+  const before=writes.filter(v=>v==='/api/workbench-actions').length;
+  await goto();await open();await page.getByRole('button',{name:'采用这组空白项',exact:true}).click();
+  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
+  await page.getByRole('status',{name:'已排队，等待事件结束',exact:true}).waitFor();
+  const popup=page.locator('.n-dialog').filter({hasText:'事件优先：通告已排队'});await popup.waitFor();assert((await popup.innerText()).includes('隔离测试事件'));
+  await page.waitForTimeout(450);
+  await page.screenshot({path:path.join(output,'event-wait-'+width+'.png'),fullPage:true});
+  await page.getByRole('button',{name:'知道了，保留排队',exact:true}).click();
+  assert.equal(await page.locator('.v2-notice-task-result .n-spin').count(),0,'waiting is not an upload spinner');
+  await page.waitForTimeout(1400);assert.equal(await page.locator('[data-v2-action=success],[data-v2-action=pending]').count(),0,'waiting never claims success or stays busy');
+  await page.getByRole('button',{name:'查询进度',exact:true}).click();assert.equal(await popup.count(),0,'one popup per task');
+  await page.getByRole('button',{name:/返回列表/}).click();await page.locator('[data-list=planned]').getByRole('button',{name:'开始',exact:true}).click();
+  await page.getByRole('status',{name:'已排队，等待事件结束',exact:true}).waitFor();
+  assert.equal(writes.filter(v=>v==='/api/workbench-actions').length,before+1,'reopening a held task does not submit again');
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+  jobPhase='success';await page.getByRole('button',{name:'查询进度',exact:true}).click();await page.getByRole('status',{name:'通告办理完成',exact:true}).waitFor();
+ }
+ assert.deepEqual(errors,[]);console.log('PASS: notice editing, attachments, SOP, event waiting/resume on desktop and mobile, no duplicate submit or false success. All writes mocked.');
 }catch(e){if(page){await page.screenshot({path:path.join(output,'experience-error.png'),fullPage:true});console.error(errors,await page.locator('.n-modal').allTextContents());}throw e;}finally{await browser.close();await server.close();}

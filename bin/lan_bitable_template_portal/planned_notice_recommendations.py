@@ -148,10 +148,8 @@ def _record_memory_name(service, record: dict[str, Any], work_type: str) -> str:
 
 
 def _record_memory_cycle(service, record: dict[str, Any], work_type: str) -> str:
-    if work_type != "maintenance":
-        return ""
     fields = record.get("display_fields") or {}
-    return str(fields.get("维护周期") or record.get("maintenance_cycle") or "").strip()
+    return str(fields.get("维护周期") or fields.get("维保周期") or record.get("maintenance_cycle") or "").strip()
 
 
 def _matches_item(
@@ -167,12 +165,9 @@ def _matches_item(
     source_canonical = _canonical_memory_name(service, item, work_type)
     if not source_canonical or source_canonical != target_canonical:
         return False
-    if work_type == "maintenance" and target_cycle:
-        source_cycle = str(item.get("maintenance_cycle") or "").strip()
-        if service._normalize_memory_cycle(source_cycle) != service._normalize_memory_cycle(
-            target_cycle
-        ):
-            return False
+    source_cycle = str(item.get("maintenance_cycle") or "").strip()
+    if service._normalize_memory_cycle(source_cycle) != service._normalize_memory_cycle(target_cycle):
+        return False
     return True
 
 

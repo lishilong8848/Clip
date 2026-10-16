@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -45,6 +45,7 @@ CUSTOM_KEY_ENV = "OPEN_METEO_CUSTOMER_KEY"
 DEFAULT_TIMEOUT = 20
 MAX_BYTES = 512 * 1024
 MAX_RESULTS = 5
+SearchType = Literal['web', 'today_news']
 MAX_CITY_CHARS = 40
 SEARCH_MIN_QUERY_LEN = 2
 SEARCH_QUALIFIERS = frozenset({'official', 'documentation', 'docs', 'tutorial', 'site', 'org', 'com', 'net', 'gov', 'cn'})
@@ -593,18 +594,20 @@ def _relevant_search_results(rows, query):
     return [row for _, row in sorted(ranked, key=lambda pair: pair[0], reverse=True)[:MAX_RESULTS]]
 
 
-def _current_news_request(question):
-    return bool(re.search(r'新闻|要闻|资讯|热搜', question) and re.search(r'今天|今日|最新|热点|热门|实时|热搜', question)
-        and not re.search(r'昨天|前天|去年|上周|上月|历史|\d{4}[-年/]|是什么|什么意思|定义', question))
-
-
-def _current_news_results(rows, query, question, queried_at):
+def _current_news_results(rows, query, topic, queried_at):
     now = dt.datetime.fromisoformat(queried_at).astimezone(TZ)
-    rows = [row for row in rows if row.get('published_at')
-        and (stamp := dt.datetime.fromisoformat(row['published_at'])).date() == now.date()
-        and stamp <= now + dt.timedelta(minutes=5)]
-    # Feed entries need not literally say "hot news"; retain any real topic or site constraints.
-    topic = re.sub(r'查询|查一下|搜索|看看|看一下|请问|帮我|给我|一下|今天|今日|最新|实时|热点|热门|热搜|新闻|要闻|资讯|有哪些|有什么|怎么样|全部|所有|[的呢吧？?，,。\s]', '', question)
+    current = []
+    for row in rows:
+        try:
+            stamp = dt.datetime.fromisoformat(row.get('published_at') or '')
+            if stamp.tzinfo is None:
+                continue
+            stamp = stamp.astimezone(TZ)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if stamp.date() == now.date() and stamp <= now + dt.timedelta(minutes=5):
+            current.append(row)
+    rows = current
     if topic:
         rows = _relevant_search_results(rows, topic)
     site = re.search(r'\bsite:([a-z0-9.-]+)', query, re.I)
@@ -1010,12 +1013,17 @@ class PublicSources:
             payload.update(city=city, timezone=SHANGHAI_TZ)
         return payload
 
-    async def search(self, query: str, question: str) -> dict[str, Any]:
+    async def search(self, query: str, question: str, *, search_type: SearchType = 'web', topic: str = '') -> dict[str, Any]:
         _ensure_public_query(query, question)
-        key = (query, question)
+        if search_type not in ('web', 'today_news') or not isinstance(topic, str) or len(topic) > 200:
+            raise PublicQueryError('公开查询类型或主题无效。')
+        topic = topic.strip()
+        if _forbidden_inputs(topic) or topic and _query_derived_from_user(topic, question):
+            raise PublicQueryError('查询主题必须来自本轮公开问题，不能包含内部业务、私密或个人数据。')
+        key = (query, question, search_type, topic, _now_iso()[:10])
         loop = asyncio.get_running_loop()
         cached = self._search_cache.get(key)
-        ttl = 30 if _current_news_request(question) else 120
+        ttl = 30 if search_type == 'today_news' else 120
         if cached and loop.time() - cached[0] < ttl and cached[1]['queried_at'][:10] == _now_iso()[:10]:
             return {**deepcopy(cached[1]), 'cached': True, 'cache_age_seconds': round(loop.time() - cached[0], 1)}
         task = self._search_tasks.get(key)
@@ -1024,7 +1032,7 @@ class PublicSources:
                 return self._unavailable('public_search', '', _now_iso(), note='公开搜索当前繁忙，请稍后重试。')
             async def retrieve():
                 try:
-                    value = await self._search_uncached(query, question)
+                    value = await self._search_uncached(query, question, search_type, topic)
                     if value.get('ok') and value.get('results'):
                         if len(self._search_cache) >= 64:
                             self._search_cache.pop(next(iter(self._search_cache)))
@@ -1051,11 +1059,11 @@ class PublicSources:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
 
-    async def _search_uncached(self, query: str, question: str) -> dict[str, Any]:
+    async def _search_uncached(self, query: str, question: str, search_type: SearchType = 'web', topic: str = '') -> dict[str, Any]:
         queried_at = _now_iso()
         deadline = asyncio.get_running_loop().time() + self._timeout
         failures, empty, navigation = [], None, {}
-        news = _current_news_request(question)
+        news = search_type == 'today_news'
         attempts = [(BING_RSS_URL, query, _parse_rss_results), (MWMBL_URL, query, _parse_mwmbl_results)]
         site = re.search(r'\bsite:([a-z0-9.-]+)', query, re.I)
         if site:
@@ -1093,8 +1101,8 @@ class PublicSources:
                     try:
                         url, rows = await completed
                         # Broader retrieval must still satisfy the original topic/site.
-                        results = _current_news_results(rows, query, question, queried_at) if url in NEWS_RSS_URLS else _relevant_search_results(rows, query)
-                        if site and not results:
+                        results = _current_news_results(rows, query, topic, queried_at) if news else _relevant_search_results(rows, query)
+                        if site and not results and not news:
                             from .lighthouse_public_page import page_url
                             for row in rows:
                                 host = (urlsplit(row['url']).hostname or '').lower().rstrip('.')
@@ -1104,10 +1112,10 @@ class PublicSources:
                                     link = page_url('https://' + row['url'][7:])
                                 if link and (host == requested or host.endswith('.' + requested)):
                                     navigation.setdefault(link, {'title': row['title'], 'link': link})
-                        value = {'ok': True, 'source': 'public_search', 'sourceURL': url,
+                        value = {'ok': True, 'source': 'public_news' if news else 'public_search', 'sourceURL': url,
                                  'queried_at': queried_at, 'unavailable': False,
                                  'empty': not results, 'count': len(results), 'results': results}
-                        if url in NEWS_RSS_URLS:
+                        if news:
                             value.update(source='public_news', note='按北京时间核对发布时间的今日要闻，不代表全网热度排名。')
                         if results:
                             return value
@@ -1119,7 +1127,8 @@ class PublicSources:
                         if not rows:
                             empty = value
                         else:
-                            failures.append('搜索返回了不相关内容或站点不符，未用作回答依据；可用原问题中的较短关键词重查。')
+                            failures.append('未取得符合北京时间今日范围、主题和站点要求的可核验新闻。' if news
+                                else '搜索返回了不相关内容或站点不符，未用作回答依据；可用原问题中的较短关键词重查。')
                     except PublicQueryError as exc:
                         failures.append(str(exc))
                     except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError, IndexError, asyncio.TimeoutError) as exc:
@@ -1138,6 +1147,11 @@ class PublicSources:
             candidates = sorted(navigation.values(), key=lambda row: not re.search(r'/contents(?:\.html)?$', row['link']))
             value.update(navigation=candidates[:3],
                 note='未命中特定主题；这些仅为官方站点导航候选，可用 public_page 读取并定位正文，不是专题内容依据。')
+        if news and not value.get('results'):
+            reasons = ['未取得符合北京时间今日范围、主题和站点要求的可核验新闻。']
+            if not value.get('ok'):
+                reasons.extend(failures)
+            value.update(source='public_news', note='；'.join(dict.fromkeys(reasons)))
         return value
 
     async def page(self, url: str, question: str, *, refresh: bool = False) -> dict[str, Any]:

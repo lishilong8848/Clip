@@ -1525,6 +1525,13 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 self.identities = []
                 self.active_items = []
                 self.events = []
+                self.documents = {}
+
+            def get_document(self, namespace, key):
+                return self.documents.get((namespace, key))
+
+            def put_document(self, namespace, key, payload):
+                self.documents[(namespace, key)] = dict(payload)
 
             def resolve_notice_identity(self, **_kwargs):
                 return None

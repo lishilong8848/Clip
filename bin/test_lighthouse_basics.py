@@ -315,7 +315,7 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
             'results': [{'title': '国际新闻', 'url': 'https://example.com/news', 'snippet': '新闻资料'}]})
         result = await LighthouseModel(self.portal, model_factory=factory, public_sources=public).answer(self.actor,
             {'question': '今天国际新闻事件有哪些', '_profile': self.model.profile()}, [], self.request, AsyncMock(), self.authorize, {})
-        public.search.assert_awaited_once_with('国际新闻事件', '今天国际新闻事件有哪些')
+        public.search.assert_awaited_once_with('国际新闻事件', '今天国际新闻事件有哪些', search_type='web', topic='')
         self.assertEqual(len(result['sources']), 1)
         self.assertEqual(self.reads, [])
 

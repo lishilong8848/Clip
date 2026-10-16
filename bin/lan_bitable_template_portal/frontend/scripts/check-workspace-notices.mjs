@@ -135,7 +135,7 @@ try {
     const bounds=await body.boundingBox();
     const actions=await page.locator('.v2-notice-editor-footer').boundingBox();assert(bounds.y+bounds.height<=actions.y+2,kind+' scrolling body stays above fixed actions');
     await page.locator('[data-notice-section=relations]').scrollIntoViewIfNeeded();
-    assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible(),'related-record tools are immediately accessible on the same page');
+    assert(await page.getByRole('button',{name:/^(重新)?查找目标通告$/}).isVisible(),'related-record tools are immediately accessible on the same page');
     await body.evaluate(el=>el.scrollTo({top:0}));
     assert.equal(await page.locator('.v2-notice-page-fields .n-pagination').count(),0,'notice fields never paginate');
     await page.screenshot({ path: path.join(output, `form-${kind}.png`), fullPage: true });

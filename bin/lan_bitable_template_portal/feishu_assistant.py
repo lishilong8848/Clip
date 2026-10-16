@@ -1452,11 +1452,14 @@ class FeishuAssistant:
         return "照片提示：" + "；".join(photo_hint_parts) + "。" + guide
 
     def _status_text(self, plan):
+        from .event_priority import plan_wait_message
         status = plan.get("status")
         label = {"needs_input": "待补充字段", "awaiting_confirmation": "待确认执行",
                  "awaiting_second_confirmation": "待再次确认", "running": "处理中",
                  "submitted": "已提交，后台处理中", "completed": "已完成", "failed": "失败",
                  "cancelled": "已取消", "superseded": "已由最新提交替代"}.get(status, str(status))
+        if plan_wait_message(plan):
+            label = "已排队，等待事件结束"
         lines = [f"**{safe_text(str(plan.get('title') or '业务操作'), limit=120)}**",
                  "状态：" + label + "，版本：" + str(plan.get("version"))]
         if status == "needs_input":
@@ -1470,6 +1473,7 @@ class FeishuAssistant:
 
     @staticmethod
     def plan_text(plan):
+        from .event_priority import plan_wait_message
         status = plan.get("status")
         title = str(plan.get("title") or "业务操作")
         lines = ["**" + title + "**", str(plan.get("explanation") or "")]
@@ -1480,7 +1484,8 @@ class FeishuAssistant:
             lines.append("操作及字段预览：\n```json\n" + operations + "\n```")
         if status == "awaiting_confirmation": lines.append("尚未执行。核对以上内容后发送“确认执行”，或发送“取消操作”。")
         elif status == "awaiting_second_confirmation": lines.append("此操作风险较高，尚未执行；核对后发送“再次确认执行”。")
-        elif status in {"running", "submitted"}: lines.append("已提交原业务流程，后台正在处理；请查询原任务结果，不要重复新增。")
+        elif status in {"running", "submitted"}:
+            lines.append(plan_wait_message(plan) or "已提交原业务流程，后台正在处理；请查询原任务结果，不要重复新增。")
         elif status == "completed": lines.append("操作已完成。")
         elif status == "needs_input":
             lines.append(FeishuAssistant._fields_text(plan))
@@ -1809,6 +1814,10 @@ def _looks_like_field_lines(question):
 
 
 def _plan_state_hint(plan):
+    from .event_priority import plan_wait_message
+    waiting = plan_wait_message(plan)
+    if waiting:
+        return waiting
     status = plan.get("status")
     if status == "needs_input":
         # Show the actual editable field list (read-only and complex fields are
@@ -1826,6 +1835,10 @@ def _plan_state_hint(plan):
 def _plain_status_line(plan):
     """Plain-language explanation of a non-terminal plan state for result
     notifications.  Never uses kernel status terms (audit #5/#7)."""
+    from .event_priority import plan_wait_message
+    waiting = plan_wait_message(plan)
+    if waiting:
+        return waiting
     status = plan.get("status")
     if status == "needs_input":
         base = ("业务核对未通过，还需要补充一些必填内容后再确认（比如现场照片）。"

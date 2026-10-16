@@ -63,6 +63,9 @@ _STATUS_PLAIN = {
 
 def _status_plain(plan):
     """User-facing label for a plan state. Never leaks kernel status terms (#5/#7)."""
+    from .event_priority import plan_wait_message
+    if plan_wait_message(plan):
+        return "已排队，等待事件结束"
     raw = str(plan.get("status") or "")
     return _STATUS_PLAIN.get(raw, "处理中")
 
@@ -1120,7 +1123,8 @@ def _build_status_card(plan, ticket):
     if status == "completed":
         lines.append("该操作已完成，无需卡片操作。")
     elif status in {"running", "submitted"}:
-        lines.append("该操作正在原业务流程中处理，这里没有可以执行的按钮。")
+        from .event_priority import plan_wait_message
+        lines.append(plan_wait_message(plan) or "该操作正在原业务流程中处理，这里没有可以执行的按钮。")
     elif status in {"failed", "cancelled", "superseded"}:
         lines.append("此操作在当前状态不能通过卡片确认/编辑。" + ("如需重试可返回原消息或网页操作。" if status == "failed" else ""))
     else:

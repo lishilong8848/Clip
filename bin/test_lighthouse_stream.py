@@ -854,7 +854,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         from openclaw_service.assistant.lighthouse_public import _ensure_public_query
         original = '讲一讲deepseek和豆包的优劣点'
         captured = []
-        async def search(query, question):
+        async def search(query, question, *, search_type='web', topic=''):
             _ensure_public_query(query, question)
             captured.append(question)
             return {'ok': True, 'queried_at': '2026-10-06T10:00:00+08:00', 'results': [
@@ -917,7 +917,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_public_search_timeout_cancels_request_and_prevents_another_fetch(self):
         cancelled = []
-        async def slow_search(*_):
+        async def slow_search(*_, **kwargs):
             try:
                 await asyncio.sleep(5)
             finally:

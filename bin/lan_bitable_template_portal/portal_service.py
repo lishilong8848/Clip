@@ -23120,6 +23120,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                     _matches_work_type(item)
                     and str(item.get("source_record_id") or "").strip()
                     == source_record_id
+                    and not (
+                        target_record_id
+                        and canonical_target_record_id(item)
+                        and canonical_target_record_id(item) != target_record_id
+                    )
                 ):
                     return item
         if target_record_id:
@@ -23135,6 +23140,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     _matches_work_type(item)
                     and str(item.get("zhihang_record_id") or "").strip()
                     == zhihang_record_id
+                    and not _has_strong_conflict(item)
                 ):
                     return item
         if active_item_id:
@@ -23143,6 +23149,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     _matches_work_type(item)
                     and str(item.get("active_item_id") or "").strip()
                     == active_item_id
+                    and not _has_strong_conflict(item)
                 ):
                     return item
         if key:
@@ -23983,13 +23990,13 @@ class MaintenancePortalService(RepairOperationsMixin):
         with self._summary_lock:
             payload = self._load_day_summary_locked()
             items = payload.setdefault("items", [])
-            item = self._find_summary_item(
+            item = self._find_work_status_item(
                 items,
                 key=key,
+                source_record_id=source_record_id,
+                target_record_id=target_record_id,
                 active_item_id=active_item_id,
-                title=title,
-                building=building,
-                reason=reason,
+                fallback_key=fallback_key,
                 work_type=work_type,
             )
             if item is None:
@@ -28090,14 +28097,18 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> dict[str, dict[str, Any]]:
         with self._summary_lock:
             status_items = self._load_work_status_items_locked(scope)
-        by_source = {
-            (
-                self._item_work_type(item),
-                str(item.get("source_record_id") or "").strip(),
-            ): item
-            for item in status_items
-            if str(item.get("source_record_id") or "").strip()
-        }
+        by_source: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in status_items:
+            source_id = canonical_source_record_id(item)
+            if not source_id:
+                continue
+            source_key = (self._item_work_type(item), source_id)
+            previous = by_source.get(source_key)
+            # A late end for an older target cannot supersede a newer start.
+            if previous is None or str(item.get("started_at") or item.get("ended_at") or item.get("updated_at") or "") >= str(
+                previous.get("started_at") or previous.get("ended_at") or previous.get("updated_at") or ""
+            ):
+                by_source[source_key] = item
         for item in daily_items or []:
             if not isinstance(item, dict):
                 continue
@@ -28149,6 +28160,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         return str(item.get("status") or "").strip() == "已结束" or bool(
             item.get("ended_at")
         )
+
+    def _work_status_matches_identity(self, row: dict[str, Any], reference: dict[str, Any]) -> bool:
+        if self._item_work_type(row) != self._item_work_type(reference):
+            return False
+        target, row_target = canonical_target_record_id(reference), canonical_target_record_id(row)
+        if target and row_target:
+            return target == row_target
+        source, row_source = canonical_source_record_id(reference), canonical_source_record_id(row)
+        if source and row_source and source != row_source:
+            return False
+        return bool(self._work_status_identity_keys(row) & self._work_status_identity_keys(reference))
 
     def _target_record_exists_for_status_item(
         self,
@@ -28258,9 +28280,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
-                    if not (
-                        self._work_status_identity_keys(row) & identity_keys
-                    ):
+                    if not self._work_status_matches_identity(row, finished):
                         continue
                     if self._is_completed_work_status_item(row):
                         continue
@@ -28289,7 +28309,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         projected.pop("ended_at", None)
         projected.pop("completed_date", None)
-        identity_keys = self._work_status_identity_keys(projected)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         matched = False
         with self._summary_lock:
@@ -28310,9 +28329,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
-                    if not (
-                        self._work_status_identity_keys(row) & identity_keys
-                    ):
+                    if not self._work_status_matches_identity(row, projected):
                         continue
                     actions = copy.deepcopy(row.get("actions") or [])
                     matched = True
@@ -28352,9 +28369,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
-                    if not (
-                        self._work_status_identity_keys(row) & identity_keys
-                    ):
+                    if not self._work_status_matches_identity(row, projected):
                         continue
                     replacement = copy.deepcopy(row)
                     replacement.update(copy.deepcopy(projected))
@@ -28648,6 +28663,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         source_work_type = self._record_source_work_type(record)
         fields = record.get("display_fields") or {}
+        maintenance_cycle = str(
+            fields.get("维护周期") or fields.get("维保周期")
+            or record.get("maintenance_cycle") or ""
+        ).strip()
         converted_maintenance = (
             work_type == WORK_TYPE_CHANGE
             and source_work_type == WORK_TYPE_MAINTENANCE
@@ -28656,9 +28675,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         if converted_maintenance:
             building = str(fields.get("楼栋") or "").strip()
             memory_name = str(fields.get("维护总项") or "").strip()
-            maintenance_cycle = str(
-                fields.get("维护周期") or record.get("maintenance_cycle") or ""
-            ).strip()
             lookup_keys.append(
                 self._converted_change_memory_key(
                     memory_name,
@@ -28686,9 +28702,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         else:
             building = str(fields.get("楼栋") or "").strip()
             memory_name = str(fields.get("维护总项") or "").strip()
-            maintenance_cycle = str(
-                fields.get("维护周期") or record.get("maintenance_cycle") or ""
-            ).strip()
         if not building or not memory_name:
             return {}
         if not lookup_keys:
@@ -28696,7 +28709,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 self._memory_item_key(
                     work_type,
                     memory_name,
-                    maintenance_cycle if work_type == WORK_TYPE_MAINTENANCE else "",
+                    maintenance_cycle,
                 )
             )
         with self._memory_lock:
@@ -28713,18 +28726,22 @@ class MaintenancePortalService(RepairOperationsMixin):
             item: dict[str, Any] = {}
             for key in lookup_keys:
                 candidate = items.get(key)
-                if isinstance(candidate, dict):
+                if isinstance(candidate, dict) and self._normalize_memory_cycle(
+                    candidate.get("maintenance_cycle")
+                ) == self._normalize_memory_cycle(maintenance_cycle):
                     item = candidate
                     break
-            if not item and work_type == WORK_TYPE_MAINTENANCE:
+            if not item and (work_type == WORK_TYPE_MAINTENANCE or maintenance_cycle):
                 canonical_name = self._canonical_history_notice_title(
                     memory_name,
-                    WORK_TYPE_MAINTENANCE,
+                    work_type,
                 )
                 canonical_cycle = self._normalize_memory_cycle(maintenance_cycle)
                 matches: list[dict[str, Any]] = []
                 for candidate_key, candidate in items.items():
                     if not isinstance(candidate, dict):
+                        continue
+                    if str(candidate.get("work_type") or WORK_TYPE_MAINTENANCE) != work_type:
                         continue
                     candidate_name = str(
                         candidate.get("memory_name")
@@ -28734,7 +28751,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if (
                         self._canonical_history_notice_title(
                             candidate_name,
-                            WORK_TYPE_MAINTENANCE,
+                            work_type,
                         )
                         != canonical_name
                     ):
@@ -28781,12 +28798,9 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> str:
         normalized = self._normalize_memory_key(item_name)
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip() or WORK_TYPE_MAINTENANCE
-        if work_type == WORK_TYPE_MAINTENANCE:
-            cycle = self._normalize_memory_key(maintenance_cycle)
-            if cycle:
-                return f"{normalized}|cycle:{cycle}"
-            return normalized
-        return f"{work_type}:{normalized}"
+        name = normalized if work_type == WORK_TYPE_MAINTENANCE else f"{work_type}:{normalized}"
+        cycle = self._normalize_memory_cycle(maintenance_cycle)
+        return f"{name}|cycle:{cycle}" if cycle else name
 
     def _converted_change_memory_key(
         self, maintenance_total: str, maintenance_cycle: str = ""
@@ -29652,7 +29666,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 candidate.get("work_type"),
                 tuple(candidate.get("building_codes") or []),
                 candidate.get("canonical_title"),
-                candidate.get("maintenance_cycle") if work_type == WORK_TYPE_MAINTENANCE else "",
+                self._normalize_memory_cycle(candidate.get("maintenance_cycle")),
             )
             current = deduped.get(key)
             if current is None or str(candidate.get("business_time") or "") >= str(current.get("business_time") or ""):
@@ -29703,15 +29717,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                     reason = "标题相似"
                 else:
                     reason = "楼栋相同"
-                if source.get("work_type") == WORK_TYPE_MAINTENANCE:
-                    source_cycle = self._normalize_memory_cycle(source.get("maintenance_cycle"))
-                    candidate_cycle = self._normalize_memory_cycle(candidate.get("maintenance_cycle"))
-                    if source_cycle and candidate_cycle and source_cycle == candidate_cycle:
-                        score += 10
-                        reason += "，周期一致"
-                    elif source_cycle and candidate_cycle and source_cycle != candidate_cycle:
-                        score -= 25
-                        reason += "，周期不同"
+                source_cycle = self._normalize_memory_cycle(source.get("maintenance_cycle"))
+                candidate_cycle = self._normalize_memory_cycle(candidate.get("maintenance_cycle"))
+                if source_cycle != candidate_cycle:
+                    continue
+                if source_cycle:
+                    score += 10
+                    reason += "，周期一致"
                 if score > best_score:
                     best = candidate
                     best_score = score
@@ -29811,6 +29823,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or match.get("maintenance_cycle")
                 or ""
             ).strip()
+            if (source.get("maintenance_cycle") and fields.get("maintenance_cycle")
+                    and self._normalize_memory_cycle(source["maintenance_cycle"])
+                    != self._normalize_memory_cycle(fields["maintenance_cycle"])):
+                skipped.append({"index": index, "reason": "源事项与历史通告周期不同，未保存"})
+                continue
             if not building or not memory_name:
                 skipped.append({"index": index, "reason": "缺少楼栋或记忆名称"})
                 continue
@@ -31881,6 +31898,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         return (
             title,
             self._date_keys_from_values(
+                fields.get("计划开始维护时间"),
+                fields.get("计划结束维护时间"),
                 fields.get("计划开始时间"),
                 fields.get("计划结束时间"),
                 fields.get("实际开始时间"),
@@ -33895,6 +33914,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         source_title_key = self._match_text(source_title)
         if not source_title_key or not source_dates:
             return ""
+        source_fields = source_record.get("display_fields") or {}
+        source_cycle = self._normalize_memory_cycle(
+            source_fields.get("维护周期") or source_fields.get("维保周期")
+            or source_record.get("maintenance_cycle")
+        )
         date_fields = [
             field_name
             for field_name in self._target_match_date_fields(work_type, field_config)
@@ -33911,6 +33935,13 @@ class MaintenancePortalService(RepairOperationsMixin):
             return ""
         for target in target_records:
             fields = target.get("display_fields") or {}
+            target_cycle = self._normalize_memory_cycle(
+                fields.get(field_config.get("maintenance_cycle", ""))
+                or fields.get("维保周期") or fields.get("维护周期")
+                or target.get("maintenance_cycle")
+            )
+            if source_cycle and source_cycle != target_cycle:
+                continue
             target_finished = bool(
                 status_field and self._target_status_is_finished(fields.get(status_field))
             )
@@ -42138,7 +42169,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _base_job(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         now_ts = time.time()
-        return {
+        job = {
             "job_id": uuid.uuid4().hex,
             "phase": "accepted",
             "created_at": now,
@@ -42174,6 +42205,10 @@ class MaintenancePortalService(RepairOperationsMixin):
             "upload_message": "",
             "prepared": {},
         }
+        from .event_priority import blockers, is_event
+        if request_payload.get("action") in {"start", "update", "end"} and not is_event(request_payload):
+            self._set_event_wait(job, blockers(self._state_store))
+        return job
 
     @staticmethod
     def classify_job_error(message: str) -> dict[str, Any]:
@@ -42571,7 +42606,17 @@ class MaintenancePortalService(RepairOperationsMixin):
                     )
                 )
             )
-            if remote_written and (
+            if job.get("execution_origin") == "qt_local" and job.get("qt_completion_pending"):
+                job["restart_recovered"] = True
+            elif job.get("execution_origin") == "qt_local" and phase not in {"success", "failed", "cancelled"}:
+                job["phase"] = "event_waiting" if phase == "event_waiting" else "accepted"
+                job["restart_recovered"] = True
+            elif phase == "event_waiting" or (
+                job.get("was_event_waiting") and not job.get("remote_intent")
+                and phase in {"accepted", "queued", "qt_queued", "upload_waiting"}
+            ):
+                job["restart_recovered"] = True
+            elif remote_written and (
                 phase not in {"success", "failed"} or projection_failed
             ):
                 if phase == "sending_message" and not bool(job.get("message_sent")):
@@ -42629,10 +42674,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             jobs[job_id] = job
         if len(jobs) > ACTION_JOB_MAX_RETAINED:
             terminal_phases = {"success", "failed"}
+            protected = self._pending_job_dependencies(jobs)
             terminal_jobs = [
                 job
                 for job in jobs.values()
                 if str(job.get("phase") or "") in terminal_phases
+                and job.get("job_id") not in protected
             ]
             terminal_jobs.sort(key=lambda item: str(item.get("created_at") or ""))
             remove_count = min(
@@ -42651,8 +42698,9 @@ class MaintenancePortalService(RepairOperationsMixin):
                 str(job.get("job_id") or "")
                 for job in self._jobs.values()
                 if isinstance(job, dict)
-                and str(job.get("phase") or "")
-                in {"accepted", "remote_intent", "remote_written"}
+                and (str(job.get("phase") or "")
+                     in {"accepted", "event_waiting", "remote_intent", "remote_written", "qt_queued", "upload_waiting"}
+                     or job.get("execution_origin") == "qt_local" and job.get("qt_completion_pending"))
                 and bool(job.get("restart_recovered"))
                 and str(job.get("job_id") or "")
             ]
@@ -42661,7 +42709,143 @@ class MaintenancePortalService(RepairOperationsMixin):
         job_id = str((job or {}).get("job_id") or "").strip()
         if not job_id:
             return
-        self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+        if job.get("phase") == "event_waiting":
+            self._state_store.put_action_job_with_queue(job)
+        else:
+            self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
+
+    def hold_action_job_for_event(self, job_id: str, events=None) -> bool:
+        from .event_priority import blockers, is_event
+        with self._jobs_lock:
+            job = self._jobs.get(job_id)
+            if not job or job.get("phase") in {"success", "failed", "cancelled"}:
+                return False
+            request = job.get("request") or {}
+            if is_event(request) or request.get("action") not in {"start", "update", "end"}:
+                return False
+            events = blockers(self._state_store) if events is None else events
+            if not events:
+                return False
+            saved = copy.deepcopy(job)
+            self._set_event_wait(saved, events)
+            self._persist_action_job_locked(saved)
+            job.update(saved)
+            return True
+
+    @staticmethod
+    def _set_event_wait(job: dict, events: list) -> None:
+        from .event_priority import wait_message
+        if not events:
+            return
+        if job.get("phase") != "event_waiting":
+            job["event_resume_phase"] = job.get("phase") or "accepted"
+        request = job.get("request") or {}
+        if not request.get("response_time") and not request.get("actual_action_time"):
+            request["response_time"] = job.get("created_at") or dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        job.update(phase="event_waiting", wait_reason="active_event", was_event_waiting=True,
+                   event_wait={"since": (job.get("event_wait") or {}).get("since") or time.time(),
+                               "events": copy.deepcopy(events), "message": wait_message(events)})
+
+    def release_event_waiting_jobs(self) -> list[str]:
+        from .event_priority import blockers
+        with self._jobs_lock:
+            waiting = [job for job in self._jobs.values() if job.get("phase") == "event_waiting"]
+            if not waiting or blockers(self._state_store):
+                return []
+            waiting.sort(key=lambda job: float(job.get("accepted_at") or 0))
+            for job in waiting:
+                saved = copy.deepcopy(job)
+                saved.update(phase=saved.pop("event_resume_phase", "accepted"), wait_reason="",
+                             event_released_at=time.time())
+                self._state_store.put_action_job_with_queue(saved)
+                job.clear()
+                job.update(saved)
+            return [job["job_id"] for job in waiting]
+
+    def cancel_event_waiting_notice(self, payload: dict) -> None:
+        kind = self._item_work_type(payload)
+        with self._jobs_lock:
+            for job in list(self._jobs.values()):
+                request = job.get("request") or {}
+                if (not job.get("was_event_waiting") or job.get("phase") in {"success", "failed", "cancelled"}
+                        or job.get("remote_intent") or job.get("upload_started_at") or request.get("work_type") != kind):
+                    continue
+                target, old_target = canonical_target_record_id(payload), canonical_target_record_id(request)
+                if target and old_target and target != old_target:
+                    continue
+                if not any(payload.get(key) and payload.get(key) == request.get(key)
+                           for key in ("active_item_id", "target_record_id", "source_record_id")):
+                    continue
+                self.mark_job(job["job_id"], phase="failed", error="目标通告已删除，排队操作已取消。",
+                              error_category="target_deleted", error_retryable=False)
+                self._state_store.mark_runtime_queue_item("qt_action", job["job_id"], "failed")
+
+    def _chain_event_wait_job(self, job: dict) -> None:
+        if not job.get("was_event_waiting"):
+            return
+        request = job.get("request") or {}
+        candidates = []
+        for previous in self._jobs.values():
+            old = previous.get("request") or {}
+            if (previous.get("job_id") == job["job_id"] or previous.get("job_id") in job.get("supersedes_job_ids", [])
+                    or previous.get("superseded_by_job_id") or previous.get("phase") in {"success", "cancelled"}
+                    or old.get("work_type") != request.get("work_type")):
+                continue
+            target, old_target = canonical_target_record_id(request), canonical_target_record_id(old)
+            if target and old_target and target != old_target:
+                continue
+            if ((job.get("target_key") and job.get("target_key") == previous.get("target_key"))
+                    or any(request.get(key) and request.get(key) == old.get(key)
+                           for key in ("active_item_id", "source_record_id", "target_record_id", "manual_id"))):
+                candidates.append(previous)
+        if candidates:
+            predecessor = max(candidates, key=lambda item: float(item.get("accepted_at") or 0))
+            job.update(depends_on_job_id=predecessor["job_id"], depends_on_phase=predecessor.get("phase") or "")
+
+    def create_qt_event_wait_job(self, command: dict, events: list) -> dict:
+        data = copy.deepcopy(command.get("data_dict") or {})
+        action = {"upload": "start", "upload_replace": "start"}.get(command.get("action_type"), command.get("action_type"))
+        request = {**data, "action": action,
+                   "work_type": self._work_type_for_notice_type(data.get("notice_type")),
+                   "response_time": command.get("response_time") or data.get("response_time") or "",
+                   "operation_id": command.get("operation_id") or data.get("operation_id") or ""}
+        with self._jobs_lock:
+            for job in self._jobs.values():
+                if request["operation_id"] and job.get("operation_id") == request["operation_id"]:
+                    return copy.deepcopy(job)
+            job = self._base_job(request)
+            job["execution_origin"] = "qt_local"
+            job["was_event_waiting"] = True
+            job["qt_request"] = copy.deepcopy(command)
+            if not job["qt_request"].get("response_time"):
+                job["qt_request"]["response_time"] = self._action_response_time(job["request"])
+            self._chain_event_wait_job(job)
+            self._set_event_wait(job, events)
+            self._state_store.put_action_job_with_queue(job)
+            self._jobs[job["job_id"]] = job
+            return copy.deepcopy(job)
+
+    def resume_qt_event_wait_job(self, job_id: str, command: dict, events: list) -> dict:
+        with self._jobs_lock:
+            job = self._jobs[job_id]
+            if job.get("phase") != "failed":
+                return copy.deepcopy(job)
+            previous = job.get("qt_request") or {}
+            if str((command.get("data_dict") or {}).get("text") or "") != str((previous.get("data_dict") or {}).get("text") or ""):
+                raise PortalError("原排队正文不能被改写，请核对原任务后另行提交。")
+            command = copy.deepcopy(command)
+            command["response_time"] = previous.get("response_time") or command.get("response_time") or ""
+            saved = copy.deepcopy(job)
+            saved.update(qt_request=command, qt_result={}, qt_completion_pending=False,
+                         phase="accepted", error="", error_category="",
+                         error_retryable=False, upload_started_at=0, upload_finished_at=0,
+                         event_wait_attempt=int(job.get("event_wait_attempt") or 0)+1)
+            saved.pop("event_resume_phase", None)
+            self._set_event_wait(saved, events)
+            self._state_store.put_action_job_with_queue(saved)
+            job.clear()
+            job.update(saved)
+            return copy.deepcopy(job)
 
     def expand_workbench_action_command(
         self,
@@ -43139,6 +43323,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if phase in {
                         "accepted",
                         "queued",
+                        "event_waiting",
                         "sending_message",
                         "message_sent",
                         "upload_queued",
@@ -43188,6 +43373,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 blocking_phase_order = {
                     "accepted": 1,
                     "queued": 2,
+                    "event_waiting": 2,
                     "sending_message": 3,
                     "message_sent": 4,
                     "upload_queued": 5,
@@ -43293,11 +43479,14 @@ class MaintenancePortalService(RepairOperationsMixin):
                     retired[item["job_id"]] = {**copy.deepcopy(item), "superseded_by_job_id": job["job_id"],
                         "superseded_at": time.time(), "superseded_error": item.get("error", ""),
                         "error": "旧任务已被最新提交替代，不可重试。", "error_category": "superseded", "error_retryable": False}
+                self._chain_event_wait_job(job)
                 self._state_store.put_documents(STATE_NS_ACTION_JOB, {**retired, job["job_id"]: job})
                 self._jobs.update(retired)
             else:
+                self._chain_event_wait_job(job)
                 self._persist_action_job_locked(job)
             self._jobs[job["job_id"]] = job
+            self.hold_action_job_for_event(job["job_id"])
             self._trim_jobs_locked()
         return job["job_id"], True
 
@@ -43305,10 +43494,12 @@ class MaintenancePortalService(RepairOperationsMixin):
         if len(self._jobs) <= ACTION_JOB_MAX_RETAINED:
             return
         terminal_phases = {"success", "failed"}
+        protected = self._pending_job_dependencies(self._jobs)
         terminal_jobs = [
             job
             for job in self._jobs.values()
             if str(job.get("phase") or "") in terminal_phases
+            and job.get("job_id") not in protected
         ]
         terminal_jobs.sort(key=lambda item: self._job_epoch(item) or 0)
         remove_count = max(0, len(self._jobs) - ACTION_JOB_MAX_RETAINED)
@@ -43317,11 +43508,20 @@ class MaintenancePortalService(RepairOperationsMixin):
             self._jobs.pop(job_id, None)
             self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
 
+    @staticmethod
+    def _pending_job_dependencies(jobs: dict) -> set[str]:
+        return {job["depends_on_job_id"] for job in jobs.values()
+                if job.get("phase") not in {"success", "failed", "cancelled"}
+                and job.get("depends_on_job_id")} | {
+                    job_id for job_id, job in jobs.items() if job.get("qt_completion_pending")}
+
     def delete_action_job(self, job_id: str) -> bool:
         job_id = str(job_id or "").strip()
         if not job_id:
             return False
         with self._jobs_lock:
+            if job_id in self._pending_job_dependencies(self._jobs):
+                return False
             existed = job_id in self._jobs
             self._jobs.pop(job_id, None)
             self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
@@ -43429,6 +43629,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         removed_failed = 0
         candidates: list[tuple[float, str, str]] = []
         documents = self._state_store.list_documents(STATE_NS_ACTION_JOB)
+        protected = self._pending_job_dependencies({row["key"]: row["payload"] for row in documents})
         for document in documents:
             job = document.get("payload") if isinstance(document, dict) else {}
             if not isinstance(job, dict):
@@ -43436,6 +43637,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             job_id = str(job.get("job_id") or document.get("key") or "").strip()
             phase = str(job.get("phase") or "").strip()
             if not job_id or phase not in {"success", "failed"}:
+                continue
+            if job_id in protected:
                 continue
             epoch = self._job_epoch(job)
             if not epoch:
@@ -43450,6 +43653,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         candidates.sort(key=lambda item: item[0])
         with self._jobs_lock:
             for _, job_id, phase in candidates[:max_delete]:
+                if job_id in self._pending_job_dependencies(self._jobs):
+                    continue
                 self._jobs.pop(job_id, None)
                 self._state_store.delete_document(STATE_NS_ACTION_JOB, job_id)
                 if phase == "success":
@@ -43545,11 +43750,12 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     def _compact_completed_job_locked(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
-        if not isinstance(job, dict) or str(job.get("phase") or "") != "success":
+        if not isinstance(job, dict) or str(job.get("phase") or "") != "success" or job.get("qt_completion_pending"):
             return
         compacted = {
             "job_id": str(job.get("job_id") or job_id),
             "phase": "success",
+            **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt") if key in job},
             "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
             "accepted_at": float(job.get("accepted_at") or 0),
@@ -43616,7 +43822,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     def _compact_failed_job_locked(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
-        if not isinstance(job, dict) or str(job.get("phase") or "") != "failed":
+        if not isinstance(job, dict) or str(job.get("phase") or "") != "failed" or job.get("qt_completion_pending"):
             return
         if job.get("remote_written") and str((job.get("request") or {}).get("work_type") or "") != WORK_TYPE_EVENT:
             # Preserve the confirmed target and prepared data for local-only
@@ -43626,6 +43832,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         compacted = {
             "job_id": str(job.get("job_id") or job_id),
             "phase": "failed",
+            **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt") if key in job},
             "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
             "accepted_at": float(job.get("accepted_at") or 0),

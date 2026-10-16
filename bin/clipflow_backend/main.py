@@ -577,6 +577,9 @@ class FastAPIPortalController:
                     },
                 )
                 stats["removed"] += int(bool(deleted))
+                from lan_bitable_template_portal.event_priority import record_result
+                record_result(PortalRuntime.state_store, payload, "delete" if missing else "end", target_record_id)
+                PortalRuntime.action_queue_event.set()
         return stats
 
     @staticmethod
@@ -2149,6 +2152,8 @@ class FastAPIPortalController:
                     denied.append(job_id)
                     continue
                 payload = dict(job)
+                from lan_bitable_template_portal.event_priority import public_job
+                payload = public_job(payload, PortalRuntime.auth_manager, session)
                 payload["job_id"] = str(payload.get("job_id") or job_id)
                 items.append(payload)
             self._record_job_batch_stats(
@@ -2184,6 +2189,8 @@ class FastAPIPortalController:
                     status_code=403,
                 )
             job = dict(job)
+            from lan_bitable_template_portal.event_priority import public_job
+            job = public_job(job, PortalRuntime.auth_manager, session)
             job["job_id"] = str(job.get("job_id") or job_id)
             return {"ok": True, "data": job}
 
@@ -8731,6 +8738,9 @@ class FastAPIPortalController:
                                 "retry_same_operation": remote_written or operation.get("status") == "executing" or bool(saved_result.get("retry_same_operation")),
                             },
                         }
+                    if data.get("queued"):
+                        PortalRuntime.service.mark_job(data["job_id"], business_audit_id=audit_id)
+                        return {"ok": True, "data": data}
                     finish_business_audit(
                         PortalRuntime.state_store,
                         audit_id,
@@ -13533,6 +13543,8 @@ class FastAPIPortalController:
                         return
                     else:
                         job["job_id"] = str(job.get("job_id") or job_id)
+                        from lan_bitable_template_portal.event_priority import public_job
+                        job = public_job(job, PortalRuntime.auth_manager, session)
                         payload = {"job_id": job_id, "job": job}
                     payload_job = (
                         (payload.get("job") or {})

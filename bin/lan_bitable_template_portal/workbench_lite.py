@@ -3755,6 +3755,13 @@ def render_workbench_lite(
       </footer>
     </section>
   </div>
+  <div class="end-check-backdrop" id="lite-event-wait-dialog" hidden>
+    <section class="end-check-dialog" role="dialog" aria-modal="true" aria-labelledby="lite-event-wait-title">
+      <header class="end-check-head"><strong id="lite-event-wait-title">事件优先：通告已排队</strong></header>
+      <div class="undo-confirm-copy" id="lite-event-wait-copy" style="white-space:pre-line;max-height:60vh;overflow:auto"></div>
+      <footer class="end-check-actions"><button class="btn primary" type="button" id="lite-event-wait-close">知道了，保留排队</button></footer>
+    </section>
+  </div>
   <script>
     const initialScope = {_json_dumps(scope)};
     const liteIsAdmin = {_json_dumps(bool(is_admin_session))};
@@ -4519,11 +4526,14 @@ def render_workbench_lite(
       if (enabled) button.setAttribute('aria-busy', 'true');
       else button.removeAttribute('aria-busy');
     }}
-    function setFormSubmitBusy(form, enabled) {{
+    function setFormSubmitBusy(form, enabled, eventWaiting = false) {{
       if (!form) return;
-      if (!enabled && form.dataset.pendingActionJobId) return;
+      if (!enabled && form.dataset.pendingActionJobId && !eventWaiting) return;
       form.classList.toggle('is-submitting', Boolean(enabled));
-      form.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(button => setButtonBusy(button, enabled));
+      form.querySelectorAll('button[name="submit_action"],button[data-ongoing-delete-mode]').forEach(button => {{
+        setButtonBusy(button, enabled);
+        if (eventWaiting) button.disabled = true;
+      }});
     }}
     function setPickerOpen(pickerId, openerId, open) {{
       document.getElementById(pickerId)?.classList.toggle('open', Boolean(open));
@@ -9418,6 +9428,7 @@ def render_workbench_lite(
     }}
     function jobPhaseText(phase) {{
       const map = {{
+        event_waiting: '已排队，等待事件结束',
         accepted: '已受理',
         queued: '排队中',
         sending_message: '正在发送个人消息',
@@ -9444,16 +9455,34 @@ def render_workbench_lite(
       return '发送成功，通告已进入进行中';
     }}
     let latestSubmittedJobId = '';
+    const shownEventWaitJobs = new Set();
+    function showEventWait(job) {{
+      const modal = document.getElementById('lite-event-wait-dialog');
+      if (!modal || job.phase !== 'event_waiting' || shownEventWaitJobs.has(job.job_id)) return;
+      shownEventWaitJobs.add(job.job_id);
+      const previous = document.activeElement;
+      document.getElementById('lite-event-wait-copy').textContent = job.event_wait?.message || '事件结束或删除后自动发送。';
+      modal.hidden = false;
+      const close = document.getElementById('lite-event-wait-close');
+      const dismiss = () => {{ modal.hidden = true; if (previous?.isConnected) previous.focus(); }};
+      close.onclick = dismiss;
+      modal.onkeydown = event => {{ if (event.key === 'Escape') {{ event.preventDefault(); dismiss(); }} }};
+      close.focus();
+    }}
     async function pollSubmittedJob(jobId, label, payload) {{
       if (!jobId) return false;
       const startedAt = Date.now();
       let delay = 800;
       let readFailures = 0;
+      let waitingMs = 0, lastReadAt = Date.now(), wasEventWaiting = false;
       const isCurrent = () => latestSubmittedJobId === jobId
         && currentNoticeMatchesDraft(document.getElementById('lite-notice-form'), payload);
       const updateStatus = text => {{ if (isCurrent()) setLiteStatus(text); }};
-      while (Date.now() - startedAt < 600000) {{
+      while (Date.now() - startedAt - waitingMs < 600000) {{
         await sleep(delay);
+        if (wasEventWaiting) waitingMs += Date.now() - lastReadAt;
+        lastReadAt = Date.now();
+        if (document.hidden) {{ delay = 15000; continue; }}
         const controller = new AbortController();
         const readTimeout = setTimeout(() => controller.abort(), 15000);
         try {{
@@ -9468,6 +9497,17 @@ def render_workbench_lite(
           readFailures = 0;
           const job = data.data || {{}};
           const phase = String(job.phase || '');
+          wasEventWaiting = phase === 'event_waiting';
+          if (wasEventWaiting) {{
+            if (isCurrent()) {{
+              showEventWait(job);
+              updateStatus('已排队，等待事件结束；已保存本次内容，可继续办理其它通告。');
+              const form = document.getElementById('lite-notice-form');
+              if (form?.dataset.pendingActionJobId === jobId) setFormSubmitBusy(form, false, true);
+            }}
+            delay = 15000;
+            continue;
+          }}
           if (phase === 'success') {{
             await deleteSubmittedLiteDraft(payload).catch(() => ({{}}));
             const wasCurrent = isCurrent();

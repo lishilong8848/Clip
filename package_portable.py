@@ -1741,6 +1741,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "state_store.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "event_priority.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "workspace_layout_routes.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "cabinet_power_evidence.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "cabinet_power_text.py",
@@ -1849,7 +1850,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_dynamic_endpoints",
          "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
-         "bin.test_planned_notices", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
+         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
                 "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
                 "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
@@ -1881,7 +1882,7 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_submission_reliability",
-         "bin.test_event_remote_atomicity", "bin.test_notice_upload_reliability", "bin.test_notice_undo", "bin.test_notice_undo_fields", "bin.test_notice_undo_pairs",
+         "bin.test_event_remote_atomicity", "bin.test_event_notice_priority", "bin.test_event_notice_priority_recovery", "bin.test_event_notice_completion_recovery", "bin.test_notice_upload_reliability", "bin.test_notice_undo", "bin.test_notice_undo_fields", "bin.test_notice_undo_pairs",
          "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
         cwd=PROJECT_ROOT,
         check=True,

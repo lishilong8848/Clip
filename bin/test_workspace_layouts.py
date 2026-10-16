@@ -52,6 +52,23 @@ class WorkspaceLayoutTests(unittest.TestCase):
             self.assertEqual(response.json()["data"]["value"], layout())
             self.assertIn("no-store", response.headers["cache-control"])
 
+    def test_layout_preferences_exist_but_are_not_model_business_tools(self):
+        from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog, _route_excluded
+        from lan_bitable_template_portal.lighthouse_ai import AssistantError
+
+        app = FastAPI()
+        install_workspace_layout_routes(app, self.controller, self.runtime)
+        route = next(route for route in app.routes if route.path == "/api/workspace-layouts/{device}/{page}")
+        self.assertEqual(route.methods, {"GET", "PUT"})
+        catalog = PortalAPICatalog(app)
+        self.assertFalse(any(item["path"].startswith("/api/workspace-layouts/") for item in catalog.discover(page_size=200)["items"]))
+        for method in ("GET", "PUT"):
+            self.assertTrue(_route_excluded(self.url, method))
+            with self.assertRaises(AssistantError):
+                catalog.validate_operation({"api_id": f"{method} {route.path}", "path_params": {"device": "desktop", "page": "workspace"}})
+        self.assertFalse(_route_excluded("/api/workspace-layouts-backup/records", "GET"))
+        self.assertEqual(self.put().status_code, 200, "normal authenticated browser saving remains available")
+
     def test_person_device_page_are_separate(self):
         self.put()
         self.session["user"] = {"open_id": "bob", "name": "同名"}

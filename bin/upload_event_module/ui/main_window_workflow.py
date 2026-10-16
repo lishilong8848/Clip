@@ -660,6 +660,9 @@ class MainWindowWorkflowMixin:
             "recover_selected": bool(recover_selected),
             "robot_group_choice": str(robot_group_choice or "auto").strip() or "auto",
         }
+        if data_snapshot.get("_event_wait_screenshot_id"):
+            request_payload["screenshot_upload_id"] = data_snapshot["_event_wait_screenshot_id"]
+            request_payload["screenshot_file_name"] = data_snapshot.get("_event_wait_screenshot_name") or "notice_screenshot.png"
         if screenshot_bytes:
             try:
                 screenshot_ref = self._upload_qt_notice_attachment(
@@ -751,6 +754,44 @@ class MainWindowWorkflowMixin:
                 str((data_snapshot or {}).get("record_id") or ""),
             )
             return True
+        if isinstance(result, dict) and result.get("queued"):
+            def show_wait():
+                if (result["job_id"], int(result.get("event_wait_attempt") or 0)) in getattr(self, "_completed_event_wait_jobs", {}):
+                    return
+                record_id = str(data_snapshot.get("record_id") or "")
+                list_widget, item = self._find_active_item_by_record_id(record_id)
+                if item and self._is_valid_list_item(item):
+                    current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+                    current["_event_wait_job_id"] = str(result["job_id"])
+                    current["_event_wait_attempt"] = int(result.get("event_wait_attempt") or 0)
+                    current["_event_wait_released"] = not bool(result.get("event_waiting"))
+                    current["_upload_in_progress"] = False
+                    item.setData(Qt.ItemDataRole.UserRole, current)
+                    self._rebuild_active_item_widget(list_widget, item, current,
+                        upload_in_progress=False, has_unuploaded_changes=True)
+                self.pending_action_record_ids.discard(record_id)
+                self.pending_action_types.pop(record_id, None)
+                self.request_active_cache_save()
+                if result.get("event_waiting"):
+                    QMessageBox.information(self, "事件优先：通告已排队",
+                        str((result.get("event_wait") or {}).get("message") or result.get("message") or "已排队，等待事件结束"))
+                else:
+                    self.show_message(str(result.get("message") or "原排队任务已继续，正在后台处理"))
+            self._enqueue_ui_mutation("event_notice_wait", show_wait)
+            return True
+        return self._apply_backend_notice_upload_result(result=result, data_snapshot=data_snapshot,
+            screenshot_bytes=screenshot_bytes, encoded_extra_images=encoded_extra_images,
+            action_type=action_type, response_time=response_time, recover_selected=recover_selected,
+            robot_group_choice=robot_group_choice, allow_target_selection=allow_target_selection)
+
+    def _apply_backend_notice_upload_result(self, *, result, data_snapshot, screenshot_bytes,
+            encoded_extra_images, action_type, response_time, recover_selected, robot_group_choice,
+            allow_target_selection=True):
+        operation_id = str(data_snapshot.get("_upload_operation_id") or data_snapshot.get("operation_id") or "")
+
+        def _finish(name, success, message, record_id):
+            self._post_request_finished(name, success, message, record_id, operation_id)
+
         if not isinstance(result, dict):
             _finish(
                 self._backend_upload_action_name(action_type),
@@ -887,6 +928,52 @@ class MainWindowWorkflowMixin:
             record_id,
         )
         return True
+
+    def _apply_event_wait_result(self, payload):
+        # The outbox can arrive before the original queued HTTP response.
+        completed = getattr(self, "_completed_event_wait_jobs", {})
+        completed[(str(payload.get("job_id") or ""), int(payload.get("attempt") or 0))] = True
+        if len(completed) > 256:
+            completed.pop(next(iter(completed)))
+        self._completed_event_wait_jobs = completed
+        command = dict(payload.get("command") or {})
+        data = dict(command.get("data_dict") or {})
+        data["_upload_operation_id"] = command.get("operation_id") or ""
+        data["_event_wait_screenshot_id"] = command.get("screenshot_upload_id") or ""
+        data["_event_wait_screenshot_name"] = command.get("screenshot_file_name") or ""
+        data["_event_wait_resume_job_id"] = payload.get("job_id") or ""
+        record_id = str(data.get("record_id") or "")
+        list_widget, item = (self._find_active_item_by_active_item_id(data["active_item_id"])
+                             if data.get("active_item_id") else (None, None))
+        if not item:
+            list_widget, item = self._find_active_item_by_record_id(record_id)
+        if item and self._is_valid_list_item(item):
+            current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+            if current.get("_event_wait_job_id") not in (None, "", payload.get("job_id")):
+                return {"ok": True, "ignored": True}
+            if int(current.get("_event_wait_attempt") or 0) > int(payload.get("attempt") or 0):
+                return {"ok": True, "ignored": True}
+            current.pop("_event_wait_job_id", None)
+            current.pop("_event_wait_attempt", None)
+            current.pop("_event_wait_released", None)
+            if (payload.get("result") or {}).get("ok"):
+                current.pop("_event_wait_resume_job_id", None)
+            else:
+                current["_event_wait_resume_job_id"] = payload.get("job_id") or ""
+            item.setData(Qt.ItemDataRole.UserRole, current)
+            if str(current.get("text") or "").strip() != str(data.get("text") or "").strip():
+                current.pop("_upload_operation_id", None)
+                self._rebuild_active_item_widget(list_widget, item, current,
+                    upload_in_progress=False, has_unuploaded_changes=True)
+                self.show_message("原排队操作已处理，当前新复制的内容已保留，尚未上传。" if (payload.get("result") or {}).get("ok")
+                                  else "原排队操作未完成，当前新内容已保留，请核对原任务。")
+                self.request_active_cache_save()
+                return {"ok": True}
+        self._apply_backend_notice_upload_result(result=payload.get("result") or {}, data_snapshot=data,
+            screenshot_bytes=None, encoded_extra_images=command.get("extra_images") or [],
+            action_type=command.get("action_type") or "upload", response_time=command.get("response_time") or "",
+            recover_selected=bool(command.get("recover_selected")), robot_group_choice=command.get("robot_group_choice") or "auto")
+        return {"ok": True}
 
     def on_screenshot_upload_confirmed(
         self,

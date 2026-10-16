@@ -275,6 +275,55 @@ KNOWN_DYNAMIC_BINDINGS = [
 
     # --- excluded:已知端点属 native 有意排除能力,必须保持 excluded ---
     dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+        line=43, kind="excluded",
+        method_paths=[("GET", "/api/workspace-layouts/{param}/{param}")],
+        window=3, needles=["let record=checked(await requestJson(url(),{signal:controller.signal,cache:'no-store'"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+            definition_marker="const url=()=>",
+            definition_needles=["'/api/workspace-layouts/'", "device.value", "encodeURIComponent(options.page())"],
+        ),
+        note="读取当前登录账号的设备/页面布局；属于界面偏好，不向助手业务工具目录开放。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+        line=47, kind="excluded",
+        method_paths=[("PUT", "/api/workspace-layouts/{param}/{param}")],
+        window=3, needles=["requestJson(url(),{method:'PUT',signal:controller.signal", "JSON.stringify({revision:0,value:fallback.candidate})"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+            definition_marker="const url=()=>",
+            definition_needles=["'/api/workspace-layouts/'", "device.value", "encodeURIComponent(options.page())"],
+        ),
+        note="仅在服务端尚无布局时迁移旧浏览器布局，revision=0 防止覆盖；不属于业务操作。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+        line=51, kind="excluded",
+        method_paths=[("GET", "/api/workspace-layouts/{param}/{param}")],
+        signature="// Another client migrated first. Read its layout instead of replacing it.",
+        window=3, needles=["record=checked(await requestJson(url(),{signal:controller.signal,cache:'no-store'", "if(e.status!==409)throw e;"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+            definition_marker="const url=()=>",
+            definition_needles=["'/api/workspace-layouts/'", "device.value", "encodeURIComponent(options.page())"],
+        ),
+        note="并发迁移遇到409后重新读取同一账号布局，不覆盖另一客户端的结果。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+        line=64, kind="excluded",
+        method_paths=[("PUT", "/api/workspace-layouts/{param}/{param}")],
+        window=3, needles=["requestJson(url(),{method:'PUT',body:JSON.stringify({revision:expected,value:normalized})"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/workspace-v2/useLayoutSync.ts",
+            definition_marker="const url=()=>",
+            definition_needles=["'/api/workspace-layouts/'", "device.value", "encodeURIComponent(options.page())"],
+        ),
+        note="用户明确保存当前账号布局，携带版本校验；个人显示设置不作为助手业务工具。",
+    ),
+    dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningPage.vue",
         line=662, kind="excluded",
         method_paths=[("GET", "/api/learning/people")],
@@ -824,6 +873,7 @@ class DynamicEndpointAuditTests(unittest.TestCase):
             "/api/learning", "/api/plan-convergence/settings", "/api/signatures/",
             "/api/polling-work-orders", "/api/qt/", "/api/system", "/api/remote",
             "/api/update", "/api/runtime",
+            "/api/workspace-layouts/",
         )
         for b in self.bindings:
             for method, p in b.get("method_paths") or []:

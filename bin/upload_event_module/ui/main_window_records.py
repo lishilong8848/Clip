@@ -349,6 +349,8 @@ class MainWindowRecordsMixin:
         for list_widget, item, data in entries:
             if not self._is_valid_list_item(item) or not isinstance(data, dict):
                 continue
+            if data.get("_event_wait_job_id"):
+                continue
             is_event = str(data.get("notice_type") or "") == "事件通告"
             waiting_event = is_event and bool(
                 data.get("_queued_upload_requested")
@@ -1684,6 +1686,12 @@ class MainWindowRecordsMixin:
         ):
             if key not in updated and key in existing_data:
                 updated[key] = existing_data.get(key)
+        if existing_data.get("_event_wait_job_id"):
+            updated["_event_wait_job_id"] = existing_data["_event_wait_job_id"]
+            updated["_event_wait_attempt"] = int(existing_data.get("_event_wait_attempt") or 0)
+            updated["_event_wait_released"] = bool(existing_data.get("_event_wait_released"))
+            if existing_data.get("_upload_operation_id"):
+                updated["_upload_operation_id"] = existing_data["_upload_operation_id"]
         if bool(existing_data.get("_upload_in_progress")):
             for key in (
                 "_upload_in_progress",
