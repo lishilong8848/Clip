@@ -248,8 +248,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { requestJson } from "../api/client";
+import { preShiftScopes, preShiftSummary } from '../preShiftUtils';
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
   SCOPE_HOME_CAPACITY_ENTRIES as capacityEntries,
@@ -278,6 +279,7 @@ const props = defineProps<{
   handoverLinks: Record<string, string>;
   canRequestMoreScopes?: boolean;
   modules?: string[];
+  currentUser?: Dict;
 }>();
 
 const emit = defineEmits<{
@@ -288,11 +290,14 @@ const emit = defineEmits<{
   "repair-management": [scope: string];
   water: [scope: string];
   "critical-guard": [];
+  "risk-inspection": [];
   drill: [];
   learning: [];
   "cabinet-power": [];
   daily: [scope: string];
   "plan-convergence": [];
+  "pre-shift": [];
+  "work-handover": [];
   "request-permission": [];
   "dashboard-visible": [visible: boolean];
 }>();
@@ -303,6 +308,34 @@ function entryMode(value: unknown): EntryKey {
 }
 
 const activeMode = ref<EntryKey>(entryMode(props.initialMode));
+const checkScopes = computed(() => preShiftScopes(props.currentUser || {}));
+const checkSummary = ref<{ pending: number; completed: number }>();
+const checkError = ref(''), checkLoading = ref(false);
+let checkController: AbortController | undefined, checkTimer: number | undefined, disposed = false;
+
+async function refreshChecks(): Promise<void> {
+  if (disposed || document.hidden || activeMode.value || checkLoading.value || !checkScopes.value.length) return;
+  const read = new AbortController(); checkController = read; checkLoading.value = true;
+  try {
+    const total = { pending: 0, completed: 0 }, scopes = [...checkScopes.value];
+    for (let index = 0; index < scopes.length; index += 3) {
+      const states = await Promise.all(scopes.slice(index, index + 3).map(scope =>
+        requestJson('/api/pre-shift-checks?scope=' + encodeURIComponent(scope), { signal: read.signal, cache: 'no-store' })));
+      for (const state of states) {
+        const summary = preShiftSummary(state); total.pending += summary.pending; total.completed += summary.completed;
+      }
+    }
+    if (!read.signal.aborted && !disposed) { checkSummary.value = total; checkError.value = ''; }
+  } catch {
+    if (!read.signal.aborted && !disposed) checkError.value = '状态读取失败，点击查看或稍后重试';
+  } finally {
+    if (checkController === read) checkLoading.value = false;
+  }
+}
+watch([() => props.currentUser?.open_id, () => checkScopes.value.join(','), () => activeMode.value], () => {
+  checkController?.abort(); checkLoading.value = false; checkSummary.value = undefined; checkError.value = '';
+  void refreshChecks();
+}, { immediate: true });
 const openingWorkbenchKey = ref("");
 const repairOverviewLoading = ref(false);
 const repairOverviewLoaded = ref(false);
@@ -329,6 +362,7 @@ function entryModule(entry: string): string {
     case "repair": return "repair";
     case "water": return "water";
     case "critical_guard": return "critical_guard";
+    case "risk_inspection": return "risk_inspection";
     case "drill": return "drills";
     case "learning": return "learning";
     case "cabinet_power": return "cabinet";
@@ -337,13 +371,14 @@ function entryModule(entry: string): string {
     case "polling": return "polling";
     case "adjust": return "adjust";
     case "handover": return "handover";
+    case "work_handover": return "work_handover";
     case "plan_convergence": return "plan_convergence";
     default: return "";
   }
 }
 const toolsModule: Record<string, string> = {
   learning: "learning", daily: "daily", power: "power", polling: "polling",
-  adjust: "adjust", handover: "handover", plan_convergence: "plan_convergence",
+  adjust: "adjust", handover: "handover", plan_convergence: "plan_convergence", work_handover: "work_handover",
 };
 const capacityModule: Record<string, string> = { water: "water", cabinet_power: "cabinet" };
 const cardModules: Record<string, string[]> = {
@@ -351,14 +386,19 @@ const cardModules: Record<string, string[]> = {
   maintenance: ["maintenance", "engineer_mop"],
   change: ["change"],
   repair_management: ["repair_management", "repair"],
-  risk: ["critical_guard"],
+  risk: ["critical_guard", "risk_inspection"],
   capacity: ["water", "cabinet"],
-  tools: ["daily", "power", "polling", "adjust", "handover", "plan_convergence", "learning"],
+  tools: ["daily", "power", "polling", "adjust", "handover", "plan_convergence", "learning", "work_handover"],
   drill: ["drills"],
 };
 const filteredModuleCards = computed(() =>
   moduleCards
     .map((card) => {
+      if (card.key === 'pre_shift') {
+        if (!checkScopes.value.length) return null;
+        return { ...card, attention: Boolean(checkSummary.value?.pending),
+          tags: [checkError.value || (checkSummary.value ? checkSummary.value.pending ? '本班待检查' : checkSummary.value.completed ? '本班已完成' : '暂无待检查清单' : '正在读取检查状态')] };
+      }
       const allowedModules = cardModules[card.key] || [];
       if (!allowedModules.some(hasModule)) return null;
       const secondary = (card.secondaryActions || []).filter((action) => hasModule(entryModule(action.key)));
@@ -584,6 +624,10 @@ const homeModuleMetrics = computed<Record<string, ScopeHomeModuleMetric>>(() => 
   const repair = aggregateWorkTypeCounts("repair");
   const stats = homeBroadcastStats.value;
   return {
+    ...(checkSummary.value && !checkError.value ? { pre_shift: {
+      primaryLabel: '待检查', primaryValue: checkSummary.value.pending,
+      secondaryLabel: '已完成', secondaryValue: checkSummary.value.completed,
+    } } : {}),
     event: {
       primaryLabel: "本月事件",
       primaryValue: value(stats.events),
@@ -670,6 +714,9 @@ function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
 }
 
 function selectEntry(key: EntryKey): void {
+  if (key === 'risk_inspection') { emit('risk-inspection'); return; }
+  if (key === 'work_handover') { emit('work-handover'); return; }
+  if (key === 'pre_shift') { emit('pre-shift'); return; }
   if (key === "learning") { emit("learning"); return; }
   if (!key) return;
   if (key === "event") {
@@ -898,11 +945,19 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 }
 
 onMounted(() => {
+  checkTimer = window.setInterval(() => void refreshChecks(), 30000);
+  window.addEventListener('clipflow-business-changed', refreshChecks);
+  document.addEventListener('visibilitychange', refreshChecks);
   emit("dashboard-visible", !activeMode.value);
   if (activeMode.value === "repair_management") void loadRepairOverview();
   if (activeMode.value === "water") void loadWaterBuildings();
 });
-onBeforeUnmount(clearWaterBuildingsPoll);
+onBeforeUnmount(() => {
+  disposed = true; checkController?.abort(); window.clearInterval(checkTimer);
+  window.removeEventListener('clipflow-business-changed', refreshChecks);
+  document.removeEventListener('visibilitychange', refreshChecks);
+  clearWaterBuildingsPoll();
+});
 
 </script>
 

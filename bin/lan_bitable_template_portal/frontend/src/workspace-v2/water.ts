@@ -63,6 +63,21 @@ export function waterTrend(rows: Dict[]): { items: ChartItem[]; missing: number 
   }
   return { items: [...days].filter(([, value]) => value.complete).sort(([a], [b]) => a.localeCompare(b)).map(([label, data]) => ({ label, value: Number(data.value.toFixed(3)) })), missing };
 }
+export type WaterBuildingTrend = { days: string[]; series: { scope: string; label: string; values: (number | null)[] }[]; missing: number };
+export function waterBuildingTrend(rows: Dict[], scopes: { value: string; label: string }[], start: string, end: string): WaterBuildingTrend {
+  if (!validWaterDate(start) || !validWaterDate(end) || start > end) throw new Error('水耗统计日期无效。');
+  const days: string[] = [];
+  for (let date = Date.parse(start + 'T00:00:00Z'); date <= Date.parse(end + 'T00:00:00Z'); date += 86400000) days.push(new Date(date).toISOString().slice(0, 10));
+  let missing = 0;
+  const seen = new Set<string>();
+  const series = scopes.filter(scope => waterScopes.has(scope.value) && !seen.has(scope.value) && seen.add(scope.value)).map(scope => {
+    const trend = waterTrend(rows.filter(row => row.scope === scope.value));
+    const values = new Map(trend.items.map(item => [item.label, item.value]));
+    missing += trend.missing;
+    return { scope: scope.value, label: scope.label, values: days.map(day => values.get(day) ?? null) };
+  });
+  return { days, series, missing };
+}
 export function waterImageMime(file: File): string {
   if (file.type.toLowerCase().startsWith('image/')) return file.type.toLowerCase();
   return ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff' } as Record<string, string>)[file.name.split('.').pop()?.toLowerCase() || ''] || '';

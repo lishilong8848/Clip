@@ -1,19 +1,19 @@
 <template>
   <section class="water-overview" aria-label="水耗汇总" :aria-busy="loading">
-    <header><div><h2>{{ scopeLabel }}水耗汇总</h2><span>{{ waterDay(-29) }} 至 {{ waterDay() }} · 近30天</span></div><NButton size="small" :loading="loading" @click="load(true)"><RefreshCw :size="15" />刷新汇总</NButton></header>
+    <header><div><h2>{{ scopeLabel }}水耗汇总</h2><span>{{ monthStart }} 至 {{ endDay }} · 本月</span></div><NButton size="small" :loading="loading" @click="load(true)"><RefreshCw :size="15" />刷新汇总</NButton></header>
     <NAlert v-if="error" type="warning" :bordered="false">{{ error }}{{ ready ? '；以下保留上次读取的汇总。' : '' }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
     <div class="water-overview-metrics">
-      <NStatistic label="近30天日统计耗水量"><NSkeleton v-if="loading&&!ready" width="120px" height="30px" /><span v-else>{{ waterNumberText(totalUsage,2) }} <small>t</small></span></NStatistic>
-      <NStatistic label="近30天日记录"><NSkeleton v-if="loading&&!ready" width="80px" height="30px" /><span v-else>{{ waterNumberText(recordCount,0) }} <small>条</small></span></NStatistic>
+      <NStatistic label="本月日统计耗水量"><NSkeleton v-if="loading&&!ready" width="120px" height="30px" /><span v-else>{{ waterNumberText(totalUsage,2) }} <small>t</small></span></NStatistic>
+      <NStatistic label="本月日记录"><NSkeleton v-if="loading&&!ready" width="80px" height="30px" /><span v-else>{{ waterNumberText(recordCount,0) }} <small>条</small></span></NStatistic>
       <NStatistic label="最近统计"><span class="water-overview-date">{{ dateText(latestDate) }}</span></NStatistic>
     </div>
     <NEmpty v-if="!available.length" description="当前账号没有可访问的水耗楼栋" />
     <NEmpty v-else-if="!loading&&!ready&&!error" description="等待首次水耗数据同步" />
     <div v-else class="water-overview-body">
-      <MotionChart title="近30天每日耗水量" :caption="scopeLabel+(trend.missing?' · 部分耗水量未取得':'')" :items="trend.items" trend view="area" unit="t" :loading="loading&&!ready" :failed="!!error || trend.missing>0" @select="item=>selectedDay=item.label" />
+      <WaterBuildingTrend :data="buildingTrend" :loading="loading&&!ready" :failed="!!error" @select="selectedDay=$event" />
       <section class="water-building-list" aria-label="楼栋水耗明细">
-        <NButton v-if="selectedDay" text size="small" @click="selectedDay=''">{{selectedDay}} · 返回30天合计</NButton>
-        <div class="water-building-head"><span>楼栋</span><span>{{selectedDay||'近30天'}}耗水量</span><span>记录</span><span aria-hidden="true"></span></div>
+        <NButton v-if="selectedDay" text size="small" @click="selectedDay=''">{{selectedDay}} · 返回本月合计</NButton>
+        <div class="water-building-head"><span>楼栋</span><span>{{selectedDay||'本月'}}耗水量</span><span>记录</span><span aria-hidden="true"></span></div>
         <NButton v-for="row in rows" :key="row.value" data-v2-navigation quaternary class="water-building-row" :aria-label="'查看'+row.label+'水耗记录'" @click="open(row.value)"><span class="water-building-name"><Building2 :size="17" /><strong>{{ row.label }}</strong></span><span class="water-building-usage">{{ waterNumberText(ready?row.month_total_usage:null,2) }} <small>t</small></span><span class="water-building-count">{{ waterNumberText(ready?row.month_record_count:null,0) }} <small>条</small></span><ChevronRight :size="15" /></NButton>
       </section>
     </div>
@@ -25,13 +25,15 @@ import { NAlert,NButton,NEmpty,NSkeleton,NStatistic } from 'naive-ui';
 import { Building2,ChevronRight,RefreshCw } from 'lucide-vue-next';
 import { requestJson,type Dict } from './client';
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
-import { waterDay,waterNumber,waterNumberText,waterScopes,waterTrend } from './water';
-const MotionChart=defineAsyncComponent(()=>import('./MotionChart.vue'));
+import { waterBuildingTrend,waterDay,waterNumberText,waterScopes,waterTrend } from './water';
+const WaterBuildingTrend=defineAsyncComponent(()=>import('./WaterBuildingTrend.vue'));
 const props=defineProps<{scope:string;scopeOptions:{value:string;label:string}[]}>();
 const emit=defineEmits<{open:[scope:string]}>();
 const data=ref<Dict>({}),loading=ref(false),error=ref(''),selectedDay=ref('');
 const available=computed(()=>props.scopeOptions.filter(row=>waterScopes.has(row.value)&&(['ALL','CAMPUS'].includes(props.scope)||row.value===props.scope)));
 const periodRows=computed<Dict[]>(()=>data.value.records||[]);
+const endDay=ref(waterDay()),monthStart=computed(()=>endDay.value.slice(0,7)+'-01');
+const buildingTrend=computed(()=>waterBuildingTrend(periodRows.value,available.value,monthStart.value,endDay.value));
 const trend=computed(()=>waterTrend(periodRows.value));
 const rows=computed<Dict[]>(()=>available.value.map(scope=>{const records=periodRows.value.filter(row=>row.scope===scope.value&&(!selectedDay.value||String(row.statistic_date_key||row.statistic_date).slice(0,10)===selectedDay.value));const result=waterTrend(records);return {...scope,month_total_usage:result.missing?null:result.items.reduce((sum,row)=>sum+row.value,0),month_record_count:records.length,latest_date_ms:Math.max(0,...records.map(row=>Date.parse(String(row.statistic_date_key||row.statistic_date).slice(0,10)+'T00:00:00+08:00')||0))};}));
 const ready=computed(()=>data.value.snapshot?.exists===true);
@@ -43,15 +45,16 @@ function open(scope:string){if(available.value.some(row=>row.value===scope))emit
 let read:AbortController|undefined,disposed=false,poll=0;
 async function load(fresh=false){
   if(disposed||document.hidden||!available.value.length)return;
+  const today=waterDay();if(today.slice(0,7)!==endDay.value.slice(0,7)){data.value={};selectedDay.value='';}endDay.value=today;
   read?.abort();clearTimeout(poll);const c=new AbortController();read=c;loading.value=true;error.value='';
   try{
     const results=await Promise.all(available.value.map(async building=>{
       const records:Dict[]=[];let page=1,total=1;
       while(records.length<total){
-        const params=new URLSearchParams({scope:building.value,start_date:waterDay(-29),end_date:waterDay(),frequency:'日',page:String(page),page_size:'200'});
+        const params=new URLSearchParams({scope:building.value,start_date:monthStart.value,end_date:endDay.value,frequency:'日',page:String(page),page_size:'200'});
         const result=await requestJson('/api/capacity/water/records?'+params,{signal:c.signal,fresh});
-        if(!Array.isArray(result.records)||!Number.isInteger(result.total)||result.total<0||result.snapshot?.exists!==true)throw new Error(building.label+'近30天数据尚未完整取得。');
-        total=result.total;if(total>10000)throw new Error(building.label+'近30天记录过多，请进入记录办理缩小范围。');
+        if(!Array.isArray(result.records)||!Number.isInteger(result.total)||result.total<0||result.snapshot?.exists!==true)throw new Error(building.label+'本月数据尚未完整取得。');
+        total=result.total;if(total>10000)throw new Error(building.label+'本月记录过多，请进入记录办理缩小范围。');
         if(!result.records.length&&records.length<total)throw new Error(building.label+'分页数据不完整。');
         records.push(...result.records.map((row:Dict)=>({...row,scope:building.value})));page++;
       }
@@ -62,7 +65,7 @@ async function load(fresh=false){
   }catch(e){if(!c.signal.aborted&&!disposed)error.value=e instanceof Error?e.message:'水耗汇总读取失败。';}
   finally{if(read===c)loading.value=false;}
 }
-function visibility(){clearTimeout(poll);if(document.hidden)read?.abort();else if(!ready.value||data.value.snapshot?.refreshing)void load(true);}
+function visibility(){clearTimeout(poll);if(document.hidden)read?.abort();else if(!ready.value||data.value.snapshot?.refreshing||endDay.value!==waterDay())void load(true);}
 watch(()=>[props.scope,props.scopeOptions],()=>{read?.abort();data.value={};selectedDay.value='';void load();});
 usePageReadRefresh(url=>url.pathname.startsWith('/api/capacity/water/'),()=>load(),()=>!loading.value);
 onMounted(()=>{void load();document.addEventListener('visibilitychange',visibility);});

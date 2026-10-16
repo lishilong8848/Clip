@@ -17,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .pre_shift_schedule import normalize_frequency, occurrences_for_date
+from .pre_shift_schedule import normalize_frequency, occurrences_for_date, upcoming_occurrences
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 SCOPES = ('110', 'A', 'B', 'C', 'D', 'E', 'H')
@@ -198,10 +198,6 @@ class CheckService:
         self.wake.set()
         return {'version': version + 1, 'items': result}
 
-    def _within_shift(self, day, shift, current):
-        lo, hi = windows(day, shift)
-        return lo <= current < hi
-
     def _task_id(self, day, scope, shift, due):
         d = dt.date.fromisoformat(day)
         standard_white = dt.datetime.combine(d, dt.time(8, 50), TZ)
@@ -257,17 +253,13 @@ class CheckService:
             conn.execute("UPDATE tasks SET items='[]' WHERE id=? AND submitted=''", (task_id,))
 
     def _reconcile_groups(self, conn, current, scope, groups, def_version):
-        today = current.date().isoformat()
-        prior = (current.date() - dt.timedelta(days=1)).isoformat()
         pending = conn.execute(
-            "SELECT * FROM tasks WHERE scope=? AND submitted='' AND items!='[]' AND deadline>? AND (day=? OR day=?)",
-            (scope, current.timestamp(), today, prior)).fetchall()
+            "SELECT * FROM tasks WHERE scope=? AND submitted='' AND items!='[]' AND deadline>?",
+            (scope, current.timestamp())).fetchall()
         all_items = {item['id']: item for item in self.definition(scope, conn)['items']}
         active_ids = set()
         for group in groups:
             people = self._people_for(conn, group['day'], scope, group['shift'])
-            if len(people) != 2:
-                continue
             due = group['due']
             task_id = self._task_id(group['day'], scope, group['shift'], due)
             active_ids.add(task_id)
@@ -300,8 +292,6 @@ class CheckService:
 
     def prepare_local(self, conn, current, scopes):
         # Editing/open re-computation reconciles pending groups atomically.
-        today = current.date().isoformat()
-        prior = (current.date() - dt.timedelta(days=1)).isoformat()
         for scope in scopes:
             definition = self.definition(scope, conn)
             items = definition['items']
@@ -309,18 +299,21 @@ class CheckService:
                 self._clear_open_tasks(conn, current, scope)
                 continue
             groups = {}
-            for day in {today, prior}:
-                for group in self._occurrence_groups(items, scope, day, current):
-                    key = (group['day'], group['shift'], group['due'].timestamp())
-                    existing = groups.get(key)
-                    if existing:
-                        for iid in group['ids']:
-                            if iid not in existing['ids']:
-                                existing['ids'].append(iid)
-                    else:
-                        merged = dict(group)
-                        merged['ids'] = list(group['ids'])
-                        groups[key] = merged
+            for item in items:
+                try:
+                    rule = normalize_frequency(item.get('frequency'), current.date().isoformat())
+                    occurrences = upcoming_occurrences(rule, current)
+                except (ValueError, TypeError):
+                    continue
+                seen = set()
+                for occ in occurrences:
+                    deadline = shift_deadline(occ['day'], occ['shift'])
+                    if deadline <= current or occ['shift'] in seen:
+                        continue
+                    seen.add(occ['shift'])
+                    key = (occ['day'], occ['shift'], occ['due'].timestamp())
+                    group = groups.setdefault(key, {**occ, 'deadline': deadline, 'ids': []})
+                    group['ids'].append(item['id'])
             self._reconcile_groups(conn, current, scope, list(groups.values()), definition['version'])
 
     def _needs_prior(self, current, prior):
@@ -370,14 +363,14 @@ class CheckService:
     @staticmethod
     def can_submit(actor, task, current):
         people = json.loads(task['people']) if isinstance(task['people'], str) else task['people']
-        return (not task['submitted'] and task['due'] <= current.timestamp() < task['deadline']
+        return (not task['submitted'] and bool(json.loads(task['items']) if isinstance(task['items'], str) else task['items'])
                 and (actor['id'] in {p['open_id'] for p in people}
-                     or actor.get('category') == 'duty' and actor.get('home_scope') == task['scope']))
+                     or actor.get('category') in DUTY and actor.get('home_scope') == task['scope']))
 
     def _is_roster_or_duty(self, actor, task):
         people = json.loads(task['people']) if isinstance(task['people'], str) else task['people']
         return (actor['id'] in {p['open_id'] for p in people}
-                or actor.get('category') == 'duty' and actor.get('home_scope') == task['scope'])
+                or actor.get('category') in DUTY and actor.get('home_scope') == task['scope'])
 
     def _evidence_file(self, frow):
         return {'id': frow['id'], 'item_id': frow.get('item_id') or '', 'name': frow['name'],
@@ -392,7 +385,7 @@ class CheckService:
             row = self._any_submitted_in_shift(task['day'], task['scope'], task['shift'])
             if row:
                 return False
-            return self._within_shift(task['day'], task['shift'], current)
+            return self._is_roster_or_duty(actor, task)
         # item file
         if frow['submitted'] or task['submitted']:
             return False
@@ -416,9 +409,9 @@ class CheckService:
         with self.connection() as conn:
             definition = self.definition(scope, conn)
             tasks = []
-            for row in conn.execute("SELECT * FROM tasks WHERE scope=? AND (submitted!='' OR items!='[]') AND (day=? OR (deadline>? AND due<=?)) ORDER BY due DESC",
-                                    (scope, day, current.timestamp(), current.timestamp())):
-                if not row['submitted'] and not definition['items']:
+            for row in conn.execute("SELECT * FROM tasks WHERE scope=? AND (submitted!='' OR items!='[]') AND (submitted='' OR deadline>?) ORDER BY due,id",
+                                    (scope, current.timestamp())):
+                if not row['submitted'] and not definition['items'] and row['deadline'] > current.timestamp():
                     continue
                 task = dict(row)
                 for key in ('items', 'people'):
@@ -483,11 +476,9 @@ class CheckService:
             return False
         if self._any_submitted_in_shift(task['day'], task['scope'], task['shift'], conn):
             return False
-        return self._within_shift(task['day'], task['shift'], current) and self._is_roster_or_duty(actor, task)
+        return self._is_roster_or_duty(actor, task)
 
     def _can_upload_handover(self, conn, actor, task, current):
-        if not self._within_shift(task['day'], task['shift'], current):
-            return False
         if not self._is_roster_or_duty(actor, task):
             return False
         h = conn.execute("SELECT id FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
@@ -505,10 +496,10 @@ class CheckService:
                 # Lost responses and concurrent submissions never replace the first result.
                 return {'completed': True, 'already_completed': True, 'actor_name': row['actor_name']}
             definition = self.definition(row['scope'], conn)
-            if not definition['items'] or row['definition_version'] != definition['version']:
+            if row['deadline'] > current.timestamp() and (not definition['items'] or row['definition_version'] != definition['version']):
                 raise CheckError('清单已更新或已清空，请重新读取。', 409)
             if not self.can_submit(actor, row, current):
-                raise CheckError('仅本班排班人员或本楼值班账号可在班次内提交。', 403)
+                raise CheckError('仅本楼值班人员或值班账号可提交该次检查。', 403)
             if type(version) is not int or version != row['definition_version']:
                 raise CheckError('清单版本已变化，请重新读取。', 409)
             items = json.loads(row['items'])
@@ -572,12 +563,10 @@ class CheckService:
                 if item_id not in items:
                     raise CheckError('检查项不存在，请刷新。', 404)
                 if not self.can_submit(actor, task, current):
-                    raise CheckError('仅本班排班人员或值班账号可在班次内上传检查附件。', 403)
+                    raise CheckError('仅本楼值班人员或值班账号可上传检查附件。', 403)
             else:
-                if not self._within_shift(task['day'], task['shift'], current):
-                    raise CheckError('当前不在该班次班前检查时段，无法上传交接班照片。', 403)
                 if not self._is_roster_or_duty(actor, task):
-                    raise CheckError('仅本班排班人员或值班账号可上传交接班照片。', 403)
+                    raise CheckError('仅本楼值班人员或值班账号可上传交接班照片。', 403)
         staging = self.staging_dir / f'{uuid.uuid4().hex}.upload'
         staging.write_bytes(b'')
         return {'path': str(staging), 'max_bytes': MAX_FILE_BYTES, 'kind': kind,
@@ -695,7 +684,7 @@ class CheckService:
                 if task['definition_version'] != session.get('definition_version'):
                     raise CheckError('清单版本已变化，请重新上传。', 409)
                 if not self.can_submit(actor, task, current):
-                    raise CheckError('仅本班排班人员或值班账号可在班次内上传检查附件。', 403)
+                    raise CheckError('仅本楼值班人员或值班账号可上传检查附件。', 403)
                 items = {i['id'] for i in json.loads(task['items'])}
                 if session.get('item_id') not in items:
                     raise CheckError('检查项不存在，请刷新。', 404)
@@ -745,10 +734,8 @@ class CheckService:
                 if task is None:
                     raise CheckError('班前检查任务不存在，请刷新。', 404)
                 authorized(actor, task['scope'])
-                if not self._within_shift(task['day'], task['shift'], current):
-                    raise CheckError('当前不在该班次时段，无法上传交接班照片。', 403)
                 if not self._is_roster_or_duty(actor, task):
-                    raise CheckError('仅本班排班人员或值班账号可上传交接班照片。', 403)
+                    raise CheckError('仅本楼值班人员或值班账号可上传交接班照片。', 403)
                 exists = conn.execute("SELECT * FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
                                       (task['day'], task['scope'], task['shift'])).fetchone()
                 if exists:
@@ -817,15 +804,15 @@ class CheckService:
                     raise CheckError('该班次已有提交记录，交接班照片已归档不能删除。', 403)
                 if row['uploader_id'] != actor['id']:
                     raise CheckError('仅上传人可删除交接班照片。', 403)
-                if not (self._within_shift(row['day'], row['shift'], current) and self._is_roster_or_duty(actor, task)):
-                    raise CheckError('仅本班排班人员可在班次内删除交接班照片。', 403)
+                if not self._is_roster_or_duty(actor, task):
+                    raise CheckError('仅本楼值班人员可删除交接班照片。', 403)
             else:
                 if row['submitted'] or (task and task['submitted']):
                     raise CheckError('已提交的检查附件不能删除或修改。', 403)
                 if row['uploader_id'] != actor['id']:
                     raise CheckError('仅上传人可删除检查附件。', 403)
                 if not self.can_submit(actor, task, current):
-                    raise CheckError('当前不在班次内，无法删除附件。', 403)
+                    raise CheckError('当前账号不能删除该检查附件。', 403)
             disk = row['disk_name']
             conn.execute('DELETE FROM files WHERE id=?', (file_id,))
         path = self.files_dir / disk
@@ -854,7 +841,7 @@ class CheckService:
                 key = f"{task['id']}:{slot}:{person['open_id']}"
                 with self.connection(True) as conn:
                     latest = conn.execute('SELECT submitted,items FROM tasks WHERE id=?', (task['id'],)).fetchone()
-                    if latest['submitted'] or latest['items'] == '[]':
+                    if not latest or latest['submitted'] or latest['items'] == '[]':
                         break
                     row = conn.execute('SELECT * FROM deliveries WHERE id=?', (key,)).fetchone()
                     if row and (row['sent'] or row['lease'] > current.timestamp()):
@@ -864,7 +851,7 @@ class CheckService:
                 card = {'config': {'wide_screen_mode': True},
                     'header': {'template': 'blue' if slot == 0 else 'orange', 'title': {'tag': 'plain_text', 'content': label}},
                     'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content':
-                        f"{task['day']} · {task['scope']}楼 · {task['shift']}班\n本班2人任意1人完成并提交即可。请逐项检查，有异常时填写备注。"}},
+                        f"{task['day']} · {task['scope']}楼 · {task['shift']}班\n本楼任意一名值班人员或值班账号提交本次清单即可。请逐项检查，有异常时填写备注。"}},
                         {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '打开班前检查'},
                             'url': base + '/assets/workspace-v2/index.html?__page=/&pre_shift=1'}]}]}
                 try:

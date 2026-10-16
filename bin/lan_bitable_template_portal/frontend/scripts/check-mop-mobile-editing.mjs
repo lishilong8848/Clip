@@ -89,7 +89,7 @@ try {
       await form.getByLabel('维护涉及位置', { exact: true }).fill('A楼三层冷站');
       await form.getByLabel('维护开始时间', { exact: true }).fill('2026-10-15T09:00');
       assert.equal(await form.getByRole('button', { name: '第10行后全正常', exact: true }).count(), 0, 'Details page excludes check results');
-      assert.equal(await page.locator('.floating-upload-box').isVisible(), false, 'Upload stays on the final page');
+      assert.equal(await page.locator('.floating-upload-box').isVisible(), version === 'v2', 'V2 keeps actions accessible while legacy upload stays on the final page');
       await page.getByRole('group', { name: '签名角色' }).getByRole('button').first().tap();
       const signatureDialog = page.getByRole('dialog', { name: '维护人员签名', exact: true });
       await signatureDialog.waitFor();

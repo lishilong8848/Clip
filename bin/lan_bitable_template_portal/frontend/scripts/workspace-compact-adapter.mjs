@@ -27,6 +27,16 @@ export function adaptCompactWorkspaces(input,filename){
     source=replace(source,node=>node.tag==='MopPageHeader','');
     source=replace(source,node=>node.tag==='MopFlowSteps','');
     source=slot(source,'MopBindingWorkspace',`<template #tools>${header}</template>`);
+    const signatures=nodes(source,node=>node.tag==='MopSignatureRoleSummary')[0].loc.source;
+    source=replace(source,byClass('mop-sign-panel'),text=>text.replace('v-if="activeSheet && !activeSheet.is_cover"','v-if="activeSheet && !activeSheet.is_cover && signatureManagerOpen"'));
+    source=slot(source,'MopUploadFooter',`<template #signatures><div v-if="activeSheet && !activeSheet.is_cover" class="mop-footer-signatures" :inert="mopFillSaving || mopUploadSaving || mopResetting">${signatures}</div></template>`);
+  }else if(file==='MopPreviewHeader.vue'){
+    source=replace(source,byClass('preview-head-status'),'');
+    source=source.replace('<strong>{{ title }}</strong>','<strong :title="title">{{ title }}</strong>');
+  }else if(file==='MopSheetStatusPanel.vue'){
+    source=replace(source,byClass('mop-file-status'),'');
+  }else if(file==='MopUploadFooter.vue'){
+    source=replace(source,byClass('floating-upload-action-row'),text=>text.replace('>','><slot name="signatures" />'));
   }else if(file==='MopBindingWorkspace.vue'){
     source=slot(source,'MopNoticeList','<template #tools><slot name="tools" /></template>');
   }else if(file==='MopNoticeList.vue'){

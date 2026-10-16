@@ -133,6 +133,13 @@ try {
     globalThis.fetch = async () => new Response(JSON.stringify({ok:false,error:'Failed to fetch'}), {status:503,headers:{'Content-Type':'application/json'}});
     await assert.rejects(requestJson(url, {}, {onServerError:message => shown=message}), error => error.message === NETWORK_ERROR_MESSAGE && error.status === 503);
     assert.equal(shown, NETWORK_ERROR_MESSAGE);
+    let attempts = 0;
+    globalThis.fetch = async () => { attempts++; return new Response(JSON.stringify({ok:false}), {status:503,headers:{'Content-Type':'application/json'}}); };
+    await assert.rejects(requestJson(url, {}, {onServerError:message => shown=message}), error => error.status === 503 && !error.offline);
+    assert.equal(shown, '当前请求暂未完成，请稍后重试。');
+    attempts = 0;
+    await assert.rejects(requestJson(url, {method:'POST',body:'{}'}), error => error.status === 503);
+    assert.equal(attempts, 1, 'business writes must never gain automatic retries');
   } finally { globalThis.fetch = nativeFetch; }
   const nativeXhr = globalThis.XMLHttpRequest;
   try {

@@ -308,3 +308,31 @@ def occurrences_for_date(rule, day):
     if not _is_on_day(rule, d, start):
         return []
     return [_single_occurrence(rule, d)]
+
+
+def upcoming_occurrences(rule, current):
+    """Candidate occurrences near now, without scanning intervening calendar days."""
+    start = _to_date(rule['start_date'])
+    first = max(start, current.date() - datetime.timedelta(days=1))
+    kind = rule['kind']
+    if kind == 'weekly':
+        first += datetime.timedelta(days=(rule['weekday'] - first.weekday()) % 7)
+        days = [first + datetime.timedelta(days=7 * i) for i in range(3)]
+    elif kind == 'interval':
+        interval = rule['every_days']
+        offset = (first - start).days
+        first = start + datetime.timedelta(days=((offset + interval - 1) // interval) * interval)
+        days = [first + datetime.timedelta(days=interval * i) for i in range(3)]
+    elif kind in ('month_start', 'month_end'):
+        days = []
+        month = first.year * 12 + first.month - 1
+        for i in range(3):
+            year, zero_month = divmod(month + i, 12)
+            m = zero_month + 1
+            day = 1 if kind == 'month_start' else calendar.monthrange(year, m)[1]
+            candidate = datetime.date(year, m, day)
+            if candidate >= first:
+                days.append(candidate)
+    else:
+        days = [first + datetime.timedelta(days=i) for i in range(3)]
+    return sorted((occ for day in days for occ in occurrences_for_date(rule, day)), key=lambda occ: occ['due'])

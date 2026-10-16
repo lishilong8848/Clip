@@ -5,22 +5,45 @@
 /node_modules/
 **/node_modules/
 **/.vite/
+# This project's committed frontend/dist is required by the portable runtime.
 
 # Environment and caches
 /.env
 .env
+.env.*
+!.env.example
+!.env.sample
 .venv/
 /venv/
 __pycache__/
 *.py[cod]
 *.pyo
+.npm-cache/
+.cache/
+.mypy_cache/
+.ruff_cache/
+*.tsbuildinfo
 
 # IDE and test tooling
 /.idea/
 /.vscode/
-/.pytest_cache/
+.pytest_cache/
 /.pytest_tmp/
 /.dev_instances/
+/.codex-audit/
+/.codex-review-diff*.txt
+/.playwright-cli/
+/.agents/
+/.workbuddy/
+playwright-report/
+test-results/
+htmlcov/
+.coverage
+.coverage.*
+*.pstats
+*.prof
+*.cpuprofile
+*.heapsnapshot
 
 # Runtime state
 /.runtime/
@@ -30,6 +53,7 @@ __pycache__/
 /build_meta.json
 /build_version_state.json
 /bin/data/
+/bin/resources/knowledge_model/
 /bin/upload_event_module/config.json
 *.db
 *.sqlite
@@ -47,12 +71,33 @@ __pycache__/
 /.tmp_day_metric_sources/
 /.tmp_*/
 /.tmp_*.py
+/artifacts/
+/bin/output/
+/bin/_baseline_out.txt
+/bin/_dbg_*.py
+/bin/_probe_*.py
+/bin/_lan_subset.txt
+/bin/_present_subset.py
+/bin/_present_subset.txt
+/bin/_run_subset.py
+/bin/_runnow.txt
+/bin/_subset_out.txt
+/bin/fields_output.json
 
 # Logs and transient files
 *.log
 *.tmp
 *.bak
 *.tmp_keep
+
+# Private credentials and certificate keys; never commit local copies.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_ed25519
 
 
 # Existing local-only project artifacts

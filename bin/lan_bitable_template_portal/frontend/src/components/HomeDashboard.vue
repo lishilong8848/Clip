@@ -31,7 +31,7 @@
         :class="[
           module.tone,
           `module-${module.key}`,
-          { core: index < 4, disabled: module.disabled, 'has-secondary': module.secondaryActions?.length },
+          { core: index < 4, disabled: module.disabled, 'has-secondary': module.secondaryActions?.length, 'needs-attention': module.attention },
         ]"
         :aria-disabled="module.disabled ? 'true' : undefined"
       >
@@ -39,7 +39,7 @@
           type="button"
           class="module-card__main"
           :disabled="module.disabled || module.primaryAction.disabled"
-          :aria-label="module.primaryAction.label"
+          :aria-label="module.primaryAction.label + (module.attention ? '，本班有待检查清单' : '')"
           @click="selectAction(module.primaryAction, module.disabled)"
         >
           <span class="module-card__head">
@@ -47,6 +47,7 @@
               <component :is="moduleIcon(module.icon)" :size="21" :stroke-width="2.1" />
             </span>
             <span v-if="module.disabled" class="module-state">建设中</span>
+            <span v-else-if="module.attention" class="module-check-alert" role="status"><i aria-hidden="true" />待检查</span>
           </span>
 
           <strong>{{ module.title }}</strong>
@@ -224,6 +225,7 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
 }
 
 .module-card {
+  position: relative;
   --module-accent: #1e63ff;
   --module-soft: #edf4ff;
   height: 186px;
@@ -237,6 +239,13 @@ function selectAction(action: ScopeHomeModuleAction, disabled = false): void {
   box-shadow: 0 5px 16px rgba(16, 66, 132, 0.055);
   transition: border-color 170ms ease, box-shadow 170ms ease, background 170ms ease;
 }
+
+.module-card.needs-attention{border-color:#cc3545}
+.module-card.needs-attention::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;box-shadow:inset 0 0 0 2px #d92d43,inset 0 0 20px rgba(217,45,67,.14);animation:homeCheckPulse 2.4s ease-in-out infinite}
+.module-check-alert{display:inline-flex;align-items:center;gap:6px;color:#b42335;font-size:12px;font-weight:600}
+.module-check-alert i{width:7px;height:7px;border-radius:50%;background:currentColor}
+@keyframes homeCheckPulse{0%,100%{opacity:.3}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.module-card.needs-attention::after{animation:none;opacity:.65}}
 
 .module-card.core {
   background: #ffffff;

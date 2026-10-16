@@ -3238,24 +3238,47 @@ class PortalRuntime:
         return {**payload, "ended_at": dt.datetime.fromtimestamp(ended_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")}
 
     @classmethod
+    def _sync_confirmed_source_end(cls, payload):
+        target_id = canonical_target_record_id(payload)
+        notice_type = str(payload.get("notice_type") or "")
+        key, owner, error = cls._acquire_event_operation_lock(
+            payload, action_type="source_finalize", target_record_id=target_id,
+        )
+        if error:
+            raise PortalError(error)
+
+        def check_lock():
+            if key and owner and not cls.state_store.renew_notice_operation_lock(key, owner):
+                raise PortalError("通告操作锁已过期，保留源表同步任务等待重试。")
+
+        try:
+            ok, record = query_record_by_id(target_id, notice_type)
+            if not ok and cls._remote_record_not_found(record):
+                return False
+            if not ok:
+                raise RuntimeError(str(record))
+            fields = record.get("fields") if isinstance(record, dict) else None
+            if not isinstance(fields, dict) or not fields:
+                raise PortalError("目标记录未完整读取，保留源表同步任务等待重试。")
+            lifecycle = cls.service._target_record_lifecycle(
+                work_type=str(payload.get("work_type") or ""), notice_type=notice_type,
+                target_record={"record_id": target_id, "display_fields": fields},
+            )
+            if not lifecycle.get("finished"):
+                return False
+            return cls.service.sync_notice_source_ended_fields(
+                cls._source_end_payload(payload, fields, notice_type),
+                before_write=check_lock,
+            )
+        finally:
+            cls._release_event_operation_lock(key, owner)
+
+    @classmethod
     def process_source_end_sync(cls):
         for task in cls.state_store.lease_outbox_events("notice_source_finalize", limit=3, lease_seconds=300):
             payload = task["payload"]
             try:
-                target_id = canonical_target_record_id(payload)
-                notice_type = str(payload.get("notice_type") or "")
-                ok, record = query_record_by_id(target_id, notice_type)
-                if not ok and cls._remote_record_not_found(record):
-                    cls.state_store.mark_outbox_event(task["id"], "done")
-                    continue
-                if not ok:
-                    raise RuntimeError(str(record))
-                fields = record.get("fields") or {}
-                lifecycle = cls.service._target_record_lifecycle(work_type=str(payload.get("work_type") or ""),
-                    notice_type=notice_type, target_record={"record_id": target_id, "display_fields": fields})
-                if lifecycle.get("finished"):
-                    payload = cls._source_end_payload(payload, fields, notice_type)
-                    cls.service.sync_notice_source_ended_fields(payload)
+                if cls._sync_confirmed_source_end(payload):
                     cls._reconcile_source_ongoing_after_target_terminal()
                     cls.clear_payload_cache()
                 cls.state_store.mark_outbox_event(task["id"], "done")
@@ -3285,24 +3308,7 @@ class PortalRuntime:
             try:
                 if not cls.service.has_ongoing_source_snapshot(identity):
                     continue
-                ok, result = query_record_by_id(target_record_id, notice_type)
-                if not ok or not isinstance(result, dict):
-                    continue
-                fields = result.get("fields")
-                if not isinstance(fields, dict) or not fields:
-                    continue
-                lifecycle = cls.service._target_record_lifecycle(
-                    work_type=work_type,
-                    notice_type=notice_type,
-                    target_record={
-                        "record_id": target_record_id,
-                        "display_fields": fields,
-                    },
-                )
-                if not lifecycle.get("finished"):
-                    continue
-                identity = cls._source_end_payload(identity, fields, notice_type)
-                if cls.service.sync_notice_source_ended_fields(identity):
+                if cls._sync_confirmed_source_end(identity):
                     synced += 1
             except Exception as exc:
                 errors.append(f"{source_record_id}: {exc}")
@@ -14084,7 +14090,6 @@ class PortalRuntime:
                                         latest_fields
                                     )
                             active_projection_warning = cls._queue_source_end_sync(data, target_record_id, notice_type)
-                            cls.service.mark_notice_source_ended_locally(data)
                             cls._enqueue_active_delete_for_ended_notice(
                                 data,
                                 remote_record_id=target_record_id,
@@ -16125,18 +16130,7 @@ class PortalRuntime:
                             sync_warning = cls._queue_source_end_sync(prepared, resolved_remote_record_id, str(prepared.get("notice_type") or ""))
                             if sync_warning:
                                 result_warnings.append(sync_warning)
-                            cls.service.mark_notice_source_ended_locally(
-                                prepared
-                            )
-                            try:
-                                source_fallback_active = (
-                                    cls.service.has_ongoing_source_snapshot(prepared)
-                                )
-                            except Exception as exc:
-                                terminal_warning = (
-                                    "源表未结束状态核对失败，已保留进行中显示："
-                                    f"{exc}"
-                                )
+                            source_fallback_active = False
                         elif target_missing:
                             source_fallback_active = False
                         else:

@@ -4,22 +4,26 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {preview} from 'vite';
+import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),output=path.resolve(root,'../../../output/playwright/pre-shift');
 await mkdir(output,{recursive:true});
 const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[];
+const layouts=layoutApiFixture();
 let writes=0,definitionWrites=0,submitted=false,fail=false,mode='operator',page;
 let fileWrites=0,files=[],handover=null;
+let shift='白',day='2026-10-14';
 const items=[{id:'x',text:'核对测试清单一'},{id:'y',text:'核对测试清单二：较长的检查说明应在手机屏幕自动换行，不挤压检查结果与异常备注'}];
 let definition={version:1,items:structuredClone(items)};
 try{
  const context=await browser.newContext({viewport:{width:1440,height:960},reducedMotion:'reduce'});
  await context.route('**/*',async route=>{
   const req=route.request(),u=new URL(req.url());if(u.origin!==origin)return route.abort();if(!u.pathname.startsWith('/api/'))return route.continue();
+  if(await layouts.handle(route,mode))return;
   const ok=data=>route.fulfill({json:{ok:true,data}});
   if(u.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'ou_'+mode,name:'隔离验收人员',role:mode==='manager'?'admin':'building',level:mode==='manager'?'L1':'L4',category:mode,home_scope:'A',modules:mode==='restricted'?['change']:['maintenance','polling','adjust'],can_delete_business:mode==='manager'},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});
   if(u.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'pre-shift-fixture'}});
-  if(u.pathname==='/api/pre-shift-checks')return ok({scope:'A',scopes:mode==='manager'?['A','B']:['A'],can_manage:mode==='manager',definition,roster_ready:true,roster_error:'',tasks:!submitted&&!definition.items.length?[]:[{id:'fixture-day',day:'2026-10-14',scope:'A',shift:'白',due:Date.now()/1000-60,files,handover_photo:handover,can_upload_handover:!handover,definition_version:submitted?1:definition.version,items:submitted?items:definition.items,people:[{name:'值班员一'},{name:'值班长二'}],submitted:submitted?'2026-10-14T09:05:00+08:00':'',actor_name:'隔离验收人员',can_submit:!submitted,deadline:Date.now()/1000+10000,answers:submitted?[{...items[0],status:'normal',note:''},{...items[1],status:'abnormal',note:'测试异常说明'}]:[],sync_status:submitted?'synced':'pending'}]});
+  if(u.pathname==='/api/pre-shift-checks')return ok({server_time:new Date().toISOString(),scope:'A',scopes:mode==='manager'?['A','B']:['A'],can_manage:mode==='manager',definition,roster_ready:true,roster_error:'',tasks:!submitted&&!definition.items.length?[]:[{id:'fixture-'+day+shift,day,scope:'A',shift,due:Date.now()/1000-60,files,handover_photo:handover,can_upload_handover:!handover,definition_version:submitted?1:definition.version,items:submitted?items:definition.items,people:[{name:'值班员一'},{name:'值班长二'}],submitted:submitted?'2026-10-14T09:05:00+08:00':'',actor_name:'隔离验收人员',can_submit:!submitted,deadline:Date.now()/1000+10000,answers:submitted?[{...items[0],status:'normal',note:''},{...items[1],status:'abnormal',note:'测试异常说明'}]:[],sync_status:submitted?'synced':'pending'}]});
   if(u.pathname==='/api/pre-shift-checks/submit'){writes++;if(fail){fail=false;return route.fulfill({status:503,json:{ok:false,error:'隔离测试：暂未确认，请重试'}});}assert.deepEqual(req.postDataJSON().answers,[{id:'x',status:'normal',note:''},{id:'y',status:'abnormal',note:'测试异常说明'}]);submitted=true;return ok({completed:true});}
   if(u.pathname==='/api/pre-shift-checks/definition'){definitionWrites++;definition={...req.postDataJSON(),version:definition.version+1};return ok(definition);}
   if(u.pathname==='/api/pre-shift-checks/files'){fileWrites++;const file={id:'file-'+fileWrites,item_id:u.searchParams.get('item_id'),name:u.searchParams.get('name'),size:req.postDataBuffer().length,is_image:false,can_delete:true};if(u.searchParams.get('kind')==='handover')handover=file;else files.push(file);return ok(file);}
@@ -31,7 +35,9 @@ try{
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
  await page.goto(origin+'/assets/workspace-v2/index.html');
  const check=page.getByRole('region',{name:'班前检查',exact:true}).last();
- await page.getByText('本班待检查',{exact:true}).waitFor();
+ await page.getByText('本次待检查',{exact:true}).waitFor();
+ assert(await check.evaluate(el=>el.classList.contains('has-pending-checks')));
+ assert.equal(await check.evaluate(el=>getComputedStyle(el,'::before').animationName),'none','reduced motion uses a static red outline');
  assert.equal(await check.getByRole('radio',{checked:true}).count(),0,'no item is pre-checked');
  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();assert.equal(await page.getByRole('button',{name:'移除班前检查',exact:true}).count(),0);await page.locator('.v2-dashboard-actions').getByRole('button',{name:'取消',exact:true}).click();
  await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('请逐项选择检查结果，并填写异常项备注。',{exact:true}).waitFor();assert.equal(writes,0);
@@ -45,8 +51,11 @@ try{
  const photoInput=check.getByLabel('上传交接班照片',{exact:true});assert.equal(await photoInput.getAttribute('capture'),null,'photo picker opens album, not a forced camera');await photoInput.setInputFiles({name:'交接班.png',mimeType:'image/png',buffer:Buffer.from('mock')});await check.getByText('本班已上传',{exact:true}).waitFor();assert.equal(fileWrites,4);assert.equal(await check.locator('.v2-check-handover').getByRole('button',{name:'上传照片',exact:true}).count(),0);
 for(const width of [1440,390]){await page.setViewportSize({width,height:width<700?844:960});await check.scrollIntoViewIfNeeded();if(width===390){const choosing=page.waitForEvent('filechooser');await rows.nth(0).getByRole('button',{name:'上传照片',exact:true}).click();const chooser=await choosing;assert.equal(await chooser.element().getAttribute('capture'),null);await chooser.setFiles({name:'手机相册.png',mimeType:'image/png',buffer:Buffer.from('album')});await rows.nth(0).getByRole('link',{name:'手机相册.png',exact:true}).waitFor();assert.equal(fileWrites,5);}assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(output,'check-'+width+'.png'),fullPage:true});}
  await page.setViewportSize({width:1440,height:960});fail=true;await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('隔离测试：暂未确认，请重试',{exact:true}).waitFor();assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');
- await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('本班已完成',{exact:true}).waitFor();assert.equal(writes,2);await check.getByText('已同步飞书',{exact:true}).waitFor();assert.equal(await check.getByRole('button',{name:'提交检查',exact:true}).count(),0);
- await page.reload();await page.getByText('本班已完成',{exact:true}).waitFor();assert.equal(writes,2);
+ await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);await check.getByText('已同步飞书',{exact:true}).waitFor();assert.equal(await check.getByRole('button',{name:'提交检查',exact:true}).count(),0);
+ await page.reload();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);
+ assert(!await check.evaluate(el=>el.classList.contains('has-pending-checks')));
+ shift='夜';submitted=false;await check.getByRole('button',{name:'刷新班前检查',exact:true}).click();await check.getByText('本次待检查',{exact:true}).waitFor();assert(await check.evaluate(el=>el.classList.contains('has-pending-checks')),'next shift alerts independently');
+ submitted=true;await check.getByRole('button',{name:'刷新班前检查',exact:true}).click();await check.getByText('本次已完成',{exact:true}).waitFor();assert(!await check.evaluate(el=>el.classList.contains('has-pending-checks')),'peer or duty completion clears every viewer');
  mode='manager';await page.reload();await page.getByRole('button',{name:'管理清单',exact:true}).click();const editor=page.locator('.v2-check-editor');await editor.getByRole('button',{name:'添加检查项',exact:true}).click();await editor.getByRole('textbox',{name:'检查项3',exact:true}).fill('新增测试检查项');await editor.getByLabel('执行频率',{exact:true}).nth(2).click();await page.locator('.n-base-select-option').getByText('每周',{exact:true}).click();await editor.getByRole('button',{name:'保存清单',exact:true}).click();await editor.waitFor({state:'hidden'});assert.equal(definitionWrites,1);assert.equal(definition.items.length,3);assert.equal(definition.items[2].frequency.kind,'weekly');
  assert.equal(await check.locator('fieldset').count(),2,'completed checks keep their original snapshot');
  submitted=false;await page.reload();await check.locator('fieldset').nth(2).waitFor();

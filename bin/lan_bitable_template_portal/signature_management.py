@@ -800,7 +800,7 @@ class SignatureManagement:
 
 def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, base_url="", send_text=None, auth=None):
     """Both HTTP servers use exactly the same authorization/operation boundary."""
-    allowed = {"GET": {"people", "request", "duplicates", "preview", "account"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate", "self-start"}}
+    allowed = {"GET": {"people", "request", "duplicates", "preview", "account", "mop-people", "mop-list"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate", "self-start", "mop-invite"}}
     if operation not in allowed.get(method, set()):
         raise SignatureManagementError("接口不存在。", 404)
     if operation not in {"request", "submit"} and not actor:
@@ -811,6 +811,10 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         return manager.submit(payload)
     if auth is None:
         raise SignatureManagementError('无法核验当前账号的人员管理权限。', 403)
+    if operation in {"mop-people", "mop-list", "mop-invite"}:
+        from .mop_signature_invitations import dispatch as dispatch_mop
+        return dispatch_mop(manager, operation, payload, actor=actor, auth=auth,
+                            base_url=base_url, send_text=send_text)
     from .signature_access import SignatureAccess
     access = SignatureAccess(manager, auth, actor)
     if operation == 'account':

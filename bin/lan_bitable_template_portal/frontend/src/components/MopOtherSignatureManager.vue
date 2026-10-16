@@ -5,7 +5,10 @@
         <strong>当前临时/外部人员</strong>
         <small :class="summaryTone">{{ summaryText }}</small>
       </div>
+      <button v-if="invitationContext" data-v2-navigation type="button" class="add-person-button" :disabled="invitationBusy" :aria-expanded="adding" @click="resume=null; adding = !adding"><Plus :size="14" />添加人员</button>
     </header>
+
+    <MopSignatureInvitation v-if="adding && invitationContext && role !== 'inspector'" :key="invitationContext.scope + ':' + invitationContext.noticeKey + ':' + role + ':' + (resume?.operation_id || 'new')" :scope="invitationContext.scope" :notice-key="invitationContext.noticeKey" :role="role" :resume="resume" @busy="invitationBusy=$event" @close="adding=false; resume=null" @changed="emit('invitation-changed',$event)" />
 
     <div v-if="displayRows.length" class="task-toolbar">
       <input v-model="taskSearch" type="search" placeholder="搜索临时/外部人员" />
@@ -37,7 +40,8 @@
             </small>
           </div>
           <div class="task-actions">
-            <button type="button" class="remove-action" @click="emit('remove-person', signaturePersonKey(row.person))">
+            <button v-if="invitationContext && row.person.mop_invitation && row.person.operation_id && !row.signed" type="button" data-v2-navigation class="link-action" :disabled="invitationBusy" @click="resumeInvitation(row.person)">{{ row.person.request_status === 'send_failed' ? '重试发送链接' : ['expired','revoked'].includes(row.person.request_status) ? '重新发送链接' : '核对发送结果' }}</button>
+            <button type="button" class="remove-action" :disabled="invitationBusy" @click="emit('remove-person', signaturePersonKey(row.person))">
               移除
             </button>
           </div>
@@ -103,7 +107,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { Plus } from "lucide-vue-next";
+import MopSignatureInvitation from "./MopSignatureInvitation.vue";
 
 type Dict = Record<string, any>;
 type SignatureRole = "implementer" | "auditor" | "inspector";
@@ -125,6 +131,7 @@ const props = defineProps<{
   externalPeople: Dict[];
   personStatusText: (person: Dict) => string;
   active?: boolean;
+  invitationContext?: {scope:string;noticeKey:string};
 }>();
 
 const emit = defineEmits<{
@@ -132,9 +139,13 @@ const emit = defineEmits<{
   "update:externalSearch": [value: string];
   "refresh-external": [];
   "add-external": [person: Dict];
+  "invitation-changed": [value:{scope:string;noticeKey:string;person?:Dict}];
 }>();
 
 const externalReuseOpen = ref(true);
+const adding = ref(false);
+const invitationBusy = ref(false);
+const resume = ref<Dict|null>(null);
 const taskSearch = ref("");
 const taskFilter = ref<"all" | "unsigned" | "signed">("all");
 const signedCount = computed(() => Math.max(0, props.displayRows.length - props.unsignedCount));
@@ -178,6 +189,11 @@ watch(() => props.active, (active) => {
 function chooseExternal(person: Dict): void {
   externalReuseOpen.value = false;
   emit("add-external", person);
+}
+
+function resumeInvitation(person:Dict):void {
+  resume.value={...person}; adding.value=true;
+  void nextTick(()=>document.querySelector('.mop-signature-invitation')?.scrollIntoView({block:'nearest'}));
 }
 
 function signaturePersonKey(person: Dict): string {
@@ -253,6 +269,7 @@ function personStatus(row: OtherSignatureRow): string {
   font-weight: 900;
   cursor: pointer;
 }
+.add-person-button{display:inline-flex;align-items:center;gap:5px}
 
 .add-person-button:disabled,
 .signature-refresh:disabled {

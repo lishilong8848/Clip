@@ -44,7 +44,7 @@ try{
   if(req.method()!=='GET')writes.push(u.pathname);
   if(u.pathname==='/api/auth/status')return ok(route,{logged_in:true,user:{open_id:'experience-fixture',name:'隔离测试',role:'admin',level:'L1',modules:['maintenance','change']},scope_options:[{value:'E',label:'E楼'},{value:'A',label:'A楼'}]});
   if(u.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'experience-fixture'}});
-  if(u.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-E',work_type:'maintenance',title:u.searchParams.get('month')+'计划',status:'未开始',building:'E楼'}],ongoing:[{active_item_id:'active-E',work_type:'maintenance',title:'E楼进行中',status:'开始',building:'E楼'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
+  if(u.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-E',work_type:'maintenance',title:u.searchParams.get('month')+'计划',source_progress:'未开始',building:'E楼'}],ongoing:[{active_item_id:'active-E',work_type:'maintenance',title:'E楼进行中',status:'开始',building:'E楼'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
   if(u.pathname==='/api/workbench/lite-detail')return ok(route,{fragments:{detail:form(u.searchParams.has('active_item_id'))}});
   if(u.pathname==='/api/workbench/draft')return ok(route,{draft:null});
   if(u.pathname==='/api/workbench/planned-notice-prefill'){

@@ -581,25 +581,15 @@ def _record_specialty(record: dict[str, Any]) -> str:
 
 
 def _record_progress(record: dict[str, Any]) -> str:
-    work_summary = (
-        record.get("work_summary")
-        if isinstance(record.get("work_summary"), dict)
-        else {}
-    )
-    source_terminal_status = _first(
-        record.get("source_progress"),
-        record.get("source_status"),
-        record.get("status"),
-    )
-    if _record_disabled_reason(source_terminal_status):
-        return source_terminal_status
+    if "source_progress" in record or "source_status" in record:
+        return _first(record.get("source_progress"), record.get("source_status"), "状态未取得")
+    if _item_work_type(record) == "repair":
+        if _field(record, "维修结束时间", "维修结束时间（2026）"):
+            return "已结束"
+        return "进行中" if _field(record, "维修开始时间") else "未开始"
     return _first(
-        work_summary.get("status"),
-        record.get("source_progress"),
-        record.get("source_status"),
-        record.get("status"),
-        _field(record, "维护实施状态", "变更进度", "维修开始时间"),
-        "未开始",
+        _field(record, "维护实施状态", "变更进度"),
+        "状态未取得",
     )
 
 
@@ -638,7 +628,7 @@ def _progress_tone(progress: Any) -> str:
 
 
 def _progress_badge(progress: Any) -> str:
-    text = str(progress or "").strip() or "未开始"
+    text = str(progress or "").strip() or "状态未取得"
     return f"<span class=\"row-status {_e(_progress_tone(text))}\">{_e(text)}</span>"
 
 
@@ -661,6 +651,8 @@ def _record_disabled_reason(
     linked_ongoing: bool = False,
 ) -> str:
     text = str(progress or "").strip()
+    if not text or text == "状态未取得":
+        return "源表状态未取得，请重新读取后办理。"
     if "未结束" not in text and any(flag in text for flag in ("已结束", "正常结束", "延期结束", "结束", "闭环", "已完成")):
         return "该事项已结束，只保留查看状态，不可再次发起。"
     if linked_ongoing and ("进行中" in text or "未结束" in text):
@@ -1998,7 +1990,7 @@ def _linked_ongoing_for_source(
     if target_record_id:
         linked["target_record_id"] = target_record_id
         linked["record_id"] = target_record_id
-    linked["source_progress"] = _ongoing_display_status(candidate)
+    linked["source_progress"] = _record_progress(record)
     linked["source_status"] = linked["source_progress"]
     return linked
 
@@ -5167,10 +5159,10 @@ def render_workbench_lite(
         const result = data.data || {{}};
         const message = result.remote_deleted
           ? (result.source_plan_reset
-              ? '已删除通告，对应计划已恢复为未开始。'
+              ? '已删除通告并清理本地关联，计划状态以重新读取的源表为准。'
               : '已删除通告，并同步删除对应多维记录。')
           : (result.source_plan_reset
-              ? '已删除本地通告，对应计划已恢复为未开始。'
+              ? '已删除本地通告并清理关联，计划状态以重新读取的源表为准。'
               : '已删除本地通告。');
         button.removeAttribute('data-delete-operation-id');
         setLiteStatus(message);
@@ -5327,11 +5319,10 @@ def render_workbench_lite(
             sourceRow.setAttribute('aria-disabled', 'true');
             sourceRow.setAttribute(
               'data-disabled-reason',
-              '该事项已结束，只保留查看状态，不可再次发起。'
+              '关联目标通告已结束，请刷新核验源表状态。'
             );
             sourceRow.setAttribute('data-linked-ongoing', '0');
             sourceRow.setAttribute('data-target-record-id', targetRecordId);
-            setOngoingRowStatus(sourceRow, '已结束', 'done');
           }} else if (hasOngoingBinding) {{
             sourceRow.classList.add('is-disabled');
             sourceRow.setAttribute('aria-disabled', 'true');
@@ -5343,7 +5334,6 @@ def render_workbench_lite(
             sourceRow.setAttribute('data-action', 'update');
             sourceRow.setAttribute('data-active-item-id', activeItemId);
             sourceRow.setAttribute('data-target-record-id', targetRecordId);
-            setOngoingRowStatus(sourceRow, '进行中', 'working');
           }}
         }}
       }}
@@ -6497,7 +6487,7 @@ def render_workbench_lite(
         title.textContent = candidate.title || '未命名计划通告';
         const meta = document.createElement('span');
         meta.textContent = [
-          candidate.progress || '未开始',
+          candidate.progress || '状态未取得',
           candidate.building || '',
           candidate.specialty || '',
         ].filter(Boolean).join(' · ');
@@ -9149,9 +9139,8 @@ def render_workbench_lite(
       row.classList.add('is-disabled');
       row.setAttribute('aria-disabled', 'true');
       row.setAttribute('data-disabled-reason', '已提交');
-      row.querySelector('.row-status')?.replaceChildren(document.createTextNode('处理中'));
     }}
-    function markSourceRowCompleted(draft) {{
+    function lockSourceRowUntilRefresh(draft) {{
       const sourceId = String(draft?.source_record_id || '').trim();
       if (!sourceId) return;
       const row = Array.from(document.querySelectorAll('.notice-row')).find(node =>
@@ -9162,13 +9151,8 @@ def render_workbench_lite(
       if (!row) return;
       row.classList.add('is-disabled');
       row.setAttribute('aria-disabled', 'true');
-      row.setAttribute('data-disabled-reason', '该事项已结束，只保留查看状态，不可再次发起。');
-      row.setAttribute('title', '该事项已结束，只保留查看状态，不可再次发起。');
-      const status = row.querySelector('.row-status');
-      if (status) {{
-        status.className = 'row-status done';
-        status.textContent = '已结束';
-      }}
+      row.setAttribute('data-disabled-reason', '正在读取源表状态，请勿重复提交。');
+      row.setAttribute('title', '正在读取源表状态，请勿重复提交。');
     }}
     function applyOptimisticSubmission(form, action, payload) {{
       const draft = compactOptimisticDraft(Object.assign({{}}, payload.patch || {{}}));
@@ -9235,7 +9219,7 @@ def render_workbench_lite(
       draft.record_id = payload?.record_id || draft.record_id || '';
       const row = findOngoingRowByDraft(draft);
       if (ok && draft.action === 'end') {{
-        markSourceRowCompleted(draft);
+        lockSourceRowUntilRefresh(draft);
         removeOngoingRow(row);
         clearCompletedCurrentNotice(draft);
         return;
@@ -9363,13 +9347,13 @@ def render_workbench_lite(
       const terminalProjectionSkipped = Boolean(patch.terminal_projection_skipped);
       const projectionSupersededByTerminal = Boolean(patch.projection_superseded_by_terminal);
       if (ok && projectionSupersededByTerminal && !patch.source_fallback_active) {{
-        markSourceRowCompleted(draft);
+        lockSourceRowUntilRefresh(draft);
         removeOngoingRow(findOngoingRowByDraft(draft));
         clearCompletedCurrentNotice(draft);
         return;
       }}
       if (ok && draft.action === 'end' && !terminalProjectionSkipped) {{
-        markSourceRowCompleted(draft);
+        lockSourceRowUntilRefresh(draft);
         removeOngoingRow(findOngoingRowByDraft(draft));
         clearCompletedCurrentNotice(draft);
         return;

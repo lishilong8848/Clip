@@ -212,8 +212,13 @@
       @switch-scope="enterDrillManagement"
     />
 
+    <PreShiftChecklistPage v-else-if="isPreShiftPage" :user="auth.user" />
+    <RiskInspectionPage v-else-if="routePath === '/risk-inspections'" :key="String(auth.user?.open_id)+':'+(routeParams.get('id')||'')" :release-id="routeParams.get('id') || ''" />
+    <WorkHandoverPage v-else-if="routePath === '/work-handover'" :key="String(auth.user?.open_id)+':'+(routeParams.get('id')||'')" :handover-id="routeParams.get('id') || ''" />
+
     <ScopeHome
       v-else
+      :current-user="auth.user"
       :modules="userModules"
       :initial-mode="routeParams.get('entry') || ''"
       :scope-options="visibleScopeOptions"
@@ -228,9 +233,12 @@
       @repair-management="enterRepairManagement"
       @water="enterWaterManagement"
       @critical-guard="enterCriticalGuard()"
+      @risk-inspection="navigate('/risk-inspections')"
       @drill="enterDrillManagement()"
       @learning="navigate('/learning')"
       @plan-convergence="navigate('/plan-convergence')"
+      @pre-shift="navigate('/?entry=pre_shift')"
+      @work-handover="navigate('/work-handover')"
       @cabinet-power="navigate('/cabinet-power')"
       @daily="enterDailyTasks"
       @request-permission="openAdditionalPermissionRequest"
@@ -262,7 +270,7 @@ import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
 import { LighthouseAssistant } from './lighthouseEntry';
 import AsyncPageState from "./components/AsyncPageState.vue";
-import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, preferredLoginUrl, rememberLoginMethod } from "./api/client";
+import { AUTH_EXPIRED_EVENT, ApiError, requestJson, setReadCacheIdentity, preferredLoginUrl, rememberLoginMethod, waitWithSignal } from "./api/client";
 import { setModulePermissions } from "./api/modulePermissions";
 import { navigate, navigateHard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
@@ -295,12 +303,15 @@ const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.v
 const SignaturePage = asyncPage(() => import("./components/SignaturePage.vue"));
 const SignatureManagementPage = asyncPage(() => import("./components/SignatureManagementPage.vue"));
 const ScopeHome = asyncPage(() => import("./components/ScopeHome.vue"));
+const PreShiftChecklistPage = asyncPage(() => import("./components/PreShiftChecklistPage.vue"));
 const WaterManagementPage = asyncPage(() => import("./components/WaterManagementPage.vue"));
 const CriticalGuardPage = asyncPage(() => import("./components/CriticalGuardPage.vue"));
 const DrillManagementPage = asyncPage(() => import("./components/DrillManagementPage.vue"));
 const CabinetPowerPage = asyncPage(() => import("./components/CabinetPowerPage.vue"));
 const CabinetPowerBatchPage = asyncPage(() => import("./components/CabinetPowerBatchPage.vue"));
 const WorkbenchLitePage = asyncPage(() => import("./components/WorkbenchLitePage.vue"));
+const WorkHandoverPage = asyncPage(() => import("./components/WorkHandoverPage.vue"));
+const RiskInspectionPage = asyncPage(() => import("./components/RiskInspectionPage.vue"));
 
 type Dict = LooseDict;
 
@@ -350,6 +361,17 @@ const workbenchOpening = ref(false);
 const workbenchOpeningText = ref("正在进入维护管理");
 const scopeHomeDashboardVisible = ref(true);
 const syncText = ref("准备中");
+const homeReadLabels: Record<string, string> = {
+  '/api/auth/status': '登录状态',
+  '/api/scope-overview': '首页概览',
+  '/api/handover-links': '交接班链接',
+  '/api/auth/permission-requests/current': '权限申请记录',
+};
+const homeReadIssues = ref<Record<string, string>>({});
+const homeReadAbort = new AbortController();
+const homeReadLatest = new Map<string, number>();
+let homeReadSerial = 0, homeReadGeneration = 0;
+const homeReadRetrying = ref(false);
 const scopeOverview = ref<Record<string, Dict>>({});
 const overviewLoading = ref(false);
 let currentOverviewKey = '', overviewRequest = 0, handoverRequest = 0;
@@ -419,8 +441,10 @@ const isCabinetPowerBatchPage = computed(() => routePath.value === "/cabinet-pow
 const isCriticalGuardPage = computed(() => routePath.value === "/critical-guard");
 const isDrillManagementPage = computed(() => routePath.value === "/drill-management" || routePath.value === "/drill-management/print");
 const isDrillPrintPage = computed(() => routePath.value === "/drill-management/print");
+const isPreShiftPage = computed(() => routePath.value === '/' && routeParams.value.get('entry') === 'pre_shift');
 const isScopeHomeDashboard = computed(() => (
   routePath.value === "/"
+  && !isPreShiftPage.value
   && !routeParams.value.get("mode")
   && auth.loggedIn
   && !authChecking.value
@@ -450,9 +474,9 @@ const MODULE_LABELS: Record<string, string> = {
   maintenance: "维护管理", change: "变更管理", repair: "检修通告管理", polling: "设备轮巡",
   adjust: "设备调整", power: "上/下电通告", event: "事件管理", engineer_mop: "维护单管理",
   repair_management: "检修管理", cabinet: "机柜上下电", daily: "每日任务", water: "水耗管理",
-  critical_guard: "重保管理", drills: "演练管理", learning: "画像学练", plan_convergence: "计划收敛审查",
+  critical_guard: "重保管理", risk_inspection: "风险排查", drills: "演练管理", learning: "画像学练", plan_convergence: "计划收敛审查",
   signatures: "签名管理", knowledge: "知识库", links: "多维表导航", life_guide: "人生指南",
-  handover: "交接班审核", assistant: "灯塔助手", accounts: "账号与权限",
+  handover: "交接班审核", work_handover: "人员工作交接", assistant: "灯塔助手", accounts: "账号与权限",
 };
 function homeEntryModule(entry: string): string {
   switch (entry) {
@@ -464,6 +488,7 @@ function homeEntryModule(entry: string): string {
     case "repair": return "repair";
     case "water": return "water";
     case "critical_guard": return "critical_guard";
+    case "risk_inspection": return "risk_inspection";
     case "drill": return "drills";
     case "learning": return "learning";
     case "cabinet_power": return "cabinet";
@@ -483,6 +508,7 @@ function moduleForCurrentRoute(): string {
   if (path === "/") return homeEntryModule(entry);
   if (path === "/admin/settings" || path === "/admin/history-memory") return "accounts";
   if (path === "/engineer/mop") return "engineer_mop";
+  if (path === "/work-handover") return "work_handover";
   if (path === "/repair-management" || path === "/repair-status") return "repair_management";
   if (path === "/learning") return "learning";
   if (path === "/plan-convergence") return "plan_convergence";
@@ -492,6 +518,7 @@ function moduleForCurrentRoute(): string {
   if (path === "/water-management") return "water";
   if (path === "/cabinet-power" || path === "/cabinet-power/batches") return "cabinet";
   if (path === "/critical-guard") return "critical_guard";
+  if (path === "/risk-inspections") return "risk_inspection";
   if (path === "/drill-management" || path === "/drill-management/print") return "drills";
   if (path === "/signature-management") return "signatures";
   if (path === "/signature") return signatureLinkMode.value ? "" : "signatures";
@@ -597,10 +624,18 @@ const pageStatusText = computed(() => {
   const text = String(syncText.value || "").trim();
   if (!text || ["准备中", "请选择功能", "切换中"].includes(text)) return "";
   if (isRoutinePageStatus(text)) return "";
-  if (/^HTTP\s+\d+/i.test(text)) return "服务暂未就绪，页面会在连接恢复后自动刷新。";
+  if (/^HTTP\s+\d+/i.test(text)) return "当前数据请求暂未完成，请在对应功能中重试。";
   return text;
 });
-const connectionNotice = computed(() => null as null | { tone?: string; text: string; actionLabel?: string; action?: () => void });
+const connectionNotice = computed(() => {
+  const home = routePath.value === '/' && !routeParams.value.get('mode');
+  const issues = Object.entries(homeReadIssues.value).filter(([path]) => home || path === '/api/auth/status');
+  if (!issues.length) return null;
+  return {
+    tone: 'warning', text: issues.map(([, text]) => text).join('；'),
+    actionLabel: homeReadRetrying.value ? '正在读取' : '重新读取', action: retryHomeReads,
+  };
+});
 
 function normalizedPath(): string {
   return window.location.pathname.replace(/\/$/, "") || "/";
@@ -701,6 +736,7 @@ function handleAuthVisibilityChange(): void {
 }
 
 function markAuthExpired(message = "登录已过期，请重新扫码登录。"): void {
+  clearHomeReadIssues();
   clearOverview(); currentOverviewKey = ''; overviewRequest++;
   scopeOverview.value = {}; handoverLinks.value = {};
   auth.loggedIn = false;
@@ -718,19 +754,82 @@ function handleGlobalAuthExpired(event: Event): void {
   redirectToLogin(String(detail.login_url || detail.loginUrl || ""));
 }
 
+function clearHomeReadIssues(): void {
+  homeReadGeneration++;
+  homeReadIssues.value = {};
+  homeReadLatest.clear();
+}
+
+async function retryHomeReads(): Promise<void> {
+  if (homeReadRetrying.value || appDisposed) return;
+  homeReadRetrying.value = true;
+  try {
+    await Promise.allSettled(Object.keys(homeReadIssues.value).map(path => {
+      if (path === '/api/auth/status') return loadAuthStatus({ silent: true });
+      if (path === '/api/scope-overview') return loadOverview();
+      if (path === '/api/handover-links') return loadHandoverLinks();
+      return loadCurrentPermissionRequest();
+    }));
+  } finally { homeReadRetrying.value = false; }
+}
+
 async function portalRequest(path: string, options: RequestInit = {}): Promise<Dict> {
-  return requestJson(path, options, {
-    onOffline(message) {
-      syncText.value = message;
-    },
+  const endpoint = path.split('?')[0];
+  const tracked = (!options.method || options.method.toUpperCase() === 'GET') && !!homeReadLabels[endpoint];
+  const serial = ++homeReadSerial, generation = homeReadGeneration;
+  if (tracked) homeReadLatest.set(endpoint, serial);
+  const current = () => !appDisposed && generation === homeReadGeneration && (!tracked || homeReadLatest.get(endpoint) === serial);
+  const usable = (data: Dict) => {
+    if (endpoint === '/api/auth/status') return typeof data.logged_in === 'boolean';
+    if (endpoint === '/api/scope-overview') {
+      const scopes = data.scopes || data.items;
+      return scopes && typeof scopes === 'object' && !Array.isArray(scopes) && data.source_snapshot_ready !== false;
+    }
+    return true;
+  };
+  let liveResponse = false;
+  const recovered = () => {
+    if (tracked && current()) delete homeReadIssues.value[endpoint];
+  };
+  const load = () => requestJson(path, tracked ? {
+    ...options, signal: options.signal || homeReadAbort.signal,
+    cache: homeReadIssues.value[endpoint] ? 'reload' : options.cache,
+  } : options, {
     onAuthExpired(message, _response, payload) {
       markAuthExpired(message);
       redirectToLogin(String(payload.login_url || payload.loginUrl || ""));
     },
-    onServerError(message) {
-      syncText.value = message;
-    },
+    onOnline: () => { liveResponse = true; },
+    onRevalidated: data => { if (usable(data)) recovered(); },
   });
+  for (let attempt = 0; ; attempt++) {
+    if (tracked && (!current() || options.signal?.aborted)) {
+      throw new DOMException('请求已取消。', 'AbortError');
+    }
+    try {
+      const data = await load();
+      if (tracked && !current()) throw new DOMException('请求已取消。', 'AbortError');
+      if (tracked && !usable(data)) throw new ApiError(`${homeReadLabels[endpoint]}未完整返回。`, { status: 200 });
+      if (liveResponse) recovered();
+      return data;
+    }
+    catch (error: any) {
+      const cancelled = homeReadAbort.signal.aborted || options.signal?.aborted;
+      if (tracked && (!current() || cancelled)) throw new DOMException('请求已取消。', 'AbortError');
+      if (tracked && current() && !cancelled
+          && !document.hidden && attempt < 2 && [500, 502, 503, 504].includes(error?.status)) {
+        await waitWithSignal([800, 2000][attempt], homeReadAbort.signal);
+        if (!current()) throw new DOMException('请求已取消。', 'AbortError');
+        if (!document.hidden) continue;
+      }
+      if (tracked && current() && !cancelled && !error?.authRequired) {
+        const text = endpoint === '/api/auth/status' ? '登录状态暂未核验，当前页面已保留，请重新读取。'
+          : `${homeReadLabels[endpoint]}暂未读取，已有内容已保留，其他功能可继续使用。`;
+        homeReadIssues.value[endpoint] = text;
+      }
+      throw error;
+    }
+  }
 }
 
 async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void> {
@@ -758,6 +857,7 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     setReadCacheIdentity(nextOverviewKey);
     const identityChanged = currentOverviewKey !== nextOverviewKey;
     if (identityChanged) {
+      clearHomeReadIssues();
       workbenchVisited.value = isWorkbenchLitePage.value;
       currentOverviewKey = nextOverviewKey; overviewRequest++;
       scopeOverview.value = nextOverviewKey ? readOverview(nextOverviewKey) || {} : {};
@@ -775,7 +875,7 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
       }
     }
   } catch (error: any) {
-    if (!options.silent) syncText.value = error?.message || "登录状态检查失败";
+    if (!options.silent && !appDisposed && error?.name !== 'AbortError' && !homeReadIssues.value['/api/auth/status']) syncText.value = error?.message || "登录状态检查失败";
     throw error;
   } finally {
     if (!options.silent) authChecking.value = false;
@@ -1089,7 +1189,7 @@ onMounted(async () => {
     void loadAuthStatus({ silent: true }).catch(() => null);
     return;
   }
-  await loadAuthStatus();
+  try { await loadAuthStatus(); } catch { return; }
   if (auth.loggedIn && !auth.scopeOptions.length) {
     await loadCurrentPermissionRequest();
   }
@@ -1107,6 +1207,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   appDisposed = true;
+  homeReadAbort.abort();
+  clearHomeReadIssues();
   pageAnimation?.cancel();
   window.removeEventListener(AUTH_EXPIRED_EVENT, handleGlobalAuthExpired);
   window.removeEventListener('clipflow-business-changed', refreshHomeAfterWrite);

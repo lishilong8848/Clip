@@ -3,7 +3,7 @@
 import datetime
 import unittest
 
-from bin.lan_bitable_template_portal.pre_shift_schedule import normalize_frequency, occurrences_for_date
+from bin.lan_bitable_template_portal.pre_shift_schedule import normalize_frequency, occurrences_for_date, upcoming_occurrences
 
 UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 
@@ -320,6 +320,29 @@ class StrictJsonSerializableTests(unittest.TestCase):
         # Rule can even carry an explicit date object for start (legacy tolerance).
         raw = {"kind": "daily", "time": "10:00", "start_date": datetime.date(2026, 1, 1)}
         self.assertEqual(occurrences_for_date(raw, "2026-01-01")[0]["day"], "2026-01-01")
+
+
+class UpcomingTests(unittest.TestCase):
+    def test_next_dates_follow_the_existing_calendar_rules(self):
+        current = _due(2026, 10, 16, 20, 0)
+        for config, expected in [
+            ({'kind': 'weekly', 'weekday': 0, 'time': '09:00'}, '2026-10-19'),
+            ({'kind': 'month_start', 'time': '09:00'}, '2026-11-01'),
+            ({'kind': 'month_end', 'time': '09:00'}, '2026-10-31'),
+            ({'kind': 'interval', 'every_days': 3660, 'time': '09:00'}, '2036-10-23'),
+        ]:
+            rule = normalize_frequency(config, '2026-10-16')
+            rows = [r for r in upcoming_occurrences(rule, current) if r['due'] >= current]
+            self.assertEqual(rows[0]['day'], expected)
+            self.assertTrue(all(r in occurrences_for_date(rule, r['due'].date()) for r in rows))
+
+    def test_finite_tasks_are_not_recreated_and_overnight_roster_day_is_preserved(self):
+        rule = normalize_frequency({'kind': 'temporary', 'cadence': 'shift', 'limit': 1}, '2026-10-14')
+        self.assertEqual(upcoming_occurrences(rule, _due(2026, 10, 16, 9, 0)), [])
+        rule = normalize_frequency({'kind': 'shift', 'night_time': '01:00'}, '2026-10-14')
+        rows = upcoming_occurrences(rule, _due(2026, 10, 15, 2, 0))
+        night = next(r for r in rows if r['due'] == _due(2026, 10, 15, 1, 0))
+        self.assertEqual((night['day'], night['shift']), ('2026-10-14', '夜'))
 
 
 if __name__ == "__main__":

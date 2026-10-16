@@ -16,6 +16,10 @@ assert.deepEqual(status({ ...row, error: '上传失败' }, 'ongoing'), { label: 
 assert.equal(status({ ...row, phase: 'failed' }, 'ongoing').label, '发送失败');
 assert.equal(status({ ...row, status: '待处理' }, 'ongoing').label, '需处理');
 assert.equal(status({ ...row, source_progress: '已结束' }, 'planned').label, '已结束');
+assert.equal(status({ ...row, source_progress: '', status: '已结束' }, 'planned').label, '状态未取得');
+assert.equal(status({ status: '未开始' }, 'planned').label, '状态未取得');
+assert.equal(status({ source_progress: '', source_status: '', display_fields: { '维护实施状态': '已结束' } }, 'planned').label, '状态未取得');
+assert.equal(status({ display_fields: { '维护实施状态': '进行中' } }, 'planned').label, '进行中');
 assert.equal(cycle(row), '周期 半年');
 assert.equal(cycle({ ...row, display_fields: { '维护周期': '每月' } }), '周期 半年');
 assert.equal(cycle({ work_type: 'maintenance', display_fields: { '维护周期': '每月' } }), '周期 每月');

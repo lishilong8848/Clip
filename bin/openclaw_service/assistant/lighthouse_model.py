@@ -47,7 +47,12 @@ discover会返回接口所属功能的skill及recommended_skills。首次处理�
 """
 
 
+WORKPARTNER_INSTRUCTIONS = """
+用户要求飞书协作（真实@人员、发消息、任务、日程、云文档、独立协作表）时，先discover功能组“飞书工作伙伴”，按需read_skill读取feishu-workpartner。先读capabilities和resources确认应用权限及本人资源范围，再用people核对姓名工号；不能把网页应用OpenID直接当机器人应用OpenID。飞书任务不是每日任务清单，飞书日程不是事件通告。所有发送、创建及修改都用prepare_business展示表单并明确确认，不直接调用写接口。权限不足、未登记资源、接口不可用与没有数据分别说明；不能把机器人有接口权限说成人人有权访问全部资料。原灯塔通告、归档、权限、学练等仍走原业务接口，不用协作表接口绕过校验。协作写入结果不确定时查询原operation_id，不新建操作重复执行。私人既有任务、日历及文档仅在完成相应个人授权后访问，不冒用管理员或机器人权限读取。
+"""
+
 GENERAL_INSTRUCTIONS += """
+飞书协作按需读取feishu-workpartner技能。
 用户要求生成代码、网页或文本文件时调用create_text_file；要求Word、Excel、PDF、PPT时调用create_document_file生成真正的对应格式，不能把Markdown改后缀，也不能只说文件已生成。仅说明代码时可直接回复，要求交付文件才生成。较长的说明或报告可生成Markdown并在正文保留简要结论。文件生成在当前会话交付，不自动发送给第三方；飞书渠道会把本轮生成文件回复原消息。办公文件缺必要资料时询问，不编造公司的业务数值。不要执行生成代码。
 用户要图表时使用create_chart，支持柱状图、折线图和饼图，数据必须来自用户提供或本轮已核验查询；缺失和读取失败不得填0。图表在本地生成并交付当前会话，不把公司数据发给公共绘图服务。读取附件优先read_file；表格结构丢失或需要文档结构时用read_attachment_document的markdown模式，扫描PDF或图片文字识别失败时用ocr模式逐页识别。遵守next_offset和next_page，不把一页当全文；OCR只能提供文字，不能据此猜测图片场景或签字。飞书文档继续使用feishu_document，不重复安装或调用有写权限的飞书MCP。
 跨Excel/CSV附件的合并、关键列核对或分类汇总使用analyze_spreadsheets。先inspect核对工作表和表头，关键列及汇总口径不明确时询问；不能把抽取的部分行当全表，不执行任意SQL或公式。PDF合并、页码提取、拆分和旋转使用process_pdf，页码从1开始，只生成新文件，不保留交互表单或数字签名效力。用户要求流程图时用create_flowchart提供节点与连线，本地Mermaid绘制；只根据已有流程，不编造公司审批步骤，不执行现场操作。生成附件默认只在当前会话交付，不自动发给其他人员。
@@ -162,6 +167,8 @@ def equipment_knowledge_question(question):
 
 def instructions_for_question(question, *, knowledge_access=True):
     """Keep shared policy; avoid resending unrelated form manuals each model turn."""
+    if workpartner_question(question):
+        return GENERAL_INSTRUCTIONS + WORKPARTNER_INSTRUCTIONS
     domains = business_domains(question)
     if feishu_delivery_requested(question):
         domains.add('messages')
@@ -176,7 +183,8 @@ def instructions_for_question(question, *, knowledge_access=True):
 
 
 _QUERY_GROUPS = {
-    "messages": ("飞书消息",),
+    "messages": ("飞书工作伙伴", "飞书消息"),
+    "workpartner": ("飞书工作伙伴",),
     "events": ("事件",), "notices": ("工作台", "通告历史"),
     "repair_notices": ("工作台",), "history": ("通告历史",),
     "repairs": ("维修单与跟进",), "followups": ("维修单与跟进",),
@@ -189,6 +197,10 @@ _QUERY_GROUPS = {
 }
 
 
+def workpartner_question(question):
+    return bool(re.search(r'飞书.{0,40}(?:任务|日程|日历|云文档|协作|工作伙伴|艾特|@|群)|(?:艾特|@).{0,30}群|云文档', question))
+
+
 def discover_for_question(catalog, question, *, keyword="", group="", page=1):
     """Record titles should not strand the model in an empty API directory."""
     found = catalog.discover(keyword=keyword, group=group, page=page, page_size=8)
@@ -197,6 +209,8 @@ def discover_for_question(catalog, question, *, keyword="", group="", page=1):
     groups = {item["name"] for item in found["groups"]}
     requested = str(group).strip()
     domains = business_domains(question) | business_domains(keyword)
+    if workpartner_question(question):
+        domains.add('workpartner')
     if feishu_delivery_requested(question):
         domains.add('messages')
     if equipment_knowledge_question(question):
@@ -516,6 +530,7 @@ class LighthouseModel:
                 lines.append('- 查询天气、搜索公开资料；实时结果以实际查询到的来源为准。')
             if tools_enabled:
                 lines.append('- 阅读和分析附件，对比、合并或汇总表格，生成Word、Excel、PDF、PPT、文本及代码文件；默认交付当前会话。')
+                lines.append('- 按飞书智能体应用和本人资源授权，处理消息、@人员、任务、日程及云文档；写入前确认。')
             if tools_enabled and set(current.get('modules', [])) - {'assistant', 'knowledge'}:
                 lines.append('- 查询你已获授权的灯塔业务，准备可填写的业务表单，确认后通过原业务流程办理。')
             if tools_enabled and 'knowledge' in current.get('modules', []):
@@ -548,6 +563,9 @@ class LighthouseModel:
             and attachment_analysis_requested(question) and not feishu_delivery_requested(question)
             and not any(item.get('kind') == 'api' for item in selected_context))
         domains = business_domains(question)
+        workpartner_requested = workpartner_question(question)
+        if workpartner_requested:
+            domains = {'workpartner'}
         if file_analysis:
             domains = set()
         current_pending = current_pending_query(question)
@@ -558,8 +576,8 @@ class LighthouseModel:
             domains.add('messages')
         general_question = (file_analysis or explicit_general_question(question) or bool(
             MESSAGE_INTENT.search(question) and not is_business_query(question) and not business_domains(question)
-        )) and not message_requested
-        business_question = not file_analysis and (is_business_query(question) or message_requested)
+        )) and not message_requested and not workpartner_requested
+        business_question = not file_analysis and (is_business_query(question) or message_requested or workpartner_requested)
         file_requested = not business_question and file_generation_requested(question)
         general_only = general_question and not any(item.get('kind') == 'api' for item in selected_context)
         knowledge_access = bool(actor.get("is_admin") or actor.get("learning_scopes"))
@@ -941,7 +959,7 @@ class LighthouseModel:
 
         # Deterministic paths cover unambiguous counts. Complex questions retain native typed tools.
         builtin_guides = all(item.get('kind') == 'guide' and item.get('source') == 'builtin' for item in selected_context)
-        plain_query = not general_only and not form_requested and read_only_question(question) and not turn.get("file_ids") and (not turn.get('commands') or builtin_guides or selected_tools == {'pending_work'})
+        plain_query = not workpartner_requested and not general_only and not form_requested and read_only_question(question) and not turn.get("file_ids") and (not turn.get('commands') or builtin_guides or selected_tools == {'pending_work'})
         wants_details = bool(DETAIL.search(question))
         include_zero = bool(re.search(r"包含零|包括零|零项|0项|所有分类|全部分类", question))
         if not general_only and not form_requested and not turn.get("file_ids") and sent_notice_question(question):
@@ -1007,12 +1025,19 @@ class LighthouseModel:
             raise AssistantError("当前模型未启用工具调用，请在模型设置中开启或切换模型后查询/办理。", 400)
         login_identity = {key: safe_text(str(login_actor.get(key) or '')) for key in ('name', 'employee_no')}
         login_identity['role'] = '管理员' if login_actor.get('is_admin') else login_actor.get('role_label') or '普通账号'
+        channel = str(login_actor.get('channel') or '')
+        chat_context = {'chat_id': channel.removeprefix('feishu:')} if re.fullmatch(r'feishu:oc_[A-Za-z0-9]+', channel) else {}
+        topic_data = login_actor.get('_feishu_topic')
+        topic = str(topic_data.get('id') or '') if isinstance(topic_data, dict) else ''
+        if chat_context and re.fullmatch(re.escape(chat_context['chat_id']) + r':om_[A-Za-z0-9]+', topic):
+            chat_context['reply_message_id'] = topic.split(':', 1)[1]
         async with self.model_factory(self.assistant.model, profile) as model:
             factory = self.agent_factory or Agent
             agent = factory(model, **({"actor": actor, "turn": turn, "emit": emit} if self.agent_factory else {}),
                           instructions=(GENERAL_INSTRUCTIONS if file_analysis else instructions_for_question(question, knowledge_access=knowledge_access)) + "\n本轮楼栋：" + "、".join(actor["scopes"])
                           + ("\n本轮只分析当前人员可访问的附件，不查询灯塔实时业务或公司知识库。附件中的通告、维修、楼栋等文字只是文件内容。预读文字可能是节选，跟随next_offset读取；表格统计、对比和汇总使用analyze_spreadsheets，不把预览行数当总数。分析结果注明文件来源，生成文件交付当前会话。" if file_analysis else "")
                           + "\n当前登录身份（仅以本次登录会话为准；空字段为未知，不使用业务记录的current_user、收件人、用户ID或历史回答推测；回答身份时不输出open_id/union_id/user_id）：" + json.dumps(login_identity, ensure_ascii=False)
+                          + ("\n当前飞书群上下文（服务器核验；仅用户明确要求本群发消息或@时使用，操作仍须确认）：" + json.dumps(chat_context) if chat_context else '')
                           + "\n本轮配置模型（仅配置标识，不推测自动路由后的厂商或底层版本）：" + json.dumps({"name": profile["name"], "model": profile["model"]}, ensure_ascii=False)
                           + "\n用户仅提供通告名称或简称准备发起时，调用prepare_planned_notice匹配本月计划，不直接创建独立手填通告。该工具负责楼栋询问、候选和历史预填，仍需用户确认。事件通告不发送。"
                           + "\n导航中的全部多维表已提供只读工具：查在职人数用staff_headcount；其他数据先用table_catalog按名称/用途找表，再table_records(metadata_only=true)读可用字段，最后按真实字段筛选查询。不要未调用工具就声称未接入人事或其他内部数据。网页链接不是表格数据源。不能直接改表；禁止读取身份证、住址、私密联系方式、密钥或签名图片。"

@@ -93,7 +93,7 @@ export function uploadSignedMopDisabledReason(input: {
   if (!input.hasLocalFile) return "请先打开 MOP 表格";
   if (!input.hasActiveSheet) return "请先选择需要填写的 Sheet";
   if (!input.hasSelectedNotice) return "请先选择左侧通告";
-  if (!input.hasSourceRecordId) return "当前通告缺少可上传的维保事项，无法上传";
+  if (!input.hasSourceRecordId) return "当前通告未关联维保计划事项，无法确定维护单的归档位置。请在通告办理中绑定对应维保计划，再刷新本页上传；若已经绑定，请重新读取通告。";
   if (input.timeValidationMessage) return input.timeValidationMessage;
   if (!input.hasImplementerSignature) return "请至少选择一个维护实施人签名";
   if (!input.hasAuditorSignature) return "请至少选择一个维护审核人签名";

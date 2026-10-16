@@ -22125,7 +22125,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _source_progress_allows_start(value: Any) -> bool:
         progress = str(value or "").strip()
         if not progress:
-            return True
+            return False
         if "未结束" not in progress and any(
             flag in progress
             for flag in ("已结束", "正常结束", "延期结束", "延迟结束", "已完成", "闭环")
@@ -22169,37 +22169,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             return False
         return any(token in status for token in ("已完成", "已结束", "正常结束", "延期结束", "延迟结束", "闭环"))
 
-    def mark_notice_source_ended_locally(
-        self, payload: dict[str, Any]
+    def sync_notice_source_ended_fields(
+        self, payload: dict[str, Any], *, before_write: Callable[[], None] | None = None,
     ) -> bool:
-        payload = normalize_notice_identity_payload(payload or {})
-        work_type = str(payload.get("source_work_type") or payload.get("converted_from_work_type") or self._item_work_type(payload))
-        if work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
-            return False
-        source_record_id = canonical_source_record_id(payload)
-        if not source_record_id or is_local_record_id(source_record_id):
-            return False
-        local_fields = {"维护实施状态": "已结束"} if work_type == WORK_TYPE_MAINTENANCE else {"变更进度": CHANGE_PROGRESS_ENDED}
-        records = self._records if work_type == WORK_TYPE_MAINTENANCE else self._change_records
-        with self._refresh_lock:
-            for record in records:
-                if str(record.get("record_id") or "").strip() != source_record_id:
-                    continue
-                fields = record.get("display_fields")
-                if not isinstance(fields, dict):
-                    fields = {}
-                    record["display_fields"] = fields
-                fields.update(local_fields)
-                break
-            self._state_store.patch_active_source_record_fields(
-                source_record_id=source_record_id,
-                work_type=work_type,
-                fields=local_fields,
-            )
-        self._touch_state_cache_version()
-        return True
-
-    def sync_notice_source_ended_fields(self, payload: dict[str, Any]) -> bool:
         """Write an ended notice back to its linked maintenance/change source row."""
         payload = normalize_notice_identity_payload(payload or {})
         source_record_id = str(payload.get("source_record_id") or "").strip()
@@ -22216,9 +22188,14 @@ class MaintenancePortalService(RepairOperationsMixin):
             or payload.get("work_type")
             or ""
         ).strip()
+        if source_work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
+            # 检修源表结束仍由维修单原有流程控制，通告结束不改其源字段。
+            return False
         ended_at = self._parse_notice_datetime(payload.get("ended_at"))
         if ended_at is None:
-            ended_at = dt.datetime.now()
+            raise PortalError("目标记录缺少实际结束时间，未使用当前时间代替。")
+        if not target_record_id or is_local_record_id(target_record_id):
+            raise PortalError("目标通告记录未确认，未回写源记录。")
         ended_at_ms = int(ended_at.timestamp() * 1000)
         ended_at_text = ended_at.strftime("%Y-%m-%d %H:%M")
         if source_work_type == WORK_TYPE_MAINTENANCE:
@@ -22246,9 +22223,6 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "变更进度": CHANGE_PROGRESS_ENDED,
             }
             source_records = self._change_records
-        else:
-            # 检修源表结束仍由维修单原有流程控制，通告结束不改其源字段。
-            return False
 
         source_record = next(
             (
@@ -22258,18 +22232,70 @@ class MaintenancePortalService(RepairOperationsMixin):
             ),
             None,
         )
+        status_field = "变更进度" if source_work_type == WORK_TYPE_CHANGE else "维护实施状态"
+
+        def read_source_fields():
+            response = self._request_json(
+                f"records/{source_record_id}", app_token=app_token, table_id=table_id,
+            )
+            current = (response.get("data") or {}).get("record") or {}
+            current_fields = current.get("fields")
+            if (
+                current.get("record_id") != source_record_id
+                or not isinstance(current_fields, dict)
+                or not current_fields
+            ):
+                raise PortalError("源记录未完整读取，保留同步任务等待重试。")
+            if not self._repair_management_plain_text(current_fields.get(status_field)).strip():
+                raise PortalError("源记录状态未取得，保留同步任务等待重试。")
+            return current_fields
+
         guard = external_real_write_guard()
         if guard.get("mock_external"):
-            pass
+            current_fields = (source_record or {}).get("display_fields") or {}
         elif not guard.get("real_write_allowed"):
             raise PortalError(str(guard.get("reason") or "真实外部写入未确认。"))
         else:
+            current_fields = read_source_fields()
+
+        # Source IDs can be reused next month; a late end must not close that new cycle.
+        plan_start = (
+            self._change_time_range({"display_fields": current_fields})[0]
+            if source_work_type == WORK_TYPE_CHANGE else
+            current_fields.get("计划开始维护时间") or current_fields.get("计划开始时间")
+        )
+        for value in (current_fields.get("实际开始时间"), plan_start):
+            value = self._repair_management_plain_text(value)
+            started_at = self._history_datetime_from_values(value)
+            if value and started_at is None:
+                raise PortalError("源记录开始时间无法解析，保留同步任务等待核验。")
+            if started_at and started_at > ended_at:
+                return False
+        identity = self._state_store.resolve_notice_identity(
+            work_type=str(payload.get("work_type") or source_work_type),
+            source_record_id=source_record_id,
+        ) or {}
+        current_target = canonical_target_record_id(identity)
+        if current_target and current_target != target_record_id:
+            raise PortalError("源记录关联的目标通告已变化，未使用旧任务回写，请核验关联。")
+
+        if before_write is not None:
+            before_write()
+        if not guard.get("mock_external"):
             self._patch_record_fields(
                 app_token=app_token,
                 table_id=table_id,
                 record_id=source_record_id,
                 fields=remote_fields,
             )
+            confirmed_fields = read_source_fields()
+            actual_end = self._repair_management_plain_text(confirmed_fields.get("实际结束时间"))
+            if not self._history_datetime_from_values(actual_end):
+                raise PortalError("源记录实际结束时间尚未读回，保留同步任务等待重试。")
+            local_fields = {
+                "实际结束时间": self._format_source_datetime(actual_end),
+                status_field: self._repair_management_plain_text(confirmed_fields[status_field]).strip(),
+            }
 
         with self._refresh_lock:
             if source_record is not None:
@@ -22916,12 +22942,38 @@ class MaintenancePortalService(RepairOperationsMixin):
             name = f"{name[:70]}_{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:10]}"
         return self._work_status_dir / f"{name}.json"
 
+    @staticmethod
+    def _normalize_reset_work_status(item: dict[str, Any]) -> dict[str, Any]:
+        if not item.get("reset_after_delete") or item.get("status") != DEFAULT_MAINTENANCE_STATUS:
+            return item
+        # Older restores merged a reset with the deleted notice's lifecycle.
+        item = copy.deepcopy(item)
+        for name in (
+            "record_id", "target_record_id", "active_item_id", "started_at",
+            "started_date", "last_updated_at", "ended_at", "completed_date",
+        ):
+            item.pop(name, None)
+        item["actions"] = []
+        item["source_progress"] = DEFAULT_MAINTENANCE_STATUS
+        item["source_status"] = DEFAULT_MAINTENANCE_STATUS
+        return item
+
+    @staticmethod
+    def _work_status_action_time(item: dict[str, Any]) -> str:
+        return max(
+            [str(item.get(name) or "") for name in ("started_at", "last_updated_at", "ended_at")]
+            + [str(action.get("time") or "") for action in item.get("actions") or []
+               if isinstance(action, dict) and action.get("action") in {"start", "update", "end"}]
+        )
+
     def _load_work_status_locked(self, building: str = "", building_code: str = "") -> dict[str, Any]:
         path = self._work_status_path(building, building_code)
         stored = self._state_store.get_document(STATE_NS_WORK_STATUS, path.stem)
         if isinstance(stored, dict):
             if not isinstance(stored.get("items"), list):
                 stored["items"] = []
+            stored["items"] = [self._normalize_reset_work_status(item)
+                               if isinstance(item, dict) else item for item in stored["items"]]
             stored["version"] = int(stored.get("version") or 1)
             stored["building"] = str(stored.get("building") or building or "")
             stored["building_code"] = str(
@@ -22943,6 +22995,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             payload = {}
         if not isinstance(payload.get("items"), list):
             payload["items"] = []
+        payload["items"] = [self._normalize_reset_work_status(item)
+                            if isinstance(item, dict) else item for item in payload["items"]]
         payload["version"] = int(payload.get("version") or 1)
         payload["building"] = str(payload.get("building") or building or "")
         payload["building_code"] = str(
@@ -23195,6 +23249,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not isinstance(incoming, dict):
             return
         action = str(action or "").strip().lower()
+        incoming = self._normalize_reset_work_status(incoming)
+        is_reset = bool(incoming.get("reset_after_delete") and incoming.get("status") == DEFAULT_MAINTENANCE_STATUS)
+        if is_reset:
+            action = ""
         now = str(now or dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
         building = str(incoming.get("building") or "").strip()
         building_code = str(incoming.get("building_code") or "").strip()
@@ -23221,6 +23279,26 @@ class MaintenancePortalService(RepairOperationsMixin):
             plan_month=str(incoming.get("plan_month") or ""),
             reason=str(incoming.get("reason") or ""),
         )
+        related = [
+            row for row in items
+            if isinstance(row, dict) and source_record_id
+            and canonical_source_record_id(row) == source_record_id
+            and self._item_work_type(row) == work_type
+        ]
+        latest_reset = max(
+            (str(row.get("reset_at") or "") for row in related if row.get("reset_after_delete")),
+            default="",
+        )
+        if is_reset:
+            reset_at = str(incoming.get("reset_at") or "")
+            if reset_at and (latest_reset > reset_at or any(
+                self._work_status_action_time(row) >= reset_at for row in related
+            )):
+                return
+        else:
+            # Replaying an old daily summary must not undo a later deletion/reset.
+            if latest_reset and (self._work_status_action_time(incoming) or now) < latest_reset:
+                return
         item = self._find_work_status_item(
             items,
             source_record_id=source_record_id,
@@ -23243,6 +23321,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "actions": [],
             }
             items.append(item)
+        if is_reset:
+            item.update(incoming)
+            cleaned = self._normalize_reset_work_status(item)
+            item.clear()
+            item.update(cleaned)
         item["work_type"] = self._item_work_type(item) if item.get("work_type") else work_type
         if work_fallback_key and not item.get("work_fallback_key"):
             item["work_fallback_key"] = work_fallback_key
@@ -28079,7 +28162,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     continue
                 for item in payload.get("items") or []:
                     if isinstance(item, dict):
-                        all_items.append(copy.deepcopy(item))
+                        all_items.append(self._normalize_reset_work_status(copy.deepcopy(item)))
             self._work_status_cache_signature = signature
             self._work_status_cache_items = all_items
         return [
@@ -28127,8 +28210,23 @@ class MaintenancePortalService(RepairOperationsMixin):
             if item is None and work_type == WORK_TYPE_MAINTENANCE:
                 item = by_source.get(("", record_id))
             if item is not None:
-                result[record_id] = copy.deepcopy(item)
+                result[record_id] = copy.deepcopy(self._work_status_for_source(record, item))
         return result
+
+    def _work_status_for_source(
+        self, record: dict[str, Any], summary: dict[str, Any]
+    ) -> dict[str, Any]:
+        summary = self._normalize_reset_work_status(summary)
+        if not summary or self._record_source_work_type(record) != WORK_TYPE_MAINTENANCE or not self._source_record_is_ongoing(record):
+            return summary
+        actual_start = self._history_datetime_from_values((record.get("display_fields") or {}).get("实际开始时间"))
+        boundary = self._history_datetime_from_values(summary.get("ended_at"))
+        if summary.get("reset_after_delete") and summary.get("status") == DEFAULT_MAINTENANCE_STATUS:
+            boundary = self._history_datetime_from_values(summary.get("reset_at"))
+        # An explicit later actual start proves this source row has a new lifecycle.
+        if actual_start is not None and boundary is not None and actual_start > boundary:
+            return {}
+        return summary
 
     def _work_status_identity_keys(self, item: dict[str, Any]) -> set[str]:
         if not isinstance(item, dict):
@@ -29902,9 +30000,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             work_summary.get("source_record_id") or ""
         ).strip()
         if work_summary and summary_source_record_id != record_id:
-            # Source rows must never inherit status from a same-title historical
-            # notice. Only an exact source relation may override source progress.
+            # Only exact source relations may contribute history or target identity.
             work_summary = {}
+        work_summary = self._work_status_for_source(record, work_summary)
         work_type = str(record.get("work_type") or WORK_TYPE_MAINTENANCE)
         source_work_type = self._record_source_work_type(record)
         source_event_id = ""
@@ -29930,20 +30028,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or display_fields.get("故障发生现象描述")
                 or display_fields.get("故障维修原因")
             )
+        # Plan status belongs to the source table, not the notice's local lifecycle.
         source_progress = self._source_record_progress(record)
-        local_status = str(work_summary.get("status") or "").strip()
-        if local_status == "已结束" or work_summary.get("ended_at"):
-            source_progress = "已结束"
-        elif local_status == "进行中" or (
-            work_summary.get("started_at") and not work_summary.get("ended_at")
-        ):
-            source_progress = "进行中"
-        elif local_status == DEFAULT_MAINTENANCE_STATUS and self._source_progress_allows_start(
-            source_progress
-        ):
-            # Deleting a mistakenly sent target notice restores the linked plan
-            # to a startable state without overwriting a terminal source status.
-            source_progress = DEFAULT_MAINTENANCE_STATUS
         title = (
             self._change_title(record)
             if work_type == WORK_TYPE_CHANGE

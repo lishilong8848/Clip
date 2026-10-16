@@ -1,0 +1,60 @@
+<template>
+  <section class="risk-library" aria-label="历史排查模板库">
+    <NAlert v-if="error&&!confirmOpen" type="error" :bordered="false" role="alert">{{error}}</NAlert>
+    <NAlert v-if="message" type="info" :bordered="false">{{message}}</NAlert>
+    <template v-if="!selected">
+      <form class="history-toolbar" @submit.prevent="page=1;load()"><NInput v-model:value="search" clearable placeholder="搜索历史模板名称" :input-props="{'aria-label':'搜索历史模板名称'}" /><NButton attr-type="submit" :loading="loading"><Search :size="16" />查询</NButton></form>
+      <NSpin :show="loading"><div class="history-list"><article v-for="row in rows" :key="row.id"><div><strong>{{row.name}}</strong><NTag size="small" :type="row.enabled?'success':'default'">{{row.enabled?'启用':'停用'}}</NTag><span>V{{row.revision}}</span></div><p>{{row.item_count}} 项排查 · {{row.field_count}} 个字段 · {{row.scopes.map(scopeLabel).join('、')}}</p><small>{{row.creator}} · {{date(row.updated)}}{{row.legacy?' · 原预填待核对':''}}</small><footer><NButton :disabled="loading" @click="open(row.id)"><Pencil :size="16" />查看 / 编辑</NButton><NButton type="primary" :disabled="!row.enabled||loading" @click="reuse(row.id)"><CopyPlus :size="16" />复用发布</NButton></footer></article></div><NEmpty v-if="!loading&&!rows.length" description="暂无可用历史模板；排查成功发布后会自动保存" /></NSpin>
+      <NPagination v-if="total>20" :page="page" :page-count="Math.ceil(total/20)" :page-slot="5" @update:page="p=>{page=p;load()}" />
+    </template>
+    <template v-else>
+      <header class="history-toolbar"><NButton :disabled="busy" @click="back"><ArrowLeft :size="16" />模板列表</NButton><span>V{{selected.revision}} · {{selected.creator}} · {{date(selected.created)}}</span><NButton type="primary" :disabled="busy||dirty||!selected.enabled" @click="reuse(selected.id)"><CopyPlus :size="16" />复用发布</NButton></header>
+      <NAlert v-if="selected.legacy" type="warning" :bordered="false">此历史任务未保存发布时的原始预填内容，目前只恢复字段与事项标题，请核对并补充预填内容。</NAlert>
+      <NAlert v-if="selected.sync_status?.error" type="warning" :bordered="false">模板已保存在灯塔，飞书备份尚未完成：{{selected.sync_status.error}} <NButton text :disabled="busy" @click="retry">重试备份</NButton></NAlert>
+      <div class="history-settings"><label><span>模板名称</span><NInput v-model:value="form.name" :maxlength="120" :disabled="busy" :input-props="{'aria-label':'历史模板名称'}" /></label><NSwitch v-model:value="form.enabled" :disabled="busy"><template #checked>启用</template><template #unchecked>停用</template></NSwitch></div>
+      <details class="history-schema"><summary>字段设置 · {{form.fields.length}} 个</summary><div v-for="f in form.fields" :key="f.key" class="history-field"><NInput v-model:value="f.field_name" :disabled="busy" :maxlength="80" :input-props="{'aria-label':'字段名称 '+f.key}" /><NSelect :value="f.type" :disabled="busy||f.is_primary||f.role!=='input'" :options="typeOptions" @update:value="v=>changeType(f,v)" /><NCheckbox v-model:checked="f.required" :disabled="busy||f.role!=='input'">必填</NCheckbox><NButton :disabled="busy||f.is_primary" type="error" text :aria-label="'删除字段 '+f.field_name" @click="removeField(f)"><Trash2 :size="16" /></NButton><label v-if="[3,4].includes(f.type)" class="history-options"><span>选项，每行一个</span><NInput :value="(f.property?.options||[]).map((o:Dict)=>o.name).join('\n')" type="textarea" :autosize="{minRows:2,maxRows:5}" :disabled="busy" @update:value="v=>setOptions(f,v)" /></label><small v-if="f.role!=='input'">系统填写{{f.is_primary?' · 主字段':''}}</small></div><NButton :disabled="busy" @click="addField"><Plus :size="16" />添加字段</NButton></details>
+      <div class="history-toolbar"><strong>排查事项</strong><NButton :disabled="busy||form.items.length>=100" @click="form.items.push({title:'',values:{}})"><Plus :size="16" />添加事项</NButton></div>
+      <article v-for="(item,index) in form.items" :key="index" class="history-item"><div class="history-toolbar"><NInput v-model:value="item.title" :disabled="busy" :maxlength="300" :input-props="{'aria-label':'排查事项 '+(index+1)}" /><NButton :disabled="busy||form.items.length===1" type="error" text :aria-label="'移除事项 '+(index+1)" @click="form.items.splice(index,1)"><Trash2 :size="16" /></NButton></div><details><summary>原始预填内容</summary><RiskInspectionFields :fields="reusableFields" v-model:values="item.values" prefill :disabled="busy" /></details></article>
+      <footer class="history-footer"><span>{{dirty?'有未保存修改':selected.cloud?.synced?'已保存并备份至飞书':'已保存，等待飞书备份'}} · 日期、人员、现场附件及审核结果不复用</span><NButton type="primary" :disabled="busy||!dirty||!form.name.trim()||form.items.some((i:Dict)=>!i.title.trim())" @click="confirmOpen=true">保存新版本</NButton></footer>
+    </template>
+    <NModal :show="confirmOpen" preset="dialog" title="保存历史模板" positive-text="确认保存" negative-text="取消" :loading="busy" :mask-closable="false" :closable="!busy" :close-on-esc="!busy" :negative-button-props="{disabled:busy}" @update:show="v=>{if(!busy)confirmOpen=v}" @positive-click="save"><NAlert v-if="error" type="error" :bordered="false" role="alert">{{error}}</NAlert><p>保存为新版本，不修改基础模板或已经发布的排查。停用后不能再次选用此模板。</p></NModal>
+  </section>
+</template>
+<script setup lang="ts">
+import {computed,onBeforeUnmount,onMounted,reactive,ref} from 'vue';
+import {NAlert,NButton,NCheckbox,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NSwitch,NTag} from 'naive-ui';
+import {ArrowLeft,CopyPlus,Pencil,Plus,Search,Trash2} from 'lucide-vue-next';
+import {requestJson,type Dict} from '../api/client';
+import {registerNavigationGuard} from '../navigation';
+import RiskInspectionFields from './RiskInspectionFields.vue';
+const emit=defineEmits<{(e:'reuse',template:Dict):void;(e:'dirty',value:boolean):void}>();
+const base='/api/risk-inspections/templates',rows=ref<Dict[]>([]),selected=ref<Dict|null>(null),search=ref(''),page=ref(1),total=ref(0),loading=ref(false),busy=ref(false),error=ref(''),message=ref(''),confirmOpen=ref(false);
+const form=reactive<Dict>({name:'',enabled:true,fields:[],items:[]});
+const original=ref('');const dirty=computed(()=>!!selected.value&&JSON.stringify(form)!==original.value);
+const reusableFields=computed(()=>form.fields.filter((f:Dict)=>![5,17].includes(f.type)));
+const typeOptions=[{value:1,label:'文本'},{value:2,label:'数字'},{value:3,label:'单选'},{value:4,label:'多选'},{value:5,label:'日期'},{value:7,label:'勾选'},{value:13,label:'电话'},{value:15,label:'链接'},{value:17,label:'附件'}];
+let abort:AbortController|undefined,disposed=false;
+function scopeLabel(s:string){return s==='110'?'110站':s+'楼';}
+function date(t:number){return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'short'}).format(new Date(t*1000));}
+function leaveAllowed(){return !busy.value&&(!dirty.value||window.confirm('放弃尚未保存的历史模板修改？'));}
+const unregister=registerNavigationGuard(leaveAllowed);
+function unload(e:BeforeUnloadEvent){if(busy.value||dirty.value){e.preventDefault();e.returnValue='';}}
+function assign(data:Dict){selected.value=data;Object.assign(form,{name:data.name,enabled:data.enabled,fields:structuredClone(data.fields),items:structuredClone(data.items)});original.value=JSON.stringify(form);}
+async function load(){if(busy.value)return;abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';try{const data=await requestJson(base+'?'+new URLSearchParams({page:String(page.value),search:search.value}),{cache:'no-store',signal:controller.signal});if(!controller.signal.aborted){rows.value=data.items;total.value=data.total;}}catch(e:any){if(!controller.signal.aborted)error.value=e.message;}finally{if(abort===controller){abort=undefined;loading.value=false;}}}
+async function open(id:string){if(!leaveAllowed())return;abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';try{const data=await requestJson(base+'/'+id,{cache:'no-store',signal:controller.signal});if(!controller.signal.aborted)assign(data);}catch(e:any){if(!controller.signal.aborted)error.value=e.message;}finally{if(abort===controller){abort=undefined;loading.value=false;}}}
+async function reuse(id:string){if(!leaveAllowed())return;busy.value=true;error.value='';try{const data=await requestJson(base+'/'+id,{cache:'no-store'});if(!data.enabled)throw new Error('该模板已停用，请选择其它模板。');if(!disposed)emit('reuse',data);}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
+function back(){if(!leaveAllowed())return;selected.value=null;message.value='';void load();}
+function clearValues(key:string){for(const item of form.items)delete item.values[key];}
+function removeField(f:Dict){if(f.is_primary||!window.confirm('删除此模板字段及其预填值？历史排查结果不会改变。'))return;form.fields=form.fields.filter((v:Dict)=>v.key!==f.key);clearValues(f.key);}
+function changeType(f:Dict,kind:number){if(f.type===kind)return;if(form.items.some((i:Dict)=>i.values[f.key]!==undefined)&&!window.confirm('更换类型将清除该字段的模板预填值，是否继续？'))return;f.type=kind;f.property={};clearValues(f.key);}
+function setOptions(f:Dict,value:string){f.property={options:value.split('\n').map(s=>s.trim()).filter(Boolean).map(name=>({name}))};}
+function addField(){if(form.fields.length>=80)return;const key='custom_'+Array.from(crypto.getRandomValues(new Uint8Array(12)),v=>v.toString(16).padStart(2,'0')).join('');form.fields.push({key,field_id:key,field_name:'新字段',type:1,role:'input',required:false,is_primary:false,property:{}});}
+async function save(){if(busy.value||!selected.value)return false;busy.value=true;error.value='';try{const data=await requestJson(base+'/'+selected.value.id,{method:'PUT',body:JSON.stringify({version:selected.value.version,...form})});assign(data);message.value='历史模板新版本已保存，已有排查不受影响。';confirmOpen.value=false;}catch(e:any){error.value=e.message;}finally{busy.value=false;}return false;}
+async function retry(){if(busy.value||!selected.value)return;busy.value=true;try{await requestJson('/api/risk-inspections/'+selected.value.source_release_id+'/retry',{method:'POST',body:JSON.stringify({kind:'template_sync'})});message.value='已安排重试模板备份。';}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
+onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});
+onBeforeUnmount(()=>{disposed=true;abort?.abort();unregister();window.removeEventListener('beforeunload',unload);});
+defineExpose({leaveAllowed});
+</script>
+<style scoped>
+.risk-library{display:grid;gap:14px;min-width:0}.history-toolbar,.history-settings,.history-footer{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.history-toolbar>.n-input{flex:1;min-width:160px}.history-toolbar>span{flex:1}.history-toolbar>strong{flex:1}.history-settings label{display:grid;gap:6px;flex:1}.history-settings{padding-block:6px}.history-list{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr))}.history-list article{border:1px solid var(--border-color,#dce2e9);border-radius:8px;padding:14px;background:var(--card-color,#fff)}.history-list article>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.history-list strong{flex:1;overflow-wrap:anywhere}.history-list p,.history-list small,.history-footer>span{font-size:13px;color:var(--text-color-3,#667085)}.history-list footer{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}.history-schema,.history-item{border-top:1px solid var(--border-color,#dce2e9);padding-top:12px}.history-schema summary,.history-item summary{cursor:pointer;padding-bottom:12px}.history-field{display:grid;grid-template-columns:minmax(150px,1fr) 140px 70px 32px;gap:10px;align-items:center;padding-bottom:12px}.history-field small,.history-options{grid-column:1/-1}.history-options{display:grid;gap:6px}.history-item>details{margin-top:12px}.history-footer{justify-content:space-between;border-top:1px solid var(--border-color,#dce2e9);padding-top:12px}.history-footer>span{flex:1}@media(max-width:600px){.history-field{grid-template-columns:minmax(0,1fr) 120px 52px 28px;gap:6px}.risk-library :deep(.n-button){min-height:40px}.history-toolbar{gap:8px}.history-settings{align-items:end}.history-footer{position:sticky;bottom:0;background:var(--card-color,#fff);padding:12px 0}.history-footer>span{flex-basis:100%}}
+</style>

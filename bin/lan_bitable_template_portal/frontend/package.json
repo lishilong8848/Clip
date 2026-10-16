@@ -7,6 +7,8 @@
     "build": "vite build && vite build --config vite.workspace-v2.config.ts && node scripts/prune-dist-assets.mjs",
     "check:navigation": "node scripts/check-navigation-back.mjs",
     "check:drill": "node scripts/check-drill-management.mjs",
+    "check:work-handover": "node scripts/check-work-handover.mjs",
+    "check:risk-inspection": "node scripts/check-risk-inspection.mjs",
     "check:reliability": "node scripts/check-request-reliability.mjs",
     "check:read-cache": "node scripts/check-page-read-cache.mjs",
     "check:repair-submission": "node scripts/check-repair-submission.mjs",
@@ -17,7 +19,7 @@
     "smoke": "python ../../tools/frontend_runtime_smoke.py",
     "typecheck": "vue-tsc --noEmit",
     "check:vipboard": "node scripts/check-workspace-vipboard.mjs && node scripts/check-event-calendar.mjs",
-    "check:pre-shift": "node scripts/check-workspace-layout.mjs && node scripts/check-pre-shift-browser.mjs",
+    "check:pre-shift": "node scripts/check-workspace-layout.mjs && node scripts/check-pre-shift-browser.mjs && node scripts/check-legacy-pre-shift.mjs",
     "check:account-layout": "node scripts/check-account-layout-sync.mjs && node scripts/check-page-layout.mjs && node scripts/check-cabinet-status-summary.mjs",
     "check:workspace-notices": "node scripts/check-workspace-navigation.mjs && node scripts/check-workspace-notices.mjs && node scripts/check-workspace-notice-tools.mjs && node scripts/check-workspace-notice-experience.mjs && node scripts/check-workspace-work-orders.mjs",
     "check:workspace-v2": "node scripts/check-workspace-layout.mjs && node scripts/check-workspace-controls.mjs && node scripts/check-workspace-requests.mjs && node scripts/check-workspace-stability.mjs && node scripts/check-workspace-v2.mjs && node scripts/check-workspace-motion.mjs && node scripts/check-workspace-motion-controls.mjs && node scripts/check-workspace-events-cabinet.mjs && node scripts/check-workspace-auth.mjs && node scripts/check-workspace-nav-theme.mjs && node scripts/check-workspace-shell.mjs && node scripts/check-workspace-filters.mjs && node scripts/check-workspace-mop.mjs && node scripts/check-workspace-operation-widgets.mjs && node scripts/check-workspace-sharing-admin.mjs && node scripts/check-workspace-accounts.mjs"

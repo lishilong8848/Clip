@@ -35,6 +35,19 @@ assert.deepEqual(water.waterTrend([
   { frequency: '周', statistic_date: '2026-10-01', computed_usage: 100 },
 ]).items, [{ label: '2026-10-01', value: 5 }]);
 assert.deepEqual(water.waterTrend([{ frequency: '日', statistic_date: '2026-10-01', computed_usage: null }]), { items: [], missing: 1 });
+const buildingTrend = water.waterBuildingTrend([
+  { scope: 'A', frequency: '日', statistic_date: '2026-10-01', corrected_usage: 0, computed_usage: 9 },
+  { scope: 'A', frequency: '日', statistic_date: '2026-10-01', computed_usage: 2.5 },
+  { scope: 'B', frequency: '日', statistic_date: '2026-10-02', computed_usage: 3 },
+  { scope: 'B', frequency: '日', statistic_date: '2026-10-03', computed_usage: null },
+  { scope: 'B', frequency: '日', statistic_date: '2026-10-03', computed_usage: 8 },
+  { scope: 'A', frequency: '月', statistic_date: '2026-10-01', computed_usage: 200 },
+  { scope: 'H', frequency: '日', statistic_date: '2026-10-01', computed_usage: 999 },
+], [{value:'A',label:'A楼'},{value:'B',label:'B楼'},{value:'A',label:'A楼'}], '2026-10-01', '2026-10-03');
+assert.deepEqual(buildingTrend.days, ['2026-10-01','2026-10-02','2026-10-03']);
+assert.deepEqual(buildingTrend.series.map(row=>[row.scope,row.values]), [['A',[2.5,null,null]],['B',[null,3,null]]], 'daily meter sums, corrected zero, gaps, and authorized buildings stay separate');
+assert.equal(buildingTrend.missing, 1);
+assert.throws(()=>water.waterBuildingTrend([], [], '2026-02-30','2026-03-01'));
 const oldPage = await readFile(path.join(root, 'src/components/WaterManagementPage.vue'), 'utf8');
 const site = process.env.CLIPFLOW_WATER_PREVIEW_SITE || path.join(output, 'site');
 if (!process.argv.includes('--full-workspace') && !process.argv.includes('--reuse-build')) {
@@ -80,6 +93,8 @@ const records = [
   { record_id: 'water-fixture-1', statistic_date: day, meter: 'A楼生活水表', frequency: '日', shift: '白', meter_value: 1200, corrected_usage: null, computed_usage: 25, photo_count: 1 },
   { record_id: 'water-fixture-2', statistic_date: day, meter: 'A楼冷却补水表', frequency: '日', shift: '白', meter_value: 2500, corrected_usage: null, computed_usage: 30, photo_count: 0 },
 ];
+const historicalUsage={A:[30,48,37,51,43,60],B:[64,72,61,90,78,84]};
+const historyDays=Math.min(6,Number(day.slice(-2))-1);
 const failures = [], requests = [];
 let lastPage;
 async function fixture(options = {}) {
@@ -107,8 +122,9 @@ async function fixture(options = {}) {
     if (url.pathname === '/api/capacity/water/records' && request.method() === 'GET') {
       if(url.searchParams.get('page_size')==='200'){
         if(state.failOverview)return fail('汇总暂不可用');
-        assert.equal(url.searchParams.get('start_date'),water.waterDay(-29));assert.equal(url.searchParams.get('end_date'),day);assert.equal(url.searchParams.get('frequency'),'日');
-        const data=url.searchParams.get('scope')==='B'?[{...records[0],record_id:'water-b',meter:'B楼水表',computed_usage:90}]:records;
+        assert.equal(url.searchParams.get('start_date'),day.slice(0,7)+'-01');assert.equal(url.searchParams.get('end_date'),day);assert.equal(url.searchParams.get('frequency'),'日');
+        const building=url.searchParams.get('scope'),data=building==='B'?[{...records[0],record_id:'water-b',meter:'B楼水表',computed_usage:90}]:[...records];
+        if(state.trendHistory)for(let i=0;i<historyDays;i++)data.push({...records[0],record_id:'history-'+building+i,statistic_date:water.waterDay(-i-1),computed_usage:historicalUsage[building][i]});
         return ok({records:data,total:data.length,snapshot:{exists:state.snapshotReady}});
       }
       const gate = state.readGate; if (gate) { state.readGate = null; await gate.promise; }
@@ -152,13 +168,39 @@ try {
   if (!process.argv.includes('--mobile-only')) {
   console.log('Checking stable overview entry, authorized totals and record navigation');
   const requestStart=requests.length;
-  const overview=await fixture({overview:true,scope:'ALL'});
+  const overview=await fixture({overview:true,scope:'ALL',trendHistory:true});
   await overview.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).waitFor();
   await overview.page.locator('.water-overview .v2-chart-canvas svg').waitFor();
   assert.equal(await overview.page.getByRole('button',{name:'自定义布局',exact:true}).count(),0,'water overview has no custom layout');
-  assert.match(await overview.page.locator('.water-overview-metrics').innerText(),/145/);
+  const monthTotal=145+Object.values(historicalUsage).flatMap(values=>values.slice(0,historyDays)).reduce((sum,value)=>sum+value,0);
+  assert((await overview.page.locator('.water-overview-metrics').innerText()).includes(String(monthTotal)));
   assert.equal(await overview.page.getByRole('button',{name:'查看H楼水耗记录',exact:true}).count(),0,'unexpected response buildings never expand permission');
-  assert(requests.slice(requestStart).filter(r=>r.path==='/api/capacity/water/records').every(r=>r.params.start_date===water.waterDay(-29)&&r.params.end_date===day&&['A','B'].includes(r.params.scope)),'overview only reads authorized recent daily records');
+  assert(requests.slice(requestStart).filter(r=>r.path==='/api/capacity/water/records').every(r=>r.params.start_date===day.slice(0,7)+'-01'&&r.params.end_date===day&&['A','B'].includes(r.params.scope)),'overview only reads authorized current-month daily records');
+  const lines=overview.page.getByRole('group',{name:'显示楼栋曲线'});
+  await lines.getByRole('checkbox',{name:'A楼',exact:true}).waitFor();
+  assert.equal(await lines.getByRole('checkbox').count(),2,'one curve per authorized building');
+  await lines.getByRole('checkbox',{name:'B楼',exact:true}).uncheck();
+  assert.equal(await lines.getByRole('checkbox',{name:'A楼',exact:true}).isChecked(),true);
+  await overview.page.locator('.water-trend-details summary').click();
+  const todayRow=overview.page.locator('.water-trend-table tbody tr').last();
+  await todayRow.locator('td').first().waitFor();
+  assert.equal(await todayRow.locator('td').count(),1);assert.equal(await todayRow.locator('td').innerText(),'55');
+  await lines.getByRole('checkbox',{name:'B楼',exact:true}).check();
+  await todayRow.locator('td').nth(1).waitFor();
+  assert.deepEqual(await todayRow.locator('td').allTextContents(),['55','90']);
+  if(Number(day.slice(-2))>historyDays+1)assert.deepEqual(await overview.page.locator('.water-trend-table tbody tr').first().locator('td').allTextContents(),['—','—'],'unrecorded days are not zero');
+  await overview.page.locator('.water-trend-details summary').click();
+  await overview.page.locator('.water-trend-table').waitFor({state:'hidden'});
+  for(const width of [1440,390]){
+    await overview.page.setViewportSize({width,height:900});
+    await overview.page.waitForFunction(()=>{const host=document.querySelector('.water-trend-surface .v2-chart-canvas'),svg=host?.querySelector('svg');return host&&svg&&Math.abs(Number(svg.getAttribute('width'))-host.clientWidth)<2;});
+    await overview.page.waitForTimeout(1200);
+    const curves=await overview.page.locator('.water-trend-surface svg path').evaluateAll(paths=>paths.filter(path=>['#197f70','#548eb3'].includes(path.getAttribute('stroke'))&&path.getAttribute('d')?.length>20).map(path=>path.getAttribute('stroke')));
+    if(historyDays>1)assert.deepEqual([...new Set(curves)].sort(),['#197f70','#548eb3'],'both authorized curves render at the current viewport');
+    assert.equal(await overview.page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    await capture(overview.page,'monthly-building-curves-'+width);
+  }
+  await overview.page.setViewportSize({width:1440,height:900});
   assert.equal(await overview.page.getByLabel('搜索水耗记录',{exact:true}).count(),0,'record filters stay hidden on overview, including teleports');
   await capture(overview.page,'desktop-overview');
   await overview.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).click();
@@ -175,6 +217,13 @@ try {
   assert.equal(await single.page.locator('.water-building-row').count(),1);
   assert.match(await single.page.locator('.water-overview-metrics').innerText(),/55/);
   await single.ctx.close();
+  const multi=await fixture({overview:true,admin:false,scopes:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});
+  await multi.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).waitFor();
+  await multi.page.getByLabel('水耗楼栋',{exact:true}).click();
+  await multi.page.locator('.n-base-select-option').getByText('全部授权楼栋',{exact:true}).click();
+  await multi.page.getByRole('button',{name:'查看B楼水耗记录',exact:true}).waitFor();
+  assert.equal(await multi.page.getByRole('group',{name:'显示楼栋曲线'}).getByRole('checkbox').count(),2,'limited multi-building accounts can compare only their authorized curves');
+  await multi.ctx.close();
   const overviewFailed=await fixture({overview:true,failOverview:true});
   await overviewFailed.page.getByText('汇总暂不可用',{exact:false}).waitFor();
   assert.match(await overviewFailed.page.locator('.water-overview-metrics').innerText(),/—/);

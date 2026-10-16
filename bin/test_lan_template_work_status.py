@@ -13342,6 +13342,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     },
                 ),
                 patch.object(service, "_patch_record_fields", return_value={}) as source_write,
+                patch.object(service, "_request_json", side_effect=[
+                    {"data": {"record": {"record_id": source_record_id, "fields": dict(record["display_fields"])}}},
+                    {"data": {"record": {"record_id": source_record_id, "fields": {
+                        **record["display_fields"], "维护实施状态": "已结束", "实际结束时间": "2026-08-17 09:14",
+                    }}}},
+                ]),
                 patch.object(
                     portal_server_module,
                     "query_record_by_id",
@@ -13360,7 +13366,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ):
                 PortalRuntime._process_maintenance_action_job(job_id)
                 self.assertFalse(
-                    service.mark_notice_source_ended_locally(
+                    service.sync_notice_source_ended_fields(
                         {
                             "work_type": WORK_TYPE_REPAIR,
                             "source_record_id": "repair-source-must-stay-unchanged",
@@ -13370,6 +13376,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
 
                 source_write.assert_not_called()
+                self.assertEqual(service._records[0]["display_fields"]["维护实施状态"], "进行中")
                 self.assertEqual(len(store.list_outbox_events("notice_source_finalize", status="pending")), 1)
                 PortalRuntime.process_source_end_sync()
 
@@ -19060,6 +19067,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "notice_type": "维保通告",
                     "title": "E楼UPS维护",
                     "building": "E楼",
+                    "source_progress": "未开始",
                 }
             ],
             "ongoing": [],
@@ -21244,7 +21252,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 records["ongoing"][0]["target_record_id"],
                 target_record_id,
             )
-            self.assertEqual(records["records"][0]["source_progress"], "未开始")
+            self.assertEqual(records["records"][0]["source_progress"], "进行中")
 
     def test_same_business_zhihang_without_targets_reconcile_to_no_items(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -28987,11 +28995,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             "repair-ended-source",
             title="D楼已结束检修",
             building="D楼",
+            ended=True,
         )
         ongoing_record = _build_repair_record(
             "repair-ongoing-source",
             title="D楼进行中检修",
             building="D楼",
+            started=True,
         )
         serialized_ended = service._serialize_record(
             ended_record,
@@ -29043,6 +29053,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             source_record_id,
             title="EA118_C01机房E楼6#柴发摇臂室盖轻微渗油检修",
             building="E楼",
+            started=True,
         )
         target = {
             "active_item_id": target_record_id,
@@ -29225,7 +29236,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 item["source_record_id"]
                 for item in options
             },
-            {"repair-pending", "repair-unlinked-ongoing"},
+            {"repair-pending", "repair-unlinked-ongoing", "repair-local-ended"},
         )
 
     def test_manual_repair_source_binding_prefills_form_from_work_order(self):
@@ -38944,7 +38955,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertIsNone(service._repair_management_event_cache)
         self.assertTrue(result["transfer_to_overhaul"])
 
-    def test_successful_end_recovers_source_identity_for_plan_status(self):
+    def test_successful_end_recovers_source_identity_without_overriding_plan_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             source_record_id = "rec_repair_source"
@@ -39021,11 +39032,11 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 source_record_id,
             )
             self.assertEqual(summaries[source_record_id]["status"], "已结束")
-            self.assertEqual(serialized["source_progress"], "已结束")
+            self.assertEqual(serialized["source_progress"], "进行中")
             self.assertEqual(identity["source_record_id"], source_record_id)
             self.assertEqual(identity["status"], "已结束")
 
-    def test_refresh_maintenance_preserves_other_sources_and_local_terminal_status(self):
+    def test_refresh_maintenance_preserves_other_sources_and_uses_source_status(self):
         class _MaintenanceRefreshService(MaintenancePortalService):
             def _load_fields(self):
                 self._field_meta_list = []
@@ -39155,8 +39166,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertIn("c-old", record_ids)
             self.assertIn("r-old", record_ids)
             self.assertNotIn("m-old", record_ids)
-            self.assertEqual(serialized["source_progress"], "已结束")
-            self.assertEqual(serialized_ongoing["source_progress"], "进行中")
+            self.assertEqual(serialized["source_progress"], "进行中")
+            self.assertEqual(serialized_ongoing["source_progress"], "未开始")
+            self.assertEqual(summaries["m-new"]["status"], "已结束")
+            self.assertEqual(ongoing_summaries["m-ongoing"]["status"], "进行中")
 
     def test_target_finished_reconcile_removes_resurrected_active_item(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -41415,6 +41428,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "display_fields": {"变更进度": "进行中"},
                 }
             ]
+            remote_sources = {row["record_id"]: dict(row["display_fields"])
+                              for row in service._records + service._change_records}
+
+            def write_source_fields(*, record_id, fields, **kwargs):
+                remote_sources[record_id].update(fields)
+                if "维护实施状态" in remote_sources[record_id]:
+                    remote_sources[record_id]["维护实施状态"] = "已结束"
+                return {}
+
             try:
                 with patch(
                     "lan_bitable_template_portal.portal_service.external_real_write_guard",
@@ -41423,7 +41445,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "real_write_allowed": True,
                         "reason": "",
                     },
-                ), patch.object(service, "_patch_record_fields", return_value={}) as patch_fields:
+                ), patch.object(service, "_request_json", side_effect=lambda path, **kwargs: {
+                    "data": {"record": {"record_id": path.split("/")[-1],
+                                        "fields": dict(remote_sources[path.split("/")[-1]])}}
+                }), patch.object(service, "_patch_record_fields", side_effect=write_source_fields) as patch_fields:
                     change_undo_id = service.create_notice_undo_checkpoint(
                         "end",
                         {
@@ -41526,6 +41551,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                                 "source_work_type": WORK_TYPE_CHANGE,
                                 "source_record_id": "source-change-end",
                                 "target_record_id": "target-change-end",
+                                "ended_at": "2026-08-20 17:00",
                             }
                         )
                     )
@@ -41576,6 +41602,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     building="E楼",
                     progress="进行中",
                     title="E楼旧结束通告源字段补写",
+                    start_time="2026-08-14 09:00",
+                    end_time="2026-08-14 18:00",
                 )
             ]
             service._change_loaded_once = True
@@ -43458,7 +43486,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             real_source_sync = service.sync_notice_source_ended_fields
             source_sync_calls = 0
 
-            def flaky_source_sync(payload):
+            def flaky_source_sync(payload, **kwargs):
                 nonlocal source_sync_calls
                 source_sync_calls += 1
                 if source_sync_calls == 1:
@@ -43471,7 +43499,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "reason": "mock",
                     },
                 ):
-                    return real_source_sync(payload)
+                    return real_source_sync(payload, **kwargs)
 
             finished_remote = {
                 "fields": {
@@ -43754,10 +43782,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         "sync_notice_source_ended_fields",
                     ) as source_sync,
                     patch.object(
-                        service,
-                        "mark_notice_source_ended_locally",
-                    ) as local_source_sync,
-                    patch.object(
                         PortalRuntime,
                         "_execute_backend_prepared_upload",
                     ) as remote_upload,
@@ -43769,7 +43793,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
         remote_upload.assert_not_called()
         source_sync.assert_not_called()
-        local_source_sync.assert_not_called()
         self.assertEqual(completed["phase"], "success")
         self.assertEqual(
             service._records[0]["display_fields"]["维护实施状态"],

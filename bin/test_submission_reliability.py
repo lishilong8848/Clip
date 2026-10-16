@@ -414,7 +414,7 @@ class SubmissionReliabilityTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["attempts"], 1)
 
-    def test_confirmed_end_updates_both_local_sources_without_a_remote_write(self):
+    def test_source_finalize_queue_preserves_status_until_source_write_succeeds(self):
         for work_type, field, records_name in (
             ('maintenance', '维护实施状态', '_records'), ('change', '变更进度', '_change_records'),
         ):
@@ -422,14 +422,27 @@ class SubmissionReliabilityTests(unittest.TestCase):
                 row = {'record_id': 'recSource', 'work_type': work_type, 'building_codes': ['A'], 'display_fields': {field: '进行中'}}
                 setattr(self.service, records_name, [row])
                 self.store.replace_source_table_snapshot(work_type, {'ALL': [row], 'A': [row]})
-                self.assertTrue(self.service.mark_notice_source_ended_locally({
+                payload = {
                     'source_record_id': 'recSource', 'target_record_id': 'recTarget', 'work_type': work_type,
-                }))
+                    'ended_at': '2026-10-16 17:00',
+                }
+                PortalRuntime._queue_source_end_sync(payload, 'recTarget', '变更通告' if work_type == 'change' else '维保通告')
+                self.assertEqual(row['display_fields'][field], '进行中')
+                with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={
+                    'mock_external': False, 'real_write_allowed': True,
+                }), patch.object(self.service, '_request_json', side_effect=[
+                    {'data': {'record': {'record_id': row['record_id'], 'fields': dict(row['display_fields'])}}},
+                    {'data': {'record': {'record_id': row['record_id'], 'fields': {
+                        field: '已结束', '实际结束时间': '2026-10-16 17:00',
+                    }}}},
+                ]), patch.object(self.service, '_patch_record_fields') as source_write:
+                    self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+                source_write.assert_called_once()
                 self.assertEqual(row['display_fields'][field], '已结束')
                 cached = self.store.get_source_scope_snapshot('A')['records']
                 self.assertTrue(any(item['record_id'] == 'recSource' and item['display_fields'][field] == '已结束'
                                     for item in cached if item.get('work_type') == work_type))
-        self.assertFalse(self.service.mark_notice_source_ended_locally({'source_record_id': 'recRepair', 'work_type': 'repair'}))
+        self.assertFalse(self.service.sync_notice_source_ended_fields({'source_record_id': 'recRepair', 'work_type': 'repair'}))
         self.service._request_payload.assert_not_called()
 
     def test_superseded_projection_reads_latest_state(self):

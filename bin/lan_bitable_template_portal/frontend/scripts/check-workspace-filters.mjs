@@ -10,6 +10,8 @@ const embeddedTasks=adaptPageFilters('<template><div class="v2-section-title"></
 assert.match(embeddedTasks,/<WorkspaceScopePicker v-if="!embedded"/,'embedded widgets must not add another global building selector');
 import { adaptCabinetPage } from './workspace-cabinet-adapter.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const home=await readFile(path.join(root,'src/workspace-v2/HomePage.vue'),'utf8');
+assert.doesNotMatch(adaptPageFilters(home,'HomePage.vue'),/WorkspaceScopePicker/,'home keeps building selection inside widgets only');
 for(const file of ['EventManagementPage','CabinetPowerPage','DrillManagementPage','DailyTaskChecklistPage','KnowledgeBasePage','LinkDirectoryPage','SignatureManagementPage','HistoryMemoryPage','PlanConvergencePage','LearningPage','MopPageHeader']){
   const source=await readFile(path.join(root,'src/components',file+'.vue'),'utf8');
   const adapted=adaptPageFilters(source,file+'.vue'),{descriptor}=parse(adapted);

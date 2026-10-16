@@ -146,9 +146,7 @@ try {
   assert.match(page.url(),/active_item_id=active_fixture/,'workbench action opens the existing notice form for the exact record');
   await page.goto(origin+entry);await page.locator('.v2-dashboard').waitFor();
   await page.getByText('A楼冷水机组月度维护',{exact:true}).waitFor();
-  const refreshStart=requests.length;await page.getByRole('button',{name:'刷新工作台',exact:true}).click();
-  await page.getByText('A楼冷水机组月度维护',{exact:true}).waitFor();
-  assert.equal(requests.slice(refreshStart).filter(r=>r.path==='/api/workbench').length,1,'one refresh makes one task request');
+  assert.equal(await page.getByRole('button',{name:'刷新工作台',exact:true}).count(),0,'dashboard has no redundant refresh action');
   const panelStart=requests.length;
   await page.locator('.v2-widget[aria-label="待处理事项"] .v2-task-filter').click();await page.locator('.v2-widget[aria-label="待处理事项"] .v2-task-filter input').fill('演练');await page.locator('.n-base-select-option').getByText('演练管理',{exact:true}).click();
   await page.getByText('当前月份 · 已发布演练',{exact:true}).waitFor();
@@ -246,7 +244,8 @@ try {
   await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'返回列表',exact:true}).click();
   await page.getByRole('menuitem',{name:'个人工作台'}).click();
   await page.locator('.v2-dashboard').waitFor();
-  assert.match(await page.locator('.v2-dashboard-heading .v2-local-scope').innerText(),/全部楼栋/,'notice A-building navigation must not replace the workbench scope');
+  assert.equal(await page.locator('.v2-dashboard .v2-local-scope').count(),0,'dashboard has no page-level building selector');
+  assert.match(await page.locator('.v2-dashboard .v2-widget-scope').first().innerText(),/全部(?:授权)?楼栋/,'notice A-building navigation must not replace the workbench scope');
   await page.getByRole('menuitem',{name:'风险与重保',exact:true}).click();await page.locator('.guard-page').waitFor();assert.match(page.url(),/scope=A/);assert.equal(await page.locator('.guard-page .landing-view').count(),0);
   assert.equal(await page.locator('#page-back-slot').count(),0);await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.locator('.v2-dashboard').waitFor();
   await page.evaluate(()=>{const link=document.createElement('a');link.href='/workbench-lite?scope=A&work_type=maintenance';document.body.append(link);link.click();link.remove();});

@@ -27,7 +27,7 @@ await page.route('**/api/**', route => {
   const reply = data => route.fulfill({ json: { ok: true, data } });
   if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-home-counts' } });
   if (url.pathname === '/api/auth/status') return reply({ logged_in: true,
-    user: { name: '隔离测试', open_id: admin ? 'isolated-admin' : 'isolated-D', role: admin ? 'admin' : 'building' }, scope_options: scopeOptions() });
+    user: { name: '隔离测试', open_id: admin ? 'isolated-admin' : 'isolated-D', role: admin ? 'admin' : 'building', modules: ['event', 'maintenance', 'change', 'repair_management'] }, scope_options: scopeOptions() });
   if (url.pathname === '/api/scope-overview') return reply({ source_snapshot_ready: true, scope_options: scopeOptions(),
     scopes: admin ? { ALL: counts(1, empty ? 0 : 19), A: counts(2, 400, false), B: counts(2, 400, false), CAMPUS: counts(2, 400, false) } : { D: counts(4, 5) } });
   if (url.pathname === '/api/assistant/conversation') return reply({ enabled: false, turns: [] });

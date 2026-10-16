@@ -9,7 +9,8 @@ export const modules: ModuleEntry[] = [
   ...['维保通告', '变更通告', '检修通告', '设备轮巡', '设备调整', '上下电通告'].map((label, i) => ({ id: NOTICE_IDS[i], label, group: '通告办理', path: '/workbench-lite?work_type=' + NOTICE_IDS[i], icon: 'notice' })),
   { id: 'engineer_mop', label: '维护单管理', group: '运行管理', path: '/engineer/mop', icon: 'wrench' },
   { id: 'repair_management', label: '维修项目', group: '运行管理', path: '/repair-management', icon: 'wrench' },
-  { id: 'critical_guard', label: '风险与重保', group: '运行管理', path: '/critical-guard', icon: 'shield' },
+  { id: 'critical_guard', label: '重保管理', group: '运行管理', path: '/critical-guard', icon: 'shield' },
+  { id: 'risk_inspection', label: '风险排查', group: '运行管理', path: '/risk-inspections', icon: 'shield' },
   { id: 'daily', label: '每日任务', group: '运行管理', path: '/daily-tasks', icon: 'task' },
   { id: 'cabinet', label: '机柜管理', group: '设备与资源', path: '/cabinet-power', icon: 'server' },
   { id: 'water', label: '水耗管理', group: '设备与资源', path: '/water-management', icon: 'water' },
@@ -21,6 +22,7 @@ export const modules: ModuleEntry[] = [
   { id: 'life_guide', label: '参考人生指南', group: '学习与资料', path: '/life-guide', icon: 'book' },
   { id: 'signatures', label: '签名管理', group: '账号与协作', path: '/signature-management', icon: 'signature' },
   { id: 'handover', label: '交接班审核', group: '账号与协作', path: '/?view=handover', icon: 'task' },
+  { id: 'work_handover', label: '人员工作交接', group: '账号与协作', path: '/work-handover', icon: 'task' },
   { id: 'assistant', label: '灯塔助手', group: '账号与协作', path: '/?view=assistant', icon: 'assistant' },
   { id: 'accounts', label: '账号与权限', group: '账号与协作', path: '/admin/settings', icon: 'settings' },
 ];
@@ -50,7 +52,7 @@ export function moduleForRoute(url: URL): string {
 }
 export function moduleUrl(module: ModuleEntry, scope: string): string {
   const url = new URL(module.path, window.location.origin);
-  if (!['accounts', 'assistant', 'knowledge', 'links', 'life_guide', 'signatures', 'handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
+  if (!['accounts', 'assistant', 'knowledge', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
   return url.pathname + url.search;
 }
 export function beijingDate(): string {

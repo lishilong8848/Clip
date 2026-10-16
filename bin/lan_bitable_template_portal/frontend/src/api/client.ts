@@ -229,7 +229,7 @@ async function requestResponseJson(
       throw new ApiError(message, { status: response.status, payload, authRequired: true });
     }
     if (response.status >= 500) {
-      hooks.onServerError?.(readableError(String(payload.error || "服务异常，稍后会自动重试。")), response, payload);
+      hooks.onServerError?.(readableError(String(payload.error || "当前请求暂未完成，请稍后重试。")), response, payload);
     }
     if (!response.ok || payload.ok === false) {
       throw new ApiError(String(payload.error || `HTTP ${response.status}`), { status: response.status, payload });
@@ -308,7 +308,7 @@ type RemoteSourceRefreshOptions = {
   onProgress?: (status: Dict) => void;
 };
 
-function waitWithSignal(delayMs: number, signal?: AbortSignal | null): Promise<void> {
+export function waitWithSignal(delayMs: number, signal?: AbortSignal | null): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new ApiError("请求已取消。"));

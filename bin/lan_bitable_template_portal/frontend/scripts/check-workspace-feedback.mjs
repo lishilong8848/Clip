@@ -134,6 +134,21 @@ try {
   assert.equal(await visible().evaluateAll(nodes=>nodes.some(n=>n.getAnimations().length>0)),false,'reduced motion skips movement');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.screenshot({path:path.join(output,'mobile-toasts.png')});
+  await set([{id:'mop-warning',tone:'warning',text:'请核对维护单填写内容'}]);
+  await page.evaluate(()=>{
+    const page=document.createElement('section');page.className='v2-mop-workspace preview-open';
+    const footer=document.createElement('div');footer.className='floating-upload-box';footer.style.cssText='position:fixed;bottom:82px;left:12px;right:12px;height:140px';
+    page.append(footer);document.body.append(page);
+  });
+  const aboveFooter=()=>page.waitForFunction(()=>{
+    const footer=document.querySelector('.floating-upload-box').getBoundingClientRect();
+    return document.querySelector('[data-test="mop-warning"]').getBoundingClientRect().bottom<footer.top;
+  });
+  await aboveFooter();
+  await page.locator('.floating-upload-box').evaluate(el=>el.style.height='220px');
+  await aboveFooter();
+  await page.locator('.v2-mop-workspace').evaluate(el=>el.remove());
+  await page.waitForFunction(()=>parseFloat(document.querySelector('[data-test="mop-warning"]').style.getPropertyValue('--v2-feedback-bottom'))===82);
   await page.evaluate(()=>window.drive.stop());
   assert.equal(await page.locator('[data-v2-feedback]').count(),0,'uninstall removes adaptation');
   await mount(true);

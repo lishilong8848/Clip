@@ -175,6 +175,8 @@
               :external-status-text="externalSignatureSearchStatus"
               :external-people="externalSignaturePeople"
               :person-status-text="otherSignaturePersonStatusText"
+              :invitation-context="selectedNotice ? {scope, noticeKey:String(selectedNotice.notice_key || '')} : undefined"
+              @invitation-changed="onMopSignatureInvitation"
               @remove-person="removeSignaturePerson(signatureRole, $event)"
               @refresh-external="refreshAllSignatures"
               @add-external="addExternalSignaturePerson"
@@ -320,7 +322,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowRight, ClipboardCheck, UsersRound } from 'lucide-vue-next';
-import type { Dict } from "../api/client";
+import { requestJson, type Dict } from "../api/client";
 import {
   bindEngineerMop,
   downloadFilledEngineerMop,
@@ -2264,13 +2266,17 @@ async function loadTemporarySignatures(options: { silent?: boolean } = {}): Prom
     return;
   }
   try {
-    const data = await fetchTemporarySignatures(requestScope, noticeKey);
+    const results = await Promise.allSettled([
+      fetchTemporarySignatures(requestScope, noticeKey),
+      requestJson('/api/signatures/management/mop-list?' + new URLSearchParams({scope:requestScope, notice_key:noticeKey}), {cache:'no-store'}),
+    ]);
     if (
       requestSeq !== temporarySignatureRequestSeq
       || scope.value !== requestScope
       || String(selectedNotice.value?.notice_key || "").trim() !== noticeKey
     ) return;
-    const items = Array.isArray(data.items) ? data.items : [];
+    const items = results.flatMap(result => result.status === 'fulfilled' && Array.isArray(result.value.items) ? result.value.items : []);
+    if (results.every(result => result.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
     mergeTemporarySignatures(items);
     updateTemporarySignaturePolling();
   } catch (error) {
@@ -2288,11 +2294,26 @@ async function loadTemporarySignatures(options: { silent?: boolean } = {}): Prom
 
 function temporarySignaturePollNeeded(): boolean {
   return previewMode.value && temporarySignatures.value.some((item) => (
-    String(item.source || "") !== "external"
+    (String(item.source || "") !== "external" || item.mop_invitation)
     && !hiddenOtherSignatureKeys.value.includes(signaturePersonKey(item))
     && String(item.status || "") !== "failed"
     && String(item.status || "") !== "signed"
+    && !(item.mop_invitation && ['send_failed','expired','revoked'].includes(String(item.request_status || '')))
   ));
+}
+
+function onMopSignatureInvitation(value:{scope:string;noticeKey:string;person?:Dict}):void {
+  if (value.scope !== scope.value || value.noticeKey !== String(selectedNotice.value?.notice_key || '')) return;
+  if (value.person) {
+    mergeTemporarySignatures([{...value.person, mop_invitation:true}]);
+    unhideSignatureKey(signaturePersonKey(value.person));
+    clearMopOutputState();
+    const completed = value.person.has_signature || value.person.request_status === 'completed';
+    signatureMessage.value = completed ? '人员签名已保存。' : value.person.request_status === 'sent' ? '签名链接已发送，等待本人签名；保存后自动更新。' : value.person.signature_reason || '签名请求尚未完成，请核对发送结果。';
+    signatureMessageType.value = completed || value.person.request_status === 'sent' ? 'success' : ['send_failed','expired','revoked'].includes(value.person.request_status) ? 'failed' : 'info';
+  }
+  updateTemporarySignaturePolling();
+  void loadTemporarySignatures({silent:true});
 }
 
 function scheduleExternalSignaturePeopleSearch(): void {

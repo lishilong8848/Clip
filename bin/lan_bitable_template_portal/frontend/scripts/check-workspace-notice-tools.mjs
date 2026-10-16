@@ -30,7 +30,7 @@ try{
   if(req.method()!=='GET')writes.push({path:url.pathname,method:req.method(),body:req.headers()['content-type']?.includes('application/json')?body():null});
   if(url.pathname==='/api/auth/status')return ok(route,{logged_in:true,user:{open_id:user,name:'隔离管理员',role,level:role==='admin'?'L1':'L4',can_delete_business:role==='admin',modules:['maintenance','change','repair','polling','adjust','power','engineer_mop','accounts']},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});
   if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'isolated-tools'}});
-  if(url.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-fixture',title:'A楼计划',work_type:kind,status:orphan?'进行中':'未开始'}],ongoing:[{active_item_id:'active-fixture',title:'A楼进行中',work_type:kind,status:'开始',scope:'A'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
+  if(url.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-fixture',title:'A楼计划',work_type:kind,source_progress:orphan?'进行中':'未开始'}],ongoing:[{active_item_id:'active-fixture',title:'A楼进行中',work_type:kind,status:'开始',scope:'A'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
   if(url.pathname==='/api/workbench/lite-detail')return ok(route,{fragments:{detail:form(kind,url.searchParams.has('active_item_id'))}});
   if(url.pathname==='/api/workbench/draft')return ok(route,{draft:null});
   if(url.pathname==='/api/workbench/polling-delay-status')return ok(route,{state:groupState,due_at_ts:0,enabled:false,missing_completion:false});

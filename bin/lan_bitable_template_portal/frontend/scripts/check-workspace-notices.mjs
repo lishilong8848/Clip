@@ -152,6 +152,20 @@ try {
       await page.locator('.v2-notice-editor').waitFor({state:'detached'});
     }
   }
+  fixtures.maintenance.payload.records[0] = { ...fixtures.maintenance.payload.records[0],
+    source_progress: '', source_status: '', status: '已结束' };
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+    await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=maintenance');
+    const planned = page.locator('[data-list="planned"] .v2-notice-entry').first();
+    await planned.getByText('状态未取得', { exact: true }).waitFor();
+    assert(await planned.getByRole('button', { name: /请重新读取/ }).isDisabled());
+    await planned.locator('.v2-notice-open').click();
+    assert.equal(await page.locator('.v2-notice-editor').count(), 0, 'unknown source status never starts a plan via its title');
+    await page.screenshot({ path: path.join(output, `source-status-unknown-${width}.png`), fullPage: true });
+    if (width <= 760) await page.getByRole('tab', { name: /进行中/ }).click();
+    assert(await page.locator('[data-list="ongoing"]').getByRole('button', { name: '更新', exact: true }).first().isEnabled(), 'source read failure does not disable existing notice operations');
+  }
   if (!process.argv.includes('--baseline')) {
     await page.getByRole('button', { name: '打开个人页面', exact: true }).click();
     await page.getByRole('button', { name: '退出登录', exact: true }).click();

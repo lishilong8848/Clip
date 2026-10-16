@@ -1742,6 +1742,10 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_points.py",
         PROJECT_ROOT / "bin" / "test_submission_reliability.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_templates.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_cloud.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_routes.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
@@ -1768,6 +1772,7 @@ def _run_packaging_preflight_tests() -> None:
     )
     py_targets.extend(sorted((PROJECT_ROOT / "bin/openclaw_service").rglob("*.py")))
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_bridge.py")
+    py_targets.extend(sorted((PROJECT_ROOT / "bin/lan_bitable_template_portal").glob("feishu_workpartner*.py")))
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_icon_weather.py")
     py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))
 
@@ -1830,7 +1835,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_workspace_layouts",
          "bin.test_public_health", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_learning_weekly_cards",
-         "bin.test_pre_shift_checks", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
+         "bin.test_pre_shift_checks", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
@@ -1839,7 +1844,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_news", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
          "bin.test_lighthouse_document_tools",
          "bin.test_lighthouse_office_tools",
-         "bin.test_lighthouse_general_tools",
+         "bin.test_lighthouse_general_tools", "bin.test_feishu_workpartner",
          "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
          "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",
          "bin.test_lighthouse_mop_fields", "bin.test_lighthouse_mop_workflows", "bin.test_lighthouse_plan_workflows",

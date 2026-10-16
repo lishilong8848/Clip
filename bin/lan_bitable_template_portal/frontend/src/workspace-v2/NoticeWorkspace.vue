@@ -23,7 +23,7 @@
               </div>
               <div class="v2-notice-entry-state">
                 <NTag :type="noticeListStatus(row,lane.id).tone" size="small" :bordered="false">{{ noticeListStatus(row,lane.id).label }}</NTag>
-                <div class="v2-notice-row-actions"><template v-if="lane.id==='ongoing'"><NButton size="small" data-v2-navigation type="primary" secondary @click="openRecord(row,false,'update')">更新</NButton><NButton size="small" data-v2-navigation @click="openRecord(row,false,'end')">结束</NButton><NButton v-if="!noticeSourceMode(row).bound" size="small" data-v2-navigation @click="openRecord(row,false,'','','',true)">绑定源表</NButton></template><NButton v-else size="small" data-v2-navigation :type="rowEnded(row)?'default':'primary'" :secondary="!rowEnded(row)" @click="openRecord(row,false,rowStarted(row)?'':'start')">{{ rowEnded(row)?'查看':rowStarted(row)?'核验':'开始' }}<ChevronRight :size="14" /></NButton></div>
+                <div class="v2-notice-row-actions"><template v-if="lane.id==='ongoing'"><NButton size="small" data-v2-navigation type="primary" secondary @click="openRecord(row,false,'update')">更新</NButton><NButton size="small" data-v2-navigation @click="openRecord(row,false,'end')">结束</NButton><NButton v-if="!noticeSourceMode(row).bound" size="small" data-v2-navigation @click="openRecord(row,false,'','','',true)">绑定源表</NButton></template><NButton v-else size="small" data-v2-navigation :disabled="rowUnknown(row)" :type="rowEnded(row)?'default':'primary'" :secondary="!rowEnded(row)" @click="openRecord(row,false,rowStarted(row)?'':'start')">{{ rowUnknown(row)?'请重新读取':rowEnded(row)?'查看':rowStarted(row)?'核验':'开始' }}<ChevronRight :size="14" /></NButton></div>
               </div>
             </article>
           </NListItem>
@@ -135,9 +135,10 @@ const total=(mode:string)=>data.value[mode==='ongoing'?'ongoing_pagination':'rec
 const typeLabel=(value:string)=>modules.find(m=>m.id===value)?.label||'通告';
 const rowKey=(row:Dict)=>String(row.active_item_id||row.record_id||row.id);
 const rowTitle=(row:Dict)=>String(row.title||row.name||row.display_fields?.['维护总项']||row.display_fields?.['名称']||'未命名通告');
-const rowEnded=(row:Dict)=>noticeIsEnded({status:row.source_progress||row.status_label||row.status});
-const rowStarted=(row:Dict)=>!rowEnded(row)&&/进行中|已开始|^开始$|^更新$/.test(String(row.source_progress||row.status_label||row.status||''));
-function rowAttention(row:Dict,lane:string){if(lane==='planned'&&rowStarted(row))return '先核验已发通告';if(lane==='ongoing'&&['maintenance','change','repair'].includes(row.work_type)&&row.site_photo_count!==undefined&&Number(row.site_photo_count)===0)return '结束前需现场照片';return '';}
+const rowEnded=(row:Dict)=>noticeIsEnded({status:lanes.value[0].rows.includes(row)?noticeListStatus(row,'planned').label:row.status_label||row.status});
+const rowUnknown=(row:Dict)=>noticeListStatus(row,'planned').label==='状态未取得';
+const rowStarted=(row:Dict)=>!rowEnded(row)&&/进行中|已开始|^开始$|^更新$/.test(noticeListStatus(row,'planned').label);
+function rowAttention(row:Dict,lane:string){if(lane==='planned'&&rowUnknown(row))return '源表状态未取得，请重新读取';if(lane==='planned'&&rowStarted(row))return '先核验已发通告';if(lane==='ongoing'&&['maintenance','change','repair'].includes(row.work_type)&&row.site_photo_count!==undefined&&Number(row.site_photo_count)===0)return '结束前需现场照片';return '';}
 const actionLabel=(value:string)=>({start:'开始',update:'更新',end:'结束'}[value]||'');
 let listAbort:AbortController|undefined,detailAbort:AbortController|undefined,disposed=false,timer=0;
 const editing=ref(false),detailLoading=ref(false),form=ref<NoticeForm|null>(null),detailError=ref(''),busy=ref(false),saving=ref(false),uploading=ref(false),confirming=ref(false),ambiguous=ref(false);
@@ -177,7 +178,7 @@ function showEventWait(value:Dict){
   shownEventWaits.add(value.job_id);
   dialog.info({title:'事件优先：通告已排队',content:()=>h('div',{style:'white-space:pre-line;max-height:60vh;overflow:auto'},String(value.event_wait?.message||'事件结束或删除后自动发送。')),positiveText:'知道了，保留排队'});
 }
-const nextRecord=computed(()=>{const v=form.value?.values||{};return (action.value==='start'?lanes.value[0].rows:lanes.value[1].rows).find(r=>![v.active_item_id,v.source_record_id,v.target_record_id].includes(rowKey(r))&&!rowEnded(r)&&!(action.value==='start'&&rowStarted(r)));});
+const nextRecord=computed(()=>{const v=form.value?.values||{};return (action.value==='start'?lanes.value[0].rows:lanes.value[1].rows).find(r=>![v.active_item_id,v.source_record_id,v.target_record_id].includes(rowKey(r))&&!rowEnded(r)&&!(action.value==='start'&&(rowStarted(r)||rowUnknown(r))));});
 function showTaskRecords(){closeEditor();recordsOpen.value=true;}
 const locked=computed(()=>busy.value||saving.value||uploading.value||detailLoading.value||ambiguous.value||!!job.value||!form.value?.actions.length);
 const saved=ref('');
@@ -200,6 +201,7 @@ function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values
 function persist(){if(!form.value||!formKey||job.value?.phase==='success')return;try{sessionStorage.setItem(formKey,JSON.stringify({snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开并使用保存草稿。';}}
 function resetRejected(){if(job.value?.phase!=='failed'||job.value.error_category!=='field_or_payload'||busy.value)return;job.value=null;frozen=null;operationId='';ambiguous.value=false;persist();}
 async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtml='',manualType='',focusBinding=false){
+  if(row&&lanes.value[0].rows.includes(row)&&rowUnknown(row)){message.warning('源表状态未取得，请重新读取后办理。');return;}
   if(busy.value||uploading.value||saving.value)return;
   if(editing.value&&dirty.value&&!job.value){askLeave(()=>openRecord(row,initial,desiredAction,parsedHtml,manualType,focusBinding));return;}
   attempted.value=false;issueTarget.value=null;confirming.value=false;verifyBeforeStart.value=false;attentionKeys.value=[];

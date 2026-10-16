@@ -39,7 +39,7 @@ export function otherSignatureDraftPriority(draft: LooseDict): number {
 }
 
 export function otherSignaturePersonStatusText(person: LooseDict): string {
-  if (String(person?.source || "") === "external") return "外部已保存签名";
+  if (String(person?.source || "") === "external") return mopPersonHasUsableSignature(person) ? "外部已保存签名" : "外部人员 · 待本人签名";
   if (mopPersonHasUsableSignature(person)) return "临时人员 · 已签名";
   const status = String(person?.status || "");
   if (status === "sending") return "临时人员 · 发送中";
@@ -75,7 +75,7 @@ export function signaturePersonDisplayName(person: LooseDict): string {
     return `${name} · ${mopPersonHasUsableSignature(person) || status === "signed" ? "已签名" : "待签名"}`;
   }
   if (source === "external") {
-    return `${name} · 已保存`;
+    return `${name} · ${mopPersonHasUsableSignature(person) ? "已保存" : "待签名"}`;
   }
   return name;
 }

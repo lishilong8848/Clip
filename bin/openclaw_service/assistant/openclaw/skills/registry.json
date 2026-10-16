@@ -1,4 +1,5 @@
 [
+  {"name": "feishu-workpartner", "description": "飞书工作伙伴：发现智能体应用已有权限，真实@人员、私信群聊与话题回复、创建指派更新任务、授权日历日程与邀请、云文档读取创建追加、独立协作表记录；统一使用原助手确认、人员权限与持久化操作回执。"},
   {"name": "alert-tagging", "description": "通告告警推荐标签、分类依据、注意事项与示例；通告成功后由独立后台任务自动调用，不影响原发送流程。", "references": ["alert-tagging/references/rules.md"]},
   {"name": "lighthouse-business", "description": "灯塔业务查询口径、权限和办理确认规则。"},
   {"name": "public-research", "description": "公开搜索和天气查询，保留来源和时间，不外传内部数据。"},

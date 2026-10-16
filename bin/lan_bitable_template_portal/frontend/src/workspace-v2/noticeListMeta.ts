@@ -9,7 +9,11 @@ export function noticeSourceMode(row: Dict): { label: string; tone: 'info' | 'wa
 
 export function noticeListStatus(row: Dict, lane: string): { label: string; tone: 'default' | 'info' | 'warning' | 'error' } {
   if (lane !== 'ongoing') {
-    return { label: String(row.source_progress || row.status_label || row.status || '未开始'), tone: 'default' };
+    const fields = row.display_fields || {};
+    const values = 'source_progress' in row || 'source_status' in row
+      ? [row.source_progress, row.source_status] : [fields['维护实施状态'], fields['变更进度']];
+    const label = values.map(value => String(value ?? '').trim()).find(Boolean) || '状态未取得';
+    return { label, tone: label === '状态未取得' ? 'warning' : 'default' };
   }
   // The active notice status is independent of its source plan's progress.
   const state = ['status', 'phase', 'error', 'last_error', 'failure_reason'].map(key => String(row[key] || '')).join(' ');

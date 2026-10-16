@@ -99,6 +99,7 @@ const AccessRequest = lazy(() => import('./AccessRequest.vue'));
 const pages: Record<string, any> = {
   event: lazy(() => import('../components/EventManagementPage.vue')),
   engineer_mop: lazy(() => import('./MopWorkspace.vue')),
+  work_handover: lazy(() => import('../components/WorkHandoverPage.vue')),
   repair_management: lazy(() => import('./RepairWorkspace.vue')),
   repair_status: lazy(() => import('./RepairWorkspace.vue')),
   learning: lazy(() => import('../components/LearningPage.vue')),
@@ -109,6 +110,7 @@ const pages: Record<string, any> = {
   daily: lazy(() => import('../components/DailyTaskChecklistPage.vue')),
   water: lazy(() => import('./WaterWorkspace.vue')),
   critical_guard: lazy(() => import('../components/CriticalGuardPage.vue')),
+  risk_inspection: lazy(() => import('../components/RiskInspectionPage.vue')),
   cabinet: lazy(() => import('../components/CabinetPowerPage.vue')),
   cabinet_batch: lazy(() => import('../components/CabinetPowerBatchPage.vue')),
   drills: lazy(() => import('../components/DrillManagementPage.vue')),
@@ -171,7 +173,7 @@ const menuOptions = computed(() => [
 const mobileTabs = [{value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},{value:'my',label:'我的',icon:UserRound}];
 const dutyTabs = computed(() => [
   ...(NOTICE_IDS.some(id => granted.value.includes(id)) ? [{id:'notices',label:'通告处理',icon:ClipboardList,url:'/workbench-lite?work_type=all'}] : []),
-  ...[{id:'water',label:'水耗处理',icon:Droplets},{id:'drills',label:'演练管理',icon:Activity},{id:'critical_guard',label:'风险管理',icon:ShieldCheck}].filter(tab => granted.value.includes(tab.id)).map(tab => ({...tab,url:moduleUrl(modules.find(m=>m.id===tab.id)!,scopeFor(tab.id))})),
+  ...[{id:'water',label:'水耗处理',icon:Droplets},{id:'drills',label:'演练管理',icon:Activity},{id:'critical_guard',label:'重保管理',icon:ShieldCheck}].filter(tab => granted.value.includes(tab.id)).map(tab => ({...tab,url:moduleUrl(modules.find(m=>m.id===tab.id)!,scopeFor(tab.id))})),
 ]);
 const dutyActive = computed(() => NOTICE_IDS.includes(activeModule.value) || activeModule.value === 'all' ? 'notices' : activeModule.value);
 const showDutyTabs = computed(() => personaFor(user.value) === 'duty' && !publicLink.value && !printMode.value && ['notices','water','drills','critical_guard'].includes(dutyActive.value));
@@ -203,11 +205,13 @@ watch(()=>route.value.pathname+':'+(componentName.value||view.value),()=>{
   if(window.matchMedia('(min-width:761px)').matches&&!window.matchMedia('(prefers-reduced-motion: reduce)').matches)
     requestAnimationFrame(()=>document.querySelector('.v2-main')?.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}));
 },{flush:'post'});
-const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (activeModule.value === 'learning' ? route.value.search : currentScope.value) + (['drills','critical_guard'].includes(activeModule.value)?':'+moduleAdminMode.value:'') + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : ''));
+const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (['learning','work_handover','risk_inspection'].includes(activeModule.value) ? route.value.search : currentScope.value) + (['drills','critical_guard'].includes(activeModule.value)?':'+moduleAdminMode.value:'') + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : ''));
 const componentProps = computed(() => {
   const p = route.value.searchParams, admin = user.value.role === 'admin';
   const common = { scope:currentScope.value, scopeOptions:scopes.value, isAdmin:admin, checking:false, loggedIn:loggedIn.value, loginUrl:loginUrl.value };
   switch(componentName.value) {
+    case 'work_handover': return {handoverId:p.get('id')||''};
+    case 'risk_inspection': return {releaseId:p.get('id')||''};
     case 'event': return {...common, refreshNonce:0};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':

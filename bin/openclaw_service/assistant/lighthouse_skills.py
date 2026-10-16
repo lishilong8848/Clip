@@ -41,6 +41,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _EXCLUDED_PARTS = ('zhinav-point-data', '告警描述核查')
 _BUILTIN = ('lighthouse-business', 'public-research', 'lighthouse-extension')
 MODULE_GUIDES = {
+    '飞书工作伙伴': 'feishu-workpartner',
     '飞书消息': 'lighthouse-people-signatures',
     '通告与事件': 'lighthouse-notices', '工作台': 'lighthouse-notices',
     '变更确认': 'lighthouse-notices', '事件': 'lighthouse-events',

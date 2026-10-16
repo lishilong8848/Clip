@@ -95,6 +95,17 @@ class Base(unittest.TestCase):
 
 
 class SchedulingTests(Base):
+    def test_invalid_legacy_frequency_does_not_block_other_items(self):
+        self.save('A', 0, [{'id': 'valid', 'text': '正常检查'}])
+        with self.service.connection(True) as conn:
+            stored = self.service.definition('A', conn)['items']
+            stored.append({'id': 'bad', 'text': '旧配置损坏', 'frequency': {'kind': 'unknown'}})
+            conn.execute('UPDATE definitions SET items=? WHERE scope=?', (json.dumps(stored), 'A'))
+        self.prepare(at(DAY + 'T09:00:00'))
+        tasks = self.service.state(self.worker, 'A', at(DAY + 'T09:00:00'))['tasks']
+        self.assertTrue(tasks)
+        self.assertTrue(all([i['id'] for i in task['items']] == ['valid'] for task in tasks))
+
     def test_per_item_groups_and_nonstandard_id(self):
         items = [
             {'id': 'legacy', 'text': '传统'},
@@ -117,7 +128,7 @@ class SchedulingTests(Base):
         self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))
         self.prepare(at(DAY + 'T09:00:00'))
         current = at(DAY + 'T09:00:00')
-        self.assertEqual(len(self.service.state(self.worker, 'A', current)['tasks']), 1)
+        self.assertEqual(len(self.service.state(self.worker, 'A', current)['tasks']), 2, 'white and upcoming night are both visible')
         self.save('A', 1, [], at(DAY + 'T09:00:00'))
         self.assertEqual(self.service.state(self.worker, 'A', current)['tasks'], [])
 
@@ -166,6 +177,26 @@ class SchedulingTests(Base):
 class AttachmentTests(Base):
     def _white_id(self):
         return f'{DAY}:A:白'
+
+    def test_early_and_late_evidence_keeps_building_and_file_permissions(self):
+        self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))
+        self.prepare(at(DAY + 'T09:00:00'))
+        future = f'{DAY}:A:夜'
+        early = at(DAY + 'T09:00:00')
+        session = self.service.stage_upload(self.worker, future, 'x', 'item', '提前检查.txt', early)
+        pathlib.Path(session['path']).write_bytes(b'early evidence')
+        self.service.commit_upload(self.worker, session, None, early)
+        photo = self.service.stage_upload(self.peer, future, '', 'handover', '提前交接.png', early)
+        make_png(photo['path'])
+        self.service.commit_upload(self.peer, photo, None, early)
+        late = at('2026-10-16T09:00:00')
+        session = self.service.stage_upload(self.peer, self._white_id(), 'x', 'item', '补做检查.txt', late)
+        pathlib.Path(session['path']).write_bytes(b'late evidence')
+        self.service.commit_upload(self.peer, session, None, late)
+        row = next(t for t in self.service.state(self.worker, 'A', late)['tasks'] if t['id'] == self._white_id())
+        self.assertEqual([f['name'] for f in row['files']], ['补做检查.txt'])
+        with self.assertRaises(checks.CheckError):
+            self.service.stage_upload({**self.peer, 'home_scope': 'B'}, self._white_id(), 'x', 'item', '越权.txt', late)
 
     def test_item_file_upload_ownership_and_frozen_evidence(self):
         self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))

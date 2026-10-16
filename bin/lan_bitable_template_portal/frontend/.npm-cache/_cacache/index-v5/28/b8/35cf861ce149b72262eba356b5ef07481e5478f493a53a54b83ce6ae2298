@@ -1,2 +1,0 @@
-
-7ad4f0f5f9623d48e862ff9bc458e5eb491713a9	{"key":"make-fetch-happen:request-cache:https://registry.npm.taobao.org/echarts","integrity":null,"time":1791852441930,"size":"262","metadata":{"time":1791852441930,"url":"https://registry.npm.taobao.org/echarts","reqHeaders":{"accept":"application/json"},"resHeaders":{"content-type":"text/html","date":"Tue, 13 Oct 2026 00:47:21 GMT","location":"https://registry.npmmirror.com/echarts"},"options":{"compress":true},"status":301}}

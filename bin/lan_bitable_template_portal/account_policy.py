@@ -266,6 +266,7 @@ async def business_delete_denial(request, controller, runtime):
     personal = (path.startswith("/api/assistant/") or path == "/api/workbench/draft"
                 or path.startswith(("/api/notice-images/", "/api/notice-attachments/"))
                 or re.fullmatch(r"/api/pre-shift-checks/files/[a-f0-9]{32}", path)
+                or re.fullmatch(r"/api/work-handovers/files/[a-f0-9]{32}", path)
                 or re.fullmatch(r"/api/change-confirmations/[^/]+/screenshot", path))
     deleting = request.method == "DELETE" and path.startswith("/api/") and not personal
     deleting = deleting or (request.method == "POST" and bool(re.search(r"/(?:delete|remove)(?:/|$)", path)))

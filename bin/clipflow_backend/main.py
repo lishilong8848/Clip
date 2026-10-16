@@ -763,6 +763,10 @@ class FastAPIPortalController:
         install_learning_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.pre_shift_routes import install_pre_shift_routes
         install_pre_shift_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.work_handover_routes import install_work_handover_routes
+        install_work_handover_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.risk_inspection_routes import install_risk_inspection_routes
+        install_risk_inspection_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
@@ -883,6 +887,7 @@ class FastAPIPortalController:
         @app.get("/life-guide")
         @app.get("/link-directory")
         @app.get("/knowledge-base")
+        @app.get("/work-handover")
         async def life_guide_page(request: Request):
             if self._current_session(request) is None:
                 entry = "/?login=password&" if request.cookies.get("clipflow-login-method") == "password" else "/api/auth/login?"
@@ -1289,6 +1294,8 @@ class FastAPIPortalController:
 
         @app.get("/critical-guard")
         @app.get("/critical-guard/")
+        @app.get("/risk-inspections")
+        @app.get("/risk-inspections/")
         async def critical_guard_page(request: Request):
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 

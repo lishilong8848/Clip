@@ -68,7 +68,7 @@ export function adaptPageFilters(source, filename) {
   const allowed = containers[file] || [];
   if (file === 'PlanConvergencePage.vue') source = source.replace('<button v-for="item in tabs"', '<button data-v2-navigation v-for="item in tabs"');
   const { descriptor } = parse(source), edits = [];
-  const anchors={'HomePage.vue':'v2-dashboard-heading','TaskWorkspace.vue':'v2-section-title','RepairWorkspace.vue':'v2-repair-filters','EventManagementPage.vue':'event-command-head','CabinetPowerPage.vue':'page-heading','CabinetPowerBatchPage.vue':'page-heading','CriticalGuardPage.vue':'guard-page__header'};
+  const anchors={'TaskWorkspace.vue':'v2-section-title','RepairWorkspace.vue':'v2-repair-filters','EventManagementPage.vue':'event-command-head','CabinetPowerPage.vue':'page-heading','CabinetPowerBatchPage.vue':'page-heading','CriticalGuardPage.vue':'guard-page__header'};
   let scopeAdded=false;
   function visit(node, overlay = false) {
     const classes = (node.props?.find(p => p.type === 6 && p.name === 'class')?.value?.content || '').split(/\s+/);

@@ -69,6 +69,93 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(night_before, len([c for c in self.sender.call_args_list if f'{DAY}:A:夜:' in c.args[2]]))
         self.assertEqual(windows(DAY, '夜')[1], at('2026-10-15T08:00:00'))
 
+    def test_duty_submission_stops_both_people_but_not_other_shifts_or_days(self):
+        self.service.tick(self.current)
+        duty = {**self.worker, 'id': 'ou_building_duty', 'category': 'duty'}
+        self.submit(duty)
+        self.service.tick(self.current + dt.timedelta(hours=2))
+        self.assertEqual(self.sender.call_count, 2)
+        self.assertTrue(self.service.state(self.peer, 'A', self.current)['tasks'][0]['submitted'])
+        night = at(DAY + 'T17:50:00')
+        self.service.tick(night)
+        self.assertEqual(self.sender.call_count, 4, 'white completion must not silence the night shift')
+        self.submit(duty, shift='夜', current=night)
+        self.service.tick(at('2026-10-15T01:50:00'))
+        self.assertEqual(self.sender.call_count, 4, 'the same overnight shift stays completed after midnight')
+        self.service.tick(at('2026-10-15T08:50:00'))
+        self.assertEqual(self.sender.call_count, 6, 'the next day is an independent checklist')
+        self.assertTrue(all('2026-10-15:A:白' in c.args[2] for c in self.sender.call_args_list[-2:]))
+
+    def test_each_due_group_is_independent_without_faking_answers(self):
+        items = [{'id': 'x', 'text': '检查一'}, {'id': 'y', 'text': '检查二'},
+                 {'id': 'later', 'text': '稍后检查', 'frequency': {'kind': 'daily', 'time': '11:00'}}]
+        self.service.save_definition(self.admin, 'A', 1, items)
+        current = at(DAY + 'T11:00:00')
+        self.service.prepare(current)
+        self.service.submit(self.worker, DAY + ':A:白', 2, self.answers, current)
+        self.service.notify(current + dt.timedelta(hours=2))
+        self.assertEqual(self.sender.call_count, 2, 'a different due time is still a separate check')
+        self.assertTrue(all(':白:1100:' in c.args[2] for c in self.sender.call_args_list))
+        later = next(t for t in self.service.state(self.peer, 'A', current)['tasks'] if t['id'].endswith(':1100'))
+        self.assertEqual(later['submitted'], '', 'unanswered items are not silently marked complete')
+        self.assertEqual(later['answers'], [])
+        self.sender.reset_mock()
+        self.service.save_definition(self.admin, 'B', 0, [{'id': 'b', 'text': 'B楼检查'}])
+        self.roster.return_value['people'] += [{**p, 'scope': 'B'} for p in list(self.roster.return_value['people'])]
+        with self.service.connection(True) as conn:
+            conn.execute('DELETE FROM rosters')
+        self.service.prepare(current)
+        self.service.notify(current)
+        self.assertTrue(any(':B:白:' in c.args[2] for c in self.sender.call_args_list), 'A completion must not silence B')
+
+    def test_submit_during_first_delivery_stops_the_second_person(self):
+        self.service.prepare(self.current)
+        def send(*_):
+            self.submit(self.peer)
+            return True, '', {}
+        self.sender.side_effect = send
+        self.service.notify(self.current)
+        self.assertEqual(self.sender.call_count, 1)
+        self.service.notify(self.current + dt.timedelta(hours=2))
+        self.assertEqual(self.sender.call_count, 1)
+
+    def test_upcoming_weekly_monthly_checks_can_be_completed_before_their_due_time(self):
+        self.service.save_definition(self.admin, 'A', 1, [
+            {'id': 'week', 'text': '每周检查', 'frequency': {'kind': 'weekly', 'weekday': 0, 'time': '10:00'}},
+            {'id': 'month', 'text': '月初检查', 'frequency': {'kind': 'month_start', 'time': '09:00'}},
+        ])
+        self.service.prepare(self.current)
+        tasks = self.service.state(self.worker, 'A', self.current)['tasks']
+        self.assertEqual([task['day'] for task in tasks], ['2026-10-19', '2026-11-01'])
+        self.assertTrue(all(task['due'] > self.current.timestamp() and task['can_submit'] for task in tasks))
+        self.assertEqual(self.roster.call_count, 1, 'future roster days are not downloaded to render plans')
+        for task in tasks:
+            results = [{'id': item['id'], 'status': 'normal', 'note': ''} for item in task['items']]
+            self.service.submit(self.peer, task['id'], task['definition_version'], results, self.current)
+        self.service.notify(at('2026-10-19T10:00:00'))
+        self.service.notify(at('2026-11-01T09:00:00'))
+        self.sender.assert_not_called()
+        completed = self.service.state(self.worker, 'A', self.current)['tasks']
+        self.assertTrue(all(t['actor_name'] == self.peer['name'] and t['submitted'] == self.current.isoformat() for t in completed))
+        later = self.service.state(self.worker, 'A', at('2026-10-19T18:00:00'))['tasks']
+        self.assertEqual([t['day'] for t in later], ['2026-11-01'], 'completed checks disappear at the end of their own window')
+
+    def test_overdue_check_keeps_its_snapshot_and_can_be_completed_late(self):
+        self.service.prepare(self.current)
+        late = at('2026-10-16T09:00:00')
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=late):
+            self.service.save_definition(self.admin, 'A', 1, [{'id': 'new', 'text': '之后的新清单'}])
+        state = self.service.state(self.peer, 'A', late)
+        row = next(t for t in state['tasks'] if t['id'] == DAY + ':A:白')
+        self.assertTrue(row['can_submit'])
+        self.assertEqual(row['definition_version'], 1, 'late work retains the original checklist')
+        self.submit(self.peer, current=late)
+        self.assertNotIn(row['id'], [t['id'] for t in self.service.state(self.worker, 'A', late)['tasks']])
+        with self.service.connection() as conn:
+            saved = conn.execute('SELECT * FROM tasks WHERE id=?', (row['id'],)).fetchone()
+            self.assertEqual(saved['submitted'], late.isoformat())
+            self.assertEqual(json.loads(saved['answers'])[0]['id'], 'x')
+
     def test_downtime_does_not_replay_every_missed_reminder(self):
         self.service.tick(at(DAY + 'T15:10:00'))
         self.assertEqual(self.sender.call_count, 2)
@@ -106,11 +193,9 @@ class CheckTests(unittest.TestCase):
             with self.assertRaises(CheckError):
                 self.service.submit(self.worker, DAY + ':A:白', 1, answers, self.current)
         with self.assertRaises(CheckError):
-            self.submit({**self.worker, 'id': 'ou_unassigned'})
+            self.submit({**self.worker, 'id': 'ou_unassigned', 'category': 'manager'})
         with self.assertRaises(CheckError):
             self.submit({**self.worker, 'home_scope': 'B'})
-        with self.assertRaises(CheckError):
-            self.submit(current=at(DAY + 'T18:00:00'))
         self.assertFalse(self.submit({**self.worker, 'id': 'ou_shared', 'category': 'duty'})['already_completed'])
 
     def test_definition_edit_authority_conflict_and_historical_snapshot(self):
@@ -224,7 +309,7 @@ class CheckTests(unittest.TestCase):
         self.service.prepare(self.current)
         self.submit()
         with self.service.connection() as conn:
-            tasks = [dict(row) for row in conn.execute('SELECT * FROM tasks')]
+            tasks = [dict(row) for row in conn.execute("SELECT * FROM tasks WHERE submitted!=''")]
         cloud = CheckCloud(None)
         cloud.schema_ready = True
         cloud.all = Mock(return_value=[{'record_id': 'rec_already_created'}])
@@ -247,7 +332,7 @@ class CheckTests(unittest.TestCase):
         task = self.service.state(self.worker, 'A', self.current)['tasks'][0]
         self.assertEqual([(a['id'], a['note']) for a in task['answers']], [('x', '第一项测试异常'), ('y', '第二项测试异常')])
         with self.service.connection() as conn:
-            rows = [dict(row) for row in conn.execute('SELECT * FROM tasks')]
+            rows = [dict(row) for row in conn.execute("SELECT * FROM tasks WHERE submitted!=''")]
         cloud = CheckCloud(None)
         cloud.schema_ready = True
         cloud.request = Mock(return_value={})

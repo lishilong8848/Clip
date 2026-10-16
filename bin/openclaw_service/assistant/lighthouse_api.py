@@ -112,6 +112,7 @@ _STREAM_AND_INTERNAL = (
 )
 
 _GROUP_BY_PREFIX = (
+    ("/api/feishu-workpartner", "飞书工作伙伴"),
     ("/api/message-delivery", "飞书消息"),
     ("/api/learning", "画像学练"),
     ("/api/assistant/question-material", "题库资料"),
@@ -154,6 +155,7 @@ _GROUP_BY_PREFIX = (
 # page URL for each group so the agent always has initial module knowledge about
 # where a source lives in the frontend.
 _PAGE_BY_GROUP = {
+    "飞书工作伙伴": "/",
     "SOP工单查询": "/workbench-lite",
     "题库资料": "/learning",
     "未完成工作": "/workbench-lite",
@@ -327,6 +329,7 @@ _ACTION_LABELS = {
 }
 
 _GROUP_KEYWORDS = {
+    "飞书工作伙伴": "飞书协作 机器人 艾特 @人员 创建任务 指派任务 完成任务 日程 日历 邀请 文档 协作表",
     "通告与事件": "通知 维保 维护 变更 通告工作台",
     "工作台": "通告工作台 通知 维保 维护 变更",
     "事件": "事件管理 故障 异常",
@@ -342,6 +345,10 @@ _GROUP_KEYWORDS = {
     "轮巡工单": "巡检 轮巡 SOP",
 }
 _PATH_KEYWORDS = {
+    "/api/feishu-workpartner/messages/send": "发飞书 群消息 私信 @ 艾特 话题回复",
+    "/api/feishu-workpartner/tasks": "飞书任务 指派 截止时间 完成 待办",
+    "/api/feishu-workpartner/events": "飞书日程 日历 会议 邀请参与人",
+    "/api/feishu-workpartner/documents": "云文档 创建 读取 追加正文",
     "/api/events/monthly": "月度事件 事件月报 月报 月份事件 月度统计",
     "/api/repair-management/records": "维修进度 检修进度 维修状态",
     "/api/repair-management/status": "维修进度 检修进度 检修状态 维修状态",
@@ -879,6 +886,20 @@ _NEED_MODULE_CONTEXT = frozenset({
 
 
 def _action_label(path: str, method: str) -> str:
+    if path.startswith('/api/feishu-workpartner/'):
+        parts = path.removeprefix('/api/feishu-workpartner/').split('/')
+        if parts[0] == 'resource-grants':
+            return '管理员登记协作资源范围'
+        if parts[-1] == 'append':
+            return '追加飞书文档正文'
+        if parts[-1] == 'attendees':
+            return '邀请日程参与人'
+        if parts[0] == 'messages':
+            return '发送飞书消息（支持@和话题回复）'
+        label = {'capabilities': '应用已授权能力', 'people': '协作人员', 'chats': '本人所在群聊',
+            'resources': '本人授权资源', 'operations': '协作操作回执', 'tasks': '飞书任务',
+            'events': '飞书日程', 'documents': '飞书云文档', 'tables': '独立协作表记录'}.get(parts[0], '飞书协作')
+        return ('查询' if method == 'GET' else '更新' if method in {'PATCH', 'PUT'} else '创建') + label
     if path == "/api/message-delivery/send":
         return "发送飞书消息"
     if path == "/api/message-delivery/recipients":
@@ -1231,6 +1252,15 @@ def _field_label(name: str) -> str:
         "rule label": "规则名称", "scenario name": "场景名称", "supplier rack": "供应商机柜号",
         "sources": "粘贴内容", "knowledge": "知识点", "difficulty": "难度",
         "from step id": "起始步骤", "to step id": "结束步骤", "work type": "适用类型",
+        "summary": "名称", "description": "说明", "recipient": "接收人（姓名或工号）",
+        "chat id": "目标群", "mention names": "需要@的人员", "reply message id": "原消息",
+        "assignees": "负责人（姓名或工号）", "followers": "关注人", "due time": "截止时间",
+        "completed": "已完成", "calendar id": "日历", "attendees": "参与人（姓名或工号）",
+        "location": "地点", "folder id": "目标文件夹", "document id": "文档",
+        "expected revision": "核对版本", "expected version id": "核对版本", "fields": "待填写字段",
+        "name": "名称", "value": "内容",
+        "kind": "资源类型", "resource id": "资源标识", "base id": "所属多维表",
+        "building scopes": "允许的楼栋", "writable": "允许修改", "enabled": "启用",
     }
     if text in zh:
         return zh[text]
@@ -2895,7 +2925,8 @@ class PortalAPICatalog:
         if model is not None:
             try:
                 parsed = model.model_validate(normalized_body)
-                normalized_body = parsed.model_dump(mode="json", exclude_none=False)
+                normalized_body = parsed.model_dump(mode="json", exclude_none=False,
+                    exclude_unset=desc["path"].startswith("/api/feishu-workpartner/"))
             except ValidationError as exc:
                 type_errors = []
                 required_fields = _missing_scalars(desc["schema"]["body"], normalized_body)

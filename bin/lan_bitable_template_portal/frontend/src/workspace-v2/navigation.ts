@@ -4,8 +4,8 @@ import { currentEmbedded } from './embeddedContext';
 export type NavigateOptions = { replace?: boolean; hard?: boolean; bypassGuard?: boolean; legacy?: boolean };
 const pagePaths = new Set(['/', '/admin/settings', '/admin/history-memory', '/signature', '/signature-management',
   '/engineer/mop', '/repair-management', '/repair-status', '/learning', '/plan-convergence', '/life-guide',
-  '/link-directory', '/knowledge-base', '/daily-tasks', '/daily-tasks/morning-meeting/print', '/water-management',
-  '/critical-guard', '/cabinet-power', '/cabinet-power/batches', '/drill-management', '/drill-management/print',
+  '/link-directory', '/knowledge-base', '/daily-tasks', '/daily-tasks/morning-meeting/print', '/water-management', '/work-handover',
+  '/critical-guard', '/risk-inspections', '/cabinet-power', '/cabinet-power/batches', '/drill-management', '/drill-management/print',
   '/workbench-lite', '/polling-work-order', '/polling-work-order/steps']);
 type NavigationGuard=(target:string,proceed:()=>void)=>boolean;
 const guards=new Set<NavigationGuard>();

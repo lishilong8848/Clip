@@ -1,11 +1,9 @@
 <template>
   <TaskWorkspace v-if="view!=='home'" v-bind="props" :initial-kind="initialKind" @open="$emit('open',$event)" />
   <div v-else class="v2-dashboard">
-    <header class="v2-dashboard-heading">
-      <div class="v2-dashboard-title"><h1>{{ personaTitles[personaFor(user)] }}</h1><time :datetime="today">{{ today }}</time></div>
+    <header v-if="editing" class="v2-dashboard-heading">
       <div class="v2-dashboard-actions">
-        <template v-if="editing"><NButton data-v2-navigation :disabled="saving" @click="cancel">取消</NButton><NButton data-v2-navigation :disabled="saving" @click="restore"><template #icon><RotateCcw :size="16" /></template>恢复默认</NButton><NButton type="primary" :loading="saving" :disabled="saving" @click="save"><template #icon><Check :size="16" /></template>保存布局</NButton></template>
-        <template v-else><NButton secondary aria-label="刷新工作台" @click="refresh"><RefreshCw :size="17" /></NButton><NButton data-v2-navigation size="small" class="v2-customize-button" :disabled="!ready||loading" aria-label="自定义工作台" :title="loading?'正在同步账号布局':'自定义工作台'" secondary type="primary" @click="edit"><template #icon><SlidersHorizontal :size="14" /></template>自定义</NButton></template>
+        <NButton data-v2-navigation :disabled="saving" @click="cancel">取消</NButton><NButton data-v2-navigation :disabled="saving" @click="restore"><template #icon><RotateCcw :size="16" /></template>恢复默认</NButton><NButton type="primary" :loading="saving" :disabled="saving" @click="save"><template #icon><Check :size="16" /></template>保存布局</NButton>
       </div>
     </header>
     <MobileBrief v-if="mobile && !editing" :user="user" :scope="scope" @open="open" />
@@ -13,7 +11,7 @@
     <Transition name="v2-editor-bar"><div v-if="editing" class="v2-edit-banner"><span><GripVertical :size="17" />个人布局 · 仅影响你的工作台</span><NButton data-v2-navigation secondary type="primary" @click="library=true"><template #icon><Plus :size="16" /></template>添加组件</NButton></div></Transition>
     <WidgetGrid :items="layout.widgets" :editing="editing&&!saving" :inert="saving||undefined" @layout="setPositions">
       <template #title="{item}">{{ mobile && !editing && item.title==='待处理事项' ? '需要留意' : item.title }}</template>
-      <template #tools="{item}"><span v-if="!editing" class="v2-widget-scope" :class="{'is-specific-scope':item.scope!=='current'}">{{ item.kind==='pre_shift'?'班组协作':item.kind==='learning'?'本人':item.scope==='current'?scopeLabel:scopes.find(s=>s.value===item.scope)?.label }}</span><div v-else class="v2-widget-tools" data-v2-navigation><NButton quaternary circle :aria-label="'上移'+item.title" :disabled="isFirst(item)" @click="move(item,-1)"><ArrowUp :size="15" /></NButton><NButton quaternary circle :aria-label="'下移'+item.title" :disabled="isLast(item)" @click="move(item,1)"><ArrowDown :size="15" /></NButton><NButton quaternary circle :aria-label="'编辑'+item.title" @click="selected=item"><Settings2 :size="16" /></NButton><NButton v-if="item.kind!=='pre_shift'||!mandatoryCheck(user)" quaternary circle :aria-label="'移除'+item.title" @click="remove(item)"><X :size="16" /></NButton></div></template>
+      <template #tools="{item}"><template v-if="!editing"><span class="v2-widget-scope" :class="{'is-specific-scope':item.scope!=='current'}">{{ item.kind==='pre_shift'?'班组协作':item.kind==='learning'?'本人':item.scope==='current'?scopeLabel:scopes.find(s=>s.value===item.scope)?.label }}</span><NButton v-if="isFirst(item)" data-v2-navigation size="small" class="v2-customize-button" :disabled="!ready||loading" aria-label="自定义工作台" :title="loading?'正在同步账号布局':'自定义工作台'" secondary type="primary" @click="edit"><template #icon><SlidersHorizontal :size="14" /></template>自定义</NButton></template><div v-else class="v2-widget-tools" data-v2-navigation><NButton quaternary circle :aria-label="'上移'+item.title" :disabled="isFirst(item)" @click="move(item,-1)"><ArrowUp :size="15" /></NButton><NButton quaternary circle :aria-label="'下移'+item.title" :disabled="isLast(item)" @click="move(item,1)"><ArrowDown :size="15" /></NButton><NButton quaternary circle :aria-label="'编辑'+item.title" @click="selected=item"><Settings2 :size="16" /></NButton><NButton v-if="item.kind!=='pre_shift'||!mandatoryCheck(user)" quaternary circle :aria-label="'移除'+item.title" @click="remove(item)"><X :size="16" /></NButton></div></template>
       <template #default="{item}"><WidgetView :item="item" :user="user" :scopes="scopes" :scope="item.scope==='current'?scope:item.scope" :brief="mobile && !editing" @open="open" /></template>
     </WidgetGrid>
     <div v-if="!layout.widgets.length" class="v2-dashboard-empty"><LayoutGrid :size="36" /><h2>把常用业务放在这里</h2><NButton data-v2-navigation type="primary" :disabled="!ready||loading" @click="edit();library=true"><template #icon><Plus :size="17" /></template>添加第一个组件</NButton></div>
@@ -32,10 +30,9 @@
 <script setup lang="ts">
 import { computed,onBeforeUnmount,ref } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,useDialog,useMessage } from 'naive-ui';
-import { ArrowDown,ArrowUp,BookOpen,ChartColumn,ChartNoAxesCombined,Check,CircleCheck,ClipboardList,Droplets,GripVertical,LayoutGrid,ListTree,PanelsTopLeft,Plus,RefreshCw,RotateCcw,Settings2,SlidersHorizontal,Wrench,X } from 'lucide-vue-next';
+import { ArrowDown,ArrowUp,BookOpen,ChartColumn,ChartNoAxesCombined,Check,CircleCheck,ClipboardList,Droplets,GripVertical,LayoutGrid,ListTree,PanelsTopLeft,Plus,RotateCcw,Settings2,SlidersHorizontal,Wrench,X } from 'lucide-vue-next';
 import type { Dict } from './client';
-import { beijingDate,moduleIcons,navigationModules } from './modules';
-import { personaFor,personaTitles } from './persona';
+import { moduleIcons,navigationModules } from './modules';
 import { registerNavigationGuard,requestEmbeddedChange } from './navigation';
 import TaskWorkspace from './TaskWorkspace.vue';
 import WidgetGrid from './dashboard/WidgetGrid.vue';
@@ -58,7 +55,7 @@ const selected=computed<Widget|null>({get:()=>layout.value.widgets.find(item=>it
 const sync=useLayoutSync({user:()=>props.user,page:()=> 'workspace',legacyKey:()=>layoutKey(props.user),locked:()=>editing.value,
   normalize:value=>sanitize(value,props.user,props.scopes.map(s=>s.value)),apply:value=>{layout.value=value;saved=JSON.stringify(value);editing.value=false;selected.value=null;library.value=false;releaseGuard();}});
 const {loading,saving,error,ready}=sync;
-const today=beijingDate(),icons={ClipboardList,LayoutGrid,ChartNoAxesCombined,ChartColumn,BookOpen,Droplets,ListTree,CircleCheck,PanelsTopLeft,Wrench};
+const icons={ClipboardList,LayoutGrid,ChartNoAxesCombined,ChartColumn,BookOpen,Droplets,ListTree,CircleCheck,PanelsTopLeft,Wrench};
 const scopeLabel=computed(()=>props.scopes.find(s=>s.value===props.scope)?.label||props.scope);
 const librarySearch=ref('');
 const matches=(entry:{title:string;description:string})=>(entry.title+entry.description).toLowerCase().includes(librarySearch.value.trim().toLowerCase());
@@ -81,7 +78,6 @@ function remove(item:Widget){if(item.kind==='pre_shift'&&(mandatoryCheck(props.u
 function apply(item:Widget){if(item.kind==='module'&&layout.value.widgets.some(row=>row.id!==item.id&&row.kind==='module'&&row.module===item.module)){message.warning('本工作台已经添加这个模块。');return;}const previous=layout.value.widgets.find(row=>row.id===item.id);const commit=()=>{layout.value.widgets=layout.value.widgets.map(w=>w.id===item.id?item:w);selected.value=null;};if(previous?.kind==='module'&&(previous.module!==item.module||previous.scope!==item.scope))requestEmbeddedChange(item.id,commit);else commit();}
 function move(item:Widget,direction:number){layout.value.widgets=reorderWidgets(layout.value.widgets,item.id,direction);}
 function setPositions(items:Widget[]){if(editing.value&&!saving.value)layout.value.widgets=items;}
-function refresh(){window.dispatchEvent(new Event('clipflow-business-changed'));}
 function open(url:string){emit('open',url);}
 function beforeUnload(event:BeforeUnloadEvent){if(saving.value||editing.value&&JSON.stringify(layout.value)!==saved){event.preventDefault();event.returnValue='';}}
 window.addEventListener('beforeunload',beforeUnload);

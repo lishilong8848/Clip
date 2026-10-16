@@ -246,5 +246,239 @@ class SignatureAccessTests(unittest.TestCase):
                 client.close()
 
 
+class MopSignatureInvitationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = LanPortalStateStore(Path(self.temp.name) / 'state.sqlite3')
+        self.service = FakeService(self.store)
+        self.manager = self.service.manager
+        self.service.add('recReceiver', name='接收人', open_id='receiver', building='E楼')
+        self.service.add('recOther', name='其他楼接收人', open_id='other', building='A楼')
+        self.service._engineer_month_maintenance_notices = Mock(return_value=[
+            {'notice_key': 'noticeE', 'building': 'E楼', 'building_codes': ['E']},
+            {'notice_key': 'noticeA', 'building': 'A楼', 'building_codes': ['A']}])
+        self.modules = ['engineer_mop']
+        self.blocked = set()
+        self.auth = SimpleNamespace(account_profile=lambda actor: {'modules': self.modules, 'scope_rules': ['E']},
+                                    directory_block_reason=lambda actor: '已离职' if actor in self.blocked else '')
+        self.sender = Mock(return_value=(True, '', []))
+        self.payload = {'scope': 'E', 'notice_key': 'noticeE', 'role': 'implementer', 'name': '新增外部人员',
+                        'specialty': '暖通', 'recipient': 'staff:recReceiver',
+                        'operation_id': 'createTest', 'send_operation_id': 'sendTest'}
+
+    def call(self, operation, payload=None, *, actor='mopOperator', method=None):
+        return dispatch(self.manager, method or ('POST' if operation == 'mop-invite' else 'GET'), operation,
+                        self.payload if payload is None else payload, actor=actor, auth=self.auth,
+                        send_text=self.sender, base_url='http://localhost:18766')
+
+    def test_mop_only_user_can_create_invite_and_sign_without_directory_management(self):
+        options = self.call('mop-people')
+        self.assertEqual(options['scope_options'], [{'value': 'E', 'label': 'E楼'}])
+        self.assertEqual({p['value'] for p in options['recipients']}, {'duty:E', 'staff:recReceiver'})
+        self.assertNotIn('open_id', str(options))
+        result = self.call('mop-invite')
+        self.assertEqual(result['request']['status'], 'sent')
+        self.assertFalse(result['person']['has_signature'])
+        self.assertEqual(self.sender.call_args.args[1], ['receiver'])
+        self.assertEqual(self.service.creates, 1)
+        pending = self.call('mop-list')['items']
+        self.assertEqual(len(pending), 1)
+        self.assertFalse(pending[0]['has_signature'])
+        token = self.sender.call_args.args[0].rsplit('#token=', 1)[-1]
+        saved = dispatch(self.manager, 'POST', 'submit', {
+            'request_id': result['request']['request_id'], 'token': token, 'confirmed_self': True,
+            'signature_png': 'data:image/png;base64,' + base64.b64encode(signature_bytes()).decode()})
+        self.assertEqual(saved['status'], 'completed')
+        signed = self.call('mop-list')['items'][0]
+        self.assertEqual(signed['status'], 'signed')
+        self.assertTrue(signed['has_signature'])
+        self.assertEqual(signed['record_id'], result['person']['record_id'])
+        self.assertEqual(self.service.uploads, 1)
+        repeated = self.call('mop-invite')
+        self.assertEqual(repeated['request']['status'], 'completed')
+        self.assertTrue(repeated['person']['has_signature'])
+        self.assertEqual(self.service.creates, 1)
+        self.assertEqual(self.sender.call_count, 1)
+        with self.assertRaises(SignatureManagementError):
+            self.call('temporary', {'name': 'other', 'building': 'E楼', 'operation_id': 'forbidden'}, method='POST')
+
+    def test_duplicate_clicks_and_concurrent_retries_do_not_create_or_send_twice(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(lambda _: self.call('mop-invite'), range(3)))
+        self.assertEqual(len({r['person']['record_id'] for r in results}), 1)
+        self.assertEqual(self.service.creates, 1)
+        self.assertEqual(self.sender.call_count, 1)
+        self.assertEqual(len(self.call('mop-list')['items']), 1)
+
+    def test_failed_delivery_explicit_retry_reuses_person(self):
+        self.sender.return_value = (False, '发送失败', [])
+        first = self.call('mop-invite')
+        self.assertEqual(first['request']['status'], 'send_failed')
+        self.assertFalse(self.call('mop-list')['items'][0]['has_signature'])
+        self.sender.return_value = (True, '', [])
+        second = self.call('mop-invite', {**self.payload, 'send_operation_id': 'retrySend',
+                                        'expected_request_id': first['request']['request_id']})
+        self.assertEqual(second['request']['status'], 'sent')
+        self.assertEqual(second['person']['record_id'], first['person']['record_id'])
+        self.assertEqual(self.service.creates, 1)
+        self.assertEqual(self.sender.call_count, 2)
+
+    def test_unconfirmed_delivery_rechecks_original_request_without_resending(self):
+        self.sender.side_effect = TimeoutError('response lost')
+        first = self.call('mop-invite')
+        self.assertEqual(first['request']['status'], 'send_unknown')
+        self.assertEqual(self.call('mop-invite')['request']['status'], 'send_unknown')
+        self.assertEqual(self.sender.call_count, 1)
+        self.assertEqual(self.service.creates, 1)
+
+    def test_module_scope_notice_recipient_and_actor_checks_precede_writes(self):
+        for changes in ({'scope': 'A'}, {'notice_key': 'noticeA'}, {'notice_key': 'missing'},
+                        {'recipient': 'staff:recOther'}, {'recipient': 'duty:A'}, {'recipient': 'ou_arbitrary'},
+                        {'role': 'inspector'}, {'name': ''}, {'operation_id': 'x' * 128}):
+            with self.subTest(changes=changes), self.assertRaises(SignatureManagementError):
+                self.call('mop-invite', {**self.payload, **changes})
+        self.modules = ['signatures']
+        with self.assertRaises(SignatureManagementError):
+            self.call('mop-invite')
+        self.modules = ['engineer_mop']
+        for blocked in ('mopOperator', 'receiver'):
+            self.blocked = {blocked}
+            with self.assertRaises(SignatureManagementError):
+                self.call('mop-invite')
+        self.assertEqual(self.service.creates, 0)
+        self.sender.assert_not_called()
+
+    def test_invitation_lists_remain_account_and_notice_isolated_after_reload(self):
+        self.call('mop-invite')
+        self.assertEqual(self.call('mop-list', actor='anotherOperator')['items'], [])
+        self.assertEqual(self.call('mop-list', {**self.payload, 'notice_key': 'other'})['items'], [])
+        from lan_bitable_template_portal.signature_management import SignatureManagement
+        self.manager = SignatureManagement(self.service)
+        self.assertEqual(self.call('mop-list')['items'][0]['name'], self.payload['name'])
+
+    def test_directory_failure_never_creates_or_claims_signed(self):
+        self.service.staff_error = True
+        with self.assertRaises(SignatureManagementError) as error:
+            self.call('mop-invite')
+        self.assertEqual(error.exception.status, 503)
+        self.assertEqual(self.service.creates, 0)
+        self.sender.assert_not_called()
+
+    def test_new_context_operations_do_not_grant_signature_management(self):
+        from lan_bitable_template_portal.module_access import required_modules
+        for operation in ('mop-people', 'mop-list', 'mop-invite'):
+            self.assertEqual(required_modules('/api/signatures/management/' + operation), {'engineer_mop'})
+        self.assertEqual(required_modules('/api/signatures/management/temporary'), {'signatures'})
+
+    def test_failed_request_can_resume_after_restart_without_creating_another_person(self):
+        self.sender.return_value = (False, '发送失败', [])
+        first = self.call('mop-invite')
+        from lan_bitable_template_portal.signature_management import SignatureManagement
+        self.manager = SignatureManagement(self.service)
+        row = self.call('mop-list')['items'][0]
+        self.assertEqual(row['operation_id'], self.payload['operation_id'])
+        self.assertEqual(row['send_operation_id'], self.payload['send_operation_id'])
+        self.assertEqual(row['recipient'], self.payload['recipient'])
+        self.assertEqual(row['request_status'], 'send_failed')
+        self.sender.return_value = (True, '', [])
+        resumed = self.call('mop-invite', {**self.payload, 'operation_id': row['operation_id'],
+            'send_operation_id': 'afterRestart', 'expected_request_id': row['request_id']})
+        self.assertEqual(resumed['request']['status'], 'sent')
+        self.assertEqual(resumed['person']['record_id'], first['person']['record_id'])
+        self.assertEqual(self.service.creates, 1)
+        self.assertEqual(self.sender.call_count, 2)
+
+    def test_old_attempt_cannot_replace_newer_active_request(self):
+        self.sender.return_value = (False, '发送失败', [])
+        first = self.call('mop-invite')
+        self.sender.return_value = (True, '', [])
+        current = self.call('mop-invite', {**self.payload, 'send_operation_id': 'newerAttempt',
+            'expected_request_id': first['request']['request_id']})
+        repeated = self.call('mop-invite')
+        self.assertEqual(repeated['request']['request_id'], current['request']['request_id'])
+        self.assertEqual(repeated['request']['status'], 'sent')
+        row = self.call('mop-list')['items'][0]
+        self.assertEqual(row['request_id'], current['request']['request_id'])
+        self.assertEqual(row['request_status'], 'sent')
+        self.assertEqual(self.sender.call_count, 2)
+        self.assertEqual(self.service.creates, 1)
+
+    def test_simultaneous_retries_with_different_ids_send_only_one_new_link(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.sender.return_value = (False, '发送失败', [])
+        first = self.call('mop-invite')
+        self.sender.return_value = (True, '', [])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda name: self.call('mop-invite', {**self.payload,
+                'send_operation_id': name, 'expected_request_id': first['request']['request_id']}),
+                ['retryTabOne', 'retryTabTwo']))
+        self.assertEqual(len({r['request']['request_id'] for r in results}), 1)
+        self.assertEqual(self.sender.call_count, 2)
+        self.assertEqual(self.service.creates, 1)
+
+    def test_expired_link_is_labelled_and_explicit_resend_reuses_original_person(self):
+        import time
+        from lan_bitable_template_portal.signature_management import REQUEST_NS
+        first = self.call('mop-invite')
+        request_id = first['request']['request_id']
+        request = self.store.get_document(REQUEST_NS, request_id)
+        request['expires_at'] = time.time() - 60
+        self.store.put_document(REQUEST_NS, request_id, request)
+        row = self.call('mop-list')['items'][0]
+        self.assertEqual(row['request_status'], 'expired')
+        self.assertIn('过期', row['signature_reason'])
+        result = self.call('mop-invite', {**self.payload, 'send_operation_id': 'renewed',
+            'expected_request_id': request_id})
+        self.assertEqual(result['request']['status'], 'sent')
+        self.assertEqual(result['person']['record_id'], first['person']['record_id'])
+        self.assertEqual(self.service.creates, 1)
+        self.assertEqual(self.sender.call_count, 2)
+
+    def test_unknown_result_never_becomes_an_implicit_resend(self):
+        self.sender.side_effect = TimeoutError('response lost')
+        first = self.call('mop-invite')
+        row = self.call('mop-list')['items'][0]
+        self.assertEqual(row['request_status'], 'send_unknown')
+        same = self.call('mop-invite', {**self.payload, 'expected_request_id': row['request_id']})
+        changed = self.call('mop-invite', {**self.payload, 'send_operation_id': 'doNotSend',
+            'expected_request_id': row['request_id']})
+        for result in (same, changed):
+            self.assertEqual(result['request']['request_id'], first['request']['request_id'])
+            self.assertEqual(result['request']['status'], 'send_unknown')
+        self.assertEqual(self.sender.call_count, 1)
+        self.assertEqual(self.service.creates, 1)
+
+    def test_legacy_rows_without_resume_metadata_retain_their_creation_id(self):
+        from lan_bitable_template_portal.mop_signature_invitations import NAMESPACE
+        self.sender.return_value = (False, '发送失败', [])
+        first = self.call('mop-invite')
+        stored = self.store.list_documents(NAMESPACE)[0]
+        value = stored['payload']
+        value.pop('operation_id', None)
+        value.pop('recipient', None)
+        self.store.put_document(NAMESPACE, stored['key'], value)
+        row = self.call('mop-list')['items'][0]
+        self.assertEqual(row['operation_id'], self.payload['operation_id'])
+        self.assertEqual(row['recipient'], '')
+        self.assertEqual(row['request_id'], first['request']['request_id'])
+
+    def test_resume_cannot_attach_another_accounts_person(self):
+        first = self.call('mop-invite')
+        with self.assertRaises(SignatureManagementError):
+            self.call('mop-invite', {**self.payload, 'send_operation_id': 'forged',
+                'expected_request_id': first['request']['request_id']}, actor='anotherOperator')
+        self.assertEqual(self.service.creates, 1)
+        self.assertEqual(self.sender.call_count, 1)
+
+    def test_repeated_same_attempt_never_rewrites_saved_recipient(self):
+        first = self.call('mop-invite')
+        repeated = self.call('mop-invite', {**self.payload, 'recipient': 'duty:E'})
+        self.assertEqual(repeated['request']['request_id'], first['request']['request_id'])
+        self.assertEqual(self.call('mop-list')['items'][0]['recipient'], self.payload['recipient'])
+        self.assertEqual(self.sender.call_count, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

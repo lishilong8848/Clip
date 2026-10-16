@@ -183,7 +183,15 @@ class PortalAuthority:
         if task is None:
             if len(self.writes) >= 4096:
                 raise AssistantError('业务请求较多，请重新连接后继续。', 429)
-            task = asyncio.create_task(catalog.invoke(operation, context['request'], file_provider=provider.get))
+            if descriptor['path'].startswith('/api/feishu-workpartner/'):
+                from .feishu_workpartner import CONFIRMED_EXECUTION
+                token = CONFIRMED_EXECUTION.set((actor['id'], operation_id))
+                try:
+                    task = asyncio.create_task(catalog.invoke(operation, context['request'], file_provider=provider.get))
+                finally:
+                    CONFIRMED_EXECUTION.reset(token)
+            else:
+                task = asyncio.create_task(catalog.invoke(operation, context['request'], file_provider=provider.get))
             self.writes[key] = task
         # Dropping the chat connection must not cancel an already submitted write.
         return copy.deepcopy(await asyncio.shield(task))

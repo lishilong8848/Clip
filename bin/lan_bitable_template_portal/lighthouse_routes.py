@@ -70,6 +70,8 @@ def install_lighthouse_routes(app, controller, runtime):
     from .feishu_assistant import install_feishu_assistant
     feishu_channel = install_feishu_assistant(app, controller, runtime, ready)
     runtime.feishu_assistant_channel = feishu_channel
+    from .feishu_workpartner_routes import install_feishu_workpartner_routes
+    install_feishu_workpartner_routes(app, controller, runtime, feishu_channel)
     app.add_event_handler('startup', startup)
     app.add_event_handler('shutdown', shutdown)
 

@@ -643,7 +643,9 @@ class FeishuAssistant:
                 from .feishu_assistant_questions import parse_question_event
                 from .feishu_notice_cards import parse_card_event
                 from .permission_review_cards import parse_event as parse_permission_event
-                message = (parse_permission_event(data, self.config['app_id'])
+                from .work_handover_cards import parse_event as parse_handover_event
+                message = (parse_handover_event(data, self.config['app_id'])
+                           or parse_permission_event(data, self.config['app_id'])
                            or parse_question_event(data, self.config['app_id'])
                            or parse_card_event(data, self.config['app_id'])
                            or await asyncio.to_thread(parse_message, data, self.config["app_id"], self.bot_id, inbox=self.inbox))
@@ -823,6 +825,8 @@ class FeishuAssistant:
                 authority.contexts.pop(context, None)
 
     async def answer(self, message):
+        if message.get("kind") == "work_handover":
+            return await self.handover_cards.handle(message)
         if message.get("kind") == "permission_review":
             return await self.permission_cards.handle(message)
         if message.get("problem"):
@@ -1841,6 +1845,8 @@ class FeishuAssistant:
     async def _run(self):
         while not self.closing:
             self.event.clear()
+            if getattr(self, 'handover_cards', None):
+                self.handover_cards.tick()
             if time.monotonic() >= self.next_cleanup:
                 try:
                     await asyncio.to_thread(self.inbox.cleanup)
@@ -1872,6 +1878,8 @@ class FeishuAssistant:
 
     async def close(self):
         self.closing = True
+        if getattr(self, 'handover_cards', None):
+            await self.handover_cards.close()
         if self.process and self.process.poll() is None:
             self.process.terminate()
             await asyncio.to_thread(self.process.wait, 5)
@@ -2155,6 +2163,8 @@ def install_feishu_assistant(app, controller, runtime, ready):
     install_feishu_assistant_settings(app, controller, runtime, service)
     from .permission_review_cards import install as install_permission_cards
     install_permission_cards(app, service)
+    from .work_handover_cards import HandoverCards
+    service.handover_cards = HandoverCards(service)
 
     async def incoming(request: Request):
         return await service.receive(request)

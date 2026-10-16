@@ -8,6 +8,9 @@ export async function checkCustomization(page,output,layouts){
   await page.evaluate(()=>window.scrollTo(0,0));
   const grid=page.locator('.v2-widget-grid'),count=await grid.locator('.grid-stack-item').count();
   const customize=page.getByRole('button',{name:'自定义工作台',exact:true});
+  assert.equal(await page.locator('.v2-dashboard-heading').count(),0,'dashboard actions do not occupy a standalone row');
+  assert.equal(await page.getByRole('button',{name:'刷新工作台',exact:true}).count(),0);
+  assert.equal(await page.locator('.v2-widget-head').filter({has:customize}).count(),1,'customize shares the first widget heading');
   const buttonSize=await customize.boundingBox();assert(buttonSize.width<110&&buttonSize.height<=34,'customize stays a compact secondary control');
   await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
   await page.getByRole('button',{name:'移除常用办理',exact:true}).click();

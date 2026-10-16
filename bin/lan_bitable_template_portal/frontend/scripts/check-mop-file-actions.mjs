@@ -16,14 +16,19 @@ import Panel from '/src/components/MopBindingPanel.vue';
 import Footer from '/src/components/MopUploadFooter.vue';
 import { downloadFilledEngineerMop } from '/src/mopFileApi.ts';
 import { useLocalMopUpload } from '/src/useLocalMopUpload.ts';
+import { canUploadSignedMop, uploadSignedMopDisabledReason, fillMopDisabledReason } from '/src/mopUploadReadiness.ts';
 import '/src/global.css';
 window.uploads=[];window.errors=[];window.visible=ref(true);window.downloadError='';
 window.props=reactive({selectedNotice:{title:'A楼测试维保'},selectedMop:null,selectedMopAttachments:[],selectedAttachmentToken:'',selectedAttachment:null,bindingStatus:'',bindingError:'',canPreview:false,busy:false,disabledReason:'',buttonText:'打开填写',mopCandidates:[],selectedMopRecordId:'',mopSearch:'',isRecommendedMop:()=>false,localUploadBusy:false,localUploadStatus:'',localUploadMessage:''});
 window.payload={scope:'A',cell_edits:[{row:1,col:2,value:'当前填写内容'}]};
 window.validateFile=useLocalMopUpload().validateFile;window.flush=nextTick;
+window.readiness={hasLocalFile:true,hasActiveSheet:true,hasSelectedNotice:true,hasSourceRecordId:true,hasImplementerSignature:true,hasAuditorSignature:true,allSelectedSignaturesReady:true,timeValidationMessage:'',involvedPeopleRequirement:{count:0,cell_ref:''},signedImplementerCount:1,unsignedPeopleCount:0};
+window.footer=reactive({items:[{key:'time',label:'时间',text:'已填',ready:true},{key:'people',label:'签名',text:'已签',ready:true}],disabled:false,disabledReason:''});
+window.checkReadiness=()=>{window.footer.disabled=!canUploadSignedMop(window.readiness);window.footer.disabledReason=uploadSignedMopDisabledReason(window.readiness)};
+window.fillReason=()=>fillMopDisabledReason({...window.readiness,selectedPeopleCount:1});
 createApp({render:()=>h('div',{},[
 window.visible.value?h(Panel,{...window.props,onUploadLocal:f=>{window.uploads.push(f.name);window.props.localUploadBusy=true},onUploadLocalInvalid:m=>window.errors.push(m),'onUpdate:mopSearch':v=>window.props.mopSearch=v}):null,
-h(Footer,{items:[],downloadDisabled:false,onDownload:async()=>{try{await downloadFilledEngineerMop(window.payload)}catch(e){window.downloadError=e.message}}})])}).mount('#app');
+h(Footer,{...window.footer,downloadDisabled:false,onDownload:async()=>{try{await downloadFilledEngineerMop(window.payload)}catch(e){window.downloadError=e.message}}})])}).mount('#app');
 </script></body></html>`;
 const server = await createServer({ root, server: { host: "127.0.0.1", port: 0 }, logLevel: "error", plugins: [{
   name: "mop-check-page",
@@ -43,6 +48,18 @@ try {
   page.on("pageerror", e=>runtimeErrors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__mop-check`);
   await page.getByText("没有合适的 MOP？上传本地文件").waitFor();
+  await page.evaluate(async()=>{window.readiness.hasSourceRecordId=false;window.checkReadiness();await window.flush()});
+  const blocked=page.locator('.floating-upload-blocked');
+  await blocked.waitFor();assert.match(await blocked.innerText(),/未关联维保计划.*绑定.*刷新/);
+  assert.equal(await page.locator('.floating-upload-title small.ready').count(),0,'complete fields must not falsely report upload readiness');
+  assert.equal(await page.locator('.floating-upload-signed-mop').isDisabled(),true);
+  assert.equal(await page.evaluate(()=>window.fillReason()),'','missing archive association never blocks local filling');
+  await page.evaluate(async()=>{window.readiness.hasSourceRecordId=true;window.checkReadiness();await window.flush()});
+  for(const status of ['未开始','进行中','已结束']){
+    await page.evaluate(async status=>{window.props.selectedNotice.status=status;window.checkReadiness();await window.flush()},status);
+    assert.equal(await page.locator('.floating-upload-signed-mop').isDisabled(),false,'notice status never blocks upload');
+    assert.equal(await blocked.count(),0);
+  }
   await page.locator("h1").focus();
   const transfer = async (event, names) => page.evaluate(({event,names})=>{
     const data=new DataTransfer();

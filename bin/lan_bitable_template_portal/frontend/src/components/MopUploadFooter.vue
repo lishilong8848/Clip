@@ -3,7 +3,7 @@
     <div class="floating-upload-compact">
       <div class="floating-upload-title">
         <strong>维护单上传</strong>
-        <small :class="{ ready: allReady }">{{ footerStateLabel }}</small>
+        <small :class="{ ready: allReady && !disabledReason }">{{ footerStateLabel }}</small>
       </div>
       <div class="floating-upload-summary">
         <span :class="{ ready: timeReady }">
@@ -93,17 +93,14 @@
     >
       {{ statusMessage }}
     </p>
-    <DisabledReason
-      v-else-if="disabledReason && !saving"
-      :text="disabledReason"
-      tone="warning"
-    />
+    <p v-if="disabledReason && !saving && disabledReason !== statusMessage" class="floating-upload-blocked" role="status">
+      <strong>暂不能上传</strong><span>{{ disabledReason }}</span>
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import DisabledReason from "./DisabledReason.vue";
 
 const props = defineProps<{
   items: Array<{ key: string; label: string; text: string; ready: boolean }>;
@@ -138,6 +135,8 @@ const visiblePersonItems = computed(() => (
 const timeReady = computed(() => timeItems.value.length > 0 && timeReadyCount.value >= timeItems.value.length);
 const personReady = computed(() => personItems.value.length > 0 && personReadyCount.value >= personItems.value.length);
 const footerStateLabel = computed(() => {
+  if (props.saving) return "上传中";
+  if (props.disabledReason) return "暂不能上传";
   if (allReady.value) return "已满足";
   if (missingCount.value > 0) return `缺 ${missingCount.value} 项`;
   return "待检查";
@@ -150,6 +149,7 @@ const uploadButtonText = computed(() => {
 });
 const uploadReadinessHint = computed(() => {
   if (props.saving) return "正在上传维护单，请不要重复点击。";
+  if (props.disabledReason) return "";
   if (allReady.value) return props.uploadedAtText ? "可覆盖上传最新维护单。" : "可以上传维护单。";
   if (missingCount.value > 0) return `还差 ${missingCount.value} 项`;
   return "";
@@ -174,6 +174,8 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
+.floating-upload-blocked{grid-column:1/-1;display:flex;gap:8px;align-items:baseline;margin:4px 0 0;font-size:12px;line-height:1.6;color:var(--v2-text,#92400e);overflow-wrap:anywhere}
+.floating-upload-blocked strong{flex:none;font-weight:700}.floating-upload-blocked span{min-width:0}
 .mop-download {
   min-height: 40px;
   padding: 0 16px;

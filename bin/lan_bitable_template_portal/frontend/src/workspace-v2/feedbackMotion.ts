@@ -24,6 +24,7 @@ export function installFeedbackMotion() {
   const entries = new Map<HTMLElement,Entry>();
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let scheduled=0,stopped=false,order=0,offset=0;
+  let observedFooter:HTMLElement|null=null;
   const counter=document.createElement('button');counter.type='button';counter.dataset.v2FeedbackCounter='';
   counter.setAttribute('data-v2-navigation','');counter.hidden=true;
   if(supported)counter.setAttribute('popover','manual');
@@ -135,8 +136,9 @@ export function installFeedbackMotion() {
     if(offset>=pending.length)offset=0;
     const visible=pending.slice(offset,offset+3);
     let bottom=innerWidth<=760?82:20;
-    const noticeFooter=document.querySelector<HTMLElement>('.v2-notice-editor-footer');
-    if(noticeFooter?.getClientRects().length)bottom=Math.max(bottom,innerHeight-noticeFooter.getBoundingClientRect().top+12);
+    const actionFooter=[...document.querySelectorAll<HTMLElement>('.v2-notice-editor-footer,.v2-mop-workspace.preview-open .floating-upload-box')].find(el=>el.getClientRects().length)||null;
+    if(actionFooter!==observedFooter){if(observedFooter)resize.unobserve(observedFooter);observedFooter=actionFooter;if(actionFooter)resize.observe(actionFooter);}
+    if(actionFooter)bottom=Math.max(bottom,innerHeight-actionFooter.getBoundingClientRect().top+12);
     const more=pending.length>visible.length||recalled.length>0;
     counter.hidden=!more;
     if(more){

@@ -71,7 +71,8 @@ class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
         paths = {"/signature-management": "signatures", "/knowledge-base": "knowledge",
                  "/admin/settings": "accounts", "/repair-status": "repair_management",
                  "/drill-management/print": "drills", "/cabinet-power/batches": "cabinet",
-                 "/life-guide": "life_guide", "/link-directory": "links", "/plan-convergence": "plan_convergence"}
+                 "/life-guide": "life_guide", "/link-directory": "links", "/plan-convergence": "plan_convergence",
+                 "/risk-inspections": "risk_inspection", "/api/risk-inspections/people": "risk_inspection"}
         for path, module in paths.items():
             self.assertEqual(required_modules(path), {module})
         self.assertTrue(set(paths.values()) <= MODULE_IDS)
