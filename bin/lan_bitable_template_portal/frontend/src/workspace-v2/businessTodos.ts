@@ -45,21 +45,21 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
   const buildings=(supported:string)=>ctx.scopes.filter(s=>supported.includes(s.value)&&s.value.length===1&&(['ALL','CAMPUS',''].includes(ctx.scope)||ctx.scope===s.value)).map(s=>s.value);
   if(kind==='notices')return [source('notices',async(page,signal)=>{
     const month=Number(beijingDate().slice(5,7))+'月';
-    const data=await read('/api/workbench',{scope:ctx.scope,work_type:'all',month,sections:'records,ongoing',records_page:page,records_page_size:30,ongoing_page:page,ongoing_page_size:30},signal);
+    const data=await read('/api/workbench',{scope:ctx.scope,work_type:'all',month,sections:'ongoing',ongoing_page:page,ongoing_page_size:30},signal);
     if(data.source_snapshot_ready===false)throw new Error('通告快照尚未准备完成。');
     const result:TodoRow[]=[];
-    for(const [key,ongoing] of [['ongoing',true],['records',false]] as const)for(const row of rows(data[key])){
+    for(const row of rows(data.ongoing)){
       const type=String(row.work_type||'');if(!NOTICE_IDS.includes(type)||!(ctx.user.modules||[]).includes(type))continue;
       const status=text(row.status_label||row.workflow||row.source_progress||row.source_status||row.work_summary?.status||row.status||row.display_fields?.['维护实施状态']||row.display_fields?.['变更进度']);
-      if(ended(status)||row.deleted||row.deleted_at||!ongoing&&row.linked_ongoing)continue;
+      if(ended(status)||row.deleted||row.deleted_at)continue;
       const id=row.active_item_id||row.record_id||row.id;if(!id)throw new Error('通告缺少记录标识，暂不能办理。');
-      const sourceId=ongoing?row.source_record_id:row.record_id;
-      result.push({key:`notice:${type}:${ongoing?'active':'plan'}:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope||row.building_codes)||ctx.scope,
-        status:status||(ongoing?'进行中':'未开始'),time:text(row.start_time||row.time||row.updated_at),detail:({maintenance:'维保',change:'变更',repair:'检修',polling:'轮巡',adjust:'设备调整',power:'上下电'} as Dict)[type],
-        ongoing,sourceKey:sourceId?type+':'+sourceId:undefined,dueAt:todoTimestamp(row.deadline),
+      const sourceId=row.source_record_id||row.record_id;
+      result.push({key:`notice:${type}:active:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope||row.building_codes)||ctx.scope,
+        status:status||'进行中',time:text(row.start_time||row.time||row.updated_at),detail:({maintenance:'维保',change:'变更',repair:'检修',polling:'轮巡',adjust:'设备调整',power:'上下电'} as Dict)[type],
+        ongoing:true,sourceKey:sourceId?type+':'+sourceId:undefined,dueAt:todoTimestamp(row.deadline),
         url:link('/workbench-lite',{scope:ctx.scope,work_type:type,month,[row.active_item_id?'active_item_id':'record_id']:id})});
     }
-    return {rows:result,more:page<Math.max(number(data.records_pagination?.total_pages),number(data.ongoing_pagination?.total_pages)),note:'本月待发计划及所有未结束通告'};
+    return {rows:result,more:page<number(data.ongoing_pagination?.total_pages),note:'已发送且进行中的通告'};
   })];
   if(kind==='repair_management')return [source(kind,async(page,signal)=>{
     const data=await read('/api/repair-management/status',{scope:ctx.scope,state:'all',period:'all',limit:50,offset:(page-1)*50},signal);

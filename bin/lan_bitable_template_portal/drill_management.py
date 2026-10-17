@@ -260,6 +260,17 @@ def parse_duration_minutes(value: Any) -> int:
     return rounded
 
 
+def _step_duration_minutes(value: str) -> int:
+    # This explicit template marker excludes estimation, not the step itself.
+    return 0 if value.strip() == "⊗" else parse_duration_minutes(value)
+
+
+def _unrecognized_draft(definition: dict[str, Any]) -> bool:
+    configuration = definition.get("configuration")
+    return (definition.get("status") == "draft" and bool(definition.get("detection_error"))
+            and isinstance(configuration, dict) and not any(configuration.values()))
+
+
 def build_time_chain(drill_date: str, first_start_time: str, durations: list[int]) -> list[dict[str, str]]:
     try:
         current = dt.datetime.strptime(
@@ -753,7 +764,7 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
         duration_text = str((sheet.get("cells") or {}).get(_cell_ref(row, duration_col)) or "").strip()
         if not any((location, content, duration_text)):
             continue
-        duration_minutes = parse_duration_minutes(duration_text)
+        duration_minutes = _step_duration_minutes(duration_text)
         executor_col = int(headers["executor_col"][1])
         steps.append(
             {
@@ -1112,7 +1123,7 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
                 "location": location,
                 "content": content,
                 "duration_text": duration_text,
-                "duration_minutes": parse_duration_minutes(duration_text),
+                "duration_minutes": _step_duration_minutes(duration_text),
                 "signature_slots": slots,
             }
         )
@@ -1198,7 +1209,9 @@ def _derived_values(
     commander = _person(execution.get("commander"))
     evaluator = _person(execution.get("evaluator"))
     participants = [_person(item) for item in execution.get("participants") or []]
+    timed_steps = [item for item in steps if str(item.get("duration_text") or "").strip() != "⊗"]
     timeline: list[dict[str, str]] = []
+    timeline_ready = False
     drill_date_text = str(execution.get("drill_date") or "")
     try:
         drill_date = dt.date.fromisoformat(drill_date_text)
@@ -1208,8 +1221,9 @@ def _derived_values(
         timeline = build_time_chain(
             drill_date_text,
             str(execution.get("first_start_time") or ""),
-            [int(item.get("duration_minutes") or 0) for item in steps],
+            [int(item.get("duration_minutes") or 0) for item in timed_steps],
         )
+        timeline_ready = True
     except DrillError:
         if not allow_incomplete:
             raise
@@ -1227,10 +1241,12 @@ def _derived_values(
             f"{drill_date.year}年{drill_date.month}月{drill_date.day}日"
         )
     step_mapping = mapping["steps"]
-    for item, times in zip(steps, timeline):
+    times_by_row = {int(item["row"]): times for item, times in zip(timed_steps, timeline)}
+    for item in (steps if timeline_ready else []):
         row = int(item["row"])
-        record_values[f"{step_mapping['start_col']}{row}"] = times["start_time"]
-        record_values[f"{step_mapping['end_col']}{row}"] = times["end_time"]
+        times = times_by_row.get(row, {})
+        record_values[f"{step_mapping['start_col']}{row}"] = times.get("start_time", "")
+        record_values[f"{step_mapping['end_col']}{row}"] = times.get("end_time", "")
         record_values[f"{step_mapping['result_col']}{row}"] = "符合【 √ 】 不符【   】"
     total_minutes = sum(int(item["duration_minutes"]) for item in steps)
     total_text = str(configuration.get("predicted_total_text") or "").strip()
@@ -2502,9 +2518,38 @@ class DrillManagementService:
             data_root = get_data_file_path("drill_management")
         self.data_root = Path(data_root).resolve()
         self._template_mapping_cache: dict[str, dict[str, str]] = {}
+        self._recognition_retry_after: dict[str, tuple[int, float, str]] = {}
+
+    def _recover_failed_configuration(self, definition: dict[str, Any]) -> dict[str, Any]:
+        if not _unrecognized_draft(definition):
+            return definition
+        drill_id = str(definition.get("drill_id") or "")
+        with self._lock:
+            current = self.state_store.get_document(DRILL_DEFINITION_NAMESPACE, drill_id)
+            if not isinstance(current, dict):
+                return definition
+            if not _unrecognized_draft(current) or self._has_execution(drill_id):
+                return current
+            version = int(current.get("version") or 0)
+            retry = self._recognition_retry_after.get(drill_id)
+            if retry and retry[0] == version and retry[1] > time.monotonic():
+                return {**current, "detection_error": retry[2]}
+            try:
+                workbook = _parse_workbook(self._source_path(current))
+                configuration = _validate_configuration(workbook, detect_drill_configuration(workbook))
+            except (DrillError, OSError, zipfile.BadZipFile, ET.ParseError, KeyError, ValueError) as exc:
+                error = str(exc) if isinstance(exc, DrillError) else "演练源文件读取失败，请稍后重新进入演练管理。"
+                self._recognition_retry_after[drill_id] = (version, time.monotonic() + 300, error)
+                return {**current, "detection_error": error}
+            # Only an untouched failed draft is repaired; stale editors must reload its new version.
+            recovered = {**current, "configuration": configuration, "detection_error": "",
+                         "version": version + 1, "updated_at": _now_text(), "updated_by": "系统重新识别"}
+            self.state_store.put_document(DRILL_DEFINITION_NAMESPACE, drill_id, recovered)
+            self._recognition_retry_after.pop(drill_id, None)
+            return recovered
 
     def _with_template_mappings(self, definition: dict[str, Any]) -> dict[str, Any]:
-        result = copy.deepcopy(definition)
+        result = copy.deepcopy(self._recover_failed_configuration(definition))
         configuration = result.get("configuration")
         if not isinstance(configuration, dict) or not configuration.get("record_sheet") or not configuration.get("assessment_sheet"):
             return result

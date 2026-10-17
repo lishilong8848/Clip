@@ -302,7 +302,8 @@ class FrontendContractTests(unittest.TestCase):
             'GET /api/risk-inspections/template', 'POST /api/risk-inspections/template',
             'GET /api/risk-inspections/templates', 'GET /api/risk-inspections/templates/{tid}',
             'PUT /api/risk-inspections/templates/{tid}', 'GET /api/risk-inspections/people',
-            'GET /api/risk-inspections/{rid}', 'POST /api/risk-inspections/{rid}/retry',
+            'GET /api/risk-inspections/{rid}', 'DELETE /api/risk-inspections/{rid}',
+            'POST /api/risk-inspections/{rid}/retry',
             'POST /api/risk-inspections/{rid}/reviewer',
             'POST /api/risk-inspections/{rid}/people/{pid}/actions',
             'POST /api/risk-inspections/{rid}/files', 'GET /api/risk-inspections/files/{fid}',
@@ -312,7 +313,7 @@ class FrontendContractTests(unittest.TestCase):
                 self.assertEqual(self.catalog.get(api_id)['id'], api_id)
         from lan_bitable_template_portal.lighthouse_ai import AssistantError
         with self.assertRaises(AssistantError):
-            self.catalog.get('DELETE /api/risk-inspections/{rid}')
+            self.catalog.get('PATCH /api/risk-inspections/{rid}')
 
     def test_work_handover_routes_include_literal_pairs_and_decorated_files(self):
         expected = (

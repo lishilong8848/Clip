@@ -1,16 +1,17 @@
 <template>
-  <div class="v2-check-attachments" :class="{'is-dragging':dragging}" data-v2-navigation role="group" :aria-label="kind==='handover'?'交接班照片上传区':'检查附件上传区'" :tabindex="locked||allowUpload===false?-1:0" @paste="paste" @dragenter.prevent="dragEnter" @dragover.prevent @dragleave="dragLeave" @drop.prevent.stop="drop" @keydown.enter.self.prevent="photos?.click()" @keydown.space.self.prevent="photos?.click()">
+  <div class="v2-check-attachments" :class="{'is-dragging':dragging,'is-handover':kind==='handover'}" data-v2-navigation role="group" :aria-label="kind==='handover'?'交接班照片上传区':'检查附件上传区'" :tabindex="locked||allowUpload===false?-1:0" @paste="paste" @dragenter.prevent="dragEnter" @dragover.prevent @dragleave="dragLeave" @drop.prevent.stop="drop" @keydown.enter.self.prevent="photos?.click()" @keydown.space.self.prevent="photos?.click()">
     <div class="v2-check-file-list"><div v-for="file in files" :key="file.id" class="v2-check-file">
-      <NImage v-if="file.is_image" :src="url(file)" :alt="file.name" width="56" height="44" object-fit="cover" />
+      <NImage v-if="file.is_image" :src="url(file)" :alt="file.name" :width="kind==='handover'?undefined:56" :height="kind==='handover'?undefined:44" :object-fit="kind==='handover'?'contain':'cover'" />
       <FileText v-else :size="18" /><a :href="url(file)" target="_blank" rel="noopener">{{file.name}}</a>
       <NButton v-if="file.can_delete" quaternary circle :disabled="locked||working" :aria-label="'移除'+file.name" @click="remove(file)"><X :size="14" /></NButton>
+      <span v-if="kind==='handover'&&file.delivery_status" class="v2-check-photo-delivery" :class="{'has-error':!!file.delivery_error}" role="status">{{file.delivery_status==='sent'?'水印照片已发送给当前登录账号':file.delivery_error||'水印照片已保存，正在发送给当前登录账号'}}</span>
     </div></div>
     <div v-if="!locked&&allowUpload!==false" class="v2-check-file-actions">
       <NButton size="small" secondary :disabled="working" @click="photos?.click()"><ImagePlus :size="15" />上传照片</NButton>
       <NButton v-if="kind!=='handover'" size="small" quaternary :disabled="working" @click="picker?.click()"><Paperclip :size="15" />添加文件</NButton>
       <NButton size="small" secondary :disabled="working" @click="camera?.click()"><Camera :size="15" />拍照</NButton>
     </div>
-    <div v-if="working" class="v2-check-file-actions" role="status"><NSpin :size="14" />正在保存 {{uploadName}}</div>
+    <div v-if="working" class="v2-check-file-actions" role="status"><NSpin :size="14" />{{kind==='handover'?'正在保存并生成水印':'正在保存'}} {{uploadName}}</div>
     <input ref="photos" class="v2-check-file-input" type="file" accept="image/jpeg,image/png,image/webp" :multiple="kind!=='handover'" :aria-label="kind==='handover'?'上传交接班照片':'上传检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
     <input ref="camera" class="v2-check-file-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" :aria-label="kind==='handover'?'拍摄交接班照片':'拍摄检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
     <input v-if="kind!=='handover'" ref="picker" class="v2-check-file-input" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf,.doc,.docx,.xls,.xlsx,.md,.txt,.csv" multiple aria-label="上传检查附件" :disabled="locked||working||allowUpload===false" @change="pick" />
@@ -40,5 +41,6 @@ onBeforeUnmount(()=>{disposed=true;});
 </script>
 <style>
 .v2-check-attachments{outline:2px solid transparent;outline-offset:3px;transition:outline-color .18s,background-color .18s;border-radius:6px}.v2-check-attachments:focus-visible,.v2-check-attachments.is-dragging{outline-color:var(--v2-blue)}.v2-check-attachments.is-dragging{background:color-mix(in srgb,var(--v2-blue) 10%,transparent)}
+.v2-check-attachments.is-handover .v2-check-file-list{display:block}.v2-check-attachments.is-handover .v2-check-file{display:grid;grid-template-columns:minmax(0,1fr) auto;width:100%;box-sizing:border-box;padding:8px;gap:8px}.v2-check-attachments.is-handover .n-image{grid-column:1/-1;width:100%;justify-content:center}.v2-check-attachments.is-handover .n-image img{max-width:100%;width:auto;max-height:320px;object-fit:contain}.v2-check-photo-delivery{grid-column:1/-1;color:var(--v2-muted);line-height:1.5}.v2-check-photo-delivery.has-error{color:#a35c10}@media(max-width:760px){.v2-check-attachments.is-handover .n-image img{max-height:240px}}
 .v2-check-attachments{grid-column:1/-1;min-width:0}.v2-check-file-list{display:flex;gap:6px;flex-wrap:wrap}.v2-check-file{display:flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px;border:1px solid var(--v2-border);border-radius:6px;font-size:12px}.v2-check-file a{overflow-wrap:anywhere;min-width:0;color:var(--v2-blue)}.v2-check-file-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}.v2-check-file-actions>span{display:flex;gap:6px;font-size:12px;overflow-wrap:anywhere}.v2-check-file-input{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}.v2-check-file-error{margin:6px 0;color:#b42318;font-size:12px}.v2-check-handover{padding:12px 0;border-top:1px solid var(--v2-border)}.v2-check-handover h3{font-size:14px;margin:0 0 8px}
 </style>

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,writeFile} from 'node:fs/promises';
+import {execFileSync} from 'node:child_process';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
@@ -7,6 +8,22 @@ import {preview} from 'vite';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),output=path.resolve(root,'../../../output/playwright/pre-shift');
 await mkdir(output,{recursive:true});
+const project=path.resolve(root,'../../..'),python=path.join(project,'bin/.venv',process.platform==='win32'?'Scripts/python.exe':'bin/python');
+const stampedPhoto=execFileSync(python,['-c',`
+import datetime as dt,sys,tempfile
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()/'bin'))
+from PIL import Image,ImageDraw
+from lan_bitable_template_portal.pre_shift_photo import render_handover,TZ
+with tempfile.TemporaryDirectory() as folder:
+    raw,stamped=Path(folder)/'source.png',Path(folder)/'stamp.jpg'
+    image=Image.new('RGB',(1600,1200),'#708090')
+    ImageDraw.Draw(image).rectangle((900,100,1400,1000),fill='#a5b5c5')
+    image.save(raw)
+    render_handover(raw,stamped,'A',dt.datetime(2026,10,14,9,tzinfo=TZ))
+    sys.stdout.buffer.write(stamped.read_bytes())
+`],{cwd:project,maxBuffer:12*1024*1024});
+await writeFile(path.join(output,'watermarked-photo.jpg'),stampedPhoto);
 const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[];
 const layouts=layoutApiFixture();
@@ -26,8 +43,8 @@ try{
   if(u.pathname==='/api/pre-shift-checks')return ok({server_time:new Date().toISOString(),scope:'A',scopes:mode==='manager'?['A','B']:['A'],can_manage:mode==='manager',definition,roster_ready:true,roster_error:'',tasks:!submitted&&!definition.items.length?[]:[{id:'fixture-'+day+shift,day,scope:'A',shift,due:Date.now()/1000-60,files,handover_photo:handover,can_upload_handover:!handover,definition_version:submitted?1:definition.version,items:submitted?items:definition.items,people:[{name:'值班员一'},{name:'值班长二'}],submitted:submitted?'2026-10-14T09:05:00+08:00':'',actor_name:'隔离验收人员',can_submit:!submitted,deadline:Date.now()/1000+10000,answers:submitted?[{...items[0],status:'normal',note:''},{...items[1],status:'abnormal',note:'测试异常说明'}]:[],sync_status:submitted?'synced':'pending'}]});
   if(u.pathname==='/api/pre-shift-checks/submit'){writes++;if(fail){fail=false;return route.fulfill({status:503,json:{ok:false,error:'隔离测试：暂未确认，请重试'}});}assert.deepEqual(req.postDataJSON().answers,[{id:'x',status:'normal',note:''},{id:'y',status:'abnormal',note:'测试异常说明'}]);submitted=true;return ok({completed:true});}
   if(u.pathname==='/api/pre-shift-checks/definition'){definitionWrites++;definition={...req.postDataJSON(),version:definition.version+1};return ok(definition);}
-  if(u.pathname==='/api/pre-shift-checks/files'){fileWrites++;const file={id:'file-'+fileWrites,item_id:u.searchParams.get('item_id'),name:u.searchParams.get('name'),size:req.postDataBuffer().length,is_image:false,can_delete:true};if(u.searchParams.get('kind')==='handover')handover=file;else files.push(file);return ok(file);}
-  if(u.pathname.startsWith('/api/pre-shift-checks/files/'))return route.fulfill({body:'isolated file'});
+  if(u.pathname==='/api/pre-shift-checks/files'){fileWrites++;const isHandover=u.searchParams.get('kind')==='handover',file={id:'file-'+fileWrites,item_id:u.searchParams.get('item_id'),name:isHandover?'交接班_交接班水印.jpg':u.searchParams.get('name'),size:req.postDataBuffer().length,is_image:isHandover,can_delete:true,...(isHandover?{watermarked:true,delivery_status:'pending'}:{})};if(isHandover)handover=file;else files.push(file);return ok(file);}
+  if(u.pathname.startsWith('/api/pre-shift-checks/files/'))return route.fulfill(handover&&u.pathname.endsWith('/'+handover.id)?{body:stampedPhoto,contentType:'image/jpeg'}:{body:'isolated file'});
   if(u.pathname==='/api/scope-overview')return ok({scopes:{A:{maintenance_pending:0,maintenance_ongoing:0}},source_snapshot_ready:true});
   if(u.pathname==='/api/workbench')return ok({records:[],ongoing:[],records_pagination:{total:0},ongoing_pagination:{total:0}});
   return ok({items:[],records:[],stats:{},summary:{}});
@@ -61,7 +78,8 @@ try{
  await uploadZone.evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['drop'],'拖拽照片.jpg',{type:'image/jpeg'}));el.dispatchEvent(new DragEvent('dragenter',{bubbles:true,cancelable:true,dataTransfer:data}));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});await check.getByRole('link',{name:'拖拽照片.jpg',exact:true}).waitFor();assert.equal(fileWrites,3);assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');
  await uploadZone.evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['no'],'不可上传.exe'));el.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));});await uploadZone.getByText('不支持此文件类型。',{exact:true}).waitFor();assert.equal(fileWrites,3);
  const photoInput=check.getByLabel('上传交接班照片',{exact:true});assert.equal(await photoInput.getAttribute('capture'),null,'photo picker opens album, not a forced camera');await photoInput.setInputFiles({name:'交接班.png',mimeType:'image/png',buffer:Buffer.from('mock')});await check.getByText('本班已上传',{exact:true}).waitFor();assert.equal(fileWrites,4);assert.equal(await check.locator('.v2-check-handover').getByRole('button',{name:'上传照片',exact:true}).count(),0);
-for(const width of [1440,390]){await page.setViewportSize({width,height:width<700?844:960});await check.scrollIntoViewIfNeeded();if(width===390){const choosing=page.waitForEvent('filechooser');await rows.nth(0).getByRole('button',{name:'上传照片',exact:true}).click();const chooser=await choosing;assert.equal(await chooser.element().getAttribute('capture'),null);await chooser.setFiles({name:'手机相册.png',mimeType:'image/png',buffer:Buffer.from('album')});await rows.nth(0).getByRole('link',{name:'手机相册.png',exact:true}).waitFor();assert.equal(fileWrites,5);}assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(output,'check-'+width+'.png'),fullPage:true});}
+for(const width of [1440,390,360,375]){await page.setViewportSize({width,height:width===360?640:width===375?667:width<700?844:960});await check.scrollIntoViewIfNeeded();if(width===390){const choosing=page.waitForEvent('filechooser');await rows.nth(0).getByRole('button',{name:'上传照片',exact:true}).click();const chooser=await choosing;assert.equal(await chooser.element().getAttribute('capture'),null);await chooser.setFiles({name:'手机相册.png',mimeType:'image/png',buffer:Buffer.from('album')});await rows.nth(0).getByRole('link',{name:'手机相册.png',exact:true}).waitFor();assert.equal(fileWrites,5);}assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));const photo=check.locator('.is-handover'),image=photo.locator('.n-image img');await image.waitFor();await photo.getByText('水印照片已保存，正在发送给当前登录账号',{exact:true}).waitFor();await image.scrollIntoViewIfNeeded();assert(await image.evaluate(el=>el.complete&&el.naturalWidth>0&&getComputedStyle(el).objectFit==='contain'),'show the actual watermarked JPEG without cropping');const box=await image.boundingBox();assert(box&&box.height>120&&box.width<=width);await photo.screenshot({path:path.join(output,'handover-'+width+'.png')});await page.screenshot({path:path.join(output,'check-'+width+'.png'),fullPage:true});}
+ handover.delivery_status='sent';await check.getByRole('button',{name:'刷新班前检查',exact:true}).click();await check.getByText('水印照片已发送给当前登录账号',{exact:true}).waitFor();assert.equal(fileWrites,5,'checking delivery status never reuploads');
  await page.setViewportSize({width:1440,height:960});fail=true;await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('隔离测试：暂未确认，请重试',{exact:true}).waitFor();assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');
  await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);await check.getByText('已同步飞书',{exact:true}).waitFor();assert.equal(await check.getByRole('button',{name:'提交检查',exact:true}).count(),0);
  await page.reload();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);

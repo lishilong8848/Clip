@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vite build && vite build --config vite.workspace-v2.config.ts && node scripts/prune-dist-assets.mjs",
     "check:navigation": "node scripts/check-navigation-back.mjs",
-    "check:drill": "node scripts/check-drill-management.mjs",
+    "check:drill": "node scripts/check-drill-management.mjs && node scripts/check-drill-recognition-recovery.mjs",
     "check:work-handover": "node scripts/check-work-handover.mjs",
     "check:risk-inspection": "node scripts/check-risk-inspection-ui.mjs && node scripts/check-risk-inspection.mjs",
     "check:reliability": "node scripts/check-request-reliability.mjs",

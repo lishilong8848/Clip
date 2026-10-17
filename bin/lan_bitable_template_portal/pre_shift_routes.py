@@ -24,7 +24,7 @@ def install_pre_shift_routes(app, controller, runtime):
             if service is None:
                 from .pre_shift_cloud import CheckCloud, read_roster
                 service = CheckService(roster=lambda day: read_roster(runtime.service, day),
-                    cloud=CheckCloud(runtime.service), sender=sender,
+                    cloud=CheckCloud(runtime.service), sender=sender, photo_sender=sender.photo,
                     portal_url=lambda: runtime.service._critical_guard_public_base_url())
             return service
 
@@ -134,7 +134,14 @@ def install_pre_shift_routes(app, controller, runtime):
                         await asyncio.to_thread(fp.write, chunk)
                 finally:
                     await asyncio.to_thread(fp.close)
-                # Reload actor: permissions may have been revoked during the stream.
+                if kind == 'handover':
+                    weather = getattr(app.state, 'lighthouse_icon_weather', None)
+                    if weather is not None:
+                        try:
+                            session['photo_weather'] = await asyncio.wait_for(weather.get('南通'), timeout=3)
+                        except Exception:
+                            pass  # A forecast outage must not block saving the handover photo.
+                # Reload actor: permissions may have been revoked during the stream/weather read.
                 actor = await asyncio.to_thread(actor_for, request)
                 result = await asyncio.to_thread(svc.commit_upload, actor, session, size)
             finally:

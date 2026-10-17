@@ -57,6 +57,35 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(self.service.state(self.worker, 'A', self.current)['tasks'][0]['actor_name'], '值班长二')
         self.assertEqual(self.cloud.upsert.call_count, 1)
 
+    def test_missing_or_cleared_checklist_never_sends_initial_or_repeat_reminders(self):
+        self.service.prepare(self.current)
+        for remove in (False, True):
+            with self.service.connection(True) as conn:
+                if remove:
+                    conn.execute("DELETE FROM definitions WHERE scope='A'")
+                else:
+                    conn.execute("UPDATE definitions SET items='[]' WHERE scope='A'")
+            for hours in (0, 2, 4):
+                self.service.notify(self.current + dt.timedelta(hours=hours))
+        self.sender.assert_not_called()
+
+    def test_clearing_definition_during_first_send_stops_remaining_recipient(self):
+        self.service.prepare(self.current)
+        def send(*_):
+            self.service.save_definition(self.admin, 'A', 1, [])
+            return True, '', {}
+        self.sender.side_effect = send
+        self.service.notify(self.current)
+        self.service.notify(self.current + dt.timedelta(hours=2))
+        self.assertEqual(self.sender.call_count, 1)
+
+    def test_superseded_definition_does_not_send_stale_task(self):
+        self.service.prepare(self.current)
+        with self.service.connection(True) as conn:
+            conn.execute("UPDATE definitions SET version=version+1 WHERE scope='A'")
+        self.service.notify(self.current)
+        self.sender.assert_not_called()
+
     def test_day_reminders_end_at_18_and_night_at_next_08(self):
         for hour in [8, 10, 12, 14, 16, 18]:
             self.service.tick(at(f'{DAY}T{hour:02d}:50:00'))

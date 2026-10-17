@@ -134,6 +134,7 @@ class IconWeather:
 
 def install_icon_weather(app, controller, runtime):
     weather = IconWeather()
+    app.state.lighthouse_icon_weather = weather
 
     async def endpoint(request: Request):
         try:

@@ -160,6 +160,8 @@
               <span :class="['status-chip', statusClass(selectedDrill.status)]">{{ statusLabel(selectedDrill.status) }}</span>
             </header>
 
+            <MessageBanner v-if="selectedDrill.detection_error" tone="warning" title="步骤识别未完成" :text="selectedDrill.detection_error" />
+
             <fieldset :disabled="configurationLocked || busy">
               <legend>工作表</legend>
               <div class="field-grid two">
@@ -926,7 +928,7 @@ async function loadBootstrap(): Promise<void> {
   try {
     const query = new URLSearchParams({ month: selectedMonth.value });
     if (activeScope.value) query.set("scope", activeScope.value);
-    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "no-store" });
+    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "reload" });
     if (disposed) return;
     loadedMonth.value = selectedMonth.value;
     stablePageUrl = `${window.location.pathname}${window.location.search}`;
@@ -956,9 +958,12 @@ async function loadBootstrap(): Promise<void> {
 async function refreshList(): Promise<void> {
   const query = new URLSearchParams({ month: selectedMonth.value });
   if (activeScope.value) query.set("scope", activeScope.value);
-  const data = await requestJson(`/api/drills?${query.toString()}`, { cache: "no-store" });
+  const data = await requestJson(`/api/drills?${query.toString()}`, { cache: "reload" });
   if (disposed) return;
   drills.value = arrayFrom(data.items || data.drills);
+  if (viewMode.value === "admin" && selectedDrill.value && !hasUnsavedChanges.value) {
+    resetConfigDraft(selectedDrill.value.configuration || {});
+  }
 }
 usePageReadRefresh(url => ['/api/drills', '/api/drills/bootstrap'].includes(url.pathname) && (url.searchParams.get('scope') || '') === activeScope.value, refreshList, () => !disposed && !busy.value && !hasUnsavedChanges.value);
 
@@ -1653,9 +1658,15 @@ async function uploadDrill(): Promise<void> {
     navigate(`/drill-management?mode=admin&month=${encodeURIComponent(selectedMonth.value)}`);
     stablePageUrl = `${window.location.pathname}${window.location.search}`;
     await refreshList();
-    mergeDrill(apiResultDrill(data));
+    const created = apiResultDrill(data);
+    const refreshed = drills.value.find(item => String(item.drill_id) === String(created?.drill_id));
+    mergeDrill(refreshed && Number(refreshed.version || 0) >= Number(created?.version || 0) ? refreshed : created);
     resetUpload();
-    setNotice("文件已上传并完成初步识别，请核对配置后发布。", "success");
+    if (selectedDrill.value?.detection_error || !configSteps.value.length) {
+      setNotice("文件已上传，但步骤识别未完成，请查看模板中的具体原因。", "warning");
+    } else {
+      setNotice("文件已上传并完成初步识别，请核对配置后发布。", "success");
+    }
   } catch (caught) {
     setFailure(caught, "演练文件上传失败");
   } finally {

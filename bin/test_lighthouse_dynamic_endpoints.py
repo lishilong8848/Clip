@@ -21,6 +21,7 @@ agent 负责),只新增一份**独立的、有边界的人工复核目录** ``KN
 - 只新建 ``bin/test_lighthouse_dynamic_endpoints.py``,不改动其他任何文件。
 - 测试只做有界断言:不启动服务器、不调用真实业务。
 """
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -142,6 +143,12 @@ KNOWN_DYNAMIC_BINDINGS = [
         line=46, kind="unresolved", method_paths=[], window=4,
         needles=["requestJson(path+'?'+new URLSearchParams(params)", "const get=(path:string"],
         note="新版工作台局部 GET 包装;实际调用端点在 WRAPPER_REVIEW 逐项复核。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/BusinessTodos.vue",
+        line=58, kind="unresolved", method_paths=[], window=2,
+        needles=["requestJson(path,{signal,cache:'no-store'})", "todoSources(kind,props,(path,signal)=>"],
+        note="业务待办 GET 传输包装；实际端点由 businessTodos.ts 限定，在 WRAPPER_REVIEW 逐项复核。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/version.ts",
@@ -503,6 +510,38 @@ KNOWN_DYNAMIC_BINDINGS = [
 #   caller_source       —— 调用者所在文件,缺省时为 wrapper 所在 source
 # 测试先用 marker 断言端点确实出现在真实源码(再对 native 目录 + _route_excluded 分类)。
 WRAPPER_REVIEW = [
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/BusinessTodos.vue",
+        line=58, label="业务待办 todoSources 只读请求包装",
+        anchor="todoSources(kind,props,(path,signal)=>requestJson(path,{signal,cache:'no-store'})",
+        callers=[
+            dict(method="GET", path="/api/workbench", caller_line=48,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="read('/api/workbench'"),
+            dict(method="GET", path="/api/repair-management/status", caller_line=65,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="read('/api/repair-management/status'"),
+            dict(method="GET", path="/api/critical-guard/tasks", caller_line=73,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="read('/api/critical-guard/tasks'"),
+            dict(method="GET", path="/api/risk-inspections", caller_line=82,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="read('/api/risk-inspections'"),
+            dict(method="GET", path="/api/capacity/water/records", caller_line=91,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="read('/api/capacity/water/records'"),
+            dict(method="GET", path="/api/learning/bootstrap", caller_line=103,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="get('/api/learning/bootstrap'"),
+            dict(method="GET", path="/api/learning/papers", caller_line=105,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="read('/api/learning/papers'"),
+            dict(method="GET", path="/api/signatures/management/account", caller_line=114,
+                 caller_source="lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts",
+                 marker="get('/api/signatures/management/account'"),
+        ],
+        note="七类待办共八个 GET 端点；业务读取复用原接口，学练和本人签名保持原生排除边界，不扩大助手权限。",
+    ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/OverviewPanel.vue",
         line=46, label="新版工作台 get(path, params) 包装", anchor="const get=(path:string",
@@ -1092,6 +1131,18 @@ class DynamicEndpointAuditTests(unittest.TestCase):
                     f"  marker={c.get('marker')!r} 未出现在 ±12 行窗口\n"
                     f"  note: {w['note']}")
         self.assertGreaterEqual(reviewed, 1, "应有至少一条 wrapper 真实调用端点被复核")
+
+    def test_business_todos_review_includes_every_real_read_source(self):
+        source = "lan_bitable_template_portal/frontend/src/workspace-v2/businessTodos.ts"
+        review = next(w for w in WRAPPER_REVIEW if w["source"].endswith("/BusinessTodos.vue"))
+        paths = re.findall(r"\b(?:read|get)\(\s*['\"](/api/[^'\"]+)['\"]", _file_text(source))
+        self.assertTrue(paths, "业务待办必须存在可核验的只读数据来源")
+        self.assertEqual(
+            [(c["method"], c["path"]) for c in review["callers"]],
+            [("GET", path) for path in paths],
+            "业务待办实际读取端点与复核清单必须一致，新增来源不得漏审或重复认领",
+        )
+        self.assertTrue(all(_caller_source_of(review, c) == source for c in review["callers"]))
 
     def test_excluded_wrapper_handle_qt_event_write_forms_are_preserved(self):
         """Qt-only 事件写(remove/add/update/end)与受保护 settings 必须保持 excluded。

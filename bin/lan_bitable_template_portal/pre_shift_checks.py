@@ -91,7 +91,7 @@ def _image_ext(path):
 
 
 class CheckService:
-    def __init__(self, root=None, *, roster=None, cloud=None, sender=None, portal_url=None):
+    def __init__(self, root=None, *, roster=None, cloud=None, sender=None, portal_url=None, photo_sender=None):
         if root is None:
             from upload_event_module.utils import get_data_file_path
             root = get_data_file_path('pre_shift_checks')
@@ -102,6 +102,7 @@ class CheckService:
         self.staging_dir = self.files_dir / 'staging'
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         self.roster, self.cloud, self.sender, self.portal_url = roster, cloud, sender, portal_url
+        self.photo_sender = photo_sender
         self.stop_event = threading.Event()
         self.wake = threading.Event()
         self.tick_lock = threading.Lock()
@@ -131,6 +132,11 @@ class CheckService:
                     content_hash TEXT DEFAULT '');
                 CREATE UNIQUE INDEX IF NOT EXISTS one_handover ON files(day, scope, shift) WHERE kind='handover';
                 CREATE INDEX IF NOT EXISTS idx_files_task ON files(task_id);
+                CREATE TABLE IF NOT EXISTS photo_deliveries(file_id TEXT PRIMARY KEY, recipient TEXT NOT NULL,
+                    watermark TEXT NOT NULL, image_key TEXT DEFAULT '', sender_app_id TEXT DEFAULT '',
+                    message_id TEXT DEFAULT '', sent INTEGER DEFAULT 0, first_attempt REAL DEFAULT 0,
+                    lease REAL DEFAULT 0, retry_at REAL DEFAULT 0, error TEXT DEFAULT '');
+                CREATE INDEX IF NOT EXISTS pending_photos ON photo_deliveries(retry_at,lease) WHERE sent=0;
             ''')
             task_cols = {r[1] for r in conn.execute('PRAGMA table_info(tasks)')}
             if 'version' not in {r[1] for r in conn.execute('PRAGMA table_info(rosters)')}:
@@ -532,7 +538,16 @@ class CheckService:
         return {'id': row['id'], 'item_id': 'handover', 'name': row['name'], 'size': row['size'],
                 'is_image': bool(row['is_image']),
                 'url': f'/api/pre-shift-checks/files/{row["id"]}',
-                'can_delete': self._handover_can_delete(conn, actor, task, current, row)}
+                'can_delete': self._handover_can_delete(conn, actor, task, current, row),
+                **self._photo_status(conn, row['id'], actor)}
+
+    def _photo_status(self, conn, file_id, actor):
+        delivery = conn.execute('SELECT * FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
+        if not delivery:
+            return {}
+        return {'watermarked': True, 'watermark': json.loads(delivery['watermark']),
+                **({'delivery_status': 'sent' if delivery['sent'] else 'pending',
+                    'delivery_error': delivery['error']} if delivery['recipient'] == actor['id'] else {})}
 
     def _handover_can_delete(self, conn, actor, task, current, row):
         if row['uploader_id'] != actor['id']:
@@ -790,10 +805,18 @@ class CheckService:
             raise CheckError('上传身份已变化，请重新上传。', 409)
         with open(staging, 'rb') as fh:
             content_hash = hashlib.file_digest(fh, 'sha256').hexdigest()
-        ext = Path(session['name']).suffix.lower()
         file_id = uuid.uuid4().hex
-        final = self.files_dir / f'{file_id}{ext}'
+        final = self.files_dir / f'{file_id}.jpg'
+        rendered = self.staging_dir / f'{file_id}.jpg'
+        name = Path(session['name']).stem[:100] + '_交接班水印.jpg'
         try:
+            authorized(actor, session['scope'])
+            from .pre_shift_photo import render_handover
+            try:
+                watermark = render_handover(staging, rendered, session['scope'], current, session.get('photo_weather'))
+            except (ValueError, OSError) as exc:
+                raise CheckError('交接班照片水印生成失败：' + str(exc)) from exc
+            size = rendered.stat().st_size
             with self.connection(True) as conn:
                 task = conn.execute('SELECT * FROM tasks WHERE id=?', (session['task_id'],)).fetchone()
                 if task is None:
@@ -805,18 +828,20 @@ class CheckService:
                                       (task['day'], task['scope'], task['shift'])).fetchone()
                 if exists:
                     if exists['uploader_id'] == actor['id'] and exists['content_hash'] == content_hash:
-                        return self._public_dict(exists['id'], '', exists['name'], exists['size'],
-                                                 bool(exists['is_image']))
+                        return {**self._public_dict(exists['id'], '', exists['name'], exists['size'],
+                                                 bool(exists['is_image'])), **self._photo_status(conn, exists['id'], actor)}
                     self.abort_upload(session)
                     raise CheckError('该班次交接班照片已存在，不能重复上传。', 409)
-                os.replace(staging, final)
+                os.replace(rendered, final)
                 created = current.isoformat()
                 conn.execute(
                     "INSERT INTO files(id,task_id,item_id,kind,day,scope,shift,name,size,is_image,disk_name,uploader_id,uploader_name,created,content_hash) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (file_id, session['task_id'], '', 'handover', task['day'], task['scope'],
-                     task['shift'], session['name'], size, 1 if ext in IMAGE_EXTS else 0, final.name,
+                     task['shift'], name, size, 1, final.name,
                      actor['id'], actor['name'], created, content_hash))
+                conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
+                             (file_id, actor['id'], dump(watermark)))
                 self._bump_shift_cloud(conn, task['day'], task['scope'], task['shift'])
         except Exception:
             try:
@@ -825,8 +850,12 @@ class CheckService:
             except OSError:
                 pass
             raise
+        finally:
+            rendered.unlink(missing_ok=True)
+            self.abort_upload(session)
         self.wake.set()
-        return self._public_dict(file_id, '', session['name'], size, True)
+        return {**self._public_dict(file_id, '', name, size, True), 'watermarked': True,
+                'watermark': watermark, 'delivery_status': 'pending'}
 
     def _bump_shift_cloud(self, conn, day, scope, shift):
         keys = {r['cloud_key'] for r in conn.execute(
@@ -871,6 +900,9 @@ class CheckService:
                     raise CheckError('仅上传人可删除交接班照片。', 403)
                 if not self._is_roster_or_duty(actor, task):
                     raise CheckError('仅本楼值班人员可删除交接班照片。', 403)
+                delivery = conn.execute('SELECT lease FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
+                if delivery and delivery['lease'] > current.timestamp():
+                    raise CheckError('交接班照片正在发送给本人，请稍后再移除。', 409)
             else:
                 if row['submitted'] or (task and task['submitted']):
                     raise CheckError('已提交的检查附件不能删除或修改。', 403)
@@ -880,6 +912,7 @@ class CheckService:
                     raise CheckError('当前账号不能删除该检查附件。', 403)
             disk = row['disk_name']
             conn.execute('DELETE FROM files WHERE id=?', (file_id,))
+            conn.execute('DELETE FROM photo_deliveries WHERE file_id=?', (file_id,))
         path = self.files_dir / disk
         try:
             Path(path).unlink(missing_ok=True)
@@ -890,14 +923,16 @@ class CheckService:
     def notify(self, current):
         if not self.sender or not self.portal_url:
             return
-        base = str(self.portal_url() or '').rstrip('/')
-        if not base.startswith(('http://', 'https://')):
-            self.last_error = '班前检查访问地址未配置，暂未推送。'
-            return
         with self.connection() as conn:
             tasks = [dict(row) for row in conn.execute(
                 "SELECT * FROM tasks WHERE submitted='' AND items!='[]' AND scope IN (SELECT scope FROM definitions WHERE items!='[]') AND due<=? AND deadline>?",
                 (current.timestamp(), current.timestamp()))]
+        if not tasks:
+            return
+        base = str(self.portal_url() or '').rstrip('/')
+        if not base.startswith(('http://', 'https://')):
+            self.last_error = '班前检查访问地址未配置，暂未推送。'
+            return
         for task in tasks:
             slot = int((current.timestamp() - task['due']) // 7200)
             for person in json.loads(task['people']):
@@ -908,8 +943,12 @@ class CheckService:
                     self.sync(current)
                 key = f"{task['id']}:{slot}:{person['open_id']}"
                 with self.connection(True) as conn:
-                    latest = conn.execute('SELECT submitted,items FROM tasks WHERE id=?', (task['id'],)).fetchone()
-                    if not latest or latest['submitted'] or latest['items'] == '[]':
+                    latest = conn.execute('SELECT * FROM tasks WHERE id=?', (task['id'],)).fetchone()
+                    definition = self.definition(task['scope'], conn)
+                    configured = {item['id'] for item in definition['items']}
+                    if (not latest or latest['submitted'] or not configured
+                            or latest['definition_version'] != definition['version']
+                            or not any(item['id'] in configured for item in json.loads(latest['items']))):
                         break
                     row = conn.execute('SELECT * FROM deliveries WHERE id=?', (key,)).fetchone()
                     if row and (row['sent'] or row['lease'] > current.timestamp()):
@@ -930,6 +969,53 @@ class CheckService:
                         conn.execute('UPDATE deliveries SET sent=1 WHERE id=?', (key,))
                 except Exception:
                     self.last_error = '班前检查消息暂未送达，后台将自动重试。'
+
+    def deliver_photos(self, current):
+        if not self.photo_sender:
+            return
+        for _ in range(2):
+            if self.stop_event.is_set():
+                return
+            with self.connection(True) as conn:
+                row = conn.execute('''SELECT p.*,f.disk_name,f.name FROM photo_deliveries p
+                    JOIN files f ON f.id=p.file_id WHERE p.sent=0 AND p.retry_at<=? AND p.lease<=?
+                    ORDER BY f.created,p.file_id LIMIT 1''', (current.timestamp(), current.timestamp())).fetchone()
+                if row is None:
+                    return
+                photo = dict(row)
+                # Feishu message UUID dedup lasts one hour; never blindly retry past it.
+                if photo['first_attempt'] and current.timestamp() - photo['first_attempt'] >= 50 * 60:
+                    conn.execute('UPDATE photo_deliveries SET retry_at=?,error=? WHERE file_id=?',
+                                 (current.timestamp() + 86400, '发送回执长时间未确认，请管理员核对原消息；照片已保留，未重复发送。', photo['file_id']))
+                    continue
+                conn.execute('UPDATE photo_deliveries SET lease=? WHERE file_id=?', (current.timestamp() + 120, photo['file_id']))
+
+            def checkpoint(image_key, app_id, file_id=photo['file_id']):
+                with self.connection(True) as conn:
+                    conn.execute('''UPDATE photo_deliveries SET image_key=?,sender_app_id=?,
+                        first_attempt=CASE WHEN first_attempt=0 THEN ? ELSE first_attempt END WHERE file_id=? AND sent=0''',
+                        (image_key, app_id, current.timestamp(), file_id))
+
+            try:
+                path = self.files_dir / photo['disk_name']
+                if not path.is_file():
+                    raise CheckError('交接班照片文件缺失，请管理员核对。')
+                message_id = self.photo_sender(photo['recipient'], {**photo, 'path': str(path)},
+                                               'pre-shift-photo:' + photo['file_id'], checkpoint)
+                if not isinstance(message_id, str) or not re.fullmatch(r'om_[A-Za-z0-9]+', message_id):
+                    raise CheckError('飞书未返回有效图片消息回执。')
+                with self.connection(True) as conn:
+                    conn.execute("UPDATE photo_deliveries SET sent=1,message_id=?,lease=0,error='' WHERE file_id=?",
+                                 (message_id, photo['file_id']))
+            except Exception as exc:
+                error = str(exc) if isinstance(exc, CheckError) else '照片已保存，飞书暂未确认送达，后台将继续核验原发送。'
+                with self.connection(True) as conn:
+                    conn.execute('UPDATE photo_deliveries SET retry_at=?,lease=0,error=? WHERE file_id=?',
+                                 (current.timestamp() + 300, error, photo['file_id']))
+        with self.connection() as conn:
+            if conn.execute('SELECT 1 FROM photo_deliveries WHERE sent=0 AND retry_at<=? AND lease<=? LIMIT 1',
+                            (current.timestamp(), current.timestamp())).fetchone():
+                self.wake.set()
 
     def _internal_files(self, conn, task):
         """Enriched internal file metadata for cloud sync (paths never public)."""
@@ -1022,6 +1108,7 @@ class CheckService:
             self.prepare(current)
             self.notify(current)
             self.sync(current)
+            self.deliver_photos(current)
         finally:
             self.tick_lock.release()
 
