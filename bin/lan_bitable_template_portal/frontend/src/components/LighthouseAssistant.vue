@@ -191,6 +191,7 @@
                   <p v-if="turn.answer && ['stopped', 'failed'].includes(turn.status)" class="muted">{{ turn.error || '回答未完成' }}</p>
                   <div v-if="turn.output_files?.length" class="message-files output-files"><div v-for="file in turn.output_files" :key="file.id" class="output-file"><button type="button" :aria-label="'预览 ' + file.name" @click="openArtifact(file)"><FileText :size="18" /><span>{{ file.name }}</span></button><a :href="safeAttachmentUrl(file.url)" download :aria-label="'下载 ' + file.name" title="下载文件"><Download :size="16" /></a></div></div>
                   <LighthouseDownloads :items="turn.downloads" />
+                  <LighthouseQuestion v-if="turn.clarification&&!turn.plan&&turnIsComplete(turn)" :id="'assistant-question-'+turn.operation_id" :question="turn.clarification" :disabled="state.busy||sending||loading||uploading||state.turns.at(-1)?.operation_id!==turn.operation_id" @reply="answerQuestion(turn,$event)" />
                   <button v-if="turn.plan && planTurns.get(turn.plan.id) !== turn" type="button" class="plan-reference" @click="locatePlan(turn.plan.id)"><ListChecks :size="14" />查看这项操作的最新状态</button>
                   <section v-if="turn.plan && planTurns.get(turn.plan.id) === turn" class="operation-plan" :data-plan-id="turn.plan.id" :data-plan-status="turn.plan.status">
                     <div class="plan-title"><ListChecks :size="16" /><strong>{{ turn.plan.title }}</strong><span>{{ planStatusText(turn.plan) }}</span><button v-if="planIsFinished(turn.plan)" class="icon" type="button" :aria-expanded="!!expandedPlans[turn.plan.id]" :title="expandedPlans[turn.plan.id] ? '收起办理详情' : '展开办理详情'" :aria-label="expandedPlans[turn.plan.id] ? '收起办理详情' : '展开办理详情'" @click="expandedPlans[turn.plan.id] = !expandedPlans[turn.plan.id]"><ChevronRight :size="16" :class="{ 'rotate-chevron': expandedPlans[turn.plan.id] }" /></button></div>
@@ -254,7 +255,7 @@
                     <p v-if="turn.plan.error && !turn.plan.results?.some((result: Dict) => !result.ok && result.error === turn.plan.error)" class="failure">{{ turn.plan.error }}</p>
                     <p v-if="turn.plan.status !== 'needs_input' && planErrors[turn.plan.id]" class="failure" role="alert">{{ planErrors[turn.plan.id] }}</p>
                     <div v-if="turn.plan.can_retry" class="plan-actions"><button type="button" class="primary" :disabled="isPlanBusy(turn.plan)" @click="retryPlan(turn)"><Loader2 v-if="isPlanBusy(turn.plan)" :size="15" class="spin" /><RotateCcw v-else :size="15" />重试原任务</button></div>
-                    <div v-if="['awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status)" class="plan-actions"><button type="button" :disabled="isPlanBusy(turn.plan)" @click="cancelPlan(turn)">取消操作</button><button v-if="turn.plan.can_edit" type="button" :disabled="isPlanBusy(turn.plan)" @click="editPlan(turn)"><Pencil :size="15" />返回修改</button><button type="button" class="primary" :disabled="isPlanBusy(turn.plan)" @click="confirmPlan(turn)">{{ turn.plan.status === 'awaiting_second_confirmation' ? '再次确认并执行' : '确认操作清单' }}</button></div>
+                    <div v-if="['awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status)" class="plan-actions"><button type="button" :disabled="isPlanBusy(turn.plan)" @click="cancelPlan(turn)">取消操作</button><button v-if="turn.plan.can_edit" type="button" :disabled="isPlanBusy(turn.plan)" @click="editPlan(turn)"><Pencil :size="15" />返回修改</button><button type="button" class="primary" :disabled="isPlanBusy(turn.plan)" @click="confirmPlan(turn)">{{ turn.plan.confirm_label || (turn.plan.status === 'awaiting_second_confirmation' ? '再次确认并执行' : '确认操作清单') }}</button></div>
                     <div v-if="turn.plan.results?.length" class="plan-results"><div v-for="(result, i) in turn.plan.results" :key="i"><Loader2 v-if="result.ok && ['running','submitted'].includes(turn.plan.status)" :size="15" class="spin" /><Check v-else-if="result.ok" :size="15" /><AlertCircle v-else :size="15" /><span>{{ resultStatusText(result, turn.plan) }}</span><a v-if="safeAttachmentUrl(result.data?.url)" :href="safeAttachmentUrl(result.data.url)" target="_blank" rel="noopener">{{ result.data.name || '下载文件' }}</a><a v-if="!result.downloads?.length && morningDownloadUrl(result)" :href="morningDownloadUrl(result)" target="_blank" rel="noopener">下载晨会表格</a><LighthouseDownloads :items="result.downloads" /><LighthouseReply v-if="result.query_reply" :text="result.query_reply" /></div></div>
                     </div>
                   </section>
@@ -342,6 +343,7 @@ import ConfirmDialog from './ConfirmDialog.vue';
 import LighthouseReply from './LighthouseReply.vue';
 import LighthouseArtifactPreview from './LighthouseArtifactPreview.vue';
 import LighthouseDownloads from './LighthouseDownloads.vue';
+import LighthouseQuestion from './LighthouseQuestion.vue';
 import LoadingIndicator from './LoadingIndicator.vue';
 import AsyncPageState from './AsyncPageState.vue';
 import LighthouseBot from './LighthouseBot.vue';
@@ -959,11 +961,16 @@ function close(): void {
   disconnectStream();
   void nextTick(() => { if (!disposed && open.value === false && epoch === shapeEpoch) launcher.value?.focus(); });
 }
-async function send(retry?: Dict, regenerate = false): Promise<void> {
-  if (sending.value || loading.value || uploading.value || (!retry && !draft.value.trim() && !draftFiles.value.some(f => f.id))) return;
-  if (!retry && commandsMenu.value?.visible) return;
-  const question = retry?.question || draft.value.trim();
-  if (!retry && /^(?:请)?确认发送[。！!\s]*$/.test(question) && !draftFiles.value.length) {
+async function answerQuestion(turn:Dict,answer:string):Promise<void>{
+  if(state.value.turns.at(-1)?.operation_id!==turn.operation_id||state.value.busy)return;
+  await send(undefined,false,{operationId:turn.operation_id,answer});
+}
+async function send(retry?: Dict, regenerate = false, clarification?:{operationId:string;answer:string}): Promise<void> {
+  if (sending.value || loading.value || uploading.value || (!retry && !clarification && !draft.value.trim() && !draftFiles.value.some(f => f.id))) return;
+  if (!retry && !clarification && commandsMenu.value?.visible) return;
+  const question = clarification?.answer || retry?.question || draft.value.trim();
+  const clarificationOperationId=clarification?.operationId||retry?.clarification_operation_id||'';
+  if (!retry && !clarificationOperationId && /^(?:请)?确认发送[。！!\s]*$/.test(question) && !draftFiles.value.length) {
     const pending = [...planTurns.value.values()].filter(turn => ['needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status));
     if (pending.some((turn: Dict) => turn.plan.planned_notice)) {
       if (pending.length !== 1) { error.value = '有多个待处理操作，请在要发送的那条通告下确认。'; return; }
@@ -974,27 +981,26 @@ async function send(retry?: Dict, regenerate = false): Promise<void> {
       return;
     }
   }
-  const commands = retry?.commands || selectedCommands.value;
+  const commands = clarification?[]:retry?.commands || selectedCommands.value;
   const submittedCommands = retry?.submitted_commands || commands.map((item: Dict) => ({ kind: item.kind, id: item.id }));
-  const attachments = retry?.attachments || draftFiles.value.filter(f => f.id).map(({ preview, localId, uploading, error, ...file }) => file);
-  const previewFile = retry ? retry.preview_file || null : artifactFile.value;
+  const attachments = clarification?[]:retry?.attachments || draftFiles.value.filter(f => f.id).map(({ preview, localId, uploading, error, ...file }) => file);
+  const previewFile = clarification?null:retry ? retry.preview_file || null : artifactFile.value;
   const operation = retry?.operation_id || (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_assistant`);
   const attempt = retry?.client_pending && !regenerate ? (retry.attempt_id || operation) : (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_attempt`);
   const at = retry?.at || Date.now() / 1000;
   sending.value = true; error.value = '';
   abortRead();
-  rememberOutgoing({ conversation_id: state.value.conversation_id, operation_id: operation, attempt_id: attempt, question: question || '请处理附件', attachments, preview_file: previewFile, commands, submitted_commands: submittedCommands, at });
+  rememberOutgoing({ conversation_id: state.value.conversation_id, operation_id: operation, attempt_id: attempt, question: question || '请处理附件', attachments, preview_file: previewFile, commands, submitted_commands: submittedCommands, clarification_operation_id:clarificationOperationId, at });
   if (!retry) {
-    state.value.turns.push({ question: question || '请处理附件', attachments, preview_file: previewFile, commands: [...commands], submitted_commands: submittedCommands, operation_id: operation, attempt_id: attempt, status: 'pending', client_pending: true, at });
-    draft.value = '';
-    selectedCommands.value = [];
-    for (const file of [...draftFiles.value]) if (attachments.some((sent: Dict) => sent.id === file.id)) removeDraftFile(file.localId);
+    state.value.turns.push({ question: question || '请处理附件', attachments, preview_file: previewFile, commands: [...commands], submitted_commands: submittedCommands, clarification_operation_id:clarificationOperationId, operation_id: operation, attempt_id: attempt, status: 'pending', client_pending: true, at });
+    if(!clarification){draft.value = '';selectedCommands.value = [];
+      for (const file of [...draftFiles.value]) if (attachments.some((sent: Dict) => sent.id === file.id)) removeDraftFile(file.localId);}
   } else { retry.status = 'pending'; retry.error = ''; retry.attempt_id = attempt; retry.client_pending = true; }
   saveDrafts();
   scrollBottom();
   scheduleRead();
   try {
-    const result = await call('messages', 'POST', { question, commands: submittedCommands, file_ids: attachments.map((file: Dict) => file.id), preview_file_id: previewFile?.id || '', operation_id: operation, attempt_id: attempt, conversation_id: state.value.conversation_id }, 20000);
+    const result = await call('messages', 'POST', { question, commands: submittedCommands, file_ids: attachments.map((file: Dict) => file.id), preview_file_id: previewFile?.id || '', operation_id: operation, attempt_id: attempt, conversation_id: state.value.conversation_id, ...(clarificationOperationId?{clarification_operation_id:clarificationOperationId}:{}) }, 20000);
     if (disposed) return;
     abortRead();
     forgetOutgoing(operation, attempt);
@@ -1593,6 +1599,9 @@ function operationPreview(op: Dict, editing = false): { label: string; value: st
     ];
   }
   if (op.selected_labels?.plan_detail) return [{ label: '屏蔽明细', value: op.selected_labels.plan_detail }];
+  if(op.api_id==='POST /api/feishu-workpartner/messages/send'&&op.body?.recipient&&!op.body?.chat_id){
+    return editing?[]:[{label:'消息类型',value:'私信'},{label:'收件人',value:op.body.recipient},{label:'消息正文',value:op.body.text||'待填写'}];
+  }
   const labels: Dict = { scope: '楼栋范围', action: '操作', work_type: '通告类型', title: '名称', name: '名称', source_record_id: '源表事项', target_record_id: '目标记录', record_id: '记录', start_time: '开始时间', end_time: '结束时间', expected: '期望时间', actual: '实际时间', content: '内容', reason: '原因', impact: '影响', progress: '进度', version: '数据版本', manual_binding_choice: '计划通告关联', signatures: '签署人员', signature_time: '演练审核人签名时间', evaluation_time: '演练评估人评估时间', commander: '指挥人', evaluator: '评估人', participants: '参演人', step_signers: '步骤执行人', cells: '检查表填写', generate_image: '生成检查文件', date: '日期', recipient_open_ids: '收件人', statistic_date: '统计日期', meter: '水表', meter_value: '水表数值', frequency: '统计频次', shift: '班次', abnormal_note: '异常原因', large_change_confirmed: '异常已核对', corrected_usage: '修正耗水量', retained_image_ids: '保留图片', upload_ids: '上传图片' };
   const valueLabels: Dict = { start: '开始', update: '更新', end: '结束', maintenance: '维保', change: '变更', event: '事件', repair: '检修', power: '上下电', polling: '轮巡', adjustment: '调整', bind: '绑定计划通告', unbound: '作为独立通告' };
   const result: { label: string; value: string }[] = [];

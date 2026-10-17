@@ -9,7 +9,19 @@ from .work_handover import HandoverError, authorized, timestamp
 NOTICE_TYPES = {'maintenance','change','repair','polling','adjust','power'}
 SOURCES = {'maintenance':'维保通告','change':'变更通告','repair':'检修通告','polling':'设备轮巡',
            'adjust':'设备调整','power':'上下电通告','repair_management':'维修项目','event':'事件',
-           'engineer_mop':'维护单','water':'水耗记录','drills':'演练','critical_guard':'风险与重保','cabinet':'机柜上下电'}
+           'engineer_mop':'维护单','water':'水耗记录','drills':'演练','critical_guard':'风险与重保',
+           'risk_inspection':'风险排查','cabinet':'机柜上下电'}
+
+
+def responsibility_modules(actor):
+    if (actor.get('category') == 'supervisor' or actor.get('level') == 'L3'
+            or actor.get('category') == 'other' and '楼长' in str(actor.get('position') or '')):
+        wanted = ('event', 'repair_management', 'risk_inspection', 'cabinet')
+    elif actor.get('category') == 'engineer':
+        wanted = ('repair_management', 'risk_inspection')
+    else:
+        wanted = ()
+    return [module for module in wanted if module in actor.get('modules', [])]
 
 
 def title_of(row):
@@ -34,7 +46,30 @@ class HandoverSources:
     def __init__(self, runtime, controller, store):
         self.runtime, self.controller, self.store = runtime, controller, store
 
-    def load(self, actor, module, scope, period):
+    def defaults(self, actor, scope, period):
+        if not authorized(actor, scope):
+            raise HandoverError('没有该楼栋的访问权限。', 403)
+        try:
+            dt.date.fromisoformat(period + '-01')
+        except (TypeError, ValueError):
+            raise HandoverError('请选择有效月份。') from None
+        rows, warnings, failed = {}, [], []
+        for module in responsibility_modules(actor):
+            if module == 'cabinet' and scope not in 'ABCDE':
+                continue
+            try:
+                result = self.load(actor, module, scope, period, active_only=True)
+                rows.update((row['id'], row) for row in result['items'])
+                warnings.extend(result['warnings'])
+                if result.get('complete') is False:
+                    failed.append(module)
+            except Exception:
+                failed.append(module)
+                warnings.append(SOURCES[module] + '暂未读取成功，请重试或从业务添加；不代表没有未完成事项。')
+        return {'items': list(rows.values()), 'warnings': list(dict.fromkeys(warnings)),
+                'failed_modules': failed, 'loaded_at': timestamp()}
+
+    def load(self, actor, module, scope, period, *, active_only=False):
         if module not in SOURCES or not authorized(actor,scope,module):
             raise HandoverError('没有该业务或楼栋的访问权限。',403)
         try:
@@ -42,8 +77,9 @@ class HandoverSources:
         except (TypeError,ValueError):
             raise HandoverError('请选择有效月份。') from None
         svc, rows, warnings = self.runtime.service, [], []
+        complete = True
 
-        def append(raw, key, route, params, status='', kind=''):
+        def append(raw, key, route, params, status='', kind='', source_period=''):
             if not key:
                 warnings.append('有记录缺少稳定标识，未纳入候选。')
                 return
@@ -51,10 +87,11 @@ class HandoverSources:
             completed = status in {'已完成','已结束','维修完成','completed','synced','done'}
             pending = status in {'未开始','未记录','未执行','未上传','待处理','pending','draft'}
             rows.append({'id':hashlib.sha256(f'{module}:{scope}:{key}'.encode()).hexdigest(),
-                'module':module,'scope':scope,'period':period,'title':title_of(raw),'business_status':status,
+                'module':module,'scope':scope,'period':source_period or period,'title':title_of(raw),'business_status':status,
                 'kind':kind or ('history' if completed else 'todo' if pending else 'ongoing'),
                 'source_url':route+'?'+urlencode(params),'source_checked_at':timestamp(),
-                'participated':explicit_participation(raw,actor)})
+                'participated':explicit_participation(raw,actor),
+                'responsible':module in responsibility_modules(actor) and not completed})
 
         if module in NOTICE_TYPES:
             svc.ensure_snapshot_loaded()
@@ -111,11 +148,24 @@ class HandoverSources:
                     raise HandoverError('维修项目数量过多，请缩小原业务范围后添加具体事项。')
             warnings.append('维修项目按现有全量项目读取，不受月份筛选限制。')
         elif module=='event':
-            data=svc.get_event_monthly_snapshot(scope=scope,month=period)
-            if not data.get('snapshot_exists'):
+            months = {period}
+            if active_only:
+                months.update(row['month'] for row in self.runtime.state_store.event_month_snapshot_stats().get('active_months', []))
+            loaded = False
+            for month in sorted(months):
+                data=svc.get_event_monthly_snapshot(scope=scope,month=month)
+                if not data.get('snapshot_exists'):
+                    complete = False
+                    if month == period:
+                        warnings.append('所选月份事件快照尚未加载，请在事件管理中核验。')
+                    continue
+                loaded = True
+                for row in data.get('records',[]):
+                    append(row,row.get('record_id') or row.get('event_id'),'/',{'mode':'events','detail':'1','scope':scope,'month':month,'search':title_of(row)},source_period=month)
+            if not loaded:
                 raise HandoverError('事件月度快照尚未加载，请先在事件管理中读取该月份。',503)
-            for row in data.get('records',[]):
-                append(row,row.get('record_id') or row.get('event_id'),'/',{'mode':'events','detail':'1','scope':scope,'month':period,'search':title_of(row)})
+            if active_only:
+                warnings.append('事件包含本机已加载月份的未闭环记录。')
         elif module=='engineer_mop':
             for row in svc._engineer_month_maintenance_notices(scope=scope,ongoing_items=self.controller._get_ongoing(scope)):
                 uploaded=bool(row.get('mop_uploaded') or row.get('mop_attachment_count'))
@@ -149,6 +199,32 @@ class HandoverSources:
             for row in svc.list_critical_guard_tasks(scope=scope).get('tasks',[]):
                 append(row,row.get('task_id'),'/critical-guard',{'scope':scope,'task_id':row.get('task_id')},'已完成' if row.get('complete') is True else '待处理')
             warnings.append('风险与重保按现有活动任务读取。')
+        elif module=='risk_inspection':
+            inspections = self.runtime.risk_inspections()
+            page_no = 1
+            statuses = {'pending': '未填写', 'returned': '退回待补充', 'submitted': '待复核', 'approved': '已完成'}
+            while True:
+                data = inspections.list(actor, page_no)
+                page = data.get('items', [])
+                for release in page:
+                    if release['status'] != 'active':
+                        continue
+                    task = inspections.get(actor, release['id'])
+                    for person in task['people']:
+                        if person.get('revoked') or person['scope'] != scope:
+                            continue
+                        for item in person['items']:
+                            status = item.get('status')
+                            if status not in statuses:
+                                continue
+                            append({'title': task['name'] + ' · ' + item['title'] + ' · ' + person['name'], 'person_id': person['id']},
+                                   ':'.join((task['id'], person['id'], item['id'])), '/risk-inspections',
+                                   {'scope': scope, 'id': task['id']}, statuses[status],
+                                   'history' if status == 'approved' else 'todo' if status in {'pending', 'returned'} else 'ongoing')
+                if not page or page_no * 20 >= data['total']:
+                    break
+                page_no += 1
+            warnings.append('风险排查只读取当前账号在原业务中可见的在办任务。')
         elif module=='cabinet':
             page_no=1
             allowed=[s for s in 'ABCDE' if authorized(actor,s,module)]
@@ -166,5 +242,7 @@ class HandoverSources:
                 page_no+=1
             warnings.append('机柜按已有全部批次读取。')
         rows=list({row['id']:row for row in rows}.values())
+        if active_only:
+            rows = [row for row in rows if row['kind'] in {'ongoing', 'todo'}]
         self.store.cache_sources(rows)
-        return {'items':rows,'warnings':list(dict.fromkeys(warnings)),'loaded_at':timestamp()}
+        return {'items':rows,'warnings':list(dict.fromkeys(warnings)),'complete':complete,'loaded_at':timestamp()}

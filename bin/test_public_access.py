@@ -76,6 +76,18 @@ def make_app():
     @app.get('/api/unreviewed-module')
     async def private():
         return {'should_not_be_public': True}
+
+    @app.api_route('/api/risk-inspections', methods=['GET', 'POST'])
+    @app.get('/api/work-handovers/people')
+    @app.get('/api/workspace-layouts/page')
+    @app.get('/api/feishu-workpartner/people')
+    @app.get('/api/pre-shift-checks/history')
+    async def business():
+        return {'ok': True}
+
+    @app.get('/api/risk-inspections/restricted')
+    async def restricted():
+        return JSONResponse({'ok': False, 'error': 'original module permission denied'}, status_code=403)
     return app
 
 
@@ -136,6 +148,27 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/api/polling-work-orders/session?token=valid')).status_code, 200)
         self.assertEqual((await self.client.get('/api/signatures/people')).status_code, 403)
         self.assertEqual((await self.client.get('/api/signatures/people?record_id=rec-one&token=valid')).status_code, 200)
+
+    async def test_all_declared_business_module_roots_follow_lan_access(self):
+        from public_access.ingress import API_ROOTS
+        from lan_bitable_template_portal.module_access import PREFIXES
+        for prefix, _ in PREFIXES:
+            if prefix.startswith('/api/') and not prefix.endswith('-'):
+                self.assertIn(prefix.split('/')[2], API_ROOTS)
+        paths = ('/api/risk-inspections', '/api/work-handovers/people',
+                 '/api/workspace-layouts/page', '/api/feishu-workpartner/people',
+                 '/api/pre-shift-checks/history')
+        for path in paths:
+            self.session = {'user': {'open_id': 'alice'}}
+            self.assertEqual((await self.client.get(path)).status_code, 200, path)
+            self.session = None
+            self.assertEqual((await self.client.get(path)).status_code, 401, path)
+            self.session = {'role': 'guest'}
+            self.assertEqual((await self.client.get(path)).status_code, 403, path)
+        self.session = {'user': {'open_id': 'alice'}}
+        self.assertEqual((await self.client.get('/api/risk-inspections/restricted')).status_code, 403)
+        self.assertEqual((await self.client.post('/api/risk-inspections', headers={'Origin': SETTINGS.public_url})).status_code, 200)
+        self.assertEqual((await self.client.post('/api/risk-inspections', headers={'Origin': 'https://evil.example'})).status_code, 403)
 
     async def test_public_health_is_minimal_and_cookie_is_secure(self):
         self.session = None

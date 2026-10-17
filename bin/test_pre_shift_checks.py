@@ -344,10 +344,12 @@ class CheckTests(unittest.TestCase):
 
     def test_roster_pagination_filters_date_long_day_and_uses_real_person_ids(self):
         fields = {'排班日期': int(self.current.timestamp() * 1000), '班组': 'A班', '机楼': 'A楼', '班次': '白',
+                  '人员（文本）':'一、二',
                   '人员': {'users': [{'id': 'ou_one', 'name': '一'}, {'id': 'ou_two', 'name': '二'}]}}
         reader = SimpleNamespace(_request_json=Mock(side_effect=[
             {'code': 0, 'data': {'items': [{'fields': {**fields, '班组': '长白'}}], 'has_more': True, 'page_token': 'p2'}},
-            {'code': 0, 'data': {'items': [{'fields': fields}], 'has_more': False}}]))
+            {'code': 0, 'data': {'items': [{'fields': fields}], 'has_more': False}}]),
+            get_permission_directory_people=lambda:{'items':[{'record_id':oid,'name':name,'open_id':oid,'scopes':['A'],'selectable':True} for oid,name in [('ou_one','一'),('ou_two','二')]]})
         self.assertEqual([p['open_id'] for p in read_roster(reader, DAY)['people']], ['ou_one', 'ou_two'])
         reader._request_json = Mock(return_value={'code': 0, 'data': {'items': [{'fields': fields}], 'has_more': True, 'page_token': 'same'}})
         with self.assertRaises(CheckError):
@@ -355,16 +357,18 @@ class CheckTests(unittest.TestCase):
 
     def test_ambiguous_building_roster_does_not_block_other_buildings(self):
         fields = {'排班日期': int(self.current.timestamp() * 1000), '班组': 'A班', '机楼': 'A楼', '班次': '白',
+                  '人员（文本）':'一、二',
                   '人员': {'users': [{'id': 'ou_one'}, {'id': 'ou_two'}]}}
-        data = {'code': 0, 'data': {'items': [{'fields': fields}, {'fields': {**fields, '机楼': '110站', '人员': {'users': [{'id': 'ou_station'}]}}}], 'has_more': False}}
-        result = read_roster(SimpleNamespace(_request_json=lambda *a, **kw: data), DAY)
+        data = {'code': 0, 'data': {'items': [{'fields': fields}, {'fields': {**fields, '机楼': '110站', '人员（文本）':'站员', '人员': {'users': [{'id': 'ou_station','name':'站员'}]}}}], 'has_more': False}}
+        directory=[{'record_id':oid,'name':name,'open_id':oid,'scopes':[scope],'selectable':True} for oid,name,scope in [('ou_one','一','A'),('ou_two','二','A'),('ou_station','站员','110')]]
+        result = read_roster(SimpleNamespace(_request_json=lambda *a, **kw: data,get_permission_directory_people=lambda:{'items':directory}), DAY)
         self.assertEqual(len(result['people']), 2)
         self.assertIn('110', result['warnings'])
         self.roster.return_value = result
         self.service.tick(self.current)
         self.assertEqual(self.sender.call_count, 2)
         self.assertFalse(self.service.state(self.worker, 'A', self.current)['roster_error'])
-        self.assertIn('1人', self.service.state(self.admin, '110', self.current)['roster_error'])
+        self.assertIn('1/2人', self.service.state(self.admin, '110', self.current)['roster_error'])
 
 
 class RouteTests(unittest.TestCase):

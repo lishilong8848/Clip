@@ -11,6 +11,18 @@ from bin.test_feishu_assistant import Memory
 
 
 class QuestionForms(unittest.TestCase):
+    def test_typed_followup_uses_native_picker_and_validates_answer(self):
+        self.turn['clarification']['options'] = []
+        for kind, tag, answer in (('date', 'date_picker', '2026-10-17'), ('time', 'picker_time', '13:30'),
+                ('datetime-local', 'picker_datetime', '2026-10-17 13:30'), ('number', 'input', '42')):
+            with self.subTest(kind=kind):
+                self.turn['clarification']['input_type'] = kind
+                card, _, message = self.make({'answer': answer})
+                self.assertEqual(card['body']['elements'][0]['elements'][1]['tag'], tag)
+                self.assertTrue(forms.read_question_reply(self.bot, message, self.actor, self.conversation)[0])
+                _, _, invalid = self.make({'answer': '不是有效值'})
+                with self.assertRaises(AssistantError): forms.read_question_reply(self.bot, invalid, self.actor, self.conversation)
+
     def setUp(self):
         self.bot = SimpleNamespace(runtime=SimpleNamespace(state_store=Memory(Path('unused'))))
         self.actor = {'id': 'ou_primary', 'scopes': ['E']}

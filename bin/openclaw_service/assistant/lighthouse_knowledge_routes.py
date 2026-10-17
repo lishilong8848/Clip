@@ -135,7 +135,8 @@ def install_knowledge_routes(app, authorize, get_knowledge):
                         data = await asyncio.to_thread(service.rename_group, actor, group_id, payload.get('name'), **({'parent_id': payload['parent_id']} if 'parent_id' in payload else {})) if request.method == 'PATCH' else await asyncio.to_thread(service.delete_group, actor, group_id)
                     elif len(parts) == 3 and parts[2] == 'documents':
                         document_ids = payload.get('document_ids')
-                        data = await asyncio.to_thread(service.set_documents_group, actor, group_id, document_ids) if request.method == 'PUT' else await asyncio.to_thread(service.remove_documents_group, actor, group_id, document_ids)
+                        data = await asyncio.to_thread(service.set_documents_group, actor, group_id, document_ids,
+                            **({'selection': payload['selection']} if 'selection' in payload else {})) if request.method == 'PUT' else await asyncio.to_thread(service.remove_documents_group, actor, group_id, document_ids)
                     else:
                         raise AssistantError('知识库请求参数无效。')
                 elif action.endswith('/file'):

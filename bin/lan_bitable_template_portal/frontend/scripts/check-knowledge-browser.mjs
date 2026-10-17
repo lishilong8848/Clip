@@ -11,7 +11,9 @@ await mkdir(output, { recursive: true });
 // Exercise the production build via vite preview so the test matches the actual
 // dist bundle shipped to users (keep in sync with source). Build is produced by
 // Codex before running; do not point this at the source-only dev server.
-const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
+const server = await preview({ root, logLevel: 'error',
+  ...(process.env.CLIPFLOW_KNOWLEDGE_BUILD_DIR?{build:{outDir:path.resolve(root,process.env.CLIPFLOW_KNOWLEDGE_BUILD_DIR)}}:{}),
+  preview: { host: '127.0.0.1', port: 0, proxy:{} } });
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -48,7 +50,7 @@ await page.route('**/api/**', async route => {
   // Dev server serves source modules under /src/api/... — never mock those, let Vite serve them.
   if (!url.pathname.startsWith('/api/')) return route.continue();
   const ok = data => route.fulfill({ json: { ok: true, data } });
-  if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'knowledge-fixture', role: 'admin', name: '隔离测试' }, scope_options: [{ value: 'E', label: 'E楼' }] });
+  if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'knowledge-fixture', role: 'admin', name: '隔离测试', modules:['knowledge','assistant'] }, scope_options: [{ value: 'E', label: 'E楼' }] });
   if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-knowledge' } });
   if (url.pathname === '/api/assistant/conversation') return ok({ conversation_id: 'fixture', enabled: true, configured: false, turns: [], can_manage_settings: true });
   if (url.pathname === '/api/assistant/appearance') return ok({ color: '#171717', size: 88, shape: 'circle', snap_back: true });
@@ -157,7 +159,8 @@ try {
   assert.ok(Math.abs(dragged.width - (resized.width - 48)) < 3);
   assert.ok(Math.abs(dragged.height - (resized.height - 32)) < 3);
   resized = dragged;
-  await page.getByRole('button', { name: '侧边栏（通告待办 / 知识库）' }).click();
+  const sidebarToggle=page.getByRole('button', { name: '侧边栏（通告待办 / 知识库）' });
+  if(await sidebarToggle.getAttribute('aria-expanded')!=='true')await sidebarToggle.click();
   await page.getByRole('tab', { name: '知识库', exact: true }).click();
   await page.getByRole('searchbox', { name: '检索知识库' }).fill('公司出差');
   await page.locator('.lk-result').waitFor();
@@ -212,17 +215,13 @@ try {
   await page.getByRole('button', { name: '全部', exact: true }).click();
   await page.getByText('测试文件m1.txt', { exact: true }).waitFor();
   // group management: create + rename
-  await page.getByRole('button', { name: '管理分组', exact: true }).click();
-  await page.getByRole('group', { name: '分组管理' }).waitFor();
-  await page.getByLabel('新分组名称').fill('临时组');
-  await page.getByRole('button', { name: '新建', exact: true }).click();
-  await page.locator('.kb-groups-list li').filter({ hasText: '临时组' }).waitFor();
-  const tempRow = page.locator('.kb-groups-list li').filter({ hasText: '临时组' });
-  await tempRow.getByRole('button', { name: '重命名分组', exact: true }).click();
-  await tempRow.locator('input[aria-label^="重命名分组"]').fill('临时组改');
-  await tempRow.getByRole('button', { name: '确认重命名', exact: true }).click();
-  await page.locator('.kb-groups-list li').filter({ hasText: '临时组改' }).waitFor();
-  await page.getByRole('button', { name: '管理分组', exact: true }).click(); // close panel
+  await page.getByLabel('新根文件夹名称').fill('临时组');
+  await page.getByRole('button', { name: '新建根文件夹', exact: true }).click();
+  await page.getByRole('button', { name: '重命名「临时组」', exact: true }).click();
+  const rename=page.getByRole('dialog',{name:'重命名文件夹',exact:true});
+  await rename.getByLabel('文件夹名称',{exact:true}).fill('临时组改');
+  await rename.getByRole('button',{name:'保存',exact:true}).click();
+  await page.locator('.kb-tree-pane button[title="临时组改"]').waitFor();
   // batch selection: select all current page (20 on 全部/page1)
   await page.getByRole('checkbox', { name: '全选本页', exact: true }).click();
   const batchBar = page.getByRole('toolbar', { name: '批量分组' });
@@ -236,9 +235,7 @@ try {
   assert.equal(await page.locator('.kb-row').count(), 20, '临时组改 shows 20 assigned rows');
   await page.screenshot({ path: path.join(output, 'knowledge-groups.png'), fullPage: true });
   // delete the group: files return to ungrouped, group button/panel remove it
-  await page.getByRole('button', { name: '管理分组', exact: true }).click();
-  const tempRow2 = page.locator('.kb-groups-list li').filter({ hasText: '临时组改' });
-  await tempRow2.getByRole('button', { name: '删除分组', exact: true }).click();
+  await page.getByRole('button', { name: '删除「临时组改」', exact: true }).click();
   await page.getByRole('dialog', { name: '删除分组' }).getByRole('button', { name: '确认', exact: true }).click();
   await page.getByText('测试文件m1.txt', { exact: true }).waitFor();
   await page.waitForFunction(() => { const t = document.querySelector('.kb-total'); return t && t.textContent.includes('共 23 项'); });

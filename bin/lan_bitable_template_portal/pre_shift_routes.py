@@ -15,19 +15,21 @@ _IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png'
 def install_pre_shift_routes(app, controller, runtime):
     service = None
     lock = threading.Lock()
+    from .pre_shift_cloud import CheckSender
+    sender = CheckSender(runtime)
 
     def get_service():
         nonlocal service
         with lock:
             if service is None:
                 from .pre_shift_cloud import CheckCloud, read_roster
-                from .learning_reminders import send_reminder
                 service = CheckService(roster=lambda day: read_roster(runtime.service, day),
-                    cloud=CheckCloud(runtime.service), sender=send_reminder,
+                    cloud=CheckCloud(runtime.service), sender=sender,
                     portal_url=lambda: runtime.service._critical_guard_public_base_url())
             return service
 
     async def startup():
+        sender.loop = asyncio.get_running_loop()
         await asyncio.to_thread(lambda: get_service().start())
 
     async def shutdown():
@@ -78,6 +80,9 @@ def install_pre_shift_routes(app, controller, runtime):
             scope = request.query_params.get('scope') or actor.get('home_scope') or scopes_for(actor)[0]
             if operation == 'state':
                 data = await asyncio.to_thread(svc.state, actor, scope)
+            elif operation == 'history':
+                data = await asyncio.to_thread(svc.history, actor, scope,
+                    request.query_params.get('page', '1'), request.query_params.get('page_size', '20'))
             elif operation == 'definition':
                 if set(body) != {'version', 'items'}:
                     raise CheckError('清单参数无效。')
@@ -97,6 +102,10 @@ def install_pre_shift_routes(app, controller, runtime):
     @app.put('/api/pre-shift-checks/definition')
     async def definition(request: Request):
         return await handle(request, 'definition')
+
+    @app.get('/api/pre-shift-checks/history')
+    async def history(request: Request):
+        return await handle(request, 'history')
 
     @app.post('/api/pre-shift-checks/submit')
     async def submit(request: Request):

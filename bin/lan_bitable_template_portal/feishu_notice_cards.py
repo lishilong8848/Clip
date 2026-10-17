@@ -1155,9 +1155,9 @@ def build_preview_card(plan, ticket, *, just_saved=True):
         elements.append({"tag": "markdown",
                          "content": "⚠️ 实际字段较多，飞书内预览已超限。已隐藏执行按钮，请在灯塔原页面核对全部字段后再确认，卡片不会缺失字段执行。"})
     elif status == "awaiting_second_confirmation":
-        elements.append(_action_button("confirm", "再次确认执行", kind, ticket, "confirm", style="danger"))
+        elements.append(_action_button("confirm", plan.get('confirm_label') or "再次确认执行", kind, ticket, "confirm", style="danger"))
     elif status == "awaiting_confirmation":
-        elements.append(_action_button("confirm", "确认执行", kind, ticket, "confirm", style="primary"))
+        elements.append(_action_button("confirm", plan.get('confirm_label') or "确认执行", kind, ticket, "confirm", style="primary"))
     elif status in {"needs_input", "failed"}:
         elements.append({"tag": "markdown",
                          "content": "（当前状态不允许确认执行。可返回编辑或取消该待处理操作。）"})

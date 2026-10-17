@@ -19,6 +19,11 @@ export type AccountLike = {
   role?: string;
   enabled?: boolean;
   scopes?: string[];
+  own_scopes?: string[];
+  home_scope?: string;
+  modules?: string[];
+  locked?: boolean;
+  blocked_reason?: string;
   [key: string]: unknown;
 };
 
@@ -245,4 +250,148 @@ export function flattenHierarchyPeople<T extends AccountLike>(tree: Hierarchy<T>
     }
   }
   return out;
+}
+
+export type AccountGroupBy = 'building' | 'level';
+export type AccountGroupDepth = 1 | 2 | 3;
+export type AccountPersonNode<T extends AccountLike = AccountLike> = PersonTreeItem<T> & {
+  type: 'person';
+  label: string;
+  depth: number;
+  managementDepth?: number;
+  managementCount?: number;
+  isLeaf?: boolean;
+  children?: AccountTreeNode<T>[];
+};
+export type AccountGroupNode<T extends AccountLike = AccountLike> = {
+  key: string;
+  type: 'building' | 'level' | 'category';
+  value: string;
+  label: string;
+  depth: number;
+  count: number;
+  children: AccountTreeNode<T>[];
+};
+export type AccountTreeNode<T extends AccountLike = AccountLike> = AccountGroupNode<T> | AccountPersonNode<T>;
+
+const CATEGORY_LABELS: Record<string, string> = {
+  manager: '经理', supervisor: '主管', engineer: '工程师', shift_leader: '值班长',
+  operator: '值班员', duty: '值班账号', other: '待分类',
+};
+const BUILDING_ORDER = ['110', 'A', 'B', 'C', 'D', 'E', 'H', 'CAMPUS', 'ALL', '*', ''];
+const LEVEL_RANK: Record<string, number> = {L0: 0, L1: 1, L2: 2, L3: 3, L4: 4};
+
+export type AccountGroupingOptions<T extends AccountLike = AccountLike> = HierarchyOptions<T> & {
+  groupBy?: AccountGroupBy;
+  depth?: AccountGroupDepth;
+  categoryLabel?: (category: string) => string;
+};
+
+export function buildGroupedAccountHierarchy<T extends AccountLike>(
+  accounts: readonly T[],
+  options: AccountGroupingOptions<T> = {},
+): AccountGroupNode<T>[] {
+  const base = buildAccountHierarchy(accounts, {
+    ...options,
+    scopeValue: options.scopeValue ?? (account => {
+      if (Array.isArray(account.own_scopes)) return account.own_scopes.length ? account.own_scopes : [''];
+      if (account.home_scope) return [account.home_scope];
+      return account.scopes?.length ? account.scopes : [''];
+    }),
+  });
+  const people = base.flatMap(level => level.buildings.flatMap(building => building.people));
+  const dimensions: AccountGroupNode<T>['type'][] = options.groupBy === 'level'
+    ? ['level', 'building', 'category'] : ['building', 'level', 'category'];
+  const depth = options.depth ?? 3;
+  function label(type: AccountGroupNode<T>['type'], value: string): string {
+    if (type === 'level') return value ? options.levelLabel?.(value) || value : options.noLevelLabel || '未分级';
+    if (type === 'category') return options.categoryLabel?.(value) || CATEGORY_LABELS[value] || value;
+    if (!value) return '未归属楼栋';
+    if (value === 'ALL' || value === '*') return '全部楼栋';
+    if (value === 'CAMPUS') return '园区';
+    return options.buildingLabel?.(value) || (value === '110' ? '110站' : value + '楼');
+  }
+  function group(rows: PersonTreeItem<T>[], at: number, path: string[]): AccountTreeNode<T>[] {
+    if (at === depth) {
+      const unique = new Map(rows.map(person => [personKey(person.source), person]));
+      return [...unique.values()].map(person => ({...person, type: 'person', label: person.name, depth: at + 1,
+        key: JSON.stringify([...path, 'person', personKey(person.source)])}));
+    }
+    const type = dimensions[at];
+    const groups = new Map<string, PersonTreeItem<T>[]>();
+    for (const person of rows) {
+      const value = type === 'building' ? person.building : type === 'level' ? person.level : String(person.source.category || 'other');
+      const bucket = groups.get(value) || [];
+      bucket.push(person);
+      groups.set(value, bucket);
+    }
+    const values = [...groups.keys()].sort((a, b) => {
+      if (type === 'level') return (options.levelRank?.(a) ?? Number(a.match(/^L(\d+)$/)?.[1] ?? 99)) - (options.levelRank?.(b) ?? Number(b.match(/^L(\d+)$/)?.[1] ?? 99)) || a.localeCompare(b);
+      if (type === 'building') return (BUILDING_ORDER.includes(a) ? BUILDING_ORDER.indexOf(a) : 98) - (BUILDING_ORDER.includes(b) ? BUILDING_ORDER.indexOf(b) : 98) || a.localeCompare(b);
+      return label(type, a).localeCompare(label(type, b), 'zh-CN');
+    });
+    return values.map(value => {
+      const rows = groups.get(value)!;
+      const nextPath = [...path, type, value];
+      return {key: JSON.stringify(nextPath), type, value, label: label(type, value), depth: at + 1,
+        count: new Set(rows.map(person => personKey(person.source))).size,
+        children: group(rows, at + 1, nextPath)};
+    });
+  }
+  return group(people, 0, []) as AccountGroupNode<T>[];
+}
+
+// Read-only projection of account_policy.account_allowed; never grants write access.
+export function accountManagementAccess(manager: AccountLike, target: AccountLike): {view: boolean; edit: boolean} {
+  const denied = {view: false, edit: false};
+  const level = String(manager.level || '');
+  if (manager.enabled !== true || manager.blocked_reason || !Array.isArray(manager.modules) || !manager.modules.includes('accounts') || !['L0', 'L1', 'L2', 'L3'].includes(level)) return denied;
+  if (!personKey(manager) || !personKey(target) || personKey(manager) === personKey(target)) return denied;
+  const rank = (value?: string) => LEVEL_RANK[String(value || '').trim()] ?? 99;
+  if (rank(target.level) <= rank(level)) return denied;
+  const editable = !target.locked && !target.blocked_reason;
+  if (level === 'L0' || level === 'L1') return {view: true, edit: editable};
+  if (target.role === 'admin' || ['L0', 'L1', 'L3'].includes(String(target.level))) return denied;
+  if (level === 'L2') return {view: false, edit: editable && target.category === 'engineer'};
+  const scopes = new Set(Array.isArray(manager.scopes) && manager.scopes.length ? manager.scopes : [manager.home_scope]);
+  const inside = ['engineer', 'operator', 'shift_leader', 'duty'].includes(String(target.category))
+    && target.level === 'L4' && Array.isArray(target.own_scopes) && !!target.own_scopes.length && target.own_scopes.every(scope => scopes.has(scope));
+  return {view: inside, edit: inside && editable};
+}
+
+export function buildAccountManagementTree<T extends AccountLike>(
+  accounts: readonly T[],
+  directory: readonly T[] = accounts,
+  options: AccountGroupingOptions<T> & {loadedPeople?: ReadonlySet<string>} = {},
+): AccountGroupNode<T>[] {
+  const visible = dedupeAccounts(directory);
+  const byIdentity = new Map(visible.map(account => [personKey(account), account]));
+  const managed = new Map<string, T[]>();
+  function members(manager: T): T[] {
+    const identity = personKey(manager);
+    if (!managed.has(identity)) managed.set(identity, visible.filter(target => {
+      const access = accountManagementAccess(manager, target);
+      return access.view || access.edit;
+    }));
+    return managed.get(identity)!;
+  }
+  function decorate(nodes: AccountTreeNode<T>[], path: string[], offset: number, managementDepth: number): AccountTreeNode<T>[] {
+    return nodes.map(node => {
+      const key = JSON.stringify([...path, node.key]);
+      if (node.type !== 'person') return {...node, key, depth: offset + node.depth,
+        children: decorate(node.children, path, offset, managementDepth)};
+      const people = members(node.source);
+      return {...node, key, depth: offset + node.depth, managementDepth, managementCount: people.length, isLeaf: !people.length,
+        children: people.length && options.loadedPeople?.has(key)
+          ? decorate(buildGroupedAccountHierarchy(people, {...options, groupBy: 'building', depth: 3}),
+            [...path, node.key], offset + node.depth, managementDepth + 1)
+          : undefined};
+    });
+  }
+  // Canonical directory rows keep current login's action flags and redacted fields intact.
+  const roots = accounts.flatMap(account => {
+    const canonical = byIdentity.get(personKey(account));
+    return canonical ? [canonical] : [];
+  });
+  return decorate(buildGroupedAccountHierarchy(roots, options), [], 0, 0) as AccountGroupNode<T>[];
 }

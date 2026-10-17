@@ -7,7 +7,7 @@ import {preview} from 'vite';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),output=path.resolve(root,'../../../output/playwright/pre-shift');
 await mkdir(output,{recursive:true});
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[];
 const layouts=layoutApiFixture();
 let writes=0,definitionWrites=0,submitted=false,fail=false,mode='operator',page;
@@ -38,11 +38,20 @@ try{
  await page.getByText('本次待检查',{exact:true}).waitFor();
  assert(await check.evaluate(el=>el.classList.contains('has-pending-checks')));
  assert.equal(await check.evaluate(el=>getComputedStyle(el,'::before').animationName),'none','reduced motion uses a static red outline');
+ const card=page.locator('.grid-stack-item[data-widget-kind="pre_shift"]>.v2-widget');
+ assert.equal(await card.evaluate(el=>getComputedStyle(el,'::after').animationName),'none','reduced motion stops the whole-card pulse');
+ assert.notEqual(await card.evaluate(el=>getComputedStyle(el,'::after').backgroundColor),'rgba(0, 0, 0, 0)','attention tints the whole card, not only its edge');
+ const custom=page.getByRole('button',{name:'自定义工作台',exact:true}),buttonBox=await custom.boundingBox(),headerBox=await card.locator('.v2-widget-head').boundingBox();
+ assert(buttonBox&&headerBox&&buttonBox.height<=32&&Math.abs(buttonBox.x+buttonBox.width-headerBox.x-headerBox.width)<=24,'compact customization stays in the top-right header gap');
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ assert.equal(await card.evaluate(el=>getComputedStyle(el,'::after').animationName),'preShiftPulse');
+ await page.emulateMedia({reducedMotion:'reduce'});
  assert.equal(await check.getByRole('radio',{checked:true}).count(),0,'no item is pre-checked');
  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();assert.equal(await page.getByRole('button',{name:'移除班前检查',exact:true}).count(),0);await page.locator('.v2-dashboard-actions').getByRole('button',{name:'取消',exact:true}).click();
  await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('请逐项选择检查结果，并填写异常项备注。',{exact:true}).waitFor();assert.equal(writes,0);
  const rows=check.locator('fieldset');await rows.nth(0).locator('.n-radio-button').filter({hasText:'无异常'}).click();await rows.nth(1).locator('.n-radio-button').filter({hasText:'异常'}).last().click();
  await check.getByRole('button',{name:'提交检查',exact:true}).click();assert.equal(writes,0,'abnormal requires a note');await rows.nth(1).getByRole('textbox').fill('测试异常说明');
+ await rows.nth(0).getByRole('button',{name:items[0].text+'附件',exact:true}).click();
  await rows.nth(0).getByLabel('上传检查附件',{exact:true}).setInputFiles({name:'检查记录.txt',mimeType:'text/plain',buffer:Buffer.from('test')});await check.getByRole('link',{name:'检查记录.txt',exact:true}).waitFor();assert.equal(fileWrites,1);assert.equal(writes,0);assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');
  const uploadZone=rows.nth(0).getByRole('group',{name:'检查附件上传区',exact:true});
  await uploadZone.evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['paste'],'粘贴截图.png',{type:'image/png'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});await check.getByRole('link',{name:'粘贴截图.png',exact:true}).waitFor();assert.equal(fileWrites,2);
@@ -54,6 +63,7 @@ for(const width of [1440,390]){await page.setViewportSize({width,height:width<70
  await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);await check.getByText('已同步飞书',{exact:true}).waitFor();assert.equal(await check.getByRole('button',{name:'提交检查',exact:true}).count(),0);
  await page.reload();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);
  assert(!await check.evaluate(el=>el.classList.contains('has-pending-checks')));
+ assert.equal(await card.evaluate(el=>getComputedStyle(el,'::after').content),'none','completion removes the whole-card tint');
  shift='夜';submitted=false;await check.getByRole('button',{name:'刷新班前检查',exact:true}).click();await check.getByText('本次待检查',{exact:true}).waitFor();assert(await check.evaluate(el=>el.classList.contains('has-pending-checks')),'next shift alerts independently');
  submitted=true;await check.getByRole('button',{name:'刷新班前检查',exact:true}).click();await check.getByText('本次已完成',{exact:true}).waitFor();assert(!await check.evaluate(el=>el.classList.contains('has-pending-checks')),'peer or duty completion clears every viewer');
  mode='manager';await page.reload();await page.getByRole('button',{name:'管理清单',exact:true}).click();const editor=page.locator('.v2-check-editor');await editor.getByRole('button',{name:'添加检查项',exact:true}).click();await editor.getByRole('textbox',{name:'检查项3',exact:true}).fill('新增测试检查项');await editor.getByLabel('执行频率',{exact:true}).nth(2).click();await page.locator('.n-base-select-option').getByText('每周',{exact:true}).click();await editor.getByRole('button',{name:'保存清单',exact:true}).click();await editor.waitFor({state:'hidden'});assert.equal(definitionWrites,1);assert.equal(definition.items.length,3);assert.equal(definition.items[2].frequency.kind,'weekly');
@@ -66,7 +76,7 @@ definition={version:definition.version+1,items:Array.from({length:25},(_,i)=>({i
  await page.getByRole('menuitem',{name:'SOP 步骤编辑',exact:true}).click();await page.locator('.v2-sop-manager.is-page').waitFor();assert.equal(await page.locator('.n-modal:visible').count(),0,'SOP editor is a page, not a notice modal');await page.getByRole('button',{name:'新增',exact:true}).click();await page.getByRole('textbox',{name:'SOP名称',exact:true}).fill('未保存模板');
  await page.getByRole('menuitem',{name:'个人工作台',exact:true}).click();await page.getByText('放弃未保存的SOP修改？',{exact:true}).waitFor();await page.getByRole('button',{name:'继续编辑',exact:true}).click();
  for(const width of [1440,390]){await page.setViewportSize({width,height:width<700?844:960});assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(output,'sop-page-'+width+'.png'),fullPage:true});}
- await page.getByRole('button',{name:'返回SOP列表',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.v2-sop-content').waitFor({state:'detached'});assert.match(page.url(),/view=sops/);await page.locator('.n-dialog:visible').waitFor({state:'hidden'});assert.equal(await page.locator('.n-dialog:visible').count(),0,'leaving SOP confirms once');
+ assert.equal(await page.getByRole('button',{name:'返回SOP列表',exact:true}).count(),0);await page.getByRole('button',{name:'取消修改',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.v2-sop-content').waitFor({state:'detached'});assert.match(page.url(),/view=sops/);await page.locator('.n-dialog:visible').waitFor({state:'hidden'});assert.equal(await page.locator('.n-dialog:visible').count(),0,'leaving SOP confirms once');
  mode='restricted';await page.goto(origin+'/assets/workspace-v2/index.html?view=sops');await page.getByText('没有该功能权限',{exact:true}).waitFor();assert.equal(await page.getByRole('menuitem',{name:'SOP 步骤编辑',exact:true}).count(),0,'change-only accounts cannot open SOP editor');
  assert.deepEqual(errors,[]);console.log('PASS: checklist clear/add live updates, completed snapshot, native wheel scroll chaining, mandatory widget, submission validation/retry, standalone SOP navigation/dirty guard, PC/mobile. No real writes.');
 }catch(e){if(page){await page.screenshot({path:path.join(output,'failure.png'),fullPage:true});console.error(errors,await page.locator('body').innerText());}throw e;}finally{await browser.close();await server.close();}

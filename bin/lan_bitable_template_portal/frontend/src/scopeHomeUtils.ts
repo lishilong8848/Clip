@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "critical_guard" | "risk_inspection" | "drill" | "learning" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence" | "pre_shift" | "work_handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "risk" | "critical_guard" | "risk_inspection" | "drill" | "learning" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence" | "pre_shift" | "work_handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -97,8 +97,7 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     badge: "闭环管理",
     title: "风险管理",
     tags: ["重保任务", "风险排查", "结果汇总"],
-    primaryAction: { key: "critical_guard", label: "进入重保管理", primary: true },
-    secondaryActions: [{ key: "risk_inspection", label: "风险排查" }],
+    primaryAction: { key: "risk", label: "进入风险管理", primary: true },
   },
   {
     key: "capacity",
@@ -117,9 +116,6 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     title: "其他工具",
     tags: ["每日任务", "辅助通告"],
     primaryAction: { key: "tools", label: "进入其他工具", primary: true },
-    secondaryActions: [
-      { key: "daily", label: "每日任务" },
-    ],
   },
   {
     key: "drill",
@@ -142,7 +138,8 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
 ];
 
 export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, ScopeHomeEntryConfig> = {
-  risk_inspection: { kicker: "风险管理", title: "风险排查", description: "", actionLabel: "进入风险排查" },
+  risk: { kicker: "风险管理", title: "选择风险管理业务", description: "", actionLabel: "选择业务" },
+  risk_inspection: { kicker: "风险管理", title: "选择楼栋进入风险排查", description: "", actionLabel: "进入风险排查" },
   pre_shift: { kicker: "班前检查", title: "班前检查清单", description: "", actionLabel: "进入班前检查清单" },
   learning: { kicker: "画像学练", title: "画像学练", description: "", actionLabel: "进入画像学练" },
   cabinet_power: { kicker: "机柜台账", title: "选择楼栋", description: "上下电记录与机柜平面图", actionLabel: "进入机柜上下电" },

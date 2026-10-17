@@ -30,14 +30,14 @@ const WaterBuildingTrend=defineAsyncComponent(()=>import('./WaterBuildingTrend.v
 const props=defineProps<{scope:string;scopeOptions:{value:string;label:string}[]}>();
 const emit=defineEmits<{open:[scope:string]}>();
 const data=ref<Dict>({}),loading=ref(false),error=ref(''),selectedDay=ref('');
-const available=computed(()=>props.scopeOptions.filter(row=>waterScopes.has(row.value)&&(['ALL','CAMPUS'].includes(props.scope)||row.value===props.scope)));
+const available=computed(()=>props.scopeOptions.filter(row=>waterScopes.has(row.value)));
 const periodRows=computed<Dict[]>(()=>data.value.records||[]);
 const endDay=ref(waterDay()),monthStart=computed(()=>endDay.value.slice(0,7)+'-01');
 const buildingTrend=computed(()=>waterBuildingTrend(periodRows.value,available.value,monthStart.value,endDay.value));
 const trend=computed(()=>waterTrend(periodRows.value));
 const rows=computed<Dict[]>(()=>available.value.map(scope=>{const records=periodRows.value.filter(row=>row.scope===scope.value&&(!selectedDay.value||String(row.statistic_date_key||row.statistic_date).slice(0,10)===selectedDay.value));const result=waterTrend(records);return {...scope,month_total_usage:result.missing?null:result.items.reduce((sum,row)=>sum+row.value,0),month_record_count:records.length,latest_date_ms:Math.max(0,...records.map(row=>Date.parse(String(row.statistic_date_key||row.statistic_date).slice(0,10)+'T00:00:00+08:00')||0))};}));
 const ready=computed(()=>data.value.snapshot?.exists===true);
-const scopeLabel=computed(()=>['ALL','CAMPUS'].includes(props.scope)?'授权楼栋':props.scopeOptions.find(row=>row.value===props.scope)?.label||'当前范围');
+const scopeLabel=computed(()=>available.value.length>1?'授权楼栋':available.value[0]?.label||'当前范围');
 const totalUsage=computed(()=>ready.value&&!trend.value.missing?trend.value.items.reduce((sum,row)=>sum+row.value,0):null),recordCount=computed(()=>ready.value?periodRows.value.length:null);
 const latestDate=computed(()=>!ready.value?null:Math.max(0,...periodRows.value.map(row=>Date.parse(String(row.statistic_date_key||row.statistic_date).slice(0,10)+'T00:00:00+08:00')||0)));
 function dateText(value:number|null){return value?new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value)):'—';}

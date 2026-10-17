@@ -1,15 +1,19 @@
 <template>
   <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing?'true':undefined">
     <div class="v2-check-toolbar" data-v2-navigation>
-      <NSelect v-if="state?.can_manage" :value="scope" :options="scopeOptions" :disabled="busy || uploading || dirty" aria-label="检查楼栋" @update:value="changeScope" />
+      <NSelect v-if="state?.can_manage&&!fixedScope" :value="scope" :options="scopeOptions" :disabled="busy || uploading || dirty" aria-label="检查楼栋" @update:value="changeScope" />
       <span v-else>{{ scope === '110' ? '110站' : scope + '楼' }}</span>
       <span v-if="needsAttention" class="v2-check-alert" role="status"><i aria-hidden="true" />待检查</span>
-      <div><NButton v-if="state?.can_manage" size="small" secondary :disabled="busy || dirty" @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
+      <div class="v2-check-actions"><NButton size="small" secondary :disabled="busy||dirty||uploading||saving||editing" :aria-pressed="historyOpen" @click="historyOpen=!historyOpen"><template #icon><History :size="15" /></template>{{historyOpen?'返回检查':'历史记录'}}</NButton><NButton v-if="!historyOpen&&!fixedScope&&state?.can_manage&&state.overview?.rows" size="small" secondary :disabled="busy||dirty||uploading" :aria-pressed="overviewOpen" @click="overviewOpen=!overviewOpen">{{overviewOpen?'本楼检查':'完成总览'}}</NButton><NButton v-if="state?.can_manage" size="small" secondary :disabled="busy || dirty" @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton v-if="!historyOpen" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
     </div>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NSkeleton v-if="!state && loading" text :repeat="4" />
     <template v-else-if="state">
-      <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy || uploading || dirty && task?.id!==row.id" @click="selectedId=row.id"><span>{{ row.shift }}班 · {{dateLabel(row.due*1000)}} 至 {{dateLabel(row.deadline*1000)}}<CheckCircle2 v-if="row.submitted" :size="14" /></span><small>{{row.items.map((item:Dict)=>item.text).join('、')}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}} · {{dateLabel(row.submitted)}}</small><small v-else>{{row.due>serverNow?'未到时间，可提前检查':row.deadline<=serverNow?'已逾期，可补做':'已到检查时间'}}</small></button></div>
+      <CheckHistory v-if="historyOpen" :key="String(user.open_id)" :scope="scope" />
+      <CheckOverview v-else-if="overviewOpen&&state.can_manage" :rows="state.overview?.rows||[]" :disabled="busy||uploading||dirty" @select="openBuilding" />
+      <div v-else class="v2-check-workspace">
+      <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy || uploading || dirty && task?.id!==row.id" @click="selectedId=row.id"><span>{{ row.shift }}班<CheckCircle2 v-if="row.submitted" :size="14" /></span><small class="v2-check-window">{{compact?shortDate(row.due*1000):dateLabel(row.due*1000)}} 至 {{compact?shortDate(row.deadline*1000):dateLabel(row.deadline*1000)}}</small><small v-if="!compact">{{row.items.map((item:Dict)=>item.text).join('、')}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}}</small><small v-else>{{row.due>serverNow?(compact?'可提前检查':'未到时间，可提前检查'):row.deadline<=serverNow?(compact?'逾期待补做':'已逾期，可补做'):'待检查'}} · {{row.items.length}} 项</small></button></div>
+      <div class="v2-check-task">
       <template v-if="task">
         <div class="v2-check-status" :class="{'is-complete':task.submitted}">
           <CheckCircle2 v-if="task.submitted" :size="20" /><ClipboardCheck v-else :size="20" />
@@ -20,24 +24,29 @@
         <NAlert v-else-if="!task.can_submit" type="info" :bordered="false">仅本楼值班人员或值班账号可提交。</NAlert>
         <form class="v2-check-form" @submit.prevent="submit">
           <div class="v2-check-items">
-            <fieldset v-for="(item,index) in task.items" :key="item.id" :disabled="busy || !task.can_submit" class="v2-check-item">
+            <fieldset v-for="(item,index) in task.items" :key="item.id" class="v2-check-item">
               <legend><span>{{ index+1 }}</span>{{ item.text }}</legend>
+              <div class="v2-check-result">
               <NRadioGroup :value="answer(item.id).status" :name="task.id+'-'+item.id" :disabled="busy || !task.can_submit" :aria-label="item.text" @update:value="value=>setAnswer(item.id,String(value))">
                 <NRadioButton value="normal">无异常</NRadioButton><NRadioButton value="abnormal">异常</NRadioButton>
               </NRadioGroup>
+              <NButton v-if="compact" quaternary circle :aria-label="item.text+'附件'" :aria-expanded="!!attachmentOpen[task.id+':'+item.id]" :title="'附件 '+(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length+' 个'" :disabled="busy||uploading||!task.can_submit&&!(task.files||[]).some((f:Dict)=>f.item_id===item.id)" @click="attachmentOpen[task.id+':'+item.id]=!attachmentOpen[task.id+':'+item.id]"><Paperclip :size="16" /></NButton>
+              </div>
               <Transition name="v2-check-note"><div v-if="answer(item.id).status==='abnormal'" class="v2-check-note">
-                <label :for="'check-note-'+item.id">异常备注 <span v-if="!task.submitted">*</span></label>
-                <NInput :value="answer(item.id).note" type="textarea" :autosize="{minRows:2,maxRows:4}" :maxlength="500" :disabled="busy || !task.can_submit" :input-props="{id:'check-note-'+item.id,'aria-label':item.text+'异常备注'}" placeholder="填写异常情况" @update:value="value=>setNote(item.id,value)" />
+                <label :for="'check-note-'+task.id+'-'+item.id">异常备注 <span v-if="!task.submitted">*</span></label>
+                <NInput :value="answer(item.id).note" type="textarea" :autosize="{minRows:compact?1:2,maxRows:4}" :maxlength="500" :disabled="busy || !task.can_submit" :input-props="{id:'check-note-'+task.id+'-'+item.id,'aria-label':item.text+'异常备注'}" placeholder="填写异常情况" @update:value="value=>setNote(item.id,value)" />
               </div></Transition>
-              <CheckAttachments :task-id="task.id" :item-id="item.id" kind="item" :files="(task.files||[]).filter((f:Dict)=>f.item_id===item.id)" :locked="busy||uploading||!task.can_submit" @busy="uploading=$event" @changed="load(true)" />
+              <CheckAttachments v-if="!compact||attachmentOpen[task.id+':'+item.id]" :task-id="task.id" :item-id="item.id" kind="item" :files="(task.files||[]).filter((f:Dict)=>f.item_id===item.id)" :locked="busy||uploading||!task.can_submit" @busy="uploading=$event" @changed="load(true)" />
             </fieldset>
           </div>
           <footer v-if="task.can_submit"><span>{{ answered===task.items.length?'检查项已填完，请核对后提交':'逐项选择检查结果' }}</span><NButton type="primary" attr-type="submit" :loading="busy" :disabled="busy||uploading">提交检查</NButton></footer>
         </form>
-        <section class="v2-check-handover"><h3>交接班照片 <small>{{task.handover_photo?'本班已上传':'本班共用一张'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
+        <section class="v2-check-handover"><h3>交接班照片 <small>{{task.handover_photo?'本班已上传':'本楼本班共用一张'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
       </template>
       <NEmpty v-else :description="!state.definition.items.length?'尚未配置班前检查清单':!state.roster_ready?'正在准备当天排班':'当前没有已发布的本楼班前检查'" size="small" />
       <ol v-if="!task && state.definition.items.length" class="v2-check-preview"><li v-for="item in state.definition.items" :key="item.id">{{ item.text }}<small> · {{frequencyLabel(item.frequency)}}</small></li></ol>
+      </div>
+      </div>
       <NAlert v-if="state.roster_error" type="warning" :bordered="false">{{ state.roster_error }}</NAlert>
     </template>
     <NModal v-model:show="editing" preset="card" title="班前检查清单" class="v2-check-editor" :mask-closable="false" :closable="!saving" :close-on-esc="!saving">
@@ -55,22 +64,30 @@
 <script setup lang="ts">
 import { computed,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,NRadioButton,NRadioGroup,NSelect,NSkeleton,useDialog,useMessage } from 'naive-ui';
-import { CheckCircle2,ClipboardCheck,Plus,RefreshCw,Settings2,Trash2 } from 'lucide-vue-next';
+import { CheckCircle2,ClipboardCheck,History,Paperclip,Plus,RefreshCw,Settings2,Trash2 } from 'lucide-vue-next';
 import { requestJson,type Dict } from '../client';
 import { randomHexId } from '../../browserStorage';
 import { registerNavigationGuard } from '../navigation';
 import { preShiftSummary } from '../../preShiftUtils';
 import CheckFrequency from './CheckFrequency.vue';
 import CheckAttachments from './CheckAttachments.vue';
-const props=defineProps<{user:Dict;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
-const state=ref<Dict>(),scope=ref(props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
+import CheckOverview from './CheckOverview.vue';
+import CheckHistory from './CheckHistory.vue';
+const props=defineProps<{user:Dict;fixedScope?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
+const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
 const editing=ref(false),saving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict}[]>([]),version=ref(0);
+const overviewOpen=ref(false);let firstState=true;
+const historyOpen=ref(false);
+const compact=document.documentElement.classList.contains('workspace-v2');
+const attachmentOpen=ref<Record<string,boolean>>({});
 const drafts=ref<Record<string,Record<string,{status:string;note:string}>>>({});
 const message=useMessage(),dialog=useDialog();let timer:ReturnType<typeof setInterval>|undefined,controller:AbortController|undefined,disposed=false;
 const serverNow=computed(()=>Date.parse(state.value?.server_time||'')/1000);
 const visibleTasks=computed<Dict[]>(()=>[...(state.value?.tasks||[])].filter((t:Dict)=>!t.submitted||t.deadline>serverNow.value).sort((a,b)=>a.due-b.due||String(a.id).localeCompare(String(b.id))));
 const task=computed<Dict|undefined>(()=>visibleTasks.value.find((t:Dict)=>t.id===selectedId.value)||visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0]);
-const needsAttention=computed(()=>Boolean(state.value&&preShiftSummary(state.value).pending));
+const needsAttention=computed(()=>Boolean(state.value&&(overviewOpen.value&&state.value.can_manage
+  ?state.value.overview?.rows?.some((row:Dict)=>['待完成','逾期待补做'].includes(row.status))
+  :preShiftSummary(state.value).pending)));
 const scopeOptions=computed(()=>state.value?.scopes.map((value:string)=>({value,label:value==='110'?'110站':value+'楼'}))||[]);
 const dirty=computed(()=>Boolean(task.value&&!task.value.submitted&&Object.keys(drafts.value[task.value.id]||{}).length));
 function answer(id:string){return task.value?.submitted ? task.value.answers.find((a:Dict)=>a.id===id)||{status:'',note:''} : drafts.value[task.value?.id||'']?.[id]||{status:'',note:''};}
@@ -78,15 +95,17 @@ const answered=computed(()=>task.value?.items.filter((i:Dict)=>answer(i.id).stat
 function setAnswer(id:string,status:string){if(!task.value)return;error.value='';const draft=drafts.value[task.value.id]||={};draft[id]={...answer(id),status};}
 function setNote(id:string,note:string){if(!task.value)return;error.value='';const draft=drafts.value[task.value.id]||={};draft[id]={...answer(id),note};}
 function dateLabel(value:string|number){return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function shortDate(value:number){return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function completionLabel(row:Dict){const time=Date.parse(row.submitted)/1000;return time<row.due?'提前完成':time>=row.deadline?'补做完成':'已完成';}
 function defaultFrequency(){return {kind:'shift',day_time:'08:50',night_time:'17:50',start_date:new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'})};}
 function frequencyLabel(f:Dict=defaultFrequency()){const labels:Dict={daily:'每日',shift:'每日每班组',weekly:'每周'+['一','二','三','四','五','六','日'][f.weekday||0],month_start:'每月月初',month_end:'每月月底',interval:'每隔'+f.every_days+'天',temporary:'临时'+f.limit+(f.limit_type==='days'?'天':'次')};return (labels[f.kind]||'每日每班组')+' '+(f.time||[f.day_time,f.night_time].filter(Boolean).join(' / '));}
 async function load(force=false){
   if(disposed||loading.value&&!force)return;controller?.abort();const read=new AbortController();controller=read;loading.value=true;
-  try{const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:'no-store'});if(disposed||read.signal.aborted)return;if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');preShiftSummary(result);for(const id of Object.keys(drafts.value)){const next=result.tasks.find((t:Dict)=>t.id===id),previous=state.value?.tasks.find((t:Dict)=>t.id===id);if(!next||next.submitted||previous?.definition_version!==next.definition_version)delete drafts.value[id];}state.value=result;error.value='';if(!visibleTasks.value.some((t:Dict)=>t.id===selectedId.value))selectedId.value=(visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0])?.id||'';}
+  try{const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:'no-store'});if(disposed||read.signal.aborted)return;if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');preShiftSummary(result);for(const id of Object.keys(drafts.value)){const next=result.tasks.find((t:Dict)=>t.id===id),previous=state.value?.tasks.find((t:Dict)=>t.id===id);if(!next||next.submitted||previous?.definition_version!==next.definition_version)delete drafts.value[id];}if(firstState){overviewOpen.value=!props.fixedScope&&!!result.can_manage&&result.scopes.length>1&&Array.isArray(result.overview?.rows);firstState=false;}state.value=result;error.value='';if(!visibleTasks.value.some((t:Dict)=>t.id===selectedId.value))selectedId.value=(visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0])?.id||'';}
   catch(e){if(!disposed&&!read.signal.aborted)error.value=e instanceof Error?e.message:'班前检查读取失败，请重试。';}finally{if(controller===read)loading.value=false;}
 }
 function changeScope(value:string){if(dirty.value||busy.value||uploading.value)return;scope.value=value;selectedId.value='';state.value=undefined;void load(true);}
+function openBuilding(value:string){overviewOpen.value=false;changeScope(value);}
 function edit(){if(uploading.value)return;items.value=(state.value?.definition.items||[]).map((item:Dict)=>({id:item.id,text:item.text,frequency:{...(item.frequency||defaultFrequency())}}));version.value=state.value?.definition.version||0;editError.value='';editing.value=true;}
 async function saveDefinition(){
   if(items.value.some(item=>!item.text.trim())){editError.value='请填写检查内容，或删除空白项。';return;}
@@ -108,7 +127,21 @@ watch(()=>props.user.open_id,()=>{drafts.value={};state.value=undefined;});
 onBeforeUnmount(()=>{disposed=true;controller?.abort();if(timer)clearInterval(timer);removeGuard();window.removeEventListener('clipflow-business-changed',refresh);window.removeEventListener('beforeunload',beforeUnload);document.removeEventListener('visibilitychange',refresh);});
 </script>
 <style>
+.v2-check-workspace{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}.v2-check-task{display:flex;flex-direction:column;gap:10px;min-width:0}.v2-check-result{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.workspace-v2 .v2-shift-check{container-type:inline-size;container-name:shift-check;gap:10px}
+.workspace-v2 .v2-check-toolbar{gap:8px;flex-wrap:wrap}.workspace-v2 .v2-check-actions{margin-left:auto;flex-wrap:wrap}
+.workspace-v2 .v2-check-toolbar>.n-select{max-width:118px}.workspace-v2 .v2-check-status{padding:8px 10px;border-radius:6px}.workspace-v2 .v2-check-status strong{font-size:13px}
+.workspace-v2 .v2-check-choice{padding:8px 10px;gap:3px}.workspace-v2 .v2-check-window{font-size:11px}
+.workspace-v2 .v2-check-item{padding:10px 0;gap:8px 12px}.workspace-v2 .v2-check-item legend span{width:21px;height:21px;margin-right:6px}
+.workspace-v2 .v2-check-note label{margin-bottom:4px}.workspace-v2 .v2-check-handover{padding:10px 0}.workspace-v2 .v2-check-handover h3{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px}
+@container shift-check (min-width:650px){.workspace-v2 .v2-check-workspace{grid-template-columns:178px minmax(0,1fr);align-items:start;gap:16px}.workspace-v2 .v2-check-workspace>.v2-check-shifts{display:grid!important;grid-template-columns:minmax(0,1fr);align-content:start;gap:8px}.workspace-v2 .v2-check-item{grid-template-columns:minmax(0,1fr) auto}.workspace-v2 .v2-check-result{justify-self:end}}
+@container shift-check (max-width:649px){.workspace-v2 .v2-check-item{grid-template-columns:minmax(0,1fr)}.workspace-v2 .v2-check-result{justify-self:end}}
 .v2-shift-check{position:relative}.v2-shift-check.has-pending-checks::before{content:"";position:absolute;inset:-4px;pointer-events:none;border-radius:8px;box-shadow:0 0 0 1px #cf3548,0 0 10px #cf354826;animation:preShiftPulse 2.4s ease-in-out infinite}.v2-check-alert{display:inline-flex;align-items:center;gap:6px;margin-right:auto;color:#bb2b40;font-size:12px;font-weight:600}.v2-check-alert i{width:7px;height:7px;border-radius:50%;background:currentColor}@keyframes preShiftPulse{0%,100%{opacity:.3}50%{opacity:1}}@media(prefers-reduced-motion:reduce){.v2-shift-check.has-pending-checks::before{animation:none;opacity:.65}}
+.workspace-v2 .v2-shift-check.has-pending-checks::before{background:#cf354812}
+.workspace-v2 .v2-widget:has(.v2-shift-check.has-pending-checks)::after{content:"";position:absolute;inset:0;z-index:2;border-radius:inherit;background:#cf354812;box-shadow:inset 0 0 0 1px #cf3548;pointer-events:none;animation:preShiftPulse 2.4s ease-in-out infinite}
+.workspace-v2 .v2-widget .v2-shift-check.has-pending-checks::before{display:none}
+.workspace-v2 .grid-stack-item[data-widget-kind="pre_shift"] .v2-customize-button{height:28px;min-height:28px;padding-inline:7px;font-size:11px;margin-left:auto}
+@media(prefers-reduced-motion:reduce){.workspace-v2 .v2-widget:has(.v2-shift-check.has-pending-checks)::after{animation:none;opacity:.4}}
 .v2-check-preview{margin:0;padding-left:24px;line-height:1.8;color:#53636e}
 .v2-check-shifts{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr))}.v2-check-choice{display:flex;flex-direction:column;gap:5px;align-items:flex-start;text-align:left;padding:9px 10px;border:1px solid var(--v2-border);border-radius:6px;background:transparent;color:inherit;min-width:0;cursor:pointer;transition:border-color .18s,background .18s}.v2-check-choice>span{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}.v2-check-choice small{font-size:12px;color:var(--v2-muted);overflow-wrap:anywhere;line-height:1.5}.v2-check-choice.is-selected{border-color:var(--v2-blue);background:color-mix(in srgb,var(--v2-blue) 6%,transparent)}.v2-check-choice.is-done>span{color:#267047}.v2-check-choice:disabled{cursor:not-allowed;opacity:.6}.v2-check-choice:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
 .v2-check-definition{border-bottom:1px solid var(--v2-border);padding:4px 0 16px;margin-bottom:12px}.v2-check-handover h3 small{font-size:12px;font-weight:400;color:var(--v2-muted);margin-left:8px}

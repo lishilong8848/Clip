@@ -19,17 +19,19 @@ const foldersVue = readFileSync(path.join(root, 'src/workspace-v2/KnowledgeFolde
 const foldersTs = readFileSync(path.join(root, 'src/workspace-v2/knowledgeFolders.ts'), 'utf8');
 const pageSource = readFileSync(path.join(root, 'src/components/KnowledgeBasePage.vue'), 'utf8');
 const helper=await transform(foldersTs,{loader:'ts',format:'esm',target:'es2022'});
-const {buildFolderTree}=await import('data:text/javascript;base64,'+Buffer.from(helper.code).toString('base64'));
+const {buildFolderTree,folderOptions}=await import('data:text/javascript;base64,'+Buffer.from(helper.code).toString('base64'));
 const nested=buildFolderTree([{id:'root',name:'根'},{id:'child',parent_id:'root',name:'子'},{id:'grand',parent_id:'child',name:'孙'}]);
 assert.equal(nested.length,1);assert.equal(nested[0].children[0].children[0].id,'grand');
 assert.equal(buildFolderTree([{id:'dangling',parent_id:'absent',name:'悬空'}])[0].id,'dangling');
 assert.equal(buildFolderTree([{id:'a',parent_id:'b',name:'甲'},{id:'b',parent_id:'a',name:'乙'}]).length,2,'bad historical cycles must not recurse or hide documents');
+assert.deepEqual(folderOptions([{id:'a',name:'A楼'},{id:'b',name:'B楼'},{id:'c',parent_id:'a',name:'电气'},{id:'d',parent_id:'b',name:'电气'}]),[
+  {value:'a',label:'A楼'},{value:'c',label:'A楼 / 电气'},{value:'b',label:'B楼'},{value:'d',label:'B楼 / 电气'}]);
 
 // 1) renderLabel must receive Naive UI's TreeRenderProps shape ({option, checked, selected}),
 //    never a bare FolderTreeOption (the compile-time bug that broke runtime tree labels).
-assert.match(foldersVue, /function renderLabel\(props: \{ option: TreeOption; checked: boolean; selected: boolean \}\)/, 'renderLabel must be typed with the Naive UI TreeRenderProps contract');
+assert.match(foldersVue, /function renderLabel\(state: \{ option: TreeOption; checked: boolean; selected: boolean \}\)/, 'renderLabel must be typed with the Naive UI TreeRenderProps contract');
 assert.doesNotMatch(foldersVue, /function renderLabel\(option: FolderTreeOption\)/, 'renderLabel must not take a bare FolderTreeOption');
-assert.ok(foldersVue.includes('const option = props.option as FolderTreeOption;'), 'renderLabel must unwrap props.option into the folder option');
+assert.ok(foldersVue.includes('const option = state.option as FolderTreeOption;'), 'renderLabel must unwrap state.option into the folder option');
 
 // 2) The tree data must satisfy TreeOption (`TreeOptionBase & Record<string, unknown>`),
 //    so FolderTreeOption needs an index signature rather than a cast masking soundness.
@@ -44,6 +46,7 @@ assert.doesNotMatch(foldersVue, /type ModalState =/, 'reactive union modal must 
 //    incompatible FolderSelectOption.
 assert.ok(foldersVue.includes('computed<SelectOption[]>(() => {'), 'move options typed with Naive UI SelectOption');
 assert.doesNotMatch(foldersVue, /interface FolderSelectOption/, 'local FolderSelectOption must be removed');
+assert.ok(foldersVue.includes('expandedKeys=[...branchKeys]'),'expansion state must not alias the computed folder keys');
 
 // 5) The adapter must turn the flat pills + hidden drawer into a main tree pane.
 let adapted = adaptKnowledgeReader(pageSource, '/components/KnowledgeBasePage.vue');
@@ -70,7 +73,8 @@ assert.ok(adapted.includes('<ConfirmDialog'), 'ConfirmDialog is preserved');
 assert.ok(adapted.includes(':open="!!deleteGroupTarget"') || adapted.includes(':open=\"!!deleteGroupTarget\"'), 'group delete confirm dialog is preserved');
 
 // 7) KnowledgeFolders must keep the root/child create + move/rename helpers wired by the adapter.
-assert.ok(adapted.includes('async function createFolder(name,parentId)'), 'root/child create wrapper injected');
-assert.ok(adapted.includes('async function moveRenameFolder(id,name,parentId)'), 'folder move/rename wrapper injected');
+assert.match(pageSource,/async function createFolder\(name:string,parentId\?:string\)/,'root/child creation shared with legacy');
+assert.match(pageSource,/async function moveRenameFolder\(id:string,name:string,parentId\?:string\)/,'folder move/rename shared with legacy');
+assert.equal(adaptKnowledgeFolders(pageSource,'/components/KnowledgeBasePage.vue'),pageSource,'V2 must not inject duplicate folders or CRUD');
 
 console.log('PASS: KnowledgeFolders renderLabel/SelectOption/modal contracts + tree-pane adapter and reader/confirm preservation.');

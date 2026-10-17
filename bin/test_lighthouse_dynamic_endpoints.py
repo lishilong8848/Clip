@@ -365,11 +365,11 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/RiskInspectionPage.vue",
-        line=105, kind="covered",
+        line=138, kind="covered",
         method_paths=[("GET", "/api/risk-inspections/template"),
                       ("GET", "/api/risk-inspections/templates/{param}")],
         window=2,
-        needles=["requestJson(root+path", "const path=editor.value==='publish'&&publish.history_template_id?'/templates/'+publish.history_template_id:'/template'"],
+        needles=["requestJson(root+path", "const mode=editor.value,path=mode==='publish'&&publish.history_template_id?'/templates/'+publish.history_template_id:'/template'"],
         definition_ref=dict(
             source="lan_bitable_template_portal/frontend/src/components/RiskInspectionPage.vue",
             definition_marker="const root=",

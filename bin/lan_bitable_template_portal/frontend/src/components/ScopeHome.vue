@@ -25,7 +25,7 @@
           <h2>{{ activeConfig.title }}</h2>
         </div>
         <div
-          v-if="!isEntryMenu"
+          v-if="!isEntryMenu && activeMode !== 'risk_inspection'"
           class="scope-summary-strip"
           :class="{ 'repair-metrics': activeMode === 'repair_management' }"
           aria-label="当前模块楼栋统计"
@@ -107,7 +107,7 @@
         </div>
       </header>
 
-      <div v-if="isEntryMenu" class="tool-grid" :class="{ 'capacity-grid': activeMode === 'capacity' }">
+      <div v-if="isEntryMenu" class="tool-grid" :class="{ 'capacity-grid': activeMode === 'capacity'||activeMode === 'risk' }">
         <button type="button"
           v-for="tool in activeMenuEntries"
           :key="tool.key"
@@ -116,7 +116,8 @@
           :aria-label="`选择${tool.title}`"
           @click="selectEntry(tool.key)"
         >
-          <span class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
+          <span v-if="activeMode==='risk'" class="risk-tool-icon" aria-hidden="true"><ClipboardCheck v-if="tool.key==='risk_inspection'" :size="24" /><ShieldCheck v-else :size="24" /></span>
+          <span v-else class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
           <span>
             <strong>{{ tool.title }}</strong>
             <small v-if="activeMode === 'capacity'">{{ tool.description }}</small>
@@ -165,6 +166,7 @@
               <span>本月记录 {{ waterScopeItem(scope.value).month_record_count || 0 }}</span>
               <span>最近 {{ formatWaterDate(waterScopeItem(scope.value).latest_date_ms) }}</span>
             </template>
+            <template v-else-if="activeMode === 'risk_inspection'"><span>本楼风险排查任务</span></template>
             <template v-else-if="activeMode === 'daily'">
               <span>今日任务清单</span>
               <span>通告 · 事件 · 检修</span>
@@ -203,6 +205,11 @@
             >
               进入水耗管理
             </button>
+            <button type="button"
+              v-else-if="activeMode === 'risk_inspection'"
+              class="primary"
+              @click="$emit('risk-inspection', scope.value)"
+            >进入风险排查</button>
             <button type="button"
               v-else-if="activeMode === 'daily'"
               class="primary"
@@ -249,6 +256,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { ClipboardCheck, ShieldCheck } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
 import { preShiftScopes, preShiftSummary } from '../preShiftUtils';
 import {
@@ -266,6 +274,7 @@ import {
   type ScopeHomeBroadcastItem,
   type ScopeHomeModuleAction as ModuleAction,
   type ScopeHomeModuleMetric,
+  type ScopeHomeToolEntry,
 } from "../scopeHomeUtils";
 import HomeDashboard from "./HomeDashboard.vue";
 import VnetBackButton from "./VnetBackButton.vue";
@@ -290,7 +299,7 @@ const emit = defineEmits<{
   "repair-management": [scope: string];
   water: [scope: string];
   "critical-guard": [];
-  "risk-inspection": [];
+  "risk-inspection": [scope?: string];
   drill: [];
   learning: [];
   "cabinet-power": [];
@@ -414,8 +423,12 @@ const isEntryAllowed = (entry: string): boolean => hasModule(entryModule(entry))
 
 const enabledModuleCount = computed(() => filteredModuleCards.value.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
-const isEntryMenu = computed(() => ["tools", "capacity"].includes(activeMode.value));
-const activeMenuEntries = computed(() => activeMode.value === "capacity" ? filteredCapacityEntries.value : filteredToolEntries.value);
+const isEntryMenu = computed(() => ["tools", "capacity", "risk"].includes(activeMode.value));
+const riskEntries: ScopeHomeToolEntry[] = [
+  { key: 'risk_inspection', title: '风险排查', description: '', badge: '排查反馈', icon: 'risk', tone: 'rose' },
+  { key: 'critical_guard', title: '重保管理', description: '', badge: '重保任务', icon: 'risk', tone: 'blue' },
+];
+const activeMenuEntries = computed(() => activeMode.value === 'risk' ? riskEntries.filter(entry => isEntryAllowed(entry.key)) : activeMode.value === "capacity" ? filteredCapacityEntries.value : filteredToolEntries.value);
 const isToolScopeMode = computed(() => ["daily", "power", "polling", "adjust", "handover"].includes(activeMode.value));
 const activeMetricWorkType = computed(() => {
   if (activeMode.value === "maintenance_mop") return "maintenance";
@@ -428,7 +441,7 @@ const activeMetricWorkType = computed(() => {
 const displayScopeOptions = computed(() => {
   const source = activeMode.value === "water"
     ? waterBuildings.value
-    : props.scopeOptions;
+    : activeMode.value === 'risk_inspection' ? props.scopeOptions.filter(option => ['110','A','B','C','D','E','H','ALL'].includes(normalizeScopeValue(option.value,''))) : props.scopeOptions;
   return [...source].sort((left, right) => {
     const leftIndex = scopeSortIndex(left.value);
     const rightIndex = scopeSortIndex(right.value);
@@ -714,7 +727,7 @@ function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
 }
 
 function selectEntry(key: EntryKey): void {
-  if (key === 'risk_inspection') { emit('risk-inspection'); return; }
+  if (key === 'risk' ? !cardModules.risk.some(hasModule) : !isEntryAllowed(key)) return;
   if (key === 'work_handover') { emit('work-handover'); return; }
   if (key === 'pre_shift') { emit('pre-shift'); return; }
   if (key === "learning") { emit("learning"); return; }
@@ -825,7 +838,7 @@ function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
 
 function returnFromFeature(): void {
   if (activeMode.value === "water") clearWaterBuildingsPoll();
-  activeMode.value = isToolScopeMode.value ? "tools" : activeMode.value === "water" ? "capacity" : "";
+  activeMode.value = isToolScopeMode.value ? "tools" : activeMode.value === "water" ? "capacity" : activeMode.value === 'risk_inspection' ? 'risk' : "";
   syncEntryUrl(activeMode.value);
   emit("dashboard-visible", !activeMode.value);
 }
@@ -1524,6 +1537,8 @@ onBeforeUnmount(() => {
   width: 56px;
   height: 56px;
 }
+
+.risk-tool-icon { display:grid;place-items:center;width:56px;height:56px;border-radius:8px;background:#edf4ff;color:#1763d7; }
 
 .tool-card.cyan .tool-icon {
   background: linear-gradient(135deg, #27d1df, #0a8fb8);

@@ -76,6 +76,7 @@ class PersonnelPasswordLogin:
         self.limit_lock = threading.Lock()
         self.attempts = {}
         self.snapshot = store.get_document(DIRECTORY_NS, DIRECTORY_KEY) or {}
+        self._permissions_ready = False
         self.auth._account_directory_provider = lambda: self.snapshot
 
     def limited(self, key, limit):
@@ -166,7 +167,16 @@ class PersonnelPasswordLogin:
                 self.store.put_document(DIRECTORY_NS, DIRECTORY_KEY, snapshot)
                 self.snapshot = snapshot
                 self.auth.sync_directory_permissions(records.values())
+                self._permissions_ready = True
                 self.auth._account_directory_refresh_failed = False
+            elif not self._permissions_ready:
+                # A fresh persisted directory must work before the next cloud refresh.
+                try:
+                    self.auth.sync_directory_permissions(self.snapshot.get("people", {}).values())
+                except Exception as exc:
+                    logging.warning("Cached personnel permission initialization deferred: %s", type(exc).__name__)
+                else:
+                    self._permissions_ready = True
             return self.snapshot
 
     def people(self):

@@ -3,8 +3,8 @@ import {parse} from '@vue/compiler-sfc';
 const cls=node=>(node.props?.find(p=>p.type===6&&p.name==='class')?.value?.content||'').split(/\s+/);
 const has=(node,value)=>cls(node).includes(value)||node.tag===value;
 const plans={
-  'RepairWorkspace.vue':[{container:'v2-repair-body',id:'repair',label:'检修办理',blocks:[['records','维修项目',['v2-repair-list'],12,10],['editor','维修单与跟进',['Transition'],12,12,'r.projectDrawerOpen']]}],
-  'NoticeSopManager.vue':[{container:'v2-sop-layout',id:'sops',label:'SOP模板',blocks:[['templates','SOP列表',['aside'],4,9],['editor','SOP步骤与附件',['NForm','NEmpty'],8,12]]}],
+  'RepairWorkspace.vue':[{container:'v2-repair-body',id:'repair',label:'检修办理',headers:{records:'v2-repair-state-row'},blocks:[['records','维修项目',['v2-repair-list'],12,10],['editor','维修单与跟进',['Transition'],12,12,'r.projectDrawerOpen']]}],
+  'NoticeSopManager.vue':[{container:'v2-sop-layout',id:'sops',label:'SOP模板',headers:{editor:'v2-sop-edit-actions'},blocks:[['templates','SOP列表',['aside'],4,9],['editor','SOP步骤与附件',['NForm','NEmpty'],8,12]]}],
   'MopBindingWorkspace.vue':[{container:'mop-layout',id:'mop',label:'维护单办理',blocks:[['notices','维保通告',['MopNoticeList'],4,10],['binding','维护单选择与办理',['MopBindingPanel'],8,12]]}],
   'PlanConvergencePage.vue':[{container:'pc-review',id:'plan-review',label:'计划收敛核对',blocks:[['records','屏蔽记录',['pc-list'],4,10],['snapshot','实例快照与明细',['pc-main'],8,10]]},{container:'pc-maintenance',id:'plan-audit',label:'通告核对',blocks:[['results','核对结果',['pc-empty','pc-table-wrap'],12,10]]}],
   'PlanConvergenceRules.vue':[{container:'workspace',id:'plan-rules',label:'规则配置',blocks:[['sets','规则集',['set-panel'],3,12,'!draftOnly'],['picker','屏蔽范围',['picker-panel'],6,12],['draft','条目草稿',['draft-panel'],3,12]]}],
@@ -21,15 +21,18 @@ const plans={
 
 function find(node,predicate){if(node.type===1&&predicate(node))return node;for(const child of node.children||[]){const found=find(child,predicate);if(found)return found;}return null;}
 function canvas(source,group,plan){
-  const nodes=(group.children||[]).filter(node=>node.type===1),selected=[],used=new Set();
+  const nodes=(group.children||[]).filter(node=>node.type===1),selected=[],headers=[],used=new Set();
   const blocks=plan.blocks.map(([id,title,matches,w,h,when,minH])=>{
     const items=nodes.filter(node=>!used.has(node)&&matches.some(value=>has(node,value)));
     if(!items.length)return null;
-    selected.push(...items);items.forEach(node=>used.add(node));return {id,title,w,h,minW:Math.min(w,4),minH:minH||4,...when?{when}: {},source:items.map(node=>node.loc.source).join('\n')};
+    let content=items.map(node=>node.loc.source).join('\n');
+    const headerClass=plan.headers?.[id],header=headerClass&&find(group,node=>has(node,headerClass));
+    if(header&&content.includes(header.loc.source)){headers.push(`<template #header-${id}>${header.loc.source}</template>`);content=content.replace(header.loc.source,'');}
+    selected.push(...items);items.forEach(node=>used.add(node));return {id,title,w,h,minW:Math.min(w,4),minH:minH||4,...when?{when}: {},source:content};
   }).filter(Boolean);
   if(!blocks.length)return source;
   const definitions='['+blocks.map(({source,when,...block})=>'{'+Object.entries(block).map(([key,value])=>key+':'+JSON.stringify(value)).join(',')+(when?',when:('+when+')':'')+'}').join(',')+']';
-  let text=`<PageCanvas page="${plan.id}" label="${plan.label}" :blocks="${definitions.replaceAll('"','&quot;')}">${blocks.map(block=>`<template #${block.id}>${block.source}</template>`).join('')}</PageCanvas>`;
+  let text=`<PageCanvas page="${plan.id}" label="${plan.label}" :blocks="${definitions.replaceAll('"','&quot;')}">${headers.join('')}${blocks.map(block=>`<template #${block.id}>${block.source}</template>`).join('')}</PageCanvas>`;
   if(plan.id==='plan-rules')text=text.replace('<PageCanvas ','<PageCanvas :plain="draftOnly" ');
   const edits=selected.map(node=>[node.loc.start.offset,node.loc.end.offset,'']);
   const first=selected.reduce((a,b)=>a.loc.start.offset<b.loc.start.offset?a:b);

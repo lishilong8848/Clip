@@ -38,7 +38,7 @@
       <NSpin v-if="detailLoading" class="v2-notice-loading" description="正在读取通告填写内容" />
       <NAlert v-if="detailError" type="error" role="alert" :bordered="false">{{ detailError }}<NButton v-if="issueTarget&&!job&&!ambiguous" text data-v2-navigation @click="focusIssue">{{ issueTarget.label }}</NButton></NAlert>
       <template v-if="form&&!detailLoading">
-        <div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div>
+        <div v-if="confirming||job||ambiguous" class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div>
         <NAlert v-if="!form.actions.length" type="warning" :bordered="false">此通告当前只可查看，不可重新发送。</NAlert>
         <NAlert v-if="verifyBeforeStart" type="warning" :bordered="false">计划显示进行中，但尚未定位到已发目标通告。请先在编辑区顶部“关联核验”中查找原通告；此时不能重复发送开始。</NAlert>
         <section v-if="job||ambiguous" class="v2-notice-task-result" role="status" :aria-label="taskTitle">
@@ -53,14 +53,8 @@
           <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ sopPersonName(sop.operator_record_id) }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
-        <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations :key="formKey" :form="form" :locked="locked" @busy="busy=$event" @bound="associationBound" /></div>
-        <section v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" class="v2-notice-field-section" data-notice-section="binding">
-          <div class="v2-notice-tools"><h2>计划事项</h2><NTag size="small" :type="form.values.source_record_id?'info':'default'" :bordered="false">{{ form.values.source_record_id?'已关联计划':'独立通告 · 未关联计划' }}</NTag><NButton :disabled="locked" :aria-expanded="sourceExpanded" data-v2-navigation @click="toggleSource">{{ sourceExpanded?'收起':form.values.source_record_id?'更换关联':'关联计划' }}</NButton></div>
-          <div v-if="sourceExpanded" class="v2-source-picker">
-            <NRadioGroup v-if="form.values.manual_binding_required&&!form.values.target_record_id" v-model:value="form.values.manual_binding_choice" :disabled="locked"><NRadio value="bind">关联计划</NRadio><NRadio value="unbound">独立通告</NRadio></NRadioGroup>
-            <div class="v2-notice-binding"><NSelect v-model:value="sourceChoice" filterable clearable remote :loading="sourceLoading" :options="sourceOptions" aria-label="源表计划事项" placeholder="输入计划名称搜索并选择" :disabled="locked" @search="searchSources" /><NButton :disabled="locked||sourceLoading||!sourceChoice||sourceChoice===form.values.source_record_id" @click="bindSource">确认关联</NButton></div>
-          </div>
-        </section>
+        <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations :key="formKey" :form="form" :locked="locked" @busy="busy=$event" @bound="associationBound"><template #context><div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div></template></NoticeRelations></div>
+        <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
           <section class="v2-notice-page-fields">
             <header><span>{{ missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
@@ -94,7 +88,7 @@
         </div>
       </template>
     </NModal>
-    <NModal :show="pasteOpen" preset="card" class="v2-notice-confirm" title="粘贴通告原文" :mask-closable="false" :closable="!parsing" :close-on-esc="!parsing" @update:show="value=>pasteOpen=value"><NAlert v-if="pasteError" role="alert" type="error" :bordered="false">{{ pasteError }}</NAlert><NInput v-model:value="pasteText" type="textarea" :autosize="{minRows:8,maxRows:16}" maxlength="30000" :input-props="{'aria-label':'通告原文'}" :disabled="parsing" placeholder="粘贴完整通告，解析后核对字段再发送" /><template #footer><div class="v2-dialog-actions"><NButton :disabled="parsing" @click="pasteOpen=false">取消</NButton><NButton type="primary" :loading="parsing" :disabled="!pasteText.trim()" @click="parsePasted">解析并填写</NButton></div></template></NModal>
+    <NModal :show="pasteOpen" preset="card" class="v2-notice-confirm" title="粘贴通告原文" :mask-closable="false" :closable="!parsing" :close-on-esc="!parsing" @update:show="value=>pasteOpen=value"><NAlert v-if="pasteError" role="alert" type="error" :bordered="false">{{ pasteError }}</NAlert><NInput v-model:value="pasteText" type="textarea" :autosize="{minRows:8,maxRows:16}" maxlength="30000" :input-props="{'aria-label':'通告原文'}" :disabled="parsing" placeholder="粘贴完整通告，解析后核对字段再发送" @paste="pasteNoticeText" /><template #footer><div class="v2-dialog-actions"><NButton :disabled="parsing" @click="pasteOpen=false">取消</NButton><NButton type="primary" :loading="parsing" :disabled="!pasteText.trim()" @click="parsePasted">解析并填写</NButton></div></template></NModal>
     <NoticeChangeConfirmations v-if="changeOpen" :scope="scope" :focus-id="params.get('change_confirmation')||''" @close="changeOpen=false" @changed="load(true)" />
     <NoticeTaskRecords v-if="recordsOpen" :user-id="user.open_id" :scope="scope" :modules="user.modules||[]" @close="recordsOpen=false" @changed="load(true)" />
     <NModal v-model:show="undoOpen" preset="card" class="v2-notice-confirm" title="近三天可回退" :bordered="false" :closable="!busy" :mask-closable="!busy" :close-on-esc="!busy"><NSpin :show="undoLoading"><NAlert v-if="undoError" role="alert" type="error" :bordered="false">{{ undoError }}</NAlert><NAlert v-if="undoJob" role="status" :type="undoJob.phase==='failed'?'error':undoJob.phase==='success'?'success':'info'" :bordered="false"><NSpin v-if="undoPending" size="small" />{{ undoJob.error || (undoJob.phase==='success'?'回退已完成':'回退任务已受理，正在处理') }}<NButton v-if="undoPending" text @click="pollUndo">查询进度</NButton></NAlert><NList><NListItem v-for="item in undos" :key="item.undo_id"><strong>{{ item.title }}</strong><p>{{ item.undo_label }} · {{ item.undo_created_at }}</p><NButton :disabled="busy||undoPending" @click="undo(item)">回退上一步</NButton></NListItem></NList><NEmpty v-if="!undoLoading&&!undos.length" description="暂无可回退记录" /></NSpin></NModal>
@@ -103,14 +97,15 @@
 <script setup lang="ts">
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
-import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NImageGroup,NInput,NList,NListItem,NModal,NPagination,NRadio,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
+import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NImageGroup,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
 import { CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2 } from 'lucide-vue-next';
 import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
 import { workspaceUrl } from './version';
 import { trackButtonRequest } from './actionMotion';
-import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,type NoticeForm } from './noticeForm';
+import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,type NoticeForm } from './noticeForm';
+import NoticePlanBinding from './NoticePlanBinding.vue';
 import NoticeFields from './NoticeFields.vue';
 import NoticeMemorySuggestions from './NoticeMemorySuggestions.vue';
 import { noticeListStatus, noticeListCycle, noticeListSpecialty, noticePlanWindow, noticeSourceMode } from './noticeListMeta';
@@ -146,7 +141,16 @@ let syncAbort:AbortController|undefined;
 function more(key:string){if(key==='undo')void openUndo();else if(key==='sop')navigate('/?'+new URLSearchParams({view:'sops',scope:props.scope,work_type:kind.value}));else if(key==='change')changeOpen.value=true;else if(key==='records')void openRecords();else navigate((key==='mop'?'/engineer/mop':'/admin/history-memory')+'?scope='+encodeURIComponent(props.scope));}
 function newNotice(key:string){if(key==='paste'){pasteError.value='';pasteOpen.value=true;}else void openRecord(null,false,'start','',key);}
 async function refreshSource(key:string){if(key==='page'){void load(true);return;}if(syncing.value||!refreshOptions.value.some(t=>t.key===key))return;syncing.value=true;error.value='';syncAbort=new AbortController();try{await refreshRemoteSourceAndWait(key as 'maintenance'|'change'|'repair','/api/'+key+'-refresh?scope='+encodeURIComponent(props.scope),{scope:props.scope,signal:syncAbort.signal});await load(true);}catch(e){if(!syncAbort.signal.aborted)error.value=(e as Error).message;}finally{syncing.value=false;}}
-async function parsePasted(){if(parsing.value||!pasteText.value.trim())return;parsing.value=true;pasteError.value='';try{const body=new FormData();body.append('scope',props.scope);body.append('month',applied.value.month);body.append('work_type',kind.value==='all'?types.value[1]?.id||'maintenance':kind.value);body.append('paste_text',pasteText.value);const result=await requestJson('/workbench-lite/parse',{method:'POST',body});parseNoticeForm(result.fragments?.detail||'');pasteOpen.value=false;await openRecord(null,false,'',result.fragments.detail);}catch(e){pasteError.value=(e as Error).message;}finally{parsing.value=false;}}
+function pasteNoticeText(event:ClipboardEvent){
+  const text=event.clipboardData?.getData('text/plain'),input=event.target;
+  if(!text||!(input instanceof HTMLTextAreaElement)||parsing.value)return;
+  event.preventDefault();
+  const before=input.value.slice(0,input.selectionStart),after=input.value.slice(input.selectionEnd);
+  pasteText.value=normalizePastedNotice(before+text+after).slice(0,30000);
+  const cursor=Math.min(normalizePastedNotice(before+text).length,pasteText.value.length);
+  void nextTick(()=>{if(document.activeElement===input)input.setSelectionRange(cursor,cursor);});
+}
+async function parsePasted(){if(parsing.value)return;pasteText.value=normalizePastedNotice(pasteText.value);if(!pasteText.value.trim())return;parsing.value=true;pasteError.value='';try{const body=new FormData();body.append('scope',props.scope);body.append('month',applied.value.month);body.append('work_type',kind.value==='all'?types.value[1]?.id||'maintenance':kind.value);body.append('paste_text',pasteText.value);const result=await requestJson('/workbench-lite/parse',{method:'POST',body});parseNoticeForm(result.fragments?.detail||'');pasteOpen.value=false;await openRecord(null,false,'',result.fragments.detail);}catch(e){pasteError.value=(e as Error).message;}finally{parsing.value=false;}}
 const pageNumber=(value:string|null)=>Math.max(1,Math.trunc(Number(value)||1));
 const pages=ref<Record<string,number>>({planned:pageNumber(params.value.get('records_page')||params.value.get('pending_page')),ongoing:pageNumber(params.value.get('ongoing_page'))}),data=ref<Dict>({}),loading=ref(false),error=ref('');
 const lanes=computed(()=>[{id:'planned',label:'计划通告',rows:(data.value.records||[]) as Dict[],total:Number(data.value.records_pagination?.total??data.value.records?.length??0)}, {id:'ongoing',label:'进行中',rows:(data.value.ongoing||[]) as Dict[],total:Number(data.value.ongoing_pagination?.total??data.value.ongoing?.length??0)}]);
@@ -170,8 +174,9 @@ function uploadBusy(value:boolean){uploading.value=value;}
 function persistAfterUpload(){void nextTick(persist);}
 const verifyBeforeStart=ref(false);
 const action=ref('start'),sop=ref<Dict>({}),sopField=ref<Dict>({}),photos=ref<Dict[]>([]),aliPhotos=ref<Dict[]>([]),job=ref<Dict|null>(null);
-const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:string}[]>([]),sourceLoading=ref(false),sourceExpanded=ref(false);
+const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:string;title?:string;building?:string;cycle?:string}[]>([]),sourceLoading=ref(false),sourceExpanded=ref(false);
 function toggleSource(){sourceExpanded.value=!sourceExpanded.value;if(sourceExpanded.value)void loadSources();}
+function chooseSourceMode(value:string){if(!form.value||locked.value||!['bind','unbound'].includes(value))return;form.value.values.manual_binding_choice=value;sourceChoice.value=null;if(value==='bind')void loadSources();persist();}
 const sopStatus=ref<Dict|null>(null);
 const sopScope=computed(()=>form.value?.values.building_codes?.length===1?String(form.value.values.building_codes[0]):'');
 const selectedBuildingLabel=computed(()=>(form.value?.values.building_codes||[]).map((v:string)=>v==='110'?'110站':v+'楼').join('、')||'未选择楼栋');
@@ -397,7 +402,7 @@ function removeAliPhoto(photo:Dict){const current=form.value;if(!current?.values
 function pastePhotos(event:ClipboardEvent){if(event.clipboardData?.files.length&&form.value?.photoRequired){event.preventDefault();siteUpload.value?.add(event.clipboardData.files);}}
 let sourceTimer=0,sourceSequence=0;
 function searchSources(q:string){clearTimeout(sourceTimer);sourceTimer=window.setTimeout(()=>loadSources(q),300);}
-async function loadSources(q=''){if(!form.value)return;const current=form.value,sequence=++sourceSequence;sourceLoading.value=true;try{const value=await requestJson('/api/workbench/source-options?'+new URLSearchParams({scope:current.values.scope,work_type:current.values.work_type,month:applied.value.month,q}));if(form.value===current&&sequence===sourceSequence){sourceOptions.value=(value.items||[]).map((r:Dict)=>({label:[r.title,r.maintenance_cycle,r.building,r.progress].filter(Boolean).join(' · '),value:r.source_record_id}));if(current.values.source_record_id&&!sourceOptions.value.some(o=>o.value===current.values.source_record_id))sourceOptions.value.unshift({label:'已绑定源表事项',value:current.values.source_record_id});}}catch(e){if(form.value===current&&sequence===sourceSequence)detailError.value=(e as Error).message;}finally{if(form.value===current&&sequence===sourceSequence)sourceLoading.value=false;}}
+async function loadSources(q=''){if(!form.value)return;const current=form.value,sequence=++sourceSequence;sourceLoading.value=true;try{const value=await requestJson('/api/workbench/source-options?'+new URLSearchParams({scope:current.values.scope,work_type:current.values.work_type,month:applied.value.month,q}));if(form.value===current&&sequence===sourceSequence){sourceOptions.value=(value.items||[]).map((r:Dict)=>({label:[r.title,r.maintenance_cycle,r.building,r.progress].filter(Boolean).join(' · '),value:r.source_record_id,title:r.title,building:r.building,cycle:r.maintenance_cycle}));if(current.values.source_record_id&&!sourceOptions.value.some(o=>o.value===current.values.source_record_id))sourceOptions.value.unshift({label:'已绑定源表事项',value:current.values.source_record_id});}}catch(e){if(form.value===current&&sequence===sourceSequence)detailError.value=(e as Error).message;}finally{if(form.value===current&&sequence===sourceSequence)sourceLoading.value=false;}}
 async function associationBound(result:Dict){const v=form.value?.values;if(!v)return;try{sessionStorage.removeItem(formKey);}catch{/* Server identity is authoritative. */}saved.value=snapshot();editing.value=false;busy.value=false;window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);await openRecord({work_type:v.work_type,active_item_id:result.active_item_id||v.active_item_id,record_id:result.source_record_id||result.repair_management_record_id||v.source_record_id||result.target_record_id||v.target_record_id});}
 function bindSource(){
   if(!form.value||!sourceChoice.value||locked.value)return;
@@ -544,8 +549,11 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-submit-group>.n-radio-group{white-space:nowrap}
 .v2-notice-edit-surface>:is([data-notice-section="relations"],[data-notice-section="binding"]){padding:8px 0}
 .v2-notice-edit-surface [data-notice-section="binding"] .v2-notice-tools h2{margin:0}
-.v2-source-picker{margin-top:8px;display:grid;gap:8px}
-.v2-source-picker>.v2-notice-binding{display:grid;grid-template-columns:minmax(0,1fr) auto;margin:0;align-items:center}
+.v2-notice-relations .v2-notice-editor-context{margin:0;padding:0;flex:none}
+.v2-notice-edit-surface [data-notice-section="binding"]{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px}
+.v2-notice-edit-surface [data-notice-section="binding"]>.v2-notice-tools{width:auto}
+.v2-source-picker{display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%;min-width:0}
+.v2-source-picker>.v2-notice-binding{display:grid;grid-template-columns:minmax(120px,320px) auto;margin:0;align-items:center;max-width:100%;min-width:0}
 @media(max-width:760px){.v2-notice-submit-group{flex:1 1 100%;justify-content:space-between;gap:6px}.v2-notice-submit-group .n-button,.v2-notice-submit-group .n-radio-button{min-height:44px}.v2-notice-submit-group .n-radio-button{display:inline-flex;align-items:center;padding-inline:9px}.v2-notice-submit-group>.n-button{padding-inline:10px}.v2-source-picker>.v2-notice-binding>.n-button{min-height:44px}}
 @media(max-width:760px){.v2-notice-editor.v2-notice-handling{width:calc(100vw - 12px);height:calc(100dvh - 12px);max-height:calc(100dvh - 12px)}.v2-notice-handling>.n-card-content{padding:8px 12px}.v2-notice-handling>.n-card-header{padding:14px 48px 12px 12px}.v2-notice-handling>.n-card__footer{padding:10px 12px}.v2-notice-page-fields>header{min-height:44px}}
 </style>

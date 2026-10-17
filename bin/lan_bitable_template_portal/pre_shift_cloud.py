@@ -1,8 +1,10 @@
 """Bounded roster reads and idempotent checklist uploads using the shared HTTP pool."""
 import datetime as dt
+import asyncio
 import json
 import re
 import uuid
+from collections import defaultdict
 
 from .pre_shift_checks import CheckError, SCOPES, TZ
 
@@ -11,12 +13,16 @@ TABLE_ID = 'tbloxEhpBIIW3Joq'
 SCHEMA = {'文本': 1, '检查标识': 1, '楼栋': 1, '检查日期': 5, '班次': 1, '提交人员': 1,
           '提交人员OpenID': 1, '提交时间': 5, '检查项数': 2, '无异常项数': 2,
           '异常项数': 2, '检查明细': 1, '异常备注': 1, '清单版本': 1,
-          '检查附件': 17, '交接班照片': 17}
+          '检查附件': 17, '交接班照片': 17, '检查清单': 1, '检查状态': 1,
+          '检查结果': 1, '正常检查项': 1, '异常检查项': 1,
+          '排班人员': 1, '计划检查时间': 5, '检查截止时间': 5}
 
 
 def read_roster(service, day):
     from .learning_reminders import APP_TOKEN as roster_app, TABLE_ID as roster_table, VIEW_ID
-    groups, cursor, seen = {}, '', set()
+    from .learning_reminders import resolve_roster
+    from .learning import text
+    groups, cursor, seen, issues = {}, '', set(), defaultdict(list)
     for _ in range(20):
         response = service._request_json('records', app_token=roster_app, table_id=roster_table,
             params={'page_size': 500, 'view_id': VIEW_ID, 'user_id_type': 'open_id',
@@ -27,7 +33,7 @@ def read_roster(service, day):
         for row in data['items']:
             fields = row.get('fields') or {}
             shift = fields.get('班次')
-            if shift not in {'白', '夜'} or fields.get('班组') == '长白':
+            if shift not in {'白', '夜'} or text(fields.get('班组')).strip() == '长白':
                 continue
             try:
                 date = dt.datetime.fromtimestamp(float(fields['排班日期']) / 1000, TZ).date().isoformat()
@@ -39,29 +45,93 @@ def read_roster(service, day):
             scope = building.removesuffix('楼').removesuffix('站') if isinstance(building, str) else ''
             if scope not in SCOPES:
                 raise CheckError('排班楼栋不明确。')
-            people = fields.get('人员') or []
-            people = people.get('users', []) if isinstance(people, dict) else people
-            if not isinstance(people, list):
+            users = fields.get('人员') or []
+            users = users.get('users', []) if isinstance(users, dict) else users
+            if not isinstance(users, list):
                 raise CheckError('排班人员格式无效。')
             group = groups.setdefault((scope, shift), {})
-            for person in people:
-                oid = person.get('id') or person.get('open_id') if isinstance(person, dict) else ''
-                if not isinstance(oid, str) or not re.fullmatch(r'ou_[A-Za-z0-9]+', oid):
-                    raise CheckError('排班人员缺少有效OpenID。')
-                group[oid] = {'scope': scope, 'shift': shift, 'open_id': oid, 'name': str(person.get('name') or '')}
+            names = list(dict.fromkeys(name for name in re.split(r'[\s,，、;；/|｜]+', text(fields.get('人员（文本）')).strip()) if name))
+            if not names:
+                issues[(scope, shift)].append('人员（文本）姓名名单缺失')
+                continue
+            linked = defaultdict(set)
+            for user in users:
+                if not isinstance(user, dict):
+                    continue
+                oid = user.get('id') or user.get('open_id') or ''
+                if isinstance(oid, str) and re.fullmatch(r'ou_[A-Za-z0-9]+', oid):
+                    linked[str(user.get('name') or '').strip()].add(oid)
+            for name in names:
+                ids = linked[name]
+                person = {'scope': scope, 'shift': shift, 'open_id': next(iter(ids)) if len(ids) == 1 else '', 'name': name}
+                if name in group and group[name]['open_id'] != person['open_id']:
+                    person['open_id'] = ''
+                group[name] = person
         if not data['has_more']:
             if not groups:
                 raise CheckError('视图中未读取到当天白夜班人员。')
-            warnings = {}
+            directory = service.get_permission_directory_people()
+            if not isinstance(directory, dict) or not isinstance(directory.get('items'), list):
+                raise CheckError('人员目录尚未就绪，请稍后重试。')
+            directory = {row['record_id']: {'name': row.get('name') or '', 'scopes': row.get('scopes') or [],
+                'selectable': row.get('selectable'), 'inactive': row.get('departed', False),
+                'login_ids': [row['open_id']] if row.get('open_id') else []} for row in directory['items']}
+            warnings, result = {}, []
             for (scope, shift), people in groups.items():
-                if len(people) != 2:
-                    warnings[scope] = warnings.get(scope, '') + f'{shift}班排班为{len(people)}人，需核对两名值班人员，暂不推送该班。'
-            return {'people': [person for people in groups.values() if len(people) == 2 for person in people.values()], 'warnings': warnings}
+                resolved, missing = resolve_roster(list(people.values()), directory, allowed_scopes=SCOPES)
+                if len(people) != 2 or len(resolved) != 2 or issues[(scope, shift)]:
+                    detail = '；'.join(issues[(scope, shift)] + missing) or f'人员（文本）包含{len(people)}人'
+                    warnings[scope] = warnings.get(scope, '') + f'{shift}班已匹配{len(resolved)}/2人：{detail}；暂不推送该班，5分钟后重试。'
+                else:
+                    result.extend(resolved)
+            return {'people': result, 'warnings': warnings}
         cursor = data.get('page_token')
         if not isinstance(cursor, str) or not cursor or cursor in seen:
             break
         seen.add(cursor)
     raise CheckError('排班分页未完成。')
+
+
+class CheckSender:
+    """Use the running agent's transport and its verified app-scoped identity map."""
+    def __init__(self, runtime):
+        self.runtime, self.loop = runtime, None
+
+    def __call__(self, recipient, card, identity):
+        if self.loop is None or self.loop.is_closed():
+            return False, '飞书智能体尚未就绪，提醒等待重试。', []
+        future = asyncio.run_coroutine_threadsafe(self.send(recipient, card, identity), self.loop)
+        try:
+            return future.result(timeout=45)
+        except Exception:
+            future.cancel()
+            return False, '飞书智能体提醒暂未确认送达，等待原任务重试。', []
+
+    async def send(self, recipient, card, identity):
+        from .portal_service import external_real_write_guard
+        guard = external_real_write_guard()
+        if guard.get('mock_external'):
+            return True, 'mock external send skipped', []
+        if not guard.get('real_write_allowed'):
+            raise CheckError('当前未允许真实飞书消息发送。')
+        bot = getattr(self.runtime, 'feishu_assistant_channel', None)
+        if not bot or not getattr(bot, 'messenger', None) or not getattr(bot, 'config', {}).get('app_id'):
+            raise CheckError('飞书智能体尚未就绪，班前检查提醒等待重试。')
+        person = await asyncio.to_thread(self.runtime.auth_manager.directory_person, recipient)
+        if not person.get('id') or not person.get('selectable') or person.get('inactive'):
+            raise CheckError('班前检查接收人身份已变化，请核对人员目录。')
+        receive_type, receive_id = await asyncio.to_thread(bot.handover_cards.recipient_id,
+            {'id': person['id'], 'open_id': recipient})
+        client = await bot.messenger.client()
+        response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
+            params={'receive_id_type': receive_type}, headers=await bot.messenger.headers(),
+            json={'receive_id': receive_id, 'msg_type': 'interactive', 'content': json.dumps(card, ensure_ascii=False),
+                  'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, identity))})
+        value = response.json()
+        mid = (value.get('data') or {}).get('message_id')
+        if response.status_code >= 400 or value.get('code') != 0 or not isinstance(mid, str) or not re.fullmatch(r'om_[A-Za-z0-9]+', mid):
+            raise CheckError('飞书智能体未返回有效发送回执，提醒等待原任务重试。')
+        return True, 'ok', [{'open_id': recipient, 'sender_app_id': bot.config['app_id'], 'message_id': mid}]
 
 
 class CheckCloud:
@@ -163,7 +233,7 @@ class CheckCloud:
         first = tasks[0]
         tokens = self._upload_files(tasks)
         checksum_files, handover_files, seen_handover = [], [], set()
-        lines, abnormal, count = [], [], 0
+        lines, normal, abnormal, count = [], [], [], 0
         for task in tasks:
             files_by_item = {}
             for ref in task.get('_files', []):
@@ -181,7 +251,7 @@ class CheckCloud:
             lines.append(task['shift'] + '班 · ' + task['submitted'])
             for index, answer in enumerate(json.loads(task['answers']), 1):
                 count += 1
-                label = '异常' if answer['status'] == 'abnormal' else '无异常'
+                label = '异常' if answer['status'] == 'abnormal' else '正常（无异常）'
                 line = f"{index}. {answer['text']}：{label}" + (f"；{answer['note']}" if answer['note'] else '')
                 attached = files_by_item.get(answer['id'])
                 if attached:
@@ -189,13 +259,22 @@ class CheckCloud:
                 lines.append(line)
                 if answer['status'] == 'abnormal':
                     abnormal.append(task['shift'] + '班 · ' + line)
+                else:
+                    normal.append(task['shift'] + '班 · ' + line)
         fields = {'文本': f"{first['day']} {first['scope']}楼 {first['actor_name']} 班前检查", '检查标识': key, '楼栋': first['scope'],
                   '检查日期': int(dt.datetime.combine(dt.date.fromisoformat(first['day']), dt.time(), TZ).timestamp() * 1000),
-                  '班次': '、'.join(t['shift'] for t in tasks), '提交人员': first['actor_name'], '提交人员OpenID': first['actor_id'],
+                  '班次': '、'.join(dict.fromkeys(t['shift'] for t in tasks)), '提交人员': first['actor_name'], '提交人员OpenID': first['actor_id'],
                   '提交时间': max(int(dt.datetime.fromisoformat(t['submitted']).timestamp() * 1000) for t in tasks),
                   '检查项数': count, '无异常项数': count - len(abnormal), '异常项数': len(abnormal),
                   '检查明细': '\n'.join(lines), '异常备注': '\n'.join(abnormal),
+                  '检查结果': '存在异常' if abnormal else '全部正常',
+                  '正常检查项': '\n'.join(normal), '异常检查项': '\n'.join(abnormal),
                   '清单版本': '、'.join(f"{t['shift']}班 v{t['definition_version']}" for t in tasks),
+                  '检查清单': '\n'.join(lines),
+                  '检查状态': '已提交',
+                  '排班人员': '、'.join(dict.fromkeys(p['name'] for t in tasks for p in json.loads(t.get('people') or '[]') if p.get('name'))),
+                  **({'计划检查时间': int(min(t['due'] for t in tasks) * 1000)} if all('due' in t for t in tasks) else {}),
+                  **({'检查截止时间': int(max(t['deadline'] for t in tasks) * 1000)} if all('deadline' in t for t in tasks) else {}),
                   '检查附件': checksum_files, '交接班照片': handover_files}
         if not record_id:
             records = self.all('records/search', {'filter': {'conjunction': 'and', 'conditions': [
@@ -209,7 +288,8 @@ class CheckCloud:
         if record_id:
             self.request('PUT', 'records/' + record_id, {'fields': fields})
             return record_id
-        data = self.request('POST', 'records', {'fields': fields}, {'client_token': str(uuid.uuid5(uuid.NAMESPACE_URL, key))})
+        from upload_event_module.services.feishu_service import _stable_uuid4_client_token
+        data = self.request('POST', 'records', {'fields': fields}, {'client_token': _stable_uuid4_client_token(key)})
         record_id = data.get('record', {}).get('record_id')
         if not isinstance(record_id, str) or not re.fullmatch(r'rec[A-Za-z0-9]+', record_id):
             raise CheckError('飞书写入结果尚未确认，稍后按检查标识核验。')

@@ -313,13 +313,17 @@ class RiskInspections:
             public['audit'] = [dict(r) for r in db.execute('SELECT person_id,action,at,data FROM risk_audit WHERE release_id=? AND person_id IN (' + ','.join('?' for _ in audit_ids) + ') ORDER BY id DESC LIMIT 100', [rid, *audit_ids])]
             return public
 
-    def list(self, actor, page=1):
+    def list(self, actor, page=1, scope=''):
         self.check(actor)
         try:
             page = max(1, int(page))
         except (TypeError, ValueError):
             raise RiskError('页码无效。') from None
         scopes = [s for s in SCOPES if can_scope(actor, s)]
+        if scope and scope != 'ALL':
+            if scope not in scopes:
+                raise RiskError('没有该楼栋风险排查的查看权限。', 403)
+            scopes = [scope]
         visible = 'p.scope IN (' + ','.join('?' for _ in scopes) + ')'
         args = list(scopes)
         if not manager(actor):

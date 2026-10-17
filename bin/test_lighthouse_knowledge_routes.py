@@ -60,6 +60,22 @@ class KnowledgeRoutes(unittest.IsolatedAsyncioTestCase):
                                      headers={'admin': '1'})).json()['data']['document']
         self.assertEqual(doc['id'], document['id'])
 
+    async def test_filtered_all_selection_moves_only_editable_documents(self):
+        base = '/api/assistant/knowledge'
+        mine = self.kb.upload(actor('owner'), *_text('公司指南。', '指南.txt'))
+        self.kb.upload(actor('other'), *_text('共享指南。', '指南-他人.txt'))
+        root = (await self.client.post(base + '/groups', json={'name': '目录'})).json()['data']
+        child = (await self.client.post(base + '/groups', json={'name': '目录', 'parent_id': root['id']})).json()['data']
+        response = await self.client.get(base, params={'q': '指南', 'select_all': '1'})
+        self.assertEqual(response.status_code, 200)
+        selection = response.json()['data']['selection']
+        self.assertEqual(selection['count'], 1)
+        moved = await self.client.put(base + '/groups/' + child['id'] + '/documents', json={'selection': selection})
+        self.assertEqual(moved.status_code, 200, moved.text)
+        self.assertEqual(moved.json()['data']['updated'], 1)
+        items = (await self.client.get(base, params={'group': child['id']})).json()['data']['items']
+        self.assertEqual([item['id'] for item in items], [mine['id']])
+
     async def test_guests_and_invalid_multipart_do_not_store(self):
         base = '/api/assistant/knowledge'
         # guests are rejected before any service call

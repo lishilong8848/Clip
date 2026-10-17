@@ -1,0 +1,66 @@
+.workspace-v2 .work-handover { padding-block: 4px 18px; }
+.workspace-v2 .work-handover .handover-toolbar { gap: 12px; padding-block: 8px 12px; }
+.workspace-v2 .work-handover .handover-toolbar > .handover-tabs { flex: 1; }
+.workspace-v2 .work-handover .handover-toolbar > .handover-tabs button { font-size: 13px; }
+.workspace-v2 .work-handover .handover-layout { grid-template-columns: 240px minmax(0, 1fr); gap: 22px; padding-top: 18px; }
+.workspace-v2 .work-handover .handover-list { padding-right: 16px; }
+.workspace-v2 .work-handover .handover-list-row { margin-bottom: 4px; padding: 12px; border-bottom-color: transparent; border-radius: 6px; }
+.workspace-v2 .work-handover .handover-list-row:hover { background: var(--cf-surface, #fff); }
+.workspace-v2 .work-handover .handover-list-row.selected { background: var(--cf-surface, #fff); box-shadow: inset 3px 0 var(--v2-blue); }
+.workspace-v2 .work-handover .handover-list-row strong { font-size: 13px; line-height: 1.65; }
+.workspace-v2 .work-handover .handover-list-row > div { flex-wrap: wrap; gap: 4px 8px; }
+.workspace-v2 .work-handover .handover-list-row p { line-height: 1.5; margin-block: 5px; }
+.workspace-v2 .work-handover .handover-list-row small { display: block; line-height: 1.65; }
+.workspace-v2 .work-handover .handover-detail { gap: 14px; }
+.workspace-v2 .work-handover .handover-detail-head { min-height: 28px; }
+.workspace-v2 .work-handover .handover-fields { gap: 14px 18px; align-items: start; }
+.workspace-v2 .work-handover .handover-fields label > span { font-weight: 500; color: var(--v2-ink); }
+.workspace-v2 .work-handover .handover-recipient > span { min-height: 20px; }
+.workspace-v2 .work-handover .handover-recipient .n-button { height: 20px; min-height: 20px; }
+.workspace-v2 .work-handover .handover-responsibilities { padding: 12px 14px; border: 0; border-left: 3px solid #29926a; background: color-mix(in srgb, #29926a 5%, var(--cf-surface, #fff)); }
+.workspace-v2 .work-handover .handover-responsibilities.is-incomplete { border-left-color: #b87915; }
+.workspace-v2 .work-handover .handover-responsibility-head strong { font-size: 13px; }
+.workspace-v2 .work-handover .handover-responsibility-head > .handover-tools { gap: 8px; }
+.workspace-v2 .work-handover .handover-source-notes .n-alert { margin-top: 8px; }
+.workspace-v2 .work-handover .handover-item-toolbar { gap: 8px; padding-block: 4px 9px; }
+.workspace-v2 .work-handover .handover-item-toolbar .handover-tabs button { font-size: 12px; min-height: 32px; padding: 6px 9px; }
+.workspace-v2 .work-handover .handover-item { padding: 13px 0; gap: 10px 16px; align-items: start; }
+.workspace-v2 .work-handover .handover-item-title { gap: 6px; }
+.workspace-v2 .work-handover .handover-item-title strong { font-size: 14px; line-height: 1.7; }
+.workspace-v2 .work-handover .handover-item-meta { gap: 6px 16px; line-height: 1.6; }
+.workspace-v2 .work-handover .handover-item-actions { flex-shrink: 0; gap: 9px; padding-top: 2px; }
+.workspace-v2 .work-handover .handover-item-actions .n-button { font-size: 12px; }
+.workspace-v2 .work-handover .handover-files { padding-top: 10px; }
+.workspace-v2 .work-handover .handover-files .handover-section-head strong { font-size: 13px; }
+.workspace-v2 .work-handover .handover-audit { padding-bottom: 2px; }
+.workspace-v2 .work-handover .handover-footer { gap: 8px 16px; margin-top: 2px; padding-block: 12px; background: var(--v2-bg); }
+.workspace-v2 .work-handover .handover-footer > .handover-tools { margin-left: auto; }
+.workspace-v2 .handover-people-menu .n-base-select-option { min-height: 42px; height: auto; padding-block: 9px; }
+.workspace-v2 .handover-people-menu .n-base-select-option__content { white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+@media (max-width: 1100px) {
+  .workspace-v2 .work-handover .handover-layout { grid-template-columns: 208px minmax(0, 1fr); gap: 16px; }
+  .workspace-v2 .work-handover .handover-item-actions { width: 100%; padding-top: 0; }
+  .workspace-v2 .work-handover .handover-item { flex-wrap: wrap; }
+}
+@media (max-width: 760px) {
+  .workspace-v2 .work-handover { padding-bottom: 14px; }
+  .workspace-v2 .work-handover:has(.handover-layout.has-detail) .handover-toolbar { display: none; }
+  .workspace-v2 .work-handover .handover-toolbar { gap: 8px; padding-block: 4px 10px; }
+  .workspace-v2 .work-handover .handover-toolbar > .handover-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; flex-basis: 100%; gap: 3px; }
+  .workspace-v2 .work-handover .handover-toolbar > .handover-tabs button { font-size: 12px; min-height: 40px; padding-inline: 4px; }
+  .workspace-v2 .work-handover .handover-toolbar > .handover-tools { width: 100%; justify-content: flex-end; gap: 8px; }
+  .workspace-v2 .work-handover .handover-layout { display: block; padding-top: 12px; }
+  .workspace-v2 .work-handover .handover-detail { gap: 12px; }
+  .workspace-v2 .work-handover .handover-fields { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .workspace-v2 .work-handover .handover-responsibilities { padding: 10px 12px; }
+  .workspace-v2 .work-handover .handover-responsibility-head { align-items: start; gap: 10px; }
+  .workspace-v2 .work-handover .handover-responsibility-head > .handover-tools { justify-content: space-between; width: 100%; }
+  .workspace-v2 .work-handover .handover-item-toolbar > .handover-tools { width: 100%; justify-content: flex-end; }
+  .workspace-v2 .work-handover .handover-item { padding-block: 11px; }
+  .workspace-v2 .work-handover .handover-item-actions { gap: 15px; }
+  .workspace-v2 .work-handover .handover-item-meta small { display: none; }
+  .workspace-v2 .work-handover .handover-recipient .n-button { min-height: 28px; }
+  .workspace-v2 .work-handover .handover-footer { bottom: calc(62px + env(safe-area-inset-bottom)); padding-block: 9px; }
+  .workspace-v2 .work-handover .handover-footer > .handover-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .workspace-v2 .work-handover .handover-footer > span { width: 100%; }
+}

@@ -11,7 +11,7 @@ from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from .work_handover import Handovers, HandoverError, MODULE, SCOPES, authorized, text, timestamp
-from .work_handover_sources import HandoverSources, SOURCES
+from .work_handover_sources import HandoverSources, SOURCES, responsibility_modules
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 FILE_EXTS = {'.pdf','.doc','.docx','.xls','.xlsx','.xlsm','.md','.txt','.csv','.jpg','.jpeg','.png','.webp'}
@@ -21,25 +21,30 @@ def install_work_handover_routes(app, controller, runtime):
     store = None
     lock = threading.Lock()
 
-    def actor_for_open_id(open_id, name=''):
+    def actor_for_open_id(open_id, name='', *, check_access=True):
         auth = runtime.auth_manager
         profile = auth.account_profile(open_id)
         person = auth.directory_person(open_id)
         if person.get('inactive') or person and not person.get('selectable'):
             raise HandoverError('当前人员信息不可用，请管理员核对。',403)
         actor = {**profile, 'id':person.get('id') or 'account:'+open_id,
-                 'open_id':open_id,'name':person.get('name') or name or '当前人员'}
-        Handovers.check_actor(actor)
+                 'open_id':open_id,'name':person.get('name') or name or '当前人员',
+                 'position':person.get('position', '')}
+        if check_access:
+            Handovers.check_actor(actor)
         return actor
 
-    def directory():
-        return runtime.service.get_permission_directory_people().get('items',[])
+    def directory(*, force_refresh=False):
+        return runtime.service.get_permission_directory_people(force_refresh=force_refresh).get('items',[])
 
     def person_for(record_id):
         row = next((r for r in directory() if r.get('record_id')==record_id and r.get('selectable') and not r.get('departed')),None)
         if not row or not row.get('open_id'):
             raise HandoverError('接收人已不在可选在岗人员目录中，请重新选择。',409)
-        return {**actor_for_open_id(row['open_id'],row['name']), 'id':row['record_id']}
+        actor = actor_for_open_id(row['open_id'],row['name'])
+        if actor['id'] != row['record_id']:
+            raise HandoverError('接收人身份尚未同步，请重新读取人员名单后再试。', 409)
+        return actor
 
     def manager():
         nonlocal store
@@ -83,24 +88,39 @@ def install_work_handover_routes(app, controller, runtime):
                     raise HandoverError('提交内容无效。')
             identity=request.path_params.get('identity','')
             if path=='people':
-                rows=await asyncio.to_thread(directory)
+                rows=await asyncio.to_thread(directory,force_refresh=request.query_params.get('refresh')=='1')
                 items=[]
+                unresolved = 0
+                query = request.query_params.get('query', '').strip().casefold()
                 for row in rows:
                     if not row.get('selectable') or row.get('departed') or not row.get('open_id'):
                         continue
                     try:
-                        target=await asyncio.to_thread(actor_for_open_id,row['open_id'],row['name'])
+                        target=await asyncio.to_thread(actor_for_open_id,row['open_id'],row['name'],check_access=False)
                     except HandoverError:
+                        continue
+                    if target['id'] != row.get('record_id'):
+                        unresolved += 1
                         continue
                     if target['id']==actor['id'] or not any(authorized(actor,s) and authorized(target,s) for s in SCOPES):
                         continue
-                    items.append({k:row.get(k,'') for k in ('record_id','name','employee_no','position','scopes')})
-                data={'items':items,'self':{k:actor[k] for k in ('id','name')},
+                    if query and query not in ' '.join(str(row.get(k) or '') for k in ('name', 'employee_no', 'position')).casefold():
+                        continue
+                    eligible = MODULE in target.get('modules', [])
+                    items.append({**{k:row.get(k,'') for k in ('record_id','name','employee_no','position')},
+                                  'scopes':[s for s in SCOPES if authorized(actor,s) and authorized(target,s)],
+                                  'selectable':eligible,
+                                  'unavailable_reason':'' if eligible else '尚无人员工作交接权限，请联系管理员授权'})
+                data={'items':items,'self':{k:actor.get(k, '') for k in ('id','name','category','level','home_scope')},
                       'scopes':[s for s in SCOPES if authorized(actor,s)],
-                      'modules':[{'value':k,'label':v} for k,v in SOURCES.items() if k in actor['modules']]}
+                      'modules':[{'value':k,'label':v} for k,v in SOURCES.items() if k in actor['modules']],
+                      'default_modules':responsibility_modules(actor),
+                      'warnings':['部分人员身份尚未同步，请刷新人员名单后重试。'] if unresolved else []}
             elif path=='sources':
                 query=request.query_params
-                data=await asyncio.to_thread(catalog.load,actor,query.get('module',''),query.get('scope',''),query.get('period',''))
+                reader = catalog.defaults if query.get('mode') == 'responsibilities' else catalog.load
+                args = () if query.get('mode') == 'responsibilities' else (query.get('module',''),)
+                data=await asyncio.to_thread(reader,actor,*args,query.get('scope',''),query.get('period',''))
             elif not path:
                 if request.method=='GET':
                     data=await asyncio.to_thread(svc.list,actor,request.query_params.get('view','received'),request.query_params.get('page',1))

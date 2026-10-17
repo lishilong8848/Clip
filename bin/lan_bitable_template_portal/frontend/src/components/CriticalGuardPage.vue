@@ -792,7 +792,7 @@ const viewMode = computed<"landing" | "admin" | "building">(() => (
 const pageTitle = computed(() => (
   viewMode.value === "admin" ? "重保任务管理" : viewMode.value === "building" ? `${activeScope.value}楼重保检查` : "重保管理"
 ));
-const backTarget = computed(() => (viewMode.value === "landing" ? "/" : "/critical-guard"));
+const backTarget = computed(() => (viewMode.value === "landing" ? "/?entry=risk" : "/critical-guard"));
 const bootstrapScopes = computed<Dict[]>(() => Array.isArray(bootstrap.value?.scopes) ? bootstrap.value!.scopes : []);
 const authorizedScopes = computed(() => bootstrapScopes.value.filter((item) => item.authorized));
 const sheetTypes = computed<string[]>(() => Array.isArray(bootstrap.value?.sheet_types) ? bootstrap.value!.sheet_types : []);

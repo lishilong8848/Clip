@@ -125,62 +125,60 @@
   border-radius: 10px;
 }
 
-/* Accessible tree */
-.v2-tree {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.v2-tree-children {
-  display: grid;
-  gap: 4px;
-  margin: 4px 0 4px 18px;
-  padding-left: 12px;
-  border-left: 1px solid var(--v2-border);
-  list-style: none;
-}
-.v2-tree button {
+/* Keyboard navigation and expansion are handled by the shared NTree control. */
+.v2-account-tree-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  text-align: left;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  min-height: 34px;
-  padding: 5px 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
 }
-.v2-tree button:hover {
-  background: color-mix(in srgb, var(--v2-blue) 10%, transparent);
-  border-color: var(--v2-border);
+.v2-account-hierarchy .v2-account-tree-depth {
+  flex: 0 1 290px;
+  min-width: 0;
 }
-.v2-tree-level {
-  font-weight: 600;
+.v2-account-tree-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
 }
-.v2-tree-building {
-  color: var(--v2-text);
-}
-.v2-tree-person {
-  color: var(--v2-text);
-}
-.v2-tree-caret {
-  display: inline-flex;
+.v2-account-native-tree .n-tree-node {
+  min-height: 36px;
   align-items: center;
-  justify-content: center;
-  width: 18px;
-  flex: none;
-  color: var(--v2-muted);
-  transform: rotate(0deg);
-  transition: transform var(--v2-motion-fast, 0.16s);
 }
-.v2-tree button[aria-expanded='false'] .v2-tree-caret {
-  transform: rotate(-90deg);
+.v2-account-native-tree .n-tree-node-content {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.v2-account-native-tree .n-tree-node-content__text {
+  flex: 1;
+  min-width: 0;
+}
+.v2-account-native-tree:focus-visible .n-tree-node--pending .n-tree-node-content {
+  outline: 2px solid var(--v2-blue);
+  outline-offset: -2px;
+}
+.v2-tree-group-label,.v2-tree-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--v2-text);
+}
+.v2-tree-person-main {
+  display: flex;
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+  flex: 1;
+}
+.v2-tree-person-detail {
+  flex: none;
+}
+.v2-tree-group-label {
+  font-weight: 600;
 }
 .v2-tree-label {
   min-width: 0;
@@ -193,8 +191,11 @@
   flex: none;
   color: var(--v2-muted);
   font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 .v2-tree-person-name {
+  flex: none;
   font-weight: 500;
 }
 .v2-tree-person-meta {
@@ -203,6 +204,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.v2-tree-person-state {
+  flex: none;
+  color: var(--v2-muted);
 }
 .v2-tree-person:hover .v2-tree-person-name {
   color: var(--v2-blue);
@@ -357,6 +362,38 @@
 }
 
 @media (max-width: 760px) {
+  .v2-account-hierarchy .v2-account-tree-depth {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .v2-account-tree-toolbar .n-radio-button,
+  .v2-account-tree-actions .n-button,
+  .v2-account-native-tree .n-tree-node {
+    min-height: 44px;
+  }
+  .v2-account-tree-actions .n-button {
+    min-width: 44px;
+  }
+  .v2-tree-person-main {
+    flex-wrap: wrap;
+    gap: 0 6px;
+  }
+  .v2-account-native-tree .v2-tree-person-detail {
+    width: 44px;
+    height: 44px;
+  }
+  .v2-tree-person-name {
+    flex: 0 1 auto;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .v2-tree-label {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .v2-tree-person-meta {
+    flex-basis: 100%;
+  }
   .v2-account-row {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -382,7 +419,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .v2-tree-caret {
-    transition: none;
+  .v2-account-native-tree .n-tree-node-switcher,
+  .v2-account-native-tree .n-tree-node-switcher__icon {
+    transition: none !important;
   }
 }

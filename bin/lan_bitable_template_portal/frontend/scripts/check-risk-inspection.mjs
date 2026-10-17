@@ -7,30 +7,36 @@ import {chromium} from 'playwright';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-const output=path.resolve(root,'../../../output/playwright/risk-table');
+const output=path.resolve(root,'../../../output/playwright/risk-sheet');
 await mkdir(output,{recursive:true});
 const server=await preview({root,configFile:false,logLevel:'error',build:{outDir:process.env.CLIPFLOW_RISK_BUILD_DIR||'dist'},preview:{host:'127.0.0.1',port:0}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 const errors=[],writes=[];
 let page;
+const versions=['legacy','v2'].filter(value=>!process.env.CLIPFLOW_RISK_VERSION||value===process.env.CLIPFLOW_RISK_VERSION);
+const widths=[1440,390,375,360].filter(value=>!process.env.CLIPFLOW_RISK_WIDTH||value===Number(process.env.CLIPFLOW_RISK_WIDTH));
 try{
- for(const version of ['legacy','v2']){
-  for(const width of [1440,390,360]){
+ assert(versions.length&&widths.length,'Select a supported risk UI version and viewport');
+ for(const version of versions){
+  for(const width of widths){
    const fields=[{key:'f1',field_name:'排查结果',type:1,role:'input',required:true},
     {key:'f2',field_name:'风险等级',type:3,role:'input',property:{options:[{name:'无异常'},{name:'有风险'}]}},
     {key:'f3',field_name:'现场照片',type:17,role:'input'},
     {key:'f4',field_name:'排查日期',type:5,role:'input'},
     {key:'f5',field_name:'发现异常',type:7,role:'input'},
     {key:'f6',field_name:'异常数量',type:2,role:'input'}];
+   if(width===1440)fields[1].property.options.push({name:'跨行\n选项'});
    const rid='a'.repeat(32),people=[{id:'alice',name:'排查人员甲',scope:'A',version:1,revoked:false,items:[{id:'item',title:'配电柜状态检查',status:'pending',values:{},files:[]}]},
     {id:'bob',name:'排查人员乙',scope:'B',version:1,revoked:false,items:[{id:'item',title:'配电柜状态检查',status:'submitted',values:{f1:'B楼接线检查正常，已核对现场标识。',f2:'无异常',f4:1792152000000,f5:false,f6:0},files:[]}]}];
-   let role='admin',reviewerId='reviewer',reviewerVersion=1,detailReads=0,loseSaveResponse=true,rejectHistorySave=true;
+   let role='admin',reviewerId='reviewer',reviewerVersion=1,detailReads=0,loseSaveResponse=true,rejectHistorySave=true,failTemplateRead=false;
+   let templateVersion='v1',requiredWrites=0;
+   let losePublication=version==='v2'&&width===1440,frozenPublication=null;
    const history={id:'c'.repeat(32),source_release_id:rid,name:'标准配电检查模板',revision:1,version:'history-v1',enabled:true,created:Date.now()/1000,updated:Date.now()/1000,creator:'发布管理员',scopes:['A'],legacy:false,cloud:{synced:false},sync_status:{status:'failed',error:'隔离测试备份失败'},
     fields:[{key:'number',field_id:'number',field_name:'排查任务编号',type:1,role:'number',is_primary:true},...structuredClone(fields)],items:[{title:'复用检查项',values:{f1:'检查接线与标识'}}]};
    const data=()=>({id:rid,name:'十月设备专项风险排查',created:Date.now()/1000,deadline:Date.now()+86400000,status:'active',fields,owner:'发布管理员',reviewer:reviewerId==='reviewer'?'审核主管':'发布管理员',reviewer_id:reviewerId,reviewer_version:reviewerVersion,
     people:structuredClone(role==='alice'?[people[0]]:people),is_manager:role!=='alice',can_manage_release:role!=='alice',is_reviewer:role===reviewerId,self_id:role,jobs:[],audit:[]});
-   const ctx=await browser.newContext({viewport:{width,height:width===360?640:900},reducedMotion:'reduce'}),layouts=layoutApiFixture();
+   const ctx=await browser.newContext({viewport:{width,height:width===360?640:width===375?667:width===390?844:900},reducedMotion:'reduce'}),layouts=layoutApiFixture();
    await ctx.route('**/*',async route=>{
     const req=route.request(),u=new URL(req.url());
     if(u.origin!==origin)return route.abort();
@@ -39,17 +45,18 @@ try{
     if(!u.pathname.startsWith('/api/'))return route.continue();
     if(await layouts.handle(route,role))return;
     const ok=data=>route.fulfill({json:{ok:true,data}});
-    if(u.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'ou_'+role,name:role,level:role==='admin'?'L0':role==='reviewer'?'L3':'L4',role:role==='admin'?'admin':'building',home_scope:'A',scope_rules:['A','B'],modules:['risk_inspection']},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}],default_scope:'A'});
+    if(u.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'ou_'+role,name:role,level:role==='admin'?'L0':role==='reviewer'?'L3':'L4',role:role==='admin'?'admin':'building',home_scope:'A',scope_rules:['A','B'],modules:role==='admin'?['risk_inspection','critical_guard','daily']:['risk_inspection']},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}],default_scope:'A'});
     if(u.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'risk-fixture'}});
     if(!u.pathname.startsWith('/api/risk-inspections')){assert.equal(req.method(),'GET','No unrelated writes');return ok({items:[],records:[],scopes:{},summary:{},total:0});}
     const p=u.pathname.slice('/api/risk-inspections'.length);
     if(req.method()!=='GET')writes.push({version,width,path:p});
-    if(p==='/template')return ok({fields,version:'v1'});
+    if(p==='/template'){if(failTemplateRead){failTemplateRead=false;return route.fulfill({status:503,json:{ok:false,error:'隔离测试模板读取失败'}});}if(req.method()==='POST'){const body=req.postDataJSON(),field=fields.find(field=>field.key===body.field_id);assert.equal(body.action,'update');assert(field);assert.equal(body.version,templateVersion);assert.equal(body.confirmed,true);assert.equal(typeof body.required,'boolean');assert.deepEqual(body.options,(field.property?.options||[]).map(option=>option.name),'Requirement changes preserve the original options, including line breaks');field.required=body.required;templateVersion='v'+(++requiredWrites+1);}return ok({fields,version:templateVersion});}
     if(p==='/templates')return ok({items:[{...history,item_count:history.items.length,field_count:history.fields.length}],total:1,page:1});
-    if(p==='/templates/'+history.id){if(req.method()==='PUT'){const body=req.postDataJSON();assert.equal(body.version,history.version);if(rejectHistorySave){rejectHistorySave=false;return route.fulfill({status:503,json:{ok:false,error:'模板保存暂未确认，请稍后重试'}});}Object.assign(history,body,{revision:history.revision+1,version:'history-v'+(history.revision+1)});}return ok(history);}
+    if(p==='/templates/'+history.id){if(req.method()==='PUT'){const body=req.postDataJSON();assert.equal(body.version,history.version);assert.equal(body.fields.find(field=>field.key==='f1').required,false,'History keeps the explicitly optional requirement');assert.deepEqual(body.fields.find(field=>field.key==='f2').property.options,history.fields.find(field=>field.key==='f2').property.options,'History requirement changes must preserve existing options');if(width===1440)assert.equal(body.fields.find(field=>field.key==='f2').required,true);if(rejectHistorySave){rejectHistorySave=false;return route.fulfill({status:503,json:{ok:false,error:'模板保存暂未确认，请稍后重试'}});}Object.assign(history,body,{revision:history.revision+1,version:'history-v'+(history.revision+1)});}return ok(history);}
     if(p==='/people')return ok({items:[{id:'alice',name:'排查人员甲',employee_no:'001',scopes:['A'],home_scope:'H',can_review:false},{id:'reviewer',name:'审核主管',employee_no:'002',scopes:['A','B'],home_scope:'A',can_review:true},{id:'admin',name:'发布管理员',employee_no:'003',scopes:['A','B'],home_scope:'A',can_review:true}]});
     if(!p&&req.method()==='GET')return ok({items:[{id:rid,name:'十月设备专项风险排查',deadline:Date.now()+86400000,status:'active',total:2,submitted:0,approved:0,people_count:2,reviewer:'审核主管'}],total:1,page:1,is_manager:role!=='alice',can_edit_template:role==='admin'});
-    if(!p&&req.method()==='POST'){const body=req.postDataJSON();assert.match(body.id,/^[a-f0-9]{32}$/);assert.equal(body.template_version,body.history_template_id?history.version:'v1');assert.equal(body.reviewer_id,'reviewer');assert.deepEqual(body.people,[{id:'alice',scope:'A'}]);assert.equal(body.items[0].title,body.history_template_id?'复用检查项':'现场设备状态检查');if(body.history_template_id){assert.equal(body.items[0].values.f1,'检查接线与标识');assert(!body.items[0].values.f3);assert(!body.items[0].values.f4);}return ok(data());}
+    if(!p&&req.method()==='POST'){const body=req.postDataJSON();assert.match(body.id,/^[a-f0-9]{32}$/);assert.equal(body.template_version,body.history_template_id?history.version:templateVersion);assert.equal(body.reviewer_id,'reviewer');assert.deepEqual(body.people,[{id:'alice',scope:'A'}]);assert.equal(body.items[0].title,body.history_template_id?'复用检查项':'现场设备状态检查');if(body.history_template_id){assert.equal(body.items[0].values.f1,'检查接线与标识');assert(!body.items[0].values.f3);assert(!body.items[0].values.f4);}if(losePublication){losePublication=false;frozenPublication=body;return route.fulfill({status:503,json:{ok:false,error:'隔离测试发布回执丢失'}});}if(frozenPublication){assert.deepEqual(body,frozenPublication,'Uncertain publication retries the exact same identity and payload');frozenPublication=null;}return ok(data());}
+    if(frozenPublication&&p==='/'+frozenPublication.id)return route.fulfill({status:503,json:{ok:false,error:'隔离测试发布暂无法核验'}});
     if(p.endsWith('/files'))return ok({id:'f'.repeat(32),name:u.searchParams.get('name'),size:req.postDataBuffer().length,field_id:'f3'});
     if(p.endsWith('/reviewer')){const body=req.postDataJSON();assert.equal(body.version,reviewerVersion);reviewerId=body.reviewer_id;reviewerVersion++;return ok(data());}
     if(p.endsWith('/retry')){assert.deepEqual(req.postDataJSON(),{kind:'template_sync'},'Backup retry must not retry messages');return ok(data());}
@@ -68,7 +75,54 @@ try{
    });
    page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));await page.clock.install();
    const url=version==='v2'?origin+'/assets/workspace-v2/index.html?__page=/risk-inspections':origin+'/risk-inspections';
+   async function cancelNavigation(){
+    const current=page.url();let prompted=false;
+    page.once('dialog',dialog=>{prompted=true;return dialog.dismiss();});
+    await page.evaluate(()=>{const target=new URL(location.href);if(target.pathname==='/assets/workspace-v2/index.html')target.searchParams.set('__page','/');else{target.pathname='/';target.search='';}history.pushState({},'',target.href);window.dispatchEvent(new PopStateEvent('popstate'));});
+    assert(prompted,'Unsubmitted risk content must keep its navigation guard');assert.equal(page.url(),current,'Cancelling departure retains the current task');
+   }
+   if(version==='legacy'){
+    await page.goto(origin);await page.getByRole('button',{name:'进入风险管理',exact:true}).waitFor();
+    assert.equal(await page.locator('.module-risk .module-secondary-action').count(),0,'Risk entry is inside the risk menu, not under its home card');
+    assert.equal(await page.locator('.module-tools .module-secondary-action').count(),0,'Daily tasks are inside the tools menu');
+    await page.getByRole('button',{name:'进入风险管理',exact:true}).click();await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();
+    await page.getByRole('button',{name:'选择重保管理',exact:true}).waitFor();
+    await page.screenshot({path:path.join(output,`legacy-${width}-entry.png`),fullPage:width>=700});
+    await page.getByRole('button',{name:'选择风险排查',exact:true}).click();await page.locator('.risk-task-list').waitFor();
+    await page.getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();
+    await page.getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('button',{name:'进入其他工具',exact:true}).click();
+    await page.getByRole('button',{name:'选择每日任务清单',exact:true}).waitFor();
+   }
    await page.goto(url);await page.locator('.risk-task-list button').first().waitFor();
+   await page.getByRole('textbox',{name:'搜索排查任务',exact:true}).fill('没有匹配的演示任务');await page.getByText('本页没有符合条件的任务',{exact:true}).waitFor();
+   await page.getByRole('button',{name:'清除筛选',exact:true}).click();await page.locator('.risk-task-list button').first().waitFor();
+   await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-sheet th').nth(6).waitFor();
+   const schemaHeaders=await page.locator('.risk-sheet th').allTextContents();
+   assert(fields.every((field,index)=>schemaHeaders[index+1].includes(field.field_name)),'Base template preserves the original column order');
+   assert.equal(await page.locator('.risk-sheet tbody tr').count(),4,'Metadata is shown by row, not as a vertical field list');
+   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Template scroll stays inside the sheet');
+   await page.screenshot({path:path.join(output,`${version}-${width}-template.png`),fullPage:width>=700});
+   if(version==='v2'&&width===1440){
+    await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin','dark'));await page.reload();await page.locator('.risk-task-list button').first().waitFor();await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-sheet th').nth(6).waitFor();
+    assert.equal(await page.evaluate(()=>document.documentElement.dataset.v2Theme),'dark');
+    const colors=await page.locator('.risk-sheet th').first().evaluate(el=>({background:getComputedStyle(el).backgroundColor,color:getComputedStyle(el).color}));
+    const luminance=value=>value.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
+    assert((luminance(colors.color)+.05)/(luminance(colors.background)+.05)>=4.5,'Template headers remain readable in night mode');
+    await page.screenshot({path:path.join(output,'v2-1440-template-dark.png'),fullPage:true});
+    await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin','light'));await page.reload();await page.locator('.risk-task-list button').first().waitFor();await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-sheet th').nth(6).waitFor();
+   }
+   await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).focus();await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).click();await page.getByRole('textbox',{name:'字段名称',exact:true}).waitFor();assert.equal(await page.getByRole('switch',{name:'字段是否必填',exact:true}).getAttribute('aria-checked'),'true');await page.locator('.risk-modal').getByRole('button',{name:'取消',exact:true}).click();
+   const requiredSwitch=page.getByRole('switch',{name:'排查结果是否必填',exact:true});
+   await requiredSwitch.waitFor();assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');assert.deepEqual(await page.locator('.risk-sheet-required>span').allTextContents(),['必填','不必填','不必填','不必填','不必填','不必填'],'Requirement labels stay outside the switch for readable contrast');assert.equal(await page.locator('.risk-sheet-required').first().evaluate(element=>getComputedStyle(element).columnGap),'8px','Requirement labels have spacing inside table-rendered cells');
+   await requiredSwitch.click();await page.locator('.risk-confirm').getByText(/设为不必填/).waitFor();await page.locator('.risk-confirm').getByRole('button',{name:'取消',exact:true}).click();await page.locator('.risk-confirm').waitFor({state:'hidden'});
+   assert.equal(requiredWrites,0,'Cancelling a requirement change never writes the template');assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');
+   for(const expected of [false,true]){await requiredSwitch.click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();await page.locator('.risk-confirm').waitFor({state:'hidden'});assert.equal(await requiredSwitch.getAttribute('aria-checked'),String(expected));}
+   if(width===1440){const choiceRequired=page.getByRole('switch',{name:'风险等级是否必填',exact:true});for(const expected of [true,false]){await choiceRequired.click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();await page.locator('.risk-confirm').waitFor({state:'hidden'});assert.equal(await choiceRequired.getAttribute('aria-checked'),String(expected));}}
+   if(width===1440){for(const expected of [true,false]){await page.getByRole('button',{name:'修改字段 风险等级',exact:true}).click();await page.getByRole('switch',{name:'字段是否必填',exact:true}).click();await page.locator('.risk-modal').getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();await page.locator('.risk-confirm').waitFor({state:'hidden'});await page.getByRole('textbox',{name:'字段名称',exact:true}).waitFor({state:'hidden'});assert.equal(await page.getByRole('switch',{name:'风险等级是否必填',exact:true}).getAttribute('aria-checked'),String(expected));}}
+   failTemplateRead=true;await page.getByRole('button',{name:'刷新',exact:true}).click();await page.getByText('模板或人员目录未完整读取，已阻止发布',{exact:true}).waitFor();
+   assert.equal(await page.locator('.risk-sheet').count(),0,'Failed template reads must not keep an old schema');
+   await page.getByRole('button',{name:'重新读取',exact:true}).click();await page.locator('.risk-sheet th').nth(6).waitFor();
+   await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.locator('.risk-task-list button').first().waitFor();
    await page.getByRole('button',{name:'发布排查',exact:true}).click();await page.locator('.risk-publish').waitFor();
    await page.getByPlaceholder('例如：10月电气设备专项排查').fill('隔离测试发布');
    const due=new Date(Date.now()+86400000*7);const dueText=`${due.getFullYear()}-${String(due.getMonth()+1).padStart(2,'0')}-${String(due.getDate()).padStart(2,'0')} 18:00:00`;
@@ -76,20 +130,36 @@ try{
    await page.locator('.risk-publish>.risk-fields>label').nth(2).locator('.n-base-selection').click();await page.getByText('审核主管 · A楼、B楼',{exact:true}).click();
    await page.locator('.risk-publish>.risk-fields>label').nth(3).locator('.n-base-selection').click();await page.getByText('排查人员甲 · 001',{exact:true}).click();await page.keyboard.press('Escape');
    await page.getByPlaceholder('事项 1：设备、部件或需要检查的内容').fill('现场设备状态检查');
+   await page.locator('.risk-publish .risk-sheet').getByRole('textbox',{name:'排查结果',exact:true}).pressSequentially('本次统一检查要求');
+   assert.equal(await page.locator('.risk-publish .risk-sheet').getByRole('textbox',{name:'排查结果',exact:true}).inputValue(),'本次统一检查要求','Editing a cell retains focus through immutable row updates');
+   await page.getByRole('button',{name:'添加事项',exact:true}).click();await page.getByRole('textbox',{name:'排查事项 2',exact:true}).fill('临时第二项');
+   await page.getByRole('button',{name:'移除事项 2',exact:true}).click();
+   assert.equal(await page.getByRole('textbox',{name:'排查事项 1',exact:true}).inputValue(),'现场设备状态检查','Removing another row cannot change the first item');
+   if(version==='v2'&&width===1440){for(let i=0;i<10;i++)await page.getByRole('button',{name:'添加事项',exact:true}).click();await page.getByRole('textbox',{name:'排查事项 11',exact:true}).fill('最后一项');assert.equal(await page.locator('.risk-publish .risk-sheet tbody tr').count(),1,'Only the current sheet page is rendered');await page.getByRole('button',{name:'移除事项 11',exact:true}).click();for(let i=10;i>1;i--)await page.getByRole('button',{name:'移除事项 '+i,exact:true}).click();assert.equal(await page.getByRole('textbox',{name:'排查事项 1',exact:true}).inputValue(),'现场设备状态检查');}
+   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Publishing table cannot widen the page');
    if(width===1440){const tops=await page.locator('.risk-publish>.risk-fields>label').evaluateAll(nodes=>nodes.map(el=>el.getBoundingClientRect().top));assert(Math.max(...tops)-Math.min(...tops)<2,'Publishing controls share one desktop row');}
-   await page.screenshot({path:path.join(output,`${version}-${width}-publish.png`),fullPage:true});
+   if(version==='v2'&&width<700){const button=page.getByRole('button',{name:'确认发布',exact:true});await button.scrollIntoViewIfNeeded();const action=await button.boundingBox(),nav=await page.locator('.v2-mobile-nav').boundingBox();assert(action.y>=56&&action.y+action.height<=nav.y-2,'The entire publish button stays above the mobile navigation');}
+   await page.screenshot({path:path.join(output,`${version}-${width}-publish.png`),fullPage:width>=700});
    await page.getByRole('button',{name:'确认发布',exact:true}).click();
    assert((await page.locator('.risk-confirm').boundingBox()).width<=Math.min(500,width),'Confirmation dialog must remain compact on desktop and fit mobile');
    await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
+   if(version==='v2'&&width===1440){await page.getByText('发布结果尚未确认，原内容已锁定保留。',{exact:true}).waitFor();assert(await page.getByRole('textbox',{name:'排查表名',exact:true}).isDisabled(),'Uncertain publication is frozen');assert(await page.getByRole('button',{name:'排查列表',exact:true}).isDisabled(),'Cannot discard an unconfirmed publication');await page.getByRole('button',{name:'按原内容重试',exact:true}).click();}
    await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'排查列表',exact:true}).click();
    await page.getByRole('button',{name:'历史模板库',exact:true}).click();await page.getByRole('button',{name:'查看 / 编辑',exact:true}).click();
+   await page.locator('.history-schema summary').click();
+   assert((await page.locator('.history-schema').boundingBox()).width<=width,'History fields must scroll inside the template, not outside the viewport');
+   await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).focus();await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).click();
+   await page.getByRole('textbox',{name:'历史字段名称',exact:true}).fill('排查结果');assert.equal(await page.getByRole('switch',{name:'历史字段是否必填',exact:true}).getAttribute('aria-checked'),'true');await page.getByRole('button',{name:'应用到当前草稿',exact:true}).click();
+   await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});const historyRequired=page.getByRole('switch',{name:'排查结果是否必填',exact:true});await historyRequired.click();assert.equal(await historyRequired.getAttribute('aria-checked'),'false');assert.equal(history.fields.find(field=>field.key==='f1').required,true,'History requirement changes remain local until saved');
+   if(width===1440){await page.getByRole('button',{name:'修改字段 风险等级',exact:true}).click();await page.getByRole('switch',{name:'历史字段是否必填',exact:true}).click();await page.getByRole('button',{name:'应用到当前草稿',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});assert.equal(await page.getByRole('switch',{name:'风险等级是否必填',exact:true}).getAttribute('aria-checked'),'true');}
    await page.getByRole('button',{name:'重试备份',exact:true}).click();await page.getByText('已安排重试模板备份。',{exact:true}).waitFor();
-   await page.getByRole('textbox',{name:'历史模板名称',exact:true}).fill('标准配电检查模板（修订）');await page.getByRole('button',{name:'保存新版本',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).click();
+   await page.getByRole('textbox',{name:'历史模板名称',exact:true}).fill('标准配电检查模板（修订）');await cancelNavigation();await page.getByRole('button',{name:'保存新版本',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).click();
    await page.locator('.n-dialog [role=alert]').filter({hasText:'模板保存暂未确认'}).waitFor();
    await page.getByRole('button',{name:'确认保存',exact:true}).click();
    await page.getByText('历史模板新版本已保存，已有排查不受影响。',{exact:true}).waitFor();
-   await page.screenshot({path:path.join(output,`${version}-${width}-history.png`),fullPage:true});
+   await page.screenshot({path:path.join(output,`${version}-${width}-history.png`),fullPage:width>=700});
    await page.getByRole('button',{name:'复用发布',exact:true}).click();await page.locator('.risk-publish').waitFor();
+   await cancelNavigation();
    assert.equal(await page.locator('.risk-publish>.risk-fields .n-date-picker input').inputValue(),'');
    assert(await page.getByRole('button',{name:'确认发布',exact:true}).isDisabled(),'Recipients, reviewer and deadline must be selected again');
    await page.locator('.risk-publish>.risk-fields .n-date-picker input').fill(dueText);await page.locator('.risk-publish>.risk-fields .n-date-picker input').press('Enter');
@@ -99,7 +169,7 @@ try{
    await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'排查列表',exact:true}).click();
    await page.locator('.risk-task-list button').first().click();await page.locator('.risk-feedback-table').waitFor();
    const table=page.locator('.risk-feedback-table');
-   if(width===1440){const counts=await page.locator('.risk-table-counts').boundingBox(),filters=await page.locator('.risk-table-filters').boundingBox();assert(Math.abs(counts.y+counts.height/2-filters.y-filters.height/2)<2,'Counts and filters share one desktop row');}
+   if(width===1440){const offset=await page.evaluate(()=>{const counts=document.querySelector('.risk-table-counts').getBoundingClientRect(),filters=document.querySelector('.risk-table-filters').getBoundingClientRect();return Math.abs(counts.y+counts.height/2-filters.y-filters.height/2);});assert(offset<2,'Counts and filters share one desktop row');}
    assert.equal(await table.locator('tbody tr').count(),2,'Both people are visible at once');
    assert.match(await table.innerText(),/B楼接线检查正常/);
    const bobRow=table.locator('tbody tr').filter({hasText:'排查人员乙'});
@@ -116,9 +186,11 @@ try{
     await page.getByText('审核人已更换，待审核事项将通知新审核人。',{exact:true}).waitFor();
     await page.locator('.risk-confirm').waitFor({state:'hidden'});
    }
-   await page.screenshot({path:path.join(output,`${version}-${width}-management.png`),fullPage:true});
+   await page.screenshot({path:path.join(output,`${version}-${width}-management.png`),fullPage:width>=700});
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'No page overflow');
-   role='alice';await page.goto(url);await page.locator('.risk-task-list button').first().click();await page.locator('.risk-feedback-table tbody tr').first().waitFor();
+   role='alice';
+   if(version==='legacy'){await page.goto(origin+'/?entry=risk');await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'选择重保管理',exact:true}).count(),0,'Unassigned risk modules remain hidden');}
+   await page.goto(url);await page.locator('.risk-task-list button').first().click();await page.locator('.risk-feedback-table tbody tr').first().waitFor();
    assert.equal(await page.locator('.risk-feedback-table tbody tr').count(),1);
    assert.equal(await page.getByText('排查人员乙',{exact:true}).count(),0,'Private rows must not leak to ordinary users');
    await page.getByRole('button',{name:width<700?'查看 排查人员甲的反馈':/处理 排查人员甲/}).click();await page.locator('.risk-feedback').waitFor();
@@ -128,7 +200,9 @@ try{
    await page.getByRole('button',{name:'提交审核',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-confirm [role=alert]').filter({hasText:'请填写：排查结果'}).waitFor();
    await page.locator('.risk-confirm').getByRole('button',{name:'取消',exact:true}).click();
+   await page.locator('.risk-confirm').waitFor({state:'hidden'});
    await page.getByRole('textbox',{name:'排查结果',exact:true}).fill('绝缘、防护及连接状态已核对，无异常。');
+   await page.waitForFunction(()=>document.querySelector('.risk-page button[aria-label="刷新"]')?.disabled);
    page.once('dialog',dialog=>dialog.dismiss());
    await page.keyboard.press('Escape');
    assert(await page.locator('.risk-feedback').isVisible(),'Cancelling close keeps the feedback form');
@@ -142,14 +216,14 @@ try{
    assert.equal(await page.getByRole('textbox',{name:'排查结果',exact:true}).inputValue(),'绝缘、防护及连接状态已核对，无异常。');
    assert(await page.locator('.risk-page').getByRole('button',{name:'刷新',exact:true}).isEnabled(),'Equivalent saved values must not leave a dirty draft when field order changes');
    await page.getByRole('button',{name:'保存草稿',exact:true}).click();await page.getByText('草稿已保存。',{exact:true}).waitFor();
-   await page.screenshot({path:path.join(output,`${version}-${width}-feedback.png`),fullPage:true});
+   await page.screenshot({path:path.join(output,`${version}-${width}-feedback.png`),fullPage:width>=700});
    await page.getByRole('button',{name:'提交审核',exact:true}).click();const before=detailReads;await page.clock.fastForward(16000);assert.equal(detailReads,before,'Confirmation must freeze background detail refresh');await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-response .n-tag').getByText('待审核',{exact:true}).waitFor();
    role='reviewer';await page.goto(url);await page.locator('.risk-task-list button').first().click();await page.getByRole('button',{name:/处理 排查人员甲/}).click();await page.locator('.risk-feedback').waitFor();
    await page.getByRole('button',{name:'审核通过',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-response .n-tag').filter({hasText:'审核通过'}).waitFor();
    assert.equal(people[0].items[0].status,'approved');
-   await page.screenshot({path:path.join(output,`${version}-${width}-review.png`),fullPage:true});
+   await page.screenshot({path:path.join(output,`${version}-${width}-review.png`),fullPage:width>=700});
    role='admin';
    people[0].items.push({id:'second-item',title:'另一设备检查',status:'approved',values:{f1:'这是同一人员的第二项独立反馈。'},files:[]});
    for(let index=0;index<6;index++)people.push({id:'preview-'+index,name:'示例人员'+(index+1),scope:index%2?'B':'A',version:1,revoked:false,items:[{id:'item',title:index%2?'冷却系统及环境检查':'配电柜状态检查',status:['pending','submitted','returned','approved'][index%4],values:{f1:index%3?'设备运行正常，现场标识完整。':'发现标识松动，已安排现场核对。',f2:index%3?'无异常':'有风险',f4:1792152000000,f5:index%3===0,f6:index%3?0:1},reason:index%4===2?'补充现场照片后重新提交。':'',files:[]}]});
@@ -159,11 +233,12 @@ try{
    await page.keyboard.press('Escape');await page.locator('.risk-feedback').waitFor({state:'hidden'});
    await page.locator('.n-drawer-mask').waitFor({state:'hidden'});await page.locator('.risk-page .n-spin-body').waitFor({state:'hidden'});
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Wide fields scroll inside the table');
-   await page.screenshot({path:path.join(output,`${version}-${width}-table.png`),fullPage:true});
+   await page.screenshot({path:path.join(output,`${version}-${width}-table.png`),fullPage:width>=700});
    await ctx.close();
+   console.log(`PASS risk inspection ${version} ${width}px`);
   }
  }
- assert.deepEqual(errors,[]);assert.equal(writes.filter(w=>w.path.endsWith('/actions')).length,30);
- console.log('PASS risk inspection: legacy/v2, PC/mobile, history edit/reuse, recipient reset, reviewer reassignment, visible errors, frozen confirmation, lost-response recovery, attachment, draft, submit, review. No real cloud writes.');
-}catch(e){if(page&&!page.isClosed())await page.screenshot({path:path.join(output,'failure.png'),fullPage:true});throw e;}
+ assert.deepEqual(errors,[]);assert.equal(writes.filter(w=>w.path.endsWith('/actions')).length,versions.length*widths.length*5);
+ console.log(`PASS risk inspection ${versions.join('/')} at ${widths.join(', ')}px: selected browser workflows and screenshots. No real cloud writes.`);
+}catch(e){if(page&&!page.isClosed())await page.screenshot({path:path.join(output,'failure.png'),fullPage:false});throw e;}
 finally{await browser.close();await server.httpServer.close();}

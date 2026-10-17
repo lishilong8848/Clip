@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from lan_bitable_template_portal.module_access import PREFIXES
 
 MARKER = b'x-clipflow-public-ingress'
 HOP = {b'connection', b'keep-alive', b'proxy-authenticate', b'proxy-authorization',
@@ -20,7 +21,10 @@ API_ROOTS = frozenset(('auth assistant admin bootstrap scope-overview records wo
     'notice-attachments notice-image-drafts notice-images notice-undo notice-target-candidates '
     'notice-identity ongoing-items polling-sops polling-work-orders change-confirmations '
     'change-target-candidates jobs qt-active-items handover-links handover-links-auth '
-    'handover-password-reset generate send-generated message-delivery').split())
+    'handover-password-reset generate send-generated message-delivery workspace-layouts').split())
+# Business modules share LAN authorization; internal and anonymous guards stay separate.
+API_ROOTS |= frozenset(prefix.split('/')[2] for prefix, _ in PREFIXES
+                       if prefix.startswith('/api/') and not prefix.endswith('-'))
 ANONYMOUS = {
     ('GET', '/api/auth/status'), ('GET', '/api/auth/login'), ('GET', '/api/auth/feishu/callback'),
     ('GET', '/api/auth/password/people'), ('POST', '/api/auth/password/login'),

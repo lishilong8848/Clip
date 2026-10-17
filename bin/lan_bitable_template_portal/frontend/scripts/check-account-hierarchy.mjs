@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -63,12 +64,131 @@ assert.ok(tree.length >= 1, 'tree root count is meaningful');
 
 console.log('PASS: hierarchy grouping, same-ID dedup and authorized-scope behavior');
 
+const groupedFixtures = [
+  {id: 'manager', open_id: 'ou_manager', name: '经理', level: 'L1', category: 'manager', own_scopes: ['H'], scopes: ['A', 'B', 'H']},
+  {id: 'engineer', open_id: 'ou_engineer', name: '工程师', level: 'L4', category: 'engineer', own_scopes: ['A', 'B', 'B'], scopes: ['A', 'B']},
+  {id: 'engineer-copy', open_id: 'ou_engineer', name: '同人副本', level: 'L4', category: 'engineer', own_scopes: ['A'], scopes: ['A']},
+  {id: 'operator', name: '值班员', level: 'L4', category: 'operator', home_scope: 'A', scopes: ['A', 'B']},
+  {id: 'legacy', name: '历史账号', level: 'L3', scopes: ['C']},
+  {id: 'unassigned', name: '待归属', own_scopes: [], scopes: ['A', 'B']},
+];
+const before = structuredClone(groupedFixtures);
+const leaves = nodes => nodes.flatMap(node => node.type === 'person' ? [node] : leaves(node.children));
+const allNodes = nodes => nodes.flatMap(node => [node, ...(node.type === 'person' ? [] : allNodes(node.children))]);
+for (const groupBy of ['building', 'level']) {
+  for (const depth of [1, 2, 3]) {
+    const grouped = hierarchy.buildGroupedAccountHierarchy(groupedFixtures, {groupBy, depth});
+    const nodes = allNodes(grouped);
+    assert.ok(grouped.every(node => node.type === groupBy), 'root follows the chosen grouping');
+    assert.equal(new Set(nodes.map(node => node.key)).size, nodes.length, 'full-path keys remain unique across branches');
+    assert.equal(new Set(leaves(grouped).map(node => node.id)).size, 5, 'all authorized accounts retained, same identity deduplicated');
+    for (const node of nodes.filter(node => node.type !== 'person')) {
+      assert.equal(node.count, new Set(leaves(node.children).map(person => person.id)).size, 'group counts distinct people');
+      assert.ok(node.depth <= depth, 'requested grouping depth is respected');
+      if (node.depth === depth) assert.ok(node.children.every(child => child.type === 'person'), 'final group contains people directly');
+    }
+    assert.deepEqual(grouped, hierarchy.buildGroupedAccountHierarchy(groupedFixtures, {groupBy, depth}), 'keys and ordering are stable');
+  }
+}
+assert.deepEqual(groupedFixtures, before, 'grouping never mutates account or permission data');
+const byBuilding = hierarchy.buildGroupedAccountHierarchy(groupedFixtures);
+assert.deepEqual(byBuilding.map(node => node.value), ['A', 'B', 'C', 'H', ''], 'building order and unassigned branch');
+assert.deepEqual(leaves(byBuilding.filter(node => node.value === 'H')).map(node => node.id), ['manager'], 'cross-building access does not change home building');
+assert.ok(!leaves(byBuilding.filter(node => node.value === 'A')).some(node => node.id === 'manager'), 'manager is not duplicated into authorized buildings');
+assert.equal(byBuilding.find(node => node.value === '').label, '未归属楼栋', 'missing affiliation is not labeled global permission');
+assert.deepEqual(leaves(hierarchy.buildGroupedAccountHierarchy(groupedFixtures, {allowedScopes: ['B']})).filter(node => node.building).map(node => node.id), ['engineer'], 'scope allow-list still filters concrete buildings');
+const levelOnly = hierarchy.buildGroupedAccountHierarchy(groupedFixtures, {groupBy: 'level', depth: 1});
+assert.deepEqual(levelOnly.map(node => node.value), ['L1', 'L3', 'L4', ''], 'permission levels sort from high to low');
+assert.equal(levelOnly.find(node => node.value === 'L4').count, 2, 'multi-building person counted once within level');
+assert.ok(allNodes(byBuilding).some(node => node.type === 'category' && node.label === '工程师'), 'role labels are localized');
+assert.deepEqual(hierarchy.buildGroupedAccountHierarchy([]), [], 'empty directory stays empty');
+console.log('PASS: both grouping orders, all depths, affiliation, unique keys, counts and immutable permissions');
+
+// Compare the read-only projection against the live Python policy, not another JS oracle.
+const manager = (id, level, scopes = ['H'], extra = {}) => ({id, open_id: 'ou_' + id, name: id,
+  level, enabled: true, modules: ['accounts'], scopes, home_scope: scopes[0], own_scopes: scopes.slice(0, 1), ...extra});
+const managers = [manager('root', 'L0', ['A', 'B', 'H']), manager('boss', 'L1', ['A', 'B', 'H']),
+  manager('h-engineer', 'L2'), manager('a-supervisor', 'L3', ['A']), manager('ab-supervisor', 'L3', ['A', 'B']),
+  manager('base', 'L4'), manager('disabled', 'L1', ['H'], {enabled: false}),
+  manager('revoked', 'L1', ['H'], {modules: []}), manager('blocked', 'L1', ['H'], {blocked_reason: 'blocked'}),
+  manager('incomplete', 'L1', ['H'], {enabled: undefined}), manager('unknown', 'unknown')];
+const targets = [];
+for (const level of ['L0', 'L1', 'L2', 'L3', 'L4', 'unknown']) for (const category of ['manager', 'supervisor', 'engineer', 'operator', 'shift_leader', 'duty']) {
+  for (const own_scopes of [[], ['A'], ['B'], ['A', 'B']]) for (const flags of [{}, {locked: true}, {blocked_reason: 'blocked'}, {role: 'admin'}]) {
+    targets.push({id: 'target-' + targets.length, name: '目标', level, category, own_scopes, role: 'building', ...flags});
+  }
+}
+targets.push({...managers[0], id: 'alias-root', is_self: false}, {id: 'self-relative-to-viewer', level: 'L4', category: 'engineer', own_scopes: ['A'], is_self: true});
+const comparisons = managers.flatMap(manager => targets.map(target => ({manager, target})));
+const policyCheck = spawnSync(path.resolve(root, '../../.venv/Scripts/python.exe'), ['-c', `
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from lan_bitable_template_portal.account_policy import account_allowed
+result = []
+for case in json.load(sys.stdin):
+    m, target = case['manager'], dict(case['target'])
+    identity = lambda row: row.get('open_id') or row.get('id') or ''
+    same = identity(m) == identity(target)
+    target['is_self'] = same
+    profile = {'level': m['level'], 'scope_rules': m.get('scopes', []), 'home_scope': m.get('home_scope'),
+        'can_manage_accounts': m.get('enabled') is True and not m.get('blocked_reason')
+            and m['level'] in ('L0', 'L1', 'L2', 'L3') and 'accounts' in m.get('modules', [])}
+    result.append({action: not same and account_allowed(profile, target, action) for action in ('view', 'edit')})
+json.dump(result, sys.stdout)
+`, path.resolve(root, '../..')], {input: JSON.stringify(comparisons), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024});
+assert.equal(policyCheck.status, 0, 'Python policy comparison failed: ' + policyCheck.stderr);
+const expectedAccess = JSON.parse(policyCheck.stdout);
+for (const [index, {manager, target}] of comparisons.entries()) assert.deepEqual(
+  hierarchy.accountManagementAccess(manager, target), expectedAccess[index], `policy mismatch: ${manager.id} / ${target.id}`);
+console.log(`PASS: ${comparisons.length} management relationships match the existing backend view/edit policy`);
+
+const relationPeople = [manager('root', 'L0', ['A', 'B', 'H']), manager('boss', 'L1', ['A', 'B', 'H']),
+  manager('h-engineer', 'L2', ['H'], {category: 'engineer'}),
+  manager('a-supervisor', 'L3', ['A'], {category: 'supervisor'}), manager('b-supervisor', 'L3', ['B'], {category: 'supervisor'}),
+  manager('a-engineer', 'L4', ['A'], {category: 'engineer', modules: ['learning'], can_edit: false}),
+  manager('b-engineer', 'L4', ['B'], {category: 'engineer', modules: ['learning']}),
+  manager('a-operator', 'L4', ['A'], {category: 'operator', modules: ['learning']}),
+  manager('a-duty', 'L4', ['A'], {category: 'duty', kind: 'duty', modules: ['learning']})];
+const relationBefore = structuredClone(relationPeople), loadedPeople = new Set();
+const visit = nodes => nodes.flatMap(node => [node, ...visit(node.children || [])]);
+const relationTree = roots => hierarchy.buildAccountManagementTree(roots, relationPeople, {loadedPeople});
+let relations = relationTree(relationPeople);
+let rootPerson = visit(relations).find(node => node.type === 'person' && node.id === 'root');
+assert.equal(rootPerson.children, undefined, 'unopened management branches are not materialized');
+assert.equal(rootPerson.managementCount, 8);
+loadedPeople.add(rootPerson.key);relations = relationTree(relationPeople);
+const bossPerson = visit(relations).find(node => node.id === 'boss' && node.managementDepth === 1);
+assert.ok(bossPerson && !bossPerson.isLeaf, 'manager inside a management range can itself expand');
+loadedPeople.add(bossPerson.key);relations = relationTree(relationPeople);
+const supervisor = visit(relations).find(node => node.id === 'a-supervisor' && node.managementDepth === 2);
+loadedPeople.add(supervisor.key);relations = relationTree(relationPeople);
+const supervisorLoaded = visit(relations).find(node => node.key === supervisor.key);
+assert.deepEqual(leaves(supervisorLoaded.children).map(node => node.id).sort(), ['a-duty', 'a-engineer', 'a-operator'], 'nested supervisor retains strict home-building and role boundaries');
+assert.equal(visit(supervisorLoaded.children).find(node => node.id === 'a-engineer').source.can_edit, false, 'selected manager never replaces current login edit flags');
+const relationNodes = visit(relations);
+assert.equal(new Set(relationNodes.map(node => node.key)).size, relationNodes.length, 'identical people in different paths have independent stable keys');
+assert.ok(relationNodes.some(node => node.managementDepth === 3 && node.depth === 16), 'four people-management levels remain expandable');
+assert.deepEqual(relationPeople, relationBefore, 'hierarchy does not mutate permission fields or account records');
+const rootSearch = relationTree([relationPeople[3]]), selectedSupervisor = visit(rootSearch).find(node => node.type === 'person');
+assert.equal(selectedSupervisor.managementCount, 3, 'root search does not discard its authorized management range');
+const limitedDirectory = relationPeople.filter(person => ['boss', 'a-supervisor', 'a-engineer'].includes(person.id));
+const limitedTree = hierarchy.buildAccountManagementTree([relationPeople[1], relationPeople[4]], limitedDirectory);
+assert.equal(visit(limitedTree).filter(node => node.type === 'person').length, 1, 'roots outside the current login directory cannot be injected');
+assert.equal(visit(limitedTree).find(node => node.id === 'boss').managementCount, 2, 'counts never include personnel missing from the backend-authorized directory');
+const revoked = relationPeople.map(person => person.id === 'boss' ? {...person, modules: []} : person);
+const revokedBoss = visit(hierarchy.buildAccountManagementTree(revoked, revoked, {loadedPeople})).find(node => node.id === 'boss' && node.managementDepth === 0);
+assert.equal(revokedBoss.managementCount, 0);assert.equal(revokedBoss.children, undefined, 'revocation removes already-loaded management ranges');
+console.log('PASS: lazy multi-person levels, stable paths, root filtering, current-login flags, scoped directory and revocation');
+
 // ---- 2. Vue component compiles -------------------------------------------
 const componentSource = readFileSync(path.join(v2Dir, 'AccountHierarchy.vue'), 'utf8');
 const comp = parse(componentSource, { filename: 'AccountHierarchy.vue' });
 const compiledScript = compileScript(comp.descriptor, { id: 'check-account-hierarchy' });
 assert.ok(compiledScript.content.includes('buildAccountHierarchy'), 'component uses hierarchy builder');
-compileTemplate({ source: comp.descriptor.template.content, filename: 'AccountHierarchy.vue', id: 'check-account-hierarchy' });
+const compiledTemplate = compileTemplate({ source: comp.descriptor.template.content, filename: 'AccountHierarchy.vue', id: 'check-account-hierarchy' });
+assert.deepEqual(compiledTemplate.errors, [], 'tree template compiles without errors');
+const {adaptSingleSelects} = await import(pathToFileURL(path.join(scriptsDir, 'workspace-select-adapter.mjs')).href);
+assert.equal(adaptSingleSelects(componentSource, path.join(v2Dir, 'AccountHierarchy.vue')), componentSource, 'existing select bridge is not wrapped a second time');
 console.log('PASS: AccountHierarchy.vue compiles (script + template)');
 
 // ---- 3. Adapter transforms (replay pipeline in build order) --------------
@@ -140,6 +260,9 @@ for (const [rel, file] of cases) {
     assert.ok(adapted.includes("v2AccountMode === 'list'"), 'list branch guards original table');
     assert.ok(adapted.includes('AccountHierarchy'), 'hierarchy component imported');
     assert.ok(adapted.includes('@select="openAccount"'), 'tree selection calls original openAccount');
+    assert.ok(adapted.includes(':level-label="levelLabel"'), 'tree reuses permission-level labels');
+    assert.ok(adapted.includes(':category-label="categoryLabel"'), 'tree reuses role labels');
+    assert.ok(adapted.includes(':directory="items"'), 'management ranges use only the original authorized directory');
     assert.ok(adapted.includes("tab === 'requests'"), 'permission review tab still present');
     assert.ok(adapted.includes('openAccount('), 'openAccount handler preserved');
     assert.ok(adapted.includes(':aria-label="`管理${item.name}`"'), 'list manage button aria-label preserved');

@@ -8,7 +8,7 @@ export function adaptEventPeriodPage(source) {
     if (code.split(before).length !== 2) throw new Error(`Event V2 contract changed: ${before.slice(0, 90)}`);
     code = code.replace(before, after);
   }
-  replace('import EventStatsCards from "./EventStatsCards.vue";', 'import EventStatsCards from "../workspace-v2/EventMetrics.vue";\nimport EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";\nimport { NSkeleton } from "naive-ui";\nimport { beijingDate, occurrenceTimestamp, eventPeriodRange, mergeEventMonths, eventPeriodStats, type EventPeriod } from "../workspace-v2/eventPeriod";');
+  replace('import EventStatsCards from "./EventStatsCards.vue";', 'import EventStatsCards from "../workspace-v2/EventMetrics.vue";\nimport EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";\nimport { NButton, NSkeleton } from "naive-ui";\nimport { beijingDate, occurrenceTimestamp, eventPeriodRange, mergeEventMonths, eventPeriodStats, type EventPeriod } from "../workspace-v2/eventPeriod";');
   replace('const selectedMonth = ref(currentLocalMonth());', `const eventQuery = new URLSearchParams(window.location.search);
 const eventPeriod = ref<EventPeriod>(['week','history','custom'].includes(eventQuery.get('period') || '') ? eventQuery.get('period') as EventPeriod : 'month');
 const selectedMonth = ref(/^\\d{4}-(0[1-9]|1[0-2])$/.test(eventQuery.get('event_month') || '') ? eventQuery.get('event_month')! : beijingDate().slice(0,7));
@@ -17,7 +17,7 @@ const eventDates = ref<[string,string]>([eventQuery.get('event_start') || beijin
 const eventRange = computed(() => eventPeriodRange(eventPeriod.value, selectedMonth.value, eventNow.value, eventDates.value));
 const chartDate = ref<{start:number;end:number;label:string}|null>(null);
 const stateFilter = ref(eventQuery.get('event_state')==='processing'?'processing':'');
-const eventDetailsOpen = ref(Boolean(eventQuery.get('event_state') || eventQuery.get('record_id')));
+const eventDetailsOpen = ref(Boolean(eventQuery.get('detail')==='1' || eventQuery.get('event_state') || eventQuery.get('record_id')));
 function showEventRows(){eventDetailsOpen.value=true;requestAnimationFrame(()=>document.getElementById('v2-event-list')?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'}));}
 function drillEventDate(start:number,end:number,label:string){clearFilters();chartDate.value={start,end,label};showEventRows();}
 function drillEventLevel(value:string){clearFilters();levelFilter.value=value;showEventRows();}`);
@@ -78,11 +78,18 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
   replace('        month: selectedMonth.value,\n        signal: abortController.signal', '        month,\n        signal: abortController.signal');
   replace('    );\n    await loadEvents();', '    );\n    }\n    if (abortController.signal.aborted) return;\n    await loadEvents();');
 
-  // Metrics already expose priority counts; records are revealed by an explicit drilldown.
+  // Reuse the same authorized event records for building counts and drilldown.
   const surface = code.indexOf('<div v-show="!errorText && !configMissing" class="event-work-surface"');
   const surfaceEnd = code.indexOf('      </div>', surface) + '      </div>'.length;
   if(surface < 0 || surfaceEnd < surface)throw new Error('Event priority layout changed');
-  code = code.slice(0,surface) + code.slice(surfaceEnd);
+  code = code.slice(0,surface) + `<section class="v2-event-buildings" aria-label="楼栋事件条数" :aria-busy="loading">
+        <NButton v-for="card in buildingCards.filter(item=>item.allowed)" :key="card.code" data-v2-navigation
+          :disabled="loading || Boolean(errorText) || configMissing" :aria-label="'查看'+card.label+eventRange.label+'事件'"
+          :aria-pressed="detailScope===card.code" @click="openBuilding(card.code);showEventRows()">
+          <span>{{ card.label }}</span><NSkeleton v-if="loading" width="28px" height="20px" />
+          <strong v-else>{{ errorText || configMissing ? '—' : card.total }}</strong><small>件</small>
+        </NButton>
+      </section>` + code.slice(surfaceEnd);
   const { descriptor } = parse(code);
   const block = descriptor.scriptSetup;
   const tree = ts.createSourceFile('Event.vue.ts', block.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -114,9 +121,11 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
       const range = eventRange.value;
       if(range.error)throw new Error(range.error);
       const payloads: LooseDict[] = [];
-      for(let offset=0;offset<range.months.length;offset+=3){
+      const readScopes = props.scopeOptions.some(item=>normalizeScope(item.value)==='ALL') ? ['ALL'] : [...allowedBuildingCodes.value];
+      const queries = range.months.flatMap(month=>readScopes.map(scope=>({scope,month})));
+      for(let offset=0;offset<queries.length;offset+=3){
         if(signal?.aborted || loadVersion!==eventLoadVersion)return;
-        payloads.push(...await Promise.all(range.months.slice(offset,offset+3).map(month=>{
+        payloads.push(...await Promise.all(queries.slice(offset,offset+3).map(({scope,month})=>{
           const params = new URLSearchParams({ scope, month, date_field: 'occurrence_time' });
           return requestJson('/api/events/monthly?' + params.toString(), { signal });
         })));

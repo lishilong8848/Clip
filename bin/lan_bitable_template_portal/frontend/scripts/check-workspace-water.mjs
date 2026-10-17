@@ -219,8 +219,7 @@ try {
   await single.ctx.close();
   const multi=await fixture({overview:true,admin:false,scopes:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});
   await multi.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).waitFor();
-  await multi.page.getByLabel('水耗楼栋',{exact:true}).click();
-  await multi.page.locator('.n-base-select-option').getByText('全部授权楼栋',{exact:true}).click();
+  assert.equal(await multi.page.getByLabel('水耗楼栋',{exact:true}).count(),0,'building list replaces the redundant scope selector');
   await multi.page.getByRole('button',{name:'查看B楼水耗记录',exact:true}).waitFor();
   assert.equal(await multi.page.getByRole('group',{name:'显示楼栋曲线'}).getByRole('checkbox').count(),2,'limited multi-building accounts can compare only their authorized curves');
   await multi.ctx.close();

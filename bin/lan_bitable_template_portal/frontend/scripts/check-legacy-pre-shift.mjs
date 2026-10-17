@@ -42,7 +42,7 @@ assert.throws(() => preShiftSummary({ ...state, tasks: [{ ...task, deadline: nul
 
 const output = path.resolve(root, '../../../output/playwright/legacy-pre-shift');
 await mkdir(output, { recursive: true });
-const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
+const server = await preview({ root, ...(process.env.CLIPFLOW_LEGACY_BUILD_DIR ? {build:{outDir:process.env.CLIPFLOW_LEGACY_BUILD_DIR}} : {}), logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
 const origin = 'http://127.0.0.1:' + server.httpServer.address().port;
 const browser = await chromium.launch({ headless: true });
 let page, mode = 'operator', submitted = false, readFail = false, submitFail = false, checks = 0, writes = 0, uploads = 0;
@@ -86,7 +86,7 @@ try {
     await page.screenshot({ path: path.join(output, `home-${width}.png`), fullPage: true });
   }
   await card.getByRole('button').click();
-  const check = page.getByRole('region', { name: '班前检查', exact: true });
+  const check = page.getByRole('region', { name: 'A楼班前检查', exact: true });
   await check.getByText('本次待检查', { exact: true }).waitFor();
   assert.match(page.url(), /entry=pre_shift/);
   await check.getByRole('button', { name: '提交检查', exact: true }).click();

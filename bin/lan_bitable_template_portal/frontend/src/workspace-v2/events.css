@@ -69,3 +69,9 @@
   .workspace-v2 .event-page .n-skeleton::after { animation:none; }
 }
 .v2-shell .v2-event-detail-toggle { display:flex; justify-content:flex-end; padding:12px 0; }
+.v2-event-buildings{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:8px;margin-top:16px}
+.v2-event-buildings>.n-button{height:48px;padding:8px 12px;border-radius:6px}
+.v2-event-buildings .n-button__content{width:100%;gap:6px;justify-content:flex-start}
+.v2-event-buildings strong{margin-left:auto;font-size:18px;font-variant-numeric:tabular-nums}
+.v2-event-buildings small{font-size:12px;color:var(--v2-muted)}
+.v2-event-buildings [aria-pressed=true]{border-color:var(--v2-blue);color:var(--v2-blue)}

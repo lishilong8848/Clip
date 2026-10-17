@@ -31,6 +31,7 @@ def prepare_question_card(bot, message, actor, conversation, turn):
         'ticket': ticket, 'owner': actor['id'], 'union_id': message['union_id'],
         'conversation_id': conversation['conversation_id'], 'operation_id': turn['operation_id'],
         'chat_id': message['chat_id'], 'options': options, 'multiple': clarification.get('multiple', False),
+        'input_type': clarification.get('input_type', 'text'),
         'chat_type': message.get('chat_type'), 'root_id': message.get('root_id') or message['message_id'],
         'question': safe_text(turn.get('question') or message.get('question') or '', limit=12000),
         'expires': time.time() + 1800,
@@ -51,9 +52,12 @@ def prepare_question_card(bot, message, actor, conversation, turn):
             'name': 'choice', 'placeholder': {'tag': 'plain_text', 'content': '选择回答'},
             'options': [{'text': {'tag': 'plain_text', 'content': text}, 'value': str(index)}
                         for index, text in enumerate(options)]})
+    from .feishu_notice_cards import _simple_component
+    answer_control = (_simple_component({'type': stored['input_type']}, 'answer')[0]
+        if stored['input_type'] != 'text' else {'tag': 'input', 'name': 'answer', 'input_type': 'multiline_text', 'rows': 2, 'max_length': 1000,
+         'placeholder': {'tag': 'plain_text', 'content': '也可以直接填写或补充说明'}})
     elements.extend([
-        {'tag': 'input', 'name': 'answer', 'input_type': 'multiline_text', 'rows': 2, 'max_length': 1000,
-         'placeholder': {'tag': 'plain_text', 'content': '也可以直接填写或补充说明'}},
+        answer_control,
         {'tag': 'button', 'name': 'reply', 'form_action_type': 'submit', 'type': 'primary',
          'text': {'tag': 'plain_text', 'content': '补充并继续'},
          'behaviors': [{'type': 'callback', 'value': {'kind': 'assistant_question', 'ticket': ticket}}]},
@@ -131,6 +135,10 @@ def read_question_reply(bot, message, actor, conversation):
             or any(not isinstance(item, str) or item not in {str(i) for i in range(len(options))} for item in choices)):
         raise AssistantError('请使用表单提供的候选或填写有效的补充文字。')
     text = '、'.join(options[int(item)] for item in dict.fromkeys(choices))
+    if answer.strip() and stored.get('input_type', 'text') != 'text':
+        from .feishu_notice_cards import _coerce_card_string
+        from .feishu_notice_forms import typed_child_value
+        answer = str(typed_child_value({'type': stored['input_type'], 'label': '补充回答'}, _coerce_card_string(answer)))
     text = '\n'.join(filter(None, (text, answer.strip())))
     if not text:
         raise AssistantError('请选择一项回答或填写补充说明。')

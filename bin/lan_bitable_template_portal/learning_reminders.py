@@ -104,9 +104,9 @@ def read_roster(service, day):
     raise ValueError('学练排班视图分页未完成，未发送。')
 
 
-def resolve_roster(people, directory):
+def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
     """Use exact names and unique live identities, never substitute a linked stranger."""
-    from .learning_personal import _hr_active, _hr_learning_scopes
+    from .learning_personal import _hr_active
     from .portal_service import BUILDING_OPEN_ID_MAP
 
     owners = Counter(oid for row in directory.values() for oid in set(row.get('login_ids') or []))
@@ -119,7 +119,8 @@ def resolve_roster(people, directory):
         candidates = names[person['name']]
         linked = [row for row in candidates if person['open_id'] and person['open_id'] in (row.get('login_ids') or [])]
         candidates = [row for row in linked or candidates
-                      if _hr_active(row) and _hr_learning_scopes(row) == [person['scope']]]
+                      if _hr_active(row) and person['scope'] in allowed_scopes
+                      and list(dict.fromkeys(s for s in row.get('scopes') or [] if s)) == [person['scope']]]
         ids = []
         if len(candidates) == 1:
             ids = [oid for oid in candidates[0].get('login_ids') or []

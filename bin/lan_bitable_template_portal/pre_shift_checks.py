@@ -22,6 +22,8 @@ from .pre_shift_schedule import normalize_frequency, occurrences_for_date, upcom
 TZ = dt.timezone(dt.timedelta(hours=8))
 SCOPES = ('110', 'A', 'B', 'C', 'D', 'E', 'H')
 DUTY = {'operator', 'shift_leader', 'duty'}
+ROSTER_VERSION = 2
+CLOUD_DETAIL_VERSION = 1
 
 ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.pdf', '.doc', '.docx',
                 '.xls', '.xlsx', '.md', '.txt', '.csv'}
@@ -109,13 +111,14 @@ class CheckService:
             conn.executescript('''
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS definitions(scope TEXT PRIMARY KEY, version INTEGER, items TEXT, actor TEXT, updated TEXT);
-                CREATE TABLE IF NOT EXISTS rosters(day TEXT PRIMARY KEY, people TEXT, retry_at REAL DEFAULT 0, error TEXT DEFAULT '');
+                CREATE TABLE IF NOT EXISTS rosters(day TEXT PRIMARY KEY, people TEXT, retry_at REAL DEFAULT 0, error TEXT DEFAULT '', version INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, day TEXT, scope TEXT, shift TEXT, due REAL, deadline REAL,
                     definition_version INTEGER, items TEXT, people TEXT, actor_id TEXT DEFAULT '', actor_name TEXT DEFAULT '',
                     submitted TEXT DEFAULT '', answers TEXT DEFAULT '', cloud_key TEXT DEFAULT '', evidence TEXT DEFAULT '');
                 CREATE INDEX IF NOT EXISTS task_window ON tasks(deadline, due);
                 CREATE INDEX IF NOT EXISTS task_building_day ON tasks(scope, day);
                 CREATE INDEX IF NOT EXISTS task_cloud ON tasks(cloud_key);
+                CREATE INDEX IF NOT EXISTS task_history ON tasks(scope, submitted DESC, id DESC) WHERE submitted!='';
                 CREATE TABLE IF NOT EXISTS deliveries(id TEXT PRIMARY KEY, lease REAL DEFAULT 0, sent INTEGER DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, revision INTEGER, synced INTEGER DEFAULT 0,
                     record_id TEXT DEFAULT '', retry_at REAL DEFAULT 0, error TEXT DEFAULT '');
@@ -130,11 +133,18 @@ class CheckService:
                 CREATE INDEX IF NOT EXISTS idx_files_task ON files(task_id);
             ''')
             task_cols = {r[1] for r in conn.execute('PRAGMA table_info(tasks)')}
+            if 'version' not in {r[1] for r in conn.execute('PRAGMA table_info(rosters)')}:
+                conn.execute('ALTER TABLE rosters ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
             if 'evidence' not in task_cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN evidence TEXT DEFAULT ''")
             file_cols = {r[1] for r in conn.execute('PRAGMA table_info(files)')}
             if 'content_hash' not in file_cols:
                 conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT DEFAULT ''")
+            if 'detail_version' not in {r[1] for r in conn.execute('PRAGMA table_info(outbox)')}:
+                conn.execute('ALTER TABLE outbox ADD COLUMN detail_version INTEGER NOT NULL DEFAULT 0')
+            # Reuse the existing row and retry queue to backfill old submissions once.
+            conn.execute('UPDATE outbox SET revision=revision+1,retry_at=0 WHERE detail_version<? AND revision=synced',
+                         (CLOUD_DETAIL_VERSION,))
 
     @contextmanager
     def connection(self, write=False):
@@ -330,20 +340,21 @@ class CheckService:
     def _ensure_roster(self, current, day):
         with self.connection() as conn:
             row = conn.execute('SELECT * FROM rosters WHERE day=?', (day,)).fetchone()
-        if row and row['people']:
+        if row and row['version'] == ROSTER_VERSION and row['people'] and not row['retry_at']:
             return
-        if row and row['retry_at'] > current.timestamp():
+        if row and row['version'] == ROSTER_VERSION and row['retry_at'] > current.timestamp():
             return
         try:
             snapshot = self.roster(day)
             with self.connection(True) as conn:
-                conn.execute('INSERT OR REPLACE INTO rosters VALUES(?,?,0,?)',
-                             (day, dump(snapshot['people']), dump(snapshot.get('warnings', {}))))
+                warnings = snapshot.get('warnings', {})
+                conn.execute('INSERT OR REPLACE INTO rosters(day,people,retry_at,error,version) VALUES(?,?,?,?,?)',
+                             (day, dump(snapshot['people']), current.timestamp() + 300 if warnings else 0, dump(warnings), ROSTER_VERSION))
         except Exception as exc:
             with self.connection(True) as conn:
-                conn.execute('INSERT OR REPLACE INTO rosters VALUES(?,?,?,?)',
+                conn.execute('INSERT OR REPLACE INTO rosters(day,people,retry_at,error,version) VALUES(?,?,?,?,?)',
                              (day, '', current.timestamp() + 300,
-                              (str(exc) if isinstance(exc, CheckError) else '排班读取未完成。') + '5分钟后重试；不会按不完整名单推送。'))
+                              (str(exc) if isinstance(exc, CheckError) else '排班读取未完成。') + '5分钟后重试；不会按不完整名单推送。', ROSTER_VERSION))
 
     def prepare(self, current):
         with self.connection() as conn:
@@ -426,14 +437,68 @@ class CheckService:
                 task['can_upload_handover'] = self._can_upload_handover(conn, actor, task, current)
                 tasks.append(task)
             roster = conn.execute('SELECT people,error FROM rosters WHERE day=?', (day,)).fetchone()
-            roster_ready = bool(roster and roster['people'])
+            roster_ready = bool(roster and roster['people'] and any(p.get('scope') == scope for p in json.loads(roster['people'])))
             roster_error = roster['error'] if roster else ''
             if roster_error.startswith('{'):
                 roster_error = json.loads(roster_error).get(scope, '')
             return {'scope': scope, 'scopes': scopes_for(actor), 'can_manage': can_manage(actor),
                     'definition': definition, 'tasks': tasks,
                     'roster_ready': roster_ready, 'roster_error': roster_error or self.last_error,
+                    'overview': self._overview(actor, conn, current) if can_manage(actor) else None,
                     'server_time': current.isoformat()}
+
+    def history(self, actor, scope, page=1, page_size=20, current=None):
+        authorized(actor, scope)
+        if not str(page).isdigit() or not str(page_size).isdigit():
+            raise CheckError('历史记录分页参数无效。')
+        page, page_size = int(page), int(page_size)
+        if not 1 <= page <= 1000000 or not 1 <= page_size <= 50:
+            raise CheckError('历史记录分页参数无效。')
+        current = current or now()
+        with self.connection() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM tasks WHERE scope=? AND submitted!=''", (scope,)).fetchone()[0]
+            page = min(page, max(1, (total + page_size - 1) // page_size))
+            rows = conn.execute("SELECT * FROM tasks WHERE scope=? AND submitted!='' ORDER BY submitted DESC,id DESC LIMIT ? OFFSET ?",
+                                (scope, page_size, (page - 1) * page_size)).fetchall()
+            items = []
+            for row in rows:
+                task = dict(row)
+                item = {key: task[key] for key in ('id', 'day', 'scope', 'shift', 'due', 'deadline',
+                                                  'definition_version', 'actor_name', 'submitted')}
+                item['answers'] = json.loads(task['answers'])
+                item['normal_count'] = sum(a['status'] == 'normal' for a in item['answers'])
+                item['abnormal_count'] = sum(a['status'] == 'abnormal' for a in item['answers'])
+                item['files'] = self._state_files(conn, actor, task, current)
+                item['handover_photo'] = self._state_handover(conn, actor, task, current)
+                outbox = conn.execute('SELECT revision,synced,error FROM outbox WHERE id=?', (task['cloud_key'],)).fetchone()
+                item['sync_status'] = 'synced' if outbox and outbox['revision'] == outbox['synced'] else 'pending'
+                item['sync_error'] = outbox['error'] if outbox else ''
+                items.append(item)
+        return {'scope': scope, 'items': items, 'total': total, 'page': page, 'page_size': page_size}
+
+    def _overview(self, actor, conn, current):
+        rows = []
+        for scope in scopes_for(actor):
+            configured = bool(self.definition(scope, conn)['items'])
+            for shift in ('白', '夜'):
+                day = (current.date() - dt.timedelta(days=1) if shift == '夜' and current.hour < 8 else current.date()).isoformat()
+                tasks = [dict(r) for r in conn.execute("SELECT * FROM tasks WHERE day=? AND scope=? AND shift=? AND items!='[]' ORDER BY due,id",
+                                                     (day, scope, shift))]
+                total = sum(len(json.loads(t['items'])) for t in tasks)
+                completed = [t for t in tasks if t['submitted']]
+                pending = [t for t in tasks if not t['submitted']]
+                status = ('未配置清单' if not configured else '本班暂无清单') if not tasks else (
+                    '已完成' if not pending else '逾期待补做' if any(t['deadline'] <= current.timestamp() for t in pending)
+                    else '待完成' if any(t['due'] <= current.timestamp() for t in pending) else '未到时间')
+                photo = conn.execute("SELECT id,name FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
+                                     (day, scope, shift)).fetchone()
+                rows.append({'id': day + ':' + scope + ':' + shift, 'day': day, 'scope': scope, 'shift': shift,
+                    'status': status, 'total': total, 'completed': sum(len(json.loads(t['items'])) for t in completed),
+                    'abnormal': sum(a['status'] == 'abnormal' for t in completed for a in json.loads(t['answers'] or '[]')),
+                    'submitted_by': '、'.join(dict.fromkeys(t['actor_name'] for t in completed)),
+                    'submitted_at': max((t['submitted'] for t in completed), default=''),
+                    'handover_photo': {'name': photo['name'], 'url': '/api/pre-shift-checks/files/' + photo['id']} if photo else None})
+        return {'rows': rows}
 
     def _state_files(self, conn, actor, task, current):
         if task['submitted'] and task['evidence']:
@@ -838,6 +903,9 @@ class CheckService:
             for person in json.loads(task['people']):
                 if self.stop_event.is_set():
                     return
+                if self.wake.is_set():
+                    self.wake.clear()
+                    self.sync(current)
                 key = f"{task['id']}:{slot}:{person['open_id']}"
                 with self.connection(True) as conn:
                     latest = conn.execute('SELECT submitted,items FROM tasks WHERE id=?', (task['id'],)).fetchone()
@@ -932,7 +1000,8 @@ class CheckService:
             try:
                 record_id = self.cloud.upsert(job['id'], rows, job['record_id'])
                 with self.connection(True) as conn:
-                    conn.execute("UPDATE outbox SET record_id=?,synced=?,error='' WHERE id=?", (record_id, job['revision'], job['id']))
+                    conn.execute("UPDATE outbox SET record_id=?,synced=?,detail_version=?,error='' WHERE id=?",
+                                 (record_id, job['revision'], CLOUD_DETAIL_VERSION, job['id']))
             except Exception:
                 with self.connection(True) as conn:
                     conn.execute('UPDATE outbox SET retry_at=?,error=? WHERE id=?',
@@ -946,8 +1015,10 @@ class CheckService:
         if not self.tick_lock.acquire(False):
             return
         try:
+            self.wake.clear()
             current = current or now()
             self.last_error = ''
+            self.sync(current)
             self.prepare(current)
             self.notify(current)
             self.sync(current)

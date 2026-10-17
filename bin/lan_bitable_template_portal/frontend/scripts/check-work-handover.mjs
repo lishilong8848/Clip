@@ -17,6 +17,13 @@ let currentPage;
 try{
   for(const version of ['legacy','v2']){
     const docs=new Map(),layouts=layoutApiFixture();
+    let category='other',defaultFailure=false,defaultReads=0,directoryFailure=false;
+    let pauseDefaults=false,defaultStarted=()=>{},releaseDefaults=()=>{},defaultFinished=()=>{};
+    const responsibilities=()=>category==='engineer'?['repair_management','risk_inspection']:category==='supervisor'?['event','repair_management','risk_inspection','cabinet']:[];
+    const roleSources=()=>responsibilities().map((module,i)=>({id:String(i+1).repeat(64),
+      title:({repair_management:'A楼冷机未完成维修',risk_inspection:'A楼配电风险排查',event:'A楼未闭环事件',cabinet:'A楼待处理上电批次'})[module],
+      kind:i%2?'ongoing':'todo',business_status:i%2?'进行中':'未完成',scope:'A',module,period:'2026-10',
+      source_url:'/'+module,source_checked_at:'2026-10-17T10:00:00+08:00',participated:false,responsible:true}));
     let delayedId='',releaseRead=()=>{},readStarted=()=>{},readFinished=()=>{};
     const entry=(p='')=>version==='v2'?origin+'/assets/workspace-v2/index.html?__page=/work-handover'+(p?'&id='+p:''):origin+'/work-handover'+(p?'?id='+p:'');
     const contexts=[];
@@ -33,13 +40,30 @@ try{
         if(!u.pathname.startsWith('/api/'))return route.continue();
         if(await layouts.handle(route,who))return;
         const ok=data=>route.fulfill({json:{ok:true,data}});
-        if(u.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'ou_'+who,name,level:'L4',role:'building',category:'other',home_scope:'A',scope_rules:['A'],modules:['work_handover','maintenance']},scope_options:[{value:'A',label:'A楼'}],default_scope:'A'});
+        if(u.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'ou_'+who,name,level:category==='supervisor'?'L3':'L4',role:'building',category,home_scope:'A',scope_rules:['A'],modules:['work_handover','maintenance',...responsibilities()]},scope_options:[{value:'A',label:'A楼'}],default_scope:'A'});
         if(u.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'handover-fixture'}});
         if(!u.pathname.startsWith('/api/work-handovers')){assert.equal(req.method(),'GET','No unrelated business writes');return ok({items:[],records:[],scopes:{},summary:{},total:0});}
         if(req.method()!=='GET')writes.push({version,path:u.pathname,body:req.postDataJSON()});
         const p=u.pathname.slice('/api/work-handovers'.length);
-        if(p==='/people')return ok({items:[{record_id:'bob',name:'接收人员乙',employee_no:'002',scopes:['A']}],self:{id:who,name},scopes:['A'],modules:[{value:'maintenance',label:'维保通告'}]});
-        if(p==='/sources')return ok({items:[{id:'f'.repeat(64),title:'A楼测试维保通告',kind:'ongoing',business_status:'进行中',scope:'A',module:'maintenance',period:'2026-10',source_url:'/workbench-lite?scope=A&record_id=fixture-notice',source_checked_at:'2026-10-16T10:00:00+08:00',participated:true}],warnings:[]});
+        if(p==='/people'&&directoryFailure)return route.fulfill({status:503,json:{ok:false,error:'人员目录暂未读取成功'}});
+        if(p==='/people')return ok({items:[{record_id:'bob',name:'接收人员乙',employee_no:'002',scopes:['A'],position:'暖通工程师',selectable:true},
+          {record_id:'revoked',name:'无交接权限人员',employee_no:'003',scopes:['A'],selectable:false,unavailable_reason:'尚无人员工作交接权限'}],
+          self:{id:who,name,category,home_scope:'A'},scopes:['A'],default_modules:responsibilities(),
+          modules:[{value:'maintenance',label:'维保通告'},...responsibilities().map(value=>({value,label:({repair_management:'维修项目',risk_inspection:'风险排查',event:'事件',cabinet:'机柜上下电'})[value]}))]});
+        if(p==='/sources'){
+          if(u.searchParams.get('mode')==='responsibilities'){
+            defaultReads++;assert.equal(u.searchParams.get('scope'),'A');
+            if(pauseDefaults){
+              pauseDefaults=false;
+              await new Promise(resolve=>{releaseDefaults=resolve;defaultStarted();});
+              await ok({items:[{...roleSources()[0],id:'e'.repeat(64),title:'过期岗位事项不得串入新草稿'}],warnings:[],failed_modules:[]});
+              defaultFinished();return;
+            }
+            if(defaultFailure)return route.fulfill({status:503,json:{ok:false,error:'岗位事项暂未读取成功'}});
+            return ok({items:roleSources(),warnings:[],failed_modules:[]});
+          }
+          return ok({items:category!=='other'?roleSources():[{id:'f'.repeat(64),title:'A楼测试维保通告',kind:'ongoing',business_status:'进行中',scope:'A',module:'maintenance',period:'2026-10',source_url:'/workbench-lite?scope=A&record_id=fixture-notice',source_checked_at:'2026-10-16T10:00:00+08:00',participated:true}],warnings:[]});
+        }
         if(!p&&req.method()==='GET')return ok({items:[...docs.values()].filter(d=>u.searchParams.get('view')==='sent'?who==='alice':who==='bob'&&d.status!=='draft').map(publicDoc),total:docs.size,page:1});
         if(!p){const {id}=req.postDataJSON();const d={id,title:'工作交接',recipient_id:'',recipient_name:'',owner:{id:'alice',name},status:'draft',version:1,notes:'',items:[],created_at:'2026-10-16T10:00:00+08:00',updated_at:'2026-10-16T10:00:00+08:00'};docs.set(id,d);return ok(publicDoc(d));}
         const id=p.split('/')[1],d=docs.get(id);assert(d,'Known handover');
@@ -75,6 +99,8 @@ try{
     await sender.getByRole('button',{name:'发起交接',exact:true}).click();
     await sender.getByLabel('交接名称',{exact:true}).fill('A楼岗位工作交接');
     await sender.locator('.handover-fields .n-select').first().click();
+    await sender.locator('.handover-recipient input').fill('002');
+    assert.equal(await sender.locator('.n-base-select-option').filter({hasText:'接收人员乙'}).count(),1,'Employee number search finds receiver');
     await sender.locator('.n-base-select-option').filter({hasText:'接收人员乙'}).click();
     await sender.getByRole('button',{name:'添加事项',exact:true}).click();
     await sender.locator('.handover-modal').getByLabel('事项名称',{exact:true}).fill('核对维修项目资料');
@@ -134,10 +160,67 @@ try{
       assert.equal(await receiver.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,version+' fits '+width);
       await receiver.screenshot({path:path.join(output,`${version}-received-${width}.png`)});
     }
+    currentPage=sender;
+    for(const role of ['engineer','supervisor']){
+      category=role;await sender.goto(entry());
+      await sender.getByRole('button',{name:'发起交接',exact:true}).click();
+      const expected=role==='engineer'?2:4;
+      await sender.locator('.handover-responsibilities').getByText('已纳入 '+expected+' 项',{exact:false}).waitFor();
+      assert.equal(await sender.locator('.handover-item').count(),expected);
+      if(role==='engineer')assert.equal(await sender.locator('.handover-item').filter({hasText:'未闭环事件'}).count(),0);
+      await sender.locator('.handover-item').first().getByRole('button',{name:'编辑',exact:true}).click();
+      await sender.locator('.handover-modal').getByLabel('当前进度、下一步与注意事项',{exact:true}).fill('人工补充的进度不能被重新读取覆盖');
+      await sender.getByRole('button',{name:'加入清单',exact:true}).click();
+      await sender.getByRole('button',{name:'补充岗位事项',exact:true}).click();
+      await sender.locator('.handover-responsibilities').getByText('已纳入 '+expected+' 项',{exact:false}).waitFor();
+      assert.equal(await sender.locator('.handover-item').count(),expected,'Re-read never duplicates source items');
+      assert.equal(await sender.getByText('人工补充的进度不能被重新读取覆盖',{exact:true}).count(),1);
+      await sender.locator('.handover-recipient .n-select').click();
+      await sender.locator('.handover-recipient input').fill('接收人员乙');
+      await sender.locator('.n-base-select-option').filter({hasText:'接收人员乙'}).click();
+      await sender.getByRole('button',{name:'从业务添加',exact:true}).click();
+      await sender.getByRole('button',{name:'读取业务',exact:true}).click();
+      await sender.getByRole('checkbox',{name:'本人参与或岗位负责',exact:true}).check();
+      assert.equal(await sender.locator('.handover-source-row').count(),expected,'Role responsibilities stay visible without fabricated participation');
+      assert.equal(await sender.getByText('有本人参与记录',{exact:false}).count(),0);
+      await sender.locator('.handover-source-modal .n-base-close').click();
+      for(const viewport of [{width:1440,height:900},{width:390,height:844},{width:360,height:640}]){
+        await sender.setViewportSize(viewport);
+        assert.equal(await sender.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,version+' '+role+' fits '+viewport.width);
+        await sender.screenshot({path:path.join(output,`${version}-${role}-${viewport.width}.png`)});
+        await sender.getByRole('button',{name:'发送交接',exact:true}).scrollIntoViewIfNeeded();
+        assert.equal(await sender.getByRole('button',{name:'发送交接',exact:true}).isEnabled(),true);
+      }
+      await sender.setViewportSize({width:1440,height:900});
+    }
+    defaultFailure=true;await sender.goto(entry());
+    await sender.getByRole('button',{name:'发起交接',exact:true}).click();
+    await sender.getByText('岗位事项暂未读取成功；未读取成功不代表没有待交接事项，可重试或从业务添加。',{exact:false}).waitFor();
+    await sender.getByLabel('交接名称',{exact:true}).fill('读取失败后仍保留填写');
+    defaultFailure=false;
+    await sender.getByRole('button',{name:'补充岗位事项',exact:true}).click();
+    await sender.locator('.handover-responsibilities').getByText('已纳入 4 项',{exact:false}).waitFor();
+    assert.equal(await sender.getByLabel('交接名称',{exact:true}).inputValue(),'读取失败后仍保留填写');
+    assert(defaultReads>=6);
+    pauseDefaults=true;
+    const defaultStart=new Promise(resolve=>{defaultStarted=resolve;}),defaultFinish=new Promise(resolve=>{defaultFinished=resolve;});
+    await sender.getByRole('button',{name:'发起交接',exact:true}).click();await defaultStart;
+    assert.equal(await sender.getByRole('button',{name:'保存草稿',exact:true}).isDisabled(),true);
+    assert.equal(await sender.getByRole('button',{name:'添加资料',exact:true}).isDisabled(),true);
+    await sender.getByRole('button',{name:'发起交接',exact:true}).click();
+    await sender.locator('.handover-responsibilities').getByText('已纳入 4 项',{exact:false}).waitFor();
+    releaseDefaults();await defaultFinish;
+    await sender.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await sender.getByText('过期岗位事项不得串入新草稿',{exact:true}).count(),0);
+    assert.equal(await sender.locator('.handover-item').count(),4);
+    directoryFailure=true;await sender.goto(entry(d.id));
+    await sender.locator('.handover-detail h2').filter({hasText:'A楼岗位工作交接'}).waitFor();
+    assert.equal(await sender.locator('.handover-item').count(),2,'Directory failure never hides existing handover records');
+    directoryFailure=false;
     for(const context of contexts)await context.close();
   }
   assert.deepEqual(errors,[]);
   assert(writes.some(w=>w.body?.action==='accept'));
-  console.log('PASS: legacy/V2 lifecycle, stale-read draft protection, failed result-card retry, PC and phone. APIs isolated; no real notifications.');
+  console.log('PASS: legacy/V2 receiver name/number search, role defaults, deduplication, manual edits, read-failure retry, lifecycle, stale-read protection, PC and small phones. APIs isolated; no real notifications.');
 }catch(e){if(currentPage)await currentPage.screenshot({path:path.join(output,'failure.png'),fullPage:true});throw e;}
 finally{await browser.close();await server.close();}

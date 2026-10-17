@@ -361,6 +361,51 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         self.assertEqual(self.harness.service._request_payload_calls, 2)
         self.assertEqual(second["items"], first["items"])
 
+    def test_fresh_persisted_directory_initializes_permissions_once_without_cloud_read(self):
+        person=self.harness.login.person({'record_id':'recCached','fields':{'姓名':'缓存人员',
+            '机楼/专业':'A楼','体系岗位':'电气工程师','员工姓名':_user('缓存人员','ou_fixtureCached')}})
+        self.harness.login.snapshot={'schema':3,'loaded_at':time.time(),'people':{person['id']:person}}
+        self.assertNotIn('work_handover',self.harness.auth.account_profile('ou_fixtureCached')['modules'])
+        with patch.object(self.harness.auth,'sync_directory_permissions',wraps=self.harness.auth.sync_directory_permissions) as sync:
+            self.harness.login.permission_people()
+            self.harness.login.permission_people()
+            self.assertEqual(sync.call_count,1)
+        profile=self.harness.auth.account_profile('ou_fixtureCached')
+        self.assertIn('work_handover',profile['modules'])
+        self.assertEqual(profile['scope_rules'],['A'])
+        self.assertEqual(self.harness.auth.directory_person('ou_fixtureCached')['id'],'recCached')
+        self.assertEqual(self.harness.service._request_payload_calls,0)
+
+    def test_cached_directory_permission_initialization_preserves_explicit_revocation(self):
+        person=self.harness.login.person({'record_id':'recRevoked','fields':{'姓名':'撤权人员',
+            '机楼/专业':'B楼','员工姓名':_user('撤权人员','ou_fixtureRevoked')}})
+        self.harness.login.snapshot={'schema':3,'loaded_at':time.time(),'people':{person['id']:person}}
+        with self.harness.auth._lock:
+            data=self.harness.auth._load_permissions_locked()
+            data['users']['ou_fixtureRevoked']={'enabled':True,'name':'撤权人员','access_version':1,
+                'level':'L4','category':'engineer','modules':[],'scopes':['B']}
+            self.harness.auth._save_permissions_locked(data)
+        self.harness.login.permission_people()
+        profile=self.harness.auth.account_profile('ou_fixtureRevoked')
+        self.assertEqual(profile['modules'],[])
+        self.assertEqual(profile['scope_rules'],['B'])
+        self.assertEqual(self.harness.service._request_payload_calls,0)
+
+    def test_cached_directory_survives_permission_store_write_failure_and_retries_without_grant_bypass(self):
+        person=self.harness.login.person({'record_id':'recRetry','fields':{'姓名':'重试人员',
+            '机楼/专业':'A楼','员工姓名':_user('重试人员','ou_fixtureRetry')}})
+        self.harness.login.snapshot={'schema':3,'loaded_at':time.time(),'people':{person['id']:person}}
+        with patch.object(self.harness.auth,'sync_directory_permissions',side_effect=OSError('synthetic write failure')):
+            with self.assertLogs(level='WARNING'):
+                data=self.harness.login.permission_people()
+        self.assertEqual([p['record_id'] for p in data['items']],['recRetry'])
+        self.assertFalse(self.harness.login._permissions_ready)
+        self.assertNotIn('work_handover',self.harness.auth.account_profile('ou_fixtureRetry')['modules'])
+        self.harness.login.permission_people()
+        self.assertTrue(self.harness.login._permissions_ready)
+        self.assertIn('work_handover',self.harness.auth.account_profile('ou_fixtureRetry')['modules'])
+        self.assertEqual(self.harness.service._request_payload_calls,0)
+
     def test_public_directory_reset_flag_preserves_external_only_rule(self):
         from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP
         rows = []

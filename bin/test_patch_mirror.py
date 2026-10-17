@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -422,6 +423,9 @@ class _ReleaseMirror:
             offset = int(kwargs['params'].get('page_token', 0))
             return {'items': copy.deepcopy(items[offset:offset+2]), 'has_more': offset+2 < len(items), 'page_token': str(offset+2)}
         if method == 'POST' and suffix == '/records':
+            token = kwargs['params']['client_token']
+            if uuid.UUID(token).version != 4:
+                raise ValueError('1254037 Invalid client token')
             self.creates += 1
             record = {'record_id': 'rec' + str(self.creates), 'fields': kwargs['json_payload']['fields']}
             self.records.append(copy.deepcopy(record))
@@ -494,6 +498,30 @@ class PatchReleaseTests(unittest.TestCase):
         self.assertEqual(mirror.creates, 1)
         self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), self.manifest())
         self.assertEqual(mirror.closed, 3)
+
+    def test_create_retry_reuses_feishu_compatible_uuid4_token(self):
+        mirror = _ReleaseMirror()
+        factory = self.factory(mirror)
+        original = mirror.request
+        captured = []
+
+        def request(method, suffix, **kwargs):
+            if method == 'POST' and suffix == '/records':
+                token = kwargs['params']['client_token']
+                self.assertEqual(uuid.UUID(token).version, 4, 'Feishu rejects UUID v5 with 1254037')
+                captured.append(token)
+                if len(captured) == 1:
+                    raise TimeoutError('fixture: request interrupted before create')
+            return original(method, suffix, **kwargs)
+
+        with patch.object(mirror, 'request', side_effect=request):
+            with self.assertRaises(TimeoutError):
+                patch_mirror.publish_manifest(self.manifest(), mirror_factory=factory)
+            patch_mirror.publish_manifest(self.manifest(), mirror_factory=factory)
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0], captured[1])
+        self.assertEqual(mirror.creates, 1)
+        self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), self.manifest())
 
     def test_unverified_or_conflicting_manifest_is_rejected(self):
         mirror = _ReleaseMirror()

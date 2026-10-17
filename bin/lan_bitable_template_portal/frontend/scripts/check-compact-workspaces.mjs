@@ -258,8 +258,17 @@ try {
     for (const width of [1440, 390]) {
       await page.setViewportSize({ width, height: width < 700 ? 844 : 900 });
       await page.goto(entry + '?__page=/&mode=events&scope=A');
-      await page.waitForFunction(() => document.body.innerText.includes('事件管理'));
+      await page.locator('.event-page').waitFor();
       await waitSpinner();
+      const buildings=page.getByRole('region',{name:'楼栋事件条数',exact:true});
+      await buildings.getByRole('button',{name:'查看A楼本月事件',exact:true}).waitFor();
+      await buildings.getByRole('button',{name:'查看A楼本月事件',exact:true}).locator('strong').waitFor();
+      assert.equal((await buildings.getByRole('button',{name:'查看A楼本月事件',exact:true}).locator('strong').innerText()).trim(),'1');
+      assert.equal(await buildings.getByRole('button').count(),scopes.length,'only authorized buildings appear, including zero-count buildings');
+      assert.equal(await buildings.getByRole('button',{name:'查看B楼本月事件',exact:true}).locator('strong').innerText(),'0');
+      await buildings.getByRole('button',{name:'查看A楼本月事件',exact:true}).click();
+      await page.locator('.event-list-panel .event-row').filter({hasText:'A楼开关事件'}).waitFor();
+      assert.equal(await page.locator('.event-list-panel .event-row').count(),1,'building count drills into current-period event records');
       assert.equal(await page.locator('.vnet-back-button[aria-label="返回"], .vnet-back-button, [aria-label="返回"]').count(), 0, 'event root must not show a return button at width ' + width);
       assert(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), 'event page overflows at ' + width);
       await shot('event-root-no-return-' + width);
@@ -277,6 +286,7 @@ try {
     const text = (await command.innerText());
     assert(/测试维修项目|搜索/.test(text) || await command.getByRole('textbox').count() >= 1, 'repair filter/search must be in command row');
     assert(/新建维修单|刷新/.test(text), 'repair action buttons must be in command row: ' + text);
+    assert.equal(await page.locator('[data-widget-id="block_records"] .v2-widget-head [aria-label="维修项目状态"]').count(),1,'state controls are part of the repair list header');
     await shot('repair-command-1440');
   });
 

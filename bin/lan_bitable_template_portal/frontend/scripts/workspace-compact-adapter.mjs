@@ -55,6 +55,9 @@ export function adaptCompactWorkspaces(input,filename){
     source=replace(source,byClass('v2-repair-filters'),text=>`<div class="v2-command-row v2-repair-command">${text}${actions}${host('repair')}</div>`);
     const health=nodes(source,node=>node.tag==='NAlert'&&node.loc.source.includes('v-else-if="r.repairHealthVisible"'))[0];
     if(health){source=replace(source,node=>node.loc.source===health.loc.source,'');source=replace(source,byClass('v2-repair-state-row'),text=>text.replace(/<\/div>$/,health.loc.source.replace('v-else-if="r.repairHealthVisible"','v-if="r.repairHealthVisible&&!r.v2RecordError" class="v2-repair-inline-health"')+'</div>'));}
+    const state=nodes(source,byClass('v2-repair-state-row'))[0].loc.source;
+    source=replace(source,byClass('v2-repair-state-row'),'');
+    source=replace(source,byClass('v2-repair-list'),text=>text.replace(/^(<section[^>]*>)/,'$1'+state));
   }else if(file==='CriticalGuardPage.vue'){
     const summary=nodes(source,byClass('admin-toolbar'))[0].loc.source;
     source=replace(source,byClass('admin-toolbar'),'');

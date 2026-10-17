@@ -1,5 +1,5 @@
 <template>
-  <div v-if="embedded||plain" class="v2-embedded-canvas"><section v-for="block in blocks.filter(block=>block.when!==false)" :key="block.id" :style="{'--block-span':plain?12:block.w||12}" class="v2-embedded-block"><slot :name="block.id" /></section></div>
+  <div v-if="embedded||plain" class="v2-embedded-canvas"><section v-for="block in blocks.filter(block=>block.when!==false)" :key="block.id" :style="{'--block-span':plain?12:block.w||12}" class="v2-embedded-block"><slot :name="'header-'+block.id" /><slot :name="block.id" /></section></div>
   <section v-else class="v2-page-canvas" :class="{'is-customizing':editing}" :data-page-layout="page">
     <Teleport v-if="toolsTarget && !editing && active" :to="toolsTarget"><NButton size="small" text data-v2-navigation class="v2-layout-trigger" :disabled="!ready||loading" :aria-label="'自定义'+label+'布局'" :title="loading?'正在同步账号布局':'自定义布局'" @click="edit"><SlidersHorizontal :size="14" />自定义布局</NButton></Teleport>
     <header v-if="editing" class="v2-page-layout-tools" data-v2-navigation>
@@ -9,6 +9,7 @@
     <NAlert v-if="error" type="warning" :bordered="false">{{error}} <NButton text data-v2-navigation :disabled="saving||loading" @click="reload">重新读取</NButton></NAlert>
     <WidgetGrid :items="visible" :editing="editing&&!saving" :inert="saving||undefined" :cell-height="64" :label="label+'布局'" adaptive @layout="positions">
       <template #tools="{item}">
+        <slot v-if="item.builtin&&!editing" :name="'header-'+item.id.slice(6)" />
         <NButton v-if="!toolsTarget&&!editing&&item.id===visible[0]?.id" size="tiny" text data-v2-navigation :disabled="!ready||loading" :aria-label="'自定义'+label+'布局'" title="自定义布局" @click="edit"><SlidersHorizontal :size="14" />自定义布局</NButton>
         <div v-if="editing&&!saving" class="v2-widget-tools" data-v2-navigation>
           <NButton quaternary circle :aria-label="'上移'+item.title" @click="move(item.id,-1)"><ArrowUp :size="14" /></NButton><NButton quaternary circle :aria-label="'下移'+item.title" @click="move(item.id,1)"><ArrowDown :size="14" /></NButton>

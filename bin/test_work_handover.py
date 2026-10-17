@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from lan_bitable_template_portal.work_handover import Handovers,HandoverError
 from lan_bitable_template_portal.work_handover_cards import HandoverCards,card,parse_event
 from lan_bitable_template_portal.work_handover_routes import install_work_handover_routes
-from lan_bitable_template_portal.work_handover_sources import HandoverSources,explicit_participation
+from lan_bitable_template_portal.work_handover_sources import HandoverSources,explicit_participation,responsibility_modules
 from lan_bitable_template_portal.module_access import required_modules
 
 
@@ -337,13 +337,58 @@ class HandoverRouteTests(HandoverTests):
         people=[{'record_id':a['id'],'name':a['name'],'open_id':a['open_id'],'selectable':True,'scopes':['A'],'employee_no':'fixture'} for a in self.actors.values()]
         def actor(oid):return self.actors[oid.removeprefix('ou_')]
         auth=SimpleNamespace(account_profile=lambda oid:actor(oid),directory_person=lambda oid:{**actor(oid),'selectable':True},public_user=lambda s:s['user'])
-        runtime=SimpleNamespace(state_store=SimpleNamespace(db_path=self.path),auth_manager=auth,service=SimpleNamespace(get_permission_directory_people=lambda:{'items':people}))
+        runtime=SimpleNamespace(state_store=SimpleNamespace(db_path=self.path),auth_manager=auth,service=SimpleNamespace(get_permission_directory_people=Mock(return_value={'items':people})))
+        self.runtime=runtime
         async def body(request,**_):return await request.json()
         controller=SimpleNamespace(_current_session=lambda r:{'user':actor(r.headers.get('x-user','ou_alice'))},_read_json_request=body,_request_base_url=lambda r:'http://testserver')
         app=FastAPI()
         install_work_handover_routes(app,controller,runtime)
         self.client=TestClient(app)
         self.addCleanup(self.client.close)
+
+    def test_recipient_search_matches_name_and_employee_number_without_exposing_ids(self):
+        data=self.client.get('/api/work-handovers/people?query=人员bob').json()['data']
+        self.assertEqual([r['record_id'] for r in data['items']],['bob'])
+        self.assertTrue(data['items'][0]['selectable'])
+        self.assertNotIn('open_id',data['items'][0])
+        by_number=self.client.get('/api/work-handovers/people?query=fixture').json()['data']
+        self.assertCountEqual([r['record_id'] for r in by_number['items']],['bob','eve'])
+        self.client.get('/api/work-handovers/people?refresh=1')
+        self.runtime.service.get_permission_directory_people.assert_called_with(force_refresh=True)
+
+    def test_recipient_without_handover_grant_is_explained_not_silently_hidden_or_granted(self):
+        self.b['modules']=[]
+        row=next(r for r in self.client.get('/api/work-handovers/people').json()['data']['items'] if r['record_id']=='bob')
+        self.assertFalse(row['selectable'])
+        self.assertIn('权限',row['unavailable_reason'])
+        self.assertEqual(self.b['modules'],[])
+        data=self.client.post('/api/work-handovers',json={'id':'4'*32}).json()['data']
+        result=self.client.put('/api/work-handovers/'+data['id'],json={'version':data['version'],
+            'data':{'title':'交接','recipient_id':'bob','notes':'','items':[]}})
+        self.assertEqual(result.status_code,403)
+
+    def test_sources_responsibilities_route_uses_trusted_actor_role(self):
+        self.a.update(category='engineer',home_scope='A')
+        people=self.client.get('/api/work-handovers/people').json()['data']
+        self.assertEqual(people['default_modules'],['repair_management'])
+        self.assertEqual(people['self']['home_scope'],'A')
+        with patch.object(HandoverSources,'defaults',return_value={'items':[],'warnings':[]}) as load:
+            response=self.client.get('/api/work-handovers/sources?mode=responsibilities&scope=A&period=2026-10')
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(load.call_args.args[0]['category'],'engineer')
+            self.assertEqual(load.call_args.args[1:],('A','2026-10'))
+
+    def test_mismatched_directory_id_is_not_silently_reassigned(self):
+        original=self.runtime.auth_manager.directory_person
+        self.runtime.auth_manager.directory_person=lambda oid:{**original(oid),'id':'different-person'} if oid=='ou_bob' else original(oid)
+        data=self.client.get('/api/work-handovers/people').json()['data']
+        self.assertNotIn('bob',[r['record_id'] for r in data['items']])
+        self.assertTrue(data['warnings'])
+        draft=self.client.post('/api/work-handovers',json={'id':'5'*32}).json()['data']
+        result=self.client.put('/api/work-handovers/'+draft['id'],json={'version':draft['version'],
+            'data':{'title':'交接','recipient_id':'bob','notes':'','items':[]}})
+        self.assertEqual(result.status_code,409)
+        self.assertEqual(self.client.get('/api/work-handovers/'+draft['id']).json()['data']['recipient_id'],'')
 
     def test_origin_protection_and_file_stream_access(self):
         identity='3'*32
@@ -382,6 +427,107 @@ class HandoverRouteTests(HandoverTests):
         self.assertEqual(self.client.get('/api/work-handovers/files/'+new_id,headers={'x-user':'ou_bob'}).status_code,403)
         self.e['scope_rules']=['B']
         self.assertEqual(self.client.get('/api/work-handovers/files/'+new_id,headers={'x-user':'ou_eve'}).status_code,403)
+
+
+class HandoverSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.actor={'id':'recEngineer','open_id':'ou_fixtureEngineer','name':'工程师甲','category':'engineer',
+                    'level':'L4','role':'building','scope_rules':['A'],
+                    'modules':['work_handover','repair_management','risk_inspection','event','cabinet']}
+        self.store=SimpleNamespace(cache_sources=Mock())
+        self.service=SimpleNamespace()
+        self.runtime=SimpleNamespace(service=self.service)
+        self.catalog=HandoverSources(self.runtime,SimpleNamespace(),self.store)
+
+    def test_role_defaults_do_not_change_permissions_or_claim_personal_participation(self):
+        self.assertEqual(responsibility_modules(self.actor),['repair_management','risk_inspection'])
+        supervisor={**self.actor,'category':'supervisor','level':'L3'}
+        self.assertEqual(responsibility_modules(supervisor),['event','repair_management','risk_inspection','cabinet'])
+        self.assertEqual(responsibility_modules({**self.actor,'category':'other','position':'A楼楼长'}),responsibility_modules(supervisor))
+        self.assertEqual(responsibility_modules({**supervisor,'modules':[]}),[])
+        self.service.get_repair_management_records=Mock(return_value={'records':[
+            {'record_id':'recPending','title':'待处理维修','workflow':'未开始'},
+            {'record_id':'recOngoing','title':'维修中项目','workflow':'维修中'},
+            {'record_id':'recDone','title':'已完成维修','workflow':'维修完成','is_completed':True}], 'total':3})
+        data=self.catalog.load(self.actor,'repair_management','A','2026-10',active_only=True)
+        self.assertEqual([r['title'] for r in data['items']],['待处理维修','维修中项目'])
+        self.assertTrue(all(r['responsible'] and not r['participated'] for r in data['items']))
+        self.service.get_repair_management_records.assert_called_once_with(scope='A',limit=200,offset=0,period='all')
+        with self.assertRaises(HandoverError):self.catalog.load(self.actor,'repair_management','B','2026-10')
+
+    def test_repair_defaults_read_the_second_page_and_keep_unverified_state_visible(self):
+        first=[{'record_id':'done'+str(i),'title':'已完成','workflow':'维修完成'} for i in range(200)]
+        self.service.get_repair_management_records=Mock(side_effect=[{'records':first,'total':201},
+            {'records':[{'record_id':'recUnverified','title':'待核验维修','state_locked':True,'workflow':'维修完成'}],'total':201}])
+        data=self.catalog.load(self.actor,'repair_management','A','2026-10',active_only=True)
+        self.assertEqual(len(data['items']),1)
+        self.assertEqual(data['items'][0]['business_status'],'状态待核对')
+        self.assertEqual(self.service.get_repair_management_records.call_args.kwargs['offset'],200)
+
+    def test_default_failure_preserves_other_modules_and_is_not_reported_as_no_work(self):
+        expected={'id':'a'*64,'kind':'ongoing','title':'待处理维修'}
+        with patch.object(self.catalog,'load',side_effect=[{'items':[expected],'warnings':[]},RuntimeError('offline')]) as load:
+            data=self.catalog.defaults(self.actor,'A','2026-10')
+        self.assertEqual(data['items'],[expected])
+        self.assertEqual(data['failed_modules'],['risk_inspection'])
+        self.assertIn('不代表没有',data['warnings'][0])
+        self.assertTrue(all(call.kwargs['active_only'] for call in load.call_args_list))
+        with self.assertRaises(HandoverError):self.catalog.defaults(self.actor,'B','2026-10')
+        with self.assertRaises(HandoverError):self.catalog.defaults(self.actor,'A','bad-month')
+
+    def test_risk_inspection_uses_existing_visibility_and_keeps_each_unfinished_assignment(self):
+        task={'id':'risk1','name':'月度风险排查','people':[
+            {'id':self.actor['id'],'name':'工程师甲','scope':'A','items':[
+                {'id':'p','title':'配电排查','status':'pending'}, {'id':'s','title':'暖通排查','status':'submitted'},
+                {'id':'a','title':'已复核项','status':'approved'}, {'id':'r','title':'已撤销项','status':'revoked'}]},
+            {'id':'recOther','name':'工程师乙','scope':'B','items':[{'id':'x','title':'B楼排查','status':'pending'}]}]}
+        inspections=SimpleNamespace(list=Mock(return_value={'items':[{'id':'risk1','status':'active'},
+            {'id':'draft','status':'publishing'}],'total':2}),get=Mock(return_value=task))
+        self.runtime.risk_inspections=lambda:inspections
+        data=self.catalog.load(self.actor,'risk_inspection','A','2026-10',active_only=True)
+        self.assertEqual([r['business_status'] for r in data['items']],['未填写','待复核'])
+        self.assertTrue(all(r['participated'] and r['responsible'] for r in data['items']))
+        self.assertEqual(len({r['id'] for r in data['items']}),2)
+        inspections.get.assert_called_once_with(self.actor,'risk1')
+        self.assertIn('id=risk1',data['items'][0]['source_url'])
+        self.actor['modules'].remove('risk_inspection')
+        with self.assertRaises(HandoverError):self.catalog.load(self.actor,'risk_inspection','A','2026-10')
+
+    def test_supervisor_includes_previous_month_unclosed_events_not_newly_closed_duplicates(self):
+        supervisor={**self.actor,'category':'supervisor','level':'L3'}
+        self.runtime.state_store=SimpleNamespace(event_month_snapshot_stats=lambda:{'active_months':[{'month':'2026-09'}]})
+        def events(**kw):
+            if kw['month']=='2026-09':
+                return {'snapshot_exists':True,'records':[{'record_id':'old','title':'上月未闭环','status':'处理中'},
+                    {'record_id':'cross','title':'跨月事件','status':'处理中'}]}
+            return {'snapshot_exists':True,'records':[{'record_id':'cross','title':'跨月事件','status':'已结束'}]}
+        self.service.get_event_monthly_snapshot=Mock(side_effect=events)
+        data=self.catalog.load(supervisor,'event','A','2026-10',active_only=True)
+        self.assertEqual([r['title'] for r in data['items']],['上月未闭环'])
+        self.assertEqual(data['items'][0]['period'],'2026-09')
+        self.assertIn('month=2026-09',data['items'][0]['source_url'])
+        self.assertTrue(data['items'][0]['responsible'])
+
+    def test_supervisor_cabinet_defaults_exclude_done_and_cancelled_batches(self):
+        self.actor.update(category='supervisor',level='L3')
+        batches=SimpleNamespace(list=Mock(return_value={'items':[
+            {'batch_id':'open','name':'待上电','is_todo':True,'scopes':['A']},
+            {'batch_id':'done','name':'已完成上电','is_todo':False,'scopes':['A']},
+            {'batch_id':'cancel','name':'取消上电','status':'cancelled','is_todo':True,'scopes':['A']},
+            {'batch_id':'cross','name':'越权批次','is_todo':True,'scopes':['A','B']}], 'total':4}))
+        self.catalog.controller=SimpleNamespace(_cabinet_power=SimpleNamespace(batches=batches))
+        data=self.catalog.load(self.actor,'cabinet','A','2026-10',active_only=True)
+        self.assertEqual([r['title'] for r in data['items']],['待上电'])
+        self.assertTrue(data['items'][0]['responsible'])
+
+    def test_missing_current_event_snapshot_keeps_prior_events_and_reports_partial_load(self):
+        self.actor.update(category='supervisor',level='L3',modules=['work_handover','event'])
+        self.runtime.state_store=SimpleNamespace(event_month_snapshot_stats=lambda:{'active_months':[{'month':'2026-09'}]})
+        self.service.get_event_monthly_snapshot=lambda **kw:{'snapshot_exists':kw['month']=='2026-09',
+            'records':[{'record_id':'old','title':'上月未闭环','status':'处理中'}] if kw['month']=='2026-09' else []}
+        data=self.catalog.defaults(self.actor,'A','2026-10')
+        self.assertEqual([r['title'] for r in data['items']],['上月未闭环'])
+        self.assertEqual(data['failed_modules'],['event'])
 
 
 if __name__=='__main__':unittest.main()

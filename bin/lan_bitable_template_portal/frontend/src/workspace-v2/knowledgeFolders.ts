@@ -91,3 +91,11 @@ export function toTreeOptions(nodes: FolderNode[]): FolderTreeOption[] {
   }));
 }
 
+export function folderOptions(groups: GroupItem[]): {value:string;label:string}[] {
+  const walk = (nodes: FolderNode[], path: string): {value:string;label:string}[] => nodes.flatMap(node => {
+    const label = path ? path + ' / ' + node.name : node.name;
+    return [{value:node.id,label}, ...walk(node.children || [], label)];
+  });
+  return walk(buildFolderTree(groups), '');
+}
+

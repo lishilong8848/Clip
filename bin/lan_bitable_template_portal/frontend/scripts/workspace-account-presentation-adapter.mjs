@@ -73,7 +73,7 @@ function adaptAdminAccounts(source) {
 `;
   const tree = `
         </template>
-        <AccountHierarchy v-else :accounts="filtered" :mode="'tree'" :show-toggle="false" @select="openAccount" />
+        <AccountHierarchy v-else :accounts="filtered" :directory="items" :mode="'tree'" :show-toggle="false" :level-label="levelLabel" :building-label="value=>scopesLabel([value])" :category-label="categoryLabel" @select="openAccount" />
       </template>
 `;
   const region = loading.loc.source + bar + tableSource + footer.loc.source + tree;

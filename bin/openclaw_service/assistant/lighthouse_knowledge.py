@@ -583,14 +583,8 @@ class KnowledgeBase:
         if type(revision) is not int or revision != row['revision']:
             raise AssistantError('文件版本已变化，请刷新后重新操作。', 409)
 
-    def list(self, actor, query):
-        check_actor(actor)
-        try:
-            page = int(query.get('page', 1))
-            if page < 1:
-                raise ValueError()
-        except (ValueError, TypeError):
-            raise AssistantError('页码无效。') from None
+    @staticmethod
+    def _document_filter(actor, query):
         deleted = str(query.get('deleted', '0')) == '1'
         q = str(query.get('q') or '').strip()[:200]
         # Qualify every column against `documents`: the FROM joins knowledge_groups,
@@ -610,7 +604,31 @@ class KnowledgeBase:
             else:
                 sql += ' AND EXISTS (SELECT 1 FROM doc_group_members m WHERE m.document_id=documents.id AND m.group_id=?)'
                 values.append(group_filter)
+        return sql, values
+
+    def _group_selection(self, db, actor, query):
+        query = {'q': str(query.get('q') or '').strip()[:200], 'group': str(query.get('group') or '')}
+        sql, values = self._document_filter(actor, query)
+        if not actor.get('is_admin'):
+            sql += ' AND documents.owner=?'
+            values.append(actor['id'])
+        ids = [row[0] for row in db.execute('SELECT documents.id FROM documents WHERE ' + sql + ' ORDER BY documents.id', values)]
+        fingerprint = hashlib.sha256(json.dumps(ids).encode()).hexdigest()
+        return ids, {**query, 'fingerprint': fingerprint, 'count': len(ids)}
+
+    def list(self, actor, query):
+        check_actor(actor)
+        try:
+            page = int(query.get('page', 1))
+            if page < 1:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise AssistantError('页码无效。') from None
+        sql, values = self._document_filter(actor, query)
+        selection = None
         with self.connect() as db:
+            if query.get('select_all') == '1' and str(query.get('deleted', '0')) != '1':
+                _, selection = self._group_selection(db, actor, query)
             total = db.execute('SELECT count(*) FROM documents WHERE ' + sql, values).fetchone()[0]
             # Clamp to the last valid page so a document removed/deleted (by this user
             # or another) on the final page never leaves the UI on an empty page.
@@ -624,7 +642,8 @@ class KnowledgeBase:
                               [*values, (page - 1) * 20]).fetchall()
             revision = self._revision(db)
         return {'items': [self._public(row, actor) for row in rows], 'total': total, 'page': page, 'page_size': 20,
-                'is_admin': bool(actor.get('is_admin')), 'settings': self.settings(actor), 'revision': revision}
+                'is_admin': bool(actor.get('is_admin')), 'settings': self.settings(actor), 'revision': revision,
+                **({'selection': selection} if selection is not None else {})}
 
     def upload(self, actor, name, content, *, document_id='', revision=None):
         """Backward-compatible alias delegating to the streaming upload path."""
@@ -951,8 +970,8 @@ class KnowledgeBase:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             normalized = self._normalize_parent(db, parent_id)
-            if db.execute('SELECT 1 FROM knowledge_groups WHERE lower(name)=lower(?)', (name,)).fetchone():
-                raise AssistantError('已存在同名分组。', 409)
+            if db.execute('SELECT 1 FROM knowledge_groups WHERE parent_id IS ? AND lower(name)=lower(?)', (normalized, name)).fetchone():
+                raise AssistantError('同一文件夹下已存在同名分组。', 409)
             db.execute('INSERT INTO knowledge_groups(id,name,owner,owner_name,parent_id,created_at) VALUES(?,?,?,?,?,?)',
                        (gid, name, actor['id'], safe_text(actor.get('name') or '用户', limit=100), normalized, stamp))
             row = db.execute('SELECT id,name,owner,owner_name,parent_id,created_at,0 AS count FROM knowledge_groups WHERE id=?', (gid,)).fetchone()
@@ -979,8 +998,8 @@ class KnowledgeBase:
                 raise AssistantError('仅分组创建者或管理员可管理该分组。', 403)
             # Older callers rename only; omission must not move a nested folder.
             normalized = self._normalize_parent(db, row['parent_id'] if parent_id is _UNCHANGED_PARENT else parent_id, exclude=group_id)
-            if db.execute('SELECT 1 FROM knowledge_groups WHERE id<>? AND lower(name)=lower(?)', (group_id, name)).fetchone():
-                raise AssistantError('已存在同名分组。', 409)
+            if db.execute('SELECT 1 FROM knowledge_groups WHERE id<>? AND parent_id IS ? AND lower(name)=lower(?)', (group_id, normalized, name)).fetchone():
+                raise AssistantError('同一文件夹下已存在同名分组。', 409)
             if normalized == row['parent_id']:
                 db.execute('UPDATE knowledge_groups SET name=? WHERE id=?', (name, group_id))
             else:
@@ -1008,6 +1027,10 @@ class KnowledgeBase:
             if not actor.get('is_admin') and row['owner'] != actor['id']:
                 raise AssistantError('仅分组创建者或管理员可管理该分组。', 403)
             parent = row['parent_id']
+            if db.execute('''SELECT 1 FROM knowledge_groups child JOIN knowledge_groups sibling
+                             ON lower(child.name)=lower(sibling.name) AND sibling.parent_id IS ?
+                             WHERE child.parent_id=? AND sibling.id<>?''', (parent, group_id, group_id)).fetchone():
+                raise AssistantError('子文件夹与上级目录存在同名分组，请先重命名或移动子文件夹，再删除。', 409)
             # Reparent direct child folders to this folder's own parent.
             db.execute('UPDATE knowledge_groups SET parent_id=? WHERE parent_id=?', (parent, group_id))
             # Files in this folder return to ungrouped; files/index untouched.
@@ -1026,15 +1049,32 @@ class KnowledgeBase:
             raise AssistantError('文件编号无效。')
         return ids
 
-    def set_documents_group(self, actor, group_id, document_ids):
+    def set_documents_group(self, actor, group_id, document_ids=None, *, selection=None):
         """Assign documents to a group (atomic; all must be editable by actor)."""
         check_actor(actor)
-        ids = self._normalize_document_ids(document_ids)
+        ids = self._normalize_document_ids(document_ids) if selection is None else None
+        if selection is not None and (document_ids is not None or not isinstance(selection, dict)
+                or not isinstance(selection.get('q'), str) or len(selection['q']) > 200
+                or not isinstance(selection.get('group'), str) or len(selection['group']) > 64
+                or not re.fullmatch(r'[a-f0-9]{64}', str(selection.get('fingerprint') or ''))):
+            raise AssistantError('全部选择信息无效，请重新选择。')
         target = None if group_id in (None, '', 'ungrouped', 'none') else str(group_id or '').strip()
         if target is not None and (not target or len(target) > 64):
             raise AssistantError('分组编号无效。')
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            if selection is not None:
+                ids, snapshot = self._group_selection(db, actor, selection)
+                if snapshot['fingerprint'] != selection['fingerprint']:
+                    raise AssistantError('搜索结果或文件权限已变化，未移动任何文件，请重新全选。', 409)
+                excluded = selection.get('excluded_ids', [])
+                available = set(ids)
+                if not isinstance(excluded, list) or any(not isinstance(value, str) or value not in available for value in excluded):
+                    raise AssistantError('取消选择的文件无效，请重新选择。')
+                excluded = set(excluded)
+                ids = [identity for identity in ids if identity not in excluded]
+                if not ids:
+                    raise AssistantError('请选择要分组的文件。')
             if target is not None and not db.execute('SELECT 1 FROM knowledge_groups WHERE id=?', (target,)).fetchone():
                 raise AssistantError('分组不存在。', 404)
             missing, forbidden = [], []

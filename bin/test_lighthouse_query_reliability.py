@@ -121,6 +121,18 @@ class QueryContractTests(unittest.TestCase):
 
 
 class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_typed_followup_controls_are_shared_across_channels(self):
+        for channel in ('', 'feishu:oc_fixture'):
+            for kind in ('date', 'time', 'datetime-local', 'number'):
+                with self.subTest(channel=channel, kind=kind):
+                    async def ask(messages, info):
+                        yield {0: DeltaToolCall(name='ask_business_question', json_args=json.dumps({
+                            'question': '请补充希望采用的值', 'input_type': kind}))}
+                    result, calls, _ = await self.run_question('帮我整理活动安排', ask, channel=channel)
+                    self.assertEqual(result['clarification'], {'options': [], 'input_type': kind})
+                    self.assertEqual(calls, [])
+                    self.assertNotIn('plan', result)
+
     async def test_general_followup_uses_structured_question_without_business_access(self):
         async def ask(messages, info):
             yield {0: DeltaToolCall(name='ask_business_question', json_args=json.dumps({

@@ -71,6 +71,25 @@ class RiskTests(unittest.TestCase):
         with self.assertRaises(RiskError):
             self.store.publish(self.people['admin'], self.body, self.template)
 
+    def test_building_filter_applies_to_list_totals_and_visible_people(self):
+        self.publish()
+        for identity, recipients in [('b' * 32, [{'id': 'other', 'scope': 'B'}]),
+                                     ('c' * 32, [{'id': 'alice', 'scope': 'A'}, {'id': 'other', 'scope': 'B'}])]:
+            body = {**self.body, 'id': identity, 'reviewer_id': 'admin', 'people': recipients}
+            self.store.publish(self.people['admin'], body, self.template)
+            self.store.activate(identity)
+        a = self.store.list(self.people['admin'], scope='A')
+        b = self.store.list(self.people['admin'], scope='B')
+        self.assertEqual({row['id'] for row in a['items']}, {'a' * 32, 'c' * 32})
+        self.assertEqual({row['id'] for row in b['items']}, {'b' * 32, 'c' * 32})
+        self.assertEqual((a['total'], b['total']), (2, 2))
+        self.assertTrue(all(row['people_count'] == 1 and row['total'] == 2 for row in b['items']))
+        self.assertEqual(self.store.list(self.people['admin'], scope='ALL')['total'], 3)
+        self.assertEqual(self.store.list(self.people['alice'], scope='A')['total'], 2)
+        with self.assertRaises(RiskError) as error:
+            self.store.list(self.people['alice'], scope='B')
+        self.assertEqual(error.exception.status, 403)
+
     def test_schema_and_scopes_required(self):
         for change in ({'template_version':'old'}, {'people':[{'id':'other','scope':'A'}]}, {'reviewer_id':'alice'}):
             with self.subTest(change=change), self.assertRaises(RiskError):
@@ -115,6 +134,26 @@ class RiskTests(unittest.TestCase):
         with self.assertRaisesRegex(RiskError, '排查结果'):
             self.act('alice', 'submit', values={'result': ' \n\t\u3000'})
         self.assertEqual(self.store.get(self.people['alice'], self.body['id'])['people'][0]['version'], 1)
+
+    def test_optional_field_can_be_saved_submitted_and_approved_empty(self):
+        self.fields = schema_fields(self.fields, {'result': {'required': False}})
+        self.template['fields'] = self.fields
+        self.assertFalse(self.fields[1]['required'])
+        self.publish()
+        self.fields[1]['required'] = True
+        self.act('alice', 'save', values={})
+        self.act('alice', 'submit', values={})
+        approved = self.act('reviewer', 'approve', values={})
+        self.assertFalse(approved['fields'][1]['required'])
+        self.assertEqual(approved['people'][0]['items'][0]['status'], 'approved')
+
+    def test_required_snapshot_still_blocks_empty_submit_after_template_change(self):
+        self.publish()
+        self.fields[1]['required'] = False
+        saved = self.act('alice', 'save', values={})
+        self.assertTrue(saved['fields'][1]['required'])
+        with self.assertRaisesRegex(RiskError, '排查结果'):
+            self.act('alice', 'submit', values={})
 
     def test_required_select_without_options_cannot_publish(self):
         self.fields[-1].update(required=True, property={'options': []})

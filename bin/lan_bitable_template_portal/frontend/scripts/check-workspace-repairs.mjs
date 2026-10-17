@@ -114,6 +114,8 @@ async function checkFieldContrast(page){
 }
 try{
   let page=await newPage();
+  assert.equal(await page.locator('[data-widget-id="block_records"] .v2-widget-head [aria-label="维修项目状态"]').count(),1,'state controls belong beside the repair list title');
+  assert.equal(await page.locator('.v2-repair-workspace>.v2-repair-state-row').count(),0,'no duplicate state toolbar above the list');
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
   assert.equal(await page.locator('.record-row').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
   await openFirst(page);await noOverflow(page);

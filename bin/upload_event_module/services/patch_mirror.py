@@ -5,7 +5,6 @@ import logging
 import shutil
 import tempfile
 import time
-import uuid
 from pathlib import Path
 
 from openclaw_service.assistant.lighthouse_distribution import (
@@ -80,6 +79,8 @@ def fetch_manifest(*, mirror_factory=FeishuRuntimeMirror):
 
 def publish_manifest(manifest, *, mirror_factory=FeishuRuntimeMirror):
     """Call only after the complete archive has passed remote download verification."""
+    from .feishu_service import _stable_uuid4_client_token
+
     key = _release_key(manifest)
     content = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     mirror = mirror_factory(table=PATCH_TABLE)
@@ -93,8 +94,8 @@ def publish_manifest(manifest, *, mirror_factory=FeishuRuntimeMirror):
         fields = {'文本': '灯塔更新-' + manifest['target_version'], '组件名称': RELEASE_COMPONENT,
                   '版本': manifest['target_version'], '平台': 'Windows x64', '启用': True,
                   '整包SHA256': manifest['zip_sha256'], '文件大小': manifest['zip_size'], '更新说明': content}
-        # Stable token covers a lost create response; the preceding read also covers later retries.
-        token = str(uuid.uuid5(uuid.NAMESPACE_URL, hashlib.sha256(content.encode('utf-8')).hexdigest()))
+        # Feishu requires UUID v4; keep it stable when a create response is lost.
+        token = _stable_uuid4_client_token('clipflow-patch-release:' + content)
         result = mirror.request('POST', '/records', params={'client_token': token}, json_payload={'fields': fields})
         record_id = result['record']['record_id']
         record = mirror.request('GET', '/records/' + record_id).get('record') or {}

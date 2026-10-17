@@ -8,6 +8,58 @@ from . import test_lighthouse_reference_workflows as ref
 
 
 class InteractiveIntentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_message_prose_becomes_editable_confirmed_plan(self):
+        from lan_bitable_template_portal.feishu_workpartner_models import MessageSend
+        from lan_bitable_template_portal.feishu_notice_cards import build_preview_card
+        @self.fixture.app.get('/api/feishu-workpartner/people')
+        async def people(q: str = ''):
+            return {'ok': True, 'data': {'items': [{'name': '测试收件人', 'employee_no': '93199', 'building': 'A'}]}}
+        @self.fixture.app.post('/api/feishu-workpartner/messages/send')
+        async def send(body: MessageSend):
+            self.fixture.writes.append(body.model_dump())
+            return {'ok': True, 'data': {'message_id': 'om_fixture'}}
+
+        async def stream(messages, info):
+            tools = self.fixture.tools(messages)
+            retried = any(getattr(part, 'part_kind', '') == 'retry-prompt' for message in messages for part in message.parts)
+            if not tools:
+                yield {0: ref.DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                    'api_id': 'GET /api/feishu-workpartner/people', 'params': {'q': '测试收件人'}}}))}
+            elif not retried:
+                yield '已查到唯一收件人。请回复“确认发送”或“修改”后继续。'
+            else:
+                yield {0: ref.DeltaToolCall(name='prepare_business', json_args=json.dumps({'title': '发送测试消息', 'operations': [{
+                    'api_id': 'POST /api/feishu-workpartner/messages/send',
+                    'body': {'recipient': '测试收件人', 'text': '这是通过灯塔助手发送的信息'}}]}))}
+
+        result = await self.fixture.answer(stream, '给测试收件人发一条消息：这是通过灯塔助手发送的信息')
+        self.assertEqual(self.fixture.writes, [])
+        self.assertIn('plan', result, result)
+        plan = result['plan']
+        self.assertEqual(plan['status'], 'awaiting_confirmation')
+        self.assertEqual(plan['confirm_label'], '确认发送')
+        self.assertTrue(plan['can_edit'])
+        card = build_preview_card(plan, 'fixture', just_saved=False)
+        self.assertIn('确认发送', json.dumps(card, ensure_ascii=False))
+        self.assertNotIn('请回复', result['answer'])
+        actor = ref.ACTOR
+        edited = self.fixture.portal.amend(actor, plan['id'], {'version': plan['version'], 'action': 'edit'})
+        self.assertEqual(edited['status'], 'needs_input')
+        self.assertEqual({field['path'] for field in edited['fields']}, {'recipient', 'text'})
+        values = {field['name']: ('修改后的消息' if field['path'] == 'text' else field['value']) for field in edited['fields']}
+        amended = self.fixture.portal.amend(actor, plan['id'], {'version': edited['version'], 'values': values})
+        with self.assertRaises(ref.AssistantError):
+            self.fixture.portal.amend(actor, plan['id'], {'version': plan['version'], 'action': 'edit'})
+        with self.assertRaises(ref.AssistantError):
+            self.fixture.portal.get_plan({**actor, 'id': 'another-person'}, plan['id'])
+        self.assertEqual(self.fixture.writes, [])
+        completed = await self.fixture.execute_plan({'plan': amended})
+        self.assertEqual(completed['status'], 'completed')
+        self.assertEqual([item['text'] for item in self.fixture.writes], ['修改后的消息'])
+        repeated = await self.fixture.portal.confirm(actor, plan['id'], {'version': amended['version'], 'stage': 'review'}, self.fixture.request)
+        self.assertEqual(repeated['status'], 'completed')
+        self.assertEqual(len(self.fixture.writes), 1)
+
     def test_workflow_instructions_keep_all_shared_guards_and_only_relevant_manuals(self):
         from lan_bitable_template_portal.lighthouse_model import INSTRUCTIONS, _WORKFLOW_TOPICS, instructions_for_question
         common = [line for line in INSTRUCTIONS.splitlines() if line and not any(line.startswith(prefix) for prefix in _WORKFLOW_TOPICS)]

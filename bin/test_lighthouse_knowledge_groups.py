@@ -174,6 +174,86 @@ class GroupPersistenceTestCase(unittest.TestCase):
             self.kb.create_group(owner, " 研发 ")
         self.assertEqual(ctx.exception.status, 409)
 
+    def test_duplicate_names_are_scoped_to_parent_for_create_rename_and_move(self):
+        owner = actor()
+        a = self.kb.create_group(owner, 'A楼')
+        b = self.kb.create_group(owner, 'B楼')
+        first = self.kb.create_group(owner, '操作规程', a['id'])
+        second = self.kb.create_group(owner, '操作规程', b['id'])
+        nested = self.kb.create_group(owner, '操作规程', first['id'])
+        self.assertEqual(nested['parent_id'], first['id'])
+        renamed = self.kb.rename_group(owner, second['id'], '操作规程')
+        self.assertEqual(renamed['parent_id'], b['id'])
+        for call in (lambda: self.kb.create_group(owner, '操作规程', a['id']),
+                     lambda: self.kb.rename_group(owner, second['id'], '操作规程', a['id']),
+                     lambda: self.kb.rename_group(owner, first['id'], '操作规程', nested['id'])):
+            with self.assertRaises(AssistantError) as ctx:
+                call()
+            self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.kb.rename_group(owner, second['id'], '操作规程', None)['parent_id'], None)
+        with self.assertRaises(AssistantError):
+            self.kb.create_group(owner, '操作规程')
+
+    def test_delete_reparent_collision_does_not_lose_folders_or_members(self):
+        owner = actor()
+        root = self.kb.create_group(owner, '电气')
+        parent = self.kb.create_group(owner, 'A楼')
+        child = self.kb.create_group(owner, '电气', parent['id'])
+        doc = self._upload(owner, '电气操作规程。')
+        self.kb.set_documents_group(owner, parent['id'], [doc['id']])
+        with self.assertRaises(AssistantError) as ctx:
+            self.kb.delete_group(owner, parent['id'])
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.kb.list(owner, {'group': parent['id']})['total'], 1)
+        self.kb.rename_group(owner, child['id'], '电气资料')
+        self.kb.delete_group(owner, parent['id'])
+        groups = {g['id']: g for g in self.kb.groups(owner)['groups']}
+        self.assertIn(root['id'], groups)
+        self.assertIsNone(groups[child['id']]['parent_id'])
+        self.assertEqual(self.kb.list(owner, {'group': 'ungrouped'})['total'], 1)
+
+    def test_select_all_search_across_pages_is_atomic_and_preserves_permissions(self):
+        owner = actor('alice')
+        source = self.kb.create_group(owner, '源目录')
+        target = self.kb.create_group(owner, '目标目录')
+        docs = [self.kb.upload(owner, *_text(f'公司报销说明第{i}份。', f'报销{i}.txt')) for i in range(105)]
+        foreign = self.kb.upload(actor('bob'), *_text('他人文档。', '报销-other.txt'))
+        outside = self.kb.upload(owner, *_text('考勤说明。', '考勤.txt'))
+        for batch in (docs[:100], docs[100:]):
+            self.kb.set_documents_group(owner, source['id'], [d['id'] for d in batch])
+        self.kb.set_documents_group(actor(admin=True), source['id'], [foreign['id'], outside['id']])
+        query = {'group': source['id'], 'q': '报销', 'select_all': '1'}
+        listing = self.kb.list(owner, query)
+        selection = listing['selection']
+        self.assertEqual(selection['count'], 105)
+        self.assertEqual(listing['total'], 106)
+        self.assertEqual(len(listing['items']), 20)
+        before = self._snapshot_meta(docs[1]['id'])
+        result = self.kb.set_documents_group(owner, target['id'], selection={**selection, 'excluded_ids': [docs[0]['id']]})
+        self.assertEqual(result['updated'], 104)
+        self.assertEqual(self.kb.list(owner, {'group': target['id']})['total'], 104)
+        self.assertEqual(self.kb.list(owner, {'group': source['id']})['total'], 3)
+        self.assertEqual(self._snapshot_meta(docs[1]['id']), before)
+        with self.assertRaises(AssistantError) as ctx:
+            self.kb.set_documents_group(owner, target['id'], selection=selection)
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.kb.list(owner, {'group': source['id']})['total'], 3)
+
+    def test_select_all_rejects_changed_results_and_tampered_exclusions(self):
+        owner = actor('alice')
+        group = self.kb.create_group(owner, '目标')
+        doc = self._upload(owner, '公司指南。', '指南.txt')
+        selection = self.kb.list(owner, {'q': '指南', 'select_all': '1'})['selection']
+        for invalid in ({**selection, 'excluded_ids': ['not-selected']}, {**selection, 'q': ['invalid']}):
+            with self.assertRaises(AssistantError):
+                self.kb.set_documents_group(owner, group['id'], selection=invalid)
+        self._upload(owner, '新增指南。', '指南新增.txt')
+        with self.assertRaises(AssistantError) as ctx:
+            self.kb.set_documents_group(owner, group['id'], selection=selection)
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertEqual(self.kb.list(owner, {'group': group['id']})['total'], 0)
+        self.assertEqual(self.kb.document(owner, doc['id'], {})['document']['name'], '指南.txt')
+
     def test_reupload_keeps_group_and_grouping_does_not_reindex(self):
         owner = actor(admin=True)
         doc = self._upload(owner, "第一版内容描述。")

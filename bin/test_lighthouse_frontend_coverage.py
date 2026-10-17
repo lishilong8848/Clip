@@ -231,6 +231,14 @@ def _resolve_concat(expr: str, file_text: str, base: str = ""):
     parts = _top_level_split(expr, sep="+")
     if not parts:
         return None, f"拼接为空:{expr[:60]}"
+    # A final literal query-only branch cannot change the endpoint path.
+    query_suffix = re.fullmatch(
+        r'''\(\s*[A-Za-z_$][\w$]*\s*\?\s*(['"])([^'"]*)\1\s*:\s*(['"])([^'"]*)\3\s*\)''',
+        parts[-1].strip(),
+    )
+    if len(parts) > 1 and query_suffix and all(
+            not value or value.startswith("?") for value in query_suffix.group(2, 4)):
+        parts = parts[:-1]
     resolved_segments = []
     first = parts[0].strip()
     # 首段必须是含 /api/ 的字面量或可解析标识符
@@ -827,6 +835,28 @@ class FrontendCoverageAuditTests(unittest.TestCase):
         self.assertEqual(rows[0]['transport'], 'multipart')
         self.assertEqual(rows[0]['norm_path'], '/api/assistant/knowledge/files')
 
+
+    def test_optional_people_refresh_query_keeps_the_exact_endpoint(self):
+        rows = [r for r in self.result['records']
+                if r['source'].endswith('/WorkHandoverPage.vue') and 'refresh=1' in r['raw_path']]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['method'], rows[0]['norm_path'], rows[0]['status']),
+                         ('GET', '/api/work-handovers/people', 'covered'))
+        for suffix in ("(force?'?refresh=1':'')", '(force ? "" : "?refresh=1")',
+                       "(force?'?refresh=1':'?refresh=0')"):
+            with self.subTest(suffix=suffix):
+                path, reason = _resolve_concat("base+'/people'+" + suffix,
+                                               "const base='/api/work-handovers';")
+                self.assertEqual((path, reason), ('/api/work-handovers/people', ''))
+
+    def test_optional_path_or_dynamic_suffix_is_not_dropped(self):
+        for suffix, placeholders in (("(force?'/other':'')", '{param}'),
+                                     ("(force?query():'')", '{param}'),
+                                     ("(force?'?refresh=1':'')+id", '{param}{param}')):
+            with self.subTest(suffix=suffix):
+                path, _ = _resolve_concat("base+'/people'+" + suffix,
+                                          "const base='/api/work-handovers';")
+                self.assertEqual(path, '/api/work-handovers/people' + placeholders)
 
     def test_inventory_is_deterministic(self):
         a = _serialize_for_hash(run_audit())

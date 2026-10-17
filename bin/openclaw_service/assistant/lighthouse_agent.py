@@ -858,6 +858,8 @@ class PortalAgent:
             if original.get("ok") and original.get("api_id") == _MORNING_GENERATE and isinstance(url, str) and re.fullmatch(r"/api/daily-tasks/morning-meeting/download\?date=\d{4}-\d{2}-\d{2}", url):
                 public["download_url"] = url
         result["can_edit"] = bool(plan.get("status") in {"awaiting_confirmation", "awaiting_second_confirmation"} and plan.get("_review_fields") and not plan.get("results"))
+        if plan.get('operations') and all(op['api_id'] in {'POST /api/feishu-workpartner/messages/send', 'POST /api/message-delivery/send'} for op in plan['operations']):
+            result['confirm_label'] = '再次确认发送' if plan.get('status') == 'awaiting_second_confirmation' else '确认发送'
         last = (plan.get("results") or [{}])[-1]
         task = last.get("job_result", {}).get("_raw", last.get("job_result", {}).get("data", {})) or {}
         result["can_retry"] = bool(plan.get("status") == "failed" and self._parallel_notice_plan(plan)
@@ -1251,6 +1253,7 @@ class PortalAgent:
         notice_delete_targets = {}
         notice_undo_targets = {}
         ready_messages = {}
+        ready_workpartner_messages = set()
         normalized, fields, risk, form_queries, repair_controls, guard_controls, drill_controls, mop_controls, template_controls = [], [], "normal", {}, {}, {}, {}, {}, {}
         for index, operation in enumerate(operations):
             if not isinstance(operation, dict):
@@ -1793,12 +1796,26 @@ class PortalAgent:
                 for value in attachment_ids:
                     self._check_plan_file(actor, op, value)
             # Result placeholders are validated once their prior step has finished.
-            if any(marker in json.dumps(op) for marker in ('"$result"', '"$reference"', '"$query"', '"$file_text"')):
+            deferred_validation = any(marker in json.dumps(op) for marker in ('"$result"', '"$reference"', '"$query"', '"$file_text"'))
+            if deferred_validation:
                 checked, missing = op, []
             else:
                 checked, missing = self._validate(op)
             checked["name"] = descriptor["name"]
             normalized.append(checked)
+            if op['api_id'] == 'POST /api/feishu-workpartner/messages/send':
+                if not missing and not deferred_validation:
+                    ready_workpartner_messages.add(index)
+                for path, label in (('recipient', '收件人'), ('text', '消息正文')):
+                    if path == 'recipient' and checked.get('body', {}).get('chat_id'):
+                        continue
+                    if path in checked.get('body', {}) and not isinstance(checked['body'][path], str):
+                        continue
+                    if not any(item.get('operation_index') == index and item.get('path') == path for item in fields):
+                        fields.append({'name': f'step{index}.{path}', 'operation_index': index, 'path': path,
+                            'section': 'body', 'label': label, 'type': 'textarea' if path == 'text' else 'text',
+                            'required': True, 'maxlength': 12000 if path == 'text' else 120,
+                            'value': checked.get('body', {}).get(path, '')})
             for field in missing:
                 if any(item.get("native_notice") and item["operation_index"] == index for item in fields) and field.get("section", "body") == "body":
                     continue
@@ -1963,6 +1980,8 @@ class PortalAgent:
                 "risk": risk, "version": 1, "status": "needs_input" if fields else "awaiting_confirmation", "created_at": time.time(), "results": [], "error": "", "_references": references or {}, "_queries": {**{key: queries[key] for key in used_queries if key in (queries or {})}, **form_queries}}
         if fields and all(field.get("type") == "file" and (field.get("value") or not field.get("required")) for field in fields):
             plan.update(fields=[], status="awaiting_confirmation", _review_fields=copy.deepcopy(fields), _review_operations=copy.deepcopy(normalized))
+        if (fields and len(ready_workpartner_messages) == len(normalized) and all(field.get('value') for field in fields)):
+            plan.update(fields=[], status='awaiting_confirmation', _review_fields=copy.deepcopy(fields), _review_operations=copy.deepcopy(normalized))
         if ready_messages:
             plan['selected_labels'] = {str(index): labels for index, labels in ready_messages.items()}
             if all(field['operation_index'] in ready_messages for field in fields):

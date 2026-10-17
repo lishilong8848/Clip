@@ -4,7 +4,7 @@ const containers = {
   'RepairWorkspace.vue': ['v2-repair-filters'],
   'NoticeWorkspace.vue': ['v2-notice-filters'],
   'NoticeSopManager.vue': ['v2-sop-filters'],
-  'WaterWorkspace.vue': ['water-scope', 'water-filter-main', 'water-date-filter', 'water-search', 'water-filter-extra'],
+  'WaterWorkspace.vue': ['water-filter-main', 'water-date-filter', 'water-search', 'water-filter-extra'],
   'EventManagementPage.vue': ['event-list-tools'],
   'CabinetPowerPage.vue': ['filter-bar', 'search'],
   'DrillManagementPage.vue': ['admin-month-filter'],
