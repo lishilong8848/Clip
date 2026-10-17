@@ -18,7 +18,7 @@ class GeneralToolTests(unittest.IsolatedAsyncioTestCase):
         await fixtures.StreamTests.asyncSetUp(self)
         self.addAsyncCleanup(self.runtime.close)
 
-    async def run_tools(self, question, steps, *, file_ids=(), channel='', history=()):
+    async def run_tools(self, question, steps, *, file_ids=(), channel='', history=(), public_sources=None):
         calls = []
         async def stream(messages, info):
             index = len(calls)
@@ -34,12 +34,41 @@ class GeneralToolTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def model(*_):
             yield FunctionModel(stream_function=stream)
-        engine = LighthouseModel(self.portal, model_factory=model)
+        engine = LighthouseModel(self.portal, model_factory=model, public_sources=public_sources)
         self.addAsyncCleanup(engine.close)
         actor = {**self.actor, 'channel': channel}
         result = await engine.answer(actor, {'question': question, 'file_ids': list(file_ids), '_profile': self.model.profile()},
                                      list(history), self.request, AsyncMock(), AsyncMock(return_value=actor), {})
         return result, calls
+
+    async def test_chinese_public_lookup_is_shared_by_web_and_feishu(self):
+        import httpx
+        from openclaw_service.assistant.lighthouse_public import PublicSources
+        question = '你上网搜一下黑尾大勾鱼是什么?'
+        requests = []
+        def handler(request):
+            requests.append(request)
+            if request.url.host == 'api.mwmbl.org':
+                return httpx.Response(200, json=[])
+            if request.url.host == 'www.bing.com':
+                return httpx.Response(503)
+            return httpx.Response(200, text='<ul class="result"><li class="res-list">'
+                '<h3 class="res-title"><a data-mdurl="https://example.com/fish" href="/link?m=tracking">黑尾大勾鱼</a></h3>'
+                '<p data-result-summary>一种小型观赏鱼。</p></li></ul>')
+        source = PublicSources(client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        for channel in ('', 'feishu:oc_fixture'):
+            with self.subTest(channel=channel):
+                result, calls = await self.run_tools(question,
+                    [('public_search', {'query': question}), '黑尾大勾鱼是一种小型观赏鱼。[1]'],
+                    channel=channel, public_sources=source)
+                self.assertIn('小型观赏鱼', result['answer'])
+                self.assertEqual(result['sources'][0]['url'], 'https://example.com/fish')
+                response = next(part.content for message in calls[-1] for part in message.parts
+                    if getattr(part, 'part_kind', '') == 'tool-return')
+                self.assertEqual(response['actual_query'], '黑尾大勾鱼')
+                self.assertTrue(response['ok'])
+        self.assertEqual(len(requests), 3, 'The second channel can reuse safe public evidence')
+        self.assertEqual(self.reads, [])
 
     async def test_attachment_business_words_use_file_not_live_business_data(self):
         file = self.portal.files.upload(self.actor, '维修记录.txt', 'A楼维修项目：测试设备一、测试设备二。'.encode())

@@ -12,7 +12,7 @@ await mkdir(output,{recursive:true});
 const browser=await chromium.launch({headless:true});
 try{
  for(const variant of ['legacy','v2']){
-  const dir=path.resolve(root,variant==='v2'?'../../../output/knowledge-folders-review':'../../../output/knowledge-folders-legacy');
+  const dir=path.resolve(root,process.env.CLIPFLOW_KNOWLEDGE_BUILD_DIR||(variant==='v2'?'../../../output/knowledge-folders-review':'../../../output/knowledge-folders-legacy'));
   const server=await preview({root,logLevel:'error',build:{outDir:dir},preview:{host:'127.0.0.1',port:0,proxy:{}}});
   const origin='http://127.0.0.1:'+server.httpServer.address().port;
   try{
@@ -80,7 +80,7 @@ try{
      async function target(value,label){
       const select=page.getByRole('combobox',{name:'目标分组',exact:true});
       if(await select.evaluate(el=>el.tagName==='SELECT'))await select.selectOption(value);
-      else{await select.click();await page.locator('.n-base-select-option').getByText(label,{exact:true}).click();}
+      else{await select.click();const picker=page.locator('.kb-group-picker-dialog');if(await picker.count()){await picker.getByTitle(label,{exact:true}).click();await picker.getByRole('button',{name:'选择此分组',exact:true}).click();}else await page.locator('.n-base-select-option').getByText(label,{exact:true}).click();}
      }
      await target('b-child','B楼 / 电气');await page.getByRole('button',{name:'应用分组',exact:true}).click();
      await page.getByText('已将 19 个文件分入「B楼 / 电气」。',{exact:true}).waitFor();assert.equal(writes[0].ids.length,19);

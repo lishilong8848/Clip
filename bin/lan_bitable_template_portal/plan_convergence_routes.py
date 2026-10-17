@@ -197,13 +197,13 @@ def install_plan_convergence_routes(app, controller, runtime):
         except RuleConflictError as exc:
             return JSONResponse({'ok': False, 'code': 'rule_version_conflict', 'error': str(exc)}, status_code=409)
         except TimeoutError as exc:
-            return JSONResponse({'ok': False, 'error': str(exc)}, status_code=504)
+            return JSONResponse({'ok': False, 'code': 'zh_query_timeout', 'error': str(exc)}, status_code=504)
         except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=400)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code in {401, 403}:
-                return JSONResponse({'ok': False, 'error': '智航认证已失效，请在计划收敛设置中重新登录'}, status_code=400)
-            return JSONResponse({'ok': False, 'error': '智航服务暂不可用，请稍后重试；其他功能不受影响'}, status_code=502)
+                return JSONResponse({'ok': False, 'code': 'zh_auth_expired', 'error': '智航认证已失效，请在计划收敛设置中重新登录'}, status_code=400)
+            return JSONResponse({'ok': False, 'code': 'zh_upstream_error', 'error': '智航服务暂不可用，请稍后重试；其他功能不受影响'}, status_code=502)
         except httpx.HTTPError:
             return JSONResponse({'ok': False, 'code': 'zh_connection_unavailable',
                                  'error': '无法连接智航，请在运行灯塔的电脑上连接 VPN 后重试。其他功能和本地规则配置不受影响'}, status_code=502)

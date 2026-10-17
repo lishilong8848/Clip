@@ -1,4 +1,4 @@
-// Only presentation and the initial input mode differ in V2; all handlers stay original.
+// V2 presentation reuses the shared text-first input mode and business handlers.
 export function adaptCabinetBatchPage(source) {
   let code = source.replaceAll('\r\n', '\n');
   const replace = (before, after) => {
@@ -6,7 +6,7 @@ export function adaptCabinetBatchPage(source) {
     code = code.replace(before, after);
   };
   replace('<script setup lang="ts">', '<script setup lang="ts">\nimport { NButton, NDropdown } from "naive-ui";\nimport DataBars from "../workspace-v2/MotionChart.vue";');
-  replace("const createMode = ref('pdf')", "const createMode = ref('text')");
+  if(!code.includes("const createMode = ref('text')"))throw new Error('Cabinet text-first input contract changed');
   replace(`<nav class="tabs" aria-label="批量登记方式"><button :class="{ active: createMode === 'pdf' }" @click="createMode = 'pdf'">PDF识别</button><button :class="{ active: createMode === 'image' }" @click="createMode = 'image'">图片识别</button><button :class="{ active: createMode === 'text' }" @click="createMode = 'text'">粘贴文本识别</button><button :class="{ active: createMode === 'manual' }" @click="createMode = 'manual'; loadDirectory()">手工批量</button></nav>`,
     `<nav class="v2-batch-methods" aria-label="批量登记方式">
       <NButton :type="createMode === 'text' ? 'primary' : 'default'" :disabled="uploading" :aria-pressed="createMode === 'text'" @click="createMode = 'text'"><template #icon><ClipboardPaste :size="17" /></template>粘贴文本识别</NButton>

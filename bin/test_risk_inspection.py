@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 import httpx
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -340,7 +341,8 @@ class RiskTests(unittest.TestCase):
 
     def test_local_supervisor_cannot_read_other_building_audit_or_table_link(self):
         self.people['reviewer']['scope_rules']=['ALL']
-        self.people['superA']=actor('superA','L3')
+        self.people['admin']=actor('admin','L1','ALL')
+        self.people['superA']=actor('superA','L0')
         self.body['people'].append({'id':'other','scope':'B'})
         self.publish();self.act('other','submit',pid='other',values={'result':'B楼独立反馈'})
         self.store.checkpoint(self.body['id'],url='https://example.test/all-buildings')
@@ -350,7 +352,8 @@ class RiskTests(unittest.TestCase):
 
     def test_job_errors_and_review_notifications_follow_subject_scope(self):
         self.people['reviewer']['scope_rules'] = ['ALL']
-        self.people['superA'] = actor('superA', 'L3')
+        self.people['admin'] = actor('admin', 'L1', 'ALL')
+        self.people['superA'] = actor('superA', 'L0')
         self.body['people'].append({'id': 'other', 'scope': 'B'})
         self.publish()
         self.act('other', 'submit', pid='other')
@@ -812,6 +815,37 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         read.assert_not_called()
 
+    def test_base_template_endpoints_preserve_old_schema_and_publish_selected_snapshot(self):
+        client = self.client(); headers = {'x-person': 'admin', 'Origin': 'http://testserver'}
+        with patch('bin.lan_bitable_template_portal.risk_inspection_routes.RiskCloud.read_template', return_value=self.template) as source:
+            reply = client.get('/api/risk-inspections/base-templates', headers=headers)
+            self.assertEqual(reply.status_code, 200, reply.text)
+            again = client.get('/api/risk-inspections/base-templates', headers=headers)
+            self.assertEqual(again.json()['data']['total'], 1)
+            self.assertEqual(source.call_count, 1, 'seed reads the original once, later reads stay local')
+        self.assertEqual(client.get('/api/risk-inspections/base-templates', headers={'x-person': 'alice'}).status_code, 403)
+        body = {'id': 'd' * 32, 'name': '第二个基础模板', 'enabled': True, 'fields': self.fields, 'items': []}
+        saved = client.post('/api/risk-inspections/base-templates', headers=headers, json=body)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        chosen = saved.json()['data']
+        self.assertEqual(client.get('/api/risk-inspections/templates/' + chosen['id'], headers=headers).status_code, 409)
+        publication = {**self.body, 'base_template_id': chosen['id'], 'template_version': chosen['version']}
+        with patch('bin.lan_bitable_template_portal.risk_inspection_routes.RiskCloud.read_template', side_effect=AssertionError('unexpected cloud schema read')):
+            accepted = client.post('/api/risk-inspections', headers=headers, json=publication)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(self.store.raw(self.body['id'])[0]['source_template']['id'], chosen['id'])
+
+    def test_claim_endpoint_cannot_spoof_another_person_and_mine_list_is_personal(self):
+        self.publish(); client = self.client()
+        rid = self.body['id']; url = '/api/risk-inspections/' + rid + '/claim'
+        self.assertEqual(client.post(url, headers={'x-person': 'bob'}, json={'scope': 'A'}).status_code, 403)
+        self.assertEqual(client.post(url, headers={'x-person': 'admin'}, json={'scope': 'A', 'person_id': 'bob'}).status_code, 400)
+        result = client.post(url, headers={'x-person': 'admin'}, json={'scope': 'A'})
+        self.assertEqual(result.status_code, 200, result.text)
+        mine = client.get('/api/risk-inspections?view=mine', headers={'x-person': 'admin'}).json()['data']
+        self.assertEqual((mine['items'][0]['people_count'], mine['items'][0]['total']), (1, 2))
+        self.assertEqual(client.post(url, headers={'x-person': 'admin', 'Origin': 'https://untrusted.test'}, json={'scope': 'A'}).status_code, 403)
+
     def test_reviewer_route_permission_and_version_checks(self):
         self.publish(); client = self.client()
         url = '/api/risk-inspections/'+self.body['id']+'/reviewer'
@@ -861,6 +895,169 @@ class RouteTests(unittest.TestCase):
         self.store.action(self.people['admin'],rid,'alice',{'action':'revoke_person','version':1,'reason':'范围调整'})
         response=client.post(f'/api/risk-inspections/{rid}/files',params={'name':'photo.png','item_id':item['id'],'field_id':'photo'},content=b'fixture',headers={'x-person':'alice'})
         self.assertEqual(response.status_code,409)
+
+
+class PublicationIsolationTests(unittest.TestCase):
+    setUp = RiskTests.setUp
+
+    def publish_as(self, owner='publisher', rid='a' * 32):
+        self.people.setdefault(owner, actor(owner, 'L3'))
+        body = {**self.body, 'id': rid, 'reviewer_id': 'admin'}
+        result = self.store.publish(self.people[owner], body, self.template)
+        self.store.activate(rid)
+        return result
+
+    def test_same_level_publications_are_isolated_but_assignment_and_review_remain(self):
+        self.publish_as()
+        self.publish_as('peer', 'b' * 32)
+        self.assertEqual(self.store.list(self.people['publisher'], view='published')['total'], 1)
+        for operation in (lambda: self.store.get(self.people['peer'], 'a' * 32),
+                          lambda: self.store.retry(self.people['peer'], 'a' * 32),
+                          lambda: self.store.change_reviewer(self.people['peer'], 'a' * 32, {'version': 1, 'reviewer_id': 'reviewer'})):
+            with self.assertRaises(RiskError) as error:
+                operation()
+            self.assertEqual(error.exception.status, 403)
+        self.assertEqual(self.store.list(self.people['admin'], view='published')['total'], 2)
+        own = self.store.list(self.people['alice'], view='mine')
+        self.assertEqual((own['total'], own['items'][0]['people_count']), (2, 1))
+        self.assertEqual([p['id'] for p in self.store.get(self.people['alice'], 'a' * 32)['people']], ['alice'])
+        self.assertTrue(self.store.get(self.people['admin'], 'a' * 32)['is_reviewer'])
+
+    def test_superior_visibility_stays_inside_existing_building_scope(self):
+        self.publish_as()
+        self.people['manager'] = actor('manager', 'L1', 'B')
+        self.assertEqual(self.store.list(self.people['manager'])['total'], 0)
+        with self.assertRaises(RiskError):
+            self.store.get(self.people['manager'], 'a' * 32)
+        self.people['manager']['scope_rules'] = ['A']
+        self.assertEqual(self.store.list(self.people['manager'])['total'], 1)
+        self.people['manager']['level'] = 'L3'
+        self.assertEqual(self.store.list(self.people['manager'])['total'], 0)
+
+    def test_owner_claim_is_idempotent_uses_original_prefill_and_is_fillable(self):
+        self.body['items'][0]['values'] = {'result': '原始排查要求'}
+        self.publish_as()
+        data = self.store.list(self.people['publisher'], view='mine')
+        self.assertTrue(data['items'][0]['can_claim'])
+        self.assertEqual(data['items'][0]['total'], 0)
+        def claim(_):
+            return self.store.claim(self.people['publisher'], 'a' * 32, {'scope': 'A'})
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(claim, range(2)))
+        person = next(p for p in results[0]['people'] if p['id'] == 'publisher')
+        self.assertEqual(person['items'][0]['values'], {'result': '原始排查要求'})
+        self.assertEqual(len([p for p in results[1]['people'] if p['id'] == 'publisher']), 1)
+        self.assertFalse(results[1]['can_claim'])
+        self.store.action(self.people['publisher'], 'a' * 32, 'publisher', {'action': 'submit', 'version': 1,
+            'item_id': person['items'][0]['id'], 'values': {'result': '本人现场排查无异常'}})
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM risk_audit WHERE action='领取本人任务'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM risk_jobs WHERE id LIKE 'claim-registry:%'").fetchone()[0], 1)
+        mine = self.store.list(self.people['publisher'], view='mine')['items'][0]
+        self.assertEqual((mine['people_count'], mine['total'], mine['submitted']), (1, 2, 1))
+
+    def test_claim_rejects_peer_reviewer_unpublished_and_wrong_scope(self):
+        self.people['publisher'] = actor('publisher', 'L3')
+        self.store.publish(self.people['publisher'], {**self.body, 'reviewer_id': 'admin'}, self.template)
+        with self.assertRaises(RiskError) as error:
+            self.store.claim(self.people['publisher'], 'a' * 32, {'scope': 'A'})
+        self.assertEqual(error.exception.status, 409)
+        self.store.activate('a' * 32)
+        self.people['peer'] = actor('peer', 'L3')
+        for who, scope in [('peer', 'A'), ('admin', 'A'), ('publisher', 'B')]:
+            with self.assertRaises(RiskError):
+                self.store.claim(self.people[who], 'a' * 32, {'scope': scope})
+
+    def test_multiple_base_templates_and_publication_versions_are_independent(self):
+        history = self.store.history
+        base = history.seed_base(self.people['admin'], self.template)
+        self.assertFalse(history.needs_base(self.people['admin']))
+        self.assertEqual(history.seed_base(self.people['admin'], self.template)['id'], base['id'])
+        custom = history.add_base(self.people['admin'], {'id': 'd' * 32, 'name': '暖通排查', 'enabled': True,
+            'fields': self.fields, 'items': [{'title': '检查冷却系统', 'values': {'result': '检查要求'}}]})
+        self.assertEqual(history.list(self.people['admin'], kind='base')['total'], 2)
+        self.assertEqual(history.list(self.people['admin'])['total'], 0)
+        body = {**self.body, 'base_template_id': custom['id'], 'template_version': custom['version'], 'items': custom['items']}
+        self.store.publish(self.people['admin'], body, None)
+        changed = history.update(self.people['admin'], custom['id'], {'version': custom['version'], 'name': '暖通新版',
+            'enabled': False, 'fields': custom['fields'], 'items': []})
+        self.assertNotEqual(changed['version'], custom['version'])
+        release = self.store.raw(self.body['id'])[0]
+        self.assertEqual(release['source_template']['name'], '暖通排查')
+        self.assertEqual(release['original_items'][0]['title'], '检查冷却系统')
+        with self.assertRaises(RiskError):
+            self.store.publish(self.people['admin'], {**body, 'id': 'e' * 32}, None)
+
+    def test_base_template_creation_and_backups_are_idempotent_and_owner_scoped(self):
+        history = self.store.history
+        self.people['publisher'] = actor('publisher', 'L3')
+        self.people['peer'] = actor('peer', 'L3')
+        base = history.seed_base(self.people['publisher'], self.template)
+        history.seed_base(self.people['publisher'], self.template)
+        self.assertEqual(history.list(self.people['peer'], kind='base')['total'], 0)
+        with self.assertRaises(RiskError):
+            history.get(self.people['peer'], base['id'])
+        self.assertEqual(history.list(self.people['admin'], kind='base')['total'], 1)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM risk_history_templates').fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM risk_jobs WHERE kind='template_sync'").fetchone()[0], 1)
+
+
+class CloudRecoveryTests(unittest.TestCase):
+    setUp = RiskTests.setUp
+    remote = CloudTests.remote
+
+    def test_record_upsert_uses_stable_uuid4_and_existing_record_after_response_loss(self):
+        remote = self.remote()
+        tokens, saved = [], {}
+        def handle(req):
+            if req.url.path.endswith('/search'):
+                return httpx.Response(200, json={'code': 0, 'data': {'items': list(saved.values()), 'has_more': False}})
+            body = json.loads(req.content)
+            if req.method == 'POST':
+                token = req.url.params['client_token']; tokens.append(token)
+                self.assertEqual(uuid.UUID(token).version, 4)
+                saved['record'] = {'record_id': 'recFixture', 'fields': body['fields']}
+                raise httpx.ReadTimeout('response lost', request=req)
+            self.assertEqual(req.method, 'PUT')
+            return httpx.Response(200, json={'code': 0, 'data': {'record': saved['record']}})
+        remote.headers = Mock(return_value={})
+        remote.http = FeishuHttpClient(transport=httpx.MockTransport(handle))
+        with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaises(httpx.ReadTimeout):
+                remote.upsert('appFixture', 'tblFixture', 'identity', {'文本': 'fixture'})
+            self.assertEqual(remote.upsert('appFixture', 'tblFixture', 'identity', {'文本': 'fixture'}), 'recFixture')
+        self.assertEqual(len(tokens), 1, 'retry finds the original row, not a second create')
+
+    def test_http400_identifies_stage_and_code_without_exposing_response_sensitive_values(self):
+        remote = self.remote(); remote.headers = Mock(return_value={})
+        remote.http = FeishuHttpClient(transport=httpx.MockTransport(lambda req: httpx.Response(400,
+            json={'code': 1254037, 'msg': 'SECRET-MUST-NOT-LEAK', 'error': {'token': 'SENSITIVE'}})))
+        from bin.lan_bitable_template_portal.risk_inspection_cloud import REGISTRY_APP, REGISTRY_TABLE
+        with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaises(CloudRejected) as error:
+                remote.request('POST', remote.table_path(REGISTRY_APP, REGISTRY_TABLE) + '/records', json={})
+        message = str(error.exception)
+        self.assertIn('登记排查任务', message); self.assertIn('1254037', message)
+        self.assertNotIn('SECRET', message); self.assertNotIn('SENSITIVE', message)
+
+    def test_created_table_is_reused_and_notifications_wait_for_confirmed_registry(self):
+        self.store.publish(self.people['admin'], self.body, self.template)
+        remote = self.remote(); remote.all = Mock(return_value=[])
+        remote.request = Mock(return_value={'table_id': 'tblExisting', 'default_view_id': 'viewExisting'})
+        remote.ensure_fields = Mock()
+        remote.registry = Mock(side_effect=[CloudRejected('HTTP 400: 1254037', 503), None, None])
+        with self.assertRaises(CloudRejected):
+            remote.create_release(*self.store.raw(self.body['id']))
+        self.assertEqual(self.store.raw(self.body['id'])[0]['status'], 'publishing')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM risk_jobs WHERE kind='notify'").fetchone()[0], 0)
+        remote.create_release(*self.store.raw(self.body['id']))
+        remote.create_release(*self.store.raw(self.body['id']))
+        self.assertEqual(remote.request.call_count, 1, 'already-created table must never be duplicated')
+        self.assertEqual(self.store.raw(self.body['id'])[0]['status'], 'active')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM risk_jobs WHERE kind='notify'").fetchone()[0], 2)
 
 
 if __name__=='__main__':

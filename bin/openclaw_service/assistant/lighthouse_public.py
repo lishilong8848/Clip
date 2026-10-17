@@ -1,4 +1,4 @@
-"""Bounded public-query helpers: search (Bing RSS/Mwmbl) and weather.
+"""Bounded public-query helpers: search (Bing RSS/Mwmbl/360) and weather.
 
 Only fixed public endpoints are contacted. Responses are streamed with a 512 KiB
 hard bound (XML and JSON alike); redirects are never followed (any 3xx is
@@ -38,6 +38,7 @@ TZ = dt.timezone(dt.timedelta(hours=8))
 SHANGHAI_TZ = "Asia/Shanghai"
 BING_RSS_URL = "https://www.bing.com/search?format=rss&q={q}"
 MWMBL_URL = "https://api.mwmbl.org/search/?s={q}"
+SO_SEARCH_URL = "https://www.so.com/s?q={q}"
 NEWS_RSS_URLS = ("https://www.chinanews.com.cn/rss/importnews.xml", "https://www.chinanews.com.cn/rss/scroll-news.xml")
 CUSTOM_METEO_GEO = "https://customer-api.open-meteo.com/v1/search"
 CUSTOM_METEO_FORECAST = "https://customer-api.open-meteo.com/v1/forecast"
@@ -375,7 +376,9 @@ def public_search_query(query: str, question: str) -> str:
             query = re.sub(r'和|与|、', ' ', comparison[1]).strip()
             if '最新' in requested:
                 query += ' 最新'
-    query = re.sub(r'^(?:(?:请|帮我|给我|麻烦|查询|搜索|查一下|查查|看看|看一下|了解一下|一下)\s*)+', '', query).strip()
+    query = re.sub(r'^(?:(?:你(?:能不能|可以|能)?(?=上网|联网|帮我|搜|查)|请|帮我|给我|麻烦你?|'
+                   r'上网|联网|查询|搜索(?:一下)?|搜一下|搜搜|查一下|查查|看看|看一下|了解一下|一下)\s*)+', '', query).strip()
+    query = re.sub(r'\s*(?:到底)?(?:是什么(?:东西|意思)?|是啥)(?:呢|呀|啊|吗)?[?？。!！\s]*$', '', query).strip()
     _ensure_public_query(query, requested)
     return query
 
@@ -561,6 +564,66 @@ def _parse_mwmbl_results(raw):
                 if isinstance(value, list) else '')
         rows.append({'url': url, 'title': text_parts(item.get('title')), 'snippet': text_parts(item.get('extract'))})
     return rows
+
+
+class _SoSearchResults(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows, self.stack, self.row, self.row_depth = [], [], None, 0
+        self.valid_page = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = (attrs.get('class') or '').split()
+        hidden = bool(self.stack and self.stack[-1][1]) or tag in {'script', 'style', 'noscript', 'svg', 'iframe'}
+        field = self.stack[-1][2] if self.stack else ''
+        if not hidden:
+            if tag == 'ul' and 'result' in classes:
+                self.valid_page = True
+            if tag == 'li' and 'res-list' in classes and self.row is None and len(self.rows) < 100:
+                self.valid_page = True
+                self.row = {'url': '', 'title': [], 'snippet': []}
+                self.row_depth = len(self.stack) + 1
+            if self.row is not None:
+                if tag == 'h3' and 'res-title' in classes:
+                    field = 'title'
+                elif 'data-result-summary' in attrs:
+                    field = 'snippet'
+                if tag == 'a' and field == 'title' and not self.row['url']:
+                    # Use the supplied original URL, never fetch an opaque search redirect.
+                    url = _verified_public_url(attrs.get('data-mdurl') or attrs.get('data-initurl') or attrs.get('href'))
+                    if url and urlsplit(url).hostname not in {'www.so.com', 'so.com', 'ai.so.com'}:
+                        self.row['url'] = url
+        if tag not in {'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'}:
+            self.stack.append((tag, hidden, field))
+
+    def handle_data(self, data):
+        if self.row is not None and self.stack:
+            _, hidden, field = self.stack[-1]
+            if not hidden and field:
+                self.row[field].append(data)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+        if self.row is not None and len(self.stack) < self.row_depth:
+            row = {'url': self.row['url'], **{key: _strip_html_markup(''.join(self.row[key])) for key in ('title', 'snippet')}}
+            if row['url'] and row['title']:
+                self.rows.append(row)
+            self.row = None
+
+
+def _parse_so_results(raw):
+    if not raw or len(raw) > MAX_BYTES:
+        raise PublicQueryError('中文搜索响应为空或超过大小上限。')
+    parser = _SoSearchResults()
+    parser.feed(raw.decode('utf-8', errors='replace'))
+    parser.close()
+    if not parser.valid_page:
+        raise PublicQueryError('中文搜索未返回有效结果页，可能需要验证，未当作没有结果。')
+    return parser.rows
 
 
 def _relevant_search_results(rows, query):
@@ -1015,6 +1078,7 @@ class PublicSources:
 
     async def search(self, query: str, question: str, *, search_type: SearchType = 'web', topic: str = '') -> dict[str, Any]:
         _ensure_public_query(query, question)
+        query = public_search_query(query, question)
         if search_type not in ('web', 'today_news') or not isinstance(topic, str) or len(topic) > 200:
             raise PublicQueryError('公开查询类型或主题无效。')
         topic = topic.strip()
@@ -1091,10 +1155,13 @@ class PublicSources:
                             raise PublicQueryError(f'搜索服务返回 HTTP {response.status_code}。')
                         return url, parse(await _read_bounded(response, '搜索'))
 
-        # Hedge slow primary reads; broaden only after both precise sources fail.
-        batches = ([[(url, query, _parse_rss_results) for url in NEWS_RSS_URLS]] if news else []) + [attempts[:2], attempts[2:]]
+        precise = attempts[:2]
+        if not news and re.search(r'[\u4e00-\u9fff]', query):
+            precise.append((SO_SEARCH_URL, query, _parse_so_results))
+        # Hedge slow reads without dropping the original topic/site or news dates.
+        batches = ([[(url, query, _parse_rss_results) for url in NEWS_RSS_URLS]] if news else []) + [precise, attempts[2:]]
         for batch in batches:
-            tasks = [asyncio.create_task(fetch(attempt, .25 if index == 1 else 0))
+            tasks = [asyncio.create_task(fetch(attempt, .25 * index))
                      for index, attempt in enumerate(batch)]
             try:
                 for completed in asyncio.as_completed(tasks):
@@ -1138,7 +1205,7 @@ class PublicSources:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-        if empty is not None:
+        if empty is not None and not failures:
             value = empty
         else:
             value = self._unavailable('public_search', BING_RSS_URL.format(q=quote(query)), queried_at,

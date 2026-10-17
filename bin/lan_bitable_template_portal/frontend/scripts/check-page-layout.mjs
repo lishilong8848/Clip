@@ -41,7 +41,13 @@ const adapted=[];
 for(const dir of ['src/components','src/workspace-v2'])for(const file of (await readdir(dir)).filter(name=>name.endsWith('.vue'))){
   const filename=process.cwd().replaceAll('\\','/')+'/'+dir+'/'+file,source=await readFile(filename,'utf8'),layout=adaptPageLayouts(source,filename),embedded=adaptEmbeddedNavigation(layout,filename);
   if(['WaterWorkspace.vue','WaterOverview.vue'].includes(file))assert.equal(layout,source,'water pages use their fixed task layout, not a custom canvas');
-  if(source!==layout){assert.deepEqual(handlers(layout),handlers(source),file+' keeps original handlers and value bindings');adapted.push(file);}
+  if(source!==layout){
+    assert.deepEqual(handlers(layout),handlers(source),file+' keeps original handlers and value bindings');adapted.push(file);
+    assert.match(parse(layout).descriptor.scriptSetup.content,/import PageCanvas from /,file+' registers the generated layout component');
+    const reordered=source.replace(/<script setup lang="ts">|<script lang="ts" setup>/,'<script lang="ts" setup>');
+    const alternative=adaptPageLayouts(reordered,filename);
+    assert.match(parse(alternative).descriptor.scriptSetup.content,/import PageCanvas from /,file+' supports reordered script attributes');
+  }
   const {descriptor,errors}=parse(embedded);assert.deepEqual(errors,[],file);
   assert.deepEqual(compileTemplate({id:file,filename,source:descriptor.template.content}).errors,[],file+' template compiles');
   const script=descriptor.scriptSetup?.content;if(script)assert.deepEqual(ts.createSourceFile(filename+'.ts',script,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS).parseDiagnostics,[],file+' script parses');

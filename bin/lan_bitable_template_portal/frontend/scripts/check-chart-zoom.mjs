@@ -40,6 +40,12 @@ for (const view of ['bar', 'line', 'area']) {
 }
 // Calendar and circular views never show slider zoom.
 assert.equal(chartOption(long, 'donut').dataZoom.length + chartOption(long, 'pie').dataZoom.length, 0, 'circular charts keep no slider');
+for (const view of ['donut', 'pie']) {
+  const option = chartOption(long, view);
+  assert.deepEqual(option.xAxis, [], 'circular charts remove stale x axes');
+  assert.deepEqual(option.yAxis, [], 'circular charts remove stale y axes');
+  assert.equal(option.tooltip.trigger, 'item');
+}
 // The ECharts slider dataZoom artifact is fully removed: no visible track anywhere.
 for (const view of ['bar', 'line', 'area', 'horizontal', 'donut', 'pie']) {
   const o = chartOption(long, view, '条');

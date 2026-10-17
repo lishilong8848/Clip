@@ -46,6 +46,51 @@ class HandoverTests(unittest.TestCase):
         data=self.draft(source=source)
         return self.store.action(self.a,data['id'],data['version'],'send')
 
+    def test_only_owner_can_delete_unsent_draft_and_retry_never_recreates_it(self):
+        draft=self.draft(source=True)
+        with self.assertRaises(HandoverError):
+            self.store.action(self.e,draft['id'],draft['version'],'delete_draft')
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(lambda _:self.store.action(self.a,draft['id'],draft['version'],'delete_draft'),range(2)))
+        self.assertTrue(all(result=={'id':draft['id'],'deleted':True} for result in results))
+        self.assertEqual(self.store.list(self.a,'sent')['total'],0)
+        self.assertEqual(self.store.list(self.b,'received')['total'],0)
+        for operation in (lambda:self.store.get(self.a,draft['id']),lambda:self.store.create(self.a,draft['id'])):
+            with self.assertRaises(HandoverError) as error:operation()
+            self.assertEqual(error.exception.status,410)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM work_handover_audit WHERE action='删除草稿'").fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM work_handover_outbox').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM work_handover_sources').fetchone()[0],1,'source business remains intact')
+
+    def test_sent_returned_and_withdrawn_handover_history_cannot_be_deleted(self):
+        pending=self.pending()
+        for current in (pending,self.store.action(self.a,pending['id'],pending['version'],'withdraw')):
+            with self.assertRaises(HandoverError):
+                self.store.action(self.a,current['id'],current['version'],'delete_draft')
+        current=self.store.get(self.a,pending['id'])
+        payload={k:current[k] for k in ('title','recipient_id','notes')}
+        payload['items']=[{k:i.get(k,'') for k in ('id','title','notes','scope','kind','source_id')} for i in current['items']]
+        saved=self.store.save(self.a,current['id'],current['version'],payload)
+        with self.assertRaises(HandoverError):
+            self.store.action(self.a,saved['id'],saved['version'],'delete_draft')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM work_handover_versions').fetchone()[0],1)
+
+    def test_delete_draft_and_send_race_have_only_one_winner(self):
+        draft=self.draft()
+        def run(action):
+            try:return self.store.action(self.a,draft['id'],draft['version'],action)
+            except HandoverError:return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(run,['send','delete_draft']))
+        self.assertEqual(sum(result is not None for result in results),1)
+        with self.store.connect() as db:
+            state=db.execute('SELECT status FROM work_handovers WHERE id=?',(draft['id'],)).fetchone()[0]
+            queued=db.execute('SELECT COUNT(*) FROM work_handover_outbox').fetchone()[0]
+            self.assertIn(state,{'pending','deleted'})
+            self.assertEqual(queued,1 if state=='pending' else 0)
+
     def test_confirmation_required_and_checklist_never_writes_source(self):
         pending=self.pending(True)
         with self.assertRaises(HandoverError):

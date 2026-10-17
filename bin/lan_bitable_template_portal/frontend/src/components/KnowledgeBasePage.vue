@@ -31,10 +31,7 @@
 
     <div v-if="!recycle && selectedCount > 0" class="kb-batch-bar" role="toolbar" aria-label="批量分组">
       <span class="kb-batch-count">已选 {{ selectedCount }} 个文件{{ allSelection ? '（全部搜索结果）' : '' }}</span>
-      <select v-model="assignGroupId" aria-label="目标分组" :disabled="selectionDisabled">
-        <option value="">选择分组…</option>
-        <option v-for="g in groupOptions" :key="g.value" :value="g.value">{{ g.label }}</option>
-      </select>
+      <KnowledgeGroupPicker v-model="assignGroupId" :groups="groups" :disabled="selectionDisabled" />
       <button type="button" class="primary" :disabled="!assignGroupId || selectionDisabled" @click="assignSelection"><Check :size="15" />应用分组</button>
       <button type="button" class="ghost-button" :disabled="selectionDisabled" @click="unassignSelection">移出分组</button>
       <button type="button" class="ghost-button" :disabled="groupBusy" @click="clearSelection">取消选择</button>
@@ -227,6 +224,7 @@ import VnetBackButton from "./VnetBackButton.vue";
 import { isAssistantEvent } from "../modalState";
 import { KNOWLEDGE_FILE_ACCEPT, supportedKnowledgeFile, folderFile, droppedKnowledgeFiles, knowledgeUploadBatches } from '../knowledgeFiles';
 import KnowledgeFolders from '../workspace-v2/KnowledgeFolders.vue';
+import KnowledgeGroupPicker from './KnowledgeGroupPicker.vue';
 import {folderOptions, type GroupItem} from '../workspace-v2/knowledgeFolders';
 
 const BASE = "/api/assistant/knowledge";
@@ -1229,7 +1227,6 @@ onBeforeUnmount(() => {
   border: 1px solid #cfe0ff; border-radius: var(--cf-radius-card, 16px); background: #f0f6ff;
 }
 .kb-batch-count { color: var(--cf-brand-blue, #1e63ff); font-weight: 850; font-size: 12px; white-space: nowrap; }
-.kb-batch-bar select { min-width:0;max-width:min(100%,440px);padding: 7px 10px; border: 1px solid var(--cf-border, #d8e5f7); border-radius: 8px; background: #fff; color: var(--cf-text, #0f172a); font: inherit; font-size: 13px; }
 .ghost-button {
   display: inline-flex; align-items: center; gap: 5px; min-height: 34px; padding: 0 12px;
   border: 1px solid var(--cf-border, #d8e5f7); border-radius: var(--cf-radius-control, 14px); background: #fff; color: #33526f; font: inherit; font-size: 13px; font-weight: 800; cursor: pointer;

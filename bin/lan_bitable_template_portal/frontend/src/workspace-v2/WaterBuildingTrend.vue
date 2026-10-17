@@ -34,15 +34,17 @@ const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
 let chart:EChartsType|undefined,resize:ResizeObserver|undefined,disposed=false,frame=0;
 watch(()=>props.data.series.map(row=>row.scope).join(','),()=>{visible.value=props.data.series.map(row=>row.scope);},{immediate:true});
 function update(){
-  if(!chart||props.loading||props.failed)return;
+  if(!chart||chart.isDisposed())return;
   try{
+    chart.dispatchAction({type:'hideTip'});
+    if(props.loading||props.failed||!hasValues.value){chart.clear();return;}
     const option=chartOption(props.data.days.map(label=>({label,value:0})),'line','t',(host.value?.clientWidth||0)<440,!reduced.matches,nightMode.value) as Dict;
     const base=option.series[0];
     option.yAxis={...option.yAxis,minInterval:undefined};
     option.xAxis={...option.xAxis,axisLabel:{...option.xAxis.axisLabel,formatter:(day:string)=>day.slice(5)}};
     option.series=shown.value.map(row=>{const index=props.data.series.findIndex(series=>series.scope===row.scope),color=colors.value[index%colors.value.length];return {...base,id:row.scope,name:row.label,data:row.values,connectNulls:false,showSymbol:row.values.filter(value=>value!==null).length<2,symbolSize:6,itemStyle:{color},lineStyle:{width:2.5,color,type:styles[index%styles.length]}};});
     option.tooltip={...option.tooltip,trigger:'axis',formatter:(params:any[])=>{const index=params[0]?.dataIndex;return index===undefined?'':[props.data.days[index],...shown.value.map(row=>row.label+'：'+waterNumberText(row.values[index],2)+' t')].join('\n');}};
-    chart.setOption(option,{replaceMerge:['series','xAxis','yAxis','dataZoom'],lazyUpdate:true});engineFailed.value=false;
+    chart.setOption(option,{replaceMerge:['series','xAxis','yAxis','dataZoom'],lazyUpdate:false});engineFailed.value=false;
   }catch{engineFailed.value=true;}
 }
 watch(()=>[props.data,props.loading,props.failed,visible.value,nightMode.value],update,{deep:true});

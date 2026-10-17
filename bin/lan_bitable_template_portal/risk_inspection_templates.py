@@ -69,9 +69,9 @@ class RiskTemplates:
                 CREATE TABLE IF NOT EXISTS risk_history_catalog(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
             ''')
 
-    @staticmethod
-    def allowed(actor, data):
-        return manager(actor) and bool(data['scopes']) and all(can_scope(actor, s) for s in data['scopes'])
+    def allowed(self, actor, data):
+        return (manager(actor) and bool(data['scopes']) and all(can_scope(actor, s) for s in data['scopes'])
+                and (actor['id'] == data['creator']['id'] or self.store.superior(actor, data['creator']['id'])))
 
     @staticmethod
     def read(db, tid):
@@ -119,15 +119,18 @@ class RiskTemplates:
                 people = [json.loads(r[0]) for r in db.execute('SELECT data FROM risk_people WHERE release_id=?', (release['id'],))]
                 self.create(db, release, people)
 
-    def get(self, actor, tid, *, usable=False):
+    def get(self, actor, tid, *, usable=False, kind=None):
         self.store.check(actor)
         with self.store.connect() as db:
             data = self.read(db, tid)
+            if kind and data.get('kind', 'history') != kind:
+                raise RiskError('模板类型不匹配，请重新选择。', 409)
             if not self.allowed(actor, data):
                 raise RiskError('没有该历史模板涉及楼栋的管理权限。', 403)
             if usable and not data['enabled']:
                 raise RiskError('该历史模板已停用，请选择其它模板。', 409)
             public = deepcopy(data)
+            public['kind'] = data.get('kind', 'history')
             public.pop('updated_by', None)
             public['creator'] = data['creator']['name']
             public['cloud'] = {'synced': data['cloud'].get('revision') == data['revision']}
@@ -135,21 +138,27 @@ class RiskTemplates:
             public['sync_status'] = dict(job) if job else {'status': 'queued', 'error': ''}
             return public
 
-    def list(self, actor, page=1, search=''):
+    def list(self, actor, page=1, search='', kind='history'):
         self.store.check(actor)
         if not manager(actor):
             raise RiskError('仅管理员或楼栋主管可使用历史模板。', 403)
-        self.backfill()
+        if kind not in {'base', 'history'}:
+            raise RiskError('模板类型无效。')
+        if kind == 'history':
+            self.backfill()
         try:
             page = min(100000, max(1, int(page)))
         except (ValueError, TypeError):
             raise RiskError('页码无效。') from None
         search = text(search, 120)
         scopes = [s for s in SCOPES if can_scope(actor, s)]
-        sql = " FROM risk_history_templates h WHERE json_array_length(h.data,'$.scopes')>0 AND NOT EXISTS(SELECT 1 FROM json_each(h.data,'$.scopes') s WHERE s.value NOT IN (" + ','.join('?' for _ in scopes) + ')) AND instr(h.name,?)>0'
         with self.store.connect() as db:
-            total = db.execute('SELECT COUNT(*)' + sql, scopes + [search]).fetchone()[0]
-            rows = db.execute('SELECT h.id' + sql + ' ORDER BY h.updated DESC,h.id LIMIT 20 OFFSET ?', scopes + [search, (page-1)*20]).fetchall()
+            owners = [actor['id'], *(row[0] for row in db.execute("SELECT DISTINCT json_extract(data,'$.creator.id') FROM risk_history_templates")
+                                     if row[0] != actor['id'] and self.store.superior(actor, row[0]))]
+            sql = " FROM risk_history_templates h WHERE COALESCE(json_extract(h.data,'$.kind'),'history')=? AND json_extract(h.data,'$.creator.id') IN (" + ','.join('?' for _ in owners) + ") AND json_array_length(h.data,'$.scopes')>0 AND NOT EXISTS(SELECT 1 FROM json_each(h.data,'$.scopes') s WHERE s.value NOT IN (" + ','.join('?' for _ in scopes) + ')) AND instr(h.name,?)>0'
+            args = [kind, *owners, *scopes, search]
+            total = db.execute('SELECT COUNT(*)' + sql, args).fetchone()[0]
+            rows = db.execute('SELECT h.id' + sql + ' ORDER BY h.updated DESC,h.id LIMIT 20 OFFSET ?', args + [(page-1)*20]).fetchall()
         items = []
         for row in rows:
             data = self.get(actor, row[0])
@@ -157,14 +166,52 @@ class RiskTemplates:
                           'field_count': len(data['fields']), 'item_count': len(data['items'])})
         return {'items': items, 'page': page, 'total': total}
 
+    def needs_base(self, actor):
+        with self.store.connect() as db:
+            return not db.execute("SELECT 1 FROM risk_history_templates WHERE json_extract(data,'$.kind')='base' AND json_extract(data,'$.creator.id')=? LIMIT 1",
+                                  (actor['id'],)).fetchone()
+
+    def seed_base(self, actor, template):
+        return self.add_base(actor, {'id': digest(['risk-base', actor['id']])[:32], 'name': '默认基础模板',
+                                    'enabled': True, 'fields': template['fields'], 'items': []})
+
+    def add_base(self, actor, body):
+        self.store.check(actor)
+        if not manager(actor):
+            raise RiskError('仅管理员或楼栋主管可创建基础模板。', 403)
+        if not isinstance(body, dict) or set(body) != {'id', 'name', 'enabled', 'fields', 'items'} or type(body['enabled']) is not bool:
+            raise RiskError('基础模板参数无效。')
+        tid = text(body['id'], 32, True)
+        if not re.fullmatch('[a-f0-9]{32}', tid):
+            raise RiskError('基础模板标识无效。')
+        fields = clean_fields(body['fields'])
+        items = reusable_items(fields, body['items']) if body['items'] != [] else []
+        data = {'id': tid, 'kind': 'base', 'source_release_id': '', 'source_name': '', 'source_url': '',
+                'name': text(body['name'], 120, True), 'revision': 1, 'enabled': body['enabled'], 'fields': fields,
+                'items': items, 'scopes': [s for s in SCOPES if can_scope(actor, s)], 'legacy': False,
+                'created': time.time(), 'updated': time.time(), 'creator': {'id': actor['id'], 'name': actor['name']},
+                'updated_by': actor['id'], 'request_hash': digest(body), 'cloud': {}}
+        if not data['scopes']:
+            raise RiskError('没有可用于基础模板的楼栋权限。', 403)
+        with self.store.connect(True) as db:
+            if db.execute('SELECT 1 FROM risk_history_templates WHERE id=?', (tid,)).fetchone():
+                existing = self.read(db, tid)
+                if existing.get('kind') != 'base' or existing['creator']['id'] != actor['id'] or existing.get('request_hash') != digest(body):
+                    raise RiskError('模板创建标识冲突，请重新读取原模板。', 409)
+            else:
+                self.put(db, data)
+                self.store._audit(db, tid, '', actor, '创建基础模板', {'name': data['name']})
+                self.store.enqueue(db, tid, 'template_sync', {'template_id': tid, 'revision': 1}, 'template:' + tid + ':1')
+        return self.get(actor, tid, kind='base')
+
     def update(self, actor, tid, body):
         self.store.check(actor)
         if not isinstance(body, dict) or set(body) != {'version', 'name', 'enabled', 'fields', 'items'} or type(body['enabled']) is not bool:
             raise RiskError('历史模板保存参数无效。')
         fields = clean_fields(body['fields'])
-        items = reusable_items(fields, body['items'])
         with self.store.connect(True) as db:
             data = self.read(db, tid)
+            items = [] if data.get('kind') == 'base' and body['items'] == [] else reusable_items(fields, body['items'])
             if not self.allowed(actor, data):
                 raise RiskError('无权修改该模板。', 403)
             if data['version'] != body['version']:
@@ -174,6 +221,13 @@ class RiskTemplates:
             self.put(db, data)
             self.store._audit(db, tid, '', actor, '修改历史模板', {'revision': data['revision'], 'enabled': data['enabled'], 'fields': fields, 'items': items})
             self.store.enqueue(db, tid, 'template_sync', {'template_id': tid, 'revision': data['revision']}, f'template:{tid}:{data["revision"]}')
+        return self.get(actor, tid)
+
+    def retry(self, actor, tid):
+        self.get(actor, tid)
+        with self.store.connect(True) as db:
+            db.execute("UPDATE risk_jobs SET status='queued',next_at=0,attempts=0 WHERE id=? AND status='failed' AND kind='template_sync'",
+                       (f'template:{tid}:{self.read(db, tid)["revision"]}',))
         return self.get(actor, tid)
 
     def raw(self, tid):

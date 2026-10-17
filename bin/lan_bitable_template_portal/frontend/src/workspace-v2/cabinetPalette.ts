@@ -12,8 +12,9 @@ export function cabinetPalette(cell:Dict,dark:boolean){
  if(dark){
   const fill=rgb(background),neutral=!fill||Math.max(...fill)-Math.min(...fill)<20&&lightness(fill)>.65;
   if(neutral)background='#232b34';
-  const light=lightness(neutral?[35,43,52]:fill!),text=rgb(color),ratio=text?(Math.max(light,lightness(text))+.05)/(Math.min(light,lightness(text))+.05):0;
-  if(ratio<4.5)color=light>.179?'#000000':'#ffffff';
+  const light=lightness(neutral?[35,43,52]:fill!);
+  // Spreadsheet fonts are thin at fitted zoom: use the strongest available contrast.
+  color=(light+.05)/.05>=1.05/(light+.05)?'#000000':'#ffffff';
  }
- return {'--v2-cell-background':background,'--v2-cell-ink':color,background:'var(--v2-cell-background)',color:'var(--v2-cell-ink)'};
+ return {'--v2-cell-background':background,'--v2-cell-ink':color,'--v2-cell-font':dark?'system-ui, "Microsoft YaHei", sans-serif':String(cell.style?.font_name||'inherit'),'--v2-cell-weight':cell.style?.bold?'700':dark?'600':'400',background:'var(--v2-cell-background)',color:'var(--v2-cell-ink)'};
 }

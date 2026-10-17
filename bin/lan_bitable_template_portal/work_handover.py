@@ -97,6 +97,9 @@ class Handovers:
 
     def _access(self, data, actor):
         self.check_actor(actor)
+        if data['status'] == 'deleted':
+            raise HandoverError('交接草稿已删除。' if actor['id'] == data['owner']['id'] else '无权查看此交接单。',
+                                410 if actor['id'] == data['owner']['id'] else 403)
         if actor['id'] != data['owner']['id'] and not (actor['id'] == data['recipient_id'] and data['status'] not in {'draft', 'withdrawn'}):
             raise HandoverError('只能查看本人发出或收到的交接单。', 403)
 
@@ -155,7 +158,7 @@ class Handovers:
     def list(self, actor, view='received', page=1):
         self.check_actor(actor)
         page = max(1, min(int(page), 10000))
-        clause = 'owner=?' if view == 'sent' else "recipient=? AND status NOT IN ('draft','withdrawn')"
+        clause = "owner=? AND status!='deleted'" if view == 'sent' else "recipient=? AND status NOT IN ('draft','withdrawn','deleted')"
         if view == 'pending':
             clause += " AND status='pending'"
         with self.connect() as db:
@@ -261,6 +264,8 @@ class Handovers:
                 target = self.actor_by_person(preview['recipient_id'])
         with self.connect(True) as db:
             data = self._read(db, identity)
+            if action == 'delete_draft' and data['status'] == 'deleted' and actor['id'] == data['owner']['id']:
+                return {'id': identity, 'deleted': True}
             self._access(data, actor)
             owner = actor['id'] == data['owner']['id']
             recipient = actor['id'] == data['recipient_id']
@@ -271,6 +276,16 @@ class Handovers:
                     return self._public(db, data, actor)
             if data['version'] != version:
                 raise HandoverError('交接内容已变化，请打开最新交接单核对。',409)
+            if action == 'delete_draft':
+                if not owner:
+                    raise HandoverError('只能删除本人创建的草稿。', 403)
+                if data['status'] != 'draft' or data.get('sent_version') or db.execute(
+                        'SELECT 1 FROM work_handover_versions WHERE handover_id=? LIMIT 1', (identity,)).fetchone():
+                    raise HandoverError('仅未发送的交接草稿可删除，已发送的交接和历史记录保留。', 409)
+                data.update(status='deleted', version=data['version'] + 1, deleted_at=timestamp())
+                db.execute('UPDATE work_handover_files SET visible=0 WHERE handover_id=?', (identity,))
+                self._save(db, data, actor, '删除草稿')
+                return {'id': identity, 'deleted': True}
             if action == 'send':
                 if not owner or data['status'] not in {'draft','returned','withdrawn'}:
                     raise HandoverError('当前交接单不能重复发送。',409)

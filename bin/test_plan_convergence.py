@@ -250,6 +250,69 @@ class PlanConvergenceTests(unittest.TestCase):
         self.assertNotIn('auth_required', response.json())
         self.assertNotIn('VPN', response.json()['error'])
 
+    def test_public_rules_use_original_permissions_and_local_catalog(self):
+        from public_access.config import Settings
+        from public_access.ingress import PublicGuard
+
+        origin = 'https://dt.sjhl.online'
+        marker = {'x-clipflow-public-ingress': 'isolated-plan-test', 'origin': origin}
+        public = TestClient(PublicGuard(self.app, 'isolated-plan-test',
+            Settings(public_url=origin), self.controller._current_session), base_url=origin, client=('127.0.0.1', 50000))
+        self.addCleanup(public.close)
+        prefix = '/api/plan-convergence'
+        with patch.object(rule_sets, 'RULE_DB', Path(self.temp.name) / 'public-rules.sqlite3'), \
+                patch.object(self.controller, '_request_base_url', return_value=origin), \
+                patch.object(auth, 'request', side_effect=AssertionError('local rules must not request VPN')):
+            self.assertEqual(public.get(prefix + '/rulesets', headers={**marker, 'x-test-anonymous': '1'}).status_code, 401)
+            self.assertEqual(public.get(prefix + '/rulesets', headers={**marker, 'x-test-guest': '1'}).status_code, 403)
+            viewer = {**marker, 'x-test-role': 'viewer'}
+            self.assertEqual(public.get(prefix + '/rulesets', headers=viewer).status_code, 200)
+            self.assertEqual(public.post(prefix + '/rulesets', headers=viewer, json={'name': 'forbidden'}).status_code, 403)
+            self.assertEqual(public.post(prefix + '/rulesets', headers={**marker, 'origin': 'https://evil.example'}, json={'name': 'forbidden'}).status_code, 403)
+            created = public.post(prefix + '/rulesets', headers=marker, json={'name': '公网隔离规则'})
+            self.assertEqual(created.status_code, 200, created.text)
+            path = prefix + '/rulesets/' + str(created.json()['data']['id'])
+            detail = public.get(path, headers=marker).json()['data']
+            payload = {'name': '公网修改规则', 'remark': '', 'expected_version': detail['version'],
+                       'items': [{'scope_type': 'device', 'inst_name': '隔离设备', 'rule_group_no': 1}]}
+            for method in ('PUT', 'DELETE'):
+                self.assertEqual(public.request(method, path, headers=viewer, json=payload).status_code, 403)
+            saved = public.put(path, headers=marker, json=payload)
+            self.assertEqual(saved.status_code, 200, saved.text)
+            detail = public.get(path, headers=marker).json()['data']
+            self.assertEqual(detail['name'], payload['name'])
+            self.assertEqual(detail['items'][0]['inst_name'], '隔离设备')
+            with patch.object(PlanConvergenceService, 'catalog', return_value={'items': [{'obj_name': '冷机'}]}):
+                catalog = public.get(prefix + '/catalog?kind=types', headers=marker)
+                self.assertEqual(catalog.status_code, 200)
+                self.assertEqual(catalog.json()['data']['items'][0]['obj_name'], '冷机')
+            self.assertEqual(public.delete(path, headers=marker).status_code, 200)
+            self.assertEqual(public.get(path, headers=marker).status_code, 404)
+            self.assertEqual(public.get(prefix + '/rulesets', headers=marker).json()['data'], [])
+
+    def test_check_failures_are_classified_and_can_retry_immediately(self):
+        request = httpx.Request('GET', 'https://isolated.invalid/blocks')
+        failures = [
+            (httpx.ConnectTimeout('offline'), 502, 'zh_connection_unavailable'),
+            (httpx.HTTPStatusError('expired', request=request, response=httpx.Response(401, request=request)), 400, 'zh_auth_expired'),
+            (httpx.HTTPStatusError('upstream', request=request, response=httpx.Response(503, request=request)), 502, 'zh_upstream_error'),
+            (TimeoutError('核对读取超时，本次未产生核对结论'), 504, 'zh_query_timeout'),
+        ]
+        for kind, method in [('maintenance', 'maintenance_check'), ('change', 'change_check')]:
+            for error, status, code in failures:
+                with self.subTest(kind=kind, code=code), patch.object(PlanConvergenceService, method,
+                        side_effect=[error, {'records': [{'record_id': 'isolated-record', 'hits': []}]}]) as check:
+                    path = '/api/plan-convergence/' + kind + '/check'
+                    failed = self.client.post(path, json={'record_id': 'isolated-record'})
+                    self.assertEqual(failed.status_code, status)
+                    self.assertEqual(failed.json()['code'], code)
+                    self.assertNotIn('data', failed.json())
+                    self.assertNotIn('auth_required', failed.json())
+                    retried = self.client.post(path, json={'record_id': 'isolated-record'})
+                    self.assertEqual(retried.status_code, 200)
+                    self.assertEqual(retried.json()['data']['records'][0]['record_id'], 'isolated-record')
+                    self.assertEqual(check.call_count, 2)
+
     def test_large_rule_set_expands_in_batches(self):
         ids = [str(index) for index in range(901)]
         with patch.object(rule_sets, 'get_set', return_value={'id': 1}), patch.object(rule_sets, 'expand_set_items', return_value=ids), patch.object(

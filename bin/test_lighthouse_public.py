@@ -45,6 +45,15 @@ CUSTOM_KEY_ENV = "OPEN_METEO_CUSTOMER_KEY"
 
 
 class TLSContextPolicyTests(unittest.TestCase):
+    def test_search_question_keeps_subject_without_chat_instructions(self):
+        from openclaw_service.assistant.lighthouse_public import public_search_query
+        for question in ('你上网搜一下黑尾大勾鱼是什么?', '请帮我联网搜索黑尾大勾鱼是什么东西？',
+                         '你能不能上网查一下黑尾大勾鱼是什么意思呢？'):
+            with self.subTest(question=question):
+                self.assertEqual(public_search_query(question, question), '黑尾大勾鱼')
+        query = '黑尾大勾鱼 site:example.com'
+        self.assertEqual(public_search_query(query, query), query)
+
     def test_model_search_rephrasing_falls_back_to_user_words_without_exfiltration(self):
         from openclaw_service.assistant.lighthouse_public import public_search_query
         question = '告诉我deepseek和豆包有什么区别，联网给我最新版'
@@ -503,13 +512,99 @@ class PublicSourcesIsolatedTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["queried_at"])
 
     async def test_search_empty_results_is_not_unavailable(self):
-        handler = self.route(lambda _: (200, _rss([]).encode("utf-8")))
+        handler = self.route(lambda request: (200, b'<ul class="result"></ul>'
+            if request.url.host == 'www.so.com' else b'[]'
+            if request.url.host == 'api.mwmbl.org' else _rss([]).encode("utf-8")))
         src = self.make_src(handler)
         result = await src.search("上海天气", "上海今天天气怎么样")
         self.assertTrue(result["ok"])
         self.assertTrue(result["empty"])
         self.assertEqual(result["count"], 0)
         self.assertFalse(result["unavailable"])
+
+    async def test_chinese_search_uses_domestic_results_when_other_sources_miss(self):
+        def handler(request):
+            if request.url.host == 'www.bing.com':
+                return httpx.Response(200, content=_rss([{'title': '银行账户登录', 'link': 'https://example.com/bank'}]).encode())
+            if request.url.host == 'api.mwmbl.org':
+                return httpx.Response(200, json=[])
+            self.assertEqual(request.url.host, 'www.so.com')
+            self.assertEqual(request.url.params['q'], '黑尾大勾鱼')
+            return httpx.Response(200, text='<ul class="result"><li class="res-list">'
+                '<h3 class="res-title"><a href="https://www.so.com/link?m=opaque" '
+                'data-mdurl="https://example.com/fish"><em>黑尾大勾</em>鱼</a></h3>'
+                '<span data-result-summary>一种银色的小型观赏鱼，学名 Moenkhausia costae。</span></li></ul>')
+        result = await self.make_src(self.route(handler)).search('你上网搜一下黑尾大勾鱼是什么?',
+                                                               '你上网搜一下黑尾大勾鱼是什么?')
+        self.assertTrue(result['ok'], result)
+        self.assertIn('www.so.com', result['sourceURL'])
+        self.assertEqual(result['results'], [{'url': 'https://example.com/fish', 'title': '黑尾大勾鱼',
+            'snippet': '一种银色的小型观赏鱼，学名 Moenkhausia costae。'}])
+        self.assertEqual(len(self.calls), 3)
+
+    async def test_partial_search_outage_is_not_reported_as_no_results(self):
+        def handler(request):
+            return httpx.Response(200, json=[]) if request.url.host == 'api.mwmbl.org' else httpx.Response(503)
+        result = await self.make_src(self.route(handler)).search('黑尾大勾鱼', '黑尾大勾鱼是什么')
+        self.assertFalse(result['ok'])
+        self.assertTrue(result['unavailable'])
+        self.assertFalse(result['empty'])
+        self.assertIsNone(result['count'])
+        self.assertIn('503', result['note'])
+
+    async def test_chinese_search_cancels_slow_sources_after_domestic_success(self):
+        started, cancelled = set(), set()
+        async def handler(request):
+            host = request.url.host
+            started.add(host)
+            if host != 'www.so.com':
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.add(host)
+            return httpx.Response(200, text='<ul class="result"><li class="res-list">'
+                '<h3 class="res-title"><a href="https://example.com/fish">黑尾大勾鱼</a></h3></li></ul>')
+        result = await asyncio.wait_for(self.make_src(handler).search('黑尾大勾鱼', '黑尾大勾鱼是什么'), 2)
+        self.assertTrue(result['ok'])
+        self.assertEqual(started, {'www.bing.com', 'api.mwmbl.org', 'www.so.com'})
+        self.assertEqual(cancelled, {'www.bing.com', 'api.mwmbl.org'})
+
+    async def test_chinese_result_parser_rejects_scripts_tracking_and_private_links(self):
+        from openclaw_service.assistant.lighthouse_public import _parse_so_results
+        def entry(title, attrs, summary='摘要'):
+            return f'<li class="res-list"><h3 class="res-title"><a {attrs}>{title}</a></h3><p data-result-summary>{summary}</p></li>'
+        raw = ('<ul class="result"><script>' + entry('伪造', 'href="https://example.com/script"') + '</script>'
+            + entry('有效 &amp; 安全', 'data-mdurl="https://example.com/fish?id=1&amp;lang=zh" href="/link?m=tracking"',
+                    '正文<em>高亮</em><script>不可信脚本</script><style>隐藏样式</style><ul><li>嵌套摘要</li></ul>')
+            + entry('跟踪', 'href="https://www.so.com/link?m=tracking"')
+            + entry('内网', 'data-mdurl="http://192.168.1.10/" href="https://example.com/fallback"')
+            + entry('凭据', 'href="https://example.com/fish?token=secret"')
+            + entry('AI答案', 'href="https://ai.so.com/search/answer"') + '</ul>')
+        rows = _parse_so_results(raw.encode())
+        self.assertEqual(rows, [{'url': 'https://example.com/fish?id=1&lang=zh', 'title': '有效 & 安全',
+            'snippet': '正文高亮嵌套摘要'}])
+        for raw in (b'<html><title>captcha</title></html>', b'<rss><channel/></rss>', b'x' * (512 * 1024 + 1)):
+            with self.subTest(raw=raw[:30]), self.assertRaises(PublicQueryError):
+                _parse_so_results(raw)
+
+    async def test_chinese_search_retains_site_and_does_not_use_html_as_news(self):
+        def handler(request):
+            if request.url.host == 'api.mwmbl.org':
+                return httpx.Response(200, json=[])
+            if request.url.host != 'www.so.com':
+                return httpx.Response(200, content=b'<rss><channel/></rss>')
+            rows = ''.join('<li class="res-list"><h3 class="res-title"><a data-mdurl="https://' + host
+                + '/fish" href="/link?m=tracking">黑尾大勾鱼</a></h3><p data-result-summary>鱼类资料</p></li>'
+                for host in ('other.example.com', 'example.com.evil.example', 'example.com'))
+            return httpx.Response(200, text='<ul class="result">' + rows + '</ul>')
+        source = self.make_src(self.route(handler))
+        result = await source.search('黑尾大勾鱼 site:example.com', '黑尾大勾鱼 site:example.com')
+        self.assertEqual([row['url'] for row in result['results']],
+                         ['https://other.example.com/fish', 'https://example.com/fish'])
+        self.calls.clear()
+        result = await source.search('今天黑尾大勾鱼新闻', '今天黑尾大勾鱼新闻', search_type='today_news', topic='黑尾大勾鱼')
+        self.assertFalse(result.get('results'))
+        self.assertFalse(any(request.url.host == 'www.so.com' for request in self.calls))
 
     async def test_fast_relevant_backup_does_not_wait_for_slow_primary(self):
         entered, stopped, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -644,6 +739,8 @@ class PublicSourcesIsolatedTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, content=_rss([]).encode())
             if request.url.host == 'api.mwmbl.org':
                 return httpx.Response(200, json=[])
+            if request.url.host == 'www.so.com':
+                return httpx.Response(200, content=b'<ul class="result"></ul>')
             return httpx.Response(503)
         src = self.make_src(self.route(handler))
         with patch.dict(os.environ, {CUSTOM_KEY_ENV: ''}):

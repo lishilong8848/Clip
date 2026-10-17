@@ -64,7 +64,7 @@ try{
           }
           return ok({items:category!=='other'?roleSources():[{id:'f'.repeat(64),title:'A楼测试维保通告',kind:'ongoing',business_status:'进行中',scope:'A',module:'maintenance',period:'2026-10',source_url:'/workbench-lite?scope=A&record_id=fixture-notice',source_checked_at:'2026-10-16T10:00:00+08:00',participated:true}],warnings:[]});
         }
-        if(!p&&req.method()==='GET')return ok({items:[...docs.values()].filter(d=>u.searchParams.get('view')==='sent'?who==='alice':who==='bob'&&d.status!=='draft').map(publicDoc),total:docs.size,page:1});
+        if(!p&&req.method()==='GET'){const visible=[...docs.values()].filter(d=>d.status!=='deleted'&&(u.searchParams.get('view')==='sent'?who==='alice':who==='bob'&&d.status!=='draft'));return ok({items:visible.map(publicDoc),total:visible.length,page:1});}
         if(!p){const {id}=req.postDataJSON();const d={id,title:'工作交接',recipient_id:'',recipient_name:'',owner:{id:'alice',name},status:'draft',version:1,notes:'',items:[],created_at:'2026-10-16T10:00:00+08:00',updated_at:'2026-10-16T10:00:00+08:00'};docs.set(id,d);return ok(publicDoc(d));}
         const id=p.split('/')[1],d=docs.get(id);assert(d,'Known handover');
         if(who==='alice'&&req.method()==='GET'&&id===delayedId){
@@ -80,6 +80,7 @@ try{
         }
         if(p.endsWith('/actions')){
           const {version:v,action,item_id}=req.postDataJSON();assert.equal(v,d.version);
+          if(action==='delete_draft'){assert.equal(who,'alice');assert.equal(d.status,'draft');assert(!d.sent_version);d.status='deleted';return ok({id:d.id,deleted:true});}
           if(action==='send'){d.status='pending';d.sent_version=d.version+1;}
           if(action==='accept'){assert.equal(who,'bob');d.status='accepted';d.decision_by=name;d.decision_at='2026-10-16T10:01:00+08:00';}
           if(action==='retry-notification'){d.notification_failures=[];return ok(publicDoc(d));}
@@ -217,6 +218,19 @@ try{
     await sender.locator('.handover-detail h2').filter({hasText:'A楼岗位工作交接'}).waitFor();
     assert.equal(await sender.locator('.handover-item').count(),2,'Directory failure never hides existing handover records');
     directoryFailure=false;
+    category='other';await sender.goto(entry());await sender.getByRole('button',{name:'发起交接',exact:true}).click();
+    const unsent=[...docs.values()].at(-1),countBeforeDelete=docs.size;
+    for(const viewport of [{width:1440,height:900},{width:375,height:667},{width:360,height:640}]){
+      await sender.setViewportSize(viewport);await sender.getByRole('button',{name:'删除草稿',exact:true}).scrollIntoViewIfNeeded();
+      const limit=version==='v2'&&viewport.width<700?(await sender.locator('.v2-mobile-nav').boundingBox()).y:viewport.height;
+      for(const name of ['删除草稿','保存草稿','发送交接']){const rect=await sender.getByRole('button',{name,exact:true}).boundingBox();assert(rect.x>=0&&rect.x+rect.width<=viewport.width&&rect.y>=0&&rect.y+rect.height<=limit+1,`${version} ${viewport.width}: ${name} stays usable`);}
+    }
+    await sender.getByRole('button',{name:'删除草稿',exact:true}).click();await sender.getByRole('dialog').getByRole('button',{name:'取消',exact:true}).click();
+    assert.equal(unsent.status,'draft','Cancelling deletion does not write or discard the draft');
+    await sender.getByRole('button',{name:'删除草稿',exact:true}).click();await sender.getByRole('dialog').getByRole('button',{name:'确认',exact:true}).click();
+    await sender.getByText('交接草稿已删除',{exact:true}).waitFor();assert.equal(await sender.locator('.handover-detail').count(),0);
+    assert.equal(unsent.status,'deleted');assert.equal(docs.size,countBeforeDelete);assert.equal(d.status,'accepted','Sent business is untouched');
+    await sender.screenshot({path:path.join(output,`${version}-draft-deleted-360.png`)});
     for(const context of contexts)await context.close();
   }
   assert.deepEqual(errors,[]);

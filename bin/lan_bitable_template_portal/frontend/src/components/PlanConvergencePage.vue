@@ -39,7 +39,7 @@
     <PlanConvergenceRules v-if="visitedRules" v-show="tab === 'rules'" ref="rulesRef" :is-admin="Boolean(boot.is_admin)" />
     <section v-if="tab === 'maintenance' || tab === 'change'" class="pc-maintenance" :aria-label="currentAudit.label + '核对'" :aria-busy="currentAudit.loading || currentAudit.checking">
       <div class="pc-toolbar"><div class="pc-actions"><input v-model="currentAudit.search" type="search" :placeholder="'搜索' + currentAudit.label + '名称、设备或位置'" :aria-label="'搜索' + currentAudit.label + '记录'" /></div><div class="pc-actions"><button :disabled="currentAudit.loading || currentAudit.checking" @click="loadNoticeAudit()"><RefreshCw :size="16" :class="{ spin: currentAudit.loading }" />刷新{{ currentAudit.label }}记录</button><button class="primary" :disabled="currentAudit.checking || currentAudit.loading" @click="checkNoticeAudit()"><Loader2 v-if="currentAudit.checking && !currentAudit.checkingId" :size="16" class="spin" /><ClipboardCheck v-else :size="16" />{{ currentAudit.checking && !currentAudit.checkingId ? '正在核对…' : '核对进行中' + currentAudit.label }}</button></div></div>
-      <div v-if="currentAudit.error" class="pc-alert error" role="alert"><AlertCircle :size="18" /><span>{{ currentAudit.error }}</span></div>
+      <div v-if="currentAudit.error" class="pc-alert error" role="alert"><AlertCircle :size="18" /><span>{{ currentAudit.error }}<small>{{ currentAudit.errorAction === 'check' ? '本次未取得核对结论。' : '本次记录读取未完成。' }}{{ currentAudit.rows.length ? '上次记录和核对结果已保留。' : '' }}</small></span><div class="pc-actions"><button :disabled="currentAudit.loading || currentAudit.checking" @click="retryNoticeAudit"><RefreshCw :size="16" />重试</button><button v-if="boot.is_admin && currentAudit.errorAction === 'check'" @click="openSettings"><Settings :size="16" />连接设置</button></div></div>
       <div v-if="currentAudit.stats" class="pc-statline"><span>{{ currentAudit.label }} {{ currentAudit.rows.length }}</span><span>屏蔽 {{ currentAudit.stats.blocks }}</span><span class="good">已匹配 {{ currentAudit.stats.matched_records }}</span><span class="bad">未匹配屏蔽 {{ currentAudit.stats.orphan_blocks }}</span></div>
       <div v-if="currentAudit.loading" class="pc-empty"><Loader2 :size="22" class="spin" />正在读取{{ currentAudit.label }}记录…</div><div v-else-if="!auditFiltered.length" class="pc-empty">{{ currentAudit.error && !currentAudit.rows.length ? '记录读取未完成，请刷新重试' : '暂无匹配的' + currentAudit.label + '记录' }}</div>
       <div v-else class="pc-table-wrap"><table><thead><tr><th>{{ currentAudit.label }}记录</th><th>楼栋 / 状态</th><th>设备 / 位置</th><th>核对结果</th><th>操作</th></tr></thead><tbody>
@@ -173,7 +173,7 @@ function settingsPayload(){return Object.fromEntries(['token'].map(key=>[key,set
 async function saveSettings(){settingsBusy.value=true;dialog.error='';const seq=dialogRequest;try{const data=await requestJson(base+'/settings',{...requestOptions,method:'PUT',body:JSON.stringify(settingsPayload())});if(disposed||seq!==dialogRequest||!dialog.open||dialog.kind!=='settings')return;Object.assign(settings,data,{token:''});boot.value.zh_ready=!!data.has_token&&!data.expired;notice.value='平台设置已保存';}catch(e){if(!disposed&&seq===dialogRequest&&dialog.open&&dialog.kind==='settings')dialog.error=e instanceof Error?e.message:String(e);}finally{settingsBusy.value=false;}}
 async function testSettings(){settingsBusy.value=true;dialog.error='';const seq=dialogRequest;try{if(settings.token.trim())await requestJson(base+'/settings',{...requestOptions,method:'PUT',body:JSON.stringify({token:settings.token.trim()})});const res=await requestJson(base+'/settings/test',{...requestOptions,method:'POST'});const data=await requestJson(base+'/settings',requestOptions);if(disposed||seq!==dialogRequest||!dialog.open||dialog.kind!=='settings')return;Object.assign(settings,data,{token:''});boot.value.zh_ready=!!data.has_token&&!data.expired;notice.value=res?.message||(data.has_token?(data.expired?'登录已过期':'连接正常'):'尚未连接智航');}catch(e){if(!disposed&&seq===dialogRequest&&dialog.open&&dialog.kind==='settings')dialog.error=e instanceof Error?e.message:String(e);}finally{settingsBusy.value=false;}}
 type AuditKind = 'maintenance' | 'change';
-function newAudit(label:string) { return { label, rows: [] as Dict[], loading: false, checking: false, checkingId: '', visited: false, search: '', page: 1, stats: null as Dict|null, error: '' }; }
+function newAudit(label:string) { return { label, rows: [] as Dict[], loading: false, checking: false, checkingId: '', visited: false, search: '', page: 1, stats: null as Dict|null, error: '', errorAction: '' as ''|'records'|'check', retryId: '' }; }
 const noticeAudits = reactive({ maintenance: newAudit('检修'), change: newAudit('变更') });
 const auditKind = computed<AuditKind>(()=>tab.value==='change'?'change':'maintenance');
 const currentAudit = computed(()=>noticeAudits[auditKind.value]);
@@ -187,23 +187,24 @@ function auditResultText(row:Dict):string {
 }
 async function loadNoticeAudit(kind:AuditKind=auditKind.value){
   const audit=noticeAudits[kind];if(audit.loading||audit.checking)return;
-  audit.visited=true;audit.loading=true;audit.error='';
-  try { const rows=await requestJson(base+'/'+kind+'/records',requestOptions);if(disposed)return;
+  audit.visited=true;audit.loading=true;audit.error='';audit.errorAction='';
+  try { const rows=await requestJson(base+'/'+kind+'/records',{...requestOptions,fresh:true,cache:'no-store'});if(disposed)return;
     if(!Array.isArray(rows))throw new Error('通告列表读取不完整，请重试');
     audit.rows=rows;audit.page=1;audit.stats=null;
-  } catch(e) { if(!disposed)audit.error=e instanceof Error?e.message:String(e); }
+  } catch(e) { if(!disposed){audit.error=e instanceof Error?e.message:String(e);audit.errorAction='records';} }
   finally { audit.loading=false; }
 }
-async function checkNoticeAudit(id?:string){
-  const kind=auditKind.value,audit=noticeAudits[kind];if(audit.checking||audit.loading)return;
-  audit.checking=true;audit.checkingId=id||'';audit.error='';
+async function checkNoticeAudit(id?:string,kind:AuditKind=auditKind.value){
+  const audit=noticeAudits[kind];if(audit.checking||audit.loading)return;
+  audit.checking=true;audit.checkingId=id||'';audit.error='';audit.errorAction='';
   try { const result=await post('/'+kind+'/check',id?{record_id:id}:{},90_000);if(disposed)return;
     if(!Array.isArray(result.records)||id&&(result.records.length!==1||result.records[0].record_id!==id))throw new Error('核对结果不完整，已保留上次结果，请重试');
     if(id){const index=audit.rows.findIndex(row=>row.record_id===id);if(index>=0)audit.rows[index]=result.records[0];audit.stats=null;}
     else{audit.rows=result.records;audit.page=1;audit.stats=result.stats;}
-  } catch(e) { if(!disposed)audit.error=e instanceof Error?e.message:String(e); }
+  } catch(e) { if(!disposed){audit.error=e instanceof Error?e.message:String(e);audit.errorAction='check';audit.retryId=id||'';} }
   finally { audit.checking=false;audit.checkingId=''; }
 }
+function retryNoticeAudit(){const kind=auditKind.value,audit=noticeAudits[kind];if(audit.errorAction==='check')void checkNoticeAudit(audit.retryId||undefined,kind);else void loadNoticeAudit(kind);}
 let noticeJumpRequest=0;
 async function locateNoticeBlock(hit:Dict, record:Dict){
   const id=String(hit.blockId||'').trim();if(!id)return;
@@ -237,6 +238,7 @@ onBeforeUnmount(()=>{disposed=true;clearDetailFocus();pageController.abort();sto
 </script>
 
 <style scoped>
+.pc-maintenance>.pc-alert{flex-wrap:wrap;align-items:flex-start}.pc-maintenance>.pc-alert>span{min-width:0;flex-basis:220px;overflow-wrap:anywhere}.pc-maintenance>.pc-alert small{display:block;margin-top:3px}.pc-maintenance>.pc-alert>.pc-actions{margin-left:auto}
 .pc-focused-detail td{animation:pcFocusBreath 1s ease-in-out 3}.pc-focused-detail td:first-child{box-shadow:inset 3px 0 #1875be}.pc-page button.pc-focused-action{background:#1767b6;border-color:#1767b6;color:#fff}
 @keyframes pcFocusBreath{0%,100%{background:#eef7fd}50%{background:#bddffc}}
 @media(prefers-reduced-motion:reduce){.pc-focused-detail td{animation:none;background:#d8ebfb}}

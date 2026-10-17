@@ -259,7 +259,7 @@ function textFillApplied(saved:Dict,count:number):void {
 const correction = ref<Dict | null>(null), correctionDirectory = ref<Dict[]>([]);
 const imageInput = ref<HTMLInputElement>();
 const batch = ref<Dict>({}), list = ref<Dict>({}), baseline = new Map<string,string>();
-const createMode = ref('pdf'), pdfFiles = ref<File[]>([]), fileInput = ref<HTMLInputElement>(), dragging = ref(false), manualScope = ref(props.scope || buildingOptions.value[0]?.value || 'A');
+const createMode = ref('text'), pdfFiles = ref<File[]>([]), fileInput = ref<HTMLInputElement>(), dragging = ref(false), manualScope = ref(props.scope || buildingOptions.value[0]?.value || 'A');
 const imageFiles = ref<File[]>([]), createImageInput = ref<HTMLInputElement>(), imageBatchId = ref('');
 const imagePreviewUrls = new Map<File,string>();
 const textInput=ref(''),textError=ref(''),textFragments=ref<Dict[]>([]),textPage=ref(1),textRequestId=ref(randomHexId());

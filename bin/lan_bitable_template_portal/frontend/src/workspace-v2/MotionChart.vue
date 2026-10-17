@@ -32,16 +32,25 @@ const unavailable=computed(()=>Boolean(props.loading||props.failed||invalid.valu
 const total=computed(()=>invalid.value?0:props.items.reduce((sum,item)=>sum+item.value,0));
 const maximum=computed(()=>invalid.value?0:Math.max(0,...props.items.map(item=>item.value)));
 const accessibleLabel=computed(()=>props.items.map(item=>`${item.label} ${item.value} ${props.unit}`).join('，'));
-let chart:EChartsType|undefined,resize:ResizeObserver|undefined,observer:IntersectionObserver|undefined,disposed=false,initializing=false,frame=0,inViewport=false;
+let chart:EChartsType|undefined,resize:ResizeObserver|undefined,observer:IntersectionObserver|undefined,disposed=false,initializing=false,frame=0,inViewport=false,ready=false,coordinates='';
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
 function update(){
   endPoint.value=null;
-  if(!chart||unavailable.value)return;
-  try{chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value),{replaceMerge:['series','xAxis','yAxis','dataZoom','calendar','visualMap'],lazyUpdate:true});engineFailed.value=false;}
-  catch{engineFailed.value=true;}
+  ready=false;pressed.value=false;
+  if(!chart||chart.isDisposed())return;
+  try{
+    // Tooltip coordinates belong to the previous render, not the next axes.
+    chart.dispatchAction({type:'hideTip'});
+    if(unavailable.value){chart.clear();coordinates='';return;}
+    const next=kind.value==='calendar'?'calendar':isCircular(kind.value)?'pie':'cartesian';
+    if(coordinates&&coordinates!==next)chart.clear();
+    coordinates=next;
+    chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value),{replaceMerge:['series','xAxis','yAxis','dataZoom','calendar','visualMap'],lazyUpdate:false});
+    ready=true;engineFailed.value=false;updateEnd();
+  }catch{ready=false;engineFailed.value=true;}
 }
 function updateEnd(){
-  if(!chart||!props.items.length||!isTrend(kind.value)||unavailable.value)return;
+  if(!chart||!ready||!props.items.length||!isTrend(kind.value)||unavailable.value)return;
   const i=props.items.length-1,point=chart.convertToPixel({seriesIndex:0},[i,props.items[i]!.value]) as number[];
   endPoint.value=Array.isArray(point)&&point.every(Number.isFinite)?point:null;
 }
@@ -53,14 +62,14 @@ async function initialize(){
     narrow.value=host.value.clientWidth<440;
     chart=init(host.value,undefined,{renderer:'svg'});chart.on('finished',updateEnd);
     chart.on('mousedown',(params:any)=>{const shape=params.event?.target;if(reduced.matches||!['bar','horizontal'].includes(kind.value)||shape?.type!=='rect')return;const bounds=shape.getBoundingRect();shape.originY=bounds.y+bounds.height;shape.animateTo({scaleY:.96},{duration:90,done:()=>{if(!disposed)shape.animateTo({scaleY:1},{duration:220,easing:'cubicOut'});}});});
-    chart.on('click',(params:any)=>{if(unavailable.value)return;const item=props.items[params.dataIndex];if(item)emit('select',item,params.dataIndex);});
+    chart.on('click',(params:any)=>{if(!ready||unavailable.value)return;const item=props.items[params.dataIndex];if(item)emit('select',item,params.dataIndex);});
     resize=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(disposed)return;chart?.resize();const small=(host.value?.clientWidth||0)<440;if(narrow.value!==small){narrow.value=small;update();}updateEnd();});});
     resize.observe(host.value);update();
   }catch{engineFailed.value=true;}finally{initializing=false;}
 }
-function scrub(event:PointerEvent){if(!isTrend(kind.value)||!chart||unavailable.value)return;pressed.value=true;host.value?.setPointerCapture?.(event.pointerId);move(event);}
+function scrub(event:PointerEvent){if(!isTrend(kind.value)||!chart||!ready||unavailable.value)return;pressed.value=true;host.value?.setPointerCapture?.(event.pointerId);move(event);}
 function move(event:PointerEvent){
-  if(!pressed.value||!chart||!host.value||unavailable.value)return;
+  if(!pressed.value||!chart||!ready||!host.value||unavailable.value)return;
   const box=host.value.getBoundingClientRect(),point=chart.convertFromPixel({seriesIndex:0},[event.clientX-box.left,event.clientY-box.top]) as number[];
   if(!Array.isArray(point)||!Number.isFinite(point[0]))return;
   chart.dispatchAction({type:'showTip',seriesIndex:0,dataIndex:Math.max(0,Math.min(props.items.length-1,Math.round(point[0]!)))});

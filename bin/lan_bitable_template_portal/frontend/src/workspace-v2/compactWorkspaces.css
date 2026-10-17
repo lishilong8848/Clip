@@ -27,7 +27,7 @@
 .workspace-v2 .cabinet-page .all-export-items{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
 .workspace-v2 .cabinet-page .all-export-items>div{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:8px;min-width:0;border:1px solid var(--v2-border);border-radius:6px;background:var(--v2-surface)}
 .workspace-v2 .cabinet-page .all-export-items>div>strong{font-size:13px}.workspace-v2 .cabinet-page .all-export-items>div>span{font-size:11px}.workspace-v2 .cabinet-page .export-item-actions{margin-left:auto}.workspace-v2 .cabinet-page .all-export-items small{width:100%}
-.workspace-v2 .map-cell{background:var(--v2-cell-background)!important;color:var(--v2-cell-ink)!important;text-shadow:none!important}
+.workspace-v2 .map-cell{background:var(--v2-cell-background)!important;color:var(--v2-cell-ink)!important;font-family:var(--v2-cell-font,inherit)!important;font-weight:var(--v2-cell-weight,400)!important;text-shadow:none!important}
 .workspace-v2[data-v2-theme="dark"] .map-viewport{background:#232b34}
 .workspace-v2 .v2-plan-command{border-bottom:1px solid var(--v2-border);padding-bottom:8px}.workspace-v2 .v2-plan-command .pc-tabs{margin:0;border:0;gap:4px}
 .workspace-v2 .v2-plan-record-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px}.workspace-v2 .v2-plan-record-head h3{margin:0;font-size:14px}.workspace-v2 .v2-plan-record-head small{font-size:12px;font-weight:400;color:var(--v2-muted)}

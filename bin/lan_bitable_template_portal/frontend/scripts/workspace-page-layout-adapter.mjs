@@ -57,6 +57,10 @@ export function adaptPageLayouts(source,filename){
   }
   if(code===source)return source;
   const importPath=filename.replaceAll('\\','/').includes('/workspace-v2/')?'./PageCanvas.vue':'../workspace-v2/PageCanvas.vue';
-  return code.replace('<script setup lang="ts">',`<script setup lang="ts">\n// page-layout-adapted\nimport PageCanvas from '${importPath}';`);
+  const setup=parse(code).descriptor.scriptSetup;
+  if(!setup)throw new Error('Page layout requires a setup script: '+file);
+  // Attribute order is not significant in an SFC script tag.
+  const offset=setup.loc.start.offset;
+  return code.slice(0,offset)+`\n// page-layout-adapted\nimport PageCanvas from '${importPath}';`+code.slice(offset);
 }
 export const pageLayoutPlans=plans;

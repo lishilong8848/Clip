@@ -14,16 +14,27 @@ import uuid
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from xml.etree import ElementTree as ET
 from .lan_bitable_template_portal.cabinet_power_data import source_rows, from_feishu, to_fields,source_evidence,complete_source_record
 from .lan_bitable_template_portal.cabinet_power_excel import CabinetError, Workbook, T, baseline_correction_operations, calculate, completed_state_event, derive_records, export_workbook, dates, digest, map_state_baseline, room_code, system_name
-from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, EXPORT_FORMAT_VERSION, equivalent
+from .lan_bitable_template_portal.cabinet_power import CabinetFeishu, CabinetPowerService, CabinetRetryLater, EXPORT_ARCHIVE_APP_TOKEN, EXPORT_ARCHIVE_FIELDS, EXPORT_ARCHIVE_TABLE_ID, EXPORT_FORMAT_VERSION, equivalent
 from .lan_bitable_template_portal.cabinet_power_batches import CabinetBatchService, CabinetBatchStore, POWER_ACTIONS_BY_STATE
 from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
+    def test_duplicate_request_keeps_original_body_and_idempotency_key(self):
+        remote=CabinetFeishu()
+        remote.token=lambda:'fixture-token'
+        remote._http=SimpleNamespace(request_json=Mock(return_value={'code':1254608}))
+        body={'fields':{'文本':'fixture'}}; params={'client_token':'original-token'}
+        with patch.object(remote,'require_write'), patch('bin.lan_bitable_template_portal.cabinet_power.time.sleep') as wait:
+            with self.assertRaises(CabinetRetryLater): remote.request('POST','records',body,params)
+        self.assertEqual([call.args[0] for call in wait.call_args_list],[1,2,4,8])
+        self.assertEqual(remote._http.request_json.call_count,5)
+        self.assertTrue(all(call.kwargs['params']==params and call.kwargs['json_payload']==body for call in remote._http.request_json.call_args_list))
+
     def test_export_timestamp_text_uses_iso_minutes_and_keeps_missing_values(self):
         from .lan_bitable_template_portal.cabinet_power_excel import export_time_text
         self.assertEqual(export_time_text('1、2026/9/22 9:01:45\n2、\n3、2026年9月23日 08：02：59'),
@@ -3248,7 +3259,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         deadline=time.time()+20
         while time.time()<deadline:
             status=service.export_batch_status(batch_id,"owner")
-            if status["status"] in ("succeeded","failed"): return status
+            if status["status"] in ("succeeded","failed","interrupted"): return status
             time.sleep(.03)
         self.fail("五楼导出批次未完成")
 
@@ -3312,6 +3323,115 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual((calls[0][1],set(calls[0][2]),calls[0][3],calls[0][4]),
                          ("admin",set("ABCDE"),True,"2026-02"))
         self.assertNotEqual(calls[0][0],calls[1][0])
+
+    def test_monthly_schedule_separates_catchup_from_next_future_plan(self):
+        zone=dt.timezone(dt.timedelta(hours=8)); now=dt.datetime(2026,10,17,15,0,tzinfo=zone)
+        self.store.put_document('cabinet_export_schedule','monthly',{'enabled':True,'day':1,'time':'02:00','owner':'admin'})
+        schedule=self.service.export_schedule(now)
+        self.assertEqual((schedule['next_run_at'],schedule['pending_run_at']),('2026-11-01 02:00','2026-10-01 02:00'))
+        self.assertEqual(self.service.export_schedule(now.astimezone(dt.timezone.utc)),schedule)
+        self.service._save_batch_record({'batch_id':self.service._scheduled_batch_id(now),'status':'succeeded'})
+        schedule=self.service.export_schedule(now)
+        self.assertEqual((schedule['next_run_at'],schedule['pending_run_at']),('2026-11-01 02:00',''))
+        self.store.put_document('cabinet_export_schedule','monthly',{'enabled':True,'day':20,'time':'09:00','owner':'admin'})
+        self.assertEqual(self.service.export_schedule(now)['next_run_at'],'2026-11-20 09:00','a completed monthly batch is not scheduled again after a date edit')
+
+    def test_monthly_schedule_short_month_leap_and_year_boundaries(self):
+        zone=dt.timezone(dt.timedelta(hours=8))
+        self.store.put_document('cabinet_export_schedule','monthly',{'enabled':True,'day':31,'time':'09:30','owner':'admin'})
+        for current,expected in [(dt.datetime(2026,2,27,tzinfo=zone),'2026-02-28 09:30'),(dt.datetime(2028,2,28,tzinfo=zone),'2028-02-29 09:30'),(dt.datetime(2026,12,31,10,tzinfo=zone),'2027-01-31 09:30')]:
+            self.assertEqual(self.service.export_schedule(current)['next_run_at'],expected)
+
+    def test_export_duplicate_request_automatically_reuses_five_uploaded_files(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; attempts=[]; snapshots=[]; bid='all_'+'4'*32
+        def delayed_create(fields,identity):
+            attempts.append(identity)
+            if len(attempts)<3: raise CabinetRetryLater('fixture duplicate request',503)
+            return create(fields,identity)
+        def waiting(delay):
+            snapshots.append(self.service._batch_record(bid))
+            return False
+        archive.create=delayed_create
+        with patch.object(self.service._archive_stop,'wait',side_effect=waiting) as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+        self.assertEqual(len(set(attempts)),1)
+        self.assertEqual([call.args[0] for call in wait.call_args_list],[15,30])
+        self.assertTrue(all(row['status']=='running' and row['retry_at'] and len(row['tokens'])==5 for row in snapshots))
+
+    def test_exhausted_duplicate_wait_preserves_files_for_same_batch_resume(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; archive.create=Mock(side_effect=CabinetRetryLater('fixture duplicate request',503)); bid='all_'+'5'*32
+        with patch.object(self.service._archive_stop,'wait',return_value=False):
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            first=self._wait_export_batch(bid)
+        self.assertEqual((first['status'],archive.upload_calls,len(archive.records)),('failed',5,0))
+        self.assertEqual(archive.create.call_count,4)
+        archive.create=create
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        recovered=self._wait_export_batch(bid)
+        self.assertEqual(recovered['status'],'succeeded',recovered.get('error'))
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+        self.assertEqual(recovered['items'],first['items'])
+
+    def test_update_receipt_rejected_but_written_record_is_verified_without_replay(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        first='all_'+'6'*32; second='all_'+'7'*32
+        self.service.start_export_batch(first,'owner',list('ABCDE'))
+        self.assertEqual(self._wait_export_batch(first)['status'],'succeeded')
+        update=archive.update; writes=[]
+        def accepted_but_rejected(rid,fields):
+            result=update(rid,fields)
+            if '上传文件' in fields:
+                writes.append(rid)
+                raise CabinetRetryLater('fixture receipt pending',503)
+            return result
+        archive.update=accepted_but_rejected
+        self.service.start_export_batch(second,'owner',list('ABCDE'))
+        recovered=self._wait_export_batch(second)
+        self.assertEqual(recovered['status'],'succeeded',recovered.get('error'))
+        self.assertEqual((len(writes),archive.creates,len(archive.records)),(1,1,1))
+
+    def test_close_during_duplicate_wait_keeps_resumable_batch(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; archive.create=Mock(side_effect=CabinetRetryLater('fixture duplicate request',503)); bid='all_'+'8'*32
+        with patch.object(self.service._archive_stop,'wait',return_value=True):
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            interrupted=self._wait_export_batch(bid)
+        self.assertEqual((interrupted['status'],self.service._batch_record(bid)['pid'],interrupted['retry_at']),('interrupted',0,0))
+        self.assertEqual(archive.create.call_count,1)
+        archive.create=create
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        recovered=self._wait_export_batch(bid)
+        self.assertEqual(recovered['status'],'succeeded',recovered.get('error'))
+        self.assertEqual((archive.upload_calls,len(archive.records)),(5,1))
+
+    def test_unknown_create_outcome_is_not_blindly_retried(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        archive.create=Mock(side_effect=TimeoutError('fixture unknown outcome')); bid='all_'+'9'*32
+        with patch.object(self.service._archive_stop,'wait') as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual((result['status'],archive.upload_calls,archive.create.call_count),('failed',5,1))
+        wait.assert_not_called()
+        self.assertEqual(len(self.service._batch_record(bid)['tokens']),5)
+
+    def test_schema_duplicate_request_waits_before_exporting_instead_of_failing_batch(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        original=self.service.ensure_export_archive_fields; calls=[]; bid='all_'+'b0'*16
+        def ensure(year):
+            calls.append(year)
+            if len(calls)==1: raise CabinetRetryLater('fixture schema busy',503)
+            return original(year)
+        with patch.object(self.service,'ensure_export_archive_fields',side_effect=ensure),patch.object(self.service._archive_stop,'wait',return_value=False) as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+        wait.assert_called_once_with(15)
 
     def test_export_batch_creates_new_month_without_changing_prior_archive(self):
         archive=FakeExportFeishu(); self.service.export_remote=archive

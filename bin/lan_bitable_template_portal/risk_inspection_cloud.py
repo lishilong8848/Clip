@@ -12,6 +12,7 @@ import uuid
 import httpx
 
 from upload_event_module.services.http_client import FeishuHttpClient
+from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 
 from .risk_inspection import RiskError, SCOPES, SYSTEM_NAMES, can_scope, digest, manager, schema_fields, text
 
@@ -26,7 +27,7 @@ HISTORY_TABLE_NAME = '风险排查模板库'
 HISTORY_FIELDS = [{'field_name': name, 'type': kind} for name, kind in (
     ('模板编号', 1), ('模板名称', 1), ('版本', 2), ('来源发布', 1), ('来源结果表链接', 1),
     ('创建人', 1), ('创建时间', 5), ('更新时间', 5), ('启用状态', 1), ('适用楼栋', 1),
-    ('配置快照', 17), ('快照摘要', 1), (KEY, 1))]
+    ('配置快照', 17), ('快照摘要', 1), ('模板类型', 1), (KEY, 1))]
 STATUS = {'pending': '未提交', 'submitted': '待审核', 'approved': '审核通过', 'returned': '退回修改', 'revoked': '已撤销'}
 
 
@@ -129,16 +130,28 @@ class RiskCloud:
             response = self.http.request(method, API + path, headers=self.headers(), **kwargs)
             if job:
                 self.store.renew_job(job)
-            if response.status_code in {400, 401, 403, 404, 405, 413, 415, 422, 429}:
+            try:
+                result = response.json()
+            except (ValueError, UnicodeError):
+                result = {}
+            if not isinstance(result, dict):
+                result = {}
+            code = result.get('code')
+            if response.status_code in {400, 401, 403, 404, 405, 413, 415, 422, 429} or code and response.status_code < 500:
                 if response.status_code == 401:
                     self.expiry = 0
-                raise CloudRejected(f'飞书拒绝请求（HTTP {response.status_code}），请核对权限、参数或稍后重试。', 503)
-            response.raise_for_status()
-            result = response.json()
-            if result.get('code'):
-                if result.get('code') in {99991663, 99991664, 99991668}:
+                if code in {99991663, 99991664, 99991668}:
                     self.expiry = 0
-                raise CloudRejected('飞书未完成请求（代码 ' + str(result.get('code')) + '），请检查应用权限或稍后重试。', 503)
+                stage = ('发送通知' if path == 'im/v1/messages' else '登记排查任务' if path.startswith(self.table_path(REGISTRY_APP, REGISTRY_TABLE))
+                         else '配置数据表字段' if '/fields' in path else '写入排查记录' if '/records' in path else '创建排查表')
+                hints = {1254037: '记录幂等标识格式无效，请更新程序后重试原任务。',
+                         1254015: '字段类型与填写内容不一致，请核对结果表字段。',
+                         1254060: '文本字段收到非文本内容，请核对字段配置。',
+                         1254291: '数据表写入冲突，原任务会稍后重试。',
+                         99991400: '请求频率受限，原任务会稍后重试。'}
+                raise CloudRejected(f'{stage}失败（HTTP {response.status_code}' + (f'，飞书代码 {code}' if code else '') + '）。' +
+                                    hints.get(code, '请核对飞书智能体的应用权限和目标表字段；保留原任务重试，不要重新发布。'), 503)
+            response.raise_for_status()
             data = result.get('data', {} if method == 'DELETE' else None)
             if not isinstance(data, dict):
                 raise RiskError('飞书返回不完整，保留任务等待核对。', 503)
@@ -263,7 +276,7 @@ class RiskCloud:
         params = {'user_id_type': 'union_id'}
         if records:
             return self.request('PUT', path + '/' + records[0]['record_id'], params=params, json={'fields': {KEY: key, **fields}})['record']['record_id']
-        params['client_token'] = str(uuid.uuid5(uuid.NAMESPACE_URL, app + ':' + table + ':' + key))
+        params['client_token'] = _stable_uuid4_client_token(app + ':' + table + ':' + key)
         return self.request('POST', path, params=params, json={'fields': {KEY: key, **fields}})['record']['record_id']
 
     def create_release(self, release, people):
@@ -384,6 +397,7 @@ class RiskCloud:
             raise RiskError('模板修改人权限已变化，定义保留，请有权限的管理员核对后保存。', 403)
         table = self.history_table()
         snapshot = {k: data[k] for k in ('id', 'name', 'revision', 'enabled', 'source_release_id', 'fields', 'items', 'scopes', 'created', 'creator', 'legacy')}
+        snapshot['kind'] = data.get('kind', 'history')
         content = json.dumps({'format': 'lighthouse-risk-template-v1', **snapshot}, ensure_ascii=False, sort_keys=True).encode('utf-8')
         if len(content) > 2 * 1024 * 1024:
             raise RiskError('模板快照超过2MB，请精简预填内容后重新保存。', 413)
@@ -401,6 +415,7 @@ class RiskCloud:
             '来源发布': data['source_name'], '来源结果表链接': data['source_url'],
             '创建人': data['creator']['name'], '创建时间': int(data['created']*1000), '更新时间': int(data['updated']*1000),
             '启用状态': '启用' if data['enabled'] else '停用', '适用楼栋': '、'.join(data['scopes']),
+            '模板类型': '基础模板' if data.get('kind') == 'base' else '历史模板',
             '配置快照': [{'file_token': token}], '快照摘要': checksum})
         history.checkpoint(data['id'], revision=data['revision'], record_id=record, table=table)
 
@@ -462,13 +477,13 @@ class RiskCloud:
             self.create_release(release, people)
         elif job['kind'] == 'registry':
             actor = self.store.person_for(job['payload']['actor']['id'])
-            if not manager(actor) or not all(can_scope(actor, p['scope']) for p in people):
+            if not self.store.controls(actor, release) or not all(can_scope(actor, p['scope']) for p in people):
                 raise RiskError('操作人权限已变化，暂未更新登记信息。', 403)
             self.registry(release, people)
         elif job['kind'] == 'sync':
             actor = self.store.person_for((job['payload'].get('retry_authorized_by') or job['payload']['actor'])['id'])
             person = job['payload']['person']
-            if not can_scope(actor, person['scope']) or actor['id'] != person['id'] and not manager(actor):
+            if not can_scope(actor, person['scope']) or actor['id'] != person['id'] and not self.store.controls(actor, release):
                 raise RiskError('原操作人楼栋权限已撤销，反馈保留，待管理员核对。', 403)
             self.sync(release, person)
             self.registry(*self.store.raw(release['id']), finished_job=job['id'])

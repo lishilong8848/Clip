@@ -45,7 +45,7 @@ for(const [file,adapt] of [['EventManagementPage.vue',adaptEventPeriodPage],['Ca
   const result=adapt(source);compileScript(parse(result).descriptor,{id:'isolated-'+file});
   assert.notEqual(result,source);
   if(file.startsWith('Event'))assert.match(result,/for \(const month of eventRange.value.months\)/);
-  else {assert.match(result,/createMode = ref\('text'\)/);assert.match(source,/createMode = ref\('pdf'\)/);}
+  else {assert.match(result,/createMode = ref\('text'\)/);assert.match(source,/createMode = ref\('text'\)/);}
 }
 const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;

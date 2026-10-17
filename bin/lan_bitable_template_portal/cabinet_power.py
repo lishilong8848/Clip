@@ -131,6 +131,11 @@ def equivalent(fields,actual):
         return False
     return True
 
+
+class CabinetRetryLater(CabinetError):
+    """Feishu has not accepted this duplicate request; retain the original batch."""
+
+
 class CabinetFeishu:
     """Reuse the app's HTTP pool and token manager."""
     def __init__(self,table_id=TABLE_ID,app_token=APP_TOKEN):
@@ -160,9 +165,9 @@ class CabinetFeishu:
     def request(self,method,path,body=None,params=None):
         read_request=method=="GET" or method=="POST" and path=="records/batch_get"
         if not read_request: self.require_write()
-        import httpx
-        from upload_event_module.services.http_client import FeishuHttpClient
         if self._http is None:
+            import httpx
+            from upload_event_module.services.http_client import FeishuHttpClient
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
@@ -175,7 +180,7 @@ class CabinetFeishu:
             if not retryable or attempt>=limit: break
             time.sleep((1 if data.get("code")==1254608 else 0.5)*(2**attempt))
         if data.get("code"):
-            if data["code"]==1254608: raise CabinetError("飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。")
+            if data["code"]==1254608: raise CabinetRetryLater("飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。",503)
             if data["code"] in (99991663,99991664,99991665): self._expires=0
             raise CabinetError(f"机柜台账请求失败：code={data['code']}，{data.get('msg','')}")
         return data.get("data",{})
@@ -236,6 +241,8 @@ class CabinetFeishu:
             if code not in (99991663,99991664,99991665) or attempt: break
             self._expires=0
         token=str((payload.get("data") or {}).get("file_token") or "").strip()
+        if int(payload.get("code") or 0)==1254608:
+            raise CabinetRetryLater("飞书附件正在处理重复请求（1254608），稍后继续原批次。",503)
         if int(payload.get("code") or 0) or not token: raise CabinetError(f"机柜导出附件上传失败：{payload.get('msg') or '未返回文件标识'}")
         return token
 
@@ -246,6 +253,8 @@ class CabinetFeishu:
         if self._http is None: self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         url=f"https://open.feishu.cn/open-apis/base/v3/bases/{self.app_token}/tables/{self.table_id}/records/share_links/batch"
         data=self._http.request_json("POST",url,headers={"Authorization":"Bearer "+self.token()},json_payload={"record_ids":[record_id]},retries=0)
+        if data.get("code")==1254608:
+            raise CabinetRetryLater("飞书归档链接正在处理重复请求（1254608），稍后核验原记录。",503)
         if data.get("code"): raise CabinetError(f"归档记录链接获取失败：{data.get('msg') or data['code']}")
         link=str(((data.get("data") or {}).get("record_share_links") or {}).get(record_id) or "").strip()
         if not link.startswith("https://"): raise CabinetError("归档记录链接获取失败：未返回有效链接")
@@ -311,6 +320,7 @@ class CabinetPowerService:
         self._bootstrap_download_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-bootstrap")
         self._archive_pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix="cabinet-archive")
         self._archive_running=set()
+        self._archive_stop=threading.Event()
         self._bootstrap_batches={}
         self._writing=set()
         self._exports=None
@@ -318,6 +328,7 @@ class CabinetPowerService:
         self._batches=None
 
     def shutdown(self,wait=True,**_kwargs):
+        self._archive_stop.set()
         if self._batches: self._batches.shutdown(wait=wait)
         for pool in self._upload_pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
         for pool in self._pools.values(): pool.shutdown(wait=wait,cancel_futures=not wait)
@@ -1550,21 +1561,26 @@ class CabinetPowerService:
         return "all_"+uuid.uuid5(uuid.NAMESPACE_URL,f"cabinet-power-monthly:{now:%Y-%m}").hex
 
     def export_schedule(self,now=None):
-        now=now or dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        zone=dt.timezone(dt.timedelta(hours=8))
+        now=(now or dt.datetime.now(zone)).astimezone(zone)
         config=self.store.get_document(EXPORT_SCHEDULE_NAMESPACE,"monthly") or {}
         result={"enabled":bool(config.get("enabled")),"day":int(config.get("day") or 1),
                 "time":str(config.get("time") or "02:00"),"updated_at":str(config.get("updated_at") or "")}
         current=self._batch_record(self._scheduled_batch_id(now))
         result["current_month_batch"] = self._public_batch_record(current) if current else None
+        result.update(server_time=now.isoformat(),pending_run_at="")
         year,month=now.year,now.month
         for _ in range(2):
             day=min(result["day"],calendar.monthrange(year,month)[1])
             hour,minute=map(int,result["time"].split(":"))
             due=now.replace(year=year,month=month,day=day,hour=hour,minute=minute,second=0,microsecond=0)
-            if due>now or not current:
+            if due>now and not current:
                 result["next_run_at"]=due.strftime("%Y-%m-%d %H:%M")
                 break
+            if result["enabled"] and not current and due<=now:
+                result["pending_run_at"]=due.strftime("%Y-%m-%d %H:%M")
             year,month=(year+1,1) if month==12 else (year,month+1)
+            current=None
         return result
 
     def save_export_schedule(self,payload,owner):
@@ -1626,7 +1642,7 @@ class CabinetPowerService:
             if batch["status"]=="succeeded": return self._public_batch_record(batch)
             if process_alive(batch.get("pid")) and (batch["pid"]!=os.getpid() or batch_id in self._archive_running):
                 return self._public_batch_record(batch)
-            batch.update(status="running",error="",pid=os.getpid())
+            batch.update(status="running",error="",retry_at=0,pid=os.getpid())
             self._save_batch_record(batch)
             self._archive_running.add(batch_id)
             try: self._archive_pool.submit(self._run_export_batch,batch_id)
@@ -1637,11 +1653,27 @@ class CabinetPowerService:
                 raise
             return self._public_batch_record(batch)
 
+    def _export_step(self,batch,run):
+        for attempt in range(4):
+            try:
+                batch.update(retry_at=0,error="")
+                self._save_batch_record(batch)
+                run()
+                return True
+            except CabinetRetryLater:
+                if attempt==3: raise
+                delay=15*2**attempt
+                batch.update(retry_at=time.time()+delay,error="飞书正在处理重复请求，稍后自动核验原批次，不会重复新增归档。")
+                self._save_batch_record(batch)
+                if self._archive_stop.wait(delay):
+                    batch.update(status="interrupted",retry_at=0,error="程序正在关闭，已保留原批次和上传进度。")
+                    return False
+
     def _run_export_batch(self,batch_id):
         batch=self._batch_record(batch_id)
         try:
             now=dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-            self.ensure_export_archive_fields(str(batch.get("year") or f"{now.year:04d}"))
+            if not self._export_step(batch,lambda:self.ensure_export_archive_fields(str(batch.get("year") or f"{now.year:04d}"))): return
             if batch.get("phase") not in ("linking","verifying"):
                 for scope in TOTALS:
                     item=batch["items"][scope]
@@ -1665,12 +1697,12 @@ class CabinetPowerService:
                     time.sleep(1)
                 failed=[scope for scope in TOTALS if batch["items"][scope]["status"]!="succeeded"]
                 if failed: raise CabinetError("以下楼栋导出失败，可继续原批次重试："+"、".join(failed))
-            self._archive_export_batch(batch)
+            if not self._export_step(batch,lambda:self._archive_export_batch(batch)): return
             batch.update(status="succeeded",phase="completed",error="")
         except Exception as exc:
             batch.update(status="failed",error=str(exc))
         finally:
-            batch["pid"]=0
+            batch.update(pid=0,retry_at=0)
             self._save_batch_record(batch)
             self._archive_running.discard(batch_id)
 
@@ -1707,6 +1739,7 @@ class CabinetPowerService:
                     raise CabinetError(f"{scope}楼导出文件已不可用，请继续原批次重新生成")
                 batch["tokens"][scope]=self.export_remote.upload_attachment(exported["path"],exported["filename"])
                 self._save_batch_record(batch)
+            batch["phase"]="archiving"; self._save_batch_record(batch)
             with archive_file_lock(self.root/"archive.lock"):
                 matches=self._archive_month_records(year,month)
                 if len(matches)>1: raise CabinetError("本月存在多条机柜上下电归档记录，请人工核对后重试",409)
@@ -1716,7 +1749,18 @@ class CabinetPowerService:
                         "文件名称":f"南通A-E楼机柜上下电_{year}{month}","导出时间":batch["upload_started_at"],
                         "文件SHA256":digest_value,"导出人":batch["owner"],"子分类":EXPORT_ARCHIVE_CATEGORY,
                         "年度":year,"月份":month,"上传文件":[{"file_token":batch["tokens"][scope]} for scope in TOTALS]}
-                if matches: cloud=self.export_remote.update(matches[0]["record_id"],fields)
+                if matches:
+                    cloud=matches[0]
+                    if (text_value(cloud.get("fields",{}).get("批次标识"))!=batch["batch_id"]
+                            or sorted(str(item.get("file_token") or "") for item in cloud.get("fields",{}).get("上传文件") or [])!=sorted(batch["tokens"].values())):
+                        try: cloud=self.export_remote.update(cloud["record_id"],fields)
+                        except Exception as exc:
+                            try:
+                                found=self.export_remote.get(cloud["record_id"])
+                                self._verify_archive_batch(found,batch)
+                            except Exception:
+                                raise exc
+                            cloud=found
                 else:
                     try: cloud=self.export_remote.create(fields,f"archive:{year}-{month}")
                     except Exception:

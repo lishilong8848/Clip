@@ -100,14 +100,36 @@ def install_risk_inspection_routes(app, controller, runtime):
                 if not isinstance(body, dict):
                     raise RiskError('请求内容无效。')
             rid = request.path_params.get('rid', '')
-            if path == 'templates':
+            if path == 'base-templates':
+                if not manager(actor):
+                    raise RiskError('仅管理员或楼栋主管可使用基础模板。', 403)
+                if request.method == 'POST':
+                    data = await asyncio.to_thread(svc.history.add_base, actor, body)
+                else:
+                    if await asyncio.to_thread(svc.history.needs_base, actor):
+                        source = await asyncio.to_thread(remote.read_template)
+                        await asyncio.to_thread(svc.history.seed_base, actor, source)
+                    data = await asyncio.to_thread(svc.history.list, actor, request.query_params.get('page', 1), request.query_params.get('search', ''), 'base')
+            elif path.startswith('base-templates/'):
+                tid = request.path_params['tid']
+                await asyncio.to_thread(svc.history.get, actor, tid, kind='base')
+                if path.endswith('/retry'):
+                    if body:
+                        raise RiskError('重试参数无效。')
+                    data = await asyncio.to_thread(svc.history.retry, actor, tid)
+                elif request.method == 'PUT':
+                    data = await asyncio.to_thread(svc.history.update, actor, tid, body)
+                else:
+                    data = await asyncio.to_thread(svc.history.get, actor, tid, kind='base')
+            elif path == 'templates':
                 data = await asyncio.to_thread(svc.history.list, actor, request.query_params.get('page', 1), request.query_params.get('search', ''))
             elif path.startswith('templates/'):
                 tid = request.path_params['tid']
                 if request.method == 'PUT':
+                    await asyncio.to_thread(svc.history.get, actor, tid, kind='history')
                     data = await asyncio.to_thread(svc.history.update, actor, tid, body)
                 else:
-                    data = await asyncio.to_thread(svc.history.get, actor, tid)
+                    data = await asyncio.to_thread(svc.history.get, actor, tid, kind='history')
             elif path == 'people':
                 if not manager(actor):
                     raise RiskError('仅发布人可查看可分配人员。', 403)
@@ -124,7 +146,11 @@ def install_risk_inspection_routes(app, controller, runtime):
                         if scopes:
                             result.append({'id': person['id'], 'name': person['name'], 'employee_no': row.get('employee_no', ''),
                                            'scopes': scopes, 'home_scope': person.get('home_scope', ''), 'can_review': manager(person)})
-                    return {'items': result, 'scopes': [s for s in SCOPES if can_scope(actor, s)]}
+                    if not any(p['id'] == actor['id'] for p in result):
+                        result.insert(0, {'id': actor['id'], 'name': actor['name'], 'employee_no': '',
+                                         'scopes': [s for s in SCOPES if can_scope(actor, s)],
+                                         'home_scope': actor.get('home_scope', ''), 'can_review': manager(actor)})
+                    return {'items': result, 'self_id': actor['id'], 'scopes': [s for s in SCOPES if can_scope(actor, s)]}
                 data = await asyncio.to_thread(people)
             elif path == 'template':
                 if not manager(actor):
@@ -132,13 +158,13 @@ def install_risk_inspection_routes(app, controller, runtime):
                 data = await asyncio.to_thread(remote.edit_field, actor, body) if request.method == 'POST' else await asyncio.to_thread(remote.read_template)
             elif not path:
                 if request.method == 'GET':
-                    data = await asyncio.to_thread(svc.list, actor, request.query_params.get('page', 1), request.query_params.get('scope', ''))
+                    data = await asyncio.to_thread(svc.list, actor, request.query_params.get('page', 1), request.query_params.get('scope', ''), request.query_params.get('view', 'all'))
                 else:
                     if not manager(actor):
                         raise RiskError('无权发布风险排查。', 403)
                     with svc.connect() as db:
                         exists = isinstance(body.get('id'), str) and db.execute('SELECT 1 FROM risk_releases WHERE id=?', (body['id'],)).fetchone()
-                    template = None if exists or body.get('history_template_id') else await asyncio.to_thread(remote.read_template)
+                    template = None if exists or body.get('history_template_id') or body.get('base_template_id') else await asyncio.to_thread(remote.read_template)
                     data = await asyncio.to_thread(svc.publish, actor, body, template)
             elif path.endswith('/retry'):
                 if set(body) - {'kind'} or body.get('kind') not in (None, 'template_sync'):
@@ -146,6 +172,8 @@ def install_risk_inspection_routes(app, controller, runtime):
                 data = await asyncio.to_thread(svc.retry, actor, rid, template_only=body.get('kind') == 'template_sync')
             elif path.endswith('/reviewer'):
                 data = await asyncio.to_thread(svc.change_reviewer, actor, rid, body)
+            elif path.endswith('/claim'):
+                data = await asyncio.to_thread(svc.claim, actor, rid, body)
             elif path.endswith('/actions'):
                 data = await asyncio.to_thread(svc.action, actor, rid, request.path_params['pid'], body)
             else:
@@ -158,7 +186,8 @@ def install_risk_inspection_routes(app, controller, runtime):
             return response(error=RiskError('排查操作暂未确认完成；已保存内容保留，请重新读取核对。', 503))
 
     for path, methods in (('', ['GET', 'POST']), ('/people', ['GET']), ('/template', ['GET', 'POST']), ('/templates', ['GET']), ('/templates/{tid}', ['GET', 'PUT']),
-                          ('/{rid}', ['GET']), ('/{rid}/retry', ['POST']), ('/{rid}/reviewer', ['POST']), ('/{rid}/people/{pid}/actions', ['POST'])):
+                          ('/base-templates', ['GET', 'POST']), ('/base-templates/{tid}', ['GET', 'PUT']), ('/base-templates/{tid}/retry', ['POST']),
+                          ('/{rid}', ['GET']), ('/{rid}/retry', ['POST']), ('/{rid}/reviewer', ['POST']), ('/{rid}/claim', ['POST']), ('/{rid}/people/{pid}/actions', ['POST'])):
         app.add_api_route('/api/risk-inspections' + path, endpoint, methods=methods)
 
     def editable(db, actor, rid, item_id, field_id):
