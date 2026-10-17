@@ -9,6 +9,11 @@
 .drill-page .drill-page__title h1 { margin: 0; font-size: 21px; line-height: 1.5; }
 .drill-page .drill-page__header > .n-button { margin: 0; }
 .admin-month-filter { width: 168px; margin-left: 0; }
+.drill-page .v2-drill-return-group { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.drill-page .v2-drill-return-group>.n-select { width: 94px; flex: none; }
+.drill-page button.v2-drill-return { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 7px 12px; white-space: nowrap; border: 1px solid var(--v2-border); border-radius: 6px; background: var(--drill-surface); color: var(--v2-blue); }
+.drill-page button.v2-drill-return:hover:not(:disabled) { background: color-mix(in srgb,var(--v2-blue) 8%,var(--drill-surface)); }
+@media(max-width:760px){.drill-page .v2-drill-return-group{flex:1}.drill-page button.v2-drill-return{min-height:44px;flex:1}.drill-page .v2-drill-return-group>.n-select{width:88px}}
 .drill-page .building-toolbar .toolbar-title { display: none; }
 .drill-page .building-toolbar { padding: 0; margin: 0; border: 0; background: transparent; box-shadow: none; }
 .drill-page .building-toolbar:empty { display: none; }

@@ -75,6 +75,8 @@ assert.ok(adapted.includes(':open="!!deleteGroupTarget"') || adapted.includes(':
 // 7) KnowledgeFolders must keep the root/child create + move/rename helpers wired by the adapter.
 assert.match(pageSource,/async function createFolder\(name:string,parentId\?:string\)/,'root/child creation shared with legacy');
 assert.match(pageSource,/async function moveRenameFolder\(id:string,name:string,parentId\?:string\)/,'folder move/rename shared with legacy');
-assert.equal(adaptKnowledgeFolders(pageSource,'/components/KnowledgeBasePage.vue'),pageSource,'V2 must not inject duplicate folders or CRUD');
+const folderAdapted=adaptKnowledgeFolders(pageSource,'/components/KnowledgeBasePage.vue');
+assert.equal((folderAdapted.match(/<KnowledgeFolders /g)||[]).length,1,'V2 must not inject duplicate folders or CRUD');
+assert(folderAdapted.indexOf('class="kb-select-all"')<folderAdapted.indexOf('class="kb-list"'),'V2 selection controls precede the file list');
 
 console.log('PASS: KnowledgeFolders renderLabel/SelectOption/modal contracts + tree-pane adapter and reader/confirm preservation.');

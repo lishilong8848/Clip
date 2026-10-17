@@ -3,7 +3,15 @@ export function adaptKnowledgeFolders(source,filename){
   if(!filename.endsWith('/KnowledgeBasePage.vue'))return source;
   // The folder tree and CRUD are now shared by legacy and V2; do not inject duplicates.
   if(!source.includes('<KnowledgeFolders')||!source.includes('kb-tree-pane'))throw new Error('Shared knowledge folders anchor changed');
-  return source;
+  const {descriptor}=parse(source);let selection,pane;
+  function visit(node){const classes=node.props?.find(p=>p.type===6&&p.name==='class')?.value?.content?.split(/\s+/)||[];if(classes.includes('kb-select-all'))selection=node;if(classes.includes('kb-pane'))pane=node;for(const child of node.children||[])visit(child);}
+  visit(descriptor.template.ast);
+  if(!selection||!pane)throw new Error('Knowledge selection toolbar anchor changed');
+  const offset=pane.loc.start.offset+pane.loc.source.indexOf('>')+1;
+  const location='<div class="v2-kb-location" role="status"><FolderOpen :size="16" /><strong>{{ groupFilter===\'all\'?\'全部文件\':groupFilter===\'ungrouped\'?\'未分组\':groupOptions.find(option=>option.value===groupFilter)?.label||\'文件夹\' }}</strong><span>{{ total }} 个文件</span></div>';
+  let code=source.slice(0,offset)+location+selection.loc.source+source.slice(offset,selection.loc.start.offset)+source.slice(selection.loc.end.offset);
+  code=code.replace(": '尚未上传文档'", ": groupFilter==='all'?'尚未上传文档':groupFilter==='ungrouped'?'当前没有未分组文件':'当前文件夹暂无文件，可展开子文件夹查看'");
+  return code;
 }
 export function adaptKnowledgeReader(source,filename){
   if(!filename.endsWith('/KnowledgeBasePage.vue'))return source;

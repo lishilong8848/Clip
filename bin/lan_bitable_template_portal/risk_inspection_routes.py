@@ -176,6 +176,8 @@ def install_risk_inspection_routes(app, controller, runtime):
                 data = await asyncio.to_thread(svc.claim, actor, rid, body)
             elif path.endswith('/actions'):
                 data = await asyncio.to_thread(svc.action, actor, rid, request.path_params['pid'], body)
+            elif request.method == 'DELETE':
+                data = await asyncio.to_thread(svc.delete, actor, rid, body)
             else:
                 data = await asyncio.to_thread(svc.get, actor, rid)
             return response(data)
@@ -187,7 +189,7 @@ def install_risk_inspection_routes(app, controller, runtime):
 
     for path, methods in (('', ['GET', 'POST']), ('/people', ['GET']), ('/template', ['GET', 'POST']), ('/templates', ['GET']), ('/templates/{tid}', ['GET', 'PUT']),
                           ('/base-templates', ['GET', 'POST']), ('/base-templates/{tid}', ['GET', 'PUT']), ('/base-templates/{tid}/retry', ['POST']),
-                          ('/{rid}', ['GET']), ('/{rid}/retry', ['POST']), ('/{rid}/reviewer', ['POST']), ('/{rid}/claim', ['POST']), ('/{rid}/people/{pid}/actions', ['POST'])):
+                          ('/{rid}', ['GET', 'DELETE']), ('/{rid}/retry', ['POST']), ('/{rid}/reviewer', ['POST']), ('/{rid}/claim', ['POST']), ('/{rid}/people/{pid}/actions', ['POST'])):
         app.add_api_route('/api/risk-inspections' + path, endpoint, methods=methods)
 
     def editable(db, actor, rid, item_id, field_id):

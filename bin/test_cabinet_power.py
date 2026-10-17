@@ -24,16 +24,24 @@ from .lan_bitable_template_portal.cabinet_power_evidence import _rows_from_ocr
 TEMPLATES=Path(__file__).parent/"lan_bitable_template_portal/templates/cabinet_power"
 
 class CabinetBatchRecognitionTests(unittest.TestCase):
-    def test_duplicate_request_keeps_original_body_and_idempotency_key(self):
+    def test_duplicate_write_returns_for_readback_without_burst_replay(self):
         remote=CabinetFeishu()
         remote.token=lambda:'fixture-token'
         remote._http=SimpleNamespace(request_json=Mock(return_value={'code':1254608}))
         body={'fields':{'文本':'fixture'}}; params={'client_token':'original-token'}
         with patch.object(remote,'require_write'), patch('bin.lan_bitable_template_portal.cabinet_power.time.sleep') as wait:
             with self.assertRaises(CabinetRetryLater): remote.request('POST','records',body,params)
-        self.assertEqual([call.args[0] for call in wait.call_args_list],[1,2,4,8])
-        self.assertEqual(remote._http.request_json.call_count,5)
+        wait.assert_not_called()
+        self.assertEqual(remote._http.request_json.call_count,1)
         self.assertTrue(all(call.kwargs['params']==params and call.kwargs['json_payload']==body for call in remote._http.request_json.call_args_list))
+
+    def test_duplicate_read_still_uses_bounded_backoff(self):
+        remote=CabinetFeishu(); remote.token=lambda:'fixture-token'
+        remote._http=SimpleNamespace(request_json=Mock(side_effect=[{'code':1254608},{'code':0,'data':{'items':[]}}]))
+        with patch('bin.lan_bitable_template_portal.cabinet_power.time.sleep') as wait:
+            self.assertEqual(remote.request('GET','records'),{'items':[]})
+        wait.assert_called_once_with(1)
+        self.assertEqual(remote._http.request_json.call_count,2)
 
     def test_export_timestamp_text_uses_iso_minutes_and_keeps_missing_values(self):
         from .lan_bitable_template_portal.cabinet_power_excel import export_time_text
@@ -3369,7 +3377,7 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
             self.service.start_export_batch(bid,'owner',list('ABCDE'))
             first=self._wait_export_batch(bid)
         self.assertEqual((first['status'],archive.upload_calls,len(archive.records)),('failed',5,0))
-        self.assertEqual(archive.create.call_count,4)
+        self.assertEqual(archive.create.call_count,7)
         archive.create=create
         self.service.start_export_batch(bid,'owner',list('ABCDE'))
         recovered=self._wait_export_batch(bid)
@@ -3401,13 +3409,79 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         with patch.object(self.service._archive_stop,'wait',return_value=True):
             self.service.start_export_batch(bid,'owner',list('ABCDE'))
             interrupted=self._wait_export_batch(bid)
-        self.assertEqual((interrupted['status'],self.service._batch_record(bid)['pid'],interrupted['retry_at']),('interrupted',0,0))
+        self.assertEqual((interrupted['status'],self.service._batch_record(bid)['pid']),('interrupted',0))
+        self.assertGreater(interrupted['retry_at'],time.time())
         self.assertEqual(archive.create.call_count,1)
         archive.create=create
-        self.service.start_export_batch(bid,'owner',list('ABCDE'))
-        recovered=self._wait_export_batch(bid)
+        with patch.object(self.service._archive_stop,'wait',return_value=False):
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            recovered=self._wait_export_batch(bid)
         self.assertEqual(recovered['status'],'succeeded',recovered.get('error'))
         self.assertEqual((archive.upload_calls,len(archive.records)),(5,1))
+
+    def test_export_duplicate_cooldown_can_outlast_old_retry_budget(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; calls=[]; bid='all_'+'a1'*16
+        def busy(fields,identity):
+            calls.append(identity)
+            if len(calls)<=5: raise CabinetRetryLater('fixture still processing',503)
+            return create(fields,identity)
+        archive.create=busy
+        with patch.object(self.service._archive_stop,'wait',return_value=False) as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        self.assertEqual([call.args[0] for call in wait.call_args_list],[15,30,60,120,120])
+        self.assertEqual((len(set(calls)),archive.upload_calls,archive.creates),(1,5,1))
+
+    def test_export_restart_honors_persisted_duplicate_cooldown(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; archive.create=Mock(side_effect=CabinetRetryLater('fixture duplicate',503)); bid='all_'+'a2'*16
+        with patch.object(self.service._archive_stop,'wait',return_value=True):
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            old=self._wait_export_batch(bid)
+        original_identity=self.service._batch_record(bid)['create_operation_id']
+        archive.create=Mock(side_effect=create)
+        fresh=CabinetPowerService(self.store,self.remote,self.tmp.name,export_remote=archive)
+        try:
+            def cooldown(delay):
+                self.assertGreater(delay,0); self.assertLessEqual(delay,15)
+                archive.create.assert_not_called()
+                return False
+            with patch.object(fresh._archive_stop,'wait',side_effect=cooldown) as wait:
+                fresh.start_export_batch(bid,'owner',list('ABCDE'))
+                result=self._wait_export_batch(bid,fresh)
+            self.assertEqual(result['status'],'succeeded',result.get('error'))
+            wait.assert_called_once()
+            self.assertEqual(archive.create.call_args.args[1],original_identity)
+            self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+            self.assertEqual(old['items'],result['items'])
+        finally: fresh.shutdown()
+
+    def test_new_archive_creation_uses_batch_key_not_reused_month_key(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; identities=[]
+        def capture(fields,identity):
+            identities.append(identity)
+            return create(fields,identity)
+        archive.create=capture
+        for bid in ('all_'+'a3'*16,'all_'+'a4'*16):
+            # A previous monthly record was explicitly removed, so the next creation is a new operation.
+            archive.records.clear()
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            self.assertEqual(self._wait_export_batch(bid)['status'],'succeeded')
+        self.assertEqual(len(set(identities)),2)
+
+    def test_legacy_archive_resume_preserves_month_creation_key(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        bid='all_'+'a5'*16
+        self.service._save_batch_record({'batch_id':bid,'owner':'owner','status':'failed','phase':'archiving',
+            'items':{s:{'scope':s,'status':'pending'} for s in 'ABCDE'},'tokens':{},'created_at':'2026-10-17 10:00:00'})
+        archive.create=Mock(wraps=archive.create)
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        self.assertEqual(archive.create.call_args.args[1],f"archive:{result['year']}-{result['month']}")
 
     def test_unknown_create_outcome_is_not_blindly_retried(self):
         archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file

@@ -1,5 +1,5 @@
 <template>
-  <section class="v2-motion-chart" :aria-label="title || '业务图表'" :aria-busy="loading">
+  <section class="v2-motion-chart" :class="{'is-fitting-calendar':fit&&kind==='calendar'}" :aria-label="title || '业务图表'" :aria-busy="loading">
     <header v-if="title || caption || trend || $slots.actions"><h3 v-if="title">{{ title }}</h3><span>{{ caption }}</span><slot name="actions" /><NRadioGroup v-if="trend" v-model:value="kind" size="small" aria-label="图表类型"><NRadioButton value="bar">柱状图</NRadioButton><NRadioButton value="line">折线图</NRadioButton><NRadioButton value="area">面积图</NRadioButton></NRadioGroup></header>
     <div class="v2-chart-surface" :class="{'is-calendar':kind==='calendar','is-long-calendar':kind==='calendar'&&items.length>62}">
       <div ref="host" class="v2-chart-canvas" :class="{muted:unavailable}" role="img" :aria-hidden="unavailable" :aria-label="accessibleLabel" @pointerdown="scrub" @pointermove="move" @pointerup="release" @pointercancel="release" @pointerleave="release" />
@@ -10,7 +10,7 @@
       <p v-else-if="isCircular(kind) && total===0" class="v2-chart-overlay v2-chart-zero">当前合计 0 {{ unit }}</p>
     </div>
     <div v-if="kind==='calendar'&&!unavailable&&!engineFailed" class="v2-calendar-scale" :aria-label="'每日数量：0 至 '+maximum+' '+unit"><span>0</span><i :style="{background:'linear-gradient(90deg,'+calendarColors(nightMode).join(',')+')'}" aria-hidden="true" /><span>{{ maximum }} {{ unit }}</span></div>
-    <details v-if="!loading&&!failed&&!invalid&&items.length" class="v2-chart-data" :open="dataOpen || engineFailed || narrow && isCircular(kind)" @toggle="dataOpen=($event.target as HTMLDetailsElement).open">
+    <details v-if="details&&!loading&&!failed&&!invalid&&items.length" class="v2-chart-data" :open="dataOpen || engineFailed || narrow && isCircular(kind)" @toggle="dataOpen=($event.target as HTMLDetailsElement).open">
       <summary>数据明细 <span>{{ items.length }} {{ kind==='calendar'?'天':'项' }}</span></summary>
       <div v-if="kind!=='calendar'||dataOpen||engineFailed" class="v2-chart-details" aria-label="图表明细"><NButton v-for="(item,index) in items" :key="String(item.key??item.label)+index" data-v2-navigation text @click="$emit('select',item,index)"><i :style="{background:chartPalette[index%chartPalette.length]}" aria-hidden="true" /><span>{{ item.label }}</span><strong>{{ item.value.toLocaleString('zh-CN') }} {{ unit }}</strong><ChevronRight :size="14" /></NButton></div>
     </details>
@@ -23,7 +23,7 @@ import { ChevronRight } from 'lucide-vue-next';
 import type { EChartsType } from 'echarts/core';
 import { chartOption,chartPalette,calendarColors,isCircular,isTrend,type ChartItem,type ChartView } from './vipboard';
 import { nightMode } from './theme';
-const props=withDefaults(defineProps<{title:string;caption?:string;items:ChartItem[];loading?:boolean;failed?:boolean;trend?:boolean;view?:ChartView;unit?:string}>(),{unit:'条'});
+const props=withDefaults(defineProps<{title:string;caption?:string;items:ChartItem[];loading?:boolean;failed?:boolean;trend?:boolean;view?:ChartView;unit?:string;fit?:boolean;details?:boolean}>(),{unit:'条',details:true});
 const emit=defineEmits<{select:[item:ChartItem,index:number]}>();
 const host=ref<HTMLDivElement>(),kind=ref<ChartView>(props.view||'bar'),pressed=ref(false),endPoint=ref<number[]|null>(null);
 const engineFailed=ref(false),visible=ref(false),narrow=ref(false),dataOpen=ref(false);
@@ -45,7 +45,7 @@ function update(){
     const next=kind.value==='calendar'?'calendar':isCircular(kind.value)?'pie':'cartesian';
     if(coordinates&&coordinates!==next)chart.clear();
     coordinates=next;
-    chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value),{replaceMerge:['series','xAxis','yAxis','dataZoom','calendar','visualMap'],lazyUpdate:false});
+    chart.setOption(chartOption(props.items,kind.value,props.unit,narrow.value,!reduced.matches&&visible.value,nightMode.value,props.fit?{width:host.value?.clientWidth||0,height:host.value?.clientHeight||0}:undefined),{replaceMerge:['series','xAxis','yAxis','dataZoom','calendar','visualMap'],lazyUpdate:false});
     ready=true;engineFailed.value=false;updateEnd();
   }catch{ready=false;engineFailed.value=true;}
 }
@@ -63,7 +63,7 @@ async function initialize(){
     chart=init(host.value,undefined,{renderer:'svg'});chart.on('finished',updateEnd);
     chart.on('mousedown',(params:any)=>{const shape=params.event?.target;if(reduced.matches||!['bar','horizontal'].includes(kind.value)||shape?.type!=='rect')return;const bounds=shape.getBoundingRect();shape.originY=bounds.y+bounds.height;shape.animateTo({scaleY:.96},{duration:90,done:()=>{if(!disposed)shape.animateTo({scaleY:1},{duration:220,easing:'cubicOut'});}});});
     chart.on('click',(params:any)=>{if(!ready||unavailable.value)return;const item=props.items[params.dataIndex];if(item)emit('select',item,params.dataIndex);});
-    resize=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(disposed)return;chart?.resize();const small=(host.value?.clientWidth||0)<440;if(narrow.value!==small){narrow.value=small;update();}updateEnd();});});
+    resize=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(disposed)return;chart?.resize();const small=(host.value?.clientWidth||0)<440;if(narrow.value!==small||props.fit){narrow.value=small;update();}updateEnd();});});
     resize.observe(host.value);update();
   }catch{engineFailed.value=true;}finally{initializing=false;}
 }
@@ -88,4 +88,10 @@ onBeforeUnmount(()=>{disposed=true;observer?.disconnect();resize?.disconnect();c
 .v2-chart-total{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:grid;text-align:center;pointer-events:none;max-width:35%}.v2-chart-total strong{font-size:24px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.v2-chart-total span{font-size:11px;color:#63746b;margin-top:2px}
 .v2-chart-data{border-top:1px solid #e7eee9;font-size:12px;margin-top:8px}.v2-chart-data summary{cursor:pointer;padding:10px 2px;color:#526c5d;min-height:38px;box-sizing:border-box}.v2-chart-data summary span{float:right;color:#718277}.v2-chart-data summary:focus-visible{outline:2px solid #197f70;outline-offset:2px}.v2-chart-details{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:2px 14px}.v2-chart-details .n-button{width:100%;height:auto;min-height:38px;text-align:left;white-space:normal}.v2-chart-details :deep(.n-button__content){display:flex;width:100%;gap:7px;min-width:0;white-space:normal}.v2-chart-details span{flex:1;overflow-wrap:anywhere}.v2-chart-details strong{font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}.v2-chart-details i{width:7px;height:7px;border-radius:2px;flex:none}
 .v2-chart-end{position:absolute;width:7px;height:7px;background:#197f70;border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;animation:v2-end-pulse 1.8s ease-in-out infinite}@keyframes v2-end-pulse{50%{box-shadow:0 0 0 5px #197f7018}}@media(max-width:760px){.v2-chart-surface{height:210px}.v2-chart-details .n-button,.v2-chart-data summary{min-height:44px}}@media(prefers-reduced-motion:reduce){.v2-chart-end{animation:none}.v2-chart-canvas{transition:none}}
+</style>
+<style scoped>
+.v2-motion-chart.is-fitting-calendar{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden}
+.is-fitting-calendar .v2-chart-surface.is-calendar{flex:1;height:auto;min-height:0;overflow:hidden}
+.is-fitting-calendar .v2-chart-canvas{min-width:0;width:100%;height:100%;touch-action:pan-y}
+.is-fitting-calendar .v2-calendar-scale{flex:none;min-height:16px}
 </style>

@@ -56,3 +56,8 @@
 .v2-common-actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0 24px}.v2-common-actions .n-button{height:44px;padding-inline:18px}.v2-common-actions .n-button__content{gap:8px}.v2-task-section .v2-table-meta .n-tag{margin-top:6px}.v2-home .v2-work-grid{grid-template-columns:minmax(0,1fr)}
 .v2-task-filter{width:200px;max-width:100%}.v2-task-section .v2-overview-panel.tasks-only{padding:0;border:0}.v2-task-section .v2-compact-list .n-list-item__suffix{max-width:40%}.v2-task-section .v2-compact-list .n-tag{max-width:100%;white-space:normal;height:auto;min-height:24px}
 @media(max-width:760px){.v2-common-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:16px 0 20px}.v2-common-actions .n-button{width:100%;height:44px;padding-inline:8px;font-size:13px}.v2-common-actions .n-button__content{gap:6px}}
+/* Detail cards keep their primary keyboard button and enlarge pointer targets. */
+.workspace-v2 .v2-clickable-card{cursor:pointer;transition:background-color 160ms ease-out,box-shadow 160ms ease-out}
+.workspace-v2 .v2-clickable-card:hover{background:color-mix(in srgb,var(--v2-blue) 5%,var(--cf-surface,#fff))}
+.workspace-v2 .v2-clickable-card:focus-within{box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--v2-blue) 48%,transparent)}
+@media(prefers-reduced-motion:reduce){.workspace-v2 .v2-clickable-card{transition:none}}

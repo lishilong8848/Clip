@@ -101,7 +101,7 @@ const filteredBlocks=computed(()=>blocks.value.filter(row=>(status.value==='全�
 const blockPages=computed(()=>Math.max(1,Math.ceil(filteredBlocks.value.length/20)));
 const blockPageRows=computed(()=>filteredBlocks.value.slice((blockPage.value-1)*20,blockPage.value*20));
 watch([search,status],()=>blockPage.value=1);
-async function loadBlocks() { if(listLoading.value) return; listLoading.value=true; error.value=''; try { const data=await requestJson(base+'/blocks?refresh=1',{...requestOptions,timeoutMs:180_000}); if(!disposed){blocks.value=data.items;loadedAt.value=data.loaded_at;blockPage.value=1;} }catch(e){report(e);}finally{listLoading.value=false;} }
+async function loadBlocks() { if(listLoading.value) return false; listLoading.value=true; error.value=''; try { const data=await requestJson(base+'/blocks?refresh=1',{...requestOptions,timeoutMs:180_000}); if(disposed)return false;if(!Array.isArray(data.items))throw new Error('屏蔽记录读取不完整，已保留原列表，请重试');blocks.value=data.items;loadedAt.value=data.loaded_at;blockPage.value=1;return true;}catch(e){report(e);return false;}finally{listLoading.value=false;} }
 const selectedId=ref(''), queryId=ref(''), detail=ref<Dict|null>(null), detailLoading=ref(false), detailPage=ref(1);
 const focusedDetails=ref(new Set<Dict>());
 let focusTimer:ReturnType<typeof setTimeout>|undefined;
@@ -124,7 +124,7 @@ const ruleSets=ref<Dict[]>([]), setId=ref(''), matchLoading=ref(false), matchRes
 const ruleSetLabel=(row:Dict)=>`${row.name}（${row.item_count || 0} 项）`;
 const setOptions=computed(()=>ruleSets.value.map(ruleSetLabel)),setLabel=computed(()=>{const row=ruleSets.value.find(row=>String(row.id)===setId.value);return row?ruleSetLabel(row):'';});
 const matchGroups=computed<Dict[]>(()=>[...(matchResult.value?.common?.groups||[]).map((g:Dict)=>({...g,kind:'公共'})),...(matchResult.value?.rules?.groups||[]).map((g:Dict)=>({...g,kind:'普通'}))]);
-async function loadRuleSets(){matchRequest++;matchResult.value=null;try{const rows=await requestJson(base+'/rulesets',requestOptions);if(!disposed)ruleSets.value=rows as unknown as Dict[];}catch(e){report(e);}}
+async function loadRuleSets(){matchRequest++;matchResult.value=null;try{const rows=await requestJson(base+'/rulesets',requestOptions);if(disposed)return false;if(!Array.isArray(rows))throw new Error('规则集列表读取不完整，请重试');ruleSets.value=rows;return true;}catch(e){report(e);return false;}}
 let matchRequest=0,excelRequest=0;
 watch(setId,()=>{matchRequest++;matchResult.value=null;});
 async function matchRules(){if(!setId.value||!detail.value||matchLoading.value)return;const id=selectedId.value,version=detailRequest,seq=++matchRequest;matchLoading.value=true;matchResult.value=null;error.value='';try{const data=await post('/rulesets/'+setId.value+'/match',{block_id:id});if(id===selectedId.value&&version===detailRequest&&seq===matchRequest&&!disposed)matchResult.value={...data,source_name:setLabel.value,checked_at:new Date().toLocaleString('zh-CN')};}catch(e){if(seq===matchRequest&&version===detailRequest)report(e);}finally{matchLoading.value=false;}}
@@ -186,12 +186,13 @@ function auditResultText(row:Dict):string {
   return status==='pending'?'正在自动核对…':status==='failed'?(row.check_error||'核对未完成，请重新核对'):status==='ready'?'核对结果不完整，请重新核对':'尚未核对';
 }
 async function loadNoticeAudit(kind:AuditKind=auditKind.value){
-  const audit=noticeAudits[kind];if(audit.loading||audit.checking)return;
+  const audit=noticeAudits[kind];if(audit.loading||audit.checking)return false;
   audit.visited=true;audit.loading=true;audit.error='';audit.errorAction='';
-  try { const rows=await requestJson(base+'/'+kind+'/records',{...requestOptions,fresh:true,cache:'no-store'});if(disposed)return;
+  try { const rows=await requestJson(base+'/'+kind+'/records',{...requestOptions,fresh:true,cache:'no-store'});if(disposed)return false;
     if(!Array.isArray(rows))throw new Error('通告列表读取不完整，请重试');
     audit.rows=rows;audit.page=1;audit.stats=null;
-  } catch(e) { if(!disposed){audit.error=e instanceof Error?e.message:String(e);audit.errorAction='records';} }
+    return true;
+  } catch(e) { if(!disposed){audit.error=e instanceof Error?e.message:String(e);audit.errorAction='records';} return false; }
   finally { audit.loading=false; }
 }
 async function checkNoticeAudit(id?:string,kind:AuditKind=auditKind.value){

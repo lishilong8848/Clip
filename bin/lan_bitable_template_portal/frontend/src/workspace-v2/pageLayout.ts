@@ -41,7 +41,7 @@ export function sanitizePageLayout(value:unknown,blocks:PageBlock[],user:Dict,sc
       items.push({...base,w,h:integer(raw.h,base.h,base.minH!,30),x:integer(raw.x,0,0,12-w),y:integer(raw.y,0,0,1000)});
     }else if(!raw.builtin&&extraKinds(module,user).includes(raw.kind)){
       const clean=sanitize({version:1,widgets:[raw]},user,scopes).widgets.find(item=>item.id===raw.id);
-      if(clean)items.push({...clean,minW:4,minH:4});
+      if(clean){delete clean.taskKinds;items.push({...clean,minW:4,minH:4});}
     }else continue;
     seen.add(raw.id);
   }

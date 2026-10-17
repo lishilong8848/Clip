@@ -10,13 +10,14 @@
     <MotionChart v-if="showChart" :title="presentation==='chart'?'':kind==='learning'?'今日答题构成':kind==='water'?'本月水耗':'核对状态'" :items="chartItems" :view="kind==='learning'?'donut':'horizontal'" :unit="kind==='water'?'t':kind==='learning'?'题':'条'" :loading="loading" :failed="Boolean(error)||chartIncomplete" @select="item=>$emit('open',String(item.url||target))" />
     <NProgress v-else-if="progress !== null && !tasksOnly && presentation!=='progress'" type="line" :percentage="progress" :show-indicator="false" :height="8" />
     <NList v-if="rows.length" :show-divider="true" class="v2-compact-list">
-      <NListItem v-for="row in brief ? rows.slice(0,3) : tasksOnly ? rows.slice(0,12) : expanded || kind === 'water' ? rows : rows.slice(0,5)" :key="row.id"><NButton text class="v2-row-title" @click="$emit('open',row.url)">{{ row.title }}</NButton><template #suffix><NTag size="small" :bordered="false" :type="row.warning ? 'warning' : 'default'">{{ row.status }}</NTag></template></NListItem>
+      <NListItem v-for="row in brief ? rows.slice(0,3) : tasksOnly ? rows.slice(0,12) : expanded || kind === 'water' ? rows : rows.slice(0,5)" :key="row.id" class="v2-clickable-card" @click="activateCard($event) && $emit('open',row.url)"><NButton text class="v2-row-title" @click="$emit('open',row.url)">{{ row.title }}</NButton><template #suffix><NTag size="small" :bordered="false" :type="row.warning ? 'warning' : 'default'">{{ row.status }}</NTag></template></NListItem>
     </NList>
     <p v-else-if="ready && !error" class="v2-source-note">{{ empty }}</p>
     <footer v-if="note || tasksOnly" class="v2-section-foot"><span>{{ note }}{{ brief&&rows.length>3?' · 当前展示前3条':tasksOnly && rows.length > 12 ? ' · 当前展示前12条' : '' }}</span><NButton v-if="tasksOnly || !expanded" text type="primary" @click="$emit('open',footerTarget)">{{ brief?'查看待办':tasksOnly?'查看完整列表':'查看明细' }} <ArrowRight :size="15" /></NButton></footer>
   </section>
 </template>
 <script setup lang="ts">
+import { activateCard } from './cardActivation';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NEmpty, NList, NListItem, NNumberAnimation, NProgress, NSkeleton, NTag } from 'naive-ui';
 import { ArrowRight, RefreshCw } from 'lucide-vue-next';

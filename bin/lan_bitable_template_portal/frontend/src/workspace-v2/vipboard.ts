@@ -14,19 +14,20 @@ export const chartViews = [
 ] as const;
 export const isTrend = (view:ChartView) => view==='line'||view==='area';
 export const isCircular = (view:ChartView) => view==='donut'||view==='pie';
-export function chartOption(items:ChartItem[], view:ChartView, unit='条', compact=false, animate=true, dark=false):EChartsCoreOption {
+export function chartOption(items:ChartItem[], view:ChartView, unit='条', compact=false, animate=true, dark=false,fit?:{width:number;height:number}):EChartsCoreOption {
   if(view==='calendar'){
     if(items.some(item=>!Number.isFinite(item.start)||!Number.isFinite(item.end)||Number(item.end)-Number(item.start)!==86400000))throw new Error('日历热力图需要逐日数据。');
     const dates=items.map(item=>beijingDate(Number(item.start))),maximum=Math.max(1,...items.map(item=>item.value));
     const long=items.length>62,labelColor=dark?'#c1cbd6':'#5b6c63';
+    const tiny=!!fit&&(fit.width<300||fit.height<130),dateLabels=!long&&(!fit||fit.width>240&&fit.height>150);
     // VIPBoard XCalendar: use the actual loaded date range, never fixed sample years or maxima.
     return {
       animation:animate,animationDuration:400,animationDurationUpdate:300,animationEasing:'cubicOut',aria:{enabled:true},
       tooltip:{trigger:'item',renderMode:'richText',confine:true,formatter:(p:any)=>`${dates[p.dataIndex]}\n${items[p.dataIndex]?.value.toLocaleString('zh-CN')} ${unit}`},
       visualMap:{show:false,min:0,max:maximum,inRange:{color:calendarColors(dark)}},
-      calendar:{range:[dates[0],dates[dates.length-1]],orient:long?'horizontal':'vertical',top:30,left:long?34:16,right:16,bottom:10,cellSize:['auto','auto'],splitLine:{show:false},itemStyle:{color:'transparent',borderColor:'transparent',borderWidth:2},dayLabel:{firstDay:1,nameMap:['日','一','二','三','四','五','六'],color:labelColor,fontSize:11},monthLabel:{show:long,nameMap:Array.from({length:12},(_,i)=>(i+1)+'月'),color:labelColor,fontSize:11},yearLabel:{show:false}},
+      calendar:{range:[dates[0],dates[dates.length-1]],orient:long?'horizontal':'vertical',top:tiny?4:30,left:tiny?4:long?34:16,right:fit?4:16,bottom:fit?4:10,cellSize:['auto','auto'],splitLine:{show:false},itemStyle:{color:'transparent',borderColor:'transparent',borderWidth:fit&&fit.width<440?1:2},dayLabel:{show:!tiny,firstDay:1,nameMap:['日','一','二','三','四','五','六'],color:labelColor,fontSize:11},monthLabel:{show:long&&!tiny,nameMap:Array.from({length:12},(_,i)=>(i+1)+'月'),color:labelColor,fontSize:11},yearLabel:{show:false}},
       xAxis:[],yAxis:[],dataZoom:[],
-      series:[{id:'records',type:'heatmap',coordinateSystem:'calendar',itemStyle:{borderRadius:3},data:items.map((item,i)=>({id:dates[i],value:[dates[i],item.value],label:{show:!long,formatter:String(Number(dates[i]?.slice(-2))),color:dark?(item.value>maximum*.5?'#122437':'#e6f0ff'):(item.value>maximum*.5?'#fff':'#24354a')}})),label:{show:!long,formatter:(p:any)=>String(Number(dates[p.dataIndex]?.slice(-2))),fontSize:11},emphasis:{itemStyle:{borderColor:dark?'#eef6ff':'#1243a5',borderWidth:2}}}],
+      series:[{id:'records',type:'heatmap',coordinateSystem:'calendar',itemStyle:{borderRadius:3},data:items.map((item,i)=>({id:dates[i],value:[dates[i],item.value],label:{show:dateLabels,formatter:String(Number(dates[i]?.slice(-2))),color:dark?(item.value>maximum*.5?'#122437':'#e6f0ff'):(item.value>maximum*.5?'#fff':'#24354a')}})),label:{show:dateLabels,formatter:(p:any)=>String(Number(dates[p.dataIndex]?.slice(-2))),fontSize:11},emphasis:{itemStyle:{borderColor:dark?'#eef6ff':'#1243a5',borderWidth:2}}}],
     };
   }
   const circle=isCircular(view), trend=isTrend(view), horizontal=view==='horizontal';

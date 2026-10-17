@@ -7,7 +7,7 @@ import vue from '@vitejs/plugin-vue';
 import {chromium} from 'playwright';
 import {fuseLearningCharts} from './workspace-controls-adapter.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
-const server=await createServer({root,configFile:false,plugins:[{name:'learning-v2-fixture',enforce:'pre',transform(code,id){if(id.replaceAll('\\','/').endsWith('/LearningDashboard.vue'))return fuseLearningCharts(code);}},vue()],logLevel:'error',server:{host:'127.0.0.1',port:0}});
+const server=await createServer({root,configFile:false,cacheDir:path.resolve(root,'../../../output/playwright/action-motion-vite-cache'),plugins:[{name:'learning-v2-fixture',enforce:'pre',transform(code,id){if(id.replaceAll('\\','/').endsWith('/LearningDashboard.vue'))return fuseLearningCharts(code);}},vue()],logLevel:'error',server:{host:'127.0.0.1',port:0}});
 await server.listen();const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 const browser=await chromium.launch({headless:true});const errors=[];
 const output=path.resolve(root,'../../../output/playwright/workspace-v2');await mkdir(output,{recursive:true});

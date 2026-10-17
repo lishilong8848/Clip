@@ -40,6 +40,7 @@ const buildDir = path.join(output, 'build/assets/workspace-v2');
 process.env.CLIPFLOW_WORKSPACE_BUILD_DIR = buildDir;
 await build({
   root, configFile: path.join(root, 'vite.workspace-v2.config.ts'),
+  build: { minify: false },
   cacheDir: path.join(output, 'vite-cache'), logLevel: 'error',
   plugins: [{ name: 'isolated-plan-chart-fixture', enforce: 'pre',
     load(id) { if (id.replaceAll('\\', '/').endsWith('/src/workspace-v2/main.ts')) return fixture; },
@@ -47,7 +48,7 @@ await build({
 });
 const server = await preview({ root, configFile: false, base: '/assets/workspace-v2/',
   build: { outDir: buildDir }, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, proxy: {} } });
-let browser;
+let browser, activePage;
 try {
   const base = `http://127.0.0.1:${server.httpServer.address().port}`;
   const entry = base + '/assets/workspace-v2/index.html?__page=/plan-convergence';
@@ -55,7 +56,11 @@ try {
   for (const width of [1440, 390]) {
     const context = await browser.newContext({ viewport: { width, height: 1000 } });
     const page = await context.newPage(), errors = [], calls = [], layouts = layoutApiFixture();
-    let admin = true, failCheck = true, rule, nextId = 1, failRecords = false;
+    activePage = page;
+    let admin = true, failCheck = true, rule, nextId = 1, failRecords = false, incompleteRecords = false;
+    let readDelay = 0, failRuleList = false, failRuleDetail = false;
+    let holdRead = false, releaseRead;
+    const waitRead = () => holdRead ? new Promise(resolve => { releaseRead = resolve; }) : new Promise(resolve => setTimeout(resolve, readDelay));
     page.setDefaultTimeout(20000);
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (/Failed to resolve component/.test(message.text())) errors.push(message.text()); });
@@ -70,7 +75,9 @@ try {
       if (pathname.endsWith('/settings/browser-login')) return reply({ status: 'idle' });
       if (pathname.endsWith('/settings')) return reply({ has_token: true, expired: false });
       if (/\/(maintenance|change)\/records$/.test(pathname)) {
+        await waitRead();
         if (failRecords) { failRecords = false; return route.fulfill({ status: 502, json: { ok: false, error: '记录读取中断' } }); }
+        if (incompleteRecords) { incompleteRecords = false; return reply({}); }
         return reply([{ record_id: 'original', name: 'A楼原记录', building: 'A楼', status: '开始', hits: [{ blockId: 1, blockName: '上次已匹配', reason: '设备一致' }], check_status: 'ready' }]);
       }
       if (/\/(maintenance|change)\/check$/.test(pathname)) {
@@ -80,12 +87,18 @@ try {
       }
       if (pathname.endsWith('/rulesets')) {
         if (method === 'POST') { rule = { ...request.postDataJSON(), id: nextId++, version: 'v1', items: [] }; return reply(rule); }
+        await waitRead();
+        if (failRuleList) { failRuleList = false; return reply({}); }
         return reply(rule ? [{ ...rule, item_count: rule.items.length }] : []);
       }
       if (/\/rulesets\/\d+\/expand$/.test(pathname)) return reply({ count: 1, devices: [{ inst_name: '冷机一号' }] });
       if (/\/rulesets\/\d+$/.test(pathname)) {
         if (method === 'DELETE') { rule = undefined; return reply({ deleted: true }); }
         if (method === 'PUT') { assert.equal(request.postDataJSON().expected_version, rule.version); rule = { ...rule, ...request.postDataJSON(), version: 'v2' }; }
+        if (method === 'GET') {
+          await waitRead();
+          if (failRuleDetail) { failRuleDetail = false; return route.fulfill({ status: 502, json: { ok: false, error: '规则读取中断' } }); }
+        }
         return reply(rule);
       }
       if (pathname.endsWith('/catalog')) {
@@ -99,11 +112,19 @@ try {
       await page.goto(entry + '&tab=' + kind);
       await page.getByText('A楼原记录', { exact: true }).waitFor();
       const refresh = page.getByRole('button', { name: '刷新' + label + '记录', exact: true });
+      assert.equal(await refresh.getAttribute('data-v2-refresh'), '');
       const before = calls.filter(call => call.pathname.endsWith('/' + kind + '/records')).length;
+      readDelay = 400;
       for (let n = 0; n < 2; n++) {
+        holdRead = true;
         await refresh.click();
-        await page.waitForFunction(label => ![...document.querySelectorAll('button')].find(b => b.textContent.includes('刷新' + label + '记录'))?.disabled, label);
+        await refresh.locator('.v2-action-feedback[aria-label="处理中"]').waitFor();
+        await page.waitForFunction(button => button.dataset.v2Action === 'pending', await refresh.elementHandle());
+        await refresh.evaluate(button => button.click());
+        holdRead = false; releaseRead();
+        await refresh.locator('.v2-action-feedback[aria-label="操作完成"]').waitFor();
       }
+      readDelay = 0;
       assert.equal(calls.filter(call => call.pathname.endsWith('/' + kind + '/records')).length, before + 2, 'manual reads bypass the 30-second cache');
       await page.getByRole('button', { name: '核对', exact: true }).evaluate(button => { button.click(); button.click(); });
       const alert = page.locator('.pc-maintenance .pc-alert.error');
@@ -122,15 +143,59 @@ try {
       failRecords = true;
       await refresh.click();
       await alert.getByText(/记录读取中断/).waitFor();
+      await refresh.locator('.v2-action-feedback[aria-label="操作未完成"]').waitFor();
+      assert.equal(await refresh.getAttribute('data-v2-action'), 'error');
       assert.match(await page.locator('.pc-maintenance').innerText(), /A楼原记录/);
-      await alert.getByRole('button', { name: '重试', exact: true }).click();
+      await refresh.click();
+      await refresh.locator('.v2-action-feedback[aria-label="操作完成"]').waitFor();
       await alert.waitFor({ state: 'detached' });
+      incompleteRecords = true;
+      await refresh.click();
+      await refresh.locator('.v2-action-feedback[aria-label="操作未完成"]').waitFor();
+      assert.match(await alert.innerText(), /通告列表读取不完整/);
+      await refresh.click();
+      await refresh.locator('.v2-action-feedback[aria-label="操作完成"]').waitFor();
     }
     await page.getByRole('button', { name: '规则配置', exact: true }).click();
     const editor = page.locator('.pc-rules');
     await editor.locator('.new-set-form input').fill('公网规则回归');
     await editor.getByRole('button', { name: '新建规则集', exact: true }).click();
     await editor.getByLabel('规则集名称', { exact: true }).waitFor();
+    const refreshSets = editor.getByRole('button', { name: '刷新规则集', exact: true });
+    const reloadSet = editor.getByRole('button', { name: '读取最新规则', exact: true });
+    readDelay = 400;
+    for (let n = 0; n < 2; n++) {
+      holdRead = true;
+      await refreshSets.click();
+      await refreshSets.locator('.v2-action-feedback[aria-label="处理中"]').waitFor();
+      holdRead = false; releaseRead();
+      await refreshSets.locator('.v2-action-feedback[aria-label="操作完成"]').waitFor();
+    }
+    failRuleList = true;
+    await refreshSets.click();
+    await refreshSets.locator('.v2-action-feedback[aria-label="操作未完成"]').waitFor();
+    assert.match(await editor.innerText(), /规则集列表读取不完整/);
+    await refreshSets.click();
+    await refreshSets.locator('.v2-action-feedback[aria-label="操作完成"]').waitFor();
+    const ruleName = editor.getByLabel('规则集名称', { exact: true });
+    await ruleName.fill('未保存的本次填写');
+    const detailReads = () => calls.filter(call => call.method === 'GET' && /\/rulesets\/\d+$/.test(call.pathname)).length;
+    const beforeCancel = detailReads();
+    await reloadSet.click();
+    await page.getByRole('dialog', { name: '读取最新规则', exact: true }).getByRole('button', { name: '取消', exact: true }).click();
+    assert.equal(await ruleName.inputValue(), '未保存的本次填写');
+    assert.equal(detailReads(), beforeCancel, 'cancel does not read or overwrite the draft');
+    assert.equal(await reloadSet.getAttribute('data-v2-action'), null, 'cancel never shows success');
+    failRuleDetail = true;
+    await reloadSet.click();
+    await page.getByRole('dialog', { name: '读取最新规则', exact: true }).getByRole('button', { name: '确认', exact: true }).click();
+    await reloadSet.locator('.v2-action-feedback[aria-label="操作未完成"]').waitFor();
+    assert.equal(await ruleName.inputValue(), '未保存的本次填写', 'failed reload preserves current fields');
+    await reloadSet.click();
+    await page.getByRole('dialog', { name: '读取最新规则', exact: true }).getByRole('button', { name: '确认', exact: true }).click();
+    await reloadSet.locator('.v2-action-feedback[aria-label="操作完成"]').waitFor();
+    assert.equal(await ruleName.inputValue(), rule.name);
+    readDelay = 0;
     await editor.locator('.picker-col').first().locator('.cand').filter({ hasText: '冷机' }).getByRole('checkbox').check();
     await editor.locator('.picker-col').nth(2).locator('.cand').filter({ hasText: '冷机一号' }).getByRole('checkbox').check();
     await editor.locator('.picker-col').nth(3).locator('.cand').filter({ hasText: '高温' }).getByRole('checkbox').check();
@@ -200,6 +265,9 @@ try {
     await context.close();
     console.log(`${width}px: immediate refresh, check recovery, rule CRUD/read-only, chart coordinate/empty/resize recovery OK`);
   }
+} catch(error) {
+  await activePage?.screenshot({path:path.join(output,'refresh-failure.png'),fullPage:true});
+  throw error;
 } finally {
   await browser?.close();
   await server.close();

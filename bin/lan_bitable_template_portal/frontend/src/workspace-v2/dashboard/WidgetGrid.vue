@@ -1,7 +1,7 @@
 <template>
   <div ref="host" class="grid-stack v2-widget-grid" :class="{'is-editing':editing}" :aria-label="label">
     <TransitionGroup :css="false" @enter="enter" @leave="leave">
-    <div v-for="item in items" :key="item.id" class="grid-stack-item" :style="{'--widget-order':item.y*12+item.x}" :gs-id="item.id" :data-widget-id="item.id" :data-widget-kind="item.kind">
+    <div v-for="item in items" :key="item.id" class="grid-stack-item" :style="{'--widget-order':item.y*12+item.x}" :gs-id="item.id" :data-widget-id="item.id" :data-widget-kind="item.kind" :data-widget-display="item.display">
       <section class="grid-stack-item-content v2-widget" :aria-label="item.title">
         <header class="v2-widget-head">
           <button v-if="editing" class="v2-widget-drag" data-v2-navigation type="button" :aria-label="'拖动'+item.title" :title="'拖动'+item.title"><GripVertical :size="16" /></button>

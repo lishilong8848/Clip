@@ -11,8 +11,8 @@
           <OverviewPanel v-if="panelKinds.includes(taskKind)" :key="taskKind" :kind="taskKind" :user="user" :scope="scope" :scopes="scopes" tasks-only :brief="brief" @open="open" />
           <template v-else>
           <NAlert v-if="taskError" type="warning" :bordered="false">{{ taskError }} <NButton text @click="loadTasks">重试</NButton></NAlert>
-          <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading"><NList class="v2-mobile-tasks"><NListItem v-for="row in visibleRows" :key="row.key">
-            <article v-if="actionMode" class="v2-task-operation">
+          <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading"><NList class="v2-mobile-tasks v2-task-operation-list"><NListItem v-for="row in visibleRows" :key="row.key">
+            <article v-if="actionMode" class="v2-task-operation v2-clickable-card" @click="activateCard($event) && open(row.url)">
               <div class="v2-task-operation-head"><NButton text class="v2-operation-title" data-v2-navigation @click="open(row.url)">{{row.title}}</NButton><NTag size="small" :bordered="false">{{row.status}}</NTag></div>
               <div class="v2-mobile-task-meta"><span>{{row.scope}}</span><span v-if="row.time">{{row.time}}</span><span v-if="row.progress!==null">进度 {{row.progress}}%</span><span v-if="taskKind==='repair_management'">跟进 {{row.followupCount??'—'}} 条</span></div>
               <div class="v2-task-operation-actions"><NButton v-for="control in rowControls(row)" :key="control.label" data-v2-navigation size="small" secondary :type="control.primary?'primary':'default'" @click="open(control.url)"><component :is="control.icon" :size="14" />{{control.label}}</NButton></div>
@@ -35,6 +35,7 @@
   </div>
 </template>
 <script setup lang="ts">
+import { activateCard } from './cardActivation';
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useCapacity } from './pageLayout';
 import { NAlert, NButton, NDataTable, NEmpty, NList, NListItem, NSelect, NSpin, NTag, type DataTableColumns } from 'naive-ui';

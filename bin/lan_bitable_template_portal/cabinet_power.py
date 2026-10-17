@@ -173,11 +173,11 @@ class CabinetFeishu:
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
         for attempt in range(5):
             data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if read_request else 0)
-            # 1254608 explicitly rejects the duplicate request. Preserve its
-            # body/client_token; unknown write outcomes are never replayed here.
+            # A duplicate write may already exist; let the journal read it back
+            # before sending it again. Reads can safely use the short retry loop.
             retryable=data.get("code")==1254608 or read_request and data.get("code") in (1255002,1254290,1254291,1254607)
             limit=4 if data.get("code")==1254608 else 2
-            if not retryable or attempt>=limit: break
+            if not retryable or not read_request or attempt>=limit: break
             time.sleep((1 if data.get("code")==1254608 else 0.5)*(2**attempt))
         if data.get("code"):
             if data["code"]==1254608: raise CabinetRetryLater("飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。",503)
@@ -1633,7 +1633,8 @@ class CabinetPowerService:
             if batch is None:
                 batch={"batch_id":batch_id,"owner":owner,"status":"pending","phase":"preparing",
                        "items":{scope:{"scope":scope,"status":"pending"} for scope in TOTALS},
-                       "tokens":{},"created_at":stamp(),"cloud_record_id":"","archive_url":""}
+                       "tokens":{},"created_at":stamp(),"cloud_record_id":"","archive_url":"",
+                       "create_operation_id":"archive:"+batch_id}
                 if archive_period:
                     batch.update(year=archive_period[:4],month=archive_period[5:],
                                  upload_started_at=stamp())
@@ -1642,7 +1643,7 @@ class CabinetPowerService:
             if batch["status"]=="succeeded": return self._public_batch_record(batch)
             if process_alive(batch.get("pid")) and (batch["pid"]!=os.getpid() or batch_id in self._archive_running):
                 return self._public_batch_record(batch)
-            batch.update(status="running",error="",retry_at=0,pid=os.getpid())
+            batch.update(status="running",error="",pid=os.getpid())
             self._save_batch_record(batch)
             self._archive_running.add(batch_id)
             try: self._archive_pool.submit(self._run_export_batch,batch_id)
@@ -1654,19 +1655,23 @@ class CabinetPowerService:
             return self._public_batch_record(batch)
 
     def _export_step(self,batch,run):
-        for attempt in range(4):
+        remaining=max(0,min(120,float(batch.get("retry_at") or 0)-time.time()))
+        if remaining and self._archive_stop.wait(remaining):
+            batch.update(status="interrupted",error="程序正在关闭，已保留原批次和上传进度。")
+            return False
+        for attempt in range(7):
             try:
                 batch.update(retry_at=0,error="")
                 self._save_batch_record(batch)
                 run()
                 return True
             except CabinetRetryLater:
-                if attempt==3: raise
-                delay=15*2**attempt
+                if attempt==6: raise
+                delay=min(120,15*2**attempt)
                 batch.update(retry_at=time.time()+delay,error="飞书正在处理重复请求，稍后自动核验原批次，不会重复新增归档。")
                 self._save_batch_record(batch)
                 if self._archive_stop.wait(delay):
-                    batch.update(status="interrupted",retry_at=0,error="程序正在关闭，已保留原批次和上传进度。")
+                    batch.update(status="interrupted",error="程序正在关闭，已保留原批次和上传进度。")
                     return False
 
     def _run_export_batch(self,batch_id):
@@ -1702,7 +1707,8 @@ class CabinetPowerService:
         except Exception as exc:
             batch.update(status="failed",error=str(exc))
         finally:
-            batch.update(pid=0,retry_at=0)
+            batch["pid"]=0
+            if batch.get("status")!="interrupted": batch["retry_at"]=0
             self._save_batch_record(batch)
             self._archive_running.discard(batch_id)
 
@@ -1762,7 +1768,9 @@ class CabinetPowerService:
                                 raise exc
                             cloud=found
                 else:
-                    try: cloud=self.export_remote.create(fields,f"archive:{year}-{month}")
+                    # Old batches retain their original key when resumed after an update.
+                    identity=batch.get("create_operation_id") or f"archive:{year}-{month}"
+                    try: cloud=self.export_remote.create(fields,identity)
                     except Exception:
                         found=self._archive_month_records(year,month)
                         if len(found)!=1: raise

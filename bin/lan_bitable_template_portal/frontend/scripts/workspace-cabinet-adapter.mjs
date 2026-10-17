@@ -31,7 +31,15 @@ export function adaptCabinetBatchPage(source) {
 
 export function adaptCabinetPage(source) {
   let code=source.replaceAll('\r\n','\n');
-  code=code.replace('<script setup lang="ts">','<script setup lang="ts">\nimport {cabinetPalette as v2CabinetPalette} from "../workspace-v2/cabinetPalette";\nimport {nightMode as v2CabinetNight} from "../workspace-v2/theme";');
+  code=code.replace('<script setup lang="ts">','<script setup lang="ts">\nimport CabinetBuildingSwitcher from "../workspace-v2/CabinetBuildingSwitcher.vue";\nimport {cabinetPalette as v2CabinetPalette} from "../workspace-v2/cabinetPalette";\nimport {nightMode as v2CabinetNight} from "../workspace-v2/theme";');
+  const props='scope: string; isAdmin: boolean;';
+  const heading='<div class="heading-title"><h1>{{ scope ? scope + \'楼机柜上下电\' : \'机柜上下电\' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>';
+  if(code.split(props).length!==2 || code.split(heading).length!==2)throw new Error('Cabinet building switcher contract changed');
+  code=code.replace(props,'scope: string; scopeOptions?: {value:string;label:string}[]; isAdmin: boolean;');
+  code=code.replace(heading,'<CabinetBuildingSwitcher :scope="scope" :scope-options="scopeOptions" />');
+  const buildingTotal='<strong>{{ building.counts.total }}<small>机柜</small></strong>';
+  if(code.split(buildingTotal).length!==2)throw new Error('Cabinet overview total contract changed');
+  code=code.replace(buildingTotal,buildingTotal+'<span class="v2-cabinet-building-rate">上电率 {{ v2CabinetRateText(building.counts) }}</span>');
   // V2-only compact status summary: original counts/state actions and rack palette stay untouched.
   const rateSummary =
     '\n// Compact cabinet status summary: powered = formal + test (or the backend powered field).\n' +

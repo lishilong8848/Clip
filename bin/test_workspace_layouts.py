@@ -128,6 +128,22 @@ class WorkspaceLayoutTests(unittest.TestCase):
         self.assertEqual(self.put(layout("new"), 1).json()["data"]["revision"], 2)
         self.assertEqual(self.put().status_code, 409)
 
+    def test_todo_order_is_account_owned_and_preserves_empty_selection(self):
+        value=layout(); value['widgets'][0]['taskKinds']=['water','notices','learning']
+        self.assertEqual(self.put(value).status_code,200)
+        self.runtime.state_store=LanPortalStateStore(db_path=self.path)
+        self.assertEqual(self.client.get(self.url).json()['data']['value'],value)
+        self.session['user']['open_id']='bob'
+        self.assertIsNone(self.client.get(self.url).json()['data']['value'])
+        self.session['user']['open_id']='alice'
+        value['widgets'][0]['taskKinds']=[]
+        self.assertEqual(self.put(value,1).json()['data']['value']['widgets'][0]['taskKinds'],[])
+        for invalid in [['notices','notices'],['accounts'],[{}],'water',None]:
+            value['widgets'][0]['taskKinds']=invalid
+            self.assertEqual(self.put(value,2).status_code,400)
+        value['widgets'][0].update(kind='shortcuts',taskKinds=['notices'])
+        self.assertEqual(self.put(value,2).status_code,400)
+
     def test_two_store_instances_use_atomic_compare_and_swap(self):
         self.put()
         other = LanPortalStateStore(db_path=self.path)

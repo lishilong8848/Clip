@@ -13,7 +13,7 @@ from .portal_service import PortalError
 
 PAGES = frozenset("workspace notices sops mop repair cabinet events daily links signatures accounts handover "
                   "plan-review plan-audit plan-rules guard-building guard-admin learning-practice learning-profile".split())
-WIDGET_FIELDS = frozenset("id kind title module scope display period metric presentation links x y w h builtin minW minH".split())
+WIDGET_FIELDS = frozenset("id kind title module scope display period metric presentation links taskKinds x y w h builtin minW minH".split())
 
 
 def validate_layout(page, value):
@@ -53,6 +53,11 @@ def validate_layout(page, value):
                 valid = type(entry) is bool
             elif key == "links":
                 valid = isinstance(entry, list) and len(entry) <= 64 and all(isinstance(link, str) and re.fullmatch(r"[a-z_]{1,48}", link) for link in entry)
+            elif key == "taskKinds":
+                valid = (page == "workspace" and item.get("kind") == "tasks" and isinstance(entry, list)
+                         and len(entry) <= 7 and all(isinstance(kind, str) and kind in {
+                             "notices", "repair_management", "critical_guard", "risk_inspection", "water", "learning", "signatures"
+                         } for kind in entry) and len(set(entry)) == len(entry))
             else:
                 valid = isinstance(entry, str) and len(entry) <= 80
             if not valid:

@@ -15,8 +15,8 @@ for(const file of ['DrillManagementPage.vue','LifeGuidePage.vue']){
   const adapted=adaptDrillPresentation(source,file),original=parse(source).descriptor;
   const {descriptor,errors}=parse(adapted);assert.deepEqual(errors,[]);
   compileScript(descriptor,{id:file,inlineTemplate:true});
-  const stableScript=text=>text.replace('\nimport { NSelect as V2DrillSelect } from "naive-ui";','').replace(/const stepSignerOptions[\s\S]*?(?=function stepSignerIds)/,'').replace(/function updateStepSigner[\s\S]*?(?=function isEccStep)/,'');
-  assert.equal(stableScript(descriptor.scriptSetup.content),stableScript(original.scriptSetup.content),'only step candidate selection changes; save controllers stay unchanged');
+  const stableScript=text=>text.replace('\nimport { NSelect as V2DrillSelect } from "naive-ui";','').replace(/const v2DrillReturnScope=[\s\S]*?(?=const buildingDrills)/,'').replace('navigate("/drill-management?mode=admin&return_scope="+encodeURIComponent(activeScope.value)+"&month="+encodeURIComponent(selectedMonth.value))','navigate("/drill-management?mode=admin")').replace(/const stepSignerOptions[\s\S]*?(?=function stepSignerIds)/,'').replace(/function updateStepSigner[\s\S]*?(?=function isEccStep)/,'');
+  assert.equal(stableScript(descriptor.scriptSetup.content),stableScript(original.scriptSetup.content),'only step candidates and local return navigation change; save controllers stay unchanged');
   assert.equal(adaptPageLayouts(adapted,file),adapted,'no PageCanvas wrapping');
   if(file==='DrillManagementPage.vue')assert.equal(descriptor.template.ast.children[0].loc.source,original.template.ast.children[0].loc.source,'print view unchanged');
 }
@@ -110,6 +110,19 @@ try{
       await page.getByRole('button',{name:'管理员入口',exact:true}).click();await page.locator('.configuration-panel').waitFor();await shot('admin-'+width);
       assert(!await page.locator('.v2-main').evaluate(el=>el.scrollWidth>el.clientWidth+1),'admin overflow '+width);
       await page.getByRole('button',{name:'上传演练文件',exact:true}).click();await page.locator('.upload-panel').waitFor();await shot('upload-'+width);
+    }
+  }
+  if(!baseline){
+    for(const width of [1440,375,360]){
+      await page.setViewportSize({width,height:width===360?640:width===375?667:960});
+      await go('/drill-management&scope=B&month=2026-10');await page.locator('#drill-commander').waitFor();
+      await page.getByRole('button',{name:'管理员入口',exact:true}).click();await page.locator('.configuration-panel').waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('return_scope'),'B');
+      const back=page.getByRole('button',{name:'返回楼栋演练',exact:true});
+      await back.scrollIntoViewIfNeeded();assert(await back.isEnabled());await shot('admin-return-'+width);
+      await back.click();await page.locator('#drill-commander').waitFor();
+      assert.equal(new URL(page.url()).searchParams.get('scope'),'B');assert.equal(new URL(page.url()).searchParams.get('month'),'2026-10');assert.equal(new URL(page.url()).searchParams.has('mode'),false);
+      assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
     }
   }
   await page.setViewportSize({width:1440,height:960});await go('/life-guide');await page.locator('.life-guide-page iframe').waitFor();await shot('guide');

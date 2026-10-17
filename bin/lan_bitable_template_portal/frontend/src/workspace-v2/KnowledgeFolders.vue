@@ -119,6 +119,7 @@ import { computed, h, reactive, ref, watch } from "vue";
 import { NModal, NTree, NSelect, NInput, NButton, type SelectOption, type TreeOption } from "naive-ui";
 import { ChevronsDownUp, ChevronsUpDown, Folder, FolderPlus, Move, Pencil, Trash2 } from "lucide-vue-next";
 import { buildFolderTree, toTreeOptions, folderOptions, type FolderTreeOption, type GroupItem } from "./knowledgeFolders";
+import { activateCard } from './cardActivation';
 
 const props = defineProps<{
   groups: GroupItem[];
@@ -247,6 +248,7 @@ function requestDelete(node: FolderTreeOption): void {
 
 function selectOption(option: FolderTreeOption): void {
   if(props.busy)return;
+  if(option.children?.length&&!expandedKeys.value.includes(option.key))expandedKeys.value.push(option.key);
   emit("select", option.key);
 }
 
@@ -265,9 +267,9 @@ function closeModal(): void {
  */
 function renderLabel(state: { option: TreeOption; checked: boolean; selected: boolean }): ReturnType<typeof h> {
   const option = state.option as FolderTreeOption;
-  return h("span", { class: "v2-folder-node" }, [
+  return h("span", { class: "v2-folder-node", onClick:(event:MouseEvent)=>{if(activateCard(event))selectOption(option);} }, [
     h(Folder, { size: 14, "aria-hidden": true, class: "v2-folder-icon" }),
-    h("button", { class: "v2-folder-name", type: "button", disabled: props.busy, 'aria-pressed': props.selectedId===option.key, title: paths.value.get(option.key), onClick: () => selectOption(option) }, [
+    h("button", { class: "v2-folder-name", type: "button", 'data-v2-navigation':'', disabled: props.busy, 'aria-pressed': props.selectedId===option.key, title: paths.value.get(option.key), onClick: () => selectOption(option) }, [
       h("span", option.label),
       option.count > 0 ? h("em", { class: "v2-folder-count" }, option.count) : null,
     ]),

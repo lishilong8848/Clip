@@ -40,6 +40,35 @@ function result(action:Action,value:any){
 }
 function observe(action:Action){action.observed=true;action.pending++;}
 function completeRequest(action:Action){action.pending--;if(action.failed&&action.button.dataset.v2Action){window.clearTimeout(action.timer);settle(action);}}
+function begin(button:HTMLButtonElement,minimum:number):Action{
+  const feedback=button.ownerDocument.createElement('span');feedback.className='v2-action-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-label','处理中');
+  const action:Action={button,feedback,started:performance.now(),pending:0,observed:false,succeeded:false,failed:false,waiting:false,timer:0,finished:false,minimum};
+  actions.set(button,action);
+  if(getComputedStyle(button).position==='static')button.dataset.v2ActionPosition='relative';
+  button.style.setProperty('--v2-action-size',Math.max(1,Math.min(48,button.clientHeight,button.clientWidth))+'px');
+  // Defer decoration until the original click handlers have inspected the target.
+  window.setTimeout(()=>{
+    if(action.finished)return;
+    if(!button.isConnected||!action.observed){clear(action);return;}
+    button.dataset.v2Action='preparing';button.append(feedback);render(h(LoaderCircle,{size:21}),feedback);
+    void button.getBoundingClientRect();
+    window.requestAnimationFrame(()=>{if(!action.finished){button.dataset.v2Action='pending';settle(action);}});
+  },0);
+  return action;
+}
+export async function runRefreshAction(button:HTMLButtonElement,refresh:()=>Promise<boolean>,failure:()=>string):Promise<void>{
+  if(button.disabled)return;
+  const previous=actions.get(button);
+  if(previous){if(previous.pending||previous.waiting)return;clear(previous);}
+  const action=begin(button,0);observe(action);
+  try{const result=await refresh();action.failed=Boolean(failure());action.succeeded=!action.failed&&result===true;}
+  catch{action.failed=true;}
+  finally{
+    action.pending--;
+    if(!action.failed&&!action.succeeded)clear(action);
+    else if(button.dataset.v2Action==='pending'){window.clearTimeout(action.timer);settle(action);}
+  }
+}
 export function trackButtonRequest<T>(promise:Promise<T>,method='POST'):Promise<T>{
   const owner=['GET','HEAD','OPTIONS'].includes(method.toUpperCase())?undefined:current;if(owner)observe(owner);
   return promise.then(data=>{const task=jobs.get(String((data as any)?.job_id||''));if(task)result(task,data);if(owner)result(owner,data);return data;},error=>{if(owner)owner.failed=true;throw error;}).finally(()=>{if(owner)completeRequest(owner);});
@@ -71,20 +100,7 @@ export function installActionMotion(doc:Document=document):()=>void{
     if(!button.hasAttribute('data-v2-submit')&&!(button.type==='submit'&&button.form))return;
     if(button.type==='submit'&&button.form&&!button.form.noValidate&&!button.form.checkValidity())return;
     if(actions.has(button)){event.preventDefault();event.stopImmediatePropagation();return;}
-    const feedback=doc.createElement('span');feedback.className='v2-action-feedback';feedback.setAttribute('role','status');feedback.setAttribute('aria-label','处理中');
-    const action:Action={button,feedback,started:performance.now(),pending:0,observed:false,succeeded:false,failed:false,waiting:false,timer:0,finished:false,minimum:1200};
-    actions.set(button,action);current=action;
-    if(getComputedStyle(button).position==='static')button.dataset.v2ActionPosition='relative';
-    button.style.setProperty('--v2-action-size',Math.max(1,Math.min(48,button.clientHeight,button.clientWidth))+'px');
-    // Defer decoration until the original click handlers have inspected the target.
-    window.setTimeout(()=>{
-      if(action.finished)return;
-      if(!button.isConnected||!action.observed){clear(action);return;}
-      button.dataset.v2Action='preparing';button.append(feedback);render(h(LoaderCircle,{size:21}),feedback);
-      // Establish the full-width clip before transitioning, instead of jumping from clip-path:none.
-      void button.getBoundingClientRect();
-      window.requestAnimationFrame(()=>{if(!action.finished){button.dataset.v2Action='pending';settle(action);}});
-    },0);
+    const action=begin(button,1200);current=action;
     window.setTimeout(()=>{if(current===action)current=undefined;},0);
   };
   doc.addEventListener('click',click,true);

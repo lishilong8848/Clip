@@ -10,7 +10,7 @@
         <button type="button" v-if="currentSetId && isAdmin" class="icon-button danger" title="删除当前规则集及其全部条目（不可恢复）" aria-label="删除当前规则集" :disabled="busy || saving" @click="deleteSet"><Trash2 :size="15" /></button>
         <button type="button" v-if="currentSetId" class="command-button" title="查看规则集覆盖设备" :disabled="busy || saving || expanding" @click="previewExpand"><Eye :size="15" />查看覆盖</button>
         <button type="button" v-if="isAdmin && currentSetId" class="primary" :disabled="busy || saving || !dirty" @click="saveSet"><Save :size="15" />保存规则集</button>
-        <button type="button" v-if="currentSetId && !draftOnly" :disabled="busy || saving" @click="reloadSet"><RefreshCw :size="15" />读取最新规则</button>
+        <button type="button" v-if="currentSetId && !draftOnly" :disabled="busy || saving || setsLoading" @click="reloadSet"><RefreshCw :size="15" />读取最新规则</button>
       </div>
     </header>
 
@@ -30,7 +30,7 @@
         <p v-else-if="!sets.length" class="muted empty">暂无规则集，{{ isAdmin ? "请在左侧新建。" : "请等待管理员创建。" }}</p>
         <ul v-else class="set-list">
           <li v-for="s in sets" :key="s.id" :class="{ active: currentSetId === s.id }">
-            <button type="button" class="set-row" :disabled="busy || saving" @click="selectSet(s.id)">
+            <button type="button" class="set-row" :disabled="busy || saving || setsLoading" @click="selectSet(s.id)">
               <span class="set-name">{{ s.name || "未命名规则集" }}</span>
               <span class="set-meta"><span class="badge">{{ s.item_count ?? 0 }} 项</span><small class="muted">{{ s.remark ? s.remark.slice(0, 18) + (s.remark.length > 18 ? "…" : "") : "无备注" }}</small></span>
             </button>
@@ -382,23 +382,27 @@ watch([name, remark, () => draftsSubmitKey(drafts.value)], () => {
   if (draftOnly.value && !applyingDraft && !props.disabled) emit("update:modelValue", { ...props.modelValue, name: name.value, remark: remark.value, items: allDraftItems(drafts.value) });
 }, { flush: "sync" });
 
-async function loadSets(): Promise<void> {
-  if (disposed) return;
+async function loadSets(): Promise<boolean> {
+  if (disposed || setsLoading.value) return false;
   setsLoading.value = true; setsError.value = "";
   try {
     const data = await getJson("/api/plan-convergence/rulesets");
-    if (disposed) return;
-    const list = Array.isArray(data) ? data : (data?.items || []);
-    sets.value = (list as Array<{ id: number; name: string; remark: string; item_count?: number }>) || [];
-  } catch (e) { if (!disposed) setsError.value = errText(e); }
+    if (disposed) return false;
+    const list = Array.isArray(data) ? data : data?.items;
+    if (!Array.isArray(list)) throw new Error('规则集列表读取不完整，已保留原列表，请重试');
+    sets.value = list;
+    return true;
+  } catch (e) { if (!disposed) setsError.value = errText(e); return false; }
   finally { if (!disposed) setsLoading.value = false; }
 }
 
 async function loadSetDetail(id: number): Promise<void> {
+  const previousId = currentSetId.value;
   currentSetId.value = id; busy.value = true; setsError.value = "";
   try {
     const data = await getJson(`/api/plan-convergence/rulesets/${id}`);
     if (disposed) return;
+    if (!Array.isArray(data.items) || !data.version || Number(data.id) !== id) throw new Error('规则集读取不完整，已保留原填写，请重试');
     drafts.value = restoreDrafts((data.items || []) as Dict[]);
     loadedVersion.value = String(data.version || '');
     mergeSel.value = [];
@@ -406,12 +410,12 @@ async function loadSetDetail(id: number): Promise<void> {
     loadedName.value = name.value; loadedRemark.value = remark.value;
     loadedItemsKey.value = draftsSubmitKey(drafts.value);
     await resetPicker();
-  } catch (e) { if (!disposed) { setsError.value = errText(e); currentSetId.value = null; } }
+  } catch (e) { if (!disposed) { setsError.value = errText(e); currentSetId.value = previousId; } }
   finally { if (!disposed) busy.value = false; }
 }
 
 async function selectSet(id: number): Promise<void> {
-  if (saving.value || busy.value) return;
+  if (saving.value || busy.value || setsLoading.value) return;
   if (id === currentSetId.value) return;
   if (dirty.value) {
     const ok = await askConfirm({
@@ -422,13 +426,16 @@ async function selectSet(id: number): Promise<void> {
     if (saving.value || disposed) return;
   }
   await loadSetDetail(id);
-  await loadSets();
+  if (!setsError.value) await loadSets();
 }
 
-async function reloadSet(): Promise<void> {
-  if (!currentSetId.value || busy.value || saving.value) return;
-  if (dirty.value && !await askConfirm({ tone: 'warning', title: '读取最新规则', message: '当前未保存修改将被替换，请先核对或备份需要保留的内容。是否继续？' })) return;
-  if (!disposed && currentSetId.value) await loadSetDetail(currentSetId.value);
+async function reloadSet(): Promise<boolean> {
+  if (!currentSetId.value || busy.value || saving.value || setsLoading.value) return false;
+  setsError.value = '';
+  if (dirty.value && !await askConfirm({ tone: 'warning', title: '读取最新规则', message: '当前未保存修改将被替换，请先核对或备份需要保留的内容。是否继续？' })) return false;
+  if (disposed || !currentSetId.value) return false;
+  await loadSetDetail(currentSetId.value);
+  return !setsError.value;
 }
 
 async function createSet(): Promise<void> {

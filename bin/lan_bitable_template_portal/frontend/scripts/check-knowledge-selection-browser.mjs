@@ -20,6 +20,8 @@ try{
     const context=await browser.newContext({viewport:{width,height:width<700?844:1000},reducedMotion:'reduce'});
     const layouts=layoutApiFixture(),errors=[],writes=[];
     const groups=[{id:'a',name:'A楼',parent_id:null},{id:'a-child',name:'电气',parent_id:'a'},{id:'b',name:'B楼',parent_id:null},{id:'b-child',name:'电气',parent_id:'b'}].map(g=>({...g,count:0,owner_name:'验收',created_at:1,can_manage:true}));
+    const longName='变压器故障应急处理与现场操作规程及交接班核对资料';
+    groups.push({id:'a-long',name:longName,parent_id:'a-child',count:0,owner_name:'验收',created_at:1,can_manage:true});
     const docs=Array.from({length:46},(_,i)=>({id:'d'+i,name:i===45?'其它制度.txt':'操作规程'+i+'.txt',version:1,active_version:1,status:'ready',size:100,chunks:1,can_edit:i>1,owner_name:'验收',group_id:'a-child',updated_at:1}));
     let stale=false,listDelay=0;
     await context.route('**/*',async route=>{
@@ -65,6 +67,15 @@ try{
      await tree.getByRole('button',{name:'收起全部',exact:true}).click();await childButton.waitFor({state:'hidden'});
      await tree.getByRole('button',{name:'展开全部',exact:true}).click();await childButton.waitFor();
      await childButton.click();await childButton.getAttribute('aria-pressed').then(value=>assert.equal(value,'true'));
+     if(variant==='v2'){
+      const bulk=page.locator('.kb-select-all'),list=page.locator('.kb-list');await list.waitFor();
+      assert((await bulk.boundingBox()).y<(await list.boundingBox()).y,'selection controls stay above files');
+      await tree.getByRole('button',{name:'收起全部',exact:true}).click();await rootButton.click();await childButton.waitFor();
+      assert.equal(await page.locator('.v2-kb-location').getByText('A楼',{exact:true}).count(),1,'folder selection is immediately visible');
+      await childButton.click();await page.locator('.kb-row-main').first().waitFor();
+      const longButton=tree.locator('button.v2-folder-name').filter({hasText:longName});await longButton.waitFor();await page.waitForTimeout(250);
+      assert(await longButton.locator('span').first().evaluate(el=>getComputedStyle(el).whiteSpace!=='nowrap'&&el.scrollWidth<=el.clientWidth+1),'deep long folder names wrap instead of clipping');
+     }
      await tree.screenshot({path:path.join(output,'tree-'+variant+'-'+width+'.png')});
      await tree.getByRole('button',{name:'全部',exact:true}).click();
      for(const building of ['A楼','B楼']){

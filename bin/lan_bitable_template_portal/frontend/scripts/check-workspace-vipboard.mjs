@@ -25,11 +25,10 @@ try{
  const page=await browser.newPage({viewport:{width:1440,height:900}});page.on('pageerror',e=>errors.push(e.message));
  await page.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==origin)return route.abort();if(u.pathname==='/fixture')return route.fulfill({contentType:'text/html',body:'<meta name="viewport" content="width=device-width,initial-scale=1"><div id="app"></div><script type="module" src="/scripts/fixtures/vipboard.ts"></script>'});return route.continue();});
  await page.goto(origin+'/fixture');await page.locator('.v2-chart-canvas svg').waitFor();await page.waitForTimeout(1000);
- const search=page.getByRole('textbox',{name:'搜索功能'});
- await search.fill('通告');assert.equal(await page.getByRole('menuitem',{name:'事件管理',exact:true}).count(),0);await search.press('Enter');await page.waitForFunction(()=>window.chartFixture.selected.value==='notices');
+ assert.equal(await page.getByRole('textbox',{name:'搜索功能'}).count(),0,'work navigation no longer adds a search row');
+ await page.getByRole('menuitem',{name:'通告办理',exact:true}).click();await page.waitForFunction(()=>window.chartFixture.selected.value==='notices');
  await page.getByRole('button',{name:'收起导航',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.v2-sidebar').clientWidth===64);
- await page.getByRole('button',{name:'搜索功能',exact:true}).click();await search.waitFor();assert.equal(await search.evaluate(el=>el===document.activeElement),true);
- await search.fill('不存在');await page.getByText('未找到相关功能',{exact:true}).waitFor();await search.press('Escape');await page.getByRole('menuitem',{name:'事件管理',exact:true}).waitFor();
+ await page.getByRole('button',{name:'展开导航',exact:true}).click();await page.getByRole('menuitem',{name:'事件管理',exact:true}).waitFor();
  await page.setViewportSize({width:1024,height:900});await page.waitForTimeout(250);assert.equal(await page.getByRole('menuitem',{name:'事件管理',exact:true}).isVisible(),true,'expanded labels remain visible on narrow desktop');
  await page.setViewportSize({width:1440,height:900});
  const instance=await page.locator('.v2-chart-canvas').getAttribute('_echarts_instance_');
@@ -53,6 +52,6 @@ try{
  await page.evaluate(()=>window.chartFixture.mounted.value=false);await page.locator('.v2-motion-chart').waitFor({state:'detached'});
  await page.evaluate(()=>window.chartFixture.mounted.value=true);await page.locator('.v2-chart-canvas svg').waitFor();
  assert.deepEqual(errors,[]);
- console.log('PASS: sidebar search/collapse/keyboard/narrow desktop, template persistence+permissions, safe options, six chart types, instance reuse, zero/error states, drill-down, unmount/remount, desktop/mobile and reduced motion.');
+ console.log('PASS: compact sidebar navigation/collapse/narrow desktop, template persistence+permissions, safe options, six chart types, instance reuse, zero/error states, drill-down, unmount/remount, desktop/mobile and reduced motion.');
 }catch(error){const page=browser.contexts()[0]?.pages()[0];if(page){await page.screenshot({path:path.join(out,'failure.png'),fullPage:true});console.error(await page.locator('body').ariaSnapshot());}console.error(errors);throw error;}
 finally{await browser.close();await server.close();}

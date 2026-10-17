@@ -147,7 +147,7 @@ watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(use
 const authDefaultScope=ref('');
 const noticeDefaultScope=computed(()=>scopes.value.some(s=>s.value==='ALL')?'ALL':scopes.value.some(s=>s.value===authDefaultScope.value)?authDefaultScope.value:scopes.value[0]?.value||'');
 function scopeFor(module:string){return moduleScope(module,scopes.value,rememberedScopes.value[scopeFamily(module)]||'',scopeFamily(module)==='notices'?noticeDefaultScope.value:authDefaultScope.value);}
-const currentScope = computed(() => route.value.searchParams.get('scope') || scopeFor(activeModule.value));
+const currentScope = computed(() => route.value.pathname === '/cabinet-power' && route.value.searchParams.get('view') === 'overview' && !route.value.searchParams.has('scope') ? '' : route.value.searchParams.get('scope') || scopeFor(activeModule.value));
 provide(pageContext,{user:computed(()=>user.value),scopes:computed(()=>scopes.value.map(scope=>scope.value)),scope:currentScope,module:computed(()=>NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value),changeScope});
 watch([route,identityKey],()=>{const value=route.value.searchParams.get('scope');if(scopeOwner(user.value)&&value&&scopes.value.some(s=>s.value===value)){rememberedScopes.value={...rememberedScopes.value,[scopeFamily(activeModule.value)]:value};saveScopeMemory(user.value,rememberedScopes.value);}},{flush:'sync'});
 const noticeActive = computed(() => loggedIn.value && !checking.value && !denied.value && route.value.pathname === '/workbench-lite');

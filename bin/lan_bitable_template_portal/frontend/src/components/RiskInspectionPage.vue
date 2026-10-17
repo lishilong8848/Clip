@@ -30,7 +30,7 @@
       </form>
       <div v-else-if="editor" class="risk-template-empty"><NEmpty v-if="!loading" description="模板或人员目录未完整读取，已阻止发布"><template #extra><NButton :disabled="busy" @click="reload">重新读取</NButton></template></NEmpty></div>
       <template v-else-if="detail">
-        <div class="risk-toolbar risk-summary"><span>{{detail.owner}}发布 · 审核人 {{detail.reviewer}} · 截止 {{date(detail.deadline)}}</span><div class="risk-tools"><NButton v-if="detail.can_manage_release&&detail.status==='active'" size="small" :disabled="busy" @click="openReviewer">更换审核人</NButton><a v-if="detail.url" :href="detail.url" target="_blank" rel="noopener noreferrer">查看结果表 <ExternalLink :size="14" /></a></div></div>
+        <div class="risk-toolbar risk-summary"><span>{{detail.owner}}发布 · 审核人 {{detail.reviewer}} · 截止 {{date(detail.deadline)}}</span><div class="risk-tools"><NButton v-if="detail.can_manage_release&&detail.status==='active'" size="small" :disabled="busy" @click="openReviewer">更换审核人</NButton><a v-if="detail.url" :href="detail.url" target="_blank" rel="noopener noreferrer">查看结果表 <ExternalLink :size="14" /></a><NButton v-if="activeView==='published'&&detail.can_delete_release" size="small" quaternary type="error" :disabled="busy" @click="ask('delete_release',detail)"><Trash2 :size="15" />删除任务</NButton></div></div>
         <NAlert v-if="detail.status!=='active'" type="warning" :bordered="false">{{failedJobs.some((job:Dict)=>job.kind==='publish')?'发布尚未完成，暂不能领取或填写。已创建的结果表会保留，请查看原因并重试原任务，不要重新发布。':'正在创建排查表并登记链接，完成后自动发送邀请。请勿重复发布。'}}</NAlert>
         <div v-if="incompleteJobs.length" class="risk-sync"><span>{{failedJobs.length?'部分云端操作未完成':'云端处理中'}} · {{incompleteJobs.length}} 项</span><NButton v-if="detail.can_manage_release&&failedJobs.some((j:Dict)=>j.status==='failed')" size="small" :disabled="busy" @click="ask('retry')">重试未完成操作</NButton><details v-if="failedJobs.length"><summary>查看原因</summary><p v-for="job in failedJobs" :key="job.id">{{jobLabel(job.kind)}}：{{job.error}}</p></details></div>
         <div v-if="detail.can_claim" class="risk-claim"><span>需要本人参与时，可领取一份独立任务。</span><NSelect v-model:value="claimScope" :disabled="busy" :options="detail.claim_scopes.map((s:string)=>({value:s,label:scopeLabel(s)}))" aria-label="本人领取楼栋" /><NButton type="primary" :disabled="busy||!claimScope" @click="ask('claim')">领取本人任务</NButton></div>
@@ -57,20 +57,28 @@
       </template>
       <template v-else>
         <div class="risk-list-controls"><NInput v-model:value="taskSearch" clearable placeholder="搜索本页任务或审核人" :input-props="{'aria-label':'搜索排查任务'}"><template #prefix><Search :size="16" /></template></NInput><NSelect v-model:value="taskState" clearable :options="taskStateOptions" placeholder="全部状态" aria-label="排查任务状态" /><span>本页 {{filteredTasks.length}} / {{list.length}} 项</span></div>
-        <div class="risk-task-list"><NDataTable :columns="taskColumns" :data="filteredTasks" :row-key="task=>task.id" :scroll-x="1050" size="small" :bordered="true" striped><template #empty><NEmpty :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></template></NDataTable></div>
+        <div class="risk-task-list"><NDataTable :columns="taskColumns" :data="filteredTasks" :row-key="task=>task.id" :scroll-x="1050" size="small" :bordered="false" striped><template #empty><NEmpty :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></template></NDataTable></div>
+        <div class="risk-mobile-tasks"><article v-for="task in filteredTasks" :key="task.id" class="risk-mobile-task"><header><NButton text class="risk-task-name" :disabled="busy" data-v2-navigation @click="openTask(task.id)">{{task.name}}</NButton><NTag size="small" :bordered="false" :type="task.total>0&&task.approved===task.total?'success':'default'">{{taskStatus(task)}}</NTag></header><dl><div><dt>反馈 / 总项数</dt><dd>{{task.submitted}} / {{task.total}}</dd></div><div><dt>已通过</dt><dd>{{task.approved}}</dd></div><div><dt>人员</dt><dd>{{task.people_count}} 人</dd></div></dl><p :class="{overdue:task.deadline<Date.now()&&task.approved<task.total}">截止 {{date(task.deadline)}} · {{task.reviewer}}审核</p><footer><NButton v-if="activeView==='published'&&task.can_delete_release" quaternary type="error" :disabled="busy" :aria-label="'删除任务：'+task.name" @click="ask('delete_release',task)"><Trash2 :size="15" />删除</NButton><NButton :disabled="busy" type="primary" secondary data-v2-navigation @click="openTask(task.id)">{{activeView==='mine'?(task.can_claim?'领取并填写':'进入本人任务'):'查看反馈'}}</NButton></footer></article><NEmpty v-if="!filteredTasks.length" :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></div>
         <footer class="risk-list-footer"><span>共 {{total}} 个排查任务</span><NPagination v-if="total>20" :page="page" :page-count="Math.ceil(total/20)" :page-slot="5" @update:page="changePage" /></footer>
       </template>
     </NSpin>
     <NModal :show="!!discard" preset="dialog" title="内容尚未保存" :content="discard?.message" type="warning" positive-text="放弃修改" negative-text="继续填写" :mask-closable="false" @positive-click="discardChanges" @negative-click="discard=null" @update:show="show=>{if(!show)discard=null}" />
     <NModal :show="!!fieldEditor" preset="card" title="模板字段" class="risk-modal" :mask-closable="false" :closable="!busy" :close-on-esc="!busy" @update:show="v=>{if(!v)closeFieldEditor()}"><NAlert v-if="error&&!confirmation" type="error" :bordered="false" role="alert">{{error}}</NAlert><div v-if="fieldEditor" class="risk-fields"><label><span>字段名称</span><NInput v-model:value="fieldEditor.field_name" :disabled="busy" :maxlength="80" :input-props="{'aria-label':'字段名称'}" /></label><label><span>字段类型</span><NSelect v-model:value="fieldEditor.type" :options="typeOptions" :disabled="busy||fieldEditor.is_primary" aria-label="字段类型" /></label><label><span>填写方式</span><NSelect v-model:value="fieldEditor.role" :disabled="busy" :options="roleOptions" aria-label="填写方式" /></label><label><span>填写要求</span><div v-if="fieldEditor.role==='input'" class="risk-required"><NSwitch v-model:value="fieldEditor.required" :disabled="busy" aria-label="字段是否必填" /><span>{{fieldEditor.required?'必填':'不必填'}}</span></div><small v-else>由系统自动填写，无需设置</small></label><label v-if="[3,4].includes(fieldEditor.type)" class="wide"><span>选项，每行一个</span><NInput v-model:value="fieldEditor.optionsText" :disabled="busy" type="textarea" :autosize="{minRows:3,maxRows:8}" /></label></div><template #footer><div class="risk-tools"><NButton :disabled="busy" @click="closeFieldEditor">取消</NButton><NButton type="primary" :disabled="busy||!fieldEditor?.field_name?.trim()" @click="ask('save_field')">保存字段</NButton></div></template></NModal>
-    <NModal :show="!!confirmation" preset="card" :title="confirmTitle" class="risk-modal risk-confirm" :mask-closable="false" :close-on-esc="!busy" :closable="!busy" @update:show="v=>{if(!v&&!busy)confirmation=null}"><NAlert v-if="error" type="error" :bordered="false" role="alert">{{error}} <NButton v-if="detail" text :disabled="busy" @click="readLatest">重新读取，保留填写</NButton></NAlert><p>{{confirmText}}</p><dl v-if="confirmation?.action==='publish'" class="risk-confirm-summary"><dt>排查表名</dt><dd>{{publish.name}}</dd><dt>反馈截止</dt><dd>{{date(publish.deadline)}}</dd><dt>审核人</dt><dd>{{people.find((person:Dict)=>person.id===publish.reviewer_id)?.name}}</dd><dt>任务分配</dt><dd>{{selectedPeople.length}} 人 × {{publish.items.length}} 项 · {{recipientSummary}}</dd></dl><NSelect v-if="confirmation?.action==='reviewer'" v-model:value="newReviewer" :options="replacementOptions" :disabled="busy" filterable placeholder="选择新审核人" aria-label="新审核人" /><NInput v-if="needsReason" v-model:value="reason" :disabled="busy" type="textarea" :maxlength="2000" :autosize="{minRows:2,maxRows:4}" placeholder="请填写原因" /><template #footer><div class="risk-tools"><NButton :disabled="busy" @click="confirmation=null">取消</NButton><NButton type="primary" :loading="busy" :disabled="busy||needsReason&&!reason.trim()||confirmation?.action==='reviewer'&&!newReviewer" @click="confirm">确认</NButton></div></template></NModal>
+    <NModal :show="!!confirmation" preset="card" :title="confirmTitle" class="risk-modal risk-confirm" :mask-closable="false" :close-on-esc="!busy" :closable="!busy" @update:show="v=>{if(!v&&!busy)confirmation=null}">
+      <NAlert v-if="error" type="error" :bordered="false" role="alert">{{error}} <NButton v-if="detail&&confirmation?.action!=='delete_release'" text :disabled="busy" @click="readLatest">重新读取，保留填写</NButton></NAlert>
+      <p>{{confirmation?.action==='delete_release'?deleteDescription:confirmText}}</p>
+      <dl v-if="confirmation?.action==='publish'" class="risk-confirm-summary"><dt>排查表名</dt><dd>{{publish.name}}</dd><dt>反馈截止</dt><dd>{{date(publish.deadline)}}</dd><dt>审核人</dt><dd>{{people.find((person:Dict)=>person.id===publish.reviewer_id)?.name}}</dd><dt>任务分配</dt><dd>{{selectedPeople.length}} 人 × {{publish.items.length}} 项 · {{recipientSummary}}</dd></dl>
+      <NSelect v-if="confirmation?.action==='reviewer'" v-model:value="newReviewer" :options="replacementOptions" :disabled="busy" filterable placeholder="选择新审核人" aria-label="新审核人" />
+      <NInput v-if="needsReason" v-model:value="reason" :disabled="busy" type="textarea" :maxlength="2000" :autosize="{minRows:2,maxRows:4}" placeholder="请填写原因" />
+      <template #footer><div class="risk-tools"><NButton :disabled="busy" @click="confirmation=null">取消</NButton><NButton :type="confirmation?.action==='delete_release'?'error':'primary'" :loading="busy" :disabled="busy||needsReason&&!reason.trim()||confirmation?.action==='reviewer'&&!newReviewer" @click="confirm">{{confirmation?.action==='delete_release'?'确认删除':'确认'}}</NButton></div></template>
+    </NModal>
   </section>
   </NConfigProvider>
 </template>
 <script setup lang="ts">
 import {computed,h,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {NAlert,NButton,NConfigProvider,NDataTable,NDatePicker,NDrawer,NDrawerContent,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NSwitch,NTab,NTabs,NTag,zhCN,dateZhCN,type DataTableColumns} from 'naive-ui';
-import {ArrowLeft,ExternalLink,Library,Plus,RefreshCw,Search,Settings2} from 'lucide-vue-next';
+import {ArrowLeft,ExternalLink,Library,Plus,RefreshCw,Search,Settings2,Trash2} from 'lucide-vue-next';
 import {ApiError,requestJson,type Dict} from '../api/client';
 import {navigate,registerNavigationGuard} from '../navigation';
 import RiskInspectionFields from './RiskInspectionFields.vue';
@@ -108,14 +116,14 @@ const focusedItems=computed(()=>(person.value?.items||[]).filter((item:Dict)=>it
 const taskStateOptions=[{value:'active',label:'进行中'},{value:'review',label:'待审核'},{value:'overdue',label:'已逾期'},{value:'completed',label:'已完成'},{value:'publishing',label:'发布处理中'}];
 const filteredTasks=computed(()=>{const search=taskSearch.value.trim().toLocaleLowerCase();return list.value.filter(task=>(!search||[task.name,task.reviewer].join(' ').toLocaleLowerCase().includes(search))&&(!taskState.value||(taskState.value==='review'?task.submitted>task.approved:taskState.value==='overdue'?task.status==='active'&&task.total>task.approved&&task.deadline<Date.now():taskState.value==='completed'?task.total>0&&task.approved===task.total:taskState.value==='active'?task.status==='active'&&task.approved<task.total:task.status===taskState.value)));});
 const taskColumns:DataTableColumns<Dict>=[
-  {key:'name',title:'排查任务',width:310,render:task=>h(NButton,{text:true,disabled:busy.value,onClick:()=>openTask(task.id),'data-v2-navigation':true,class:'risk-task-name'},()=>task.name)},
-  {key:'status',title:'状态',width:115,render:task=>h(NTag,{size:'small',bordered:false,type:task.total>0&&task.approved===task.total?'success':'default'},()=>task.status==='publishing'?'发布处理中':task.can_claim&&activeView.value==='mine'?'待领取':!task.total?'已撤销':task.approved===task.total?'已完成':'进行中')},
-  {key:'people_count',title:'人员',width:80,render:task=>task.people_count+' 人'},
-  {key:'progress',title:'反馈 / 总项数',width:120,render:task=>task.submitted+' / '+task.total},
-  {key:'approved',title:'已通过',width:80},
-  {key:'reviewer',title:'审核人',width:115},
-  {key:'deadline',title:'反馈截止时间',width:190,render:task=>h('span',{class:task.deadline<Date.now()&&task.approved<task.total?'overdue':''},date(task.deadline))},
-  {key:'action',title:'操作',width:120,fixed:'right',render:task=>h(NButton,{size:'small',disabled:busy.value,onClick:()=>openTask(task.id),'data-v2-navigation':true},()=>activeView.value==='mine'?(task.can_claim?'领取并填写':'进入本人任务'):'查看反馈')},
+  {key:'name',title:'排查任务',width:260,render:task=>h(NButton,{text:true,disabled:busy.value,onClick:()=>openTask(task.id),'data-v2-navigation':true,class:'risk-task-name'},()=>task.name)},
+  {key:'status',title:'状态',width:90,render:task=>h(NTag,{size:'small',bordered:false,type:task.total>0&&task.approved===task.total?'success':'default'},()=>taskStatus(task))},
+  {key:'people_count',title:'人员',width:70,render:task=>task.people_count+' 人'},
+  {key:'progress',title:'反馈 / 总项数',width:110,render:task=>task.submitted+' / '+task.total},
+  {key:'approved',title:'已通过',width:70},
+  {key:'reviewer',title:'审核人',width:100},
+  {key:'deadline',title:'反馈截止时间',width:170,render:task=>h('span',{class:task.deadline<Date.now()&&task.approved<task.total?'overdue':''},date(task.deadline))},
+  {key:'action',title:'操作',width:180,fixed:'right',render:task=>h('div',{class:'risk-task-actions'},[h(NButton,{size:'small',disabled:busy.value,onClick:()=>openTask(task.id),'data-v2-navigation':true},()=>activeView.value==='mine'?(task.can_claim?'领取并填写':'进入本人任务'):'查看反馈'),...(activeView.value==='published'&&task.can_delete_release?[h(NButton,{size:'small',quaternary:true,type:'error',disabled:busy.value,'aria-label':'删除任务：'+task.name,onClick:()=>ask('delete_release',task)},()=>[h(Trash2,{size:15}),'删除'])]:[])])},
 ];
 const incompleteJobs=computed(()=>(detail.value?.jobs||[]).filter((j:Dict)=>j.status!=='done'));
 const failedJobs=computed(()=>incompleteJobs.value.filter((j:Dict)=>j.error));
@@ -124,12 +132,14 @@ const unsaved=computed(()=>dirty.value||!!pendingPublication.value||!!fieldEdito
 const publishProblems=computed(()=>publicationIssues(publish,template.value?.fields||[],people.value));
 const publishValid=computed(()=>!!template.value&&!publishProblems.value.length);
 const needsReason=computed(()=>['return','revoke_item','revoke_person'].includes(confirmation.value?.action));
-const confirmTitle=computed(()=>actionName(confirmation.value?.action||''));
+const confirmTitle=computed(()=>confirmation.value?.action==='delete_release'?'删除排查任务：'+confirmation.value.item.name:actionName(confirmation.value?.action||''));
+const deleteDescription='删除后从任务列表移除，停止后续填写、通知与同步。已提交反馈、附件、历史模板和多维结果表保留；已发出的邀请链接将不可继续办理。';
 const confirmText=computed(()=>confirmation.value?.action==='save_field'&&confirmation.value.item?`将「${confirmation.value.item.field_name}」设为${confirmation.value.item.required?'必填':'不必填'}，仅用于后续发布的排查，已发布任务不受影响。`:(({claim:'仅增加你本人的独立排查任务，不修改或代填其他人的反馈；领取后需由你填写并提交审核。',publish:'确认后将创建排查表并通知所选人员。',submit:'提交后不能继续编辑，审核人退回后可修改。',approve:'确认反馈内容已核实，通过后同步最终结果。',return:'反馈将退回本人修改，原提交记录保留。',revoke_item:'该人员不再需要完成此事项，已有反馈和操作记录保留。',revoke_person:'该人员不再需要完成本次排查，已有反馈和操作记录保留。',delete_field:'此操作会删除发布模板的字段及该列数据；不会修改已经发布的任务。',save_field:'字段修改用于后续发布。更改字段类型可能转换或清空模板原有数据。',reviewer:'已提交的反馈和原审核记录保留，尚未审核的事项将交由新审核人处理。',retry:'请先核对未完成原因。确认后以你的管理权限重试已保存的反馈，不改动原操作人和已填写内容。'} as Dict)[confirmation.value?.action||'']||''));
 let read:AbortController|undefined,timer=0,disposed=false;
 function beginWrite(){read?.abort();read=undefined;loading.value=false;busy.value=true;}
 function date(v:number){return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'short'}).format(new Date(v));}
 function scopeLabel(v:string){return v==='110'?'110站':v+'楼';}
+function taskStatus(task:Dict){return task.status==='publishing'?'发布处理中':task.can_claim&&activeView.value==='mine'?'待领取':!task.total?'已撤销':task.approved===task.total?'已完成':'进行中';}
 function statusName(v:string){return ({pending:'未提交',submitted:'待审核',approved:'审核通过',returned:'退回修改',revoked:'已撤销'} as Dict)[v]||v;}
 function actionName(v:string){return ({save:'保存草稿',submit:'提交审核',approve:'审核通过',return:'退回修改',revoke_item:'撤销事项',revoke_person:'撤销人员',publish:'发布风险排查',delete_field:'删除模板字段',save_field:'保存模板字段',reviewer:'更换审核人',retry:'核对并重试同步',claim:'领取本人排查任务'} as Dict)[v]||v;}
 function jobLabel(v:string){return ({publish:'发布排查',notify:'消息通知',review_notice:'审核通知',sync:'结果落表',registry:'登记信息同步',template_sync:'历史模板备份'} as Dict)[v]||v;}
@@ -171,8 +181,22 @@ async function act(action:string,item?:Dict,version=person.value?.version){
  try{const data=await requestJson(`${root}/${detail.value.id}/people/${person.value.id}/actions`,{method:'POST',body:JSON.stringify({action,version,item_id:item?.id,values:item?(drafts.value[item.id]||item.values):undefined,reason:reason.value})});applyDetail(data);if(item)delete drafts.value[item.id];message.value=action==='save'?'草稿已保存。':'操作已保存，云端结果正在同步。';confirmation.value=null;}
  catch(e:any){error.value=e.message;}finally{busy.value=false;}
 }
+async function deleteTask(task:Dict){
+ if(busy.value||!task?.id)return;beginWrite();error.value='';message.value='';
+ let deleted=false;
+ try{const result=await requestJson(root+'/'+task.id,{method:'DELETE',body:'{}'});if(result.id!==task.id||result.status!=='deleted')throw new Error('删除结果尚未确认，请重新读取原任务。');deleted=true;}
+ catch(e:any){
+  if(!e.status||e.status>=500){try{await requestJson(root+'/'+task.id,{cache:'no-store'});}catch(check:any){if(check.status===410)deleted=true;}}
+  if(!deleted)error.value=e.message;
+ }finally{busy.value=false;}
+ if(!deleted)return;
+ confirmation.value=null;detail.value=null;feedbackOpen.value=false;drafts.value={};
+ if(list.value.length===1&&page.value>1)page.value--;
+ await reload();message.value='排查任务已删除；已有反馈、历史模板和多维结果表保留。';
+}
 async function confirm(){
  const c=confirmation.value;if(!c||busy.value)return;
+ if(c.action==='delete_release'){await deleteTask(c.item);return;}
  if(c.action==='publish'){await publishNow();return;}
  if(c.action==='retry'){await retry();return;}
  if(c.action==='claim'){beginWrite();error.value='';try{applyDetail(await requestJson(root+'/'+detail.value!.id+'/claim',{method:'POST',body:JSON.stringify({scope:claimScope.value})}));activeView.value='mine';personId.value=detail.value!.self_id;const first=person.value?.items.find((item:Dict)=>['pending','returned'].includes(item.status));if(first){focusedItemId.value=first.id;feedbackOpen.value=true;}confirmation.value=null;message.value='本人任务已领取，可填写并提交审核。';}catch(e:any){error.value=e.message;}finally{busy.value=false;}return;}
@@ -204,6 +228,9 @@ onMounted(async()=>{await reload();if(disposed)return;if(props.releaseId)await o
 onBeforeUnmount(()=>{disposed=true;read?.abort();unregister();window.clearInterval(timer);window.removeEventListener('beforeunload',leaving);});
 </script>
 <style scoped>
+.risk-mobile-tasks{display:none}.risk-task-list :deep(.risk-task-actions){display:flex;align-items:center;gap:8px}
+.risk-mobile-task{padding:14px 0;border-bottom:1px solid var(--border-color)}.risk-mobile-task>header{display:flex;align-items:flex-start;gap:8px;justify-content:space-between}.risk-mobile-task :deep(.risk-task-name){height:auto;white-space:normal;line-height:1.6;text-align:left;justify-content:flex-start;flex:1;min-width:0}.risk-mobile-task :deep(.risk-task-name .n-button__content){white-space:normal;overflow-wrap:anywhere;justify-content:flex-start}.risk-mobile-task dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.risk-mobile-task dt{font-size:12px;color:var(--text-color-3)}.risk-mobile-task dd{margin:4px 0 0;font-weight:600;font-variant-numeric:tabular-nums}.risk-mobile-task>p{font-size:12px;line-height:1.6;color:var(--text-color-3);margin:8px 0}.risk-mobile-task>p.overdue{color:var(--error-color,#c94b42)}.risk-mobile-task>footer{display:flex;justify-content:flex-end;align-items:center;gap:8px}.risk-mobile-task>footer>.n-button:first-child:not(:last-child){margin-right:auto}
+@media(max-width:700px){.risk-task-list{display:none}.risk-mobile-tasks{display:block}}
 .risk-required{display:flex;align-items:center;gap:8px}
 .risk-publish{grid-template-columns:minmax(0,1fr)}
 .risk-claim{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--border-color)}.risk-claim>span{flex:1;min-width:170px;font-size:13px;color:var(--text-color-3)}.risk-claim>.n-select{width:130px}

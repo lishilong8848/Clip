@@ -4,7 +4,7 @@
       <NFormItem label="组件名称"><NInput v-model:value="draft.title" :maxlength="40" placeholder="请输入组件名称" /></NFormItem>
       <div class="v2-widget-form-grid">
         <NFormItem v-if="presentationOptions(draft.kind).length>1" label="组件样式"><NSelect v-model:value="draft.presentation" :options="presentationOptions(draft.kind)" /></NFormItem>
-        <NFormItem v-if="draft.kind==='tasks'" label="待办业务"><NSelect v-model:value="draft.module" :options="taskOptions(user)" filterable /></NFormItem>
+        <NFormItem v-if="draft.kind==='tasks'" label="待办业务及排列顺序"><TodoKindPicker :value="draft.taskKinds||[]" :user="user" @update:value="draft.taskKinds=$event" /></NFormItem>
         <NFormItem v-if="draft.kind==='notice_actions'" label="默认通告分类"><NSelect v-model:value="draft.module" :options="taskOptions(user).filter(item=>NOTICE_IDS.includes(item.value))" /></NFormItem>
         <NFormItem v-if="draft.kind==='module'" label="完整业务模块"><NSelect v-model:value="draft.module" :options="navigationModules(user.modules||[]).map(item=>({value:item.id,label:item.label}))" filterable /></NFormItem>
         <NFormItem v-if="!['shortcuts','learning','pre_shift'].includes(draft.kind)" label="楼栋范围"><NSelect v-model:value="draft.scope" :options="[{value:'current',label:'跟随工作台楼栋'},...scopes]" /></NFormItem>
@@ -26,6 +26,7 @@ import { NAlert,NButton,NForm,NFormItem,NInput,NModal,NSelect } from 'naive-ui';
 import type { Dict } from '../client';
 import { navigationModules,NOTICE_IDS } from '../modules';
 import { displayOptions,presentationOptions,taskOptions,type Widget } from './layout';
+import TodoKindPicker from '../TodoKindPicker.vue';
 const props=defineProps<{value:Widget|null;user:Dict;scopes:{value:string;label:string}[]}>();
 const emit=defineEmits<{close:[];apply:[value:Widget]}>();
 const draft=ref<Widget|null>(null),error=ref('');

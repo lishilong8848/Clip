@@ -9,7 +9,7 @@ function slot(source,tag,content){return replace(source,node=>node.tag===tag,(te
 
 // Build-only rearrangement keeps the original bindings and business controllers.
 export function adaptCompactWorkspaces(input,filename){
-  const file=filename.replaceAll('\\','/').split('/').pop();let source=input.replaceAll('\r\n','\n');
+  const file=filename.replaceAll('\\','/').split('/').pop();let source=input.replaceAll('\r\n','\n'),additions='';
   if(source.includes('v2-compact-adapted'))return source;
   if(file==='EventManagementPage.vue'){
     source=replace(source,byClass('event-command-head'),'');
@@ -69,7 +69,7 @@ export function adaptCompactWorkspaces(input,filename){
     const buttons=nodes(header.loc.source,node=>node.tag==='button'||node.tag==='V2AdminButton').map(node=>node.loc.source).join('');
     source=replace(source,byClass('drill-page__header'),'');
     source=replace(source,byClass('building-toolbar'),text=>text.replace(/<\/div>$/,`<div class="v2-command-actions">${buttons}</div></div>`));
-    const back='<button type="button" data-v2-navigation :disabled="busy" @click="requestDiscardChanges(\'返回将放弃未保存修改。\',()=>openBuilding(String(landingScopes.find(item=>item.authorized)?.value||\'A\')))"><ChevronLeft :size="16" />返回楼栋演练</button>';
+    const back='<div class="v2-drill-return-group"><V2DrillSelect v-if="v2DrillReturnOptions.length>1" :value="v2DrillReturnTarget" :options="v2DrillReturnOptions" :disabled="busy" aria-label="返回的演练楼栋" @update:value="value=>v2DrillReturnScope=String(value)" /><button type="button" class="v2-drill-return" data-v2-navigation :disabled="busy||!v2DrillReturnTarget" @click="requestDiscardChanges(\'返回将放弃未保存修改。\',()=>openBuilding(v2DrillReturnTarget))"><ChevronLeft :size="16" />返回楼栋演练</button></div>';
     source=replace(source,byClass('command-bar'),text=>text.replace(/<\/div>$/,`<div class="v2-command-actions">${back}${buttons}</div></div>`));
     source=source.replaceAll('v-if="isAdmin" data-v2-navigation class="v2-module-admin"','v-if="isAdmin && viewMode!==\'admin\'" data-v2-navigation class="v2-module-admin"');
   }else if(file==='EventManagementPage.vue'){
@@ -93,6 +93,26 @@ function v2PlanRoute(){if(loading.value)return;const value=new URL(location.href
 onMounted(()=>window.addEventListener('popstate',v2PlanRoute));onBeforeUnmount(()=>window.removeEventListener('popstate',v2PlanRoute));`);
     source=source.replace('if(tabs.some(t=>t.id===initial))switchTab(initial);','if(tabs.some(t=>t.id===initial))v2ApplyPlanTab(initial);');
     source=source.replace("if(new URL(target).pathname==='/plan-convergence'||!hasUnsaved())return true;","if((new URL(target).pathname==='/plan-convergence'&&(new URL(target).searchParams.get('tab')||'review')===tab.value)||!hasUnsaved())return true;");
+    source=source.replaceAll('@click="loadNoticeAudit()"','data-v2-refresh :aria-label="\'刷新\'+currentAudit.label+\'记录\'" :aria-busy="currentAudit.loading" @click="v2RefreshNotices($event)"');
+    source=source.replaceAll('@click="loadBlocks"','data-v2-refresh :aria-busy="listLoading" @click="v2RefreshBlocks($event)"');
+    source=source.replaceAll('@click="loadRuleSets"','data-v2-refresh @click="v2RefreshMatchSets($event)"');
+    additions=`import {runRefreshAction} from '../workspace-v2/actionMotion';
+function v2RefreshNotices(event:MouseEvent){const kind=auditKind.value;return runRefreshAction(event.currentTarget as HTMLButtonElement,()=>loadNoticeAudit(kind),()=>noticeAudits[kind].error);}
+function v2RefreshBlocks(event:MouseEvent){return runRefreshAction(event.currentTarget as HTMLButtonElement,loadBlocks,()=>error.value);}
+function v2RefreshMatchSets(event:MouseEvent){return runRefreshAction(event.currentTarget as HTMLButtonElement,()=>{error.value='';return loadRuleSets();},()=>error.value);}
+`;
+  }else if(file==='PlanConvergenceRules.vue'){
+    // Keep grouped disabling without a native fieldset's anonymous layout around GridStack.
+    source=source.replace('<fieldset class="editor-fields" :disabled="disabled">','<div class="editor-fields" role="group" aria-label="规则集编辑" :inert="disabled" :aria-disabled="disabled">').replace('</fieldset>','</div>');
+    source=source.replaceAll('@click="loadSets"','data-v2-refresh :aria-busy="setsLoading" @click="v2RefreshSets($event)"');
+    source=source.replaceAll('@click="reloadSet"','data-v2-refresh aria-label="读取最新规则" :aria-busy="busy" @click="v2ReloadSet($event)"');
+    additions=`import {runRefreshAction} from '../workspace-v2/actionMotion';
+function v2RefreshSets(event:MouseEvent){return runRefreshAction(event.currentTarget as HTMLButtonElement,loadSets,()=>setsError.value);}
+function v2ReloadSet(event:MouseEvent){return runRefreshAction(event.currentTarget as HTMLButtonElement,reloadSet,()=>setsError.value);}
+`;
   }else return input;
-  return source.replace('<script setup lang="ts">','<script setup lang="ts">\n// v2-compact-adapted');
+  const setup=parse(source).descriptor.scriptSetup;
+  if(!setup)throw new Error('Compact page requires a setup script: '+file);
+  const offset=setup.loc.start.offset;
+  return source.slice(0,offset)+'\n// v2-compact-adapted\n'+additions+source.slice(offset);
 }

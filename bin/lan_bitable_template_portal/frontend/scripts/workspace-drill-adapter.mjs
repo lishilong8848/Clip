@@ -14,6 +14,11 @@ export function adaptDrillPresentation(source, filename) {
   if (file === 'LifeGuidePage.vue') return source + '\n<style scoped src="../workspace-v2/lifeGuide.css"></style>\n';
   if (file !== 'DrillManagementPage.vue') return source;
   source=replaceOnce(source,'uniquePeople([...selectedParticipants.value, ...commanderPeople.value])','uniquePeople(selectedParticipants.value)');
+  source=replaceOnce(source,'  navigate("/drill-management?mode=admin");','  navigate("/drill-management?mode=admin&return_scope="+encodeURIComponent(activeScope.value)+"&month="+encodeURIComponent(selectedMonth.value));');
+  source=replaceOnce(source,'const buildingDrills = computed',`const v2DrillReturnScope=ref(normalizeBuilding(routeParams.get('return_scope')||''));
+const v2DrillReturnOptions=computed(()=>authorizedBuildingScopes.value.map(item=>({value:item.value,label:item.label})));
+const v2DrillReturnTarget=computed(()=>v2DrillReturnOptions.value.some(item=>item.value===v2DrillReturnScope.value)?v2DrillReturnScope.value:v2DrillReturnOptions.value[0]?.value||'');
+const buildingDrills = computed`);
   source=replaceOnce(source,`  if (!participantIds.value.includes(id)) {
     if (participantIds.value.length >= 10) {
       setNotice("参演人员已满 10 人，请先移除不参与本次演练的人员，再选择签名。", "warning");

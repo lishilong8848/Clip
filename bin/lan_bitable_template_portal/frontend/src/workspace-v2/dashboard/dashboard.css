@@ -105,3 +105,26 @@
 .v2-task-operation .v2-operation-title .n-button__content{white-space:normal;overflow-wrap:anywhere;display:block}
 .v2-task-operation-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
 .v2-task-operation-actions .n-button__content{gap:6px}
+.workspace-v2 .v2-dashboard .v2-widget-head{height:36px;min-height:36px;padding-inline:12px;gap:6px}
+.workspace-v2 .v2-dashboard .v2-widget-head h2{font-size:13px}
+.workspace-v2 .v2-dashboard .grid-stack-item[data-widget-display="calendar"] .v2-widget-body{overflow:hidden;padding:8px;display:flex;flex-direction:column}
+.workspace-v2 .v2-dashboard .grid-stack-item[data-widget-display="calendar"] .v2-widget-content{height:100%;min-height:0;width:100%}
+.workspace-v2 .v2-task-section{container-type:inline-size;container-name:business-tasks}
+.workspace-v2 .v2-task-operation-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;align-items:stretch}
+.workspace-v2 .v2-task-operation-list .n-list-item{min-width:0;margin:0;padding:0;border:0}
+.workspace-v2 .v2-task-operation-list .n-list-item__main{min-width:0;width:100%}
+.workspace-v2 .v2-task-operation-list .v2-task-operation{width:100%;height:100%;padding:10px;border:1px solid var(--v2-border);border-radius:6px}
+@container business-tasks (min-width:640px){.workspace-v2 .v2-task-operation-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container business-tasks (min-width:1020px){.workspace-v2 .v2-task-operation-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.workspace-v2 .v2-overview-panel{container-type:inline-size;container-name:summary-tasks}
+.workspace-v2 .v2-overview-panel .v2-compact-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.workspace-v2 .v2-compact-list .v2-clickable-card{min-width:0;min-height:44px;padding:8px;border:1px solid var(--v2-border);border-radius:6px}
+@container summary-tasks (min-width:640px){.workspace-v2 .v2-overview-panel .v2-compact-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container summary-tasks (min-width:1020px){.workspace-v2 .v2-overview-panel .v2-compact-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:760px){.workspace-v2 .v2-dashboard .v2-widget-head{height:40px;min-height:40px}}
+.workspace-v2 .v2-business-todos{container-type:inline-size;container-name:business-todos}
+.workspace-v2 .v2-widget .v2-business-todos ul.v2-todo-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+.workspace-v2 .v2-widget .v2-business-todos ul.v2-todo-list>li{min-width:0;border:1px solid var(--v2-border);border-radius:6px;overflow:hidden}
+.workspace-v2 .v2-widget .v2-business-todos ul.v2-todo-list button.v2-todo-row{height:100%;padding:10px!important}
+@container business-todos (min-width:640px){.workspace-v2 .v2-widget .v2-business-todos ul.v2-todo-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container business-todos (min-width:1020px){.workspace-v2 .v2-widget .v2-business-todos ul.v2-todo-list{grid-template-columns:repeat(3,minmax(0,1fr))}}

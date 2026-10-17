@@ -1,6 +1,6 @@
 <template>
   <div class="v2-check-overview" aria-label="各楼栋班前检查完成情况">
-    <article v-for="building in buildings" :key="building.scope" class="v2-check-building">
+    <article v-for="building in buildings" :key="building.scope" class="v2-check-building" :class="{'v2-clickable-card':!disabled}" @click="!disabled && activateCard($event) && $emit('select',building.scope)">
       <header><NButton text :disabled="disabled" :aria-label="'查看'+scopeLabel(building.scope)+'检查'" @click="$emit('select',building.scope)">{{scopeLabel(building.scope)}}<ChevronRight :size="15" /></NButton><small>{{building.rows.filter(row=>row.status==='已完成').length}} / {{building.rows.length}} 班完成</small></header>
       <section v-for="row in building.rows" :key="row.id" class="v2-check-building-shift">
         <div><strong>{{row.shift}}班</strong><NTag size="small" :bordered="false" :type="row.status==='已完成'?'success':['待完成','逾期待补做'].includes(row.status)?'warning':'default'">{{row.status}}</NTag><span v-if="row.total">{{row.completed}} / {{row.total}} 项</span></div>
@@ -13,6 +13,7 @@
   </div>
 </template>
 <script setup lang="ts">
+import { activateCard } from '../cardActivation';
 import {computed} from 'vue';
 import {NButton,NEmpty,NTag} from 'naive-ui';
 import {ChevronRight,Image} from 'lucide-vue-next';

@@ -43,7 +43,7 @@ const server = await preview({ root, ...(process.env.CLIPFLOW_WORKSPACE_BUILD_DI
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 const errors = [], writes = [], oldPages = [], entry = '/assets/workspace-v2/index.html';
-let failLogout = true;
+let failLogout = true,detailReads=0;
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.route('**/*', async route => {
@@ -59,7 +59,7 @@ try {
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-notice-ui' } });
     if (url.pathname === '/api/workbench') return ok(data.payload);
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });
-    if (url.pathname === '/api/workbench/lite-detail') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });
+    if (url.pathname === '/api/workbench/lite-detail') {detailReads++;return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });}
     if (req.method() !== 'GET') {
       writes.push(url.pathname);
       if (url.pathname === '/api/workbench/draft') return ok({ draft: { version: 1 } });
@@ -113,11 +113,25 @@ try {
       assert.equal(await page.locator('.v2-context').count(),0,'building selection stays in the notice toolbar');
       if(width>760){const columns=await page.locator('.v2-notice-section').evaluateAll(els=>els.map(el=>el.getBoundingClientRect().toJSON()));assert.equal(columns.length,2);assert(Math.abs(columns[0].top-columns[1].top)<2);assert(columns[1].left>=columns[0].right,'planned and ongoing appear side by side');}
     }
+    if(index===0){
+      await page.setViewportSize({width:1920,height:1000});
+      for(const [list,width,expected] of [['planned',4,1],['ongoing',6,2],['planned',12,3],['ongoing',12,3],['planned',6,2],['ongoing',4,1]]){
+        const lane=page.locator(`[data-list="${list}"]`);
+        await lane.evaluate((el,w)=>{const item=el.closest('.grid-stack-item');item.closest('.grid-stack').gridstack.update(item,{w});},width);
+        await page.waitForTimeout(320);
+        const columns=await lane.locator('.v2-notice-list').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length);
+        assert.equal(columns,expected,list+' adapts to its independently resized component');
+      }
+      await page.screenshot({path:path.join(output,'resized-independent-lists.png'),fullPage:true});
+      await page.reload();await page.locator('.v2-notice-entry').first().waitFor();
+    }
     if(page.viewportSize().width<=760)await page.getByRole('tab', { name: /进行中/ }).click();
-    await page.locator('[data-list="ongoing"] .v2-notice-open').first().click();
+    const beforeReads=detailReads,entryCard=page.locator('[data-list="ongoing"] .v2-notice-entry').first();
+    await entryCard.click({position:{x:5,y:Math.min(50,(await entryCard.boundingBox()).height/2)}});
     try{await page.locator('.v2-notice-editor .v2-notice-field-grid').first().waitFor({timeout:10000});}
     catch(e){await page.screenshot({path:path.join(output,'form-error.png'),fullPage:true});console.error(errors,await page.locator('.v2-notice-editor').innerText());throw e;}
     assert.equal(await page.locator('.v2-notice-editor-footer').isVisible(), true);
+    assert.equal(detailReads,beforeReads+1,'card whitespace opens one editor, without double activation');
     assert.equal(await page.locator('.v2-notice-editor-context [role=radiogroup]').count(),0);
     assert.equal(await page.locator('.v2-notice-submit-group [role=radiogroup]').count(),1,'action and preview share one footer group');
     assert.equal(await page.getByRole('button',{name:'保存草稿',exact:true}).count(),0);

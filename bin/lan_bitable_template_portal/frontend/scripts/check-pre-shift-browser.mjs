@@ -49,7 +49,10 @@ try{
  assert.equal(await check.getByRole('radio',{checked:true}).count(),0,'no item is pre-checked');
  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();assert.equal(await page.getByRole('button',{name:'移除班前检查',exact:true}).count(),0);await page.locator('.v2-dashboard-actions').getByRole('button',{name:'取消',exact:true}).click();
  await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('请逐项选择检查结果，并填写异常项备注。',{exact:true}).waitFor();assert.equal(writes,0);
- const rows=check.locator('fieldset');await rows.nth(0).locator('.n-radio-button').filter({hasText:'无异常'}).click();await rows.nth(1).locator('.n-radio-button').filter({hasText:'异常'}).last().click();
+ const rows=check.locator('fieldset');
+ assert((await rows.nth(0).locator('.n-radio-button').first().boundingBox()).height>=44,'check results have a full touch target on PC as well as phone');
+ await check.locator('.v2-check-choice').first().click({position:{x:5,y:5}});assert.equal(writes,0,'selecting a shift card does not submit the check');
+ await rows.nth(0).locator('.n-radio-button').filter({hasText:'无异常'}).click();await rows.nth(1).locator('.n-radio-button').filter({hasText:'异常'}).last().click();
  await check.getByRole('button',{name:'提交检查',exact:true}).click();assert.equal(writes,0,'abnormal requires a note');await rows.nth(1).getByRole('textbox').fill('测试异常说明');
  await rows.nth(0).getByRole('button',{name:items[0].text+'附件',exact:true}).click();
  await rows.nth(0).getByLabel('上传检查附件',{exact:true}).setInputFiles({name:'检查记录.txt',mimeType:'text/plain',buffer:Buffer.from('test')});await check.getByRole('link',{name:'检查记录.txt',exact:true}).waitFor();assert.equal(fileWrites,1);assert.equal(writes,0);assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');

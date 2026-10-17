@@ -14,7 +14,7 @@
         <NSkeleton v-if="loading&&!lane.rows.length" :repeat="6" height="72px" class="v2-notice-skeleton" />
         <NList v-else class="v2-notice-list" :aria-busy="loading">
           <NListItem v-for="row in lane.rows" :key="rowKey(row)">
-            <article class="v2-notice-entry">
+            <article class="v2-notice-entry v2-clickable-card" @click="activateCard($event) && openRecord(row)">
               <div class="v2-notice-entry-copy">
                 <button type="button" class="v2-notice-open" data-v2-navigation @click="openRecord(row)">{{ rowTitle(row) }}</button>
                 <span class="v2-notice-entry-meta"><NTag size="small" :bordered="false">{{ typeLabel(row.work_type) }}</NTag><NTag v-if="lane.id==='ongoing'" :type="noticeSourceMode(row).tone" size="small" :bordered="false">{{ noticeSourceMode(row).label }}</NTag><span>{{ row.building || row.scope || scopeLabel }}</span><span v-if="noticeListCycle(row)" class="v2-notice-cycle">{{ noticeListCycle(row) }}</span><span v-if="noticeListSpecialty(row)" class="v2-notice-specialty">专业 · {{ noticeListSpecialty(row) }}</span></span>
@@ -95,6 +95,7 @@
   </section>
 </template>
 <script setup lang="ts">
+import { activateCard } from './cardActivation';
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NImageGroup,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
@@ -556,4 +557,17 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-source-picker>.v2-notice-binding{display:grid;grid-template-columns:minmax(120px,320px) auto;margin:0;align-items:center;max-width:100%;min-width:0}
 @media(max-width:760px){.v2-notice-submit-group{flex:1 1 100%;justify-content:space-between;gap:6px}.v2-notice-submit-group .n-button,.v2-notice-submit-group .n-radio-button{min-height:44px}.v2-notice-submit-group .n-radio-button{display:inline-flex;align-items:center;padding-inline:9px}.v2-notice-submit-group>.n-button{padding-inline:10px}.v2-source-picker>.v2-notice-binding>.n-button{min-height:44px}}
 @media(max-width:760px){.v2-notice-editor.v2-notice-handling{width:calc(100vw - 12px);height:calc(100dvh - 12px);max-height:calc(100dvh - 12px)}.v2-notice-handling>.n-card-content{padding:8px 12px}.v2-notice-handling>.n-card-header{padding:14px 48px 12px 12px}.v2-notice-handling>.n-card__footer{padding:10px 12px}.v2-notice-page-fields>header{min-height:44px}}
+</style>
+<style>
+.v2-notice-section{container-type:inline-size;container-name:notice-lane}
+.v2-notice-section .v2-notice-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;align-items:stretch}
+.v2-notice-section .v2-notice-list>.n-list-item{min-width:0;margin:0;border:0;padding:0}
+.v2-notice-list>.n-list-item>.n-list-item__main{min-width:0;width:100%}
+.v2-notice-section .v2-notice-entry{height:100%;flex-wrap:wrap}
+.v2-notice-section .v2-notice-entry-copy{flex:1 1 220px;min-width:0}
+.v2-notice-section .v2-notice-entry-state{flex:0 1 auto;min-width:0}
+.v2-notice-section .v2-notice-row-actions{flex-wrap:wrap}
+.v2-notice-list>.n-empty{grid-column:1/-1}
+@container notice-lane (min-width:700px){.v2-notice-section .v2-notice-list{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@container notice-lane (min-width:1060px){.v2-notice-section .v2-notice-list{grid-template-columns:repeat(3,minmax(0,1fr))}}
 </style>

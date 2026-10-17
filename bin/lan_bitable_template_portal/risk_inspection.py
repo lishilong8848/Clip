@@ -162,11 +162,14 @@ class RiskInspections:
             db.execute('INSERT OR REPLACE INTO risk_template(id,data) VALUES(1,?)', (json.dumps(data, ensure_ascii=False),))
 
     @staticmethod
-    def _release(db, rid):
+    def _release(db, rid, *, include_deleted=False):
         row = db.execute('SELECT data FROM risk_releases WHERE id=?', (rid,)).fetchone()
         if not row:
             raise RiskError('排查任务不存在。', 404)
-        return json.loads(row[0])
+        release = json.loads(row[0])
+        if release.get('status') == 'deleted' and not include_deleted:
+            raise RiskError('排查任务已删除，不能继续填写或操作。', 410)
+        return release
 
     @staticmethod
     def _person(db, rid, pid):
@@ -331,6 +334,7 @@ class RiskInspections:
                     i['files'] = files.get((p['id'], i['id']), [])
             jobs = db.execute("SELECT id,kind,status,error,COALESCE(json_extract(payload,'$.subject_id'),json_extract(payload,'$.person_id')) AS subject FROM risk_jobs WHERE release_id=? AND status!='done'", (rid,))
             public['can_manage_release'] = controls and len(visible) == len(people)
+            public['can_delete_release'] = public['can_manage_release']
             public['jobs'] = []
             for job in jobs:
                 if (job['subject'] in visible_ids and (manager(actor) or job['kind'] != 'review_notice')
@@ -376,7 +380,7 @@ class RiskInspections:
             else:
                 visible += ' AND (p.person_id=? OR ' + control_sql + ')'
                 args += [actor['id'], *control_args]
-            sql = ' FROM risk_releases r WHERE EXISTS(SELECT 1 FROM risk_people p WHERE p.release_id=r.id AND ' + visible + ')'
+            sql = " FROM risk_releases r WHERE json_extract(r.data,'$.status')!='deleted' AND EXISTS(SELECT 1 FROM risk_people p WHERE p.release_id=r.id AND " + visible + ')'
             total = db.execute('SELECT COUNT(*)' + sql, args).fetchone()[0]
             rows = db.execute('SELECT r.data' + sql + ' ORDER BY r.created DESC,r.id LIMIT 20 OFFSET ?', args + [(page - 1) * 20]).fetchall()
             for row in rows:
@@ -390,10 +394,31 @@ class RiskInspections:
                     [data['id'], *args, *([actor['id']] if view == 'mine' else [])]).fetchone()
                 result.append({**{k: data[k] for k in ('id', 'name', 'deadline', 'status')},
                                'owner': data['owner']['name'], 'reviewer': data['reviewer']['name'], **dict(counts),
+                               'can_delete_release': self.controls(actor, data) and all(can_scope(actor, p[0]) for p in db.execute('SELECT scope FROM risk_people WHERE release_id=?', (data['id'],))),
                                'can_claim': manager(actor) and data['owner']['id'] == actor['id'] and data['reviewer']['id'] != actor['id']
                                    and data['status'] == 'active' and not db.execute('SELECT 1 FROM risk_people WHERE release_id=? AND person_id=?', (data['id'], actor['id'])).fetchone()})
         return {'items': result, 'total': total, 'page': page, 'is_manager': manager(actor),
                 'can_edit_template': actor.get('level') in {'L0', 'L1'}}
+
+    def delete(self, actor, rid, body):
+        self.check(actor)
+        if not isinstance(body, dict) or body:
+            raise RiskError('删除参数无效。')
+        with self.connect(True) as db:
+            release = self._release(db, rid, include_deleted=True)
+            scopes = [row[0] for row in db.execute('SELECT scope FROM risk_people WHERE release_id=?', (rid,))]
+            if not self.controls(actor, release) or not all(can_scope(actor, scope) for scope in scopes):
+                raise RiskError('没有删除本次排查任务的权限。', 403)
+            if release['status'] == 'deleted':
+                return {'id': rid, 'status': 'deleted'}
+            if db.execute("SELECT 1 FROM risk_jobs WHERE release_id=? AND kind!='template_sync' AND status='running' AND lease>=? LIMIT 1", (rid, time.time())).fetchone():
+                raise RiskError('本任务正在同步或发送通知，请稍后再删除；原任务与反馈保持不变。', 409)
+            release.update(status='deleted', deleted_at=time.time(), deleted_by=self.brief(actor))
+            self._put_release(db, release)
+            # Keep evidence and result tables; only stop work that has not started.
+            db.execute("UPDATE risk_jobs SET status='cancelled',lease=0,error='排查任务已删除，停止后续执行' WHERE release_id=? AND kind!='template_sync' AND status!='done'", (rid,))
+            self._audit(db, rid, '', actor, '删除排查任务', {})
+        return {'id': rid, 'status': 'deleted'}
 
     def action(self, actor, rid, pid, body):
         self.check(actor)
@@ -549,9 +574,10 @@ class RiskInspections:
         with self.connect(True) as db:
             row = db.execute("""SELECT j.* FROM risk_jobs j
                 WHERE (j.status='queued' AND j.next_at<=? OR j.status='running' AND j.lease<?)
+                AND (j.kind='template_sync' OR EXISTS(SELECT 1 FROM risk_releases r WHERE r.id=j.release_id AND json_extract(r.data,'$.status')!='deleted'))
                 AND NOT EXISTS(SELECT 1 FROM risk_jobs owner WHERE owner.status='running' AND owner.lease>=?)
                 AND NOT EXISTS(SELECT 1 FROM risk_jobs earlier WHERE earlier.release_id=j.release_id
-                    AND earlier.status!='done' AND earlier.id!=j.id AND
+                    AND earlier.status NOT IN ('done','cancelled') AND earlier.id!=j.id AND
                     (earlier.kind='publish' OR (j.kind='sync' AND earlier.kind='sync'
                     AND json_extract(earlier.payload,'$.person.version')<json_extract(j.payload,'$.person.version')
                     AND json_extract(earlier.payload,'$.person_id')=json_extract(j.payload,'$.person_id'))))
