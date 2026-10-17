@@ -49,7 +49,7 @@ class TransportSafetyTests(unittest.TestCase):
                 for name, content in payloads.items():
                     z.writestr(name, content)
             old_size = archive.stat().st_size
-            with patch.object(portable_packaging, "GITEE_RAW_MAX_BYTES", 1):
+            with patch.object(portable_packaging, "PATCH_RECOMPRESS_MIN_BYTES", 1):
                 self.assertTrue(portable_packaging._compact_patch_zip(archive))
                 self.assertFalse(portable_packaging._compact_patch_zip(archive))
             self.assertLess(archive.stat().st_size, old_size)
@@ -70,7 +70,7 @@ class TransportSafetyTests(unittest.TestCase):
                 z.writestr("runtime/app.py", b"a" * 1000)
             original = archive.read_bytes()
             self.assertFalse(portable_packaging._compact_patch_zip(archive))
-            with patch.object(portable_packaging, "GITEE_RAW_MAX_BYTES", 1), \
+            with patch.object(portable_packaging, "PATCH_RECOMPRESS_MIN_BYTES", 1), \
                     patch.object(portable_packaging.shutil, "copyfileobj", side_effect=OSError("disk error")):
                 with self.assertRaisesRegex(OSError, "disk error"):
                     portable_packaging._compact_patch_zip(archive)
@@ -84,110 +84,24 @@ class TransportSafetyTests(unittest.TestCase):
             name = "patch_" + hashlib.sha256((version + "_patch_only").encode()).hexdigest()[:12] + ".zip"
             archive = root / name
             archive.write_bytes(b"archive")
-            manifest = {"target_version": version, "target_patch_version": 467,
+            manifest = {"target_version": version, "target_patch_version": 467, "update_source": "feishu",
                         "zip_name": name, "zip_size": 7,
                         "zip_sha256": hashlib.sha256(b"archive").hexdigest()}
             manifest_path = root / "latest_patch.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with patch.object(portable_packaging, "BUILD_DIR", root):
                 self.assertEqual(portable_packaging._load_existing_patch()[0], archive)
+                legacy = {key: value for key, value in manifest.items() if key != 'update_source'}
+                manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "不能仅重试上传旧 ZIP"):
+                    portable_packaging._load_existing_patch()
                 for bad in ("../" + name, "patch_000000000000.zip", "unrelated.zip"):
                     manifest["zip_name"] = bad
                     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
                     with self.subTest(name=bad), self.assertRaisesRegex(RuntimeError, "文件名无效"):
                         portable_packaging._load_existing_patch()
 
-    def test_retry_compacts_and_updates_manifest_before_publishing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / "patch.zip"
-            with zipfile.ZipFile(archive, "w") as z:
-                z.writestr("release_patch_only/bin/app.py", b"runtime\n" * 5000)
-            manifest = {"zip_url": "https://gitee.com/owner/repo/raw/master/patch.zip",
-                        "zip_name": archive.name, "zip_size": archive.stat().st_size,
-                        "zip_sha256": portable_packaging._hash_file(archive)}
-            manifest_path = Path(tmp) / "latest_patch.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            old_hash = manifest["zip_sha256"]
-
-            def upload(*args, **kwargs):
-                saved = json.loads(manifest_path.read_text(encoding="utf-8"))
-                self.assertEqual(saved, manifest)
-                self.assertEqual(saved["zip_sha256"], portable_packaging._hash_file(archive))
-                self.assertEqual(saved["zip_size"], archive.stat().st_size)
-                self.assertTrue(saved["zip_url"].endswith("?_clipflow_sha256=" + saved["zip_sha256"]))
-                self.assertLessEqual(saved["zip_size"], 1024)
-                return True
-
-            with patch.object(portable_packaging, "GITEE_RAW_MAX_BYTES", 1024), \
-                    patch.object(portable_packaging, "_publish_patch_to_feishu") as mirror, \
-                    patch.object(portable_packaging, "_upload_patch_to_gitee", side_effect=upload) as push, \
-                    patch.object(portable_packaging, "_verify_published_patch") as verify:
-                portable_packaging._publish_patch(archive, manifest_path, manifest,
-                    repo_url="https://gitee.com/owner/repo.git", branch="master", subdir="", manifest_repo_path="latest.json")
-            self.assertNotEqual(old_hash, manifest["zip_sha256"])
-            push.assert_called_once()
-            mirror.assert_called_once()
-            verify.assert_called_once()
-            self.assertFalse(manifest_path.with_suffix(".json.tmp").exists())
-
-    def test_oversized_patch_never_pushes_new_update_manifest(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / "patch.zip"
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_LZMA) as z:
-                z.writestr("release_patch_only/bin/app.py", b"runtime")
-            manifest = {"zip_url": "https://gitee.com/owner/repo/raw/master/patch.zip"}
-            manifest_path = Path(tmp) / "latest_patch.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            with patch.object(portable_packaging, "GITEE_RAW_MAX_BYTES", 1), \
-                    patch.object(portable_packaging, "_upload_patch_to_gitee") as push:
-                with self.assertRaisesRegex(RuntimeError, "已停止推送"):
-                    portable_packaging._publish_patch(archive, manifest_path, manifest,
-                        repo_url="https://gitee.com/owner/repo.git", branch="master", subdir="", manifest_repo_path="latest.json")
-            push.assert_not_called()
-            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), manifest)
-
-    def test_retry_restores_original_archive_if_manifest_cannot_be_saved(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive = Path(tmp) / "patch.zip"
-            with zipfile.ZipFile(archive, "w") as z:
-                z.writestr("release_patch_only/bin/app.py", b"runtime\n" * 5000)
-            original = archive.read_bytes()
-            manifest = {"zip_url": "https://gitee.com/owner/repo/raw/master/patch.zip",
-                        "zip_name": archive.name, "zip_size": len(original),
-                        "zip_sha256": hashlib.sha256(original).hexdigest()}
-            manifest_path = Path(tmp) / "latest_patch.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            replace = Path.replace
-
-            def fail_manifest_save(path, target):
-                if target == manifest_path:
-                    raise PermissionError("manifest locked")
-                return replace(path, target)
-
-            with patch.object(portable_packaging, "GITEE_RAW_MAX_BYTES", 1024), \
-                    patch.object(Path, "replace", fail_manifest_save), \
-                    patch.object(portable_packaging, "_upload_patch_to_gitee") as push:
-                with self.assertRaisesRegex(PermissionError, "manifest locked"):
-                    portable_packaging._publish_patch(archive, manifest_path, manifest,
-                        repo_url="https://gitee.com/owner/repo.git", branch="master", subdir="", manifest_repo_path="latest.json")
-            push.assert_not_called()
-            self.assertEqual(archive.read_bytes(), original)
-            self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), manifest)
-            self.assertFalse(list(Path(tmp).glob(".compact-*")))
-
-    def test_published_url_and_size_must_match_before_zip_verification(self):
-        manifest = {"target_patch_version": 467, "zip_name": "patch.zip", "zip_size": 5,
-                    "zip_url": "https://example.invalid/patch.zip", "zip_sha256": hashlib.sha256(b"patch").hexdigest()}
-        for key, value in (("zip_url", "https://example.invalid/stale.zip"), ("zip_size", 6), ("feishu_patch", {"stale": True})):
-            remote = dict(manifest, **{key: value})
-            with self.subTest(key=key), patch("urllib.request.urlopen", side_effect=lambda *a, **k: io.BytesIO(json.dumps(remote).encode())) as get, \
-                    patch("time.sleep"):
-                with self.assertRaisesRegex(RuntimeError, "远端清单尚未更新"):
-                    portable_packaging._verify_published_patch(manifest, repo_url="https://example.invalid/repo.git",
-                                                              branch="master", manifest_path="latest.json")
-                self.assertTrue(all("latest.json" in call.args[0].full_url for call in get.call_args_list))
-
-    def test_new_manifest_download_url_is_content_versioned(self):
+    def test_new_manifest_has_only_feishu_source_and_archive_integrity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             patch_dir = root / "release_patch_only"
@@ -196,215 +110,11 @@ class TransportSafetyTests(unittest.TestCase):
             archive = root / "patch.zip"
             archive.write_bytes(b"runtime")
             with patch.object(portable_packaging, "BUILD_DIR", root):
-                _, manifest = portable_packaging._write_latest_patch_manifest(patch_dir, archive,
-                    gitee_repo="https://gitee.com/owner/repo.git", gitee_branch="master", gitee_subdir="updates/patches")
-            self.assertEqual(manifest["zip_url"],
-                "https://gitee.com/owner/repo/raw/master/updates/patches/patch.zip?_clipflow_sha256="
-                + hashlib.sha256(b"runtime").hexdigest())
-
-    def test_sparse_patch_upload_and_existing_archive_validation(self):
-        def git(*args, cwd=None):
-            return subprocess.run(
-                ["git", *map(str, args)], cwd=cwd, check=True,
-                capture_output=True, text=True,
-            ).stdout
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            remote, source, build = (root / name for name in ("remote.git", "source", "build"))
-            git("init", "--bare", "--initial-branch=master", remote)
-            git("init", "-b", "master", source)
-            git("-C", source, "config", "user.name", "Package Test")
-            git("-C", source, "config", "user.email", "package@example.invalid")
-            patches = source / "updates" / "patches"
-            patches.mkdir(parents=True)
-            for stamp in ("100000", "110000", "120000"):
-                (patches / f"ClipFlow_V2_20260917_{stamp}_patch_only.zip").write_bytes(b"old")
-            (patches / "ClipFlow_patch_only.zip").write_bytes(b"legacy")
-            (source / "updates" / "latest_patch.json").write_text("old", encoding="utf-8")
-            git("-C", source, "add", ".")
-            git("-C", source, "commit", "-m", "initial")
-            git("-C", source, "remote", "add", "origin", remote)
-            git("-C", source, "push", "origin", "master")
-
-            build.mkdir()
-            name = "ClipFlow_V2_20260918_153651_patch_only.zip"
-            archive = build / name
-            archive.write_bytes(b"new-patch")
-            manifest = {
-                "target_version": "ClipFlow_V2_20260918_153651",
-                "target_patch_version": 381,
-                "zip_name": name,
-                "zip_size": archive.stat().st_size,
-                "zip_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-            }
-            manifest_path = build / "latest_patch.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            with patch.object(portable_packaging, "BUILD_DIR", build), patch.dict(os.environ, {
-                "GIT_AUTHOR_NAME": "Package Test", "GIT_AUTHOR_EMAIL": "package@example.invalid",
-                "GIT_COMMITTER_NAME": "Package Test", "GIT_COMMITTER_EMAIL": "package@example.invalid",
-            }):
-                self.assertEqual(portable_packaging._load_existing_patch()[0], archive)
-                self.assertTrue(portable_packaging._upload_patch_to_gitee(
-                    archive, manifest_path, repo_url=remote.as_uri(), branch="master",
-                    subdir="updates/patches", manifest_repo_path="updates/latest_patch.json",
-                ))
-                self.assertFalse(list(build.glob(".gitee_upload_*")))
-                archive.write_bytes(b"tampered")
-                with self.assertRaisesRegex(RuntimeError, "ZIP 与清单不一致"):
-                    portable_packaging._load_existing_patch()
-
-            tracked = git("--git-dir", remote, "ls-tree", "-r", "--name-only", "master")
-            self.assertIn(name, tracked)
-            self.assertNotIn("ClipFlow_V2_20260917_100000_patch_only.zip", tracked)
-            self.assertIn("ClipFlow_patch_only.zip", tracked)
-            self.assertEqual(git("--git-dir", remote, "show", "master:updates/latest_patch.json"), json.dumps(manifest))
-
-    def test_upload_pushes_when_commit_reports_failure_after_creating_commit(self):
-        def git(*args, cwd=None):
-            return subprocess.run(
-                ["git", *map(str, args)], cwd=cwd, check=True,
-                capture_output=True, text=True,
-            ).stdout
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            remote, source, build = (root / name for name in ("remote.git", "source", "build"))
-            git("init", "--bare", "--initial-branch=master", remote)
-            git("init", "-b", "master", source)
-            git("-C", source, "config", "user.name", "Package Test")
-            git("-C", source, "config", "user.email", "package@example.invalid")
-            (source / "updates" / "patches").mkdir(parents=True)
-            (source / "updates" / "latest_patch.json").write_text("{}", encoding="utf-8")
-            git("-C", source, "add", ".")
-            git("-C", source, "commit", "-m", "initial")
-            git("-C", source, "remote", "add", "origin", remote)
-            git("-C", source, "push", "origin", "master")
-
-            build.mkdir()
-            name = "ClipFlow_V2_20260923_171740_patch_only.zip"
-            archive = build / name
-            archive.write_bytes(b"patch")
-            manifest = {
-                "target_version": "ClipFlow_V2_20260923_171740",
-                "target_patch_version": 435,
-                "zip_name": name,
-                "zip_size": archive.stat().st_size,
-                "zip_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-            }
-            manifest_path = build / "latest_patch.json"
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            original_run = portable_packaging._run_cmd
-
-            def commit_succeeds_but_reports_failure(args, **kwargs):
-                result = original_run(args, **kwargs)
-                return False if args[:2] == ["git", "commit"] and result else result
-
-            with patch.object(portable_packaging, "BUILD_DIR", build), patch.object(
-                portable_packaging, "_run_cmd", side_effect=commit_succeeds_but_reports_failure
-            ), patch.dict(os.environ, {
-                "GIT_AUTHOR_NAME": "Package Test", "GIT_AUTHOR_EMAIL": "package@example.invalid",
-                "GIT_COMMITTER_NAME": "Package Test", "GIT_COMMITTER_EMAIL": "package@example.invalid",
-            }):
-                self.assertTrue(portable_packaging._upload_patch_to_gitee(
-                    archive, manifest_path, repo_url=remote.as_uri(), branch="master",
-                    subdir="updates/patches", manifest_repo_path="updates/latest_patch.json",
-                ))
-
-            self.assertEqual(
-                json.loads(git("--git-dir", remote, "show", "master:updates/latest_patch.json")),
-                manifest,
-            )
-
-    def test_packaging_checks_published_manifest_and_zip_hash(self):
-        content = b"patch-content"
-        manifest = {
-            "target_patch_version": 378,
-            "zip_name": "ClipFlow_V2_test_patch_only.zip",
-            "zip_url": "https://example.invalid/patch.zip",
-            "zip_sha256": hashlib.sha256(content).hexdigest(),
-            "zip_size": len(content),
-        }
-        remote_manifest = MagicMock()
-        remote_manifest.__enter__.return_value = remote_manifest
-        remote_manifest.read.return_value = json.dumps(manifest).encode()
-        archive = MagicMock()
-        archive.__enter__.return_value = archive
-        archive.read.side_effect = [content, b""]
-        with patch("urllib.request.urlopen", side_effect=[remote_manifest, archive]) as get:
-            portable_packaging._verify_published_patch(
-                manifest, repo_url="https://example.invalid/repo.git",
-                branch="master", manifest_path="updates/latest_patch.json"
-            )
-        self.assertEqual(get.call_count, 2)
-        wrong_archive = MagicMock()
-        wrong_archive.__enter__.return_value = wrong_archive
-        def wrong_get(request, **_kwargs):
-            if request.full_url == manifest["zip_url"]:
-                wrong_archive.read.side_effect = [b"wrong-content", b""]
-                return wrong_archive
-            return remote_manifest
-        with patch("urllib.request.urlopen", side_effect=wrong_get), patch("time.sleep"):
-            with self.assertRaisesRegex(RuntimeError, "下载核验失败"):
-                portable_packaging._verify_published_patch(
-                    manifest, repo_url="https://example.invalid/repo.git",
-                    branch="master", manifest_path="updates/latest_patch.json"
-                )
-
-    def test_published_download_retries_incomplete_manifest_and_archive_from_start(self):
-        content = b'complete-patch-content'
-        manifest = {'target_patch_version': 472, 'zip_name': 'patch.zip',
-                    'zip_url': 'https://example.invalid/patch.zip',
-                    'zip_sha256': hashlib.sha256(content).hexdigest(), 'zip_size': len(content)}
-        for stage in ('manifest', 'archive'):
-            with self.subTest(stage=stage):
-                broken = MagicMock()
-                broken.__enter__.return_value = broken
-                broken.read.side_effect = ([IncompleteRead(b'{"zip_', 40)] if stage == 'manifest'
-                                           else [content[:4], IncompleteRead(b'interrupted', 100)])
-                responses = ([broken] if stage == 'manifest'
-                             else [io.BytesIO(json.dumps(manifest).encode()), broken])
-                responses += [io.BytesIO(json.dumps(manifest).encode()), io.BytesIO(content)]
-                with patch('urllib.request.urlopen', side_effect=responses) as get, patch('time.sleep') as sleep:
-                    portable_packaging._verify_published_patch(manifest, repo_url='https://example.invalid/repo.git',
-                                                              branch='master', manifest_path='latest.json')
-                self.assertEqual(get.call_count, len(responses))
-                sleep.assert_called_once_with(5)
-                broken.__exit__.assert_called_once()
-
-    def test_published_incomplete_download_never_reports_success_after_retry_limit(self):
-        manifest = {'target_patch_version': 472, 'zip_name': 'patch.zip',
-                    'zip_url': 'https://example.invalid/patch.zip',
-                    'zip_sha256': hashlib.sha256(b'patch').hexdigest(), 'zip_size': 5}
-        def response(request, **kwargs):
-            if request.full_url != manifest['zip_url']:
-                return io.BytesIO(json.dumps(manifest).encode())
-            broken = MagicMock()
-            broken.__enter__.return_value = broken
-            broken.read.side_effect = IncompleteRead(b'partial', 10)
-            return broken
-        with patch('urllib.request.urlopen', side_effect=response) as get, patch('time.sleep') as sleep:
-            with self.assertRaisesRegex(RuntimeError, '下载核验失败.*补丁文件.*IncompleteRead'):
-                portable_packaging._verify_published_patch(manifest, repo_url='https://example.invalid/repo.git',
-                                                          branch='master', manifest_path='latest.json')
-        self.assertEqual(get.call_count, 20)
-        self.assertEqual(sleep.call_count, 9)
-
-    def test_public_download_denial_fails_promptly_with_stage_and_reason(self):
-        manifest = {'target_patch_version': 453, 'zip_name': 'patch.zip',
-                    'zip_url': 'https://example.invalid/patch.zip',
-                    'zip_sha256': hashlib.sha256(b'patch').hexdigest(), 'zip_size': 5}
-        for archive_denied in (False, True):
-            with self.subTest(archive_denied=archive_denied):
-                denied = HTTPError(manifest['zip_url'], 403, 'Forbidden', {},
-                                   io.BytesIO(b'large file require login for access.'))
-                responses = [io.BytesIO(json.dumps(manifest).encode()), denied] if archive_denied else [denied]
-                with patch('urllib.request.urlopen', side_effect=responses) as get, patch('time.sleep') as sleep:
-                    with self.assertRaisesRegex(RuntimeError, ('补丁文件' if archive_denied else '远端清单') + ' HTTP 403.*需要登录'):
-                        portable_packaging._verify_published_patch(manifest, repo_url='https://example.invalid/repo.git',
-                                                                  branch='master', manifest_path='latest.json')
-                self.assertEqual(get.call_count, len(responses))
-                sleep.assert_not_called()
+                _, manifest = portable_packaging._write_latest_patch_manifest(patch_dir, archive)
+            self.assertEqual(manifest["update_source"], "feishu")
+            self.assertNotIn("zip_url", manifest)
+            self.assertEqual(manifest["zip_sha256"], hashlib.sha256(b"runtime").hexdigest())
+            self.assertEqual(manifest["zip_size"], 7)
 
     def test_installer_is_not_packaged_or_deleted_from_existing_installations(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -444,17 +154,15 @@ class TransportSafetyTests(unittest.TestCase):
                 with self.subTest(path=relative):
                     self.assertEqual((root / 'build/complete_patch_only' / relative).read_bytes(), (source / relative).read_bytes())
 
-    def test_manifest_fetch_bypasses_mutable_url_cache(self):
-        updater = RemotePatchUpdater(
-            Path.cwd(), Path(tempfile.gettempdir()), "https://example.invalid/latest.json"
-        )
-        response = MagicMock()
-        response.json.return_value = {"version": "next"}
-        with patch("requests.get", return_value=response) as get:
-            self.assertEqual(updater.fetch_manifest(), {"version": "next"})
-        kwargs = get.call_args.kwargs
-        self.assertTrue(kwargs["params"]["_clipflow"])
-        self.assertEqual(kwargs["headers"]["Cache-Control"], "no-cache")
+    def test_manifest_fetch_ignores_old_gitee_settings(self):
+        from upload_event_module.services import patch_mirror
+        with tempfile.TemporaryDirectory() as tmp:
+            for old_url in ("", "https://gitee.com/owner/repo/raw/master/latest_patch.json"):
+                updater = RemotePatchUpdater(Path(tmp), Path(tmp) / "data", old_url)
+                with patch.object(patch_mirror, "fetch_manifest", return_value={"target_patch_version": 481}) as fetch, patch("requests.get") as get:
+                    self.assertEqual(updater.fetch_manifest(), {"target_patch_version": 481})
+                    fetch.assert_called_once_with()
+                    get.assert_not_called()
 
     def test_streamed_body_limit_and_json_validation(self):
         controller = isolated_class(BIN / "clipflow_backend/main.py", "FastAPIPortalController", {"_read_bounded_body", "_read_json_request"}, {"Request": Request, "json": json, "MAX_JSON_BODY_BYTES": 8})
@@ -495,108 +203,6 @@ class TransportSafetyTests(unittest.TestCase):
                     with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, "unsafe"):
                         updater._download_zip({"zip_url": "https://example.invalid/a", "zip_name": name})
                 get.assert_not_called()
-
-    def test_download_atomic_failure_preserves_previous_archive(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            updater = RemotePatchUpdater(Path(tmp), Path(tmp) / "data", "")
-            target = updater.data_dir / "patch.zip"
-            target.write_bytes(b"previous")
-            response = MagicMock()
-            response.__enter__.return_value = response
-            manifest = {"zip_url": "https://example.invalid/patch.zip?version=2", "zip_sha256": hashlib.sha256(b"new").hexdigest(), "zip_size": 3}
-            for chunks in [[b"bad"], [b"too long"], [b"n"]]:
-                response.iter_content.return_value = iter(chunks)
-                with patch("requests.get", return_value=response), patch("time.sleep"), self.assertRaises(RuntimeError):
-                    updater._download_zip(manifest)
-                self.assertEqual(target.read_bytes(), b"previous")
-                self.assertEqual(list(updater.data_dir.glob("*.part")), [])
-            def interrupted():
-                yield b"n"
-                raise OSError("disconnected")
-            response.iter_content.return_value = interrupted()
-            with patch("requests.get", return_value=response), self.assertRaises(OSError):
-                updater._download_zip(manifest)
-            self.assertEqual(target.read_bytes(), b"previous")
-            response.iter_content.return_value = iter([b"n", b"ew"])
-            with patch("requests.get", return_value=response):
-                self.assertEqual(updater._download_zip(manifest), target.resolve())
-            self.assertEqual(target.read_bytes(), b"new")
-            self.assertEqual(list(updater.data_dir.glob("*.part")), [])
-
-    def test_client_download_resumes_or_restarts_after_interrupted_response(self):
-        from requests.exceptions import ReadTimeout, ChunkedEncodingError
-        content = b'new-patch'
-        manifest = {'zip_url': 'https://example.invalid/patch.zip', 'zip_name': 'patch.zip',
-                    'zip_size': len(content), 'zip_sha256': hashlib.sha256(content).hexdigest()}
-        for status in (200, 206):
-            for error in (None, ReadTimeout('timeout'), ChunkedEncodingError('interrupted')):
-                with self.subTest(status=status, error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
-                    updater = RemotePatchUpdater(Path(tmp), Path(tmp) / 'data', '')
-                    first, second = MagicMock(), MagicMock()
-                    first.__enter__.return_value, second.__enter__.return_value = first, second
-                    first.status_code, second.status_code = 200, status
-                    def interrupted():
-                        yield content[:3]
-                        if error is not None:
-                            raise error
-                    first.iter_content.return_value = interrupted()
-                    second.headers = {'Content-Range': 'bytes 3-8/9'} if status == 206 else {}
-                    second.iter_content.return_value = iter([content[3:] if status == 206 else content])
-                    with patch('requests.get', side_effect=[first, second]) as get, patch('time.sleep') as sleep:
-                        result = updater._download_zip(manifest)
-                    self.assertEqual(result.read_bytes(), content)
-                    self.assertEqual(get.call_args_list[1].kwargs['headers']['Range'], 'bytes=3-')
-                    self.assertEqual(get.call_args_list[1].kwargs['timeout'], (10, 120))
-                    self.assertEqual(get.call_args_list[1].kwargs['headers']['Accept-Encoding'], 'identity')
-                    sleep.assert_called_once_with(2)
-                    self.assertEqual(list(updater.data_dir.glob('*.part')), [])
-
-    def test_client_download_rejects_wrong_resume_range_without_touching_previous_zip(self):
-        from requests.exceptions import ReadTimeout
-        manifest = {'zip_url': 'https://example.invalid/patch.zip', 'zip_size': 9,
-                    'zip_sha256': hashlib.sha256(b'new-patch').hexdigest()}
-        for header in ('bytes 0-8/9', 'bytes 3-8/10', 'bytes 3-10/9', 'invalid'):
-            with self.subTest(header=header), tempfile.TemporaryDirectory() as tmp:
-                updater = RemotePatchUpdater(Path(tmp), Path(tmp) / 'data', '')
-                target = updater.data_dir / 'patch.zip'
-                target.write_bytes(b'previous')
-                first, second = MagicMock(), MagicMock()
-                first.__enter__.return_value, second.__enter__.return_value = first, second
-                first.status_code, second.status_code = 200, 206
-                def interrupted():
-                    yield b'new'
-                    raise ReadTimeout('timeout')
-                first.iter_content.return_value = interrupted()
-                second.headers = {'Content-Range': header}
-                with patch('requests.get', side_effect=[first, second]) as get, patch('time.sleep'):
-                    with self.assertRaisesRegex(RuntimeError, '补丁续传'):
-                        updater._download_zip(manifest)
-                self.assertEqual(get.call_count, 2)
-                second.iter_content.assert_not_called()
-                self.assertEqual(target.read_bytes(), b'previous')
-                self.assertEqual(list(updater.data_dir.glob('*.part')), [])
-
-    def test_client_download_has_bounded_retries_and_no_retry_for_denied_download(self):
-        from requests.exceptions import ReadTimeout, HTTPError
-        manifest = {'zip_url': 'https://example.invalid/patch.zip', 'zip_size': 9,
-                    'zip_sha256': hashlib.sha256(b'new-patch').hexdigest()}
-        with tempfile.TemporaryDirectory() as tmp:
-            updater = RemotePatchUpdater(Path(tmp), Path(tmp) / 'data', '')
-            target = updater.data_dir / 'patch.zip'
-            target.write_bytes(b'previous')
-            with patch('requests.get', side_effect=ReadTimeout('timeout')) as get, patch('time.sleep') as sleep:
-                with self.assertRaisesRegex(RuntimeError, '连续3次下载未完成'):
-                    updater._download_zip(manifest)
-                self.assertEqual(get.call_count, 3)
-                self.assertEqual(sleep.call_count, 2)
-            denied = SimpleNamespace(status_code=403, url=manifest['zip_url'])
-            with patch('requests.get', side_effect=HTTPError(response=denied)) as get, patch('time.sleep') as sleep:
-                with self.assertRaises(HTTPError):
-                    updater._download_zip(manifest)
-                self.assertEqual(get.call_count, 1)
-                sleep.assert_not_called()
-            self.assertEqual(target.read_bytes(), b'previous')
-            self.assertEqual(list(updater.data_dir.glob('*.part')), [])
 
     def test_frontend_generations_and_patch_rollback(self):
         methods = {"_apply_patch_worker", "_collect_patch_files", "_parse_deleted_files", "_is_runtime_data_patch_path", "_copy_with_retry", "_delete_with_retry", "_backup_patch_targets", "_rollback_patch", "_sha256_file"}

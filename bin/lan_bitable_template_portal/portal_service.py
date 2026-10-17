@@ -46920,6 +46920,18 @@ class MaintenancePortalService(RepairOperationsMixin):
                 retries=2,
             )
         except FeishuHTTPError as exc:
+            detail = str(exc).lower()
+            if "certificate_verify_failed" in detail or "certificate verify failed" in detail:
+                endpoint = urlparse(CRITICAL_GUARD_WEATHER_URL).netloc
+                reason = (
+                    "HTTPS 证书已过期，请维护人员续签并重新加载该服务的证书"
+                    if "certificate has expired" in detail
+                    else "HTTPS 证书校验未通过，请维护人员检查该服务的证书链和运行电脑时间"
+                )
+                raise PortalError(
+                    f"天气预警服务（{endpoint}）{reason}。"
+                    "本次天气查询未完成，已保留上次成功结果，不据此解除戒备。"
+                ) from exc
             raise PortalError(f"天气预警接口请求失败：{exc}") from exc
         if not isinstance(payload, dict):
             raise PortalError("天气预警接口返回格式无效。")

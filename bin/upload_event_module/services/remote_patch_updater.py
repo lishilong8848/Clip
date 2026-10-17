@@ -7,11 +7,9 @@ import re
 import shutil
 import stat
 import tempfile
-import time
 import zipfile
 from pathlib import Path, PureWindowsPath
 from typing import Any
-from urllib.parse import urlsplit, unquote
 
 class RemotePatchUpdater:
     def __init__(self, app_root: Path, data_dir: Path, manifest_url: str):
@@ -41,21 +39,9 @@ class RemotePatchUpdater:
         return 0
 
     def fetch_manifest(self, timeout: tuple[float, float] = (5.0, 20.0)) -> dict:
-        if not self.manifest_url:
-            return {}
-        import requests
-
-        response = requests.get(
-            self.manifest_url,
-            params={"_clipflow": str(time.time_ns())},
-            headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            return {}
-        return payload
+        # Older saved Gitee URLs must never reactivate the retired update source.
+        from .patch_mirror import fetch_manifest
+        return fetch_manifest()
 
     def has_newer_patch(self, local_build_meta: dict, remote_manifest: dict) -> bool:
         if not remote_manifest:
@@ -108,14 +94,9 @@ class RemotePatchUpdater:
         return hasher.hexdigest()
 
     def _download_zip(self, manifest: dict) -> Path:
-        import requests
-
-        zip_url = (manifest.get("zip_url") or "").strip()
         zip_name = str(manifest.get("zip_name") or "")
-        if not zip_url:
-            raise RuntimeError("remote manifest missing zip_url")
         if not zip_name:
-            zip_name = unquote(urlsplit(zip_url).path.rsplit("/", 1)[-1]) or "patch.zip"
+            raise RuntimeError("飞书补丁清单缺少文件名，请重新检查更新。")
         if (
             zip_name in {".", ".."}
             or re.search(r'[<>:"/\\|?*\x00-\x1f]', zip_name)
@@ -127,79 +108,9 @@ class RemotePatchUpdater:
         target_zip = root / zip_name
         if not target_zip.resolve().is_relative_to(root):
             raise RuntimeError("remote manifest contains an unsafe zip path")
-        expected_sha256 = (manifest.get("zip_sha256") or "").strip().lower()
-        expected_size = self._safe_int(manifest.get("zip_size"), 0)
-        if manifest.get("feishu_patch"):
-            try:
-                from .patch_mirror import download_patch
-                logging.info("优先从飞书多维表下载补丁。")
-                return download_patch(manifest, target_zip)
-            except Exception as exc:
-                logging.warning("飞书补丁下载未完成，转用 Gitee 备用源：%s", type(exc).__name__)
-        temporary = None
-        try:
-            digest = hashlib.sha256()
-            size = 0
-            with tempfile.NamedTemporaryFile(dir=root, prefix=".download-", suffix=".part", delete=False) as stream:
-                temporary = Path(stream.name)
-                for attempt in range(3):
-                    if expected_size > 0 and size == expected_size and expected_sha256 \
-                            and digest.hexdigest() == expected_sha256:
-                        break
-                    headers = {"Accept-Encoding": "identity"}
-                    if size:
-                        headers["Range"] = f"bytes={size}-"
-                    logging.info("补丁下载：第 %s/3 次，已接收 %.2f MiB", attempt + 1, size / 1024 / 1024)
-                    try:
-                        with requests.get(zip_url, headers=headers, stream=True, timeout=(10, 120)) as resp:
-                            resp.raise_for_status()
-                            range_end = None
-                            if resp.status_code == 206:
-                                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", resp.headers.get("Content-Range", ""))
-                                if not match:
-                                    raise RuntimeError("补丁续传响应无效，请重新检查更新。")
-                                start, range_end, total = map(int, match.groups())
-                                if start != size or not start <= range_end < total \
-                                        or expected_size > 0 and total != expected_size:
-                                    raise RuntimeError("补丁续传位置或大小不一致，请重新检查更新。")
-                            else:
-                                # A server may ignore Range; never append a full response to a partial file.
-                                stream.seek(0)
-                                stream.truncate()
-                                size, digest = 0, hashlib.sha256()
-                            for chunk in resp.iter_content(chunk_size=128 * 1024):
-                                if not chunk:
-                                    continue
-                                size += len(chunk)
-                                if expected_size > 0 and size > expected_size \
-                                        or range_end is not None and size > range_end + 1:
-                                    raise RuntimeError("zip size mismatch")
-                                stream.write(chunk)
-                                digest.update(chunk)
-                            if expected_size > 0 and size < expected_size \
-                                    or range_end is not None and size < range_end + 1:
-                                raise requests.exceptions.ChunkedEncodingError("补丁未下载完整")
-                        break
-                    except (requests.Timeout, requests.ConnectionError, requests.exceptions.ChunkedEncodingError,
-                            requests.HTTPError) as exc:
-                        if isinstance(exc, requests.HTTPError) and exc.response is not None \
-                                and exc.response.status_code not in {408, 429, 500, 502, 503, 504}:
-                            raise
-                        logging.warning("补丁下载中断（%s/3），已接收 %.2f MiB：%s", attempt + 1, size / 1024 / 1024, exc)
-                        if attempt == 2:
-                            raise RuntimeError("补丁连续3次下载未完成，请稍后重新检查更新；现有程序未更改。") from exc
-                        time.sleep(2 * (attempt + 1))
-                stream.flush()
-                os.fsync(stream.fileno())
-            if expected_sha256 and digest.hexdigest() != expected_sha256:
-                raise RuntimeError("zip sha256 mismatch")
-            if expected_size > 0 and size != expected_size:
-                raise RuntimeError("zip size mismatch")
-            os.replace(temporary, target_zip)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-        return target_zip
+        from .patch_mirror import download_patch
+        logging.info("从飞书多维表下载补丁。")
+        return download_patch(manifest, target_zip)
 
     def _extract_patch_dir(self, zip_path: Path) -> Path:
         app_root = self.app_root.resolve()

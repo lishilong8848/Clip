@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { preview } from 'vite';
 import { chromium } from 'playwright';
+import { layoutApiFixture } from './layout-api-fixture.mjs';
 
 assert(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR,'An isolated V2 build is required.');
 const output=path.resolve('../../../output/playwright/event-range-repair-scroll');
@@ -15,14 +16,16 @@ const fixture={empty:true};
 let inFlight=0,maxInFlight=0;
 try {
   const ctx=await browser.newContext({viewport:{width:1440,height:900},reducedMotion:'reduce',timezoneId:'America/Los_Angeles'});
+  const layouts=layoutApiFixture();
   await ctx.route('**/*',async route=>{
     const req=route.request(),url=new URL(req.url());
     if(url.origin!==origin)return route.abort();
     if(url.pathname==='/assets/vnet-logo.png')return route.fulfill({path:path.resolve('public/assets/vnet-logo.png'),contentType:'image/png'});
     if(!url.pathname.startsWith('/api/'))return route.continue();
+    if(await layouts.handle(route,'isolated-range'))return;
     if(req.method()!=='GET'){writes.push(url.pathname);return route.fulfill({status:400,json:{ok:false,error:'Writes disabled'}});}
     const ok=data=>route.fulfill({json:{ok:true,data}});
-    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-range',name:'测试值班员',role:'building',level:'L4',category:'operator',modules:['event','repair_management']},scope_options:[{value:'A',label:'A楼'}]});
+    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-range',name:'测试值班员',role:'building',level:'L4',category:'operator',modules:['event','repair_management']},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'range-scroll-fixture'}});
     if(url.pathname==='/api/events/monthly'){
       requests.push(Object.fromEntries(url.searchParams));inFlight++;maxInFlight=Math.max(maxInFlight,inFlight);
@@ -41,6 +44,11 @@ try {
   const custom='?__page=/&mode=events&scope=A&period=custom&event_start=2026-01-15&event_end=2026-03-15';
   await page.goto(entry+custom);
   await page.getByRole('tab',{name:'自定义',selected:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:/^刷新本页$|^刷新事件$/}).count(),0);
+  const scopeBox=await page.locator('.v2-event-controls .v2-local-scope').boundingBox();
+  const periodBox=await page.locator('.v2-event-controls .n-tabs').boundingBox();
+  await page.screenshot({path:path.join(output,'event-controls.png')});
+  assert(scopeBox&&periodBox&&Math.abs(scopeBox.y-periodBox.y)<4,'building and period controls share a toolbar: '+JSON.stringify({scopeBox,periodBox}));
   await page.locator('[data-metric=total] .n-statistic-value__content').filter({hasText:'3'}).waitFor();
   assert.deepEqual([...new Set(requests.map(r=>r.month))].sort(),['2026-01','2026-02','2026-03']);
   assert(requests.every(r=>r.scope==='A'));
@@ -85,9 +93,15 @@ try {
     await wheelTarget.scrollIntoViewIfNeeded();
     const box=await wheelTarget.boundingBox();
     await page.mouse.move(box.x+box.width/2,Math.min(box.y+60,550));
-    const scroll=()=>page.evaluate(()=>document.querySelector('.v2-main').scrollTop+document.documentElement.scrollTop);
+    // Custom layouts scroll the panel body; empty panels hand the wheel to the page.
+    const scroll=()=>page.evaluate(()=>[document.documentElement,...document.querySelectorAll('.v2-main,.v2-responsive-body')].reduce((sum,el)=>sum+el.scrollTop,0));
     const top=await scroll();await page.mouse.wheel(0,260);
-    await page.waitForFunction(top=>document.querySelector('.v2-main').scrollTop+document.documentElement.scrollTop>top+40,top);
+    try {
+      await page.waitForFunction(top=>[document.documentElement,...document.querySelectorAll('.v2-main,.v2-responsive-body')].reduce((sum,el)=>sum+el.scrollTop,0)>top+40,top);
+    } catch(error) {
+      await page.screenshot({path:path.join(output,`scroll-failed-${empty?'empty':'records'}-${width}.png`)});
+      throw new Error(`Wheel failed: ${empty?'empty':'records'}, ${width}px, before=${top}, after=${await scroll()}`,{cause:error});
+    }
     assert.equal(await page.locator('.record-list').evaluate(el=>el.scrollTop),0,'no nested list scroll');
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
     await page.screenshot({path:path.join(output,`repair-${empty?'empty':'records'}-${width}.png`)});

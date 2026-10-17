@@ -102,6 +102,8 @@ try {
   for (const [index, kind] of Object.keys(fixtures).entries()) {
     await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=' + kind);
     await page.locator('.v2-notice-entry').first().waitFor();
+    assert.equal(await page.locator('[data-list="planned"] .v2-notice-filters').count(),1,'plan filters belong to the plan list');
+    assert.equal(await page.locator('[data-list="ongoing"] .v2-notice-filters').count(),0);
     assert.equal(await page.locator('iframe').count(), 0, 'new notice page must not embed legacy HTML');
     for (const width of index === 0 ? [1440,1920,360,390,430] : [1366]) {
       await page.setViewportSize({ width, height: width < 700 ? 844 : 1000 });
@@ -116,6 +118,9 @@ try {
     try{await page.locator('.v2-notice-editor .v2-notice-field-grid').first().waitFor({timeout:10000});}
     catch(e){await page.screenshot({path:path.join(output,'form-error.png'),fullPage:true});console.error(errors,await page.locator('.v2-notice-editor').innerText());throw e;}
     assert.equal(await page.locator('.v2-notice-editor-footer').isVisible(), true);
+    assert.equal(await page.locator('.v2-notice-editor-context [role=radiogroup]').count(),0);
+    assert.equal(await page.locator('.v2-notice-submit-group [role=radiogroup]').count(),1,'action and preview share one footer group');
+    assert.equal(await page.getByRole('button',{name:'保存草稿',exact:true}).count(),0);
     await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'删除通告',exact:true}).click();
     await page.getByRole('button',{name:'确认删除',exact:true}).waitFor();
     assert.equal(writes.length,0,'opening deletion confirmation must not delete');
@@ -134,6 +139,20 @@ try {
     assert.equal(await body.evaluate(el=>getComputedStyle(el).overflowY),'auto','one body scrolls through all notice information');
     const bounds=await body.boundingBox();
     const actions=await page.locator('.v2-notice-editor-footer').boundingBox();assert(bounds.y+bounds.height<=actions.y+2,kind+' scrolling body stays above fixed actions');
+    if(kind==='maintenance'){
+      for(const [width,height] of [[360,640],[375,667],[390,844]]){
+        await page.setViewportSize({width,height});
+        const group=page.locator('.v2-notice-submit-group');
+        const radio=await group.getByRole('radiogroup',{name:'本次操作'}).boundingBox();
+        const preview=group.getByRole('button',{name:/预览并确认/});const box=await preview.boundingBox();
+        await page.screenshot({path:path.join(output,`compact-footer-${width}.png`)});
+        assert(radio&&box&&Math.abs(radio.y+radio.height/2-box.y-box.height/2)<4,'mobile operation and preview remain adjacent: '+JSON.stringify({radio,box}));
+        assert(box.y>=0&&box.y+box.height<=height&&box.x+box.width<=width,'preview stays on screen');
+        assert(await preview.evaluate(el=>{const b=el.getBoundingClientRect();return el.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));}),'preview is not covered');
+        await page.screenshot({path:path.join(output,`compact-footer-${width}.png`)});
+      }
+      await page.setViewportSize({width:1366,height:768});
+    }
     await page.locator('[data-notice-section=relations]').scrollIntoViewIfNeeded();
     assert(await page.getByRole('button',{name:/^(重新)?查找目标通告$/}).isVisible(),'related-record tools are immediately accessible on the same page');
     await body.evaluate(el=>el.scrollTo({top:0}));

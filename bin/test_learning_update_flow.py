@@ -105,6 +105,10 @@ class LearningUpdateFlowTests(TestCase):
                 packaging.build_patch(root / 'dist', client, 'fixture_update', force_ui_update=True)
             payload = output / 'fixture_update_patch_only'
             expected = (
+                'bin/upload_event_module/config.py',
+                'bin/upload_event_module/services/remote_patch_updater.py',
+                'bin/upload_event_module/services/patch_mirror.py',
+                'bin/openclaw_service/assistant/lighthouse_distribution.py',
                 'bin/lan_bitable_template_portal/learning.py',
                 'bin/lan_bitable_template_portal/learning_reminders.py',
                 'bin/lan_bitable_template_portal/learning_routes.py',

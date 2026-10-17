@@ -113,7 +113,7 @@ def build_native_catalog():
     # 模型名经 lighthouse_api._resolve_model 的 clipflow_backend.api_models 兜底解析。
     real_source: dict[tuple, str] = {}
 
-    for route_file in (MAIN_PY, PORTAL_DIR / "pre_shift_routes.py"):
+    for route_file in (MAIN_PY, PORTAL_DIR / "pre_shift_routes.py", PORTAL_DIR / "risk_inspection_routes.py"):
         tree = ast.parse(route_file.read_text(encoding="utf-8-sig"))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -149,6 +149,13 @@ def build_native_catalog():
             if isinstance(routes, ast.Dict):
                 for path, methods in ast.literal_eval(routes).items():
                     app.add_api_route(f"/api/{prefix}/{path}", _dummy_endpoint, methods=list(methods))
+
+    # Risk routes register literal (suffix, methods) pairs instead of a ROUTES dict.
+    risk_tree = ast.parse((PORTAL_DIR / "risk_inspection_routes.py").read_text(encoding="utf-8-sig"))
+    for node in ast.walk(risk_tree):
+        if isinstance(node, ast.For) and ast.unparse(node.target) == '(path, methods)':
+            for path, methods in ast.literal_eval(node.iter):
+                app.add_api_route('/api/risk-inspections' + path, _dummy_endpoint, methods=methods)
 
     original_source = lighthouse_api._endpoint_source
 
@@ -285,6 +292,24 @@ class FrontendContractTests(unittest.TestCase):
             missing, [],
             "以下前端已核实的业务API在 native 目录中缺失(被排除或未注册):\n" + "\n".join(
                 f"  {cid}" for cid in missing))
+
+    def test_risk_routes_include_literal_pairs_and_decorated_uploads(self):
+        expected = (
+            'GET /api/risk-inspections', 'POST /api/risk-inspections',
+            'GET /api/risk-inspections/template', 'POST /api/risk-inspections/template',
+            'GET /api/risk-inspections/templates', 'GET /api/risk-inspections/templates/{tid}',
+            'PUT /api/risk-inspections/templates/{tid}', 'GET /api/risk-inspections/people',
+            'GET /api/risk-inspections/{rid}', 'POST /api/risk-inspections/{rid}/retry',
+            'POST /api/risk-inspections/{rid}/reviewer',
+            'POST /api/risk-inspections/{rid}/people/{pid}/actions',
+            'POST /api/risk-inspections/{rid}/files', 'GET /api/risk-inspections/files/{fid}',
+        )
+        for api_id in expected:
+            with self.subTest(api_id=api_id):
+                self.assertEqual(self.catalog.get(api_id)['id'], api_id)
+        from lan_bitable_template_portal.lighthouse_ai import AssistantError
+        with self.assertRaises(AssistantError):
+            self.catalog.get('DELETE /api/risk-inspections/{rid}')
 
     def test_transport_format_matches_directory(self):
         bad = [g for g in self.gaps if g[1].startswith("传输格式")]

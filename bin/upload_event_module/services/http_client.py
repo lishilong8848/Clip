@@ -142,6 +142,10 @@ class FeishuHttpClient:
         except Exception:
             pass
 
+    def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        """Single attempt; callers inspect HTTP status and own uncertain-write recovery."""
+        return self._client_for_request().request(method, url, **kwargs)
+
     def request_json(
         self,
         method: str,

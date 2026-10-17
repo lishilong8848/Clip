@@ -1,5 +1,6 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import io
 import json
 from pathlib import Path
 import sys
@@ -7,7 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
-import requests
+import httpx
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bin.lan_bitable_template_portal.risk_inspection import RiskInspections, RiskError, schema_fields, validate_values
 from bin.lan_bitable_template_portal.risk_inspection_cloud import CloudRejected, RiskCloud, TEMPLATE_APP, field_spec
+from upload_event_module.services.http_client import FeishuHttpClient
 
 
 def actor(identity, level='L4', scope='A'):
@@ -327,6 +329,66 @@ class CloudTests(unittest.TestCase):
         self.addCleanup(cloud.close)
         return cloud
 
+    def test_unified_transport_preserves_token_cache_search_and_multipart(self):
+        calls = []
+        def handle(request):
+            calls.append(request)
+            if request.url.path.endswith('/tenant_access_token/internal'):
+                return httpx.Response(200, json={'code': 0, 'tenant_access_token': 'fixture-token', 'expire': 7200})
+            return httpx.Response(200, json={'code': 0, 'data': {'file_token': 'fixture-file'}})
+        remote = self.remote()
+        self.assertIsInstance(remote.http, FeishuHttpClient)
+        self.assertEqual(remote.http.retries, 0)
+        remote.http = FeishuHttpClient(timeout=remote.http.timeout, transport=httpx.MockTransport(handle))
+        remote.config_path.write_text(json.dumps({'app_id': 'cli_aa42dc770a381cb3', 'secret_cipher': 'fixture-cipher'}))
+        with patch('openclaw_service.assistant.lighthouse_ai.unprotect_key', return_value='fixture-secret'), \
+                patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            remote.request('POST', 'bitable/v1/apps/test/tables/test/records/search', params={'page_token': 'page-2'}, json={'field_names': ['员工姓名']})
+            result = remote.request('POST', 'drive/v1/medias/upload_all', data={'size': '7'}, files={'file': ('note.txt', io.BytesIO(b'fixture'), 'text/plain')})
+        self.assertEqual(len(calls), 3, 'token is reused for both business requests')
+        self.assertEqual(json.loads(calls[0].content)['app_secret'], 'fixture-secret')
+        self.assertEqual(calls[0].extensions['timeout']['read'], 25)
+        self.assertEqual(calls[1].extensions['timeout']['read'], 30)
+        self.assertEqual(calls[1].url.params['page_token'], 'page-2')
+        self.assertEqual(json.loads(calls[1].content)['field_names'], ['员工姓名'])
+        self.assertEqual(calls[2].headers['authorization'], 'Bearer fixture-token')
+        self.assertIn('multipart/form-data', calls[2].headers['content-type'])
+        self.assertIn(b'fixture', calls[2].content)
+        self.assertEqual(result['file_token'], 'fixture-file')
+
+    def test_transport_failure_retains_create_checkpoint_without_automatic_retry(self):
+        for failure in ('timeout', 'server_error'):
+            with self.subTest(failure=failure):
+                self.body['id'] = ('a' if failure == 'timeout' else 'b') * 32
+                self.store.publish(self.people['admin'], self.body, self.template)
+                calls = []
+                def handle(request):
+                    calls.append(request)
+                    if failure == 'timeout':
+                        raise httpx.ReadTimeout('fixture timeout', request=request)
+                    return httpx.Response(503, json={})
+                remote = self.remote()
+                remote.http = FeishuHttpClient(transport=httpx.MockTransport(handle), retries=3)
+                remote.headers = Mock(return_value={})
+                remote.all = Mock(return_value=[])
+                with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+                    with self.assertRaises(httpx.HTTPError):
+                        remote.create_release(*self.store.raw(self.body['id']))
+                    self.assertTrue(self.store.raw(self.body['id'])[0]['cloud']['create_attempted'])
+                    with self.assertRaises(RiskError):
+                        remote.create_release(*self.store.raw(self.body['id']))
+                self.assertEqual(len(calls), 1, 'uncertain creation must not be sent twice')
+
+    def test_isolated_write_is_blocked_before_transport_or_credentials(self):
+        remote = self.remote()
+        remote.headers = Mock()
+        remote.http.request = Mock()
+        with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': False}):
+            with self.assertRaises(CloudRejected):
+                remote.request('POST', 'im/v1/messages', json={})
+        remote.headers.assert_not_called()
+        remote.http.request.assert_not_called()
+
     def test_cloud_uses_correct_field_name_and_attachment_column(self):
         self.publish()
         release, people = self.store.raw(self.body['id'])
@@ -407,10 +469,10 @@ class CloudTests(unittest.TestCase):
                 self.body['id'] = f'{status:032x}'
                 self.store.publish(self.people['admin'], self.body, self.template)
                 remote = self.remote(); remote.all = Mock(return_value=[]); remote.headers = Mock(return_value={})
-                response = requests.Response(); response.status_code = status; response._content = b'{}'
+                response = httpx.Response(status, json={}, request=httpx.Request('POST', 'https://fixture.test/tables'))
                 remote.http.request = Mock(return_value=response)
                 with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
-                    with self.assertRaises((RiskError, requests.HTTPError)):
+                    with self.assertRaises((RiskError, httpx.HTTPStatusError)):
                         remote.create_release(*self.store.raw(self.body['id']))
                 self.assertEqual(self.store.raw(self.body['id'])[0]['cloud']['create_attempted'], uncertain)
 

@@ -9,7 +9,9 @@ import threading
 import time
 import uuid
 
-import requests
+import httpx
+
+from upload_event_module.services.http_client import FeishuHttpClient
 
 from .risk_inspection import RiskError, SCOPES, SYSTEM_NAMES, can_scope, digest, manager, schema_fields, text
 
@@ -48,7 +50,7 @@ class RiskCloud:
     def __init__(self, store, config_path, recipient, base_url):
         self.store, self.config_path = store, Path(config_path)
         self.recipient, self.base_url = recipient, base_url
-        self.http = requests.Session()
+        self.http = FeishuHttpClient(timeout=httpx.Timeout(30, connect=10), retries=0)
         self.token, self.expiry, self.config_hash = '', 0, ''
         self.lock = threading.RLock()
         self.work = threading.local()
@@ -108,8 +110,8 @@ class RiskCloud:
         signature = digest([config['app_id'], config['secret_cipher']])
         if self.token and self.expiry > time.time() and self.config_hash == signature:
             return {'Authorization': 'Bearer ' + self.token}
-        reply = self.http.post(API + 'auth/v3/tenant_access_token/internal', json={
-            'app_id': config['app_id'], 'app_secret': unprotect_key(config['secret_cipher'])}, timeout=(10, 25)).json()
+        reply = self.http.request('POST', API + 'auth/v3/tenant_access_token/internal', json={
+            'app_id': config['app_id'], 'app_secret': unprotect_key(config['secret_cipher'])}, timeout=httpx.Timeout(25, connect=10)).json()
         if reply.get('code') or not reply.get('tenant_access_token'):
             raise CloudRejected('飞书智能体身份验证失败，请检查应用配置。', 503)
         self.token, self.expiry, self.config_hash = reply['tenant_access_token'], time.time() + reply.get('expire', 7200) - 90, signature
@@ -124,7 +126,7 @@ class RiskCloud:
             job = getattr(self.work, 'job', None)
             if job:
                 self.store.renew_job(job)
-            response = self.http.request(method, API + path, headers=self.headers(), timeout=(10, 30), **kwargs)
+            response = self.http.request(method, API + path, headers=self.headers(), **kwargs)
             if job:
                 self.store.renew_job(job)
             if response.status_code in {400, 401, 403, 404, 405, 413, 415, 422, 429}:

@@ -1,4 +1,4 @@
-"""Patch distribution checks with isolated files and fake Feishu/Gitee transports."""
+"""Patch distribution checks with isolated files and fake Feishu transports."""
 import copy
 import hashlib
 import json
@@ -86,7 +86,7 @@ def _stream_response(chunks, *, error=None):
 
 class PatchMirrorTests(unittest.TestCase):
     def manifest(self, content=b'patch-content'):
-        return {'target_version': 'ClipFlow_V2_test', 'target_patch_version': 473,
+        return {'target_version': 'ClipFlow_V2_test', 'major_version': 2, 'target_patch_version': 473,
                 'zip_name': 'patch.zip', 'zip_url': 'https://example.invalid/patch.zip',
                 'zip_size': len(content), 'zip_sha256': hashlib.sha256(content).hexdigest()}
 
@@ -111,6 +111,9 @@ class PatchMirrorTests(unittest.TestCase):
                     value = kwargs['json_payload']
                     fields[value['field_name']] = value['type']
                 return {'code': 0, 'data': {'items': [{'field_name': k, 'type': v} for k, v in fields.items()]}}
+            if url.endswith('/records/search'):
+                return {'code': 0, 'data': {'has_more': False, 'items': [value for value in records.values()
+                    if value['fields']['组件名称'] == patch_mirror.RELEASE_COMPONENT]}}
             if url.endswith('/records') and method == 'POST':
                 rid = 'rec' + str(len(records))
                 records[rid] = {'record_id': rid, 'fields': kwargs['json_payload']['fields']}
@@ -145,6 +148,12 @@ class PatchMirrorTests(unittest.TestCase):
             self.assertEqual(len(files), 4)
             self.assertEqual(len(records), 4)
             self.assertNotIn('DELETE', [method for method, _ in calls])
+            manifest.pop('zip_url')
+            manifest['update_source'] = 'feishu'
+            patch_mirror.publish_manifest(manifest, mirror_factory=factory)
+            patch_mirror.publish_manifest(manifest, mirror_factory=factory)
+            self.assertEqual(len(records), 5)
+            self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), manifest)
             target = patch_mirror.download_patch(manifest, root / 'download.zip', mirror_factory=factory)
             self.assertEqual(target.read_bytes(), archive.read_bytes())
             self.assertFalse(list(root.glob('.feishu-patch-*')))
@@ -186,7 +195,7 @@ class PatchMirrorTests(unittest.TestCase):
         combined = '\n'.join(logs.output)
         self.assertNotIn('飞书补丁整包大小及 SHA256 校验通过', combined)
 
-    def test_updater_prefers_feishu_and_falls_back_to_original_url(self):
+    def test_updater_only_downloads_feishu_even_when_old_url_exists(self):
         with tempfile.TemporaryDirectory() as temp:
             updater = RemotePatchUpdater(Path(temp), Path(temp) / 'data', '')
             manifest = {**self.manifest(b'patch'), 'feishu_patch': {'fixture': True}}
@@ -197,42 +206,42 @@ class PatchMirrorTests(unittest.TestCase):
             with patch.object(patch_mirror, 'download_patch', side_effect=download), patch('requests.get') as get:
                 self.assertEqual(updater._download_zip(manifest), target.resolve())
                 get.assert_not_called()
-            response = MagicMock(status_code=200)
-            response.__enter__.return_value = response
-            response.iter_content.return_value = iter([b'patch'])
-            with patch.object(patch_mirror, 'download_patch', side_effect=OSError('fixture unavailable')), \
-                    patch('requests.get', return_value=response) as get:
-                self.assertEqual(updater._download_zip(manifest).read_bytes(), b'patch')
-                self.assertEqual(get.call_args.args[0], manifest['zip_url'])
+            with patch.object(patch_mirror, 'download_patch', side_effect=OSError('fixture unavailable')), patch('requests.get') as get:
+                with self.assertRaises(OSError):
+                    updater._download_zip(manifest)
+                self.assertEqual(target.read_bytes(), b'patch')
+                get.assert_not_called()
+            with patch('requests.get') as get:
+                with self.assertRaises(Exception):
+                    updater._download_zip(self.manifest())
+                get.assert_not_called()
 
-    def test_packaging_publishes_verified_mirror_pointer_before_gitee_manifest(self):
+    def test_packaging_publishes_feishu_manifest_only_after_archive_verification(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             archive, manifest_path = root / 'patch.zip', root / 'latest_patch.json'
-            archive.write_bytes(b'patch')
-            manifest = self.manifest(b'patch')
+            archive.write_bytes(b'x' * 11_000_000)
+            manifest = self.manifest(archive.read_bytes())
             manifest_path.write_text(json.dumps(manifest))
             sequence = []
             def mirror(*args):
-                sequence.append('feishu')
+                sequence.append('verified-archive')
                 return {'fixture': 'verified'}
-            def gitee(*args, **kwargs):
-                self.assertEqual(json.loads(manifest_path.read_text())['feishu_patch'], {'fixture': 'verified'})
-                sequence.append('gitee')
-                return True
-            with patch.object(packaging, 'BUILD_DIR', root), \
-                    patch.object(patch_mirror, 'publish_patch', side_effect=mirror), \
-                    patch.object(packaging, '_upload_patch_to_gitee', side_effect=gitee), \
-                    patch.object(packaging, '_verify_published_patch', side_effect=lambda *a, **k: sequence.append('verify')):
-                packaging._publish_patch(archive, manifest_path, manifest, repo_url='https://example.invalid/repo.git',
-                                         branch='master', subdir='', manifest_repo_path='latest.json')
-            self.assertEqual(sequence, ['feishu', 'gitee', 'verify'])
-            with patch.object(patch_mirror, 'publish_patch', side_effect=OSError('fixture upload failed')), \
-                    patch.object(packaging, '_upload_patch_to_gitee') as push:
-                with self.assertRaises(OSError):
-                    packaging._publish_patch(archive, manifest_path, manifest, repo_url='https://example.invalid/repo.git',
-                                             branch='master', subdir='', manifest_repo_path='latest.json')
-                push.assert_not_called()
+            def publish(value):
+                self.assertNotIn('zip_url', value)
+                self.assertEqual(value['feishu_patch'], {'fixture': 'verified'})
+                self.assertEqual(value['update_source'], 'feishu')
+                sequence.append('published-manifest')
+            with patch.object(packaging, 'BUILD_DIR', root), patch.object(patch_mirror, 'publish_patch', side_effect=mirror), \
+                    patch.object(patch_mirror, 'publish_manifest', side_effect=publish), \
+                    patch.object(packaging.subprocess, 'run') as run, patch('requests.get') as get:
+                packaging._publish_patch(archive, manifest_path, manifest)
+                run.assert_not_called()
+                get.assert_not_called()
+            self.assertEqual(sequence, ['verified-archive', 'published-manifest'])
+            self.assertEqual(json.loads(manifest_path.read_text(encoding='utf-8')), manifest)
+            self.assertNotIn('zip_url', manifest)
+            self.assertEqual(archive.stat().st_size, 11_000_000)
 
     def test_publish_download_timeout_preserves_journal_and_retry_does_not_reupload(self):
         api = distribution.API.replace(distribution.TABLE, distribution.PATCH_TABLE)
@@ -364,57 +373,166 @@ class PatchMirrorTests(unittest.TestCase):
         combined = '\n'.join(logs.output)
         self.assertNotIn('飞书补丁整包大小及 SHA256 校验通过', combined)
 
-    def test_packaging_feishu_reread_failure_blocks_gitee_then_retry_succeeds(self):
+    def test_publication_failure_preserves_local_patch_and_retry_succeeds(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             archive, manifest_path = root / 'patch.zip', root / 'latest_patch.json'
             archive.write_bytes(b'patch')
             manifest = self.manifest(b'patch')
             manifest_path.write_text(json.dumps(manifest))
-
-            def fail_mirror(*args):
-                raise OSError('fixture feishu download verify failed')
-
+            for stage in ('archive', 'manifest'):
+                with self.subTest(stage=stage), patch.object(packaging, 'BUILD_DIR', root), \
+                        patch.object(patch_mirror, 'publish_patch', return_value={'fixture': 'verified'}) as upload, \
+                        patch.object(patch_mirror, 'publish_manifest') as publish:
+                    (upload if stage == 'archive' else publish).side_effect = OSError('fixture failure')
+                    before = manifest_path.read_bytes()
+                    with self.assertRaises(OSError):
+                        packaging._publish_patch(archive, manifest_path, manifest)
+                    if stage == 'archive':
+                        publish.assert_not_called()
+                    self.assertEqual(manifest_path.read_bytes(), before)
+                    self.assertEqual(archive.read_bytes(), b'patch')
+                    self.assertNotIn('feishu_patch', manifest)
             with patch.object(packaging, 'BUILD_DIR', root), \
-                    patch.object(patch_mirror, 'publish_patch', side_effect=fail_mirror), \
-                    patch.object(packaging, '_upload_patch_to_gitee') as push, \
-                    patch.object(packaging, '_verify_published_patch') as verify:
-                manifest_snapshot = copy.deepcopy(manifest)
-                manifest_bytes_snapshot = manifest_path.read_bytes()
-                archive_bytes_snapshot = archive.read_bytes()
-                with self.assertRaises(OSError):
-                    packaging._publish_patch(archive, manifest_path, manifest,
-                                             repo_url='https://example.invalid/repo.git',
-                                             branch='master', subdir='', manifest_repo_path='latest.json')
-                push.assert_not_called()
-                verify.assert_not_called()
-                self.assertEqual(manifest, manifest_snapshot)
-                self.assertEqual(manifest_path.read_bytes(), manifest_bytes_snapshot)
-                self.assertEqual(archive.read_bytes(), archive_bytes_snapshot)
-                self.assertEqual(json.loads(manifest_path.read_text()), manifest)
-                self.assertTrue(manifest_path.is_file(), "manifest file must not be deleted")
-                self.assertNotIn('feishu_patch', manifest)
+                    patch.object(patch_mirror, 'publish_patch', return_value={'fixture': 'verified'}), \
+                    patch.object(patch_mirror, 'publish_manifest') as publish:
+                packaging._publish_patch(archive, manifest_path, manifest)
+                publish.assert_called_once_with(manifest)
+            self.assertEqual(manifest['feishu_patch'], {'fixture': 'verified'})
 
-            sequence = []
 
-            def ok_mirror(*args):
-                sequence.append('feishu')
-                return {'fixture': 'verified'}
+class _ReleaseMirror:
+    def __init__(self):
+        self.records = []
+        self.creates = 0
+        self.closed = 0
+        self.lose_response = False
 
-            def ok_gitee(*args, **kwargs):
-                self.assertEqual(json.loads(manifest_path.read_text())['feishu_patch'], {'fixture': 'verified'})
-                sequence.append('gitee')
-                return True
+    def ensure_fields(self):
+        pass
 
-            with patch.object(packaging, 'BUILD_DIR', root), \
-                    patch.object(patch_mirror, 'publish_patch', side_effect=ok_mirror), \
-                    patch.object(packaging, '_upload_patch_to_gitee', side_effect=ok_gitee), \
-                    patch.object(packaging, '_verify_published_patch',
-                                 side_effect=lambda *a, **k: sequence.append('verify')):
-                packaging._publish_patch(archive, manifest_path, manifest,
-                                         repo_url='https://example.invalid/repo.git',
-                                         branch='master', subdir='', manifest_repo_path='latest.json')
-            self.assertEqual(sequence, ['feishu', 'gitee', 'verify'])
+    def close(self):
+        self.closed += 1
+
+    def request(self, method, suffix, **kwargs):
+        if suffix == '/records/search':
+            conditions = kwargs['json_payload']['filter']['conditions']
+            assert conditions[0]['value'] == [patch_mirror.RELEASE_COMPONENT]
+            items = [r for r in self.records if patch_mirror._text(r['fields'].get('组件名称')) == patch_mirror.RELEASE_COMPONENT]
+            offset = int(kwargs['params'].get('page_token', 0))
+            return {'items': copy.deepcopy(items[offset:offset+2]), 'has_more': offset+2 < len(items), 'page_token': str(offset+2)}
+        if method == 'POST' and suffix == '/records':
+            self.creates += 1
+            record = {'record_id': 'rec' + str(self.creates), 'fields': kwargs['json_payload']['fields']}
+            self.records.append(copy.deepcopy(record))
+            if self.lose_response:
+                self.lose_response = False
+                raise TimeoutError('created but response lost')
+            return {'record': record}
+        if method == 'GET':
+            return {'record': copy.deepcopy(next(r for r in self.records if suffix.endswith('/' + r['record_id'])))}
+        raise AssertionError((method, suffix))
+
+
+class PatchReleaseTests(unittest.TestCase):
+    def test_saved_update_source_migrates_without_changing_other_settings(self):
+        from upload_event_module.config import ConfigManager, DEFAULT_REMOTE_UPDATE_MANIFEST_URL
+        saved = {'remote_update_manifest_url': 'https://gitee.com/old/latest_patch.json',
+                 'remote_update_enabled': False, 'remote_update_interval_seconds': 1200,
+                 'feishu_app_id': 'fixture-app', 'feishu_app_secret': 'fixture-secret',
+                 'table_id_weibao': 'fixture-table'}
+        with patch.object(ConfigManager, '_load_config_from_sqlite', return_value=saved), \
+                patch.object(ConfigManager, '_save_config_to_sqlite', return_value=True) as persist:
+            settings = ConfigManager()
+            settings.load()
+            self.assertEqual(settings.remote_update_manifest_url, DEFAULT_REMOTE_UPDATE_MANIFEST_URL)
+            self.assertFalse(settings.remote_update_enabled)
+            self.assertEqual(settings.remote_update_interval_seconds, 1200)
+            self.assertEqual(settings.app_id, 'fixture-app')
+            self.assertEqual(settings.app_secret, 'fixture-secret')
+            persist.assert_not_called()
+            self.assertTrue(settings.save(remote_update_manifest_url=saved['remote_update_manifest_url']))
+            self.assertEqual(persist.call_args.args[0]['remote_update_manifest_url'], DEFAULT_REMOTE_UPDATE_MANIFEST_URL)
+            self.assertEqual(settings.app_id, 'fixture-app')
+
+    def manifest(self, version=481):
+        fixture = PatchMirrorTests()
+        manifest = fixture.manifest(b'patch')
+        manifest.update(target_patch_version=version, update_source='feishu', feishu_patch=fixture._patch_spec(b'patch'))
+        manifest.pop('zip_url')
+        return manifest
+
+    def factory(self, mirror):
+        def build(**kwargs):
+            self.assertEqual(kwargs, {'table': distribution.PATCH_TABLE})
+            return mirror
+        return build
+
+    def test_verified_releases_are_discovered_across_pages_without_duplicate_retry(self):
+        mirror = _ReleaseMirror()
+        factory = self.factory(mirror)
+        self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), {})
+        for version in (480, 482, 481, 479):
+            patch_mirror.publish_manifest(self.manifest(version), mirror_factory=factory)
+        patch_mirror.publish_manifest(self.manifest(481), mirror_factory=factory)
+        self.assertEqual(mirror.creates, 4)
+        mirror.records.append({'fields': {'组件名称': '灯塔完整更新补丁', '启用': True}})
+        self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), self.manifest(482))
+        # Feishu text fields may be returned as rich-text arrays.
+        for key in ('更新说明', '组件名称', '版本', '整包SHA256'):
+            mirror.records[1]['fields'][key] = [{'text': mirror.records[1]['fields'][key]}]
+        self.assertEqual(patch_mirror._read_release(mirror.records[1]), self.manifest(482))
+        self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), self.manifest(482))
+
+    def test_lost_create_response_is_recovered_without_republishing(self):
+        mirror = _ReleaseMirror()
+        factory = self.factory(mirror)
+        mirror.lose_response = True
+        with self.assertRaises(TimeoutError):
+            patch_mirror.publish_manifest(self.manifest(), mirror_factory=factory)
+        patch_mirror.publish_manifest(self.manifest(), mirror_factory=factory)
+        self.assertEqual(mirror.creates, 1)
+        self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), self.manifest())
+        self.assertEqual(mirror.closed, 3)
+
+    def test_unverified_or_conflicting_manifest_is_rejected(self):
+        mirror = _ReleaseMirror()
+        factory = self.factory(mirror)
+        for key, value in (('major_version', True), ('target_patch_version', '481'), ('zip_name', ''),
+                           ('zip_sha256', 'wrong'), ('feishu_patch', {})):
+            invalid = dict(self.manifest(), **{key: value})
+            with self.subTest(key=key), self.assertRaises(Exception):
+                patch_mirror.publish_manifest(invalid, mirror_factory=factory)
+        self.assertEqual(mirror.creates, 0)
+        patch_mirror.publish_manifest(self.manifest(), mirror_factory=factory)
+        conflict = dict(self.manifest(), restart_required=True)
+        with self.assertRaisesRegex(ValueError, '已发布且内容不同'):
+            patch_mirror.publish_manifest(conflict, mirror_factory=factory)
+        mirror.records.append(copy.deepcopy(mirror.records[0]))
+        mirror.records[-1]['fields']['更新说明'] = json.dumps(conflict)
+        with self.assertRaisesRegex(ValueError, '同一补丁号'):
+            patch_mirror.fetch_manifest(mirror_factory=factory)
+
+    def test_disabled_releases_ignored_and_broken_reads_fail_closed(self):
+        mirror = _ReleaseMirror()
+        factory = self.factory(mirror)
+        patch_mirror.publish_manifest(self.manifest(), mirror_factory=factory)
+        mirror.records[0]['fields']['启用'] = False
+        self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), {})
+        mirror.records[0]['fields']['启用'] = True
+        mirror.records[0]['fields']['更新说明'] = 'broken-json'
+        with self.assertRaises(ValueError):
+            patch_mirror.fetch_manifest(mirror_factory=factory)
+        for result in ({'items': [], 'has_more': True}, {'items': [], 'has_more': True, 'page_token': 'same'}):
+            with patch.object(mirror, 'request', return_value=result), self.assertRaisesRegex(ValueError, '分页不完整'):
+                patch_mirror.fetch_manifest(mirror_factory=factory)
+        with patch.object(mirror, 'request', side_effect=TimeoutError), self.assertRaises(TimeoutError):
+            patch_mirror.fetch_manifest(mirror_factory=factory)
+        for result in ({}, {'items': []}, {'has_more': False}, {'items': [None], 'has_more': False}):
+            with patch.object(mirror, 'request', return_value=result), self.assertRaisesRegex(ValueError, '响应不完整'):
+                patch_mirror.fetch_manifest(mirror_factory=factory)
+        with patch.object(mirror, 'request', return_value={'has_more': False, 'total': 0}):
+            self.assertEqual(patch_mirror.fetch_manifest(mirror_factory=factory), {})
 
 
 if __name__ == '__main__':

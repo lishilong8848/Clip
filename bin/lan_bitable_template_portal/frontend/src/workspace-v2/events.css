@@ -1,5 +1,9 @@
 .workspace-v2 .v2-main .event-page { padding:0; gap:24px; }
 .workspace-v2 .event-page .page-back-row:empty { display:none; }
+.v2-event-controls { display:flex; align-items:flex-start; flex-wrap:wrap; gap:10px; padding-block:8px 12px; }
+.workspace-v2 .v2-event-controls>.v2-event-period { flex:1; min-width:0; padding:0; border:0; gap:8px 16px; }
+.v2-event-controls>.v2-local-scope { margin:0; }
+@media(max-width:700px){.v2-event-controls>.v2-event-period{flex-basis:100%}}
 .workspace-v2 .v2-main .event-command-card,
 .workspace-v2 .v2-main .event-list-panel { padding:0; border:0; border-radius:0; background:none; box-shadow:none; }
 .workspace-v2 .event-title-block .section-kicker { display:none; }

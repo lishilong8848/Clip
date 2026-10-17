@@ -5,11 +5,103 @@ import logging
 import shutil
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from openclaw_service.assistant.lighthouse_distribution import (
     BASE, PATCH_TABLE, PART_BYTES, FeishuRuntimeMirror, checksum, validate_spec,
 )
+
+RELEASE_COMPONENT = '灯塔补丁发布清单'
+
+
+def _release_key(manifest):
+    if not isinstance(manifest, dict) or any(type(manifest.get(key)) is not int or manifest[key] < 1
+            for key in ('major_version', 'target_patch_version')):
+        raise ValueError('飞书补丁发布清单的版本号无效。')
+    if not isinstance(manifest.get('zip_name'), str) or not manifest['zip_name']:
+        raise ValueError('飞书补丁发布清单缺少文件名。')
+    _manifest_spec(manifest)
+    return manifest['major_version'], manifest['target_patch_version']
+
+
+def _text(value):
+    return ''.join(item.get('text', '') for item in value) if isinstance(value, list) else value
+
+
+def _read_release(record):
+    fields = record.get('fields') or {}
+    manifest = json.loads(_text(fields.get('更新说明')) or '{}')
+    _release_key(manifest)
+    if (fields.get('启用') is not True or _text(fields.get('组件名称')) != RELEASE_COMPONENT
+            or _text(fields.get('整包SHA256')) != manifest['zip_sha256']
+            or _text(fields.get('版本')) != manifest['target_version']):
+        raise ValueError('飞书补丁发布记录与清单不一致，停止更新。')
+    return manifest
+
+
+def _releases(mirror):
+    page, seen, records = '', set(), []
+    while True:
+        data = mirror.request('POST', '/records/search',
+            params={'page_size': 100, **({'page_token': page} if page else {})},
+            json_payload={'field_names': ['组件名称', '版本', '启用', '整包SHA256', '更新说明'],
+                          'filter': {'conjunction': 'and', 'conditions': [
+                {'field_name': '组件名称', 'operator': 'is', 'value': [RELEASE_COMPONENT]},
+            ]}})
+        items = data.get('items')
+        if items is None and data.get('has_more') is False and data.get('total') == 0:
+            items = []
+        if (not isinstance(items, list) or not all(isinstance(item, dict) for item in items)
+                or not isinstance(data.get('has_more'), bool)):
+            raise ValueError('飞书补丁发布清单响应不完整，停止更新。')
+        records.extend(_read_release(record) for record in items if (record.get('fields') or {}).get('启用') is True)
+        if not data['has_more']:
+            return records
+        page = data.get('page_token')
+        if not isinstance(page, str) or not page or page in seen:
+            raise ValueError('飞书补丁发布清单分页不完整，停止更新。')
+        seen.add(page)
+
+
+def fetch_manifest(*, mirror_factory=FeishuRuntimeMirror):
+    mirror = mirror_factory(table=PATCH_TABLE)
+    try:
+        releases = _releases(mirror)
+        if not releases:
+            return {}
+        latest = max(releases, key=_release_key)
+        if any(item != latest for item in releases if _release_key(item) == _release_key(latest)):
+            raise ValueError('同一补丁号存在不同发布清单，停止更新。')
+        return latest
+    finally:
+        mirror.close()
+
+
+def publish_manifest(manifest, *, mirror_factory=FeishuRuntimeMirror):
+    """Call only after the complete archive has passed remote download verification."""
+    key = _release_key(manifest)
+    content = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    mirror = mirror_factory(table=PATCH_TABLE)
+    try:
+        mirror.ensure_fields()
+        for existing in _releases(mirror):
+            if _release_key(existing) == key:
+                if existing != manifest:
+                    raise ValueError('此补丁号已发布且内容不同，请重新打包生成新补丁号。')
+                return
+        fields = {'文本': '灯塔更新-' + manifest['target_version'], '组件名称': RELEASE_COMPONENT,
+                  '版本': manifest['target_version'], '平台': 'Windows x64', '启用': True,
+                  '整包SHA256': manifest['zip_sha256'], '文件大小': manifest['zip_size'], '更新说明': content}
+        # Stable token covers a lost create response; the preceding read also covers later retries.
+        token = str(uuid.uuid5(uuid.NAMESPACE_URL, hashlib.sha256(content.encode('utf-8')).hexdigest()))
+        result = mirror.request('POST', '/records', params={'client_token': token}, json_payload={'fields': fields})
+        record_id = result['record']['record_id']
+        record = mirror.request('GET', '/records/' + record_id).get('record') or {}
+        if _read_release(record) != manifest:
+            raise ValueError('飞书补丁发布清单回读校验失败。')
+    finally:
+        mirror.close()
 
 
 def _manifest_spec(manifest):

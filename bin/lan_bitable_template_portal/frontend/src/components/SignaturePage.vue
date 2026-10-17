@@ -72,9 +72,10 @@
           <small v-else>{{ linkMode ? "读取中" : "未选择" }}</small>
         </div>
 
-        <div v-if="managedRequestId && (!selectedPerson || selectedPerson.status === 'completed')" class="signature-terminal" role="status" aria-live="polite">
-          <strong>{{ loading ? "正在核验签名链接" : selectedPerson?.status === "completed" ? "签名已完成" : "签名链接已失效" }}</strong>
+        <div v-if="linkMode && (!selectedPerson || managedRequestId && selectedPerson.status === 'completed')" class="signature-terminal" :class="{ failed: !loading && messageType === 'failed' }" role="status" aria-live="polite">
+          <strong>{{ loading ? "正在核验签名链接" : selectedPerson?.status === "completed" ? "签名已完成" : readRetryable ? "暂时无法读取签名" : "签名链接不可用" }}</strong>
           <span>{{ loading ? "请稍候…" : message || "请从签名管理重新发送链接。" }}</span>
+          <button v-if="!loading && readRetryable" type="button" class="btn blue" @click="loadPeople({ silent: true })">重新读取签名</button>
         </div>
 
         <template v-else>
@@ -142,9 +143,8 @@ let savedToken = "";
 try { if (managedRequestId) savedToken = sessionStorage.getItem(tokenStorageKey) || ""; } catch { /* storage may be disabled */ }
 const linkToken = ref(fragmentToken || params.get("token") || savedToken);
 if (managedRequestId && fragmentToken) {
-  let stored = false;
-  try { sessionStorage.setItem(tokenStorageKey, fragmentToken); stored = true; } catch { /* keep token in fragment */ }
-  if (stored) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  // Feishu can reopen the URL in a different webview without this session storage.
+  try { sessionStorage.setItem(tokenStorageKey, fragmentToken); } catch { /* The fragment remains the credential source. */ }
 }
 const temporaryMode = computed(() => Boolean(requestedTemporaryId.value));
 const linkMode = computed(() => Boolean(managedRequestId || requestedRecordId.value || requestedTemporaryId.value));
@@ -152,6 +152,7 @@ const people = ref<Dict[]>([]);
 const totalCount = ref(0);
 const selectedRecordId = ref("");
 const loading = ref(Boolean(managedRequestId));
+const readRetryable = ref(false);
 const saving = ref(false);
 const message = ref("");
 const messageType = ref<"success" | "failed" | "info">("info");
@@ -225,10 +226,11 @@ function schedulePeopleSearch(): void {
 async function loadPeople(options: { silent?: boolean } = {}): Promise<void> {
   const requestSeq = ++peopleRequestSeq;
   loading.value = true;
+  readRetryable.value = false;
   try {
     if (managedRequestId) {
       const query = new URLSearchParams({ request_id: managedRequestId });
-      const data = await requestJson("/api/signatures/management/request?" + query, { headers: { "X-Signature-Token": linkToken.value } });
+      const data = await requestJson("/api/signatures/management/request?" + query, { cache: "no-store", headers: { "X-Signature-Token": linkToken.value } });
       if (requestSeq !== peopleRequestSeq) return;
       people.value = [{ ...data, record_id: managedRequestId, has_signature: data.status === "completed" }];
       selectedRecordId.value = managedRequestId;
@@ -275,6 +277,8 @@ async function loadPeople(options: { silent?: boolean } = {}): Promise<void> {
     }
   } catch (error: unknown) {
     if (requestSeq !== peopleRequestSeq) return;
+    const status = Number((error as { status?: number })?.status || 0);
+    readRetryable.value = !!linkToken.value && (!status || status === 200 || status >= 500 || status === 429);
     const text = error instanceof Error ? error.message : "读取签名人员失败。";
     setMessage(text, "failed");
   } finally {
@@ -443,23 +447,33 @@ async function saveSignature(): Promise<void> {
 }
 
 onMounted(async () => {
-  if (!linkMode.value || !linkToken.value) {
+  if (!linkMode.value) {
     window.location.replace("/signature-management");
     return;
   }
   if (linkMode.value) {
     document.body.classList.add("signature-link-active");
   }
-  await loadPeople({ silent: linkMode.value });
-  await nextTick();
-  resizeCanvas();
-  if (canvasRef.value && "ResizeObserver" in window) {
-    resizeObserver = new ResizeObserver(() => resizeCanvas());
-    resizeObserver.observe(canvasRef.value);
+  if (!linkToken.value) {
+    loading.value = false;
+    setMessage("签名链接缺少验证信息，请从原消息重新打开完整链接。", "failed");
+    return;
   }
+  await loadPeople({ silent: linkMode.value });
 });
 
+watch(canvasRef, canvas => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  if (canvas && "ResizeObserver" in window) {
+    resizeCanvas();
+    resizeObserver = new ResizeObserver(() => resizeCanvas());
+    resizeObserver.observe(canvas);
+  }
+}, { flush: "post" });
+
 onBeforeUnmount(() => {
+  peopleRequestSeq++;
   document.body.classList.remove("signature-link-active");
   if (searchTimer) {
     clearTimeout(searchTimer);
@@ -748,6 +762,8 @@ watch(query, () => {
 
 .signature-terminal strong { font-size: 22px; }
 .signature-terminal span { color: #4b6b58; font-size: 13px; }
+.signature-terminal.failed { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+.signature-terminal.failed span { color: inherit; }
 
 .canvas-wrap {
   position: relative;

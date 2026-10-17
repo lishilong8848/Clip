@@ -119,8 +119,8 @@ function shouldSuppressAuthRedirect(): boolean {
   if (typeof window === "undefined") return true;
   const path = window.location.pathname.replace(/\/$/, "") || "/";
   const params = new URLSearchParams(window.location.search);
-  const isSignatureRoute = path === "/signature" || params.get("mode") === "signature";
-  return Boolean(isSignatureRoute && (params.get("record_id") || params.get("temporary_id")));
+  const isSignatureRoute = path === "/signature" || params.get("__page") === "/signature" || params.get("mode") === "signature";
+  return Boolean(isSignatureRoute && (params.get("request_id") || params.get("record_id") || params.get("temporary_id")));
 }
 
 function scheduleAuthRedirect(loginUrl: string): void {

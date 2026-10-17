@@ -68,7 +68,7 @@ try{
  await page.setViewportSize({width:1440,height:1000});
  assert.equal(await lane.locator('.v2-notice-entry').filter({hasText:'B楼已绑定计划'}).getByRole('button',{name:'绑定源表',exact:true}).count(),0);
  await manual.getByRole('button',{name:'绑定源表',exact:true}).click();
- const binding=page.locator('[data-notice-section=binding]');await binding.getByText('纯手填 · 未绑定',{exact:true}).waitFor();
+ const binding=page.locator('[data-notice-section=binding]');await binding.getByText('独立通告 · 未关联计划',{exact:true}).waitFor();
  await binding.locator('.n-select').click();
  await page.locator('.n-base-select-option').getByText('同名过滤器检查 · 月度 · B楼 · 未开始',{exact:true}).click();
  await page.screenshot({path:path.join(screenshots,'notice-source-binding.png'),fullPage:true});
@@ -78,9 +78,11 @@ try{
  assert.equal(writes.length,0,'cancelling confirmation does not bind');
  await binding.getByRole('button',{name:'确认关联',exact:true}).click();
  await page.getByRole('button',{name:'确认绑定',exact:true}).click();
- await binding.getByText('已绑定源表事项',{exact:true}).first().waitFor();
+ await binding.getByText('已关联计划',{exact:true}).first().waitFor();
  await manual.getByText('源表事项',{exact:true}).waitFor();
  assert.deepEqual(writes,['/api/notice-identity/bind'],'binding reuses the existing API and never resends the notice');
+ assert.equal(await binding.locator('.n-select').count(),0,'successful association collapses the picker');
+ await binding.getByRole('button',{name:'更换关联',exact:true}).click();
  assert.equal(await binding.getByRole('button',{name:'确认关联',exact:true}).isDisabled(),true);
  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
  await page.setViewportSize({width:390,height:844});

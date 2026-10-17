@@ -356,10 +356,26 @@ KNOWN_DYNAMIC_BINDINGS = [
     # --- unresolved:确为包装/动态/页面路由,保持审计如实 unresolved ---
     dict(
         source="lan_bitable_template_portal/frontend/src/App.vue",
-        line=552, kind="unresolved",
+        line=794, kind="unresolved",
         method_paths=[], window=6,
-        needles=["requestJson(path, options", "portalRequest(path"],
+        needles=["const load = () => requestJson(path, tracked ? {",
+                 "...options, signal: options.signal || homeReadAbort.signal",
+                 "cache: homeReadIssues.value[endpoint] ? 'reload' : options.cache"],
         note="portalRequest(path, options) 传输包装;path 为调用方传入参数,非独立端点",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/components/RiskInspectionPage.vue",
+        line=105, kind="covered",
+        method_paths=[("GET", "/api/risk-inspections/template"),
+                      ("GET", "/api/risk-inspections/templates/{param}")],
+        window=2,
+        needles=["requestJson(root+path", "const path=editor.value==='publish'&&publish.history_template_id?'/templates/'+publish.history_template_id:'/template'"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/components/RiskInspectionPage.vue",
+            definition_marker="const root=",
+            definition_needles=["const root='/api/risk-inspections'"],
+        ),
+        note="风险排查编辑读取基础模板或指定历史模板；同一行的有限分支对应两个已注册 GET 接口。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/PlanConvergencePage.vue",
@@ -483,7 +499,7 @@ WRAPPER_REVIEW = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/App.vue",
-        line=552, label="portalRequest(path, options) 传输包装",
+        line=775, label="portalRequest(path, options) 传输包装",
         anchor="async function portalRequest(path",
         callers=[
             dict(method="GET", path="/api/auth/status", caller_line=570,
@@ -974,8 +990,13 @@ class DynamicEndpointAuditTests(unittest.TestCase):
         records = _resolve_binding_records(self.audit_records, [dict(w, needles=[w['anchor']]) for w in WRAPPER_REVIEW])
         self.assertTrue(all(records), "wrapper 复核未能唯一定位到审计调用")
         reviewed_keys = {(r['source'], r['line']) for r in records if r}
-        expected_keys = {(self._binding_record(b)['source'], self._binding_record(b)['line'])
-                         for b in self.bindings if b['kind'] == 'unresolved'}
+        expected_keys = set()
+        for binding in self.bindings:
+            if binding['kind'] != 'unresolved':
+                continue
+            record = self._binding_record(binding)
+            self.assertIsNotNone(record, f"wrapper 绑定未能定位: {binding['source']} {binding['needles']}")
+            expected_keys.add((record['source'], record['line']))
         self.assertEqual(len(reviewed_keys), len(WRAPPER_REVIEW), "wrapper 复核重复认领同一调用")
         self.assertEqual(reviewed_keys, expected_keys, "wrapper 复核漏项或额外认领了其他调用")
         for w in WRAPPER_REVIEW:

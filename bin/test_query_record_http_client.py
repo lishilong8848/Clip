@@ -41,6 +41,23 @@ class _FakeFeishuClient:
 
 
 class QueryRecordHttpClientTests(unittest.TestCase):
+    def test_raw_request_reuses_pool_preserves_status_and_never_retries(self):
+        calls = []
+        def handle(request):
+            calls.append(request)
+            return httpx.Response(503, json={'code': 1})
+        transport = httpx.MockTransport(handle)
+        client = FeishuHttpClient(transport=transport, retries=3)
+        self.addCleanup(client.close)
+        response = client.request('POST', 'https://fixture.test/create', json={'name': 'fixture'})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(len(calls), 1)
+        shared = client._client
+        client.request('GET', 'https://fixture.test/status')
+        self.assertIs(client._client, shared)
+        client.close()
+        self.assertTrue(shared.is_closed)
+
     def test_per_request_timeout_does_not_change_the_shared_client_defaults(self):
         timeouts = []
         def handle(request):

@@ -29,7 +29,7 @@ DEFAULT_RELAY_ENABLE_PROXY_DINGTALK = False
 DEFAULT_REMOTE_UPDATE_ENABLED = True
 DEFAULT_REMOTE_UPDATE_INTERVAL_SECONDS = 3600
 DEFAULT_REMOTE_UPDATE_MANIFEST_URL = (
-    "https://gitee.com/myligitt/test/raw/master/updates/latest_patch.json"
+    "feishu://tblhc8hUnGsjiNRY"
 )
 DEFAULT_REMOTE_UPDATE_AUTO_APPLY_NON_UI = True
 DEFAULT_AUTO_INSTALL_DEPENDENCIES = True
@@ -294,13 +294,7 @@ class ConfigManager:
                     except Exception:
                         _interval_value = DEFAULT_REMOTE_UPDATE_INTERVAL_SECONDS
                     self.remote_update_interval_seconds = max(60, _interval_value)
-                    self.remote_update_manifest_url = str(
-                        config_data.get(
-                            "remote_update_manifest_url",
-                            DEFAULT_REMOTE_UPDATE_MANIFEST_URL,
-                        )
-                        or ""
-                    ).strip()
+                    self.remote_update_manifest_url = DEFAULT_REMOTE_UPDATE_MANIFEST_URL
                     self.remote_update_auto_apply_non_ui = bool(
                         config_data.get(
                             "remote_update_auto_apply_non_ui",
@@ -632,11 +626,7 @@ class ConfigManager:
                 new_remote_update_interval_seconds = max(60, _new_interval_value)
             else:
                 new_remote_update_interval_seconds = self.remote_update_interval_seconds
-            new_remote_update_manifest_url = (
-                str(remote_update_manifest_url).strip()
-                if remote_update_manifest_url is not None
-                else self.remote_update_manifest_url
-            )
+            new_remote_update_manifest_url = DEFAULT_REMOTE_UPDATE_MANIFEST_URL
             new_remote_update_auto_apply_non_ui = (
                 bool(remote_update_auto_apply_non_ui)
                 if remote_update_auto_apply_non_ui is not None

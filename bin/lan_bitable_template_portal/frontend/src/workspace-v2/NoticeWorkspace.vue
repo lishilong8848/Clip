@@ -2,15 +2,15 @@
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
     <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton data-v2-navigation><Ellipsis :size="17" />更多办理</NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton :loading="loading||syncing" data-v2-navigation><RefreshCw :size="16" />刷新</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation type="primary" @click="newNotice(kind)"><Plus :size="17" />手填{{ typeLabel(kind) }}</NButton><NDropdown v-else :options="newOptions" trigger="click" @select="newNotice"><NButton data-v2-navigation type="primary"><Plus :size="17" />新建通告</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation @click="newNotice('paste')">粘贴原文</NButton></div></header>
     <nav class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav>
-    <form class="v2-notice-filters" :class="{'has-scopes':scopes.length>1}" @submit.prevent="filter"><NInput v-model:value="search" clearable placeholder="搜索名称、楼栋或专业" :input-props="{'aria-label':'搜索通告'}"><template #prefix><Search :size="16" /></template></NInput><NSelect v-if="scopes.length>1" :value="scope" :options="scopeOptions" aria-label="通告楼栋" @update:value="changeScope" /><NSelect v-model:value="month" :options="months" aria-label="计划月份" /><NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="专业筛选" /><NButton attr-type="submit" :loading="loading">筛选</NButton></form>
-    <p v-if="filtersDirty" class="v2-notice-filter-note" role="status">筛选条件已修改，点击“筛选”后更新列表。</p>
     <NAlert v-if="error" role="alert" type="error" :bordered="false" class="v2-notice-feedback">{{ error }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
     <NAlert v-if="syncing" type="info" :bordered="false"><NSpin size="small" />正在同步源表，当前仍可查看已加载的通告。</NAlert>
     <NTabs v-model:value="list" class="v2-notice-mobile-tabs" type="line" animated><NTab name="planned" role="tab" :aria-selected="list==='planned'">计划通告<span class="v2-notice-count">{{ total('planned') }}</span></NTab><NTab name="ongoing" role="tab" :aria-selected="list==='ongoing'">进行中<span class="v2-notice-count">{{ total('ongoing') }}</span></NTab></NTabs>
     <PageCanvas page="notices" label="通告办理" :active="active" :blocks="lanes.map(lane=>({id:lane.id,title:lane.label,w:6,h:11,minW:4,minH:5}))">
       <template v-for="lane in lanes" :key="lane.id" #[lane.id]>
       <section class="v2-notice-section" :class="{'is-mobile-hidden':list!==lane.id}" :data-list="lane.id" :aria-label="lane.label">
-        <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2></header>
+        <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2><NTag v-if="lane.id==='ongoing'" size="small" :bordered="false">{{ scopeLabel }}</NTag></header>
+        <form v-if="lane.id==='planned'" class="v2-notice-filters" :class="{'has-scopes':scopes.length>1}" aria-label="计划通告筛选" @submit.prevent="filter"><NInput v-model:value="search" clearable placeholder="搜索计划名称" :input-props="{'aria-label':'搜索通告'}"><template #prefix><Search :size="16" /></template></NInput><NSelect v-if="scopes.length>1" :value="scope" :options="scopeOptions" aria-label="通告楼栋" @update:value="changeScope" /><NSelect v-model:value="month" :options="months" aria-label="计划月份" /><NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="专业筛选" /><NButton attr-type="submit" :loading="loading">筛选</NButton></form>
+        <p v-if="lane.id==='planned'&&filtersDirty" class="v2-notice-filter-note" role="status">计划筛选已修改，点击“筛选”后更新。</p>
         <NSkeleton v-if="loading&&!lane.rows.length" :repeat="6" height="72px" class="v2-notice-skeleton" />
         <NList v-else class="v2-notice-list" :aria-busy="loading">
           <NListItem v-for="row in lane.rows" :key="rowKey(row)">
@@ -38,7 +38,7 @@
       <NSpin v-if="detailLoading" class="v2-notice-loading" description="正在读取通告填写内容" />
       <NAlert v-if="detailError" type="error" role="alert" :bordered="false">{{ detailError }}<NButton v-if="issueTarget&&!job&&!ambiguous" text data-v2-navigation @click="focusIssue">{{ issueTarget.label }}</NButton></NAlert>
       <template v-if="form&&!detailLoading">
-        <div class="v2-notice-editor-context" data-notice-section="action"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span><NRadioGroup v-model:value="action" :disabled="locked||confirming" size="small" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup></div>
+        <div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div>
         <NAlert v-if="!form.actions.length" type="warning" :bordered="false">此通告当前只可查看，不可重新发送。</NAlert>
         <NAlert v-if="verifyBeforeStart" type="warning" :bordered="false">计划显示进行中，但尚未定位到已发目标通告。请先在编辑区顶部“关联核验”中查找原通告；此时不能重复发送开始。</NAlert>
         <section v-if="job||ambiguous" class="v2-notice-task-result" role="status" :aria-label="taskTitle">
@@ -54,7 +54,13 @@
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
         <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations :key="formKey" :form="form" :locked="locked" @busy="busy=$event" @bound="associationBound" /></div>
-        <section v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" class="v2-notice-field-section" data-notice-section="binding"><h2>源表事项关联 <NTag size="small" :type="form.values.source_record_id?'info':'warning'" :bordered="false">{{ form.values.source_record_id?'已绑定源表事项':'纯手填 · 未绑定' }}</NTag></h2><NRadioGroup v-if="form.values.manual_binding_required&&!form.values.target_record_id" v-model:value="form.values.manual_binding_choice" :disabled="locked"><NRadio value="bind">关联计划</NRadio><NRadio value="unbound">独立通告</NRadio></NRadioGroup><div class="v2-notice-binding"><NSelect v-model:value="sourceChoice" filterable clearable remote :options="sourceOptions" placeholder="输入名称查找对应计划" :disabled="locked" @search="searchSources" /><NButton :loading="sourceLoading" :disabled="locked" @click="loadSources()">读取计划</NButton><NButton :disabled="locked||!sourceChoice||sourceChoice===form.values.source_record_id" @click="bindSource">确认关联</NButton></div></section>
+        <section v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" class="v2-notice-field-section" data-notice-section="binding">
+          <div class="v2-notice-tools"><h2>计划事项</h2><NTag size="small" :type="form.values.source_record_id?'info':'default'" :bordered="false">{{ form.values.source_record_id?'已关联计划':'独立通告 · 未关联计划' }}</NTag><NButton :disabled="locked" :aria-expanded="sourceExpanded" data-v2-navigation @click="toggleSource">{{ sourceExpanded?'收起':form.values.source_record_id?'更换关联':'关联计划' }}</NButton></div>
+          <div v-if="sourceExpanded" class="v2-source-picker">
+            <NRadioGroup v-if="form.values.manual_binding_required&&!form.values.target_record_id" v-model:value="form.values.manual_binding_choice" :disabled="locked"><NRadio value="bind">关联计划</NRadio><NRadio value="unbound">独立通告</NRadio></NRadioGroup>
+            <div class="v2-notice-binding"><NSelect v-model:value="sourceChoice" filterable clearable remote :loading="sourceLoading" :options="sourceOptions" aria-label="源表计划事项" placeholder="输入计划名称搜索并选择" :disabled="locked" @search="searchSources" /><NButton :disabled="locked||sourceLoading||!sourceChoice||sourceChoice===form.values.source_record_id" @click="bindSource">确认关联</NButton></div>
+          </div>
+        </section>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
           <section class="v2-notice-page-fields">
             <header><span>{{ missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
@@ -73,7 +79,20 @@
         </NForm>
         </div>
       </template>
-      <template #footer><div class="v2-notice-editor-footer"><NButton v-if="form?.canDelete&&!confirming" type="error" text :disabled="locked" @click="deleteNotice"><Trash2 :size="16" />删除通告</NButton><span></span><NButton v-if="confirming" data-v2-navigation :disabled="busy" @click="confirming=false">返回修改</NButton><NButton v-else data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor">{{ job&&!terminal?'后台处理，返回列表':job||ambiguous?'返回列表':'关闭' }}</NButton><NButton v-if="succeeded&&nextRecord" type="primary" data-v2-navigation @click="openRecord(nextRecord)">办理下一条</NButton><NButton v-if="form?.values.target_record_id&&!confirming&&!job&&!ambiguous" :loading="saving" :disabled="locked||!dirty" data-v2-submit @click="saveWithFeedback">保存草稿</NButton><NButton v-if="confirming" type="primary" :loading="busy" data-v2-submit @click="send">确认发送{{ actionLabel(action) }}</NButton><NButton v-else-if="!job&&!ambiguous" type="primary" :disabled="locked||!form?.actions.length" :loading="busy" @click="preview"><Send :size="16" />预览并确认{{ actionLabel(action) }}</NButton></div></template>
+      <template #footer>
+        <div class="v2-notice-editor-footer">
+          <NButton v-if="form?.canDelete&&!confirming" type="error" text :disabled="locked" @click="deleteNotice"><Trash2 :size="16" />删除通告</NButton>
+          <span></span>
+          <NButton v-if="confirming" data-v2-navigation :disabled="busy" @click="confirming=false">返回修改</NButton>
+          <NButton v-else data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor">{{ job&&!terminal?'后台处理，返回列表':job||ambiguous?'返回列表':'关闭' }}</NButton>
+          <NButton v-if="succeeded&&nextRecord" type="primary" data-v2-navigation @click="openRecord(nextRecord)">办理下一条</NButton>
+          <div v-if="form&&!job&&!ambiguous" class="v2-notice-submit-group" data-notice-section="action">
+            <NRadioGroup v-if="!confirming" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
+            <NButton v-if="confirming" type="primary" :loading="busy" data-v2-submit @click="send">确认发送{{ actionLabel(action) }}</NButton>
+            <NButton v-else type="primary" :disabled="locked||!form.actions.length" :loading="busy" @click="preview"><Send :size="16" />预览并确认{{ actionLabel(action) }}</NButton>
+          </div>
+        </div>
+      </template>
     </NModal>
     <NModal :show="pasteOpen" preset="card" class="v2-notice-confirm" title="粘贴通告原文" :mask-closable="false" :closable="!parsing" :close-on-esc="!parsing" @update:show="value=>pasteOpen=value"><NAlert v-if="pasteError" role="alert" type="error" :bordered="false">{{ pasteError }}</NAlert><NInput v-model:value="pasteText" type="textarea" :autosize="{minRows:8,maxRows:16}" maxlength="30000" :input-props="{'aria-label':'通告原文'}" :disabled="parsing" placeholder="粘贴完整通告，解析后核对字段再发送" /><template #footer><div class="v2-dialog-actions"><NButton :disabled="parsing" @click="pasteOpen=false">取消</NButton><NButton type="primary" :loading="parsing" :disabled="!pasteText.trim()" @click="parsePasted">解析并填写</NButton></div></template></NModal>
     <NoticeChangeConfirmations v-if="changeOpen" :scope="scope" :focus-id="params.get('change_confirmation')||''" @close="changeOpen=false" @changed="load(true)" />
@@ -151,7 +170,8 @@ function uploadBusy(value:boolean){uploading.value=value;}
 function persistAfterUpload(){void nextTick(persist);}
 const verifyBeforeStart=ref(false);
 const action=ref('start'),sop=ref<Dict>({}),sopField=ref<Dict>({}),photos=ref<Dict[]>([]),aliPhotos=ref<Dict[]>([]),job=ref<Dict|null>(null);
-const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:string}[]>([]),sourceLoading=ref(false);
+const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:string}[]>([]),sourceLoading=ref(false),sourceExpanded=ref(false);
+function toggleSource(){sourceExpanded.value=!sourceExpanded.value;if(sourceExpanded.value)void loadSources();}
 const sopStatus=ref<Dict|null>(null);
 const sopScope=computed(()=>form.value?.values.building_codes?.length===1?String(form.value.values.building_codes[0]):'');
 const selectedBuildingLabel=computed(()=>(form.value?.values.building_codes||[]).map((v:string)=>v==='110'?'110站':v+'楼').join('、')||'未选择楼栋');
@@ -198,7 +218,7 @@ function changeScope(value:string){if(!props.scopes.some(s=>s.value===value))ret
 function changePage(lane:string,page:number){pages.value[lane]=page;const q=query();q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(before===location.href)void load();}
 function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('specialty',specialty.value||'');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
 function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values.scope+':'+values.work_type+':'+(values.target_record_id||values.source_record_id||'manual');}
-function persist(){if(!form.value||!formKey||job.value?.phase==='success')return;try{sessionStorage.setItem(formKey,JSON.stringify({snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开并使用保存草稿。';}}
+function persist(){if(!form.value||!formKey||job.value?.phase==='success')return;try{sessionStorage.setItem(formKey,JSON.stringify({snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';}}
 function resetRejected(){if(job.value?.phase!=='failed'||job.value.error_category!=='field_or_payload'||busy.value)return;job.value=null;frozen=null;operationId='';ambiguous.value=false;persist();}
 async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtml='',manualType='',focusBinding=false){
   if(row&&lanes.value[0].rows.includes(row)&&rowUnknown(row)){message.warning('源表状态未取得，请重新读取后办理。');return;}
@@ -213,7 +233,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
     const result=parsedHtml?{fragments:{detail:parsedHtml}}:await requestJson('/api/workbench/lite-detail?'+q,{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;
     const next=parseNoticeForm(result.fragments?.detail||'');
     if(!NOTICE_IDS.includes(next.values.work_type)||!(props.user.modules||[]).includes(next.values.work_type))throw new Error('无权办理此类通告。');
-    form.value=next;action.value=next.actions.includes(next.initialAction)?next.initialAction:next.actions[0]||'start';formKey=cacheKey(next.values);sourceChoice.value=next.values.source_record_id||null;sourceOptions.value=next.sourceOptions;
+    form.value=next;action.value=next.actions.includes(next.initialAction)?next.initialAction:next.actions[0]||'start';formKey=cacheKey(next.values);sourceChoice.value=next.values.source_record_id||null;sourceOptions.value=next.sourceOptions;sourceExpanded.value=focusBinding||!!(next.values.manual_binding_required&&!next.values.source_record_id&&!next.values.target_record_id);
     if(sourceChoice.value&&!sourceOptions.value.some(o=>o.value===sourceChoice.value))sourceOptions.value.unshift({label:'已绑定源表事项',value:sourceChoice.value});
     verifyBeforeStart.value=!!row&&rowStarted(row)&&!row.active_item_id&&!next.values.target_record_id&&next.actions.includes('start');
     originalFields.value={...next.values};attentionKeys.value=next.fields.filter(f=>f.required&&!String(next.values[f.key]??'').trim()).map(f=>f.key);
@@ -332,7 +352,6 @@ async function submit(){
   }finally{busy.value=false;}
 }
 function send(){return trackButtonRequest(submit());}
-function saveWithFeedback(){return trackButtonRequest(saveDraft().then(ok=>({ok})));}
 async function pollJob(){
   window.clearTimeout(timer);
   if(!job.value?.job_id||!editing.value||!props.active||document.hidden||disposed)return;
@@ -517,5 +536,16 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-handling .v2-notice-field .n-input--textarea{min-height:34px}
 .v2-notice-handling .v2-notice-review{min-width:0}
 .v2-notice-handling .n-alert{max-height:none}
+.v2-notice-section>.v2-notice-filters{grid-template-columns:repeat(2,minmax(0,1fr)) auto;max-width:none;margin:8px 0 12px}
+.v2-notice-section>.v2-notice-filters.has-scopes{grid-template-columns:repeat(3,minmax(0,1fr)) auto}
+.v2-notice-section>.v2-notice-filters>.n-input{grid-column:1/-1}
+.v2-notice-section>.v2-notice-filters>.n-select{min-width:0}
+.v2-notice-submit-group{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:0}
+.v2-notice-submit-group>.n-radio-group{white-space:nowrap}
+.v2-notice-edit-surface>:is([data-notice-section="relations"],[data-notice-section="binding"]){padding:8px 0}
+.v2-notice-edit-surface [data-notice-section="binding"] .v2-notice-tools h2{margin:0}
+.v2-source-picker{margin-top:8px;display:grid;gap:8px}
+.v2-source-picker>.v2-notice-binding{display:grid;grid-template-columns:minmax(0,1fr) auto;margin:0;align-items:center}
+@media(max-width:760px){.v2-notice-submit-group{flex:1 1 100%;justify-content:space-between;gap:6px}.v2-notice-submit-group .n-button,.v2-notice-submit-group .n-radio-button{min-height:44px}.v2-notice-submit-group .n-radio-button{display:inline-flex;align-items:center;padding-inline:9px}.v2-notice-submit-group>.n-button{padding-inline:10px}.v2-source-picker>.v2-notice-binding>.n-button{min-height:44px}}
 @media(max-width:760px){.v2-notice-editor.v2-notice-handling{width:calc(100vw - 12px);height:calc(100dvh - 12px);max-height:calc(100dvh - 12px)}.v2-notice-handling>.n-card-content{padding:8px 12px}.v2-notice-handling>.n-card-header{padding:14px 48px 12px 12px}.v2-notice-handling>.n-card__footer{padding:10px 12px}.v2-notice-page-fields>header{min-height:44px}}
 </style>

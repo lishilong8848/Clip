@@ -679,7 +679,7 @@ function currentLoginUrl(): string {
 
 function shouldSuppressAuthRedirect(): boolean {
   if (!isSignaturePage.value) return false;
-  return Boolean(routeParams.value.get("record_id") || routeParams.value.get("temporary_id"));
+  return signatureLinkMode.value;
 }
 
 function currentRouteNeedsAuth(): boolean {
@@ -849,7 +849,7 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
     if (nextLoggedIn) rememberLoginMethod(auth.user.login_method === 'password' ? 'password' : 'feishu');
     auth.scopeOptions = Array.isArray(data.scope_options) ? data.scope_options : [];
     auth.loginUrl = data.login_url || "/api/auth/login";
-    if (isGuest.value && routePath.value !== '/cabinet-power') {
+    if (isGuest.value && routePath.value !== '/cabinet-power' && !signatureLinkMode.value) {
       window.history.replaceState({}, '', '/cabinet-power');
       updateLocationRefs();
     }

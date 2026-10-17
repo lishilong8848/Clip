@@ -45,6 +45,29 @@ class ReleaseReadinessTests(unittest.TestCase):
         ok, offenders = readiness.check_frontend_api_client()
         self.assertTrue(ok, '\n'.join(offenders))
 
+    def test_business_and_tests_use_unified_http(self):
+        ok, offenders = readiness.check_requests_usage()
+        self.assertTrue(ok, '\n'.join(offenders))
+
+    def test_home_read_recovery_requires_visible_preserved_state_and_retry(self):
+        ok, errors = readiness.check_frontend_vnet_skin()
+        self.assertTrue(ok, '\n'.join(errors))
+        original = Path.read_text
+        for marker in (
+            '登录状态暂未核验，当前页面已保留，请重新读取。',
+            '已有内容已保留，其他功能可继续使用。',
+            'action: retryHomeReads',
+            ':connection-notice="signatureLinkMode ? null : connectionNotice"',
+        ):
+            with self.subTest(marker=marker):
+                def removed_recovery(path, *args, **kwargs):
+                    value = original(path, *args, **kwargs)
+                    return value.replace(marker, '') if path.name == 'App.vue' else value
+                with patch.object(Path, 'read_text', removed_recovery):
+                    ok, errors = readiness.check_frontend_vnet_skin()
+                self.assertFalse(ok)
+                self.assertTrue(any(marker in error for error in errors), '\n'.join(errors))
+
     def test_admin_settings_guard_checks_full_page_not_old_style_comment(self):
         ok, errors = readiness.check_frontend_vnet_skin()
         self.assertTrue(ok, '\n'.join(errors))

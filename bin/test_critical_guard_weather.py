@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -32,6 +32,7 @@ from lan_bitable_template_portal.portal_service import (
     PortalError,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
+from upload_event_module.services.http_client import FeishuHTTPError
 
 
 class CriticalGuardWeatherParserTests(unittest.TestCase):
@@ -859,6 +860,53 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         self.assertEqual(state["snapshot"]["marker"], "keep")
         self.assertIn("network timeout", state["last_error"])
         self.assertEqual(job["status"], "failed")
+
+    def test_certificate_failure_preserves_guard_until_verified_recovery(self) -> None:
+        service = self._weather_service()
+        payload = CriticalGuardWeatherParserTests._payload()
+        payload.update(status="clear", hasWarning=False, hasGuard=False, warnings=[], guardLevel="", primaryWarningId="")
+        payload["guard"] = {**payload["guard"], "required": False, "level": ""}
+        client = SimpleNamespace(request_json=Mock(side_effect=[
+            FeishuHTTPError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: certificate has expired"),
+            payload,
+        ]))
+        service._critical_guard_weather_http_client = client
+        previous = {"snapshot": {"status": "active", "marker": "keep"}, "last_success_at": 123,
+                    "current_warnings": [{"id": "warning-keep"}], "current_guard_level": "三级戒备"}
+        self.store.put_critical_guard_weather_state(previous)
+        for job_id in ("expired-certificate", "renewed-certificate"):
+            self.store.create_critical_guard_weather_job(job_id=job_id, trigger_type="manual")
+            service._critical_guard_weather_running_job_id = job_id
+            if job_id == "expired-certificate":
+                with self.assertLogs("lan_bitable_template_portal.portal_service", level="ERROR"):
+                    service._run_critical_guard_weather_job(job_id=job_id)
+                state = self.store.get_critical_guard_weather_state()
+                for key, value in previous.items():
+                    self.assertEqual(state[key], value)
+                self.assertIn("证书已过期", state["last_error"])
+                self.assertIn("不据此解除戒备", state["last_error"])
+                self.assertEqual(self.store.get_critical_guard_weather_job(job_id)["status"], "failed")
+            else:
+                service._run_critical_guard_weather_job(job_id=job_id)
+                state = self.store.get_critical_guard_weather_state()
+                self.assertEqual(state["last_error"], "")
+                self.assertEqual(state["current_warnings"], [])
+                self.assertEqual(state["current_guard_level"], "")
+                self.assertGreater(state["last_success_at"], 123)
+                self.assertEqual(self.store.get_critical_guard_weather_job(job_id)["status"], "completed")
+        self.assertEqual(client.request_json.call_count, 2)
+        for call in client.request_json.call_args_list:
+            self.assertEqual(call.args, ("GET", CRITICAL_GUARD_WEATHER_URL))
+            self.assertNotIn("verify", call.kwargs)
+
+    def test_other_certificate_errors_do_not_claim_expiry(self) -> None:
+        service = self._weather_service()
+        service._critical_guard_weather_http_client = SimpleNamespace(request_json=Mock(side_effect=
+            FeishuHTTPError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate")))
+        with self.assertRaises(PortalError) as raised:
+            service._fetch_critical_guard_weather_snapshot()
+        self.assertIn("检查该服务的证书链", str(raised.exception))
+        self.assertNotIn("已过期", str(raised.exception))
 
     def test_degraded_response_keeps_last_authoritative_warning_state(self) -> None:
         service = self._weather_service()

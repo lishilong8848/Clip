@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { parse, compileScript } from '@vue/compiler-sfc';
 import { adaptRepairController, controllerBindings } from './workspace-repair-adapter.mjs';
+import { layoutApiFixture } from './layout-api-fixture.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,process.env.CLIPFLOW_REPAIR_SCREENSHOT_DIR||'../../../output/playwright/workspace-repairs');
@@ -44,13 +45,16 @@ const project=(id=1,extra={})=>({record_id:'project-'+id,title:`A-${id} 配电�
 const historic={record_id:'followup-history',title:'完成现场检查，待更换模块',progress:.35,created_time:'2026-10-14 09:30',ledger_device_ids:['device-1'],ledger_devices:[{record_id:'device-1','设备编号':'A-101','设备名称':'配电设备','机楼':'A楼'}],raw_fields:{'维修进展描述':'完成现场检查，待更换模块','维修进度':.35,'设备名称':'配电设备'},display_fields:{'维修进展描述':'完成现场检查，待更换模块','维修进度':'35%','设备名称':'配电设备'}};
 const fixture={canDelete:false,locked:false,conflict:false,unlinked:false,modules:['repair_management','repair','event'],delayDetail:0,failRecords:false,failStats:false,delaySave:0,failSave:false,followups:[historic],writes:[],reads:[],errors:[],scopes:[{value:'A',label:'A楼'}]};
 let ctx;
-async function newPage(width=1440){
+async function newPage(width=1440,height=950,night=false){
   if(ctx)await ctx.close();
-  ctx=await browser.newContext({viewport:{width,height:950},reducedMotion:'reduce'});
+  ctx=await browser.newContext({viewport:{width,height},reducedMotion:'reduce'});
+  const layouts=layoutApiFixture();
+  if(night)await ctx.addInitScript(()=>localStorage.setItem('clipflow:workspace-night-mode:isolated-person-A','dark'));
   await ctx.route('**/*',async route=>{
     const request=route.request(),url=new URL(request.url());
     if(url.origin!==origin)return route.abort();
     if(!url.pathname.startsWith('/api/'))return route.continue();
+    if(await layouts.handle(route,'isolated-person-A'))return;
     fixture.reads.push({path:url.pathname,method:request.method(),params:Object.fromEntries(url.searchParams)});
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-person-A',name:'隔离验收人员',role:'admin',level:'L1',category:'engineer',can_delete_business:fixture.canDelete,modules:fixture.modules},scope_options:fixture.scopes});
@@ -99,6 +103,15 @@ async function newPage(width=1440){
 const detail=page=>page.locator('.v2-repair-detail');
 async function openFirst(page){await page.locator('.record-row').first().click();await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).waitFor();}
 async function noOverflow(page){assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'no page horizontal overflow');}
+async function fieldRect(page,label){return detail(page).getByLabel(label,{exact:true}).evaluate(el=>{const box=el.closest('.n-form-item').getBoundingClientRect();return {x:box.x,y:box.y,width:box.width};});}
+async function checkFieldContrast(page){
+  const editable=await detail(page).getByLabel('维修名称',{exact:true}).evaluate(el=>getComputedStyle(el.closest('.n-input')).backgroundColor);
+  const readonly=await detail(page).getByLabel('故障原因',{exact:true}).evaluate(el=>getComputedStyle(el.closest('.n-input')).backgroundColor);
+  assert.notEqual(editable,readonly,'writable controls must differ visibly from source-owned values');
+  assert.notEqual(editable,await detail(page).evaluate(el=>getComputedStyle(el).backgroundColor),'editable fields must stand out from the surrounding form');
+  const readonlySelect=detail(page).locator('.v2-repair-field.is-readonly .n-base-selection').first();
+  assert(await readonlySelect.evaluate(el=>getComputedStyle(el).getPropertyValue('--n-color').trim()===getComputedStyle(el).getPropertyValue('--repair-readonly-bg').trim()),'source-owned dropdowns use the readonly surface too');
+}
 try{
   let page=await newPage();
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
@@ -116,7 +129,12 @@ try{
   assert(flowTitles.every(title=>title.height<=44),'step titles must not collapse: '+JSON.stringify(flowTitles));
   await flow.getByRole('button',{name:'查看或填写维修单',exact:true}).focus();await page.keyboard.press('Enter');
   await detail(page).locator('.v2-repair-project-form:visible').waitFor();
+  await checkFieldContrast(page);
+  const faultTime=await fieldRect(page,'故障发生时间'),cause=await fieldRect(page,'故障原因');
+  assert(Math.abs(faultTime.y-cause.y)<2&&cause.x>faultTime.x,'source time and reason share the desktop row');
   await flow.getByRole('button',{name:'查看或填写跟进记录',exact:true}).click();
+  const followupItem=await fieldRect(page,'跟进项'),measure=await fieldRect(page,'后续整改措施');
+  assert(Math.abs(followupItem.y-measure.y)<2&&measure.x>followupItem.x,'supplementary followup text fields share a desktop row');
   assert.equal(fixture.writes.length,0,'step navigation only switches the existing form');
   await flow.screenshot({path:path.join(output,'repair-flow-desktop.png')});
   assert.equal(await detail(page).getByRole('button',{name:'检修通告',exact:true}).count(),1,'notice access independent of delete permission');
@@ -149,7 +167,7 @@ try{
   assert(await detail(page).locator('.v2-repair-flow .n-step-content-header__title').evaluateAll(nodes=>nodes.every(el=>el.getBoundingClientRect().height<=44)));
   await detail(page).locator('.v2-repair-flow').screenshot({path:path.join(output,'repair-flow-mobile.png')});
   for(const width of [360,390,430]){
-    page=await newPage(width);await openFirst(page);
+    page=await newPage(width,640);await openFirst(page);
     assert.equal(await page.locator('#workspace-page-filters').isVisible(),false,'mobile filling uses the screen instead of keeping list filters');
     const listBlock=page.locator('.grid-stack-item').filter({has:page.locator('.v2-repair-list')});
     if(await listBlock.count())assert.equal(await listBlock.isVisible(),false,'mobile detail hides the list wrapper as well as its rows');
@@ -187,7 +205,8 @@ try{
     const filters=await mobilePicker.locator('.ledger-filters label').evaluateAll(items=>items.map(el=>{const b=el.getBoundingClientRect();return {x:b.x,y:b.y,right:b.right};}));
     assert.equal(filters[0].y,filters[1].y);assert(filters[2].y>filters[0].y,'filters use two rows');
     assert(filters.every(item=>item.x>=0&&item.right<=width),'filter inputs stay inside viewport');
-    await mobilePicker.getByRole('combobox',{name:'机楼',exact:true}).click();await page.getByRole('option',{name:'A楼',exact:true}).click();
+    await mobilePicker.getByRole('combobox',{name:'机楼',exact:true}).click();await page.locator('.v2-single-select-menu').getByText('A楼',{exact:true}).click();
+    assert.equal(fixture.reads.filter(item=>item.path==='/api/repair-management/ledger-candidates').at(-1).params['机楼'],'A楼','the visible filter updates the original request');
     await mobilePicker.getByRole('button',{name:/收起筛选/}).click();
     await mobilePicker.getByRole('checkbox').first().check();
     await mobilePicker.getByRole('button',{name:'下一页',exact:true}).click();await mobilePicker.getByText('A-102',{exact:true}).waitFor();await mobilePicker.getByRole('checkbox').first().check();
@@ -201,6 +220,8 @@ try{
     await detail(page).locator('.v2-repair-spares').evaluate(el=>el.scrollIntoView({block:'center',behavior:'instant'}));
     await page.waitForFunction(()=>{const r=document.querySelector('.v2-repair-spares').getBoundingClientRect();return r.top>=68&&r.bottom<innerHeight-150;});
     await page.screenshot({path:path.join(output,`mobile-compact-controls-${width}.png`)});
+    const saveBox=await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).boundingBox();
+    assert(saveBox.y>=0&&saveBox.y+saveBox.height<=640-62,'small-screen save button stays above bottom navigation');
     page=await newPage(width);await page.getByRole('button',{name:'新建维修单',exact:true}).click();
     const flow=detail(page).getByRole('region',{name:'关联资料自动填写'});
     await flow.waitFor();assert.match(await flow.innerText(),/0 \/ 2/);
@@ -223,6 +244,9 @@ try{
   await detail(page).getByRole('region',{name:'关联资料自动填写'}).waitFor();fixture.unlinked=false;
   fixture.locked=true;page=await newPage();await page.locator('.record-row').first().click();await detail(page).getByText('跟进状态尚未核验，当前只读。',{exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'绑定已有',exact:true}).count(),0);assert.equal(await detail(page).getByRole('button',{name:/保存/}).count(),0);fixture.locked=false;
   fixture.failSave=true;page=await newPage();await openFirst(page);await detail(page).getByRole('textbox',{name:'维修进展描述',exact:true}).fill('等待核验原任务');await detail(page).getByRole('button',{name:'选择台账设备',exact:true}).click();await page.getByRole('dialog').getByRole('checkbox').first().check();await page.getByRole('dialog').getByRole('button',{name:'确认',exact:true}).click();await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).click();await detail(page).getByRole('button',{name:'核验原任务',exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).isDisabled(),true,'uncertain write cannot be resubmitted as new');fixture.failSave=false;
+  page=await newPage(1440,900,true);await openFirst(page);await detail(page).getByText('维修单信息',{exact:true}).click();
+  assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');await checkFieldContrast(page);await noOverflow(page);
+  await detail(page).locator('.v2-repair-project-form').screenshot({path:path.join(output,'dark-project-fields.png')});
   fixture.modules=['repair_management'];page=await newPage();await openFirst(page);assert.equal(await detail(page).getByRole('button',{name:'检修通告',exact:true}).count(),0,'module revocation removes notice access');
   assert.deepEqual(fixture.errors,[],'no browser runtime errors');
   console.log('Repair V2: isolated PC/mobile, permissions, draft guard, late requests, equipment pagination, original API payload and refresh checks passed.');

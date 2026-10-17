@@ -11,6 +11,10 @@ function slot(source,tag,content){return replace(source,node=>node.tag===tag,(te
 export function adaptCompactWorkspaces(input,filename){
   const file=filename.replaceAll('\\','/').split('/').pop();let source=input.replaceAll('\r\n','\n');
   if(source.includes('v2-compact-adapted'))return source;
+  if(file==='EventManagementPage.vue'){
+    source=replace(source,byClass('event-command-head'),'');
+    source=replace(source,node=>node.tag==='EventPeriodFilter',text=>`<div class="v2-event-controls">${text}</div>`);
+  }
   if(file==='NoticeWorkspace.vue'){
     const header=nodes(source,byClass('v2-notice-heading'))[0];
     const tools=nodes(header.loc.source,byClass('v2-notice-tools'))[0].loc.source;

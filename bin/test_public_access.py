@@ -427,15 +427,17 @@ class ConfigAndDistributionTests(unittest.TestCase):
                                    'http://127.0.0.1:18766', SECRET, data=Path(temp))
 
             def spawn(args, **kwargs):
-                child = real_popen([sys.executable, '-u', '-c',
+                child = real_popen([sys.executable, '-I', '-S', '-u', '-c',
                     "import time; print('start proxy success [clipflow-public]', flush=True); time.sleep(30)"], **kwargs)
                 children.append(child)
                 return child
 
+            # Verify lifecycle, without background I/O starvation from parallel test processes.
             with patch('public_access.supervisor.previous', return_value=(None, None)), \
                  patch('public_access.supervisor.install', return_value=(Path(temp) / 'frpc.exe', {'version': 'fixture'})), \
                  patch('public_access.supervisor.verify_binary'), \
                  patch('public_access.supervisor.subprocess.Popen', side_effect=spawn), \
+                 patch('upload_event_module.services.process_lifetime.lower_current_thread_priority'), \
                  patch('upload_event_module.services.process_lifetime.register_child_process', return_value=True):
                 try:
                     manager.start()

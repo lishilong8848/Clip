@@ -575,8 +575,11 @@ def check_frontend_vnet_skin() -> tuple[bool, list[str]]:
         "VNET blue-white production skin",
         "const headerSubtitle = computed",
         "const pageStatusText = computed",
-        "服务暂未就绪，页面会在连接恢复后自动刷新。",
+        "登录状态暂未核验，当前页面已保留，请重新读取。",
+        "已有内容已保留，其他功能可继续使用。",
+        "action: retryHomeReads",
         "<AppStatusNotices",
+        ":connection-notice=\"signatureLinkMode ? null : connectionNotice\"",
         ":page-status-text=\"pageStatusText\"",
     ]
     for marker in app_markers:

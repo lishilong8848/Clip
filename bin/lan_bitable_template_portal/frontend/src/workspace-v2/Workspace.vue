@@ -232,12 +232,12 @@ async function loadAuth() {
   checkingAuth = true;
   const controller=new AbortController();authRead=controller;
   try {
-    const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search + window.location.hash), {signal:controller.signal, cache:'no-store',timeoutMs:15000});
+    const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search), {signal:controller.signal, cache:'no-store',timeoutMs:15000});
     if (disposed || controller.signal.aborted || authRead!==controller) return;
     loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; authDefaultScope.value = String(data.default_scope||''); loginUrl.value = data.login_url || '/api/auth/login';
     setModulePermissions(granted.value); setReadCacheIdentity(identityKey.value); authError.value = data.directory_warning || '';
     if (loggedIn.value && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
-    if (user.value.role === 'guest' && route.value.pathname !== '/cabinet-power') navigate('/cabinet-power', {replace:true,bypassGuard:true});
+    if (user.value.role === 'guest' && route.value.pathname !== '/cabinet-power' && !publicLink.value) navigate('/cabinet-power', {replace:true,bypassGuard:true});
   } catch (e:any) { if (!disposed && !controller.signal.aborted) authError.value = e.message || '登录状态读取失败'; }
   finally { if(authRead===controller){authRead=undefined;checking.value = false; checkingAuth = false; window.clearTimeout(timer); if (!disposed && loggedIn.value && !document.hidden) timer = window.setTimeout(loadAuth,60000);} }
 }
@@ -247,7 +247,7 @@ async function logout() {
   catch(e){operationError.value=e instanceof Error?e.message:'退出失败，请重试。';}
   finally{logoutBusy.value=false;if(loggedIn.value&&!disposed&&!document.hidden)timer=window.setTimeout(loadAuth,60000);}
 }
-function expired(event: Event) { (event as CustomEvent).preventDefault?.(); cancelAuth();checking.value=false;loggedIn.value=false; user.value={}; scopes.value=[]; setModulePermissions([]); invalidateReadCache(); navigate('/?login=password&next=' + encodeURIComponent(window.location.pathname + window.location.search), {replace:true,bypassGuard:true}); }
+function expired(event: Event) { (event as CustomEvent).preventDefault?.(); cancelAuth();checking.value=false;loggedIn.value=false; user.value={}; scopes.value=[]; setModulePermissions([]); invalidateReadCache(); if(!publicLink.value)navigate('/?login=password&next=' + encodeURIComponent(window.location.pathname + window.location.search), {replace:true,bypassGuard:true}); }
 function routeChanged() { statusRevision++; route.value = logicalUrl(); authError.value=''; operationError.value=''; }
 function visibility() { if(document.hidden) window.clearTimeout(timer); else void loadAuth(); }
 const permission = reactive({scopes:[] as string[],reason:'',code:'',requestId:'',message:'',status:'',rejectReason:'',approverOpenId:'',notificationStatus:'',notificationError:''}), permissionBusy=ref(false);
