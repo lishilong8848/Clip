@@ -28,7 +28,7 @@ const browser=await chromium.launch({headless:true});
 const scopes=['A','B','C','D','E'].map(value=>({value,label:value+'楼'}));
 const people=Array.from({length:7},(_,i)=>({record_id:`p${i}`,name:`演练人员${'甲乙丙丁戊己庚'[i]}`,employee_no:`1000${i}`,building:'A',has_signature:i!==6}));
 people.push({record_id:'external:cross-building',name:'外部跨楼签名人员',source:'external',employee_no:'20001',building:'B',has_signature:true});
-const steps=[['设备间','确认故障设备位置、现场环境及安全条件。'],['值班室','汇报现场情况，核对人员到位情况并记录处理过程。'],['设备间','恢复设备，确认运行参数正常并完成记录。']].map(([location,content],i)=>({row:10+i,location,content,duration_minutes:5,signature_slots:2}));
+const steps=[['设备间','确认故障设备位置、现场环境及安全条件。'],['值班室','汇报现场情况，核对人员到位情况并记录处理过程。'],['ECC','恢复设备，确认运行参数正常并完成记录。']].map(([location,content],i)=>({row:10+i,location,content,duration_minutes:5,signature_slots:i===2?0:2}));
 const definitions=['冷却水系统故障应急演练','高压配电系统停电应急演练','制冷单元故障处置演练','消防系统联动应急演练'].map((name,i)=>({
   drill_id:`fixture-${i}`,name,year:2026,month:10,status:'published',assigned_scopes:['A','B'],version:1,
   source:{name:name+'.xlsx',size:25600},sheets:['演练记录表','演练评估表'],
@@ -91,6 +91,9 @@ try{
     await page.getByRole('button',{name:'保存草稿',exact:true}).click();await page.getByText('演练草稿已保存',{exact:true}).waitFor();
     assert.equal(saved.simulation_scenario,'修改后的模拟场景');assert.deepEqual(saved.evaluator,{});
     assert.equal(saved.step_signers['10'][1],'external:cross-building');
+    assert.deepEqual(saved.step_signers['12'],[],'zero-signature ECC step must not acquire a default signer');
+    assert.equal(await page.locator('.execution-step').count(),3);
+    assert.equal(await page.locator('.execution-step').nth(2).locator('.signer-grid label').count(),0);
     assert(saved.participants.some(person=>person.record_id==='external:cross-building'),'only selected participants can be assigned steps');
     await page.locator('.v2-drill-preview summary').click();await page.locator('.v2-drill-preview .sheet-table-wrap').waitFor();
     await page.getByRole('button',{name:'生成并归档',exact:true}).click();await page.getByText('已提交生成任务，完成后会自动同步飞书。',{exact:true}).waitFor();assert.equal(generated,1);

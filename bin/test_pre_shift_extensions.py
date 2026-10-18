@@ -18,6 +18,7 @@ import PIL.Image
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from lan_bitable_template_portal import pre_shift_checks as checks
 from lan_bitable_template_portal import pre_shift_cloud as cloudmod
+from test_pre_shift_checks import receipt
 
 TZ = checks.TZ
 DAY = '2026-10-14'
@@ -75,7 +76,7 @@ class Base(unittest.TestCase):
             return {'people': roster_people(), 'warnings': {}}
         self.roster = roster
         self.roster_calls = roster_calls
-        self.sender = Mock(return_value=(True, '', {}))
+        self.sender = Mock(side_effect=receipt)
         self.cloud = Mock()
         self.cloud.upsert.return_value = 'rec_test'
         self.service = checks.CheckService(self.temp, roster=self.roster, cloud=self.cloud,

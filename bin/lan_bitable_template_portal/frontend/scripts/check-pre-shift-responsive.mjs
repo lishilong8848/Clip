@@ -75,7 +75,7 @@ try{
   for(const width of [360,375,390]){await page.setViewportSize({width,height:width===360?640:667});await page.locator('#stage').evaluate(el=>{el.style.width='100%';el.style.height='calc(100dvh - 20px)';});assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(screenshots,'operator-'+width+'.png'),fullPage:true});}
   for(const row of await page.locator('fieldset').all())await row.locator('.n-radio-button').filter({hasText:'无异常'}).click();
   await page.getByRole('button',{name:'提交检查',exact:true}).click();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,1);
-  await page.getByRole('button',{name:'历史记录',exact:true}).click();
+  await page.getByRole('button',{name:'历史检查记录',exact:true}).click();
   const history=page.getByRole('region',{name:'历史检查记录',exact:true});
   await history.locator('.n-collapse-item').nth(19).waitFor();
   await history.locator('.n-collapse-item__header').first().click();

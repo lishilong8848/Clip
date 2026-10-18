@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {preview} from 'vite';
@@ -7,15 +7,15 @@ import {chromium} from 'playwright';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
 const output=path.resolve(root,'../../../output/playwright/operation-widgets');await mkdir(output,{recursive:true});
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),context=await browser.newContext({viewport:{width:1440,height:960},reducedMotion:'reduce'});
 const user={open_id:'operation-fixture',name:'操作组件验收',level:'L4',role:'user',category:'engineer',modules:['maintenance','repair_management']};
-const project={record_id:'repair-fixture',title:'A楼配电设备检修',building:'A楼',building_codes:['A'],workflow:'维修中',progress_percent:25,followup_count:2,followup_state_verified:true};
+const project={record_id:'repair-fixture',title:'BMS报D-416-UPS-1011#电池组最高电池内阻值过高告警并进行设备模块核对与修复'.repeat(3),building:'A楼',building_codes:['A'],workflow:'维修中',progress_percent:25,followup_count:2,followup_state_verified:true};
 const errors=[],reads=[];
 let noticeActionAvailable=true;
 const layouts=layoutApiFixture();
 await context.route('**/*',async route=>{
-  const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(!url.pathname.startsWith('/api/'))return route.continue();
+  const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(url.pathname==='/assets/vnet-logo.png')return route.fulfill({contentType:'image/png',body:await readFile(path.join(root,'public/assets/vnet-logo.png'))});if(!url.pathname.startsWith('/api/'))return route.continue();
   if(await layouts.handle(route,user.open_id))return;
   assert.equal(req.method(),'GET','choosing a widget operation never sends or saves a notice');reads.push(url.pathname+url.search);
   const ok=data=>route.fulfill({json:{ok:true,data}});
@@ -27,7 +27,7 @@ await context.route('**/*',async route=>{
     return ok({fragments:{detail:`<form id="lite-notice-form"><input name="scope" type="hidden" value="A"><input name="work_type" type="hidden" value="maintenance"><input name="notice_type" type="hidden" value="维保通告"><input name="source_record_id" type="hidden" value="plan-fixture">${ongoing?'<input name="target_record_id" type="hidden" value="active-fixture">':''}<label><span>名称</span><input name="title" required value="A楼测试维护"></label><label><span>通告内容</span><textarea name="content" required>维护内容</textarea></label>${(ongoing?noticeActionAvailable?['update','end']:['update']:['start']).map(action=>`<button name="submit_action" value="${action}">${action}</button>`).join('')}</form>`}});
   }
   if(url.pathname==='/api/workbench/draft')return ok({draft:null});
-  if(url.pathname==='/api/repair-management/status')return ok({records:[project],stats:{total:1,in_progress:1,completed_total:0}});
+  if(url.pathname==='/api/repair-management/status')return ok({records:[project,{...project,record_id:'repair-next',title:'LONG_DEVICE_IDENTIFIER_WITHOUT_ANY_SPACES_'.repeat(12)}],stats:{total:2,in_progress:2,completed_total:0}});
   if(url.pathname==='/api/repair-management/records')return ok({records:[project],fields:[],total:1,offset:0});
   if(url.pathname==='/api/repair-management/records/repair-fixture')return ok({record:{...project,record_version:'v1',display_fields:{},raw_fields:{}}});
   if(url.pathname==='/api/repair-management/followups')return ok({fields:[],records:[],total:0,shared_fields:{}});
@@ -58,11 +58,11 @@ try{
   await page.goto(entry);await notice().scrollIntoViewIfNeeded();await notice().getByRole('button',{name:'填写开始',exact:true}).click();
   await page.locator('.v2-notice-editor .n-radio-button--checked').getByText('开始',{exact:true}).waitFor();
   assert(reads.some(url=>url.includes('/api/workbench/lite-detail?')&&url.includes('record_id=plan-fixture')));
-  await page.goto(entry);await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'填写跟进',exact:true}).click();
+  await page.goto(entry);await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'填写跟进',exact:true}).first().click();
   await page.locator('.v2-repair-detail').getByRole('heading',{name:'本次跟进',exact:true}).waitFor();
   assert(reads.some(url=>url.includes('/api/repair-management/status?')&&url.includes('state=all')),'reuse the existing unfinished status query');
   assert(reads.some(url=>url.includes('/api/repair-management/followups?')&&url.includes('repair-fixture')));
-  await page.goto(entry);await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'维修单',exact:true}).click();
+  await page.goto(entry);await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'维修单',exact:true}).first().click();
   await page.locator('.v2-repair-project-form:visible').waitFor();
   noticeActionAvailable=false;await page.goto(entry+'?__page=/workbench-lite&scope=A&work_type=maintenance&active_item_id=active-fixture&notice_action=end');
   await page.getByText(/该记录当前不能结束/).waitFor();
@@ -81,7 +81,28 @@ try{
     }
     await notice().scrollIntoViewIfNeeded();
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+    await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();
+    for(const widget of [notice(),repair()]){
+      await widget.scrollIntoViewIfNeeded();
+      assert(await widget.locator('.v2-widget-body').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'widget has no horizontal overflow');
+      const geometry=await widget.locator('.v2-task-operation').evaluateAll(cards=>cards.map(card=>{
+        const box=card.getBoundingClientRect(),title=card.querySelector('.v2-operation-title').getBoundingClientRect(),status=card.querySelector('.n-tag').getBoundingClientRect();
+        return {fits:card.scrollWidth<=card.clientWidth+1,titleFits:title.left>=box.left&&title.right<=status.left+1&&status.right<=box.right+1};
+      }));
+      assert(geometry.every(v=>v.fits&&v.titleFits),'long titles stay within their cards: '+JSON.stringify(geometry));
+    }
     await page.screenshot({path:path.join(output,'widgets-'+width+'.png')});
+    if(width===1366){
+      for(const span of [12,4]){
+        await repair().evaluate((el,w)=>{const item=el.closest('.grid-stack-item');item.closest('.grid-stack').gridstack.update(item,{w});},span);
+        await page.waitForTimeout(350);await repair().scrollIntoViewIfNeeded();
+        assert(await repair().evaluate(el=>[el,...el.querySelectorAll('.v2-task-operation,.v2-task-operation-head')].every(n=>n.scrollWidth<=n.clientWidth+1)),'resized repair cards never overflow');
+        await repair().screenshot({path:path.join(output,'repair-width-'+span+'.png')});
+      }
+      await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:operation-fixture','dark'));await page.reload();await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();await repair().scrollIntoViewIfNeeded();
+      assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');
+      await repair().screenshot({path:path.join(output,'repair-dark-long-titles.png')});
+    }
   }
   user.modules=['learning'];await page.reload();await page.getByRole('button',{name:'自定义工作台',exact:true}).waitFor();
   assert.equal(await notice().count()+await repair().count(),0,'revoked modules cannot retain operation widgets');

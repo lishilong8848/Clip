@@ -438,6 +438,10 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
         self.assertEqual(validated_timed_total, 14)
         assessment_rows = validated["mapping"]["assessment"]["score_rows"]
         self.assertEqual(sum(int(row["score"]) for row in assessment_rows), 100)
+        next(step for step in validated["steps"] if step["row"] == 17)["signature_slots"] = 0
+        zero_signatures = _validate_configuration(workbook, validated)
+        self.assertEqual(len(zero_signatures["steps"]), 7)
+        self.assertEqual(next(step["signature_slots"] for step in zero_signatures["steps"] if step["row"] == 17), 0)
 
 
 if __name__ == "__main__":

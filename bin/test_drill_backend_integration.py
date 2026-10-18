@@ -459,6 +459,18 @@ class DrillBackendIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(execution["step_signers"]["14"], ["a", "", "b"])
 
+    def test_zero_signature_ecc_step_does_not_require_commander_assignment(self):
+        controller = object.__new__(FastAPIPortalController)
+        person = {"record_id": "a", "name": "指挥人", "has_signature": True}
+        definition = {"configuration": {"steps": [{"row": 17, "location": "ECC", "signature_slots": 0}]}}
+        with patch.object(controller, "_drill_people", return_value=[person]):
+            execution = {"commander": person, "participants": [person], "step_signers": {"17": []}}
+            controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
+            self.assertEqual(execution["step_signers"]["17"], [])
+            execution["step_signers"]["17"] = ["a"]
+            with self.assertRaisesRegex(PortalError, "最多选择 0"):
+                controller._validate_drill_people_payload("A", definition, execution, require_complete=True, require_signatures=True)
+
     def test_ecc_step_accepts_commander_in_any_signature_slot(self):
         controller = object.__new__(FastAPIPortalController)
         people = [

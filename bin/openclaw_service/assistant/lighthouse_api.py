@@ -2084,7 +2084,7 @@ def _drill_configuration_frontend_fields(definition: dict) -> dict:
             label += f" · {content}"
         ui_key = f"step_{index}"
         signer_child.append({"path": ui_key, "label": label, "type": "number",
-                             "min": 1, "max": DRILL_MAX_PARTICIPANTS, "step": 1})
+                             "min": 0, "max": DRILL_MAX_PARTICIPANTS, "step": 1})
         slots = step.get("signature_slots")
         if isinstance(slots, bool) or slots is None:
             slots = ""

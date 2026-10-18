@@ -1,8 +1,9 @@
 """Authenticated pre-shift routes and an independent lightweight worker."""
 import asyncio
+import json
 import threading
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, FileResponse
@@ -23,7 +24,7 @@ def install_pre_shift_routes(app, controller, runtime):
         with lock:
             if service is None:
                 from .pre_shift_cloud import CheckCloud, read_roster
-                service = CheckService(roster=lambda day: read_roster(runtime.service, day),
+                service = CheckService(roster=lambda day: read_roster(runtime.service, day, scopes=get_service().configured_scopes()),
                     cloud=CheckCloud(runtime.service), sender=sender, photo_sender=sender.photo,
                     portal_url=lambda: runtime.service._critical_guard_public_base_url())
             return service
@@ -111,19 +112,63 @@ def install_pre_shift_routes(app, controller, runtime):
     async def submit(request: Request):
         return await handle(request, 'submit')
 
+    @app.delete('/api/pre-shift-checks/photo-preview')
+    async def discard_photo(request: Request):
+        try:
+            actor = await asyncio.to_thread(actor_for, request)
+            body = await body_for(request)
+            if set(body) != {'preview_id'}:
+                raise CheckError('照片预览参数无效。')
+            svc = await asyncio.to_thread(get_service)
+            result = await asyncio.to_thread(svc.discard_photo_preview, actor, body['preview_id'])
+            return JSONResponse({'ok': True, 'data': result}, headers={'Cache-Control': 'no-store'})
+        except CheckError as exc:
+            return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status)
+
+    @app.post('/api/pre-shift-checks/photo-preview')
     @app.post('/api/pre-shift-checks/files')
     async def upload_file(request: Request):
         try:
             actor = await asyncio.to_thread(actor_for, request)
             assert_same_origin(request)
             svc = await asyncio.to_thread(get_service)
+            if (request.url.path.endswith('/files') and not request.query_params.get('task_id')
+                    and request.headers.get('content-type', '').split(';')[0] == 'application/json'):
+                body = await body_for(request)
+                if set(body) != {'preview_id', 'watermark', 'remember_style'}:
+                    raise CheckError('照片确认参数无效。')
+                result = await asyncio.to_thread(svc.commit_photo_preview, actor, body['preview_id'], body['watermark'], body['remember_style'])
+                return JSONResponse({'ok': True, 'data': result}, headers={'Cache-Control': 'no-store'})
             task_id = request.query_params.get('task_id') or ''
             item_id = request.query_params.get('item_id') or ''
             kind = request.query_params.get('kind') or ''
             name = request.query_params.get('name') or ''
-            session = await asyncio.to_thread(svc.stage_upload, actor, task_id, item_id, kind, name)
+            capture = request.query_params.get('capture', '0')
+            retain = request.query_params.get('retain', '0')
+            if retain not in ('0', '1') or retain == '1' and not request.url.path.endswith('/photo-preview'):
+                raise CheckError('照片预览暂存参数无效。')
+            if capture not in ('0', '1'):
+                raise CheckError('拍照参数无效。')
+            raw_context = request.headers.get('X-Photo-Context', '{}')
+            try:
+                if len(raw_context) > 16384:
+                    raise ValueError()
+                raw_context = unquote(raw_context) if raw_context.startswith('%') else raw_context
+                if len(raw_context) > 4096:
+                    raise ValueError()
+                photo_capture = json.loads(raw_context)
+                if not isinstance(photo_capture, dict):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise CheckError('拍照信息格式无效。') from None
+            if capture != '1':
+                photo_capture.pop('captured_at', None)
+            photo_capture.pop('_time_audit', None)
+            session = await asyncio.to_thread(svc.stage_upload, actor, task_id, item_id, kind, name, captured=capture == '1')
+            session['photo_capture'] = photo_capture
             stage = Path(session['path'])
             size = 0
+            retained = False
             try:
                 fp = await asyncio.to_thread(stage.open, 'wb')
                 try:
@@ -134,20 +179,32 @@ def install_pre_shift_routes(app, controller, runtime):
                         await asyncio.to_thread(fp.write, chunk)
                 finally:
                     await asyncio.to_thread(fp.close)
-                if kind == 'handover':
+                if kind == 'handover' or capture == '1' or request.url.path.endswith('/photo-preview') or 'watermark' in photo_capture:
+                    try:
+                        state = await asyncio.to_thread(runtime.service._state_store.get_critical_guard_weather_state)
+                        if isinstance(state, dict) and isinstance(state.get('snapshot'), dict):
+                            session['photo_weather'] = dict(state['snapshot'])
+                    except Exception:
+                        pass  # Missing current observations leave the weather line out.
                     weather = getattr(app.state, 'lighthouse_icon_weather', None)
                     if weather is not None:
                         try:
-                            session['photo_weather'] = await asyncio.wait_for(weather.get('南通'), timeout=3)
+                            session.setdefault('photo_weather', {})['forecast'] = await asyncio.wait_for(weather.get('南通'),timeout=3)
                         except Exception:
-                            pass  # A forecast outage must not block saving the handover photo.
+                            pass
                 # Reload actor: permissions may have been revoked during the stream/weather read.
                 actor = await asyncio.to_thread(actor_for, request)
-                result = await asyncio.to_thread(svc.commit_upload, actor, session, size)
+                if retain == '1':
+                    result = await asyncio.to_thread(svc.retain_photo_preview, actor, session, size)
+                    retained = True
+                else:
+                    result = await asyncio.to_thread(svc.commit_upload, actor, session, size,
+                                                    preview=request.url.path.endswith('/photo-preview'))
             finally:
                 # Successful rename leaves an already-moved (nonexistent) stage and
                 # dedup leaves an unused stage, so always abort the staging path.
-                await asyncio.to_thread(svc.abort_upload, session)
+                if not retained:
+                    await asyncio.to_thread(svc.abort_upload, session)
             return JSONResponse({'ok': True, 'data': result}, headers={'Cache-Control': 'no-store'})
         except CheckError as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status)
@@ -161,7 +218,8 @@ def install_pre_shift_routes(app, controller, runtime):
             headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'}
             suffix = Path(meta['name']).suffix.lower()
             if meta['is_image'] and suffix in _IMAGE_TYPES:
-                return FileResponse(meta['path'], media_type=_IMAGE_TYPES[suffix], headers=headers)
+                return FileResponse(meta['path'], media_type=_IMAGE_TYPES[suffix], filename=meta['name'],
+                                    content_disposition_type='inline', headers=headers)
             return FileResponse(meta['path'], filename=meta['name'],
                                 media_type='application/octet-stream', headers=headers)
         except CheckError as exc:

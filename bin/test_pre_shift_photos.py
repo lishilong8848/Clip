@@ -1,5 +1,6 @@
 """Watermarked handover evidence and private image delivery; no external writes."""
 import asyncio
+import base64
 import datetime as dt
 import io
 import json
@@ -11,10 +12,329 @@ import unittest
 from PIL import Image
 
 from .test_pre_shift_extensions import Base, DAY, at, checks, cloudmod
-from lan_bitable_template_portal.pre_shift_photo import render_handover, watermark_details
+from lan_bitable_template_portal.pre_shift_photo import render_handover, watermark_details, inspect_photo, photo_options
+
+
+class PhotoPreviewTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.current = at(DAY+'T09:00:00')
+        self.save('A', 0, [{'id':'x','text':'检查'}]); self.prepare(self.current)
+        self.ocr = patch('openclaw_service.assistant.lighthouse_files.recognize_text', return_value='')
+        self.ocr.start(); self.addCleanup(self.ocr.stop)
+
+    def preview(self, actor=None, kind='item', exif=True):
+        session = self.service.stage_upload(actor or self.worker, DAY+':A:白', 'x' if kind=='item' else '', kind, '现场.jpg')
+        tags = Image.Exif()
+        if exif:
+            tags[36867] = '2026:10:13 08:31:00'
+        Image.new('RGB', (900,700), '#708090').save(session['path'], format='JPEG', exif=tags)
+        info = self.service.retain_photo_preview(actor or self.worker, session, Path(session['path']).stat().st_size, self.current)
+        return session, info
+
+    def counts(self):
+        with self.service.connection() as conn:
+            return tuple(conn.execute('SELECT COUNT(*) FROM '+name).fetchone()[0] for name in ('files','photo_deliveries'))
+
+    def stamped(self, info, **fields):
+        return {**info['options'], 'enabled':True, **fields}
+
+    def test_cancel_owner_expiry_and_quota_do_not_write_business_files(self):
+        session, info = self.preview()
+        self.assertEqual(self.counts(), (0,0))
+        with self.assertRaises(checks.CheckError) as caught:
+            self.service.commit_photo_preview(self.peer,info['preview_id'],info['options'],current=self.current)
+        self.assertEqual(caught.exception.status,404)
+        with self.assertRaises(checks.CheckError) as caught:
+            self.service.discard_photo_preview({**self.worker,'scope_rules':['B'],'home_scope':'B'},info['preview_id'],self.current)
+        self.assertEqual(caught.exception.status,403)
+        self.assertTrue(Path(session['path']).is_file())
+        self.assertTrue(self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)['cancelled'])
+        self.assertFalse(Path(session['path']).exists())
+        session, info = self.preview()
+        with self.assertRaises(checks.CheckError) as caught:
+            self.service.commit_photo_preview(self.worker,info['preview_id'],info['options'],current=self.current+dt.timedelta(hours=2))
+        self.assertEqual(caught.exception.status,410)
+        self.service.cleanup_photo_previews(self.current+dt.timedelta(hours=2))
+        self.assertFalse(Path(session['path']).exists())
+        with patch.object(checks,'MAX_PREVIEW_BYTES',1), self.assertRaisesRegex(checks.CheckError,'待确认照片'):
+            self.preview()
+        self.assertEqual(self.counts(),(0,0))
+
+    def test_commit_restart_replay_and_metadata_only_preferences(self):
+        session, info = self.preview()
+        options = self.stamped(info, logo='vnet', scale=.5, position={'x':.8,'y':.2}, weather='多云',location='本次定位')
+        result = self.service.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        self.assertEqual(self.counts(),(1,1))
+        self.assertFalse(Path(session['path']).exists())
+        restarted = checks.CheckService(self.temp)
+        replay = restarted.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        self.assertEqual(replay['id'],result['id']); self.assertEqual(self.counts(),(1,1))
+        style = restarted.photo_preferences(self.worker)
+        self.assertEqual(style,{'version':1,'style':{'scale':.5,'logo':'vnet','position':{'x':.8,'y':.2}}})
+        self.assertEqual(restarted.photo_preferences(self.peer),{'version':0,'style':{}})
+        self.assertFalse(self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)['cancelled'])
+        with self.assertRaisesRegex(checks.CheckError,'其他设置'):
+            restarted.commit_photo_preview(self.worker,info['preview_id'],{**options,'scale':.6},current=self.current)
+        self.service.delete_file(self.worker,result['id'])
+        with self.assertRaisesRegex(checks.CheckError,'已被移除'):
+            restarted.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+
+    def test_concurrent_preferences_keep_newer_device_and_opt_out_is_honored(self):
+        _, older = self.preview(); _, newer = self.preview()
+        self.service.commit_photo_preview(self.worker,newer['preview_id'],self.stamped(newer,scale=.6),current=self.current)
+        result = self.service.commit_photo_preview(self.worker,older['preview_id'],self.stamped(older,scale=.3),current=self.current)
+        self.assertIn('另一设备',result['preference_warning'])
+        self.assertEqual(self.service.photo_preferences(self.worker)['style']['scale'],.6)
+        _, other = self.preview()
+        self.service.commit_photo_preview(self.worker,other['preview_id'],self.stamped(other,scale=.45),False,self.current)
+        self.assertEqual(self.service.photo_preferences(self.worker)['version'],1)
+        with self.service.connection(True) as conn:
+            conn.execute('UPDATE photo_preferences SET style=?', ('[]',))
+        self.assertIn('无法读取',self.service.photo_preferences(self.worker)['warning'])
+
+    def test_saved_photo_survives_receipt_failure_and_retry_never_duplicates(self):
+        import sqlite3
+        session, info = self.preview(); options = self.stamped(info)
+        with patch.object(self.service,'_complete_photo_preview',side_effect=sqlite3.OperationalError('disk write')):
+            result = self.service.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        self.assertIn('照片已上传',result['preference_warning'])
+        self.assertTrue(Path(session['path']).is_file()); self.assertEqual(self.counts(),(1,1))
+        with self.assertRaisesRegex(checks.CheckError,'已提交上传'):
+            self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)
+        replay = checks.CheckService(self.temp).commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        self.assertEqual(result['id'],replay['id']); self.assertEqual(self.counts(),(1,1))
+        self.assertEqual(self.service.photo_preferences(self.worker)['version'],1)
+
+    def test_failed_write_preserves_original_preview_and_same_request_can_retry(self):
+        session, info = self.preview(); options = self.stamped(info)
+        with patch.object(self.service,'commit_upload',side_effect=OSError('disk write')):
+            with self.assertRaises(checks.CheckError) as caught:
+                self.service.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        self.assertEqual(caught.exception.status,503)
+        self.assertTrue(Path(session['path']).is_file()); self.assertEqual(self.counts(),(0,0))
+        self.assertEqual(self.service.photo_preferences(self.worker)['version'],0)
+        self.service.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        self.assertEqual(self.counts(),(1,1))
+
+    def test_cleanup_failure_after_success_does_not_report_upload_failure(self):
+        session, info = self.preview(); real_unlink = Path.unlink
+        def unlink(path, *args, **kwargs):
+            if str(path)==session['path']:
+                raise PermissionError('busy file')
+            return real_unlink(path,*args,**kwargs)
+        with patch.object(Path,'unlink',unlink):
+            result = self.service.commit_photo_preview(self.worker,info['preview_id'],self.stamped(info),current=self.current)
+        self.assertTrue(result['id']); self.assertEqual(self.counts(),(1,1))
+        self.service.cleanup_photo_previews(self.current+dt.timedelta(hours=2))
+        self.assertFalse(Path(session['path']).exists())
+
+    def test_concurrent_commit_and_expired_worker_cannot_release_new_lease(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        session, info = self.preview(); options = self.stamped(info)
+        entered, finish = threading.Event(), threading.Event()
+        original = self.service.commit_upload
+        def pause(*args,**kwargs):
+            entered.set(); self.assertTrue(finish.wait(8)); return original(*args,**kwargs)
+        with patch.object(self.service,'commit_upload',side_effect=pause),ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.service.commit_photo_preview,self.worker,info['preview_id'],options,True,self.current)
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaisesRegex(checks.CheckError,'正在上传'):
+                    self.service.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+                with self.service.connection(True) as conn:
+                    conn.execute('UPDATE photo_previews SET lease=?',(self.current.timestamp()+999,))
+            finally:
+                finish.set()
+            self.assertIn('preference_warning',first.result(timeout=10))
+        with self.service.connection() as conn:
+            self.assertEqual(conn.execute('SELECT lease FROM photo_previews').fetchone()[0],self.current.timestamp()+999)
+        self.assertTrue(Path(session['path']).exists()); self.assertEqual(self.counts(),(1,1))
+
+    def test_cleanup_ignores_corrupt_metadata_and_never_deletes_external_file(self):
+        session, info = self.preview()
+        outside = Path(self.temp)/'preserve.txt'; outside.write_text('preserve')
+        with self.service.connection(True) as conn:
+            conn.execute('UPDATE photo_previews SET session=?,expires=?', (json.dumps({'path':str(outside)}),0))
+            conn.execute("INSERT INTO photo_previews(id,actor_id,scope,session,size,content_hash,expires) VALUES('corrupt','x','A','{',1,'x',0)")
+        self.service.cleanup_photo_previews(self.current)
+        self.assertEqual(outside.read_text(),'preserve')
+        with self.service.connection() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_previews').fetchone()[0],0)
+        # An expired but still-leased preview must not be removed by maintenance.
+        _, info = self.preview()
+        with self.service.connection(True) as conn:
+            conn.execute('UPDATE photo_previews SET expires=0,lease=?',(self.current.timestamp()+100,))
+        self.service.cleanup_photo_previews(self.current)
+        with self.service.connection() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_previews').fetchone()[0],1)
+
+    def test_manual_capture_time_has_server_audit_and_does_not_leak_actor_into_jpeg(self):
+        _, info = self.preview()
+        self.assertEqual(info['time_origin'],'exif')
+        options = self.stamped(info,time='2026-10-13 08:45')
+        result = self.service.commit_photo_preview(self.worker,info['preview_id'],options,current=self.current)
+        audit = result['watermark']['audit']
+        self.assertEqual(audit['original_time'],'2026-10-13 08:31')
+        self.assertEqual(audit['display_time'],'2026-10-13 08:45'); self.assertTrue(audit['modified'])
+        self.assertEqual(audit['actor_id'],self.worker['id']); self.assertIn('手动修改',result['watermark']['time_label'])
+        path = self.service.get_file(self.worker,result['id'])['path']
+        with Image.open(path) as image:
+            saved = json.loads(image.info['comment'].split(b':',1)[1])
+            self.assertNotIn('actor_id',saved['audit']); self.assertNotIn('actor_name',saved['audit'])
+        _, blank = self.preview(exif=False)
+        result = self.service.commit_photo_preview(self.worker,blank['preview_id'],self.stamped(blank,time='2026-10-12 08:00'),current=self.current)
+        self.assertEqual(result['watermark']['audit']['origin'],'unknown')
+        self.assertIn('手动填写',result['watermark']['time_label'])
+
+    def test_existing_platform_stamp_is_not_applied_twice_or_remembered_as_new_style(self):
+        raw=Path(self.temp)/'raw.jpg';Image.new('RGB',(900,700)).save(raw)
+        session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','已有水印.jpg')
+        render_handover(raw,session['path'],'A',self.current,capture={'captured_at':self.current.timestamp()*1000})
+        content=Path(session['path']).read_bytes()
+        info=self.service.retain_photo_preview(self.worker,session,len(content),self.current)
+        self.assertTrue(info['existing_locked'])
+        result=self.service.commit_photo_preview(self.worker,info['preview_id'],self.stamped(info,existing=False,scale=.7),current=self.current)
+        self.assertFalse(result['watermark']['applied']);self.assertTrue(result['watermark']['existing'])
+        self.assertEqual(Path(self.service.get_file(self.worker,result['id'])['path']).read_bytes(),content)
+        self.assertEqual(self.service.photo_preferences(self.worker)['version'],0)
 
 
 class WatermarkTests(unittest.TestCase):
+    def test_positions_are_validated_and_corner_pixels_stay_inside_photo(self):
+        import tempfile
+        options = {'enabled':True,'existing':False,'title':'检查','area':'A楼','time':'2026-10-13 08:31','scale':.4}
+        self.assertEqual(photo_options(options),photo_options({**options,'position':{'x':0,'y':1}}))
+        for value in ({'x':2,'y':0},{'x':float('nan'),'y':0},{'x':True,'y':0},[],{'x':0},None):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'位置'):
+                photo_options({**options,'position':value})
+        with tempfile.TemporaryDirectory() as folder:
+            raw, out = Path(folder)/'raw.jpg',Path(folder)/'out.jpg'
+            Image.new('RGB',(1600,1200),'#708090').save(raw)
+            for x,y in ((0,0),(0,1),(1,0),(1,1),(.5,.5)):
+                render_handover(raw,out,'A',at(DAY+'T09:00:00'),capture={'watermark':{**options,'position':{'x':x,'y':y}}})
+                with Image.open(out) as image:
+                    left,top = 24+round((1600-48-640)*x),24+round((1200-48-177)*y)
+                    r,g,b = image.getpixel((left+300,min(top+15,1170)))
+                    self.assertGreater(b,r+50,'header follows the selected position')
+            Image.new('RGB',(320,1600),'#708090').save(raw)
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',return_value=''):
+                info=inspect_photo(raw,'A',at(DAY+'T09:00:00'))
+            render_handover(raw,out,'A',at(DAY+'T09:00:00'),capture={'watermark':options})
+            with Image.open(out) as image:
+                self.assertAlmostEqual(image.width/image.height,info['width']/info['height'],places=3,msg='editable tall photos must not gain side padding')
+
+    def test_delivery_copy_is_bounded_and_preserves_large_original(self):
+        import tempfile, hashlib
+        from lan_bitable_template_portal.pre_shift_photo import prepare_delivery_image,DELIVERY_IMAGE_BYTES,_photo_time
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'noise.png'
+            Image.effect_noise((2300,2300),100).convert('RGB').save(path,compress_level=0)
+            before=hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertGreater(path.stat().st_size,DELIVERY_IMAGE_BYTES)
+            result=prepare_delivery_image(path,'原始照片.png')
+            self.assertTrue(0<len(result['content'])<=DELIVERY_IMAGE_BYTES)
+            self.assertEqual(result['mime'],'image/jpeg')
+            self.assertEqual(Image.open(io.BytesIO(result['content'])).format,'JPEG')
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(),before)
+            Image.new('RGB',(20,20)).save(path)
+            self.assertIsNone(prepare_delivery_image(path,'small.png')['content'])
+        self.assertEqual(_photo_time({306:'2026:10:13 08:00:00'}),'','file modification is not capture time')
+        self.assertEqual(_photo_time({36867:'2099:12:31 00:00:00'},at(DAY+'T09:00:00')),'','future EXIF is not auto-filled as capture time')
+    def test_logo_validation_and_pixels_in_final_watermark(self):
+        import tempfile
+        options={'enabled':True,'existing':False,'scale':.4,'title':'测试Logo水印','area':'A楼',
+                 'time':'2026-10-13 08:31','weather':'','location':''}
+        self.assertEqual(photo_options({**options,'logo':''}),photo_options(options),'empty logo must preserve pre-upgrade dedup identity')
+        self.assertNotIn('logo',photo_options(options))
+        content=io.BytesIO();Image.new('RGBA',(128,64),'#ed2020').save(content,format='PNG')
+        logo='data:image/png;base64,'+base64.b64encode(content.getvalue()).decode()
+        for invalid in ('https://other.example/logo.png','data:image/svg+xml;base64,PHN2Zy8+',
+                        'data:image/png;base64,%%%', 'data:image/jpeg;base64,'+logo.split(',')[1],
+                        'data:image/png;base64,'+'A'*2804, [], True):
+            with self.subTest(logo=invalid),self.assertRaisesRegex(ValueError,'Logo'):
+                photo_options({**options,'logo':invalid})
+        transparent=io.BytesIO();Image.new('RGBA',(20,20)).save(transparent,format='PNG')
+        with self.assertRaisesRegex(ValueError,'Logo'):
+            photo_options({**options,'logo':'data:image/png;base64,'+base64.b64encode(transparent.getvalue()).decode()})
+        with tempfile.TemporaryDirectory() as folder:
+            source,target=Path(folder)/'raw.jpg',Path(folder)/'stamped.jpg'
+            Image.new('RGB',(1600,1200),'#708090').save(source)
+            for choice in ('', 'vnet', logo):
+                details=render_handover(source,target,'A',at(DAY+'T09:00:00'),capture={'watermark':{**options,'logo':choice}})
+                self.assertEqual(details.get('logo',''),'vnet' if choice=='vnet' else 'custom' if choice else '')
+                with Image.open(target) as image:
+                    self.assertEqual(image.size,(1600,1200))
+                    self.assertNotIn(b'data:image',image.info['comment'],'do not embed uploaded logo data in photo metadata')
+                    if choice==logo:
+                        self.assertGreater(sum(1 for r,g,b in image.crop((20,980,160,1060)).getdata() if r>180 and g<80 and b<80),200)
+
+    def test_inspection_reads_exif_and_existing_stamp_without_business_write(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            source,target=Path(folder)/'raw.jpg',Path(folder)/'stamped.jpg'
+            exif=Image.Exif();exif[36867]='2026:10:12 17:32:00'
+            Image.new('RGB',(1200,800),'#708090').save(source,exif=exif)
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',return_value='施工区域：H楼\n拍摄时间：2026.10.11 18:00'):
+                info=inspect_photo(source,'A',at(DAY+'T09:00:00'))
+            self.assertEqual(info['options']['time'],'2026-10-12 17:32')
+            self.assertTrue(info['existing_watermark'])
+            self.assertFalse(info['options']['enabled'])
+            render_handover(source,target,'A',at(DAY+'T09:00:00'))
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text') as ocr:
+                info=inspect_photo(target,'A',at(DAY+'T09:00:00'))
+                ocr.assert_not_called()
+            self.assertTrue(info['existing_watermark'])
+            self.assertEqual(info['options']['time'],'2026-10-12 17:32')
+
+    def test_ocr_time_and_missing_metadata_require_real_selection_not_upload_time(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            source=Path(folder)/'raw.jpg';Image.new('RGB',(800,600)).save(source)
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',return_value='拍照时间：2026.10.13 08:31\n施工区域：A楼'):
+                info=inspect_photo(source,'A',at(DAY+'T09:00:00'))
+            self.assertEqual(info['options']['time'],'2026-10-13 08:31')
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',return_value='施 工 区 域 ： H 楼\n拍 摄 时 间 ： 2026 ． 1 0 ． 1 7 1 8 ： 00'):
+                info=inspect_photo(source,'H',at('2026-10-18T09:00:00'))
+            self.assertTrue(info['existing_watermark'])
+            self.assertEqual(info['options']['time'],'2026-10-17 18:00')
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',return_value='拍 摄 时 间 ： 2026 ． 1 0 ． 2 1 3 ： 00'):
+                info=inspect_photo(source,'H',at('2026-10-18T09:00:00'))
+            self.assertEqual(info['options']['time'],'','ambiguous OCR day/hour must be chosen by the user')
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',return_value='拍摄时间：2026.10.2 13:00'):
+                info=inspect_photo(source,'H',at('2026-10-18T09:00:00'))
+            self.assertEqual(info['options']['time'],'2026-10-02 13:00')
+            with patch('openclaw_service.assistant.lighthouse_files.recognize_text',side_effect=TimeoutError()):
+                info=inspect_photo(source,'A',at(DAY+'T09:00:00'))
+            self.assertEqual(info['options']['time'],'')
+            self.assertNotIn('未获取',json.dumps(info,ensure_ascii=False))
+            with self.assertRaisesRegex(ValueError,'拍照时间'):
+                photo_options({**info['options'],'enabled':True})
+
+    def test_edited_fields_size_and_option_validation(self):
+        import tempfile
+        options={'enabled':True,'existing':False,'scale':.18,'title':'自定义标题','area':'B楼施工区域',
+                 'time':'2026-10-13 08:31','weather':'多云','location':'用户确认地点'}
+        for bad in ({'scale':.17},{'scale':.76},{'scale':float('nan')},{'time':''},{'title':'x'*101},{'other':'x'},{'enabled':1}):
+            with self.subTest(bad=bad),self.assertRaises(ValueError):photo_options({**options,**bad})
+        with tempfile.TemporaryDirectory() as folder:
+            source,target=Path(folder)/'raw.jpg',Path(folder)/'out.jpg'
+            Image.new('RGB',(1600,1200),'#708090').save(source)
+            for scale in (.18,.75):
+                result=render_handover(source,target,'A',at(DAY+'T09:00:00'),capture={'watermark':{**options,'scale':scale}})
+                self.assertEqual([result[k] for k in ('title','area','time','weather','location')],[options[k] for k in ('title','area','time','weather','location')])
+                with Image.open(target) as image:
+                    self.assertEqual(image.size,(1600,1200))
+                    expected_width=1600*scale
+                    self.assertGreater(image.getpixel((int(expected_width*.8),1160))[0],140)
+                    self.assertLess(image.getpixel((int(expected_width+80),1160))[0],140)
+            render_handover(source,target,'A',at(DAY+'T09:00:00'),capture={'watermark':{
+                **options,'title':'标题'*50,'area':'区域'*40,'weather':'天气'*50,'location':'地点'*100}})
+            with Image.open(target) as image:
+                self.assertEqual(image.size,(1600,1200))
+                self.assertEqual(image.getpixel((400,1100)),(112,128,144),'long edited text stays inside the watermark panel')
+
     def test_building_time_and_weather_are_sourced_not_copied_from_example(self):
         current = at(DAY + 'T09:00:00')
         for scope in checks.SCOPES:
@@ -22,19 +342,32 @@ class WatermarkTests(unittest.TestCase):
             label = '110站' if scope == '110' else scope + '楼'
             self.assertEqual(stamp['title'], f'EA118南通机房{label}交接班')
             self.assertEqual(stamp['area'], label)
-            self.assertEqual(stamp['time_label'], '上传时间')
-            self.assertEqual(stamp['time'], '2026.10.14 09:00')
-            self.assertEqual(stamp['weather'], '未获取')
-            self.assertIn(label, stamp['location'])
-        weather = {'available': True, 'city': '南通', 'date': DAY, 'fetched_at': current.timestamp(),
-                   'description': '多云', 'minimum': 19, 'maximum': 25}
-        stamp = watermark_details('B', current, weather, {36867: '2026:10:14 08:56:00'})
-        self.assertEqual(stamp['time_label'], '拍摄时间')
+            self.assertEqual(stamp['time_label'], '拍照时间')
+            self.assertEqual(stamp['time'], '未获取')
+            self.assertEqual(stamp['weather'], '')
+            self.assertEqual(stamp['location'], '')
+        capture = {'captured_at': current.timestamp()*1000, 'position':{'latitude':32.0167,'longitude':120.8667,'accuracy':15,'timestamp':current.timestamp()*1000}}
+        weather = {'source_state':'fresh','weather':{'observed_at':current.isoformat(),'condition':'多云','temperature':25}}
+        stamp = watermark_details('B', current, weather, {36867: '2026:10:14 08:56:00'},capture=capture)
+        self.assertEqual(stamp['time_label'], '拍照时间')
         self.assertEqual(stamp['time'], '2026.10.14 08:56')
-        self.assertEqual(stamp['weather'], '今日预报 多云 19～25℃')
-        for bad in ({'city': '北京'}, {'date': '2026-10-13'}, {'fetched_at': current.timestamp()-3600}):
-            self.assertEqual(watermark_details('B', current, {**weather, **bad})['weather'], '未获取')
-        self.assertEqual(watermark_details('B', current, exif={36867: '2099:01:01 01:00:00'})['time_label'], '上传时间')
+        self.assertEqual(stamp['weather'], '多云 25℃')
+        self.assertIn('32.01670', stamp['location'])
+        self.assertEqual(watermark_details('B',current,capture=capture)['time'],'2026.10.14 09:00')
+        for bad in ({'source_state':'stale'},{'weather':{**weather['weather'],'observed_at':(current-dt.timedelta(hours=1)).isoformat()}},
+                    {'weather':{**weather['weather'],'temperature':None}}, {'weather':{}}):
+            self.assertEqual(watermark_details('B',current,{**weather,**bad},capture=capture)['weather'],'')
+        for bad in ({'timestamp':0},{'latitude':float('nan')},{'accuracy':2000}):
+            stamp=watermark_details('B',current,weather,capture={**capture,'position':{**capture['position'],**bad}})
+            self.assertEqual((stamp['location'],stamp['weather']),('',''))
+        self.assertEqual(watermark_details('B',current,{'available':True,'description':'多云','minimum':19,'maximum':25},capture=capture)['weather'],'')
+        self.assertEqual(watermark_details('B', current, exif={36867: '2099:01:01 01:00:00'})['time'], '未获取')
+        forecast={'forecast':{'available':True,'city':'南通','date':DAY,'fetched_at':current.timestamp(),
+                              'description':'多云','minimum':19,'maximum':25}}
+        self.assertEqual(watermark_details('B',current,forecast)['weather'],'南通预报 多云 19～25℃')
+        self.assertEqual(watermark_details('B',current,forecast)['location'],'')
+        away={**capture,'position':{**capture['position'],'latitude':39.9,'longitude':116.4}}
+        self.assertEqual(watermark_details('B',current,forecast,capture=away)['weather'],'')
 
     def test_pixels_orientation_format_and_readable_small_images(self):
         import tempfile
@@ -49,7 +382,7 @@ class WatermarkTests(unittest.TestCase):
                 self.assertEqual(out.format, 'JPEG')
                 self.assertEqual(out.size, (1200, 1600))
                 self.assertFalse(out.getexif(), 'strip original location/EXIF before sharing')
-                self.assertGreater(out.getpixel((50, 1530))[0], 140, 'white translucent stamp at bottom-left')
+                self.assertGreater(out.getpixel((600, 1550))[0], 140, 'white translucent stamp at bottom-left, away from text')
             self.assertEqual(details['area'], 'C楼')
             for size in ((2, 2), (1, 20000), (20000, 1)):
                 Image.new('RGB', size).save(source)
@@ -63,6 +396,77 @@ class WatermarkTests(unittest.TestCase):
 
 
 class DeliveryTests(Base):
+    def test_logo_is_part_of_upload_identity_and_existing_stamp_is_not_overlaid(self):
+        self.save('A',0,[{'id':'x','text':'检查'}]);current=at(DAY+'T09:00:00');self.prepare(current)
+        options={'enabled':True,'existing':False,'scale':.4,'title':'测试','area':'A楼','time':'2026-10-13 08:31','weather':'','location':''}
+        raw=io.BytesIO();Image.new('RGB',(1000,800),'#708090').save(raw,format='PNG')
+        def upload(logo,content=None,name='现场.png'):
+            session=self.service.stage_upload(self.worker,DAY+':A:白','x','item',name)
+            Path(session['path']).write_bytes(content or raw.getvalue());session['photo_capture']={'watermark':{**options,'logo':logo}}
+            return self.service.commit_upload(self.worker,session,None,current)
+        stamped=upload('vnet');self.assertEqual(upload('vnet')['id'],stamped['id'])
+        plain=upload('');self.assertNotEqual(plain['id'],stamped['id'])
+        original=Path(self.service.get_file(self.worker,stamped['id'])['path']).read_bytes()
+        preserved=upload('vnet',original,'已有水印.jpg')
+        self.assertEqual(Path(self.service.get_file(self.worker,preserved['id'])['path']).read_bytes(),original)
+        self.assertEqual(list(self.service.staging_dir.iterdir()),[])
+
+    def test_optional_stamp_preserves_original_and_uses_option_aware_dedup(self):
+        self.save('A',0,[{'id':'x','text':'检查'}]);current=at(DAY+'T09:00:00');self.prepare(current)
+        options={'enabled':False,'existing':False,'scale':.4,'title':'自定义','area':'A楼','time':'2026-10-13 08:31','weather':'','location':''}
+        original=io.BytesIO();Image.new('RGB',(1000,800),'#708090').save(original,format='PNG')
+        def upload(opts,kind='item',content=None,name='现场.png'):
+            session=self.service.stage_upload(self.worker,DAY+':A:白','x' if kind=='item' else '',kind,name)
+            Path(session['path']).write_bytes(content or original.getvalue())
+            session['photo_capture']={'watermark':opts}
+            return self.service.commit_upload(self.worker,session,None,current)
+        plain=upload(options)
+        self.assertFalse(plain['watermarked'])
+        self.assertEqual(Path(self.service.get_file(self.worker,plain['id'])['path']).read_bytes(),original.getvalue())
+        self.assertEqual(upload(options)['id'],plain['id'])
+        stamped=upload({**options,'enabled':True,'scale':.18})
+        self.assertNotEqual(stamped['id'],plain['id'])
+        changed=upload({**options,'enabled':True,'scale':.75,'title':'改后标题'})
+        self.assertNotEqual(changed['id'],stamped['id'])
+        result=upload({**options,'enabled':True},content=Path(self.service.get_file(self.worker,stamped['id'])['path']).read_bytes(),name='已加水印.jpg')
+        self.assertEqual(Path(self.service.get_file(self.worker,result['id'])['path']).read_bytes(),Path(self.service.get_file(self.worker,stamped['id'])['path']).read_bytes())
+        handover=upload({**options,'existing':True,'enabled':True},kind='handover')
+        self.assertEqual(handover['name'],'现场.png')
+        self.assertEqual(Path(self.service.get_file(self.worker,handover['id'])['path']).read_bytes(),original.getvalue())
+        self.assertTrue(handover['watermarked'])
+        with self.service.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0],5)
+        self.assertEqual(list(self.service.staging_dir.iterdir()),[])
+
+    def test_item_camera_also_stamps_persists_and_queues_only_once(self):
+        self.save('A', 0, [{'id':'x','text':'检查'}])
+        current = at(DAY+'T09:00:00')
+        self.prepare(current)
+        def upload(captured):
+            session = self.service.stage_upload(self.worker,DAY+':A:白','x','item','现场.png',captured=captured)
+            Image.new('RGB',(800,600),'#708090').save(session['path'],format='PNG')
+            return self.service.commit_upload(self.worker,session,None,current)
+        ordinary = upload(False)
+        camera = upload(True)
+        self.assertNotEqual(ordinary['id'],camera['id'],'a prior unwatermarked file cannot replace the camera result')
+        self.assertTrue(camera['watermarked'])
+        self.assertEqual(camera['watermark']['title'],'EA118南通机房A楼班前检查')
+        self.assertEqual(upload(True)['id'],camera['id'])
+        meta = self.service.get_file(self.worker,camera['id'])
+        with Image.open(meta['path']) as photo:
+            self.assertEqual(photo.format,'JPEG')
+            self.assertGreater(photo.getpixel((40,560))[0],140)
+        state = self.service.state(self.worker,'A',current)
+        file = next(f for f in state['tasks'][0]['files'] if f['id']==camera['id'])
+        self.assertEqual(file['delivery_status'],'pending')
+        with self.service.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0],1)
+        self.assertEqual(list(self.service.staging_dir.iterdir()),[])
+        self.service.submit(self.worker,DAY+':A:白',1,[{'id':'x','status':'normal','note':''}],current)
+        self.service.sync(current)
+        cloud_files = self.cloud.upsert.call_args.args[1][0]['_files']
+        self.assertEqual(Path(next(f['path'] for f in cloud_files if f['file_id']==camera['id'])).read_bytes(),Path(meta['path']).read_bytes())
+
     def upload(self):
         self.save('A', 0, [{'id': 'x', 'text': '检查'}])
         self.prepare(at(DAY+'T09:00:00'))
@@ -267,6 +671,36 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 await self.sender.send('ou_logged_in', None, 'stable-photo',
                     photo={**payload,'image_key':'img_key','sender_app_id':'cli_other'}, checkpoint=checkpoint)
 
+    async def test_preserved_png_is_uploaded_with_its_actual_mime(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'original.png';Image.new('RGB',(20,20)).save(path)
+            self.client.post.side_effect=[SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'image_key':'img_key'}}),
+                                         SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_png'}})]
+            result=await self.sender.send('ou_logged_in',None,'png',photo={'path':str(path),'name':'original.png'},checkpoint=Mock())
+            self.assertEqual(result,'om_png')
+            self.assertEqual(self.client.post.call_args_list[0].kwargs['files']['image'][2],'image/png')
+
+    async def test_large_original_uses_small_send_copy_and_retry_reuses_image_key(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'original.png'
+            Image.effect_noise((2300,2300),100).convert('RGB').save(path,compress_level=0)
+            original=path.read_bytes()
+            async def post(url, **kwargs):
+                if url.endswith('/images'):
+                    name,stream,mime=kwargs['files']['image'];data=stream.read()
+                    self.assertTrue(0<len(data)<=10*1024*1024);self.assertEqual(mime,'image/jpeg')
+                    self.assertIn('发送副本',name)
+                    return SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'image_key':'img_large'}})
+                return SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_large'}})
+            self.client.post.side_effect=post
+            result=await self.sender.send('ou_logged_in',None,'large',photo={'path':str(path),'name':'original.png'},checkpoint=Mock())
+            self.assertEqual(result,'om_large');self.assertEqual(path.read_bytes(),original)
+            with patch('lan_bitable_template_portal.pre_shift_photo.prepare_delivery_image',side_effect=AssertionError('must not reupload')):
+                await self.sender.send('ou_logged_in',None,'large',photo={'path':str(path),'name':'original.png','image_key':'img_large','sender_app_id':'cli_agent'},checkpoint=Mock())
+            self.assertEqual(self.client.post.call_count,3)
+
     async def test_image_permission_failure_or_revoked_person_never_sends_message(self):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
@@ -300,6 +734,85 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PhotoRouteTests(Base):
+    def test_retained_preview_confirm_cancel_and_permissions_via_real_routes(self):
+        from fastapi import FastAPI
+        import httpx
+        from lan_bitable_template_portal import pre_shift_routes
+        self.save('A',0,[{'id':'x','text':'检查'}]);self.prepare(at(DAY+'T09:00:00'))
+        user={**self.worker,'open_id':self.worker['id'],'modules':['maintenance']}
+        async def read_json(request, **kwargs):
+            return await request.json()
+        controller=SimpleNamespace(_current_session=lambda _: {'user':user},_request_base_url=lambda _:'http://fixture',_read_json_request=read_json)
+        runtime=SimpleNamespace(service=Mock(),auth_manager=SimpleNamespace(public_user=lambda _:user));app=FastAPI()
+        raw=io.BytesIO();Image.new('RGB',(900,700)).save(raw,format='JPEG')
+        params={'task_id':DAY+':A:白','item_id':'x','kind':'item','name':'现场.jpg','retain':'1'}
+        with patch.object(pre_shift_routes,'CheckService',return_value=self.service),patch(
+            'openclaw_service.assistant.lighthouse_files.recognize_text',return_value=''):
+            pre_shift_routes.install_pre_shift_routes(app,controller,runtime)
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://fixture') as client:
+                    response=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue())
+                    self.assertEqual(response.status_code,200,response.text);info=response.json()['data']
+                    self.assertEqual(len(list(self.service.staging_dir.glob('*.upload'))),1)
+                    body={'preview_id':info['preview_id'],'watermark':info['options'],'remember_style':True}
+                    denied=await client.post('/api/pre-shift-checks/files',json=body,headers={'Origin':'https://other.example'})
+                    self.assertEqual(denied.status_code,403)
+                    response=await client.post('/api/pre-shift-checks/files',json={**body,'task_id':'another'})
+                    self.assertEqual(response.status_code,400,'metadata confirmation cannot rebind task')
+                    response=await client.post('/api/pre-shift-checks/files',json=body)
+                    self.assertEqual(response.status_code,200,response.text);result=response.json()['data']
+                    replay=await client.post('/api/pre-shift-checks/files',json=body)
+                    self.assertEqual(replay.json()['data']['id'],result['id'])
+                    photo=await client.get(result['url']);self.assertEqual(photo.content,raw.getvalue())
+                    response=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue())
+                    key=response.json()['data']['preview_id']
+                    response=await client.request('DELETE','/api/pre-shift-checks/photo-preview',json={'preview_id':key})
+                    self.assertTrue(response.json()['data']['cancelled'])
+                    self.assertEqual(list(self.service.staging_dir.glob('*.upload')),[])
+                    response=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue())
+                    key=response.json()['data']['preview_id'];user['modules']=[]
+                    denied=await client.post('/api/pre-shift-checks/files',json={**body,'preview_id':key})
+                    self.assertEqual(denied.status_code,403)
+                    with self.service.connection() as conn:
+                        self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0],1)
+                        self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0],1)
+            asyncio.run(exercise())
+
+    def test_photo_editor_preview_never_commits_and_no_stamp_preserves_original(self):
+        from fastapi import FastAPI
+        import httpx
+        from urllib.parse import quote
+        from lan_bitable_template_portal import pre_shift_routes
+        self.save('A',0,[{'id':'x','text':'检查'}]);current=at(DAY+'T09:00:00');self.prepare(current)
+        user={**self.worker,'open_id':self.worker['id'],'modules':['maintenance']}
+        controller=SimpleNamespace(_current_session=lambda _: {'user':user},_request_base_url=lambda _:'http://fixture')
+        runtime=SimpleNamespace(service=Mock(),auth_manager=SimpleNamespace(public_user=lambda _:user));app=FastAPI()
+        raw=io.BytesIO();exif=Image.Exif();exif[36867]='2026:10:12 17:32:00';Image.new('RGB',(800,600)).save(raw,format='JPEG',exif=exif)
+        params={'task_id':DAY+':A:白','kind':'handover','name':'现场.jpg'}
+        with patch.object(pre_shift_routes,'CheckService',return_value=self.service),patch(
+            'openclaw_service.assistant.lighthouse_files.recognize_text',return_value=''):
+            pre_shift_routes.install_pre_shift_routes(app,controller,runtime)
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://fixture') as client:
+                    result=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue())
+                    self.assertEqual(result.status_code,200,result.text);info=result.json()['data']
+                    self.assertEqual(info['options']['time'],'2026-10-12 17:32')
+                    with self.service.connection() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM files').fetchone()[0],0)
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0],0)
+                    self.assertEqual(list(self.service.staging_dir.iterdir()),[])
+                    denied=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue(),headers={'Origin':'https://other.example'})
+                    self.assertEqual(denied.status_code,403)
+                    headers={'X-Photo-Context':quote(json.dumps({'watermark':{**info['options'],'enabled':False}},ensure_ascii=False))}
+                    result=await client.post('/api/pre-shift-checks/files',params=params,content=raw.getvalue(),headers=headers)
+                    self.assertEqual(result.status_code,200,result.text);photo=result.json()['data']
+                    self.assertFalse(photo['watermarked'])
+                    fetched=await client.get(photo['url'])
+                    self.assertEqual(fetched.content,raw.getvalue())
+                    self.assertIn('inline',fetched.headers['content-disposition'])
+                    self.assertEqual(photo['delivery_status'],'pending')
+            asyncio.run(exercise())
+
     def test_shared_weather_download_and_permission_refresh_after_weather_read(self):
         from fastapi import FastAPI
         import httpx
@@ -312,33 +825,37 @@ class PhotoRouteTests(Base):
             _request_base_url=lambda _: 'http://fixture')
         runtime = SimpleNamespace(service=Mock(),auth_manager=SimpleNamespace(public_user=lambda _:user))
         app = FastAPI()
-        weather = AsyncMock(return_value={'available':True,'city':'南通','date':DAY,
-            'fetched_at':current.timestamp(),'description':'多云','minimum':19,'maximum':25})
-        app.state.lighthouse_icon_weather = SimpleNamespace(get=weather)
+        weather = Mock(return_value={'snapshot':{'source_state':'fresh','weather':{
+            'observed_at':current.isoformat(),'condition':'多云','temperature':25}}})
+        runtime.service._state_store.get_critical_guard_weather_state = weather
+        capture = {'captured_at':current.timestamp()*1000,'position':{
+            'latitude':32.0167,'longitude':120.8667,'accuracy':15,'timestamp':current.timestamp()*1000}}
         raw = io.BytesIO()
         Image.new('RGB',(800,600),'#708090').save(raw,format='PNG')
-        params = {'task_id':DAY+':A:白','kind':'handover','name':'现场.png'}
+        params = {'task_id':DAY+':A:白','kind':'handover','name':'现场.png','capture':'1'}
         with patch.object(pre_shift_routes, 'CheckService', return_value=self.service):
             pre_shift_routes.install_pre_shift_routes(app,controller,runtime)
             async def exercise():
-                async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://fixture') as client:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://fixture',headers={'X-Photo-Context':json.dumps(capture)}) as client:
                     response = await client.post('/api/pre-shift-checks/files',params=params,content=raw.getvalue())
                     self.assertEqual(response.status_code,200,response.text)
                     photo = response.json()['data']
                     self.assertEqual(photo['watermark']['area'],'A楼')
-                    self.assertIn('今日预报 多云',photo['watermark']['weather'])
-                    weather.assert_awaited_once_with('南通')
+                    self.assertEqual(photo['watermark']['weather'],'多云 25℃')
+                    self.assertEqual(photo['watermark']['time_label'],'拍照时间')
+                    self.assertEqual(photo['watermark']['time'],'2026.10.14 09:00')
+                    weather.assert_called_once_with()
                     download = await client.get(photo['url'])
                     self.assertEqual(download.headers['content-type'],'image/jpeg')
                     self.assertEqual(Image.open(io.BytesIO(download.content)).format,'JPEG')
                     self.service.delete_file(self.worker,photo['id'])
-                    weather.side_effect = TimeoutError('forecast unavailable')
+                    weather.side_effect = TimeoutError('observation unavailable')
                     response = await client.post('/api/pre-shift-checks/files',params=params,content=raw.getvalue())
                     self.assertEqual(response.status_code,200,response.text)
                     photo = response.json()['data']
-                    self.assertEqual(photo['watermark']['weather'],'未获取')
+                    self.assertEqual(photo['watermark']['weather'],'')
                     self.service.delete_file(self.worker,photo['id'])
-                    async def revoke(_):
+                    def revoke():
                         user['modules'] = []
                         return {}
                     weather.side_effect = revoke

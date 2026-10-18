@@ -25,7 +25,7 @@
             <div v-if="r.loading&&!r.records.length" class="v2-repair-skeleton"><NSkeleton v-for="i in 5" :key="i" height="90px" :sharp="false" /></div>
             <NEmpty v-else-if="!r.records.length" :description="r.v2RecordError?'列表暂不可用，请重试':r.recordEmptyText" />
             <div v-else class="record-page-list">
-              <article v-for="record in r.records" :key="record.record_id" class="record-row" :class="{active:r.selectedRecord?.record_id===record.record_id,completed:r.repairRecordIsCompleted(record),'is-loading':r.loading}" tabindex="0" role="button" :aria-label="'打开维修项目：'+record.title" @click="r.requestSelectRecord(record,'followups')" @keydown.enter.prevent="r.requestSelectRecord(record,'followups')" @keydown.space.prevent="r.requestSelectRecord(record,'followups')">
+              <article v-for="record in r.records" :key="record.record_id" class="record-row" :class="{active:r.selectedRecord?.record_id===record.record_id,completed:r.repairRecordIsCompleted(record),'is-loading':r.loading}" tabindex="0" role="button" :aria-label="'打开维修项目：'+record.title" @click="r.requestSelectRecord(record,'flow')" @keydown.enter.self.prevent="r.requestSelectRecord(record,'flow')" @keydown.space.self.prevent="r.requestSelectRecord(record,'flow')">
                 <div class="v2-repair-row-copy"><strong :title="record.title">{{record.title || '未命名维修项目'}}</strong><div class="v2-repair-row-meta"><span>{{r.recordBuildingLabel(record)}}</span><span>{{r.v2SpecialtyLabel(record)}}</span><span><Clock3 :size="12" />{{r.recordFaultTimeLabel(record)}}</span></div></div>
                 <div class="v2-repair-row-state"><NTag size="small" :bordered="false" :type="r.repairRecordStateLocked(record)?'warning':r.repairRecordIsCompleted(record)?'success':'info'">{{r.repairRecordStateLocked(record)?'状态待核验':record.workflow||'状态未填写'}}</NTag><div class="v2-repair-row-progress"><NProgress v-if="r.v2ProgressKnown(record)" type="line" :height="4" :percentage="r.recordProgressPercent(record)" :show-indicator="false" /><small>{{r.v2ProgressKnown(record)?r.recordProgressPercent(record)+'%':'进度待核验'}}</small></div></div>
                 <NButton data-v2-navigation secondary type="primary" size="small" class="record-followup-button" :disabled="r.loading||r.v2Writing" @click.stop="r.requestSelectRecord(record,'followups')"><MessageSquarePlus :size="15" /><span>跟进 {{record.followup_count ?? '—'}}</span></NButton>
@@ -41,14 +41,15 @@
             <div class="project-drawer-body v2-repair-detail-body">
               <NSkeleton v-if="r.recordDetailLoading" text :repeat="8" />
               <template v-else>
-                <RepairFlowSteps context="project" :record="r.selectedRecord" :event="r.selectedEvent" :sync-status="r.projectSyncStatus?.status" :busy="r.v2Writing||r.prefillLoading" :actions="flowActions(r)" @select="action=>openFlowStep(action,r)" />
+                <RepairFlowSteps context="project" :record="r.selectedRecord" :event="r.selectedEvent" :sync-status="r.projectSyncStatus?.status" :busy="r.v2Writing||r.prefillLoading" :actions="flowActions(r)" :order="flowOrder(r)" :compact="r.editingRecordId&&r.activeWorkspaceTab!=='flow'" :active-step="r.activeWorkspaceTab" @select="action=>openFlowStep(action,r)" />
                 <NAlert v-if="r.selectedRecordReadOnly" type="warning" :bordered="false">{{r.selectedRecordStateLocked?'跟进状态尚未核验，当前只读。':'当前项目只读。'}}</NAlert>
                 <NAlert v-if="r.projectSyncStatus?.status==='pending'||r.projectSyncStatus?.status==='failed'" :type="r.projectSyncStatus.status==='failed'?'warning':'info'" :bordered="false"><NSpin v-if="r.projectSyncStatus.status==='pending'" :size="14" />{{r.projectSyncStatusText}}<NButton v-if="r.projectSyncStatus.status==='failed'" text :loading="r.syncRetrying" @click="r.retryProjectSync">重试同步</NButton></NAlert>
                 <NAlert v-if="r.submission.pending.value" :type="r.submission.status.value==='failed'?'error':'warning'" :bordered="false">{{r.submission.message.value}}<NButton text :disabled="r.submission.checking.value" @click="r.submission.check(true,true)">核验原任务</NButton></NAlert>
                 <NAlert v-if="r.projectConflict" type="warning" :bordered="false">{{r.projectConflict.message}}<div class="v2-repair-inline-actions"><NButton data-v2-navigation size="small" @click="r.copyCurrentProjectDraft">复制当前填写</NButton><NButton size="small" :loading="r.recordDetailLoading" @click="r.reloadLatestProject">读取最新内容</NButton></div></NAlert>
                 <NAlert v-else-if="r.messageText" :type="tone(r.messageTone)" :bordered="false">{{r.messageText}}</NAlert>
-                <NRadioGroup :value="r.activeWorkspaceTab" aria-label="维修办理内容" :disabled="r.v2Writing" @update:value="r.openWorkspaceTab"><NRadioButton v-if="r.editingRecordId" value="followups">跟进记录 {{r.selectedFollowupCount}}</NRadioButton><NRadioButton value="project">维修单信息</NRadioButton></NRadioGroup>
-                <NAlert v-if="r.activeWorkspaceTab==='followups'&&!r.selectedRecordReadOnly&&(!r.sourceEventId||!r.selectedRepairIds.length)" type="info" :bordered="false" class="v2-repair-source-hint"><div class="v2-repair-inline-actions"><span>{{!r.sourceEventId?'尚未关联事件与检修通告':'尚未关联检修通告'}}</span><NButton data-v2-navigation type="primary" secondary @click="r.openWorkspaceTab('project')">关联并自动填入</NButton></div></NAlert>
+                <NRadioGroup :value="r.activeWorkspaceTab" aria-label="维修办理内容" :disabled="r.v2Writing" @update:value="r.openWorkspaceTab"><NRadioButton v-if="r.editingRecordId" value="flow">办理流程</NRadioButton><NRadioButton v-if="r.editingRecordId" value="followups">跟进记录 {{r.selectedFollowupCount}}</NRadioButton><NRadioButton value="project">维修单信息</NRadioButton><NRadioButton v-if="r.editingRecordId" value="complete">完成核对</NRadioButton></NRadioGroup>
+                <section v-if="r.activeWorkspaceTab==='flow'&&r.editingRecordId" class="v2-repair-flow-actions" aria-label="继续办理"><div><h3>{{r.selectedRecordReadOnly?'查看已保存记录':'继续处理这项维修'}}</h3><span>{{r.selectedRepairIds.length?'已关联检修通告':'检修通告尚未关联，可先保存跟进记录'}}</span></div><NButton data-v2-navigation type="primary" :disabled="r.v2Writing" @click="r.openWorkspaceTab('followups')"><MessageSquarePlus :size="16" />{{r.selectedRecordReadOnly?'查看历史跟进':'填写跟进'}} · {{r.selectedFollowupCount}} 条</NButton><NButton v-if="noticeAllowed&&!r.selectedRecordReadOnly" data-v2-navigation :disabled="r.v2Writing" @click="r.requestOpenRepairNoticeWorkbench"><FileText :size="16" />{{r.selectedRecord?.source_repair_ids?.length?'核对检修通告':'办理检修通告'}}</NButton></section>
+                <section v-if="r.activeWorkspaceTab==='complete'" class="v2-repair-completion" aria-label="维修完成核对"><NAlert :type="r.selectedRecordStateLocked?'warning':r.repairRecordIsCompleted(r.selectedRecord||{})?'success':'info'" :bordered="false"><strong>{{r.selectedRecordStateLocked?'完成状态待核验':r.repairRecordIsCompleted(r.selectedRecord||{})?'维修已完成':'维修尚未完成'}}</strong><p>{{r.v2ProgressKnown(r.selectedRecord||{})?'已保存进度 '+r.recordProgressPercent(r.selectedRecord||{})+'%':'进度待核验'}} · 已保存 {{r.selectedFollowupCount}} 条跟进</p></NAlert><div class="v2-repair-inline-actions"><NButton data-v2-navigation :disabled="r.v2Writing" @click="r.openWorkspaceTab('followups')">查看历史跟进</NButton><NButton v-if="!r.selectedRecordReadOnly" type="primary" data-v2-navigation :disabled="r.v2Writing" @click="startCompletionFollowup(r)">填写完成跟进</NButton><NButton v-if="noticeAllowed&&!r.selectedRecordReadOnly" data-v2-navigation :disabled="r.v2Writing" @click="r.requestOpenRepairNoticeWorkbench">核对检修通告</NButton></div></section>
                 <div v-if="r.editingRecordId&&r.followupPanelMounted" v-show="r.activeWorkspaceTab==='followups'"><RepairFollowups :ref="value=>r.v2FollowupApi=value" embedded :scope="scope" :user-id="userId" :summary-record-id="r.editingRecordId" :summary-title="r.selectedRecordTitle" :read-only="r.selectedRecordReadOnly" :can-delete="canDelete" :refresh-version="r.repairSourceRefreshVersion" @changed="r.handleFollowupChanged" @source-refreshed="r.handleRepairSourceRefreshed" @dirty-changed="r.followupHasUnsavedChanges=$event" @count-changed="r.updateSelectedFollowupCount" @busy="r.v2FollowupBusy=$event" /></div>
                 <div v-show="r.activeWorkspaceTab==='project'" class="v2-repair-project-form">
                   <section class="v2-repair-source-flow" aria-label="关联资料自动填写" :aria-busy="r.prefillLoading">
@@ -68,7 +69,7 @@
             <footer v-if="!r.recordDetailLoading" class="v2-repair-detail-footer">
               <div class="v2-repair-save-state" :class="r.projectSaveStateTone"><span v-if="r.activeWorkspaceTab==='project'">{{r.projectSaveStateText}}</span><span v-else-if="r.followupHasUnsavedChanges">跟进有未保存修改</span></div>
               <div class="v2-repair-inline-actions">
-                <NButton v-if="r.editingRecordId&&noticeAllowed&&!r.selectedRecordReadOnly" data-v2-navigation :disabled="r.v2Writing" @click="r.requestOpenRepairNoticeWorkbench"><FileText :size="15" />检修通告</NButton>
+                <NButton v-if="r.editingRecordId&&noticeAllowed&&!r.selectedRecordReadOnly&&r.activeWorkspaceTab!=='flow'&&r.activeWorkspaceTab!=='complete'" data-v2-navigation :disabled="r.v2Writing" @click="r.requestOpenRepairNoticeWorkbench"><FileText :size="15" />检修通告</NButton>
                 <NDropdown v-if="r.activeWorkspaceTab==='project'&&!r.selectedRecordReadOnly" trigger="click" :options="recordOptions(r)" @select="value=>recordMore(value,r)"><NButton data-v2-navigation :disabled="r.v2Writing" aria-label="维修单更多操作"><Ellipsis :size="17" /></NButton></NDropdown>
                 <NButton v-if="r.activeWorkspaceTab==='project'&&!r.selectedRecordReadOnly" type="primary" :loading="r.saving" :disabled="!r.canSaveRecord" @click="r.saveRecord"><Save :size="16" />{{r.editingRecordId?'保存修改':'保存维修单'}}</NButton>
                 <NButton v-if="r.activeWorkspaceTab==='followups'&&r.v2FollowupApi?.action.canDelete" data-v2-navigation quaternary type="error" :disabled="r.v2Writing" @click="r.v2FollowupApi.remove">删除这条</NButton>
@@ -86,7 +87,7 @@
   </RepairController>
 </template>
 <script setup lang="ts">
-import { computed,ref } from 'vue';
+import { computed,nextTick,ref } from 'vue';
 import { NAlert,NButton,NDropdown,NEmpty,NInput,NPagination,NProgress,NRadioButton,NRadioGroup,NSkeleton,NSpin,NTag } from 'naive-ui';
 import { Check,Clock3,Ellipsis,FileText,MessageSquarePlus,Plus,RefreshCw,Save,Search,X } from 'lucide-vue-next';
 import RepairController from '../components/RepairManagementPage.vue';
@@ -94,7 +95,7 @@ import RepairFollowups from './RepairFollowups.vue';
 import RepairField from './RepairField.vue';
 import RepairPeoplePicker from '../components/RepairPeoplePicker.vue';
 import RepairFlowSteps from './RepairFlowSteps.vue';
-import type { RepairFlowAction } from './repairFlow';
+import type { RepairFlowAction,RepairFlowOrder } from './repairFlow';
 import RepairTaskCenter from '../components/RepairTaskCenter.vue';
 import RecordPickerDialog from '../components/RecordPickerDialog.vue';
 import ConfirmDialog from './RepairConfirmation.vue';
@@ -107,6 +108,8 @@ defineOptions({inheritAttrs:false});
 const noticeAllowed=computed(()=>canUseModule('repair'));
 const statusEntry=computed(()=>logicalUrl().pathname==='/repair-status');
 const listElement=ref<HTMLElement|null>(null);
+function flowOrder(r:any):RepairFlowOrder{return r.selectedRecord?.source_repair_ids?.length?'notice-first':'followup-first';}
+async function startCompletionFollowup(r:any){if(r.v2Writing||r.selectedRecordReadOnly)return;r.openWorkspaceTab('followups');await nextTick();r.v2FollowupApi?.create();}
 function changePage(r:any,value:number){r.changeRecordPage(value-r.recordPage);listElement.value?.scrollIntoView({block:'start',behavior:'auto'});}
 const moreOptions=[{key:'tasks',label:'任务中心'},{key:'sync',label:'同步飞书数据'}];
 const tone=(value:string)=>value==='failed'?'error':value==='warning'?'warning':'success';
@@ -119,6 +122,6 @@ function flowActions(r:any):RepairFlowAction[]{return ['event','project',...(r.e
 function openFlowStep(action:RepairFlowAction,r:any){
   if(r.v2Writing||r.prefillLoading||!flowActions(r).includes(action))return;
   if(action==='notice')r.requestOpenRepairNoticeWorkbench();
-  else r.openWorkspaceTab(action==='followups'||action==='complete'?'followups':'project');
+  else r.openWorkspaceTab(action==='followups'||action==='complete'?action:'project');
 }
 </script>

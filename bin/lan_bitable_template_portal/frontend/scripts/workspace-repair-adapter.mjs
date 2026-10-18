@@ -67,7 +67,7 @@ onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();window.removeEventListe
 `;
 
 const followupExtras = `
-const v2HistoryOpen = ref(false), v2EditingHistory = ref(false), v2EquipmentOpen = ref(false);
+const v2HistoryOpen = ref(true), v2EditingHistory = ref(false), v2EquipmentOpen = ref(false);
 const v2ReadError = ref(''), v2Ready = ref(false);
 const v2Locked = computed(() => props.readOnly || Boolean(editingRecordId.value) && !v2EditingHistory.value);
 const v2Submission = useRepairSubmission(() => 'followup:' + props.userId + ':' + props.scope + ':' + props.summaryRecordId, result => {
@@ -107,10 +107,11 @@ export function adaptRepairController(source, kind, exposedNames) {
   script = `import { proxyRefs } from 'vue';\n` + script;
   script = changeOnce(script, '  scope: string;', '  scope: string;\n  userId?: string;');
   if (kind === 'management') {
+    script = changeOnce(script, 'type WorkspaceTab = "project" | "followups";', 'type WorkspaceTab = "project" | "followups" | "flow" | "complete";');
     script = `import { useDialog, useMessage } from 'naive-ui';\nimport { registerNavigationGuard } from '../workspace-v2/navigation';\n` + script;
     script = changeOnce(script, 'const recordState = ref<RecordStateFilter>("all");', 'const recordState = ref<RecordStateFilter>(props.focusRecordId ? "all" : "active");');
     if(script.split('loadRecordDetailAndOpen(focused);').length!==4)throw new Error('Repair focus entry contract changed');
-    script = script.replaceAll('loadRecordDetailAndOpen(focused);','loadRecordDetailAndOpen(focused, new URLSearchParams(window.location.search).get("workspace_tab") === "followups" ? "followups" : "project");');
+    script = script.replaceAll('loadRecordDetailAndOpen(focused);','loadRecordDetailAndOpen(focused, new URLSearchParams(window.location.search).get("workspace_tab") === "followups" ? "followups" : new URLSearchParams(window.location.search).get("workspace_tab") === "project" ? "project" : "flow");');
     script = changeOnce(script, '`project:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`', '`project:${props.userId}:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`');
     script = changeOnce(script, '}, () => `project:${props.scope}`);', '});');
     script = changeOnce(script,'    && hasWritableDraft.value','    && hasWritableDraft.value\n    && !projectConflict.value\n    && (!submission.pending.value || submission.status.value === "failed")');

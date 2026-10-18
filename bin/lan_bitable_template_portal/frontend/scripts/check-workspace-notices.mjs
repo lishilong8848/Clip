@@ -7,6 +7,7 @@ import { chromium } from 'playwright';
 import { preview } from 'vite';
 import { build } from 'esbuild';
 import { runInNewContext } from 'node:vm';
+import {layoutApiFixture} from './layout-api-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repo = path.resolve(root, '../../..');
@@ -43,12 +44,14 @@ const server = await preview({ root, ...(process.env.CLIPFLOW_WORKSPACE_BUILD_DI
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 const errors = [], writes = [], oldPages = [], entry = '/assets/workspace-v2/index.html';
+const layouts=layoutApiFixture();
 let failLogout = true,detailReads=0;
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.origin !== origin) return route.abort();
+    if(await layouts.handle(route,'ou_notice_fixture'))return;
     const kind = url.searchParams.get('work_type') || 'maintenance';
     const data = fixtures[kind] || fixtures.maintenance;
     if (url.pathname === '/workbench-lite') { oldPages.push(req.url()); return route.fulfill({ contentType: 'text/html', body: data.html }); }
@@ -60,6 +63,9 @@ try {
     if (url.pathname === '/api/workbench') return ok(data.payload);
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });
     if (url.pathname === '/api/workbench/lite-detail') {detailReads++;return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });}
+    if (url.pathname === '/api/notice-alert-tags') return ok({status:'ready',title:'EA118机房B楼12台柴油发电机组维护保养变更',action:'update',tags:[{label:'变更',content:'12台柴油发电机组维护保养变更'}]});
+    if (url.pathname === '/api/notice-attachments') return ok({upload_id:'isolated-image',file_name:'确认截图.png',preview_url:'/api/notice-images/'+ 'a'.repeat(32)});
+    if (url.pathname.startsWith('/api/notice-images/')) return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6oDQAAAAASUVORK5CYII=','base64')});
     if (req.method() !== 'GET') {
       writes.push(url.pathname);
       if (url.pathname === '/api/workbench/draft') return ok({ draft: { version: 1 } });
@@ -102,7 +108,8 @@ try {
   for (const [index, kind] of Object.keys(fixtures).entries()) {
     await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=' + kind);
     await page.locator('.v2-notice-entry').first().waitFor();
-    assert.equal(await page.locator('[data-list="planned"] .v2-notice-filters').count(),1,'plan filters belong to the plan list');
+    assert.equal(await page.locator('.v2-notice-command .v2-notice-filters').count(),1,'shared notice filters stay beside the type controls');
+    assert.equal(await page.locator('[data-list="planned"]>header .v2-notice-plan-search').count(),1,'name search stays beside the plan title');
     assert.equal(await page.locator('[data-list="ongoing"] .v2-notice-filters').count(),0);
     assert.equal(await page.locator('iframe').count(), 0, 'new notice page must not embed legacy HTML');
     for (const width of index === 0 ? [1440,1920,360,390,430] : [1366]) {
@@ -170,6 +177,19 @@ try {
     await page.locator('[data-notice-section=relations]').scrollIntoViewIfNeeded();
     assert(await page.getByRole('button',{name:/^(重新)?查找目标通告$/}).isVisible(),'related-record tools are immediately accessible on the same page');
     await body.evaluate(el=>el.scrollTo({top:0}));
+    const tags=page.getByRole('complementary',{name:'通告推荐标签'});await tags.getByText('【变更】12台柴油发电机组维护保养变更',{exact:true}).waitFor();
+    const tagBox=await tags.boundingBox(),relationBox=await page.locator('[data-notice-section=relations]').boundingBox();
+    assert(tagBox.x>relationBox.x&&Math.abs(tagBox.y-relationBox.y)<12,'tags occupy the top-right, not the form footer');
+    for(const uploadKind of kind==='change'?['site','ali']:['maintenance','repair'].includes(kind)?['site']:[]){
+      await page.getByLabel(uploadKind==='ali'?'添加阿里确认截图':'添加现场照片',{exact:true}).setInputFiles({name:'确认截图.png',mimeType:'image/png',buffer:Buffer.from('isolated')});
+      const upload=page.locator('[data-notice-upload-kind='+uploadKind+']');await upload.getByText('本次新增 · 已就绪',{exact:true}).waitFor();
+      const image=await upload.locator('figure').last().boundingBox(),picker=await upload.locator('.v2-notice-upload').boundingBox();
+      assert(Math.abs(image.y-picker.y)<2&&picker.x>image.x,'screenshot picker stays beside the image');
+      assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' with an uploaded image fits the desktop viewport');
+      await page.screenshot({path:path.join(output,'compact-'+kind+'-'+uploadKind+'-upload.png'),fullPage:true});
+      await upload.getByRole('button',{name:'移除本次图片',exact:true}).click();
+    }
+    assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' common form fits a 1366x768 desktop viewport');
     assert.equal(await page.locator('.v2-notice-page-fields .n-pagination').count(),0,'notice fields never paginate');
     await page.screenshot({ path: path.join(output, `form-${kind}.png`), fullPage: true });
     await page.locator('.v2-notice-editor-footer').getByRole('button', { name: '关闭', exact: true }).click();

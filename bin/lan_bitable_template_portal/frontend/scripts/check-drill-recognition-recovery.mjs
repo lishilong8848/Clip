@@ -94,7 +94,12 @@ try {
   assert.equal(await page.getByText('文件已上传并完成初步识别，请核对配置后发布。',{exact:true}).count(),0);
   uploadMode='recovered';await upload();await slots.first().waitFor();
   assert.equal(await slots.count(),expected,'fresh list recovery must not be overwritten by the older POST response');
+  assert.equal(await slots.first().getAttribute('min'),'0');
+  await slots.first().fill('0');await slots.last().fill('10');
   await page.getByRole('button',{name:'保存配置',exact:true}).click();await page.locator('.drill-page').getByText('模板配置已保存',{exact:true}).waitFor();
+  assert.equal(listing[0].configuration.steps[0].signature_slots,0);
+  assert.equal(listing[0].configuration.steps.at(-1).signature_slots,10);
+  await page.reload();await slots.first().waitFor();assert.equal(await slots.first().inputValue(),'0');
   await panel.locator('details').filter({hasText:'步骤与签名人数'}).scrollIntoViewIfNeeded();
   await page.screenshot({path:path.join(shots,`${version}-${width}.png`),fullPage:true});
   assert.deepEqual(errors,[]);assert.equal(writes,2);

@@ -112,6 +112,13 @@ class DrillConfigurationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(again["status"], "completed")
         self.assertEqual(len(self.writes), 1)
 
+    async def test_zero_and_ten_signature_counts_are_saved_by_assistant(self):
+        result = await self.execute(self.prepare(), {"steps.0.signature_slots": 0, "steps.1.signature_slots": 10})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        steps = self.service.get_definition(self.definition["drill_id"])["configuration"]["steps"]
+        self.assertEqual([step["signature_slots"] for step in steps[:2]], [0, 10])
+        self.assertEqual(len(self.writes), 1)
+
     async def test_model_patch_is_visible_but_cannot_change_readonly_steps(self):
         config = copy.deepcopy(self.definition["configuration"])
         config["steps"][0]["signature_slots"] = 4
@@ -138,7 +145,7 @@ class DrillConfigurationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.writes, [])
 
     async def test_invalid_edits_leave_original_untouched(self):
-        for changed in ({"steps.0.signature_slots": 11}, {"steps.0.signature_slots": 1.5}, {"steps.0.signature_slots": False},
+        for changed in ({"steps.0.signature_slots": -1}, {"steps.0.signature_slots": 11}, {"steps.0.signature_slots": 1.5}, {"steps.0.signature_slots": False},
                         {"record_sheet": "陌生工作表"}, {"mapping.reviewer_signature": "arbitrary-file-path"}):
             plan = self.prepare()
             with self.subTest(changed=changed), self.assertRaises(AssistantError):

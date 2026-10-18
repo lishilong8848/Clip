@@ -22,7 +22,7 @@ const localFilters = {
   'MetricWidget.vue': ['v2-metric-toolbar'],
   'PreShiftCheck.vue': ['v2-check-toolbar'],
   'EventPeriodFilter.vue': ['v2-event-period'],
-  'NoticeWorkspace.vue': ['v2-notice-types', 'v2-notice-mobile-tabs'],
+  'NoticeWorkspace.vue': ['v2-notice-types', 'v2-notice-mobile-tabs', 'v2-notice-plan-search'],
   'RepairWorkspace.vue': ['v2-repair-state-row'],
   'RepairFollowups.vue': ['v2-repair-history-search'],
   'PermissionReview.vue': ['v2-review-filters'],

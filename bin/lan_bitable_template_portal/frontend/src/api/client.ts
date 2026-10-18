@@ -254,7 +254,7 @@ async function requestResponseJson(
 
 export type RemoteSourceRefreshKind = "maintenance" | "repair" | "change" | "event";
 
-export async function downloadFile(path: string, options: ApiRequestOptions = {}): Promise<void> {
+export async function requestFile(path: string, options: ApiRequestOptions = {}): Promise<File> {
   const { timeoutMs = 180_000, ...fetchOptions } = options;
   const requestSignal = requestSignalWithTimeout(fetchOptions.signal, timeoutMs);
   try {
@@ -277,14 +277,7 @@ export async function downloadFile(path: string, options: ApiRequestOptions = {}
     if (!blob.size) throw new ApiError("下载文件为空，请重试。");
     const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get("Content-Disposition") || "")?.[1];
     const fileName = encodedName ? decodeURIComponent(encodedName) : "下载文件";
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    return new File([blob], fileName, { type: blob.type });
   } catch (error) {
     if (requestSignal.signal.aborted) {
       throw new ApiError(requestSignal.timedOut() ? "文件生成或下载超时，请稍后重试。" : "下载已取消。");
@@ -298,6 +291,18 @@ export async function downloadFile(path: string, options: ApiRequestOptions = {}
   } finally {
     requestSignal.cleanup();
   }
+}
+
+export async function downloadFile(path: string, options: ApiRequestOptions = {}): Promise<void> {
+  const file = await requestFile(path, options);
+  const url = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = file.name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 type RemoteSourceRefreshOptions = {

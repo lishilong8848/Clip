@@ -555,6 +555,55 @@ class DrillManagementTests(unittest.TestCase):
                     self.assertEqual(sum(1 for root in drawings for prop in root.findall('.//{*}cNvPr') if prop.attrib.get('name') == '测试Logo'), 1)
                 reused = output.read_bytes()
 
+    def test_zero_signature_steps_save_publish_preview_and_generate(self) -> None:
+        for counts in ((0, 10, 0), (0, 0, 0)):
+            with self.subTest(counts=counts), tempfile.TemporaryDirectory() as temporary:
+                store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+                service = DrillManagementService(store, data_root=Path(temporary) / "drills")
+                source = _fixture_xlsx()
+                definition = service.create_definition(name="零人签名", year=2026, month=10,
+                    file_name="test.xlsx", source=source)
+                config = definition["configuration"]
+                for step, count in zip(config["steps"], counts):
+                    step["signature_slots"] = count
+                definition = service.save_configuration(definition["drill_id"], config, expected_version=1)
+                definition = service.publish(definition["drill_id"], expected_version=2)
+                restarted = DrillManagementService(store, data_root=Path(temporary) / "drills")
+                self.assertEqual([s["signature_slots"] for s in restarted.get_definition(definition["drill_id"])["configuration"]["steps"]], list(counts))
+                people = [{"record_id": f"p{i}", "name": f"人员{i}"} for i in range(10)]
+                execution = service.save_execution(definition["drill_id"], "A", {
+                    "drill_date": "2026-10-17", "first_start_time": "09:00",
+                    "commander": people[0], "participants": people,
+                    "step_signers": {str(s["row"]): [p["record_id"] for p in people[:s["signature_slots"]]] for s in config["steps"]},
+                }, expected_version=0)
+                self.assertEqual(execution["validation_errors"], [])
+                preview = service.preview_model(definition["drill_id"], "A", "record")
+                for cell in preview["signature_cells"]:
+                    if cell.get("layout") == "vertical":
+                        count = counts[int(cell["range"][1:]) - 13]
+                        self.assertEqual((cell["signature_slots"], len(cell["signers"])), (count, count))
+                result = service.generate(definition["drill_id"], "A",
+                    signatures={p["record_id"]: _signature_png() for p in people})
+                output = Path(result["generated"]["path"])
+                with zipfile.ZipFile(output) as archive:
+                    drawing = ET.fromstring(archive.read(_parse_workbook(output)["sheets"][0]["drawing_path"]))
+                for row in (13, 15):
+                    anchors = [a for a in drawing if (m := a.find("{*}from")) is not None
+                               and m.findtext("{*}row") == str(row - 1) and m.findtext("{*}col") == "7"]
+                    self.assertEqual(anchors, [], "zero-signature steps have neither signatures nor dividers")
+                self.assertEqual(Path(definition["source"]["path"]).read_bytes(), source)
+
+    def test_signature_count_rejects_invalid_values_without_saving(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DrillManagementService(LanPortalStateStore(Path(temporary) / "state.sqlite3"), data_root=Path(temporary) / "drills")
+            definition = service.create_definition(name="签名人数边界", year=2026, month=10, file_name="test.xlsx", source=_fixture_xlsx())
+            for value in (-1, 11, 0.5, False, None, ""):
+                config = service.get_definition(definition["drill_id"])["configuration"]
+                config["steps"][0]["signature_slots"] = value
+                with self.subTest(value=value), self.assertRaises(DrillError):
+                    service.save_configuration(definition["drill_id"], config, expected_version=1)
+                self.assertEqual(service.get_definition(definition["drill_id"])["version"], 1)
+
     def test_changed_step_signature_slots_replace_template_dividers(self) -> None:
         source = _replace_zip_part(
             _fixture_xlsx(), "xl/worksheets/sheet1.xml",

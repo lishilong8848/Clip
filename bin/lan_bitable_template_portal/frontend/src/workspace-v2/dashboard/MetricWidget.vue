@@ -22,7 +22,7 @@ import MotionChart from '../MotionChart.vue';
 import type { Widget } from './layout';
 import {useCapacity} from '../pageLayout';
 import {eventSnapshot} from '../eventSnapshots';
-const props=defineProps<{item:Widget;scope:string;user:Dict}>();
+const props=defineProps<{item:Widget;scope:string;selectedScopes?:string[];user:Dict}>();
 const emit=defineEmits<{open:[url:string]}>();
 const host=ref<HTMLElement>(),loading=ref(false),ready=ref(false),error=ref(''),stamp=ref(''),period=ref(props.item.period);
 const unknownCount=ref(0),capacity=useCapacity();
@@ -39,18 +39,20 @@ async function load(){
     let next:typeof items.value=[],nextRecords:Dict[]=[],nextStamp='',nextUnknown=0;
     if(props.item.kind==='events'){
       const range=props.item.display==='calendar'?eventCalendarRange(period.value):eventPeriodRange(period.value==='year'?'month':period.value),payloads:Dict[]=[];
-      for(const month of range.months)payloads.push(await eventSnapshot(props.scope,month,controller.signal));
+      for(const month of range.months)payloads.push(...await Promise.all((props.selectedScopes||[props.scope]).map(scope=>eventSnapshot(scope,month,controller.signal))));
       const data=mergeEventMonths(payloads,range);nextUnknown=Number(data.unknown_time_count||0);
       nextRecords=data.records;next=eventTrend(nextRecords,range,props.item.display==='calendar');nextStamp=range.caption;
     }else{
-      const data=await requestJson('/api/scope-overview?scope='+encodeURIComponent(props.scope),{signal:controller.signal});
-      if(data.source_snapshot_ready===false)throw new Error('本地资料尚未准备完成，不能判断为零。');
-      const values=data.scopes?.[props.scope];if(!values)throw new Error('所选楼栋统计尚未返回。');
+      const scopes=props.selectedScopes||[props.scope];
+      const payloads=await Promise.all(scopes.map(scope=>requestJson('/api/scope-overview?scope='+encodeURIComponent(scope),{signal:controller.signal})));
+      if(payloads.some(data=>data.source_snapshot_ready===false))throw new Error('本地资料尚未准备完成，不能判断为零。');
+      const values=payloads.map((data,index)=>data.scopes?.[scopes[index]!]);if(values.some(value=>!value))throw new Error('所选楼栋统计尚未返回。');
       for(const entry of modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))){
-        const value=count(values[entry.id+'_'+props.item.metric]);if(value===null)throw new Error('部分通告统计暂不可用，请进入业务页核对。');
-        next.push({label:entry.label,value,url:moduleUrl(entry,props.scope)});
+        const amounts=values.map(value=>count(value[entry.id+'_'+props.item.metric]));if(amounts.some(value=>value===null))throw new Error('部分通告统计暂不可用，请进入业务页核对。');
+        const url=new URL(moduleUrl(entry,props.scope),location.origin);if(props.selectedScopes)url.searchParams.set('buildings',props.selectedScopes.join(','));
+        next.push({label:entry.label,value:amounts.reduce<number>((sum,value)=>sum+(value??0),0),url:url.pathname+url.search});
       }
-      nextStamp=String(data.last_loaded_at||'当前状态');
+      nextStamp=String(payloads[0]?.last_loaded_at||'当前状态');
     }
     if(controller.signal.aborted)return;items.value=next;records.value=nextRecords;unknownCount.value=nextUnknown;stamp.value=nextStamp;ready.value=true;stale=false;
   }catch(e){if(!controller.signal.aborted)error.value=e instanceof Error?e.message:'统计读取失败，不能判断为零。';}
@@ -58,14 +60,14 @@ async function load(){
 }
 function drill(item?:typeof items.value[number]){
   if(!ready.value||unavailable.value)return;
-  if(props.item.kind==='notices'){emit('open',item?.url||'/workbench-lite?'+new URLSearchParams({scope:props.scope,work_type:(props.user.modules||[]).filter((id:string)=>NOTICE_IDS.includes(id)).length===1?(props.user.modules||[]).find((id:string)=>NOTICE_IDS.includes(id)):'all'}));return;}
+  if(props.item.kind==='notices'){emit('open',item?.url||'/workbench-lite?'+new URLSearchParams({scope:props.scope,work_type:(props.user.modules||[]).filter((id:string)=>NOTICE_IDS.includes(id)).length===1?(props.user.modules||[]).find((id:string)=>NOTICE_IDS.includes(id)):'all',...(props.selectedScopes?{buildings:props.selectedScopes.join(',')}:{})}));return;}
   details.value=item?.start!==undefined?records.value.filter(r=>{const t=occurrenceTimestamp(r.occurrence_time);return t>=item.start!&&t<item.end!;}):records.value;
   detailTitle.value=(item?.label||'全部')+' · 事件明细';showDetails.value=true;
 }
-function openEvent(row:Dict){emit('open','/?'+new URLSearchParams({mode:'events',detail:'1',scope:props.scope,record_id:eventRecordId(row),month:String(row.occurrence_time).slice(0,7)}));}
+function openEvent(row:Dict){const building=String(row.scope||row.building||'').match(/110|[ABCDEH]/)?.[0];emit('open','/?'+new URLSearchParams({mode:'events',detail:'1',scope:building&&props.selectedScopes?.includes(building)?building:props.scope,record_id:eventRecordId(row),month:String(row.occurrence_time).slice(0,7)}));}
 function reviewDates(){emit('open','/?'+new URLSearchParams({mode:'events',detail:'1',scope:props.scope}));}
 watch(()=>[props.item.period,props.item.display],()=>period.value=props.item.period==='year'&&props.item.display!=='calendar'?'month':props.item.period);
-watch(()=>[props.scope,props.item.kind,props.item.metric,period.value,props.item.display==='calendar'],()=>{abort?.abort();ready.value=false;items.value=[];records.value=[];unknownCount.value=0;showDetails.value=false;void load();});
+watch(()=>[props.scope,props.selectedScopes?.join(','),props.item.kind,props.item.metric,period.value,props.item.display==='calendar'],()=>{abort?.abort();ready.value=false;items.value=[];records.value=[];unknownCount.value=0;showDetails.value=false;void load();});
 function changed(){stale=true;void load();}
 function visibility(){if(document.hidden)abort?.abort();else if(stale||!ready.value)void load();}
 onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&(stale||!ready.value)&&!loading.value)void load();},{rootMargin:'80px'});if(host.value)observer.observe(host.value);window.addEventListener('clipflow-business-changed',changed);document.addEventListener('visibilitychange',visibility);});

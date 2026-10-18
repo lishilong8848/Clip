@@ -1,11 +1,10 @@
 <template>
-  <section ref="host" class="v2-repair-flow" aria-label="检修办理流程" :aria-busy="busy">
+  <section ref="host" class="v2-repair-flow" :class="{'is-compact':compact}" aria-label="检修办理流程" :aria-busy="busy">
     <h3>检修办理流程</h3>
-    <NSteps size="small" :theme-overrides="stepTheme" :vertical="narrow" :content-placement="narrow?'right':'bottom'">
-      <NStep v-for="step in steps" :key="step.id" :status="step.status" :data-flow-step="step.id" :data-flow-status="step.status">
+    <NSteps size="small" data-v2-navigation :theme-overrides="stepTheme" :vertical="narrow&&!compact" :content-placement="narrow&&!compact?'right':'bottom'">
+      <NStep v-for="step in steps" :key="step.id" :status="step.status" :data-flow-step="step.id" :data-flow-status="step.status" :class="{'is-active':activeStep===step.id,'is-actionable':actions?.includes(step.id)}" :role="actions?.includes(step.id)?'button':undefined" :tabindex="actions?.includes(step.id)?0:undefined" :aria-label="step.actionLabel" :aria-disabled="busy||!actions?.includes(step.id)" :aria-current="activeStep===step.id?'step':undefined" @click="select(step.id)" @keydown.enter.prevent="select(step.id)" @keydown.space.prevent="select(step.id)">
         <template #title>
-          <NButton v-if="actions?.includes(step.id)" text data-v2-navigation :disabled="busy" :aria-label="step.actionLabel" @click="select(step.id)">{{step.title}}<ChevronRight :size="13" aria-hidden="true" /></NButton>
-          <span v-else>{{step.title}}</span>
+          <span>{{step.title}}<ChevronRight v-if="actions?.includes(step.id)" :size="13" aria-hidden="true" /></span>
         </template>
         <span :key="step.description" class="v2-repair-flow-description" role="status">{{step.description}}</span>
       </NStep>
@@ -14,13 +13,13 @@
 </template>
 <script setup lang="ts">
 import { computed,onBeforeUnmount,onMounted,ref } from 'vue';
-import { NButton,NStep,NSteps,useThemeVars } from 'naive-ui';
+import { NStep,NSteps,useThemeVars } from 'naive-ui';
 import { ChevronRight } from 'lucide-vue-next';
-import { repairFlowSteps,type RepairFlowAction } from './repairFlow';
+import { repairFlowSteps,type RepairFlowAction,type RepairFlowOrder } from './repairFlow';
 import type { Dict } from './client';
-const props=defineProps<{context:'event'|'project';record?:Dict|null;event?:Dict|null;syncStatus?:string;actions?:RepairFlowAction[];busy?:boolean}>();
+const props=defineProps<{context:'event'|'project';record?:Dict|null;event?:Dict|null;syncStatus?:string;actions?:RepairFlowAction[];busy?:boolean;order?:RepairFlowOrder;activeStep?:string;compact?:boolean}>();
 const emit=defineEmits<{select:[action:RepairFlowAction]}>();
-const steps=computed(()=>repairFlowSteps(props.context,props.record,props.event,props.syncStatus));
+const steps=computed(()=>repairFlowSteps(props.context,props.record,props.event,props.syncStatus,props.order));
 const colors=useThemeVars();
 const stepTheme=computed(()=>({indicatorColorFinish:colors.value.successColor,indicatorBorderColorFinish:colors.value.successColor,indicatorTextColorFinish:colors.value.baseColor,splitorColorFinish:colors.value.successColor,headerTextColorFinish:colors.value.textColor1,headerTextColorWait:colors.value.textColor2,indicatorTextColorWait:colors.value.textColor2}));
 const host=ref<HTMLElement>(),narrow=ref(false);let observer:ResizeObserver|undefined;
@@ -42,6 +41,7 @@ onBeforeUnmount(()=>observer?.disconnect());
 .v2-repair-flow :deep(.n-step--process-status .n-step-indicator){box-shadow:0 0 0 4px color-mix(in srgb,var(--v2-blue) 12%,transparent)}
 .v2-repair-flow :deep(.n-steps--vertical .n-step-content){padding-bottom:12px}
 .v2-repair-flow-description{display:inline-block;animation:repair-flow-in 200ms ease-out}
+.v2-repair-flow .is-actionable{cursor:pointer;border-radius:6px;transition:background-color 180ms ease-out}.v2-repair-flow .is-actionable:hover,.v2-repair-flow .is-active{background:color-mix(in srgb,var(--v2-blue) 7%,transparent)}.v2-repair-flow .is-actionable:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}.v2-repair-flow :deep(.n-step-content-header__title>span){display:inline-flex;align-items:center;gap:2px}.v2-repair-flow.is-compact h3,.v2-repair-flow.is-compact .v2-repair-flow-description{display:none}.v2-repair-flow.is-compact{padding:6px 0}.v2-repair-flow.is-compact :deep(.n-step){padding-block:6px}.v2-repair-flow.is-compact :deep(.n-step-content__description){margin:0}.v2-repair-flow.is-compact :deep(.n-step-content-header__title){font-size:12px!important}.v2-repair-flow [aria-disabled=true]{cursor:default}
 @keyframes repair-flow-in{from{opacity:.35;transform:translateY(3px)}to{opacity:1;transform:none}}
 @media(max-width:760px){.v2-repair-flow :deep(.n-button){min-height:44px}.v2-repair-flow :deep(.n-steps--vertical .n-step-content){padding-bottom:5px}}
 @media(prefers-reduced-motion:reduce){.v2-repair-flow-description{animation:none}.v2-repair-flow :deep(*){transition:none!important;animation:none!important}}

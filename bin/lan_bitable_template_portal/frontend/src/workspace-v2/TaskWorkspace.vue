@@ -8,12 +8,12 @@
       <div class="v2-work-grid tasks-only">
         <section class="v2-task-section">
           <div class="v2-section-title"><h2 v-if="!embedded">{{ persona === 'personal' && view === 'home' ? '我的待办' : '未开始与进行中' }}</h2><NSelect v-if="taskTabs.length > 1" v-model:value="taskKind" class="v2-task-filter" :options="taskTabs" value-field="id" aria-label="待办业务分类" filterable /><NButton v-if="embedded" text :loading="taskLoading" aria-label="刷新待办" @click="refresh"><RefreshCw :size="15" /></NButton></div>
-          <OverviewPanel v-if="panelKinds.includes(taskKind)" :key="taskKind" :kind="taskKind" :user="user" :scope="scope" :scopes="scopes" tasks-only :brief="brief" @open="open" />
+          <OverviewPanel v-if="panelKinds.includes(taskKind)" :key="taskKind" :kind="taskKind" :user="user" :scope="scope" :scopes="scopes" :selected-scopes="selectedScopes" tasks-only :brief="brief" @open="open" />
           <template v-else>
           <NAlert v-if="taskError" type="warning" :bordered="false">{{ taskError }} <NButton text @click="loadTasks">重试</NButton></NAlert>
           <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading"><NList class="v2-mobile-tasks v2-task-operation-list"><NListItem v-for="row in visibleRows" :key="row.key">
             <article v-if="actionMode" class="v2-task-operation v2-clickable-card" @click="activateCard($event) && open(row.url)">
-              <div class="v2-task-operation-head"><NButton text class="v2-operation-title" data-v2-navigation @click="open(row.url)">{{row.title}}</NButton><NTag size="small" :bordered="false">{{row.status}}</NTag></div>
+              <div class="v2-task-operation-head"><NButton text class="v2-operation-title" :title="row.title" data-v2-navigation @click="open(row.url)"><span class="v2-operation-name">{{row.title}}</span></NButton><NTag size="small" :bordered="false">{{row.status}}</NTag></div>
               <div class="v2-mobile-task-meta"><span>{{row.scope}}</span><span v-if="row.time">{{row.time}}</span><span v-if="row.progress!==null">进度 {{row.progress}}%</span><span v-if="taskKind==='repair_management'">跟进 {{row.followupCount??'—'}} 条</span></div>
               <div class="v2-task-operation-actions"><NButton v-for="control in rowControls(row)" :key="control.label" data-v2-navigation size="small" secondary :type="control.primary?'primary':'default'" @click="open(control.url)"><component :is="control.icon" :size="14" />{{control.label}}</NButton></div>
             </article>
@@ -45,7 +45,7 @@ import { modules, moduleIcons, navigationModules, NOTICE_IDS, beijingDate, count
 import { eventStatusTone } from '../eventManagementUtils';
 import { personaFor, personaTitles } from './persona';
 import OverviewPanel from './OverviewPanel.vue';
-const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean}>();
+const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;selectedScopes?:string[];view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean}>();
 const emit=defineEmits<{open:[url:string]}>();
 const open=(url:string)=>emit('open',url);
 const today=beijingDate(), greeting=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',weekday:'long'}).format(new Date());
@@ -98,13 +98,13 @@ function rowControls(row:Dict){
 function toRows(items:Dict[],kind:string,ongoing=false):Dict[]{
   return items.map((item,i)=>{
     const fields=item.display_fields||item.fields||{},id=item.active_item_id||item.record_id||item.id;
-    const url=new URL(moduleUrl(modules.find(m=>m.id===kind)!,props.scope),location.origin);
+    const url=new URL(moduleUrl(modules.find(m=>m.id===kind)!,item._widget_scope||props.scope),location.origin);
     if(id)url.searchParams.set(item.active_item_id?'active_item_id':'record_id',id);
     return{
       key:kind+':'+String(id||i),
       title:text(item.title||item.name||item.notice_title||fields['维护总项']||fields['名称（标题）']||fields['名称']||fields['标题']||fields['维修名称']||fields['事件概述'])||'未命名事项',
       status:text(item.status_label||item.workflow||item.source_progress||item.source_status||item.status||fields['流程']||fields['维护实施状态'])||'待处理',
-      scope:text(item.building_codes||item.building||item.scope||fields['楼栋'])||scopeLabel.value,
+      scope:text(item.building_codes||item.building||item.scope||fields['楼栋']||item._widget_scope)||scopeLabel.value,
       time:text(item.time||item.start_time||item.updated_at||item.created_at||fields['开始时间']||fields['故障发生时间']),
       progress:count(item.progress_percent??item.progress),dueAt:item.end_time||item.deadline||'',url:url.pathname+url.search,
       ongoing,followupCount:count(item.followup_count),
@@ -115,18 +115,24 @@ async function loadTasks(){
   taskAbort?.abort();
   const kind=taskKind.value;if(!kind||panelKinds.includes(kind)||props.view==='functions'||disposed||document.hidden){rows.value=[];taskLoading.value=false;return;}
   const abort=new AbortController();taskAbort=abort;taskLoading.value=true;taskError.value='';rows.value=[];taskNote.value='';emptyText.value='当前分类暂无待处理事项';
-  const key=props.scope+':'+kind;
+  const selected=props.selectedScopes?.filter(scope=>props.scopes.some(option=>option.value===scope))||[props.scope];
+  const key=selected.join(',')+':'+kind;
+  const read=async(path:string,query:Record<string,string>)=>{
+    const result=await Promise.all(selected.map(async scope=>({scope,data:await requestJson(path+'?'+new URLSearchParams({...query,scope}),{signal:abort.signal})})));
+    const collect=(field:string)=>[...new Map(result.flatMap(({scope,data})=>items(data[field]).map((row):Dict=>({...row,_widget_scope:scope}))).map(row=>[(row.work_type||kind)+':'+(row.active_item_id||row.record_id||row.id||JSON.stringify(row)),row])).values()];
+    return {...result[0]?.data,records:collect('records'),ongoing:collect('ongoing'),categories:result.flatMap(({scope,data})=>items(data.categories).map(category=>({...category,tasks:items(category.tasks).map(row=>({...row,_widget_scope:scope}))}))),source_snapshot_ready:result.every(({data})=>data.source_snapshot_ready!==false)};
+  };
   try{
     const existing=cache.get('tasks:'+key);let data:Dict;
     if(existing&&Date.now()-existing.at<30000)data=existing.value;
-    else if(NOTICE_IDS.includes(kind))data=await requestJson('/api/workbench?'+new URLSearchParams({scope:props.scope,work_type:kind,month:Number(today.slice(5,7))+'月',sections:'records,ongoing,stats',records_page:'1',records_page_size:'30',ongoing_page:'1',ongoing_page_size:'30'}),{signal:abort.signal});
+    else if(NOTICE_IDS.includes(kind))data=await read('/api/workbench',{work_type:kind,month:Number(today.slice(5,7))+'月',sections:'records,ongoing,stats',records_page:'1',records_page_size:'30',ongoing_page:'1',ongoing_page_size:'30'});
     // This status API's "all" already means unfinished, so both widget types share the read.
-    else if(kind==='repair_management')data=await requestJson('/api/repair-management/status?'+new URLSearchParams({scope:props.scope,state:'all',period:'all',limit:'60',offset:'0'}),{signal:abort.signal});
-    else if(kind==='event')data=await requestJson('/api/events/monthly?'+new URLSearchParams({scope:props.scope,month:today.slice(0,7)}),{signal:abort.signal});
+    else if(kind==='repair_management')data=await read('/api/repair-management/status',{state:'all',period:'all',limit:'60',offset:'0'});
+    else if(kind==='event')data=await read('/api/events/monthly',{month:today.slice(0,7)});
     else if(kind==='learning'){
       const boot=await requestJson('/api/learning/bootstrap',{signal:abort.signal});
       data=boot.self_person?.id?{...(await requestJson('/api/learning/profile?'+new URLSearchParams({scope:boot.self_scope,person_id:boot.self_person.id,period:'7'}),{signal:abort.signal})),self_scope:boot.self_scope}: {unlinked:true};
-    }else data=await requestJson('/api/daily-tasks?'+new URLSearchParams({scope:props.scope,date:today}),{signal:abort.signal});
+    }else data=await read('/api/daily-tasks',{date:today});
     if(abort.signal.aborted)return;
     if(data.source_snapshot_ready===false)throw new Error('本地资料尚未准备完成，请稍后重试。');
     if(NOTICE_IDS.includes(kind)){
@@ -151,7 +157,7 @@ function visibility(){if(document.hidden){taskAbort?.abort();}else{void loadTask
 function resize(){compact.value=window.innerWidth<800;}
 watch(taskTabs,tabs=>{if(!tabs.some(t=>t.id===taskKind.value))taskKind.value=tabs.find(t=>t.id===props.initialKind)?.id||tabs[0]?.id||'';},{immediate:true});
 watch(()=>props.initialKind,kind=>{if(taskTabs.value.some(t=>t.id===kind))taskKind.value=kind!;});
-watch(()=>[taskKind.value,props.scope,props.view],()=>void loadTasks(),{flush:'post'});
+watch(()=>[taskKind.value,props.scope,props.selectedScopes?.join(','),props.view],()=>void loadTasks(),{flush:'post'});
 onMounted(()=>{void loadTasks();window.addEventListener('clipflow-business-changed',invalidate);window.addEventListener('resize',resize);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;taskAbort?.abort();window.removeEventListener('clipflow-business-changed',invalidate);window.removeEventListener('resize',resize);document.removeEventListener('visibilitychange',visibility);});
 </script>

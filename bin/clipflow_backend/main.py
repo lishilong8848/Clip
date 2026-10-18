@@ -11046,7 +11046,7 @@ class FastAPIPortalController:
                 raise PortalError(
                     f"演练步骤第 {row or '?'} 行执行人必须来自参演人员。"
                 )
-            if require_complete and "ECC" in str(step.get("location") or "").upper() and commander_id not in selected:
+            if require_complete and slots > 0 and "ECC" in str(step.get("location") or "").upper() and commander_id not in selected:
                 raise PortalError(
                     f"演练步骤第 {row or '?'} 行位置包含 ECC，请在任意签名位选择指挥人。"
                 )

@@ -12,7 +12,7 @@ export type TodoKind = typeof todoCatalog[number]['value'];
 export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean };
 export type TodoPage = { rows:TodoRow[]; more:boolean; note?:string };
 export type TodoSource = { id:string; page:number; more:boolean; load:(page:number, signal:AbortSignal)=>Promise<TodoPage> };
-export type TodoContext = { user:Dict; scope:string; scopes:{value:string;label:string}[] };
+export type TodoContext = { user:Dict; scope:string; scopes:{value:string;label:string}[]; selectedScopes?:string[] };
 export type TodoRead = (path:string, signal:AbortSignal)=>Promise<Dict>;
 
 export function todoOptions(user:Dict) { const granted:string[]=user.modules||[]; return ['guest','temporary'].includes(user.role)?[]:todoCatalog.filter(item=>item.value==='notices'?NOTICE_IDS.some(id=>granted.includes(id)):granted.includes(item.value)); }
@@ -40,6 +40,8 @@ export function sortTodos(input:TodoRow[], now=Date.now()):TodoRow[] {
 
 export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSource[] {
   if(!todoOptions(ctx.user).some(item=>item.value===kind))return [];
+  if(ctx.selectedScopes&&!['learning','signatures'].includes(kind))return [...new Set(ctx.selectedScopes)].filter(scope=>ctx.scopes.some(option=>option.value===scope)).flatMap(scope=>
+    todoSources(kind,{...ctx,scope,selectedScopes:undefined},get).map(source=>({...source,id:scope+':'+source.id})));
   const source=(id:string,load:TodoSource['load']):TodoSource=>({id,page:0,more:true,load});
   const read=(path:string,q:Dict,signal:AbortSignal)=>get(link(path,q),signal);
   const buildings=(supported:string)=>ctx.scopes.filter(s=>supported.includes(s.value)&&s.value.length===1&&(['ALL','CAMPUS',''].includes(ctx.scope)||ctx.scope===s.value)).map(s=>s.value);

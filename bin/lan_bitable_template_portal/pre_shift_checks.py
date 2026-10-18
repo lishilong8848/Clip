@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import uuid
@@ -22,7 +23,8 @@ from .pre_shift_schedule import normalize_frequency, occurrences_for_date, upcom
 TZ = dt.timezone(dt.timedelta(hours=8))
 SCOPES = ('110', 'A', 'B', 'C', 'D', 'E', 'H')
 DUTY = {'operator', 'shift_leader', 'duty'}
-ROSTER_VERSION = 2
+ROSTER_VERSION = 3
+REMINDER_LEAD_SECONDS = 600
 CLOUD_DETAIL_VERSION = 1
 
 ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.pdf', '.doc', '.docx',
@@ -31,12 +33,18 @@ IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
 MAX_FILE_BYTES = 20 * 1024 * 1024          # 20 MiB per file
 MAX_TASK_BYTES = 100 * 1024 * 1024         # 100 MiB per task
 MAX_FILES_PER_ITEM = 10
+PHOTO_PREVIEW_SECONDS = 3600
+MAX_PREVIEW_BYTES = 512 * 1024 * 1024
 
 
 class CheckError(Exception):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+class CheckDeliveryUncertain(CheckError):
+    pass
 
 
 def now():
@@ -137,8 +145,18 @@ class CheckService:
                     message_id TEXT DEFAULT '', sent INTEGER DEFAULT 0, first_attempt REAL DEFAULT 0,
                     lease REAL DEFAULT 0, retry_at REAL DEFAULT 0, error TEXT DEFAULT '');
                 CREATE INDEX IF NOT EXISTS pending_photos ON photo_deliveries(retry_at,lease) WHERE sent=0;
+                CREATE TABLE IF NOT EXISTS photo_previews(id TEXT PRIMARY KEY, actor_id TEXT NOT NULL,
+                    scope TEXT NOT NULL, session TEXT NOT NULL, size INTEGER NOT NULL, content_hash TEXT NOT NULL,
+                    expires REAL NOT NULL, lease REAL DEFAULT 0, request_hash TEXT DEFAULT '', result TEXT DEFAULT '');
+                CREATE INDEX IF NOT EXISTS photo_preview_expiry ON photo_previews(expires,lease);
+                CREATE TABLE IF NOT EXISTS photo_preferences(actor_id TEXT PRIMARY KEY, version INTEGER NOT NULL, style TEXT NOT NULL);
             ''')
             task_cols = {r[1] for r in conn.execute('PRAGMA table_info(tasks)')}
+            delivery_cols = {r[1] for r in conn.execute('PRAGMA table_info(deliveries)')}
+            for field, sql_type in {'message_id': "TEXT DEFAULT ''", 'sender_app_id': "TEXT DEFAULT ''",
+                                    'error': "TEXT DEFAULT ''", 'first_attempt': 'REAL DEFAULT 0'}.items():
+                if field not in delivery_cols:
+                    conn.execute(f'ALTER TABLE deliveries ADD COLUMN {field} {sql_type}')
             if 'version' not in {r[1] for r in conn.execute('PRAGMA table_info(rosters)')}:
                 conn.execute('ALTER TABLE rosters ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
             if 'evidence' not in task_cols:
@@ -210,6 +228,8 @@ class CheckService:
                 raise CheckError('清单已被其他管理人员修改，请重新读取。', 409)
             conn.execute('INSERT OR REPLACE INTO definitions VALUES(?,?,?,?,?)',
                          (scope, version + 1, dump(result), actor['id'], current.isoformat()))
+            if result and not stored['items']:
+                conn.execute('UPDATE rosters SET version=0')
             self.prepare_local(conn, current, [scope])
         self.wake.set()
         return {'version': version + 1, 'items': result}
@@ -259,7 +279,7 @@ class CheckService:
             return []
         people = [p for p in json.loads(row['people'])
                   if p.get('scope') == scope and p.get('shift') == shift]
-        return people if len(people) == 2 else []
+        return list({p['open_id']: p for p in people if p.get('open_id')}.values())
 
     def _clear_open_tasks(self, conn, current, scope):
         rows = [r['id'] for r in conn.execute(
@@ -338,8 +358,8 @@ class CheckService:
             for scope in [r['scope'] for r in conn.execute("SELECT scope FROM definitions WHERE items!='[]'")]:
                 definition = self.definition(scope, conn)
                 for day in (today, prior):
-                    groups = self._occurrence_groups(definition['items'], scope, day, current)
-                    if any(g['due'] <= current < g['deadline'] and g['day'] == prior for g in groups):
+                    groups = self._occurrence_groups(definition['items'], scope, day, current + dt.timedelta(seconds=REMINDER_LEAD_SECONDS))
+                    if any(g['due'] - dt.timedelta(seconds=REMINDER_LEAD_SECONDS) <= current < g['deadline'] and g['day'] == prior for g in groups):
                         return True
         return False
 
@@ -353,7 +373,8 @@ class CheckService:
         try:
             snapshot = self.roster(day)
             with self.connection(True) as conn:
-                warnings = snapshot.get('warnings', {})
+                configured = set(self.configured_scopes())
+                warnings = {scope: message for scope, message in snapshot.get('warnings', {}).items() if scope in configured}
                 conn.execute('INSERT OR REPLACE INTO rosters(day,people,retry_at,error,version) VALUES(?,?,?,?,?)',
                              (day, dump(snapshot['people']), current.timestamp() + 300 if warnings else 0, dump(warnings), ROSTER_VERSION))
         except Exception as exc:
@@ -363,8 +384,7 @@ class CheckService:
                               (str(exc) if isinstance(exc, CheckError) else '排班读取未完成。') + '5分钟后重试；不会按不完整名单推送。', ROSTER_VERSION))
 
     def prepare(self, current):
-        with self.connection() as conn:
-            configured = [row['scope'] for row in conn.execute("SELECT scope FROM definitions WHERE items!='[]'")]
+        configured = self.configured_scopes()
         if not configured or not self.roster:
             return
         # Previous-night tasks remain durable through midnight; do not re-read yesterday's changing view
@@ -376,6 +396,10 @@ class CheckService:
             self._ensure_roster(current, prior)
         with self.connection(True) as conn:
             self.prepare_local(conn, current, configured)
+
+    def configured_scopes(self):
+        with self.connection() as conn:
+            return [row['scope'] for row in conn.execute("SELECT scope FROM definitions WHERE items!='[]'")]
 
     @staticmethod
     def can_submit(actor, task, current):
@@ -449,7 +473,7 @@ class CheckService:
                 roster_error = json.loads(roster_error).get(scope, '')
             return {'scope': scope, 'scopes': scopes_for(actor), 'can_manage': can_manage(actor),
                     'definition': definition, 'tasks': tasks,
-                    'roster_ready': roster_ready, 'roster_error': roster_error or self.last_error,
+                    'roster_ready': roster_ready, 'roster_error': (roster_error or self.last_error) if definition['items'] else '',
                     'overview': self._overview(actor, conn, current) if can_manage(actor) else None,
                     'server_time': current.isoformat()}
 
@@ -510,13 +534,13 @@ class CheckService:
         if task['submitted'] and task['evidence']:
             ev = json.loads(task['evidence'])
             refs = ev.get('item_files', [])
-            return [self._public_ref(r, actor, task, current, can_delete=False)
+            return [{**self._public_ref(r, actor, task, current, can_delete=False), **self._photo_status(conn, r['id'], actor)}
                     for r in refs if r.get('kind') != 'handover']
         rows = conn.execute("SELECT * FROM files WHERE task_id=? AND kind='item' ORDER BY created", (task['id'],)).fetchall()
         out = []
         for row in rows:
             f = dict(row)
-            out.append(self._public_file(f, actor, task, current))
+            out.append({**self._public_file(f, actor, task, current), **self._photo_status(conn, f['id'], actor)})
         return out
 
     def _public_ref(self, ref, actor, task, current, can_delete=False):
@@ -545,7 +569,8 @@ class CheckService:
         delivery = conn.execute('SELECT * FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
         if not delivery:
             return {}
-        return {'watermarked': True, 'watermark': json.loads(delivery['watermark']),
+        stamp = json.loads(delivery['watermark'])
+        return {'watermarked': bool(stamp.get('applied', True) or stamp.get('existing')), 'watermark': stamp,
                 **({'delivery_status': 'sent' if delivery['sent'] else 'pending',
                     'delivery_error': delivery['error']} if delivery['recipient'] == actor['id'] else {})}
 
@@ -620,7 +645,7 @@ class CheckService:
         self.wake.set()
         return {'completed': True, 'already_completed': False, 'actor_name': actor['name']}
 
-    def stage_upload(self, actor, task_id, item_id, kind, name, current=None):
+    def stage_upload(self, actor, task_id, item_id, kind, name, current=None, *, captured=False):
         """Validate upload intent before reading request body; returns a session dict."""
         current = current or now()
         if kind not in ('item', 'handover'):
@@ -631,6 +656,8 @@ class CheckService:
             raise CheckError('不允许该文件类型。')
         if kind == 'handover' and ext not in IMAGE_EXTS:
             raise CheckError('交接班照片仅支持图片。')
+        if not isinstance(captured, bool) or captured and ext not in IMAGE_EXTS:
+            raise CheckError('拍照仅支持图片。')
         if kind == 'item' and not task_id:
             raise CheckError('缺少检查任务标识。')
         with self.connection() as conn:
@@ -652,6 +679,7 @@ class CheckService:
         return {'path': str(staging), 'max_bytes': MAX_FILE_BYTES, 'kind': kind,
                 'task_id': task_id, 'item_id': item_id or '', 'name': name,
                 'actor_id': actor.get('id'), 'scope': task['scope'],
+                'captured': captured,
                 'definition_version': task['definition_version']}
 
     def abort_upload(self, session):
@@ -661,7 +689,180 @@ class CheckService:
         except OSError:
             pass
 
-    def commit_upload(self, actor, session, size, current=None):
+    def _preview_path(self, session):
+        path = Path(session['path']).resolve()
+        if path.parent != self.staging_dir.resolve() or not re.fullmatch(r'[a-f0-9]{32}\.upload', path.name):
+            raise CheckError('照片暂存路径无效。', 409)
+        return path
+
+    def cleanup_photo_previews(self, current=None):
+        current = current or now()
+        with self.connection(True) as conn:
+            rows = conn.execute('SELECT id,session FROM photo_previews WHERE expires<? AND lease<=? LIMIT 100',
+                                (current.timestamp(), current.timestamp())).fetchall()
+            for row in rows:
+                try:
+                    path = self._preview_path(json.loads(row['session']))
+                except (ValueError, KeyError, TypeError, CheckError):
+                    conn.execute('DELETE FROM photo_previews WHERE id=?', (row['id'],))
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
+                conn.execute('DELETE FROM photo_previews WHERE id=?', (row['id'],))
+            referenced = set()
+            for row in conn.execute('SELECT session FROM photo_previews'):
+                try:
+                    referenced.add(str(self._preview_path(json.loads(row[0]))))
+                except (ValueError, KeyError, TypeError, CheckError):
+                    continue
+        for index, path in enumerate(self.staging_dir.glob('*.upload')):
+            if index >= 500:
+                break
+            try:
+                if str(path) not in referenced and path.stat().st_mtime < current.timestamp() - PHOTO_PREVIEW_SECONDS * 2:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def photo_preferences(self, actor):
+        from .pre_shift_photo import photo_style
+        with self.connection() as conn:
+            row = conn.execute('SELECT * FROM photo_preferences WHERE actor_id=?', (actor['id'],)).fetchone()
+        if not row:
+            return {'version': 0, 'style': {}}
+        try:
+            style = photo_style(json.loads(row['style']))
+        except (ValueError, TypeError):
+            return {'version': row['version'], 'style': {}, 'warning': '上次水印样式无法读取，本次使用默认样式。'}
+        return {'version': row['version'], 'style': style}
+
+    def retain_photo_preview(self, actor, session, size, current=None):
+        current = current or now()
+        self.cleanup_photo_previews(current)
+        info = self.commit_upload(actor, session, size, current, preview=True)
+        preferences = self.photo_preferences(actor)
+        session = {**session, 'photo_inspection': {key: info[key] for key in ('original_time', 'time_origin', 'time_source')},
+                   'preference_version': preferences['version']}
+        path = self._preview_path(session)
+        with path.open('rb') as stream:
+            content_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
+        key = uuid.uuid4().hex
+        with self.connection(True) as conn:
+            count, total = conn.execute("SELECT COUNT(*),COALESCE(SUM(size),0) FROM photo_previews WHERE actor_id=? AND result=''", (actor['id'],)).fetchone()
+            global_total = conn.execute("SELECT COALESCE(SUM(size),0) FROM photo_previews WHERE result=''").fetchone()[0]
+            if count >= MAX_FILES_PER_ITEM or total + size > MAX_TASK_BYTES or global_total + size > MAX_PREVIEW_BYTES:
+                raise CheckError('待确认照片较多，请先完成或取消已有照片后重试。', 409)
+            conn.execute('INSERT INTO photo_previews(id,actor_id,scope,session,size,content_hash,expires) VALUES(?,?,?,?,?,?,?)',
+                         (key, actor['id'], session['scope'], dump(session), size, content_hash, current.timestamp() + PHOTO_PREVIEW_SECONDS))
+        return {**info, 'preview_id': key, 'preferences': preferences}
+
+    def _photo_preview(self, conn, actor, key, current):
+        if not isinstance(key, str) or not re.fullmatch(r'[a-f0-9]{32}', key):
+            raise CheckError('照片预览不存在或已过期，请重新选择。', 404)
+        row = conn.execute('SELECT * FROM photo_previews WHERE id=? AND actor_id=?', (key, actor['id'])).fetchone()
+        if not row:
+            raise CheckError('照片预览不存在或不属于当前账号。', 404)
+        authorized(actor, row['scope'])
+        if row['expires'] < current.timestamp():
+            raise CheckError('照片预览已过期，请重新选择。', 410)
+        return row
+
+    def discard_photo_preview(self, actor, key, current=None):
+        current = current or now()
+        with self.connection(True) as conn:
+            row = self._photo_preview(conn, actor, key, current)
+            if row['result']:
+                return {'cancelled': False, 'uploaded': True}
+            if row['request_hash']:
+                raise CheckError('照片已提交上传，请先核验列表中的原结果，不要重复上传。', 409)
+            self._preview_path(json.loads(row['session'])).unlink(missing_ok=True)
+            conn.execute('DELETE FROM photo_previews WHERE id=?', (key,))
+        return {'cancelled': True}
+
+    def _complete_photo_preview(self, actor, key, session, options, remember, result, current, lease):
+        from .pre_shift_photo import photo_style
+        with self.connection(True) as conn:
+            row = conn.execute('SELECT lease FROM photo_previews WHERE id=? AND actor_id=?', (key, actor['id'])).fetchone()
+            if not row or row['lease'] != lease:
+                raise CheckError('原上传仍在核验，请稍候重试原预览。', 409)
+            if remember and options['enabled'] and not options['existing'] and result.get('watermark', {}).get('applied'):
+                row = conn.execute('SELECT version FROM photo_preferences WHERE actor_id=?', (actor['id'],)).fetchone()
+                version = row['version'] if row else 0
+                if version != session['preference_version']:
+                    result['preference_warning'] = '照片已上传；另一设备已更新水印样式，本次未覆盖。'
+                else:
+                    conn.execute('INSERT OR REPLACE INTO photo_preferences VALUES(?,?,?)',
+                                 (actor['id'], version + 1, dump(photo_style(options))))
+            conn.execute('UPDATE photo_previews SET result=?,lease=0,expires=? WHERE id=?',
+                         (dump(result), current.timestamp() + PHOTO_PREVIEW_SECONDS, key))
+
+    def commit_photo_preview(self, actor, key, watermark, remember=True, current=None):
+        from .pre_shift_photo import photo_options
+        current = current or now()
+        if type(remember) is not bool:
+            raise CheckError('水印样式记忆参数无效。')
+        try:
+            options = photo_options(watermark)
+            if options is None:
+                raise ValueError('请先核对水印设置。')
+        except ValueError as exc:
+            raise CheckError(str(exc)) from None
+        request_hash = hashlib.sha256(json.dumps([options, remember], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        with self.connection(True) as conn:
+            row = self._photo_preview(conn, actor, key, current)
+            if row['request_hash'] and row['request_hash'] != request_hash:
+                raise CheckError('该预览已提交过其他设置，请核验原照片，不要重复上传。', 409)
+            if row['result']:
+                result = json.loads(row['result'])
+                if not conn.execute('SELECT 1 FROM files WHERE id=?', (result['id'],)).fetchone():
+                    raise CheckError('原照片已被移除，请重新选择。', 409)
+                return {**result, **self._photo_status(conn, result['id'], actor)}
+            if row['lease'] > current.timestamp():
+                raise CheckError('照片正在上传，请稍候重试原预览。', 409)
+            session = json.loads(row['session'])
+            source = self._preview_path(session)
+            if not source.is_file():
+                raise CheckError('照片暂存已丢失，请重新选择。', 410)
+            lease = current.timestamp() + 180
+            conn.execute('UPDATE photo_previews SET lease=?,request_hash=?,expires=? WHERE id=?',
+                         (lease, request_hash, current.timestamp() + PHOTO_PREVIEW_SECONDS, key))
+        work = {**session, 'path': str(self.staging_dir / f'{uuid.uuid4().hex}.upload')}
+        try:
+            with source.open('rb') as stream:
+                if hashlib.file_digest(stream, 'sha256').hexdigest() != row['content_hash']:
+                    raise CheckError('照片暂存已变化，请重新选择。', 409)
+            shutil.copyfile(source, work['path'])
+            # Fixed ordering preserves the old web form's file dedup identity.
+            ordered = {field: options[field] for field in ('enabled', 'existing', 'scale', 'title', 'area', 'weather', 'location', 'time', 'logo', 'position') if field in options}
+            work['photo_capture'] = {**session.get('photo_capture', {}), 'watermark': ordered}
+            result = self.commit_upload(actor, work, row['size'], current)
+            try:
+                self._complete_photo_preview(actor, key, session, options, remember, result, current, lease)
+            except Exception:
+                logging.exception('Photo saved; preview receipt/preferences will recover on retry')
+                result['preference_warning'] = '照片已上传，水印样式暂未保存；请勿重复上传。'
+            else:
+                try:
+                    source.unlink(missing_ok=True)
+                except OSError:
+                    logging.warning('Saved photo preview source will be removed by expiry cleanup')
+            return result
+        except CheckError:
+            raise
+        except Exception:
+            logging.exception('Photo preview commit requires retry')
+            raise CheckError('照片上传结果暂未确认，请保留当前预览重试，不要重新上传。', 503) from None
+        finally:
+            self.abort_upload(work)
+            try:
+                with self.connection(True) as conn:
+                    conn.execute('UPDATE photo_previews SET lease=0 WHERE id=? AND lease=?', (key, lease))
+            except sqlite3.Error:
+                logging.exception('Photo preview lease will expire automatically')
+
+    def commit_upload(self, actor, session, size, current=None, *, preview=False):
         """Re-validate and commit a streamed upload. ``size`` is final byte count."""
         current = current or now()
         staging = Path(session['path'])
@@ -688,6 +889,50 @@ class CheckService:
             self.abort_upload(session)
             raise CheckError('文件内容与扩展名不符或无效。')
         try:
+            from .pre_shift_photo import inspect_photo, photo_options
+            try:
+                options = photo_options((session.get('photo_capture') or {}).get('watermark'))
+                if options is not None and options['enabled'] and Path(name).suffix.lower() in IMAGE_EXTS:
+                    from PIL import Image
+                    with Image.open(staging) as image:
+                        marker = image.info.get('comment', b'')
+                    if isinstance(marker, bytes) and marker.startswith(b'ClipFlowWatermark:'):
+                        options = {**options, 'enabled':False, 'existing':True}
+            except ValueError as exc:
+                raise CheckError(str(exc)) from None
+            if preview:
+                if Path(name).suffix.lower() not in IMAGE_EXTS:
+                    raise CheckError('照片预览仅支持图片。')
+                with self.connection() as conn:
+                    task = conn.execute('SELECT * FROM tasks WHERE id=?',(session['task_id'],)).fetchone()
+                    if not task or actor.get('id') != session.get('actor_id'):
+                        raise CheckError('上传身份或任务已变化，请重新选择。',409)
+                    authorized(actor,task['scope'])
+                    if session['kind']=='item' and (not self.can_submit(actor,task,current)
+                            or session['item_id'] not in {i['id'] for i in json.loads(task['items'])}):
+                        raise CheckError('当前检查项不能上传照片。',403)
+                    if session['kind']=='handover' and not self._is_roster_or_duty(actor,task):
+                        raise CheckError('当前账号不能上传交接班照片。',403)
+                return inspect_photo(staging,session['scope'],current,session.get('photo_weather'),
+                                     handover=kind=='handover',capture=session.get('photo_capture'))
+            session['photo_options'] = options
+            capture = {key: value for key, value in (session.get('photo_capture') or {}).items() if key != '_time_audit'}
+            if options is not None and Path(name).suffix.lower() in IMAGE_EXTS:
+                from PIL import Image
+                from .pre_shift_photo import _photo_time, watermark_details, time_audit
+                info = session.get('photo_inspection')
+                if not info:
+                    with Image.open(staging) as image:
+                        original = _photo_time(image.getexif(), current)
+                        details = watermark_details(session['scope'], current, exif=image.getexif(), capture=capture)
+                    origin = 'exif' if original else 'camera' if details['time'] != '未获取' else 'unknown'
+                    original = original or (details['time'].replace('.', '-') if details['time'] != '未获取' else '')
+                    info = {'original_time': original, 'time_origin': origin,
+                            'time_source': '照片拍摄信息' if original else '未识别拍摄时间'}
+                display_time = options['time'] if options['enabled'] and not options['existing'] else info.get('original_time', '')
+                session['photo_audit'] = time_audit(info, display_time, actor, current)
+                capture['_time_audit'] = session['photo_audit']
+            session['photo_capture'] = capture
             if kind == 'item':
                 return self._commit_item_file(actor, session, staging, size, current)
             return self._commit_handover(actor, session, staging, size, current)
@@ -754,6 +999,23 @@ class CheckService:
             content_hash = hashlib.file_digest(fh, 'sha256').hexdigest()
         ext = Path(session['name']).suffix.lower()
         file_id = uuid.uuid4().hex
+        watermark = None
+        rendered = self.staging_dir / f'{file_id}.jpg'
+        name = session['name']
+        options = session.get('photo_options')
+        stamp_enabled = options['enabled'] and not options['existing'] if options is not None else session.get('captured')
+        if options is not None:
+            content_hash = hashlib.sha256((content_hash + dump(options)).encode()).hexdigest()
+        if stamp_enabled:
+            content_hash = hashlib.sha256(('camera-watermark-v1:' + content_hash).encode()).hexdigest()
+            from .pre_shift_photo import render_handover
+            try:
+                watermark = render_handover(staging, rendered, session['scope'], current, session.get('photo_weather'), handover=False, capture=session.get('photo_capture'))
+                ext, size = '.jpg', rendered.stat().st_size
+                name = Path(name).stem[:100] + '_班前检查水印.jpg'
+            except (ValueError, OSError) as exc:
+                rendered.unlink(missing_ok=True)
+                raise CheckError('检查照片水印生成失败：' + str(exc)) from exc
         final = self.files_dir / f'{file_id}{ext}'
         try:
             with self.connection(True) as conn:
@@ -772,8 +1034,8 @@ class CheckService:
                     "SELECT * FROM files WHERE task_id=? AND item_id=? AND kind='item' AND uploader_id=? AND content_hash=? LIMIT 1",
                     (session['task_id'], session['item_id'], actor['id'], content_hash)).fetchone()
                 if existing:
-                    return self._public_dict(existing['id'], existing['item_id'], existing['name'],
-                                             existing['size'], bool(existing['is_image']))
+                    return {**self._public_dict(existing['id'], existing['item_id'], existing['name'],
+                                             existing['size'], bool(existing['is_image'])), **self._photo_status(conn, existing['id'], actor)}
                 count = conn.execute("SELECT COUNT(*) FROM files WHERE task_id=? AND item_id=? AND kind='item' AND submitted=0",
                                      (session['task_id'], session['item_id'])).fetchone()[0]
                 if count >= MAX_FILES_PER_ITEM:
@@ -782,14 +1044,21 @@ class CheckService:
                                      (session['task_id'],)).fetchone()[0]
                 if total + size > MAX_TASK_BYTES:
                     raise CheckError('单个检查任务附件合计不能超过100MiB。')
-                os.replace(staging, final)
+                os.replace(rendered if watermark else staging, final)
                 created = current.isoformat()
                 conn.execute(
                     "INSERT INTO files(id,task_id,item_id,kind,day,scope,shift,name,size,is_image,disk_name,uploader_id,uploader_name,created,content_hash) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (file_id, session['task_id'], session.get('item_id'), 'item', task['day'], task['scope'],
-                     task['shift'], session['name'], size, 1 if ext in IMAGE_EXTS else 0, final.name,
+                     task['shift'], name, size, 1 if ext in IMAGE_EXTS else 0, final.name,
                      actor['id'], actor['name'], created, content_hash))
+                if watermark:
+                    conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
+                                 (file_id, actor['id'], dump(watermark)))
+                elif options is not None and ext in IMAGE_EXTS:
+                    watermark = {'applied':False,'existing':options['existing'], 'audit': session.get('photo_audit', {})}
+                    conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
+                                 (file_id, actor['id'], dump(watermark)))
         except Exception:
             try:
                 if final.exists():
@@ -797,8 +1066,13 @@ class CheckService:
             except OSError:
                 pass
             raise
-        return self._public_dict(file_id, session.get('item_id'), session['name'], size,
-                                 ext in IMAGE_EXTS)
+        finally:
+            rendered.unlink(missing_ok=True)
+            self.abort_upload(session)
+        if watermark:
+            self.wake.set()
+        return {**self._public_dict(file_id, session.get('item_id'), name, size, ext in IMAGE_EXTS),
+                **({'watermarked': bool(watermark.get('applied',True) or watermark.get('existing')), 'watermark': watermark, 'delivery_status': 'pending'} if watermark else {})}
 
     def _commit_handover(self, actor, session, staging, size, current):
         if actor.get('id') != session.get('actor_id'):
@@ -806,17 +1080,22 @@ class CheckService:
         with open(staging, 'rb') as fh:
             content_hash = hashlib.file_digest(fh, 'sha256').hexdigest()
         file_id = uuid.uuid4().hex
-        final = self.files_dir / f'{file_id}.jpg'
+        options = session.get('photo_options')
+        stamp_enabled = options['enabled'] and not options['existing'] if options is not None else True
+        if options is not None:
+            content_hash = hashlib.sha256((content_hash + dump(options)).encode()).hexdigest()
+        final = self.files_dir / (file_id + ('.jpg' if stamp_enabled else Path(session['name']).suffix.lower()))
         rendered = self.staging_dir / f'{file_id}.jpg'
-        name = Path(session['name']).stem[:100] + '_交接班水印.jpg'
+        name = Path(session['name']).stem[:100] + '_交接班水印.jpg' if stamp_enabled else session['name']
         try:
             authorized(actor, session['scope'])
             from .pre_shift_photo import render_handover
             try:
-                watermark = render_handover(staging, rendered, session['scope'], current, session.get('photo_weather'))
+                watermark = (render_handover(staging, rendered, session['scope'], current, session.get('photo_weather'), capture=session.get('photo_capture'))
+                             if stamp_enabled else {'applied':False,'existing':options['existing'], 'audit': session.get('photo_audit', {})})
             except (ValueError, OSError) as exc:
                 raise CheckError('交接班照片水印生成失败：' + str(exc)) from exc
-            size = rendered.stat().st_size
+            size = (rendered if stamp_enabled else staging).stat().st_size
             with self.connection(True) as conn:
                 task = conn.execute('SELECT * FROM tasks WHERE id=?', (session['task_id'],)).fetchone()
                 if task is None:
@@ -832,7 +1111,7 @@ class CheckService:
                                                  bool(exists['is_image'])), **self._photo_status(conn, exists['id'], actor)}
                     self.abort_upload(session)
                     raise CheckError('该班次交接班照片已存在，不能重复上传。', 409)
-                os.replace(rendered, final)
+                os.replace(rendered if stamp_enabled else staging, final)
                 created = current.isoformat()
                 conn.execute(
                     "INSERT INTO files(id,task_id,item_id,kind,day,scope,shift,name,size,is_image,disk_name,uploader_id,uploader_name,created,content_hash) "
@@ -854,7 +1133,7 @@ class CheckService:
             rendered.unlink(missing_ok=True)
             self.abort_upload(session)
         self.wake.set()
-        return {**self._public_dict(file_id, '', name, size, True), 'watermarked': True,
+        return {**self._public_dict(file_id, '', name, size, True), 'watermarked': bool(watermark.get('applied',True) or watermark.get('existing')),
                 'watermark': watermark, 'delivery_status': 'pending'}
 
     def _bump_shift_cloud(self, conn, day, scope, shift):
@@ -910,6 +1189,9 @@ class CheckService:
                     raise CheckError('仅上传人可删除检查附件。', 403)
                 if not self.can_submit(actor, task, current):
                     raise CheckError('当前账号不能删除该检查附件。', 403)
+                delivery = conn.execute('SELECT lease FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
+                if delivery and delivery['lease'] > current.timestamp():
+                    raise CheckError('水印照片正在发送给本人，请稍后再移除。', 409)
             disk = row['disk_name']
             conn.execute('DELETE FROM files WHERE id=?', (file_id,))
             conn.execute('DELETE FROM photo_deliveries WHERE file_id=?', (file_id,))
@@ -925,8 +1207,8 @@ class CheckService:
             return
         with self.connection() as conn:
             tasks = [dict(row) for row in conn.execute(
-                "SELECT * FROM tasks WHERE submitted='' AND items!='[]' AND scope IN (SELECT scope FROM definitions WHERE items!='[]') AND due<=? AND deadline>?",
-                (current.timestamp(), current.timestamp()))]
+                    "SELECT * FROM tasks WHERE submitted='' AND items!='[]' AND scope IN (SELECT scope FROM definitions WHERE items!='[]') AND due<=? AND deadline>? ORDER BY due,id",
+                (current.timestamp() + REMINDER_LEAD_SECONDS, current.timestamp()))]
         if not tasks:
             return
         base = str(self.portal_url() or '').rstrip('/')
@@ -934,13 +1216,10 @@ class CheckService:
             self.last_error = '班前检查访问地址未配置，暂未推送。'
             return
         for task in tasks:
-            slot = int((current.timestamp() - task['due']) // 7200)
+            slot = max(0, int((current.timestamp() - task['due']) // 7200))
             for person in json.loads(task['people']):
                 if self.stop_event.is_set():
                     return
-                if self.wake.is_set():
-                    self.wake.clear()
-                    self.sync(current)
                 key = f"{task['id']}:{slot}:{person['open_id']}"
                 with self.connection(True) as conn:
                     latest = conn.execute('SELECT * FROM tasks WHERE id=?', (task['id'],)).fetchone()
@@ -952,23 +1231,46 @@ class CheckService:
                         break
                     row = conn.execute('SELECT * FROM deliveries WHERE id=?', (key,)).fetchone()
                     if row and (row['sent'] or row['lease'] > current.timestamp()):
+                        if not row['sent'] and row['error']:
+                            self.last_error = row['error']
                         continue
-                    conn.execute('INSERT OR REPLACE INTO deliveries VALUES(?,?,0)', (key, current.timestamp() + 300))
-                label = '班前检查' if slot == 0 else '班前检查未完成提醒'
+                    if row and row['first_attempt'] and current.timestamp() - row['first_attempt'] >= 50 * 60:
+                        self.last_error = '班前检查原消息回执未确认，请管理员核对；未重复新增同一轮消息。'
+                        conn.execute('UPDATE deliveries SET error=? WHERE id=?', (self.last_error, key))
+                        continue
+                    conn.execute('INSERT OR IGNORE INTO deliveries(id) VALUES(?)', (key,))
+                    conn.execute('UPDATE deliveries SET lease=?,first_attempt=CASE WHEN first_attempt=0 THEN ? ELSE first_attempt END WHERE id=?',
+                                 (current.timestamp() + 300, current.timestamp(), key))
+                label = '班前检查预提醒' if slot == 0 and current.timestamp() < task['due'] else '班前检查' if slot == 0 else '班前检查未完成提醒'
+                items = json.loads(latest['items'])
+                summary = '\n'.join(f"{index + 1}. {item['text']}" for index, item in enumerate(items[:8]))
+                if len(items) > 8:
+                    summary += f'\n其余{len(items) - 8}项请打开清单查看。'
+                due_text = dt.datetime.fromtimestamp(task['due'], TZ).strftime('%m-%d %H:%M')
                 card = {'config': {'wide_screen_mode': True},
                     'header': {'template': 'blue' if slot == 0 else 'orange', 'title': {'tag': 'plain_text', 'content': label}},
                     'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content':
-                        f"{task['day']} · {task['scope']}楼 · {task['shift']}班\n本楼任意一名值班人员或值班账号提交本次清单即可。请逐项检查，有异常时填写备注。"}},
+                        f"{task['day']} · {task['scope']}楼 · {task['shift']}班\n计划检查：{due_text}，共{len(items)}项\n{summary}\n本楼任意一名值班人员或值班账号提交本次清单即可。请逐项检查，有异常时填写备注。"}},
                         {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '打开班前检查'},
                             'url': base + '/assets/workspace-v2/index.html?__page=/&pre_shift=1'}]}]}
                 try:
                     result = self.sender(person['open_id'], card, 'pre-shift:' + key)
                     if not result[0]:
-                        raise CheckError('班前检查消息发送失败，稍后重试。')
+                        raise CheckError(str(result[1] or '班前检查消息发送失败，稍后重试。'))
+                    receipts = result[2] if len(result) > 2 and isinstance(result[2], list) else []
+                    receipt = next((r for r in receipts if r.get('open_id') == person['open_id']
+                                    and re.fullmatch(r'om_[A-Za-z0-9]+', str(r.get('message_id') or ''))
+                                    and r.get('sender_app_id')), None)
+                    if not receipt:
+                        raise CheckDeliveryUncertain('班前检查未取得有效投递回执，等待原任务核验。')
                     with self.connection(True) as conn:
-                        conn.execute('UPDATE deliveries SET sent=1 WHERE id=?', (key,))
-                except Exception:
-                    self.last_error = '班前检查消息暂未送达，后台将自动重试。'
+                        conn.execute("UPDATE deliveries SET sent=1,lease=0,error='',message_id=?,sender_app_id=? WHERE id=?",
+                                     (receipt['message_id'], receipt['sender_app_id'], key))
+                except Exception as exc:
+                    self.last_error = str(exc) if isinstance(exc, CheckError) else '班前检查消息暂未确认送达，后台将核验原任务。'
+                    with self.connection(True) as conn:
+                        conn.execute('UPDATE deliveries SET error=?,first_attempt=CASE WHEN ? THEN 0 ELSE first_attempt END WHERE id=?',
+                                     (self.last_error, isinstance(exc, CheckError) and not isinstance(exc, CheckDeliveryUncertain), key))
 
     def deliver_photos(self, current):
         if not self.photo_sender:
@@ -1104,7 +1406,7 @@ class CheckService:
             self.wake.clear()
             current = current or now()
             self.last_error = ''
-            self.sync(current)
+            self.cleanup_photo_previews(current)
             self.prepare(current)
             self.notify(current)
             self.sync(current)

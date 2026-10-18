@@ -11,12 +11,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lan_bitable_template_portal.pre_shift_checks import CheckService, CheckError, TZ, windows
+from lan_bitable_template_portal.pre_shift_checks import CheckService, CheckError, CheckDeliveryUncertain, TZ, windows
 from lan_bitable_template_portal.pre_shift_cloud import CheckCloud, read_roster
 
 DAY = '2026-10-14'
 def at(value):
     return dt.datetime.fromisoformat(value).replace(tzinfo=TZ)
+
+def receipt(recipient, *_):
+    return True, 'ok', [{'open_id': recipient, 'message_id': 'om_test', 'sender_app_id': 'cli_agent'}]
 
 
 class CheckTests(unittest.TestCase):
@@ -27,7 +30,7 @@ class CheckTests(unittest.TestCase):
         self.worker = {'id': 'ou_staff1', 'name': '值班员一', 'level': 'L4', 'scope_rules': ['A'], 'home_scope': 'A', 'category': 'operator'}
         self.peer = {**self.worker, 'id': 'ou_staff2', 'name': '值班长二', 'category': 'shift_leader'}
         self.roster = Mock(return_value={'people': [{'scope': 'A', 'shift': shift, 'open_id': f'ou_staff{i}', 'name': f'人员{i}'} for shift in ('白', '夜') for i in (1, 2)], 'warnings': {}})
-        self.sender = Mock(return_value=(True, '', {}))
+        self.sender = Mock(side_effect=receipt)
         self.cloud = Mock()
         self.cloud.upsert.return_value = 'rec_test'
         self.service = CheckService(self.temp.name, roster=self.roster, cloud=self.cloud, sender=self.sender, portal_url=lambda: 'http://portal:18766')
@@ -42,9 +45,9 @@ class CheckTests(unittest.TestCase):
         return self.service.submit(actor or self.worker, DAY + ':A:' + shift, 1, self.answers, current or self.current)
 
     def test_schedule_and_stop_after_either_person_submits(self):
-        self.service.tick(self.current - dt.timedelta(seconds=1))
+        self.service.tick(self.current - dt.timedelta(minutes=10, seconds=1))
         self.assertEqual(self.sender.call_count, 0)
-        self.service.tick(self.current)
+        self.service.tick(self.current - dt.timedelta(minutes=10))
         self.assertEqual(self.sender.call_count, 2)
         self.service.tick(self.current + dt.timedelta(minutes=119))
         self.assertEqual(self.sender.call_count, 2)
@@ -56,6 +59,81 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(self.roster.call_count, 1)
         self.assertEqual(self.service.state(self.worker, 'A', self.current)['tasks'][0]['actor_name'], '值班长二')
         self.assertEqual(self.cloud.upsert.call_count, 1)
+
+    def test_night_prealert_groups_items_and_does_not_repeat_at_due_or_restart(self):
+        due = at(DAY + 'T17:50:00')
+        self.service.prepare(due)
+        self.service.submit(self.worker, DAY + ':A:白', 1, self.answers, due)
+        self.service.notify(due - dt.timedelta(minutes=10, seconds=1))
+        self.sender.assert_not_called()
+        self.service.notify(due - dt.timedelta(minutes=10))
+        self.assertEqual(self.sender.call_count, 2)
+        for call in self.sender.call_args_list:
+            self.assertIn(':夜:0:', call.args[2])
+            content = call.args[1]['elements'][0]['text']['content']
+            self.assertIn('共2项', content)
+            self.assertIn('检查测试项一', content)
+            self.assertIn('检查测试项二', content)
+        restarted = CheckService(self.temp.name, roster=self.roster, sender=self.sender, portal_url=lambda:'https://fixture.invalid')
+        restarted.tick(due)
+        self.assertEqual(self.sender.call_count, 2)
+        self.submit(self.peer, shift='夜', current=due)
+        restarted.tick(due + dt.timedelta(hours=2))
+        self.assertEqual(self.sender.call_count, 2)
+
+    def test_prealert_partial_roster_sends_resolved_person_then_only_missing_person(self):
+        full = self.roster.return_value['people']
+        self.roster.side_effect = [{'people':[p for p in full if p['open_id']=='ou_staff1'], 'warnings':{'A':'一人待核对'}},
+                                  {'people':full,'warnings':{}}]
+        current = self.current - dt.timedelta(minutes=10)
+        self.service.tick(current)
+        self.assertEqual(self.sender.call_count, 1)
+        self.service.tick(current + dt.timedelta(minutes=5))
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_staff1','ou_staff2'])
+
+    def test_uncertain_receipts_are_persisted_and_not_retried_beyond_dedup_window(self):
+        self.sender.side_effect = CheckDeliveryUncertain('回执丢失')
+        self.service.tick(self.current)
+        self.service.tick(self.current + dt.timedelta(minutes=5))
+        self.assertEqual(self.sender.call_count, 4)
+        self.assertEqual(self.sender.call_args_list[0].args[2], self.sender.call_args_list[2].args[2])
+        restarted = CheckService(self.temp.name, roster=self.roster, sender=self.sender, portal_url=lambda:'https://fixture.invalid')
+        restarted.tick(self.current + dt.timedelta(minutes=50))
+        self.assertEqual(self.sender.call_count, 4)
+        with self.service.connection() as db:
+            rows = db.execute('SELECT sent,message_id,error FROM deliveries').fetchall()
+        self.assertTrue(all(row['sent']==0 and row['message_id']=='' and row['error'] for row in rows))
+
+    def test_definite_failure_can_retry_later_and_requires_valid_receipt(self):
+        self.sender.side_effect = CheckError('应用暂未就绪')
+        self.service.tick(self.current)
+        self.sender.side_effect = lambda *_:(True, 'ok', [])
+        self.service.tick(self.current + dt.timedelta(hours=1))
+        with self.service.connection() as db:
+            self.assertEqual(db.execute('SELECT SUM(sent) FROM deliveries').fetchone()[0],0)
+        self.sender.side_effect = receipt
+        self.service.tick(self.current + dt.timedelta(hours=1, minutes=5))
+        with self.service.connection() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM deliveries WHERE sent=1 AND message_id!=\'\'').fetchone()[0],2)
+
+    def test_unconfigured_scope_hides_cached_roster_errors_and_never_sends(self):
+        self.service.prepare(self.current)
+        with self.service.connection(True) as db:
+            db.execute('UPDATE rosters SET error=?', (json.dumps({'110':'未找到身份'}),))
+        self.service.last_error = '后台发送暂未完成'
+        self.assertEqual(self.service.state(self.admin,'110',self.current)['roster_error'],'')
+        self.service.save_definition(self.admin,'A',1,[])
+        self.service.tick(self.current)
+        self.sender.assert_not_called()
+        self.assertEqual(self.service.state(self.admin,'A',self.current)['roster_error'],'')
+
+    def test_due_reminders_run_before_cloud_attachment_sync(self):
+        order = []
+        with patch.object(self.service,'prepare',side_effect=lambda *_:order.append('prepare')), patch.object(
+            self.service,'notify',side_effect=lambda *_:order.append('notify')), patch.object(
+            self.service,'sync',side_effect=lambda *_:order.append('sync')):
+            self.service.tick(self.current)
+        self.assertEqual(order[:3],['prepare','notify','sync'])
 
     def test_missing_or_cleared_checklist_never_sends_initial_or_repeat_reminders(self):
         self.service.prepare(self.current)
@@ -73,7 +151,7 @@ class CheckTests(unittest.TestCase):
         self.service.prepare(self.current)
         def send(*_):
             self.service.save_definition(self.admin, 'A', 1, [])
-            return True, '', {}
+            return receipt(*_)
         self.sender.side_effect = send
         self.service.notify(self.current)
         self.service.notify(self.current + dt.timedelta(hours=2))
@@ -141,7 +219,7 @@ class CheckTests(unittest.TestCase):
         self.service.prepare(self.current)
         def send(*_):
             self.submit(self.peer)
-            return True, '', {}
+            return receipt(*_)
         self.sender.side_effect = send
         self.service.notify(self.current)
         self.assertEqual(self.sender.call_count, 1)
@@ -391,13 +469,13 @@ class CheckTests(unittest.TestCase):
         data = {'code': 0, 'data': {'items': [{'fields': fields}, {'fields': {**fields, '机楼': '110站', '人员（文本）':'站员', '人员': {'users': [{'id': 'ou_station','name':'站员'}]}}}], 'has_more': False}}
         directory=[{'record_id':oid,'name':name,'open_id':oid,'scopes':[scope],'selectable':True} for oid,name,scope in [('ou_one','一','A'),('ou_two','二','A'),('ou_station','站员','110')]]
         result = read_roster(SimpleNamespace(_request_json=lambda *a, **kw: data,get_permission_directory_people=lambda:{'items':directory}), DAY)
-        self.assertEqual(len(result['people']), 2)
-        self.assertIn('110', result['warnings'])
+        self.assertEqual(len(result['people']), 3)
+        self.assertIn('夜班排班未读取到', result['warnings']['110'])
         self.roster.return_value = result
         self.service.tick(self.current)
         self.assertEqual(self.sender.call_count, 2)
-        self.assertFalse(self.service.state(self.worker, 'A', self.current)['roster_error'])
-        self.assertIn('1/2人', self.service.state(self.admin, '110', self.current)['roster_error'])
+        self.assertIn('夜班排班未读取到', self.service.state(self.worker, 'A', self.current)['roster_error'])
+        self.assertEqual(self.service.state(self.admin, '110', self.current)['roster_error'], '')
 
 
 class RouteTests(unittest.TestCase):

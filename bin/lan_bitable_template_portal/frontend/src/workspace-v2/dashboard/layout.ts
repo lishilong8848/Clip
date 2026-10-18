@@ -4,6 +4,7 @@ import { personaFor } from '../persona';
 import { randomHexId } from '../../browserStorage';
 import { chartViews,type ChartView } from '../vipboard';
 import {todoOptions,todoSelection,type TodoKind} from '../businessTodos';
+import {sanitizeWidgetScope} from './widgetScopes';
 
 export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift' | 'notice_actions' | 'repair_actions' | 'module';
 export type Widget = {
@@ -95,7 +96,7 @@ export function sanitize(value:unknown,user:Dict,scopes:string[]):Layout{
     if(item.kind==='module'&&(!links.includes(item.module)||widgets.some(w=>w.kind==='module'&&w.module===item.module)))continue;
     seen.add(item.id);const w=integer(item.w,6,item.kind==='module'?4:3,12);
     const presentation=presentationOptions(item.kind).some(p=>p.value===item.presentation)?item.presentation:'default';
-    widgets.push({id:item.id,kind:item.kind,title:typeof item.title==='string'?item.title.trim().slice(0,40):catalog.find(c=>c.kind===item.kind)!.title,module:(item.kind==='module'?links:granted).includes(item.module)?item.module:'',scope:scopes.includes(item.scope)?item.scope:'current',display:displayOptions(item.kind).some(option=>option.value===item.display)?item.display:'bar',period:item.period==='year'&&item.kind==='events'&&item.display==='calendar'?'year':item.period==='month'||item.period==='year'?'month':'week',metric:item.metric==='pending'?'pending':'ongoing',presentation,links:Array.isArray(item.links)?[...new Set(item.links.filter(id=>links.includes(id)))]:[],x:integer(item.x,0,0,12-w),y:integer(item.y,0,0,1000),w,h:integer(item.h,item.kind==='module'?12:5,item.kind==='module'?6:3,item.kind==='module'?30:12)});
+    widgets.push({id:item.id,kind:item.kind,title:typeof item.title==='string'?item.title.trim().slice(0,40):catalog.find(c=>c.kind===item.kind)!.title,module:(item.kind==='module'?links:granted).includes(item.module)?item.module:'',scope:sanitizeWidgetScope(item.scope,scopes),display:displayOptions(item.kind).some(option=>option.value===item.display)?item.display:'bar',period:item.period==='year'&&item.kind==='events'&&item.display==='calendar'?'year':item.period==='month'||item.period==='year'?'month':'week',metric:item.metric==='pending'?'pending':'ongoing',presentation,links:Array.isArray(item.links)?[...new Set(item.links.filter(id=>links.includes(id)))]:[],x:integer(item.x,0,0,12-w),y:integer(item.y,0,0,1000),w,h:integer(item.h,item.kind==='module'?12:5,item.kind==='module'?6:3,item.kind==='module'?30:12)});
   }
   for(const item of widgets)if(item.kind==='tasks'){
     const original=(value as Layout).widgets.find(row=>row.id===item.id);

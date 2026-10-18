@@ -1083,17 +1083,20 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
     for raw in supplied_steps:
         if not isinstance(raw, dict):
             continue
+        raw_slots = raw.get("signature_slots")
+        if isinstance(raw_slots, bool) or not re.fullmatch(r"[+-]?\d+", str(raw_slots).strip()):
+            raise DrillError("演练步骤签名人数须为 0–10 之间的整数。")
         try:
             row = int(raw.get("row") or 0)
-            slots = int(raw.get("signature_slots") or 0)
+            slots = int(raw_slots)
         except (TypeError, ValueError) as exc:
             raise DrillError("演练步骤行号或签名人数无效。") from exc
         if row in supplied_slots:
             raise DrillError(f"演练步骤第 {row} 行重复。")
         if row <= 0 or row > DRILL_MAX_SOURCE_ROWS:
             raise DrillError("演练步骤行号无效。")
-        if slots not in range(1, DRILL_MAX_PARTICIPANTS + 1):
-            raise DrillError(f"第 {row} 行步骤签名人数必须在 1–10 人之间。")
+        if slots not in range(0, DRILL_MAX_PARTICIPANTS + 1):
+            raise DrillError(f"第 {row} 行步骤签名人数必须在 0–10 人之间。")
         supplied_slots[row] = slots
 
     detected_by_row = {int(item["row"]): item for item in detected_record["steps"]}
@@ -1113,8 +1116,8 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
                 record, row, _column_number(step_mapping["executor_col"])
             ),
         )
-        if slots not in range(1, DRILL_MAX_PARTICIPANTS + 1):
-            raise DrillError(f"第 {row} 行步骤签名人数必须在 1–10 人之间。")
+        if slots not in range(0, DRILL_MAX_PARTICIPANTS + 1):
+            raise DrillError(f"第 {row} 行步骤签名人数必须在 0–10 人之间。")
         if not content:
             raise DrillError(f"演练记录表第 {row} 行缺少步骤内容。")
         normalized_steps.append(
@@ -1397,7 +1400,7 @@ def _validate_execution(definition: dict[str, Any], execution: dict[str, Any]) -
             continue
         if len(assigned) != len(set(assigned)) or any(item not in selected for item in assigned):
             errors.append(f"第 {row} 行步骤执行人必须来自参演人员且不能重复。")
-        if "ECC" in str(step.get("location") or "").upper() and commander["record_id"] not in assigned:
+        if int(step.get("signature_slots") or 0) > 0 and "ECC" in str(step.get("location") or "").upper() and commander["record_id"] not in assigned:
             errors.append(f"第 {row} 行 ECC 步骤需选择指挥人签名。")
     return errors
 
@@ -2305,7 +2308,7 @@ def _verify_generated_workbook(
                     anchor for anchor in drawing_root
                     if _is_step_signature_divider(anchor, sheet, bounds)
                 ]
-                expected_dividers = sum(int(step["signature_slots"]) - 1 for step in configuration.get("steps") or [])
+                expected_dividers = sum(max(0, int(step["signature_slots"]) - 1) for step in configuration.get("steps") or [])
                 if len(dividers) != expected_dividers:
                     raise DrillError("生成文件中的步骤签名分隔线数量不正确。")
                 for step, (_row, _col, _left, _top, _width, height) in zip(

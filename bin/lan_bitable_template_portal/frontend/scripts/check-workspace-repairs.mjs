@@ -101,7 +101,7 @@ async function newPage(width=1440,height=950,night=false){
   return page;
 }
 const detail=page=>page.locator('.v2-repair-detail');
-async function openFirst(page){await page.locator('.record-row').first().click();await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).waitFor();}
+async function openFirst(page,followups=true){await page.locator('.record-row').first().click();await detail(page).getByRole('region',{name:'继续办理'}).waitFor();assert.equal(await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).count(),0,'opening a record starts with its actionable workflow');if(followups){await detail(page).getByText(/^跟进记录 \d+$/).click();await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).waitFor();}}
 async function noOverflow(page){assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'no page horizontal overflow');}
 async function fieldRect(page,label){return detail(page).getByLabel(label,{exact:true}).evaluate(el=>{const box=el.closest('.n-form-item').getBoundingClientRect();return {x:box.x,y:box.y,width:box.width};});}
 async function checkFieldContrast(page){
@@ -118,14 +118,17 @@ try{
   assert.equal(await page.locator('.v2-repair-workspace>.v2-repair-state-row').count(),0,'no duplicate state toolbar above the list');
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
   assert.equal(await page.locator('.record-row').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
-  await openFirst(page);await noOverflow(page);
+  await openFirst(page,false);await noOverflow(page);
   const flow=detail(page).getByRole('region',{name:'检修办理流程'});
   assert.equal(await flow.locator('[data-flow-step]').count(),5);
   assert.equal(await flow.locator('[data-flow-step="project"]').getAttribute('data-flow-status'),'finish');
-  assert.equal(await flow.locator('[data-flow-step="complete"]').getAttribute('data-flow-status'),'process');
+  assert.equal(await flow.locator('[data-flow-step="followups"]').getAttribute('data-flow-status'),'process');
+  assert.equal(await flow.locator('[data-flow-step="complete"]').getAttribute('data-flow-status'),'wait');
+  assert.equal(await detail(page).getByLabel('检修办理顺序').count(),0,'workflow order comes from the saved association, not another choice');
   assert.match(await flow.locator('[data-flow-step="event"]').innerText(),/转检修待核对/);
   assert.match(await flow.locator('[data-flow-step="notice"]').innerText(),/发送状态需核对/);
   await flow.scrollIntoViewIfNeeded();
+  await page.screenshot({path:path.join(output,'workflow-overview-desktop.png')});
   const flowTitles=await flow.locator('.n-step-content-header__title').evaluateAll(nodes=>nodes.map(el=>({text:el.textContent,width:el.getBoundingClientRect().width,height:el.getBoundingClientRect().height,flex:getComputedStyle(el).flex})));
   await flow.screenshot({path:path.join(output,'repair-flow-desktop.png')});
   assert(flowTitles.every(title=>title.height<=44),'step titles must not collapse: '+JSON.stringify(flowTitles));
@@ -165,7 +168,7 @@ try{
   fixture.conflict=true;await detail(page).getByRole('textbox',{name:'备注',exact:true}).fill('当前填写应保留');await detail(page).getByRole('button',{name:'保存修改',exact:true}).click();await detail(page).locator('.n-alert').filter({hasText:'记录已由其他人修改，请核对最新版。'}).waitFor();assert.equal(await detail(page).getByRole('textbox',{name:'备注',exact:true}).inputValue(),'当前填写应保留');fixture.conflict=false;
   fixture.canDelete=false;fixture.failStats=true;page=await newPage(390);await page.getByText('数量暂不可用',{exact:false}).waitFor();assert.match(await page.locator('.v2-repair-state-row .n-radio-button').filter({hasText:'未完成'}).innerText(),/—/,'failed count not zero');fixture.failStats=false;await noOverflow(page);assert.equal(await page.locator('.v2-repair-row-state').first().isVisible(),true,'mobile keeps status');assert.equal(await page.locator('.v2-repair-row-progress').first().isVisible(),true,'mobile keeps progress');await page.screenshot({path:path.join(output,'mobile-list.png'),fullPage:true});await openFirst(page);await noOverflow(page);assert.equal(await page.locator('.v2-repair-list').isVisible(),false);await page.screenshot({path:path.join(output,'mobile-followup.png'),fullPage:true});
   page=await newPage(360);await openFirst(page);await noOverflow(page);
-  await detail(page).locator('.v2-repair-flow .n-steps--vertical').waitFor();
+  await detail(page).getByText('办理流程',{exact:true}).click();await detail(page).locator('.v2-repair-flow .n-steps--vertical').waitFor();
   assert(await detail(page).locator('.v2-repair-flow .n-step-content-header__title').evaluateAll(nodes=>nodes.every(el=>el.getBoundingClientRect().height<=44)));
   await detail(page).locator('.v2-repair-flow').screenshot({path:path.join(output,'repair-flow-mobile.png')});
   for(const width of [360,390,430]){
@@ -242,7 +245,14 @@ try{
     await noOverflow(page);await page.screenshot({path:path.join(output,`mobile-association-${width}.png`)});
   }
   fixture.unlinked=true;page=await newPage(390);await openFirst(page);
-  await detail(page).getByRole('button',{name:'关联并自动填入',exact:true}).click();
+  assert(await detail(page).getByRole('textbox',{name:'维修进展描述',exact:true}).isVisible(),'no notice association is required to enter followup');
+  assert(await detail(page).getByRole('button',{name:/完成现场检查，待更换模块/}).isVisible(),'history is expanded by default');
+  await detail(page).getByText('办理流程',{exact:true}).click();
+  assert.deepEqual(await detail(page).locator('[data-flow-step]').evaluateAll(nodes=>nodes.map(n=>n.getAttribute('data-flow-step'))),['event','project','followups','notice','complete']);
+  await page.screenshot({path:path.join(output,'workflow-overview-mobile.png')});
+  await detail(page).getByRole('button',{name:'查看维修完成情况',exact:true}).click();await detail(page).getByRole('region',{name:'维修完成核对'}).waitFor();
+  await detail(page).getByRole('button',{name:'填写完成跟进',exact:true}).click();await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).waitFor();
+  await detail(page).getByText('维修单信息',{exact:true}).click();
   await detail(page).getByRole('region',{name:'关联资料自动填写'}).waitFor();fixture.unlinked=false;
   fixture.locked=true;page=await newPage();await page.locator('.record-row').first().click();await detail(page).getByText('跟进状态尚未核验，当前只读。',{exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'绑定已有',exact:true}).count(),0);assert.equal(await detail(page).getByRole('button',{name:/保存/}).count(),0);fixture.locked=false;
   fixture.failSave=true;page=await newPage();await openFirst(page);await detail(page).getByRole('textbox',{name:'维修进展描述',exact:true}).fill('等待核验原任务');await detail(page).getByRole('button',{name:'选择台账设备',exact:true}).click();await page.getByRole('dialog').getByRole('checkbox').first().check();await page.getByRole('dialog').getByRole('button',{name:'确认',exact:true}).click();await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).click();await detail(page).getByRole('button',{name:'核验原任务',exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).isDisabled(),true,'uncertain write cannot be resubmitted as new');fixture.failSave=false;

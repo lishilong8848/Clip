@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.pre_shift_cloud import CheckCloud, CheckSender, read_roster
 from lan_bitable_template_portal.pre_shift_checks import CheckService, CheckError, ROSTER_VERSION, TZ
+from test_pre_shift_checks import receipt
 
 DAY = '2026-10-17'
 NOW = dt.datetime.fromisoformat(DAY + 'T09:00:00').replace(tzinfo=TZ)
@@ -52,7 +53,7 @@ class RosterTests(unittest.TestCase):
         service=reader([roster_fields(),roster_fields(scope='B',**{'人员（文本）':'乙一、乙二','人员':[]})],
             [person('人员一','ou_one'),person('人员二','ou_two'),person('人员二','ou_duplicate'),person('乙一','ou_bone','B'),person('乙二','ou_btwo','B')])
         result=read_roster(service,DAY)
-        self.assertEqual([p['scope'] for p in result['people']],['B','B'])
+        self.assertEqual([p['scope'] for p in result['people']],['A','B','B'])
         self.assertIn('人员二',result['warnings']['A'])
         self.assertIn('1/2',result['warnings']['A'])
 
@@ -63,6 +64,15 @@ class RosterTests(unittest.TestCase):
         values=[{'scope':'110','shift':'白','name':'人员一','open_id':''}]
         directory={'one':{'name':'人员一','scopes':['110'],'selectable':True,'login_ids':['ou_one']}}
         self.assertEqual(resolve_roster(values,directory)[0],[])
+
+    def test_unconfigured_building_is_not_resolved_or_reported(self):
+        service=reader([roster_fields(),roster_fields('夜'),roster_fields(scope='110')])
+        result=read_roster(service,DAY,scopes=['A'])
+        self.assertEqual({p['scope'] for p in result['people']},{'A'})
+        self.assertEqual(result['warnings'],{})
+        service._request_json.reset_mock()
+        self.assertEqual(read_roster(service,DAY,scopes=[]),{'people':[],'warnings':{}})
+        service._request_json.assert_not_called()
 
     def test_missing_text_names_only_holds_the_affected_shift(self):
         service=reader([roster_fields(**{'人员（文本）':''}),roster_fields('夜')])
@@ -76,7 +86,7 @@ class RecoveryTests(unittest.TestCase):
         temp=tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.roster=Mock(return_value={'people':[{'scope':'A','shift':shift,'open_id':oid,'name':name} for shift in ('白','夜') for oid,name in [('ou_one','人员一'),('ou_two','人员二')]],'warnings':{}})
-        self.sender=Mock(return_value=(True,'ok',[]))
+        self.sender=Mock(side_effect=receipt)
         self.cloud=Mock()
         self.cloud.upsert.return_value='recSynced'
         self.service=CheckService(temp.name,roster=self.roster,sender=self.sender,cloud=self.cloud,portal_url=lambda:'https://fixture.invalid')

@@ -51,5 +51,5 @@ function expanded(value:unknown){return Array.isArray(value)&&value.length>0;}
 function orderedGroups(r:any){const order=['progress','execution','equipment'];return [...r.groupedFields].sort((a,b)=>order.indexOf(a.key)-order.indexOf(b.key));}
 const controllerRef=ref<any>(null);
 const action=computed(()=>{const r=controllerRef.value?.v2Controller;const unresolved=r?.v2Submission.pending.value&&r.v2Submission.status.value!=='failed';return {editable:Boolean(r&&!r.v2Locked),disabled:!r||r.saving||r.binding||r.loading||r.conflictState||unresolved||(r.editingRecordId?!r.followupDirty:!r.hasDraftContent),busy:Boolean(r?.saving||r?.binding||r?.v2Submission.checking.value),label:r?.editingRecordId?'保存跟进修改':'保存本次跟进',canDelete:Boolean(props.canDelete&&r?.editingRecordId&&r?.v2EditingHistory&&!props.readOnly)};});
-defineExpose({action,save:()=>controllerRef.value?.v2Controller.saveRecord(),remove:()=>controllerRef.value?.v2Controller.requestDeleteRecord()});
+defineExpose({action,save:()=>controllerRef.value?.v2Controller.saveRecord(),remove:()=>controllerRef.value?.v2Controller.requestDeleteRecord(),create:()=>controllerRef.value?.v2Controller.requestStartCreate()});
 </script>

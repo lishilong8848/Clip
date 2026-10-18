@@ -1,7 +1,6 @@
 <template>
   <section class="v2-notice-field-section v2-plan-binding" data-notice-section="binding">
-    <div class="v2-notice-tools"><h2>计划事项</h2><NTag v-if="!undecided" size="small" :type="form.values.source_record_id?'info':'default'" :bordered="false">{{form.values.source_record_id?'已关联计划':form.values.manual_binding_choice==='unbound'?'已选择独立通告':'待确认所选计划'}}</NTag><NButton :disabled="locked" :aria-expanded="expanded" data-v2-navigation @click="$emit('toggle')">{{expanded?'收起':form.values.source_record_id?'更换关联':'选择办理方式'}}</NButton></div>
-    <NAlert v-if="undecided" type="warning" :bordered="false" role="alert" class="v2-plan-choice-alert"><strong>独立通告 · 未关联计划</strong><span>请选择“关联计划”或“独立通告”，确认本次办理方式。</span></NAlert>
+    <div class="v2-notice-tools"><h2>计划事项</h2><NTag v-if="!undecided" size="small" :type="form.values.source_record_id?'info':'default'" :bordered="false">{{form.values.source_record_id?'已关联计划':form.values.manual_binding_choice==='unbound'?'已选择独立通告':'待确认所选计划'}}</NTag><NButton :disabled="locked" :aria-expanded="expanded" :aria-describedby="undecided?'v2-plan-choice-hint':undefined" :class="{'needs-choice':undecided}" data-v2-navigation @click="$emit('toggle')">{{expanded?'收起':form.values.source_record_id?'更换关联':'选择办理方式'}}</NButton><span v-if="undecided" id="v2-plan-choice-hint" class="v2-plan-choice-hint" role="alert"><strong>独立通告 · 未关联计划</strong><span>请选择“关联计划”或“独立通告”，确认本次办理方式。</span></span></div>
     <div v-if="expanded" class="v2-plan-options">
       <NRadioGroup v-if="!form.values.source_record_id" :value="form.values.manual_binding_choice" :disabled="locked" aria-label="计划关联方式" @update:value="value=>$emit('mode',String(value))"><NRadio value="bind">关联计划</NRadio><NRadio value="unbound">独立通告</NRadio></NRadioGroup>
       <div v-if="form.values.source_record_id||form.values.manual_binding_choice==='bind'" class="v2-plan-picker" :class="{'has-recommendation':!form.values.source_record_id}">
@@ -14,7 +13,7 @@
 </template>
 <script setup lang="ts">
 import {computed} from 'vue';
-import {NAlert,NButton,NRadio,NRadioGroup,NSelect,NTag} from 'naive-ui';
+import {NButton,NRadio,NRadioGroup,NSelect,NTag} from 'naive-ui';
 import type {NoticeForm} from './noticeForm';
 const props=defineProps<{form:NoticeForm;expanded:boolean;choice:string|null;options:{label:string;value:string;title?:string;building?:string;cycle?:string}[];loading:boolean;locked:boolean}>();
 defineEmits<{toggle:[];mode:[value:string];search:[value:string];'update:choice':[value:string|null];confirm:[]}>();
@@ -33,7 +32,9 @@ const recommendation=computed(()=>{
 });
 </script>
 <style>
-.v2-plan-binding .v2-plan-choice-alert{flex-basis:100%;margin-bottom:0}.v2-plan-choice-alert .n-alert-body__content{display:flex;gap:8px;flex-wrap:wrap;line-height:1.6}.v2-plan-choice-alert strong{font-weight:600}
+.v2-plan-choice-hint{display:inline-flex;gap:6px;flex-wrap:wrap;font-size:12px;line-height:1.5;color:var(--v2-muted);max-width:100%}.v2-plan-choice-hint>span{font-weight:400}.v2-plan-binding .needs-choice::after{content:'';position:absolute;inset:-3px;border:2px solid var(--v2-blue);border-radius:inherit;pointer-events:none;animation:v2-plan-attention 1.8s ease-in-out infinite}.v2-plan-binding .needs-choice{position:relative}
+@keyframes v2-plan-attention{0%,100%{opacity:.15;transform:scale(.98)}50%{opacity:.8;transform:scale(1.03)}}
+@media(prefers-reduced-motion:reduce){.v2-plan-binding .needs-choice::after{animation:none;opacity:.6}}
 .v2-plan-options{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0;width:100%}
 .v2-plan-picker{display:grid;grid-template-columns:minmax(120px,320px) auto;align-items:center;gap:8px;min-width:0;max-width:100%}.v2-plan-picker.has-recommendation{grid-template-columns:minmax(120px,320px) auto minmax(180px,1fr);width:100%}.v2-plan-picker>.n-select{min-width:0}
 .v2-plan-recommendation{display:flex;align-items:center;gap:8px;min-width:0;padding-left:8px;border-left:1px solid var(--v2-border)}.v2-plan-recommendation>span{display:grid;gap:3px;min-width:0}.v2-plan-recommendation small{font-size:12px;color:var(--v2-muted)}.v2-plan-recommendation strong{font-size:12px;font-weight:400;line-height:1.6;overflow-wrap:anywhere}.v2-plan-recommendation>.n-button{flex:none}

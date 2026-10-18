@@ -12,8 +12,8 @@
     <Transition name="v2-editor-bar"><div v-if="editing" class="v2-edit-banner"><span><GripVertical :size="17" />个人布局 · 仅影响你的工作台</span><NButton data-v2-navigation secondary type="primary" @click="library=true"><template #icon><Plus :size="16" /></template>添加组件</NButton></div></Transition>
     <WidgetGrid :items="layout.widgets" :editing="editing&&!saving" :inert="saving||undefined" @layout="setPositions">
       <template #title="{item}">{{ mobile && !editing && item.title==='待处理事项' ? '需要留意' : item.title }}</template>
-      <template #tools="{item}"><template v-if="!editing"><span class="v2-widget-scope" :class="{'is-specific-scope':item.scope!=='current'}">{{ item.kind==='pre_shift'?'班组协作':item.kind==='learning'?'本人':item.scope==='current'?scopeLabel:scopes.find(s=>s.value===item.scope)?.label }}</span><NButton v-if="isFirst(item)" data-v2-navigation size="small" class="v2-customize-button" :disabled="!ready||loading" aria-label="自定义工作台" :title="loading?'正在同步账号布局':'自定义工作台'" secondary type="primary" @click="edit"><template #icon><SlidersHorizontal :size="14" /></template>自定义</NButton></template><div v-else class="v2-widget-tools" data-v2-navigation><NButton quaternary circle :aria-label="'上移'+item.title" :disabled="isFirst(item)" @click="move(item,-1)"><ArrowUp :size="15" /></NButton><NButton quaternary circle :aria-label="'下移'+item.title" :disabled="isLast(item)" @click="move(item,1)"><ArrowDown :size="15" /></NButton><NButton quaternary circle :aria-label="'编辑'+item.title" @click="selected=item"><Settings2 :size="16" /></NButton><NButton v-if="item.kind!=='pre_shift'||!mandatoryCheck(user)" quaternary circle :aria-label="'移除'+item.title" @click="remove(item)"><X :size="16" /></NButton></div></template>
-      <template #default="{item}"><WidgetView :item="item" :user="user" :scopes="scopes" :scope="item.scope==='current'?scope:item.scope" :brief="mobile && !editing" ordered-todos :preferences-busy="!ready||loading||saving" @task-kinds="chooseTodos(item.id,$event)" @open="open" /></template>
+      <template #tools="{item}"><template v-if="!editing"><WidgetScopePicker v-if="buildingOptions(item).length>1" :value="pickerValue(item)" :options="buildingOptions(item)" :label="item.title+'楼栋范围'" :disabled="!ready||loading||saving" @change="chooseBuildings(item,$event)" /><span v-else-if="item.kind==='learning'" class="v2-widget-scope">本人</span><span class="v2-widget-head-space" /><NButton v-if="isFirst(item)" data-v2-navigation size="small" class="v2-customize-button" :disabled="!ready||loading" aria-label="自定义工作台" :title="loading?'正在同步账号布局':'自定义工作台'" secondary type="primary" @click="edit"><template #icon><SlidersHorizontal :size="14" /></template>自定义</NButton><span :id="'v2-widget-tools-'+item.id" class="v2-widget-module-tools" /></template><div v-else class="v2-widget-tools" data-v2-navigation><NButton quaternary circle :aria-label="'上移'+item.title" :disabled="isFirst(item)" @click="move(item,-1)"><ArrowUp :size="15" /></NButton><NButton quaternary circle :aria-label="'下移'+item.title" :disabled="isLast(item)" @click="move(item,1)"><ArrowDown :size="15" /></NButton><NButton quaternary circle :aria-label="'编辑'+item.title" @click="selected=item"><Settings2 :size="16" /></NButton><NButton v-if="item.kind!=='pre_shift'||!mandatoryCheck(user)" quaternary circle :aria-label="'移除'+item.title" @click="remove(item)"><X :size="16" /></NButton></div></template>
+      <template #default="{item}"><WidgetView :item="item" :user="user" :scopes="scopes" :scope="itemScope(item)" :selected-scopes="buildingOptions(item).length?buildingSelection(item):undefined" :header-tools-id="!editing?'v2-widget-tools-'+item.id:undefined" :brief="mobile && !editing" ordered-todos :preferences-busy="!ready||loading||saving" @task-kinds="chooseTodos(item.id,$event)" @open="open" /></template>
     </WidgetGrid>
     <div v-if="!layout.widgets.length" class="v2-dashboard-empty"><LayoutGrid :size="36" /><h2>把常用业务放在这里</h2><NButton data-v2-navigation type="primary" :disabled="!ready||loading" @click="edit();library=true"><template #icon><Plus :size="17" /></template>添加第一个组件</NButton></div>
     <NModal v-model:show="library" preset="card" title="添加组件" class="v2-widget-library" :bordered="false">
@@ -41,6 +41,8 @@ import {todoSelection,type TodoKind} from './businessTodos';
 import WidgetGrid from './dashboard/WidgetGrid.vue';
 import WidgetView from './dashboard/WidgetView.vue';
 import WidgetEditor from './dashboard/WidgetEditor.vue';
+import WidgetScopePicker from './dashboard/WidgetScopePicker.vue';
+import {widgetScopeOptions,selectedWidgetScopes} from './dashboard/widgetScopes';
 import MobileBrief from './dashboard/MobileBrief.vue';
 import TemplatePreview from './dashboard/TemplatePreview.vue';
 import { allowedKind,catalog,chartTemplates,motionTemplates,defaults,sanitize,layoutKey,widget,mandatoryCheck,reorderWidgets,type Layout,type Widget,type WidgetKind } from './dashboard/layout';
@@ -62,6 +64,18 @@ const sync=useLayoutSync({user:()=>props.user,page:()=> 'workspace',legacyKey:()
 const {loading,saving,error,ready}=sync;
 const icons={ClipboardList,LayoutGrid,ChartNoAxesCombined,ChartColumn,BookOpen,Droplets,ListTree,CircleCheck,PanelsTopLeft,Wrench};
 const scopeLabel=computed(()=>props.scopes.find(s=>s.value===props.scope)?.label||props.scope);
+const buildingOptions=(item:Widget)=>widgetScopeOptions(item,props.scopes);
+const buildingSelection=(item:Widget)=>selectedWidgetScopes(item.scope,props.scope,buildingOptions(item));
+const pickerValue=(item:Widget)=>{const values=buildingSelection(item);return values.length===buildingOptions(item).length?['ALL']:values;};
+const itemScope=(item:Widget)=>{const values=buildingSelection(item);return values.length>1&&props.scopes.some(option=>option.value==='ALL')?'ALL':values[0]||(item.scope==='current'?props.scope:item.scope);};
+function chooseBuildings(item:Widget,values:string[]){
+  if(!ready.value||loading.value||saving.value||protectedContent())return;
+  requestEmbeddedChange('*',()=>{
+    const allowed=buildingOptions(item).map(option=>option.value);
+    item.scope=values.includes('ALL')?(props.scopes.some(option=>option.value==='ALL')?'ALL':allowed.join(',')):values.filter(value=>allowed.includes(value)).join(',');
+    todoPending.value=true;void saveTodoSelection();
+  });
+}
 const librarySearch=ref('');
 const matches=(entry:{title:string;description:string})=>(entry.title+entry.description).toLowerCase().includes(librarySearch.value.trim().toLowerCase());
 const available=computed(()=>catalog.filter(c=>c.kind!=='module'&&allowedKind(c.kind,props.user)&&matches(c)&&(c.kind!=='pre_shift'||!layout.value.widgets.some(w=>w.kind==='pre_shift'))));
@@ -90,7 +104,7 @@ async function chooseTodos(id:string,kinds:TodoKind[]){
   else{if(layout.value.widgets.length>=16){message.warning('请先在工作台添加或设置一个业务待办组件。');return;}layout.value.widgets.push(widget('tasks',props.user,{taskKinds:next}));}
   if(!editing.value){todoPending.value=true;await saveTodoSelection();}
 }
-async function saveTodoSelection(){try{if(!await sync.save(layout.value))return;saved=JSON.stringify(layout.value);todoPending.value=false;}catch(e){error.value=(e instanceof Error?e.message:'待办选择保存失败')+'；当前选择已保留，尚未同步到账号。';}}
+async function saveTodoSelection(){try{if(!await sync.save(layout.value))return;saved=JSON.stringify(layout.value);todoPending.value=false;}catch(e){error.value=(e instanceof Error?e.message:'组件选择保存失败')+'；当前选择已保留，尚未同步到账号。';}}
 const releaseTodoGuard=registerNavigationGuard((_target,proceed)=>{if(!todoPending.value)return true;if(saving.value){message.warning('正在保存待办选择，请稍候。');return false;}dialog.warning({title:'待办选择尚未同步',content:'离开后本次选择可能丢失。',positiveText:'放弃并离开',negativeText:'继续保存',onPositiveClick:()=>{todoPending.value=false;proceed();}});return false;});
 function open(url:string){emit('open',url);}
 function beforeUnload(event:BeforeUnloadEvent){if(saving.value||todoPending.value||editing.value&&JSON.stringify(layout.value)!==saved){event.preventDefault();event.returnValue='';}}
@@ -98,5 +112,7 @@ window.addEventListener('beforeunload',beforeUnload);
 onBeforeUnmount(()=>{releaseGuard();releaseTodoGuard();media.removeEventListener('change',resize);window.removeEventListener('beforeunload',beforeUnload);});
 </script>
 <style>
+.workspace-v2 .v2-dashboard .v2-widget-head{height:auto;min-height:40px;flex-wrap:wrap;padding-block:4px}.workspace-v2 .v2-dashboard .v2-widget-head>h2{flex:0 1 auto;max-width:40%}.v2-widget-head-space{flex:1;min-width:0}.v2-widget-module-tools{display:flex;align-items:center;flex:none;margin-left:auto}.v2-widget-module-tools:empty{display:none}.v2-widget-module-tools .n-button__content{gap:4px}.v2-widget-module-tools .n-button{font-size:12px}
+@media(max-width:760px){.workspace-v2 .v2-dashboard .v2-widget-head{gap:6px;min-height:44px;flex-wrap:nowrap}.workspace-v2 .v2-dashboard .v2-widget-head>h2{max-width:none}.v2-widget-module-tools .n-button{min-height:40px;width:40px;padding:0}.v2-widget-module-tools .v2-module-open-label{display:none}.v2-dashboard .v2-widget-head>.v2-customize-button{width:32px;padding-inline:0}.v2-dashboard .v2-customize-button .n-button__content{font-size:0}.v2-widget-head:has(.v2-widget-module-tools:not(:empty)) .v2-widget-head-space{flex-basis:0}}
 .v2-widget-library .v2-library-search{margin-bottom:16px}.v2-chart-template-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.v2-chart-template-grid .v2-chart-template{height:auto;min-height:164px;padding:12px;border-radius:8px;text-align:left;white-space:normal}.v2-chart-template .n-button__content{display:flex;flex-direction:column;align-items:stretch;width:100%;gap:12px;min-width:0;white-space:normal}.v2-template-copy{display:grid;grid-template-columns:minmax(0,1fr) 16px;gap:6px;align-items:center}.v2-template-copy strong{font-size:14px;color:#294237}.v2-template-copy small{grid-column:1/-1;font-size:12px;line-height:1.6;color:#61756a;overflow-wrap:anywhere}.v2-chart-template:hover .v2-template-preview{background:#eaf3ee}@media(max-width:480px){.v2-chart-template-grid{grid-template-columns:1fr}.v2-chart-template-grid .v2-chart-template{min-height:150px}}
 </style>

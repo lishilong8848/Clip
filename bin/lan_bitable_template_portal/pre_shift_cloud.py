@@ -2,12 +2,13 @@
 import datetime as dt
 import asyncio
 import json
+import io
 import re
 import uuid
 from collections import defaultdict
 from pathlib import Path
 
-from .pre_shift_checks import CheckError, SCOPES, TZ
+from .pre_shift_checks import CheckError, CheckDeliveryUncertain, SCOPES, TZ
 
 APP_TOKEN = 'MliKbC3fXa8PXrsndKscmxjdn1g'
 TABLE_ID = 'tbloxEhpBIIW3Joq'
@@ -19,10 +20,12 @@ SCHEMA = {'文本': 1, '检查标识': 1, '楼栋': 1, '检查日期': 5, '班�
           '排班人员': 1, '计划检查时间': 5, '检查截止时间': 5}
 
 
-def read_roster(service, day):
+def read_roster(service, day, *, scopes=SCOPES):
     from .learning_reminders import APP_TOKEN as roster_app, TABLE_ID as roster_table, VIEW_ID
     from .learning_reminders import resolve_roster
     from .learning import text
+    if not scopes:
+        return {'people': [], 'warnings': {}}
     groups, cursor, seen, issues = {}, '', set(), defaultdict(list)
     for _ in range(20):
         response = service._request_json('records', app_token=roster_app, table_id=roster_table,
@@ -46,6 +49,8 @@ def read_roster(service, day):
             scope = building.removesuffix('楼').removesuffix('站') if isinstance(building, str) else ''
             if scope not in SCOPES:
                 raise CheckError('排班楼栋不明确。')
+            if scope not in scopes:
+                continue
             users = fields.get('人员') or []
             users = users.get('users', []) if isinstance(users, dict) else users
             if not isinstance(users, list):
@@ -80,11 +85,14 @@ def read_roster(service, day):
             warnings, result = {}, []
             for (scope, shift), people in groups.items():
                 resolved, missing = resolve_roster(list(people.values()), directory, allowed_scopes=SCOPES)
-                if len(people) != 2 or len(resolved) != 2 or issues[(scope, shift)]:
-                    detail = '；'.join(issues[(scope, shift)] + missing) or f'人员（文本）包含{len(people)}人'
-                    warnings[scope] = warnings.get(scope, '') + f'{shift}班已匹配{len(resolved)}/2人：{detail}；暂不推送该班，5分钟后重试。'
-                else:
-                    result.extend(resolved)
+                if len(resolved) != len(people) or issues[(scope, shift)]:
+                    detail = '；'.join(issues[(scope, shift)] + missing)
+                    warnings[scope] = warnings.get(scope, '') + f'{shift}班已匹配{len(resolved)}/{len(people)}人：{detail}；已匹配人员正常推送，其余5分钟后重试。'
+                result.extend(resolved)
+            for scope in {scope for scope, _ in groups}:
+                for shift in ('白', '夜'):
+                    if (scope, shift) not in groups:
+                        warnings[scope] = warnings.get(scope, '') + f'{shift}班排班未读取到，5分钟后重试。'
             return {'people': result, 'warnings': warnings}
         cursor = data.get('page_token')
         if not isinstance(cursor, str) or not cursor or cursor in seen:
@@ -104,9 +112,11 @@ class CheckSender:
         future = asyncio.run_coroutine_threadsafe(self.send(recipient, card, identity), self.loop)
         try:
             return future.result(timeout=45)
+        except CheckError:
+            raise
         except Exception:
             future.cancel()
-            return False, '飞书智能体提醒暂未确认送达，等待原任务重试。', []
+            raise CheckDeliveryUncertain('飞书智能体提醒暂未确认送达，等待原任务重试。') from None
 
     def photo(self, recipient, photo, identity, checkpoint):
         if self.loop is None or self.loop.is_closed():
@@ -124,13 +134,13 @@ class CheckSender:
         from .portal_service import external_real_write_guard
         guard = external_real_write_guard()
         if guard.get('mock_external'):
-            return 'om_mockexternal' if photo else (True, 'mock external send skipped', [])
+            return 'om_mockexternal' if photo else (False, '隔离模式未发送真实消息。', [])
         if not guard.get('real_write_allowed'):
             raise CheckError('当前未允许真实飞书消息发送。')
         bot = getattr(self.runtime, 'feishu_assistant_channel', None)
         if not bot or not getattr(bot, 'messenger', None) or not getattr(bot, 'config', {}).get('app_id'):
             raise CheckError('飞书智能体尚未就绪，班前检查提醒等待重试。')
-        person = await asyncio.to_thread(self.runtime.auth_manager.directory_person, recipient)
+        person = await asyncio.to_thread(self.runtime.auth_manager.directory_person, recipient) or {}
         if photo is not None:
             from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
             profile = await asyncio.to_thread(self.runtime.auth_manager.account_profile, recipient)
@@ -150,12 +160,15 @@ class CheckSender:
             key = photo.get('image_key') or ''
             if not key:
                 path = Path(photo['path'])
-                if not 0 < path.stat().st_size <= 10 * 1024 * 1024:
-                    raise CheckError('交接班水印图片为空或超过10MiB。')
-                with path.open('rb') as fp:
+                from .pre_shift_photo import prepare_delivery_image
+                try:
+                    image = await asyncio.to_thread(prepare_delivery_image, path, photo['name'])
+                except (ValueError, OSError) as exc:
+                    raise CheckError('照片已保存，发送副本生成失败：' + str(exc)) from None
+                with io.BytesIO(image['content']) if image['content'] is not None else path.open('rb') as fp:
                     uploaded = await client.post('https://open.feishu.cn/open-apis/im/v1/images',
                         headers=await bot.messenger.headers(), data={'image_type': 'message'},
-                        files={'image': (photo['name'], fp, 'image/jpeg')}, timeout=30)
+                        files={'image': (image['name'], fp, image['mime'])}, timeout=30)
                 data = uploaded.json()
                 key = (data.get('data') or {}).get('image_key')
                 if uploaded.status_code >= 400 or data.get('code') != 0 or not isinstance(key, str) or not re.fullmatch(r'img_[A-Za-z0-9_-]{1,500}', key):
@@ -164,14 +177,22 @@ class CheckSender:
                 raise CheckError('照片发送进度中的图片标识无效，请管理员核对。')
             await asyncio.to_thread(checkpoint, key, bot.config['app_id'])
             content, kind = {'image_key': key}, 'image'
-        response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
-            params={'receive_id_type': receive_type}, headers=await bot.messenger.headers(),
-            json={'receive_id': receive_id, 'msg_type': kind, 'content': json.dumps(content, ensure_ascii=False),
-                  'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, identity))})
-        value = response.json()
+        headers = await bot.messenger.headers()
+        try:
+            response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
+                params={'receive_id_type': receive_type}, headers=headers,
+                json={'receive_id': receive_id, 'msg_type': kind, 'content': json.dumps(content, ensure_ascii=False),
+                      'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, identity))})
+            value = response.json()
+        except Exception:
+            raise CheckDeliveryUncertain('飞书发送回执未确认，等待原任务重试。') from None
+        if response.status_code >= 500:
+            raise CheckDeliveryUncertain('飞书服务暂未确认发送结果，等待原任务重试。')
+        if response.status_code >= 400 or value.get('code') != 0:
+            raise CheckError(f"飞书拒绝提醒（HTTP {response.status_code}，code={value.get('code')}），请核对智能体应用可用范围及消息权限。")
         mid = (value.get('data') or {}).get('message_id')
-        if response.status_code >= 400 or value.get('code') != 0 or not isinstance(mid, str) or not re.fullmatch(r'om_[A-Za-z0-9]+', mid):
-            raise CheckError('飞书智能体未返回有效发送回执，提醒等待原任务重试。')
+        if not isinstance(mid, str) or not re.fullmatch(r'om_[A-Za-z0-9]+', mid):
+            raise CheckDeliveryUncertain('飞书智能体未返回有效发送回执，提醒等待原任务重试。')
         if photo is not None:
             return mid
         return True, 'ok', [{'open_id': recipient, 'sender_app_id': bot.config['app_id'], 'message_id': mid}]

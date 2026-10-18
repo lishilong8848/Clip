@@ -228,7 +228,7 @@ class DrillConfigurationFrontendFieldsTests(unittest.TestCase):
         children = {child["path"]: child for child in signers["children"]}
         self.assertEqual(sorted(children), ["step_0", "step_1", "step_2"])
         self.assertEqual(children["step_0"]["type"], "number")
-        self.assertEqual(children["step_0"]["min"], 1)
+        self.assertEqual(children["step_0"]["min"], 0)
         self.assertEqual(children["step_0"]["max"], 10)
         self.assertEqual(children["step_0"]["label"], "第 13 行 · ECC · 第一步")
         self.assertEqual(children["step_1"]["label"], "第 14 行 · IT包间 · 第二步")

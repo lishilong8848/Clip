@@ -26,7 +26,7 @@ import { beijingDate, count, modules, moduleUrl } from './modules';
 import { mopNoticeNeedsAction, noticeIsEnded } from '../mopSelectionUtils';
 import MotionChart from './MotionChart.vue';
 import type { ChartItem } from './vipboard';
-const props = defineProps<{kind:string;scope:string;scopes:{value:string;label:string}[];user:Dict;personal?:boolean;expanded?:boolean;tasksOnly?:boolean;brief?:boolean;presentation?:string}>();
+const props = defineProps<{kind:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;personal?:boolean;expanded?:boolean;tasksOnly?:boolean;brief?:boolean;presentation?:string}>();
 defineEmits<{open:[url:string]}>();
 const element=ref<HTMLElement>(),loading=ref(false),ready=ref(false),error=ref(''),note=ref(''),empty=ref('当前没有待处理事项');
 const motion=window.matchMedia('(prefers-reduced-motion: reduce)'),reduced=ref(motion.matches);
@@ -37,7 +37,8 @@ const chartItems=ref<ChartItem[]>([]),chartIncomplete=ref(false);
 const showChart=computed(()=>!props.tasksOnly&&ready.value&&['learning','water','plan_convergence'].includes(props.kind)&&(!props.presentation||['default','chart'].includes(props.presentation))&&(chartItems.value.length>0||chartIncomplete.value));
 const title=computed(()=>props.kind==='learning'?(props.personal?'我的学练':'楼栋学练'):props.kind==='plan_convergence'?'计划收敛 · 需关注':props.kind==='cabinet'?'机柜上下电待办':modules.find(m=>m.id===props.kind)?.label || '待处理');
 const target=computed(()=>props.kind==='learning'?'/learning?view='+ (props.personal?'practice':'overview')+(props.personal?'':'&scope='+props.scope):props.kind==='cabinet'?'/cabinet-power/batches?'+new URLSearchParams({scope:props.scope,status:'todo'}):moduleUrl(modules.find(m=>m.id===props.kind)!,props.scope));
-const buildingScopes=computed(()=>props.scopes.filter(s=>'ABCDE'.split('').includes(s.value)&&(['ALL','CAMPUS'].includes(props.scope)||s.value===props.scope)).map(s=>s.value));
+const selectedScopeOptions=computed(()=>props.scopes.filter(option=>props.selectedScopes?props.selectedScopes.includes(option.value):['ALL','CAMPUS'].includes(props.scope)||option.value===props.scope));
+const buildingScopes=computed(()=>selectedScopeOptions.value.filter(s=>'ABCDE'.split('').includes(s.value)).map(s=>s.value));
 const footerTarget=computed(()=>props.brief?'/?'+new URLSearchParams({view:'tasks',kind:props.kind,scope:props.scope}):target.value);
 let abort:AbortController|undefined,observer:IntersectionObserver|undefined,visible=false,disposed=false,stale=true;
 function array(value:unknown):Dict[]{if(!Array.isArray(value))throw new Error('资料未完整返回，请进入详情核对。');return value;}
@@ -54,8 +55,11 @@ async function load(){
         const data=await get('/api/plan-convergence/'+kind+'/records');
         for(const row of array(data)){
           const codes:string[]=(String(row.building||'').match(/110|[ABCDEH]+/g)||[]).flatMap(code=>code==='110'?[code]:code.split(''));
-          if(!['ALL','CAMPUS'].includes(props.scope)&&!codes.length)throw new Error('部分核对记录缺少明确楼栋，暂不能确认本楼数量。');
-          if(!['ALL','CAMPUS'].includes(props.scope)&&!codes.includes(props.scope))continue;
+          const selected=selectedScopeOptions.value.map(option=>option.value);
+          if(props.selectedScopes||!['ALL','CAMPUS'].includes(props.scope)){
+            if(!codes.length)throw new Error('部分核对记录缺少明确楼栋，暂不能确认所选楼栋数量。');
+            if(!codes.some(code=>selected.includes(code)))continue;
+          }
           if(row.check_status==='skipped'){excluded++;continue;}
           const checked=row.check_status==='ready'&&Array.isArray(row.hits);
           if(checked&&row.hits.length)continue;
@@ -81,13 +85,14 @@ async function load(){
         nextEmpty=data.published?'今日已发布，可继续学练':'今日尚未发布，可进入自主练习';
       }
     }else if(props.kind==='engineer_mop'){
-      const data=await get('/api/engineer/mop/bootstrap',{scope:props.scope});
-      const items=array(data.notices).filter(item=>!noticeIsEnded(item)&&mopNoticeNeedsAction(item));
+      const scopes=props.selectedScopes?.filter(scope=>props.scopes.some(option=>option.value===scope))||[props.scope];
+      const payloads=await Promise.all(scopes.map(async scope=>({scope,data:await get('/api/engineer/mop/bootstrap',{scope})})));
+      const items=[...new Map(payloads.flatMap(({scope,data})=>array(data.notices).filter(item=>!noticeIsEnded(item)&&mopNoticeNeedsAction(item)).map((item):Dict=>({...item,_widget_scope:scope}))).map(item=>[item.notice_key,item])).values()];
       nextStats=[{label:'维护单待处理',value:items.length}];
-      nextRows=items.map(item=>({id:item.notice_key,title:item.title||item.name||'通告维护单',status:item.mop_binding?'待上传':'待绑定',url:'/engineer/mop?scope='+props.scope+'&notice_key='+encodeURIComponent(item.notice_key)}));
+      nextRows=items.map(item=>({id:item.notice_key,title:item.title||item.name||'通告维护单',status:item.mop_binding?'待上传':'待绑定',url:'/engineer/mop?scope='+item._widget_scope+'&notice_key='+encodeURIComponent(item.notice_key)}));
       nextNote='按原维护单待处理口径';
     }else if(props.kind==='water'){
-      const scopes=props.scopes.filter(s=>'ABCDEH'.split('').includes(s.value)&&(['ALL','CAMPUS'].includes(props.scope)||s.value===props.scope));
+      const scopes=selectedScopeOptions.value.filter(s=>'ABCDEH'.split('').includes(s.value));
       if(!scopes.length)throw new Error('当前范围未接入水耗管理。');
       const data=await Promise.all(scopes.map(async s=>({scope:s.value,label:s.label,data:await get('/api/capacity/water/bootstrap',{scope:s.value})})));
       const sum=(key:string)=>{const values=data.map(item=>count(item.data.summary?.[key]));return values.some(v=>v===null)?null:Number(values.reduce<number>((total,v)=>total+(v??0),0).toFixed(2));};
@@ -130,7 +135,7 @@ async function load(){
   }catch(e:any){if(!controller.signal.aborted){error.value=e.message||'读取失败，不能判断为零';note.value=ready.value?'保留上次读取的数据':'';}}
   finally{if(abort===controller)loading.value=false;}
 }
-watch(()=>[props.scope,props.kind,props.personal],()=>{abort?.abort();ready.value=false;rows.value=[];stats.value=[];progress.value=null;chartItems.value=[];chartIncomplete.value=false;note.value='';error.value='';if(visible)void load();});
+watch(()=>[props.scope,props.scopes.map(option=>option.value).join(','),props.selectedScopes?.join(','),props.kind,props.personal],()=>{abort?.abort();ready.value=false;rows.value=[];stats.value=[];progress.value=null;chartItems.value=[];chartIncomplete.value=false;note.value='';error.value='';if(visible)void load();});
 function changed(){stale=true;if(visible)void load();}
 function visibility(){if(document.hidden)abort?.abort();else if(visible&&(stale||!ready.value))void load();}
 onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&(stale||!ready.value)&&!loading.value)void load();},{rootMargin:'80px'});if(element.value)observer.observe(element.value);window.addEventListener('clipflow-business-changed',changed);document.addEventListener('visibilitychange',visibility);});

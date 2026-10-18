@@ -49,7 +49,7 @@ try{
   });
   page=await ctx.newPage();page.on('pageerror',error=>errors.push(error.message));
   const cases=[
-    ['notice','?__page=/workbench-lite&scope=A&work_type=maintenance','.v2-notice-filters .n-input'],
+    ['notice','?__page=/workbench-lite&scope=A&work_type=maintenance','.v2-notice-plan-search .n-input'],
     ['sop','?view=sops&scope=A','.v2-sop-layout .n-input'],
     ['repair','?__page=/repair-management&scope=A','.v2-repair-filters .n-input'],
     ['event','?__page=/&mode=events&detail=1&scope=A&period=custom&event_start=2026-10-01&event_end=2026-10-15','.event-list-tools input[type=search]'],
@@ -58,9 +58,11 @@ try{
     ['water','?__page=/water-management&scope=A&water_view=records','.water-search'],
     ['convergence','?__page=/plan-convergence&scope=A','.pc-list-filters input[type=search]'],
   ];
-  for(const [name,query,searchSelector] of cases){
+  const only=process.argv.find(value=>value.startsWith('--only='))?.slice(7),selectedCases=only?cases.filter(([name])=>name===only):cases;
+  assert(selectedCases.length,'Unknown filter test case');
+  for(const [name,query,searchSelector] of selectedCases){
     await page.goto(entry+query);
-    if(name==='event')await page.getByRole('button',{name:'展开事件明细',exact:true}).click();
+    if(name==='event'){const expand=page.getByRole('button',{name:'展开事件明细',exact:true});if(await expand.count())await expand.click();}
     const search=page.locator('.v2-main '+searchSelector).first();await search.waitFor();
     for(const width of [1440,390]){
       await page.setViewportSize({width,height:1000});
@@ -83,6 +85,6 @@ try{
     }
   }
   assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);
-  console.log(`PASS: ${marked} adapted templates preserve handlers; eight modules share desktop/mobile filter sizes and styles; query and dropdown interaction retained.`);
+  console.log(`PASS: ${marked} adapted templates preserve handlers; ${selectedCases.length} selected modules share desktop/mobile filter sizes and styles; query and dropdown interaction retained.`);
 }catch(error){if(page){await page.screenshot({path:path.join(output,'failure.png')});console.error(errors,await page.locator('#workspace-page-filters').innerText().catch(()=>''));}throw error;}
 finally{await browser.close();await server.close();}

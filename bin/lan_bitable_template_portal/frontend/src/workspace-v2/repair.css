@@ -47,6 +47,8 @@ html.workspace-v2:has(.v2-repair-workspace) .record-picker-table th{background:#
 html.workspace-v2:has(.v2-repair-workspace) .record-picker-table td{font-size:13px;line-height:1.5}
 html.workspace-v2:has(.v2-repair-workspace) .picker-confirm{background:#0071e3;color:#fff;border-color:#0071e3}
 .v2-repair-source-flow{border-block:1px solid var(--repair-line);padding:14px 0}
+.v2-repair-flow-actions h3{font-size:14px;margin:0;line-height:1.5}.v2-repair-flow-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 0}.v2-repair-flow-actions>div{flex:1 1 100%;display:grid;gap:5px}.v2-repair-flow-actions span{font-size:12px;color:var(--repair-muted)}.v2-repair-completion{display:grid;gap:12px}.v2-repair-completion p{margin:6px 0 0}.v2-repair-followups>.n-collapse{border-block:1px solid var(--repair-line);padding:6px 0}.v2-repair-history>button{border-left:3px solid transparent}.v2-repair-history>button.active{border-left-color:var(--v2-blue)}
+@media(max-width:760px){.v2-repair-workspace .v2-repair-detail-body>.n-radio-group{flex-wrap:wrap}.v2-repair-workspace .v2-repair-detail-body>.n-radio-group .n-radio-button{padding-inline:9px;font-size:12px}}
 .v2-repair-source-flow>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
 .v2-repair-source-flow h3{font-size:15px;margin:0 0 4px;font-weight:600}
 .v2-repair-source-flow header span:not(.n-tag__content){color:var(--repair-muted);font-size:12px;line-height:1.5}

@@ -1,19 +1,18 @@
 <template>
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
     <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton data-v2-navigation><Ellipsis :size="17" />更多办理</NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton :loading="loading||syncing" data-v2-navigation><RefreshCw :size="16" />刷新</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation type="primary" @click="newNotice(kind)"><Plus :size="17" />手填{{ typeLabel(kind) }}</NButton><NDropdown v-else :options="newOptions" trigger="click" @select="newNotice"><NButton data-v2-navigation type="primary"><Plus :size="17" />新建通告</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation @click="newNotice('paste')">粘贴原文</NButton></div></header>
-    <nav class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav>
+    <div class="v2-notice-type-filters"><nav class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav><form class="v2-notice-filters" aria-label="通告筛选" @submit.prevent="filter"><WidgetScopePicker v-if="!selectedScopes&&buildingOptions.length>1" :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><NSelect v-model:value="month" :options="months" aria-label="计划月份" /><NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="专业筛选" /><NButton attr-type="submit" :loading="loading">筛选</NButton></form></div>
     <NAlert v-if="error" role="alert" type="error" :bordered="false" class="v2-notice-feedback">{{ error }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
     <NAlert v-if="syncing" type="info" :bordered="false"><NSpin size="small" />正在同步源表，当前仍可查看已加载的通告。</NAlert>
     <NTabs v-model:value="list" class="v2-notice-mobile-tabs" type="line" animated><NTab name="planned" role="tab" :aria-selected="list==='planned'">计划通告<span class="v2-notice-count">{{ total('planned') }}</span></NTab><NTab name="ongoing" role="tab" :aria-selected="list==='ongoing'">进行中<span class="v2-notice-count">{{ total('ongoing') }}</span></NTab></NTabs>
     <PageCanvas page="notices" label="通告办理" :active="active" :blocks="lanes.map(lane=>({id:lane.id,title:lane.label,w:6,h:11,minW:4,minH:5}))">
       <template v-for="lane in lanes" :key="lane.id" #[lane.id]>
       <section class="v2-notice-section" :class="{'is-mobile-hidden':list!==lane.id}" :data-list="lane.id" :aria-label="lane.label">
-        <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2><NTag v-if="lane.id==='ongoing'" size="small" :bordered="false">{{ scopeLabel }}</NTag></header>
-        <form v-if="lane.id==='planned'" class="v2-notice-filters" :class="{'has-scopes':scopes.length>1}" aria-label="计划通告筛选" @submit.prevent="filter"><NInput v-model:value="search" clearable placeholder="搜索计划名称" :input-props="{'aria-label':'搜索通告'}"><template #prefix><Search :size="16" /></template></NInput><NSelect v-if="scopes.length>1" :value="scope" :options="scopeOptions" aria-label="通告楼栋" @update:value="changeScope" /><NSelect v-model:value="month" :options="months" aria-label="计划月份" /><NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="专业筛选" /><NButton attr-type="submit" :loading="loading">筛选</NButton></form>
+        <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2><form v-if="lane.id==='planned'" class="v2-notice-plan-search" @submit.prevent="filter"><NInput v-model:value="search" clearable size="small" placeholder="搜索计划名称" :input-props="{'aria-label':'搜索通告'}" @clear="search='';filter()"><template #prefix><Search :size="16" /></template><template #suffix><NButton text data-v2-navigation aria-label="搜索计划" @click="filter"><ArrowRight :size="15" /></NButton></template></NInput></form></header>
         <p v-if="lane.id==='planned'&&filtersDirty" class="v2-notice-filter-note" role="status">计划筛选已修改，点击“筛选”后更新。</p>
         <NSkeleton v-if="loading&&!lane.rows.length" :repeat="6" height="72px" class="v2-notice-skeleton" />
         <NList v-else class="v2-notice-list" :aria-busy="loading">
-          <NListItem v-for="row in lane.rows" :key="rowKey(row)">
+          <NListItem v-for="row in lane.rows" :key="row.work_type+':'+rowKey(row)">
             <article class="v2-notice-entry v2-clickable-card" @click="activateCard($event) && openRecord(row)">
               <div class="v2-notice-entry-copy">
                 <button type="button" class="v2-notice-open" data-v2-navigation @click="openRecord(row)">{{ rowTitle(row) }}</button>
@@ -53,8 +52,10 @@
           <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ sopPersonName(sop.operator_record_id) }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
+        <div class="v2-notice-context-row" :class="{'has-tags':form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired}"><div class="v2-notice-context-controls">
         <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations :key="formKey" :form="form" :locked="locked" @busy="busy=$event" @bound="associationBound"><template #context><div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div></template></NoticeRelations></div>
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
+        </div><aside v-if="form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-top-tags" aria-label="通告推荐标签"><NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" /><section v-if="form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section></aside></div>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
           <section class="v2-notice-page-fields">
             <header><span>{{ missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
@@ -65,11 +66,10 @@
           <section v-if="form.values.source_record_id&&!form.values.target_record_id&&action==='start'" class="v2-notice-field-section" data-notice-section="memory"><NoticeMemorySuggestions :key="formKey" :form="form" :month="applied.month" :action="action" :locked="locked" @applied="persist" /></section>
           <section v-if="form.sop&&action==='start'" class="v2-notice-field-section" data-notice-section="sop"><h2>本次工单</h2><LighthouseNoticeSop id="v2-notice-sop" :field="sopField" v-model="sop" :disabled="locked" @load-options="loadSops($event.q)" /></section>
           <section v-if="form.groupId" class="v2-notice-field-section" data-notice-section="workorder"><h2>已关联工单</h2><NAlert v-if="sopStatus" :type="sopStatus.state==='completed'?'success':'info'" :bordered="false">{{ sopStatus.error || (sopStatus.state==='completed'?'工单已完成':sopStatus.state==='upload_pending'?'步骤已全部完成，工单表格正在上传':'工单执行中') }}<span v-if="sopStatus.enabled&&!sopStatus.ready"> · 延时核验尚未满足，剩余 {{ sopStatus.remaining_seconds }} 秒</span></NAlert><div class="v2-notice-tools"><NButton v-for="link in form.sopLinks" :key="link.url" tag="a" :href="workspaceUrl(link.url)" target="_blank" rel="noopener noreferrer">{{ link.label }}</NButton><NButton :loading="busy" :disabled="locked" @click="refreshSopStatus">刷新工单状态</NButton><NButton :loading="busy" :disabled="locked" @click="resendSopLinks">重发操作人及审核人链接</NButton><NButton v-if="sopStatus?.state==='upload_pending'" :loading="busy" :disabled="locked" @click="retrySopUpload">重试上传工单表格</NButton></div></section>
-          <div v-if="form.photoRequired||form.values.work_type==='change'" class="v2-notice-photo-columns">
-          <section v-if="form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NImageGroup><div class="v2-notice-photos"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></div></NImageGroup><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload" /></section>
-          <section v-if="form.values.work_type==='change'" class="v2-notice-field-section" data-notice-section="ali"><h2>阿里确认截图</h2><NImageGroup><div class="v2-notice-photos"><figure v-for="photo in form.aliPhotos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" width="108" :alt="photo.file_name||'已上传确认截图'" /><span>{{ photo.file_name || '已上传' }}</span><NButton quaternary circle :disabled="locked" aria-label="删除已上传确认截图" @click="removeAliPhoto(photo)"><Trash2 :size="15" /></NButton></figure></div></NImageGroup><NoticePhotoUpload ref="aliUpload" :form="form" v-model="aliPhotos" :locked="locked" ali @busy="uploadBusy" @update:model-value="persistAfterUpload" /><NButton v-if="form.values.target_record_id&&aliPhotos.length" :disabled="locked" :loading="busy" @click="uploadAliNow">仅上传确认截图</NButton></section>
+          <div v-if="form.photoRequired&&form.values.work_type!=='repair'||form.values.work_type==='change'" class="v2-notice-photo-columns">
+          <section v-if="form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section>
+          <section v-if="form.values.work_type==='change'" class="v2-notice-field-section" data-notice-section="ali"><h2>阿里确认截图</h2><NoticePhotoUpload ref="aliUpload" :form="form" v-model="aliPhotos" :locked="locked" ali @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.aliPhotos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" width="108" :alt="photo.file_name||'已上传确认截图'" /><span>{{ photo.file_name || '已上传' }}</span><small>已保存到通告</small><NButton quaternary circle :disabled="locked" aria-label="删除已上传确认截图" @click="removeAliPhoto(photo)"><Trash2 :size="15" /></NButton></figure></NoticePhotoUpload><NButton v-if="form.values.target_record_id&&aliPhotos.length" :disabled="locked" :loading="busy" @click="uploadAliNow">仅上传确认截图</NButton></section>
           </div>
-          <NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" />
         </NForm>
         </div>
       </template>
@@ -98,8 +98,8 @@
 import { activateCard } from './cardActivation';
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
-import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NImageGroup,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
-import { CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2 } from 'lucide-vue-next';
+import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
+import { ArrowRight,CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2 } from 'lucide-vue-next';
 import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
@@ -120,7 +120,9 @@ import LighthouseNoticeSop from '../components/LighthouseNoticeSop.vue';
 import NoticeAlertTags from '../components/NoticeAlertTags.vue';
 import { createRepairOperationId } from '../repairManagementUtils';
 import { noticeIsEnded } from '../mopSelectionUtils';
-const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];user:Dict;active:boolean}>();
+import {readNoticeBuildings} from './noticeBuildingPages';
+import WidgetScopePicker from './dashboard/WidgetScopePicker.vue';
+const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;active:boolean}>();
 const dialog=useDialog(),message=useMessage();
 const params=computed(()=>new URL(props.url,location.origin).searchParams);
 const types=computed(()=>[{id:'all',label:'全部'},...modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))]);
@@ -129,17 +131,18 @@ const applied=ref({month:month.value,search:search.value,specialty:specialty.val
 const filtersDirty=computed(()=>month.value!==applied.value.month||search.value!==applied.value.search||specialty.value!==applied.value.specialty);
 const months=Array.from({length:12},(_,i)=>({label:(i+1)+'月',value:(i+1)+'月'})),specialties=['电气','暖通','弱电','消防'].map(value=>({label:value,value}));
 const scopeOptions=computed(()=>props.scopes.map(s=>({...s,label:s.value==='ALL'?'全部楼栋':s.label})));
-const scopeLabel=computed(()=>scopeOptions.value.find(s=>s.value===props.scope)?.label||props.scope);
+const selectedBuildings=computed(()=>{const requested=props.selectedScopes||params.value.get('buildings')?.split(',');return requested?[...new Set(requested.filter(value=>buildingOptions.value.some(option=>option.value===value)))]:null;});
+const scopeLabel=computed(()=>selectedBuildings.value?selectedBuildings.value.map(value=>scopeOptions.value.find(option=>option.value===value)?.label||value).join('、'):scopeOptions.value.find(s=>s.value===props.scope)?.label||props.scope);
 const buildingOptions=computed(()=>props.scopes.filter(s=>['110',...'ABCDEH'].includes(s.value)));
 const sopTypes=computed(()=>types.value.filter(t=>['maintenance','polling','adjust'].includes(t.id)).map(t=>({value:t.id,label:t.label})));
 const newOptions=computed(()=>[...types.value.filter(t=>t.id!=='all').map(t=>({key:t.id,label:'手填'+t.label})),{type:'divider',key:'divider'},{key:'paste',label:'粘贴原文解析'}]);
-const moreOptions=computed(()=>[{key:'records',label:'本机办理记录'},{key:'undo',label:'近三天回退'},...(sopTypes.value.length?[{key:'sop',label:'SOP与工单模板'}]:[]),...((props.user.role==='admin'||props.user.is_admin===true)&&types.value.some(t=>t.id==='change')?[{key:'change',label:'变更确认'}]:[]),...((props.user.modules||[]).includes('engineer_mop')?[{key:'mop',label:'维护单管理'}]:[]),...((props.user.modules||[]).includes('accounts')?[{key:'memory',label:'历史记忆管理'}]:[])]);
+const moreOptions=computed(()=>[{key:'paste',label:'粘贴原文'},{key:'records',label:'本机办理记录'},{key:'undo',label:'近三天回退'},...(sopTypes.value.length?[{key:'sop',label:'SOP与工单模板'}]:[]),...((props.user.role==='admin'||props.user.is_admin===true)&&types.value.some(t=>t.id==='change')?[{key:'change',label:'变更确认'}]:[]),...((props.user.modules||[]).includes('engineer_mop')?[{key:'mop',label:'维护单管理'}]:[]),...((props.user.modules||[]).includes('accounts')?[{key:'memory',label:'历史记忆管理'}]:[])]);
 const refreshOptions=computed(()=>[{key:'page',label:'刷新本页'},...types.value.filter(t=>['maintenance','change','repair'].includes(t.id)).map(t=>({key:t.id,label:'同步'+t.label+'源表'}))]);
 const changeOpen=ref(false),pasteOpen=ref(false),pasteText=ref(''),pasteError=ref(''),parsing=ref(false),syncing=ref(false);
 const recordsOpen=ref(false);
 function openRecords(){recordsOpen.value=true;}
 let syncAbort:AbortController|undefined;
-function more(key:string){if(key==='undo')void openUndo();else if(key==='sop')navigate('/?'+new URLSearchParams({view:'sops',scope:props.scope,work_type:kind.value}));else if(key==='change')changeOpen.value=true;else if(key==='records')void openRecords();else navigate((key==='mop'?'/engineer/mop':'/admin/history-memory')+'?scope='+encodeURIComponent(props.scope));}
+function more(key:string){if(key==='paste')newNotice('paste');else if(key==='undo')void openUndo();else if(key==='sop')navigate('/?'+new URLSearchParams({view:'sops',scope:props.scope,work_type:kind.value}));else if(key==='change')changeOpen.value=true;else if(key==='records')void openRecords();else navigate((key==='mop'?'/engineer/mop':'/admin/history-memory')+'?scope='+encodeURIComponent(props.scope));}
 function newNotice(key:string){if(key==='paste'){pasteError.value='';pasteOpen.value=true;}else void openRecord(null,false,'start','',key);}
 async function refreshSource(key:string){if(key==='page'){void load(true);return;}if(syncing.value||!refreshOptions.value.some(t=>t.key===key))return;syncing.value=true;error.value='';syncAbort=new AbortController();try{await refreshRemoteSourceAndWait(key as 'maintenance'|'change'|'repair','/api/'+key+'-refresh?scope='+encodeURIComponent(props.scope),{scope:props.scope,signal:syncAbort.signal});await load(true);}catch(e){if(!syncAbort.signal.aborted)error.value=(e as Error).message;}finally{syncing.value=false;}}
 function pasteNoticeText(event:ClipboardEvent){
@@ -155,7 +158,7 @@ async function parsePasted(){if(parsing.value)return;pasteText.value=normalizePa
 const pageNumber=(value:string|null)=>Math.max(1,Math.trunc(Number(value)||1));
 const pages=ref<Record<string,number>>({planned:pageNumber(params.value.get('records_page')||params.value.get('pending_page')),ongoing:pageNumber(params.value.get('ongoing_page'))}),data=ref<Dict>({}),loading=ref(false),error=ref('');
 const lanes=computed(()=>[{id:'planned',label:'计划通告',rows:(data.value.records||[]) as Dict[],total:Number(data.value.records_pagination?.total??data.value.records?.length??0)}, {id:'ongoing',label:'进行中',rows:(data.value.ongoing||[]) as Dict[],total:Number(data.value.ongoing_pagination?.total??data.value.ongoing?.length??0)}]);
-const total=(mode:string)=>data.value[mode==='ongoing'?'ongoing_pagination':'records_pagination']?.total??'—';
+const total=(mode:string)=>{const page=data.value[mode==='ongoing'?'ongoing_pagination':'records_pagination'];return page?(page.partial?'已读取 ':'')+String(page.total):'—';};
 const typeLabel=(value:string)=>modules.find(m=>m.id===value)?.label||'通告';
 const rowKey=(row:Dict)=>String(row.active_item_id||row.record_id||row.id);
 const rowTitle=(row:Dict)=>String(row.title||row.name||row.display_fields?.['维护总项']||row.display_fields?.['名称']||'未命名通告');
@@ -211,16 +214,30 @@ const saved=ref('');
 let draftVersion=0,operationId='',frozen:Dict|null=null,formKey='',originalProgress='',progressBeforeEnd='';
 const snapshot=()=>JSON.stringify({values:form.value?.values,sop:sop.value,photos:photos.value,aliPhotos:aliPhotos.value,action:action.value});
 const dirty=computed(()=>!!form.value&&(snapshot()!==saved.value||pendingPhotos.value>0));
-function query(){return new URLSearchParams({scope:props.scope,work_type:kind.value,month:applied.value.month,search:applied.value.search,specialty:applied.value.specialty||'',sections:'records,ongoing',records_page:String(pages.value.planned),records_page_size:'20',ongoing_page:String(pages.value.ongoing),ongoing_page_size:'20'});}
+function query(){return new URLSearchParams({scope:props.scope,work_type:kind.value,month:applied.value.month,search:applied.value.search,specialty:applied.value.specialty||'',sections:'records,ongoing',records_page:String(pages.value.planned),records_page_size:'20',ongoing_page:String(pages.value.ongoing),ongoing_page_size:'20',...(selectedBuildings.value?{buildings:selectedBuildings.value.join(',')}:{})});}
 async function load(fresh=false){
   if(!props.active||disposed||document.hidden)return;
   listAbort?.abort();const c=new AbortController();listAbort=c;loading.value=true;error.value='';
-  try{const value=await requestJson('/api/workbench?'+query(),{signal:c.signal,...(fresh?{fresh:true}:{})});if(c.signal.aborted)return;if(value.source_snapshot_ready===false||!Array.isArray(value.records)||!Array.isArray(value.ongoing))throw new Error('通告资料尚未完整读取，请稍后重试。');data.value=value;}
+  try{
+    const read=(q:URLSearchParams)=>requestJson('/api/workbench?'+q,{signal:c.signal,...(fresh?{fresh:true}:{})});
+    const q=query();q.delete('buildings');const buildings=selectedBuildings.value;
+    if(buildings?.length===0)throw new Error('当前未选择可访问楼栋。');
+    if(buildings?.length===1)q.set('scope',buildings[0]!);
+    const aggregate=props.scope==='ALL'&&buildings?.length===buildingOptions.value.length;
+    const value=buildings&&buildings.length>1&&!aggregate?await readNoticeBuildings(q,buildings,read):await read(q);
+    if(c.signal.aborted)return;
+    if(value.source_snapshot_ready===false||!Array.isArray(value.records)||!Array.isArray(value.ongoing))throw new Error('通告资料尚未完整读取，请稍后重试。');data.value=value;
+  }
   catch(e){if(!c.signal.aborted)error.value=e instanceof Error?e.message:'读取失败，原页面保留';}
   finally{if(listAbort===c)loading.value=false;}
 }
 function setKind(value:string){const q=query();q.set('work_type',value);q.set('records_page','1');q.set('ongoing_page','1');q.delete('sections');navigate('/workbench-lite?'+q);}
-function changeScope(value:string){if(!props.scopes.some(s=>s.value===value))return;const q=query();q.set('scope',value);q.set('records_page','1');q.set('ongoing_page','1');q.delete('sections');navigate('/workbench-lite?'+q);}
+function changeBuildings(values:string[]){
+  const selected=values.includes('ALL')?buildingOptions.value.map(option=>option.value):values.filter(value=>buildingOptions.value.some(option=>option.value===value));if(!selected.length)return;
+  const q=query();q.delete('buildings');q.set('scope',selected.length>1&&props.scopes.some(option=>option.value==='ALL')?'ALL':selected[0]!);
+  if(selected.length>1)q.set('buildings',selected.join(','));
+  q.set('records_page','1');q.set('ongoing_page','1');q.delete('sections');navigate('/workbench-lite?'+q);
+}
 function changePage(lane:string,page:number){pages.value[lane]=page;const q=query();q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(before===location.href)void load();}
 function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('specialty',specialty.value||'');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
 function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values.scope+':'+values.work_type+':'+(values.target_record_id||values.source_record_id||'manual');}
@@ -233,7 +250,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   attempted.value=false;issueTarget.value=null;confirming.value=false;verifyBeforeStart.value=false;attentionKeys.value=[];
   detailAbort?.abort();const c=new AbortController();detailAbort=c;editing.value=true;detailLoading.value=true;detailError.value='';form.value=null;job.value=null;ambiguous.value=false;frozen=null;operationId='';draftVersion=0;photos.value=[];aliPhotos.value=[];sop.value={};sopField.value={};formKey='';
   const work=row?.work_type||manualType||kind.value;
-  const q=new URLSearchParams({scope:props.scope,work_type:work,month:applied.value.month});
+  const q=new URLSearchParams({scope:row?._request_scope||props.scope,work_type:work,month:applied.value.month});
   if(row)q.set(row.active_item_id?'active_item_id':'record_id',rowKey(row));else if(initial){for(const key of ['active_item_id','record_id','prefill_context_id','prefill_source_record_id','prefill_target_record_id','prefill_action'])if(params.value.has(key))q.set(key,params.value.get(key)!);}else q.set('manual','1');
   try{
     const result=parsedHtml?{fragments:{detail:parsedHtml}}:await requestJson('/api/workbench/lite-detail?'+q,{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;
@@ -244,7 +261,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
     verifyBeforeStart.value=!!row&&rowStarted(row)&&!row.active_item_id&&!next.values.target_record_id&&next.actions.includes('start');
     originalFields.value={...next.values};attentionKeys.value=next.fields.filter(f=>f.required&&!String(next.values[f.key]??'').trim()).map(f=>f.key);
     sop.value={sop_version:0,scope:sopScope.value,exempt:next.values.polling_work_order_exempt===true};sopField.value={notice_scope:sopScope.value,work_type:next.values.work_type};
-    if(next.values.target_record_id){const draft=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:props.scope,work_type:next.values.work_type,target_record_id:next.values.target_record_id,action:action.value}),{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;if(draft.draft){draftVersion=Number(draft.draft.version)||0;for(const field of next.fields)if(draft.draft.fields?.[field.key]!==undefined)next.values[field.key]=draft.draft.fields[field.key];}}
+    if(next.values.target_record_id){const draft=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:next.values.scope||q.get('scope')||props.scope,work_type:next.values.work_type,target_record_id:next.values.target_record_id,action:action.value}),{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;if(draft.draft){draftVersion=Number(draft.draft.version)||0;for(const field of next.fields)if(draft.draft.fields?.[field.key]!==undefined)next.values[field.key]=draft.draft.fields[field.key];}}
     originalProgress=String(next.values.progress||'');progressBeforeEnd=originalProgress;saved.value=snapshot();
     try{
       const cached=JSON.parse(sessionStorage.getItem(formKey)||'null');
@@ -464,9 +481,9 @@ function undo(item:Dict){
 const stopGuard=registerNavigationGuard((_target,proceed)=>{if(!props.active)return true;if(busy.value||uploading.value||saving.value||parsing.value){message.warning('正在提交或上传，请等待结果。');return false;}if(editing.value&&dirty.value&&!job.value){askLeave(proceed);return false;}persist();return true;});
 function visibility(){if(document.hidden){listAbort?.abort();window.clearTimeout(timer);window.clearTimeout(undoTimer);}else if(props.active){void load();void pollJob();void pollUndo();}}
 function beforeUnload(event:BeforeUnloadEvent){persist();if(busy.value||uploading.value||dirty.value){event.preventDefault();event.returnValue='';}}
-const contextKey=()=>JSON.stringify([props.scope,kind.value,applied.value]);
+const contextKey=()=>JSON.stringify([props.scope,selectedBuildings.value,kind.value,applied.value]);
 let listContext=contextKey();
-watch(()=>[props.url,props.active,props.scope],()=>{
+watch(()=>[props.url,props.active,props.scope,props.selectedScopes?.join(',')],()=>{
   persist();detailAbort?.abort();editing.value=false;confirming.value=false;undoOpen.value=false;changeOpen.value=false;recordsOpen.value=false;pasteOpen.value=false;window.clearTimeout(timer);syncAbort?.abort();
   if(!props.active){listAbort?.abort();return;}
   kind.value=params.value.get('work_type')||'all';month.value=params.value.get('month')||month.value;
@@ -486,6 +503,10 @@ watch(undoOpen,value=>{if(!value)window.clearTimeout(undoTimer);});
 onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();detailAbort?.abort();syncAbort?.abort();window.clearTimeout(timer);window.clearTimeout(sourceTimer);window.clearTimeout(undoTimer);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('beforeunload',beforeUnload);window.removeEventListener('resize',measureViewport);});
 </script>
 <style>
+.workspace-v2 .v2-notices>.v2-notice-command{flex-wrap:wrap}.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-filters{flex:none;flex-wrap:nowrap}.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-types{flex:0 1 auto}.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-tools{flex:none;flex-wrap:nowrap}.workspace-v2 [data-page-layout="notices"]:not(.is-customizing)>.grid-stack>.grid-stack-item[data-widget-id^="block_"]>.v2-widget>.v2-widget-head{display:none}
+@media(max-width:760px){.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-types{flex:1 0 100%;max-width:100%}.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-filters{flex:1 0 100%;width:100%}.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-filters>.n-select{min-width:0;flex:1;width:0}.workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-tools{flex:1;min-width:0}.workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:nth-child(-n+2){flex:none;width:44px;padding-inline:0}.workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:nth-child(-n+2) .n-button__content{font-size:0;gap:0}.workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:nth-child(4){display:none}.workspace-v2 .v2-notice-command>.v2-toolbar-end .n-button{width:44px;padding-inline:0}.workspace-v2 .v2-notice-command>.v2-toolbar-end .n-button__content{font-size:0;gap:0}}
+.workspace-v2 .v2-notice-command{align-items:center;row-gap:8px}.workspace-v2 .v2-notice-command .v2-notice-types{flex:0 1 auto;margin:0;padding:0;border:0}.workspace-v2 .v2-notice-command .v2-notice-filters{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0;max-width:none}.workspace-v2 .v2-notice-command .v2-notice-filters>.n-select{width:116px;min-width:0}.workspace-v2 .v2-notice-command .v2-notice-tools{margin-left:auto;width:auto}.workspace-v2 .v2-notice-section>header{display:flex;align-items:center;gap:10px;min-width:0}.workspace-v2 .v2-notice-section>header>h2{flex:none;font-size:14px;white-space:nowrap}.v2-notice-plan-search{flex:1;min-width:110px;max-width:300px;margin:0}.v2-notice-plan-search .n-input{width:100%}
+@media(max-width:760px){.workspace-v2 .v2-notice-command .v2-notice-types{flex-basis:100%;padding-bottom:4px}.workspace-v2 .v2-notice-command .v2-notice-filters{flex:1}.workspace-v2 .v2-notice-command .v2-notice-filters>.n-select{flex:1;min-width:88px;width:100px}.workspace-v2 .v2-notice-command .v2-notice-tools{flex-wrap:wrap;margin-left:0}.workspace-v2 .v2-notice-section>header{display:flex;padding-block:4px 8px;gap:6px}.workspace-v2 .v2-notice-section>header>h2{font-size:13px}.workspace-v2 .v2-notice-section h2 .v2-notice-count{margin-left:3px;padding-inline:4px}.v2-notice-plan-search{min-width:100px}.v2-notice-plan-search .n-input{--n-height:44px!important}}
 .v2-notice-filter-note{font-size:12px;color:#956008;margin:0 0 10px}.v2-notice-section h2 .n-spin{margin-left:10px}.v2-notice-facts-summary{margin:0;border-block:1px solid var(--v2-border);display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 24px}.v2-notice-facts-summary>div{display:grid;grid-template-columns:90px minmax(0,1fr) 24px;gap:8px;align-items:start;padding:9px 0;font-size:13px}.v2-notice-facts-summary dt{color:var(--v2-muted)}.v2-notice-facts-summary dd{margin:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}.v2-notice-task-result{padding:40px 20px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:14px}.v2-notice-task-result h2{margin:0;font-size:20px}.v2-notice-task-result p{margin:0;max-width:600px;font-size:14px;line-height:1.8;overflow-wrap:anywhere}.v2-notice-task-result .is-success{color:#168058}.v2-notice-task-result .v2-notice-tools{justify-content:center}.v2-notice-memory .n-collapse-item__header{font-size:13px}.v2-notice-facts-summary .n-button{min-height:24px}@media(max-width:760px){.v2-notice-facts-summary{grid-template-columns:1fr}.v2-notice-task-result{padding:28px 6px}}
 .v2-notice-review header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.v2-notice-review h2{font-size:17px;margin:0}.v2-notice-review-layout{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(220px,1fr);gap:24px}.v2-notice-fulltext{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;background:#f5f7fa;border:1px solid var(--v2-border);padding:20px;border-radius:6px;font-family:inherit;font-size:14px;line-height:1.9}.v2-notice-review-layout h3{font-size:13px;margin-top:0}.v2-notice-review-layout dl{margin:0;display:grid;gap:5px;font-size:13px}.v2-notice-review-layout dt{color:var(--v2-muted)}.v2-notice-review-layout dd{margin:0 0 8px;white-space:pre-wrap;overflow-wrap:anywhere}.v2-notice-review-layout p{font-size:12px;color:var(--v2-muted);line-height:1.6}.v2-notice-entry-copy .v2-notice-attention{gap:5px;color:#956008;font-size:12px}.v2-notice-editor .n-collapse{margin:12px 0}.v2-notice-review{animation:v2-notice-enter 180ms ease-out}.v2-notice-editor>.n-card-header{border-bottom:1px solid var(--v2-border)}.v2-notice-editor>.n-card__footer{border-top:1px solid var(--v2-border)}
 @keyframes v2-notice-enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -526,7 +547,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 
 /* One continuous editing surface; only its body scrolls, not each section. */
 .v2-notice-editor.v2-notice-handling{width:min(1680px,calc(100vw - 24px));height:calc(100dvh - 24px);max-height:calc(100dvh - 24px)}
-.v2-notice-handling>.n-card-content{display:block;overflow:auto;padding:12px 20px;scroll-padding-block:16px}
+.v2-notice-handling>.n-card-content{display:block;overflow:auto;padding:8px 20px;scroll-padding-block:16px}
 .v2-notice-handling>.n-card-header{padding:16px 48px 14px 20px;flex:none}
 .v2-notice-handling .n-card-header__main{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:16px}
 .v2-notice-handling>.n-card__footer{padding:12px 20px;flex:none}
@@ -534,10 +555,12 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-edit-surface{min-width:0}
 .v2-notice-pane-form{min-width:0}
 .v2-notice-page-fields{min-width:0}
-.v2-notice-page-fields>header{display:flex;justify-content:space-between;align-items:center;min-height:46px;font-size:12px;color:var(--v2-muted);gap:8px}
+.v2-notice-page-fields>header{display:flex;justify-content:space-between;align-items:center;min-height:30px;font-size:12px;color:var(--v2-muted);gap:8px}
 .v2-notice-handling .v2-notice-field-grid{grid-template-columns:repeat(var(--notice-field-columns,4),minmax(0,1fr));gap:0 16px;align-items:start}
 .v2-notice-handling .v2-notice-field-grid .is-wide{grid-column:auto}
-.v2-notice-handling .v2-notice-field{margin-bottom:10px;min-width:0;min-height:0}
+.v2-notice-handling .v2-notice-field{margin-bottom:6px;min-width:0;min-height:0}
+.v2-notice-handling .v2-notice-field .n-form-item-label{padding-bottom:4px;font-size:12px}
+@media(min-width:1200px){.v2-notice-handling .v2-notice-field-grid{grid-template-columns:repeat(5,minmax(0,1fr))}}
 .v2-notice-handling .v2-notice-field .n-form-item-blank{min-height:0;align-items:flex-start}
 .v2-notice-handling .v2-notice-field .n-input--textarea{min-height:34px}
 .v2-notice-handling .v2-notice-review{min-width:0}
@@ -548,7 +571,11 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-section>.v2-notice-filters>.n-select{min-width:0}
 .v2-notice-submit-group{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:0}
 .v2-notice-submit-group>.n-radio-group{white-space:nowrap}
-.v2-notice-edit-surface>:is([data-notice-section="relations"],[data-notice-section="binding"]){padding:8px 0}
+.v2-notice-context-controls>:is([data-notice-section="relations"],[data-notice-section="binding"]){padding:8px 0}
+.v2-notice-context-row{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:start}.v2-notice-context-row.has-tags{grid-template-columns:minmax(0,1fr) minmax(260px,28%)}.v2-notice-context-controls{min-width:0}.v2-notice-top-tags{min-width:0;border-left:1px solid var(--v2-border);padding:4px 0 4px 16px}.v2-notice-top-tags .notice-tags{border:0;margin:0;padding:0;font-size:12px;line-height:1.5}.v2-notice-top-tags h4{font-size:12px;font-weight:500;margin:0 0 5px;color:var(--v2-muted)}.v2-notice-top-tags p{margin:3px 0;font-size:12px}.v2-notice-top-tags strong{font-size:13px}.v2-notice-pane-form>.v2-notice-field-section,.v2-notice-photo-columns>.v2-notice-field-section{padding-block:8px}.v2-notice-photo-columns h2{margin-bottom:6px}
+.v2-notice-top-tags>.v2-notice-field-section{padding:6px 0 0;margin-top:6px}.v2-notice-top-tags h2{font-size:12px;margin-bottom:4px}.v2-notice-top-tags .v2-notice-upload{min-height:48px}
+.v2-notice-top-tags .v2-notice-photo-strip .v2-notice-photos img{height:42px}.v2-notice-top-tags .v2-notice-photo-uploader:has(figure)>.v2-notice-upload{min-height:80px}
+@media(max-width:1050px){.v2-notice-context-row.has-tags{grid-template-columns:minmax(0,1fr)}.v2-notice-top-tags{border-left:0;border-top:1px solid var(--v2-border);padding:8px 0}.v2-notice-context-row{gap:0}}
 .v2-notice-edit-surface [data-notice-section="binding"] .v2-notice-tools h2{margin:0}
 .v2-notice-relations .v2-notice-editor-context{margin:0;padding:0;flex:none}
 .v2-notice-edit-surface [data-notice-section="binding"]{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px}

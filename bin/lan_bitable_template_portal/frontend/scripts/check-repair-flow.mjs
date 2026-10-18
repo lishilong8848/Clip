@@ -9,7 +9,7 @@ assert.deepEqual(steps.map(s=>s.status),['process','wait','wait','wait','wait'])
 steps=repairFlowSteps('event',null,event);
 assert.deepEqual(steps.map(s=>s.status),['finish','process','wait','wait','wait']);
 steps=repairFlowSteps('project',project,event);
-assert.deepEqual(steps.map(s=>s.status),['finish','finish','finish','finish','process']);
+assert.deepEqual(steps.map(s=>s.status),['finish','finish','finish','process','wait']);
 assert.match(steps[2].description,/发送状态需核对/);
 assert.match(steps[4].description,/尚未完成/,'100% alone is not completion');
 assert.equal(repairFlowSteps('project',{...project,is_completed:true},event)[4].status,'finish');
@@ -33,4 +33,10 @@ for(const status of ['pending','failed']){
 }
 steps=repairFlowSteps('project',null,event);
 assert.equal(steps[0].status,'wait','unsaved association is not shown as saved');assert.equal(steps[1].status,'process');
+steps=repairFlowSteps('project',{...project,source_repair_ids:[],followup_count:0},event,'','followup-first');
+assert.deepEqual(steps.map(s=>s.id),['event','project','followups','notice','complete']);
+assert.equal(steps[2].status,'process','a saved repair can be followed up before a notice is linked');
+assert.equal(steps[3].status,'wait');
+steps=repairFlowSteps('project',{...project,source_repair_ids:[]},event,'','followup-first');
+assert.equal(steps[2].status,'finish');assert.equal(steps[3].status,'process','after followups the notice can be handled');
 console.log('PASS: five evidence-based steps, missing/locked states, source identity, saved versus unsaved, 100% versus completed, sync failure and no invented notice send.');

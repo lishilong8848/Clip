@@ -240,7 +240,7 @@
                         <input
                           v-model.number="step.signature_slots"
                           type="number"
-                          min="1"
+                          min="0"
                           max="10"
                           :disabled="configurationLocked || busy"
                           aria-label="步骤签名人数"
@@ -413,7 +413,7 @@
                     <p>{{ step.content || "未填写操作内容" }}</p>
                   </div>
                   <div class="signer-grid">
-                    <label v-for="slot in Number(step.signature_slots || 1)" :key="`${step.row}-${slot}`">
+                    <label v-for="slot in Number(step.signature_slots ?? 1)" :key="`${step.row}-${slot}`">
                       <span>执行人 {{ slot }}</span>
                       <VnetSelect
                         :input-id="`drill-step-${step.row}-${slot}`"
@@ -1109,7 +1109,7 @@ function ensureExecutionSelectionShape(): void {
   execution.value.participants = [...participantMap.values()];
   for (const step of executionSteps.value) {
     const key = String(step.row);
-    const count = Math.max(1, Number(step.signature_slots || 1));
+    const count = Math.max(0, Number(step.signature_slots ?? 1));
     const ids = arrayFrom(execution.value.step_signers[key]).map((item) => String(item || "")).slice(0, count);
     while (ids.length < count) ids.push("");
     execution.value.step_signers[key] = ids;
@@ -1281,7 +1281,7 @@ function isEccStep(step: Dict): boolean {
 }
 
 function eccStepSignerError(step: Dict): string {
-  if (!isEccStep(step) || stepSignerIds(step.row).includes(commanderId.value)) return "";
+  if (Number(step.signature_slots ?? 1) === 0 || !isEccStep(step) || stepSignerIds(step.row).includes(commanderId.value)) return "";
   return `步骤 ${stepIndex(step)}（ECC）需包含指挥人签名，可在任意签名位选择。`;
 }
 
@@ -1307,7 +1307,7 @@ function validateExecution(): string[] {
   if (!participantIds.value.length) errors.push("请选择参演人员");
   if (participantIds.value.length > 10) errors.push("参演人员不能超过 10 人");
   for (const step of executionSteps.value) {
-    const needed = Math.max(1, Number(step.signature_slots || 1));
+    const needed = Math.max(0, Number(step.signature_slots ?? 1));
     const ids = stepSignerIds(step.row).filter(Boolean);
     if (ids.length > needed || new Set(ids).size !== ids.length) errors.push(`步骤 ${stepIndex(step)} 最多选择 ${needed} 名不同的执行人`);
     const eccError = eccStepSignerError(step);

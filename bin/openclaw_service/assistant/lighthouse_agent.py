@@ -433,7 +433,7 @@ def _drill_configuration_from_form(field, filled):
         value = _read_path(values, alias)
         key = path[-1]
         if key in {"score", "signature_slots", "header_row", "start_row", "end_row"}:
-            minimum, maximum = (0, 100) if key == "score" else (1, DRILL_MAX_PARTICIPANTS if key == "signature_slots" else DRILL_MAX_SOURCE_ROWS)
+            minimum, maximum = (0, 100) if key == "score" else (0, DRILL_MAX_PARTICIPANTS) if key == "signature_slots" else (1, DRILL_MAX_SOURCE_ROWS)
             if type(value) is not int or not minimum <= value <= maximum:
                 raise AssistantError(f"分值、行号和签名人数须为有效整数（{minimum}–{maximum}）。")
         elif value and path[0] == "mapping" and not key.endswith("_col"):

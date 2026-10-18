@@ -19,7 +19,7 @@ export function adaptCompactWorkspaces(input,filename){
     const header=nodes(source,byClass('v2-notice-heading'))[0];
     const tools=nodes(header.loc.source,byClass('v2-notice-tools'))[0].loc.source;
     source=replace(source,byClass('v2-notice-heading'),'');
-    source=replace(source,byClass('v2-notice-types'),text=>`<div class="v2-command-row v2-notice-command">${text}${tools}${host('notices')}</div>`);
+    source=replace(source,byClass('v2-notice-type-filters'),text=>text.replace('class="v2-notice-type-filters"','class="v2-command-row v2-notice-command"').replace(/<\/div>$/,`${tools}${host('notices')}</div>`));
   }else if(file==='NoticeSopManager.vue'){
     source=source.replace(' title="SOP 与工单模板"',' title=" "');
     const search=nodes(source,node=>node.tag==='NInput'&&node.loc.source.includes('v-model:value="search"'))[0].loc.source;

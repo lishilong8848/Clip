@@ -87,6 +87,19 @@ KNOWN_DYNAMIC_BINDINGS = [
         note="班前检查附件删除复用已注册 DELETE 路由；后端校验上传人、楼栋及提交状态，保留用户确认。",
     ),
     dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/dashboard/CheckAttachments.vue",
+        line=60, kind="covered",
+        method_paths=[("POST", "/api/pre-shift-checks/photo-preview"),
+                      ("POST", "/api/pre-shift-checks/files")],
+        window=3, needles=["requestBinaryJson((preview?'/api/pre-shift-checks/photo-preview?':'/api/pre-shift-checks/files?')"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/api/client.ts",
+            definition_marker="export async function requestBinaryJson",
+            definition_needles=['method: options.method || "POST"'],
+        ),
+        note="照片只读检查与确认后上传共用统一二进制 POST 客户端，两条路径均已注册并核验楼栋及任务权限。",
+    ),
+    dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/NoticeChangeConfirmations.vue",
         line=32, kind="covered",
         method_paths=[("POST", "/api/change-confirmations/{param}/confirm")],
@@ -149,6 +162,12 @@ KNOWN_DYNAMIC_BINDINGS = [
         line=58, kind="unresolved", method_paths=[], window=2,
         needles=["requestJson(path,{signal,cache:'no-store'})", "todoSources(kind,props,(path,signal)=>"],
         note="业务待办 GET 传输包装；实际端点由 businessTodos.ts 限定，在 WRAPPER_REVIEW 逐项复核。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/TaskWorkspace.vue",
+        line=121, kind="unresolved", method_paths=[], window=3,
+        needles=["requestJson(path+'?'+new URLSearchParams({...query,scope})", "const read=async(path:string"],
+        note="组件按选定楼栋读取既有 GET 接口；四个固定调用者在 WRAPPER_REVIEW 中逐项核对。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/version.ts",
@@ -510,6 +529,17 @@ KNOWN_DYNAMIC_BINDINGS = [
 #   caller_source       —— 调用者所在文件,缺省时为 wrapper 所在 source
 # 测试先用 marker 断言端点确实出现在真实源码(再对 native 目录 + _route_excluded 分类)。
 WRAPPER_REVIEW = [
+    dict(
+        source="lan_bitable_template_portal/frontend/src/workspace-v2/TaskWorkspace.vue",
+        line=121, label="工作台按楼栋读取包装", anchor="const read=async(path:string",
+        callers=[
+            dict(method="GET", path="/api/workbench", caller_line=129, marker="read('/api/workbench'"),
+            dict(method="GET", path="/api/repair-management/status", caller_line=131, marker="read('/api/repair-management/status'"),
+            dict(method="GET", path="/api/events/monthly", caller_line=132, marker="read('/api/events/monthly'"),
+            dict(method="GET", path="/api/daily-tasks", caller_line=136, marker="read('/api/daily-tasks'"),
+        ],
+        note="仅拆分楼栋读取；不创建新业务接口，不改变提交动作和权限。",
+    ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/BusinessTodos.vue",
         line=58, label="业务待办 todoSources 只读请求包装",
