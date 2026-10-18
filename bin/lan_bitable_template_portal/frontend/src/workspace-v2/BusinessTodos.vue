@@ -60,7 +60,7 @@ async function loadGroup(kind:TodoKind,reset=false){
   if(disposed||document.hidden||!selected.value.includes(kind))return;
   if(states.value[kind]?.loading&&!reset)return;
   controllers.get(kind)?.abort();const controller=new AbortController();controllers.set(kind,controller);
-  const previous=states.value[kind];if(reset||!previous){const next=makeGroup(kind);for(const source of next.sources)source.rows=previous?.sources.find(old=>old.id===source.id)?.rows||[];states.value[kind]=next;}
+  const previous=states.value[kind];if(reset||!previous){const next=makeGroup(kind);next.ready=previous?.ready||false;for(const source of next.sources)source.rows=previous?.sources.find(old=>old.id===source.id)?.rows||[];states.value[kind]=next;}
   const group=states.value[kind]!;group.loading=true;
   await Promise.all(group.sources.filter(source=>source.more||source.error).map(async source=>{
     try{
@@ -77,7 +77,7 @@ function openRow(row:TodoRow){active.value=row;}
 function closeHandler(){if(!active.value)return;const kind=active.value.kind;requestEmbeddedChange(props.widgetId+'-action',()=>{active.value=null;void loadGroup(kind,true);});}
 function visibility(){if(!document.hidden)refresh();else for(const controller of controllers.values())controller.abort();}
 watch(()=>props.selection,value=>{selected.value=todoSelection(value,props.user);},{deep:true});
-watch(()=>[props.scope,props.user.open_id,JSON.stringify(props.user.modules),JSON.stringify(props.scopes),JSON.stringify(props.selectedScopes)],()=>{
+watch(()=>JSON.stringify([props.scope,props.user.open_id,props.user.modules,props.scopes,props.selectedScopes]),()=>{
   for(const controller of controllers.values())controller.abort();controllers.clear();states.value={};active.value=null;selected.value=todoSelection(props.selection,props.user);refresh();
 });
 watch(selected,kinds=>{for(const [kind,controller] of controllers)if(!kinds.includes(kind)){controller.abort();controllers.delete(kind);delete states.value[kind];}for(const kind of kinds)if(!states.value[kind])void loadGroup(kind);},{immediate:true,deep:true});

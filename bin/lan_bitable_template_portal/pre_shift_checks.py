@@ -159,6 +159,8 @@ class CheckService:
                     conn.execute(f'ALTER TABLE deliveries ADD COLUMN {field} {sql_type}')
             if 'version' not in {r[1] for r in conn.execute('PRAGMA table_info(rosters)')}:
                 conn.execute('ALTER TABLE rosters ADD COLUMN version INTEGER NOT NULL DEFAULT 0')
+            if 'loaded_at' not in {r[1] for r in conn.execute('PRAGMA table_info(rosters)')}:
+                conn.execute('ALTER TABLE rosters ADD COLUMN loaded_at REAL NOT NULL DEFAULT 0')
             if 'evidence' not in task_cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN evidence TEXT DEFAULT ''")
             file_cols = {r[1] for r in conn.execute('PRAGMA table_info(files)')}
@@ -364,19 +366,28 @@ class CheckService:
         return False
 
     def _ensure_roster(self, current, day):
+        configured = set(self.configured_scopes())
         with self.connection() as conn:
             row = conn.execute('SELECT * FROM rosters WHERE day=?', (day,)).fetchone()
-        if row and row['version'] == ROSTER_VERSION and row['people'] and not row['retry_at']:
+            # Recheck once on entering each reminder window, not on every worker tick.
+            due_refresh = row and conn.execute("""SELECT 1 FROM tasks WHERE day=? AND submitted=''
+                AND items!='[]' AND scope IN (SELECT scope FROM definitions WHERE items!='[]')
+                AND due<=? AND deadline>? AND due-?>? LIMIT 1""",
+                (day, current.timestamp() + REMINDER_LEAD_SECONDS, current.timestamp(),
+                 REMINDER_LEAD_SECONDS, row['loaded_at'])).fetchone()
+        covered = {p['scope'] for p in json.loads(row['people'] or '[]')} if row else set()
+        if (row and row['version'] == ROSTER_VERSION and row['people'] and not row['retry_at']
+                and (day < current.date().isoformat() or configured <= covered and not due_refresh)):
             return
         if row and row['version'] == ROSTER_VERSION and row['retry_at'] > current.timestamp():
             return
         try:
             snapshot = self.roster(day)
             with self.connection(True) as conn:
-                configured = set(self.configured_scopes())
                 warnings = {scope: message for scope, message in snapshot.get('warnings', {}).items() if scope in configured}
-                conn.execute('INSERT OR REPLACE INTO rosters(day,people,retry_at,error,version) VALUES(?,?,?,?,?)',
-                             (day, dump(snapshot['people']), current.timestamp() + 300 if warnings else 0, dump(warnings), ROSTER_VERSION))
+                conn.execute('INSERT OR REPLACE INTO rosters(day,people,retry_at,error,version,loaded_at) VALUES(?,?,?,?,?,?)',
+                             (day, dump(snapshot['people']), current.timestamp() + 300 if warnings else 0,
+                              dump(warnings), ROSTER_VERSION, current.timestamp()))
         except Exception as exc:
             with self.connection(True) as conn:
                 conn.execute('INSERT OR REPLACE INTO rosters(day,people,retry_at,error,version) VALUES(?,?,?,?,?)',

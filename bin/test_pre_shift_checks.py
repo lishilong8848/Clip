@@ -56,7 +56,7 @@ class CheckTests(unittest.TestCase):
         self.submit(self.peer, current=self.current + dt.timedelta(hours=2, minutes=1))
         self.service.tick(self.current + dt.timedelta(hours=4))
         self.assertEqual(self.sender.call_count, 4)
-        self.assertEqual(self.roster.call_count, 1)
+        self.assertEqual(self.roster.call_count, 2, 'initial read plus one pre-reminder roster recheck')
         self.assertEqual(self.service.state(self.worker, 'A', self.current)['tasks'][0]['actor_name'], '值班长二')
         self.assertEqual(self.cloud.upsert.call_count, 1)
 

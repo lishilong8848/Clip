@@ -12,7 +12,7 @@
           <OverviewPanel v-if="panelKinds.includes(taskKind)" :key="taskKind" :kind="taskKind" :user="user" :scope="scope" :scopes="scopes" :selected-scopes="selectedScopes" tasks-only :brief="brief" @open="open" />
           <template v-else>
           <NAlert v-if="taskError" type="warning" :bordered="false">{{ taskError }} <NButton text @click="refresh">重试</NButton></NAlert>
-          <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading"><NList class="v2-mobile-tasks v2-task-operation-list"><NListItem v-for="row in visibleRows" :key="row.key">
+          <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading&&!taskReady"><NList class="v2-mobile-tasks v2-task-operation-list"><NListItem v-for="row in visibleRows" :key="row.key">
             <article v-if="actionMode" class="v2-task-operation v2-clickable-card" @click="activateCard($event) && open(row.url)">
               <div class="v2-task-operation-head"><NButton text class="v2-operation-title" :title="row.title" data-v2-navigation @click="open(row.url)"><span class="v2-operation-name">{{row.title}}</span></NButton><NTag size="small" :bordered="false">{{row.status}}</NTag></div>
               <div class="v2-mobile-task-meta"><span>{{row.scope}}</span><span v-if="row.time">{{row.time}}</span><span v-if="row.progress!==null">进度 {{row.progress}}%</span><span v-if="taskKind==='repair_management'">跟进 {{row.followupCount??'—'}} 条</span></div>
@@ -24,7 +24,7 @@
               <span class="v2-task-action">{{ brief?'查看':taskKind==='learning'?(row.status==='未开始'?'开始学练':'继续学练'):'办理' }}<ChevronRight :size="16" class="v2-task-arrow" aria-hidden="true" /></span>
             </NButton>
           </NListItem></NList><NEmpty v-if="!visibleRows.length && !taskLoading && !taskError" :description="brief&&rows.length?'已读取事项中暂无到期或异常提醒':emptyText" /></NSpin>
-          <NDataTable v-else-if="taskTabs.length" :columns="columns" :data="rows" :loading="taskLoading" :row-key="row=>row.key" :bordered="false" :single-line="false" :pagination="false" size="small"><template #empty><NEmpty :description="taskError ? '资料暂未读取成功' : emptyText" /></template></NDataTable>
+          <NDataTable v-else-if="taskTabs.length" :columns="columns" :data="rows" :loading="taskLoading&&!taskReady" :row-key="row=>row.key" :bordered="false" :single-line="false" :pagination="false" size="small"><template #empty><NEmpty :description="taskError ? '资料暂未读取成功' : emptyText" /></template></NDataTable>
           <NEmpty v-else description="当前没有获授待办模块" />
           <div v-if="taskTabs.length" class="v2-section-foot"><span>{{ brief?'基于已读取事项':taskNote }}</span><NButton data-v2-navigation text type="primary" :disabled="!taskUrl" @click="open(footerTarget)">{{ brief?'查看待办':taskKind === 'learning' ? '进入我的学练' : '更多待办' }} <ArrowRight :size="15" /></NButton></div>
           </template>
@@ -62,10 +62,11 @@ const commonActions=computed(()=>{
 const scopeLabel=computed(()=>props.scopes.find(s=>s.value===props.scope)?.label || props.scope || '授权范围');
 const compact=ref(window.innerWidth<800);
 const taskKind=ref(''), taskLoading=ref(false), taskError=ref(''), rows=ref<Dict[]>([]), taskNote=ref('');
+const taskReady=ref(false);
 const emptyText=ref('当前分类暂无待处理事项');
 const widgetCapacity=useCapacity();
 const visibleRows=computed(()=>props.brief?rows.value.filter(row=>taskKind.value==='learning'||dueLabel(row)||/异常|失败|待核对/.test(row.status)).slice(0,3):rows.value);
-let taskAbort:AbortController|undefined, disposed=false;
+let taskAbort:AbortController|undefined, disposed=false,readContext='';
 const cache=new Map<string,{at:number;value:Dict}>();
 const noticeTypes=computed(()=>modules.filter(m=>NOTICE_IDS.includes(m.id)&&permitted.value.includes(m.id)));
 const panelKinds=['plan_convergence','cabinet','engineer_mop','drills','critical_guard'];
@@ -116,10 +117,14 @@ function toRows(items:Dict[],kind:string,ongoing=false):Dict[]{
 }
 async function loadTasks(){
   taskAbort?.abort();
-  const kind=taskKind.value;if(!kind||panelKinds.includes(kind)||props.view==='functions'||disposed||document.hidden){rows.value=[];taskLoading.value=false;return;}
-  const abort=new AbortController();taskAbort=abort;taskLoading.value=true;taskError.value='';rows.value=[];taskNote.value='';emptyText.value='当前分类暂无待处理事项';
+  if(disposed)return;
+  const kind=taskKind.value;
   const selected=props.selectedScopes?.filter(scope=>props.scopes.some(option=>option.value===scope))||[props.scope];
-  const key=selected.join(',')+':'+kind;
+  const key=JSON.stringify([props.user.open_id,props.user.modules,selected,kind,props.view]);
+  if(readContext!==key){readContext=key;rows.value=[];taskReady.value=false;taskNote.value='';emptyText.value='当前分类暂无待处理事项';cache.clear();}
+  if(!kind||panelKinds.includes(kind)||props.view==='functions'){rows.value=[];taskReady.value=false;taskLoading.value=false;return;}
+  if(document.hidden){taskLoading.value=false;return;}
+  const abort=new AbortController();taskAbort=abort;taskLoading.value=true;taskError.value='';
   const read=async(path:string,query:Record<string,string>)=>{
     const result=await Promise.all(selected.map(async scope=>({scope,data:await requestJson(path+'?'+new URLSearchParams({...query,scope}),{signal:abort.signal})})));
     const collect=(field:string)=>[...new Map(result.flatMap(({scope,data})=>items(data[field]).map((row):Dict=>({...row,_widget_scope:scope}))).map(row=>[(row.work_type||kind)+':'+(row.active_item_id||row.record_id||row.id||JSON.stringify(row)),row])).values()];
@@ -147,12 +152,14 @@ async function loadTasks(){
       rows.value=[...toRows(active,kind,true),...toRows(pending,kind)].slice(0,60);taskNote.value=`已读取 ${rows.value.length} 条`;
     } else if(kind==='learning'){
       const total=count(data.today_summary?.assigned),done=count(data.today_summary?.task_answered);
+      rows.value=[];
       if(total && done!==null && done<total)rows.value=[{key:'self-learning',title:'今日学练',status:done?'答题中':'未开始',scope:data.self_scope,time:`已答 ${done} / ${total} 题`,progress:null,url:'/learning?view=practice'}];
       emptyText.value=data.unlinked?'当前账号尚未关联个人学练身份':total&&done===total?'今日学练已完成':total===0?'今日暂无已领取题单': '今日学练进度暂未返回';
       taskNote.value='仅当前登录人员的题单';
     } else if(kind==='event'){rows.value=toRows(items(data.records).filter((r:Dict)=>eventStatusTone(r.status)==='processing'),kind).slice(0,60);taskNote.value=`本月处理中 · 已读取 ${rows.value.length} 条`;}
     else if(kind==='daily'){const tasks=items(data.categories).flatMap((c:Dict)=>items(c.tasks)).filter((r:Dict)=>r.status_tone!=='completed');rows.value=toRows(tasks,kind).slice(0,60);taskNote.value=`今日任务 · 已读取 ${rows.value.length} 条`;}
     else{rows.value=toRows(items(data.records),kind);taskNote.value=`未开始与维修中 · 显示 ${rows.value.length} 条`;}
+    taskReady.value=true;
     cache.set('tasks:'+key,{at:Date.now(),value:data});
   }catch(e:any){if(!abort.signal.aborted)taskError.value=e.message||'此分类读取失败，不能判断为零条。';}
   finally{if(taskAbort===abort)taskLoading.value=false;}
@@ -163,7 +170,7 @@ function visibility(){if(document.hidden){taskAbort?.abort();}else{void loadTask
 function resize(){compact.value=window.innerWidth<800;}
 watch(taskTabs,tabs=>{if(!tabs.some(t=>t.id===taskKind.value))taskKind.value=tabs.find(t=>t.id===props.initialKind)?.id||tabs[0]?.id||'';},{immediate:true});
 watch(()=>props.initialKind,kind=>{if(taskTabs.value.some(t=>t.id===kind))taskKind.value=kind!;});
-watch(()=>[taskKind.value,props.scope,props.selectedScopes?.join(','),props.view],()=>void loadTasks(),{flush:'post'});
+watch(()=>JSON.stringify([taskKind.value,props.scope,props.selectedScopes,props.view,props.user.open_id,props.user.modules]),()=>void loadTasks(),{flush:'post'});
 onMounted(()=>{void loadTasks();window.addEventListener('clipflow-business-changed',invalidate);window.addEventListener('resize',resize);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;taskAbort?.abort();window.removeEventListener('clipflow-business-changed',invalidate);window.removeEventListener('resize',resize);document.removeEventListener('visibilitychange',visibility);});
 </script>

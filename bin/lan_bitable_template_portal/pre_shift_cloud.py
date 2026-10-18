@@ -89,7 +89,7 @@ def read_roster(service, day, *, scopes=SCOPES):
                     detail = '；'.join(issues[(scope, shift)] + missing)
                     warnings[scope] = warnings.get(scope, '') + f'{shift}班已匹配{len(resolved)}/{len(people)}人：{detail}；已匹配人员正常推送，其余5分钟后重试。'
                 result.extend(resolved)
-            for scope in {scope for scope, _ in groups}:
+            for scope in scopes:
                 for shift in ('白', '夜'):
                     if (scope, shift) not in groups:
                         warnings[scope] = warnings.get(scope, '') + f'{shift}班排班未读取到，5分钟后重试。'
@@ -140,7 +140,10 @@ class CheckSender:
         bot = getattr(self.runtime, 'feishu_assistant_channel', None)
         if not bot or not getattr(bot, 'messenger', None) or not getattr(bot, 'config', {}).get('app_id'):
             raise CheckError('飞书智能体尚未就绪，班前检查提醒等待重试。')
-        person = await asyncio.to_thread(self.runtime.auth_manager.directory_person, recipient) or {}
+        try:
+            person = await asyncio.to_thread(self.runtime.auth_manager.directory_person, recipient) or {}
+        except Exception:
+            raise CheckError('接收人目录暂未就绪，班前检查提醒等待重试。') from None
         if photo is not None:
             from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
             profile = await asyncio.to_thread(self.runtime.auth_manager.account_profile, recipient)
@@ -150,9 +153,13 @@ class CheckSender:
                 person = {'id': recipient, 'selectable': True}
         if not person.get('id') or not person.get('selectable') or person.get('inactive'):
             raise CheckError('班前检查接收人身份已变化，请核对人员目录。')
-        receive_type, receive_id = await asyncio.to_thread(bot.handover_cards.recipient_id,
-            {'id': person['id'], 'open_id': recipient})
-        client = await bot.messenger.client()
+        try:
+            receive_type, receive_id = await asyncio.to_thread(bot.handover_cards.recipient_id,
+                {'id': person['id'], 'open_id': recipient})
+            client = await bot.messenger.client()
+        except Exception:
+            # Nothing was sent yet; do not exhaust the uncertain-delivery dedup window.
+            raise CheckError('飞书智能体接收人映射暂未就绪，提醒等待重试。') from None
         content, kind = card, 'interactive'
         if photo is not None:
             if photo.get('sender_app_id') and photo['sender_app_id'] != bot.config['app_id']:
@@ -177,7 +184,10 @@ class CheckSender:
                 raise CheckError('照片发送进度中的图片标识无效，请管理员核对。')
             await asyncio.to_thread(checkpoint, key, bot.config['app_id'])
             content, kind = {'image_key': key}, 'image'
-        headers = await bot.messenger.headers()
+        try:
+            headers = await bot.messenger.headers()
+        except Exception:
+            raise CheckError('飞书智能体消息凭据暂未就绪，提醒等待重试。') from None
         try:
             response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
                 params={'receive_id_type': receive_type}, headers=headers,

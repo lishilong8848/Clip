@@ -484,7 +484,7 @@ function visibility(){if(document.hidden){listAbort?.abort();window.clearTimeout
 function beforeUnload(event:BeforeUnloadEvent){persist();if(busy.value||uploading.value||dirty.value){event.preventDefault();event.returnValue='';}}
 const contextKey=()=>JSON.stringify([props.scope,selectedBuildings.value,kind.value,applied.value]);
 let listContext=contextKey();
-watch(()=>[props.url,props.active,props.scope,props.selectedScopes?.join(',')],()=>{
+watch(()=>JSON.stringify([props.url,props.active,props.scope,props.selectedScopes]),()=>{
   persist();detailAbort?.abort();editing.value=false;confirming.value=false;undoOpen.value=false;changeOpen.value=false;recordsOpen.value=false;pasteOpen.value=false;window.clearTimeout(timer);syncAbort?.abort();
   if(!props.active){listAbort?.abort();return;}
   kind.value=params.value.get('work_type')||'all';month.value=params.value.get('month')||month.value;

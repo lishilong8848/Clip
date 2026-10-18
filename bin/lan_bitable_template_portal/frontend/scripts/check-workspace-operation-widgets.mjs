@@ -12,7 +12,7 @@ const browser=await chromium.launch({headless:true}),context=await browser.newCo
 const user={open_id:'operation-fixture',name:'操作组件验收',level:'L4',role:'user',category:'engineer',modules:['maintenance','repair_management']};
 const project={record_id:'repair-fixture',title:'BMS报D-416-UPS-1011#电池组最高电池内阻值过高告警并进行设备模块核对与修复'.repeat(3),building:'A楼',building_codes:['A'],workflow:'维修中',progress_percent:25,followup_count:2,followup_state_verified:true};
 const errors=[],reads=[];
-let noticeActionAvailable=true,repairMalformed=false;
+let noticeActionAvailable=true,repairMalformed=false,repairDelay=0;
 const layouts=layoutApiFixture();
 await context.route('**/*',async route=>{
   const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(url.pathname==='/assets/vnet-logo.png')return route.fulfill({contentType:'image/png',body:await readFile(path.join(root,'public/assets/vnet-logo.png'))});if(!url.pathname.startsWith('/api/'))return route.continue();
@@ -27,7 +27,7 @@ await context.route('**/*',async route=>{
     return ok({fragments:{detail:`<form id="lite-notice-form"><input name="scope" type="hidden" value="A"><input name="work_type" type="hidden" value="maintenance"><input name="notice_type" type="hidden" value="维保通告"><input name="source_record_id" type="hidden" value="plan-fixture">${ongoing?'<input name="target_record_id" type="hidden" value="active-fixture">':''}<label><span>名称</span><input name="title" required value="A楼测试维护"></label><label><span>通告内容</span><textarea name="content" required>维护内容</textarea></label>${(ongoing?noticeActionAvailable?['update','end']:['update']:['start']).map(action=>`<button name="submit_action" value="${action}">${action}</button>`).join('')}</form>`}});
   }
   if(url.pathname==='/api/workbench/draft')return ok({draft:null});
-  if(url.pathname==='/api/repair-management/status')return ok({...(!repairMalformed?{records:[project,{...project,record_id:'repair-next',title:'LONG_DEVICE_IDENTIFIER_WITHOUT_ANY_SPACES_'.repeat(12)}]}:{}),stats:{total:2,in_progress:2,completed_total:0}});
+  if(url.pathname==='/api/repair-management/status'){if(repairDelay)await new Promise(resolve=>setTimeout(resolve,repairDelay));return ok({...(!repairMalformed?{records:[project,{...project,record_id:'repair-next',title:'LONG_DEVICE_IDENTIFIER_WITHOUT_ANY_SPACES_'.repeat(12)}]}:{}),stats:{total:2,in_progress:2,completed_total:0}});}
   if(url.pathname==='/api/repair-management/records')return ok({records:[project],fields:[],total:1,offset:0});
   if(url.pathname==='/api/repair-management/records/repair-fixture')return ok({record:{...project,record_version:'v1',display_fields:{},raw_fields:{}}});
   if(url.pathname==='/api/repair-management/followups')return ok({fields:[],records:[],total:0,shared_fields:{}});
@@ -62,7 +62,18 @@ try{
   const repairRefresh=repair().locator('.v2-widget-head').getByRole('button',{name:'刷新维修跟进',exact:true});
   await repairRefresh.waitFor();await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();
   assert.equal(await repair().locator('.v2-widget-body').getByRole('button',{name:'刷新待办',exact:true}).count(),0,'refresh is in the widget header, not another content row');
+  repairDelay=1400;
+  await repair().locator('.v2-task-operation').first().evaluate(el=>window.refreshCard=el);
+  await repairRefresh.click();await page.waitForTimeout(200);
+  assert(await page.evaluate(()=>window.refreshCard.isConnected),'refresh does not remove operation cards');
+  assert.equal(await repair().locator('.n-spin-content--spinning').count(),0,'background refresh does not mask the loaded list');
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新维修跟进"].n-button--loading'));repairDelay=0;
+  await page.evaluate(()=>{Object.defineProperty(document,'hidden',{value:true,configurable:true});window.dispatchEvent(new Event('clipflow-business-changed'));});
+  assert(await page.evaluate(()=>window.refreshCard.isConnected),'background notifications cannot blank a hidden tab');
+  await page.evaluate(()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));});
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新维修跟进"].n-button--loading'));
   repairMalformed=true;await repairRefresh.click();await repair().getByText('待办资料未完整返回，请重试或进入业务列表核对。',{exact:false}).waitFor();
+  assert(await page.evaluate(()=>window.refreshCard.isConnected),'failed refresh keeps the last verified operation cards');
   assert.equal(await repair().locator('.n-empty').count(),0,'incomplete required records never become a successful empty result');
   repairMalformed=false;await repair().getByRole('button',{name:'重试',exact:true}).click();await repair().locator('.n-alert').waitFor({state:'hidden'});
   await repair().getByRole('button',{name:'填写跟进',exact:true}).first().click();

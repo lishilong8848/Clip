@@ -4,8 +4,8 @@
     <NAlert v-if="error" type="warning" :bordered="false">{{ error }}<NButton text @click="load">重新读取</NButton></NAlert>
     <NAlert v-if="unknownCount&&!compactCalendar" type="warning" :bordered="false">{{unknownCount}} 条事件缺少有效发生时间，未计入图表。<NButton text @click="reviewDates">核对事件</NButton></NAlert>
     <NButton v-else-if="unknownCount" class="v2-calendar-warning" text :title="unknownCount+' 条事件缺少发生时间，未计入图表'" :aria-label="unknownCount+' 条事件未计入，打开事件核对'" @click="reviewDates"><CircleAlert :size="15" /></NButton>
-    <NButton v-if="item.display==='number'" text class="v2-number-widget" :disabled="unavailable||!ready" @click="drill()"><NNumberAnimation v-if="ready&&!unavailable" :from="0" :to="total" :duration="reduced?0:650" /><span v-else>—</span><small>{{ item.kind==='events'?(unknownCount?'已核验日期事件':'事件总数'):item.metric==='ongoing'?'进行中通告':'待发计划' }}</small></NButton>
-    <MotionChart v-else title="" :items="items" :loading="loading||!ready&&!error" :failed="unavailable" :view="item.display" :fit="item.display==='calendar'" :details="item.display!=='calendar'" @select="drill" />
+    <NButton v-if="item.display==='number'" text class="v2-number-widget" :disabled="unavailable||!ready" @click="drill()"><NNumberAnimation v-if="ready&&!incomplete" :from="0" :to="total" :duration="reduced?0:650" /><span v-else>—</span><small>{{ item.kind==='events'?(unknownCount?'已核验日期事件':'事件总数'):item.metric==='ongoing'?'进行中通告':'待发计划' }}</small></NButton>
+    <MotionChart v-else title="" :items="items" :loading="!ready&&!error" :failed="!ready&&Boolean(error)||incomplete" :view="item.display" :fit="item.display==='calendar'" :details="item.display!=='calendar'" @select="drill" />
     <footer v-if="!compactCalendar" class="v2-widget-source"><span>{{ stamp || '本地业务快照' }}</span><NButton text type="primary" :disabled="!ready||unavailable" @click="drill()">查看明细 <ArrowUpRight :size="14" /></NButton></footer>
     <NModal v-model:show="showDetails" preset="card" class="v2-chart-records" :title="detailTitle" :bordered="false"><NList><NListItem v-for="row in details" :key="eventRecordId(row)"><NButton text class="v2-row-title" @click="openEvent(row)">{{ row.title||row.name||row.summary||row.overview||'事件记录' }}</NButton><div class="v2-source-note">{{ row.building||row.scope }} · {{ row.status }} · {{ row.occurrence_time }}</div></NListItem></NList><NEmpty v-if="!details.length" description="该时段没有事件记录" /></NModal>
   </div>
@@ -27,7 +27,8 @@ const emit=defineEmits<{open:[url:string]}>();
 const host=ref<HTMLElement>(),loading=ref(false),ready=ref(false),error=ref(''),stamp=ref(''),period=ref(props.item.period);
 const unknownCount=ref(0),capacity=useCapacity();
 const compactCalendar=computed(()=>props.item.display==='calendar'&&(capacity.value.width<380||capacity.value.height<240));
-const unavailable=computed(()=>Boolean(error.value)||unknownCount.value>0&&!records.value.length);
+const incomplete=computed(()=>unknownCount.value>0&&!records.value.length);
+const unavailable=computed(()=>Boolean(error.value)||incomplete.value);
 const items=ref<Array<{label:string;value:number;url?:string;start?:number;end?:number}>>([]),records=ref<Dict[]>([]),details=ref<Dict[]>([]),showDetails=ref(false),detailTitle=ref('事件明细');
 const total=computed(()=>items.value.reduce((sum,item)=>sum+item.value,0));
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -55,7 +56,7 @@ async function load(){
       nextStamp=String(payloads[0]?.last_loaded_at||'当前状态');
     }
     if(controller.signal.aborted)return;items.value=next;records.value=nextRecords;unknownCount.value=nextUnknown;stamp.value=nextStamp;ready.value=true;stale=false;
-  }catch(e){if(!controller.signal.aborted)error.value=e instanceof Error?e.message:'统计读取失败，不能判断为零。';}
+  }catch(e){if(!controller.signal.aborted)error.value=(e instanceof Error?e.message:'统计读取失败，不能判断为零。')+(ready.value?'（保留上次读取的数据）':'');}
   finally{if(abort===controller)loading.value=false;}
 }
 function drill(item?:typeof items.value[number]){
@@ -67,7 +68,7 @@ function drill(item?:typeof items.value[number]){
 function openEvent(row:Dict){const building=String(row.scope||row.building||'').match(/110|[ABCDEH]/)?.[0];emit('open','/?'+new URLSearchParams({mode:'events',detail:'1',scope:building&&props.selectedScopes?.includes(building)?building:props.scope,record_id:eventRecordId(row),month:String(row.occurrence_time).slice(0,7)}));}
 function reviewDates(){emit('open','/?'+new URLSearchParams({mode:'events',detail:'1',scope:props.scope}));}
 watch(()=>[props.item.period,props.item.display],()=>period.value=props.item.period==='year'&&props.item.display!=='calendar'?'month':props.item.period);
-watch(()=>[props.scope,props.selectedScopes?.join(','),props.item.kind,props.item.metric,period.value,props.item.display==='calendar'],()=>{abort?.abort();ready.value=false;items.value=[];records.value=[];unknownCount.value=0;showDetails.value=false;void load();});
+watch(()=>JSON.stringify([props.user.open_id,props.user.modules,props.scope,props.selectedScopes,props.item.kind,props.item.metric,period.value,props.item.display==='calendar']),()=>{abort?.abort();ready.value=false;items.value=[];records.value=[];unknownCount.value=0;showDetails.value=false;void load();});
 function changed(){stale=true;void load();}
 function visibility(){if(document.hidden)abort?.abort();else if(stale||!ready.value)void load();}
 onMounted(()=>{observer=new IntersectionObserver(entries=>{visible=entries.some(e=>e.isIntersecting);if(visible&&(stale||!ready.value)&&!loading.value)void load();},{rootMargin:'80px'});if(host.value)observer.observe(host.value);window.addEventListener('clipflow-business-changed',changed);document.addEventListener('visibilitychange',visibility);});

@@ -34,7 +34,7 @@ const paper={id:'paper-1',date:'2026-10-17',scope:'A',person_id:'person-alice',p
 let page;
 async function client(owner='alice',width=1440,modules=allModules){
   const context=await browser.newContext({viewport:{width,height:width<700?640:960},reducedMotion:'reduce'});contexts.push(context);
-  const state={owner,modules,failRepair:false,failSave:false,doneWater:false,signed:false};
+  const state={owner,modules,failRepair:false,failSave:false,doneWater:false,signed:false,readDelay:0};
   await context.route('**/*',async route=>{
     const req=route.request(),u=new URL(req.url()),p=u.pathname;if(u.origin!==origin)return route.abort();
     if(p==='/assets/vnet-logo.png')return route.fulfill({contentType:'image/png',body:await readFile(path.join(root,'public/assets/vnet-logo.png'))});
@@ -42,6 +42,7 @@ async function client(owner='alice',width=1440,modules=allModules){
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(p.startsWith('/api/workspace-layouts/')){if(state.failSave&&req.method()==='PUT')return route.fulfill({status:503,json:{ok:false,error:'隔离测试：保存暂不可用'}});if(await layouts.handle(route,owner))return;}
     reads.push({path:p,query:Object.fromEntries(u.searchParams),method:req.method()});
+    if(state.readDelay&&['/api/workbench','/api/repair-management/status'].includes(p))await new Promise(resolve=>setTimeout(resolve,state.readDelay));
     if(p==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'todo-fixture'}});
     if(p==='/api/auth/status')return ok({logged_in:true,default_scope:'A',user:{open_id:owner,name:'验收人员',role:'building',level:'L4',category:'engineer',modules:state.modules},scope_options:[{value:'A',label:'A楼'}]});
     if(p==='/api/workbench')return ok({source_snapshot_ready:true,records:[],ongoing:[{active_item_id:'active-1',record_id:'target-1',work_type:'maintenance',scope:'A',title:rowNames[0],status:'开始'}],records_pagination:{page:1,total_pages:1,total:0},ongoing_pagination:{page:1,total_pages:1,total:1}});
@@ -90,6 +91,17 @@ async function select(page,name){await page.locator('.v2-todo-toolbar .n-base-se
 try{
   const a=await client();page=a.page;
   for(const name of rowNames)await page.locator('.v2-todo-row').filter({hasText:name}).waitFor();
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:900});
+    a.state.readDelay=1400;
+    await page.locator('.v2-todo-row').first().evaluate(el=>window.refreshRow=el);
+    await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
+    await page.waitForTimeout(200);
+    assert(await page.evaluate(()=>window.refreshRow.isConnected),'background refresh retains the existing row DOM');
+    assert.equal(await page.locator('.v2-todo-skeleton').count(),0,'loaded lists do not return to skeletons');
+    assert(await group(page,'通告').getByRole('button',{name:/A楼维保进行中/}).isVisible());
+    await page.waitForFunction(()=>!document.querySelector('.v2-todo-group .n-spin'));a.state.readDelay=0;
+  }
   await page.setViewportSize({width:1920,height:1000});
   for(const width of [360,760,1120]){
     await page.locator('.v2-business-todos').evaluate((el,w)=>el.style.width=w+'px',width);
@@ -164,6 +176,23 @@ try{
     await group(page,label).getByRole('button',{name:new RegExp(title)}).click();await page.locator('.v2-todo-handler').getByText(readyText,{exact:false}).first().waitFor();assert.equal(page.url(),homeUrl);await close(page);
   }
   await group(page,'我的签名').getByRole('button',{name:/填写个人签名/}).click();await page.locator('.v2-todo-handler').getByRole('button',{name:'开始签名',exact:true}).click();await page.locator('.v2-todo-handler canvas').waitFor();assert.equal(page.url(),homeUrl);await close(page);
+  for(const current of [home,phone]){
+    page=current.page;
+    await page.locator('.v2-todo-toolbar .n-base-selection').click();
+    for(const name of ['维修项目','重保填写','风险排查','水耗填写','我的学练','我的签名'])await page.locator('.n-base-select-option').filter({hasText:name}).click();
+    assert.deepEqual(await labels(page),['1通告']);
+    const authReads=reads.filter(r=>r.path==='/api/auth/status').length;
+    await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));
+    await page.waitForFunction(()=>!document.querySelector('.v2-todo-group .n-spin'));
+    await page.waitForTimeout(300);
+    assert(reads.filter(r=>r.path==='/api/auth/status').length>authReads,'exercise the real auth-status refresh');
+    assert.deepEqual(await labels(page),['1通告'],'same permissions must not reset an uncommitted single selection');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>!document.querySelector('.v2-todo-toolbar .n-base-selection--disabled'));
+    await page.reload();await page.locator('.v2-todo-group').first().waitFor();
+    await page.waitForFunction(()=>!document.querySelector('.v2-todo-toolbar .n-base-selection--disabled'));
+    assert.deepEqual(await labels(page),['1通告'],'single category survives account-layout save and reload');
+  }
   assert.deepEqual(errors,[]);console.log('PASS: numbered multi-select order, account/PC/mobile isolation, pagination, seven real module handlers without navigation, water save+unsaved guard, isolated failure and permissions. All APIs mocked. Screenshots: '+shots);
 }catch(error){if(page){await page.screenshot({path:path.join(shots,'failure.png'),fullPage:true});console.error((await page.locator('body').innerText()).slice(-6500));}console.error(errors);throw error;}
 finally{for(const context of contexts)await context.close();await browser.close();await server.close();}

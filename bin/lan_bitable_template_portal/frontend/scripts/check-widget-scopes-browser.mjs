@@ -92,6 +92,16 @@ try{
   await page.reload();await notice.getByText('B楼计划0',{exact:true}).waitFor();assert.equal(await notice.getByText('A楼计划0',{exact:true}).count(),0,'saved widget selection survives login/page reload');
   await notice.locator('[data-list="planned"] .v2-notice-entry').first().getByRole('button',{name:'开始',exact:true}).click();await page.locator('.v2-notice-editor').waitFor();
   assert.equal(reads.filter(url=>url.pathname==='/api/workbench/lite-detail').at(-1).searchParams.get('scope'),'B');
+  const title=page.locator('.v2-notice-editor').getByRole('textbox').first();
+  const originalTitle=await title.inputValue();
+  await title.fill('B楼保留本次填写');
+  const authReads=reads.filter(url=>url.pathname==='/api/auth/status').length;
+  await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));
+  await page.waitForTimeout(400);
+  assert(reads.filter(url=>url.pathname==='/api/auth/status').length>authReads);
+  assert(await page.locator('.v2-notice-editor').isVisible(),'same account status refresh must not close an embedded editor');
+  assert.equal(await title.inputValue(),'B楼保留本次填写','status refresh cannot reset an in-progress notice draft');
+  await title.fill(originalTitle);
   await page.goto(origin+'/assets/workspace-v2/index.html');
   for(const width of [1440,360,375,390]){
     await page.setViewportSize({width,height:width<700?667:1000});await notice.scrollIntoViewIfNeeded();await notice.getByText(/楼计划0/).first().waitFor();

@@ -4,7 +4,7 @@
     <NAlert v-if="error" type="warning" :bordered="false">{{ error }} <NButton text @click="load">重试</NButton></NAlert>
     <div class="v2-brief-grid">
       <NButton v-for="entry in entries" :key="entry.label" data-v2-navigation quaternary @click="$emit('open',entry.url)">
-        <span>{{ entry.label }}</span><NSkeleton v-if="loading" width="42px" height="28px" /><strong v-else>{{ value(entry.keys) ?? '—' }}</strong><ChevronRight :size="14" aria-hidden="true" />
+        <span>{{ entry.label }}</span><NSkeleton v-if="loading&&!ready" width="42px" height="28px" /><strong v-else>{{ value(entry.keys) ?? '—' }}</strong><ChevronRight :size="14" aria-hidden="true" />
       </NButton>
     </div>
   </section>
@@ -17,7 +17,7 @@ import { requestJson,type Dict } from '../client';
 import { NOTICE_IDS,count,beijingDate } from '../modules';
 const props=defineProps<{user:Dict;scope:string}>();
 defineEmits<{open:[url:string]}>();
-const data=ref<Dict>({}),loading=ref(false),error=ref('');
+const data=ref<Dict>({}),loading=ref(false),ready=ref(false),error=ref('');
 const entries=computed(()=>{
   const notices=NOTICE_IDS.filter(id=>(props.user.modules||[]).includes(id));
   const noticeUrl='/workbench-lite?'+new URLSearchParams({scope:props.scope,work_type:notices.length===1?notices[0]:'all',month:Number(beijingDate().slice(5,7))+'月'});
@@ -29,19 +29,19 @@ const entries=computed(()=>{
 let abort:AbortController|undefined;
 function value(keys:string[]){const values=keys.map(key=>count(data.value[key]));return values.some(v=>v===null)?null:values.reduce<number>((sum,v)=>sum+v!,0);}
 async function load(){
-  abort?.abort();data.value={};error.value='';
+  abort?.abort();error.value='';
   if(!entries.value.length||document.hidden){loading.value=false;return;}
   const controller=new AbortController();abort=controller;loading.value=true;
   try{
     const result=await requestJson('/api/scope-overview?scope='+encodeURIComponent(props.scope),{signal:controller.signal});
     if(controller.signal.aborted)return;
     if(result.source_snapshot_ready===false||!result.scopes?.[props.scope])throw new Error('概况暂未就绪，不能判断为零。');
-    data.value=result.scopes[props.scope];
+    data.value=result.scopes[props.scope];ready.value=true;
   }catch(e){if(!controller.signal.aborted)error.value=e instanceof Error?e.message:'概况读取失败';}
   finally{if(abort===controller)loading.value=false;}
 }
 function visibility(){if(document.hidden)abort?.abort();else void load();}
-watch(()=>[props.scope,props.user.modules],load);
+watch(()=>JSON.stringify([props.scope,props.user.open_id,props.user.modules]),()=>{data.value={};ready.value=false;void load();});
 onMounted(()=>{void load();window.addEventListener('clipflow-business-changed',load);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{abort?.abort();window.removeEventListener('clipflow-business-changed',load);document.removeEventListener('visibilitychange',visibility);});
 </script>

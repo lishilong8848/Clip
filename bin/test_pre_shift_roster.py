@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.pre_shift_cloud import CheckCloud, CheckSender, read_roster
-from lan_bitable_template_portal.pre_shift_checks import CheckService, CheckError, ROSTER_VERSION, TZ
+from lan_bitable_template_portal.pre_shift_checks import CheckService, CheckError, CheckDeliveryUncertain, ROSTER_VERSION, TZ
 from test_pre_shift_checks import receipt
 
 DAY = '2026-10-17'
@@ -38,7 +38,7 @@ def reader(fields, directory=None):
 class RosterTests(unittest.TestCase):
     def test_text_names_complete_both_shifts_when_linked_people_has_only_one(self):
         service=reader([roster_fields(),roster_fields('夜')])
-        result=read_roster(service,DAY)
+        result=read_roster(service,DAY,scopes=['A'])
         self.assertEqual([(p['shift'],p['open_id']) for p in result['people']], [('白','ou_one'),('白','ou_two'),('夜','ou_one'),('夜','ou_two')])
         self.assertEqual(result['warnings'],{})
         self.assertEqual(service.get_permission_directory_people.call_count,1)
@@ -79,6 +79,28 @@ class RosterTests(unittest.TestCase):
         result=read_roster(service,DAY)
         self.assertEqual([p['shift'] for p in result['people']],['夜','夜'])
         self.assertIn('人员（文本）姓名名单缺失',result['warnings']['A'])
+
+    def test_missing_entire_configured_building_retries_until_its_roster_arrives(self):
+        source=reader([roster_fields(),roster_fields('夜')])
+        with tempfile.TemporaryDirectory() as root:
+            sender=Mock(side_effect=receipt)
+            service=CheckService(root,roster=lambda day:read_roster(source,day,scopes=['A','H']),
+                                 sender=sender,portal_url=lambda:'https://fixture.invalid')
+            with patch('lan_bitable_template_portal.pre_shift_checks.now',return_value=NOW):
+                for scope in ('A','H'):
+                    service.save_definition(ADMIN,scope,0,[{'id':'one','text':'交接检查'}])
+            service.tick(NOW)
+            self.assertEqual(sender.call_count,2)
+            self.assertIn('白班排班未读取到',service.state(ADMIN,'H',NOW)['roster_error'])
+            h_fields=roster_fields(scope='H',**{'人员（文本）':'祁金鹰、张岳军','人员':[]})
+            source._request_json.return_value['data']['items'] += [{'fields':h_fields}, {'fields':{**h_fields,'班次':'夜'}}]
+            source.get_permission_directory_people.return_value['items'] += [person('祁金鹰','ou_hone','H'),person('张岳军','ou_htwo','H')]
+            service.tick(NOW+dt.timedelta(minutes=4))
+            self.assertEqual(sender.call_count,2)
+            service.tick(NOW+dt.timedelta(minutes=5))
+            self.assertEqual([c.args[0] for c in sender.call_args_list],['ou_one','ou_two','ou_hone','ou_htwo'])
+            service.tick(NOW+dt.timedelta(minutes=6))
+            self.assertEqual(sender.call_count,4,'already acknowledged A/H messages are not repeated')
 
 
 class RecoveryTests(unittest.TestCase):
@@ -136,6 +158,35 @@ class RecoveryTests(unittest.TestCase):
         self.service.tick(NOW + dt.timedelta(minutes=1))
         self.assertEqual(self.cloud.upsert.call_count,1)
 
+    def test_before_night_reminder_rechecks_day_cache_and_preserves_dedup_after_restart(self):
+        early=NOW.replace(hour=8,minute=30)
+        self.service.prepare(early)
+        self.service.submit(WORKER,DAY+':A:白',1,[{'id':'one','status':'normal','note':''}],NOW)
+        self.roster.return_value={'people':[
+            {'scope':'A','shift':'夜','open_id':oid,'name':oid} for oid in ('ou_nightone','ou_nighttwo')], 'warnings':{}}
+        self.service.tick(NOW.replace(hour=17,minute=39))
+        self.sender.assert_not_called()
+        self.assertEqual(self.roster.call_count,1)
+        due=NOW.replace(hour=17,minute=40)
+        self.service.tick(due)
+        self.assertEqual([c.args[0] for c in self.sender.call_args_list],['ou_nightone','ou_nighttwo'])
+        self.assertEqual(self.roster.call_count,2,'one fresh roster read at the new reminder window')
+        restarted=CheckService(self.service.db.parent,roster=self.roster,sender=self.sender,portal_url=lambda:'https://fixture.invalid')
+        restarted.tick(due+dt.timedelta(minutes=10))
+        self.assertEqual(self.sender.call_count,2)
+        self.assertEqual(self.roster.call_count,2)
+
+    def test_upgrade_does_not_discard_cached_previous_night_roster_after_midnight(self):
+        self.service.prepare(NOW)
+        self.service.submit(WORKER,DAY+':A:白',1,[{'id':'one','status':'normal','note':''}],NOW)
+        with self.service.connection(True) as db:
+            db.execute('UPDATE rosters SET loaded_at=0')
+        self.roster.side_effect=CheckError('当前视图仅含今天排班')
+        self.service.tick(NOW+dt.timedelta(days=1,hours=-8))
+        self.assertEqual(self.roster.call_count,2,'only the new day is read; prior-night people stay durable')
+        self.assertEqual(self.sender.call_count,2)
+        self.assertTrue(all(':夜:' in c.args[2] for c in self.sender.call_args_list))
+
     def test_cloud_fields_and_v4_idempotency_token_include_complete_checklist(self):
         self.service.prepare(NOW)
         self.service.submit(WORKER,DAY+':A:白',1,[{'id':'one','status':'abnormal','note':'指示灯异常'}],NOW)
@@ -161,6 +212,52 @@ class RecoveryTests(unittest.TestCase):
 
 
 class AgentSenderTests(unittest.TestCase):
+    def test_identity_mapping_recovers_after_one_hour_without_suspending_unsent_reminders(self):
+        client=SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_recovered'}})))
+        mapper=Mock(side_effect=RuntimeError('directory warming up'))
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={})),
+                            handover_cards=SimpleNamespace(recipient_id=mapper))
+        sender=CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
+            auth_manager=SimpleNamespace(directory_person=Mock(return_value={'id':'recOne','selectable':True}))))
+        async def run(service):
+            sender.loop=asyncio.get_running_loop()
+            await asyncio.to_thread(service.tick,NOW)
+            client.post.assert_not_awaited()
+            with service.connection() as db:
+                self.assertTrue(all(not row['first_attempt'] and not row['sent'] for row in db.execute('SELECT * FROM deliveries')))
+            mapper.side_effect=None
+            mapper.return_value=('open_id','ou_agentPerson')
+            await asyncio.to_thread(service.tick,NOW+dt.timedelta(hours=1))
+            self.assertEqual(client.post.await_count,2)
+            await asyncio.to_thread(service.tick,NOW+dt.timedelta(hours=1,minutes=1))
+            self.assertEqual(client.post.await_count,2)
+            with service.connection() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM deliveries WHERE sent=1 AND message_id=?',('om_recovered',)).fetchone()[0],2)
+        with tempfile.TemporaryDirectory() as root:
+            roster=lambda _: {'people':[{'scope':'A','shift':'白','open_id':oid,'name':oid} for oid in ('ou_one','ou_two')],'warnings':{}}
+            service=CheckService(root,roster=roster,sender=sender,portal_url=lambda:'https://fixture.invalid')
+            with patch('lan_bitable_template_portal.pre_shift_checks.now',return_value=NOW):
+                service.save_definition(ADMIN,'A',0,[{'id':'one','text':'交接检查'}])
+            with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+                asyncio.run(run(service))
+
+    def test_mapping_or_credentials_not_ready_is_retryable_not_unknown_delivery(self):
+        client=SimpleNamespace(post=AsyncMock())
+        mapper=Mock(return_value=('union_id','on_person'))
+        headers=AsyncMock(return_value={})
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=headers),
+                            handover_cards=SimpleNamespace(recipient_id=mapper))
+        sender=CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
+            auth_manager=SimpleNamespace(directory_person=Mock(return_value={'id':'recOne','selectable':True}))))
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            for stage in ('mapping','headers'):
+                mapper.side_effect=RuntimeError('not ready') if stage=='mapping' else None
+                headers.side_effect=RuntimeError('not ready') if stage=='headers' else None
+                with self.subTest(stage=stage),self.assertRaises(CheckError) as caught:
+                    asyncio.run(sender.send('ou_one',{},'stable-reminder'))
+                self.assertNotIsInstance(caught.exception,CheckDeliveryUncertain)
+                client.post.assert_not_awaited()
+
     def test_agent_app_scoped_identity_and_receipt_are_used_not_login_app(self):
         client=SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_delivered'}})))
         bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={'Authorization':'fixture'})),

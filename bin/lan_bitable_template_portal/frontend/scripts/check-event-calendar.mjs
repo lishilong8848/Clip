@@ -35,17 +35,18 @@ window.fixture={item,mounted,scope,resize:(w,h)=>{width.value=w;height.value=h},
 </script>`;
 const server=await createServer({root,configFile:false,cacheDir:path.join(root,'node_modules/.vite-calendar-check'),logLevel:'error',optimizeDeps:{include:['vue','naive-ui','lucide-vue-next','echarts/core','echarts/charts','echarts/components','echarts/renderers','echarts/features']},plugins:[{name:'calendar-fixture',enforce:'pre',resolveId(id){if(['/calendar.vue','/calendar.js'].includes(id))return id;},load(id){if(id==='/calendar.vue')return fixture;if(id==='/calendar.js')return 'import {createApp} from "vue";import App from "/calendar.vue";createApp(App).mount("#app")';},transform(code,id){if(id.endsWith('.vue'))return portalFloatingControls(code);}},vue()],server:{host:'127.0.0.1',port:0}});
 await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port;
-const browser=await chromium.launch({headless:true});let page,missing=false,zero=false,failRefresh=false,unknown=0,refreshes=0;const errors=[],requests=[];
+const browser=await chromium.launch({headless:true});let page,missing=false,zero=false,failRefresh=false,unknown=0,refreshes=0,readDelay=0;const errors=[],requests=[];
 try{
   await mkdir(output,{recursive:true});page=await browser.newPage({viewport:{width:1440,height:900}});await page.clock.setFixedTime(new Date(now));
   page.on('pageerror',e=>errors.push(e.message));
-  await page.route('**/*',route=>{
+  await page.route('**/*',async route=>{
     const u=new URL(route.request().url());if(u.origin!==origin)return route.abort();
     if(u.pathname==='/fixture')return route.fulfill({contentType:'text/html',body:'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="app"></div><script type="module" src="/calendar.js"></script>'});
     if(!u.pathname.startsWith('/api/'))return route.continue();
     if(u.pathname==='/api/events/refresh'){assert.equal(route.request().method(),'POST');refreshes++;if(failRefresh)return route.fulfill({status:503,json:{ok:false,error:'隔离事件同步失败'}});missing=false;return route.fulfill({json:{ok:true,data:{mock_external:true}}});}
     assert.equal(route.request().method(),'GET');assert.equal(u.searchParams.get('date_field'),'occurrence_time');
     const month=u.searchParams.get('month'),scope=u.searchParams.get('scope');requests.push({month,scope});assert.equal(u.pathname,'/api/events/monthly');assert(['A','B'].includes(scope));assert(month<='2026-10','never requests future months');
+    if(readDelay)await new Promise(resolve=>setTimeout(resolve,readDelay));
     const records=zero?[]:[{record_id:month+'-'+scope,title:scope+'楼实际事件',scope,occurrence_time:month+'-15 09:00'},...(month==='2026-10'?[{record_id:'second-'+scope,title:scope+'楼第二条事件',scope,occurrence_time:'2026-10-15 10:00'},{record_id:'earlier-'+scope,title:scope+'楼早前事件',scope,occurrence_time:'2026-10-13 09:00'},{record_id:'future-'+scope,title:'未来记录不计入',scope,occurrence_time:'2026-10-16 09:00'}]:[])];
     return route.fulfill({json:{ok:true,data:{snapshot_exists:!missing,records,unknown_time_count:unknown}}});
   });
@@ -54,6 +55,13 @@ try{
   assert.equal(await page.evaluate(()=>window.fixture.option().visualMap[0].max),2,'color scale reflects actual counts');
   assert(await page.evaluate(()=>{const data=window.fixture.engine().getModel().getSeriesByIndex(0).getData();return Array.from({length:data.count()},(_,i)=>data.getItemGraphicEl(i).shape.r).every(r=>r===3);}), 'every rendered day has rounded corners');
   const engineId=await page.locator('.v2-chart-canvas').getAttribute('_echarts_instance_');
+  readDelay=160;
+  await page.getByRole('button',{name:'刷新图表',exact:true}).click();
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('.v2-chart-overlay .n-skeleton').count(),0,'refresh never covers an already loaded chart');
+  assert.equal(await page.locator('.v2-chart-canvas.muted').count(),0);
+  assert.equal(await page.evaluate(()=>window.fixture.option()?.series?.[0]?.data?.length),288,'refresh never clears the chart engine');
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新图表"].n-button--loading'));readDelay=0;
   const point=await page.evaluate(()=>window.fixture.point('2026-10-15'));const box=await page.locator('.v2-chart-canvas').boundingBox();await page.mouse.click(box.x+point[0],box.y+point[1]);
   await page.getByText('10/15 · 事件明细',{exact:true}).waitFor();assert.equal(await page.locator('.v2-chart-records .n-list-item').count(),2);await page.keyboard.press('Escape');
   await page.locator('.n-radio-button').filter({hasText:'本月'}).click();await page.waitForFunction(()=>window.fixture.option()?.series?.[0]?.data.length===15);assert.equal(await page.locator('.v2-chart-canvas').getAttribute('_echarts_instance_'),engineId);await page.waitForTimeout(600);assert(await page.locator('.v2-chart-canvas svg text').filter({hasText:/^15$/}).count()>0,'month cells show their dates');await page.screenshot({path:path.join(output,'calendar-month.png')});
@@ -66,7 +74,7 @@ try{
   await page.setViewportSize({width:1440,height:900});await page.getByRole('button',{name:/查看明细/}).click();await page.getByText('全部 · 事件明细',{exact:true}).waitFor();await page.keyboard.press('Escape');
   zero=true;await page.getByRole('button',{name:'刷新图表',exact:true}).click();await page.waitForFunction(()=>window.fixture.option()?.series?.[0]?.data.every(d=>d.value[1]===0));assert.equal(await page.getByText('暂无数据',{exact:true}).count(),0,'known zero days remain valid');
   missing=true;await page.getByRole('button',{name:'刷新图表',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('[aria-busy="true"]'));assert.equal(refreshes,1,'a missing month is prepared using the existing refresh job');
-  missing=true;failRefresh=true;await page.getByRole('button',{name:'刷新图表',exact:true}).click();await page.getByText('数据暂不可用',{exact:true}).waitFor();assert(await page.getByRole('button',{name:/查看明细/}).isDisabled());failRefresh=false;zero=false;unknown=2;
+  missing=true;failRefresh=true;await page.getByRole('button',{name:'刷新图表',exact:true}).click();await page.getByText(/保留上次读取的数据/).waitFor();assert.equal(await page.locator('.v2-chart-canvas.muted').count(),0,'failed refresh keeps previous verified chart visible');assert.equal(await page.evaluate(()=>window.fixture.option()?.series?.[0]?.data?.length),288);assert(await page.getByRole('button',{name:/查看明细/}).isDisabled());failRefresh=false;zero=false;unknown=2;
   await page.getByRole('button',{name:'重新读取',exact:true}).click();await page.waitForFunction(()=>window.fixture.option()?.series?.[0]?.data.some(d=>d.value[1]===2));await page.locator('.n-alert').filter({hasText:'2 条事件缺少有效发生时间，未计入图表。'}).waitFor();assert(!await page.getByRole('button',{name:/查看明细/}).isDisabled(),'invalid dates do not block verified data');unknown=0;
   zero=true;unknown=2;await page.getByRole('button',{name:'刷新图表',exact:true}).click();await page.getByText('数据暂不可用',{exact:true}).waitFor();assert(await page.getByRole('button',{name:/查看明细/}).isDisabled(),'unknown-only data cannot appear as verified zero');unknown=0;
   missing=false;zero=false;await page.evaluate(()=>window.fixture.scope.value='B');await page.waitForFunction(()=>window.fixture.option()?.series?.[0]?.data.some(d=>d.value[1]===2));
