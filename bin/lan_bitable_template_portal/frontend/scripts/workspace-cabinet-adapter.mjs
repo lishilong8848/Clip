@@ -31,6 +31,44 @@ export function adaptCabinetBatchPage(source) {
 
 export function adaptCabinetPage(source) {
   let code=source.replaceAll('\r\n','\n');
+  const archiveLoading='<LoadingIndicator v-if="allExportBusy">各楼正在导出</LoadingIndicator>';
+  const archiveButton='<button v-if="!scope && !readOnly" class="primary" :disabled="!allExportReady || allExportBusy || [\'running\',\'checking\',\'interrupted\',\'failed\'].includes(allExportStatus)" @click="startAllExports">';
+  const archiveResume='<button v-if="[\'failed\',\'interrupted\',\'checking\'].includes(allExportStatus)" :disabled="allExportBusy" @click="resumeAllExports">{{ allExportStatus === \'checking\' ? \'核验状态\' : \'继续原批次\' }}</button>';
+  const archiveLabel=code.split('\n').find(line=>line.startsWith('const allExportStatusLabel = computed('));
+  const archiveRetry='  allExportRetryAt.value = Number(batch.retry_at || 0);';
+  if(code.split(archiveLoading).length!==2 || code.split(archiveButton).length!==2 || code.split(archiveResume).length!==2 || !archiveLabel || code.split(archiveRetry).length!==2)throw new Error('Cabinet archive progress contract changed');
+  code=code.replace(archiveButton,'<button v-if="!scope && !readOnly" class="primary" data-v2-navigation :aria-label="v2ArchiveActionLabel" :disabled="v2ArchiveChecking || ((!allExportBatchId || allExportStatus === \'succeeded\') && !allExportReady) || (allExportBusy && !allExportRetryAt)" @click="v2ArchiveAction">');
+  code=code.replace(archiveResume,'');
+  code=code.replace('<template v-else>一键导出/上传所有楼栋</template>','<template v-else>{{ v2ArchiveActionLabel }}</template>');
+  code=code.replace(archiveLoading,'<LoadingIndicator v-if="allExportBusy">{{ v2ArchiveButtonLabel }}</LoadingIndicator>');
+  code=code.replace(archiveLabel,`const v2ArchiveProgress = ref({uploaded:0,error:''});
+const v2ArchiveChecking = ref(false);
+async function v2ArchiveAction(): Promise<void> {
+  if(v2ArchiveChecking.value)return;
+  v2ArchiveChecking.value=true;
+  try {
+    if(allExportBusy.value) {
+      const batch=await read('export-batches/'+allExportBatchId.value,{},12000);
+      applyAllExportBatch(batch);saveAllExportState();
+    } else if(['running','failed','interrupted','checking'].includes(allExportStatus.value)) {
+      if(allExportStatus.value!=='checking')applyAllExportBatch(await write('export-batches/'+allExportBatchId.value+'/resume',{}));
+      void pollAllExports();
+    } else { v2ArchiveChecking.value=false;void startAllExports(); }
+  } catch(exc) { fail(exc); }
+  finally { v2ArchiveChecking.value=false; }
+}
+const v2ArchiveButtonLabel = computed(() => allExportRetryAt.value ? (v2ArchiveChecking.value ? '正在核验原批次' : '核验归档进度') : ({uploading:'上传附件 '+v2ArchiveProgress.value.uploaded+'/5',archiving:'合并写入归档',linking:'补齐归档链接',verifying:'核验归档结果'} as Dict)[allExportPhase.value] || '正在生成五楼表格');
+const v2ArchiveActionLabel = computed(() => allExportBusy.value ? v2ArchiveButtonLabel.value : v2ArchiveChecking.value ? '正在核验原批次' : ['running','failed','interrupted','checking'].includes(allExportStatus.value) ? '继续原批次' : '一键导出/上传所有楼栋');
+const allExportStatusLabel = computed(() => {
+  if(allExportStatus.value==='succeeded')return '五楼已归档';
+  if(allExportStatus.value==='checking')return '状态待核验';
+  if(allExportStatus.value==='interrupted')return '任务已中断，将继续原批次';
+  if(allExportStatus.value==='failed')return allExportPhase.value==='linking' ? '附件已写入，链接待补齐' : '批次未完成，请继续原批次';
+  const stage=({uploading:'已上传 '+v2ArchiveProgress.value.uploaded+'/5 份附件',archiving:'五份附件合并写入同一条记录',linking:'附件已写入，正在补齐归档链接',verifying:'正在回读核验归档',preparing:'正在生成五楼表格'} as Dict)[allExportPhase.value] || '正在处理原批次';
+  return stage+(allExportRetryAt.value ? '，飞书处理中，稍后自动继续原批次' : '');
+});`);
+  code=code.replace(archiveRetry,archiveRetry+"\n  v2ArchiveProgress.value = {uploaded:Number(batch.uploaded_files || 0),error:String(batch.error || '')};");
+  code=code.replace('<div class="all-export-items">','<p v-if="allExportRetryAt && v2ArchiveProgress.error" class="all-export-retry" role="status">{{ v2ArchiveProgress.error }}</p>\n      <div class="all-export-items">');
   code=code.replace('<script setup lang="ts">','<script setup lang="ts">\nimport CabinetBuildingSwitcher from "../workspace-v2/CabinetBuildingSwitcher.vue";\nimport {cabinetPalette as v2CabinetPalette} from "../workspace-v2/cabinetPalette";\nimport {nightMode as v2CabinetNight} from "../workspace-v2/theme";');
   const props='scope: string; isAdmin: boolean;';
   const heading='<div class="heading-title"><h1>{{ scope ? scope + \'楼机柜上下电\' : \'机柜上下电\' }}</h1><p>机柜台账 <span v-if="overview.updated_at">· 更新于 {{ overview.updated_at }}</span></p></div>';

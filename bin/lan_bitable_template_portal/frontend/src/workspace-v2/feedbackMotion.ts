@@ -66,7 +66,7 @@ export function installFeedbackMotion() {
       for(const e of affected){
         // A later result must not be hidden by the previous message's exit animation.
         if(e.signature!==signature||!e.dismissed)continue;
-        hide(e);e.el.querySelector<HTMLButtonElement>('.n-base-close,:scope > button[aria-label="关闭提示"],:scope > button[aria-label="收起提示"],:scope > button[aria-label="关闭通知"]')?.click();
+        hide(e);e.el.querySelector<HTMLButtonElement>('.n-base-close,:scope > button[aria-label="关闭提示"],:scope > button[aria-label="收起提示"],:scope > button[aria-label="关闭通知"],:scope > button[aria-label="关闭错误"]')?.click();
       }
       schedule();
     };

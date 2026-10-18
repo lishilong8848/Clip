@@ -32,6 +32,11 @@ class CabinetTransportTests(unittest.TestCase):
         self.remote._http.request_json.side_effect = [
             {'code': 1254608}, {'code': 0, 'data': {'record': {'record_id': 'recFixture'}}},
         ]
+        with self.assertRaisesRegex(CabinetError, '1254608'):
+            self.remote.create({'机架': 'A01'}, 'stable-cabinet-operation')
+        self.remote._http.request_json.assert_called_once()
+        self.sleep.assert_not_called()
+        # The journal decides when to retry, after reconciling the original write.
         self.assertEqual(self.remote.create({'机架': 'A01'}, 'stable-cabinet-operation')['record_id'], 'recFixture')
         calls = self.remote._http.request_json.call_args_list
         self.assertEqual(len(calls), 2)
@@ -43,8 +48,8 @@ class CabinetTransportTests(unittest.TestCase):
         self.remote._http.request_json.return_value = {'code': 1254608}
         with self.assertRaisesRegex(CabinetError, '1254608'):
             self.remote.update('recFixture', {'结果': '成功'})
-        self.assertEqual(self.remote._http.request_json.call_count, 5)
-        self.assertEqual(sum(call.args[0] for call in self.sleep.call_args_list), 15)
+        self.remote._http.request_json.assert_called_once()
+        self.sleep.assert_not_called()
 
     def test_ambiguous_network_and_invalid_field_writes_are_not_retried(self):
         self.remote._http.request_json.side_effect = FeishuHTTPError('fixture response lost')

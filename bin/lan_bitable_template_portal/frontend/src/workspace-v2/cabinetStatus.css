@@ -5,6 +5,7 @@
    the legacy `.metrics` and `.metric-link` card styles are overridden into this
    compact single-row presentation. Original counts, state actions and rack palette
    stay untouched. */
+.all-export-retry { margin: 4px 0 8px; color: var(--v2-muted); font-size: 12px; overflow-wrap: anywhere; }
 .metrics.v2-cabinet-status {
   display: flex;
   align-items: center;

@@ -3285,6 +3285,8 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
     def test_five_exports_use_one_monthly_record_and_replace_it(self):
         archive=FakeExportFeishu(); self.service.export_remote=archive
         self.service.do_export=self._fake_export_file
+        archive.create=Mock(wraps=archive.create); archive.update=Mock(wraps=archive.update)
+        archive.record_share_link=Mock(wraps=archive.record_share_link)
         first="all_"+"a"*32; second="all_"+"b"*32
         self.service.start_export_batch(first,"owner",list("ABCDE"))
         saved=self._wait_export_batch(first)
@@ -3294,6 +3296,9 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(before["fields"]["子分类"],"机柜上下电记录")
         self.assertEqual(len(before["fields"]["上传文件"]),5)
         self.assertEqual(before["fields"]["链接"],saved["archive_url"])
+        self.assertEqual(len(archive.create.call_args.args[0]['上传文件']),5)
+        self.assertEqual([set(call.args[1]) for call in archive.update.call_args_list],[{'链接'}])
+        archive.update.reset_mock(); archive.record_share_link.reset_mock()
         self.service.start_export_batch(second,"owner",list("ABCDE"))
         updated=self._wait_export_batch(second)
         self.assertEqual(updated["status"],"succeeded",updated.get("error"))
@@ -3302,8 +3307,111 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         self.assertEqual(after["record_id"],before["record_id"])
         self.assertEqual(after["fields"]["批次标识"],second)
         self.assertEqual(len(after["fields"]["上传文件"]),5)
+        archive.update.assert_called_once()
+        self.assertEqual(len(archive.update.call_args.args[1]['上传文件']),5)
+        archive.record_share_link.assert_not_called()
         old_eid=saved["items"]["A"]["result"]["export_id"]
         self.assertEqual(self.service.local.document("A","export:"+old_eid)["cloud_upload_status"],"replaced")
+
+    def test_archive_readback_delay_does_not_replay_accepted_attachment_write(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        create=archive.create; get=archive.get; pending=[]; bid='all_'+'c1'*16
+        def accepted(fields,identity):
+            result=create(fields,identity)
+            pending.append(True)
+            return result
+        def delayed_read(rid):
+            if pending:
+                pending.pop()
+                raise CabinetRetryLater('fixture accepted record not yet readable',503)
+            return get(rid)
+        archive.create=Mock(side_effect=accepted); archive.get=delayed_read
+        with patch.object(self.service._archive_stop,'wait',return_value=False) as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        archive.create.assert_called_once(); wait.assert_called_once_with(15)
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+
+    def test_link_retry_reuses_saved_link_and_never_rewrites_attachments(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        update=archive.update; writes=[]; bid='all_'+'c2'*16
+        archive.record_share_link=Mock(return_value='https://vnet.feishu.cn/record/recExport1')
+        def busy_link(rid,fields):
+            writes.append(copy.deepcopy(fields))
+            if len(writes)<3: raise CabinetRetryLater('fixture link write pending',503)
+            return update(rid,fields)
+        archive.update=busy_link
+        def waiting(delay):
+            saved=self.service._batch_record(bid)
+            self.assertEqual(saved['archive_url'],archive.record_share_link.return_value)
+            self.assertEqual(saved['error'],'fixture link write pending')
+            return False
+        with patch.object(self.service._archive_stop,'wait',side_effect=waiting) as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        archive.record_share_link.assert_called_once()
+        self.assertEqual([call.args[0] for call in wait.call_args_list],[15,30])
+        self.assertEqual(writes,[{'链接':result['archive_url']}]*3)
+        self.assertEqual((archive.upload_calls,archive.creates,len(archive.records)),(5,1,1))
+
+    def test_link_write_lost_receipt_is_verified_without_retry(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        update=archive.update; bid='all_'+'c3'*16
+        def lost_receipt(rid,fields):
+            update(rid,fields)
+            raise CabinetRetryLater('fixture link receipt lost',503)
+        archive.update=Mock(side_effect=lost_receipt)
+        with patch.object(self.service._archive_stop,'wait') as wait:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        archive.update.assert_called_once(); wait.assert_not_called()
+        self.assertEqual((archive.upload_calls,archive.creates),(5,1))
+
+    def test_archive_partial_media_upload_resume_keeps_completed_file_tokens(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        upload=archive.upload_attachment; calls=[]; bid='all_'+'c4'*16
+        def interrupted(path,name):
+            calls.append(name)
+            if len(calls)==3: raise CabinetError('fixture C upload interrupted')
+            return upload(path,name)
+        archive.upload_attachment=interrupted
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        first=self._wait_export_batch(bid)
+        self.assertEqual((first['status'],archive.upload_calls,archive.creates),('failed',2,0))
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        final=self._wait_export_batch(bid)
+        self.assertEqual(final['status'],'succeeded',final.get('error'))
+        self.assertEqual((archive.upload_calls,archive.creates,len(calls)),(5,1,6))
+        self.assertEqual(first['items'],final['items'])
+
+    def test_archive_orphan_worker_is_interrupted_but_registered_queue_is_not(self):
+        bid='all_'+'c5'*16
+        self.service._save_batch_record({'batch_id':bid,'owner':'owner','status':'running','pid':os.getpid(),
+            'phase':'uploading','items':{},'tokens':{'A':'saved-token'}})
+        self.assertEqual(self.service.export_batch_status(bid,'owner')['status'],'interrupted')
+        with patch.object(self.service._archive_pool,'submit') as submit:
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            self.assertEqual(self.service.export_batch_status(bid,'owner')['status'],'running')
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            submit.assert_called_once()
+        self.assertEqual(self.service._batch_record(bid)['tokens'],{'A':'saved-token'})
+        self.assertNotIn('tokens',self.service.export_batch_status(bid,'owner'))
+        with self.assertRaises(CabinetError): self.service.export_batch_status(bid,'another-user')
+        with self.assertRaises(CabinetError): self.service.start_export_batch(bid,'another-user',list('ABCDE'))
+
+    def test_archive_shutdown_while_waiting_for_exports_remains_resumable(self):
+        self.service.export_remote=FakeExportFeishu(); bid='all_'+'c6'*16
+        self.service._archive_stop.set()
+        with patch.object(self.service,'job',return_value={'job_id':'fixture','status':'pending'}), \
+                patch.object(self.service,'job_status',return_value={'status':'running'}):
+            self.service.start_export_batch(bid,'owner',list('ABCDE'))
+            result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'interrupted')
+        self.assertEqual(self.service._batch_record(bid)['pid'],0)
+        self.assertEqual(self.service.export_remote.upload_calls,0)
 
     def test_monthly_export_schedule_runs_once_and_freezes_archive_month(self):
         beijing=dt.timezone(dt.timedelta(hours=8))
@@ -3482,6 +3590,47 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         result=self._wait_export_batch(bid)
         self.assertEqual(result['status'],'succeeded',result.get('error'))
         self.assertEqual(archive.create.call_args.args[1],f"archive:{result['year']}-{result['month']}")
+
+    def test_legacy_month_key_collision_with_previous_month_recovers_without_overwrite(self):
+        archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        bid='all_'+'c7'*16
+        old={'record_id':'recOldMonth','operation_id':'archive:2026-10','fields':{
+            '导出标识':'cabinet-power:2026-10','批次标识':'all_'+'11'*16,'子分类':'机柜上下电记录',
+            '年度':'2026','月份':'09','上传文件':[{'file_token':'old-file'}],'链接':'https://vnet.feishu.cn/record/old'}}
+        archive.records[old['record_id']]=copy.deepcopy(old)
+        self.service._save_batch_record({'batch_id':bid,'owner':'owner','status':'failed','phase':'archiving',
+            'items':{s:{'scope':s,'status':'pending'} for s in 'ABCDE'},'tokens':{},'year':'2026','month':'10',
+            'upload_started_at':'2026-10-17 15:36:32','created_at':'2026-10-17 15:36:24'})
+        create=archive.create
+        def reject_consumed_key(fields,identity):
+            if identity=='archive:2026-10': raise CabinetRetryLater('fixture consumed month token',503)
+            return create(fields,identity)
+        archive.create=Mock(side_effect=reject_consumed_key)
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'succeeded',result.get('error'))
+        archive.create.assert_called_once()
+        self.assertEqual(archive.create.call_args.args[1],'archive:'+bid)
+        self.assertEqual(self.service._batch_record(bid)['create_operation_id'],'archive:'+bid)
+        self.assertEqual((archive.upload_calls,len(archive.records)),(5,2))
+        self.assertEqual(archive.records[old['record_id']],old)
+
+    def test_archive_own_record_moved_to_another_month_never_creates_duplicate(self):
+        archive=FakeExportFeishu(); archive.fail_share=True
+        self.service.export_remote=archive; self.service.do_export=self._fake_export_file
+        bid='all_'+'c8'*16
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        self.assertEqual(self._wait_export_batch(bid)['status'],'failed')
+        saved=self.service._batch_record(bid)
+        archive.records[saved['cloud_record_id']]['fields']['月份']='00'
+        saved['phase']='archiving';self.service._save_batch_record(saved)
+        archive.fail_share=False;archive.create=Mock(wraps=archive.create);archive.update=Mock(wraps=archive.update)
+        self.service.start_export_batch(bid,'owner',list('ABCDE'))
+        result=self._wait_export_batch(bid)
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('不会重复新增',result['error'])
+        archive.create.assert_not_called();archive.update.assert_not_called()
+        self.assertEqual((archive.upload_calls,len(archive.records)),(5,1))
 
     def test_unknown_create_outcome_is_not_blindly_retried(self):
         archive=FakeExportFeishu(); self.service.export_remote=archive; self.service.do_export=self._fake_export_file

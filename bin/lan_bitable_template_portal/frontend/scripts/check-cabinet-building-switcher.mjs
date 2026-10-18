@@ -78,9 +78,10 @@ try{
   await releaseOverview();await page.waitForTimeout(100);
   assert.equal(await page.getByRole('button',{name:/^B-201机房/}).count(),0,'late prior-building response never replaces current data');
   await overview.click();await page.getByRole('button',{name:'一键导出/上传所有楼栋',exact:true}).click();
-  await page.getByText('飞书处理中，稍后自动继续原批次',{exact:true}).waitFor();
+  await page.getByText('五份附件合并写入同一条记录，飞书处理中，稍后自动继续原批次',{exact:true}).waitFor();
+  assert(await page.getByRole('button',{name:'核验归档进度',exact:true}).isEnabled());
   assert.equal(writes.length,1);const id=writes[0].batch_id;
-  await page.reload();await page.getByText('飞书处理中，稍后自动继续原批次',{exact:true}).waitFor();
+  await page.reload();await page.getByText('五份附件合并写入同一条记录，飞书处理中，稍后自动继续原批次',{exact:true}).waitFor();
   assert.equal(writes.length,1,'reload only queries the same batch');
   complete=true;await page.getByText('五楼已归档',{exact:true}).waitFor();
   assert(reads.some(u=>u.pathname.endsWith('/export-batches/'+id)));

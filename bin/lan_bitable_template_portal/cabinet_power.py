@@ -1614,14 +1614,16 @@ class CabinetPowerService:
 
     @staticmethod
     def _public_batch_record(batch):
-        return {key:copy.deepcopy(value) for key,value in batch.items() if key not in ("pid","tokens")}
+        return {**{key:copy.deepcopy(value) for key,value in batch.items() if key not in ("pid","tokens")},
+                "uploaded_files":len(batch.get("tokens") or {})}
 
     def export_batch_status(self,batch_id,owner,admin=False):
         batch=self._batch_record(batch_id)
         if not batch: raise CabinetError("五楼导出批次不存在",404)
         if not admin and batch.get("owner")!=owner: raise CabinetError("无权查看此导出批次",403)
         result=self._public_batch_record(batch)
-        if batch.get("status")=="running" and not process_alive(batch.get("pid")):
+        if batch.get("status")=="running" and (not process_alive(batch.get("pid"))
+                or batch.get("pid")==os.getpid() and batch_id not in self._archive_running):
             result["status"]="interrupted"
         return result
 
@@ -1644,9 +1646,10 @@ class CabinetPowerService:
             if process_alive(batch.get("pid")) and (batch["pid"]!=os.getpid() or batch_id in self._archive_running):
                 return self._public_batch_record(batch)
             batch.update(status="running",error="",pid=os.getpid())
-            self._save_batch_record(batch)
             self._archive_running.add(batch_id)
-            try: self._archive_pool.submit(self._run_export_batch,batch_id)
+            try:
+                self._save_batch_record(batch)
+                self._archive_pool.submit(self._run_export_batch,batch_id)
             except Exception:
                 self._archive_running.discard(batch_id)
                 batch.update(status="failed",error="服务正在停止，原批次可继续",pid=0)
@@ -1665,10 +1668,10 @@ class CabinetPowerService:
                 self._save_batch_record(batch)
                 run()
                 return True
-            except CabinetRetryLater:
+            except CabinetRetryLater as exc:
                 if attempt==6: raise
                 delay=min(120,15*2**attempt)
-                batch.update(retry_at=time.time()+delay,error="飞书正在处理重复请求，稍后自动核验原批次，不会重复新增归档。")
+                batch.update(retry_at=time.time()+delay,error=str(exc))
                 self._save_batch_record(batch)
                 if self._archive_stop.wait(delay):
                     batch.update(status="interrupted",error="程序正在关闭，已保留原批次和上传进度。")
@@ -1699,6 +1702,9 @@ class CabinetPowerService:
                         running|=job["status"] in ("pending","running")
                     self._save_batch_record(batch)
                     if not running: break
+                    if self._archive_stop.is_set():
+                        batch.update(status="interrupted",error="程序正在关闭，已保留原批次和导出进度。")
+                        return
                     time.sleep(1)
                 failed=[scope for scope in TOTALS if batch["items"][scope]["status"]!="succeeded"]
                 if failed: raise CabinetError("以下楼栋导出失败，可继续原批次重试："+"、".join(failed))
@@ -1712,8 +1718,8 @@ class CabinetPowerService:
             self._save_batch_record(batch)
             self._archive_running.discard(batch_id)
 
-    def _archive_month_records(self,year,month):
-        return [record for record in self.export_remote.list_all() if all(
+    def _archive_month_records(self,year,month,records=None):
+        return [record for record in (self.export_remote.list_all() if records is None else records) if all(
             text_value((record.get("fields") or {}).get(name))==value
             for name,value in (("子分类",EXPORT_ARCHIVE_CATEGORY),("年度",year),("月份",month)))]
 
@@ -1747,8 +1753,17 @@ class CabinetPowerService:
                 self._save_batch_record(batch)
             batch["phase"]="archiving"; self._save_batch_record(batch)
             with archive_file_lock(self.root/"archive.lock"):
-                matches=self._archive_month_records(year,month)
+                records=self.export_remote.list_all()
+                matches=self._archive_month_records(year,month,records)
                 if len(matches)>1: raise CabinetError("本月存在多条机柜上下电归档记录，请人工核对后重试",409)
+                if any(text_value((row.get("fields") or {}).get("批次标识"))==batch["batch_id"] and row not in matches for row in records):
+                    raise CabinetError("原批次归档的年度、月份或分类已变化，请核对原记录；不会重复新增。",409)
+                if not matches and not batch.get("create_operation_id") and any(
+                        text_value((row.get("fields") or {}).get("导出标识"))==f"cabinet-power:{year}-{month}"
+                        and text_value((row.get("fields") or {}).get("子分类"))==EXPORT_ARCHIVE_CATEGORY for row in records):
+                    # A historical row already consumed the legacy month key; use this batch's own key.
+                    batch["create_operation_id"]="archive:"+batch["batch_id"]
+                    self._save_batch_record(batch)
                 files=[self.local.document(scope,"export:"+batch["items"][scope]["result"]["export_id"]) for scope in TOTALS]
                 digest_value=digest([file["sha256"] for file in files])
                 fields={"导出标识":f"cabinet-power:{year}-{month}","批次标识":batch["batch_id"],"楼栋":"A-E楼",
@@ -1777,15 +1792,26 @@ class CabinetPowerService:
                         cloud=found[0]
                 batch["cloud_record_id"]=str(cloud.get("record_id") or "")
                 if not batch["cloud_record_id"]: raise CabinetError("月度归档未返回记录ID")
+                # Save the accepted write before readback; a delayed read must not replay it.
+                batch["phase"]="linking"; self._save_batch_record(batch)
                 record=self.export_remote.get(batch["cloud_record_id"])
                 self._verify_archive_batch(record,batch)
-                batch["phase"]="linking"; self._save_batch_record(batch)
         record=record or self.export_remote.get(batch["cloud_record_id"])
         self._verify_archive_batch(record,batch)
-        link=batch.get("archive_url") or self.export_remote.record_share_link(batch["cloud_record_id"])
+        existing_link=text_value((record.get("fields") or {}).get("链接"))
+        link=batch.get("archive_url") or (existing_link if existing_link.startswith("https://") else "")
+        if not link: link=self.export_remote.record_share_link(batch["cloud_record_id"])
+        batch["archive_url"]=link; self._save_batch_record(batch)
         if text_value((record.get("fields") or {}).get("链接"))!=link:
-            self.export_remote.update(batch["cloud_record_id"],{"链接":link})
-        batch["archive_url"]=link; batch["phase"]="verifying"; self._save_batch_record(batch)
+            try: self.export_remote.update(batch["cloud_record_id"],{"链接":link})
+            except Exception as exc:
+                try:
+                    found=self.export_remote.get(batch["cloud_record_id"])
+                    self._verify_archive_batch(found,batch)
+                    if text_value((found.get("fields") or {}).get("链接"))!=link: raise exc
+                except Exception:
+                    raise exc
+        batch["phase"]="verifying"; self._save_batch_record(batch)
         verified=self.export_remote.get(batch["cloud_record_id"])
         self._verify_archive_batch(verified,batch)
         if text_value((verified.get("fields") or {}).get("链接"))!=link:

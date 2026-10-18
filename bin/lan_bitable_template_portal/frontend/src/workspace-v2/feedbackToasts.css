@@ -20,7 +20,7 @@
 .workspace-v2 [data-v2-feedback]::backdrop{background:transparent;pointer-events:none}
 .workspace-v2 [data-v2-feedback]>.n-alert__icon,.workspace-v2 [data-v2-feedback]>.n-message__icon,
 .workspace-v2 [data-v2-feedback]>.n-alert__close,.workspace-v2 [data-v2-feedback]>.n-base-close{display:none!important}
-.workspace-v2 [data-v2-feedback]>svg,.workspace-v2 [data-v2-feedback]>button:is([aria-label="关闭提示"],[aria-label="收起提示"],[aria-label="关闭通知"]){display:none!important}
+.workspace-v2 [data-v2-feedback]>svg,.workspace-v2 [data-v2-feedback]>button:is([aria-label="关闭提示"],[aria-label="收起提示"],[aria-label="关闭通知"],[aria-label="关闭错误"]){display:none!important}
 .workspace-v2 .message-banner[data-v2-feedback]::before,.workspace-v2 .message-banner[data-v2-feedback]>.message-dot{display:none!important}
 .workspace-v2 [data-v2-feedback] .n-alert-body{padding:0!important;margin:0!important}
 .workspace-v2 [data-v2-feedback] .n-alert-body__content,.workspace-v2 [data-v2-feedback] .n-message__content{color:inherit;font-size:14px;line-height:1.65}

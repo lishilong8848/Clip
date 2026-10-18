@@ -119,13 +119,38 @@ async function checkFieldContrast(page){
   const readonlySelect=detail(page).locator('.v2-repair-field.is-readonly .n-base-selection').first();
   assert(await readonlySelect.evaluate(el=>getComputedStyle(el).getPropertyValue('--n-color').trim()===getComputedStyle(el).getPropertyValue('--repair-readonly-bg').trim()),'source-owned dropdowns use the readonly surface too');
 }
+async function checkWorkflowActions(page){
+  const actions=detail(page).getByRole('region',{name:'继续办理'});
+  await actions.getByRole('button').first().evaluate(el=>el.scrollIntoView({block:'center',behavior:'instant'}));
+  for(const button of await actions.getByRole('button').all()){
+    const paint=await button.evaluate(el=>{
+      const content=el.querySelector('.n-button__content'),icon=content.querySelector('svg'),style=getComputedStyle(el),text=getComputedStyle(content);
+      const rgb=[0,0,0];let coverage=0;
+      for(let node=el;node&&coverage<1;node=node.parentElement){
+        const values=getComputedStyle(node).backgroundColor.match(/[\d.]+/g).map(Number),weight=(values[3]??1)*(1-coverage);
+        for(let i=0;i<3;i++)rgb[i]+=values[i]*weight;
+        coverage+=weight;
+      }
+      const box=el.getBoundingClientRect(),hit=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);
+      return {button:style.color,text:text.color,icon:getComputedStyle(icon).color,font:parseFloat(text.fontSize),buttonFont:parseFloat(style.fontSize),background:'rgb('+rgb.join(',')+')',width:el.clientWidth,contentWidth:content.scrollWidth,clickable:el.contains(hit)};
+    });
+    assert.equal(paint.text,paint.button,'workflow labels inherit the button theme, not muted help text');
+    assert.equal(paint.icon,paint.text,'workflow icon and label have the same contrast');
+    assert.equal(paint.font,paint.buttonFont,'workflow labels keep the component font size');
+    const luminance=color=>color.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
+    const foreground=luminance(paint.text),background=luminance(paint.background);
+    assert((Math.max(foreground,background)+.05)/(Math.min(foreground,background)+.05)>=4.5,'workflow action text needs 4.5:1 contrast: '+JSON.stringify(paint));
+    assert(paint.contentWidth<=paint.width,'workflow labels fit inside the button');
+    assert(paint.clickable,'workflow action must not be covered by fixed toolbars');
+  }
+}
 try{
   let page=await newPage();
   assert.equal(await page.locator('[data-widget-id="block_records"] .v2-widget-head [aria-label="维修项目状态"]').count(),1,'state controls belong beside the repair list title');
   assert.equal(await page.locator('.v2-repair-workspace>.v2-repair-state-row').count(),0,'no duplicate state toolbar above the list');
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
   assert.equal(await page.locator('.record-row').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
-  await openFirst(page,false);await noOverflow(page);
+  await openFirst(page,false);await noOverflow(page);await checkWorkflowActions(page);
   const flow=detail(page).getByRole('region',{name:'检修办理流程'});
   assert.equal(await flow.locator('[data-flow-step]').count(),5);
   assert.equal(await flow.locator('[data-flow-step="project"]').getAttribute('data-flow-status'),'finish');
@@ -177,6 +202,8 @@ try{
   fixture.canDelete=false;fixture.failStats=true;page=await newPage(390);await page.getByText('数量暂不可用',{exact:false}).waitFor();assert.match(await page.locator('.v2-repair-state-row .n-radio-button').filter({hasText:'未完成'}).innerText(),/—/,'failed count not zero');fixture.failStats=false;await noOverflow(page);assert.equal(await page.locator('.v2-repair-row-state').first().isVisible(),true,'mobile keeps status');assert.equal(await page.locator('.v2-repair-row-progress').first().isVisible(),true,'mobile keeps progress');await page.screenshot({path:path.join(output,'mobile-list.png'),fullPage:true});await openFirst(page);await noOverflow(page);assert.equal(await page.locator('.v2-repair-list').isVisible(),false);await page.screenshot({path:path.join(output,'mobile-followup.png'),fullPage:true});
   page=await newPage(360);await openFirst(page);await noOverflow(page);
   await detail(page).getByText('办理流程',{exact:true}).click();await detail(page).locator('.v2-repair-flow .n-steps--vertical').waitFor();
+  await checkWorkflowActions(page);
+  await detail(page).getByRole('region',{name:'继续办理'}).screenshot({path:path.join(output,'workflow-actions-mobile.png')});
   assert(await detail(page).locator('.v2-repair-flow .n-step-content-header__title').evaluateAll(nodes=>nodes.every(el=>el.getBoundingClientRect().height<=44)));
   await detail(page).locator('.v2-repair-flow').screenshot({path:path.join(output,'repair-flow-mobile.png')});
   for(const width of [360,390,430]){
@@ -270,7 +297,9 @@ try{
   await detail(page).getByRole('region',{name:'关联资料自动填写'}).waitFor();fixture.unlinked=false;
   fixture.locked=true;page=await newPage();await page.locator('.record-row').first().click();await detail(page).getByText('跟进状态尚未核验，当前只读。',{exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'绑定已有',exact:true}).count(),0);assert.equal(await detail(page).getByRole('button',{name:/保存/}).count(),0);fixture.locked=false;
   fixture.failSave=true;page=await newPage();await openFirst(page);await detail(page).getByRole('textbox',{name:'维修进展描述',exact:true}).fill('等待核验原任务');await detail(page).getByRole('button',{name:'选择台账设备',exact:true}).click();await page.getByRole('dialog').getByRole('checkbox').first().check();await page.getByRole('dialog').getByRole('button',{name:'确认',exact:true}).click();await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).click();await detail(page).getByRole('button',{name:'核验原任务',exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).isDisabled(),true,'uncertain write cannot be resubmitted as new');fixture.failSave=false;
-  page=await newPage(1440,900,true);await openFirst(page);await detail(page).getByText('维修单信息',{exact:true}).click();
+  page=await newPage(1440,900,true);await openFirst(page,false);await checkWorkflowActions(page);
+  await detail(page).getByRole('region',{name:'继续办理'}).screenshot({path:path.join(output,'workflow-actions-dark.png')});
+  await detail(page).getByText('维修单信息',{exact:true}).click();
   assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');await checkFieldContrast(page);await noOverflow(page);
   await detail(page).locator('.v2-repair-project-form').screenshot({path:path.join(output,'dark-project-fields.png')});
   fixture.modules=['repair_management'];page=await newPage();await openFirst(page);assert.equal(await detail(page).getByRole('button',{name:'检修通告',exact:true}).count(),0,'module revocation removes notice access');

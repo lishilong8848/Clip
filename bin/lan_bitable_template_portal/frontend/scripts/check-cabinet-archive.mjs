@@ -42,9 +42,10 @@ await build({root,configFile:false,publicDir:false,logLevel:'error',plugins:[{
  load(id){if(id===adapted)return adaptCabinetPage(source);if(id!=='\0cabinet-check')return;return `
  import {createApp,h} from 'vue';import Cabinet from '/src/components/CabinetPowerPage.vue';import Night from 'virtual:cabinet-v2';import Batch from '/src/components/CabinetPowerBatchPage.vue';
  import UiTransition from '/src/components/UiTransition.vue';import LoadingIndicator from '/src/components/LoadingIndicator.vue';import {applyNightMode} from '/src/workspace-v2/theme';
- import '/src/global.css';import '/src/workspace-v2/compactWorkspaces.css';
- const q=new URLSearchParams(location.search),night=q.has('night');if(night){document.documentElement.classList.add('workspace-v2');applyNightMode(true);}
- const app=createApp({render:()=>h(q.has('batch')?Batch:night?Night:Cabinet,{scope:night?'A':'',isAdmin:true,userId:'archive-fixture',scopeOptions:['A','B','C','D','E'].map(value=>({value,label:value+'楼'}))})});
+ import {installFeedbackMotion} from '/src/workspace-v2/feedbackMotion';import {installActionMotion} from '/src/workspace-v2/actionMotion';
+ import '/src/global.css';import '/src/workspace-v2/compactWorkspaces.css';import '/src/workspace-v2/feedbackToasts.css';
+ const q=new URLSearchParams(location.search),night=q.has('night'),v2=night||q.has('v2');if(v2){document.documentElement.classList.add('workspace-v2');applyNightMode(night);installFeedbackMotion();installActionMotion();}
+ const app=createApp({render:()=>h(q.has('batch')?Batch:v2?Night:Cabinet,{scope:night?'A':'',isAdmin:true,userId:v2?'archive-fixture-v2':'archive-fixture',scopeOptions:['A','B','C','D','E'].map(value=>({value,label:value+'楼'}))})});
  app.component('UiTransition',UiTransition);app.component('LoadingIndicator',LoadingIndicator);app.mount('#app');`;},
 },vue(),{
  name:'cabinet-fixture-html',enforce:'post',
@@ -52,9 +53,9 @@ await build({root,configFile:false,publicDir:false,logLevel:'error',plugins:[{
 }],build:{outDir,emptyOutDir:true,cssCodeSplit:false,rollupOptions:{input:'virtual:cabinet-check'}}});
 const server=await preview({root,configFile:false,logLevel:'error',build:{outDir},preview:{host:'127.0.0.1',port:33000+Math.floor(Math.random()*5000)}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port,browser=await chromium.launch();
-let page,done=false,saves=0;
+let page,done=false,saves=0,archiveState='waiting',starts=0,resumes=0,statusReads=0;
 const errors=[],buildings='ABCDE'.split('').map(scope=>({scope,counts:{total:1000,formal:890,test:10,off:100,unknown:0},record_count:10,inventory_only:0,bootstrap_status:'succeeded'}));
-const batch=id=>({batch_id:id,status:done?'succeeded':'running',phase:done?'completed':'archiving',retry_at:done?0:now/1000+30,created_at:'2026-10-17 15:36:27',items:Object.fromEntries(buildings.map(item=>[item.scope,{scope:item.scope,status:'succeeded',result:{export_id:'fixture'+item.scope,created_at:'2026-10-17 15:36:31'}}]))});
+const batch=id=>({batch_id:id,status:done?'succeeded':archiveState==='failed'?'failed':'running',phase:done?'completed':'archiving',retry_at:!done&&archiveState==='waiting'?now/1000+30:0,uploaded_files:5,error:done?'':'飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。',created_at:'2026-10-17 15:36:27',items:Object.fromEntries(buildings.map(item=>[item.scope,{scope:item.scope,status:'succeeded',result:{export_id:'fixture'+item.scope,created_at:'2026-10-17 15:36:31'}}]))});
 const mapCells=[{text:'恒湿机1',style:{font_name:'宋体',font_color:'#FF0000'}},{text:'空调',style:{font_name:'宋体',fill:'#fff'}},{text:'A01',rack:'A01',state:'formal',color:'#ff0000'},{text:'A02',rack:'A02',state:'test',color:'#ffc000'},{text:'A03',rack:'A03',state:'off',color:'#00b050'}].map((cell,i)=>({...cell,ref:'cell'+i,x:i*120,y:10,width:110,height:70}));
 try{
  const context=await browser.newContext({viewport:{width:1440,height:900},timezoneId:'America/Los_Angeles',reducedMotion:'reduce'});
@@ -68,8 +69,8 @@ try{
    if(request.method()==='PUT'){saves++;assert.equal(request.postDataJSON().day,20);assert.equal(request.postDataJSON().time,'18:30');return ok({...initial,...request.postDataJSON()});}
    return ok(initial);
   }
-  if(p==='export-batches'){assert.equal(request.method(),'POST');return ok(batch(request.postDataJSON().batch_id));}
-  if(p.startsWith('export-batches/')){assert.equal(request.method(),'GET','Polling never submits a new batch');return ok(batch(p.split('/')[1]));}
+  if(p==='export-batches'){assert.equal(request.method(),'POST');starts++;return ok(batch(request.postDataJSON().batch_id));}
+  if(p.startsWith('export-batches/')){if(p.endsWith('/resume')){assert.equal(request.method(),'POST');resumes++;archiveState='waiting';}else{assert.equal(request.method(),'GET','Polling never submits a new batch');statusReads++;}return ok(batch(p.split('/')[1]));}
   assert.equal(request.method(),'GET','No other business writes');
   if(p==='overview')return ok({version:1,counts:{total:3,powered:2,formal:1,test:1,off:1,unknown:0},rooms:[{id:'201',name:'201-M2机房',total:3,counts:{formal:1,test:1,off:1,unknown:0},types:{网络机柜:1,服务器机柜:2}}],racks:[],issues:[]});
   if(p.includes('/layout'))return ok({layout:{width:620,height:100,cells:mapCells},racks:[]});
@@ -87,6 +88,19 @@ try{
  for(const scope of 'ABCDE')assert.match(await page.locator('.all-export-items>div').filter({hasText:scope+'楼'}).getByRole('link',{name:'下载'}).getAttribute('href'),new RegExp('fixture'+scope+'/download$'));
  await page.screenshot({path:path.join(shots,'legacy-five-buildings-1440.png'),fullPage:true});
  for(const width of [360,375,390]){await page.setViewportSize({width,height:width===360?640:667});await page.clock.runFor(50);assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));assert((await page.locator('.heading-title h1').boundingBox()).height<50,'phone heading must not be squeezed into a vertical column: '+await page.locator('.heading-title').evaluate(node=>JSON.stringify({viewport:innerWidth,width:node.getBoundingClientRect().width,flex:getComputedStyle(node).flex,font:getComputedStyle(node.querySelector('h1')).fontSize})));for(const link of await page.locator('.all-export-items a').all())assert((await link.boundingBox()).height>=44);await page.screenshot({path:path.join(shots,'legacy-five-buildings-'+width+'.png'),fullPage:true});}
+ done=true;await page.clock.fastForward(2000);await page.getByText('五楼已归档',{exact:true}).waitFor();
+ done=false;await page.setViewportSize({width:1440,height:900});await page.goto(origin+'/?v2=1');
+ await page.getByRole('button',{name:'一键导出/上传所有楼栋',exact:true}).click();
+ await page.getByText('五份附件合并写入同一条记录，飞书处理中，稍后自动继续原批次',{exact:true}).waitFor();
+ const verify=page.getByRole('button',{name:'核验归档进度',exact:true});assert(await verify.isEnabled(),'waiting batch remains verifiable');
+ const started=starts,read=statusReads;await verify.click();await verify.waitFor();assert.equal(starts,started);assert.equal(resumes,0);assert(statusReads>read,'check reads the original task without bypassing cooldown');assert.equal(await verify.getAttribute('data-v2-action'),null,'waiting is never a green success tick');
+ await page.screenshot({path:path.join(shots,'v2-five-buildings-waiting-1440.png'),fullPage:true});
+ archiveState='failed';await page.clock.fastForward(2000);const original=page.getByRole('button',{name:'继续原批次',exact:true});await original.waitFor();assert(await original.isEnabled());
+ const warning=page.locator('.notice.danger[role="alert"]').filter({hasText:'1254608'});await page.clock.runFor(500);await warning.locator('[data-v2-feedback-close]').waitFor();
+ assert.equal(await warning.locator('button:visible').count(),1,'cabinet error has one close button');
+ await warning.locator('[data-v2-feedback-close]').click();await page.clock.runFor(500);await warning.waitFor({state:'hidden'});
+ await original.click();await verify.waitFor();assert.equal(resumes,1);assert.equal(starts,started,'resume cannot create a second batch');
+ for(const width of [360,375,390]){await page.setViewportSize({width,height:width===360?640:667});await page.clock.runFor(50);assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));assert(await verify.isEnabled());await page.screenshot({path:path.join(shots,'v2-five-buildings-waiting-'+width+'.png'),fullPage:true});}
  done=true;await page.clock.fastForward(2000);await page.getByText('五楼已归档',{exact:true}).waitFor();
  await page.goto(origin+'/?batch=1&mode=new');await page.getByRole('textbox',{name:'粘贴机柜确认文本',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'粘贴文本识别',exact:true}).getAttribute('class'),'active');assert.equal(await page.getByRole('heading',{name:'上传确认单',exact:true}).count(),0);
  for(const width of [1440,390]){await page.setViewportSize({width,height:900});await page.goto(origin+'/?night=1');await page.getByRole('button',{name:'原始平面图',exact:true}).click();await page.locator('.map-cell').first().waitFor();
