@@ -4,12 +4,11 @@ import path from 'node:path';
 import {preview} from 'vite';
 import {chromium} from 'playwright';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
-assert(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR,'Use an isolated frontend build.');
 const output=path.resolve('../../../output/playwright/widget-scopes');await mkdir(output,{recursive:true});
-const server=await preview({configFile:'vite.workspace-v2.config.ts',logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
+const server=await preview({...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:'vite.workspace-v2.config.ts'}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
-const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
+const context=await browser.newContext({viewport:{width:1440,height:1000},reducedMotion:'reduce',hasTouch:true});
 const layouts=layoutApiFixture(),reads=[],errors=[];
 const user={open_id:'widget-scope-test',name:'隔离验收',role:'admin',level:'L1',category:'manager',home_scope:'A',modules:['maintenance','change','repair','polling','adjust','power','water','event']};
 const options=['ALL','A','B','C'].map(value=>({value,label:value==='ALL'?'全部楼栋':value+'楼'}));
@@ -50,7 +49,7 @@ const notice=page.locator('.v2-dashboard .grid-stack-item[data-widget-id="notice
 const tasks=page.locator('.v2-dashboard .grid-stack-item[data-widget-id="tasks"]>.v2-widget');
 const checks=page.locator('.v2-dashboard .grid-stack-item[data-widget-id="checks"]>.v2-widget');
 const savedScope=()=>layouts.records.get(user.open_id+':/api/workspace-layouts/desktop/workspace').value.widgets.find(item=>item.id==='notices').scope;
-async function choose(label){const picker=notice.locator('.v2-widget-head .v2-widget-building-picker');await picker.click();await page.locator('.n-base-select-option').getByText(label,{exact:true}).click();await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('.v2-widget-building-picker.n-select--disabled'));}
+async function choose(label){const picker=notice.locator('.v2-widget-head .v2-widget-building-picker');await picker.click();await page.locator('.v2-widget-building-menu .n-base-select-option').getByText(label,{exact:true}).click();await page.keyboard.press('Escape');await page.locator('.v2-widget-building-menu').waitFor({state:'hidden'});}
 try{
   await page.goto(origin+'/assets/workspace-v2/index.html');await notice.getByText('A楼计划0',{exact:true}).waitFor();
   assert.equal(await notice.locator('.v2-widget-head').getByRole('button',{name:'独立页面',exact:true}).count(),1);
@@ -58,18 +57,36 @@ try{
   assert.equal(await notice.getByLabel('通告楼栋',{exact:true}).count(),0,'widget scope picker owns both notice lanes');
   assert.equal(await notice.locator('.v2-notice-types').getByRole('button',{name:'全部',exact:true}).count(),1);
   assert.equal(await notice.locator('[data-list="planned"]>header .v2-notice-plan-search').count(),1);
-  assert.equal(await notice.locator('.v2-notice-command .v2-notice-filters').count(),1);
+  assert.equal(await notice.locator('.v2-notice-command .v2-notice-filters').count(),0,'filters do not crowd the primary command row');
+  assert.equal(await notice.locator('.v2-notices>.v2-notice-filters').count(),1,'shared filters stay local, directly below the primary commands');
+  for(const width of [4,8,12]){
+    await notice.evaluate((el,w)=>{const item=el.closest('.grid-stack-item');item.closest('.grid-stack').gridstack.update(item,{w});},width);
+    await page.waitForTimeout(350);
+    assert(await notice.locator('.v2-notice-command,.v2-notices>.v2-notice-filters').evaluateAll(nodes=>nodes.every(el=>el.scrollWidth<=el.clientWidth+1)),'notice toolbar responds to widget width, not only viewport width');
+  }
   await tasks.scrollIntoViewIfNeeded();await tasks.getByText('B楼进行中0',{exact:true}).waitFor();
   await checks.scrollIntoViewIfNeeded();await checks.locator('.v2-check-overview').waitFor();
+  assert.equal(await checks.locator('.v2-widget-head').getByRole('button',{name:'刷新班前检查',exact:true}).count(),1,'checklist refresh belongs in the compact widget header');
+  assert.equal(await checks.locator('.v2-widget-body').getByRole('button',{name:'刷新班前检查',exact:true}).count(),0,'no duplicated body refresh');
   assert.equal(await checks.getByLabel('检查楼栋',{exact:true}).count(),0);
   assert.equal(await checks.getByText('本楼检查',{exact:true}).count()+await checks.getByText('完成总览',{exact:true}).count(),0);
   await checks.locator('.v2-check-overview button').first().click();await checks.getByLabel('检查楼栋',{exact:true}).waitFor();await checks.getByRole('button',{name:'返回楼栋列表',exact:true}).click();
-  await notice.scrollIntoViewIfNeeded();await notice.locator('.v2-notice-types').getByRole('button',{name:'维保通告',exact:true}).click();await choose('B楼');
+  await notice.scrollIntoViewIfNeeded();await notice.locator('.v2-notice-types').getByRole('button',{name:'维保通告',exact:true}).click();
+  const writesBefore=layouts.writes;
+  await notice.locator('.v2-widget-building-picker').click();
+  for(const label of ['B楼','C楼','C楼']){
+    await page.locator('.v2-widget-building-menu .n-base-select-option').getByText(label,{exact:true}).click();
+    await page.waitForTimeout(240);
+    assert(await page.locator('.v2-widget-building-menu').isVisible(),'selecting a building keeps the menu open');
+    assert.equal(layouts.writes,writesBefore,'selection is saved once when the menu closes, not on every click');
+  }
+  await page.mouse.move(900,80);await page.locator('.v2-widget-building-menu').waitFor({state:'hidden'});
   await notice.getByText('B楼计划0',{exact:true}).waitFor();await notice.getByText('B楼进行中0',{exact:true}).waitFor();assert.equal(savedScope(),'A,B');
+  assert.equal(layouts.writes,writesBefore+1,'leaving the complete dropdown commits a single layout update');
   assert.equal(await notice.getByText('C楼计划0',{exact:true}).count(),0);
   assert.equal(await notice.locator('.v2-notice-types').getByRole('button',{name:'维保通告',exact:true}).getAttribute('aria-pressed'),'true','changing buildings retains the active notice type');
   assert.equal(await tasks.getByText('A楼进行中0',{exact:true}).count(),0,'another widget retains its own building');
-  await choose('A楼');await notice.getByText('A楼计划0',{exact:true}).waitFor({state:'hidden'});assert.equal(savedScope(),'B');
+  await notice.locator('.v2-widget-building-picker .n-tag__close').first().click();await notice.getByText('A楼计划0',{exact:true}).waitFor({state:'hidden'});assert.equal(savedScope(),'B','removing a visible tag still saves while the menu is closed');
   await choose('全部授权楼栋');await notice.getByText('C楼计划0',{exact:true}).waitFor();assert.equal(savedScope(),'ALL');
   await choose('B楼');await notice.getByText('C楼计划0',{exact:true}).waitFor({state:'hidden'});assert.equal(savedScope(),'B');
   await page.reload();await notice.getByText('B楼计划0',{exact:true}).waitFor();assert.equal(await notice.getByText('A楼计划0',{exact:true}).count(),0,'saved widget selection survives login/page reload');
@@ -84,10 +101,15 @@ try{
     const plan=notice.locator('[data-list="planned"]>header');assert(await plan.evaluate(el=>el.scrollWidth<=el.clientWidth+1));
     await page.evaluate(()=>{window.scrollTo(0,0);document.querySelector('.v2-main').scrollTop=0;});await notice.locator('.v2-widget-head').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(output,'notices-'+width+'.png')});
   }
+  await notice.locator('.v2-widget-building-picker').tap();await page.locator('.v2-widget-building-menu .n-base-select-option').getByText('A楼',{exact:true}).tap();
+  await page.waitForTimeout(240);assert(await page.locator('.v2-widget-building-menu').isVisible(),'touch selections do not close the menu');
+  await page.touchscreen.tap(10,90);await page.locator('.v2-widget-building-menu').waitFor({state:'hidden'});await notice.getByText('A楼计划0',{exact:true}).waitFor();
   await page.setViewportSize({width:1440,height:1000});
   await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=ALL&buildings=A,B');
   await page.getByText('A楼计划0',{exact:true}).waitFor();await page.getByText('B楼计划0',{exact:true}).waitFor();assert.equal(await page.getByText('C楼计划0',{exact:true}).count(),0);
-  const standalonePicker=page.locator('.v2-notice-filters .v2-widget-building-picker');await standalonePicker.click();await page.locator('.n-base-select-option').getByText('C楼',{exact:true}).click();await page.keyboard.press('Escape');await page.getByText('C楼计划0',{exact:true}).waitFor();
+  const standalonePicker=page.locator('.v2-notice-filters .v2-widget-building-picker');await standalonePicker.click();
+  await page.waitForTimeout(450);assert(await page.locator('.v2-widget-building-menu').isVisible(),'hovering collapsed selection tags cannot dismiss the real menu');
+  await page.locator('.n-base-select-option').getByText('C楼',{exact:true}).click();await page.keyboard.press('Escape');await page.getByText('C楼计划0',{exact:true}).waitFor();
   assert.deepEqual(errors,[]);console.log('PASS: widget scopes single/multi/all, scoped operations, independent widgets, account persistence, compact notice tools, checklist building drill, PC/mobile and standalone multi-building filters.');
 }catch(error){await page.screenshot({path:path.join(output,'failure.png'),fullPage:true});console.error(errors);throw error;}
 finally{await browser.close();await server.close();}

@@ -773,6 +773,8 @@ class FastAPIPortalController:
         install_link_directory_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.workspace_layout_routes import install_workspace_layout_routes
         install_workspace_layout_routes(app, self, PortalRuntime)
+        from public_access.certificate import install_certificate_routes
+        install_certificate_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes
         recommend_notice_tags = install_lighthouse_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.notice_alert_tags import install_notice_alert_tag_routes

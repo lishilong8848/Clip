@@ -20,6 +20,16 @@ export function reviewerIssue(person: Dict | undefined, recipients: Dict[]): str
 }
 
 const empty = (value: unknown) => value == null || typeof value === 'string' && !value.trim() || Array.isArray(value) && !value.length;
+export const missingRiskFields = (fields: Dict[], values: Dict) => fields.filter(field => field.role === 'input' && field.required && empty(values[field.key]));
+export function riskTaskPriority(task: Dict, now = Date.now()): number {
+  if (task.status !== 'active' || !(task.total > task.approved)) return 3;
+  return task.deadline < now ? 0 : task.submitted < task.total ? 1 : 2;
+}
+export function riskFeedbackPriority(item: Dict, reviewer: boolean, revoked: boolean): number {
+  if (revoked || item.status === 'revoked') return 4;
+  if (reviewer && item.status === 'submitted') return -1;
+  return ({ returned: 0, pending: 1, submitted: 2, approved: 3 } as Record<string, number>)[item.status] ?? 3;
+}
 export function prefillIssues(fields: Dict[], items: Dict[]): string[] {
   const inputs = fields.filter(field => field.role === 'input');
   const inputKeys = new Set(inputs.map(field => field.key));

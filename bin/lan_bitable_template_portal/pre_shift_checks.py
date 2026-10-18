@@ -401,14 +401,17 @@ class CheckService:
         with self.connection() as conn:
             return [row['scope'] for row in conn.execute("SELECT scope FROM definitions WHERE items!='[]'")]
 
-    @staticmethod
-    def can_submit(actor, task, current):
-        people = json.loads(task['people']) if isinstance(task['people'], str) else task['people']
+    @classmethod
+    def can_submit(cls, actor, task, current):
         return (not task['submitted'] and bool(json.loads(task['items']) if isinstance(task['items'], str) else task['items'])
-                and (actor['id'] in {p['open_id'] for p in people}
-                     or actor.get('category') in DUTY and actor.get('home_scope') == task['scope']))
+                and cls._can_complete(actor, task))
 
-    def _is_roster_or_duty(self, actor, task):
+    @staticmethod
+    def _can_complete(actor, task):
+        if task['scope'] not in scopes_for(actor):
+            return False
+        if can_manage(actor):
+            return True
         people = json.loads(task['people']) if isinstance(task['people'], str) else task['people']
         return (actor['id'] in {p['open_id'] for p in people}
                 or actor.get('category') in DUTY and actor.get('home_scope') == task['scope'])
@@ -426,7 +429,7 @@ class CheckService:
             row = self._any_submitted_in_shift(task['day'], task['scope'], task['shift'])
             if row:
                 return False
-            return self._is_roster_or_duty(actor, task)
+            return self._can_complete(actor, task)
         # item file
         if frow['submitted'] or task['submitted']:
             return False
@@ -507,9 +510,12 @@ class CheckService:
         return {'scope': scope, 'items': items, 'total': total, 'page': page, 'page_size': page_size}
 
     def _overview(self, actor, conn, current):
-        rows = []
+        rows, pending_count = [], 0
         for scope in scopes_for(actor):
             configured = bool(self.definition(scope, conn)['items'])
+            pending_count += conn.execute("""SELECT COUNT(*) FROM tasks WHERE scope=? AND submitted=''
+                AND items!='[]' AND due<=? AND (? OR deadline<=?)""",
+                (scope, current.timestamp(), configured, current.timestamp())).fetchone()[0]
             for shift in ('白', '夜'):
                 day = (current.date() - dt.timedelta(days=1) if shift == '夜' and current.hour < 8 else current.date()).isoformat()
                 tasks = [dict(r) for r in conn.execute("SELECT * FROM tasks WHERE day=? AND scope=? AND shift=? AND items!='[]' ORDER BY due,id",
@@ -528,7 +534,7 @@ class CheckService:
                     'submitted_by': '、'.join(dict.fromkeys(t['actor_name'] for t in completed)),
                     'submitted_at': max((t['submitted'] for t in completed), default=''),
                     'handover_photo': {'name': photo['name'], 'url': '/api/pre-shift-checks/files/' + photo['id']} if photo else None})
-        return {'rows': rows}
+        return {'rows': rows, 'pending': pending_count}
 
     def _state_files(self, conn, actor, task, current):
         if task['submitted'] and task['evidence']:
@@ -581,10 +587,10 @@ class CheckService:
             return False
         if self._any_submitted_in_shift(task['day'], task['scope'], task['shift'], conn):
             return False
-        return self._is_roster_or_duty(actor, task)
+        return self._can_complete(actor, task)
 
     def _can_upload_handover(self, conn, actor, task, current):
-        if not self._is_roster_or_duty(actor, task):
+        if not self._can_complete(actor, task):
             return False
         h = conn.execute("SELECT id FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
                          (task['day'], task['scope'], task['shift'])).fetchone()
@@ -604,7 +610,7 @@ class CheckService:
             if row['deadline'] > current.timestamp() and (not definition['items'] or row['definition_version'] != definition['version']):
                 raise CheckError('清单已更新或已清空，请重新读取。', 409)
             if not self.can_submit(actor, row, current):
-                raise CheckError('仅本楼值班人员或值班账号可提交该次检查。', 403)
+                raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可提交该次检查。', 403)
             if type(version) is not int or version != row['definition_version']:
                 raise CheckError('清单版本已变化，请重新读取。', 409)
             items = json.loads(row['items'])
@@ -670,10 +676,10 @@ class CheckService:
                 if item_id not in items:
                     raise CheckError('检查项不存在，请刷新。', 404)
                 if not self.can_submit(actor, task, current):
-                    raise CheckError('仅本楼值班人员或值班账号可上传检查附件。', 403)
+                    raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传检查附件。', 403)
             else:
-                if not self._is_roster_or_duty(actor, task):
-                    raise CheckError('仅本楼值班人员或值班账号可上传交接班照片。', 403)
+                if not self._can_complete(actor, task):
+                    raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传交接班照片。', 403)
         staging = self.staging_dir / f'{uuid.uuid4().hex}.upload'
         staging.write_bytes(b'')
         return {'path': str(staging), 'max_bytes': MAX_FILE_BYTES, 'kind': kind,
@@ -911,7 +917,7 @@ class CheckService:
                     if session['kind']=='item' and (not self.can_submit(actor,task,current)
                             or session['item_id'] not in {i['id'] for i in json.loads(task['items'])}):
                         raise CheckError('当前检查项不能上传照片。',403)
-                    if session['kind']=='handover' and not self._is_roster_or_duty(actor,task):
+                    if session['kind']=='handover' and not self._can_complete(actor,task):
                         raise CheckError('当前账号不能上传交接班照片。',403)
                 return inspect_photo(staging,session['scope'],current,session.get('photo_weather'),
                                      handover=kind=='handover',capture=session.get('photo_capture'))
@@ -1026,7 +1032,7 @@ class CheckService:
                 if task['definition_version'] != session.get('definition_version'):
                     raise CheckError('清单版本已变化，请重新上传。', 409)
                 if not self.can_submit(actor, task, current):
-                    raise CheckError('仅本楼值班人员或值班账号可上传检查附件。', 403)
+                    raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传检查附件。', 403)
                 items = {i['id'] for i in json.loads(task['items'])}
                 if session.get('item_id') not in items:
                     raise CheckError('检查项不存在，请刷新。', 404)
@@ -1101,8 +1107,8 @@ class CheckService:
                 if task is None:
                     raise CheckError('班前检查任务不存在，请刷新。', 404)
                 authorized(actor, task['scope'])
-                if not self._is_roster_or_duty(actor, task):
-                    raise CheckError('仅本楼值班人员或值班账号可上传交接班照片。', 403)
+                if not self._can_complete(actor, task):
+                    raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传交接班照片。', 403)
                 exists = conn.execute("SELECT * FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
                                       (task['day'], task['scope'], task['shift'])).fetchone()
                 if exists:
@@ -1177,8 +1183,8 @@ class CheckService:
                     raise CheckError('该班次已有提交记录，交接班照片已归档不能删除。', 403)
                 if row['uploader_id'] != actor['id']:
                     raise CheckError('仅上传人可删除交接班照片。', 403)
-                if not self._is_roster_or_duty(actor, task):
-                    raise CheckError('仅本楼值班人员可删除交接班照片。', 403)
+                if not self._can_complete(actor, task):
+                    raise CheckError('仅有本楼检查权限的上传人可删除未提交的交接班照片。', 403)
                 delivery = conn.execute('SELECT lease FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
                 if delivery and delivery['lease'] > current.timestamp():
                     raise CheckError('交接班照片正在发送给本人，请稍后再移除。', 409)
@@ -1250,7 +1256,7 @@ class CheckService:
                 card = {'config': {'wide_screen_mode': True},
                     'header': {'template': 'blue' if slot == 0 else 'orange', 'title': {'tag': 'plain_text', 'content': label}},
                     'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content':
-                        f"{task['day']} · {task['scope']}楼 · {task['shift']}班\n计划检查：{due_text}，共{len(items)}项\n{summary}\n本楼任意一名值班人员或值班账号提交本次清单即可。请逐项检查，有异常时填写备注。"}},
+                        f"{task['day']} · {task['scope']}楼 · {task['shift']}班\n计划检查：{due_text}，共{len(items)}项\n{summary}\n本楼值班人员、值班账号或有该楼管理权限的上级，任意一人提交本次清单即可。其他时段的清单仍需分别完成。请逐项检查，有异常时填写备注。"}},
                         {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '打开班前检查'},
                             'url': base + '/assets/workspace-v2/index.html?__page=/&pre_shift=1'}]}]}
                 try:

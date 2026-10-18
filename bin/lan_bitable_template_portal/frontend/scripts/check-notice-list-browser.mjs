@@ -106,6 +106,7 @@ try {
   await page.setViewportSize({width:1440,height:1000});
   await page.getByLabel('通告楼栋',{exact:true}).click();
   await page.locator('.n-base-select-option').getByText('E楼',{exact:true}).click();
+  await page.keyboard.press('Escape');
   await page.waitForFunction(()=>new URL(location.href).searchParams.get('scope')==='E');
   await page.waitForFunction(()=>document.querySelector('.v2-notice-heading p')?.textContent.startsWith('E楼'));
   await page.reload();await page.locator('.v2-notice-entry').first().waitFor();

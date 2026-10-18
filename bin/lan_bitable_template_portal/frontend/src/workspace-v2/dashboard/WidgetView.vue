@@ -12,8 +12,8 @@
     <NEmpty v-if="!entries.length" description="尚未添加常用功能" size="small" />
   </nav>
   <BusinessTodos v-else-if="item.kind==='tasks'&&orderedTodos" :widget-id="item.id" :selection="item.taskKinds" :selected-scopes="selectedScopes" :user="user" :scopes="scopes" :scope="scope" :preferences-busy="preferencesBusy" @selection="$emit('task-kinds',$event)" />
-  <TaskWorkspace v-else-if="['tasks','notice_actions','repair_actions'].includes(item.kind)" :user="user" :scopes="scopes" :selected-scopes="selectedScopes" :scope="scope" view="tasks" embedded :action-mode="item.kind!=='tasks'" :presentation="item.presentation" :initial-kind="item.module" @open="$emit('open',$event)" />
-  <PreShiftCheck v-else-if="item.kind==='pre_shift'" :user="user" />
+  <TaskWorkspace v-else-if="['tasks','notice_actions','repair_actions'].includes(item.kind)" :user="user" :scopes="scopes" :selected-scopes="selectedScopes" :scope="scope" :header-tools-id="headerToolsId" view="tasks" embedded :action-mode="item.kind!=='tasks'" :presentation="item.presentation" :initial-kind="item.module" @open="$emit('open',$event)" />
+  <PreShiftCheck v-else-if="item.kind==='pre_shift'" :user="user" :header-tools-id="headerToolsId" />
   <MetricWidget v-else-if="item.kind==='notices'||item.kind==='events'" :item="item" :user="user" :scope="scope" :selected-scopes="selectedScopes" @open="$emit('open',$event)" />
   <OverviewPanel v-else :kind="item.kind" :scope="scope" :scopes="scopes" :selected-scopes="selectedScopes" :user="user" :personal="item.kind==='learning'" :presentation="item.presentation" @open="$emit('open',$event)" />
   </template>

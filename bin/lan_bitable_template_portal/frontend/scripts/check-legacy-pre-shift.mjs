@@ -146,8 +146,14 @@ try {
   await check.locator('.v2-check-alert').waitFor();
   assert(await check.evaluate(el => el.classList.contains('has-pending-checks')), 'the next occurrence starts alerting only when due');
   scheduledTasks = null; serverTime = state.server_time;
-  mode = 'manager';
+  mode = 'manager'; submitted = false;
   await page.goto(origin + '/?entry=pre_shift');
+  for (const width of [1440,390]) {
+    await page.setViewportSize({width,height:width<700?844:960});
+    await check.getByRole('button',{name:'提交检查',exact:true}).waitFor();
+    assert(await check.getByRole('button',{name:'提交检查',exact:true}).isEnabled(),'legacy managers can submit on PC/mobile');
+    assert(await check.locator('.n-radio-input').first().isEnabled(),'legacy manager fields are editable');
+  }
   await check.getByRole('button', { name: '管理清单', exact: true }).click();
   const editor = page.locator('.v2-check-editor');
   await editor.getByRole('textbox', { name: '检查项1', exact: true }).waitFor();

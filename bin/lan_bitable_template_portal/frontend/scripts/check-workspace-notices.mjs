@@ -108,7 +108,8 @@ try {
   for (const [index, kind] of Object.keys(fixtures).entries()) {
     await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=' + kind);
     await page.locator('.v2-notice-entry').first().waitFor();
-    assert.equal(await page.locator('.v2-notice-command .v2-notice-filters').count(),1,'shared notice filters stay beside the type controls');
+    assert.equal(await page.locator('.v2-notice-command .v2-notice-filters').count(),0,'the primary command row is not crowded by filters');
+    assert.equal(await page.locator('.v2-notices>.v2-notice-filters').count(),1,'shared notice filters stay directly below the primary controls');
     assert.equal(await page.locator('[data-list="planned"]>header .v2-notice-plan-search').count(),1,'name search stays beside the plan title');
     assert.equal(await page.locator('[data-list="ongoing"] .v2-notice-filters').count(),0);
     assert.equal(await page.locator('iframe').count(), 0, 'new notice page must not embed legacy HTML');

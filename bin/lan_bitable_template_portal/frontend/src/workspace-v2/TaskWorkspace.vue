@@ -1,5 +1,6 @@
 <template>
   <div class="v2-home" :class="{'v2-task-embedded':embedded,'v2-task-timeline':presentation==='timeline'}">
+    <Teleport v-if="headerTarget" :to="headerTarget"><NButton data-v2-navigation size="small" quaternary circle :loading="taskLoading" :disabled="!taskTabs.length" :aria-label="initialKind==='repair_management'?'刷新维修跟进':'刷新待办'" @click="refresh"><RefreshCw :size="16" /></NButton></Teleport>
     <template v-if="view !== 'functions'">
       <section v-if="!embedded" class="v2-welcome"><div><span class="v2-eyebrow">{{ today }} · {{ greeting }}</span><h1>{{ view === 'tasks' ? '待处理事项' : personaTitles[persona] }}</h1><p>{{ scopeLabel }} · {{ user.name }}</p></div><NButton secondary :loading="taskLoading" :disabled="!taskTabs.length" @click="refresh"><template #icon><RefreshCw :size="16" /></template>刷新</NButton></section>
       <nav v-if="!embedded && view === 'home' && persona !== 'duty' && commonActions.length" class="v2-common-actions" aria-label="常用操作">
@@ -7,10 +8,10 @@
       </nav>
       <div class="v2-work-grid tasks-only">
         <section class="v2-task-section">
-          <div class="v2-section-title"><h2 v-if="!embedded">{{ persona === 'personal' && view === 'home' ? '我的待办' : '未开始与进行中' }}</h2><NSelect v-if="taskTabs.length > 1" v-model:value="taskKind" class="v2-task-filter" :options="taskTabs" value-field="id" aria-label="待办业务分类" filterable /><NButton v-if="embedded" text :loading="taskLoading" aria-label="刷新待办" @click="refresh"><RefreshCw :size="15" /></NButton></div>
+          <div v-if="!embedded||taskTabs.length>1||!headerTarget" class="v2-section-title"><h2 v-if="!embedded">{{ persona === 'personal' && view === 'home' ? '我的待办' : '未开始与进行中' }}</h2><NSelect v-if="taskTabs.length > 1" v-model:value="taskKind" class="v2-task-filter" :options="taskTabs" value-field="id" aria-label="待办业务分类" filterable /><NButton v-if="embedded&&!headerTarget" text :loading="taskLoading" aria-label="刷新待办" @click="refresh"><RefreshCw :size="15" /></NButton></div>
           <OverviewPanel v-if="panelKinds.includes(taskKind)" :key="taskKind" :kind="taskKind" :user="user" :scope="scope" :scopes="scopes" :selected-scopes="selectedScopes" tasks-only :brief="brief" @open="open" />
           <template v-else>
-          <NAlert v-if="taskError" type="warning" :bordered="false">{{ taskError }} <NButton text @click="loadTasks">重试</NButton></NAlert>
+          <NAlert v-if="taskError" type="warning" :bordered="false">{{ taskError }} <NButton text @click="refresh">重试</NButton></NAlert>
           <NSpin v-if="(compact || embedded) && taskTabs.length" :show="taskLoading"><NList class="v2-mobile-tasks v2-task-operation-list"><NListItem v-for="row in visibleRows" :key="row.key">
             <article v-if="actionMode" class="v2-task-operation v2-clickable-card" @click="activateCard($event) && open(row.url)">
               <div class="v2-task-operation-head"><NButton text class="v2-operation-title" :title="row.title" data-v2-navigation @click="open(row.url)"><span class="v2-operation-name">{{row.title}}</span></NButton><NTag size="small" :bordered="false">{{row.status}}</NTag></div>
@@ -36,7 +37,7 @@
 </template>
 <script setup lang="ts">
 import { activateCard } from './cardActivation';
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useCapacity } from './pageLayout';
 import { NAlert, NButton, NDataTable, NEmpty, NList, NListItem, NSelect, NSpin, NTag, type DataTableColumns } from 'naive-ui';
 import { ArrowRight, ChevronRight, FileText, MessageSquarePlus, PencilLine, Play, RefreshCw, SquareCheck } from 'lucide-vue-next';
@@ -45,7 +46,9 @@ import { modules, moduleIcons, navigationModules, NOTICE_IDS, beijingDate, count
 import { eventStatusTone } from '../eventManagementUtils';
 import { personaFor, personaTitles } from './persona';
 import OverviewPanel from './OverviewPanel.vue';
-const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;selectedScopes?:string[];view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean}>();
+const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;selectedScopes?:string[];view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean;headerToolsId?:string}>();
+const headerTarget=ref<HTMLElement|null>(null);
+watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
 const emit=defineEmits<{open:[url:string]}>();
 const open=(url:string)=>emit('open',url);
 const today=beijingDate(), greeting=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',weekday:'long'}).format(new Date());
@@ -105,7 +108,7 @@ function toRows(items:Dict[],kind:string,ongoing=false):Dict[]{
       title:text(item.title||item.name||item.notice_title||fields['维护总项']||fields['名称（标题）']||fields['名称']||fields['标题']||fields['维修名称']||fields['事件概述'])||'未命名事项',
       status:text(item.status_label||item.workflow||item.source_progress||item.source_status||item.status||fields['流程']||fields['维护实施状态'])||'待处理',
       scope:text(item.building_codes||item.building||item.scope||fields['楼栋']||item._widget_scope)||scopeLabel.value,
-      time:text(item.time||item.start_time||item.updated_at||item.created_at||fields['开始时间']||fields['故障发生时间']),
+      time:text(item.time||item.start_time||item.fault_time||item.updated_at||item.created_at||fields['开始时间']||fields['故障发生时间']),
       progress:count(item.progress_percent??item.progress),dueAt:item.end_time||item.deadline||'',url:url.pathname+url.search,
       ongoing,followupCount:count(item.followup_count),
     };
@@ -120,7 +123,10 @@ async function loadTasks(){
   const read=async(path:string,query:Record<string,string>)=>{
     const result=await Promise.all(selected.map(async scope=>({scope,data:await requestJson(path+'?'+new URLSearchParams({...query,scope}),{signal:abort.signal})})));
     const collect=(field:string)=>[...new Map(result.flatMap(({scope,data})=>items(data[field]).map((row):Dict=>({...row,_widget_scope:scope}))).map(row=>[(row.work_type||kind)+':'+(row.active_item_id||row.record_id||row.id||JSON.stringify(row)),row])).values()];
-    return {...result[0]?.data,records:collect('records'),ongoing:collect('ongoing'),categories:result.flatMap(({scope,data})=>items(data.categories).map(category=>({...category,tasks:items(category.tasks).map(row=>({...row,_widget_scope:scope}))}))),source_snapshot_ready:result.every(({data})=>data.source_snapshot_ready!==false)};
+    const merged:Dict={...result[0]?.data,source_snapshot_ready:result.every(({data})=>data.source_snapshot_ready!==false)};
+    if(kind==='daily')merged.categories=result.flatMap(({scope,data})=>items(data.categories).map(category=>({...category,tasks:items(category.tasks).map(row=>({...row,_widget_scope:scope}))})));
+    else{merged.records=collect('records');if(NOTICE_IDS.includes(kind))merged.ongoing=collect('ongoing');}
+    return merged;
   };
   try{
     const existing=cache.get('tasks:'+key);let data:Dict;

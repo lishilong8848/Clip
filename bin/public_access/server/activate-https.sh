@@ -7,12 +7,13 @@ source_dir="$base/deployment"
 site="/www/server/panel/vhost/nginx/$domain.conf"
 
 [[ $EUID == 0 ]] || { echo 'Run this script as root in the server terminal.'; exit 1; }
-for file in dt-https.conf clipflow-cert-renew.service clipflow-cert-renew.timer; do
+for file in dt-https.conf clipflow-cert-renew.service clipflow-cert-renew.timer certificate-status.py; do
     test -s "$source_dir/$file"
 done
 test -s "$site"
 test -s "$base/acme/acme.sh"
 test -s "$base/tls/dt/privkey.pem"
+test -s "$base/status/access.conf"
 openssl x509 -in "$base/tls/dt/fullchain.pem" -noout -checkend 0 -checkhost "$domain"
 systemctl is-active --quiet firewalld
 [[ $(firewall-cmd --get-zone-of-interface=eth0) == public ]]

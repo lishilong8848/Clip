@@ -1,11 +1,13 @@
 """Package coverage and UI freshness; never builds or publishes a real patch."""
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'bin'))
 spec = importlib.util.spec_from_file_location('mcp_packaging_fixture', ROOT / 'package_portable.py')
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
@@ -57,9 +59,32 @@ class PackagingTests(unittest.TestCase):
             (frontend / 'dist/assets').mkdir(parents=True)
             (frontend / 'dist/assets/tools.js').write_text('/api/assistant/extensions', encoding='utf-8')
             (frontend / 'dist/assistant.html').touch()
+            (frontend / 'dist/index.html').touch()
             asset = Path('bin/lan_bitable_template_portal/frontend/dist/assets/tools.js')
             with patch.object(package, 'PROJECT_ROOT', root), patch.object(package, 'referenced_assets', return_value={asset}), patch.object(package.subprocess, 'run', side_effect=AssertionError('fresh assets must not rebuild')):
                 package._ensure_mcp_frontend_assets()
+
+    def test_checklist_changes_or_stale_workspace_entry_rebuild_both_frontends(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);frontend=root/'bin/lan_bitable_template_portal/frontend'
+            inputs=['src/components/LighthouseTools.vue','src/components/LighthouseSkills.vue',
+                    'src/workspace-v2/dashboard/PreShiftCheck.vue','src/preShiftUtils.ts']
+            entries=['dist/assistant.html','dist/index.html','dist/assets/workspace-v2/index.html']
+            for relative in inputs+entries+['dist/assets/tools.js']:
+                path=frontend/relative;path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text('/api/assistant/extensions',encoding='utf-8')
+                os.utime(path,(100,100) if relative in entries else (50,50))
+            asset=Path('bin/lan_bitable_template_portal/frontend/dist/assets/tools.js')
+            with patch.object(package,'PROJECT_ROOT',root),patch.object(package,'referenced_assets',return_value={asset}),patch.object(
+                package.shutil,'which',return_value='fixture-npm'),patch.object(package.subprocess,'run') as build:
+                package._ensure_mcp_frontend_assets();build.assert_not_called()
+                for relative in entries:
+                    os.utime(frontend/relative,(40,40));package._ensure_mcp_frontend_assets()
+                    build.assert_called_once();build.reset_mock();os.utime(frontend/relative,(100,100))
+                os.utime(frontend/inputs[2],(110,110));package._ensure_mcp_frontend_assets();build.assert_called_once()
+                build.reset_mock();os.utime(frontend/inputs[2],(50,50))
+                os.utime(frontend/inputs[3],(120,120));package._ensure_mcp_frontend_assets();build.assert_called_once()
 
 
 if __name__ == '__main__':

@@ -226,6 +226,120 @@ class CheckTests(unittest.TestCase):
         self.service.notify(self.current + dt.timedelta(hours=2))
         self.assertEqual(self.sender.call_count, 1)
 
+    def test_supervisor_completion_isolated_by_building_shift_due_and_restart(self):
+        items=[{'id':'x','text':'检查一'},{'id':'y','text':'检查二'},
+               {'id':'later','text':'另一时段','frequency':{'kind':'daily','time':'11:00'}}]
+        self.service.save_definition(self.admin,'A',1,items)
+        self.service.save_definition(self.admin,'B',0,items)
+        self.roster.return_value['people'] += [{**p,'scope':'B'} for p in list(self.roster.return_value['people'])]
+        current=at(DAY+'T11:05:00');self.service.prepare(current)
+        supervisor={**self.worker,'id':'ou_supervisor','name':'A楼主管','category':'supervisor','level':'L3'}
+        self.service.notify(current)
+        self.service.submit(supervisor,DAY+':A:白',2,self.answers,current)
+        with self.assertRaises(CheckError):
+            self.service.submit(supervisor,DAY+':B:白',1,self.answers,current)
+        self.sender.reset_mock();self.service.notify(current+dt.timedelta(hours=2))
+        keys=[call.args[2] for call in self.sender.call_args_list]
+        self.assertEqual(len(keys),6)
+        self.assertFalse(any(key.startswith('pre-shift:'+DAY+':A:白:2:') for key in keys))
+        self.assertTrue(any(':A:白:1100:' in key for key in keys))
+        self.assertTrue(any(':B:白:' in key for key in keys))
+        restarted=CheckService(self.temp.name,roster=self.roster,sender=self.sender,portal_url=lambda:'https://fixture.invalid')
+        self.sender.reset_mock();restarted.tick(current+dt.timedelta(hours=2,minutes=1))
+        self.sender.assert_not_called()
+        later=DAY+':A:白:1100'
+        restarted.submit(supervisor,later,2,[{'id':'later','status':'normal','note':''}],current+dt.timedelta(hours=2))
+        self.sender.reset_mock();restarted.notify(current+dt.timedelta(hours=4))
+        self.assertTrue(self.sender.called)
+        self.assertTrue(all(':B:白:' in call.args[2] for call in self.sender.call_args_list))
+        self.sender.reset_mock();night=at(DAY+'T17:50:00');restarted.tick(night)
+        self.assertTrue(any(':A:夜:' in call.args[2] for call in self.sender.call_args_list))
+        restarted.submit(supervisor,DAY+':A:夜',2,self.answers,night)
+        self.sender.reset_mock();restarted.tick(at('2026-10-15T01:50:00'))
+        self.assertTrue(self.sender.called)
+        self.assertTrue(all(':B:夜:' in call.args[2] for call in self.sender.call_args_list))
+        self.sender.reset_mock();restarted.tick(at('2026-10-15T08:50:00'))
+        self.assertTrue(any('2026-10-15:A:白:' in call.args[2] for call in self.sender.call_args_list))
+
+    def test_overview_attention_keeps_other_due_and_overdue_periods(self):
+        self.service.prepare(self.current)
+        tomorrow=at('2026-10-15T09:00:00');self.service.prepare(tomorrow)
+        # Finish today's work, but leave yesterday's day shift for a late check.
+        self.service.submit(self.admin,DAY+':A:夜',1,self.answers,tomorrow)
+        self.service.submit(self.admin,'2026-10-15:A:白',1,self.answers,tomorrow)
+        state=self.service.state(self.admin,'A',tomorrow)
+        self.assertFalse(any(row['status'] in ('待完成','逾期待补做') for row in state['overview']['rows']))
+        self.assertEqual(state['overview']['pending'],1,'an old unfinished period still needs attention in the global view')
+        self.service.submit(self.admin,DAY+':A:白',1,self.answers,tomorrow)
+        self.assertEqual(self.service.state(self.admin,'A',tomorrow)['overview']['pending'],0)
+
+    def test_real_patch_install_preserves_checks_and_receipts_and_enables_supervisor(self):
+        import importlib.util
+        import package_portable as packaging
+        from upload_event_module.ui.main_window_patch import PatchUpdateMixin
+        with tempfile.TemporaryDirectory(prefix='pre_shift_update_') as directory:
+            root=Path(directory);client=root/'client';data=client/'bin/data/pre_shift_checks'
+            sender=Mock(side_effect=receipt)
+            before=CheckService(data,roster=self.roster,sender=sender,portal_url=lambda:'https://fixture.invalid')
+            before.save_definition(self.admin,'A',0,[{'id':'x','text':'更新前的检查'}]);before.prepare(self.current)
+            session=before.stage_upload(self.worker,DAY+':A:白','x','item','检查记录.txt',self.current)
+            Path(session['path']).write_bytes(b'original evidence')
+            photo=before.commit_upload(self.worker,session,None,self.current)
+            before.submit(self.worker,DAY+':A:白',1,[{'id':'x','status':'normal','note':''}],self.current)
+            night=at(DAY+'T17:50:00');before.notify(night-dt.timedelta(minutes=10))
+            self.assertEqual(sender.call_count,2)
+            protected={str(data.relative_to(client)/'checks.sqlite3'):before.db.read_bytes(),
+                       str(Path(before.get_file(self.worker,photo['id'])['path']).relative_to(client)):b'original evidence',
+                       'bin/data/config.json':b'{"fixture":"preserve account settings"}'}
+            config=client/'bin/data/config.json';config.write_bytes(protected['bin/data/config.json'])
+            name='pre_shift_isolated_update';output=root/'build'
+            with patch.object(packaging,'BUILD_DIR',output):
+                packaging.build_patch(root/'unused',client,name,force_ui_update=True)
+            payload=output/(name+'_patch_only')
+            expected=['bin/lan_bitable_template_portal/'+part+'.py' for part in
+                      ('pre_shift_checks','pre_shift_schedule','pre_shift_routes','pre_shift_cloud','pre_shift_photo')]
+            expected+=['bin/clipflow_backend/main.py','bin/lan_bitable_template_portal/frontend/dist/index.html',
+                       'bin/lan_bitable_template_portal/frontend/dist/assets/workspace-v2/index.html']
+            for relative in expected:
+                self.assertEqual((payload/relative).read_bytes(),(packaging.PROJECT_ROOT/relative).read_bytes())
+            self.assertFalse((payload/'bin/data').exists())
+            meta=json.loads((payload/'bin/patch_meta.json').read_text(encoding='utf-8'))
+            self.assertTrue(meta['restart_required'])
+            # A stale update must not overwrite or delete the installed checklist database/evidence.
+            for relative in protected:
+                target=payload/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'must not install')
+            with (payload/'patch_manifest.txt').open('a',encoding='utf-8') as manifest:
+                manifest.write('\n'+'\n'.join(protected)+'\n')
+            class Client(PatchUpdateMixin):
+                def _get_app_root_dir(self):
+                    return client
+            updater=Client();updater._last_patch_meta=meta;updater._last_patch_source='isolated-test'
+            updater.patch_update_finished=SimpleNamespace(emit=Mock())
+            guard=Mock();guard.finish.return_value=''
+            with patch('openclaw_service.update.AssistantUpdateGuard',return_value=guard),patch(
+                'upload_event_module.services.process_lifetime.lower_current_thread_priority'),patch(
+                'upload_event_module.ui.main_window_patch.config.auto_install_dependencies',False),patch(
+                'upload_event_module.ui.main_window_patch.send_system_alert') as alert:
+                updater._apply_patch_worker(payload)
+                alert.assert_not_called()
+            self.assertTrue(updater.patch_update_finished.emit.call_args.args[0],updater.patch_update_finished.emit.call_args)
+            self.assertTrue(updater._last_patch_requires_restart)
+            for relative,content in protected.items():
+                self.assertEqual((client/relative).read_bytes(),content)
+            spec=importlib.util.spec_from_file_location('lan_bitable_template_portal._updated_pre_shift',client/expected[0])
+            installed=importlib.util.module_from_spec(spec);spec.loader.exec_module(installed)
+            after=installed.CheckService(data,roster=self.roster,sender=sender,portal_url=lambda:'https://fixture.invalid')
+            sender.reset_mock();after.tick(night-dt.timedelta(minutes=5));sender.assert_not_called()
+            supervisor={**self.worker,'id':'ou_supervisor','name':'A楼主管','category':'supervisor','level':'L3'}
+            row=next(t for t in after.state(supervisor,'A',night)['tasks'] if t['id']==DAY+':A:夜')
+            self.assertTrue(row['can_submit'])
+            after.submit(supervisor,row['id'],1,[{'id':'x','status':'normal','note':''}],night)
+            after.tick(at('2026-10-15T01:50:00'));sender.assert_not_called()
+            self.assertEqual(after.state(self.worker,'A',night)['overview'],None)
+            self.assertEqual(after.state(self.admin,'A',night)['overview']['pending'],0)
+            after.tick(at('2026-10-15T08:50:00'))
+            self.assertEqual(sender.call_count,2,'new day must not inherit the previous completion')
+
     def test_upcoming_weekly_monthly_checks_can_be_completed_before_their_due_time(self):
         self.service.save_definition(self.admin, 'A', 1, [
             {'id': 'week', 'text': '每周检查', 'frequency': {'kind': 'weekly', 'weekday': 0, 'time': '10:00'}},
@@ -282,12 +396,12 @@ class CheckTests(unittest.TestCase):
 
     def test_concurrent_and_repeated_submissions_keep_one_winner(self):
         self.service.prepare(self.current)
-        barrier = threading.Barrier(2)
+        barrier = threading.Barrier(3)
         def send(actor):
             barrier.wait()
             return self.submit(actor)
-        with ThreadPoolExecutor(2) as pool:
-            results = list(pool.map(send, [self.worker, self.peer]))
+        with ThreadPoolExecutor(3) as pool:
+            results = list(pool.map(send, [self.worker, self.peer, self.admin]))
         self.assertEqual(sum(not r['already_completed'] for r in results), 1)
         with self.service.connection() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM outbox').fetchone()[0], 1)
@@ -300,10 +414,53 @@ class CheckTests(unittest.TestCase):
             with self.assertRaises(CheckError):
                 self.service.submit(self.worker, DAY + ':A:白', 1, answers, self.current)
         with self.assertRaises(CheckError):
-            self.submit({**self.worker, 'id': 'ou_unassigned', 'category': 'manager'})
+            self.submit({**self.worker, 'id': 'ou_unassigned', 'category': 'engineer'})
         with self.assertRaises(CheckError):
             self.submit({**self.worker, 'home_scope': 'B'})
         self.assertFalse(self.submit({**self.worker, 'id': 'ou_shared', 'category': 'duty'})['already_completed'])
+
+    def test_superiors_submit_only_in_their_managed_buildings_and_stop_reminders(self):
+        cases = [
+            ('root', 'L0', 'manager', 'H', ['ALL'], True),
+            ('manager', 'L1', 'manager', 'H', ['ALL'], True),
+            ('h_duty', 'L1', 'duty', 'H', ['ALL'], True),
+            ('supervisor', 'L3', 'supervisor', 'A', ['A'], True),
+            ('other_supervisor', 'L3', 'supervisor', 'B', ['B'], False),
+            ('limited_manager', 'L1', 'manager', 'B', ['B'], False),
+            ('h_engineer', 'L2', 'engineer', 'H', ['H'], False),
+            ('engineer', 'L4', 'engineer', 'A', ['A'], False),
+            ('operator', 'L4', 'operator', 'A', ['A'], True),
+            ('other_operator', 'L4', 'operator', 'B', ['B'], False),
+        ]
+        for name,level,category,home,scopes,allowed in cases:
+            with self.subTest(name=name):
+                sender=Mock(side_effect=receipt)
+                service=CheckService(Path(self.temp.name)/name,roster=self.roster,sender=sender)
+                service.save_definition(self.admin,'A',0,[{'id':'x','text':'检查'}])
+                service.prepare(self.current)
+                actor={'id':'ou_'+name,'name':name,'level':level,'category':category,'home_scope':home,'scope_rules':scopes}
+                with service.connection() as conn:
+                    row=conn.execute('SELECT * FROM tasks WHERE id=?',(DAY+':A:白',)).fetchone()
+                self.assertEqual(service.can_submit(actor,row,self.current),allowed)
+                answers=[{'id':'x','status':'normal','note':''}]
+                if not allowed:
+                    with self.assertRaises(CheckError) as denied:
+                        service.submit(actor,row['id'],1,answers,self.current)
+                    self.assertEqual(denied.exception.status,403)
+                    with self.assertRaises(CheckError):
+                        service.stage_upload(actor,row['id'],'','handover','交接班.jpg',self.current)
+                    continue
+                task=next(t for t in service.state(actor,'A',self.current)['tasks'] if t['id']==row['id'])
+                self.assertTrue(task['can_submit']);self.assertTrue(task['can_upload_handover'])
+                for kind,item,file_name in [('item','x','记录.txt'),('handover','','交接班.jpg')]:
+                    session=service.stage_upload(actor,row['id'],item,kind,file_name,self.current)
+                    service.abort_upload(session)
+                result=service.submit(actor,row['id'],1,answers,self.current)
+                self.assertFalse(result['already_completed']);self.assertEqual(result['actor_name'],name)
+                service.notify(self.current+dt.timedelta(hours=2))
+                sender.assert_not_called()
+                peer=next(t for t in service.state(self.worker,'A',self.current)['tasks'] if t['id']==row['id'])
+                self.assertFalse(peer['can_submit']);self.assertEqual(peer['actor_name'],actor['name'])
 
     def test_definition_edit_authority_conflict_and_historical_snapshot(self):
         with self.assertRaises(CheckError):
@@ -554,6 +711,7 @@ class RouteTests(unittest.TestCase):
             app = FastAPI()
             pre_shift_routes.install_pre_shift_routes(app, controller, runtime)
             with TestClient(app) as client:
+                svc.start.assert_called_once()
                 response = client.get('/api/pre-shift-checks?scope=A')
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(svc.state.call_args.args[0]['id'], 'ou_fixture')
@@ -564,6 +722,7 @@ class RouteTests(unittest.TestCase):
                 self.assertEqual(client.get('/api/pre-shift-checks').status_code, 403)
                 session = None
                 self.assertEqual(client.get('/api/pre-shift-checks').status_code, 401)
+            svc.stop.assert_called_once()
 
 
 if __name__ == '__main__':

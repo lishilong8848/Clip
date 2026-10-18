@@ -82,6 +82,8 @@
 .v2-drill-preview[open] > summary::after { content: '\2212'; }
 .drill-page .assessment-view { padding: 16px 0; }
 .drill-page .assessment-fields { margin-bottom: 18px; }
+/* Workbook cells keep their original fills and fonts on a paper surface. */
+.drill-page :deep(.sheet-table-wrap) { color-scheme: light; background: #fff; color: #000; }
 .drill-page .sticky-actions { position: sticky; bottom: 0; z-index: 8; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 12px 0; margin: 18px 0 0; background: var(--v2-bg); border: 0; border-top: 1px solid var(--v2-border); border-radius: 0; box-shadow: none; backdrop-filter: none; }
 .drill-page .sticky-actions button { min-height: 38px; padding: 8px 12px; font-size: 13px; }
 .drill-page .save-indicator { margin-right: auto; font-size: 12px; }

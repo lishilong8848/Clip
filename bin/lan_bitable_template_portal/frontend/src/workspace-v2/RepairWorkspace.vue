@@ -2,9 +2,9 @@
   <RepairController v-bind="props" v-slot="{controller:r}">
     <section class="repair-management-page v2-repair-workspace" data-v2-inline-feedback :class="{'has-detail':r.projectDrawerOpen,'repair-status-page':statusEntry}">
       <header class="v2-repair-heading"><div><h1>检修办理</h1><p>维修项目与跟进</p></div><div class="v2-repair-actions">
-        <NButton data-v2-navigation :disabled="r.loading||r.v2Writing" :loading="r.loading" @click="r.v2RefreshView"><RefreshCw :size="16" />刷新显示</NButton>
-        <NDropdown trigger="click" :options="moreOptions" @select="value=>more(value,r)"><NButton data-v2-navigation aria-label="更多检修操作" :disabled="r.v2Writing"><Ellipsis :size="18" /></NButton></NDropdown>
         <NButton data-v2-navigation type="primary" :disabled="r.v2Writing" @click="r.requestStartCreate"><Plus :size="17" />新建维修单</NButton>
+        <NDropdown trigger="click" :options="moreOptions" @select="value=>more(value,r)"><NButton data-v2-navigation aria-label="更多检修操作" title="更多检修操作" :disabled="r.v2Writing"><Ellipsis :size="18" /></NButton></NDropdown>
+        <NButton data-v2-navigation class="v2-repair-refresh" quaternary circle aria-label="刷新显示" title="刷新维修项目列表" :disabled="r.loading||r.v2Writing" :loading="r.loading" @click="r.v2RefreshView"><RefreshCw :size="16" /></NButton>
       </div></header>
       <div class="v2-repair-filters">
         <NInput :value="r.searchText" placeholder="搜索维修名称、设备、位置或专业" clearable :input-props="{'aria-label':'搜索维修项目'}" @update:value="r.searchText=$event"><template #prefix><Search :size="16" /></template></NInput>

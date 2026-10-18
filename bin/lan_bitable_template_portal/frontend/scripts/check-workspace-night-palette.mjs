@@ -18,6 +18,9 @@ const source=`:root{--cf-text:#0f172a;--cf-surface:#fff}
 .trend-plot text{fill:#64748b}
 .repair{--repair-panel:#fff;--repair-soft:#f4f7f8;--repair-line:#dce3e7;--filter-selected:#eaf3ff;background:var(--repair-panel)}
 .shared,.signature-pad{background:white;color:black}
+.step-table-wrap,.sheet-table-wrap{background:white;color:black}
+.sheet-preview-table td{color:black}.sheet-signers span{background:#eff6ff;color:#1d4ed8}
+.drill-page :deep(.sheet-table-wrap){color-scheme:light;background:#fff;color:#000}
 .module .panel{background:transparent;border:0;box-shadow:none;color:var(--cf-text)}
 .accent-button{background:var(--v2-blue);color:white}
 @media(max-width:760px){.panel{background:#f8fafc}}
@@ -37,6 +40,8 @@ assert(!css.includes('data-v2-theme="dark"] .sheet'));
 assert(css.includes('data-v2-theme="dark"] .trend-plot text'));
 assert(css.includes('data-v2-theme="dark"] .shared'));
 assert(!css.includes('data-v2-theme="dark"] .signature-pad'));
+assert(css.includes('data-v2-theme="dark"] .step-table-wrap'),'step editor still follows night mode');
+assert(!/data-v2-theme="dark"\][^{]*\.sheet-(?:table-wrap|preview-table|signers)/.test(css),'document previews keep paper colors, including nested component selectors');
 const themedRepair=result.nodes.flatMap(node=>node.type==='atrule'?node.nodes||[]:[]).find(rule=>rule.selector?.endsWith(' .repair'));
 for(const prop of ['--repair-panel','--repair-soft','--repair-line','--filter-selected'])assert.notEqual(themedRepair.nodes.find(decl=>decl.prop===prop).value,postcss.parse(source).nodes.find(rule=>rule.selector==='.repair').nodes.find(decl=>decl.prop===prop).value);
 const override=result.nodes.flatMap(node=>node.type==='atrule'?node.nodes||[]:[]).find(rule=>rule.selector?.endsWith(' .module .panel'));

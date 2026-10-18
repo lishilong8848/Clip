@@ -223,8 +223,59 @@ try {
     assert(band.height <= 60, 'notice command row must stay a single compact row, height=' + band.height);
     assert((band.max - band.min) < 20, 'notice categories/actions/layout must share one desktop row');
     assert(Math.abs(band.triggerTop - band.min) < 20, 'custom layout trigger must sit on the same notice row');
+    const filters=page.locator('.v2-notices>.v2-notice-filters');
+    assert.equal(await command.locator('.v2-notice-filters').count(),0,'shared filters have their own row instead of squeezing commands');
+    assert(await filters.evaluate(el=>el.previousElementSibling?.classList.contains('v2-notice-command')),'filters directly follow the primary command row');
     assert(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), 'notice page overflows at 1440');
     await shot('notice-command-row-1440');
+  });
+
+  await scenario('notice-toolbar-desktop-mobile-responsive-actions',async()=>{
+    const kinds=['all','maintenance','change','repair','polling','adjust','power'];
+    for(const width of [1366,1440,1920,1024,360,375,390,430]){
+      await page.setViewportSize({width,height:width<761?640:900});
+      for(const kind of kinds){
+        await page.goto(entry+'?__page=/workbench-lite&scope=A&work_type='+kind);
+        const command=page.locator('.v2-notice-command'),filters=page.locator('.v2-notices>.v2-notice-filters');
+        await command.locator('.v2-layout-trigger').waitFor();await filters.getByRole('button',{name:'筛选',exact:true}).waitFor();
+        const geometry=await command.evaluate(el=>{
+          const nodes=[el,...el.querySelectorAll('.v2-notice-types,.v2-notice-tools,.v2-toolbar-end')];
+          const controls=[...el.querySelectorAll('button')].filter(button=>button.getClientRects().length&&!button.closest('.v2-notice-types'));
+          const boxes=controls.map(button=>button.getBoundingClientRect());
+          return {height:el.getBoundingClientRect().height,fits:nodes.every(node=>node.scrollWidth<=node.clientWidth+1||node.classList.contains('v2-notice-types')),actionsFit:boxes.every(box=>box.left>=0&&box.right<=innerWidth+1),overlap:boxes.some((a,i)=>boxes.slice(i+1).some(b=>a.left<b.right&&a.right>b.left&&a.top<b.bottom-1&&a.bottom>b.top+1)),touch:boxes.every(box=>box.width>=44&&box.height>=44)};
+        });
+        assert(geometry.fits&&geometry.actionsFit&&!geometry.overlap,JSON.stringify({width,kind,geometry}));
+        assert(await filters.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'shared filters never overflow at '+width);
+        assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),'no page overflow at '+width);
+        if(width>=1366){
+          assert(geometry.height<=60,'desktop primary commands stay in one row: '+JSON.stringify({width,kind,geometry}));
+          assert(await command.locator('.v2-notice-types').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'desktop categories remain fully visible');
+        }
+        if(width<761){
+          assert(geometry.touch,'phone actions retain 44px touch targets');
+          assert(await command.locator('.v2-notice-types button').evaluateAll(nodes=>nodes.every(el=>{const box=el.getBoundingClientRect();return box.width>=44&&box.height>=44;})),'phone categories retain 44px targets too');
+          await command.getByRole('button',{name:'更多办理',exact:true}).click();
+          await page.locator('.n-dropdown-menu').getByText('粘贴原文',{exact:true}).click();
+          await page.getByLabel('通告原文',{exact:true}).waitFor();await page.getByRole('button',{name:'取消',exact:true}).click();
+          await command.getByRole('button',{name:'刷新通告',exact:true}).click();
+          await page.locator('.n-dropdown-menu').getByText('刷新本页',{exact:true}).click();await page.locator('.n-dropdown-menu:visible').waitFor({state:'hidden'});
+        }
+        if(kind==='all'||kind==='maintenance')await shot('notice-toolbar-'+kind+'-'+width);
+      }
+    }
+  });
+
+  await scenario('notice-toolbar-night-theme',async()=>{
+    await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:Athen-1','dark'));
+    for(const width of [1440,390]){
+      await page.setViewportSize({width,height:width<761?667:900});
+      await page.goto(entry+'?__page=/workbench-lite&scope=A&work_type=change');
+      await page.locator('.v2-notice-command .v2-layout-trigger').waitFor();
+      assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');
+      assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+      await shot('notice-toolbar-dark-'+width);
+    }
+    await page.evaluate(()=>localStorage.removeItem('clipflow:workspace-night-mode:Athen-1'));await page.reload();
   });
 
   // ---------------------------------------------------------- 2. SOP filters

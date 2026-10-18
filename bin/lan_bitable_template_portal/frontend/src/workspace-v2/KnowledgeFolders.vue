@@ -20,15 +20,20 @@
       <NButton quaternary circle size="small" aria-label="收起全部" title="收起全部" :disabled="!treeOptions.length || busy" @click="expandedKeys=[]"><ChevronsDownUp :size="16" /></NButton>
     </div>
     <div v-if="treeOptions.length" class="v2-kb-folders-tree">
+      <!-- NTree's height animation can retain stale nodes when CRUD changes a branch into a leaf. -->
       <NTree
+        :animated="false"
         v-model:expanded-keys="expandedKeys"
         :data="treeOptions"
         block-line
         show-line
         :indent="18"
-        :selectable="false"
+        :disabled="busy"
+        :cancelable="false"
+        expand-on-click
         :selected-keys="selectedKeys"
         :render-label="renderLabel"
+        @update:selected-keys="selectKeys"
       />
     </div>
     <p v-else class="muted kb-groups-empty">
@@ -119,7 +124,6 @@ import { computed, h, reactive, ref, watch } from "vue";
 import { NModal, NTree, NSelect, NInput, NButton, type SelectOption, type TreeOption } from "naive-ui";
 import { ChevronsDownUp, ChevronsUpDown, Folder, FolderPlus, Move, Pencil, Trash2 } from "lucide-vue-next";
 import { buildFolderTree, toTreeOptions, folderOptions, type FolderTreeOption, type GroupItem } from "./knowledgeFolders";
-import { activateCard } from './cardActivation';
 
 const props = defineProps<{
   groups: GroupItem[];
@@ -159,6 +163,16 @@ watch(branchKeys,(keys,previous=[])=>{
   expandedKeys.value=[...expandedKeys.value.filter(key=>valid.has(String(key))),...keys.filter(key=>!old.has(key))];
 },{immediate:true});
 const selectedKeys = computed(() => (props.selectedId && props.selectedId !== "all" && props.selectedId !== "ungrouped" ? [props.selectedId] : []));
+watch([() => props.selectedId, () => props.groups], ([id]) => {
+  const folders = new Map(props.groups.map(group => [group.id, group]));
+  const parents = new Set<string>();
+  let parent = id ? folders.get(id)?.parent_id : null;
+  while (parent && folders.has(parent) && !parents.has(parent)) {
+    parents.add(parent);
+    parent = folders.get(parent)?.parent_id;
+  }
+  expandedKeys.value = [...new Set([...expandedKeys.value, ...parents])];
+}, { immediate: true });
 
 const currentName = computed(()=>modal.node?.label||'');
 
@@ -246,10 +260,8 @@ function requestDelete(node: FolderTreeOption): void {
   if (group) emit("delete", group);
 }
 
-function selectOption(option: FolderTreeOption): void {
-  if(props.busy)return;
-  if(option.children?.length&&!expandedKeys.value.includes(option.key))expandedKeys.value.push(option.key);
-  emit("select", option.key);
+function selectKeys(keys: (string | number)[]): void {
+  if (!props.busy && typeof keys[0] === "string") emit("select", keys[0]);
 }
 
 function closeModal(): void {
@@ -267,14 +279,14 @@ function closeModal(): void {
  */
 function renderLabel(state: { option: TreeOption; checked: boolean; selected: boolean }): ReturnType<typeof h> {
   const option = state.option as FolderTreeOption;
-  return h("span", { class: "v2-folder-node", onClick:(event:MouseEvent)=>{if(activateCard(event))selectOption(option);} }, [
+  return h("span", { class: "v2-folder-node" }, [
     h(Folder, { size: 14, "aria-hidden": true, class: "v2-folder-icon" }),
-    h("button", { class: "v2-folder-name", type: "button", 'data-v2-navigation':'', disabled: props.busy, 'aria-pressed': props.selectedId===option.key, title: paths.value.get(option.key), onClick: () => selectOption(option) }, [
+    h("button", { class: "v2-folder-name", type: "button", 'data-v2-navigation':'', disabled: props.busy, 'aria-pressed': props.selectedId===option.key, title: paths.value.get(option.key) }, [
       h("span", option.label),
       option.count > 0 ? h("em", { class: "v2-folder-count" }, option.count) : null,
     ]),
     option.canManage
-      ? h("span", { class: "v2-folder-actions" }, [
+      ? h("span", { class: "v2-folder-actions", onClick: (event: MouseEvent) => event.stopPropagation() }, [
           h("button", { class: "icon-button", type: "button", disabled:props.busy, title: "新建子文件夹", "aria-label": `在「${option.label}」下新建子文件夹`, onClick: () => beginChild(option) }, [h(FolderPlus, { size: 14 })]),
           h("button", { class: "icon-button", type: "button", disabled:props.busy, title: "重命名", "aria-label": `重命名「${option.label}」`, onClick: () => beginRename(option) }, [h(Pencil, { size: 14 })]),
           h("button", { class: "icon-button", type: "button", disabled:props.busy, title: "移动", "aria-label": `移动「${option.label}」`, onClick: () => beginMove(option) }, [h(Move, { size: 14 })]),

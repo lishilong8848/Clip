@@ -1,10 +1,11 @@
 <template>
   <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing?'true':undefined">
+    <Teleport v-if="headerTarget&&!historyOpen" :to="headerTarget"><NButton data-v2-navigation size="small" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></Teleport>
     <div class="v2-check-toolbar" data-v2-navigation>
       <NSelect v-if="state?.can_manage&&!fixedScope&&(!compact||!overviewOpen||historyOpen)" :value="scope" :options="scopeOptions" :disabled="busy || uploading || dirty" aria-label="检查楼栋" @update:value="changeScope" />
       <span v-else-if="!compact||!overviewOpen||historyOpen">{{ scope === '110' ? '110站' : scope + '楼' }}</span>
       <span v-if="needsAttention" class="v2-check-alert" role="status"><i aria-hidden="true" />待检查</span>
-      <div class="v2-check-actions"><NButton v-if="!compact||!overviewOpen||historyOpen" size="small" secondary :disabled="busy||dirty||uploading||saving||editing" :aria-pressed="historyOpen" @click="historyOpen=!historyOpen"><template #icon><History :size="15" /></template>{{compact?(historyOpen?'返回检查清单':'历史检查记录'):(historyOpen?'返回检查':'历史记录')}}</NButton><NButton v-if="!historyOpen&&(!compact||!overviewOpen)&&!fixedScope&&state?.can_manage&&state.overview?.rows" size="small" secondary :disabled="busy||dirty||uploading" @click="overviewOpen=!overviewOpen">{{compact?'返回楼栋列表':overviewOpen?'本楼检查':'完成总览'}}</NButton><NButton v-if="state?.can_manage&&(!compact||!overviewOpen)" size="small" secondary :disabled="busy || dirty" @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton v-if="!historyOpen" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
+      <div class="v2-check-actions"><NButton v-if="!compact||!overviewOpen||historyOpen" size="small" secondary :disabled="busy||dirty||uploading||saving||editing" :aria-pressed="historyOpen" @click="historyOpen=!historyOpen"><template #icon><History :size="15" /></template>{{compact?(historyOpen?'返回检查清单':'历史检查记录'):(historyOpen?'返回检查':'历史记录')}}</NButton><NButton v-if="!historyOpen&&(!compact||!overviewOpen)&&!fixedScope&&state?.can_manage&&state.overview?.rows" size="small" secondary :disabled="busy||dirty||uploading" @click="overviewOpen=!overviewOpen">{{compact?'返回楼栋列表':overviewOpen?'本楼检查':'完成总览'}}</NButton><NButton v-if="state?.can_manage&&(!compact||!overviewOpen)" size="small" secondary :disabled="busy || dirty" @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton v-if="!historyOpen&&!headerTarget" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
     </div>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NSkeleton v-if="!state && loading" text :repeat="4" />
@@ -21,7 +22,7 @@
           <span v-if="!task.submitted">{{ answered }} / {{ task.items.length }}</span>
         </div>
         <div v-if="task.submitted" class="v2-check-sync" role="status">{{ task.sync_status==='synced'?'已同步飞书':'本地已保存，飞书同步中' }}<span v-if="task.sync_error"> · {{ task.sync_error }}</span></div>
-        <NAlert v-else-if="!task.can_submit" type="info" :bordered="false">仅本楼值班人员或值班账号可提交。</NAlert>
+        <NAlert v-else-if="!task.can_submit" type="info" :bordered="false">仅本楼值班人员、值班账号或有该楼管理权限的上级可提交。</NAlert>
         <form class="v2-check-form" @submit.prevent="submit">
           <div class="v2-check-items">
             <fieldset v-for="(item,index) in task.items" :key="item.id" class="v2-check-item">
@@ -62,7 +63,7 @@
   </section>
 </template>
 <script setup lang="ts">
-import { computed,onBeforeUnmount,onMounted,ref,watch } from 'vue';
+import { computed,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,NRadioButton,NRadioGroup,NSelect,NSkeleton,useDialog,useMessage } from 'naive-ui';
 import { CheckCircle2,ClipboardCheck,History,Paperclip,Plus,RefreshCw,Settings2,Trash2 } from 'lucide-vue-next';
 import { requestJson,type Dict } from '../client';
@@ -73,7 +74,9 @@ import CheckFrequency from './CheckFrequency.vue';
 import CheckAttachments from './CheckAttachments.vue';
 import CheckOverview from './CheckOverview.vue';
 import CheckHistory from './CheckHistory.vue';
-const props=defineProps<{user:Dict;fixedScope?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
+const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
+const headerTarget=ref<HTMLElement|null>(null);
+watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
 const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
 const editing=ref(false),saving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict}[]>([]),version=ref(0);
 const overviewOpen=ref(false);let firstState=true;
@@ -86,7 +89,7 @@ const serverNow=computed(()=>Date.parse(state.value?.server_time||'')/1000);
 const visibleTasks=computed<Dict[]>(()=>[...(state.value?.tasks||[])].filter((t:Dict)=>!t.submitted||t.deadline>serverNow.value).sort((a,b)=>a.due-b.due||String(a.id).localeCompare(String(b.id))));
 const task=computed<Dict|undefined>(()=>visibleTasks.value.find((t:Dict)=>t.id===selectedId.value)||visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0]);
 const needsAttention=computed(()=>Boolean(state.value&&(overviewOpen.value&&state.value.can_manage
-  ?state.value.overview?.rows?.some((row:Dict)=>['待完成','逾期待补做'].includes(row.status))
+  ?(state.value.overview?.pending??state.value.overview?.rows?.some((row:Dict)=>['待完成','逾期待补做'].includes(row.status)))
   :preShiftSummary(state.value).pending)));
 const scopeOptions=computed(()=>state.value?.scopes.map((value:string)=>({value,label:value==='110'?'110站':value+'楼'}))||[]);
 const dirty=computed(()=>Boolean(task.value&&!task.value.submitted&&Object.keys(drafts.value[task.value.id]||{}).length));
@@ -117,7 +120,7 @@ async function submit(){
   if(!task.value||!task.value.can_submit||busy.value||uploading.value)return;
   if(answered.value!==task.value.items.length){error.value='请逐项选择检查结果，并填写异常项备注。';return;}
   const row=task.value;busy.value=true;error.value='';
-  try{const result=await requestJson('/api/pre-shift-checks/submit',{method:'POST',body:JSON.stringify({task_id:row.id,version:row.definition_version,answers:row.items.map((item:Dict)=>({id:item.id,...answer(item.id)}))})});delete drafts.value[row.id];message.success(result.already_completed?'本班已由'+result.actor_name+'提交，无需重复检查':'检查已提交，飞书后台同步');await load(true);}catch(e){error.value=e instanceof Error?e.message:'提交暂未确认，请重试；不会重复新增。';}finally{busy.value=false;}
+  try{const result=await requestJson('/api/pre-shift-checks/submit',{method:'POST',body:JSON.stringify({task_id:row.id,version:row.definition_version,answers:row.items.map((item:Dict)=>({id:item.id,...answer(item.id)}))})});delete drafts.value[row.id];message.success(result.already_completed?'本次清单已由'+result.actor_name+'提交，无需重复提交':'本次清单已提交，飞书后台同步');window.dispatchEvent(new Event('clipflow-business-changed'));await load(true);}catch(e){error.value=e instanceof Error?e.message:'提交暂未确认，请重试；不会重复新增。';}finally{busy.value=false;}
 }
 const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
 function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||busy.value||saving.value||editing.value||uploading.value){event.preventDefault();event.returnValue='';}}

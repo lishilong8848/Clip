@@ -104,6 +104,13 @@ const detail=page=>page.locator('.v2-repair-detail');
 async function openFirst(page,followups=true){await page.locator('.record-row').first().click();await detail(page).getByRole('region',{name:'继续办理'}).waitFor();assert.equal(await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).count(),0,'opening a record starts with its actionable workflow');if(followups){await detail(page).getByText(/^跟进记录 \d+$/).click();await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).waitFor();}}
 async function noOverflow(page){assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'no page horizontal overflow');}
 async function fieldRect(page,label){return detail(page).getByLabel(label,{exact:true}).evaluate(el=>{const box=el.closest('.n-form-item').getBoundingClientRect();return {x:box.x,y:box.y,width:box.width};});}
+async function checkRefreshPosition(page){
+  const heading=detail(page).locator('.v2-repair-followup-heading');
+  const refresh=heading.getByRole('button',{name:'刷新历史跟进',exact:true});
+  const button=await refresh.boundingBox(),box=await heading.boundingBox();
+  assert(button&&box&&Math.abs(button.x+button.width-box.x-box.width)<3,'followup refresh stays on the right of its heading');
+  assert.equal(await detail(page).locator('.v2-repair-history-search button').count(),0,'search does not consume a separate action row');
+}
 async function checkFieldContrast(page){
   const editable=await detail(page).getByLabel('维修名称',{exact:true}).evaluate(el=>getComputedStyle(el.closest('.n-input')).backgroundColor);
   const readonly=await detail(page).getByLabel('故障原因',{exact:true}).evaluate(el=>getComputedStyle(el.closest('.n-input')).backgroundColor);
@@ -140,6 +147,7 @@ try{
   await flow.getByRole('button',{name:'查看或填写跟进记录',exact:true}).click();
   const followupItem=await fieldRect(page,'跟进项'),measure=await fieldRect(page,'后续整改措施');
   assert(Math.abs(followupItem.y-measure.y)<2&&measure.x>followupItem.x,'supplementary followup text fields share a desktop row');
+  await checkRefreshPosition(page);
   assert.equal(fixture.writes.length,0,'step navigation only switches the existing form');
   await flow.screenshot({path:path.join(output,'repair-flow-desktop.png')});
   assert.equal(await detail(page).getByRole('button',{name:'检修通告',exact:true}).count(),1,'notice access independent of delete permission');
@@ -173,6 +181,9 @@ try{
   await detail(page).locator('.v2-repair-flow').screenshot({path:path.join(output,'repair-flow-mobile.png')});
   for(const width of [360,390,430]){
     page=await newPage(width,640);await openFirst(page);
+    await checkRefreshPosition(page);
+    const shortItem=await fieldRect(page,'跟进项'),shortMeasure=await fieldRect(page,'后续整改措施');
+    assert(Math.abs(shortItem.y-shortMeasure.y)<2&&shortMeasure.x>shortItem.x,'short followup notes share a mobile row');
     assert.equal(await page.locator('#workspace-page-filters').isVisible(),false,'mobile filling uses the screen instead of keeping list filters');
     const listBlock=page.locator('.grid-stack-item').filter({has:page.locator('.v2-repair-list')});
     if(await listBlock.count())assert.equal(await listBlock.isVisible(),false,'mobile detail hides the list wrapper as well as its rows');
@@ -227,7 +238,10 @@ try{
     await page.screenshot({path:path.join(output,`mobile-compact-controls-${width}.png`)});
     const saveBox=await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).boundingBox();
     assert(saveBox.y>=0&&saveBox.y+saveBox.height<=640-62,'small-screen save button stays above bottom navigation');
-    page=await newPage(width);await page.getByRole('button',{name:'新建维修单',exact:true}).click();
+    page=await newPage(width);
+    const create=page.getByRole('button',{name:'新建维修单',exact:true});
+    assert(await create.locator('.n-button__content').evaluate(el=>Number.parseFloat(getComputedStyle(el).fontSize)>=12),'mobile create action retains its visible label');
+    await create.click();
     const flow=detail(page).getByRole('region',{name:'关联资料自动填写'});
     await flow.waitFor();assert.match(await flow.innerText(),/0 \/ 2/);
     await flow.scrollIntoViewIfNeeded();await page.screenshot({path:path.join(output,`mobile-association-empty-${width}.png`)});

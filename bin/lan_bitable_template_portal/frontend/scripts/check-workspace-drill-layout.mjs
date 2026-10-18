@@ -36,6 +36,15 @@ const definitions=['冷却水系统故障应急演练','高压配电系统停电
 }));
 let role='admin',failSave=true,saved,generated=0;
 const executions=new Map(definitions.map(item=>[item.drill_id,{drill_id:item.drill_id,scope:'A',version:1,status:'draft',drill_date:'2026-10-15',first_start_time:'09:00',simulation_scenario:'模拟冷却水供水异常，组织人员进行排查和恢复。',commander:people[0],participants:people.slice(0,3),step_signers:{10:['p0','p1'],11:['p1','p2'],12:['p0','p2']},steps}]));
+const logo='data:image/png;base64,'+(await readFile(path.join(root,'public/assets/vnet-logo.png'))).toString('base64');
+const previewModel=sheet=>({
+  column_count:4,sheet_width_px:960,column_widths:[160,360,140,300],row_heights:[90,60,60,60],
+  rows:[['',sheet==='assessment'?'演练评估表':'演练记录表','',''],['机房名称','南通机房A楼','白底文字','5'],['指标','评价标准','深色模板单元格','得分'],['签名','','现场确认','操作记录']],
+  merges:[{row:0,col:1,rowspan:1,colspan:3}],
+  cell_styles:{B1:{font_color:'#000000',bold:true,font_size:22},B2:{font_color:'#000000'},C2:{fill:'#ffffff'},D2:{fill:'#ffffff',font_color:'#ff0000'},A3:{fill:'#eeece1',font_color:'#000000',bold:true},C3:{fill:'#24312e',font_color:'#ffffff'}},
+  images:[{row:0,col:0,data_url:logo,name:'VNET',width_px:140,height_px:64}],
+  signature_cells:[{range:'B4',signers:[people[0]],signature_slots:1}],
+});
 try{
   const context=await browser.newContext({viewport:{width:1440,height:960},reducedMotion:'reduce'});
   const errors=[];
@@ -59,7 +68,7 @@ try{
       }
       return ok({drill:definitions.find(item=>item.drill_id===id),execution});
     }
-    if(p.endsWith('/preview'))return ok({model:{column_count:3,rows:[[{text:'演练表格预览'},{text:'现场确认'},{text:'操作记录'}]],sheet_width_px:720}});
+    if(p.endsWith('/preview'))return ok({model:previewModel(url.searchParams.get('sheet'))});
     if(p.endsWith('/generate')){generated++;execution.status='completed';definitions.find(item=>item.drill_id===id).execution_status='completed';return ok({execution});}
     assert.equal(request.method(),'GET','Unexpected write: '+p);
     return ok({items:[],records:[],settings:{},summary:{}});
@@ -126,6 +135,39 @@ try{
       await back.click();await page.locator('#drill-commander').waitFor();
       assert.equal(new URL(page.url()).searchParams.get('scope'),'B');assert.equal(new URL(page.url()).searchParams.get('month'),'2026-10');assert.equal(new URL(page.url()).searchParams.has('mode'),false);
       assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+    }
+  }
+  if(!baseline){
+    const colors=()=>page.locator('.sheet-preview-table td').evaluateAll(cells=>cells.map(cell=>{
+      const style=getComputedStyle(cell),text=cell.querySelector('.sheet-cell-text');
+      return {color:text?getComputedStyle(text).color:style.color,background:style.backgroundColor};
+    }));
+    for(const width of [1440,390,360]){
+      await page.setViewportSize({width,height:width===360?640:width===390?844:960});
+      await go('/drill-management&scope=A');await page.locator('#drill-commander').waitFor();
+      for(const sheet of ['record','assessment']){
+        await page.getByRole('button',{name:sheet==='record'?'演练记录表':'演练评估表',exact:true}).click();
+        if(sheet==='record')await page.locator('.v2-drill-preview summary').click();
+        const table=page.locator('.sheet-preview-table'),wrap=page.locator('.sheet-table-wrap');
+        await table.getByText(sheet==='record'?'演练记录表':'演练评估表',{exact:true}).waitFor();
+        let day;
+        for(const mode of ['light','dark','light']){
+          await page.locator('html').evaluate((html,mode)=>html.dataset.v2Theme=mode,mode);
+          const sample=await colors();
+          if(!day)day=sample;else assert.deepEqual(sample,day,`${sheet} template colors stay unchanged in ${mode}`);
+          assert.equal(await wrap.evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(255, 255, 255)');
+          assert.equal(await wrap.evaluate(el=>getComputedStyle(el).colorScheme),'light');
+          for(const text of ['机房名称','南通机房A楼','白底文字','得分'])assert.equal(await table.getByText(text,{exact:true}).evaluate(el=>getComputedStyle(el).color),'rgb(0, 0, 0)',text);
+          assert.equal(await table.getByText('5',{exact:true}).evaluate(el=>getComputedStyle(el).color),'rgb(255, 0, 0)','template red score preserved');
+          assert.equal(await table.getByText('深色模板单元格',{exact:true}).evaluate(el=>getComputedStyle(el).color),'rgb(255, 255, 255)','explicit template white text preserved');
+          assert.equal(await table.locator('td[colspan="3"]').count(),1,'merged title preserved');
+          assert(await table.locator('img').evaluate(img=>img.complete&&img.naturalWidth>0),'logo remains visible');
+          assert(!await page.locator('.v2-main').evaluate(el=>el.scrollWidth>el.clientWidth+1),'wide sheet stays inside its preview');
+          await wrap.scrollIntoViewIfNeeded();await shot(`preview-${sheet}-${mode}-${width}`);
+        }
+        await page.locator('html').evaluate(html=>html.dataset.v2Theme='dark');
+        await page.emulateMedia({media:'print'});assert.deepEqual(await colors(),day,'print colors remain unchanged');await page.emulateMedia({media:'screen'});
+      }
     }
   }
   await page.setViewportSize({width:1440,height:960});await go('/life-guide');await page.locator('.life-guide-page iframe').waitFor();await shot('guide');

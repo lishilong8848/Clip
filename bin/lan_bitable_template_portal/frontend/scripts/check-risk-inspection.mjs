@@ -28,7 +28,7 @@ try{
     {key:'f6',field_name:'异常数量',type:2,role:'input'}];
    if(width===1440)fields[1].property.options.push({name:'跨行\n选项'});
    const rid='a'.repeat(32),people=[{id:'alice',name:'排查人员甲',scope:'A',version:1,revoked:false,items:[{id:'item',title:'配电柜状态检查',status:'pending',values:{},files:[]}]},
-    {id:'bob',name:'排查人员乙',scope:'B',version:1,revoked:false,items:[{id:'item',title:'配电柜状态检查',status:'submitted',values:{f1:'B楼接线检查正常，已核对现场标识。',f2:'无异常',f4:1792152000000,f5:false,f6:0},files:[]}]}];
+    {id:'bob',name:'排查人员乙',scope:'B',version:1,revoked:false,items:[{id:'item',title:'配电柜状态检查',status:'submitted',values:{f1:'B楼接线检查正常，已核对现场标识。',f2:'无异常',f3:['b'.repeat(32)],f4:1792152000000,f5:false,f6:0},files:[{id:'b'.repeat(32),name:'接线照片.png'}]}]}];
    let role='admin',reviewerId='reviewer',reviewerVersion=1,detailReads=0,loseSaveResponse=true,rejectHistorySave=true,failTemplateRead=false;
    let templateVersion='v1',requiredWrites=0,deleted=false,rejectDeletion=true;
    let losePublication=version==='v2'&&width===1440,frozenPublication=null;
@@ -93,6 +93,8 @@ try{
    });
    page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('dialog',dialog=>{errors.push('Unexpected browser dialog: '+dialog.type());void dialog.dismiss();});await page.clock.install();
    const url=version==='v2'?origin+'/assets/workspace-v2/index.html?__page=/risk-inspections':origin+'/risk-inspections';
+   const feedbackRows=()=>page.locator(width>=700?'.risk-feedback-table tbody tr':'.risk-feedback-card');
+   const feedbackItem=row=>width>=700?row.locator('td').nth(1).locator('.risk-table-text'):row.locator('.risk-feedback-title');
    async function cancelNavigation(){
     const current=page.url();
     await page.evaluate(()=>{const target=new URL(location.href);if(target.pathname==='/assets/workspace-v2/index.html')target.searchParams.set('__page','/');else{target.pathname='/';target.search='';}history.pushState({},'',target.href);window.dispatchEvent(new PopStateEvent('popstate'));});
@@ -115,6 +117,17 @@ try{
    if(width===1440)assert(await page.locator('.risk-task-list').evaluate(el=>[...el.querySelectorAll('.n-scrollbar-container')].every(node=>node.scrollWidth<=node.clientWidth+1)),'Desktop task columns, deadline and actions fit without horizontal scrolling');
    await page.getByRole('textbox',{name:'搜索排查任务',exact:true}).fill('没有匹配的演示任务');await page.getByText('本页没有符合条件的任务',{exact:true}).filter({visible:true}).waitFor();
    await page.getByRole('button',{name:'清除筛选',exact:true}).click();await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
+   const taskSurface=()=>width>=700?page.locator('.risk-task-list tbody tr').first().locator('td').nth(1):page.locator('.risk-mobile-task').first().locator('p');
+   const initialReads=detailReads;
+   await taskSurface().click({modifiers:['Control']});assert.equal(detailReads,initialReads,'Modified row clicks do not navigate');
+   await taskSurface().evaluate(element=>{const range=document.createRange();range.selectNodeContents(element);getSelection().removeAllRanges();getSelection().addRange(range);element.click();getSelection().removeAllRanges();});
+   assert.equal(detailReads,initialReads,'Selecting row text does not navigate');
+   await taskSurface().click();await page.locator('.risk-feedback-table').waitFor();
+   assert.equal(detailReads,initialReads+1,'Clicking a task row or mobile card opens its original detail once');
+   await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.locator('.risk-task-name:visible').waitFor();
+   const keyboardReads=detailReads;await page.locator('.risk-task-name:visible').focus();await page.keyboard.press('Enter');await page.locator('.risk-feedback-table').waitFor();
+   assert.equal(detailReads,keyboardReads+1,'The existing keyboard action opens once without row bubbling');
+   await page.getByRole('button',{name:'排查列表',exact:true}).click();
    await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.history-list article').nth(1).waitFor();
    assert.equal(await page.locator('.history-list article').count(),2,'Multiple base templates are independently selectable');
    await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.history-schema summary').click();
@@ -192,15 +205,26 @@ try{
    await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.locator('.risk-feedback-table').waitFor();
    const table=page.locator('.risk-feedback-table');
    if(width===1440){const offset=await page.evaluate(()=>{const counts=document.querySelector('.risk-table-counts').getBoundingClientRect(),filters=document.querySelector('.risk-table-filters').getBoundingClientRect();return Math.abs(counts.y+counts.height/2-filters.y-filters.height/2);});assert(offset<2,'Counts and filters share one desktop row');}
-   assert.equal(await table.locator('tbody tr').count(),2,'Both people are visible at once');
+   assert.equal(await feedbackRows().count(),2,'Both people are visible at once');
    assert.match(await table.innerText(),/B楼接线检查正常/);
-   const bobRow=table.locator('tbody tr').filter({hasText:'排查人员乙'});
-   assert.equal(await bobRow.locator('td').nth(7).innerText(),'否','False is a real answer, not missing');
-   assert.equal(await bobRow.locator('td').nth(8).innerText(),'0','Zero is a real answer, not missing');
+   const bobRow=feedbackRows().filter({hasText:'排查人员乙'});
+   if(width>=700){assert.equal(await bobRow.locator('td').nth(7).innerText(),'否','False is a real answer, not missing');assert.equal(await bobRow.locator('td').nth(8).innerText(),'0','Zero is a real answer, not missing');}
+   else{assert.equal(await table.locator('table').count(),0,'Mobile feedback uses summaries instead of a horizontally scrolling table');assert.equal(await bobRow.locator('.risk-feedback-summary>div').count(),2);const controls=await bobRow.locator('.risk-feedback-meta button').evaluateAll(nodes=>nodes.map(node=>{const rect=node.getBoundingClientRect();return rect.y+rect.height/2;}));assert(Math.abs(controls[0]-controls[1])<2,'Person and action share a compact row');}
    await page.getByRole('textbox',{name:'搜索排查反馈',exact:true}).fill('现场标识');
-   assert.equal(await table.locator('tbody tr').count(),1,'Feedback text participates in local filtering');
-   assert.match(await table.locator('tbody').innerText(),/排查人员乙/);
+   assert.equal(await feedbackRows().count(),1,'Feedback text participates in local filtering');
+   assert.match((await feedbackRows().allTextContents()).join(' '),/排查人员乙/);
    await page.getByRole('textbox',{name:'搜索排查反馈',exact:true}).fill('');
+   const bobItem=feedbackItem(bobRow);
+   await bobItem.click({modifiers:['Control']});assert.equal(await page.locator('.risk-feedback').count(),0,'Modified feedback clicks do not open an editor');
+   await bobItem.evaluate(element=>{const range=document.createRange();range.selectNodeContents(element);getSelection().removeAllRanges();getSelection().addRange(range);element.click();getSelection().removeAllRanges();});
+   assert.equal(await page.locator('.risk-feedback').count(),0,'Feedback text stays selectable');
+   await page.evaluate(()=>document.addEventListener('click',event=>{if(event.target.closest('a'))event.preventDefault();},{once:true}));
+   await bobRow.getByRole('link',{name:'接线照片.png',exact:true}).click();assert.equal(await page.locator('.risk-feedback').count(),0,'Opening an attachment does not open its feedback drawer');
+   await bobItem.click();await page.locator('.risk-feedback').waitFor();
+   assert.match(await page.locator('.risk-feedback-drawer').innerText(),/排查人员乙/);
+   assert.deepEqual((await page.locator('.risk-feedback .risk-readonly').allTextContents()).slice(-2),['否','0'],'Complete feedback values remain available behind the summary');
+   assert.equal(await page.getByRole('button',{name:'提交审核',exact:true}).count(),0,'Row activation preserves read-only permissions for another person');
+   await page.keyboard.press('Escape');await page.locator('.risk-feedback').waitFor({state:'hidden'});await page.locator('.n-drawer-mask').waitFor({state:'hidden'});
    for(const next of ['发布管理员','审核主管']){
     await page.getByRole('button',{name:'更换审核人',exact:true}).click();
     await page.locator('.risk-confirm .n-base-selection').click();await page.getByText(next+' · A楼、B楼',{exact:true}).click();
@@ -210,20 +234,29 @@ try{
    }
    await page.screenshot({path:path.join(output,`${version}-${width}-management.png`),fullPage:width>=700});
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'No page overflow');
-   role='alice';
+   role='alice';fields[2].required=true;
    if(version==='legacy'){await page.goto(origin+'/?entry=risk');await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'选择重保管理',exact:true}).count(),0,'Unassigned risk modules remain hidden');}
-   await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.locator('.risk-feedback-table tbody tr').first().waitFor();
-   assert.equal(await page.locator('.risk-feedback-table tbody tr').count(),1);
+   await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await feedbackRows().first().waitFor();
+   assert.equal(await feedbackRows().count(),1);
    assert.equal(await page.getByText('排查人员乙',{exact:true}).count(),0,'Private rows must not leak to ordinary users');
-   await page.getByRole('button',{name:width<700?'查看 排查人员甲的反馈':/处理 排查人员甲/}).click();await page.locator('.risk-feedback').waitFor();
+   await feedbackItem(feedbackRows().first()).click();await page.locator('.risk-feedback').waitFor();
+   assert.equal(await page.getByRole('textbox',{name:'排查结果',exact:true}).isEditable(),true,'Clicking an assigned feedback row opens the original editable form');
    await page.getByRole('textbox',{name:'排查结果',exact:true}).focus();const focusedReads=detailReads;await page.clock.fastForward(16000);assert.equal(detailReads,focusedReads,'Focused feedback input must retain the existing refresh protection');
    assert.equal(await page.getByRole('button',{name:'撤销该人员'}).count(),0);
    assert.equal(await page.getByRole('button',{name:'更换审核人',exact:true}).count(),0);
-   await page.getByRole('button',{name:'提交审核',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
-   await page.locator('.risk-confirm [role=alert]').filter({hasText:'请填写：排查结果'}).waitFor();
-   await page.locator('.risk-confirm').getByRole('button',{name:'取消',exact:true}).click();
-   await page.locator('.risk-confirm').waitFor({state:'hidden'});
+   const beforeIncomplete=writes.length;
+   await page.getByRole('button',{name:'提交审核',exact:true}).click();await page.locator('.risk-missing-summary').getByText('还有 2 项必填信息待补充',{exact:true}).waitFor();
+   assert.equal(writes.length,beforeIncomplete,'Missing answers cannot issue an action request');assert.equal(await page.locator('.risk-confirm').count(),0,'Missing answers do not open the confirmation');
+   await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='排查结果');
+   assert.equal(await page.getByRole('textbox',{name:'排查结果',exact:true}).getAttribute('aria-invalid'),'true');
+   const errorDescription=await page.getByRole('textbox',{name:'排查结果',exact:true}).getAttribute('aria-describedby');assert(errorDescription);assert.equal(await page.locator('[id="'+errorDescription+'"]').innerText(),'请填写排查结果');
+   await page.getByRole('textbox',{name:'排查结果',exact:true}).fill('   ');await page.getByRole('button',{name:'提交审核',exact:true}).click();assert.equal(writes.length,beforeIncomplete,'Whitespace cannot bypass required validation');
    await page.getByRole('textbox',{name:'排查结果',exact:true}).fill('绝缘、防护及连接状态已核对，无异常。');
+   assert.equal(await page.getByRole('textbox',{name:'排查结果',exact:true}).getAttribute('aria-invalid'),null,'Correcting a field clears its error');
+   assert.equal(await page.locator('.risk-feedback [data-risk-field="f1"] .n-input--error-status').count(),0,'A corrected field no longer uses the error appearance');
+   await page.getByRole('button',{name:'提交审核',exact:true}).click();await page.waitForFunction(()=>document.activeElement?.classList.contains('risk-file-zone'));
+   await page.locator('.risk-missing-summary').getByRole('button',{name:'现场照片',exact:true}).click();assert.equal(writes.length,beforeIncomplete,'Missing attachment links only locate the upload control');
+   await page.screenshot({path:path.join(output,`${version}-${width}-missing.png`),fullPage:width>=700});
    await page.waitForFunction(()=>document.querySelector('.risk-page button[aria-label="刷新"]')?.disabled);
    await page.keyboard.press('Escape');
    await page.getByRole('button',{name:'继续填写',exact:true}).click();
@@ -232,6 +265,7 @@ try{
    await page.locator('.risk-feedback .n-base-selection').click();await page.getByText('无异常',{exact:true}).last().click();
    await page.locator('.risk-file-zone input[type=file]').setInputFiles({name:'fixture.png',mimeType:'image/png',buffer:Buffer.from('isolated attachment')});
    await page.locator('.risk-feedback').getByRole('link',{name:'fixture.png'}).waitFor();
+   await page.locator('.risk-missing-summary').waitFor({state:'hidden'});
    await page.getByRole('button',{name:'保存草稿',exact:true}).click();await page.getByText('保存回执未收到，请重新读取核对',{exact:false}).waitFor();
    await page.getByRole('button',{name:'重新读取，保留填写',exact:true}).click();await page.getByText('已读取最新状态，未提交的填写仍保留，请核对后继续。',{exact:true}).waitFor();
    assert.equal(await page.locator('.risk-feedback [data-v2-feedback]').count(),0,'Feedback remains inside the drawer and cannot cover mobile save actions');
@@ -249,26 +283,40 @@ try{
    role='admin';
    people[0].items.push({id:'second-item',title:'另一设备检查',status:'approved',values:{f1:'这是同一人员的第二项独立反馈。'},files:[]});
    for(let index=0;index<6;index++)people.push({id:'preview-'+index,name:'示例人员'+(index+1),scope:index%2?'B':'A',version:1,revoked:false,items:[{id:'item',title:index%2?'冷却系统及环境检查':'配电柜状态检查',status:['pending','submitted','returned','approved'][index%4],values:{f1:index%3?'设备运行正常，现场标识完整。':'发现标识松动，已安排现场核对。',f2:index%3?'无异常':'有风险',f4:1792152000000,f5:index%3===0,f6:index%3?0:1},reason:index%4===2?'补充现场照片后重新提交。':'',files:[]}]});
-   await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.locator('.risk-feedback-table tbody tr').nth(8).waitFor();
-   await page.getByRole('button',{name:'查看 排查人员甲的反馈 · 另一设备检查',exact:true}).click();
+   await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await feedbackRows().nth(8).waitFor();
+   assert.match(await feedbackRows().first().innerText(),/退回修改/,'Returned feedback is placed ahead of completed feedback');
+   await feedbackItem(feedbackRows().filter({hasText:'另一设备检查'})).click();
    assert.equal(await page.locator('.risk-feedback .risk-readonly').first().innerText(),'这是同一人员的第二项独立反馈。','Opening another item from the same person must not show the first item');
    await page.keyboard.press('Escape');await page.locator('.risk-feedback').waitFor({state:'hidden'});
    await page.locator('.n-drawer-mask').waitFor({state:'hidden'});await page.locator('.risk-page .n-spin-body').waitFor({state:'hidden'});
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Wide fields scroll inside the table');
    await page.screenshot({path:path.join(output,`${version}-${width}-table.png`),fullPage:width>=700});
+   if(width<700){
+    for(let index=0;index<15;index++)people.push({id:'page-'+index,name:'分页人员'+(index+1),scope:'A',version:1,revoked:false,items:[{id:'item',title:'分页检查项',status:'approved',values:{f1:'已核对'},files:[]}]});
+    await page.getByRole('button',{name:'刷新',exact:true}).click();await feedbackRows().nth(19).waitFor();assert.equal(await feedbackRows().count(),20,'Mobile summaries retain pagination');
+    await page.locator('.risk-feedback-pagination .n-pagination-item').filter({hasText:/^2$/}).click();assert.equal(await feedbackRows().count(),4,'The second page only shows the remaining records');
+    await page.getByRole('textbox',{name:'搜索排查反馈',exact:true}).fill('分页人员15');assert.equal(await feedbackRows().count(),1,'Searching returns to the first result page');await page.getByRole('textbox',{name:'搜索排查反馈',exact:true}).fill('');assert.equal(await feedbackRows().count(),20);
+    if(version==='v2'&&width===360){
+     await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin','dark'));await page.goto(url);await page.locator('.risk-mobile-tasks button:visible').first().click();await feedbackRows().first().waitFor();
+     assert.equal(await page.evaluate(()=>document.documentElement.dataset.v2Theme),'dark');const colors=await feedbackRows().first().evaluate(node=>({background:getComputedStyle(node).backgroundColor,color:getComputedStyle(node).color}));const luminance=value=>value.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);assert((Math.max(luminance(colors.color),luminance(colors.background))+.05)/(Math.min(luminance(colors.color),luminance(colors.background))+.05)>=4.5,'Mobile summary text stays readable in night mode');
+     await page.screenshot({path:path.join(output,'v2-360-summary-dark.png')});await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin','light'));await page.goto(url);await page.locator('.risk-mobile-tasks button:visible').first().click();await feedbackRows().first().waitFor();
+    }
+   }
    await page.getByRole('button',{name:'排查列表',exact:true}).click();
    await page.getByRole('tab',{name:'我的排查任务',exact:true}).click();await page.getByRole('button',{name:'领取并填写',exact:true}).click();
    await page.getByRole('button',{name:'领取本人任务',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-feedback').getByRole('textbox',{name:'排查结果',exact:true}).waitFor();
-   assert.equal(await page.locator('.risk-feedback-table tbody tr').count(),1,'My tasks only renders the current account, not other assignees');
+   assert.equal(await feedbackRows().count(),1,'My tasks only renders the current account, not other assignees');
    assert.match(await page.locator('.risk-feedback-drawer').innerText(),/发布管理员/);
    await page.waitForFunction(()=>{const drawer=document.querySelector('.n-drawer'),rect=drawer?.getBoundingClientRect();return rect&&rect.x>=-1&&rect.right<=innerWidth+1&&!document.querySelector('.n-modal-mask');});
    await page.screenshot({path:path.join(output,`${version}-${width}-own-task.png`),fullPage:width>=700});
    role='alice';await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
    assert.equal(await page.getByRole('button',{name:/^删除任务/}).count(),0,'Ordinary assignees have no task deletion action');
    role='admin';await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
+   const beforeDeleteReads=detailReads;
    await page.getByRole('button',{name:'删除任务：十月设备专项风险排查',exact:true}).filter({visible:true}).click();
    const deleteDialog=page.locator('.risk-confirm');await deleteDialog.getByText(/多维结果表保留/).waitFor();
+   assert.equal(detailReads,beforeDeleteReads,'Delete retains its independent confirmation and does not open task details');
    const deletedWrites=()=>writes.filter(write=>write.path==='/'+rid).length,beforeDelete=deletedWrites();
    await deleteDialog.getByRole('button',{name:'取消',exact:true}).click();assert.equal(deletedWrites(),beforeDelete);
    await page.getByRole('button',{name:'删除任务：十月设备专项风险排查',exact:true}).filter({visible:true}).click();
@@ -283,7 +331,7 @@ try{
    console.log(`PASS risk inspection ${version} ${width}px`);
   }
  }
- assert.deepEqual(errors,[]);assert.equal(writes.filter(w=>w.path.endsWith('/actions')).length,versions.length*widths.length*5);
+ assert.deepEqual(errors,[]);assert.equal(writes.filter(w=>w.path.endsWith('/actions')).length,versions.length*widths.length*4);
  console.log(`PASS risk inspection ${versions.join('/')} at ${widths.join(', ')}px: selected browser workflows and screenshots. No real cloud writes.`);
 }catch(e){if(page&&!page.isClosed())await page.screenshot({path:path.join(output,'failure.png'),fullPage:false});throw e;}
 finally{await browser.close();await server.httpServer.close();}

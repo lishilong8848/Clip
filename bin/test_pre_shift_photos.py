@@ -39,6 +39,31 @@ class PhotoPreviewTests(Base):
     def stamped(self, info, **fields):
         return {**info['options'], 'enabled':True, **fields}
 
+    def test_supervisor_photo_upload_confirm_and_submission_keep_actual_actor_and_ownership(self):
+        supervisor={**self.worker,'id':'ou_supervisor','name':'本楼主管','level':'L3','category':'supervisor'}
+        for kind in ('item','handover'):
+            _,info=self.preview(supervisor,kind)
+            photo=self.service.commit_photo_preview(supervisor,info['preview_id'],info['options'],current=self.current)
+            with self.service.connection() as conn:
+                delivery=conn.execute('SELECT recipient FROM photo_deliveries WHERE file_id=?',(photo['id'],)).fetchone()
+                file=conn.execute('SELECT uploader_id FROM files WHERE id=?',(photo['id'],)).fetchone()
+            self.assertEqual(delivery['recipient'],supervisor['id']);self.assertEqual(file['uploader_id'],supervisor['id'])
+            with self.assertRaises(checks.CheckError) as denied:
+                self.service.delete_file(self.worker,photo['id'])
+            self.assertEqual(denied.exception.status,403)
+        self.service.submit(supervisor,DAY+':A:白',1,[{'id':'x','status':'normal','note':''}],self.current)
+        task=next(t for t in self.service.state(self.worker,'A',self.current)['tasks'] if t['id']==DAY+':A:白')
+        self.assertFalse(task['can_submit']);self.assertEqual(task['actor_name'],supervisor['name'])
+
+    def test_supervisor_authority_revoked_after_preview_cannot_commit(self):
+        supervisor={**self.worker,'id':'ou_supervisor','level':'L3','category':'supervisor'}
+        for kind in ('item','handover'):
+            _,info=self.preview(supervisor,kind)
+            with self.assertRaises(checks.CheckError) as denied:
+                self.service.commit_photo_preview({**supervisor,'category':'engineer','level':'L4'},info['preview_id'],info['options'],current=self.current)
+            self.assertEqual(denied.exception.status,403)
+        self.assertEqual(self.counts(),(0,0))
+
     def test_cancel_owner_expiry_and_quota_do_not_write_business_files(self):
         session, info = self.preview()
         self.assertEqual(self.counts(), (0,0))
@@ -739,7 +764,7 @@ class PhotoRouteTests(Base):
         import httpx
         from lan_bitable_template_portal import pre_shift_routes
         self.save('A',0,[{'id':'x','text':'检查'}]);self.prepare(at(DAY+'T09:00:00'))
-        user={**self.worker,'open_id':self.worker['id'],'modules':['maintenance']}
+        user={**self.worker,'open_id':'ou_supervisor','name':'本楼主管','category':'supervisor','level':'L3','modules':['maintenance']}
         async def read_json(request, **kwargs):
             return await request.json()
         controller=SimpleNamespace(_current_session=lambda _: {'user':user},_request_base_url=lambda _:'http://fixture',_read_json_request=read_json)
@@ -776,6 +801,10 @@ class PhotoRouteTests(Base):
                     with self.service.connection() as conn:
                         self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0],1)
                         self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0],1)
+                    user['modules']=['maintenance']
+                    response=await client.post('/api/pre-shift-checks/submit',json={'task_id':DAY+':A:白','version':1,'answers':[{'id':'x','status':'normal','note':''}]})
+                    self.assertEqual(response.status_code,200,response.text)
+                    self.assertEqual(response.json()['data']['actor_name'],'本楼主管')
             asyncio.run(exercise())
 
     def test_photo_editor_preview_never_commits_and_no_stamp_preserves_original(self):

@@ -38,14 +38,15 @@
         <NEmpty v-else-if="detail.status==='active'" :description="detail.can_claim?'尚未领取本人任务':'本次排查没有分配给本人，可在发布管理中查看授权反馈'" />
         <NDrawer :show="feedbackOpen" placement="right" width="min(760px, 100vw)" :mask-closable="!busy" :close-on-esc="!busy" @update:show="value=>{if(!value)closeFeedback()}">
           <NDrawerContent :title="person?person.name+' · '+scopeLabel(person.scope):'排查反馈'" :closable="!busy" class="risk-feedback-drawer" data-v2-inline-feedback>
-          <main v-if="person" class="risk-feedback">
+          <main v-if="person" ref="feedbackForm" class="risk-feedback">
             <NAlert v-if="error&&!confirmation" type="error" :bordered="false" role="alert">{{error}} <NButton text :disabled="busy" @click="readLatest">重新读取，保留填写</NButton></NAlert>
             <NAlert v-if="message" type="info" :bordered="false" role="status">{{message}}</NAlert>
             <header class="risk-toolbar"><NTag :bordered="false">{{personProgress(person)}}</NTag><NButton v-if="activeView==='published'&&detail.is_manager&&!person.revoked" type="error" size="small" quaternary :disabled="busy" @click="ask('revoke_person')">撤销该人员</NButton></header>
             <article v-for="item in focusedItems" :key="item.id" class="risk-response" :class="{revoked:item.status==='revoked'}">
               <header><strong>{{item.title}}</strong><NTag :type="item.status==='approved'?'success':item.status==='returned'?'warning':'default'" size="small">{{statusName(item.status)}}</NTag><NButton v-if="activeView==='published'&&detail.is_manager&&!person.revoked&&item.status!=='revoked'" size="small" quaternary type="error" :disabled="busy" @click="ask('revoke_item',item)">撤销事项</NButton></header>
               <p v-if="item.reason" class="risk-note">{{item.status==='revoked'?'撤销原因':item.reviewed_by||'管理员'}}：{{item.reason}}</p>
-              <RiskInspectionFields v-if="item.status!=='revoked'" :fields="detail.fields" :values="editable(item)?drafts[item.id]||item.values:item.values" :files="item.files" :disabled="!editable(item)||busy" @update:values="v=>drafts[item.id]=v" @files="(field,files)=>uploadFiles(item,field,files)" />
+              <NAlert v-if="editable(item)&&validationItem===item.id&&missingFields(item).length" type="warning" :bordered="false" role="alert" class="risk-missing-summary"><strong>还有 {{missingFields(item).length}} 项必填信息待补充</strong><div class="risk-tools"><NButton v-for="field in missingFields(item)" :key="field.key" text @click="focusField(field.key)">{{field.field_name}}</NButton></div></NAlert>
+              <RiskInspectionFields v-if="item.status!=='revoked'" :fields="detail.fields" :values="editable(item)?drafts[item.id]||item.values:item.values" :files="item.files" :disabled="!editable(item)||busy" :invalid-fields="validationItem===item.id?missingFields(item).map((field:Dict)=>field.key):[]" @update:values="v=>drafts[item.id]=v" @files="(field,files)=>uploadFiles(item,field,files)" />
               <details v-if="drafts[item.id]&&!editable(item)" class="risk-local-draft"><summary>本地未提交内容（当前事项已变更）</summary><RiskInspectionFields :fields="detail.fields" :values="drafts[item.id]" :files="item.files" disabled /><NButton size="small" :disabled="busy" @click="discardDraft(item.id)">放弃这份本地填写</NButton></details>
               <footer><small>{{item.submitted_at?'提交于 '+date(item.submitted_at*1000):'尚未提交'}}{{item.reviewed_at?' · 审核于 '+date(item.reviewed_at*1000):''}}</small><div class="risk-tools"><template v-if="editable(item)"><NButton :disabled="busy" @click="act('save',item)">保存草稿</NButton><NButton type="primary" :disabled="busy" @click="ask('submit',item)">提交审核</NButton></template><template v-if="detail.is_reviewer&&item.status==='submitted'&&!person.revoked"><NButton :disabled="busy" @click="ask('return',item)">退回修改</NButton><NButton type="primary" :disabled="busy" @click="ask('approve',item)">审核通过</NButton></template></div></footer>
             </article>
@@ -57,8 +58,8 @@
       </template>
       <template v-else>
         <div class="risk-list-controls"><NInput v-model:value="taskSearch" clearable placeholder="搜索本页任务或审核人" :input-props="{'aria-label':'搜索排查任务'}"><template #prefix><Search :size="16" /></template></NInput><NSelect v-model:value="taskState" clearable :options="taskStateOptions" placeholder="全部状态" aria-label="排查任务状态" /><span>本页 {{filteredTasks.length}} / {{list.length}} 项</span></div>
-        <div class="risk-task-list"><NDataTable :columns="taskColumns" :data="filteredTasks" :row-key="task=>task.id" :scroll-x="1050" size="small" :bordered="false" striped><template #empty><NEmpty :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></template></NDataTable></div>
-        <div class="risk-mobile-tasks"><article v-for="task in filteredTasks" :key="task.id" class="risk-mobile-task"><header><NButton text class="risk-task-name" :disabled="busy" data-v2-navigation @click="openTask(task.id)">{{task.name}}</NButton><NTag size="small" :bordered="false" :type="task.total>0&&task.approved===task.total?'success':'default'">{{taskStatus(task)}}</NTag></header><dl><div><dt>反馈 / 总项数</dt><dd>{{task.submitted}} / {{task.total}}</dd></div><div><dt>已通过</dt><dd>{{task.approved}}</dd></div><div><dt>人员</dt><dd>{{task.people_count}} 人</dd></div></dl><p :class="{overdue:task.deadline<Date.now()&&task.approved<task.total}">截止 {{date(task.deadline)}} · {{task.reviewer}}审核</p><footer><NButton v-if="activeView==='published'&&task.can_delete_release" quaternary type="error" :disabled="busy" :aria-label="'删除任务：'+task.name" @click="ask('delete_release',task)"><Trash2 :size="15" />删除</NButton><NButton :disabled="busy" type="primary" secondary data-v2-navigation @click="openTask(task.id)">{{activeView==='mine'?(task.can_claim?'领取并填写':'进入本人任务'):'查看反馈'}}</NButton></footer></article><NEmpty v-if="!filteredTasks.length" :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></div>
+        <div class="risk-task-list"><NDataTable :columns="taskColumns" :data="filteredTasks" :row-key="task=>task.id" :row-props="taskRowProps" :scroll-x="1050" size="small" :bordered="false" striped><template #empty><NEmpty :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></template></NDataTable></div>
+        <div class="risk-mobile-tasks"><article v-for="task in filteredTasks" :key="task.id" class="risk-mobile-task" v-bind="taskRowProps(task)"><header><NButton text class="risk-task-name" :disabled="busy" data-v2-navigation @click="openTask(task.id)">{{task.name}}</NButton><NTag size="small" :bordered="false" :type="task.total>0&&task.approved===task.total?'success':'default'">{{taskStatus(task)}}</NTag></header><dl><div><dt>反馈 / 总项数</dt><dd>{{task.submitted}} / {{task.total}}</dd></div><div><dt>已通过</dt><dd>{{task.approved}}</dd></div><div><dt>人员</dt><dd>{{task.people_count}} 人</dd></div></dl><p :class="{overdue:task.deadline<Date.now()&&task.approved<task.total}">截止 {{date(task.deadline)}} · {{task.reviewer}}审核</p><footer><NButton v-if="activeView==='published'&&task.can_delete_release" quaternary type="error" :disabled="busy" :aria-label="'删除任务：'+task.name" @click="ask('delete_release',task)"><Trash2 :size="15" />删除</NButton><NButton :disabled="busy" type="primary" secondary data-v2-navigation @click="openTask(task.id)">{{activeView==='mine'?(task.can_claim?'领取并填写':'进入本人任务'):'查看反馈'}}</NButton></footer></article><NEmpty v-if="!filteredTasks.length" :description="taskSearch||taskState?'本页没有符合条件的任务':'暂无分配的风险排查'"><template v-if="taskSearch||taskState" #extra><NButton @click="taskSearch='';taskState=null">清除筛选</NButton></template></NEmpty></div>
         <footer class="risk-list-footer"><span>共 {{total}} 个排查任务</span><NPagination v-if="total>20" :page="page" :page-count="Math.ceil(total/20)" :page-slot="5" @update:page="changePage" /></footer>
       </template>
     </NSpin>
@@ -76,16 +77,17 @@
   </NConfigProvider>
 </template>
 <script setup lang="ts">
-import {computed,h,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
+import {computed,h,nextTick,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {NAlert,NButton,NConfigProvider,NDataTable,NDatePicker,NDrawer,NDrawerContent,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NSwitch,NTab,NTabs,NTag,zhCN,dateZhCN,type DataTableColumns} from 'naive-ui';
 import {ArrowLeft,ExternalLink,Library,Plus,RefreshCw,Search,Settings2,Trash2} from 'lucide-vue-next';
 import {ApiError,requestJson,type Dict} from '../api/client';
 import {navigate,registerNavigationGuard} from '../navigation';
+import {activateCard} from '../workspace-v2/cardActivation';
 import RiskInspectionFields from './RiskInspectionFields.vue';
 import RiskInspectionTemplateLibrary from './RiskInspectionTemplateLibrary.vue';
 import RiskInspectionTable from './RiskInspectionTable.vue';
 import RiskInspectionSheet from './RiskInspectionSheet.vue';
-import {publicationIssues,reviewerIssue,riskRoles,riskTypeOptions} from './riskInspectionUi';
+import {missingRiskFields,publicationIssues,reviewerIssue,riskRoles,riskTaskPriority,riskTypeOptions} from './riskInspectionUi';
 const props=defineProps<{releaseId?:string;scope?:string}>();
 const legacy=!document.documentElement.classList.contains('workspace-v2');
 const root='/api/risk-inspections';
@@ -96,6 +98,7 @@ const libraryMode=computed(()=>['history','base','choose'].includes(editor.value
 const feedbackDetail=computed(()=>!detail.value?null:activeView.value==='mine'?{...detail.value,is_manager:false,is_reviewer:false,people:detail.value.people.filter((p:Dict)=>p.id===detail.value!.self_id)}:detail.value);
 const discard=ref<{message:string;proceed:()=>void}|null>(null);
 const feedbackOpen=ref(false),focusedItemId=ref('');
+const feedbackForm=ref<HTMLElement>(),validationItem=ref('');
 const drafts=ref<Record<string,Dict>>({}),fieldEditor=ref<Dict|null>(null),confirmation=ref<Dict|null>(null),reason=ref(''),selectedPeople=ref<string[]>([]);
 const publish=reactive<Dict>({id:'',name:'',deadline:null,reviewer_id:null,people:[],items:[{title:'',values:{}}],history_template_id:'',base_template_id:''});
 const historyLibrary=ref<InstanceType<typeof RiskInspectionTemplateLibrary>|null>(null);
@@ -114,7 +117,8 @@ function setScope(id:string,scope:string){const p=publish.people.find((p:Dict)=>
 const person=computed(()=>detail.value?.people.find((p:Dict)=>p.id===personId.value));
 const focusedItems=computed(()=>(person.value?.items||[]).filter((item:Dict)=>item.id===focusedItemId.value));
 const taskStateOptions=[{value:'active',label:'进行中'},{value:'review',label:'待审核'},{value:'overdue',label:'已逾期'},{value:'completed',label:'已完成'},{value:'publishing',label:'发布处理中'}];
-const filteredTasks=computed(()=>{const search=taskSearch.value.trim().toLocaleLowerCase();return list.value.filter(task=>(!search||[task.name,task.reviewer].join(' ').toLocaleLowerCase().includes(search))&&(!taskState.value||(taskState.value==='review'?task.submitted>task.approved:taskState.value==='overdue'?task.status==='active'&&task.total>task.approved&&task.deadline<Date.now():taskState.value==='completed'?task.total>0&&task.approved===task.total:taskState.value==='active'?task.status==='active'&&task.approved<task.total:task.status===taskState.value)));});
+const filteredTasks=computed(()=>{const search=taskSearch.value.trim().toLocaleLowerCase(),now=Date.now();return list.value.filter(task=>(!search||[task.name,task.reviewer].join(' ').toLocaleLowerCase().includes(search))&&(!taskState.value||(taskState.value==='review'?task.submitted>task.approved:taskState.value==='overdue'?task.status==='active'&&task.total>task.approved&&task.deadline<now:taskState.value==='completed'?task.total>0&&task.approved===task.total:taskState.value==='active'?task.status==='active'&&task.approved<task.total:task.status===taskState.value))).sort((a,b)=>riskTaskPriority(a,now)-riskTaskPriority(b,now));});
+function taskRowProps(task:Dict){return {class:busy.value?'':'risk-clickable-row',onClick:(event:MouseEvent)=>{if(!busy.value&&activateCard(event))void openTask(task.id);}};}
 const taskColumns:DataTableColumns<Dict>=[
   {key:'name',title:'排查任务',width:260,render:task=>h(NButton,{text:true,disabled:busy.value,onClick:()=>openTask(task.id),'data-v2-navigation':true,class:'risk-task-name'},()=>task.name)},
   {key:'status',title:'状态',width:90,render:task=>h(NTag,{size:'small',bordered:false,type:task.total>0&&task.approved===task.total?'success':'default'},()=>taskStatus(task))},
@@ -146,10 +150,13 @@ function jobLabel(v:string){return ({publish:'发布排查',notify:'消息通知
 function auditName(row:Dict){try{return JSON.parse(row.data).name}catch{return '操作人'}}
 function personProgress(p:Dict){const items=p.items.filter((i:Dict)=>i.status!=='revoked');return `反馈 ${items.filter((i:Dict)=>['submitted','approved'].includes(i.status)).length}/${items.length} · 通过 ${items.filter((i:Dict)=>i.status==='approved').length}`;}
 function editable(item:Dict){return detail.value?.status==='active'&&!person.value?.revoked&&detail.value?.self_id===person.value?.id&&['pending','returned'].includes(item.status);}
+function missingFields(item:Dict){return missingRiskFields(detail.value?.fields||[],drafts.value[item.id]||item.values);}
+function focusField(key:string){const field=feedbackForm.value?.querySelector<HTMLElement>('[data-risk-field="'+CSS.escape(key)+'"]');const input=field?.querySelector<HTMLElement>('input:not([type="hidden"]),textarea,[role="combobox"],[tabindex="0"]');input?.focus({preventScroll:true});(input||field)?.scrollIntoView({block:'center'});}
+function feedbackComplete(item:Dict){if(!editable(item))return false;validationItem.value=item.id;const missing=missingFields(item);if(missing.length)void nextTick(()=>focusField(missing[0].key));return !missing.length;}
 function askDiscard(message:string,proceed:()=>void){if(!discard.value)discard.value={message,proceed};}
 function discardChanges(){const proceed=discard.value?.proceed;discard.value=null;proceed?.();return false;}
 function leaveAllowed(proceed:()=>void){if(busy.value||pendingPublication.value)return false;if(libraryMode.value)return historyLibrary.value?.leaveAllowed(proceed)!==false;if(!unsaved.value)return true;askDiscard('离开将放弃当前尚未保存的填写。',proceed);return false;}
-function openFeedback(row:{person:Dict;item:Dict}){if(busy.value)return;const proceed=()=>{drafts.value={};personId.value=row.person.id;focusedItemId.value=row.item.id;feedbackOpen.value=true;error.value='';message.value='';};if(dirty.value)askDiscard('有未保存内容，是否放弃并切换反馈？',proceed);else proceed();}
+function openFeedback(row:{person:Dict;item:Dict}){if(busy.value)return;const proceed=()=>{drafts.value={};validationItem.value='';personId.value=row.person.id;focusedItemId.value=row.item.id;feedbackOpen.value=true;error.value='';message.value='';};if(dirty.value)askDiscard('有未保存内容，是否放弃并切换反馈？',proceed);else proceed();}
 function closeFeedback(){if(busy.value)return;const proceed=()=>{drafts.value={};feedbackOpen.value=false;};if(dirty.value)askDiscard('有未保存内容，是否放弃并关闭？',proceed);else proceed();}
 function validateDetail(data:Dict){if(!data?.id||!Array.isArray(data.fields)||!Array.isArray(data.people)||data.people.some((person:Dict)=>!Array.isArray(person.items)))throw new Error('反馈记录未完整返回，已保留当前内容，请重新读取核对。');}
 function applyDetail(data:Dict){validateDetail(data);detail.value=data;claimScope.value=data.claim_scopes?.includes(claimScope.value)?claimScope.value:data.claim_scopes?.[0]||null;if(!feedbackOpen.value&&!data.people.some((p:Dict)=>p.id===personId.value))personId.value=data.people.find((p:Dict)=>p.id===data.self_id)?.id||data.people[0]?.id;}
@@ -171,13 +178,13 @@ function changePage(value:number){page.value=value;taskSearch.value='';taskState
 function editField(field?:Dict){fieldEditor.value=field?{...field,optionsText:(field.property?.options||[]).map((v:Dict)=>v.name).join('\n')}:{field_name:'',type:1,role:'input',required:false,optionsText:''};fieldOriginal.value=JSON.stringify(fieldEditor.value);}
 function changeRequired(field:Dict,required:boolean){if(busy.value||!canEditTemplate.value||field.role!=='input'||field.unsupported)return;ask('save_field',{...field,required});}
 function closeFieldEditor(){if(busy.value)return;if(fieldEditor.value&&JSON.stringify(fieldEditor.value)!==fieldOriginal.value){askDiscard('放弃尚未保存的字段修改？',()=>{fieldEditor.value=null;});return;}fieldEditor.value=null;}
-function ask(action:string,item?:Dict){if(action==='publish'&&(!publishValid.value||pendingPublication.value)){error.value=publishProblems.value.length?'请补充：'+publishProblems.value.join('；'):'请先核验原发布结果。';return;}error.value='';reason.value='';confirmation.value={action,item,version:person.value?.version};}
+function ask(action:string,item?:Dict){if(action==='publish'&&(!publishValid.value||pendingPublication.value)){error.value=publishProblems.value.length?'请补充：'+publishProblems.value.join('；'):'请先核验原发布结果。';return;}error.value='';if(action==='submit'&&item&&!feedbackComplete(item))return;reason.value='';confirmation.value={action,item,version:person.value?.version};}
 async function openReviewer(){if(busy.value)return;beginWrite();error.value='';try{const data=await requestJson(root+'/people',{cache:'no-store'});people.value=data.items;newReviewer.value=null;confirmation.value={action:'reviewer',version:detail.value?.reviewer_version};}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
 function discardDraft(id:string){askDiscard('确认放弃此项尚未提交的本地填写？',()=>{delete drafts.value[id];});}
 function sameValues(a:Dict|undefined,b:Dict|undefined){const keys=Object.keys(a||{}),other=Object.keys(b||{});return keys.length===other.length&&keys.every(k=>other.includes(k)&&JSON.stringify(a?.[k])===JSON.stringify(b?.[k]));}
 async function readLatest(){if(busy.value||!detail.value)return;beginWrite();try{const data=await requestJson(root+'/'+detail.value.id,{cache:'no-store'});validateDetail(data);const current=data.people.find((p:Dict)=>p.id===personId.value);for(const item of current?.items||[])if(sameValues(drafts.value[item.id],item.values))delete drafts.value[item.id];applyDetail(data);confirmation.value=null;error.value='';message.value='已读取最新状态，未提交的填写仍保留，请核对后继续。';}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
 async function act(action:string,item?:Dict,version=person.value?.version){
- if(busy.value||!detail.value||!person.value)return;beginWrite();error.value='';message.value='';
+ if(busy.value||!detail.value||!person.value)return;if(action==='submit'&&item&&!feedbackComplete(item)){confirmation.value=null;return;}beginWrite();error.value='';message.value='';
  try{const data=await requestJson(`${root}/${detail.value.id}/people/${person.value.id}/actions`,{method:'POST',body:JSON.stringify({action,version,item_id:item?.id,values:item?(drafts.value[item.id]||item.values):undefined,reason:reason.value})});applyDetail(data);if(item)delete drafts.value[item.id];message.value=action==='save'?'草稿已保存。':'操作已保存，云端结果正在同步。';confirmation.value=null;}
  catch(e:any){error.value=e.message;}finally{busy.value=false;}
 }
@@ -229,6 +236,8 @@ onBeforeUnmount(()=>{disposed=true;read?.abort();unregister();window.clearInterv
 </script>
 <style scoped>
 .risk-mobile-tasks{display:none}.risk-task-list :deep(.risk-task-actions){display:flex;align-items:center;gap:8px}
+.risk-mobile-task.risk-clickable-row,.risk-task-list :deep(.risk-clickable-row){cursor:pointer}.risk-mobile-task.risk-clickable-row:hover,.risk-mobile-task.risk-clickable-row:focus-within{background:var(--table-header-color,#f3f6fa)}
+.risk-missing-summary{margin-bottom:12px}.risk-missing-summary .risk-tools{justify-content:flex-start;gap:4px 14px;margin-top:4px}.risk-missing-summary :deep(.n-button){min-height:44px}
 .risk-mobile-task{padding:14px 0;border-bottom:1px solid var(--border-color)}.risk-mobile-task>header{display:flex;align-items:flex-start;gap:8px;justify-content:space-between}.risk-mobile-task :deep(.risk-task-name){height:auto;white-space:normal;line-height:1.6;text-align:left;justify-content:flex-start;flex:1;min-width:0}.risk-mobile-task :deep(.risk-task-name .n-button__content){white-space:normal;overflow-wrap:anywhere;justify-content:flex-start}.risk-mobile-task dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.risk-mobile-task dt{font-size:12px;color:var(--text-color-3)}.risk-mobile-task dd{margin:4px 0 0;font-weight:600;font-variant-numeric:tabular-nums}.risk-mobile-task>p{font-size:12px;line-height:1.6;color:var(--text-color-3);margin:8px 0}.risk-mobile-task>p.overdue{color:var(--error-color,#c94b42)}.risk-mobile-task>footer{display:flex;justify-content:flex-end;align-items:center;gap:8px}.risk-mobile-task>footer>.n-button:first-child:not(:last-child){margin-right:auto}
 @media(max-width:700px){.risk-task-list{display:none}.risk-mobile-tasks{display:block}}
 .risk-required{display:flex;align-items:center;gap:8px}

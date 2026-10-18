@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -54,6 +56,89 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         await answer_company(self.engine, self.actor, {'_profile': self.profile}, '公司出差规定', self.emit, AsyncMock(return_value=self.actor))
         self.model.complete.assert_called_once()
         self.kb.search.assert_called_once()
+
+    async def test_compound_faults_retrieve_both_topics_even_when_first_search_hits(self):
+        transformer = [{**self.item, 'document_id': 'transformer', 'ordinal': n,
+                        'name': '变压器故障流程.xlsx', 'text': '变压器故障按电气应急流程处理。'} for n in range(8)]
+        heat = [{**self.item, 'document_id': 'room-heat', 'ordinal': n,
+                 'name': '机房局部高温流程.xlsx', 'text': '机房环境高温按暖通应急流程处理。'} for n in range(8)]
+        self.kb.search.side_effect = [{'items': rows, 'warning': ''} for rows in (transformer, transformer, heat)]
+        self.model.complete.side_effect = ['{"keywords":["变压器故障","机房高温"]}', '分别核实供电与机房温度，按对应流程协调处置。[1][2]']
+        question = '根据公司知识库中的内容告诉我变压器故障的同时又机房温度高温了给我一个简单的应急思路。'
+        response = await answer_company(self.engine, self.actor, {'_profile': self.profile}, question,
+                                        self.emit, AsyncMock(return_value=self.actor))
+        self.assertEqual([call.args[1] for call in self.kb.search.call_args_list], [question, '变压器故障', '机房高温'])
+        prompt = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertEqual({doc['name'] for doc in prompt['documents']}, {'变压器故障流程.xlsx', '机房局部高温流程.xlsx'})
+        self.assertEqual(len(prompt['documents']), 12)
+        self.assertEqual([doc['number'] for doc in prompt['documents']], list(range(1, 13)))
+        self.assertEqual(len({(s['data']['document_id'], s['data']['ordinal']) for s in response['sources']}), 12)
+        self.assertTrue(all(topic['candidate_sources'] for topic in prompt['topics']))
+        self.assertIn('逐一覆盖', self.model.complete.call_args.args[0][0]['content'])
+
+    async def test_compound_partial_miss_is_explicit_not_replaced_by_first_topic(self):
+        self.kb.search.side_effect = [{'items': rows, 'warning': ''} for rows in ([self.item], [self.item], [])]
+        self.model.complete.side_effect = ['{"keywords":["变压器故障","机房高温"]}', '仅找到第一项的资料。[1]']
+        response = await answer_company(self.engine, self.actor, {'_profile': self.profile}, '变压器故障同时机房高温',
+                                        self.emit, AsyncMock(return_value=self.actor))
+        self.assertIn('以下主题尚未检索到公司资料依据：机房高温', response['answer'])
+        prompt = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertEqual(prompt['topics'][1]['candidate_sources'], [])
+
+    async def test_compound_answer_uses_two_real_indexed_documents(self):
+        from openclaw_service.assistant.lighthouse_knowledge import KnowledgeBase
+        from bin.test_lighthouse_knowledge import FakeEmbedder, FakeMemoryIndex, actor, _protect
+        with tempfile.TemporaryDirectory() as folder:
+            kb = KnowledgeBase(folder, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex,
+                               protect=_protect, start_worker=False)
+            try:
+                for name, content in (('变压器故障流程.txt', '变压器故障：先核实供电状态，再按批准的电气应急流程处理。'),
+                                      ('机房局部高温流程.txt', '机房高温：核实机房环境温度，再按批准的暖通应急流程处理。')):
+                    kb.upload(actor(admin=True), name, content.encode('utf-8'))
+                    self.assertTrue(kb.process_one())
+                self.engine.portal.get_knowledge = lambda: kb
+                self.model.complete.side_effect = ['{"keywords":["变压器故障","机房高温"]}', '分别核实供电和环境温度，协调处置。[1][2]']
+                user = {**actor(), 'scopes': ['E']}
+                response = await answer_company(self.engine, user, {'_profile': self.profile},
+                    '根据公司知识库中的内容告诉我变压器故障的同时又机房温度高温了给我一个简单的应急思路。',
+                    self.emit, AsyncMock(return_value=user))
+                names = {source['title'].split(' · ')[0] for source in response['sources']}
+                self.assertEqual(names, {'变压器故障流程.txt', '机房局部高温流程.txt'})
+                self.assertIn('[2]', response['answer'])
+            finally:
+                kb.close()
+
+    async def test_compound_planner_failure_still_searches_separate_original_clauses(self):
+        self.model.complete.side_effect = [AssistantError('模型暂不可用', 502), '仅提供已核实的安全概述。[1]']
+        await answer_company(self.engine, self.actor, {'_profile': self.profile}, '变压器故障同时又机房高温',
+                             self.emit, AsyncMock(return_value=self.actor))
+        self.assertEqual([call.args[1] for call in self.kb.search.call_args_list],
+                         ['变压器故障同时又机房高温', '变压器故障', '机房高温'])
+
+    async def test_failed_topic_is_reported_as_failed_not_as_no_document(self):
+        self.kb.search.side_effect = [{'items': [self.item], 'warning': ''},
+                                     {'items': [self.item], 'warning': ''}, AssistantError('高温资料读取暂忙', 503)]
+        self.model.complete.side_effect = ['{"keywords":["变压器故障","机房高温"]}', '先依据已取得的资料核实。[1]']
+        response = await answer_company(self.engine, self.actor, {'_profile': self.profile}, '变压器故障同时机房高温',
+                                        self.emit, AsyncMock(return_value=self.actor))
+        self.assertIn('高温资料读取暂忙', response['answer'])
+        self.assertNotIn('以下主题尚未检索到', response['answer'])
+
+    async def test_topic_permission_failure_stops_generation(self):
+        self.kb.search.side_effect = [{'items': [self.item], 'warning': ''}, AssistantError('无权读取', 403)]
+        self.model.complete.return_value = '{"keywords":["变压器故障","机房高温"]}'
+        with self.assertRaises(AssistantError) as caught:
+            await answer_company(self.engine, self.actor, {'_profile': self.profile}, '变压器故障同时机房高温',
+                                 self.emit, AsyncMock(return_value=self.actor))
+        self.assertEqual(caught.exception.status, 403)
+        self.model.complete.assert_called_once()
+
+    async def test_knowledge_module_revocation_during_answer_discards_generated_text(self):
+        self.model.complete.return_value = '不应返回的旧文档回答。[1]'
+        response = await answer_company(self.engine, self.actor, {'_profile': self.profile}, '公司出差规定',
+            self.emit, AsyncMock(side_effect=[self.actor, self.actor, {**self.actor, 'modules': []}]))
+        self.assertNotIn('不应返回', response['answer'])
+        self.assertEqual(response['sources'], [])
 
     async def test_miss_expands_once_using_the_same_account_model_then_cites_evidence(self):
         self.kb.search.side_effect = [{'items': [], 'warning': ''}, {'items': [self.item], 'warning': ''}]
@@ -142,7 +227,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(company_request({'question': '/公司知识库：变压器故障怎么应急'}), '变压器故障怎么应急')
         self.assertEqual(company_request({'question': '问题', 'commands': selected}), '问题')
 
-    async def test_ordinary_question_and_followup_never_open_knowledge(self):
+    async def test_ordinary_new_question_never_opens_knowledge(self):
         @asynccontextmanager
         async def ordinary_model(*args):
             raise RuntimeError('ordinary pipeline reached')
@@ -152,7 +237,8 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         history = [{'question': '/公司知识库 公司报销规定', 'sources': [{'kind': 'company_knowledge'}]}]
         for channel in ('', 'feishu:oc_group'):
             actor = {**self.actor, 'channel': channel}
-            for question in ('公司报销规定是什么', '变压器故障怎么应急?给我一个精简的步骤', '那具体需要哪些凭证？'):
+            for question in ('公司报销规定是什么', '变压器故障怎么应急?给我一个精简的步骤',
+                             '那今天天气怎么样', '不用公司资料，再详细点', '还有今天学练未答的人'):
                 with self.subTest(channel=channel, question=question), patch(
                         'openclaw_service.assistant.lighthouse_planned.continue_selection', new_callable=AsyncMock, return_value=None), patch(
                         'openclaw_service.assistant.lighthouse_knowledge_answer.answer_company', new_callable=AsyncMock) as query:
@@ -163,6 +249,42 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
                             history, None, self.emit, AsyncMock(return_value=actor), {})
                     query.assert_not_awaited()
                     portal.get_knowledge.assert_not_called()
+
+    async def test_related_knowledge_correction_resumes_fresh_retrieval_in_both_channels(self):
+        first = {'question': '/公司知识库 变压器故障同时机房高温，给我简单的应急思路',
+                 'answer': '只回答了变压器。', 'sources': [{'kind': 'company_knowledge'}], 'scopes': ['E']}
+        unrelated = {'question': '鱼缸养什么鱼', 'answer': '旧的无关话题。', 'sources': []}
+        question = '还有个机房高温的你这里只说了一个变压器的'
+        for channel in ('', 'feishu:oc_group'):
+            actor = {**self.actor, 'channel': channel}
+            engine = LighthouseModel(Mock())
+            with patch('openclaw_service.assistant.lighthouse_knowledge_answer.answer_company',
+                       new_callable=AsyncMock, return_value={'answer': '两种故障的安全概述'}) as query:
+                result = await engine.answer(actor, {'question': question, 'submitted_commands': []}, [unrelated, first],
+                    None, self.emit, AsyncMock(return_value=actor), {'summary': '以前聊鱼缸。'})
+            self.assertEqual(result['answer'], '两种故障的安全概述')
+            query.assert_awaited_once()
+            combined = query.call_args.args[3]
+            self.assertIn('变压器故障同时机房高温', combined)
+            self.assertIn(question, combined)
+            self.assertNotIn('鱼缸', combined)
+            self.assertNotIn('只回答了变压器', combined)
+
+    async def test_knowledge_followup_does_not_cross_permission_or_topic_boundaries(self):
+        @asynccontextmanager
+        async def ordinary_model(*args):
+            raise RuntimeError('ordinary pipeline reached')
+            yield
+        first = {'question': '/公司知识库 公司报销规定', 'sources': [{'kind': 'company_knowledge'}]}
+        for history in ([], [first, {'question': '今天天气', 'sources': []}], [{**first, 'scopes': ['A']} ]):
+            with self.subTest(history=history), patch(
+                'openclaw_service.assistant.lighthouse_planned.continue_selection', new_callable=AsyncMock, return_value=None), patch(
+                'openclaw_service.assistant.lighthouse_knowledge_answer.answer_company', new_callable=AsyncMock) as query:
+                engine = LighthouseModel(Mock(), model_factory=ordinary_model)
+                with self.assertRaisesRegex(RuntimeError, 'ordinary pipeline reached'):
+                    await engine.answer(self.actor, {'question': '那具体需要哪些凭证？', '_profile': self.profile},
+                        history, None, self.emit, AsyncMock(return_value=self.actor), {})
+                query.assert_not_awaited()
 
     async def test_bare_command_asks_question_without_loading_library(self):
         engine = LighthouseModel(Mock())

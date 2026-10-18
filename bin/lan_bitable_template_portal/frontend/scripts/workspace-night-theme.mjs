@@ -53,7 +53,7 @@ export default function workspaceNightTheme() {
   return {postcssPlugin:'workspace-night-theme',OnceExit(root) {
     const rules=[];root.walkRules(rule=>rules.push(rule));
     for(const rule of rules) {
-      const selectors=postcss.list.comma(rule.selector).filter(selector=>!/data-v2-theme|weather-lighthouse|\.wl-|\.lighthouse|\.assistant-|\.bot-|signature-pad|signature-canvas|print-sheet/.test(selector));
+      const selectors=postcss.list.comma(rule.selector).filter(selector=>!/data-v2-theme|weather-lighthouse|\.wl-|\.lighthouse|\.assistant-|\.bot-|signature-pad|signature-canvas|print-sheet|\.sheet-(?:table-wrap|preview-table|signers|image-warning)\b/.test(selector));
       if(!selectors.length)continue;
       let excluded=false;
       for(let parent=rule.parent;parent;parent=parent.parent)if(parent.type==='atrule'&&(/keyframes/.test(parent.name)||/print|forced-colors/.test(parent.params)))excluded=true;

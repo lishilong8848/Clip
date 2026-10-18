@@ -1825,7 +1825,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_robot_webhook",
          "bin.test_learning_update_flow",
          "bin.test_workspace_layouts",
-         "bin.test_public_health", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
+         "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_roster", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
@@ -1916,8 +1916,15 @@ def _ensure_mcp_frontend_assets() -> None:
     inputs = [frontend / "src/components/LighthouseTools.vue", frontend / "src/components/LighthouseSkills.vue"]
     if not all(path.is_file() for path in inputs):
         return
-    entry = frontend / "dist/assistant.html"
-    current = entry.is_file() and entry.stat().st_mtime >= max(path.stat().st_mtime for path in inputs)
+    inputs = [path for path in (frontend / 'src').rglob('*') if path.is_file()]
+    inputs += [path for path in (frontend / 'public').rglob('*') if path.is_file()]
+    inputs += [path for path in frontend.iterdir() if path.is_file() and
+               (path.name.startswith('vite.') or path.name in {'package.json', 'package-lock.json', 'index.html', 'assistant.html'})]
+    entries = [frontend / 'dist/assistant.html', frontend / 'dist/index.html']
+    if (frontend / 'src/workspace-v2').is_dir():
+        entries.append(frontend / 'dist/assets/workspace-v2/index.html')
+    newest = max(path.stat().st_mtime for path in inputs)
+    current = all(entry.is_file() and entry.stat().st_mtime >= newest for entry in entries)
     if current:
         current = any("/api/assistant/extensions" in (PROJECT_ROOT / path).read_text(encoding="utf-8")
                       for path in referenced_assets(PROJECT_ROOT) if path.suffix == ".js")
@@ -1925,8 +1932,8 @@ def _ensure_mcp_frontend_assets() -> None:
         return
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not npm:
-        raise RuntimeError("助手工具页面尚未构建，且未找到npm；请安装构建环境后重新打包，不能发布旧工具页面。")
-    log("助手工具页面有更新，正在构建完整前端资源。")
+        raise RuntimeError("前端页面尚未完整构建，且未找到npm；请安装构建环境后重新打包，不能发布旧页面。")
+    log("前端源码或资源有更新，正在构建完整新旧版前端资源。")
     subprocess.run([npm, "run", "build"], cwd=frontend, check=True, timeout=300)
 
 
