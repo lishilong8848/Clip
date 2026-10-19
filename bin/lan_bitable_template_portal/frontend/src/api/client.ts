@@ -6,6 +6,9 @@ export function setReadCacheIdentity(identity: string): void {
   if (before !== readCacheGeneration()) window.dispatchEvent(new Event('clipflow-read-cache-reset'));
 }
 export type Dict = Record<string, any>;
+// Per-document context: a tab must never inherit another tab's cookie identity.
+let impersonationContext = '';
+export function setImpersonationContext(id: string): void { impersonationContext = id || ''; }
 
 export const NETWORK_ERROR_MESSAGE = '暂时无法连接服务，请检查网络连接后重试。';
 function readableError(message: string): string {
@@ -70,10 +73,12 @@ export class ApiError extends Error {
   }
 }
 
-function buildHeaders(options: RequestInit): Headers {
+function buildHeaders(options: RequestInit, json = true): Headers {
   const headers = new Headers(options.headers || {});
+  headers.delete('X-Clipflow-Impersonation');
+  headers.set('X-Clipflow-Impersonation', impersonationContext);
   const body = options.body;
-  if (!headers.has("Content-Type") && !(typeof FormData !== "undefined" && body instanceof FormData)) {
+  if (json && !headers.has("Content-Type") && !(typeof FormData !== "undefined" && body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
   return headers;
@@ -147,6 +152,9 @@ export async function requestJson(
 ): Promise<Dict> {
   const { fresh, ...request } = options;
   const method = String(request.method || 'GET').toUpperCase();
+  if (impersonationContext && !['GET', 'HEAD'].includes(method) && path.startsWith('/api/workspace-layouts/')) {
+    throw new ApiError('临时代登录只能查看布局，不能修改或自动迁移该人员的个人布局。', { status: 403 });
+  }
   if (method !== 'GET' && method !== 'HEAD' && (!path.startsWith('/api/assistant/') || /\/plans\/[^/]+\/confirm/.test(path))) invalidateReadCache();
   const key = method === 'GET' && request.credentials !== 'omit' && !new Headers(request.headers).has('Authorization')
     ? readCacheKey(path, window.location.origin) : '';
@@ -189,7 +197,7 @@ export async function requestJson(
 }
 
 const readRevalidations = new Map<string, Promise<Dict>>();
-window.addEventListener(AUTH_EXPIRED_EVENT, () => { setReadCacheIdentity(''); readRevalidations.clear(); });
+window.addEventListener(AUTH_EXPIRED_EVENT, () => { setImpersonationContext(''); setReadCacheIdentity(''); readRevalidations.clear(); });
 window.addEventListener('clipflow-business-changed', () => { invalidateReadCache(); readRevalidations.clear(); });
 
 async function requestResponseJson(
@@ -401,7 +409,7 @@ export async function requestBinaryJson(
 ): Promise<Dict> {
   return requestResponseJson(path, {
     ...options, method: options.method || "POST", body, timeoutMs: 120_000,
-  }, hooks, options.headers);
+  }, hooks, buildHeaders({ ...options, body }, false));
 }
 
 export interface UploadProgressEvent {
@@ -441,6 +449,7 @@ export async function uploadJson(path: string, body: FormData, options: UploadJs
     return await new Promise<Dict>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", path);
+      buildHeaders({ body }).forEach((value, name) => xhr.setRequestHeader(name, value));
       xhr.withCredentials = true;
       xhr.responseType = "json";
       xhr.timeout = timeoutMs;

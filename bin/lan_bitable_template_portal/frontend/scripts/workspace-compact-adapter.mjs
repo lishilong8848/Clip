@@ -15,7 +15,14 @@ export function adaptCompactWorkspaces(input,filename){
     source=replace(source,byClass('event-command-head'),'');
     source=replace(source,node=>node.tag==='EventPeriodFilter',text=>`<div class="v2-event-controls">${text}</div>`);
   }
-  if(file==='NoticeWorkspace.vue'){
+  if(file==='RiskInspectionPage.vue'||file==='RiskInspectionTemplateLibrary.vue'){
+    if(file==='RiskInspectionPage.vue')source=replace(source,node=>node.tag==='RiskInspectionTemplateLibrary',text=>text.replace('<RiskInspectionTemplateLibrary ','<RiskInspectionTemplateLibrary workspace-v2 '));
+    // Teleported modals no longer inherit the risk page's inline-feedback boundary.
+    for(const node of nodes(source,node=>node.tag==='NModal').sort((a,b)=>b.loc.start.offset-a.loc.start.offset)){
+      const offset=node.loc.start.offset+'<NModal'.length;
+      source=source.slice(0,offset)+' data-v2-inline-feedback'+source.slice(offset);
+    }
+  }else if(file==='NoticeWorkspace.vue'){
     const header=nodes(source,byClass('v2-notice-heading'))[0];
     const tools=nodes(header.loc.source,byClass('v2-notice-tools'))[0].loc.source;
     source=replace(source,byClass('v2-notice-heading'),'');

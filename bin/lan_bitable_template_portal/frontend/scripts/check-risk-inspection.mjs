@@ -140,12 +140,12 @@ try{
    const keyboardReads=detailReads;await page.locator('.risk-task-name:visible').focus();await page.keyboard.press('Enter');await page.locator('.risk-feedback-table').waitFor();
    assert.equal(detailReads,keyboardReads+1,'The existing keyboard action opens once without row bubbling');
    await page.getByRole('button',{name:'排查列表',exact:true}).click();
-   await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
-   assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'New base templates start with only the required primary field');
-   await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.locator('.history-list article').nth(1).waitFor();
+   await page.getByRole('button',{name:'基础模板',exact:true}).click();
+   if(version==='legacy'){await page.locator('.risk-field-picker').waitFor();assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Legacy creation retains its primary field');await page.getByRole('button',{name:'模板列表',exact:true}).click();}
+   await page.locator('.history-list article').nth(1).waitFor();
    assert.equal(await page.locator('.history-list article').count(),2,'Multiple base templates are independently selectable');
    await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
-   assert.deepEqual(await page.locator('.risk-selected-name strong').allTextContents(),basics[0].fields.map(field=>field.field_name),'Existing templates retain their field selection and order');
+   assert.deepEqual(await page.locator('.risk-selected-name strong').allTextContents(),basics[0].fields.filter(field=>version==='legacy'||!field.is_primary&&field.role==='input').map(field=>field.field_name),'Existing templates retain editable field selection and order');
    const panes=await page.locator('.risk-field-pane').evaluateAll(nodes=>nodes.map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,right:r.right};}));
    if(width===1440){assert(Math.abs(panes[0].y-panes[1].y)<2);assert(panes[0].right<panes[1].x,'Desktop library is left, selected fields are right');}else assert(panes[1].y>panes[0].y,'Mobile panels stack in reading order');
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Field picker stays inside the page');
@@ -154,7 +154,7 @@ try{
    if(version==='v2'&&width===1440){
     for(const theme of ['dark','light']){
      await page.evaluate(value=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin',value),theme);await page.goto(url);
-     await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+     await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
      assert.equal(await page.evaluate(()=>document.documentElement.dataset.v2Theme),theme);
      if(theme==='dark'){
       const colors=await page.locator('.risk-selected-name strong').first().evaluate(el=>{let node=el;while(node){const background=getComputedStyle(node).backgroundColor;if(background.startsWith('rgb('))return {background,color:getComputedStyle(el).color};node=node.parentElement;}return {background:'rgb(255,255,255)',color:getComputedStyle(el).color};});
@@ -177,7 +177,7 @@ try{
    await page.getByRole('button',{name:'添加字段',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('现场说明');await page.getByRole('button',{name:'保存字段',exact:true}).click();
    await page.locator('.risk-history-field-modal').getByText('字段库暂未保存，请重试',{exact:true}).waitFor();assert.equal(libraryWrites,0);assert.equal(await page.getByRole('textbox',{name:'字段库名称',exact:true}).inputValue(),'现场说明','Failed library saves retain the field draft');
    await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
-   assert.equal(libraryWrites,1);assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Saving a library field does not implicitly select it');
+   assert.equal(libraryWrites,1);assert.equal(await page.locator('.risk-selected-fields>li').count(),version==='v2'?0:1,'Saving a library field does not implicitly select it');
    await page.getByRole('button',{name:'修改字段 现场说明',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('现场补充说明');await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
    await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.getByRole('button',{name:'添加字段 现场补充说明',exact:true}).waitFor();
    assert.equal(libraryWrites,2,'Added and edited library fields survive reopening');
@@ -319,9 +319,9 @@ try{
    await page.locator('.risk-response .n-tag').filter({hasText:'审核通过'}).waitFor();
    assert.equal(people[0].items[0].status,'approved');
    await page.screenshot({path:path.join(output,`${version}-${width}-review.png`),fullPage:width>=700});
-   await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+   await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();if(version==='v2')await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
    assert.equal(await page.getByRole('button',{name:'添加字段',exact:true}).count(),0,'Building managers cannot add shared library fields');assert.equal(await page.locator('.risk-field-tools').count(),0,'Building managers cannot edit or delete shared library fields');
-   await page.getByRole('button',{name:'添加字段 排查结果',exact:true}).click();assert.equal(await page.locator('.risk-selected-fields>li').count(),2,'Building managers can select fields for their template');
+   await page.getByRole('button',{name:'添加字段 排查结果',exact:true}).click();assert.equal(await page.locator('.risk-selected-fields>li').count(),version==='v2'?1:2,'Building managers can select fields for their template');
    await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.n-modal-mask').waitFor({state:'hidden'});
    role='admin';
    people[0].items.push({id:'second-item',title:'另一设备检查',status:'approved',values:{f1:'这是同一人员的第二项独立反馈。'},files:[]});

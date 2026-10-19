@@ -330,6 +330,17 @@ header.app-topbar .danger-text {
   opacity: 0.92;
 }
 
+header.app-topbar.home-mode .topbar-actions > * {
+  flex-shrink: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+header.app-topbar.home-mode .topbar-actions :deep(svg),
+header.app-topbar.home-mode .settings-icon {
+  flex: 0 0 auto;
+}
+
 header.app-topbar .settings-entry {
   width: 38px;
   min-width: 38px;
@@ -444,24 +455,36 @@ header.app-topbar .settings-entry {
   }
 
   header.app-topbar.home-mode .topbar-actions {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 6px;
   }
 
   header.app-topbar.home-mode .user-chip {
     min-width: 0;
-    flex: 1 1 auto;
+    flex: 0 1 auto;
+    max-width: min(240px, 100%);
     padding-inline: 10px;
   }
 
   header.app-topbar.home-mode .danger-text {
-    width: 38px;
-    min-width: 38px;
-    padding: 0;
+    width: auto;
+    min-width: 44px;
   }
 
   header.app-topbar.home-mode .danger-text span {
-    display: none;
+    display: inline;
+  }
+
+  header.app-topbar.home-mode :is(button, .user-chip) {
+    min-height: 44px;
+    padding-inline: 10px;
+  }
+
+  header.app-topbar.home-mode .settings-entry {
+    width: 44px;
+    min-width: 44px;
+    flex-basis: 44px;
+    padding: 0;
   }
 }
 
@@ -514,13 +537,13 @@ header.app-topbar .life-guide-entry {white-space:nowrap;padding-inline:11px}
   header.app-topbar.home-mode {
     min-height: 88px;
     align-items: center;
-    flex-flow: row nowrap;
+    flex-flow: row wrap;
     gap: 16px;
     padding: 14px 30px;
   }
 
   header.app-topbar.home-mode .brand {
-    flex: 1 1 auto;
+    flex: 1 1 480px;
     gap: 18px;
   }
 
@@ -542,9 +565,9 @@ header.app-topbar .life-guide-entry {white-space:nowrap;padding-inline:11px}
   }
 
   header.app-topbar.home-mode .topbar-actions {
-    flex: 0 0 auto;
-    max-width: min(480px, 42vw);
-    flex-wrap: nowrap;
+    flex: 0 1 auto;
+    max-width: 100%;
+    flex-wrap: wrap;
     justify-content: flex-end;
     margin-left: auto;
   }
@@ -558,7 +581,7 @@ header.app-topbar .life-guide-entry {white-space:nowrap;padding-inline:11px}
   }
 
   header.app-topbar.home-mode .user-chip {
-    max-width: 156px;
+    max-width: min(240px, 100%);
   }
 
   header.app-topbar.home-mode .settings-entry {

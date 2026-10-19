@@ -2,7 +2,7 @@
   <Teleport :to="nativeModal || 'body'">
     <div ref="launcherLayer" class="lighthouse-launcher" :popover="nativeModal ? 'manual' : undefined">
       <button ref="launcher" class="assistant-launcher" :aria-label="open ? '收起灯塔助手' : '打开灯塔助手'" :aria-pressed="open" title="灯塔助手" @click="onLauncherClick">
-        <LighthouseBot :appearance="shownAppearance" :position="botPosition" :mood="botMood" :motion-key="userId" interactive @moved="saveBotPosition" />
+        <LighthouseBot :appearance="launcherView.appearance" :position="launcherView.position" :mood="botMood" :motion-key="userId" interactive @moved="saveBotPosition" />
       </button>
     </div>
   </Teleport>
@@ -353,6 +353,7 @@ import LighthousePlannedChoices from './LighthousePlannedChoices.vue';
 import VnetSelect from './VnetSelect.vue';
 import { labelledOptions, selectedLabel, selectedValue, smallSingleChoice } from '../lighthouseSelect';
 import { readAssistantDraft, writeAssistantDraft, planDraftValues } from '../lighthouseDrafts';
+import { footerSafePosition, temporaryLauncherPlacement, type FooterRect } from '../assistantFooterAvoidance';
 const LighthouseSkills = defineAsyncComponent({ loader: () => import('./LighthouseSkills.vue'), loadingComponent: LoadingIndicator, delay: 0 });
 const LighthouseNoticePanel = defineAsyncComponent(() => import('./LighthouseNoticePanel.vue'));
 const LighthouseKnowledge = defineAsyncComponent({ loader: () => import('./LighthouseKnowledge.vue'), loadingComponent: LoadingIndicator, delay: 0 });
@@ -372,6 +373,8 @@ const shownAppearance = computed(() => appearanceOpen.value ? { ...previewAppear
 const botColor = computed(() => BOT_COLORS.find(([id]) => id === shownAppearance.value.color)?.[2] || '#0a0a0c');
 function showAppearanceSettings(): void { previewAppearance.value = { ...appearance.value }; appearanceOpen.value = true; }
 const botPosition = ref<{ x: number; y: number } | null>(null);
+const footerAvoidance = ref<{ x: number; y: number } | null>(null);
+const launcherView = computed(() => temporaryLauncherPlacement(shownAppearance.value, botPosition.value, footerAvoidance.value));
 let appearanceController: AbortController | undefined;
 function appearanceKey(): string { return 'lighthouse_appearance:' + props.userId; }
 function readAppearanceCache(): unknown {
@@ -384,8 +387,12 @@ function readAppearanceCache(): unknown {
   } catch { return null; }
 }
 function saveBotPosition(position: { x: number; y: number }): void {
+  // The renderer may report a drag while temporarily displaced; keep the user's saved home.
+  if (footerAvoidance.value) return;
+  avoidanceHome = null;
   botPosition.value = position;
   saveStoredPos('launcher', position.x, position.y);
+  scheduleFooterAvoidance();
 }
 function saveAppearance(value: BotAppearance, resetPosition = true): void {
   appearanceController?.abort(); appearanceController = undefined; appearanceLoading.value = false;
@@ -566,6 +573,72 @@ const panelHost = computed(() => {
 });
 const botMood = computed<BotMood>(() => busy.value || loading.value || uploading.value ? 'thinking' : feedback.value !== 'idle' ? feedback.value : engaged.value ? 'engaged' : 'idle');
 let interactionTimer = 0, feedbackTimer = 0, overlayObserver: MutationObserver | undefined, nativeDialogObserver: MutationObserver | undefined;
+const BUSINESS_MODAL = 'dialog[open],[role="dialog"][aria-modal="true"],.n-modal[role="dialog"],.n-dialog[role="dialog"]';
+const MODAL_FOOTER = 'footer,.n-card__action,.n-card__footer,.n-dialog__action,.n-drawer-footer,.dialog-footer,.modal-footer,.editor-footer,.v2-notice-editor-footer,.floating-upload-box';
+const BOTTOM_SUBMIT_BAR = '.drill-page .sticky-actions,.v2-learning-answerbar';
+const ASSISTANT_LAYER = '.lighthouse,.lighthouse-layer,.lighthouse-launcher,[data-assistant-control="true"]';
+let avoidanceFrame = 0, avoidanceHome: FooterRect | null = null;
+let observedModal: HTMLElement | undefined, observedFooter: HTMLElement | undefined, footerResize: ResizeObserver | undefined;
+function visibleModalElement(element: HTMLElement): boolean {
+  const style = getComputedStyle(element), box = element.getBoundingClientRect();
+  return !element.closest(ASSISTANT_LAYER) && style.display !== 'none' && style.visibility !== 'hidden'
+    && Number(style.opacity) !== 0 && box.width > 0 && box.height > 0;
+}
+function visibleBottomSubmitBar(element: HTMLElement, bounds: FooterRect): boolean {
+  const style = getComputedStyle(element), box = element.getBoundingClientRect();
+  return visibleModalElement(element) && ['sticky', 'fixed'].includes(style.position) && style.bottom !== 'auto'
+    && !!element.querySelector('button') && box.right > bounds.left && box.left < bounds.right
+    && box.top < bounds.bottom && box.bottom > bounds.top
+    && box.bottom >= bounds.bottom - Math.max(160, (Number.parseFloat(style.bottom) || 0) + 32);
+}
+function syncFooterAvoidance(): void {
+  avoidanceFrame = 0;
+  if (disposed || !launcher.value) return;
+  const modals = [...document.querySelectorAll<HTMLElement>(BUSINESS_MODAL)].filter(visibleModalElement);
+  const native = [...modalOrder].reverse().find(modal => modals.includes(modal) && modal.matches(':modal'));
+  const layer = (element: HTMLElement) => {
+    let z = 0;
+    for (let node: HTMLElement | null = element; node; node = node.parentElement) z = Math.max(z, Number.parseInt(getComputedStyle(node).zIndex) || 0);
+    return z;
+  };
+  modals.sort((a, b) => layer(a) - layer(b));
+  const modal = native || modals[modals.length - 1];
+  const viewport = window.visualViewport;
+  const bounds = { left: viewport?.offsetLeft || 0, top: viewport?.offsetTop || 0,
+    right: (viewport?.offsetLeft || 0) + (viewport?.width || innerWidth), bottom: (viewport?.offsetTop || 0) + (viewport?.height || innerHeight) };
+  const footers = modal ? [...modal.querySelectorAll<HTMLElement>(MODAL_FOOTER)]
+    .filter(element => element.closest(BUSINESS_MODAL) === modal && visibleModalElement(element))
+    : [...document.querySelectorAll<HTMLElement>(BOTTOM_SUBMIT_BAR)].filter(element => visibleBottomSubmitBar(element, bounds)).sort((a, b) => layer(a) - layer(b));
+  const footer = footers[footers.length - 1];
+  if (modal !== observedModal || footer !== observedFooter) {
+    footerResize?.disconnect(); observedModal = modal; observedFooter = footer;
+    if (modal) footerResize?.observe(modal);
+    if (footer) footerResize?.observe(footer);
+  }
+  if (!modal && !footer) { avoidanceHome = null; footerAvoidance.value = null; return; }
+  const actual = launcher.value.getBoundingClientRect();
+  // Use the same home while displaced, otherwise each observer notification would restore it.
+  avoidanceHome ||= { left: actual.left, top: actual.top, right: actual.right, bottom: actual.bottom };
+  const point = footerSafePosition({ ...avoidanceHome, right: avoidanceHome.left + actual.width, bottom: avoidanceHome.top + actual.height }, footer?.getBoundingClientRect() || null, bounds);
+  if (!point || !footerAvoidance.value || Math.hypot(point.x - footerAvoidance.value.x, point.y - footerAvoidance.value.y) > .5) footerAvoidance.value = point;
+}
+function scheduleFooterAvoidance(): void {
+  if (!disposed && !avoidanceFrame) avoidanceFrame = requestAnimationFrame(syncFooterAvoidance);
+}
+function modalLayoutChanged(records: MutationRecord[]): boolean {
+  return records.some(record => {
+    if (record.target instanceof Element && record.target.closest(ASSISTANT_LAYER)) return false;
+    if (record.target instanceof Element && (observedModal && record.target.contains(observedModal) || observedFooter && record.target.contains(observedFooter))) return true;
+    const relevant = BUSINESS_MODAL + ',' + BOTTOM_SUBMIT_BAR;
+    if (record.target instanceof Element && record.target.closest(relevant)) return true;
+    return [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element && (node.matches(relevant) || node.querySelector(relevant)));
+  });
+}
+function modalScrolled(event: Event): void {
+  if ((observedModal ? observedModal.contains(event.target as Node) : document.querySelector(BOTTOM_SUBMIT_BAR))
+    && !(event.target instanceof Element && event.target.closest(ASSISTANT_LAYER))) scheduleFooterAvoidance();
+}
+watch(() => [shownAppearance.value.size, shownAppearance.value.snap_back], scheduleFooterAvoidance);
 function showFeedback(value: BotMood): void {
   window.clearTimeout(feedbackTimer); feedback.value = value;
   feedbackTimer = window.setTimeout(() => { feedback.value = 'idle'; }, value === 'error' ? 3500 : 2200);
@@ -605,6 +678,7 @@ watch(nativeModal, async value => {
     if (value.parentElement) nativeDialogObserver.observe(value.parentElement, { childList: true });
   }
   await nextTick();
+  scheduleFooterAvoidance();
   if (disposed || value !== nativeModal.value || !value?.open) return;
   if (panelHost.value === value) assistantLayer.value?.showPopover?.();
   launcherLayer.value?.showPopover?.();
@@ -2080,6 +2154,7 @@ function ensureInBounds(): void {
 }
 watch(() => [appearance.value.size, appearanceOpen.value], () => { if (open.value) void nextTick(applyPanelPosition); });
 function onWindowResize(): void {
+  scheduleFooterAvoidance();
   desktopNotices.value = window.innerWidth >= 1000;
   if (dragging) stopGesture();
   if (resizeActive.value) cancelResize();
@@ -2361,14 +2436,20 @@ onMounted(async () => {
   document.addEventListener('focusout', onPageBlur);
   document.addEventListener('toggle', onNativeToggle, true);
   refreshNativeBlock();
+  footerResize = new ResizeObserver(scheduleFooterAvoidance);
+  window.visualViewport?.addEventListener('resize', scheduleFooterAvoidance);
+  window.visualViewport?.addEventListener('scroll', scheduleFooterAvoidance);
+  document.addEventListener('scroll', modalScrolled, true);
+  scheduleFooterAvoidance();
   overlayObserver = new MutationObserver(records => {
     if (records.some(record => record.type === 'attributes' && record.target instanceof HTMLDialogElement
       || [...record.addedNodes, ...record.removedNodes].some(node => node instanceof Element && (node.matches('dialog') || node.querySelector('dialog'))))) {
       const opened = [...records].reverse().find(record => record.type === 'attributes' && record.target instanceof HTMLDialogElement && record.target.open);
       refreshNativeBlock(opened?.target as HTMLDialogElement | undefined);
     }
+    if (modalLayoutChanged(records)) scheduleFooterAvoidance();
   });
-  overlayObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open'] });
+  overlayObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'aria-modal', 'aria-hidden', 'class', 'style'] });
   if (open.value) await readState(true, true);
 });
 onBeforeUnmount(() => {
@@ -2385,6 +2466,11 @@ onBeforeUnmount(() => {
   appearanceController?.abort();
   overlayObserver?.disconnect();
   nativeDialogObserver?.disconnect();
+  footerResize?.disconnect();
+  if (avoidanceFrame) cancelAnimationFrame(avoidanceFrame);
+  window.visualViewport?.removeEventListener('resize', scheduleFooterAvoidance);
+  window.visualViewport?.removeEventListener('scroll', scheduleFooterAvoidance);
+  document.removeEventListener('scroll', modalScrolled, true);
   document.removeEventListener('click', onPageInteraction);
   document.removeEventListener('focusin', onPageFocus);
   document.removeEventListener('focusout', onPageBlur);

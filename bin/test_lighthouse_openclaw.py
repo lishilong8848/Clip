@@ -632,6 +632,25 @@ class OpenClawRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         FakeGatewayClient._reset()
 
+    async def test_validation_retry_keeps_original_question_and_latest_conditions(self):
+        agent = _recovery_agent()
+        client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+        agent.client = client
+        count = 0
+        async def validate(answer):
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise ModelRetry('请查询实际记录后回答')
+            return answer
+        agent.validators.append(validate)
+        events = [event async for event in agent._events(client, ['今天A楼答题人员名单，不包含未提交'], [])]
+        calls = [params for method, params in client.calls if method == 'agent']
+        self.assertEqual(len(calls), 2)
+        self.assertIn('今天A楼答题人员名单，不包含未提交', calls[1]['message'])
+        self.assertIn('请查询实际记录后回答', calls[1]['message'])
+        self.assertEqual(events[-1].event_kind, 'agent_run_result')
+
     async def test_image_and_thinking_options_reach_native_run_without_probe(self):
         from pydantic_ai import BinaryContent
         for image_input in (True, False):

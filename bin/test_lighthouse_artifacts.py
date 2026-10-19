@@ -81,6 +81,11 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaises(AssistantError): create_document(self.files, ACTOR, '不允许.docx', {'paragraphs': ['身份证号：11010519491231002X']})
         self.assertFalse(self.files.store.docs)
 
+    def test_feishu_long_answer_stays_inline_without_requiring_file_upload_permission(self):
+        result = {'answer': '完整名单与统计。' * 900, 'sources': [{'number': 1, 'title': '学练记录'}]}
+        self.assertEqual(package_long_reply(self.files, {**ACTOR, 'channel': 'feishu:oc_Test'}, result), result)
+        self.assertFalse(self.files.store.docs)
+
     def test_long_reply_file_inherits_referenced_file_scope(self):
         result = package_long_reply(self.files, {**ACTOR, 'scopes': ['D'], 'allowed_scopes': ['A', 'D']},
                                     {'answer': '设备记录说明。' * 700, '_artifact_source_scopes': ['A', 'D']})
@@ -150,26 +155,24 @@ class FeishuArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.category, 'feishu_file_upload_permission')
         self.assertIn('文件上传权限', str(error.exception))
 
-    async def test_long_answer_becomes_file_and_retry_does_not_resend_finished_parts(self):
+    async def test_long_answer_stays_inline_and_retry_does_not_resend_finished_parts(self):
         messenger = FeishuMessenger({})
-        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0, 'data': {'file_key': 'file_test'}})))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})))
         messenger.client = AsyncMock(return_value=client)
         messenger.headers = AsyncMock(return_value={'Authorization': 'test'})
-        message, reply = {'message_id': 'om_fixture'}, {'text': '完整说明。' * 900}
+        message, reply = {'message_id': 'om_fixture', 'chat_id': 'oc_Chat', 'chat_type': 'p2p'}, {'text': '完整说明。' * 900}
         checkpoint = AsyncMock()
         with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
             await messenger.send(message, reply, checkpoint=checkpoint)
             await messenger.send(message, reply, checkpoint=checkpoint)
-        self.assertEqual(client.post.await_count, 3)
-        self.assertEqual(client.post.call_args_list[0].kwargs['files']['file'][1].decode(), '完整说明。' * 900)
-        parts = [call.kwargs['json'] for call in client.post.call_args_list[1:]]
-        self.assertEqual([p['msg_type'] for p in parts], ['interactive', 'file'])
-        self.assertLess(len(parts[0]['content']), 500)
-        self.assertEqual(json.loads(parts[1]['content']), {'file_key': 'file_test'})
+        self.assertEqual(client.post.await_count, 2)
+        parts = [call.kwargs['json'] for call in client.post.call_args_list]
+        self.assertEqual([p['msg_type'] for p in parts], ['interactive', 'interactive'])
+        self.assertEqual(''.join(json.loads(p['content'])['body']['elements'][0]['content'] for p in parts), reply['text'])
 
     async def test_generated_file_reply_uses_original_message(self):
         messenger = FeishuMessenger({})
-        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0})))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})))
         messenger.client, messenger.headers = AsyncMock(return_value=client), AsyncMock(return_value={})
         with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
             await messenger.send({'message_id': 'om_original'}, {'text': '已生成文件', 'files': [{'id': 'abc', 'file_key': 'file_private'}]})
@@ -178,7 +181,7 @@ class FeishuArtifactTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_file_reply_retries_only_unsent_file_with_the_same_uuid(self):
         messenger = FeishuMessenger({})
-        success = SimpleNamespace(json=lambda: {'code': 0})
+        success = SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})
         client = SimpleNamespace(post=AsyncMock(side_effect=[success, success, TimeoutError(), success]))
         messenger.client, messenger.headers = AsyncMock(return_value=client), AsyncMock(return_value={})
         reply = {'text': '已生成两个文件', 'files': [{'id': 'a', 'file_key': 'file_a'}, {'id': 'b', 'file_key': 'file_b'}]}
@@ -192,7 +195,7 @@ class FeishuArtifactTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_attachment_stop_notice_is_not_deduplicated_as_the_original_answer(self):
         messenger = FeishuMessenger({})
-        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0})))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})))
         messenger.client, messenger.headers = AsyncMock(return_value=client), AsyncMock(return_value={})
         message = {'message_id': 'om_stopped'}
         with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):

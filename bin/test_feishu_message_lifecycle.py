@@ -54,7 +54,7 @@ class MessageLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.bot.messenger.react.assert_awaited_once()
         text = self.bot.messenger.send.await_args.args[1]['text']
         self.assertIn('状态尚未确认', text)
-        self.assertIn('诊断编号', text)
+        self.assertNotIn('诊断编号', text)
         self.assertNotIn('操作已完成', text)
         self.assertEqual(self.bot.inbox.owners(), [])
 

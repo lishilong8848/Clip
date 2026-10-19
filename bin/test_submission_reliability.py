@@ -407,12 +407,16 @@ class SubmissionReliabilityTests(unittest.TestCase):
 
     def test_source_sync_failure_is_durable_secondary_work(self):
         payload = {"source_record_id": "recSource", "target_record_id": "recTarget", "work_type": "maintenance", "notice_type": "维保通告"}
-        self.assertIn("后台", PortalRuntime._queue_source_end_sync(payload, "recTarget", "维保通告"))
-        with patch.object(server, "query_record_by_id", return_value=(False, "offline")):
+        with patch.object(PortalRuntime, "service", self.service), \
+                patch.object(server, "query_record_by_id", return_value=(False, "offline")) as query:
+            self.assertIn("后台", PortalRuntime._queue_source_end_sync(payload, "recTarget", "维保通告"))
             PortalRuntime.process_source_end_sync()
-        events = self.store.list_outbox_events("notice_source_finalize", status="pending")
+        query.assert_called_once_with("recTarget", "维保通告")
+        events = self.store.list_outbox_events("notice_source_finalize", status="deferred")
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["attempts"], 1)
+        self.assertEqual(events[0]["attempts"], 0)
+        self.assertIn("offline", events[0]["last_error"])
+        self.assertFalse(self.store.list_outbox_events("notice_source_finalize", status="done"))
 
     def test_source_finalize_queue_preserves_status_until_source_write_succeeds(self):
         for work_type, field, records_name in (

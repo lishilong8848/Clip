@@ -1,11 +1,12 @@
 <template>
-  <main class="app-shell" :class="{ 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }" @dragstart.capture="preventSignatureImageDrag">
+  <main :key="impersonationSession" class="app-shell" :class="{ 'has-impersonation': !!auth.user?.impersonation, 'signature-link-shell': signatureLinkMode, 'drill-print-shell': isDrillPrintPage, 'morning-print-shell': isMorningMeetingPrintPage }" @dragstart.capture="preventSignatureImageDrag">
+    <ImpersonationBanner v-if="auth.user?.impersonation" :info="auth.user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
     <div v-if="!isWorkbenchLitePage && !isDrillPrintPage && !isMorningMeetingPrintPage && !isLifeGuidePage" class="security-watermark" aria-hidden="true">
       <span v-for="index in 30" :key="index">{{ watermarkText }}</span>
     </div>
     <AppTopbar
       :class="{ 'learning-topbar': isLearningPage }"
-      v-if="!isWorkbenchLitePage && !signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
+      v-if="!impersonationBlocked && !isWorkbenchLitePage && !signatureLinkMode && !isDrillPrintPage && !isMorningMeetingPrintPage"
       :brand-logo-src="brandLogoSrc"
       :modules="userModules"
       :header-subtitle="headerSubtitle"
@@ -33,19 +34,19 @@
     />
 
     <AppStatusNotices
-      v-if="!isWorkbenchLitePage && !isDrillPrintPage && !isMorningMeetingPrintPage && (!signatureLinkMode || pageStatusText)"
+      v-if="!impersonationBlocked && !isWorkbenchLitePage && !isDrillPrintPage && !isMorningMeetingPrintPage && (!signatureLinkMode || pageStatusText)"
       :connection-notice="signatureLinkMode ? null : connectionNotice"
       :page-status-text="pageStatusText"
     />
 
-    <div v-if="workbenchOpening" class="workbench-opening-mask" role="status" aria-live="polite">
+    <div v-if="!impersonationBlocked && workbenchOpening" class="workbench-opening-mask" role="status" aria-live="polite">
       <div class="workbench-opening-card">
         <span class="spinner" aria-hidden="true"></span>
         <strong>{{ workbenchOpeningText }}</strong>
       </div>
     </div>
 
-    <div ref="pageContent" class="page-content">
+    <div v-if="!impersonationBlocked" ref="pageContent" class="page-content">
     <section v-if="pageAccessDenied" class="module-denied" role="alert">
       <h2>没有该功能权限</h2>
       <p>当前账号未授予「{{ pageAccessDeniedLabel }}」功能，如需使用请在下方申请或联系管理员。</p>
@@ -249,12 +250,12 @@
     </UiTransition>
     </div>
 
-    <button v-if="isScopeHomeDashboard && !isGuest && hasModule('links')" type="button" class="home-link-directory" @click="navigate('/link-directory')">
+    <button v-if="!impersonationBlocked && isScopeHomeDashboard && !isGuest && hasModule('links')" type="button" class="home-link-directory" @click="navigate('/link-directory')">
       <Library :size="18" aria-hidden="true" />多维表导航
     </button>
 
     <LighthouseAssistant
-      v-if="auth.loggedIn && !pageAccessDenied && auth.user?.role !== 'guest' && hasModule('assistant')"
+      v-if="auth.loggedIn && !auth.user?.impersonation && !pageAccessDenied && auth.user?.role !== 'guest' && hasModule('assistant')"
       :key="String(auth.user?.open_id || '')"
       :user-name="String(auth.user?.name || '')"
       :user-id="String(auth.user?.open_id || '')"
@@ -268,9 +269,10 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, r
 import { Library } from "lucide-vue-next";
 import AppStatusNotices from "./components/AppStatusNotices.vue";
 import AppTopbar from "./components/AppTopbar.vue";
+import ImpersonationBanner, { impersonationIdentity } from './components/ImpersonationBanner.vue';
 import { LighthouseAssistant } from './lighthouseEntry';
 import AsyncPageState from "./components/AsyncPageState.vue";
-import { AUTH_EXPIRED_EVENT, ApiError, requestJson, setReadCacheIdentity, preferredLoginUrl, rememberLoginMethod, waitWithSignal } from "./api/client";
+import { AUTH_EXPIRED_EVENT, ApiError, requestJson, setReadCacheIdentity, setImpersonationContext, preferredLoginUrl, rememberLoginMethod, waitWithSignal } from "./api/client";
 import { setModulePermissions } from "./api/modulePermissions";
 import { navigate, navigateHard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
@@ -347,6 +349,8 @@ watch([routePath, windowLocationSearch], ([path, search], [previousPath, previou
 }, { flush: 'post' });
 const currentScope = ref(normalizeScopeValue(routeParams.value.get("scope") || ""));
 const authChecking = ref(true);
+const impersonationExpired=ref(false),impersonationLeaving=ref(false);
+const impersonationBlocked=computed(()=>impersonationExpired.value||impersonationLeaving.value);
 const loading = ref(false);
 const adminInitialTab = computed(() => {
   const value = routeParams.value.get('tab');
@@ -400,6 +404,9 @@ const auth = reactive({
   scopeOptions: [] as ScopeOption[],
   loginUrl: "/api/auth/login",
 });
+const impersonationSession=computed(()=>JSON.stringify([auth.user?.open_id,impersonationIdentity(auth.user||{})]));
+watch(impersonationSession,()=>{impersonationExpired.value=false;impersonationLeaving.value=false;},{flush:'sync'});
+watch(()=>auth.user,user=>setImpersonationContext(user?.impersonation?.id||''),{immediate:true,flush:'sync'});
 
 let authKeepaliveTimer: number | null = null;
 let authKeepaliveInFlight = false;
@@ -853,14 +860,14 @@ async function loadAuthStatus(options: { silent?: boolean } = {}): Promise<void>
       window.history.replaceState({}, '', '/cabinet-power');
       updateLocationRefs();
     }
-    const nextOverviewKey = nextLoggedIn ? overviewKey(auth.user, auth.scopeOptions) : '';
+    const nextOverviewKey = nextLoggedIn ? overviewKey(auth.user, auth.scopeOptions)+(impersonationIdentity(auth.user)||'') : '';
     setReadCacheIdentity(nextOverviewKey);
     const identityChanged = currentOverviewKey !== nextOverviewKey;
     if (identityChanged) {
       clearHomeReadIssues();
       workbenchVisited.value = isWorkbenchLitePage.value;
       currentOverviewKey = nextOverviewKey; overviewRequest++;
-      scopeOverview.value = nextOverviewKey ? readOverview(nextOverviewKey) || {} : {};
+      scopeOverview.value = nextOverviewKey && !auth.user.impersonation ? readOverview(nextOverviewKey) || {} : {};
       handoverLinks.value = {};
     }
     if (nextLoggedIn) {
@@ -891,7 +898,7 @@ async function loadOverview(): Promise<void> {
     if (appDisposed || key !== currentOverviewKey || serial !== overviewRequest) return;
     const scopes = data.scopes || data.items;
     if (scopes && typeof scopes === 'object' && !Array.isArray(scopes) && data.source_snapshot_ready !== false) {
-      scopeOverview.value = scopes; if (key) saveOverview(key, scopes);
+      scopeOverview.value = scopes; if (key && !auth.user.impersonation) saveOverview(key, scopes);
     }
   } catch {
     // Keep the last authorized snapshot while refreshing, not a false zero.
@@ -1223,6 +1230,9 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.app-shell.has-impersonation{display:flex;flex-direction:column;height:100dvh;min-height:0;box-sizing:border-box;overflow:hidden}
+.app-shell.has-impersonation>.page-content{flex:1;min-height:0;overflow:auto}
+.app-shell.has-impersonation>.impersonation-banner,.app-shell.has-impersonation>.app-topbar{flex:none}
 :global(*) {
   box-sizing: border-box;
 }

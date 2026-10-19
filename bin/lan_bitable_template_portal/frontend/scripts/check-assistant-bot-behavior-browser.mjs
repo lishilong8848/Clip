@@ -35,7 +35,7 @@ const app=createApp({render(){return h('div',{class:'app-shell'},[
  h('button',{id:'mop-open',onClick:()=>mop.value=true},'维护单签名'),
  h('button',{id:'native-open',onClick:()=>document.querySelector('dialog').showModal()},'原生弹窗')]),
  h(KeepAlive,{},()=>h(host.value?first:second,{key:host.value?'first':'second'})),
- h(UiTransition,{},()=>modal.value?h('div',{class:'fixture-overlay'},h('section',{class:'fixture-modal',role:'dialog'},'弹窗')):null),
+ h(UiTransition,{},()=>modal.value?h('div',{class:'fixture-overlay'},h('section',{class:'fixture-modal',role:'dialog','aria-modal':'true'},'弹窗')):null),
  h(UiTransition,{name:'ui-drawer'},()=>mop.value?h('div',{class:'signature-manager-backdrop fixture-overlay'}):null),
  mop.value?h('section',{class:'mop-sign-panel manager-open',role:'dialog'},h('button',{id:'mop-close',onClick:()=>mop.value=false},'关闭维护签名')):null,
  h('dialog',{id:'native-dialog'},[h('input',{id:'native-input'}),h('button',{id:'native-close',onClick:()=>document.querySelector('dialog').close()},'关闭')]),
@@ -140,7 +140,7 @@ try {
   await assertVisibleAbove();
   const stored=await page.evaluate(()=>({...localStorage}));
   await motion('openModal');await assertVisibleAbove();
-  assert(same(await iconBox(),original),'modal does not move the bot');
+  assert(same(await iconBox(),original),'modal without a colliding footer does not move the bot');
   await motion('closeModal');assert(same(await iconBox(),outside));
   await page.evaluate(()=>{window.closeDrawer();setTimeout(window.openDrawer,40)});await page.waitForTimeout(500);
   assert.equal(await page.locator('.fixture-drawer').count(),1,'cancelled leave retains one drawer');

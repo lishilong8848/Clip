@@ -30,10 +30,12 @@ class AssistantTables:
     def cached(self, key, ttl, load):
         # Fixed lock stripes bound memory and coalesce identical concurrent reads.
         with self.locks[int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % len(self.locks)]:
+            version = getattr(self.service, 'state_cache_version', None)
+            revision = version() if callable(version) and not key.startswith('base:') else None
             old = self.store.get_document(NS, key)
-            if old and time.time() - old['observed_at'] < ttl:
+            if old and old.get('source_revision') == revision and time.time() - old['observed_at'] < ttl:
                 return old
-            value = {'value': load(), 'observed_at': time.time()}
+            value = {'value': load(), 'observed_at': time.time(), 'source_revision': revision}
             self.store.put_document(NS, key, value)
             return value
 
@@ -96,7 +98,7 @@ class AssistantTables:
             return node['obj_token']
         return self.cached('base:' + parts[2], 86400, load)['value']
 
-    def schema(self, item):
+    def schema(self, item, *, ttl=3600):
         base = self.base(item)
         def load():
             fields, cursor, seen = [], '', set()
@@ -112,7 +114,7 @@ class AssistantTables:
                     break
                 seen.add(cursor)
             raise AssistantError('字段分页不完整，未继续读取记录。', 503)
-        return base, self.cached('schema:' + item['table_id'], 3600, load)['value']
+        return base, self.cached('schema:' + item['table_id'], ttl, load)['value']
 
     @staticmethod
     def valid_page(data):
@@ -129,6 +131,14 @@ class AssistantTables:
         if re.search(r'密钥|凭证|密码|令牌|模型配置|应用配置|账号配置|token|secret', item['name'] + item['category'], re.I):
             raise AssistantError('凭证及安全配置表不向助手开放直接读取，请使用原安全设置页面。', 403)
         base, schema = self.schema(item)
+        requested = query.get('fields') or []
+        filters = query.get('filters') or []
+        names = ([name for name in requested if isinstance(name, str)] if isinstance(requested, list) else [])
+        if isinstance(filters, list):
+            names += [row['field_name'] for row in filters if isinstance(row, dict) and isinstance(row.get('field_name'), str)]
+        if any(field_allowed(name) and name not in {field['name'] for field in schema} for name in names):
+            # Missing columns may have been added remotely; coalesce a bounded schema re-read.
+            base, schema = self.schema(item, ttl=10)
         safe_fields = [f['name'] for f in schema if field_allowed(f['name']) and f['type'] not in {17, 18}]
         # Questions/answers retain the learning module's original visibility rules.
         if not actor.get('is_admin') and re.search(r'题库|学练|权限|账户|账号|密钥|配置|程序日志', item['name'] + item['category']):

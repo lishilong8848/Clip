@@ -1,9 +1,9 @@
 <template>
   <NConfigProvider :theme="nightMode && !printMode && !printing ? darkTheme : null" :theme-overrides="nightMode && !printMode && !printing ? nightTheme : theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
-      <div class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
+      <div :key="impersonationSession" class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'has-impersonation':!!user.impersonation, 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
-        <header v-if="!printMode" class="v2-header">
+        <header v-if="!printMode && !impersonationBlocked" class="v2-header">
           <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
           <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
@@ -13,8 +13,9 @@
             <NButton v-else-if="loggedIn" quaternary aria-label="退出登录" @click="logout"><LogOut :size="17" /></NButton>
           </div>
         </header>
-        <SidebarNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" @select="selectMenu" />
-        <main class="v2-main">
+        <ImpersonationBanner v-if="user.impersonation" :info="user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
+        <SidebarNavigation v-if="!impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed" :options="menuOptions" :selected="selectedMenu" @select="selectMenu" />
+        <main v-if="!impersonationBlocked" class="v2-main">
           <NAlert v-if="authError" type="error" :bordered="false" class="v2-alert">{{ authError }} <NButton text type="primary" @click="loadAuth">重新读取</NButton></NAlert>
           <NAlert v-if="operationError" type="error" :bordered="false" closable role="alert" class="v2-alert" @close="operationError=''">{{ operationError }}</NAlert>
           <div v-if="checking" class="v2-loading"><NSpin size="medium" /><span>正在检查登录状态</span></div>
@@ -57,9 +58,9 @@
             <NoticeWorkspace v-if="noticeView" v-show="noticeActive" :key="noticeView.identity" :url="noticeView.url" :active="noticeActive" :scope="currentScope" :scopes="scopes" :user="user" />
           </template>
         </main>
-        <MobileNavigation v-if="loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="route.pathname === '/' && !route.searchParams.get('mode') ? view : 'functions'" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
-        <LighthouseAssistant v-if="loggedIn && user.role !== 'guest' && granted.includes('assistant') && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
-        <NModal v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
+        <MobileNavigation v-if="!impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="route.pathname === '/' && !route.searchParams.get('mode') ? view : 'functions'" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
+        <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && granted.includes('assistant') && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
+        <NModal v-if="!impersonationBlocked" v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
       </div>
     </NDialogProvider></NMessageProvider>
   </NConfigProvider>
@@ -68,7 +69,7 @@
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue';
 import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
 import { Activity, Building2, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound } from 'lucide-vue-next';
-import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, invalidateReadCache, type Dict } from './client';
+import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
 import { modules, moduleIcons, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate } from './modules';
 import { personaFor } from './persona';
@@ -87,6 +88,7 @@ function animateMobilePage(direction:number){
   requestAnimationFrame(()=>document.querySelector('.v2-main')?.animate([{opacity:.25,transform:`translateX(${direction*30}px)`},{opacity:1,transform:'translateX(0)'}],{duration:250,easing:'ease-out'}));
 }
 import { LighthouseAssistant } from '../lighthouseEntry';
+import ImpersonationBanner, { impersonationIdentity } from '../components/ImpersonationBanner.vue';
 import AsyncPageState from '../components/AsyncPageState.vue';
 import AccountSignature from '../components/AccountSignature.vue';
 const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, loadingComponent: AsyncPageState, errorComponent: AsyncPageState, delay: 100, timeout: 30000 });
@@ -123,6 +125,11 @@ const pages: Record<string, any> = {
 };
 const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), user = ref<Dict>({}), scopes = ref<{value:string;label:string}[]>([]), authError = ref(''), loginUrl = ref('/api/auth/login'), collapsed = ref(false);
 const operationError=ref(''),logoutBusy=ref(false);
+const impersonationExpired=ref(false),impersonationLeaving=ref(false);
+const impersonationBlocked=computed(()=>impersonationExpired.value||impersonationLeaving.value);
+const impersonationSession=computed(()=>JSON.stringify([user.value.open_id,impersonationIdentity(user.value)]));
+watch(impersonationSession,()=>{impersonationExpired.value=false;impersonationLeaving.value=false;},{flush:'sync'});
+watch(user,value=>setImpersonationContext(value.impersonation?.id||''),{immediate:true,flush:'sync'});
 const navColor=ref(DEFAULT_NAV_COLOR);
 watch(()=>String(user.value.open_id||''),loadNightMode,{immediate:true,flush:'sync'});
 const printMedia=window.matchMedia('print'),printing=ref(printMedia.matches);
@@ -135,7 +142,7 @@ function cancelAuth(){authRead?.abort();authRead=undefined;checkingAuth=false;wi
 function refreshAuth(){cancelAuth();void loadAuth();}
 const watermarkDay=beijingDate();
 function preventSignatureDrag(event:DragEvent){const image=(event.target as Element)?.closest?.('img');if(image&&(image.src.includes('/api/signatures/')||image.alt.includes('签名')))event.preventDefault();}
-const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.modules, scopes.value]));
+const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.modules, scopes.value, impersonationIdentity(user.value)]));
 const profileGroups = computed(() => [...new Set(modules.map(item=>item.group))].map(name=>({name,items:modules.filter(item=>item.group===name&&granted.value.includes(item.id))})).filter(group=>group.items.length));
 const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? user.value.modules : []);
 const activeModule = computed(() => moduleForRoute(route.value));
@@ -238,7 +245,7 @@ async function loadAuth() {
     if (disposed || controller.signal.aborted || authRead!==controller) return;
     loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; authDefaultScope.value = String(data.default_scope||''); loginUrl.value = data.login_url || '/api/auth/login';
     setModulePermissions(granted.value); setReadCacheIdentity(identityKey.value); authError.value = data.directory_warning || '';
-    if (loggedIn.value && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
+    if (loggedIn.value && !user.value.impersonation && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
     if (user.value.role === 'guest' && route.value.pathname !== '/cabinet-power' && !publicLink.value) navigate('/cabinet-power', {replace:true,bypassGuard:true});
   } catch (e:any) { if (!disposed && !controller.signal.aborted) authError.value = e.message || '登录状态读取失败'; }
   finally { if(authRead===controller){authRead=undefined;checking.value = false; checkingAuth = false; window.clearTimeout(timer); if (!disposed && loggedIn.value && !document.hidden) timer = window.setTimeout(loadAuth,60000);} }
@@ -275,6 +282,18 @@ onMounted(()=>{void loadAuth();window.addEventListener('popstate',routeChanged);
 onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
 </script>
 <style scoped>
+.v2-shell.has-impersonation>.impersonation-banner{margin:0 10px}
+@media(min-width:761px){
+  .v2-shell.has-impersonation:not(.is-print){grid-template-rows:var(--head-height) auto minmax(0,1fr)}
+  .v2-shell.has-impersonation:not(.is-print)>.impersonation-banner{grid-area:2 / 1 / 3 / -1}
+  .v2-shell.has-impersonation:not(.is-print)>.v2-sidebar{grid-area:3 / 1}
+  .v2-shell.has-impersonation:not(.is-print)>.v2-main{grid-area:3 / 2}
+}
+@media(max-width:760px){
+  .v2-shell.has-impersonation:not(.is-print){display:flex;flex-direction:column;height:100dvh;overflow:hidden}
+  .v2-shell.has-impersonation:not(.is-print)>.v2-header{position:static;flex:none}
+  .v2-shell.has-impersonation:not(.is-print)>.v2-main{flex:1;min-height:0;overflow:auto;--v2-content-sticky-top:0px}
+}
 .v2-my-signatures { margin-top: 28px; }
 @media (max-width: 760px) { .v2-my-signatures { margin-top: 20px; } }
 </style>

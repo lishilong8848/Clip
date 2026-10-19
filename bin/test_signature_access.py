@@ -42,6 +42,101 @@ class SignatureAccessTests(unittest.TestCase):
         return dispatch(self.manager, method, operation, payload or {}, actor=actor, auth=self.auth,
                         send_text=self.sender, base_url='http://localhost:18766')
 
+    def c_signer_fixture(self):
+        self.hr = {}
+        for oid, scope, level, category in (('signerC', 'C', 'L4', 'operator'),
+                ('sameNameD', 'D', 'L4', 'operator'), ('supervisorC', 'C', 'L3', 'supervisor'),
+                ('supervisorD', 'D', 'L3', 'supervisor')):
+            self.profiles[oid] = {'level': level, 'home_scope': scope, 'category': category,
+                'scope_rules': [scope], 'role': 'building', 'modules': ['signatures', 'accounts'],
+                'can_manage_accounts': level == 'L3'}
+            self.hr[oid] = {'scopes': [scope]}
+            self.service.add('rec' + oid, name='杨占山' if level == 'L4' else oid,
+                             open_id=oid, building='D楼')
+        self.auth.directory_person = Mock(side_effect=lambda oid: copy.deepcopy(self.hr.get(oid, {})))
+
+    def test_signer_presentation_and_directory_filters_use_account_c_not_cached_d(self):
+        from lan_bitable_template_portal.signature_access import SignatureAccess
+        self.c_signer_fixture()
+        before = copy.deepcopy(self.service.staff)
+        access = SignatureAccess(self.manager, self.auth, 'super')
+        access.bind(self.manager.directory())
+        raw = self.manager.person('staff', 'recsignerC')
+        self.assertEqual(raw['building'], 'D楼')
+        presented = access.presentation(raw)
+        self.assertEqual(presented['building'], 'C楼')
+        self.assertEqual(presented['scope_text'], 'C楼')
+        for key in ('name', 'source', 'record_id', 'person_key'):
+            self.assertEqual(presented[key], raw[key])
+        listing = self.call('people', {'scope': 'C', 'q': '杨占山'}, actor='super')
+        self.assertEqual([row['record_id'] for row in listing['people']], ['recsignerC'])
+        self.assertEqual(listing['people'][0]['building'], 'C楼')
+        other = self.call('people', {'scope': 'D', 'q': '杨占山'}, actor='super')
+        self.assertEqual([row['record_id'] for row in other['people']], ['recsameNameD'])
+        self.assertEqual(self.service.staff, before)
+        self.assertEqual(self.service.uploads, 0)
+        self.sender.assert_not_called()
+
+    def test_presentation_falls_back_to_home_scope_without_directory_person_interface(self):
+        self.c_signer_fixture()
+        del self.auth.directory_person
+        self.profiles['signerC']['scope_rules'] = list('ABCDEH') + ['110']
+        person = self.call('account', actor='signerC')['person']
+        self.assertEqual(person['building'], 'C楼')
+        self.assertEqual(person['scope_text'], 'C楼')
+
+    def test_admin_signer_multi_home_presentation_keeps_all_trusted_scopes_not_admin_grants(self):
+        self.c_signer_fixture()
+        self.hr['manager'] = {'scopes': ['C', 'D']}
+        self.service.staff['recmanager']['楼栋'] = 'D楼'
+        before = copy.deepcopy(self.profiles['manager'])
+        listing = self.call('people', {'scope': 'C'}, actor='super')
+        row = next(row for row in listing['people'] if row['record_id'] == 'recmanager')
+        self.assertEqual(set(self.service._building_codes_from_value(row['building'])), {'C', 'D'})
+        self.assertEqual(row['scope_text'], row['building'])
+        self.assertNotIn('recmanager', {row['record_id'] for row in self.call('people', {'scope': 'H'}, actor='super')['people']})
+        sent = self.call('requests', {'source': 'staff', 'record_id': 'recmanager',
+            'operation_id': 'multiHomePresentation'}, actor='super', method='POST')
+        self.assertEqual(set(self.service._building_codes_from_value(sent['building'])), {'C', 'D'})
+        self.assertIn('楼栋：' + sent['building'], self.sender.call_args.args[0].splitlines())
+        self.assertEqual(self.profiles['manager'], before)
+
+    def test_linked_temporary_signer_uses_c_but_unlinked_same_name_keeps_own_building(self):
+        self.c_signer_fixture()
+        self.service.add('recsignerC', name='杨占山', signature=False, open_id='signerC', building='D楼')
+        self.service.add('recLinkedC', source='external', origin='recsignerC', name='杨占山', building='D楼')
+        self.service.add('recUnlinkedD', source='external', name='杨占山', building='D楼')
+        person = self.call('account', actor='signerC')['person']
+        self.assertEqual((person['source'], person['record_id'], person['building']), ('external', 'recLinkedC', 'C楼'))
+        listing = self.call('people', {'q': '杨占山'}, actor='super')['people']
+        rows = {row['record_id']: row for row in listing}
+        self.assertEqual(rows['recLinkedC']['building'], 'C楼')
+        self.assertEqual(rows['recUnlinkedD']['building'], 'D楼')
+        self.assertEqual(rows['recsameNameD']['building'], 'D楼')
+        with self.assertRaises(SignatureManagementError) as error:
+            self.call('preview', {'source': 'external', 'record_id': 'recLinkedC'}, actor='sameNameD')
+        self.assertEqual(error.exception.status, 403)
+        self.sender.assert_not_called()
+        sent = self.call('requests', {'source': 'external', 'record_id': 'recLinkedC',
+            'operation_id': 'linkedHomePresentation'}, actor='super', method='POST')
+        self.assertEqual(sent['building'], 'C楼')
+        self.assertEqual(self.sender.call_args.args[1], ['signerC'])
+        self.assertIn('楼栋：C楼', self.sender.call_args.args[0].splitlines())
+
+    def test_self_start_uses_presented_c_without_changing_signature_or_password_fields(self):
+        self.c_signer_fixture()
+        self.service.staff['recsignerC']['密码'] = 'synthetic-existing-password-hash'
+        before = copy.deepcopy(self.service.staff)
+        result = self.call('self-start', actor='signerC', method='POST')
+        self.assertEqual(result['building'], 'C楼')
+        self.assertEqual(result['name'], '杨占山')
+        saved = self.store.get_document('signature_management_request', result['request_id'])
+        self.assertEqual((saved['source'], saved['record_id'], saved['person_key']), ('staff', 'recsignerC', 'staff:recsignerC'))
+        self.assertEqual(saved['person']['scope_text'], 'C楼')
+        self.assertEqual(self.service.staff, before)
+        self.assertEqual(self.service.uploads, 0)
+        self.sender.assert_not_called()
+
     def test_personal_directory_and_account_use_identity_not_name(self):
         result = self.call('people')
         self.assertEqual([p['record_id'] for p in result['people'] if not p['invite_only']], ['recoperatorE'])

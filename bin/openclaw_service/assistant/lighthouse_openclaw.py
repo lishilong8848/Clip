@@ -107,6 +107,10 @@ class BusinessBridge:
 
 
 class OpenClawToolAgent:
+    FINAL_REPLY_GRACE = 8
+    FINAL_REPLY_POLL = .5
+    RUN_STATUS_POLL = 2
+
     def __init__(self, engine, actor, turn, emit, profile, *, instructions, **_):
         self.engine, self.actor, self.turn, self.emit, self.profile = engine, actor, turn, emit, profile
         self.resident = getattr(engine.manager, 'resident', False) is True
@@ -156,18 +160,48 @@ class OpenClawToolAgent:
         await self.engine.keep_gateway(self.actor, self.item, self.client)
         # This is an observer RPC for the exact accepted run, not another agent call.
         waited = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 0}, timeout=5)
-        if waited.get('runId', self.run_id) != self.run_id:
-            raise AssistantError('原回答运行编号不一致，未使用其他会话内容。', 502)
-        if waited.get('status') == 'error':
-            raise self._model_failure(waited.get('error'))
-        reply = waited.get('terminalReply') or {}
-        if waited.get('status') == 'ok':
-            if reply.get('disposition') == 'visible' and isinstance(reply.get('text'), str):
-                return reply['text'], True
-            raise AssistantError('原回答已结束但未取得完整内容，消息已保留。', 502)
+        text = self._terminal_answer(waited)
+        if text is not None:
+            return text, True
         history = await self.client.request('chat.history', {'sessionKey': self.session_key, 'limit': 1}, timeout=5)
         flight = history.get('inFlightRun') or {}
         return flight.get('text', answer) if flight.get('runId') == self.run_id else answer, False
+
+    @staticmethod
+    def _reply_text(message):
+        if not isinstance(message, dict) or message.get('role') != 'assistant':
+            return None
+        if (message.get('phase') in {'commentary', 'analysis'} or message.get('channel') in {'commentary', 'analysis'}
+                or message.get('stopReason') in {'toolUse', 'tool_use', 'tool_calls', 'length', 'max_tokens', 'aborted', 'error'}
+                or message.get('pendingToolCalls') or message.get('yielded') or message.get('aborted')):
+            return None
+        content = message.get('content', message.get('text'))
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list) and all(isinstance(part, dict) and part.get('type') == 'text'
+                                             and isinstance(part.get('text'), str) for part in content):
+            return ''.join(part['text'] for part in content)
+        return None
+
+    def _terminal_answer(self, outcome, chat_message=None):
+        if not isinstance(outcome, dict) or outcome.get('runId', self.run_id) != self.run_id:
+            raise AssistantError('原回答运行编号不一致，未使用其他会话内容。', 502)
+        if outcome.get('pendingError') or outcome.get('yielded') or outcome.get('pendingToolCalls') or outcome.get('aborted'):
+            return None
+        if outcome.get('status') == 'error':
+            raise self._model_failure(outcome.get('error'))
+        if outcome.get('status') != 'ok':
+            return None
+        if outcome.get('stopReason') in {'toolUse', 'tool_use', 'tool_calls', 'length', 'max_tokens', 'aborted', 'error'}:
+            return None
+        reply = outcome.get('terminalReply')
+        if isinstance(reply, dict):
+            if reply.get('disposition') == 'visible':
+                return self._reply_text({**reply, 'role': 'assistant'})
+            # Suppression is explicit terminal evidence, not permission to reuse a preview.
+            raise AssistantError('原回答已结束但未取得完整可见内容，原消息与操作任务已保留；未重新提交业务。',
+                                 502, category='model_protocol')
+        return self._reply_text(chat_message)
 
     async def _acquire_runtime(self, *, warm_only=False):
         definitions = [{'name': name, 'label': tool.name, 'description': tool.description or '',
@@ -356,6 +390,7 @@ class OpenClawToolAgent:
         if images and not capabilities['image_input']:
             images = []
             message += '\n当前模型设置未启用图片输入，只能使用附件中提取的文字；没有可靠文字时提示开启图片输入或切换模型，不推断图像内容。'
+        original_message = message
         for attempt in range(2):
             native_run = 'lh-' + account_key(self.actor['id']) + ':' + (self.turn.get('run_id') or self.turn['operation_id'])
             if getattr(self, '_fallback_attempt', 0):
@@ -396,23 +431,51 @@ class OpenClawToolAgent:
             if accepted.get('status') == 'ok' and not terminal_ack:
                 # A completed idempotent RPC returns its outcome, not new WS events.
                 finished = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 0}, timeout=5)
-                terminal = finished.get('terminalReply') or {}
-                text = terminal.get('text') if terminal.get('disposition') == 'visible' else None
-                if finished.get('status') != 'ok' or finished.get('runId', self.run_id) != self.run_id or \
-                        not isinstance(text, str) or not text.strip():
+                text = self._terminal_answer(finished)
+                if not isinstance(text, str) or not text.strip():
                     self.run_id = ''
                     raise AssistantError('原回答已结束但未取得完整内容，消息已保留；未重新提交业务。', 502)
                 answer, terminal_ack = text, True
                 yield SimpleNamespace(event_kind='part_start', part=SimpleNamespace(part_kind='text', content=answer))
             if terminal_ack:
                 self.run_id = ''
-            deadline, sequence, compaction_notified = time.monotonic() + 190, 0, False
+            deadline, sequences, compaction_notified = time.monotonic() + 190, {}, False
+            terminal_deadline, chat_message = None, None
+            next_terminal_check = time.monotonic() + self.RUN_STATUS_POLL
             while self.run_id and time.monotonic() < deadline:
                 if not compaction_notified and self.item.get('compaction_run_id') == self.run_id:
                     await self.emit('status', {'label': '正在自动整理上下文'})
                     compaction_notified = True
                 while not self.events.empty():
                     yield self.events.get_nowait()
+                if time.monotonic() >= next_terminal_check:
+                    try:
+                        finished = await self.client.request('agent.wait', {'runId': self.run_id,
+                            'timeoutMs': 5000 if terminal_deadline else 0}, timeout=7 if terminal_deadline else 5)
+                    except (GatewayError, OSError, asyncio.TimeoutError) as exc:
+                        if reconnected or isinstance(exc, GatewayError) and exc.code not in {'DISCONNECTED', 'CLOSED', 'UNAVAILABLE', 'TIMEOUT'}:
+                            raise AssistantError('原回答完成核验未成功，消息已保留；未重新提交业务。', 502) from None
+                        reconnected = True
+                        text, terminal = await self._recover(answer)
+                        if not terminal:
+                            text = None
+                    else:
+                        text = self._terminal_answer(finished, chat_message)
+                        if finished.get('status') == 'ok' and terminal_deadline is None:
+                            terminal_deadline = time.monotonic() + self.FINAL_REPLY_GRACE
+                    next_terminal_check = time.monotonic() + (self.FINAL_REPLY_POLL if terminal_deadline else self.RUN_STATUS_POLL)
+                    if text is not None:
+                        if text != answer:
+                            if text.startswith(answer):
+                                yield SimpleNamespace(event_kind='part_delta', delta=SimpleNamespace(part_delta_kind='text', content_delta=text[len(answer):]))
+                            else:
+                                yield SimpleNamespace(event_kind='part_start', part=SimpleNamespace(part_kind='text', content=text))
+                        answer = text
+                        self.run_id = ''
+                        break
+                if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
+                    raise AssistantError('原回答尚未取得完整终答，原消息与操作任务已保留；未重新提交业务。',
+                                         502, category='model_protocol')
                 try:
                     frame = await self.client.next_event(timeout=.5)
                 except asyncio.TimeoutError:
@@ -438,11 +501,29 @@ class OpenClawToolAgent:
                 data = frame.get('payload') or {}
                 if data.get('runId') != self.run_id:
                     continue
+                if (data.get('sessionKey', self.session_key) != self.session_key
+                        or data.get('agentId', agent_id(self.actor['id'])) != agent_id(self.actor['id'])):
+                    continue
+                if terminal_deadline is None:
+                    next_terminal_check = time.monotonic() + self.RUN_STATUS_POLL
                 seq = data.get('seq')
                 if type(seq) is int:
-                    if seq <= sequence:
+                    channel = frame.get('event')
+                    if seq <= sequences.get(channel, 0):
                         continue
-                    sequence = seq
+                    sequences[channel] = seq
+                if frame['event'] == 'chat':
+                    if data.get('state') == 'final':
+                        chat_message = data.get('message')
+                        if isinstance(chat_message, dict):
+                            chat_message = {**chat_message, **{key: data[key] for key in
+                                ('stopReason', 'yielded', 'aborted', 'pendingToolCalls') if key in data}}
+                        terminal_deadline = terminal_deadline or time.monotonic() + self.FINAL_REPLY_GRACE
+                        next_terminal_check = 0
+                    elif data.get('state') in {'error', 'aborted'}:
+                        raise AssistantError('原回答未正常完成，原消息与操作任务已保留；未重新提交业务。',
+                                             502, category='model_protocol')
+                    continue
                 if frame['event'] == 'agent':
                     stream, update = data.get('stream'), data.get('data') or {}
                     if stream == 'assistant':
@@ -478,28 +559,9 @@ class OpenClawToolAgent:
                     if stream == 'lifecycle' and update.get('phase') in {'end', 'error'}:
                         if update['phase'] == 'error':
                             raise self._model_failure(update.get('error'))
-                        try:
-                            finished = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 5000}, timeout=7)
-                        except (GatewayError, OSError, asyncio.TimeoutError) as exc:
-                            if reconnected or isinstance(exc, GatewayError) and exc.code not in {'DISCONNECTED', 'CLOSED', 'UNAVAILABLE', 'TIMEOUT'}:
-                                raise AssistantError('原回答完成核验未成功，消息已保留；未重新提交业务。', 502) from None
-                            reconnected = True
-                            text, terminal = await self._recover(answer)
-                            if not terminal:
-                                raise AssistantError('模型运行结果尚未确认，原消息已保留。', 502)
-                        else:
-                            if finished.get('status') != 'ok' or finished.get('runId', self.run_id) != self.run_id:
-                                raise AssistantError('模型运行结果尚未确认，原消息已保留。', 502)
-                            terminal = finished.get('terminalReply') or {}
-                            text = terminal.get('text') if terminal.get('disposition') == 'visible' else None
-                        if isinstance(text, str) and text != answer:
-                            if text.startswith(answer):
-                                yield SimpleNamespace(event_kind='part_delta', delta=SimpleNamespace(part_delta_kind='text', content_delta=text[len(answer):]))
-                            else:
-                                yield SimpleNamespace(event_kind='part_start', part=SimpleNamespace(part_kind='text', content=text))
-                            answer = text
-                        self.run_id = ''
-                        break
+                        if terminal_deadline is None:
+                            terminal_deadline = time.monotonic() + self.FINAL_REPLY_GRACE
+                            next_terminal_check = 0
             if self.run_id:
                 raise AssistantError('助手响应超时，原消息已保留。', 504)
             while not self.events.empty():
@@ -521,7 +583,7 @@ class OpenClawToolAgent:
                                          502, category='model_protocol') from None
                 if attempt:
                     raise AssistantError('未取得可靠业务依据，未执行业务，请重试或明确查询内容。', 502) from None
-                message = safe_text(str(exc))
+                message = original_message + '\n本轮回答核验要求：' + safe_text(str(exc))
                 continue
             self.item['native_history_session'] = self.session_key
             yield SimpleNamespace(event_kind='agent_run_result', result=SimpleNamespace(output=answer))

@@ -8,6 +8,7 @@ _BACKEND_IMPORT_STARTED_AT = time.perf_counter()
 import argparse
 import asyncio
 import base64
+import copy
 import datetime as dt
 import hashlib
 import io
@@ -6661,7 +6662,7 @@ class FastAPIPortalController:
                     return self._json_ok(request, session, {"exists": False})
                 draft = await asyncio.to_thread(
                     PortalRuntime.get_workbench_notice_draft,
-                    open_id=str(user.get("open_id") or ""),
+                    open_id=self._workbench_draft_identity(session),
                     work_type=work_type,
                     target_record_id=target_record_id,
                 )
@@ -6687,7 +6688,7 @@ class FastAPIPortalController:
                 target_record_id = str(payload.get("target_record_id") or "").strip()
                 action = str(payload.get("action") or "update").strip()
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                open_id = str(user.get("open_id") or "")
+                open_id = self._workbench_draft_identity(session)
                 if action == "start":
                     result = await asyncio.to_thread(
                         PortalRuntime.delete_workbench_notice_draft,
@@ -6723,7 +6724,7 @@ class FastAPIPortalController:
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 result = await asyncio.to_thread(
                     PortalRuntime.delete_workbench_notice_draft,
-                    open_id=str(user.get("open_id") or ""),
+                    open_id=self._workbench_draft_identity(session),
                     work_type=str(payload.get("work_type") or "").strip(),
                     target_record_id=str(payload.get("target_record_id") or "").strip(),
                     expected_version=int(payload.get("expected_version") or 0),
@@ -9809,9 +9810,20 @@ class FastAPIPortalController:
         )
 
     def _current_session(self, request: Request) -> dict | None:
+        if hasattr(request.state, 'admin_impersonation_session'):
+            return copy.deepcopy(request.state.admin_impersonation_session)
+        from lan_bitable_template_portal.account_impersonation import COOKIE, current
+        if request.cookies.get(COOKIE):
+            return current(PortalRuntime.auth_manager, PortalRuntime.state_store,
+                           request.cookies.get(AUTH_COOKIE_NAME, ''), request.cookies[COOKIE])[2]
         return PortalRuntime.auth_manager.get_session(
             str(request.cookies.get(AUTH_COOKIE_NAME) or "")
         )
+
+    @staticmethod
+    def _workbench_draft_identity(session: dict) -> str:
+        from lan_bitable_template_portal.account_impersonation import draft_identity
+        return draft_identity(session)
 
     @staticmethod
     def _request_session_id(request: Request) -> str:

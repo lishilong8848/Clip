@@ -419,7 +419,7 @@ class SignatureManagement:
             public["status"] = "expired"
         return public
 
-    def send(self, payload, *, actor: str, base_url: str, send_text, local=False, direct_open_id="") -> dict:
+    def send(self, payload, *, actor: str, base_url: str, send_text, local=False, direct_open_id="", access=None) -> dict:
         operation_id = _id(payload.get("operation_id"))
         source, rid = _text(payload.get("source")), _id(payload.get("record_id"))
         recipient = _text(payload.get("recipient"))
@@ -431,7 +431,24 @@ class SignatureManagement:
                 if prior.get("fingerprint") != fingerprint:
                     raise SignatureManagementError("操作编号已被使用。", 409)
                 return self._public_request(prior)
-            person = self.person(source, rid)
+            person = self.person(source, rid, refresh=True)
+            if access:
+                access.profile = access.auth.account_profile(actor)
+                access.profiles = {actor: access.profile}
+                directory = self.directory()
+                if any(not info['ok'] for info in directory['sources'].values()):
+                    raise SignatureManagementError('人员表读取失败，不能核验签名归属，请稍后重试。', 503)
+                access.bind(directory)
+                if ('signatures' not in access.profile.get('modules', [])
+                        or not access.allowed(person, 'request')
+                        or recipient and not access.allowed(person, 'edit')):
+                    raise SignatureManagementError('人员归属或管理权限已变化，请刷新后重试。', 403)
+                access.recipient(recipient)
+                owner = access.target(person) or {}
+                if local and not owner.get('is_self'):
+                    raise SignatureManagementError('无法核验本人签名身份，请刷新后重试。', 403)
+                direct_open_id = owner.get('open_id', '')
+                person = access.presentation(person)
             if source == "external":
                 real = self.directory()["resolved"].get(f"external:{rid}", person)
                 if rid in (real.get("historical_record_ids") or []):
@@ -828,7 +845,7 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         if not person or not person['is_self'] or not person['can_request']:
             raise SignatureManagementError(result['reason'] or '未能核验本人签名身份。', 409)
         return manager.send({'source': person['source'], 'record_id': person['record_id'],
-            'operation_id': uuid.uuid4().hex}, actor=actor, base_url=base_url, send_text=None, local=True)
+            'operation_id': uuid.uuid4().hex}, actor=actor, base_url=base_url, send_text=None, local=True, access=access)
     if operation == 'preview':
         access.require(payload.get('source'), payload.get('record_id'), 'view')
         return manager.preview(payload)
@@ -844,9 +861,8 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         if payload.get('recipient') and not access.allowed(person, 'edit'):
             raise SignatureManagementError('向上级发起的签名邀请只能发送给该人员本人，不能选择代收人。', 403)
         access.recipient(payload.get('recipient'))
-        target = access.target(person) or {}
         return manager.send(payload, actor=actor, base_url=base_url, send_text=send_text,
-                            direct_open_id=target.get('open_id', ''))
+                            access=access)
     if operation == "duplicates":
         data = manager.duplicates()
         data['groups'] = [{**group, 'people': [access.decorate(person) for person in group['people']]}

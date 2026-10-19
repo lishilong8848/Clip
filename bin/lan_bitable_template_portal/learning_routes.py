@@ -307,6 +307,9 @@ def install_learning_routes(app, controller, runtime):
             if action == "bootstrap":
                 scope = query.get("scope", "" if actor["is_admin"] else actor["scope"])
                 data = await asyncio.to_thread(current.bootstrap, scope, actor)
+            elif action == "profile" and request.query_params.get("view") == "participation":
+                from .learning_personal import participation
+                data = await asyncio.to_thread(participation, current, actor, query)
             elif action == "attachments":
                 data = await asyncio.to_thread(current.add_attachments, files, query, actor)
             elif action == "attachment":

@@ -91,6 +91,20 @@
     gap: 8px;
   }
   .metrics.v2-cabinet-status .v2-cabinet-rate { grid-row: 1; white-space: normal; }
-  .metrics.v2-cabinet-status .v2-cabinet-counts { grid-row: 2; }
+  .metrics.v2-cabinet-status .v2-cabinet-counts { grid-row: 2; flex-wrap: wrap; overflow-x: visible; gap: 4px 8px; }
   .metrics.v2-cabinet-status .v2-cabinet-count { min-height: 44px; }
+}
+@media (max-width: 760px) {
+  .cabinet-page > .heading { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .cabinet-page > .heading :deep(.v2-cabinet-building-switcher) { display: flex; flex: 0 1 auto; flex-wrap: nowrap; width: auto; gap: 6px; }
+  .cabinet-page > .heading :deep(.v2-cabinet-building-switcher > .n-button) { flex: none; width: auto; min-height: 44px; }
+  .cabinet-page > .heading :deep(.v2-cabinet-building-select) { flex: 0 1 120px; width: 120px; min-width: 100px; }
+  .cabinet-page > .heading > .actions { display: contents; }
+  .cabinet-page > .heading > .actions > button { margin: 0; min-height: 44px; padding: 8px; font-size: 13px; }
+}
+/* The shared component's later 1100px rule must not restore its desktop grid on phones. */
+@media (max-width: 640px) {
+  .cabinet-page .group-editor { grid-template-columns: minmax(0, 1fr); }
+  .cabinet-page .group-editor > b,
+  .cabinet-page .group-editor > button { grid-column: auto; grid-row: auto; margin-top: 0; }
 }

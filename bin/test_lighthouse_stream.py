@@ -88,6 +88,62 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
     async def finish(self):
         await asyncio.wait_for(asyncio.gather(*self.runtime.workers.values(), return_exceptions=True), 8)
 
+    async def test_failure_reply_is_actionable_without_internal_diagnostic_or_fake_success(self):
+        async def fail(*args):
+            raise AssistantError('未取得可靠业务依据，未执行业务，请重试或明确查询内容。', 502)
+        self.engine.answer = fail
+        ack = await self.submit('今天答题的都有哪些?')
+        await self.finish()
+        run = self.runtime.get_run(self.actor, ack['run_id'])
+        turn = (await self.runtime.conversation(self.actor))['turns'][-1]
+        self.assertEqual(run['status'], 'failed')
+        self.assertEqual(turn['status'], 'failed')
+        self.assertIn('完整的答题名单', turn['error'])
+        self.assertNotIn('诊断编号', turn['error'])
+        self.assertNotIn('未取得可靠业务依据', turn['error'])
+        self.assertEqual(turn['question'], '今天答题的都有哪些?')
+
+    async def test_empty_result_always_has_feedback_and_is_not_completed(self):
+        async def empty(*args):
+            return {'answer': '', 'sources': []}
+        self.engine.answer = empty
+        ack = await self.submit('帮我整理一下')
+        await self.finish()
+        run = self.runtime.get_run(self.actor, ack['run_id'])
+        self.assertEqual(run['status'], 'failed')
+        self.assertTrue(run['error'])
+        self.assertNotIn('诊断编号', run['error'])
+
+    async def test_compressed_history_is_not_sent_again_with_its_summary(self):
+        state = self.assistant._state(self.actor)
+        state['turns'] = [{'operation_id': 'history_' + str(i), 'question': '原问题' + str(i),
+                          'answer': '历史回答' * 600, 'status': 'completed', 'scopes': ['D'], 'access_scopes': ['D']}
+                         for i in range(10)]
+        self.store.put_document('lighthouse_ai', self.assistant._key(self.actor), state)
+        await self.submit('继续')
+        await self.finish()
+        self.assertEqual(len(self.engine.calls[-1]['history']), 6)
+        saved = self.assistant._state(self.actor)
+        self.assertEqual(saved['context']['through'], 'history_3')
+        self.assertEqual(len(saved['turns']), 11)
+
+    async def test_learning_query_hint_never_crosses_feishu_topics(self):
+        query = {'from': '2026-10-19', 'to': '2026-10-19', 'scope': 'D'}
+        original = self.engine.answer
+        async def answer(*args):
+            return {**await original(*args), 'learning_query': query}
+        self.engine.answer = answer
+        self.actor.update(channel='feishu:oc_Test', _feishu_topic={'id': 'topic-one', 'context': ''})
+        await self.submit('今天哪些人答题')
+        await self.finish()
+        await self.submit('有哪些?')
+        await self.finish()
+        self.assertEqual(self.engine.calls[-1]['turn']['_learning_followup_query'], query)
+        self.actor['_feishu_topic'] = {'id': 'topic-two', 'context': ''}
+        await self.submit('有哪些?')
+        await self.finish()
+        self.assertIsNone(self.engine.calls[-1]['turn']['_learning_followup_query'])
+
     async def test_default_scope_is_actor_scope_and_wire_is_sdk_stream(self):
         ack = await self.submit("你好")
         await self.finish()
@@ -152,7 +208,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         replay = ''.join([chunk async for chunk in self.runtime.stream(self.actor, ack['run_id'], self.authorize)])
         self.assertIn('0123456789', replay)
 
-    async def test_long_answer_is_a_durable_file_on_web_and_feishu(self):
+    async def test_long_answer_is_inline_on_feishu_and_durable_file_on_web(self):
         text = '二分查找需要有序序列，每次将查找范围减半。\n' * 250
         async def answer(*args): return {'answer': text, 'sources': []}
         self.engine.answer = answer
@@ -165,6 +221,10 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
                 conversation = await self.runtime.conversation(self.actor)
                 turn = conversation['turns'][-1]
                 self.assertEqual(turn['status'], 'completed', turn.get('error'))
+                if channel:
+                    self.assertEqual(turn['answer'], text)
+                    self.assertFalse(turn.get('output_files'))
+                    continue
                 self.assertLess(len(turn['answer']), 200)
                 output = turn['output_files'][0]
                 self.assertEqual(Path(self.portal.files.get(self.actor, output['id'])['path']).read_text(encoding='utf-8'), text)
@@ -172,6 +232,27 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(input_file['id'], saved['file_ids'])
                 self.assertIn(output['id'], saved['file_ids'])
                 self.assertEqual((await self.runtime.conversation(self.actor))['turns'][-1]['output_files'], turn['output_files'])
+
+    async def test_recovery_reads_exact_archived_turn_without_other_accounts_or_cleared_history(self):
+        operation = 'feishu_' + 'a' * 40
+        state = self.assistant._state(self.actor)
+        turn = {'operation_id': operation, 'answer': 'Original final answer', 'status': 'completed',
+                'scopes': self.actor['scopes'], 'access_scopes': self.actor['scopes']}
+        self.store.put_document('lighthouse_messages', state['id'] + ':' + operation, turn)
+        result = await self.runtime.conversation(self.actor, operation=operation)
+        self.assertEqual(result['turns'], [turn])
+        other = {**self.actor, 'id': 'ou_Other'}
+        self.assertEqual((await self.runtime.conversation(other, operation=operation))['turns'], [])
+        self.assistant.clear(self.actor)
+        self.assertEqual((await self.runtime.conversation(self.actor, operation=operation))['turns'], [])
+
+    async def test_recovery_of_archived_answer_rechecks_permissions(self):
+        operation = 'feishu_' + 'b' * 40
+        state = self.assistant._state(self.actor)
+        self.store.put_document('lighthouse_messages', state['id'] + ':' + operation,
+            {'operation_id': operation, 'status': 'completed', 'answer': 'Hidden', 'scopes': ['UNAUTHORIZED']})
+        with self.assertRaises(AssistantError):
+            await self.runtime.conversation(self.actor, operation=operation)
 
     async def test_generated_file_is_checkpointed_before_later_model_failure_or_stop(self):
         for outcome in ('failure', 'stop'):
@@ -1123,7 +1204,8 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         turn = (await self.runtime.conversation(self.actor))["turns"][-1]
         self.assertEqual(turn["status"], "failed")
         self.assertEqual(turn["error_code"], "query_adapter")
-        self.assertIn(ack["run_id"][:8], turn["error"])
+        self.assertNotIn(ack["run_id"][:8], turn["error"])
+        self.assertIn(ack['run_id'], '\n'.join(log.output))
         self.assertNotIn("must-not-appear", "\n".join(log.output) + turn["error"])
         from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
         for exc, expected in ((UnexpectedModelBehavior("bad"), "model_protocol"), (UsageLimitExceeded("too many"), "model_protocol"), (TimeoutError(), "timeout")):

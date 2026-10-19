@@ -1254,6 +1254,14 @@ class PortalError(RuntimeError):
     pass
 
 
+class NoticeSourcePending(PortalError):
+    """The target is terminal, but the source has not confirmed that same end."""
+
+
+class NoticeSourceSuperseded(PortalError):
+    """A saved end belongs to a different source period; never overwrite it."""
+
+
 class PortalNoticePhotoRequiredError(PortalError):
     status_code = 422
     error_code = "notice_photo_required"
@@ -1302,12 +1310,13 @@ class FieldMeta:
 def send_text_to_open_ids(
     text: str,
     open_ids: list[str],
+    *, message_uuid: str = "",
 ) -> tuple[bool, str, list[dict[str, Any]]]:
     from upload_event_module.services.robot_webhook import (
         send_text_to_open_ids as send_impl,
     )
 
-    return send_impl(text, open_ids)
+    return send_impl(text, open_ids, message_uuid=message_uuid) if message_uuid else send_impl(text, open_ids)
 
 
 def send_interactive_to_open_ids(
@@ -22169,6 +22178,18 @@ class MaintenancePortalService(RepairOperationsMixin):
             return False
         return any(token in status for token in ("已完成", "已结束", "正常结束", "延期结束", "延迟结束", "闭环"))
 
+    def notice_source_period_snapshot(self, payload: dict, *, use_local: bool = False) -> dict:
+        source_id = canonical_source_record_id(payload)
+        kind = str(payload.get('source_work_type') or payload.get('converted_from_work_type') or payload.get('work_type') or '')
+        fields = {}
+        if use_local and source_id:
+            records = self._records if kind == WORK_TYPE_MAINTENANCE else self._change_records if kind == WORK_TYPE_CHANGE else []
+            row = next((item for item in records if item.get('record_id') == source_id), {})
+            fields = row.get('display_fields') or {}
+        return {'source_record_id': source_id, 'source_work_type': kind,
+                'plan_month': re.sub(r'\s+', '', self._repair_management_plain_text(payload.get('plan_month') or fields.get('计划维护月份'))),
+                'maintenance_cycle': self._normalize_memory_cycle(payload.get('maintenance_cycle') or fields.get('维护周期'))}
+
     def sync_notice_source_ended_fields(
         self, payload: dict[str, Any], *, before_write: Callable[[], None] | None = None,
     ) -> bool:
@@ -22278,20 +22299,60 @@ class MaintenancePortalService(RepairOperationsMixin):
         current_target = canonical_target_record_id(identity)
         if current_target and current_target != target_record_id:
             raise PortalError("源记录关联的目标通告已变化，未使用旧任务回写，请核验关联。")
+        expected_period = payload.get('_source_period')
+        if not isinstance(expected_period, dict):
+            expected_period = self.notice_source_period_snapshot(payload)
+        current_period = self.notice_source_period_snapshot({
+            'source_record_id': source_record_id, 'work_type': source_work_type,
+            'plan_month': current_fields.get('计划维护月份'), 'maintenance_cycle': current_fields.get('维护周期')})
+        if expected_period.get('source_record_id') != source_record_id or expected_period.get('source_work_type') != source_work_type:
+            raise NoticeSourcePending('原源表周期快照与当前事项不对应，未回写，请核验原任务。')
+        for key, label in (('plan_month', '计划月份'), ('maintenance_cycle', '维护周期')):
+            expected, current = expected_period.get(key), current_period.get(key)
+            if expected and current and expected != current:
+                raise NoticeSourceSuperseded(f'源表{label}已变化，旧任务未回写新周期，请核验原任务。')
+            if bool(expected) != bool(current):
+                raise NoticeSourcePending(f'缺少可核验的原{label}快照或当前字段，未根据日期推算，源表暂未回写。')
+        # Formula/lookup statuses must never be written. Unknown metadata is
+        # read-only as well; an actual writable status uses its existing option.
+        meta_by_name = getattr(self, '_field_meta_by_name' if source_work_type == WORK_TYPE_MAINTENANCE else '_change_field_meta_by_name', {})
+        default_app = self.app_token if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_SOURCE_APP_TOKEN
+        default_table = self.table_id if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_SOURCE_TABLE_ID
+        if (app_token, table_id) != (default_app, default_table):
+            _, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
+        status_meta = meta_by_name.get(status_field)
+        writable_status = bool(status_meta and not self._field_meta_is_readonly(status_meta))
+        expected_status = '已结束' if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_PROGRESS_ENDED
+        def status_ended(fields):
+            return self._maintenance_status_is_completed({'display_fields': {
+                '维护实施状态': self._repair_management_plain_text(fields.get(status_field)).strip()}})
 
+        current_end = self._history_datetime_from_values(self._repair_management_plain_text(current_fields.get('实际结束时间')))
+        same_end = bool(current_end and int(current_end.timestamp() * 1000) == ended_at_ms)
+        end_meta = meta_by_name.get('实际结束时间')
+        if same_end or (end_meta and self._field_meta_is_readonly(end_meta)):
+            remote_fields.pop('实际结束时间', None)
+        if writable_status and not status_ended(current_fields):
+            if status_meta.option_names and expected_status not in status_meta.option_names:
+                raise PortalError('源表状态缺少对应结束选项，未猜测写入，请核对字段配置。')
+            remote_fields[status_field] = expected_status
+        else:
+            remote_fields.pop(status_field, None)
         if before_write is not None:
             before_write()
-        if not guard.get("mock_external"):
+        if not guard.get("mock_external") and remote_fields:
             self._patch_record_fields(
                 app_token=app_token,
                 table_id=table_id,
                 record_id=source_record_id,
                 fields=remote_fields,
             )
-            confirmed_fields = read_source_fields()
+        if not guard.get("mock_external"):
+            confirmed_fields = read_source_fields() if remote_fields else current_fields
             actual_end = self._repair_management_plain_text(confirmed_fields.get("实际结束时间"))
-            if not self._history_datetime_from_values(actual_end):
-                raise PortalError("源记录实际结束时间尚未读回，保留同步任务等待重试。")
+            confirmed_end = self._history_datetime_from_values(actual_end)
+            if not confirmed_end or int(confirmed_end.timestamp() * 1000) != ended_at_ms:
+                raise NoticeSourcePending("源记录本次实际结束时间尚未准确读回，保留同步任务等待核验。")
             local_fields = {
                 "实际结束时间": self._format_source_datetime(actual_end),
                 status_field: self._repair_management_plain_text(confirmed_fields[status_field]).strip(),
@@ -22310,6 +22371,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                 fields=local_fields,
             )
         self._touch_state_cache_version()
+        if not guard.get('mock_external') and not status_ended(confirmed_fields):
+            reason = ('源表状态字段元信息缺失，未猜测写入状态，请核对字段配置。' if not status_meta else
+                      '源表公式/只读状态尚未结束，后台仅回读，不重复写入结束时间。' if not writable_status else
+                      '源表可写状态尚未确认结束，保留同步核验。')
+            raise NoticeSourcePending(reason)
         return True
 
     def _change_record_building_codes(self, record: dict[str, Any]) -> list[str]:
@@ -23675,9 +23741,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         message_error = str(job.get("message_error") or "").strip()
         message_warning = str(job.get("message_warning") or "").strip()
         if success and message_error:
-            personal_message_warning = (
-                f"多维上传成功；个人消息发送失败，可复制通告文本：{message_error}"
-            )
+            personal_message_warning = str(job.get('message_delivery_warning') or
+                f"多维上传成功；个人消息发送失败，可复制通告文本：{message_error}")
             message_warning = "；".join(
                 dict.fromkeys(
                     item
@@ -42284,6 +42349,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
 
     def _base_job(self, request_payload: dict[str, Any]) -> dict[str, Any]:
+        from .notice_actions import trusted_notice_request
+        request_payload = trusted_notice_request(request_payload)
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
         now_ts = time.time()
         job = {
@@ -42322,6 +42389,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "upload_message": "",
             "prepared": {},
         }
+        if request_payload.get('_admin_impersonation_id'):
+            job['impersonation_binding_pending'] = True
         from .event_priority import blockers, is_event
         if request_payload.get("action") in {"start", "update", "end"} and not is_event(request_payload):
             self._set_event_wait(job, blockers(self._state_store))
@@ -42723,7 +42792,18 @@ class MaintenancePortalService(RepairOperationsMixin):
                     )
                 )
             )
-            if job.get("execution_origin") == "qt_local" and job.get("qt_completion_pending"):
+            impersonated = bool((job.get('request') or {}).get('_admin_impersonation_id'))
+            if impersonated and job.get('impersonation_audit_pending') and phase in {'success', 'failed', 'cancelled'}:
+                job['restart_recovered'] = True
+            elif impersonated and phase == 'cancelled':
+                job['restart_recovered'] = False
+            elif (impersonated and phase in {'accepted', 'queued', 'qt_queued', 'upload_waiting'}
+                    and not job.get('remote_intent') and not job.get('upload_started_at')
+                    and not job.get('message_started_at') and not job.get('message_sent')):
+                # This accepted task has not crossed a remote boundary; resume its own binding/audit.
+                job['phase'] = 'accepted'
+                job['restart_recovered'] = True
+            elif job.get("execution_origin") == "qt_local" and job.get("qt_completion_pending"):
                 job["restart_recovered"] = True
             elif job.get("execution_origin") == "qt_local" and phase not in {"success", "failed", "cancelled"}:
                 job["phase"] = "event_waiting" if phase == "event_waiting" else "accepted"
@@ -42792,6 +42872,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if len(jobs) > ACTION_JOB_MAX_RETAINED:
             terminal_phases = {"success", "failed"}
             protected = self._pending_job_dependencies(jobs)
+            protected.update(job_id for job_id, job in jobs.items() if self._impersonation_followups_pending(job))
             terminal_jobs = [
                 job
                 for job in jobs.values()
@@ -42817,7 +42898,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if isinstance(job, dict)
                 and (str(job.get("phase") or "")
                      in {"accepted", "event_waiting", "remote_intent", "remote_written", "qt_queued", "upload_waiting"}
-                     or job.get("execution_origin") == "qt_local" and job.get("qt_completion_pending"))
+                     or job.get("execution_origin") == "qt_local" and job.get("qt_completion_pending")
+                     or job.get('impersonation_audit_pending'))
                 and bool(job.get("restart_recovered"))
                 and str(job.get("job_id") or "")
             ]
@@ -42826,7 +42908,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         job_id = str((job or {}).get("job_id") or "").strip()
         if not job_id:
             return
-        if job.get("phase") == "event_waiting":
+        if job.get("phase") == "event_waiting" or job.get('impersonation_binding_pending'):
             self._state_store.put_action_job_with_queue(job)
         else:
             self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
@@ -42920,7 +43002,10 @@ class MaintenancePortalService(RepairOperationsMixin):
             job.update(depends_on_job_id=predecessor["job_id"], depends_on_phase=predecessor.get("phase") or "")
 
     def create_qt_event_wait_job(self, command: dict, events: list) -> dict:
-        data = copy.deepcopy(command.get("data_dict") or {})
+        from .notice_actions import trusted_notice_request, check_notice_job_owner
+        command = trusted_notice_request(command)
+        data = trusted_notice_request(command.get("data_dict") or {})
+        command['data_dict'] = data
         action = {"upload": "start", "upload_replace": "start"}.get(command.get("action_type"), command.get("action_type"))
         request = {**data, "action": action,
                    "work_type": self._work_type_for_notice_type(data.get("notice_type")),
@@ -42929,6 +43014,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         with self._jobs_lock:
             for job in self._jobs.values():
                 if request["operation_id"] and job.get("operation_id") == request["operation_id"]:
+                    check_notice_job_owner(job.get('request') or {}, request)
                     return copy.deepcopy(job)
             job = self._base_job(request)
             job["execution_origin"] = "qt_local"
@@ -42943,8 +43029,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             return copy.deepcopy(job)
 
     def resume_qt_event_wait_job(self, job_id: str, command: dict, events: list) -> dict:
+        from .notice_actions import trusted_notice_request, check_notice_job_owner
+        command = trusted_notice_request(command)
+        command['data_dict'] = trusted_notice_request(command.get('data_dict') or {})
         with self._jobs_lock:
             job = self._jobs[job_id]
+            check_notice_job_owner(job.get('request') or {}, command['data_dict'])
             if job.get("phase") != "failed":
                 return copy.deepcopy(job)
             previous = job.get("qt_request") or {}
@@ -43367,6 +43457,8 @@ class MaintenancePortalService(RepairOperationsMixin):
     def create_action_job(self, request_payload: dict[str, Any]) -> tuple[str, bool]:
         if not isinstance(request_payload, dict):
             raise PortalError("请求体格式错误。")
+        from .notice_actions import trusted_notice_request, check_notice_job_owner
+        request_payload = trusted_notice_request(request_payload)
         is_workbench_command = (
             str(request_payload.get("command_format") or "") == "notice_command"
         )
@@ -43385,7 +43477,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 scope=scope,
                 ongoing_items=ongoing_items,
             )
-        request_payload = normalize_notice_identity_payload(request_payload)
+        request_payload = trusted_notice_request(normalize_notice_identity_payload(request_payload))
         self.validate_manual_notice_type_consistency(request_payload)
         request_payload = self._normalize_request_notice_type(request_payload)
         action = str(request_payload.get("action") or "").strip().lower()
@@ -43425,6 +43517,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         validate_source_scope(self, request_payload)
         guard = getattr(self, '_notice_plan_guard', None)
         with self._jobs_lock:
+            for job in self._jobs.values():
+                if operation_id and job.get('operation_id') == operation_id:
+                    check_notice_job_owner(job.get('request') or {}, request_payload)
             existing_submission = any(operation_id and job.get('operation_id') == operation_id
                 and job.get('phase') not in {'failed', 'cancelled'} for job in self._jobs.values())
         if callable(guard) and not existing_submission:
@@ -43437,6 +43532,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if existing.get("superseded_by_job_id"):
                         raise PortalError("旧任务已被最新提交替代，不可重试；请查看最新提交。")
                     phase = str(existing.get("phase") or "")
+                    if phase == 'cancelled' and (existing.get('request') or {}).get('_admin_impersonation_id'):
+                        raise PortalError('原代办任务已停止，已发生结果保留；请核对原任务，不要用相同操作号重复发送。')
                     if phase in {
                         "accepted",
                         "queued",
@@ -43550,11 +43647,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if action == "start" and request_work_type == WORK_TYPE_EVENT and phase == "failed" and existing.get("error_category") == "network_timeout" and not existing.get("remote_written"):
                         raise PortalError("该通告上次飞书写入结果尚未确认，请核验或重试原任务，不能作为新通告再次新增。")
                     if phase == "failed" and request_work_type != WORK_TYPE_EVENT and not existing.get("superseded_by_job_id"):
+                        check_notice_job_owner(existing_request, request_payload)
                         if request_payload.get("planned_notice_version"):
                             return str(existing.get("job_id") or ""), False
                         replacements.append(existing)
                         continue
                     if action == "start" and phase in duplicate_start_phases:
+                        check_notice_job_owner(existing_request, request_payload)
                         return str(existing.get("job_id") or ""), False
                     if phase not in blocking_phase_order:
                         continue
@@ -43612,6 +43711,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             return
         terminal_phases = {"success", "failed"}
         protected = self._pending_job_dependencies(self._jobs)
+        protected.update(job_id for job_id, job in self._jobs.items() if self._impersonation_followups_pending(job))
         terminal_jobs = [
             job
             for job in self._jobs.values()
@@ -43630,7 +43730,28 @@ class MaintenancePortalService(RepairOperationsMixin):
         return {job["depends_on_job_id"] for job in jobs.values()
                 if job.get("phase") not in {"success", "failed", "cancelled"}
                 and job.get("depends_on_job_id")} | {
-                    job_id for job_id, job in jobs.items() if job.get("qt_completion_pending")}
+                    job_id for job_id, job in jobs.items()
+                    if job.get("qt_completion_pending") or job.get('impersonation_audit_pending')}
+
+    def _impersonation_followups_pending(self, job: dict) -> bool:
+        if job.get('_notice_personal_staging_pending') or job.get('source_sync_state') in {'awaiting_target', 'staging_pending'}:
+            return True
+        job_id = str(job.get('job_id') or '')
+        if job_id and any(self._state_store.has_outbox_event_payload(channel, key, job_id,
+                                                               statuses=('pending', 'leased', 'deferred'))
+                          for channel, key in (('notice_personal', 'job_id'), ('notice_source_finalize', '_source_job_id'))):
+            return True
+        if not (job.get('request') or {}).get('_admin_impersonation_id'):
+            return False
+        for channel in ('notice_source_finalize', 'cabinet_power_notice'):
+            if self._state_store.has_outbox_event_payload(channel, '_admin_notice_job_id', job_id,
+                                                         statuses=('pending', 'leased')):
+                return True
+        operation_id = ((job.get('qt_request') or {}).get('operation_id') if job.get('execution_origin') == 'qt_local'
+                        else 'notice_action:' + job_id)
+        return any(self._state_store.has_outbox_event_payload('notice_robot', 'operation_id', operation_id + suffix,
+                                                              statuses=('pending', 'leased'))
+                   for suffix in ('', ':paired-maintenance') if operation_id)
 
     def delete_action_job(self, job_id: str) -> bool:
         job_id = str(job_id or "").strip()
@@ -43638,6 +43759,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             return False
         with self._jobs_lock:
             if job_id in self._pending_job_dependencies(self._jobs):
+                return False
+            if self._impersonation_followups_pending(self._jobs.get(job_id) or {}):
                 return False
             existed = job_id in self._jobs
             self._jobs.pop(job_id, None)
@@ -43673,6 +43796,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if isinstance(job.get("request"), dict)
                 else {}
             )
+            from .notice_actions import trusted_notice_request, check_notice_job_owner
+            check_notice_job_owner(job.get('request') or {}, trusted_notice_request(request_payload))
             if not request_payload.get("action") or not request_payload.get("work_type"):
                 raise PortalError("任务缺少可重试请求内容，请重新发起通告。")
             job["request"] = copy.deepcopy(request_payload)
@@ -43747,6 +43872,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         candidates: list[tuple[float, str, str]] = []
         documents = self._state_store.list_documents(STATE_NS_ACTION_JOB)
         protected = self._pending_job_dependencies({row["key"]: row["payload"] for row in documents})
+        protected.update(row['key'] for row in documents if self._impersonation_followups_pending(row['payload']))
         for document in documents:
             job = document.get("payload") if isinstance(document, dict) else {}
             if not isinstance(job, dict):
@@ -43846,6 +43972,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             return {}
         keep_keys = (
             "_auth_open_id",
+            "_admin_impersonation_id",
+            "_topic_delegation_id",
             "scope",
             "action",
             "work_type",
@@ -43872,7 +44000,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         compacted = {
             "job_id": str(job.get("job_id") or job_id),
             "phase": "success",
-            **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt") if key in job},
+            **{key: copy.deepcopy(job[key]) for key in ('recipient_results', 'message_delivery_state', 'message_delivery_warning', 'source_sync_state', 'source_sync_warning', '_notice_personal_staging_pending', '_notice_personal_retry_after') if key in job},
+            **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt", "impersonation_binding_pending", "impersonation_audit_pending") if key in job},
             "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
             "accepted_at": float(job.get("accepted_at") or 0),
@@ -43949,7 +44078,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         compacted = {
             "job_id": str(job.get("job_id") or job_id),
             "phase": "failed",
-            **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt") if key in job},
+            **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt", "impersonation_binding_pending", "impersonation_audit_pending") if key in job},
             "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
             "accepted_at": float(job.get("accepted_at") or 0),
@@ -44214,6 +44343,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             prepared["planned_memory"] = pending
         else:
             prepared = self.prepare_workbench_action(request_payload, job_id=job_id)
+        prepared['_source_period'] = self.notice_source_period_snapshot(prepared, use_local=True)
         message_signature = self._action_message_signature(prepared)
         prepared["message_signature"] = message_signature
         prepared["message_sent"] = bool(job.get("message_sent")) and (
@@ -46238,12 +46368,50 @@ class MaintenancePortalService(RepairOperationsMixin):
             normalized["start_time"] = expected_time
         return normalized
 
-    def send_action_personal_message(self, prepared: dict[str, Any]) -> tuple[bool, str]:
+    def set_notice_followup(self, job_id: str, kind: str, state: str, warning: str) -> None:
+        job = self.get_job(job_id) or {}
+        if not job:
+            return
+        old = str(job.get(kind + '_warning') or '')
+        combined = str(job.get('message_warning') or '')
+        if old:
+            combined = combined.replace(old, '').strip('；')
+        combined = '；'.join(dict.fromkeys(item for item in (combined, warning) if item))
+        patch = {kind + '_state': state, kind + '_warning': warning, 'message_warning': combined}
+        if old and old in str(job.get('upload_message') or ''):
+            patch['upload_message'] = str(job['upload_message']).replace(old, warning).strip('；')
+        self.mark_job(job_id, **patch)
+
+    def _notice_personal_result(self, document: dict) -> tuple[bool, str]:
+        if not self.get_job(document['job_id']):
+            raise PortalError('原个人投递任务不存在，未重建通告或误报送达。')
+        results = document['results']
+        complete = bool(document['recipients']) and all(
+            results.get(recipient, {}).get('ok') is True and results.get(recipient, {}).get('message_id')
+            for recipient in document['recipients'])
+        unknown = any(results.get(recipient, {}).get('failure_kind') in {'posting', 'uncertain'}
+                      for recipient in document['recipients'])
+        state = 'sent' if complete else 'verification_required' if unknown else 'pending'
+        failed = [recipient for recipient in document['recipients'] if not results.get(recipient, {}).get('ok')]
+        reason = '；'.join(dict.fromkeys(str(results.get(recipient, {}).get('message') or '回执未完整返回') for recipient in failed))
+        warning = '' if complete else '个人消息：' + ('部分结果待核验，未盲目重发；' if unknown else '部分接收人未送达，后台仅重试明确失败者；') + reason
+        document.update(state=state, warning=warning, next_check_at=time.time() + (300 if unknown else 60))
+        self._state_store.put_document('notice_personal_delivery', document['job_id'], document)
+        self.mark_job(document['job_id'], recipient_results=[results[recipient] for recipient in document['recipients']],
+                      message_sent=complete, message_failed=not complete, message_failed_continue=not complete,
+                      message_error='' if complete else warning)
+        self.set_notice_followup(document['job_id'], 'message_delivery', state, warning)
+        if document.get('outbox_id'):
+            self._state_store.mark_outbox_event(document['outbox_id'], 'done' if complete else 'deferred',
+                                              error=warning, count_attempt=False)
+        return complete, warning or 'ok'
+
+    def send_action_personal_message(self, prepared: dict[str, Any], *, recipient_limit: int | None = None) -> tuple[bool, str]:
         if (prepared or {}).get("skip_personal_message"):
             return True, "无需发送个人消息"
         prepared = self._synchronize_prepared_notice_text(prepared)
         text = str((prepared or {}).get("text") or "").strip()
-        recipients = list(prepared.get("recipients") or [])
+        recipients = list(dict.fromkeys(str(value or '').strip() for value in prepared.get('recipients', []) if str(value or '').strip()))
         if not text:
             return False, "通告文本为空。"
         if not recipients:
@@ -46251,55 +46419,116 @@ class MaintenancePortalService(RepairOperationsMixin):
         job_id = str((prepared or {}).get("job_id") or "")
         message_signature = str((prepared or {}).get("message_signature") or "")
         job = self.get_job(job_id) or {}
+        guard = external_real_write_guard()
+        if guard['mock_external']:
+            self.mark_job(job_id, recipient_results=[{'open_id': recipient, 'ok': True, 'message': 'mock external send skipped'} for recipient in recipients])
+            return True, 'mock external send skipped'
+        if not guard['real_write_allowed']:
+            return False, str(guard['reason'] or '真实外部写入未确认。')
+        if not job_id:
+            return False, '缺少原通告任务编号，未发送个人消息。'
+        if not job:
+            return False, '原通告任务不存在，未发送个人消息。'
+        owner = uuid.uuid4().hex
+        acquired, _ = self._state_store.acquire_notice_operation_lock('notice_personal:' + job_id,
+            owner=owner, action='personal_delivery', ttl_seconds=300)
+        if not acquired:
+            return False, '个人消息：原投递任务正在处理，未重复发送。'
+        try:
+            result = self._send_notice_personal_locked(prepared, text, recipients, message_signature, job, owner, recipient_limit=recipient_limit)
+            if job.get('_notice_personal_staging_pending'):
+                self.mark_job(job_id, _notice_personal_staging_pending=None)
+            return result
+        except Exception:
+            saved = self._state_store.get_document('notice_personal_delivery', job_id)
+            if not saved:
+                self.mark_job(job_id, _notice_personal_staging_pending={
+                    'job_id': job_id, 'text': text, 'recipients': recipients, 'signature': message_signature,
+                    'next_check_at': time.time() + 60,
+                    'request': {**self._compact_job_request(job.get('request') or {}),
+                        **{key: job['request'][key] for key in ('_topic_delegation_id',) if key in (job.get('request') or {})}}})
+            self.set_notice_followup(job_id, 'message_delivery', 'verification_required' if saved else 'pending',
+                '个人消息：投递记录暂未完整保存，后台恢复原任务；未重复执行通告上传。')
+            raise
+        finally:
+            self._state_store.release_notice_operation_lock('notice_personal:' + job_id, owner)
+
+    def _send_notice_personal_locked(self, prepared, text, recipients, signature, job, owner, *, recipient_limit=None):
+        from .feishu_delivery import PublicFeishuSender
+        job_id = str(prepared['job_id'])
+        fingerprint = hashlib.sha256(json.dumps([text, sorted(recipients)], ensure_ascii=False).encode()).hexdigest()
+        document = self._state_store.get_document('notice_personal_delivery', job_id)
         prior_results = []
-        if str(job.get("message_signature") or "") == message_signature:
+        if str(job.get("message_signature") or "") == signature:
             prior_results = [
                 item
                 for item in (job.get("recipient_results") or [])
                 if isinstance(item, dict)
             ]
-        succeeded = {
-            str(item.get("open_id") or "").strip()
-            for item in prior_results
-            if item.get("ok") and str(item.get("open_id") or "").strip()
-        }
-        pending_recipients = [
-            str(open_id or "").strip()
-            for open_id in recipients
-            if str(open_id or "").strip() and str(open_id or "").strip() not in succeeded
-        ]
-        if not pending_recipients:
-            self.mark_job(job_id, recipient_results=prior_results)
-            return True, "ok"
-        guard = external_real_write_guard()
-        if guard["mock_external"]:
-            new_results = [
-                {"open_id": open_id, "ok": True, "message": "mock external send skipped"}
-                for open_id in pending_recipients
-            ]
-            ok = True
-            message = "mock external send skipped"
-        elif not guard["real_write_allowed"]:
-            return False, str(guard["reason"] or "真实外部写入未确认。")
-        else:
-            ok, message, new_results = send_text_to_open_ids(text, pending_recipients)
-        by_open_id = {
-            str(item.get("open_id") or "").strip(): dict(item)
-            for item in prior_results
-            if str(item.get("open_id") or "").strip()
-        }
-        for item in new_results:
-            open_id = str(item.get("open_id") or "").strip()
-            if open_id:
-                by_open_id[open_id] = dict(item)
-        recipient_results = [by_open_id.get(str(open_id).strip()) for open_id in recipients]
-        recipient_results = [item for item in recipient_results if item]
-        ok = ok and all(bool(item.get("ok")) for item in recipient_results)
-        self.mark_job(
-            job_id,
-            recipient_results=recipient_results,
-        )
-        return ok, message
+        if document and document.get('fingerprint') != fingerprint:
+            raise PortalError('原个人投递任务的正文或接收人已变化，未重新发送。')
+        if not document:
+            prior = {item.get('open_id'): item for item in prior_results}
+            results = {}
+            for recipient in recipients:
+                receipt = prior.get(recipient, {})
+                confirmed = receipt.get('ok') is True and bool(receipt.get('message_id'))
+                definite = receipt.get('failure_kind') in {'not_sent', 'bot_unavailable', 'blocked', 'agent_required'}
+                uncertain = (bool(receipt) and not confirmed and not definite
+                             or job.get('message_delivery_uncertain') or job.get('message_sent'))
+                identity = str(receipt.get('message_uuid') or uuid.uuid5(uuid.NAMESPACE_URL,
+                    'clipflow:notice-personal:' + job_id + ':' + fingerprint + ':' + recipient))
+                results[recipient] = {**receipt, 'open_id': recipient, 'message_uuid': identity,
+                    'ok': confirmed, 'failure_kind': '' if confirmed else 'uncertain' if uncertain else 'not_sent',
+                    'message': receipt.get('message') or '尚未发送'}
+            document = {'job_id': job_id, 'fingerprint': fingerprint, 'text': text, 'recipients': recipients,
+                'signature': signature, 'created_at': time.time(), 'next_check_at': 0, 'state': 'pending',
+                'request': {**self._compact_job_request(job.get('request') or {}),
+                            **{key: job['request'][key] for key in ('_topic_delegation_id',) if key in (job.get('request') or {})}},
+                'results': results}
+        if not document.get('outbox_id'):
+            document['outbox_id'] = self._state_store.enqueue_outbox_event('notice_personal', {'job_id': job_id, 'idempotency_key': job_id},
+                documents={('notice_personal_delivery', job_id): document})
+        self._state_store.mark_outbox_event(document['outbox_id'], 'leased', count_attempt=False)
+        sent_count = 0
+        ordered = sorted(document['recipients'], key=lambda recipient: float(document['results'][recipient].get('attempted_at') or 0)) if recipient_limit else document['recipients']
+        for recipient in ordered:
+            result = document['results'][recipient]
+            if result.get('ok') is True:
+                continue
+            identity = result['message_uuid']
+            if result.get('failure_kind') in {'posting', 'uncertain'}:
+                receipt = self._state_store.get_document('feishu_public_delivery', PublicFeishuSender.route_key(recipient, 'open_id', identity)) or {}
+                if receipt.get('status') == 'sent' and (receipt.get('receipt') or {}).get('message_id'):
+                    result.update(receipt['receipt'], ok=True, failure_kind='', message='ok')
+                    self._state_store.put_document('notice_personal_delivery', job_id, document)
+                    continue
+                if receipt.get('status') != 'not_sent':
+                    result.update(ok=False, failure_kind='uncertain', message='原消息结果未确认，请核验原消息；未使用新UUID补发。')
+                    continue
+                result['failure_kind'] = 'not_sent'
+            if recipient_limit is not None and sent_count >= recipient_limit:
+                continue
+            if not self._state_store.renew_notice_operation_lock('notice_personal:' + job_id, owner):
+                raise PortalError('个人投递锁已失效，原任务保留，未重复发送。')
+            result.update(failure_kind='posting', ok=False, attempted_at=time.time())
+            self._state_store.put_document('notice_personal_delivery', job_id, document)
+            sent_count += 1
+            try:
+                sent, message, receipts = send_text_to_open_ids(text, [recipient], message_uuid=identity)
+            except Exception:
+                sent, message, receipts = False, '个人发送中断，结果待核验。', []
+            matches = [item for item in receipts if isinstance(item, dict) and item.get('open_id') == recipient]
+            returned = matches[0] if len(matches) == 1 else {}
+            if sent and returned.get('ok') is True and returned.get('message_id'):
+                result.update(returned, ok=True, failure_kind='', message='ok')
+            else:
+                definite = returned.get('failure_kind') in {'not_sent', 'bot_unavailable', 'blocked', 'agent_required'}
+                result.update(returned, ok=False, failure_kind='not_sent' if definite else 'uncertain',
+                              message=str(returned.get('message') or message or '完整回执未返回，结果待核验。'))
+            result['message_uuid'] = identity
+            self._state_store.put_document('notice_personal_delivery', job_id, document)
+        return self._notice_personal_result(document)
 
     def _validate_generated_item(
         self, item: dict[str, Any]

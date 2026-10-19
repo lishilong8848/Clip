@@ -11,7 +11,7 @@
       <header class="history-toolbar"><NButton :disabled="busy" @click="back"><ArrowLeft :size="16" />模板列表</NButton><span>{{selected.version?'V'+selected.revision:'新建模板'}} · {{selected.creator}} · {{date(selected.created)}}</span><NButton v-if="selected.version" type="primary" :disabled="busy||dirty||!selected.enabled" @click="reuse(selected.id)"><CopyPlus :size="16" />{{selecting?'选用并填写':'复用发布'}}</NButton></header>
       <NAlert v-if="selected.legacy" type="warning" :bordered="false">此历史任务未保存发布时的原始预填内容，目前只恢复字段与事项标题，请核对并补充预填内容。</NAlert>
       <NAlert v-if="selected.sync_status?.error" type="warning" :bordered="false">模板已保存在灯塔，飞书备份尚未完成：{{selected.sync_status.error}} <NButton text :disabled="busy" @click="retry">重试备份</NButton></NAlert>
-      <RiskInspectionFieldPicker v-if="baseMode" :library="fieldLibrary" :fields="form.fields" :loading="libraryLoading" :disabled="busy" :can-edit="canEditLibrary" :error="libraryError" @select="selectField" @remove="removeField" @required="(field,required)=>{if(!busy)field.required=required}" @add="editLibraryField()" @edit="editLibraryField" @delete="deleteLibraryField" @reload="loadFieldLibrary">
+      <RiskInspectionFieldPicker v-if="baseMode" :workspace-v2="workspaceV2" :library="fieldLibrary" :fields="form.fields" :loading="libraryLoading" :disabled="busy" :can-edit="canEditLibrary" :error="libraryError" @select="selectField" @remove="removeField" @required="(field,required)=>{if(!busy)field.required=required}" @add="editLibraryField()" @edit="editLibraryField" @delete="deleteLibraryField" @reload="loadFieldLibrary">
         <template #settings><div class="history-settings"><label><span>模板名称</span><NInput v-model:value="form.name" :maxlength="120" :disabled="busy" :input-props="{'aria-label':'基础模板名称'}" placeholder="输入基础模板名称" /></label><NSwitch v-model:value="form.enabled" :disabled="busy" aria-label="启用基础模板"><template #checked>启用</template><template #unchecked>停用</template></NSwitch></div></template>
         <template #prefill><details class="history-base-prefill"><summary>排查事项预填 · {{form.items.length}} 项</summary><div class="history-toolbar"><NButton size="small" :disabled="busy||form.items.length>=100" @click="form.items.push({title:'',values:{}})"><Plus :size="16" />添加事项</NButton></div><RiskInspectionSheet :fields="form.fields" v-model:items="form.items" history :disabled="busy" /></details><NAlert v-if="valueIssues.length" type="warning" :bordered="false">{{valueIssues.slice(0,3).join('；')}}</NAlert></template>
         <template #footer><span>{{!selected.version?'尚未生成模板':dirty?'有未保存修改':'模板已保存'}}</span><NButton type="primary" :disabled="saveDisabled" @click="confirmOpen=true">{{selected.version?'保存新版本':'生成基础模板'}}</NButton></template>
@@ -27,15 +27,15 @@
     </template>
     <NModal :show="confirmOpen" preset="dialog" :title="baseMode?'保存基础模板':'保存历史模板'" positive-text="确认保存" negative-text="取消" :loading="busy" :mask-closable="false" :closable="!busy" :close-on-esc="!busy" :negative-button-props="{disabled:busy}" @update:show="v=>{if(!busy)confirmOpen=v}" @positive-click="save"><NAlert v-if="error" type="error" :bordered="false" role="alert">{{error}}</NAlert><p>仅保存当前模板，不修改其它模板或已经发布的排查。停用后不能再次选用此模板。</p></NModal>
     <NModal :show="!!discard" preset="dialog" :title="discard?.title||'确认放弃修改'" :content="discard?.message" type="warning" :positive-text="discard?.positive||'放弃修改'" negative-text="继续编辑" :mask-closable="false" @positive-click="discardChanges" @negative-click="discard=null" @update:show="show=>{if(!show)discard=null}" />
-    <NModal :show="!!fieldDraft" preset="card" :title="fieldTarget==='library'?'字段库字段':'历史模板字段'" class="risk-history-field-modal" :mask-closable="false" :closable="!busy" :close-on-esc="!busy" @update:show="show=>{if(!show)closeField()}">
+    <NModal :show="!!fieldDraft" preset="card" :title="fieldTarget==='library'?'字段库字段':'历史模板字段'" class="risk-history-field-modal" :class="{'risk-v2-field-modal':workspaceV2}" :style="workspaceV2?fieldViewport:undefined" :mask-closable="false" :closable="!busy" :close-on-esc="!busy" @update:show="show=>{if(!show)closeField()}">
       <NAlert v-if="fieldError" type="error" :bordered="false">{{fieldError}}</NAlert>
-      <div v-if="fieldDraft" class="history-field-form"><label><span>字段名称</span><NInput v-model:value="fieldDraft.field_name" :maxlength="80" :disabled="busy" :input-props="{'aria-label':fieldTarget==='library'?'字段库名称':'历史字段名称'}" /></label><label><span>字段类型</span><NSelect v-model:value="fieldDraft.type" :disabled="busy||fieldDraft.is_primary||fieldDraft.role!=='input'" :options="typeOptions" :aria-label="fieldTarget==='library'?'字段库类型':'历史字段类型'" /></label><label><span>填写要求</span><div v-if="fieldDraft.role==='input'" class="history-required"><NSwitch v-model:value="fieldDraft.required" :disabled="busy" :aria-label="fieldTarget==='library'?'字段库是否必填':'历史字段是否必填'" /><span>{{fieldDraft.required?'必填':'不必填'}}</span></div><small v-else>由系统自动填写，无需设置</small></label><label v-if="[3,4].includes(fieldDraft.type)" class="wide"><span>选项，每行一个</span><NInput v-model:value="fieldDraft.optionsText" :disabled="busy" type="textarea" :autosize="{minRows:3,maxRows:6}" /></label></div>
+      <div v-if="fieldDraft" class="history-field-form"><label><span>字段名称</span><NInput v-model:value="fieldDraft.field_name" :maxlength="80" :disabled="busy" :input-props="{'aria-label':fieldTarget==='library'?'字段库名称':'历史字段名称'}" /></label><label><span>字段类型</span><NSelect v-model:value="fieldDraft.type" :to="workspaceV2?'body':undefined" :virtual-scroll="!workspaceV2" :menu-props="workspaceV2?{class:'risk-v2-field-menu'}:undefined" :disabled="busy||fieldDraft.is_primary||fieldDraft.role!=='input'" :options="typeOptions" :aria-label="fieldTarget==='library'?'字段库类型':'历史字段类型'" /></label><label><span>填写要求</span><div v-if="fieldDraft.role==='input'" class="history-required"><NSwitch v-model:value="fieldDraft.required" :disabled="busy" :aria-label="fieldTarget==='library'?'字段库是否必填':'历史字段是否必填'" /><span>{{fieldDraft.required?'必填':'不必填'}}</span></div><small v-else>由系统自动填写，无需设置</small></label><label v-if="[3,4].includes(fieldDraft.type)" class="wide"><span>选项，每行一个</span><NInput v-model:value="fieldDraft.optionsText" :disabled="busy" type="textarea" :autosize="{minRows:3,maxRows:6}" /></label></div>
       <template #footer><div class="history-toolbar"><NButton :disabled="busy" @click="closeField">取消</NButton><NButton type="primary" :loading="busy" :disabled="busy" @click="applyField">{{fieldTarget==='library'?'保存字段':'应用到当前草稿'}}</NButton></div></template>
     </NModal>
   </section>
 </template>
 <script setup lang="ts">
-import {computed,onBeforeUnmount,onMounted,reactive,ref,toRaw} from 'vue';
+import {computed,onBeforeUnmount,onMounted,reactive,ref,toRaw,watch} from 'vue';
 import {NAlert,NButton,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NSwitch,NTag} from 'naive-ui';
 import {ArrowLeft,CopyPlus,Pencil,Plus,Search} from 'lucide-vue-next';
 import {requestJson,type Dict} from '../api/client';
@@ -43,7 +43,7 @@ import RiskInspectionSheet from './RiskInspectionSheet.vue';
 import RiskInspectionFieldPicker from './RiskInspectionFieldPicker.vue';
 import {prefillIssues,riskTypeOptions} from './riskInspectionUi';
 const emit=defineEmits<{(e:'reuse',template:Dict):void;(e:'dirty',value:boolean):void}>();
-const props=withDefaults(defineProps<{kind?:'base'|'history';selecting?:boolean;canEditLibrary?:boolean}>(),{kind:'history',selecting:false,canEditLibrary:false});
+const props=withDefaults(defineProps<{kind?:'base'|'history';selecting?:boolean;canEditLibrary?:boolean;workspaceV2?:boolean}>(),{kind:'history',selecting:false,canEditLibrary:false,workspaceV2:false});
 const baseMode=computed(()=>props.kind==='base');
 const base='/api/risk-inspections/'+(props.kind==='base'?'base-templates':'templates'),rows=ref<Dict[]>([]),selected=ref<Dict|null>(null),search=ref(''),page=ref(1),total=ref(0),loading=ref(false),busy=ref(false),error=ref(''),message=ref(''),confirmOpen=ref(false);
 const form=reactive<Dict>({name:'',enabled:true,fields:[],items:[]});
@@ -52,6 +52,16 @@ const reusableFields=computed(()=>form.fields.filter((f:Dict)=>![5,17].includes(
 const valueIssues=computed(()=>prefillIssues(reusableFields.value,form.items));
 const saveDisabled=computed(()=>busy.value||!dirty.value||!form.name.trim()||!form.fields.length||form.fields.filter((f:Dict)=>f.is_primary).length!==1||form.fields.some((f:Dict)=>f.unsupported)||!baseMode.value&&!form.items.length||valueIssues.value.length>0||form.items.some((i:Dict)=>!i.title.trim()));
 const typeOptions=riskTypeOptions,fieldDraft=ref<Dict|null>(null),fieldError=ref(''),fieldOriginal=ref('');
+const fieldViewport=ref<Record<string,string>>({});
+// Keyboard/zoom can shrink only the visual viewport, leaving vh and the modal wrapper unchanged.
+watch(()=>props.workspaceV2&&!!fieldDraft.value,(open,_,cleanup)=>{
+ if(!open){fieldViewport.value={};return;}
+ const viewport=window.visualViewport;let frame=0;
+ const update=()=>{frame=0;fieldViewport.value={'--risk-field-height':(viewport?.height??window.innerHeight)+'px','--risk-field-width':(viewport?.width??window.innerWidth)+'px','--risk-field-top':(viewport?.offsetTop??0)+'px','--risk-field-left':(viewport?.offsetLeft??0)+'px'};};
+ const schedule=()=>{if(!frame)frame=requestAnimationFrame(update);};
+ update();viewport?.addEventListener('resize',schedule);viewport?.addEventListener('scroll',schedule);window.addEventListener('resize',schedule);
+ cleanup(()=>{cancelAnimationFrame(frame);viewport?.removeEventListener('resize',schedule);viewport?.removeEventListener('scroll',schedule);window.removeEventListener('resize',schedule);});
+},{flush:'post'});
 const fieldLibrary=ref<Dict|null>(null),libraryLoading=ref(false),libraryError=ref(''),fieldTarget=ref<'library'|'template'>('template');
 const fieldDirty=computed(()=>!!fieldDraft.value&&JSON.stringify(fieldDraft.value)!==fieldOriginal.value);
 let abort:AbortController|undefined,libraryAbort:AbortController|undefined,disposed=false;
@@ -101,7 +111,7 @@ function applyField(){
 }
 async function save(){if(busy.value||!selected.value)return false;busy.value=true;error.value='';try{const existing=!!selected.value.version;const data=await requestJson(base+(existing?'/'+selected.value.id:''),{method:existing?'PUT':'POST',body:JSON.stringify({...(existing?{version:selected.value.version}:{id:selected.value.id}),...form})});assign(data);message.value='模板已保存，已有排查不受影响。';confirmOpen.value=false;}catch(e:any){error.value=e.message;}finally{busy.value=false;}return false;}
 async function retry(){if(busy.value||!selected.value)return;busy.value=true;try{await requestJson(baseMode.value?base+'/'+selected.value.id+'/retry':'/api/risk-inspections/'+selected.value.source_release_id+'/retry',{method:'POST',body:JSON.stringify(baseMode.value?{}:{kind:'template_sync'})});message.value='已安排重试模板备份。';}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
-onMounted(()=>{if(baseMode.value&&!props.selecting)void create();else void load();window.addEventListener('beforeunload',unload);});
+onMounted(()=>{if(baseMode.value&&!props.selecting&&!props.workspaceV2)void create();else void load();window.addEventListener('beforeunload',unload);});
 onBeforeUnmount(()=>{disposed=true;abort?.abort();libraryAbort?.abort();window.removeEventListener('beforeunload',unload);});
 defineExpose({leaveAllowed});
 </script>
@@ -112,4 +122,17 @@ defineExpose({leaveAllowed});
 .history-field-form :deep(.n-switch){justify-self:start}
 .risk-library{display:grid;gap:14px;min-width:0}.history-toolbar,.history-settings,.history-footer{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.history-toolbar>.n-input{flex:1;min-width:160px}.history-toolbar>span{flex:1}.history-toolbar>strong{flex:1}.history-settings label{display:grid;gap:6px;flex:1}.history-settings{padding-block:6px}.history-list{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(min(100%,320px),1fr))}.history-list article{border:1px solid var(--border-color,#dce2e9);border-radius:8px;padding:14px;background:var(--card-color,#fff)}.history-list article>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.history-list strong{flex:1;overflow-wrap:anywhere}.history-list p,.history-list small,.history-footer>span{font-size:13px;color:var(--text-color-3,#667085)}.history-list footer{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}.history-schema,.history-item{border-top:1px solid var(--border-color,#dce2e9);padding-top:12px}.history-schema summary,.history-item summary{cursor:pointer;padding-bottom:12px}.history-field{display:grid;grid-template-columns:minmax(150px,1fr) 140px 70px 32px;gap:10px;align-items:center;padding-bottom:12px}.history-field small,.history-options{grid-column:1/-1}.history-options{display:grid;gap:6px}.history-item>details{margin-top:12px}.history-footer{justify-content:space-between;border-top:1px solid var(--border-color,#dce2e9);padding-top:12px}.history-footer>span{flex:1}@media(max-width:600px){.history-field{grid-template-columns:minmax(0,1fr) 120px 52px 28px;gap:6px}.risk-library :deep(.n-button){min-height:40px}.history-toolbar{gap:8px}.history-settings{align-items:end}.history-footer{position:sticky;bottom:0;background:var(--card-color,#fff);padding:12px 0}.history-footer>span{flex-basis:100%}}
 .history-schema-actions{display:flex;justify-content:flex-end;padding-top:10px}.history-field-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.history-field-form label{display:grid;gap:6px;min-width:0}.history-field-form .wide{grid-column:1/-1}:global(.risk-history-field-modal.n-modal){width:min(580px,calc(100vw - 24px));max-height:90dvh;overflow:auto}.history-field-form{margin-top:12px}.history-settings{gap:14px}.history-settings label>span{font-weight:600;font-size:13px}@media(max-width:600px){.history-field-form{grid-template-columns:1fr}:global(.workspace-v2 .history-footer){bottom:calc(68px + env(safe-area-inset-bottom))}}
+</style>
+<style>
+.workspace-v2 .risk-v2-field-modal.n-modal.n-card{overflow:hidden;display:flex;flex-direction:column;position:fixed;margin:0;box-sizing:border-box;top:calc(var(--risk-field-top,0px) + var(--risk-field-height,100dvh)*.5);left:calc(var(--risk-field-left,0px) + var(--risk-field-width,100vw)*.5);translate:-50% -50%;width:min(580px,calc(var(--risk-field-width,100vw) - 24px));max-width:calc(var(--risk-field-width,100vw) - 24px);max-height:calc(var(--risk-field-height,100dvh) - 24px)!important}
+.workspace-v2 .risk-v2-field-modal>.n-card-content{min-height:0;overflow:auto;overscroll-behavior:contain}
+.workspace-v2 .risk-v2-field-modal .history-field-form{margin-top:0}
+.workspace-v2 .risk-v2-field-modal .history-required{flex-wrap:wrap}
+.workspace-v2 .risk-v2-field-modal .n-card-header,.workspace-v2 .risk-v2-field-modal .n-card__footer{flex:none}
+.workspace-v2 .risk-v2-field-menu .n-base-select-option{min-height:40px}
+@media(max-width:600px){
+  .workspace-v2 .risk-v2-field-modal .history-field-form{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .workspace-v2 .risk-v2-field-modal .history-field-form>label:first-child{grid-column:1/-1}
+  .workspace-v2 .risk-v2-field-modal .n-base-selection,.workspace-v2 .risk-v2-field-modal .n-input,.workspace-v2 .risk-v2-field-menu .n-base-select-option{min-height:44px}
+}
 </style>

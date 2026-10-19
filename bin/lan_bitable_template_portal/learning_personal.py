@@ -1,13 +1,262 @@
 """Personal allocation and bounded local projections for the learning service."""
 import copy
 import datetime as dt
+import json
 import random
+import sqlite3
+import threading
 import time
 from collections import Counter, defaultdict
 from contextlib import closing
+from pathlib import Path
 
 from . import learning as core
 from .learning import BANKS, QUOTAS, SCOPES, LearningError, digest, stamp
+
+
+_PARTICIPATION_CACHE_GUARD = threading.Lock()
+_PARTICIPATION_CACHES = {}
+
+
+def _participation_readonly(path):
+    conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute('BEGIN')
+    return conn
+
+
+def _participation_schema(source):
+    schema = ['CREATE TABLE IF NOT EXISTS documents(kind TEXT,key TEXT,payload TEXT,revision INTEGER DEFAULT 1,dirty INTEGER DEFAULT 0,PRIMARY KEY(kind,key))']
+    for table in ('learning_usage', 'learning_results', 'learning_practice'):
+        sql = source.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if not sql:
+            raise LearningError('学练统计索引尚未就绪，不能确认统计。', 503)
+        schema.append(sql[0].replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS ', 1))
+    return schema
+
+
+def _participation_entity(kind, key, value):
+    """Allowlist statistics only; never persist questions, attachments or login fields."""
+    if not isinstance(value, dict) or value.get('id', key) != key:
+        raise ValueError('invalid learning entity')
+    if kind == 'person':
+        name, scopes = value.get('name') or '', value.get('scopes') or []
+        if not isinstance(name, str) or not isinstance(scopes, list):
+            raise ValueError('invalid person projection')
+        return {'id': key, 'name': name,
+                'scopes': [scope for scope in scopes if isinstance(scope, str) and scope in SCOPES]}
+    if kind == 'paper':
+        return {'id': key, 'person_id': value.get('person_id', ''), 'scope': value['scope'],
+            'date': value['date'], 'deleted_at': bool(value.get('deleted_at')),
+            'person': _participation_entity('person', value.get('person_id', ''),
+                {**(value.get('person') or {}), 'id': value.get('person_id', '')}),
+            'questions': [{'id': q['id'], 'family_id': q.get('family_id') or q['id'],
+                'bank': q['bank'], 'type': q['type'], 'stem': '', 'invalid': bool(q.get('invalid'))}
+                for q in value.get('questions', [])]}
+    def attempt(item):
+        submitted = item['submitted_at']
+        dt.datetime.fromisoformat(submitted)
+        if item.get('correct') not in (None, True, False):
+            raise ValueError('invalid grade')
+        return {'submitted_at': submitted, 'correct': item.get('correct'),
+                **({'operation_id': item['operation_id']} if item.get('operation_id') else {})}
+    return {'id': key, 'entries': {qid: {'attempt': attempt(entry['attempt']) if entry.get('attempt') else None,
+        'needs_review': bool(entry.get('needs_review')), 'practice': [attempt(item) for item in entry.get('practice', [])]}
+        for qid, entry in value.get('entries', {}).items() if entry.get('attempt')}}
+
+
+def _participation_put(conn, kind, key, value):
+    conn.execute('INSERT OR REPLACE INTO documents(kind,key,payload) VALUES(?,?,?)',
+                 (kind, key, json.dumps(value, ensure_ascii=False)))
+
+
+def _participation_name(service, conn, pid):
+    name = str((service._get('person', pid, conn) or {}).get('name') or '').strip()
+    if not name:
+        for row in conn.execute("SELECT payload FROM documents WHERE kind='paper' AND json_extract(payload,'$.person_id')=? ORDER BY json_extract(payload,'$.date') DESC,key DESC", (pid,)):
+            name = str((json.loads(row['payload']).get('person') or {}).get('name') or '').strip()
+            if name:
+                break
+    return name
+
+
+def _participation_cache(service, schema, *, missing_names, need_data, end):
+    """Single-flight read-through cache, separate from the business database/outbox."""
+    path = Path(service.root) / 'assistant-participation.sqlite3'
+    with _PARTICIPATION_CACHE_GUARD:
+        state = _PARTICIPATION_CACHES.setdefault(str(path.resolve()), {'lock': threading.Lock(), 'retry_at': 0})
+    with state['lock']:
+        if path.exists():
+            with closing(_participation_readonly(path)) as cached:
+                try:
+                    fetched = cached.execute("SELECT value FROM metadata WHERE key='fetched_at'").fetchone()
+                    if fetched:
+                        age = (core.now() - dt.datetime.fromisoformat(fetched[0])).total_seconds()
+                        if (0 <= age < 300 and fetched[0][:10] >= min(end, core.now().date().isoformat())
+                                or not need_data and all(_participation_name(service, cached, pid) for pid in missing_names)):
+                            return path
+                except (sqlite3.Error, ValueError, TypeError):
+                    pass
+        if time.monotonic() < state['retry_at']:
+            raise LearningError('学练只读补缺暂未完成，旧缓存已保留，请稍后重试；未按零人统计。', 503)
+        try:
+            entities = service.cloud.load_entities()
+            if not isinstance(entities, list) or not entities:
+                raise ValueError('incomplete learning snapshot')
+            projected, seen = [], set()
+            for item in entities:
+                kind, key = item['kind'], item['key']
+                if kind not in {'person', 'paper', 'record'}:
+                    continue
+                if not key or (kind, key) in seen:
+                    raise ValueError('duplicate learning entity')
+                seen.add((kind, key))
+                projected.append((kind, key, _participation_entity(kind, key, item['payload'])))
+            papers = {key: value for kind, key, value in projected if kind == 'paper'}
+            records = {key: value for kind, key, value in projected if kind == 'record'}
+            for key, record in records.items():
+                if set(record['entries']) - {question['id'] for question in (papers.get(key) or {}).get('questions', [])}:
+                    raise ValueError('answer snapshot lacks its paper or questions')
+            for kind, key, value in projected:
+                if kind == 'paper':
+                    answered = (records.get(key) or {}).get('entries', {})
+                    value['questions'] = [question for question in value['questions'] if question['id'] in answered]
+            with closing(sqlite3.connect(path, timeout=5)) as cached:
+                cached.row_factory = sqlite3.Row
+                with cached:
+                    for sql in schema:
+                        cached.execute(sql)
+                    cached.execute('CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT)')
+                    for table in ('documents', 'learning_usage', 'learning_results', 'learning_practice'):
+                        cached.execute('DELETE FROM ' + table)
+                    for kind, key, value in projected:
+                        _participation_put(cached, kind, key, value)
+                    for kind, key, value in projected:
+                        if kind == 'paper':
+                            service._index_paper(value, cached)
+                    cached.execute("INSERT OR REPLACE INTO metadata VALUES('fetched_at',?)", (core.now().isoformat(),))
+            state['retry_at'] = 0
+            return path
+        except Exception:
+            state['retry_at'] = time.monotonic() + 60
+            raise LearningError('学练只读补缺暂未完成，旧缓存已保留，请稍后重试；未按零人统计。', 503) from None
+
+
+def _participation_projection(service, source, cached, start, end, access):
+    """Overlay only relevant papers in RAM; local records/tombstones always win."""
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    try:
+        for sql in _participation_schema(source):
+            conn.execute(sql)
+        papers = set()
+        for db in (source, cached):
+            for table in ('learning_results', 'learning_practice'):
+                papers.update(row[0] for row in db.execute('SELECT DISTINCT paper_id FROM ' + table + ' WHERE day BETWEEN ? AND ?', (start, end)))
+        # An existing local answer index remains authoritative even if its paper document is absent.
+        local_ids = set()
+        for table in ('learning_results', 'learning_practice'):
+            for row in source.execute('SELECT * FROM ' + table + ' WHERE day BETWEEN ? AND ?', (start, end)):
+                local_ids.add(row['paper_id'])
+                conn.execute('INSERT INTO ' + table + ' VALUES(' + ','.join('?' for _ in row) + ')', tuple(row))
+        for identity in papers:
+            paper = service._get('paper', identity, source)
+            if paper is None and identity in local_ids:
+                continue
+            paper = paper if paper is not None else service._get('paper', identity, cached)
+            if not paper or access['scope'] and paper.get('scope') != access['scope'] or access['person_id'] and paper.get('person_id') != access['person_id']:
+                continue
+            record = service._get('record', identity, source)
+            record = record if record is not None else service._get('record', identity, cached)
+            if record is not None:
+                _participation_put(conn, 'record', identity, _participation_entity('record', identity, record))
+            service._index_paper(_participation_entity('paper', identity, paper), conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def participation(service, actor, query):
+    """Complete local participation, by actual answer date, under native access."""
+    from .learning_engagement import weekly_stats
+
+    access = service._access(actor, scope=query.get('scope'), person_id=query.get('person_id'))
+    if access['scope'] and access['scope'] not in SCOPES:
+        raise LearningError('无效学练楼栋。')
+    today = core.now().astimezone(core.TZ).date()
+    monday = today - dt.timedelta(days=today.weekday())
+    period = query.get('period') or 'last_week'
+    if query.get('from') or query.get('to'):
+        try:
+            start, end = (dt.date.fromisoformat(str(query.get(key) or '')) for key in ('from', 'to'))
+        except ValueError:
+            raise LearningError('请同时提供有效的起止日期（YYYY-MM-DD）。') from None
+    elif period in {'last_week', 'week'}:
+        start = monday - dt.timedelta(days=7) if period == 'last_week' else monday
+        end = monday - dt.timedelta(days=1) if period == 'last_week' else today
+    else:
+        raise LearningError('请选择上周、本周或明确的起止日期。')
+    if end < start:
+        raise LearningError('结束日期不能早于开始日期。')
+    if (end - start).days > 366:
+        raise LearningError('单次统计最多366天，请缩小日期范围。')
+    def read(conn):
+        refresh = service._get('local', 'refresh', conn) or {}
+        ready = service._restored or bool(refresh.get('at'))
+        stats = weekly_stats(service, start.isoformat(), end.isoformat(), conn,
+                             access['scope'], person_id=access['person_id'])
+        names = {pid: _participation_name(service, conn, pid) for pid in stats}
+        return ready, refresh, stats, names
+    with closing(_participation_readonly(service.db)) as conn:
+        ready, refresh, stats, names = read(conn)
+        path = None
+        needs_cache = not ready or not all(names.values())
+        schema = _participation_schema(conn) if needs_cache else None
+    name_fill_failed = False
+    if needs_cache:
+        try:
+            path = _participation_cache(service, schema, missing_names=[pid for pid, name in names.items() if not name],
+                                        need_data=not ready, end=end.isoformat())
+        except LearningError:
+            if not ready:
+                raise
+            # Missing names must not discard a complete, authoritative local answer index.
+            with closing(_participation_readonly(service.db)) as conn:
+                ready, refresh, stats, names = read(conn)
+            if not ready:
+                raise
+            name_fill_failed = True
+    cached_at = ''
+    if path is not None:
+        # Re-read after I/O so newly submitted local answers take precedence over the cache.
+        with closing(_participation_readonly(service.db)) as conn, closing(_participation_readonly(path)) as cached:
+            ready, refresh, stats, names = read(conn)
+            cached_at = cached.execute("SELECT value FROM metadata WHERE key='fetched_at'").fetchone()[0]
+            if not ready:
+                with closing(_participation_projection(service, conn, cached, start.isoformat(), end.isoformat(), access)) as projection:
+                    stats = weekly_stats(service, start.isoformat(), end.isoformat(), projection,
+                                         access['scope'], person_id=access['person_id'])
+                    names = {pid: _participation_name(service, conn, pid) for pid in stats}
+            names = {pid: name or _participation_name(service, cached, pid) for pid, name in names.items()}
+    participants = [{key: item[key] for key in (
+        'person_id', 'scopes', 'answered', 'practice', 'choices', 'correct', 'wrong', 'interviews', 'accuracy')}
+        | {'name': names[pid], 'name_resolved': bool(names[pid]), 'answer_attempts': item['answered'] + item['practice']}
+        for pid, item in stats.items()]
+    participants.sort(key=lambda item: (item['scopes'], item['name'], item['person_id']))
+    totals = {key: sum(item[key] for item in participants)
+              for key in ('answered', 'practice', 'answer_attempts', 'choices', 'correct', 'wrong', 'interviews')}
+    totals['participants'] = len(participants)
+    totals['unresolved_names'] = sum(not item['name_resolved'] for item in participants)
+    totals['accuracy'] = round(totals['correct'] * 100 / totals['choices'], 1) if totals['choices'] else None
+    return {'kind': 'learning_participation', 'from': start.isoformat(), 'to': end.isoformat(),
+            'timezone': 'Asia/Shanghai', 'complete': True, 'truncated': False,
+            'names_complete': not totals['unresolved_names'],
+            'name_fill_failed': name_fill_failed,
+            'scope': access['scope'], 'self_only': not actor.get('is_admin') and not actor.get('shared_account'),
+            'summary': totals, 'participants': participants, 'updated_at': refresh.get('at') or cached_at,
+            'cache_updated_at': cached_at, 'data_source': 'local' if path is None else 'local_with_assistant_read_cache',
+            'basis': '本地优先；缺失资料使用飞书只读补取的助手隔离缓存。首次作答与重复练习分列，待答题单不计入；按实际提交日期统计，不按题单发布日期。'}
 
 
 def _directory_open_ids(directory):

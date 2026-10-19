@@ -172,6 +172,9 @@ def package_long_reply(files, actor, result):
     if len(text) <= LONG_REPLY:
         return result
     check_content(text)
+    if str(actor.get('channel') or '').startswith('feishu:'):
+        # Feishu delivers long answers in resumable message parts, not hidden attachments.
+        return result
     sources = result.get('sources') or []
     source_lines = ['\n\n## 参考资料'] if sources else []
     for source in sources:

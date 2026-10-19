@@ -645,7 +645,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_result_replies_to_original_message_without_private_copy(self):
         messenger = FeishuMessenger({})
-        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda:{"code":0})))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda:{"code":0, 'data': {'message_id': 'om_Receipt'}})))
         messenger.client = AsyncMock(return_value=client)
         messenger.headers = AsyncMock(return_value={})
         message = parse_message(event(chat_type="group"), "cliTest", "ouBot")
@@ -683,7 +683,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         for code in (230071, 230072, 99991400):
             messenger = FeishuMessenger({})
             client = SimpleNamespace(post=AsyncMock(side_effect=[SimpleNamespace(json=lambda: {'code': code}),
-                                                                 SimpleNamespace(json=lambda: {'code': 0})]))
+                                                                 SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})]))
             messenger.client = AsyncMock(return_value=client)
             messenger.headers = AsyncMock(return_value={})
             message = parse_message(event(), 'cliTest', 'ouBot')
@@ -703,12 +703,12 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_editable_reply_uses_real_callback_message_and_falls_back_only_on_rejection(self):
         messenger = FeishuMessenger({})
         client = SimpleNamespace(post=AsyncMock(side_effect=[
-            SimpleNamespace(json=lambda: {'code': 230001}), SimpleNamespace(json=lambda: {'code': 0})]))
+            SimpleNamespace(json=lambda: {'code': 230001}), SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})]))
         messenger.client = AsyncMock(return_value=client)
         messenger.headers = AsyncMock(return_value={})
         message = parse_message(event(chat_type='group'), 'cliTest', 'ouBot')
         message.update(message_id='crd_synthetic', reply_to_message_id='om_actualcard')
-        reply = {'text': '填写仍保留', 'card': {'schema': '2.0', 'body': {'elements': []}}}
+        reply = {'text': '填写仍保留', 'card': {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': '填写仍保留'}]}}}
         with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
             await messenger.send(message, reply)
         self.assertEqual(client.post.await_count, 2)
@@ -718,7 +718,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_parallel_group_answers_keep_original_message_and_retry_uuid(self):
         messenger = FeishuMessenger({})
-        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda:{"code":0})))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda:{"code":0, 'data': {'message_id': 'om_Receipt'}})))
         messenger.client = AsyncMock(return_value=client)
         messenger.headers = AsyncMock(return_value={})
         messages = [parse_message(event(owner=str(i), chat_type='group', message_id=str(i)), 'cliTest', 'ouBot') for i in range(2)]

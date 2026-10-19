@@ -162,6 +162,20 @@ class PortalAuthority:
         if service is None:
             raise AssistantError('画像学练资料暂未就绪。', 503)
         params = dict(operation.get('params') or {})
+        if params.get('view') == 'participation':
+            from .learning_personal import participation
+            scope = params.get('scope')
+            if (not execution.matches_operation(operation) or not execution.matches('GET', '/api/learning/profile')
+                    or 'learning' not in execution.modules or set(execution.scopes) != {scope}
+                    or set(params) - {'scope', 'from', 'to', 'period', 'view'}
+                    or operation.get('body') or operation.get('files')):
+                raise AssistantError('学练参与统计与原话题授权范围不一致，未查询。', 403)
+            # Scope-only projection through the native read-only building guard, never personal history.
+            data = participation(service, {'id': execution.operator, 'shared_account': True, 'scope': scope}, params)
+            data.update(read_only=True, aggregate_only=True)
+            execution.audit('read')
+            return {'ok': True, 'status': 200, 'data': data, '_raw': data,
+                    'api_id': operation['api_id'], 'truncated': False}
         today = dt.date.today()
         dates = service._date_filters(params)
         first, last = dates.get('from') or (today - dt.timedelta(days=6)).isoformat(), dates.get('to') or today.isoformat()

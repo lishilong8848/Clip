@@ -785,6 +785,55 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(item['model_key'], response.text)
         self.assertNotIn('private-record-id', response.text)
 
+    async def test_context_rejection_retries_only_model_request_with_shorter_history(self):
+        item = await self.acquire('first')
+        item['run_id'] = 'original-run'
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            if len(bodies) == 1:
+                return httpx.Response(400, json={'error': {'code': 'context_length_exceeded'}})
+            return httpx.Response(200, json={'answer': 'fixture'})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        messages = [{'role': 'system', 'content': 'policy'}]
+        for i in range(8):
+            messages += [{'role': 'user', 'content': 'prior ' + str(i)}, {'role': 'assistant', 'content': 'answer' * 500}]
+        messages += [{'role': 'user', 'content': 'latest question'},
+                     {'role': 'assistant', 'tool_calls': [{'id': 'original-tool'}]},
+                     {'role': 'tool', 'tool_call_id': 'original-tool', 'content': 'original result'}]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'], 'messages': messages})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(bodies), 2)
+        self.assertLess(len(json.dumps(bodies[1])), len(json.dumps(bodies[0])))
+        self.assertEqual(bodies[1]['messages'][-3:], messages[-3:])
+        self.assertEqual(item['compaction_run_id'], 'original-run')
+
+    async def test_context_retry_rechecks_cancellation_and_never_retries_general_400(self):
+        for cancelled in (False, True):
+            item = await self.acquire('cancelled-' + str(cancelled))
+            calls = []
+            async def upstream(request):
+                calls.append(request)
+                if cancelled:
+                    item['busy'] = False
+                return httpx.Response(400, json={'error': {'code': 'context_length_exceeded' if cancelled else 'invalid_request'}})
+            if self.runtime.http:
+                await self.runtime.http.aclose()
+            self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+            app = FastAPI()
+            install_model_route(app, self.runtime)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+                response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'], 'messages': [
+                        {'role': 'user', 'content': 'old'}, {'role': 'assistant', 'content': 'answer' * 3000},
+                        {'role': 'user', 'content': 'current'}]})
+            self.assertEqual(response.status_code, 403 if cancelled else 400)
+            self.assertEqual(len(calls), 1)
+
     async def test_model_proxy_reports_rejected_images_without_provider_secrets(self):
         item = await self.acquire('first')
         code = 400

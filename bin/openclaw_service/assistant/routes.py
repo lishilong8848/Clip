@@ -458,7 +458,7 @@ def install_assistant_routes(app, host):
                     current_streams = await ready_streams()
                     warm_current(current_streams, actor)
                     stamp = await asyncio.to_thread(current.conversation_stamp, actor)
-                    data = await current_streams.conversation(actor)
+                    data = await current_streams.conversation(actor, operation=request.query_params.get('operation_id'))
                     if agent is not None:
                         refreshed = False
                         for turn in data.get("turns", []):
@@ -467,7 +467,7 @@ def install_assistant_routes(app, host):
                                 await agent.refresh(actor, plan, request)
                                 refreshed = True
                         if refreshed:
-                            data = await current_streams.conversation(actor)
+                            data = await current_streams.conversation(actor, operation=request.query_params.get('operation_id'))
                     data['sync_stamp'] = stamp
                     return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
                 if request.method == "DELETE":

@@ -985,7 +985,7 @@ class PortalAgent:
         data = result.get("data")
         summary = {key: result.get(key) for key in ("ok", "status", "error", "truncated", "api_id", "query_ref", "scope_warning")}
         if isinstance(data, dict):
-            summary["data"] = {k: v for k, v in data.items() if k in {"total", "count", "page", "page_size", "stats", "counts", "summary", "status"}}
+            summary["data"] = {k: v for k, v in data.items() if k in {"total", "count", "page", "page_size", "stats", "counts", "summary", "status", "kind", "from", "to", "complete", "names_complete", "updated_at"}}
         return safe_data(summary)
 
     @staticmethod
@@ -2044,6 +2044,32 @@ class PortalAgent:
         else:
             self.assistant._save_state(actor, state)
 
+    async def learning_participation_answer(self, actor, query, request):
+        from .lighthouse_sources import collect_learning_participation, learning_participation_reply
+
+        async def invoke(operation):
+            return await self._invoke(actor, operation, request)
+
+        data = await collect_learning_participation(actor, query, invoke)
+        return {'answer': learning_participation_reply(data), 'learning_query': dict(query), 'sources': [{
+            'number': 1, 'title': '学练实际答题参与统计', 'url': data['url'],
+            'scopes': data['scopes'], 'available': True, 'data': safe_data(data, list_limit=None),
+        }]}
+
+    async def _answer_learning_participation(self, actor, state, turn, query, request):
+        try:
+            result = await self.learning_participation_answer(actor, query, request)
+            turn.update(**result, status='completed', model_name='灯塔业务查询')
+        except AssistantError as exc:
+            turn.update(status='failed', error=str(exc))
+            raise
+        except Exception:
+            turn.update(status='failed', error='学练参与查询未完成，原问题已保留。')
+            raise AssistantError(turn['error'], 503) from None
+        finally:
+            await asyncio.to_thread(self._save_chat, actor, state, finish=True)
+        return self.assistant.conversation(actor)
+
     async def _answer_pending(self, actor, state, turn, question, request):
         from .lighthouse_pending import pending_reply
         try:
@@ -2104,6 +2130,11 @@ class PortalAgent:
             assistant._reserve(actor)
         if PENDING_QUERY.search(question) and not file_ids and not WRITE_INTENT.search(question) and not re.search(r"为什么|原因|怎么|如何|建议|删除|修改|设置|why|how", question, re.I):
             return await self._answer_pending(actor, state, turn, question, request)
+        from .lighthouse_sources import learning_participation_request
+        previous_turn = next((t for t in reversed(state['turns']) if t is not turn and assistant._allowed(t, actor)), {})
+        participation = learning_participation_request(question, previous_turn.get('learning_query')) if not file_ids else None
+        if participation is not None:
+            return await self._answer_learning_participation(actor, state, turn, participation, request)
         sources, references, queries = [], {}, {}
         try:
             previous = [t for t in state["turns"] if t["operation_id"] != operation and t.get("answer") and assistant._allowed(t, actor)]
@@ -2277,7 +2308,13 @@ class PortalAgent:
                 return [project(item) for item in value]
             return value
         if isinstance(result.get("_raw"), (dict, list)):
-            result["data"] = safe_data(project(result["_raw"]))
+            raw = result['_raw']
+            complete_learning = (result.get('api_id') == 'GET /api/learning/profile'
+                                 and isinstance(raw, dict) and raw.get('kind') == 'learning_participation'
+                                 and raw.get('complete') is True and raw.get('truncated') is False
+                                 and isinstance(raw.get('participants'), list)
+                                 and len(raw['participants']) == (raw.get('summary') or {}).get('participants'))
+            result["data"] = safe_data(project(raw), list_limit=None if complete_learning else 40)
         return result
 
     def amend(self, actor, identity, payload):

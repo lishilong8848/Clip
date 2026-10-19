@@ -125,7 +125,7 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_part_rechecks_authority_and_keeps_sent_checkpoint(self):
         messenger = FeishuMessenger({})
-        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0})))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})))
         messenger.client = AsyncMock(return_value=client)
         messenger.headers = AsyncMock(return_value={})
         guard = AsyncMock(side_effect=[None, AssistantError('revoked', 403)])

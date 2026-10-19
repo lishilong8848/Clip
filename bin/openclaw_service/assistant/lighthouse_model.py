@@ -71,7 +71,8 @@ INSTRUCTIONS = GENERAL_INSTRUCTIONS + """
 当前问题缺少必要条件时直接在对话中询问，不给用户展示功能目录；已有明确上下文则不要重复询问。
 只能用注册工具查询业务，不编造数量、记录ID、接口、人员或状态。普通知识问题和模型身份问题不需要业务查询。
 仅问如何使用或查看某功能时，依据功能说明回答操作方法，不必读取当前业务记录；问实际数量、明细或某条记录状态时仍必须查询。
-查询楼栋已由服务器按登录权限与用户选择限定；不得扩大。统计、最新状态必须重新查询，历史摘要不是当前事实。
+查询楼栋已由服务器按登录权限与用户选择限定；不得扩大。统计、最新状态必须重新读取程序现有共享数据，历史聊天摘要不是当前事实；重新查询不等于强制刷新飞书。
+业务数据优先使用本地共享快照、完整统计和历史索引；完整有效的空结果就是零，不因无命中反复拉取。所需字段、日期范围或分页确实缺失时，先用read_query读已有完整结果，再用原只读接口或table_catalog/table_records补取明确缺失的表、字段和分页。多维表工具会复用助手专用缓存、合并相同补取；结果仍按本轮账号权限过滤。禁止为只读查询调用管理刷新、恢复、发布、写表或变更业务状态接口；缓存副本不能写回原业务。补取失败要说明范围和来源时间，不把未知说成零。
 未发检修=计划列表中未开始的检修；未结束检修=进行中检修通告；未完成维修单是另一类事项。
 已发送通告数量使用notice_sends工具，按实际发送时间统计成功的开始、更新、结束；不同通告条数和发送次数分别回答。工作台待办、计划时间、历史stats.started都不能替代发送总量。
 维修项目的跟进条数和当前进度用repair_followup_status读取原记录；先查明record_id，不用标题猜ID。追问某条时沿用资料中的原ID重新读取。
@@ -551,6 +552,19 @@ class LighthouseModel:
             answer = '\n'.join(lines)
             await emit('text', {'delta': answer})
             return {'answer': answer, 'sources': []}
+
+        from .lighthouse_sources import learning_participation_request
+        participation = (learning_participation_request(turn['question'], turn.get('_learning_followup_query'))
+                         or learning_participation_request(question))
+        if not warm_only and not turn.get('file_ids') and not turn.get('_private_request') and not private_identifier(question) and participation is not None:
+            current = await current_actor()
+            await emit('status', {'label': '正在查询完整学练参与记录'})
+            result = await self.portal.learning_participation_answer(current, participation, request)
+            latest = await current_actor()
+            if 'learning' not in latest.get('modules', []) or set(current.get('learning_scopes') or []) - set(latest.get('learning_scopes') or []):
+                raise AssistantError('学练查询权限已变化，未提供原统计结果。', 403)
+            await emit('text', {'delta': result['answer']})
+            return result
 
         selected_context = [item for item in turn.get('_command_context', [])
                             if item.get('name') != 'company-knowledge']

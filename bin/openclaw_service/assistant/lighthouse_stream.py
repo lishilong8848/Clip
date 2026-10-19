@@ -45,8 +45,12 @@ def failure_detail(exc):
 
 
 def public_turn(turn):
-    return {key: copy.deepcopy(value) for key, value in turn.items()
-            if not key.startswith("_") and key not in {"prompt", "file_ids", "submitted_file_ids"}}
+    result = {key: copy.deepcopy(value) for key, value in turn.items()
+              if not key.startswith("_") and key not in {"prompt", "file_ids", "submitted_file_ids"}}
+    if result.get('error'):
+        from .lighthouse_context import reply_failure
+        result['error'] = reply_failure(result['error'], result.get('error_code'), turn.get('question', ''))
+    return result
 
 
 class LighthouseStream:
@@ -210,6 +214,7 @@ class LighthouseStream:
             if old:
                 turn.setdefault("attempts", []).append({key: copy.deepcopy(old.get(key)) for key in ("run_id", "answer", "status", "error", "at")})
             turn.update(question=clean_question, prompt=prompt, file_ids=files, submitted_file_ids=payload.get("file_ids") or [], _private_request=private_request or bool(old and old.get("_private_request")),
+                        _learning_followup_query=copy.deepcopy(previous.get('learning_query')) if previous and refining and self.assistant._allowed(previous, actor) else None,
                         feishu_topic=topic_id,
                         commands=selected_commands, submitted_commands=copy.deepcopy(selections), _command_context=command_context,
                         attachments=attachments, preview_file=preview_file, output_files=[], downloads=[], status="pending", answer="", error="", error_code="", process=[], sources=[], scopes=scopes,
@@ -330,6 +335,7 @@ class LighthouseStream:
                 eligible = [t for t in run["_history"] if set(t.get("scopes", [])) <= set(run["scopes"])]
                 # Keep the archive; only compress what is sent to a model.
                 cutoff = next((n + 1 for n, t in enumerate(eligible) if t["operation_id"] == context.get("through")), 0)
+                model_history = eligible if getattr(self.engine, 'manages_context', False) else eligible[cutoff:]
                 older = eligible[cutoff:-6]
                 if not getattr(self.engine, "manages_context", False) and older and sum(len(t.get("question", "")) + len(t.get("answer", "")) for t in eligible[cutoff:]) > 12000:
                     await emit("status", {"label": "正在整理上下文"})
@@ -338,9 +344,13 @@ class LighthouseStream:
                         context = {"summary": summary, "through": older[-1]["operation_id"], "scopes": run["scopes"], "access_scopes": actor["scopes"],
                                    "compressed_turns": context.get("compressed_turns", 0) + len(older), "last_compressed_at": time.time()}
                         await asyncio.to_thread(self._save_context, actor, run, context)
+                        model_history = eligible[-6:]
                     except Exception:
                         await emit("status", {"label": "上下文整理暂未完成，保留原记录继续"})
-                result = await self.engine.answer(public_actor, run["_turn"], eligible, request, emit, authorize, context)
+                result = await self.engine.answer(public_actor, run["_turn"], model_history, request, emit, authorize, context)
+                if not str(result.get('answer') or run['answer'] or '').strip() and not (
+                        result.get('plan') or result.get('output_files') or run.get('output_files')):
+                    raise AssistantError('模型未返回可见回答。', 502, category='model_protocol')
                 current = await authorize()
                 if current["id"] != actor["id"] or set(actor["scopes"]) - set(current["scopes"]):
                     raise AssistantError("登录权限已变化，请重新提问。", 403)
@@ -361,7 +371,8 @@ class LighthouseStream:
             chunk(AbortChunk(reason="已停止当前回答"))
         except Exception as exc:
             error_code, error = failure_detail(exc)
-            error += "（诊断编号：" + run["id"][:8] + "）"
+            from .lighthouse_context import reply_failure
+            error = reply_failure(error, error_code, run['_turn'].get('prompt') or run['_turn']['question'])
             frames = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)[-6:]]
             logging.getLogger(__name__).warning("Assistant run failed: run=%s category=%s type=%s http_status=%s frames=%s",
                 run["id"], error_code, type(exc).__name__, getattr(exc, "status_code", None), ",".join(frames))
@@ -413,7 +424,9 @@ class LighthouseStream:
                     await asyncio.to_thread(self._save_run, run)
             return {"run_id": identity, "status": "stopped" if run["status"] in ACTIVE else run["status"]}
 
-    async def conversation(self, actor):
+    async def conversation(self, actor, *, operation=None):
+        if operation is not None and (not isinstance(operation, str) or not re.fullmatch(r'feishu_[a-f0-9]{40}', operation)):
+            raise AssistantError('消息编号无效。')
         state = await asyncio.to_thread(self._read, actor)
         identity = state.get("active_run_id")
         task = self.workers.get(actor["id"])
@@ -449,6 +462,13 @@ class LighthouseStream:
                     turn["answer"] = active.get("answer", "")
                     turn["process"] = copy.deepcopy(active.get("process", []))
         result["turns"] = [public_turn(t) for t in result["turns"]]
+        if operation is not None:
+            turn = next((t for t in result['turns'] if t.get('operation_id') == operation), None)
+            if turn is None:
+                turn = await asyncio.to_thread(self.store.get_document, MESSAGES, state['id'] + ':' + operation)
+            if turn and not self.assistant._allowed(turn, actor):
+                raise AssistantError('当前账号无权查看原回答。', 403)
+            result['turns'] = [public_turn(turn)] if turn else []
         return result
 
     def _clear_active(self, actor, identity):

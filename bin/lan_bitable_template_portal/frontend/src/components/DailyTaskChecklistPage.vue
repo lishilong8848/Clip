@@ -846,7 +846,12 @@ onBeforeUnmount(() => {
 
 .daily-header__actions {
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 9px;
+}
+.daily-header__actions > button { flex: none; white-space: nowrap; }
+@media (min-width: 1101px) {
+  .daily-header__actions > :deep(.vnet-select), .daily-header__actions > :deep(.v2-string-select) { flex: 0 1 140px; width: 140px; min-width: 100px; }
 }
 
 .btn,

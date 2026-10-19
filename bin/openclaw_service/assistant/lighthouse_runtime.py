@@ -634,19 +634,26 @@ class OpenClawRuntime:
                 message.get('role') == 'system' and isinstance(message.get('content'), str) and
                 message['content'].startswith('You are a context summarization assistant.') for message in messages):
             item['compaction_run_id'] = item['run_id']
-        try:
-            client = await self.model_client()
-            if self.closing or self.accounts.get(key) is not item or item.get('blocked') or not item.get('busy'):
+        from .lighthouse_context import compact_model_messages
+        compacted = compact_model_messages(payload)
+        if compacted is not payload and item.get('run_id'):
+            item['compaction_run_id'] = item['run_id']
+        payload = compacted
+        for attempt in range(2):
+            try:
+                client = await self.model_client()
+                if self.closing or self.accounts.get(key) is not item or item.get('blocked') or not item.get('busy'):
+                    return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
+                response = await client.send(client.build_request('POST', item['profile']['endpoint'], json=payload,
+                    headers={'Authorization': 'Bearer ' + item['model_key'], 'Cookie': ''}), stream=True)
+            except AssistantStartupError:
                 return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
-            response = await client.send(client.build_request('POST', item['profile']['endpoint'], json=payload,
-                headers={'Authorization': 'Bearer ' + item['model_key'], 'Cookie': ''}), stream=True)
-        except AssistantStartupError:
-            return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
-        except httpx.TimeoutException:
-            return JSONResponse({'error': model_provider_error(504)}, status_code=504)
-        except (httpx.HTTPError, OSError):
-            return JSONResponse({'error': model_provider_error(502)}, status_code=502)
-        if response.status_code != 200:
+            except httpx.TimeoutException:
+                return JSONResponse({'error': model_provider_error(504)}, status_code=504)
+            except (httpx.HTTPError, OSError):
+                return JSONResponse({'error': model_provider_error(502)}, status_code=502)
+            if response.status_code == 200:
+                break
             error_body = bytearray()
             try:
                 if response.status_code in {400, 413, 415, 422}:
@@ -660,7 +667,17 @@ class OpenClawRuntime:
                 error_body.clear()
             finally:
                 await response.aclose()
-            return JSONResponse({'error': model_provider_error(response.status_code, error_body)}, status_code=response.status_code)
+            error = model_provider_error(response.status_code, error_body)
+            # Only a rejected model request may be retried; never replay a tool or an accepted stream.
+            if attempt == 0 and error.get('code') == 'context_length_exceeded':
+                budget = max(2000, len(json.dumps(payload.get('messages', []), ensure_ascii=False)) // 2)
+                compacted = compact_model_messages(payload, budget)
+                if compacted is not payload:
+                    payload = compacted
+                    if item.get('run_id'):
+                        item['compaction_run_id'] = item['run_id']
+                    continue
+            return JSONResponse({'error': error}, status_code=response.status_code)
 
         async def chunks():
             size = 0

@@ -2360,7 +2360,7 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .result-empty.image-error button { min-height: 30px; border: 1px solid #e6c48f; border-radius: 8px; padding: 0 10px; background: #fff; color: #8b5312; font: inherit; font-size: 11px; font-weight: 850; cursor: pointer; }
 .result-empty.image-error button:hover { border-color: #ce9c50; background: #fff5e5; }
 
-.status-chip { display: inline-flex; border-radius: 999px; padding: 5px 8px; background: #fff7ed; color: #b45309 !important; font-size: 11px !important; font-weight: 900 !important; }
+.status-chip { display: inline-flex; flex: none; white-space: nowrap; border-radius: 999px; padding: 5px 8px; background: #fff7ed; color: #b45309 !important; font-size: 11px !important; font-weight: 900 !important; }
 .status-chip.submitted { background: #ecfdf5; color: #087f5b !important; }
 .status-chip.draft { background: #eef5ff; color: #1d5ebc !important; }
 

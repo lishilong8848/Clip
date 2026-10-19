@@ -202,6 +202,117 @@ class SignatureManagementTests(unittest.TestCase):
         return {"request_id": parse_qs(parsed.query)["request_id"][0], "token": parse_qs(parsed.fragment)["token"][0],
                 "signature_png": "data:image/png;base64," + base64.b64encode(signature_bytes(blank)).decode(), "confirmed_self": True}
 
+    def c_signer_access(self, actor='ou-admin'):
+        from lan_bitable_template_portal.signature_access import SignatureAccess
+        profiles = {
+            'ou-admin': {'level': 'L0', 'home_scope': 'H', 'scope_rules': list('ABCDEH') + ['110'],
+                         'role': 'admin', 'category': 'manager', 'can_manage_accounts': True},
+            'ou-managerC': {'level': 'L3', 'home_scope': 'C', 'scope_rules': ['C'],
+                            'role': 'building', 'category': 'supervisor', 'can_manage_accounts': True},
+            'ou-person': {'level': 'L4', 'home_scope': 'C', 'scope_rules': ['C'],
+                          'role': 'building', 'category': 'operator', 'can_manage_accounts': False},
+            'ou-relay': {'level': 'L4', 'home_scope': 'C', 'scope_rules': ['C'],
+                         'role': 'building', 'category': 'operator', 'can_manage_accounts': False},
+        }
+        for profile in profiles.values():
+            profile['modules'] = ['signatures', 'accounts']
+        hr = {oid: {'scopes': [profile['home_scope']]} for oid, profile in profiles.items()}
+        auth = SimpleNamespace(account_profile=lambda oid: copy.deepcopy(profiles.get(oid, {})),
+            directory_block_reason=lambda oid: '', directory_person=lambda oid: copy.deepcopy(hr.get(oid, {})))
+        self.s.add('recStaff', name='杨占山', open_id='ou-person', signature=False, building='D楼')
+        return SignatureAccess(self.m, auth, actor), profiles, hr
+
+    def access_send(self, access, operation_id, **changes):
+        return self.m.send({'source': 'staff', 'record_id': 'recStaff', 'operation_id': operation_id, **changes},
+            actor=access.actor, base_url='http://localhost:18766', send_text=self.sender, access=access)
+
+    def test_access_send_uses_signer_c_not_d_recipient_page_or_payload(self):
+        access, _, _ = self.c_signer_access()
+        self.m.people({})
+        before = copy.deepcopy(self.s.staff)
+        result = self.access_send(access, 'presentedC', recipient='duty:D', building='D楼', scope='D', name='伪造姓名')
+        self.assertEqual((result['name'], result['building']), ('杨占山', 'C楼'))
+        self.assertEqual(self.messages[-1][1], [self.s.d.BUILDING_OPEN_ID_MAP['D']])
+        self.assertIn('楼栋：C楼', self.messages[-1][0].splitlines())
+        self.assertNotIn('楼栋：D楼', self.messages[-1][0].splitlines())
+        self.assertIn('签名人员：杨占山', self.messages[-1][0].splitlines())
+        snapshot = self.store.get_document(REQUEST_NS, 'presentedC')
+        self.assertEqual((snapshot['source'], snapshot['record_id']), ('staff', 'recStaff'))
+        self.assertEqual(snapshot['person']['scope_text'], 'C楼')
+        self.assertEqual(self.s.staff, before)
+        self.assertEqual(self.s.uploads, 0)
+
+    def test_send_refresh_resets_old_target_profile_before_former_supervisor_authorization(self):
+        access, profiles, hr = self.c_signer_access('ou-managerC')
+        self.s.staff['recStaff']['楼栋'] = 'C楼'
+        access.bind(self.m.directory())
+        self.assertTrue(access.allowed(self.m.person('staff', 'recStaff'), 'request'))
+        self.s.staff['recStaff']['楼栋'] = 'D楼'
+        profiles['ou-person'].update(home_scope='D', scope_rules=['D'])
+        hr['ou-person']['scopes'] = ['D']
+        with self.assertRaises(SignatureManagementError) as error:
+            self.access_send(access, 'movedPerson')
+        self.assertEqual(error.exception.status, 403)
+        self.sender.assert_not_called()
+        self.assertEqual(self.store.list_documents(REQUEST_NS), [])
+
+    def test_send_refresh_rechecks_operator_modules_and_relay_scope(self):
+        access, profiles, hr = self.c_signer_access('ou-managerC')
+        self.s.add('recRelay', name='代收人', open_id='ou-relay', building='C楼')
+        access.bind(self.m.directory())
+        access.recipient('staff:recRelay')
+        profiles['ou-relay'].update(home_scope='D', scope_rules=['D'])
+        hr['ou-relay']['scopes'] = ['D']
+        self.s.staff['recRelay']['楼栋'] = 'D楼'
+        with self.assertRaises(SignatureManagementError) as error:
+            self.access_send(access, 'movedRelay', recipient='staff:recRelay')
+        self.assertEqual(error.exception.status, 403)
+        profiles['ou-managerC']['modules'] = []
+        with self.assertRaises(SignatureManagementError) as error:
+            self.access_send(access, 'operatorRevoked')
+        self.assertEqual(error.exception.status, 403)
+        self.sender.assert_not_called()
+        self.assertEqual(self.store.list_documents(REQUEST_NS), [])
+
+    def test_new_send_rejects_failed_staff_refresh_even_with_a_cached_person(self):
+        access, _, _ = self.c_signer_access()
+        access.bind(self.m.directory())
+        self.s.staff_error = True
+        with self.assertRaises(SignatureManagementError) as error:
+            self.access_send(access, 'failedStaffRefresh')
+        self.assertEqual(error.exception.status, 503)
+        self.sender.assert_not_called()
+        self.assertEqual(self.store.list_documents(REQUEST_NS), [])
+
+    def test_linked_temporary_send_rejects_failed_origin_directory(self):
+        access, _, _ = self.c_signer_access()
+        self.s.add('recLinked', source='external', origin='recStaff', name='杨占山', building='D楼')
+        access.bind(self.m.directory())
+        self.s.staff_error = True
+        with self.assertRaises(SignatureManagementError) as error:
+            self.m.send({'source': 'external', 'record_id': 'recLinked', 'recipient': 'duty:D',
+                         'operation_id': 'failedOriginRefresh'}, actor=access.actor, base_url='http://localhost:18766',
+                        send_text=self.sender, access=access)
+        self.assertEqual(error.exception.status, 503)
+        self.sender.assert_not_called()
+        self.assertEqual(self.store.list_documents(REQUEST_NS), [])
+
+    def test_sent_operation_retry_retains_original_c_snapshot_without_refresh_or_resend(self):
+        access, profiles, hr = self.c_signer_access()
+        first = self.access_send(access, 'stableSnapshot')
+        before = self.store.get_document(REQUEST_NS, 'stableSnapshot')
+        self.s.staff['recStaff']['楼栋'] = 'D楼'
+        profiles['ou-person'].update(home_scope='D', scope_rules=['D'])
+        hr['ou-person']['scopes'] = ['D']
+        self.s.staff_error = True
+        with patch.object(self.m, 'person', side_effect=AssertionError('Delivered retry must not reload personnel')):
+            repeated = self.access_send(access, 'stableSnapshot', building='D楼')
+        self.assertEqual(repeated, first)
+        self.assertEqual(repeated['building'], 'C楼')
+        self.assertEqual(self.store.get_document(REQUEST_NS, 'stableSnapshot'), before)
+        self.assertEqual(self.sender.call_count, 1)
+        self.assertEqual(self.s.uploads, 0)
+
     def test_name_alone_does_not_merge(self):
         self.s.add("recTemp", source="external")
         self.assertEqual(len(self.m.directory()["people"]), 2)
@@ -264,14 +375,18 @@ class SignatureManagementTests(unittest.TestCase):
         self.assertEqual(error.exception.status, 410)
         self.assertEqual(self.m.submit(payload)["status"], "completed")
 
-    def test_send_reuses_the_directory_already_loaded_by_the_page(self):
+    def test_send_refreshes_directory_even_when_the_page_already_loaded_it(self):
         self.m.people({})
+        self.s.staff['recStaff']['楼栋'] = 'C楼'
         staff_forces, external_forces = [], []
         staff_loader, external_loader = self.s._load_signature_people, self.s._load_external_signature_people
         with (patch.object(self.s, "_load_signature_people", side_effect=lambda force=False: (staff_forces.append(force), staff_loader(force))[1]),
               patch.object(self.s, "_load_external_signature_people", side_effect=lambda force=False: (external_forces.append(force), external_loader(force))[1])):
-            self.request()
-        self.assertFalse(any(staff_forces + external_forces))
+            result = self.request()
+        self.assertTrue(any(staff_forces))
+        self.assertTrue(any(external_forces))
+        self.assertEqual(result['building'], 'C楼')
+        self.assertIn('楼栋：C楼', self.messages[-1][0].splitlines())
 
     def test_save_and_duplicate_submission_upload_once(self):
         self.request()

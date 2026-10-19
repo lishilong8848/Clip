@@ -76,8 +76,21 @@ class SignatureAccess:
         subordinate = {**self.profile, 'own_scopes': [self.profile['home_scope']] if self.profile.get('home_scope') else []}
         return bool(superior and account_allowed(superior, subordinate, 'edit'))
 
-    def decorate(self, person):
+    def presentation(self, person):
         row = dict(person)
+        target = self.target(person)
+        if target:
+            lookup = getattr(self.auth, 'directory_person', None)
+            personnel = lookup(target['open_id']) if callable(lookup) else {}
+            scopes = personnel.get('scopes', []) if personnel else [target.get('home_scope')]
+            # A person's home is not the buildings they can administer or receive for.
+            scopes = dict.fromkeys(s for s in scopes if s in self.manager.d.BUILDING_OPEN_ID_MAP)
+            row['building'] = '、'.join('110站' if s == '110' else s + '楼' for s in scopes)
+            row['scope_text'] = row['building']
+        return row
+
+    def decorate(self, person):
+        row = self.presentation(person)
         target = self.target(person)
         row.update(is_self=bool(target and target['is_self']),
                    can_preview=bool(person.get('has_signature') and self.allowed(person, 'view')),

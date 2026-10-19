@@ -136,7 +136,7 @@ export function installFeedbackMotion() {
     if(offset>=pending.length)offset=0;
     const visible=pending.slice(offset,offset+3);
     let bottom=innerWidth<=760?82:20;
-    const actionFooter=[...document.querySelectorAll<HTMLElement>('.v2-notice-editor-footer,.v2-mop-workspace.preview-open .floating-upload-box')].find(el=>el.getClientRects().length)||null;
+    const actionFooter=[...document.querySelectorAll<HTMLElement>('.v2-notice-editor-footer,.v2-mop-workspace.preview-open .floating-upload-box,.account-editor .editor-footer,.drill-page .sticky-actions,.v2-learning-answerbar')].filter(el=>{const box=el.getBoundingClientRect();return box.width>0&&box.height>0&&box.top<innerHeight&&box.bottom>0;}).sort((a,b)=>a.getBoundingClientRect().top-b.getBoundingClientRect().top)[0]||null;
     if(actionFooter!==observedFooter){if(observedFooter)resize.unobserve(observedFooter);observedFooter=actionFooter;if(actionFooter)resize.observe(actionFooter);}
     if(actionFooter)bottom=Math.max(bottom,innerHeight-actionFooter.getBoundingClientRect().top+12);
     const more=pending.length>visible.length||recalled.length>0;

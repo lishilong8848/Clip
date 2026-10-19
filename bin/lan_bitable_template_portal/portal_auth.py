@@ -74,7 +74,8 @@ def topic_capability(operation, fallback_scopes=()):
     if len(modules) != 1 or modules & forbidden or '{' in path:
         raise PortalError('该操作不支持话题权限委派，请由有权限的本人办理。')
     if 'learning' in modules and (method != 'GET' or path != '/api/learning/profile'
-            or not params.get('scope') or set(params) - {'scope', 'from', 'to', 'period'} or body or operation.get('files')):
+            or not params.get('scope') or set(params) - {'scope', 'from', 'to', 'period', 'view'}
+            or 'view' in params and params['view'] != 'participation' or body or operation.get('files')):
         raise PortalError('话题仅可借权读取明确楼栋的学练汇总，不可读取或操作个人题目。')
     if method not in {'GET', 'HEAD'} and path not in {'/api/workbench-actions', '/api/ongoing-items/delete'}:
         raise PortalError('该异步业务尚无执行阶段委派复核，仅允许按本人原有权限办理。')
@@ -1628,6 +1629,10 @@ class PortalAuthManager:
             "login_method": "password" if session.get("source") == "personnel_password" else "feishu",
             **({"modules": ["cabinet"]} if is_cabinet_guest(session) else self.account_profile(open_id)),
             **({"personnel_record_id": user.get("personnel_record_id", "")} if session.get("source") == "personnel_password" else {}),
+            **({'impersonation': copy.deepcopy(session['impersonation']), 'login_method': 'impersonation',
+                'modules': [module for module in self.account_profile(open_id)['modules'] if module not in {'assistant', 'signatures', 'accounts'}],
+                'can_manage_accounts': False, 'can_view_accounts': False}
+               if session.get('source') == 'admin_impersonation' else {}),
         }
 
     def create_guest_session(self) -> str:

@@ -13873,6 +13873,11 @@ class LanPortalStateStore:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from .impersonation_context import CURRENT_IMPERSONATION, audit_metadata
+        grant = CURRENT_IMPERSONATION.get()
+        if grant is not None:
+            actor_open_id, actor_name = grant['operator_open_id'], grant['operator_name']
+            metadata = {**(metadata or {}), 'impersonation': audit_metadata(grant)}
         normalized_audit_id = self._text(audit_id) or uuid.uuid4().hex
         normalized_status = self._text(status).lower() or "unknown"
         now = time.time()

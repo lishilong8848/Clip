@@ -1,5 +1,6 @@
 """Bounded local-cache retrieval. No cloud calls, file traversal or SQL from AI."""
 import base64
+import datetime as dt
 import json
 import difflib
 import hashlib
@@ -34,7 +35,7 @@ MODULE_HELP = {
     "日常工作": "楼栋日常任务、工作报告、晨会和事项状态。",
     "计划收敛审查": "智航认证、核对台、规则配置、本地规则库和当前未结束检修通告核对。",
     "题库资料": "只读查询笔试、值班工程师和专业工程师题库，沿用原题目和答案可见权限；不办理画像学练流程。",
-    "画像学练": "只查询原权限内今日题单、未答数量、答题进度和历史资料；未发布与待完成分开说明，答题、发布和编辑继续使用原页面。",
+    "画像学练": "只查询原权限内今日题单、未答数量、答题进度和历史资料。查询上周/本周参与人员及真实答题数量，使用GET /api/learning/profile（view=participation，period=last_week/week或from/to），完整读取各授权楼栋后按person_id去重；history是含待答题单的分页列表，不可作为参与统计。首次答题与重复练习分列，不把待答当已答。答题、发布和编辑继续使用原页面。",
     "重保管理": "重保任务、按楼检查表、填写和提交情况、天气相关检查。",
     "人员与签名管理": "签名管理全部业务仅使用原页面，不在助手办理；其他业务表单可选择签名人员，签名图像、身份证、住址、联系方式和凭证不可提供。",
     "通告历史": "查询已结束通告及历史操作；活动事项状态以当前缓存为准。",
@@ -51,6 +52,136 @@ REPAIR = {"repair_projects": "维修单", "repair_followups": "维修跟进", "r
           **{"notice_target." + kind: label for kind, label in
              (("maintenance", "维保通告"), ("change", "变更通告"), ("polling", "轮巡通告"),
               ("adjust", "调整通告"), ("power", "上下电通告"))}}
+
+
+def learning_participation_request(question, previous=None, *, now=None):
+    """Only completed-answer participation queries, not study actions or paper lists."""
+    text = str(question or '')
+    if previous and re.fullmatch(r'(?:请)?(?:有哪些|都是哪些|分别是哪些|具体有哪些|列出来|列一下|名单呢)[?？。！!\s]*', text):
+        return dict(previous)
+    if not re.search(r'学练|答题|做题|考试', text) or not re.search(
+            r'哪些人|什么人|谁|参与人员|参加人员|人员参与|人员参加|人数|多少人|人员名单|答题统计|学练统计|学练汇总|学练周报|(?:答题|做题|考试)的(?:都)?有哪些', text):
+        return None
+    if re.search(r'未答|待答|没答|没有答|未做|没做|未完成|未提交|没有提交|未参与|没参与|未参加|没参加|发布|提醒|发送|删除|创建|修改|设置|导出', text):
+        return None
+    dates = re.findall(r'\d{4}-\d{2}-\d{2}|今天|今日|昨天|昨日|前天|上(?:一|个)?(?:周|星期)|本周|这周|这个星期', text)
+    last = dates[-1] if dates else ''
+    if re.fullmatch(r'\d{4}-\d{2}-\d{2}', last):
+        query = {'from': dates[-2] if len(dates) > 1 and re.fullmatch(r'\d{4}-\d{2}-\d{2}', dates[-2]) else last, 'to': last}
+    elif last in {'今天', '今日', '昨天', '昨日', '前天'}:
+        today = (now or dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))).date()
+        day = today - dt.timedelta(days={'昨天': 1, '昨日': 1, '前天': 2}.get(last, 0))
+        query = {'from': day.isoformat(), 'to': day.isoformat()}
+    elif re.fullmatch(r'上(?:一|个)?(?:周|星期)', last):
+        query = {'period': 'last_week'}
+    elif last in {'本周', '这周', '这个星期'}:
+        query = {'period': 'week'}
+    else:
+        return None
+    selected = codes(text)
+    query['scope'] = ','.join(sorted(selected)) if selected and selected != set(SCOPES) else 'ALL'
+    return query
+
+
+async def collect_learning_participation(actor, query, invoke):
+    """Read every authorized building; never derive totals from history samples."""
+    if 'learning' not in actor.get('modules', []):
+        raise AssistantError('当前账号尚未获授画像学练权限。', 403)
+    allowed = set(actor.get('scopes') or []) & set(actor.get('learning_scopes') or []) & set('ABCDEH')
+    if (actor.get('_feishu_topic') or {}).get('id'):
+        # Discovery only: PortalAuthority still issues and validates an exact TopicExecution per read.
+        for profile in actor.get('_topic_capabilities') or []:
+            if 'learning' not in profile.get('modules', []):
+                continue
+            candidate = set(profile.get('scopes') or [])
+            if profile.get('role') != 'admin':
+                candidate &= {profile.get('home_scope')} if profile.get('category') == 'duty' else set()
+            allowed |= candidate & set(actor.get('scopes') or []) & set('ABCDEH')
+    selected = str(query.get('scope') or 'ALL')
+    requested = codes(selected) if ',' not in selected else set(selected.split(','))
+    if not requested or selected != 'ALL' and requested - allowed:
+        raise AssistantError('无权查询所选楼栋的学练参与情况。', 403)
+    scopes = sorted(requested & allowed)
+    if not scopes:
+        raise AssistantError('当前账号没有可查询的学练楼栋。', 403)
+    reports, people = [], {}
+    for scope in scopes:
+        result = await invoke({'api_id': 'GET /api/learning/profile',
+                               'params': {**query, 'scope': scope, 'view': 'participation'}})
+        data = result.get('_raw', result.get('data'))
+        if not result.get('ok') or not isinstance(data, dict) or data.get('kind') != 'learning_participation' or data.get('complete') is not True or data.get('truncated') is not False:
+            raise AssistantError(scope + '楼学练参与资料未完整返回，暂不能确认完整名单和人数。', 503)
+        rows = data.get('participants')
+        if not isinstance(rows, list) or len(rows) != (data.get('summary') or {}).get('participants'):
+            raise AssistantError(scope + '楼学练参与名单与人数不一致，未生成统计。', 502)
+        if len({row.get('person_id') for row in rows}) != len(rows):
+            raise AssistantError(scope + '楼学练参与人员重复，未生成统计。', 502)
+        for key in ('answered', 'practice', 'answer_attempts', 'choices', 'correct', 'wrong', 'interviews'):
+            values = [row.get(key) for row in rows]
+            if any(type(value) is not int or value < 0 for value in values) or sum(values) != data['summary'].get(key):
+                raise AssistantError(scope + '楼学练题数与明细不一致，未生成统计。', 502)
+        if not data.get('self_only') and any(set(row.get('scopes') or []) - {scope} for row in rows):
+            raise AssistantError('学练统计返回了查询楼栋之外的数据，未提供。', 403)
+        if reports and (data.get('from'), data.get('to')) != (reports[0]['from'], reports[0]['to']):
+            raise AssistantError('学练查询跨越日期边界，请重新查询同一时间范围。', 409)
+        reports.append(data)
+        for row in rows:
+            pid = row.get('person_id')
+            if not pid:
+                raise AssistantError('答题人员标识缺失，暂不能准确去重。', 502)
+            old = people.get(pid)
+            if old is None:
+                people[pid] = {**row, 'scopes': list(row['scopes'])}
+            else:
+                for key in ('answered', 'practice', 'answer_attempts', 'choices', 'correct', 'wrong', 'interviews'):
+                    old[key] += row[key]
+                old['scopes'] = sorted(set(old['scopes']) | set(row['scopes']))
+                if row.get('name'):
+                    old['name'] = row['name']
+        # Native personal access already spans all of one's own historical buildings.
+        if data.get('self_only'):
+            break
+    participants = sorted(people.values(), key=lambda row: (row['scopes'], row['name'], row['person_id']))
+    totals = {key: sum(row[key] for row in participants)
+              for key in ('answered', 'practice', 'answer_attempts', 'choices', 'correct', 'wrong', 'interviews')}
+    totals.update(participants=len(participants), unresolved_names=sum(not row.get('name') for row in participants))
+    totals['accuracy'] = round(totals['correct'] * 100 / totals['choices'], 1) if totals['choices'] else None
+    for row in participants:
+        row['accuracy'] = round(row['correct'] * 100 / row['choices'], 1) if row['choices'] else None
+    cache_dates = sorted({report.get('cache_updated_at') for report in reports if report.get('cache_updated_at')})
+    return {**reports[0], 'participants': participants, 'summary': totals,
+            'names_complete': not totals['unresolved_names'],
+            'name_fill_failed': any(report.get('name_fill_failed') for report in reports),
+            'cache_updated_at': cache_dates[0] if cache_dates else '',
+            'data_source': 'local_with_assistant_read_cache' if cache_dates else 'local',
+            'scope': reports[0]['scope'] if len(reports) == 1 else '',
+            'scopes': scopes[:1] if reports[0].get('self_only') else scopes,
+            'url': '/learning?' + urlencode({key: reports[0][key] for key in ('from', 'to')})}
+
+
+def learning_participation_reply(data):
+    if data.get('complete') is not True or data.get('truncated') is not False:
+        raise AssistantError('学练资料尚未读取完整，未生成统计。', 503)
+    totals = data['summary']
+    if len(data['participants']) != totals['participants']:
+        raise AssistantError('参与名单与人数不一致，未生成统计。', 502)
+    audience = '本人' if data.get('self_only') else '、'.join(scope + '楼' for scope in data['scopes'])
+    lines = [f"**{data['from']} 至 {data['to']}（北京时间）**，{audience}：",
+             f"实际参与 **{totals['participants']} 人**；首次作答 **{totals['answered']} 题**，重复练习 **{totals['practice']} 题次**，合计 **{totals['answer_attempts']} 题次**。"]
+    if data['participants']:
+        lines += ['', '| 姓名 | 楼栋 | 首次答题 | 重复练习 |', '| --- | --- | ---: | ---: |']
+        for row in data['participants']:
+            name = re.sub(r'[|\r\n]', ' ', safe_text(row.get('name') or '姓名待核实'))
+            lines.append(f"| {name} | {'、'.join(row['scopes'])} | {row['answered']} | {row['practice']} |")
+    if totals['unresolved_names']:
+        lines += ['', f"其中 {totals['unresolved_names']} 人的姓名资料缺失，人数和题次已计入，但暂不能提供完整实名名单。"]
+    if data.get('name_fill_failed'):
+        lines += ['', '飞书只读补名暂未成功；以上人数、题数和已知姓名仍来自完整本地答题索引，未将缺姓名人员排除或按零人处理。']
+    origin = '本地已提交答题索引'
+    if data.get('cache_updated_at'):
+        origin += '与助手只读补缺缓存（缓存时间：' + data['cache_updated_at'] + '）'
+    lines += ['', '口径：每日及自主学练，按实际提交日期统计；待答题单不算参与，首次作答与重复练习分列。数据来自' + origin + '。[1]']
+    return '\n'.join(lines)
 
 
 def codes(value):
@@ -477,6 +608,15 @@ class LocalAssistantSources:
                 return []
             raise AssistantError("部分本地资料暂忙，未使用不完整数据回答，请稍后重试。", 503) from None
 
+    @staticmethod
+    def _can_read(actor, module, scopes):
+        found = set(scopes)
+        if not found or found - set(actor['scopes']) or module not in set(actor.get('modules') or []):
+            return False
+        profiles = actor.get('_topic_capabilities') or [actor]
+        return any(module in set(profile.get('modules') or []) and found <= set(profile.get('scopes') or [])
+                   for profile in profiles)
+
     def __call__(self, query, actor):
         if not is_business_query(query):
             return [], []
@@ -485,6 +625,12 @@ class LocalAssistantSources:
         if requested - allowed:
             raise AssistantError("当前账号无权查询问题中涉及的楼栋。", 403)
         scopes = sorted(requested or allowed)
+        if not scopes:
+            raise AssistantError("当前账号没有可查询的楼栋。", 403)
+        def has_module(module):
+            return any(self._can_read(actor, module, {scope}) for scope in scopes)
+        if not any(has_module(module) for module in actor.get('modules') or [] if module != 'assistant'):
+            return [], ["当前账号尚未获授可检索的业务模块权限。"]
         terms = query_terms(query)
         if PENDING_QUERY.search(query) and not re.search(r"为什么|原因|怎么|如何|建议|删除|修改|设置|why|how", query, re.I):
             return self._pending(query, actor, scopes, terms)
@@ -499,11 +645,17 @@ class LocalAssistantSources:
                     warnings.append(message)
                 return []
 
-        def add(label, payload, href, authoritative=None, shared=False, priority=0):
+        def add(label, payload, href, authoritative=None, shared=False, priority=0, module=None):
             if not isinstance(payload, dict):
                 return
             found = record_codes(payload) or set(authoritative or [])
-            if found - allowed or (not found and (not shared or scope_hint(payload))):
+            if found - allowed or (found and not found & set(scopes)) or (not found and (not shared or scope_hint(payload))):
+                return
+            from lan_bitable_template_portal.module_access import required_modules
+            from urllib.parse import parse_qs, urlsplit
+            url = urlsplit(href)
+            needed = {module} if module else required_modules(url.path, parse_qs(url.query).get('work_type', [''])[0])
+            if not any(self._can_read(actor, key, found) if found else has_module(key) for key in needed):
                 return
             if payload.get("deleted_at") or payload.get("status") in {"deleted", "已删除"}:
                 return
@@ -527,17 +679,24 @@ class LocalAssistantSources:
                     "(EXISTS (SELECT 1 FROM json_each(" + column + ") WHERE value IN (" + placeholders + "))"
                     + (" OR json_array_length(" + column + ")=0" if shared else "") + ")")
         # Only the active per-source plan snapshots, never stale historical snapshots.
+        notice_modules = sorted(module for module in ('maintenance', 'change', 'repair', 'polling', 'adjust', 'power') if has_module(module))
+        notice_placeholders = ','.join('?' for _ in notice_modules) or "NULL"
         rows = read(db, "SELECT payload_json,scope,work_type FROM source_table_snapshot_records "
             "WHERE snapshot_id IN (SELECT snapshot_id FROM source_table_snapshot_manifest WHERE status='active') "
-            "AND scope IN (" + placeholders + ",'ALL','CAMPUS') AND (" + wildcard + ") LIMIT 80", (*scopes, *values))
+            "AND work_type IN (" + notice_placeholders + ") AND scope IN (" + placeholders + ",'ALL','CAMPUS') AND (" + wildcard + ") LIMIT 80", (*notice_modules, *scopes, *values))
         for row in rows:
             add("计划通告", json.loads(row["payload_json"]), "/workbench-lite?" + urlencode({"scope": row["scope"], "work_type": row["work_type"] or "maintenance"}), codes(row["scope"]))
-        for row in read(db, "SELECT payload_json,building_codes_json FROM ongoing_items WHERE " + scoped_sql("building_codes_json") + " AND (" + wildcard + ") LIMIT 40", (*allowed_list, *scopes, *values)):
+        for row in read(db, "SELECT payload_json,building_codes_json FROM ongoing_items WHERE " + scoped_sql("building_codes_json")
+                        + " AND COALESCE(json_extract(payload_json,'$.work_type'),'maintenance') IN (" + notice_placeholders + ") AND (" + wildcard + ") LIMIT 40", (*allowed_list, *scopes, *notice_modules, *values)):
             item = json.loads(row["payload_json"])
             found = codes(json.loads(row["building_codes_json"]))
             add("进行中通告", item, "/workbench-lite?" + urlencode({"scope": next(iter(sorted(found)), scopes[0]), "work_type": item.get("work_type", "maintenance"), "active_item_id": item.get("active_item_id", "")}), found)
         # CMDB's blank-building records are intentionally shared by existing business rules.
         for kind, label in REPAIR.items():
+            module = ('repair_management' if kind in {'repair_projects', 'repair_followups', 'repair_cmdb'} else
+                      'event' if kind == 'repair_events' else 'repair' if kind == 'repair_notices' else kind.removeprefix('notice_target.'))
+            if not has_module(module):
+                continue
             if kind == "repair_cmdb" and not re.search(r"CMDB|智航|设备|品牌|型号|唯一.?ID|柴发|柴油|冷水|冷机|制冷|水泵|HVDC|UPS", query, re.I):
                 continue
             indexed_text = wildcard.replace("payload_json", "CASE WHEN search_text='' THEN payload_json ELSE search_text END")
@@ -546,8 +705,9 @@ class LocalAssistantSources:
                 "WHERE source_key=? AND " + scoped_sql("scope_codes_json", kind == "repair_cmdb") + " AND (" + indexed_text + ") LIMIT 25", (kind, *allowed_list, *scopes, *values))
             for row in rows:
                 found = codes(json.loads(row["scope_codes_json"]))
-                href = "/repair-management" if kind.startswith("repair_") else "/workbench-lite"
-                add(label, json.loads(row["payload_json"]), href + "?" + urlencode({"scope": next(iter(sorted(found)), scopes[0]), "record_id": row["record_id"]}), found, kind == "repair_cmdb")
+                href = '/event-management' if module == 'event' else '/repair-management' if module == 'repair_management' else '/workbench-lite'
+                add(label, json.loads(row["payload_json"]), href + "?" + urlencode({"scope": next(iter(sorted(found)), scopes[0]),
+                    "record_id": row["record_id"], **({'work_type': module} if href == '/workbench-lite' else {})}), found, kind == "repair_cmdb", module=module)
         for namespace, (label, href, shared) in DOCS.items():
             for row in read(db, "SELECT payload_json FROM json_documents WHERE namespace=? AND (" + wildcard + ") LIMIT 20", (namespace, *values)):
                 item = json.loads(row["payload_json"])
@@ -555,17 +715,23 @@ class LocalAssistantSources:
                     for scope in scopes:
                         report = (item.get("reports") or {}).get(scope)
                         if report:
-                            add(label, {"scope": scope, "title": scope + "楼工作报告", "report": report, "generated_at": item.get("generated_at")}, href, {scope})
+                            add(label, {"scope": scope, "title": scope + "楼工作报告", "report": report, "generated_at": item.get("generated_at")}, href, {scope}, module='daily')
                 elif namespace == "daily_morning_meeting":
                     public = {k: item.get(k) for k in ("date", "file_name", "actor_name", "generated_at")}
                     if actor.get("is_admin"):
                         public["model"] = item.get("model")
-                    add(label, public, href, shared=True)
+                    add(label, public, href, record_codes(item), shared=not scope_hint(item), module='daily')
                 elif namespace == "drill_definition":
-                    if codes(item.get("assigned_scopes")) & set(scopes) or actor.get("is_admin"):
-                        add(label, {k: item.get(k) for k in ("name", "year", "month", "status", "configuration")}, href, shared=True)
+                    found = codes(item.get('assigned_scopes'))
+                    public = {k: item.get(k) for k in ('name', 'year', 'month', 'status')}
+                    for scope in sorted(found & set(scopes)):
+                        # Definitions are shared with each assigned building; their full configuration is not.
+                        add(label, {**public, 'scope': scope}, href + '?scope=' + scope, {scope}, module='drills')
+                    if not item.get('assigned_scopes') and actor.get("is_admin"):
+                        add(label, {**public, 'configuration': item.get('configuration')}, href, shared=True, module='drills')
                 else:
-                    add(label, item, href, shared=shared)
+                    module = str(item.get('work_type') or 'polling') if namespace.startswith('polling_') else 'drills'
+                    add(label, item, href, shared=shared, module=module)
         for row in read(db, "SELECT payload_json FROM qt_active_items WHERE deleted_at IS NULL AND (" + wildcard + ") ORDER BY updated_at DESC LIMIT 30", values):
             item = json.loads(row["payload_json"])
             add("Qt通告", item, "/workbench-lite?" + urlencode({"scope": next(iter(sorted(record_codes(item))), scopes[0]), "work_type": item.get("work_type", "event")}))
@@ -578,8 +744,8 @@ class LocalAssistantSources:
             if found - allowed or (not found and scope_hint(item)):
                 continue
             allowed_fields = {k: item[k] for k in ("name", "姓名", "employee_no", "staff_no", "工号", "scope", "building") if k in item}
-            add("人员", allowed_fields, "/signature-management", found, shared=True)
-        if any(t in query for t in ("机柜", "上电", "下电", "测试电", "正式电", "包间")) or re.search(r"[A-Z]\d{2}", query):
+            add("人员", allowed_fields, "/signature-management", found, shared=True, module='signatures')
+        if has_module('cabinet') and (any(t in query for t in ("机柜", "上电", "下电", "测试电", "正式电", "包间")) or re.search(r"[A-Z]\d{2}", query)):
             self._cabinets(scopes, add, warnings)
         for row in read(self.root / "cabinet_power" / "batches.sqlite3", "SELECT payload_json,scopes_json,batch_id FROM batches WHERE status!='deleted' AND (" + wildcard + ") LIMIT 15", values):
             found = codes(json.loads(row["scopes_json"]))
@@ -594,7 +760,7 @@ class LocalAssistantSources:
         rule_db = self.root / "plan_convergence" / "rule_sets.sqlite3"
         rule_filter = " OR ".join("(inst_name||' '||point_name||' '||rule_name||' '||COALESCE(obj_name,'')) LIKE ?" for _ in terms) or "0"
         for row in read(rule_db, "SELECT * FROM rule_set_item WHERE (" + rule_filter + ") LIMIT 20", values):
-            add("收敛规则配置", row, "/plan-convergence", shared=True)
+            add("收敛规则配置", row, "/plan-convergence", codes(str(row.get('inst_name', '')) + ' ' + str(row.get('obj_name', ''))), shared=True)
         catalog = self.root / "plan_convergence" / "catalog.sqlite3"
         device_filter = " OR ".join("(inst_name||' '||COALESCE(position,'')||' '||COALESCE(ins_standard_id,'')) LIKE ?" for _ in terms) or "0"
         if re.search(r"智航|收敛|测点|规则", query):
@@ -606,9 +772,16 @@ class LocalAssistantSources:
         for row in read(db, "SELECT key,payload_json FROM json_documents WHERE namespace='cabinet_power' AND (" + wildcard + ") LIMIT 20", values):
             item = json.loads(row["payload_json"])
             add("机柜导出与设置", item, "/cabinet-power", shared=bool(actor.get("is_admin")))
-        guide = {"title": "灯塔功能说明", "url": "/?entry=tools", "scopes": [], "data": {"模块": [{"名称": label, "说明": MODULE_HELP[label]} for label, _ in MODULES if not terms or any(t in label + MODULE_HELP[label] for t in terms)]}}
+        guide_modules = {'通告与事件': {'maintenance', 'change', 'repair', 'polling', 'adjust', 'power', 'event'},
+            '维修单与跟进': {'repair_management'}, '机柜上下电': {'cabinet'}, '水耗管理': {'water'},
+            '维护单': {'engineer_mop'}, 'SOP与工单': {'maintenance', 'polling', 'adjust'}, '演练': {'drills'},
+            '日常工作': {'daily'}, '计划收敛审查': {'plan_convergence'}, '题库资料': {'learning'},
+            '重保管理': {'critical_guard'}, '人员与签名管理': {'signatures'}, '通告历史': set(notice_modules),
+            '参考人生指南': {'life_guide'}}
+        labels = [label for label, _ in MODULES if any(has_module(module) for module in guide_modules.get(label, set()))]
+        guide = {"title": "灯塔功能说明", "url": "/?entry=tools", "scopes": [], "data": {"模块": [{"名称": label, "说明": MODULE_HELP[label]} for label in labels if not terms or any(t in label + MODULE_HELP[label] for t in terms)]}}
         if not guide["data"]["模块"]:
-            guide["data"]["模块"] = [{"名称": label, "说明": MODULE_HELP[label]} for label, _ in MODULES]
+            guide["data"]["模块"] = [{"名称": label, "说明": MODULE_HELP[label]} for label in labels]
         ranked = sorted(hits, key=lambda row: row["_score"], reverse=True)
         chosen, seen, size = [], set(), 0
         for hit in ranked:
@@ -635,6 +808,9 @@ class LocalAssistantSources:
         db, allowed = Path(self.store.db_path), set(actor["scopes"])
         placeholders = ",".join("?" for _ in scopes)
         groups, warnings = [], []
+        notice_modules = {'maintenance', 'change', 'repair', 'polling', 'adjust', 'power'}
+        def has_module(module):
+            return any(self._can_read(actor, module, {scope}) for scope in scopes)
 
         def rows(path, sql, params=()):
             if not path.is_file():
@@ -644,11 +820,13 @@ class LocalAssistantSources:
             except AssistantError:
                 return None
 
-        def visible(item, fallback=()):
+        def visible(item, fallback=(), *, module):
             found = record_codes(item) or set(fallback)
-            return bool(found & set(scopes)) and not found - allowed
+            return bool(found & set(scopes)) and not found - allowed and self._can_read(actor, module, found)
 
-        def group(label, items, href, available=True):
+        def group(label, items, href, available=True, *, modules):
+            if not any(has_module(module) for module in modules):
+                return
             if terms and not any(t in label for t in terms):
                 items = [item for item in items if any(t.casefold() in json.dumps(item, ensure_ascii=False).casefold() for t in terms)]
                 if not items:
@@ -663,7 +841,8 @@ class LocalAssistantSources:
         notices, seen = [], set()
         for row in ongoing or []:
             item = json.loads(row["payload_json"])
-            if visible(item, codes(json.loads(row["building_codes_json"]))) and unfinished(item.get("status")):
+            module = str(item.get('work_type') or 'maintenance')
+            if module in notice_modules and visible(item, codes(json.loads(row["building_codes_json"])), module=module) and unfinished(item.get("status")):
                 identity = item.get("record_id") or item.get("active_item_id")
                 if identity in seen:
                     continue
@@ -678,7 +857,9 @@ class LocalAssistantSources:
         repairs, events = [], []
         for row in records or []:
             found = codes(json.loads(row["scope_codes_json"]))
-            if not visible({}, found) or not unfinished(row["state"]):
+            module = ('repair_management' if row['source_key'] == 'repair_projects' else
+                      'event' if row['source_key'] == 'repair_events' else 'repair' if row['source_key'] == 'repair_notices' else row['source_key'].removeprefix('notice_target.'))
+            if not visible({}, found, module=module) or not unfinished(row["state"]):
                 continue
             item = {"名称": row["title"], "状态": row["state"], "楼栋": sorted(found), "记录ID": row["record_id"]}
             if row["source_key"] == "repair_projects":
@@ -689,19 +870,25 @@ class LocalAssistantSources:
                 seen.add(row["record_id"])
                 notices.append(item)
         manifests = rows(db, "SELECT source_key,status FROM repair_snapshot_sources")
-        initialized = {r["source_key"] for r in manifests or [] if r["status"] not in {"empty", "initializing"}}
-        loaded = {r["source_key"] for r in records or []}
-        group("进行中通告", notices, "/workbench-lite?scope=" + (scopes[0] if len(scopes) == 1 else "ALL"), ongoing is not None and records is not None)
-        group("未完成维修项目", repairs, "/repair-management?scope=" + (scopes[0] if len(scopes) == 1 else "ALL"), records is not None and "repair_projects" in initialized | loaded)
-        group("未闭环事件", events, "/event-management", records is not None and "repair_events" in initialized | loaded)
+        # A failed first sync has no usable zero; retained rows are not a complete count.
+        initialized = {r["source_key"] for r in manifests or [] if r["status"] == 'active'}
+        required_targets = {'repair_notices' if module == 'repair' else 'notice_target.' + module
+                            for module in notice_modules if has_module(module)}
+        group("进行中通告", notices, "/workbench-lite?scope=" + (scopes[0] if len(scopes) == 1 else "ALL"),
+              ongoing is not None and records is not None and required_targets <= initialized, modules=notice_modules)
+        group("未完成维修项目", repairs, "/repair-management?scope=" + (scopes[0] if len(scopes) == 1 else "ALL"),
+              records is not None and "repair_projects" in initialized, modules={'repair_management'})
+        group("未闭环事件", events, "/event-management", records is not None and "repair_events" in initialized, modules={'event'})
 
         plans = rows(db, "SELECT payload_json,scope,work_type FROM source_table_snapshot_records WHERE snapshot_id IN (SELECT snapshot_id FROM source_table_snapshot_manifest WHERE status='active')")
         pending_plans, seen_plans = [], set()
+        plans_available = False
         for row in plans or []:
             item = json.loads(row["payload_json"])
             found = record_codes(item) or codes(row["scope"])
-            if not visible(item, found):
+            if not visible(item, found, module=row['work_type']):
                 continue
+            plans_available = True
             fields = item.get("display_fields") or item.get("fields") or {}
             if row["work_type"] == "repair":
                 state = "已结束" if fields.get("维修结束时间") or fields.get("维修结束时间（2026）") else "进行中" if fields.get("维修开始时间") else "未开始"
@@ -712,7 +899,8 @@ class LocalAssistantSources:
                 continue
             seen_plans.add(identity)
             pending_plans.append({"名称": record_title(item), "状态": state, "楼栋": sorted(found), "计划时间": fields.get("计划开始维护时间") or fields.get("计划开始时间") or ""})
-        group("待执行计划事项", pending_plans, "/workbench-lite?scope=" + (scopes[0] if len(scopes) == 1 else "ALL"), plans is not None and bool(plans))
+        group("待执行计划事项", pending_plans, "/workbench-lite?scope=" + (scopes[0] if len(scopes) == 1 else "ALL"),
+              plans is not None and plans_available, modules=notice_modules)
 
         documents = rows(db, "SELECT namespace,key,payload_json FROM json_documents WHERE namespace IN ('polling_work_order','polling_sop','drill_definition','drill_execution')")
         docs = {ns: {} for ns in ("polling_work_order", "polling_sop", "drill_definition", "drill_execution")}
@@ -721,9 +909,9 @@ class LocalAssistantSources:
         orders = []
         for item in docs["polling_work_order"].values():
             found = record_codes(item) or record_codes(docs["polling_sop"].get(item.get("sop_id"), {}))
-            if visible(item, found) and unfinished(item.get("state")):
+            if visible(item, found, module=str(item.get('work_type') or 'polling')) and unfinished(item.get("state")):
                 orders.append({"名称": record_title(item), "状态": item["state"], "楼栋": sorted(found), "当前步骤": int(item.get("current_index") or 0) + 1, "总步骤": len(item.get("steps") or [])})
-        group("SOP工单", orders, "/?entry=tools", documents is not None)
+        group("SOP工单", orders, "/?entry=tools", documents is not None, modules={'maintenance', 'polling', 'adjust'})
         drills = []
         for definition in docs["drill_definition"].values():
             if definition.get("status") != "published":
@@ -731,26 +919,29 @@ class LocalAssistantSources:
             for scope in sorted(codes(definition.get("assigned_scopes")) & set(scopes)):
                 execution = docs["drill_execution"].get(str(definition.get("drill_id")) + ":" + scope, {})
                 state = execution.get("status") or "未开始"
-                if unfinished(state):
+                if visible(execution, {scope}, module='drills') and unfinished(state):
                     drills.append({"名称": definition.get("name", "演练"), "楼栋": scope, "状态": state})
-        group("演练任务", drills, "/drill-management", documents is not None)
+        group("演练任务", drills, "/drill-management", documents is not None, modules={'drills'})
 
         batches = rows(self.root / "cabinet_power" / "batches.sqlite3", "SELECT batch_id,payload_json,scopes_json,status FROM batches WHERE status NOT IN ('deleted','cancelled','completed')")
         cabinet_tasks = []
         for row in batches or []:
             item = json.loads(row["payload_json"])
-            if not visible({}, codes(json.loads(row["scopes_json"]))) or (item.get("source_notice") or {}).get("deleted_at"):
+            if not visible(item, codes(json.loads(row["scopes_json"])), module='cabinet') or (item.get("source_notice") or {}).get("deleted_at"):
                 continue
             active = [r for r in item.get("rows", []) if not r.get("notice_removed") and r.get("status") not in {"completed", "duplicate"} and not str(r.get("status", "")).startswith("excluded_")]
             if active or row["status"] in {"recognizing", "running", "failed"}:
                 cabinet_tasks.append({"名称": (item.get("source_notice") or {}).get("title") or "批次 " + row["batch_id"][:8], "状态": row["status"], "楼栋": sorted(codes(json.loads(row["scopes_json"]))), "未确认机柜": len(active), "批次ID": row["batch_id"]})
-        group("上下电待办", cabinet_tasks, "/cabinet-power/batches?status=todo", batches is not None)
+        group("上下电待办", cabinet_tasks, "/cabinet-power/batches?status=todo", batches is not None, modules={'cabinet'})
 
         responses = rows(db, "SELECT t.task_name,r.scope_code,r.status,r.sheet_type FROM critical_guard_responses r JOIN critical_guard_tasks t ON t.task_id=r.task_id WHERE t.status='active' AND r.scope_code IN (" + placeholders + ")", scopes)
-        guard = [{"名称": r["task_name"], "楼栋": r["scope_code"], "状态": r["status"], "表类型": r["sheet_type"]} for r in responses or [] if unfinished(r["status"])]
-        group("重保检查表", guard, "/critical-guard", responses is not None)
+        guard = [{"名称": r["task_name"], "楼栋": r["scope_code"], "状态": r["status"], "表类型": r["sheet_type"]} for r in responses or []
+                 if visible({}, {r['scope_code']}, module='critical_guard') and unfinished(r["status"])]
+        group("重保检查表", guard, "/critical-guard", responses is not None, modules={'critical_guard'})
         files = rows(db, "SELECT notice_title,scope,status FROM engineer_mop_local_files WHERE deleted_at IS NULL AND scope IN (" + placeholders + ")", scopes)
-        group("维护单待处理文件", [{"名称": r["notice_title"], "楼栋": r["scope"], "状态": r["status"]} for r in files or [] if unfinished(r["status"]) and r["status"] != "uploaded"], "/engineer/mop", files is not None)
+        group("维护单待处理文件", [{"名称": r["notice_title"], "楼栋": r["scope"], "状态": r["status"]} for r in files or []
+              if visible({}, {r['scope']}, module='engineer_mop') and unfinished(r["status"]) and r["status"] != "uploaded"],
+              "/engineer/mop", files is not None, modules={'engineer_mop'})
         overview = {"title": "未完成工作概览", "url": "/?entry=daily", "scopes": scopes, "number": 1, "data": {
             "查询楼栋": scopes, "口径": "本地最新状态；各模块可能关联同一工作，分组数量不可相加为独立工作总数。每组列出至多5条，完整内容可在对应页面查看。",
             "分组": [{k: v for k, v in g.items() if k not in {"明细", "href"}} for g in groups]}}

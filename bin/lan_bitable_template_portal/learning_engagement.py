@@ -74,13 +74,16 @@ def supervisors(service):
     return result
 
 
-def weekly_stats(service, start, end, conn, scope=None):
+def weekly_stats(service, start, end, conn, scope=None, *, person_id=None):
     rows = {}
     def row(pid):
         return rows.setdefault(pid, {'person_id': pid, 'answered': 0, 'choices': 0, 'correct': 0,
             'wrong': 0, 'interviews': 0, 'practice': 0, 'papers': set(), 'days': set(), 'topics': {}, 'ratings': {}, 'scopes': set()})
-    scope_filter = ' AND scope=?' if scope else ''
-    params = (start, end, scope) if scope else (start, end)
+    scope_filter, params = '', [start, end]
+    for field, value in (('scope', scope), ('person_id', person_id)):
+        if value:
+            scope_filter += ' AND ' + field + '=?'
+            params.append(value)
     for value in conn.execute('SELECT * FROM learning_results WHERE day BETWEEN ? AND ? AND invalid=0 AND needs_review=0' + scope_filter, params):
         item = row(value['person_id'])
         item['answered'] += 1

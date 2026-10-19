@@ -1692,6 +1692,8 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "process_lifetime.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_service.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "account_management.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "account_impersonation.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "impersonation_context.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "account_policy.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "personnel_password_login.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_auth.py",
@@ -1737,6 +1739,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_points.py",
         PROJECT_ROOT / "bin" / "test_submission_reliability.py",
+        PROJECT_ROOT / "bin" / "test_notice_delivery_source_recovery.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_templates.py",
@@ -1823,11 +1826,19 @@ def _run_packaging_preflight_tests() -> None:
     )
     log("通告 ID 边界测试通过。")
 
+    # Loopback streaming checks retain their strict timing budget outside CPU-heavy shards.
+    _run_preflight_check(
+        [test_python, "-m", "unittest", "bin.test_public_access"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
     _run_preflight_check(
         [test_python, "-m", "unittest",
-         "bin.test_public_access",
          "bin.test_robot_webhook",
          "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
+         "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
+         "bin.test_lighthouse_shared_snapshot",
+         "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery",
          "bin.test_learning_update_flow",
          "bin.test_workspace_layouts",
@@ -1861,7 +1872,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_dynamic_endpoints",
          "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
-         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
+         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_notice_delivery_source_recovery", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
                 "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
                 "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",

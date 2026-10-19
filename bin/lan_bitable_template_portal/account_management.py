@@ -116,6 +116,8 @@ class AccountManagement:
             item["can_edit_access"] = bool(item["can_edit"]) and self._access_editable(profile, item)
             item["can_delete"] = bool(profile and account_allowed(profile, item, "delete") and item["open_id"] != actor.get("open_id"))
             item["can_set_password"] = item["can_set_password"] and item["can_edit"]
+            from .account_impersonation import can_impersonate
+            item['can_impersonate'] = bool(actor and can_impersonate(self.auth, actor.get('open_id'), item['open_id']))
         if profile:
             items = [item for item in items if account_allowed(profile, item, "view") or account_allowed(profile, item, "edit")]
             if profile["level"] == "L2":
@@ -395,6 +397,9 @@ class AccountManagement:
 
 
 def install_account_management(app, controller, runtime, get_directory):
+    from .account_impersonation import install
+    install(app, controller, runtime, get_directory)
+
     def response(data=None, error=None, status=200):
         return JSONResponse({"ok": not error, **({"error": error} if error else {"data": data})},
                             status_code=status, headers={"Cache-Control": "no-store"})

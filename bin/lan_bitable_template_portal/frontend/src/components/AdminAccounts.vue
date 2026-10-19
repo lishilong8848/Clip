@@ -41,7 +41,7 @@
               <td class="scope-cell">{{ scopesLabel(item.scopes) }}</td>
               <td><span :class="['status', !item.enabled || item.blocked_reason ? 'warn' : item.scopes.length ? 'ok' : '']" :title="item.blocked_reason">{{ stateLabel(item) }}</span></td>
               <td v-if="myLevel !== 'L2'" class="muted">{{ formatTime(item.last_login) }}</td>
-              <td class="account-actions"><button type="button" class="link-button" :disabled="saving" :aria-label="`管理${item.name}`" @click="openAccount(item)"><Settings2 :size="15" />管理</button><button v-if="item.can_delete" type="button" class="link-button danger" :disabled="saving" :aria-label="`撤销${item.name}的登录权限`" @click="deleteAccount(item)"><Trash2 :size="15" />撤销</button></td>
+              <td class="account-actions"><button type="button" class="link-button" :disabled="saving" :aria-label="`管理${item.name}`" @click="openAccount(item)"><Settings2 :size="15" />管理</button><button type="button" class="link-button" data-v2-navigation :disabled="saving||loading||item.can_impersonate!==true" :title="item.can_impersonate?'临时以该人员身份查看':'当前账号不可临时代登录'" :aria-label="`临时代登录${item.name}`" @click="requestImpersonation(item)"><UserRoundCog :size="15" />临时代登录</button><button v-if="item.can_delete" type="button" class="link-button danger" :disabled="saving" :aria-label="`撤销${item.name}的登录权限`" @click="deleteAccount(item)"><Trash2 :size="15" />撤销</button></td>
             </tr>
             <tr v-if="!filtered.length"><td :colspan="myLevel !== 'L2' ? 10 : 9" class="empty">没有匹配的账号</td></tr>
           </tbody>
@@ -53,8 +53,9 @@
     <template v-else>
       <button type="button" :disabled="auditLoading || saving" @click="loadAudit"><RefreshCw :size="16" :class="{ spin: auditLoading }" />刷新记录</button>
       <div class="table-wrap"><table><thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>账号及变更</th><th>结果</th></tr></thead>
-        <tbody><tr v-for="row in audits" :key="row.audit_id"><td>{{ formatTime(row.updated_at) }}</td><td>{{ row.actor_name || '管理员' }}</td><td>{{ actionLabel(row.action) }}</td><td><template v-if="row.action === 'password' || row.action === 'delete'">{{ row.metadata?.name }}</template><div v-for="(change, i) in row.metadata?.changes || []" :key="i">{{ change.name }}：{{ scopesLabel(change.before?.scopes || []) }} → {{ scopesLabel(change.after?.scopes || []) }}；{{ change.after?.enabled === false ? '停用' : change.after?.role === 'admin' ? '管理员' : '普通用户' }}</div></td><td>{{ statusLabel(row.status) }}</td></tr><tr v-if="!audits.length"><td colspan="5" class="empty">暂无变更记录</td></tr></tbody></table></div>
+        <tbody><tr v-for="row in audits" :key="row.audit_id"><td>{{ formatTime(row.updated_at) }}</td><td>{{ row.actor_name || '管理员' }}</td><td>{{ actionLabel(row.action) }}</td><td><template v-if="row.metadata?.impersonation">代办账号：{{ row.metadata.impersonation.target_name }}<div v-if="row.metadata.path">{{ row.metadata.method }} {{ row.metadata.path }}</div></template><template v-else-if="row.action === 'password' || row.action === 'delete'">{{ row.metadata?.name }}</template><div v-for="(change, i) in row.metadata?.changes || []" :key="i">{{ change.name }}：{{ scopesLabel(change.before?.scopes || []) }} → {{ scopesLabel(change.after?.scopes || []) }}；{{ change.after?.enabled === false ? '停用' : change.after?.role === 'admin' ? '管理员' : '普通用户' }}</div></td><td>{{ statusLabel(row.status) }}</td></tr><tr v-if="!audits.length"><td colspan="5" class="empty">暂无变更记录</td></tr></tbody></table></div>
     </template>
+    <Teleport to="body"><div style="--cf-z-confirm:5100" data-v2-inline-feedback><ConfirmDialog :open="!!impersonationTarget" tone="warning" kicker="管理员临时代办" :title="`临时以${impersonationTarget?.name||''}身份查看？`" message="临时代登录有效期20分钟，所有操作仍以真实管理员作为实际操作人记录。" :details="['不能代签、代审批、代答题，也不能读取该人员的私人聊天。需本人操作的事项请交由本人完成。','确认后将整页进入当前版本首页，当前页面未提交的填写不会保留。']" confirm-label="确认临时代登录" @resolve="confirmImpersonation" /></div></Teleport>
     <Teleport to="body">
       <UiTransition name="ui-overlay">
         <div v-if="draft" class="account-overlay" @click.self="closeEditor">
@@ -106,7 +107,7 @@
               <p v-else class="muted">{{ draft.kind === 'vnet' || draft.kind === 'duty' ? '飞书账号密码请在飞书中修改。' : '该账号未关联可使用密码登录的在岗人员。' }}</p>
               <AccountSignature v-if="draft.open_id && actorModules.includes('signatures') && draft.kind !== 'duty'" :key="draft.open_id" :open-id="draft.open_id" class="account-signature-editor" />
             </div>
-            <footer class="editor-footer"><span class="muted">{{ (draft?.modules || []).length }} 项模块权限</span><button type="button" :disabled="saving" @click="closeEditor">关闭</button><button v-if="draft && canEditAccess(draft)" type="button" class="primary" :disabled="saving" @click="saveAccess"><Save :size="16" />{{ saving ? '正在保存' : '保存权限' }}</button></footer>
+            <footer class="editor-footer"><span class="muted">{{ (draft?.modules || []).length }} 项模块权限</span><button v-if="draft?.can_impersonate" class="impersonate-action" type="button" data-v2-navigation :disabled="saving" @click="requestImpersonation(draft)"><UserRoundCog :size="15" />临时代登录</button><button type="button" :disabled="saving" @click="closeEditor">关闭</button><button v-if="draft && canEditAccess(draft)" type="button" class="primary" :disabled="saving" @click="saveAccess"><Save :size="16" />{{ saving ? '正在保存' : '保存权限' }}</button></footer>
           </section>
         </div>
       </UiTransition>
@@ -116,11 +117,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { ChevronLeft, ChevronRight, KeyRound, RefreshCw, Save, Search, Settings2, Trash2, X } from 'lucide-vue-next';
+import { ChevronLeft, ChevronRight, KeyRound, RefreshCw, Save, Search, Settings2, Trash2, UserRoundCog, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 import { acquireModal } from '../modalState';
 import AccountSignature from './AccountSignature.vue';
-type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; home_scope?: string };
+import ConfirmDialog from './ConfirmDialog.vue';
+import { finishImpersonation } from './ImpersonationBanner.vue';
+type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; home_scope?: string; can_impersonate?: boolean };
 const props = defineProps<{ pendingCount: number; permissions: Dict[] }>();
 const emit = defineEmits<{ changed: [] }>();
 const kinds: Record<string, string> = { vnet: 'VNET人员', external: '非VNET人员', duty: '值班账号', legacy: '历史账号', unknown: '类型待核对' };
@@ -141,6 +144,16 @@ const search = ref(''), kind = ref(''), building = ref(''), state = ref(''), cat
 const loading = ref(false), saving = ref(false), error = ref(''), notice = ref(''), warning = ref(''), loadedAt = ref(0);
 const draft = ref<Account | null>(null), editor = ref<HTMLElement | null>(null);
 const editorError = ref(''), newPassword = ref(''), confirmPassword = ref('');
+const impersonationTarget=ref<Account|null>(null);
+function requestImpersonation(item:Account){if(!saving.value&&!loading.value&&item.can_impersonate===true)impersonationTarget.value=item;}
+async function confirmImpersonation(confirmed:boolean){
+  const item=impersonationTarget.value;impersonationTarget.value=null;
+  if(!confirmed||!item||saving.value||items.value.find(value=>value.id===item.id)?.can_impersonate!==true)return;
+  saving.value=true;error.value='';
+  try{const data=await requestJson(`/api/auth/accounts/${encodeURIComponent(item.id)}/impersonate`,{method:'POST',body:'{}',signal:abort.signal});if(!abort.signal.aborted)await finishImpersonation(data,false,async()=>{saving.value=false;draft.value=null;newPassword.value='';confirmPassword.value='';await nextTick();});}
+  catch(e:any){if(!abort.signal.aborted){const text=e.message||'临时代登录未完成，请重试。';if(draft.value)editorError.value=text;else error.value=text;}}
+  finally{if(!abort.signal.aborted)saving.value=false;}
+}
 const audits = ref<Dict[]>([]), auditLoading = ref(false);
 let modal: ReturnType<typeof acquireModal> | null = null;
 const abort = new AbortController();
@@ -206,8 +219,8 @@ function moduleLabel(modules?: string[]) {
   if (!list.length) return '未配置';
   return list.map(value => moduleOptions.value.find(option => option.value === value)?.label || value).join('、');
 }
-function actionLabel(action: string) { return action === 'password' ? '修改密码' : action === 'delete' ? '撤销登录' : '修改权限'; }
-function statusLabel(status: string) { return status === 'success' ? '成功' : status === 'failed' ? '未完成' : status === 'denied' ? '已拒绝' : '处理中'; }
+function actionLabel(action: string) { return ({password:'修改密码',delete:'撤销登录',permissions:'修改权限',impersonation_start:'进入代登录',impersonation_stop:'退出代登录',impersonation_request:'管理员代办请求'} as Record<string,string>)[action] || action; }
+function statusLabel(status: string) { return status === 'request_finished' ? '请求已处理，以业务结果为准' : status === 'success' ? '成功' : status === 'failed' ? '未完成' : status === 'denied' ? '已拒绝' : '处理中'; }
 function stateLabel(item: Account) { return item.blocked_reason ? '待核对' : !item.enabled ? '已停用' : item.scopes.length ? '已授权' : '未授权'; }
 function scopesLabel(scopes: string[]) { return scopes.map(scope => scopeOptions.value.find(x => x.value === scope)?.label || scope).join('、') || '未配置'; }
 function formatTime(timestamp?: number) { return timestamp ? new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无记录'; }
@@ -335,6 +348,11 @@ onBeforeUnmount(() => { abort.abort(); newPassword.value = ''; confirmPassword.v
 
 <style scoped>
 .accounts { display: grid; gap: 16px; color: #203650; }
+@media(max-width:600px){
+  .account-editor .editor-footer:has(.impersonate-action){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:10px 14px;gap:8px}
+  .account-editor .editor-footer:has(.impersonate-action)>span{margin:0}
+  .account-editor .editor-footer:has(.impersonate-action)>button{min-width:0;min-height:44px;padding:8px;font-size:13px;white-space:normal}
+}
 .account-header,.filters,.pagination,.tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .account-header strong { font-size: 19px; margin-right: auto; }.muted,small { color: #63778e; font-size: 12px; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #ccd8e6; background: #fff; color: #294662; border-radius: 7px; min-height: 36px; padding: 6px 11px; font: inherit; font-size: 13px; cursor: pointer; }
@@ -355,5 +373,16 @@ fieldset { border: 0; border-top: 1px solid #dce6f0; padding: 15px 0 0; margin: 
 .editor-body .check-group { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; padding-bottom: 12px; }
 .account-access .check-group { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 @media(max-width:600px) { .metrics { grid-template-columns: repeat(2,1fr); gap: 14px; }.filters .search { flex-basis: 100%; }.account-editor { padding: 16px; } }
+@media(max-width:760px) {
+  .account-overlay { padding: 12px; }
+  .account-overlay>.account-editor { padding: 0; max-height: calc(100dvh - 24px); }
+  .account-editor header { padding: 14px 16px; }
+  .account-editor .editor-body { grid-template-columns: minmax(0,1fr); gap: 16px; padding: 14px 16px; }
+  .editor-body .account-access { grid-column: 1; grid-row: auto; border-left: 0; border-top: 1px solid #dce6f0; padding: 14px 0 0; }
+  .account-access .check-group { grid-template-columns: repeat(auto-fit,minmax(90px,1fr)); }
+  .module-options { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .account-editor .editor-footer { flex-wrap: wrap; padding: 10px 16px; }
+  .account-editor .editor-footer>button { min-height: 44px; }
+}
 @media(prefers-reduced-motion:reduce) { .spin { animation: none; } }
 </style>

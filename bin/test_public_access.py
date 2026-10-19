@@ -815,6 +815,9 @@ class LoopbackFlowTests(unittest.TestCase):
     def test_stream_parallel_people_and_public_outage_leave_lan_working(self):
         import uvicorn
         import time
+        import ssl
+        # This fixture uses HTTP loopback only; do not load Windows certificate stores.
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         app = make_app()
         release = threading.Event()
 
@@ -856,9 +859,12 @@ class LoopbackFlowTests(unittest.TestCase):
         proxy = None
         try:
             backend_url = start_server(guard)
-            proxy = StreamingIngress(backend_url, SECRET, SETTINGS)
+            proxy = StreamingIngress(backend_url, SECRET, SETTINGS, client=httpx.AsyncClient(
+                trust_env=False, follow_redirects=False, verify=tls,
+                timeout=httpx.Timeout(300, connect=5, pool=5),
+                limits=httpx.Limits(max_connections=SETTINGS.max_requests, max_keepalive_connections=8)))
             public_url = start_server(proxy)
-            with httpx.Client(base_url=public_url, trust_env=False, timeout=3,
+            with httpx.Client(base_url=public_url, trust_env=False, timeout=3, verify=tls,
                               headers={'Host': 'portal.example.com'}) as browser:
                 # Cold client/TLS setup is separate from the live-stream response budget.
                 self.assertEqual(browser.get('/api/auth/status', timeout=15).status_code, 200)
@@ -879,7 +885,7 @@ class LoopbackFlowTests(unittest.TestCase):
             servers[-1].should_exit = True
             threads[-1].join(timeout=3)
             self.assertFalse(threads[-1].is_alive())
-            with httpx.Client(trust_env=False, timeout=2) as lan:
+            with httpx.Client(trust_env=False, timeout=2, verify=tls) as lan:
                 self.assertEqual(lan.get(backend_url + '/api/qt/events').status_code, 200)
         finally:
             release.set()

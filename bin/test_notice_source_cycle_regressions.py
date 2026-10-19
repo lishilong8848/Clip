@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from bin.test_notice_memory_history import _HistoryMemoryService, _source_record
 from lan_bitable_template_portal.portal_service import (
-    STATE_NS_DAILY_SUMMARY, STATE_NS_MEMORY, STATE_NS_WORK_STATUS, MaintenancePortalService,
+    STATE_NS_DAILY_SUMMARY, STATE_NS_MEMORY, STATE_NS_WORK_STATUS, MaintenancePortalService, NoticeSourcePending,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
@@ -376,7 +376,8 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
         source = self.monthly_source()
         self.service._records = [source]
         payload = {'work_type': 'maintenance', 'source_record_id': source['record_id'],
-                   'target_record_id': 'rec-target', 'ended_at': '2026-10-16 17:00'}
+                   'target_record_id': 'rec-target', 'ended_at': '2026-10-16 17:00',
+                   'plan_month': '10月', 'maintenance_cycle': '每月'}
         self.service._request_json = Mock(return_value={'data': {'record': {
             'record_id': source['record_id'], 'fields': dict(source['display_fields']),
         }}})
@@ -411,10 +412,12 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
                 **source['display_fields'], '实际结束时间': '2026-10-16 17:00',
             }}}},
         ]), patch.object(self.service, '_patch_record_fields'):
-            self.assertTrue(self.service.sync_notice_source_ended_fields({
-                'work_type': 'maintenance', 'source_record_id': source['record_id'],
-                'target_record_id': 'rec-target', 'ended_at': '2026-10-16 17:00',
-            }))
+            with self.assertRaises(NoticeSourcePending):
+                self.service.sync_notice_source_ended_fields({
+                    'work_type': 'maintenance', 'source_record_id': source['record_id'],
+                    'target_record_id': 'rec-target', 'ended_at': '2026-10-16 17:00',
+                    'plan_month': '10月', 'maintenance_cycle': '每月',
+                })
         self.assertEqual(self.service._serialize_record(source)['source_progress'], '进行中')
         self.assertEqual(source['display_fields']['实际结束时间'], '2026-10-16 17:00')
 
@@ -436,12 +439,15 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
                 RuntimeError('readback offline'),
             ]), patch.object(self.service, '_patch_record_fields') as write:
             PortalRuntime._queue_source_end_sync({'work_type': 'maintenance',
-                'source_record_id': source['record_id']}, 'rec-target', '维保通告')
+                'source_record_id': source['record_id'], 'plan_month': '10月',
+                'maintenance_cycle': '每月'}, 'rec-target', '维保通告')
             PortalRuntime.process_source_end_sync()
             write.assert_called_once()
-            tasks = store.list_outbox_events('notice_source_finalize', status='pending')
+            tasks = store.list_outbox_events('notice_source_finalize', status='deferred')
             self.assertEqual(len(tasks), 1)
             self.assertIn('readback offline', tasks[0]['last_error'])
+            self.assertEqual(tasks[0]['attempts'], 0)
+            self.assertFalse(store.list_outbox_events('notice_source_finalize', status='done'))
         self.assertEqual(self.service._serialize_record(source)['source_progress'], '进行中')
         self.assertNotIn('实际结束时间', source['display_fields'])
 
@@ -523,9 +529,11 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
                 patch.object(self.service, '_patch_record_fields') as write:
                 PortalRuntime.process_source_end_sync()
             write.assert_not_called()
-            tasks = store.list_outbox_events('notice_source_finalize', status='pending')
+            tasks = store.list_outbox_events('notice_source_finalize', status='deferred')
             self.assertEqual(len(tasks), 1)
             self.assertIn('source offline', tasks[0]['last_error'])
+            self.assertEqual(tasks[0]['attempts'], 0)
+            self.assertFalse(store.list_outbox_events('notice_source_finalize', status='done'))
         self.assertEqual(source['display_fields']['维护实施状态'], '进行中')
 
     def test_source_end_refuses_conflicting_current_target_binding(self):
@@ -617,7 +625,7 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
                 'source_record_id': 'rec-source'}, 'rec-target', '维保通告')
             PortalRuntime.process_source_end_sync()
             write.assert_not_called()
-            self.assertEqual(len(store.list_outbox_events('notice_source_finalize', status='pending')), 1)
+            self.assertEqual(len(store.list_outbox_events('notice_source_finalize', status='deferred')), 1)
             self.assertFalse(store.list_outbox_events('notice_source_finalize', status='done'))
 
     def test_expired_target_lock_after_source_read_cannot_write(self):
@@ -638,12 +646,15 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
             }}}), patch.object(store, 'renew_notice_operation_lock', return_value=False), \
             patch.object(self.service, '_patch_record_fields') as write:
             PortalRuntime._queue_source_end_sync({'work_type': 'maintenance',
-                'source_record_id': source['record_id']}, 'rec-target', '维保通告')
+                'source_record_id': source['record_id'], 'plan_month': '10月',
+                'maintenance_cycle': '每月'}, 'rec-target', '维保通告')
             PortalRuntime.process_source_end_sync()
             write.assert_not_called()
-            tasks = store.list_outbox_events('notice_source_finalize', status='pending')
+            tasks = store.list_outbox_events('notice_source_finalize', status='deferred')
             self.assertEqual(len(tasks), 1)
             self.assertIn('操作锁已过期', tasks[0]['last_error'])
+            self.assertEqual(tasks[0]['attempts'], 0)
+            self.assertFalse(store.list_outbox_events('notice_source_finalize', status='done'))
 
 
 if __name__ == '__main__':

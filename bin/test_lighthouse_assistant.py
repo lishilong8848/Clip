@@ -365,14 +365,15 @@ class SourcesAndRoutesTests(unittest.TestCase):
         self.store.replace_repair_snapshot("repair_projects", records=[{"record_id": "r-b" + str(n), "scope_codes": ["B"], "fields": {"楼栋": "B楼", "名称": "柴发"}} for n in range(40)] + [{"record_id": "r-a", "scope_codes": ["A"], "fields": {"楼栋": "A楼", "名称": "柴发"}}])
         self.store.replace_repair_snapshot("repair_cmdb", records=[{"record_id": "global-device", "fields": {"设备名称": "柴发", "楼栋": ""}}])
         sources = LocalAssistantSources(self.store)
-        result, warnings = sources("A楼柴发维保", ACTOR)
+        actor = {**ACTOR, 'modules': ['polling', 'repair_management']}
+        result, warnings = sources("A楼柴发维保", actor)
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertIn("A楼柴发维保", serialized)
         self.assertIn("r-a", serialized)
         self.assertIn("global-device", serialized)
         self.assertNotIn("B楼柴发维保", serialized)
         self.assertNotIn("never-send-this", serialized)
-        with self.assertRaises(AssistantError): sources("B楼柴发", ACTOR)
+        with self.assertRaises(AssistantError): sources("B楼柴发", actor)
         self.assertEqual(codes("园区"), set("ABCDE"))
         self.assertEqual(codes("110站"), {"110"})
         self.assertEqual(codes("设备110功率"), set())
@@ -460,7 +461,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
                   "inventory": [{"room": "201", "rack": "B01", "rack_type": "网络机柜", "state": "off", "positions": []}],
                   "power_baseline": {"201/B01": {"state": "test", "last_operation": "上测试电", "event_hashes": []}}}
         local.replace("A", config, [], [])
-        result, _ = LocalAssistantSources(self.store)("A楼机柜上电数量", ACTOR)
+        result, _ = LocalAssistantSources(self.store)("A楼机柜上电数量", {**ACTOR, 'modules': ['cabinet']})
         summary = next(x for x in result if "库存汇总" in x["title"])
         self.assertEqual(summary["data"]["counts"]["test"], 1)
         self.assertEqual(summary["data"]["counts"]["off"], 0)
@@ -480,7 +481,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
                 raise AssistantError("查询超时", 503)
             return original(path, sql, params)
         with patch.object(reader, "_read", side_effect=unavailable):
-            results, warnings = reader("A楼柴发维保", ACTOR)
+            results, warnings = reader("A楼柴发维保", {**ACTOR, 'modules': ['polling']})
         self.assertTrue(any("A楼柴发维保" in x["title"] for x in results))
         self.assertTrue(any("不能据此计算全量数量" in w for w in warnings))
         self.assertNotIn("B楼柴发维保", json.dumps(results, ensure_ascii=False))
@@ -494,7 +495,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
                 raise AssistantError("操作历史读取超时", 503)
             return original(path, sql, params)
         with patch.object(reader, "_read", side_effect=unavailable):
-            results, warnings = reader("A楼机柜上电数量", ACTOR)
+            results, warnings = reader("A楼机柜上电数量", {**ACTOR, 'modules': ['cabinet']})
         self.assertFalse(any("库存汇总" in x["title"] for x in results))
         self.assertTrue(any("未使用该楼机柜状态或数量" in w for w in warnings))
 
@@ -502,7 +503,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
         self.store.put_document("signature_management_person", "known-person", {"name": "范围测试人员", "scope_codes": ["B"], "工号": "E12345"})
         self.store.put_document("signature_management_person", "unknown-person", {"name": "区域测试人员", "area": "未知站点", "工号": "E54321"})
         self.store.put_document("signature_management_person", "global-person", {"name": "公开测试人员", "工号": "E99999"})
-        result, _ = LocalAssistantSources(self.store)("测试人员", ACTOR)
+        result, _ = LocalAssistantSources(self.store)("测试人员", {**ACTOR, 'modules': ['signatures']})
         text = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("范围测试人员", text)
         self.assertNotIn("区域测试人员", text)

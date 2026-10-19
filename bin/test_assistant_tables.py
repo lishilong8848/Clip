@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -79,6 +80,58 @@ class TableTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.tables.read(ADMIN, {'table_id': PERSONNEL_TABLE, 'cursor': 'next'})
         self.assertEqual(len(self.calls), 3)
+
+    def test_shared_read_cache_only_writes_assistant_namespace_and_coalesces_missing_pages(self):
+        before = copy.deepcopy(self.store.docs)
+        self.tables.read(ADMIN, {'table_id': PERSONNEL_TABLE, 'metadata_only': True})
+        self.calls.clear()
+        actors = [{'id': str(i), 'scopes': ['A' if i % 2 else 'D'], 'is_admin': False} for i in range(20)]
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            results = list(pool.map(lambda actor: self.tables.read(actor, {'table_id': PERSONNEL_TABLE}), actors))
+        self.assertEqual(len(self.calls), 1)
+        for actor, result in zip(actors, results):
+            self.assertEqual([row['record_id'] for row in result['items']], ['rec' + actor['scopes'][0]])
+        self.assertEqual({key: value for key, value in self.store.docs.items() if key[0] != 'assistant_table_cache'}, before)
+        self.assertTrue(all(url.endswith('/records/search') and method == 'POST' for method, url, _ in self.calls))
+
+    def test_business_data_version_invalidates_read_copy_without_changing_business(self):
+        revision = [1]
+        self.service.state_cache_version = lambda: revision[0]
+        query = {'table_id': PERSONNEL_TABLE}
+        self.tables.read(ADMIN, query)
+        count = len(self.calls)
+        self.tables.read(ADMIN, query)
+        self.assertEqual(len(self.calls), count)
+        self.records[0]['fields']['员工姓名'] = '更新后人员'
+        revision[0] += 1
+        refreshed = self.tables.read(ADMIN, query)
+        self.assertEqual(refreshed['items'][0]['fields']['员工姓名'], '更新后人员')
+        self.assertEqual(len(self.calls), count + 2)
+        self.tables.read(ADMIN, query)
+        self.assertEqual(len(self.calls), count + 2)
+
+    def test_missing_new_field_reloads_only_schema_then_caches_new_projection(self):
+        self.tables.read(ADMIN, {'table_id': PERSONNEL_TABLE, 'metadata_only': True})
+        self.store.docs[('assistant_table_cache', 'schema:' + PERSONNEL_TABLE)]['observed_at'] -= 11
+        self.fields.append(('专业', 1))
+        self.records[0]['fields']['专业'] = '电气'
+        query = {'table_id': PERSONNEL_TABLE, 'fields': ['员工姓名', '专业']}
+        result = self.tables.read(ADMIN, query)
+        self.assertEqual(result['items'][0]['fields']['专业'], '电气')
+        count = len(self.calls)
+        self.tables.read(ADMIN, query)
+        self.assertEqual(len(self.calls), count)
+
+    def test_failed_fill_preserves_good_read_copy_without_claiming_it_is_current(self):
+        query = {'table_id': PERSONNEL_TABLE}
+        self.tables.read(ADMIN, query)
+        key = next(key for key in self.store.docs if key[0] == 'assistant_table_cache' and key[1].startswith('page:'))
+        self.store.docs[key]['observed_at'] -= 121
+        original = copy.deepcopy(self.store.docs[key])
+        self.service._request_payload = Mock(side_effect=AssistantError('read failed', 503))
+        with self.assertRaises(AssistantError):
+            self.tables.read(ADMIN, query)
+        self.assertEqual(self.store.docs[key], original)
 
     def test_blank_scope_and_narrowed_admin_fail_closed(self):
         self.records += [{'record_id': 'recBlank', 'fields': {'员工姓名': '无楼栋'}}]

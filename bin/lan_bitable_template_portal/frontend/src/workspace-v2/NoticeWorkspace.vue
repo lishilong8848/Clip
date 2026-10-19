@@ -1,7 +1,7 @@
 <template>
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
     <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" />更多办理</NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" />刷新</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation type="primary" @click="newNotice(kind)"><Plus :size="17" />手填{{ typeLabel(kind) }}</NButton><NDropdown v-else :options="newOptions" trigger="click" @select="newNotice"><NButton data-v2-navigation type="primary"><Plus :size="17" />新建通告</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation @click="newNotice('paste')">粘贴原文</NButton></div></header>
-    <div class="v2-notice-type-filters"><nav class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav></div>
+    <div class="v2-notice-type-filters"><nav ref="typeNavigation" class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav></div>
     <form class="v2-notice-filters" :class="{'has-scopes':!selectedScopes&&buildingOptions.length>1}" aria-label="通告筛选" @submit.prevent="filter"><WidgetScopePicker v-if="!selectedScopes&&buildingOptions.length>1" :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><NSelect v-model:value="month" :options="months" aria-label="计划月份" /><NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="专业筛选" /><NButton attr-type="submit" :loading="loading">筛选</NButton></form>
     <NAlert v-if="error" role="alert" type="error" :bordered="false" class="v2-notice-feedback">{{ error }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
     <NAlert v-if="syncing" type="info" :bordered="false"><NSpin size="small" />正在同步源表，当前仍可查看已加载的通告。</NAlert>
@@ -128,6 +128,15 @@ const dialog=useDialog(),message=useMessage();
 const params=computed(()=>new URL(props.url,location.origin).searchParams);
 const types=computed(()=>[{id:'all',label:'全部'},...modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))]);
 const kind=ref(params.value.get('work_type')||'all'),list=ref('planned'),month=ref(params.value.get('month')||Number(beijingDate().slice(5,7))+'月'),search=ref(params.value.get('search')||''),specialty=ref(params.value.get('specialty')||null);
+const typeNavigation=ref<HTMLElement|null>(null);
+function revealActiveType(){
+  const nav=typeNavigation.value,button=nav?.querySelector<HTMLElement>('[aria-pressed="true"]');
+  if(!nav||!button||nav.scrollWidth<=nav.clientWidth)return;
+  const bounds=nav.getBoundingClientRect(),selected=button.getBoundingClientRect();
+  const delta=selected.left<bounds.left?selected.left-bounds.left:selected.right>bounds.right?selected.right-bounds.right:0;
+  if(delta)nav.scrollLeft+=delta;
+}
+watch([kind,typeNavigation,()=>props.active],()=>{void nextTick(revealActiveType);},{flush:'post'});
 const applied=ref({month:month.value,search:search.value,specialty:specialty.value});
 const filtersDirty=computed(()=>month.value!==applied.value.month||search.value!==applied.value.search||specialty.value!==applied.value.specialty);
 const months=Array.from({length:12},(_,i)=>({label:(i+1)+'月',value:(i+1)+'月'})),specialties=['电气','暖通','弱电','消防'].map(value=>({label:value,value}));
@@ -171,7 +180,7 @@ const actionLabel=(value:string)=>({start:'开始',update:'更新',end:'结束'}
 let listAbort:AbortController|undefined,detailAbort:AbortController|undefined,disposed=false,timer=0;
 const editing=ref(false),detailLoading=ref(false),form=ref<NoticeForm|null>(null),detailError=ref(''),busy=ref(false),saving=ref(false),uploading=ref(false),confirming=ref(false),ambiguous=ref(false);
 const viewport=ref({width:innerWidth,height:innerHeight});
-function measureViewport(){viewport.value={width:innerWidth,height:innerHeight};}
+function measureViewport(){viewport.value={width:innerWidth,height:innerHeight};void nextTick(revealActiveType);}
 const attempted=ref(false),issueTarget=ref<Omit<NoticeIssue,'message'>|null>(null);
 const siteUpload=ref<InstanceType<typeof NoticePhotoUpload>|null>(null),aliUpload=ref<InstanceType<typeof NoticePhotoUpload>|null>(null);
 const pendingPhotos=computed(()=>Number(siteUpload.value?.pending||0)+Number(aliUpload.value?.pending||0));

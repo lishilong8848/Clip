@@ -30,6 +30,7 @@ ANONYMOUS = {
     ('GET', '/api/auth/password/people'), ('POST', '/api/auth/password/login'),
     ('POST', '/api/auth/password/reset'), ('GET', '/api/auth/logout'), ('POST', '/api/auth/logout'),
     ('POST', '/api/auth/guest'),
+    ('POST', '/api/auth/impersonation/stop'),
 }
 # These original endpoints verify their own scoped, expiring link tokens.
 SIGNED = {
@@ -50,10 +51,11 @@ async def reject(scope, receive, send, status, message):
 
 
 def clean_headers(headers):
+    # The impersonation hint is not authentication; the backend matches it to both session cookies.
     nominated = {part.strip().lower() for key, value in headers if key.lower() == b'connection'
                  for part in value.split(b',')}
     return [(key.lower(), value) for key, value in headers if key.lower() not in HOP | nominated
-            and not key.lower().startswith((b'x-forwarded-', b'x-clipflow-'))
+            and (key.lower() == b'x-clipflow-impersonation' or not key.lower().startswith((b'x-forwarded-', b'x-clipflow-')))
             and key.lower() not in {b'forwarded', b'x-real-ip'}]
 
 

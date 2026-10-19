@@ -19,7 +19,9 @@ from lan_bitable_template_portal.lighthouse_agent import PortalAgent
 from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog
 from lan_bitable_template_portal.lighthouse_files import LighthouseFiles
 
-ACTOR = {"id": "fixture-a", "scopes": ["A"], "is_admin": False}
+ACTOR = {"id": "fixture-a", "scopes": ["A"], "is_admin": False,
+         "modules": ["assistant", "maintenance", "change", "repair", "event", "repair_management",
+                     "cabinet", "polling", "engineer_mop", "drills", "critical_guard"]}
 
 
 class PendingTests(unittest.IsolatedAsyncioTestCase):
@@ -486,7 +488,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_learning_pending_only_reads_own_building_for_broad_h_account(self):
         actor = {"id": "h", "scopes": ["A", "B", "C", "D", "E", "H"],
-                 "learning_scopes": ["H"], "is_admin": False}
+                 "learning_scopes": ["H"], "modules": ["learning"], "is_admin": False}
         data = await collect_pending(actor, "学练未答题", self.invoke, self.cached, groups_only={'learning'})
         self.assertEqual(data['groups'][0]['count'], 1)
         self.assertEqual(data['groups'][0]['items'][0]['status'], '待答 7 题')
@@ -498,7 +500,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
         async def unpublished(op):
             self.assertEqual(op['api_id'], 'GET /api/learning/papers')
             return {'ok': True, '_raw': {'items': [], 'total': 0}}
-        data = await collect_pending({**ACTOR, 'learning_scopes': ['A']}, '学练', unpublished, self.cached, groups_only={'learning'})
+        data = await collect_pending({**ACTOR, 'modules': ['learning'], 'learning_scopes': ['A']}, '学练', unpublished, self.cached, groups_only={'learning'})
         self.assertIn('未发布', pending_reply(data))
         self.assertEqual(data['groups'][0]['stats']['unpublished_scopes'], ['A'])
 
@@ -506,7 +508,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_early_module_does_not_block_guard_learning_and_order_is_stable(self):
         notices_blocked = asyncio.Event()
         guard_started, learning_started = asyncio.Event(), asyncio.Event()
-        actor = {**ACTOR, "learning_scopes": ["A"]}
+        actor = {**ACTOR, "modules": ["maintenance", "critical_guard", "learning"], "learning_scopes": ["A"]}
 
         async def invoke(op):
             api = op["api_id"]
@@ -632,7 +634,7 @@ class PendingTests(unittest.IsolatedAsyncioTestCase):
                 return {"ok": True, "_raw": {"items": [], "total": 0}}
             raise AssertionError("Unexpected API " + api)
 
-        actor = {**ACTOR, "learning_scopes": ["A"]}
+        actor = {**ACTOR, "modules": [*ACTOR['modules'], "learning"], "learning_scopes": ["A"]}
         with patch.object(lp, "WHOLE_LOADER_BUDGET_SECONDS", 0.2), \
              patch.object(lp, "SHARED_BOARD_BUDGET_SECONDS", 0.2), \
              patch.object(lp, "ROUND_DEADLINE_SECONDS", 30):

@@ -3507,9 +3507,23 @@ def render_workbench_lite(
       .scope-select {{ min-height:44px; }}
       .top-actions .top-link,.top-actions .exit {{ min-height:44px; }}
       .shell {{ padding:10px 10px 24px; }}
-      .type-tabs {{ width:100%; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }}
-      .toolbar form {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }}
-      .toolbar form input {{ grid-column:1/-1; }}
+      .summary {{ grid-template-columns:repeat(4,minmax(0,1fr)); gap:6px; }}
+      .summary article {{ min-width:0; padding:7px 8px; border-radius:12px; }}
+      .summary article::before {{ left:8px; top:11px; width:7px; height:7px; border-radius:3px; }}
+      .summary strong {{ padding-left:11px; white-space:nowrap; }}
+      .summary b {{ margin-top:4px; font-size:22px; overflow-wrap:anywhere; }}
+      .toolbar {{ gap:6px; padding:6px; }}
+      .type-tabs {{ width:100%; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }}
+      .type-tab {{ min-width:0; padding:6px 4px; gap:4px; flex-wrap:wrap; justify-content:center; font-size:12px; }}
+      .type-tab > span:first-child {{ white-space:nowrap; }}
+      .type-counts {{ max-width:100%; gap:2px; padding-inline:3px; flex-wrap:wrap; }}
+      .type-count {{ min-width:14px; height:auto; min-height:17px; padding-inline:2px; overflow-wrap:anywhere; }}
+      .toolbar form {{ min-width:0; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:6px; }}
+      .toolbar form #lite-search-input {{ grid-column:1/-1; grid-row:1; }}
+      .toolbar form #lite-month-select {{ grid-column:1; grid-row:2; }}
+      .toolbar form #lite-specialty-select {{ grid-column:2; grid-row:2; }}
+      .toolbar form select {{ width:100%; max-width:none; padding-left:10px; }}
+      .toolbar form > .btn {{ grid-column:3; grid-row:2; padding-inline:12px; white-space:nowrap; }}
       .manual-menu,.refresh-menu {{ top:auto; bottom:calc(100% + 6px); }}
       .refresh-menu {{ right:0; left:auto; }}
       .polling-sop-dialog {{ width:100%; max-height:calc(100dvh - 12px); }}

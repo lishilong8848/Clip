@@ -11,7 +11,7 @@
 .workspace-v2 .mop-summary{display:flex;align-items:center;gap:10px 20px;flex-wrap:wrap;margin:8px 0 12px;padding:0;border:0}
 .workspace-v2 .mop-summary>article{display:flex;align-items:center;gap:8px;min-width:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
 .workspace-v2 .mop-summary strong{font-size:17px!important}.workspace-v2 .mop-summary span{font-size:12px}.workspace-v2 .mop-summary .v2-toolbar-end{margin-left:auto}
-.workspace-v2 .v2-repair-command{gap:8px}.workspace-v2 .v2-repair-command .v2-repair-filters{display:flex;align-items:center;gap:8px;flex:1;min-width:260px;margin:0;grid-template-columns:none}
+.workspace-v2 .v2-repair-command{gap:8px}.workspace-v2 .v2-repair-command .v2-repair-filters{display:flex;align-items:center;gap:8px;flex:1;min-width:260px!important;margin:0;grid-template-columns:none}
 .workspace-v2 .v2-repair-command .v2-repair-filters>.n-input{flex:1;min-width:160px}.workspace-v2 .v2-repair-command .v2-repair-actions{flex:none;gap:6px}.workspace-v2 .v2-repair-state-row{margin-block:0 8px;gap:8px}
 .workspace-v2 .v2-repair-workspace>.n-alert{padding:6px 10px;margin-block:6px}.workspace-v2 .v2-repair-workspace>.n-alert .n-alert-body__content{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
 .workspace-v2 .v2-repair-inline-health.n-alert{flex:1;min-width:200px;padding:4px 8px;font-size:12px}.workspace-v2 .v2-repair-inline-health .n-button{margin-left:6px}
@@ -50,7 +50,7 @@
  .workspace-v2 .v2-command-row{gap:6px}.workspace-v2 .v2-command-actions{gap:6px}.workspace-v2 .v2-notice-command .v2-notice-types{overflow-x:auto;flex-wrap:nowrap}.workspace-v2 .v2-notice-command .v2-notice-types>.n-button{flex:none}
  .workspace-v2 .v2-notice-command .v2-notice-tools{flex:1;flex-wrap:wrap}.workspace-v2 .v2-notice-command .n-button{height:38px;padding-inline:8px}
  .workspace-v2 .v2-sop-filters{flex-wrap:wrap}.workspace-v2 .v2-sop-filters>.n-select{width:calc(50% - 4px);max-width:none}.workspace-v2 .v2-sop-filters>.v2-toolbar-end{margin-left:auto}
- .workspace-v2 .v2-repair-command .v2-repair-filters{min-width:100%}.workspace-v2 .v2-repair-command .v2-repair-actions{flex:0 1 auto;justify-content:flex-end;margin-left:auto}
+ .workspace-v2 .v2-repair-command .v2-repair-filters{min-width:100%!important}.workspace-v2 .v2-repair-command .v2-repair-actions{flex:0 1 auto;justify-content:flex-end;margin-left:auto}
  .workspace-v2 .cabinet-page .all-export-items{grid-template-columns:repeat(2,minmax(0,1fr))}.workspace-v2 .mop-summary{gap:8px 14px}.workspace-v2 .mop-summary>article{gap:5px}
  .workspace-v2 .drill-page .building-toolbar label{width:calc(50% - 4px)}.workspace-v2 .learning-page .toolbar>.filters>.vnet-select{width:calc(50% - 4px)}
  .workspace-v2 .learning-page .toolbar>.filters>label{min-width:100%}.workspace-v2 .v2-plan-command .pc-tabs{width:100%;display:flex}.workspace-v2 .v2-plan-command .pc-tabs>button{flex:1;padding-inline:5px;font-size:12px}
