@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -53,6 +54,223 @@ OAUTH_STATE_PREFIX = "oauth3_"
 REQUIRED_ADMIN_USERS = {
     LI_SHILONG_OPEN_ID: "李世龙",
 }
+
+
+TOPIC_EXECUTION = ContextVar('lighthouse_topic_execution', default=None)
+TOPIC_NAMESPACE = 'lighthouse_topics'
+TOPIC_GRANTS = 'lighthouse_topic_grants'
+
+
+def topic_capability(operation, fallback_scopes=()):
+    import re
+    from .module_access import required_modules
+    body, params = operation.get('body') or {}, operation.get('params') or {}
+    method = operation.get('method') or str(operation.get('api_id') or '').partition(' ')[0]
+    path = operation.get('path') or str(operation.get('api_id') or '').partition(' ')[2]
+    work_type = body.get('work_type') or params.get('work_type') or ''
+    modules = required_modules(path, work_type)
+    # Personal records, account grants and free-form cloud messages are never delegated.
+    forbidden = {'accounts', 'assistant', 'signatures', 'knowledge', 'handover', 'work_handover', 'links', 'life_guide'}
+    if len(modules) != 1 or modules & forbidden or '{' in path:
+        raise PortalError('该操作不支持话题权限委派，请由有权限的本人办理。')
+    if 'learning' in modules and (method != 'GET' or path != '/api/learning/profile'
+            or not params.get('scope') or set(params) - {'scope', 'from', 'to', 'period'} or body or operation.get('files')):
+        raise PortalError('话题仅可借权读取明确楼栋的学练汇总，不可读取或操作个人题目。')
+    if method not in {'GET', 'HEAD'} and path not in {'/api/workbench-actions', '/api/ongoing-items/delete'}:
+        raise PortalError('该异步业务尚无执行阶段委派复核，仅允许按本人原有权限办理。')
+    raw = body.get('scope') or params.get('scope') or body.get('scopes') or params.get('scopes') or list(fallback_scopes)
+    scopes = set(raw if isinstance(raw, list) else [raw])
+    if 'ALL' in scopes:
+        scopes.update(BUILDING_SCOPE_CODES)
+    if 'CAMPUS' in scopes:
+        scopes.update('ABCDE')
+    scopes -= {'ALL', 'CAMPUS'}
+    if not scopes or scopes - set(BUILDING_SCOPE_CODES):
+        raise PortalError('话题委派必须绑定明确的业务楼栋。')
+    action = 'read' if operation.get('read_only', method == 'GET') else 'delete' if method == 'DELETE' or re.search(r'/(?:delete|remove)(?:/|$)', path) or str(body.get('action', '')).startswith(('delete', 'remove')) else 'create' if method == 'POST' else 'update'
+    resource = hashlib.sha256(json.dumps({k: operation.get(k) for k in ('api_id', 'method', 'path', 'params', 'body', 'files')}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return {'module': next(iter(modules)), 'scopes': sorted(scopes), 'action': action, 'method': method,
+            'path': path, 'resource': resource,
+            'binding': {key: body[key] for key in ('scope', 'work_type', 'action', 'source_record_id', 'target_record_id', 'active_item_id', 'manual_id') if body.get(key) not in (None, '')},
+            'admin': bool(re.search(r'/(?:admin|settings|rules)(?:/|$)', path) or str(params.get('admin', '')) == '1')}
+
+
+def topic_capable(profile, capability):
+    from .module_access import NOTICE_MODULES
+    scopes = set(profile.get('scopes', profile.get('scope_rules', [])))
+    if 'ALL' in scopes:
+        scopes.update(BUILDING_SCOPE_CODES)
+    if 'CAMPUS' in scopes:
+        scopes.update('ABCDE')
+    if 'legacy' in capability:
+        access = capability['legacy']
+        return (set(access.get('scopes') or []) <= scopes and set(access.get('modules') or []) <= set(profile.get('modules', []))
+                and (not access.get('is_admin') or profile.get('role') == 'admin' or profile.get('is_admin')))
+    return (capability['module'] in profile.get('modules', []) and set(capability['scopes']) <= scopes
+            and (capability['action'] != 'delete' or capability['module'] in NOTICE_MODULES or profile.get('can_delete_business', False))
+            and (capability['module'] != 'learning' or profile.get('role') == 'admin' or profile.get('category') == 'duty' and set(capability['scopes']) == {profile.get('home_scope')})
+            and (not capability.get('admin') or profile.get('role') == 'admin'))
+
+
+def topic_access_allowed(access, actor):
+    profiles = actor.get('_topic_capabilities') or [actor]
+    capabilities = access.get('capabilities')
+    if capabilities is None:
+        capabilities = [{'legacy': {k: access.get(k) for k in ('scopes', 'modules', 'is_admin')},
+                         **({'source_owner': access['source_owner']} if access.get('source_owner') else {})}]
+    return (not access.get('source_owner') or access['source_owner'] == actor['id']) and all(
+        (not cap.get('source_owner') or cap['source_owner'] == actor['id']) and any(topic_capable(profile, cap) for profile in profiles)
+        for cap in capabilities)
+
+
+def topic_execution(auth, session):
+    value = TOPIC_EXECUTION.get()
+    if not isinstance(value, TopicExecution) or value.registry.auth is not auth:
+        return None
+    identity = (session.get('user') or {}).get('open_id') if isinstance(session, dict) else None
+    if identity != value.operator:
+        raise PortalError('话题委派与实际操作人不一致。')
+    value.validate()
+    return value
+
+
+class TopicDelegations:
+    """Portal-owned evidence and operation-bound grants; never account grants."""
+
+    def __init__(self, auth, store):
+        self.auth, self.store = auth, store
+        self.lock = getattr(auth, '_lock', threading.RLock())
+
+    @staticmethod
+    def key(topic):
+        return hashlib.sha256(topic.encode()).hexdigest()
+
+    def register(self, topic, actor, message):
+        import re
+        app, chat, root = (str(message.get(key) or '') for key in ('app_id', 'chat_id', 'root_id'))
+        expected = chat + ':' + root + ':app:' + hashlib.sha256(app.encode()).hexdigest()[:16]
+        if (message.get('chat_type') != 'group' or message.get('kind') or not app
+                or not re.fullmatch(r'oc_[A-Za-z0-9]+', chat) or not re.fullmatch(r'om_[A-Za-z0-9]+', root)
+                or not re.fullmatch(r'om_[A-Za-z0-9]+', str(message.get('message_id') or ''))
+                or not re.fullmatch(r'ou_[A-Za-z0-9]+', str(message.get('sender_id') or ''))
+                or topic != expected or actor.get('channel') != 'feishu:' + chat):
+            return False
+        if not self.profile(actor['id']):
+            raise PortalError('当前话题参与人的账号已停用或权限已撤销。')
+        with self.lock:
+            record = self.store.get_document(TOPIC_NAMESPACE, self.key(topic)) or {'id': topic, 'people': {}}
+            people = record.setdefault('people', {})
+            if actor['id'] not in people and len(people) >= 300:
+                raise PortalError('话题参与人数超出限制。')
+            people[actor['id']] = {'message_id': message['message_id'], 'sender_id': message['sender_id'], 'at': time.time(),
+                                  'source': message.get('_evidence_kind', 'message'), 'interaction': message.get('_evidence_event', '')}
+            self.store.put_document(TOPIC_NAMESPACE, self.key(topic), record)
+        return True
+
+    def profile(self, identity):
+        if self.auth._open_id_explicitly_disabled(identity):
+            return None
+        person = self.auth.directory_person(identity)
+        if person and (person.get('inactive') or not person.get('selectable')):
+            return None
+        profile = self.auth.account_profile(identity)
+        if 'assistant' not in profile.get('modules', []):
+            return None
+        scopes = set(profile.get('scope_rules', []))
+        if 'ALL' in scopes:
+            scopes.update(BUILDING_SCOPE_CODES)
+        if 'CAMPUS' in scopes:
+            scopes.update('ABCDE')
+        return {**profile, 'id': identity, 'scopes': sorted(scopes & set(BUILDING_SCOPE_CODES))}
+
+    def evidence(self, topic, operator):
+        record = self.store.get_document(TOPIC_NAMESPACE, self.key(topic)) or {}
+        evidence = record.get('people', {}) if record.get('id') == topic else {}
+        if operator not in evidence or not self.profile(operator):
+            raise PortalError('当前操作人不是有效的话题参与人。')
+        return evidence
+
+    def participants(self, topic, operator):
+        evidence = self.evidence(topic, operator)
+        return [profile for identity in evidence if (profile := self.profile(identity))]
+
+    def enrich(self, actor, topic):
+        profiles = self.participants(topic, actor['id'])
+        scopes = list(actor.get('_personal_scopes', actor['scopes']))
+        modules = list(actor.get('_personal_modules', actor.get('modules', [])))
+        # These are discovery hints, not a Cartesian-product authorization grant.
+        return {**actor, '_personal_scopes': scopes, '_personal_modules': modules,
+                '_topic_capabilities': profiles,
+                'scopes': sorted(set(scopes).union(*(set(p['scopes']) for p in profiles))),
+                'modules': sorted(set(modules).union(*(set(p['modules']) for p in profiles)))}
+
+    def issue(self, topic, operator, capability):
+        profiles = self.participants(topic, operator)
+        eligible = [p['id'] for p in profiles if topic_capable(p, capability)]
+        if not eligible:
+            raise PortalError('话题内没有一位当前有效人员具备该动作、模块、楼栋及资源的完整权限。')
+        identity = secrets.token_hex(24)
+        grant = {'id': identity, 'topic': topic, 'operator': operator, 'capability': copy.deepcopy(capability),
+                 'eligible': eligible, 'at': time.time()}
+        self.store.put_document(TOPIC_GRANTS, identity, grant)
+        return TopicExecution(self, grant)
+
+    def resume(self, identity, operator):
+        grant = self.store.get_document(TOPIC_GRANTS, identity)
+        if not grant or grant.get('operator') != operator:
+            raise PortalError('原话题委派不存在或不属于实际操作人。')
+        value = TopicExecution(self, grant)
+        value.validate()
+        return value
+
+
+class TopicExecution:
+    """Only an in-process object can activate delegation in business guards."""
+
+    def __init__(self, registry, grant):
+        self.registry, self.grant = registry, copy.deepcopy(grant)
+        self.operator = grant['operator']
+
+    def validate(self):
+        evidence = self.registry.evidence(self.grant['topic'], self.operator)
+        sponsor = next((p for identity in self.grant['eligible'] if identity in evidence
+                        and (p := self.registry.profile(identity)) and topic_capable(p, self.grant['capability'])), None)
+        if not sponsor:
+            raise PortalError('话题委派权限已撤销或人员已离职，未执行后续业务。')
+        return sponsor
+
+    @property
+    def scopes(self):
+        self.validate()
+        return list(self.grant['capability']['scopes'])
+
+    @property
+    def modules(self):
+        self.validate()
+        return [self.grant['capability']['module']]
+
+    def audit(self, phase, *, operation_id=''):
+        sponsor = self.validate()
+        self.registry.store.put_document('lighthouse_topic_audit', self.grant['id'] + ':' + phase,
+            {'operator': self.operator, 'authorized_by': sponsor['id'], 'topic': self.grant['topic'],
+             'capability': self.grant['capability'], 'operation_id': operation_id, 'phase': phase, 'at': time.time()})
+
+    def matches(self, method, path):
+        from urllib.parse import unquote
+        cap = self.grant['capability']
+        return cap['method'] == method and cap['path'] == unquote(path)
+
+    def matches_operation(self, operation):
+        resource = hashlib.sha256(json.dumps({k: operation.get(k) for k in ('api_id', 'method', 'path', 'params', 'body', 'files')}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        return self.matches(operation.get('method'), operation.get('path')) and hmac.compare_digest(resource, self.grant['capability']['resource'])
+
+    def check_job(self, payload):
+        self.validate()
+        binding = self.grant['capability'].get('binding') or {}
+        if (self.grant['capability']['path'] != '/api/workbench-actions'
+                or payload.get('_auth_open_id') != self.operator
+                or any(payload.get(key) != value for key, value in binding.items())):
+            raise PortalError('排队业务与原话题授权的资源不一致。')
 
 
 class PortalAuthStateError(PortalError):
@@ -1259,6 +1477,9 @@ class PortalAuthManager:
     def session_scopes(self, session: dict[str, Any] | None) -> list[str]:
         if not isinstance(session, dict):
             return []
+        delegated = topic_execution(self, session)
+        if delegated is not None:
+            return delegated.scopes
         scopes = self._scopes_from_raw(session.get("allowed_scopes"))
         if not is_cabinet_guest(session):
             identity = (session.get("user") or {}).get("open_id", "")

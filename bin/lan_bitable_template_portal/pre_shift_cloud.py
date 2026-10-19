@@ -101,6 +101,32 @@ def read_roster(service, day, *, scopes=SCOPES):
     raise CheckError('排班分页未完成。')
 
 
+def fixed_recipient_options(runtime, scope):
+    from .pre_shift_checks import scopes_for
+    from .portal_auth import BUILDING_OPEN_ID_MAP
+    auth = runtime.auth_manager
+    provider = getattr(auth, '_account_directory_provider', None)
+    snapshot = provider() if provider else {}
+    if not isinstance(snapshot, dict) or not snapshot.get('loaded_at') or not isinstance(snapshot.get('people'), dict):
+        raise CheckError('人员目录暂未就绪，请稍后重试。', 503)
+    options = {}
+    for person in snapshot.get('people', {}).values():
+        ids = person.get('login_ids') or []
+        if person.get('inactive') or not person.get('selectable') or len(ids) != 1:
+            continue
+        oid = ids[0]
+        if not re.fullmatch(r'ou_[A-Za-z0-9]+', str(oid)) or auth._open_id_explicitly_disabled(oid):
+            continue
+        profile = auth.account_profile(oid)
+        if profile.get('modules') and scope in scopes_for(profile):
+            options[oid] = {'open_id': oid, 'name': person['name'], 'employee_no': person.get('employee_no', '')}
+    for building, oid in BUILDING_OPEN_ID_MAP.items():
+        profile = auth.account_profile(oid)
+        if profile.get('modules') and scope in scopes_for(profile) and not auth._open_id_explicitly_disabled(oid):
+            options[oid] = {'open_id': oid, 'name': ('110站' if building == '110' else building + '楼') + '值班账号', 'employee_no': ''}
+    return sorted(options.values(), key=lambda p: (p['name'], p['open_id']))
+
+
 class CheckSender:
     """Use the running agent's transport and its verified app-scoped identity map."""
     def __init__(self, runtime):
@@ -132,6 +158,7 @@ class CheckSender:
 
     async def send(self, recipient, card, identity, *, photo=None, checkpoint=None):
         from .portal_service import external_real_write_guard
+        from openclaw_service.assistant.lighthouse_ai import AssistantError
         guard = external_real_write_guard()
         if guard.get('mock_external'):
             return 'om_mockexternal' if photo else (False, '隔离模式未发送真实消息。', [])
@@ -144,22 +171,44 @@ class CheckSender:
             person = await asyncio.to_thread(self.runtime.auth_manager.directory_person, recipient) or {}
         except Exception:
             raise CheckError('接收人目录暂未就绪，班前检查提醒等待重试。') from None
-        if photo is not None:
-            from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
-            profile = await asyncio.to_thread(self.runtime.auth_manager.account_profile, recipient)
-            if not profile.get('modules'):
+        from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
+        fixed_account = recipient in BUILDING_OPEN_ID_MAP.values() or recipient in REQUIRED_ADMIN_USERS
+        if photo is not None or not person and fixed_account:
+            try:
+                profile = await asyncio.to_thread(self.runtime.auth_manager.account_profile, recipient)
+            except Exception:
+                raise CheckError('接收人权限暂未就绪，等待重试。') from None
+            if photo is not None and not profile.get('modules'):
                 raise CheckError('照片已保存，上传账号权限已变化，暂未发送。')
-            if not person and (recipient in BUILDING_OPEN_ID_MAP.values() or recipient in REQUIRED_ADMIN_USERS):
+            if not person and fixed_account and profile.get('modules'):
                 person = {'id': recipient, 'selectable': True}
         if not person.get('id') or not person.get('selectable') or person.get('inactive'):
             raise CheckError('班前检查接收人身份已变化，请核对人员目录。')
+        receive_id, directory_error = None, None
         try:
-            receive_type, receive_id = await asyncio.to_thread(bot.handover_cards.recipient_id,
-                {'id': person['id'], 'open_id': recipient})
-            client = await bot.messenger.client()
+            if re.fullmatch(r'rec[A-Za-z0-9]+', person['id']):
+                try:
+                    receive_id = await bot.messenger.recipient_open_id(person['id'])
+                except AssistantError as exc:
+                    if exc.category != 'feishu_sender_directory_unavailable':
+                        raise
+                    directory_error = exc
+            if receive_id:
+                receive_type = 'open_id'
+            else:
+                # Keep verified legacy bindings and fixed duty accounts usable.
+                receive_type, receive_id = await asyncio.to_thread(bot.handover_cards.recipient_id,
+                    {'id': person['id'], 'open_id': recipient})
+        except AssistantError as exc:
+            raise CheckError(str(directory_error or exc)) from None
         except Exception:
             # Nothing was sent yet; do not exhaust the uncertain-delivery dedup window.
-            raise CheckError('飞书智能体接收人映射暂未就绪，提醒等待重试。') from None
+            raise CheckError(str(directory_error) if directory_error else
+                '未能取得接收人的飞书智能体身份，请核对人员表的员工姓名关联；提醒等待重试。') from None
+        try:
+            client = await bot.messenger.client()
+        except Exception:
+            raise CheckError('飞书智能体消息连接暂未就绪，提醒等待重试。') from None
         content, kind = card, 'interactive'
         if photo is not None:
             if photo.get('sender_app_id') and photo['sender_app_id'] != bot.config['app_id']:

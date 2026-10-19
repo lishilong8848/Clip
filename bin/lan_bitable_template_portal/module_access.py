@@ -67,6 +67,10 @@ def allowed_modules(auth, session):
     from .cabinet_guest import is_cabinet_guest
     if is_cabinet_guest(session):
         return {"cabinet"}
+    from .portal_auth import topic_execution
+    delegated = topic_execution(auth, session)
+    if delegated is not None:
+        return set(delegated.modules)
     profile = auth.account_profile((session.get("user") or {}).get("open_id") or session.get("open_id"))
     return set(profile.get("modules", []))
 

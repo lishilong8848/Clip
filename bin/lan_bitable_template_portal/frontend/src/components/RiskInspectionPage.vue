@@ -11,7 +11,7 @@
     <NAlert v-if="error&&!confirmation&&!fieldEditor&&!feedbackOpen&&!pendingPublication" type="error" :bordered="false" role="alert">{{error}} <NButton v-if="detail" text :disabled="busy" @click="readLatest">重新读取，保留填写</NButton></NAlert>
     <NAlert v-if="message&&!feedbackOpen" type="info" :bordered="false" role="status">{{message}}</NAlert>
     <NSpin :show="loading">
-      <RiskInspectionTemplateLibrary v-if="libraryMode" :key="editor" ref="historyLibrary" :kind="editor==='history'?'history':'base'" :selecting="editor==='choose'" @reuse="reuseHistory" />
+      <RiskInspectionTemplateLibrary v-if="libraryMode" :key="editor" ref="historyLibrary" :kind="editor==='history'?'history':'base'" :selecting="editor==='choose'" :can-edit-library="canEditTemplate" @reuse="reuseHistory" />
       <template v-else-if="editor==='template'&&template">
         <div class="risk-section-heading"><div><strong>字段配置</strong><span>{{template.fields.length}} 列 · {{template.fields.filter((field:Dict)=>field.role==='input').length}} 列由排查人填写</span></div><NButton v-if="canEditTemplate" :disabled="busy||template.fields.length>=80" @click="editField()"><Plus :size="16" />添加字段</NButton></div>
         <NAlert v-if="template.fields.some((field:Dict)=>field.unsupported)" type="warning" :bordered="false">存在关联、公式或其它不支持复制的字段，调整后才可发布。</NAlert>

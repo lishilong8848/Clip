@@ -13,6 +13,7 @@ export const HISTORY_MEMORY_EDITABLE_FIELD_DEFS = [
   { key: "impact", label: "影响/影响范围", multi: true },
   { key: "progress", label: "进度/完成情况", multi: true },
   { key: "specialty", label: "专业" },
+  { key: "execution_party", label: "执行方" },
   { key: "level", label: "等级/紧急程度" },
   { key: "repair_device", label: "维修设备" },
   { key: "repair_fault", label: "维修故障" },
@@ -33,6 +34,7 @@ export const HISTORY_MEMORY_PRIMARY_FIELD_KEYS = new Set([
   "impact",
   "progress",
   "specialty",
+  "execution_party",
   "level",
 ]);
 
@@ -75,6 +77,7 @@ export function historyMemoryFieldVisible(key: string, workType: string): boolea
   }
   if (key.startsWith("zhihang_")) return type === "change";
   if (key === "level") return type !== "maintenance";
+  if (key === "execution_party") return type === "maintenance" || type === "change";
   return true;
 }
 

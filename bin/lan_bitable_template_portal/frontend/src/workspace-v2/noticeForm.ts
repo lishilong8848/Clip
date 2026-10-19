@@ -1,7 +1,7 @@
 import type { Dict } from './client';
 
 export type NoticeField = { key:string; label:string; group:string; type:string; required:boolean; readonly:boolean; options:{label:string;value:string}[]; hint:string; min?:number; max?:number; step?:number };
-export type NoticeForm = { values:Dict; fields:NoticeField[]; actions:string[]; initialAction:string; detailMode:string; canDelete:boolean; photoRequired:boolean; photos:Dict[]; aliPhotos:Dict[]; sop:boolean; groupId:string; sopLinks:{label:string;url:string}[]; sourceOptions:{label:string;value:string}[]; repairRelation?:{eventId:string;eventTitle:string;projectId:string;projectTitle:string} };
+export type NoticeForm = { values:Dict; contextVersion?:string; fields:NoticeField[]; actions:string[]; initialAction:string; detailMode:string; canDelete:boolean; photoRequired:boolean; photos:Dict[]; aliPhotos:Dict[]; sop:boolean; groupId:string; sopLinks:{label:string;url:string}[]; sourceOptions:{label:string;value:string}[]; repairRelation?:{eventId:string;eventTitle:string;projectId:string;projectTitle:string} };
 export const endProgress = '工作已完成，设备运行正常，请知晓！';
 export function normalizePastedNotice(value:string):string {return value.replace(/\r\n?/g,'\n').split('\n').filter(line=>line.trim()).join('\n');}
 const patchKeys = new Set(`manual manual_id scope source_month action work_type notice_type operation_id manual_binding_choice manual_binding_required active_item_id source_record_id target_record_id record_id repair_management_record_id source_work_type converted_from_work_type converted_to_work_type sync_maintenance_target paired_maintenance_target_record_id paired_maintenance_original_title paired_maintenance_actual_start_time building buildings building_code building_codes title name specialty maintenance_cycle execution_party level start_time end_time actual_action_time response_time location content reason impact progress repair_device repair_fault fault_type repair_mode discovery symptom solution spare_parts fault_time expected_time cabinet quantity device status site_photo_count site_photos extra_images ali_confirmation_images polling_work_order_exempt polling_sop_id polling_sop_version polling_run_count polling_runs polling_operator_record_id polling_reviewer_record_id mop_status zhihang_record_id lan_zhihang_record_id zhihang_involved`.split(' '));
@@ -42,7 +42,7 @@ export function parseNoticeForm(html:string):NoticeForm {
   const projectId=values.repair_management_record_id||values.source_record_id||'';
   values.manual_binding_required=['1','true'].includes(String(values.manual_binding_required||''));
   if(form.querySelector('[data-manual-source-binding]'))values.manual_binding_required=true;
-  return {values,fields,actions:[...form.querySelectorAll<HTMLButtonElement>('button[name=submit_action]')].filter(b=>!b.disabled).map(b=>b.value),
+  return {values,fields,contextVersion:form.dataset.draftContext||'',actions:[...form.querySelectorAll<HTMLButtonElement>('button[name=submit_action]')].filter(b=>!b.disabled).map(b=>b.value),
     ...(values.work_type==='repair'?{repairRelation:{eventId,eventTitle:eventId?form.querySelector('#lite-repair-event-link-status')?.textContent?.trim()||'':'',projectId,projectTitle:source?[...source.options].find(o=>o.value===projectId)?.label||'':''}}:{}),
     initialAction:form.dataset.action||'',detailMode:form.dataset.detailMode||'planned',
     canDelete:!!form.querySelector('[data-ongoing-delete-mode]'),photoRequired:!!form.querySelector('[data-site-photo-panel]'),photos:json('[data-site-photo-panel]','data-existing-images'),aliPhotos:json('[data-ali-confirmation-panel]','data-existing-images'),
@@ -51,6 +51,18 @@ export function parseNoticeForm(html:string):NoticeForm {
       try{const url=new URL(el.getAttribute('data-polling-copy-link')||'',location.origin);return url.origin===location.origin&&url.pathname==='/polling-work-order'&&url.searchParams.has('token')?[{label:(el.textContent||'查看工单').replace(/^复制/,'打开'),url:url.pathname+url.search}]:[];}catch{return [];}
     }),
     sourceOptions:source?[...source.options].filter(o=>o.value).map(o=>({label:o.label,value:o.value})):[]};
+}
+export function noticeDraftContext(form:NoticeForm):string {
+  return form.contextVersion||JSON.stringify(['scope','work_type','notice_type','source_record_id','target_record_id','active_item_id','source_month','title','maintenance_cycle','building_codes'].map(key=>form.values[key]??''));
+}
+export function restoreNoticeEdits(form:NoticeForm,cached:Dict,version:number):boolean {
+  if(cached.schema!==2||cached.context!==noticeDraftContext(form)||cached.draftVersion!==version||!cached.baseValues||!cached.snapshot?.values)return false;
+  // Restore edits, never the automatic defaults captured with an older memory.
+  for(const field of form.fields){
+    if(field.readonly||!Object.prototype.hasOwnProperty.call(cached.snapshot.values,field.key))continue;
+    if(JSON.stringify(cached.snapshot.values[field.key])!==JSON.stringify(cached.baseValues[field.key]))form.values[field.key]=cached.snapshot.values[field.key];
+  }
+  return true;
 }
 // Display-only formats mirror the existing web preview; submission remains noticeCommand.
 const previewKeys:Record<string,string[]>={

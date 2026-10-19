@@ -6,6 +6,7 @@ import json
 import math
 import re
 import secrets
+import time
 import uuid
 from .learning import LearningError
 from .learning_engagement import rate, summary_card, weekly_score, weekly_score_key
@@ -104,13 +105,15 @@ class WeeklyCards:
 
     def send_from_worker(self, job, target, identity):
         if self.loop is None or self.loop.is_closed():
-            return False
+            raise LearningError('飞书智能体周报发送器尚未就绪，原周报等待重试。', 503)
         future = asyncio.run_coroutine_threadsafe(self.send(job, target, identity), self.loop)
         try:
             return future.result(timeout=25)
+        except LearningError:
+            raise
         except Exception:
             future.cancel()
-            return False
+            raise LearningError('飞书智能体周报回执尚未确认，保留原任务重试，不改用旧应用重复发送。', 503) from None
 
     def prepare(self, job, target, app_id):
         service = self.get_learning()
@@ -131,32 +134,59 @@ class WeeklyCards:
                           'view_scope': job.get('scope', ''), 'page': 0}
                 service._put('engagement', identity, ticket, conn)
             if ticket['app_id'] != app_id:
-                raise LearningError('周报所属飞书应用已变化，请核对原应用，未重复发送。', 409)
+                if ticket.get('message_id') or ticket.get('attempted_at'):
+                    raise LearningError('周报所属飞书应用已变化，请核对原应用，未重复发送。', 409)
+                ticket['app_id'] = app_id
+                service._put('engagement', identity, ticket, conn)
             return ticket
 
     async def send(self, job, target, identity):
         from .portal_service import external_real_write_guard
         if not external_real_write_guard().get('real_write_allowed'):
-            return False
+            raise LearningError('当前环境不允许真实周报发送，原任务保留。', 503)
         bot, service = self.bot(), self.get_learning()
         ticket = await asyncio.to_thread(self.prepare, job, target, bot.config['app_id'])
         if ticket['message_id']:
             return True
+        if ticket.get('attempted_at') and time.time() - ticket['attempted_at'] > 3500:
+            raise LearningError('原周报发送结果未确认且已超过飞书去重窗口，请核验原消息，未重复发送。', 503)
         if target.startswith('oc_'):
             receive_id, receive_type = target, 'chat_id'
         else:
-            receive_id = await asyncio.to_thread(bot.permission_cards.union_id, target)
-            receive_type = 'union_id'
+            from upload_event_module.services.robot_webhook import DeliveryAttempt
+            sender = getattr(self.runtime, 'feishu_public_sender', None)
+            if sender is None or sender.closing:
+                raise LearningError('飞书智能体接收人映射尚未就绪，原周报等待重试。', 503)
+            recipient = await sender.recipient(bot, target)
+            if isinstance(recipient, DeliveryAttempt):
+                raise LearningError(recipient.message, 503)
+            receive_type, receive_id = recipient
         card = render(ticket, service.portal_url(), scope=ticket['view_scope'])
         client = await bot.messenger.client()
+        headers = await bot.messenger.headers()
+        def attempted():
+            with service.transaction() as conn:
+                ticket.setdefault('attempted_at', time.time())
+                service._put('engagement', ticket['id'], ticket, conn)
+        await asyncio.to_thread(attempted)
         response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
-            params={'receive_id_type': receive_type}, headers=await bot.messenger.headers(),
+            params={'receive_id_type': receive_type}, headers=headers,
             json={'receive_id': receive_id, 'msg_type': 'interactive', 'content': json.dumps(card, ensure_ascii=False),
                   'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, identity))})
         data = response.json()
         sent = data.get('data') or {}
-        if response.status_code >= 400 or data.get('code') != 0 or not sent.get('message_id') or not sent.get('chat_id'):
-            raise LearningError('周报卡片未送达，请核对智能体群成员及卡片权限。', 503)
+        code = data.get('code')
+        if response.status_code < 500 and response.status_code != 408 and type(code) is int and code != 0:
+            def rejected():
+                with service.transaction() as conn:
+                    ticket.pop('attempted_at', None)
+                    service._put('engagement', ticket['id'], ticket, conn)
+            await asyncio.to_thread(rejected)
+            raise LearningError(f'飞书智能体拒绝周报（HTTP {response.status_code}，code={code}）。请确认智能体已加入指定汇总群、可发送消息并支持卡片；原任务等待重试。', 503)
+        if response.status_code >= 400 or type(code) is not int or code != 0 or not re.fullmatch(r'om_[A-Za-z0-9]+', str(sent.get('message_id') or '')) or not re.fullmatch(r'oc_[A-Za-z0-9]+', str(sent.get('chat_id') or '')):
+            raise LearningError('飞书智能体周报回执不完整，原任务等待核验，未改用旧应用发送。', 503)
+        if receive_type == 'chat_id' and sent['chat_id'] != receive_id:
+            raise LearningError('飞书智能体周报回执的群标识不一致，原任务等待核验，未重复发送。', 503)
         def receipt():
             with service.transaction() as conn:
                 ticket.update(message_id=sent['message_id'], chat_id=sent['chat_id'], status='sent')

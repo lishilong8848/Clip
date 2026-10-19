@@ -28,9 +28,10 @@ def install_pre_shift_routes(app, controller, runtime):
         nonlocal service
         with lock:
             if service is None:
-                from .pre_shift_cloud import CheckCloud, read_roster
-                service = CheckService(roster=lambda day: read_roster(runtime.service, day, scopes=get_service().configured_scopes()),
+                from .pre_shift_cloud import CheckCloud, read_roster, fixed_recipient_options
+                service = CheckService(roster=lambda day: read_roster(runtime.service, day, scopes=get_service().configured_scopes(roster_only=True)),
                     cloud=CheckCloud(runtime.service), sender=sender, photo_sender=sender.photo,
+                    recipient_directory=lambda scope: fixed_recipient_options(runtime, scope),
                     portal_url=lambda: runtime.service._critical_guard_public_base_url())
             return service
 
@@ -116,6 +117,11 @@ def install_pre_shift_routes(app, controller, runtime):
             if operation == 'state':
                 data = await asyncio.to_thread(svc.state, actor, scope)
                 data['can_configure_location'] = actor.get('level') in ('L0', 'L1')
+            elif operation == 'recipients':
+                from .pre_shift_checks import authorized
+                from .pre_shift_cloud import fixed_recipient_options
+                await asyncio.to_thread(authorized, actor, scope, True)
+                data = {'items': await asyncio.to_thread(fixed_recipient_options, runtime, scope)}
             elif operation == 'location-settings':
                 if actor.get('level') not in ('L0', 'L1'):
                     raise CheckError('仅 L0/L1 管理员可配置全局地点解析。', 403)
@@ -146,6 +152,10 @@ def install_pre_shift_routes(app, controller, runtime):
     @app.put('/api/pre-shift-checks/definition')
     async def definition(request: Request):
         return await handle(request, 'definition')
+
+    @app.get('/api/pre-shift-checks/recipients')
+    async def recipients(request: Request):
+        return await handle(request, 'recipients')
 
     @app.api_route('/api/pre-shift-checks/location-settings', methods=['GET', 'PUT'])
     async def location_settings(request: Request):

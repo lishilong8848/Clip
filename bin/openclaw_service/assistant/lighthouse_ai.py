@@ -490,18 +490,27 @@ class LighthouseAssistant:
 
     @staticmethod
     def _key(actor):
+        topic = actor.get('_feishu_topic')
+        if actor.get('channel', '').startswith('feishu:') and isinstance(topic, dict) and topic.get('id'):
+            # The shared public transcript is separate from each operator's private execution state.
+            return 'topic-conversation:' + hashlib.sha256(topic['id'].encode()).hexdigest()[:24] + ':' + actor['id']
         channel = actor.get("channel")
         suffix = ":" + hashlib.sha256(channel.encode()).hexdigest()[:24] if channel and not channel.startswith('feishu:') else ""
         return "conversation:" + actor["id"] + suffix
 
     @staticmethod
     def _allowed(turn, actor):
-        return set(turn.get("access_scopes", turn.get("scopes", []))) <= set(actor.get("allowed_scopes", actor["scopes"]))
+        if turn.get('topic_access'):
+            from lan_bitable_template_portal.portal_auth import topic_access_allowed
+            return topic_access_allowed({'capabilities': turn['topic_access']}, actor)
+        return (set(turn.get("access_scopes", turn.get("scopes", []))) <= set(actor.get("allowed_scopes", actor["scopes"]))
+                and (not (turn.get('feishu_topic') or turn.get('display_only')) or set(turn.get('access_modules', [])) <= set(actor.get('modules', []))))
 
     def _state(self, actor):
         with self._lock:
             data = self.store.get_document(NAMESPACE, self._key(actor))
-            if (not actor.get('channel') or actor['channel'].startswith('feishu:')) and not (data or {}).get('unified_person'):
+            if (not actor.get('_feishu_topic') and (not actor.get('channel') or actor['channel'].startswith('feishu:'))
+                    and not (data or {}).get('unified_person')):
                 previous = self.store.list_documents(NAMESPACE, key_prefix='conversation:' + actor['id'] + ':')
                 previous.sort(key=lambda item: item.get('updated_at', 0))
                 states = [item['payload'] for item in previous if isinstance(item.get('payload'), dict) and item['payload'].get('id')]
@@ -555,15 +564,44 @@ class LighthouseAssistant:
             existing = next((t for t in state['turns'] if t['operation_id'] == operation), None)
             existing = existing or self.store.get_document('lighthouse_messages', state['id'] + ':' + operation)
             if existing:
+                self._mirror_topic_reply(actor, payload, existing)
                 return {'recorded': True}
             turn = {'operation_id': operation, 'at': time.time(), 'question': safe_text(payload['question'], limit=12000),
                     'answer': safe_text(payload['answer'], limit=120000), 'status': 'completed', 'source_channel': 'feishu',
                     'scopes': actor['scopes'], 'access_scopes': actor['scopes'], 'sources': [], 'process': []}
+            if actor.get('_feishu_topic'):
+                turn.update(feishu_topic=actor['_feishu_topic']['id'], access_modules=list(actor.get('modules', [])))
             state['turns'].append(turn)
             self.store.put_document('lighthouse_messages', state['id'] + ':' + operation, turn)
             self._trim_turns(state)
             self.store.put_document(NAMESPACE, self._key(actor), state)
+            self._mirror_topic_reply(actor, payload, turn)
         return {'recorded': True}
+
+    def _mirror_topic_reply(self, actor, payload, turn):
+        topic = actor.get('_feishu_topic') or {}
+        if not topic.get('id') or not actor.get('channel', '').startswith('feishu:'):
+            return
+        personal = {**actor, 'scopes': list(actor.get('_personal_scopes', actor['scopes'])),
+                    'modules': list(actor.get('_personal_modules', actor.get('modules', [])))}
+        personal.pop('_feishu_topic', None)
+        personal.pop('_topic_capabilities', None)
+        personal['role'] = 'admin' if personal.get('is_admin') else 'building'
+        state = self._state(personal)
+        identity = 'topic_mirror_' + hashlib.sha256((topic['id'] + ':' + payload['operation_id']).encode()).hexdigest()[:40]
+        if any(t.get('operation_id') == identity for t in state.get('turns', [])):
+            return
+        accessible = self._allowed(turn, personal)
+        mirror = {'operation_id': identity, 'at': turn.get('at', time.time()), 'question': safe_text(payload['question'], limit=12000),
+                  'answer': safe_text(payload['answer'], limit=120000) if accessible else '本话题回复涉及临时委派权限，请返回原话题查看。',
+                  'status': 'completed', 'source_channel': 'feishu', 'display_only': True,
+                  'source_topic': topic['id'], 'scopes': personal['scopes'], 'access_scopes': personal['scopes'],
+                  'access_modules': list(personal.get('modules', [])),
+                  'sources': [], 'process': []}
+        state['turns'].append(mirror)
+        self.store.put_document('lighthouse_messages', state['id'] + ':' + identity, mirror)
+        self._trim_turns(state)
+        self.store.put_document(NAMESPACE, self._key(personal), state)
 
     @staticmethod
     def _selected(data, settings):
@@ -703,6 +741,7 @@ class LighthouseAssistant:
                 self._slots.release()
 
     def _compress(self, state, previous, actor, profile):
+        previous = [turn for turn in previous if not turn.get('display_only')]
         context = state.get("context", {})
         if not self._allowed(context, actor):
             context = {}
@@ -748,6 +787,7 @@ class LighthouseAssistant:
         return context
 
     def _messages(self, previous, context, sources, question, warnings=(), identity=""):
+        previous = [turn for turn in previous if not turn.get('display_only')]
         evidence, used = "[]", []
         for source in sources:
             candidate = json.dumps(safe_data([*used, source]), ensure_ascii=False)

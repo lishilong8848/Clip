@@ -106,7 +106,7 @@ import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
 import { workspaceUrl } from './version';
 import { trackButtonRequest } from './actionMotion';
-import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,type NoticeForm } from './noticeForm';
+import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,noticeDraftContext,restoreNoticeEdits,type NoticeForm } from './noticeForm';
 import NoticePlanBinding from './NoticePlanBinding.vue';
 import NoticeFields from './NoticeFields.vue';
 import NoticeMemorySuggestions from './NoticeMemorySuggestions.vue';
@@ -241,8 +241,8 @@ function changeBuildings(values:string[]){
 }
 function changePage(lane:string,page:number){pages.value[lane]=page;const q=query();q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(before===location.href)void load();}
 function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('specialty',specialty.value||'');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
-function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values.scope+':'+values.work_type+':'+(values.target_record_id||values.source_record_id||'manual');}
-function persist(){if(!form.value||!formKey||job.value?.phase==='success')return;try{sessionStorage.setItem(formKey,JSON.stringify({snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';}}
+function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values.scope+':'+values.work_type+':'+(values.target_record_id||(values.manual==='1'?'manual':values.source_record_id)||'manual');}
+function persist(){if(!form.value||!formKey||job.value?.phase==='success')return;try{sessionStorage.setItem(formKey,JSON.stringify({schema:2,context:noticeDraftContext({...form.value,values:originalFields.value}),baseValues:originalFields.value,snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';}}
 function resetRejected(){if(job.value?.phase!=='failed'||job.value.error_category!=='field_or_payload'||busy.value)return;job.value=null;frozen=null;operationId='';ambiguous.value=false;persist();}
 async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtml='',manualType='',focusBinding=false){
   if(row&&lanes.value[0].rows.includes(row)&&rowUnknown(row)){message.warning('源表状态未取得，请重新读取后办理。');return;}
@@ -263,22 +263,21 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
     originalFields.value={...next.values};attentionKeys.value=next.fields.filter(f=>f.required&&!String(next.values[f.key]??'').trim()).map(f=>f.key);
     sop.value={sop_version:0,scope:sopScope.value,exempt:next.values.polling_work_order_exempt===true};sopField.value={notice_scope:sopScope.value,work_type:next.values.work_type};
     if(next.values.target_record_id){const draft=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:next.values.scope||q.get('scope')||props.scope,work_type:next.values.work_type,target_record_id:next.values.target_record_id,action:action.value}),{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;if(draft.draft){draftVersion=Number(draft.draft.version)||0;for(const field of next.fields)if(draft.draft.fields?.[field.key]!==undefined)next.values[field.key]=draft.draft.fields[field.key];}}
-    originalProgress=String(next.values.progress||'');progressBeforeEnd=originalProgress;saved.value=snapshot();
+    originalFields.value=JSON.parse(JSON.stringify(next.values));originalProgress=String(next.values.progress||'');progressBeforeEnd=originalProgress;saved.value=snapshot();
     try{
       const cached=JSON.parse(sessionStorage.getItem(formKey)||'null');
       if(cached&&Date.now()-cached.at<7*86400000){
-        if(cached.draftVersion===draftVersion&&(!parsedHtml||cached.job||cached.frozen)){
-          for(const field of next.fields)if(!field.readonly&&cached.snapshot.values[field.key]!==undefined)next.values[field.key]=cached.snapshot.values[field.key];
-          next.values.building_codes=(cached.snapshot.values.building_codes||[]).filter((s:string)=>buildingOptions.value.some(b=>b.value===s));
+        if((!parsedHtml||cached.job||cached.frozen)&&restoreNoticeEdits(next,cached,draftVersion)){
+          if(JSON.stringify(cached.snapshot.values.building_codes)!==JSON.stringify(cached.baseValues.building_codes))next.values.building_codes=(cached.snapshot.values.building_codes||[]).filter((s:string)=>buildingOptions.value.some(b=>b.value===s));
           sop.value={sop_version:0,...cached.snapshot.sop};photos.value=cached.snapshot.photos||[];aliPhotos.value=cached.snapshot.aliPhotos||[];
           action.value=next.actions.includes(cached.snapshot.action)?cached.snapshot.action:action.value;
-        }else if(!parsedHtml)detailError.value='已读取较新的服务端草稿，本机旧副本未覆盖新内容。';
+        }else if(!parsedHtml)detailError.value='已重新读取当前通告；旧副本缺少来源校验或楼栋、周期、版本已变化，未自动覆盖。';
         // An unresolved write must still be recoverable even when another window saved a newer draft.
         job.value=cached.job||null;operationId=cached.operationId||'';frozen=cached.frozen||null;ambiguous.value=!!frozen&&!job.value;
         if(parsedHtml&&(job.value||frozen))detailError.value='同类手填通告有未核验的原任务，请先核验原任务；本次解析尚未提交。';
       }
     }catch{/* An invalid local draft never replaces the server values. */}
-    const localManual=(()=>{try{const cached=JSON.parse(sessionStorage.getItem(formKey)||'null');return cached&&Date.now()-cached.at<7*86400000?cached.snapshot?.values:null;}catch{return null;}})();
+    const localManual=(()=>{try{const cached=JSON.parse(sessionStorage.getItem(formKey)||'null');return cached?.schema===2&&cached.context===noticeDraftContext({...next,values:originalFields.value})&&Date.now()-cached.at<7*86400000?cached.snapshot?.values:null;}catch{return null;}})();
     if(!parsedHtml&&next.values.manual==='1'&&!next.values.source_record_id&&!next.values.target_record_id&&localManual){
       const prefix='manual:lite:'+next.values.scope+':'+next.values.work_type+':';
       if(String(localManual.manual_id||'').startsWith(prefix))next.values.manual_id=localManual.manual_id;
@@ -426,7 +425,13 @@ async function associationBound(result:Dict){const v=form.value?.values;if(!v)re
 function bindSource(){
   if(!form.value||!sourceChoice.value||locked.value)return;
   const current=form.value,selected=sourceChoice.value;
-  if(!current.values.target_record_id){current.values.source_record_id=selected;current.values.manual_binding_choice='bind';persist();return;}
+  if(!current.values.target_record_id){
+    if(current.values.manual!=='1'&&current.detailMode!=='manual'){
+      const open=()=>{saved.value=snapshot();editing.value=false;void openRecord({record_id:selected,work_type:current.values.work_type,_request_scope:current.values.scope},false,'start');};
+      if(dirty.value)askLeave(open);else open();
+    }else{current.values.source_record_id=selected;current.values.manual_binding_choice='bind';formKey=cacheKey(current.values);originalFields.value={...originalFields.value,source_record_id:selected,manual_binding_choice:'bind'};persist();}
+    return;
+  }
   dialog.warning({title:'确认绑定源表事项',content:'将绑定“'+(sourceOptions.value.find(o=>o.value===selected)?.label||'所选计划')+'”。只更新关联，不重复发送通告；保存后重新读取，未保存的填写将重置。',positiveText:'确认绑定',negativeText:'返回核对',onPositiveClick:async()=>{
     if(form.value!==current||locked.value)return false;
     const v=current.values;busy.value=true;detailError.value='';

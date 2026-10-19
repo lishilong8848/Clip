@@ -245,15 +245,96 @@ class HandoverTests(unittest.TestCase):
         self.assertNotIn('form_action_type',content)
 
     def test_bot_uses_app_scoped_verified_binding_not_login_open_id(self):
-        directory=Mock(return_value=[{'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob'}}])
+        directory=Mock(return_value=[{'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}])
         union=Mock(return_value='on_bob')
         bot=SimpleNamespace(config={'app_id':'cli_bot'},runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=directory)),
             permission_cards=SimpleNamespace(union_id=union))
         cards=HandoverCards(bot)
         self.assertEqual(cards.recipient_id(self.b),('open_id','ou_botBob'))
         union.assert_not_called()
-        directory.return_value=[{'key':'cli_bot:ou_wrong','payload':{'open_id':'ou_bob','record_id':'eve'}}]
+        directory.return_value=[{'key':'cli_bot:ou_wrong','payload':{'open_id':'ou_bob','record_id':'eve','matched_by':'record_id'}}]
         self.assertEqual(cards.recipient_id(self.b),('union_id','on_bob'))
+
+    def test_name_only_binding_cannot_send_and_record_evidence_can_send(self):
+        self.pending()
+        with self.store.connect() as db:
+            row=dict(db.execute("SELECT * FROM work_handover_outbox WHERE kind='invite'").fetchone())
+        binding={'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'name'}}
+        union=Mock(side_effect=HandoverError('没有可信身份关联',403))
+        post=AsyncMock(return_value=SimpleNamespace(json=lambda:{'code':0,'data':{'message_id':'om_verified'}}))
+        bot=SimpleNamespace(config={'app_id':'cli_bot'},
+            permission_cards=SimpleNamespace(union_id=union),
+            runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=Mock(return_value=[binding])),
+                service=SimpleNamespace(_critical_guard_public_base_url=lambda:'https://portal.invalid')),
+            messenger=SimpleNamespace(client=AsyncMock(return_value=SimpleNamespace(post=post)),
+                                      headers=AsyncMock(return_value={'Authorization':'fixture'})))
+        cards=HandoverCards(bot)
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            with self.assertRaisesRegex(HandoverError,'可信身份'):
+                asyncio.run(cards.deliver(self.store,row))
+            post.assert_not_awaited()
+            union.assert_called_once_with('ou_bob')
+            union.reset_mock()
+            binding['payload']['matched_by']='record_id'
+            self.assertEqual(asyncio.run(cards.deliver(self.store,row)),'om_verified')
+        union.assert_not_called()
+        post.assert_awaited_once()
+        self.assertEqual(post.call_args.kwargs['params'],{'receive_id_type':'open_id'})
+        self.assertEqual(post.call_args.kwargs['json']['receive_id'],'ou_botBob')
+        self.assertNotEqual(post.call_args.kwargs['json']['receive_id'],self.b['open_id'])
+
+    def test_recipient_binding_requires_trusted_provenance_and_exact_current_app(self):
+        binding={'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob'}}
+        directory=Mock(return_value=[binding])
+        union=Mock(return_value='on_bob')
+        cards=HandoverCards(SimpleNamespace(config={'app_id':'cli_bot'},
+            runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=directory)),
+            permission_cards=SimpleNamespace(union_id=union)))
+        for method in ('name',None,'unknown','record_id','union_id','admin'):
+            with self.subTest(method=method):
+                binding['payload']['matched_by']=method
+                union.reset_mock()
+                trusted=method in {'record_id','union_id','admin'}
+                self.assertEqual(cards.recipient_id(self.b),('open_id','ou_botBob') if trusted else ('union_id','on_bob'))
+                if trusted:
+                    union.assert_not_called()
+                else:
+                    union.assert_called_once_with('ou_bob')
+        binding['key']='cli_old:ou_oldBob'
+        binding['payload']['matched_by']='record_id'
+        self.assertEqual(cards.recipient_id(self.b),('union_id','on_bob'))
+        directory.assert_called_with('feishu_assistant_sender',key_prefix='cli_bot:')
+
+    def test_untrusted_name_binding_does_not_override_or_ambiguate_trusted_binding(self):
+        directory=Mock(return_value=[
+            {'key':'cli_bot:ou_nameOnly','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'name'}},
+            {'key':'cli_bot:ou_verified','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}])
+        union=Mock(side_effect=AssertionError('A unique verified binding needs no union lookup'))
+        cards=HandoverCards(SimpleNamespace(config={'app_id':'cli_bot'},
+            runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=directory)),
+            permission_cards=SimpleNamespace(union_id=union)))
+        self.assertEqual(cards.recipient_id(self.b),('open_id','ou_verified'))
+        union.assert_not_called()
+
+    def test_gateway_recipient_fallback_rejects_name_only_binding(self):
+        from lan_bitable_template_portal.feishu_delivery import PublicFeishuSender
+        binding={'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'recBob','matched_by':'name'}}
+        union=Mock(side_effect=HandoverError('没有可信身份关联',403))
+        runtime=SimpleNamespace(auth_manager=SimpleNamespace(directory_person=Mock(
+            return_value={'id':'recBob','selectable':True})),
+            state_store=SimpleNamespace(list_documents=Mock(return_value=[binding])))
+        bot=SimpleNamespace(config={'app_id':'cli_bot'},runtime=runtime,
+            permission_cards=SimpleNamespace(union_id=union),
+            messenger=SimpleNamespace(recipient_open_id=AsyncMock(return_value=None)))
+        bot.handover_cards=HandoverCards(bot)
+        gateway=PublicFeishuSender(runtime)
+        with self.assertRaisesRegex(HandoverError,'可信身份'):
+            asyncio.run(gateway.recipient(bot,'ou_bob'))
+        bot.messenger.recipient_open_id.assert_awaited_once_with('recBob')
+        binding['payload']['matched_by']='record_id'
+        union.reset_mock()
+        self.assertEqual(asyncio.run(gateway.recipient(bot,'ou_bob')),('open_id','ou_botBob'))
+        union.assert_not_called()
 
     def test_sources_skip_missing_ids_and_preserve_zero_reading(self):
         from lan_bitable_template_portal.portal_service import MaintenancePortalService

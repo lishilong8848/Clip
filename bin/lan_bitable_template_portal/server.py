@@ -15195,8 +15195,22 @@ class PortalRuntime:
     @classmethod
     def _process_maintenance_action_job(cls, job_id: str) -> None:
         remote_operation_id = f"notice_action:{job_id}"
+        topic_token, topic_check_pending = None, False
         try:
             current_job = cls.service.get_job(job_id) or {}
+            queued_request = current_job.get('request') or {}
+            grant_id = queued_request.get('_topic_delegation_id')
+            if grant_id:
+                topic_check_pending = True
+                from .portal_auth import TOPIC_EXECUTION, TopicDelegations
+                registry = getattr(cls.auth_manager, '_topic_delegations', None)
+                if registry is None:
+                    registry = cls.auth_manager._topic_delegations = TopicDelegations(cls.auth_manager, cls.state_store)
+                delegated = registry.resume(grant_id, queued_request.get('_auth_open_id'))
+                delegated.check_job(queued_request)
+                delegated.audit('queue_execution', operation_id=job_id)
+                topic_token = TOPIC_EXECUTION.set(delegated)
+                topic_check_pending = False
             if current_job.get("execution_origin") == "qt_local" and current_job.get("qt_result"):
                 cls._finish_qt_event_wait_job(job_id, current_job["qt_request"], current_job["qt_result"])
                 return
@@ -16261,6 +16275,16 @@ class PortalRuntime:
         except Exception as exc:
             operation = None
             current = cls.service.get_job(job_id) or {}
+            if topic_check_pending:
+                receipt = cls._get_notice_remote_operation(remote_operation_id) or {}
+                written = bool(current.get('remote_written') or current.get('message_sent') or receipt.get('status') in {'remote_written', 'completed'})
+                message = ('原任务已部分完成，' if written else '原任务尚未执行，') + '话题委派已失效，后续执行已停止；已发生结果保留，请勿重复发送。'
+                cls.service.mark_job(job_id, phase='cancelled', partial=written,
+                    error=message, error_category='permission_denied', error_retryable=False,
+                    message_warning=message, delegation_blocked=True, qt_phase='cancelled',
+                    queue_position=0, qt_queue_position=0, upload_queue_position=0)
+                cls.state_store.mark_runtime_queue_item('qt_action', job_id, 'failed', error=message)
+                return
             if current.get("execution_origin") == "qt_local":
                 cls._finish_qt_event_wait_job(job_id, current["qt_request"], {"ok": False, "message": str(exc)})
                 return
@@ -16328,6 +16352,10 @@ class PortalRuntime:
                 )
             except Exception:
                 pass
+
+        finally:
+            if topic_token is not None:
+                TOPIC_EXECUTION.reset(topic_token)
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return

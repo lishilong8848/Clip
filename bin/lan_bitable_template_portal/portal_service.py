@@ -28824,9 +28824,13 @@ class MaintenancePortalService(RepairOperationsMixin):
             item: dict[str, Any] = {}
             for key in lookup_keys:
                 candidate = items.get(key)
-                if isinstance(candidate, dict) and self._normalize_memory_cycle(
-                    candidate.get("maintenance_cycle")
-                ) == self._normalize_memory_cycle(maintenance_cycle):
+                expected_name = self._change_title(record) if converted_maintenance and key == lookup_keys[-1] and len(lookup_keys) > 1 else memory_name
+                if (isinstance(candidate, dict)
+                    and str(candidate.get("work_type") or WORK_TYPE_MAINTENANCE) == work_type
+                    and self._canonical_history_notice_title(candidate.get("memory_name") or candidate.get("maintenance_total") or expected_name, work_type)
+                        == self._canonical_history_notice_title(expected_name, work_type)
+                    and (not candidate.get("building") or set(self._building_codes_from_value(candidate["building"])) == set(self._building_codes_from_value(building)))
+                    and self._normalize_memory_cycle(candidate.get("maintenance_cycle")) == self._normalize_memory_cycle(maintenance_cycle)):
                     item = candidate
                     break
             if not item and (work_type == WORK_TYPE_MAINTENANCE or maintenance_cycle):
@@ -28840,6 +28844,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if not isinstance(candidate, dict):
                         continue
                     if str(candidate.get("work_type") or WORK_TYPE_MAINTENANCE) != work_type:
+                        continue
+                    if candidate.get("building") and set(self._building_codes_from_value(candidate["building"])) != set(self._building_codes_from_value(building)):
                         continue
                     candidate_name = str(
                         candidate.get("memory_name")
@@ -28942,6 +28948,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         remembered = {
             "work_type": work_type,
+            "building": building,
             "memory_name": memory_name,
             "maintenance_total": maintenance_total,
             "maintenance_cycle": maintenance_cycle,
@@ -29558,6 +29565,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if work_type == WORK_TYPE_CHANGE:
             return {
                 "location": str(fields.get("位置") or fields.get("变更楼栋") or "").strip(),
+                "execution_party": str(fields.get("执行方") or "").strip(),
                 "content": self._change_title(record),
                 "reason": str(fields.get("变更原因") or fields.get("原因") or "").strip(),
                 "impact": str(fields.get("影响") or fields.get("影响范围") or "").strip(),
@@ -29571,6 +29579,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         maintenance_total = str(fields.get("维护总项") or "").strip()
         return {
             "location": str(fields.get("位置") or fields.get("楼栋") or "").strip(),
+            "execution_party": str(fields.get("执行方") or "").strip(),
             "content": str(fields.get("内容") or fields.get("维护内容") or maintenance_total).strip(),
             "reason": str(fields.get("原因") or fields.get("维护原因") or "").strip(),
             "impact": str(fields.get("影响") or fields.get("影响范围") or "").strip(),
@@ -29881,6 +29890,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             reverse=True,
         )
         matches = self._recommend_history_memory_matches(source_items, candidates)
+        with self._memory_lock:
+            self._history_memory_scan = {
+                "at": time.monotonic(),
+                "sources": {item["id"]: copy.deepcopy(item) for item in source_items},
+                "candidates": {item["id"]: copy.deepcopy(item) for item in candidates},
+            }
         return {
             "months": months,
             "work_types": work_type_list,
@@ -29912,6 +29927,21 @@ class MaintenancePortalService(RepairOperationsMixin):
                 continue
             source = match.get("source_item") if isinstance(match.get("source_item"), dict) else {}
             fields = match.get("fields") if isinstance(match.get("fields"), dict) else {}
+            if match.get("field_origin") == "candidate":
+                with self._memory_lock:
+                    scan = getattr(self, "_history_memory_scan", {})
+                    candidate = (scan.get("candidates") or {}).get(str(match.get("candidate_id") or ""))
+                    verified_source = (scan.get("sources") or {}).get(str(source.get("id") or ""))
+                if not candidate or not verified_source or time.monotonic() - scan.get("at", 0) > 3600:
+                    skipped.append({"index": index, "reason": "历史候选校验已失效，请重新扫描后核对保存"})
+                    continue
+                if (candidate.get("work_type") != verified_source.get("work_type")
+                    or candidate.get("canonical_title") != verified_source.get("canonical_title")
+                    or set(candidate.get("building_codes") or []) != set(verified_source.get("building_codes") or [])
+                    or self._normalize_memory_cycle(candidate.get("maintenance_cycle")) != self._normalize_memory_cycle(verified_source.get("maintenance_cycle"))):
+                    skipped.append({"index": index, "reason": "历史候选与源事项名称、楼栋、类型或周期不一致，未保存"})
+                    continue
+                source = verified_source
             work_type = str(source.get("work_type") or match.get("work_type") or WORK_TYPE_MAINTENANCE).strip()
             building = str(source.get("building") or match.get("building") or "").strip()
             memory_name = str(source.get("memory_name") or source.get("title") or match.get("memory_name") or "").strip()
@@ -29937,6 +29967,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 overwritten_count += 1
             extra_fields = {
                 "specialty": str(fields.get("specialty") or ""),
+                "execution_party": str(fields.get("execution_party") or ""),
                 "level": str(fields.get("level") or ""),
                 "progress": str(fields.get("progress") or ""),
                 "repair_device": str(fields.get("repair_device") or ""),
@@ -45432,6 +45463,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if action == "start":
             remembered_change_fields = {
                 "specialty": specialty,
+                "execution_party": execution_party,
                 "level": level,
                 "progress": progress,
                 "zhihang_involved": "1" if zhihang_involved else "",

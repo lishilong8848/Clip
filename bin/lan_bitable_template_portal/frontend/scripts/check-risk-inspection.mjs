@@ -36,6 +36,7 @@ try{
     fields:[{key:'number',field_id:'number',field_name:'排查任务编号',type:1,role:'number',is_primary:true},...structuredClone(fields)],items:[{title:'复用检查项',values:{f1:'检查接线与标识'}}]};
    const basics=[{...structuredClone(history),id:'d'.repeat(32),kind:'base',name:'电气基础模板',items:[],version:'base-v1'},
     {...structuredClone(history),id:'e'.repeat(32),kind:'base',name:'暖通基础模板',items:[],version:'hvac-v1'}];
+   let libraryFields=structuredClone(history.fields),libraryWrites=0,rejectLibrarySave=true;
    const data=()=>({id:rid,name:'十月设备专项风险排查',created:Date.now()/1000,deadline:Date.now()+86400000,status:'active',fields,owner:'发布管理员',reviewer:reviewerId==='reviewer'?'审核主管':'发布管理员',reviewer_id:reviewerId,reviewer_version:reviewerVersion,
     people:structuredClone(role==='alice'?[people[0]]:people),is_manager:role!=='alice',can_manage_release:role!=='alice',can_delete_release:role!=='alice',is_reviewer:role===reviewerId,self_id:role,jobs:[],audit:[],can_claim:role==='admin'&&!people.some(person=>person.id==='admin'),claim_scopes:['A','B']});
    const ctx=await browser.newContext({viewport:{width,height:width===360?640:width===375?667:width===390?844:900},reducedMotion:'reduce'}),layouts=layoutApiFixture();
@@ -52,7 +53,17 @@ try{
     if(!u.pathname.startsWith('/api/risk-inspections')){assert.equal(req.method(),'GET','No unrelated writes');return ok({items:[],records:[],scopes:{},summary:{},total:0});}
     const p=u.pathname.slice('/api/risk-inspections'.length);
     if(req.method()!=='GET')writes.push({version,width,path:p});
-    if(p==='/template'){assert.equal(req.method(),'GET','Creating a template must not edit the old cloud template');return ok({fields:history.fields,version:templateVersion});}
+    if(p==='/template'){
+     if(req.method()==='POST'){
+      const body=req.postDataJSON();assert.equal(role,'admin');assert.equal(body.version,templateVersion);assert.equal(body.confirmed,true);
+      if(rejectLibrarySave){rejectLibrarySave=false;return route.fulfill({status:503,json:{ok:false,error:'字段库暂未保存，请重试'}});}
+      const old=libraryFields.find(field=>field.key===body.field_id);
+      if(body.action==='delete'){assert(old&&!old.is_primary);libraryFields=libraryFields.filter(field=>field.key!==body.field_id);}
+      else{const key=old?.key||'library'+(libraryWrites+1);const field={key,field_id:key,field_name:body.field_name,type:body.type,role:body.role,required:body.required,is_primary:!!old?.is_primary,property:[3,4].includes(body.type)?{options:body.options.map(name=>({name}))}:{}};if(old)libraryFields=libraryFields.map(item=>item.key===key?field:item);else libraryFields.push(field);}
+      templateVersion='library-v'+(++libraryWrites);
+     }
+     return ok({fields:libraryFields,version:templateVersion});
+    }
     if(p==='/base-templates'){
      if(req.method()==='POST'){const body=req.postDataJSON();assert(!basics.some(template=>template.id===body.id));basics.push({...structuredClone(basics[0]),...body,kind:'base',version:'new-base-v1',revision:1});return ok(basics.at(-1));}
      return ok({items:basics.map(template=>({...template,item_count:template.items.length,field_count:template.fields.length})),page:1,total:basics.length});
@@ -99,6 +110,7 @@ try{
     const current=page.url();
     await page.evaluate(()=>{const target=new URL(location.href);if(target.pathname==='/assets/workspace-v2/index.html')target.searchParams.set('__page','/');else{target.pathname='/';target.search='';}history.pushState({},'',target.href);window.dispatchEvent(new PopStateEvent('popstate'));});
     await page.getByRole('button',{name:/^继续(编辑|填写)$/}).click();assert.equal(page.url(),current,'Cancelling departure retains the current task');
+    await page.locator('.n-modal-mask').waitFor({state:'hidden'});
    }
    if(version==='legacy'){
     await page.goto(origin);await page.getByRole('button',{name:'进入风险管理',exact:true}).waitFor();
@@ -128,35 +140,62 @@ try{
    const keyboardReads=detailReads;await page.locator('.risk-task-name:visible').focus();await page.keyboard.press('Enter');await page.locator('.risk-feedback-table').waitFor();
    assert.equal(detailReads,keyboardReads+1,'The existing keyboard action opens once without row bubbling');
    await page.getByRole('button',{name:'排查列表',exact:true}).click();
-   await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.history-list article').nth(1).waitFor();
+   await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+   assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'New base templates start with only the required primary field');
+   await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.locator('.history-list article').nth(1).waitFor();
    assert.equal(await page.locator('.history-list article').count(),2,'Multiple base templates are independently selectable');
-   await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.history-schema summary').click();
-   const schemaHeaders=await page.locator('.risk-sheet th').allTextContents();
-   assert(basics[0].fields.every((field,index)=>schemaHeaders[index+1].includes(field.field_name)),'Base template preserves the original column order');
-   assert.equal(await page.locator('.risk-sheet tbody tr').count(),4,'Metadata is shown by row, not as a vertical field list');
-   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Template scroll stays inside the sheet');
+   await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+   assert.deepEqual(await page.locator('.risk-selected-name strong').allTextContents(),basics[0].fields.map(field=>field.field_name),'Existing templates retain their field selection and order');
+   const panes=await page.locator('.risk-field-pane').evaluateAll(nodes=>nodes.map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,right:r.right};}));
+   if(width===1440){assert(Math.abs(panes[0].y-panes[1].y)<2);assert(panes[0].right<panes[1].x,'Desktop library is left, selected fields are right');}else assert(panes[1].y>panes[0].y,'Mobile panels stack in reading order');
+   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Field picker stays inside the page');
+   await page.locator('.risk-field-picker .n-spin-body').waitFor({state:'hidden'});
    await page.screenshot({path:path.join(output,`${version}-${width}-template.png`),fullPage:width>=700});
    if(version==='v2'&&width===1440){
     for(const theme of ['dark','light']){
      await page.evaluate(value=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin',value),theme);await page.goto(url);
-     await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.history-schema summary').click();
+     await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
      assert.equal(await page.evaluate(()=>document.documentElement.dataset.v2Theme),theme);
      if(theme==='dark'){
-      const colors=await page.locator('.risk-sheet th').first().evaluate(el=>({background:getComputedStyle(el).backgroundColor,color:getComputedStyle(el).color}));
+      const colors=await page.locator('.risk-selected-name strong').first().evaluate(el=>{let node=el;while(node){const background=getComputedStyle(node).backgroundColor;if(background.startsWith('rgb('))return {background,color:getComputedStyle(el).color};node=node.parentElement;}return {background:'rgb(255,255,255)',color:getComputedStyle(el).color};});
       const luminance=value=>value.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
-      assert((luminance(colors.color)+.05)/(luminance(colors.background)+.05)>=4.5,'Template headers remain readable in night mode');
+      assert((luminance(colors.color)+.05)/(luminance(colors.background)+.05)>=4.5,'Selected field names remain readable in night mode');
       await page.screenshot({path:path.join(output,'v2-1440-template-dark.png'),fullPage:true});
      }
     }
    }
-   await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).click();await page.getByRole('textbox',{name:'历史字段名称',exact:true}).waitFor();assert.equal(await page.getByRole('switch',{name:'历史字段是否必填',exact:true}).getAttribute('aria-checked'),'true');await page.locator('.risk-history-field-modal').getByRole('button',{name:'取消',exact:true}).click();
+   await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).waitFor();assert.equal(await page.getByRole('switch',{name:'字段库是否必填',exact:true}).getAttribute('aria-checked'),'true');await page.locator('.risk-history-field-modal').getByRole('button',{name:'取消',exact:true}).click();
    const requiredSwitch=page.getByRole('switch',{name:'排查结果是否必填',exact:true});
-   await requiredSwitch.waitFor();assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');assert.deepEqual(await page.locator('.risk-sheet-required>span').allTextContents(),['必填','不必填','不必填','不必填','不必填','不必填'],'Requirement labels stay outside the switch for readable contrast');assert.equal(await page.locator('.risk-sheet-required').first().evaluate(element=>getComputedStyle(element).columnGap),'8px','Requirement labels have spacing inside table-rendered cells');
+   await requiredSwitch.waitFor();assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');assert.equal(await page.locator('.risk-field-required>span').count(),6,'Each selected input field retains a labelled required control');
    await requiredSwitch.click();assert.equal(requiredWrites,0,'Template edits remain local until saved');await cancelNavigation();
    for(const expected of [false,true]){if(expected)await requiredSwitch.click();await page.getByRole('button',{name:'保存新版本',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});assert.equal(await requiredSwitch.getAttribute('aria-checked'),String(expected));}
-   await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.getByRole('textbox',{name:'历史模板名称',exact:true}).fill('第三个基础模板');await page.getByRole('button',{name:'保存基础模板',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});assert.equal(basics.length,3);
    await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
-   await page.getByRole('button',{name:'发布排查',exact:true}).click();await page.locator('.history-list article').nth(2).waitFor();assert.equal(await page.locator('.risk-publish').count(),0,'Template must be explicitly selected before publication');
+   await page.getByRole('button',{name:'发布排查',exact:true}).click();await page.locator('.history-list article').nth(1).waitFor();assert.equal(await page.locator('.risk-publish').count(),0,'Template must be explicitly selected before publication');
+   await page.getByRole('button',{name:'新建基础模板',exact:true}).waitFor();assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Template creation entry fits the chooser');await page.screenshot({path:path.join(output,`${version}-${width}-choose-create.png`),fullPage:width>=700});
+   await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+   const originalFields=structuredClone(basics[0].fields);
+   await page.getByRole('button',{name:'添加字段',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('现场说明');await page.getByRole('button',{name:'保存字段',exact:true}).click();
+   await page.locator('.risk-history-field-modal').getByText('字段库暂未保存，请重试',{exact:true}).waitFor();assert.equal(libraryWrites,0);assert.equal(await page.getByRole('textbox',{name:'字段库名称',exact:true}).inputValue(),'现场说明','Failed library saves retain the field draft');
+   await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
+   assert.equal(libraryWrites,1);assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Saving a library field does not implicitly select it');
+   await page.getByRole('button',{name:'修改字段 现场说明',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('现场补充说明');await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
+   await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.getByRole('button',{name:'添加字段 现场补充说明',exact:true}).waitFor();
+   assert.equal(libraryWrites,2,'Added and edited library fields survive reopening');
+   await page.getByRole('button',{name:'添加字段',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('待移除字段');await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
+   await page.getByRole('button',{name:'删除库字段 待移除字段',exact:true}).click();await page.getByRole('button',{name:'确认删除',exact:true}).click();await page.getByRole('button',{name:'删除库字段 待移除字段',exact:true}).waitFor({state:'hidden'});assert.equal(libraryWrites,4);
+   assert.deepEqual(basics[0].fields,originalFields,'Field library changes cannot mutate previously generated templates');
+   for(const name of ['排查结果','风险等级','现场补充说明'])await page.getByRole('button',{name:'添加字段 '+name,exact:true}).click();
+   await page.getByRole('button',{name:'移除已选字段 风险等级',exact:true}).click();assert.equal(libraryWrites,4,'Removing a selected field must not delete the library field');
+   assert(await page.getByRole('button',{name:'添加字段 风险等级',exact:true}).isEnabled());
+   await page.getByRole('textbox',{name:'基础模板名称',exact:true}).fill('第三个基础模板');await cancelNavigation();
+   const generate=page.getByRole('button',{name:'生成基础模板',exact:true});await generate.scrollIntoViewIfNeeded();
+   if(version==='v2'&&width<700){const button=await generate.boundingBox(),nav=await page.locator('.v2-mobile-nav').boundingBox();assert(button.y>=56&&button.y+button.height<=nav.y-2,'Generate button stays above mobile navigation');}
+   await page.screenshot({path:path.join(output,`${version}-${width}-field-picker.png`),fullPage:width>=700});
+   await generate.click();await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});assert.equal(basics.length,3);
+   assert.deepEqual(basics[2].fields.map(field=>field.field_name),['排查任务编号','排查结果','现场补充说明'],'Generated templates contain exactly the selected fields');
+   assert.equal(writes.filter(write=>write.version===version&&write.width===width&&write.path==='').length,0,'Saving a base template must not publish an inspection');
+   await page.getByRole('button',{name:'选用并填写',exact:true}).click();await page.locator('.risk-publish').waitFor();await page.getByText('基础模板：第三个基础模板 · V1',{exact:true}).waitFor();
+   await page.getByRole('button',{name:'更换基础模板',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.history-list article').nth(2).waitFor();
    failTemplateRead=true;await page.locator('.history-list article').first().getByRole('button',{name:'选用并填写',exact:true}).click();await page.getByText('隔离测试模板读取失败',{exact:false}).waitFor();assert.equal(await page.locator('.risk-publish').count(),0);
    await page.locator('.history-list article').first().getByRole('button',{name:'选用并填写',exact:true}).click();await page.locator('.risk-publish').waitFor();
    await page.getByPlaceholder('例如：10月电气设备专项排查').fill('隔离测试发布');
@@ -280,6 +319,10 @@ try{
    await page.locator('.risk-response .n-tag').filter({hasText:'审核通过'}).waitFor();
    assert.equal(people[0].items[0].status,'approved');
    await page.screenshot({path:path.join(output,`${version}-${width}-review.png`),fullPage:width>=700});
+   await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+   assert.equal(await page.getByRole('button',{name:'添加字段',exact:true}).count(),0,'Building managers cannot add shared library fields');assert.equal(await page.locator('.risk-field-tools').count(),0,'Building managers cannot edit or delete shared library fields');
+   await page.getByRole('button',{name:'添加字段 排查结果',exact:true}).click();assert.equal(await page.locator('.risk-selected-fields>li').count(),2,'Building managers can select fields for their template');
+   await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.n-modal-mask').waitFor({state:'hidden'});
    role='admin';
    people[0].items.push({id:'second-item',title:'另一设备检查',status:'approved',values:{f1:'这是同一人员的第二项独立反馈。'},files:[]});
    for(let index=0;index<6;index++)people.push({id:'preview-'+index,name:'示例人员'+(index+1),scope:index%2?'B':'A',version:1,revoked:false,items:[{id:'item',title:index%2?'冷却系统及环境检查':'配电柜状态检查',status:['pending','submitted','returned','approved'][index%4],values:{f1:index%3?'设备运行正常，现场标识完整。':'发现标识松动，已安排现场核对。',f2:index%3?'无异常':'有风险',f4:1792152000000,f5:index%3===0,f6:index%3?0:1},reason:index%4===2?'补充现场照片后重新提交。':'',files:[]}]});

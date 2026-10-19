@@ -49,6 +49,8 @@ class EngagementTests(unittest.TestCase):
         return self.dispatch('paper.start', {'id': paper['id'], 'person_id': paper['person_id']}, self.self_actor(paper['person_id']))
 
     def send(self, current):
+        if not callable(getattr(self.service, '_weekly_card_sender', None)):
+            self.service._weekly_card_sender = lambda job, target, identity: self.service._send(target, engagement.make_card(job, self.service.portal_url()), identity)
         with self.service._notification_lock:
             engagement.send_due(self.service, current)
 
@@ -607,6 +609,38 @@ class EngagementTests(unittest.TestCase):
         self.assertFalse(any(':summary:' in identity for _, _, identity in self.sender.calls))
         self.send(CURRENT + dt.timedelta(days=7, minutes=6))
         self.assertEqual(len(deliveries), 6, 'already delivered weekly cards must not be resent')
+
+    def test_missing_interactive_sender_keeps_report_pending_instead_of_using_old_app(self):
+        self.weekly()
+        key = 'week:2026-09-28:summary:group'
+        with self.service.transaction() as conn:
+            job = self.service._get('engagement', key, conn)
+            job.update(status='pending', sent_to=[], due_at=0)
+            self.service._put('engagement', key, job, conn)
+        self.service._weekly_card_sender = None
+        before = len(self.sender.calls)
+        engagement.send_due(self.service, CURRENT + dt.timedelta(days=7, minutes=6))
+        job = self.service._get('engagement', key)
+        self.assertEqual(job['status'], 'pending')
+        self.assertIn('智能体周报发送器尚未就绪', job['error'])
+        self.assertEqual(len(self.sender.calls), before)
+
+    def test_interactive_sender_error_is_preserved_and_recovery_reuses_same_task(self):
+        calls = []
+        def failed(job, target, identity):
+            calls.append(identity)
+            raise learning.LearningError('飞书智能体拒绝周报（HTTP 400，code=230002）。请将智能体加入指定群。', 503)
+        self.service._weekly_card_sender = failed
+        self.weekly()
+        key = 'week:2026-09-28:summary:group'
+        job = self.service._get('engagement', key)
+        self.assertEqual(job['status'], 'pending')
+        self.assertIn('230002', job['error'])
+        self.assertIn('230002', self.service._last_error)
+        self.service._weekly_card_sender = lambda job, target, identity: calls.append(identity) or True
+        self.send(CURRENT + dt.timedelta(days=7, minutes=6))
+        self.assertEqual(self.service._get('engagement', key)['status'], 'sent')
+        self.assertEqual(calls, [key, key])
 
     def test_retired_pending_summary_recipients_cancel_after_restart(self):
         self.weekly()

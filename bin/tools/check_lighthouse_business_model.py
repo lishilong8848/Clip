@@ -154,7 +154,8 @@ async def main(*, notice_only=False, event_transfer_only=False, notice_binding_o
         calls.append("unexpected-write")
         raise AssertionError("A model proposal must never write without confirmation")
 
-    actor = {"id": "synthetic-probe", "scopes": ["E"], "is_admin": False}
+    from lan_bitable_template_portal.account_policy import default_modules
+    actor = {"id": "synthetic-probe", "scopes": ["E"], "is_admin": False, "modules": list(default_modules('L4'))}
     request = Request({"type": "http", "scheme": "http", "server": ("testserver", 80), "client": ("127.0.0.1", 1),
         "path": "/api/assistant/messages", "root_path": "", "query_string": b"", "headers": [(b"origin", b"http://testserver"), (b"cookie", b"fixture=synthetic")]})
     async def authorize(): return actor

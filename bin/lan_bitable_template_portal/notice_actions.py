@@ -43,6 +43,11 @@ async def submit_notice_action(controller, runtime, session, payload, *, card_su
         payload["_notice_card_submission"] = True
     from .module_access import require_module
     require_module(runtime.auth_manager, session, str(payload.get("work_type") or "maintenance"))
+    from .portal_auth import topic_execution
+    delegated = topic_execution(runtime.auth_manager, session)
+    payload.pop('_topic_delegation_id', None)
+    if delegated is not None:
+        payload['_topic_delegation_id'] = delegated.grant['id']
     job_id, should_start = await asyncio.to_thread(runtime.service.create_action_job, payload)
     job = await asyncio.to_thread(runtime.service.get_job, job_id) or {}
     audit_id = str(job.get("business_audit_id") or "").strip()

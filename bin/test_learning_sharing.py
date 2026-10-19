@@ -450,6 +450,32 @@ class SourceTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_weekly_group_summary_uses_agent_only_and_preserves_pending_on_failure(self):
+        from lan_bitable_template_portal.feishu_delivery import FeishuDeliveryError
+        from lan_bitable_template_portal.learning_engagement import WEEKLY_CHAT_ID
+        setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
+        setup.publish(); setup.core.schedule(dt.datetime(2026, 10, 19, tzinfo=TZ))
+        job = next(j for j in setup.learning._all('sharing_delivery') if j['kind'] == 'weekly')
+        setup.learning._portal_url = lambda: 'http://portal.test'
+        setup.learning._send = Mock(side_effect=AssertionError('weekly reports must not use the old app'))
+        worker = SharingRuntime(SimpleNamespace(), lambda: setup.learning); worker.core = setup.core
+        guard = SimpleNamespace(external_real_write_guard=lambda: {'real_write_allowed': True})
+        sender = AsyncMock(side_effect=FeishuDeliveryError('智能体未加入汇总群'))
+        with patch.dict(sys.modules, {'lan_bitable_template_portal.portal_service': guard}), patch(
+                'lan_bitable_template_portal.feishu_delivery.send_agent_message', sender):
+            for _ in range(6):
+                await worker.send(job)
+                job = setup.learning._get('sharing_delivery', job['id'])
+            self.assertEqual(job['status'], 'pending')
+            self.assertIn('智能体未加入', job['error'])
+            sender.side_effect = None; sender.return_value = {'message_id': 'om_summary', 'chat_id': WEEKLY_CHAT_ID}
+            await worker.send(job)
+        self.assertEqual(setup.learning._get('sharing_delivery', job['id'])['status'], 'sent')
+        self.assertEqual(setup.learning._get('sharing_delivery', job['id'])['message_id'], 'om_summary')
+        self.assertTrue(all(call.args[1] == WEEKLY_CHAT_ID for call in sender.call_args_list))
+        self.assertEqual(len({call.kwargs['message_uuid'] for call in sender.call_args_list}), 1)
+        setup.learning._send.assert_not_called()
+
     async def test_new_answer_results_take_priority_over_older_bank_uploads(self):
         setup = SharingTests(); setup.setUp(); self.addCleanup(setup.doCleanups)
         setup.publish(); setup.submit(setup.core.attempts(setup.bid)[0])

@@ -104,10 +104,20 @@ class WorkOrderQueryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = Store(Path(self.tmp.name) / "state.sqlite3")
-        self.actor_a = {"id": "fixture-a", "scopes": ["A"], "is_admin": False}
+        self.actor_a = {"id": "fixture-a", "scopes": ["A"], "is_admin": False,
+                        "modules": ["maintenance", "polling", "adjust"]}
 
     def records(self, query, actor=None):
         return work_order_records(self.store, actor or self.actor_a, query)
+
+    def test_module_grant_required_for_list_and_direct_order(self):
+        seed(self.store, [group('wo-module', 'A', work_type='polling')])
+        for modules in ([], ['maintenance']):
+            actor = {**self.actor_a, 'modules': modules}
+            self.assertEqual(self.records({'scope': 'A'}, actor)['items'], [])
+            with self.assertRaises(AssistantError):
+                self.records({'scope': 'A', 'group_id': 'wo-module'}, actor)
+        self.assertEqual(self.records({'scope': 'A'})['total'], 1)
 
     # -- native completion semantics -----------------------------------------
 

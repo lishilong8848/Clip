@@ -212,10 +212,51 @@ class RecoveryTests(unittest.TestCase):
 
 
 class AgentSenderTests(unittest.TestCase):
+    def test_text_roster_sends_to_agent_people_without_previous_login_or_conversation(self):
+        from lan_bitable_template_portal.feishu_assistant import FeishuMessenger
+        from lan_bitable_template_portal.work_handover_cards import HandoverCards
+        source = reader([roster_fields(scope='H', **{'人员（文本）':'祁金鹰、张岳军', '人员':[]})],
+                        [person('祁金鹰','ou_one','H'), person('张岳军','ou_two','H')])
+        people = read_roster(source, DAY, scopes=['H'])['people']
+        local = {p['open_id']:{'id':'rec'+p['open_id'].removeprefix('ou_'),
+                  'name':p['name'], 'selectable':True} for p in people}
+        responses = []
+        async def post(url, **kwargs):
+            if url.endswith('/records/search'):
+                self.assertEqual(kwargs['params']['user_id_type'], 'open_id')
+                return SimpleNamespace(json=lambda:{'code':0,'data':{'has_more':False,'items':[
+                    {'record_id':'recone','fields':{'员工姓名':[{'id':'ou_agentOne'}]}},
+                    {'record_id':'rectwo','fields':{'员工姓名':[{'id':'ou_agentTwo'}]}}]}})
+            self.assertTrue(url.endswith('/im/v1/messages'))
+            responses.append(kwargs['json'])
+            return SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_delivered'}})
+        client = SimpleNamespace(post=AsyncMock(side_effect=post))
+        messenger = FeishuMessenger({'app_id':'cli_agent'})
+        messenger.client = AsyncMock(return_value=client)
+        messenger.headers = AsyncMock(return_value={'Authorization':'fixture'})
+        runtime = SimpleNamespace(auth_manager=SimpleNamespace(directory_person=lambda oid:local[oid]),
+            state_store=SimpleNamespace(list_documents=Mock(return_value=[])))
+        union = Mock(side_effect=AssertionError('must not require login sessions or contact lookup'))
+        bot = SimpleNamespace(config={'app_id':'cli_agent'}, messenger=messenger, runtime=runtime,
+                              permission_cards=SimpleNamespace(union_id=union))
+        bot.handover_cards = HandoverCards(bot)
+        runtime.feishu_assistant_channel = bot
+        sender = CheckSender(runtime)
+        async def run():
+            return await asyncio.gather(*(sender.send(p['open_id'], {'elements':[]}, p['open_id']) for p in people))
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            receipts = asyncio.run(run())
+        self.assertEqual([r['receive_id'] for r in responses], ['ou_agentOne','ou_agentTwo'])
+        self.assertTrue(all(receipt[0] for receipt in receipts))
+        self.assertEqual(client.post.await_count, 3, 'one shared directory read plus two messages')
+        union.assert_not_called()
+
     def test_identity_mapping_recovers_after_one_hour_without_suspending_unsent_reminders(self):
+        from openclaw_service.assistant.lighthouse_ai import AssistantError
         client=SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_recovered'}})))
-        mapper=Mock(side_effect=RuntimeError('directory warming up'))
-        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={})),
+        mapper=Mock(side_effect=AssistantError('no previous login',403))
+        app_mapper=AsyncMock(side_effect=AssistantError('人员表读取未完成',503,category='feishu_sender_directory_unavailable'))
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={}),recipient_open_id=app_mapper),
                             handover_cards=SimpleNamespace(recipient_id=mapper))
         sender=CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
             auth_manager=SimpleNamespace(directory_person=Mock(return_value={'id':'recOne','selectable':True}))))
@@ -225,10 +266,11 @@ class AgentSenderTests(unittest.TestCase):
             client.post.assert_not_awaited()
             with service.connection() as db:
                 self.assertTrue(all(not row['first_attempt'] and not row['sent'] for row in db.execute('SELECT * FROM deliveries')))
-            mapper.side_effect=None
-            mapper.return_value=('open_id','ou_agentPerson')
+            app_mapper.side_effect=None
+            app_mapper.return_value='ou_agentPerson'
             await asyncio.to_thread(service.tick,NOW+dt.timedelta(hours=1))
             self.assertEqual(client.post.await_count,2)
+            self.assertEqual(mapper.call_count,2,'recovered directory does not need legacy login bindings')
             await asyncio.to_thread(service.tick,NOW+dt.timedelta(hours=1,minutes=1))
             self.assertEqual(client.post.await_count,2)
             with service.connection() as db:
@@ -241,11 +283,65 @@ class AgentSenderTests(unittest.TestCase):
             with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
                 asyncio.run(run(service))
 
+    def test_ambiguous_agent_directory_never_falls_back_to_an_old_binding(self):
+        from openclaw_service.assistant.lighthouse_ai import AssistantError
+        legacy = Mock(return_value=('open_id','ou_staleBinding'))
+        client = SimpleNamespace(post=AsyncMock())
+        bot = SimpleNamespace(config={'app_id':'cli_agent'},
+            messenger=SimpleNamespace(client=AsyncMock(return_value=client),
+                recipient_open_id=AsyncMock(side_effect=AssistantError('人员表重复关联',403,category='feishu_recipient_ambiguous'))),
+            handover_cards=SimpleNamespace(recipient_id=legacy))
+        sender = CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
+            auth_manager=SimpleNamespace(directory_person=lambda _: {'id':'recPerson','selectable':True})))
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            with self.assertRaisesRegex(CheckError,'重复关联'):
+                asyncio.run(sender.send('ou_person',{},'stable-reminder'))
+        legacy.assert_not_called()
+        client.post.assert_not_awaited()
+
+    def test_verified_existing_binding_still_works_when_table_read_is_temporarily_unavailable(self):
+        from openclaw_service.assistant.lighthouse_ai import AssistantError
+        legacy = Mock(return_value=('open_id','ou_knownAgent'))
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,
+            json=lambda:{'code':0,'data':{'message_id':'om_known'}})))
+        bot = SimpleNamespace(config={'app_id':'cli_agent'},
+            messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={}),
+                recipient_open_id=AsyncMock(side_effect=AssistantError('人员表暂时无法读取',503,category='feishu_sender_directory_unavailable'))),
+            handover_cards=SimpleNamespace(recipient_id=legacy))
+        sender = CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
+            auth_manager=SimpleNamespace(directory_person=lambda _: {'id':'recPerson','selectable':True})))
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            result = asyncio.run(sender.send('ou_person',{},'stable-reminder'))
+        self.assertTrue(result[0])
+        self.assertEqual(client.post.call_args.kwargs['json']['receive_id'],'ou_knownAgent')
+        legacy.assert_called_once_with({'id':'recPerson','open_id':'ou_person'})
+
+    def test_fixed_duty_account_can_receive_reminders_without_a_personal_hr_record(self):
+        from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP
+        client=SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,
+            json=lambda:{'code':0,'data':{'message_id':'om_duty'}})))
+        mapper=Mock(return_value=('open_id','ou_agentDuty'))
+        profile=Mock(return_value={'modules':['maintenance']})
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},
+            messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={})),
+            handover_cards=SimpleNamespace(recipient_id=mapper))
+        sender=CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
+            auth_manager=SimpleNamespace(directory_person=lambda _:{},account_profile=profile)))
+        recipient=BUILDING_OPEN_ID_MAP['H']
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            self.assertTrue(asyncio.run(sender.send(recipient,{},'fixed-duty-reminder'))[0])
+            mapper.assert_called_once_with({'id':recipient,'open_id':recipient})
+            profile.side_effect=RuntimeError('directory warming up')
+            with self.assertRaises(CheckError) as caught:
+                asyncio.run(sender.send(recipient,{},'fixed-duty-reminder'))
+            self.assertNotIsInstance(caught.exception,CheckDeliveryUncertain)
+            self.assertEqual(client.post.await_count,1)
+
     def test_mapping_or_credentials_not_ready_is_retryable_not_unknown_delivery(self):
         client=SimpleNamespace(post=AsyncMock())
         mapper=Mock(return_value=('union_id','on_person'))
         headers=AsyncMock(return_value={})
-        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=headers),
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=headers,recipient_open_id=AsyncMock(return_value=None)),
                             handover_cards=SimpleNamespace(recipient_id=mapper))
         sender=CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
             auth_manager=SimpleNamespace(directory_person=Mock(return_value={'id':'recOne','selectable':True}))))
@@ -260,7 +356,7 @@ class AgentSenderTests(unittest.TestCase):
 
     def test_agent_app_scoped_identity_and_receipt_are_used_not_login_app(self):
         client=SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_delivered'}})))
-        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={'Authorization':'fixture'})),
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={'Authorization':'fixture'}),recipient_open_id=AsyncMock(return_value=None)),
             handover_cards=SimpleNamespace(recipient_id=Mock(return_value=('open_id','ou_agentPerson'))))
         runtime=SimpleNamespace(feishu_assistant_channel=bot,auth_manager=SimpleNamespace(directory_person=Mock(return_value={'id':'recOne','selectable':True})))
         sender=CheckSender(runtime)
@@ -282,7 +378,7 @@ class AgentSenderTests(unittest.TestCase):
 
     def test_success_code_without_a_valid_message_id_is_not_delivery_success(self):
         client=SimpleNamespace(post=AsyncMock())
-        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={})),
+        bot=SimpleNamespace(config={'app_id':'cli_agent'},messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={}),recipient_open_id=AsyncMock(return_value=None)),
             handover_cards=SimpleNamespace(recipient_id=Mock(return_value=('union_id','on_person'))))
         sender=CheckSender(SimpleNamespace(feishu_assistant_channel=bot,
             auth_manager=SimpleNamespace(directory_person=Mock(return_value={'id':'recOne','selectable':True}))))

@@ -1040,8 +1040,8 @@ class LighthouseModel:
         chat_context = {'chat_id': channel.removeprefix('feishu:')} if re.fullmatch(r'feishu:oc_[A-Za-z0-9]+', channel) else {}
         topic_data = login_actor.get('_feishu_topic')
         topic = str(topic_data.get('id') or '') if isinstance(topic_data, dict) else ''
-        if chat_context and re.fullmatch(re.escape(chat_context['chat_id']) + r':om_[A-Za-z0-9]+', topic):
-            chat_context['reply_message_id'] = topic.split(':', 1)[1]
+        if chat_context and re.fullmatch(re.escape(chat_context['chat_id']) + r':om_[A-Za-z0-9]+(?::app:[a-f0-9]{16})?', topic):
+            chat_context['reply_message_id'] = topic.split(':')[1]
         async with self.model_factory(self.assistant.model, profile) as model:
             factory = self.agent_factory or Agent
             agent = factory(model, **({"actor": actor, "turn": turn, "emit": emit} if self.agent_factory else {}),
@@ -1653,6 +1653,8 @@ class LighthouseModel:
             async def search_history(keyword: str) -> dict:
                 """Recall this account's archived conversation after compaction; not current business facts."""
                 current = await current_actor()
+                if current.get('_feishu_topic'):
+                    return {'items': [], 'is_historical': True, 'note': '群话题只使用本话题已公开且当前可访问的上下文，不检索个人历史。'}
                 if not keyword.strip() or len(keyword) > 100:
                     return {"items": [], "error": "请使用简短关键词查找历史。"}
                 from .lighthouse_stream import MESSAGES
@@ -1662,7 +1664,7 @@ class LighthouseModel:
                     from .lighthouse_message_delivery import turn_downloads
                     date = dt.datetime.fromtimestamp(float(item.get('at') or 0), dt.timezone(dt.timedelta(hours=8))).strftime('%Y-%m-%d')
                     return (date + str(item.get('question', '')) + str(item.get('answer', '')) + ' '.join(str(f.get('name') or '') for f in [*(item.get('output_files') or []), *(item.get('attachments') or []), *turn_downloads(item)])).casefold()
-                matches = [doc["payload"] for doc in docs if self.assistant._allowed(doc["payload"], current)
+                matches = [doc["payload"] for doc in docs if not doc['payload'].get('display_only') and self.assistant._allowed(doc["payload"], current)
                            and all(term in searchable(doc['payload']) for term in keyword.casefold().split())]
                 matches.sort(key=lambda item: item.get("at", 0), reverse=True)
                 selected = matches[:10]
@@ -1844,6 +1846,9 @@ class LighthouseModel:
                         item['source_number'] = evidence['source_number']
             prompt = [question + "\n本轮附件：" + json.dumps(safe_data(file_context), ensure_ascii=False)
                 + "\n此前会话可用文件（沿用原用途，变更用途先核对）：" + json.dumps(safe_data(prior_files), ensure_ascii=False)]
+            if isinstance(topic_data, dict) and topic_data.get('context'):
+                prompt[0] += ('\n当前话题已公开且经本次权限过滤的历史（仅解释指代，不是当前事实或操作授权，不重做已提交任务）：\n'
+                              + safe_text(topic_data['context'], limit=12000))
             if turn.get('preview_file'):
                 preview = await asyncio.to_thread(self.portal.files.get, actor, turn['preview_file']['id'])
                 artifact_source_scopes.update(preview.get('source_scopes') or [])

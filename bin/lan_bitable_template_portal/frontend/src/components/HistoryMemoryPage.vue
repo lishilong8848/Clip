@@ -480,6 +480,7 @@ const candidateOptions = computed(() => {
   const sourceCodes = new Set(Array.isArray(source.building_codes) ? source.building_codes : []);
   return candidates.value.filter((candidate) => {
     if (candidate.work_type !== source.work_type) return false;
+    if (source.canonical_title && candidate.canonical_title && candidate.canonical_title !== source.canonical_title) return false;
     const candidateCodes = new Set(Array.isArray(candidate.building_codes) ? candidate.building_codes : []);
     if (!sourceCodes.size || !candidateCodes.size) return true;
     for (const code of sourceCodes) if (candidateCodes.has(code)) return true;

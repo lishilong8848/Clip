@@ -163,6 +163,8 @@ class HandoverCards:
         identities=set()
         for row in bindings:
             person=row.get('payload') or {}
+            if person.get('matched_by') not in {'record_id','union_id','admin'}:
+                continue
             identity=str(row.get('key') or '').removeprefix(prefix)
             if person.get('open_id')==target['open_id'] and person.get('record_id')==target['id'] and re.fullmatch(r'ou_[A-Za-z0-9]+',identity):
                 identities.add(identity)

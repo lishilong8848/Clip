@@ -219,6 +219,9 @@ class LighthouseFiles:
         item = {"id": identity, "owner": actor["id"], "name": name, "mime": mime, "size": len(content),
                 "path": str(target), "relative_path": target.relative_to(self.root).as_posix(),
                 "sha256": hashlib.sha256(content).hexdigest(), "created_at": time.time(), "text": "", "error": "", "extracted": extract}
+        topic = actor.get('_feishu_topic') if actor.get('channel', '').startswith('feishu:') else None
+        if isinstance(topic, dict) and topic.get('id'):
+            item['topic_id'] = topic['id']
         if source_scopes:
             item["source_scopes"] = sorted(set(source_scopes))
         if purpose:
@@ -249,6 +252,10 @@ class LighthouseFiles:
         shared = identity in grant.get('file_ids', []) and actor.get('channel') == 'feishu:' + str(grant.get('chat_id'))
         if not item or item.get("owner") != actor["id"] and not shared or item.get("deleted_at"):
             raise AssistantError("附件不存在或没有访问权限。", 404)
+        topic = actor.get('_feishu_topic') if actor.get('channel', '').startswith('feishu:') else None
+        topic_id = topic.get('id') if isinstance(topic, dict) else None
+        if item.get('topic_id') != topic_id and not (shared and topic_id and grant.get('topic_id') == topic_id):
+            raise AssistantError('附件不属于当前话题或个人会话。', 404)
         if set(item.get("source_scopes", [])) - set(actor.get("allowed_scopes", actor["scopes"])):
             raise AssistantError("当前账号已无权读取该业务文件。", 403)
         relative = item.get('relative_path')

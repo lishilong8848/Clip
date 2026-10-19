@@ -138,7 +138,7 @@ class RemoteCatalog(PortalAPICatalog):
                 raise AssistantError('附件不存在或没有访问权限。', 404)
             for identity in dict.fromkeys(ids):
                 item = await asyncio.to_thread(file_provider, identity)
-                uploads.append({key: item[key] for key in ('id', 'owner', 'name', 'mime', 'path', 'sha256', 'size', 'source_scopes') if key in item})
+                uploads.append({key: item[key] for key in ('id', 'owner', 'name', 'mime', 'path', 'sha256', 'size', 'source_scopes', 'topic_id') if key in item})
         result = await self.bridge.acall('invoke', {'operation': operation, 'uploads': uploads,
             'operation_id': OPERATION.get()}, context)
         binary = result.get('_binary') if isinstance(result, dict) else None

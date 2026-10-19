@@ -7,7 +7,7 @@ import json
 import logging
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -117,6 +117,11 @@ class OpenClawToolAgent:
         scope_key = hashlib.sha256(json.dumps(sorted(actor['scopes'])).encode()).hexdigest()[:16]
         state = engine.assistant._state(actor)
         self.session_key = 'agent:' + agent_id(actor['id']) + ':lighthouse:' + state['id'] + ':' + scope_key
+        topic = actor.get('_feishu_topic')
+        if isinstance(topic, dict) and topic.get('id'):
+            # Rehydrate only the currently authorized public transcript, never hidden native history.
+            view = [topic['id'], topic.get('context', ''), actor.get('modules', []), turn.get('run_id') or turn.get('operation_id')]
+            self.session_key += ':topic:' + hashlib.sha256(json.dumps(view, sort_keys=True).encode()).hexdigest()[:24]
         self.token = engine.tokens.setdefault(account_key(actor['id']), secrets.token_urlsafe(40))
 
     def tool_plain(self, function=None, **kwargs):
@@ -154,7 +159,7 @@ class OpenClawToolAgent:
         if waited.get('runId', self.run_id) != self.run_id:
             raise AssistantError('原回答运行编号不一致，未使用其他会话内容。', 502)
         if waited.get('status') == 'error':
-            raise native_model_error(waited.get('error'))
+            raise self._model_failure(waited.get('error'))
         reply = waited.get('terminalReply') or {}
         if waited.get('status') == 'ok':
             if reply.get('disposition') == 'visible' and isinstance(reply.get('text'), str):
@@ -218,7 +223,86 @@ class OpenClawToolAgent:
 
     @asynccontextmanager
     async def run_stream_events(self, prompt, *, message_history, **_):
-        await self.engine.wait_warmup(self.actor, self.emit)
+        try:
+            # Bound the entire inference chain, not 190 seconds per alternative.
+            async with asyncio.timeout(240), AsyncExitStack() as stack:
+                await self.engine.wait_warmup(self.actor, self.emit)
+                self._fallback_attempt = 0
+                events = await stack.enter_async_context(self._run_stream_attempt(prompt, message_history))
+                stream = self._events_with_fallback(prompt, message_history, stack, events)
+                try:
+                    yield stream
+                finally:
+                    await stream.aclose()
+        except TimeoutError:
+            raise AssistantError('模型处理超时，原消息与任务已保留；请查询原任务，不要重复提交业务。',
+                                 504, category='timeout') from None
+
+    def _model_failure(self, error, *, timeout=False):
+        # Only a terminal outcome for this exact run permits a new model run.
+        self._terminal_model_failure = True
+        self.run_id = ''
+        return native_model_error(error, timeout=timeout)
+
+    def _next_profile(self, attempted):
+        from .lighthouse_ai import model_capabilities
+        model = self.engine.assistant.model_for(self.actor)
+        settings = model.settings()
+        if not settings.get('enabled'):
+            return None
+        required = model_capabilities(self.profile)
+        for item in settings.get('models', []):
+            if not item.get('configured'):
+                continue
+            try:
+                candidate = model.profile(item['id'])
+                capabilities = model_capabilities(candidate)
+            except AssistantError:
+                continue
+            if self._profile_key(candidate) in attempted:
+                continue
+            if any(capabilities[key] != required[key] for key in ('tool_calls', 'image_input')):
+                continue
+            return candidate
+        return None
+
+    @staticmethod
+    def _profile_key(profile):
+        return hashlib.sha256(json.dumps([profile.get(key) for key in
+            ('endpoint', 'model', 'key_cipher')], ensure_ascii=False).encode()).hexdigest()
+
+    async def _events_with_fallback(self, prompt, history, stack, events):
+        attempted, visible = set(), False
+        while True:
+            attempted.add(self._profile_key(self.profile))
+            self._terminal_model_failure = False
+            try:
+                async for event in events:
+                    if event.event_kind in {'part_start', 'part_delta', 'agent_run_result'}:
+                        visible = True
+                    yield event
+                return
+            except AssistantError as exc:
+                await stack.aclose()
+                if (not self._terminal_model_failure or self.calls or visible or len(attempted) >= 4
+                        or exc.category not in {'model_auth', 'model_busy', 'model_request',
+                            'model_connection', 'model_protocol', 'model_context', 'timeout', 'vision_unsupported'}):
+                    raise
+                try:
+                    candidate = await asyncio.to_thread(self._next_profile, attempted)
+                except AssistantError:
+                    candidate = None
+                if candidate is None:
+                    raise exc
+                self.profile = {**candidate, '_fallback_model': True}
+                self._fallback_attempt += 1
+                logging.getLogger(__name__).warning('Assistant model fallback: run=%s category=%s attempt=%s',
+                    str(self.turn.get('run_id') or '')[:8], exc.category, self._fallback_attempt)
+                await self.emit('status', {'label': '当前模型暂不可用，正在切换可用模型'})
+                events = await stack.enter_async_context(self._run_stream_attempt(prompt, history))
+
+    @asynccontextmanager
+    async def _run_stream_attempt(self, prompt, history):
         item = await self._acquire_runtime()
         self.running = True
         self.item, self.item_url = item, 'ws://127.0.0.1:' + str(item['port'])
@@ -227,7 +311,7 @@ class OpenClawToolAgent:
         events = None
         try:
             self.client = await self.engine.gateway_client(self.actor, item)
-            events = self._events(self.client, prompt, message_history)
+            events = self._events(self.client, prompt, history)
             yield events
         finally:
             self.running = False
@@ -274,6 +358,8 @@ class OpenClawToolAgent:
             message += '\n当前模型设置未启用图片输入，只能使用附件中提取的文字；没有可靠文字时提示开启图片输入或切换模型，不推断图像内容。'
         for attempt in range(2):
             native_run = 'lh-' + account_key(self.actor['id']) + ':' + (self.turn.get('run_id') or self.turn['operation_id'])
+            if getattr(self, '_fallback_attempt', 0):
+                native_run += ':fallback:' + str(self._fallback_attempt)
             params = {'message': message, 'sessionKey': self.session_key, 'idempotencyKey': native_run,
                       'deliver': False, 'thinking': capabilities['reasoning_effort'] if capabilities['reasoning'] else 'off',
                       'extraSystemPrompt': self.instructions, 'timeout': 180}
@@ -306,8 +392,7 @@ class OpenClawToolAgent:
             if accepted.get('runId') != self.run_id:
                 raise AssistantError('助手运行编号校验失败，未继续执行。', 502)
             if accepted.get('status') in {'error', 'timeout'}:
-                self.run_id = ''
-                raise native_model_error(accepted.get('summary'), timeout=accepted['status'] == 'timeout')
+                raise self._model_failure(accepted.get('summary'), timeout=accepted['status'] == 'timeout')
             if accepted.get('status') == 'ok' and not terminal_ack:
                 # A completed idempotent RPC returns its outcome, not new WS events.
                 finished = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 0}, timeout=5)
@@ -392,7 +477,7 @@ class OpenClawToolAgent:
                         compaction_notified = True
                     if stream == 'lifecycle' and update.get('phase') in {'end', 'error'}:
                         if update['phase'] == 'error':
-                            raise native_model_error(update.get('error'))
+                            raise self._model_failure(update.get('error'))
                         try:
                             finished = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 5000}, timeout=7)
                         except (GatewayError, OSError, asyncio.TimeoutError) as exc:
@@ -420,6 +505,9 @@ class OpenClawToolAgent:
             while not self.events.empty():
                 yield self.events.get_nowait()
             if not answer.strip():
+                if self.calls:
+                    raise AssistantError('模型未返回可见回答，原工具结果与操作任务已保留；请核对原任务，不要重复提交。',
+                                         502, category='model_protocol')
                 if attempt:
                     raise AssistantError('模型未返回可见回答，原问题已保留，可重试或切换模型。', 502)
                 message = '用户主动提问，需要可见回答，不能使用静默标记。请回答原问题：\n' + message
@@ -428,6 +516,9 @@ class OpenClawToolAgent:
                 for validate in self.validators:
                     answer = await validate(answer)
             except ModelRetry as exc:
+                if self.calls:
+                    raise AssistantError('模型未能核验工具结果，原操作状态未据此判定成败；请核对原任务，不要重复提交。',
+                                         502, category='model_protocol') from None
                 if attempt:
                     raise AssistantError('未取得可靠业务依据，未执行业务，请重试或明确查询内容。', 502) from None
                 message = safe_text(str(exc))

@@ -3132,7 +3132,29 @@ class PortalAPICatalog:
             else:
                 client_host = getattr(client, "host", None) or client_host
                 client_port = getattr(client, "port", None) or client_port
-        transport = httpx.ASGITransport(app=self.app, client=(client_host, client_port))
+        target_app = self.app
+        scope = getattr(request, 'scope', None)
+        state = scope.get('state') if isinstance(scope, dict) else None
+        delegated = state.get('lighthouse_topic_execution') if isinstance(state, dict) else None
+        if delegated is not None:
+            from lan_bitable_template_portal.portal_auth import TOPIC_EXECUTION, TopicExecution
+            if not isinstance(delegated, TopicExecution) or not delegated.matches_operation(normalized):
+                raise AssistantError('话题授权与原业务请求不一致。', 403)
+            await asyncio.to_thread(delegated.validate)
+            original_app = target_app
+
+            async def target_app(scope, receive, send):
+                await asyncio.to_thread(delegated.validate)
+                if scope.get('type') != 'http' or not delegated.matches(scope.get('method'), scope.get('path')):
+                    raise AssistantError('话题授权不能用于其它业务请求。', 403)
+                scope = {**scope, 'state': {**scope.get('state', {}), 'lighthouse_topic_execution': delegated}}
+                token = TOPIC_EXECUTION.set(delegated)
+                try:
+                    await original_app(scope, receive, send)
+                finally:
+                    TOPIC_EXECUTION.reset(token)
+
+        transport = httpx.ASGITransport(app=target_app, client=(client_host, client_port))
 
         try:
             local_client = await asyncio.to_thread(httpx.AsyncClient,

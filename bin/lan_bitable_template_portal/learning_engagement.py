@@ -336,28 +336,36 @@ def send_due(service, current):
             else:
                 card = None
                 sent_to = job.setdefault('sent_to', [])
+                errors = []
                 for target in recipients_for_job:
                     if target in sent_to or service._stop.is_set():
                         continue
                     identity = job['id'] + ':' + target if job.get('scope') else job['id']
                     try:
                         interactive = getattr(service, '_weekly_card_sender', None)
-                        if job['kind'] == 'weekly_summary' and callable(interactive):
+                        if job['kind'] == 'weekly_summary':
+                            if not callable(interactive):
+                                raise core.LearningError('飞书智能体周报发送器尚未就绪，原周报等待重试。', 503)
                             result = interactive(job, target, identity)
                         else:
                             if card is None:
                                 card = make_card(job, url, paper, record)
                             result = service._send(target, card, identity)
                         ok = result[0] if isinstance(result, tuple) else bool(result)
-                    except Exception:
+                        if not ok:
+                            errors.append('飞书智能体周报尚未确认送达' if job['kind'] == 'weekly_summary' else '飞书提醒尚未确认送达')
+                    except Exception as exc:
                         ok = False
+                        errors.append(str(exc) if isinstance(exc, core.LearningError) else '发送未完成（' + type(exc).__name__ + '），原任务等待重试')
                     if ok:
                         sent_to.append(target)
                         # Persist each receipt before sending to another supervisor.
                         with service.transaction() as conn:
                             service._put('engagement', job['id'], job, conn)
                 complete = all(target in sent_to for target in recipients_for_job)
-                job['error'] = '' if complete else '飞书发送失败，等待重试。'
+                job['error'] = '' if complete else '；'.join(dict.fromkeys(errors))[:800] or '飞书发送失败，等待重试。'
+                if not complete:
+                    service._last_error = job['error']
                 if complete:
                     job.update(status='sent', sent_at=current.isoformat(timespec='seconds'))
         with service.transaction() as conn:

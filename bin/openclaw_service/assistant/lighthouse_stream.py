@@ -134,7 +134,8 @@ class LighthouseStream:
             from .lighthouse_commands import resolve
             selected_commands, command_context = resolve(self.store, actor, getattr(self.portal, 'catalog', None), selections)
             from .lighthouse_planned import selection_reply
-            topic_turns = [item for item in state['turns'] if not topic_id or item.get('feishu_topic') == topic_id]
+            topic_turns = [item for item in state['turns'] if not topic_id or
+                           item.get('feishu_topic') == topic_id and self.assistant._allowed(item, actor)]
             previous = next((item for item in reversed(topic_turns) if item is not old and item.get('question')), None)
             awaiting_clarification = bool(previous and previous.get('status') == 'completed' and previous.get('clarification')
                 and self.assistant._allowed(previous, actor))
@@ -213,6 +214,7 @@ class LighthouseStream:
                         commands=selected_commands, submitted_commands=copy.deepcopy(selections), _command_context=command_context,
                         attachments=attachments, preview_file=preview_file, output_files=[], downloads=[], status="pending", answer="", error="", error_code="", process=[], sources=[], scopes=scopes,
                         access_scopes=actor["scopes"],
+                        access_modules=list(actor.get('modules', [])) if topic_id else [],
                         source_channel='feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
                         run_id=run_id, attempt_id=attempt, model_name=profile["name"], plan=None, clarification=None,
                         _clarification_reply=clarification_reply or bool(old and old['question'] == clean_question and old.get('_clarification_reply')))
@@ -232,11 +234,11 @@ class LighthouseStream:
             run = {"id": run_id, "owner": actor["id"], "conversation_id": state["id"], "operation_id": operation,
                    "scopes": scopes, "access_scopes": actor["scopes"], "status": "queued", "label": "等待处理", "events": [], "revision": 1,
                    "answer": "", "process": [], "created_at": time.time(), "_turn": {**copy.deepcopy(turn), "_profile": profile},
-                   "_history": copy.deepcopy([t for t in state["turns"] if t is not turn
+                   "_history": [] if topic_id else copy.deepcopy([t for t in state["turns"] if t is not turn and not t.get('display_only')
                        and (t.get("answer") and t.get("status") == "completed"
                             or t.get("output_files") and t.get("status") in {"completed", "failed", "stopped", "superseded"})
                        and self.assistant._allowed(t, actor)]),
-                   "_context": copy.deepcopy(state.get("context") or {})}
+                   "_context": {} if topic_id else copy.deepcopy(state.get("context") or {})}
             self._save_run(run)
             return run, {"conversation_id": state["id"], "run_id": run_id, "turn": public_turn(turn)}
 
@@ -342,6 +344,8 @@ class LighthouseStream:
                 current = await authorize()
                 if current["id"] != actor["id"] or set(actor["scopes"]) - set(current["scopes"]):
                     raise AssistantError("登录权限已变化，请重新提问。", 403)
+                if actor.get('_feishu_topic'):
+                    result['topic_access'] = copy.deepcopy(current.get('_topic_access', []))
                 from .lighthouse_artifacts import package_long_reply
                 result['file_ids'] = list(dict.fromkeys([*run['_turn'].get('file_ids', []), *result.get('file_ids', [])]))
                 result = await asyncio.to_thread(package_long_reply, self.portal.files, public_actor, result)

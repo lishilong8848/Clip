@@ -371,6 +371,44 @@ class CloudTests(unittest.TestCase):
         self.addCleanup(cloud.close)
         return cloud
 
+    def test_field_library_persists_separately_from_selected_base_template(self):
+        cloud = self.remote()
+        source = copy.deepcopy(self.fields)
+        cloud.all = Mock(side_effect=lambda _: copy.deepcopy(source))
+        def write(method, path, **kwargs):
+            if method == 'POST':
+                source.append({'field_id':'library_field', **kwargs['json']})
+                return {'field': {'field_id':'library_field'}}
+            if method == 'PUT':
+                next(field for field in source if field['field_id']=='library_field').update(kwargs['json'])
+            elif method == 'DELETE':
+                source[:] = [field for field in source if field['field_id']!='library_field']
+            return {}
+        cloud.request = Mock(side_effect=write)
+        current = cloud.read_template()
+        body = {'action':'add', 'version':current['version'], 'field_name':'现场补充说明',
+                'type':1, 'role':'input', 'required':True, 'confirmed':True}
+        current = cloud.edit_field(self.people['admin'], body)
+        stale_version = current['version']
+        chosen = [current['fields'][0], next(field for field in current['fields'] if field['key']=='library_field')]
+        saved = self.store.history.add_base(self.people['admin'],
+            {'id':'d'*32, 'name':'选定字段的基础模板', 'enabled':True, 'fields':chosen, 'items':[]})
+        restarted = RiskInspections(self.store.db_path, self.store.person_for)
+        self.assertTrue(restarted.template()['settings']['library_field']['required'])
+        self.assertEqual([field['key'] for field in saved['fields']], ['primary','library_field'])
+        current = cloud.edit_field(self.people['admin'], {**body,'action':'update',
+            'version':current['version'],'field_id':'library_field','field_name':'改名后的说明'})
+        current = cloud.edit_field(self.people['admin'],
+            {'action':'delete','version':current['version'],'field_id':'library_field','confirmed':True})
+        self.assertNotIn('library_field', [field['key'] for field in current['fields']])
+        self.assertEqual(restarted.history.get(self.people['admin'], saved['id'])['fields'], saved['fields'])
+        self.assertEqual(cloud.request.call_count, 3)
+        with self.assertRaises(RiskError):
+            cloud.edit_field(self.people['reviewer'], {**body,'version':current['version']})
+        with self.assertRaises(RiskError):
+            cloud.edit_field(self.people['admin'], {**body,'version':stale_version})
+        self.assertEqual(cloud.request.call_count, 3, 'unauthorized or stale field changes must not write')
+
     def test_unified_transport_preserves_token_cache_search_and_multipart(self):
         calls = []
         def handle(request):

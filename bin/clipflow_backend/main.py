@@ -790,12 +790,22 @@ class FastAPIPortalController:
 
         @app.middleware("http")
         async def pressure_guard(request: Request, call_next):
+            from lan_bitable_template_portal.portal_auth import TopicExecution, topic_execution
+            delegated = getattr(request.state, 'lighthouse_topic_execution', None)
+            if delegated is not None:
+                try:
+                    if not isinstance(delegated, TopicExecution) or not delegated.matches(request.method, request.url.path):
+                        raise PortalError('话题授权与当前请求不一致。')
+                    topic_execution(PortalRuntime.auth_manager, self._current_session(request))
+                    await asyncio.to_thread(delegated.audit, 'started')
+                except Exception:
+                    return JSONResponse({'ok': False, 'error': '话题授权已失效，未执行业务。'}, status_code=403)
             from lan_bitable_template_portal.module_access import module_denial
             denial = await module_denial(request, self, PortalRuntime)
             if denial is not None:
                 return denial
             from lan_bitable_template_portal.account_policy import business_delete_denial
-            denial = await business_delete_denial(request, self, PortalRuntime)
+            denial = None if delegated is not None and delegated.grant['capability']['action'] == 'delete' else await business_delete_denial(request, self, PortalRuntime)
             if denial is not None:
                 return denial
             group = self._endpoint_group(request)
@@ -6736,6 +6746,11 @@ class FastAPIPortalController:
                         reject_large_inline_images=True,
                     )
                 ).to_payload()
+                payload.pop('_topic_delegation_id', None)
+                from lan_bitable_template_portal.portal_auth import topic_execution
+                delegated = topic_execution(PortalRuntime.auth_manager, session)
+                if delegated is not None:
+                    payload['_topic_delegation_id'] = delegated.grant['id']
                 from lan_bitable_template_portal.notice_actions import submit_notice_action
                 return await submit_notice_action(self, PortalRuntime, session, payload)
             except Exception as exc:
@@ -7244,7 +7259,10 @@ class FastAPIPortalController:
                 )
                 PortalRuntime.service.validate_ongoing_delete_item(payload, scope=scope)
                 from lan_bitable_template_portal.account_policy import require_notice_delete
-                require_notice_delete(PortalRuntime.auth_manager, session, str(payload.get("work_type") or "maintenance"))
+                from lan_bitable_template_portal.portal_auth import topic_execution
+                delegated = topic_execution(PortalRuntime.auth_manager, session)
+                if delegated is None or delegated.grant['capability']['action'] != 'delete':
+                    require_notice_delete(PortalRuntime.auth_manager, session, str(payload.get("work_type") or "maintenance"))
                 delete_result = await asyncio.to_thread(
                     PortalRuntime.execute_local_delete_active_item,
                     {"data_dict": payload},

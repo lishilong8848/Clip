@@ -59,7 +59,8 @@ app = FastAPI()
 def session(request):
     code = request.cookies.get("fixture_user", "D")
     admin = code == "ALL"
-    return {"user": {"open_id": LI_SHILONG_OPEN_ID if admin else "fixture-" + code, "name": "隔离测试" + code, "role": "admin" if admin else "building"},
+    from lan_bitable_template_portal.account_policy import default_modules
+    return {"user": {"open_id": LI_SHILONG_OPEN_ID if admin else "fixture-" + code, "name": "隔离测试" + code, "role": "admin" if admin else "building", "modules": list(default_modules('L0' if admin else 'L4'))},
             "role": "admin" if admin else "building", "allowed_scopes": [code]}
 controller = SimpleNamespace(_current_session=session, _auth_required_response=lambda: JSONResponse({"ok": False}, status_code=401),
                              _request_base_url=lambda request: str(request.base_url).rstrip("/"),

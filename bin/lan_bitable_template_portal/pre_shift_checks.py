@@ -99,7 +99,7 @@ def _image_ext(path):
 
 
 class CheckService:
-    def __init__(self, root=None, *, roster=None, cloud=None, sender=None, portal_url=None, photo_sender=None):
+    def __init__(self, root=None, *, roster=None, cloud=None, sender=None, portal_url=None, photo_sender=None, recipient_directory=None):
         if root is None:
             from upload_event_module.utils import get_data_file_path
             root = get_data_file_path('pre_shift_checks')
@@ -111,6 +111,7 @@ class CheckService:
         self.staging_dir.mkdir(parents=True, exist_ok=True)
         self.roster, self.cloud, self.sender, self.portal_url = roster, cloud, sender, portal_url
         self.photo_sender = photo_sender
+        self.recipient_directory = recipient_directory
         self.stop_event = threading.Event()
         self.wake = threading.Event()
         self.tick_lock = threading.Lock()
@@ -201,8 +202,9 @@ class CheckService:
             stored = self.definition(scope, conn)
         previous = {item['id']: item for item in stored['items']}
         default_start = current.date().isoformat()
+        recipient_options = None
         for item in items:
-            if not isinstance(item, dict) or set(item) - {'id', 'text', 'frequency'}:
+            if not isinstance(item, dict) or set(item) - {'id', 'text', 'frequency', 'fixed_recipients'}:
                 raise CheckError('检查项格式无效。')
             key, text = item.get('id'), item.get('text')
             if not isinstance(key, str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', key) or key in seen:
@@ -224,13 +226,27 @@ class CheckService:
                     rule = normalize_frequency(None, default_start)
                 except (ValueError, TypeError):
                     raise CheckError('检查项排期格式无效。')
-            result.append({'id': key, 'text': text.strip(), 'frequency': rule})
+            recipients = item.get('fixed_recipients', previous.get(key, {}).get('fixed_recipients', []))
+            if (not isinstance(recipients, list) or len(recipients) > 50
+                    or any(not isinstance(oid, str) or not re.fullmatch(r'ou_[A-Za-z0-9]+', oid) for oid in recipients)):
+                raise CheckError('固定接收人格式无效，请从人员列表中选择。')
+            recipients = sorted(set(recipients))
+            if recipients:
+                if recipient_options is None:
+                    if not self.recipient_directory:
+                        raise CheckError('固定接收人目录暂未就绪，请稍后重试。', 503)
+                    recipient_options = {p['open_id'] for p in self.recipient_directory(scope)}
+                if not set(recipients) <= recipient_options:
+                    raise CheckError('固定接收人已停用或没有本楼检查权限，请重新选择。', 403)
+            result.append({'id': key, 'text': text.strip(), 'frequency': rule,
+                           **({'fixed_recipients': recipients} if recipients else {})})
         with self.connection(True) as conn:
             if self.definition(scope, conn)['version'] != version:
                 raise CheckError('清单已被其他管理人员修改，请重新读取。', 409)
             conn.execute('INSERT OR REPLACE INTO definitions VALUES(?,?,?,?,?)',
                          (scope, version + 1, dump(result), actor['id'], current.isoformat()))
-            if result and not stored['items']:
+            if (any(not i.get('fixed_recipients') for i in result)
+                    and not any(not i.get('fixed_recipients') for i in stored['items'])):
                 conn.execute('UPDATE rosters SET version=0')
             self.prepare_local(conn, current, [scope])
         self.wake.set()
@@ -295,19 +311,39 @@ class CheckService:
             "SELECT * FROM tasks WHERE scope=? AND submitted='' AND items!='[]' AND deadline>?",
             (scope, current.timestamp())).fetchall()
         all_items = {item['id']: item for item in self.definition(scope, conn)['items']}
+        fixed_people = {}
+        fixed_ids = {oid for item in all_items.values() for oid in item.get('fixed_recipients', [])}
+        if fixed_ids:
+            try:
+                fixed_people = {p['open_id']: p for p in self.recipient_directory(scope)} if self.recipient_directory else {}
+            except Exception:
+                self.last_error = '固定接收人目录暂未就绪，将自动重试；未改发给排班人员。'
+            else:
+                if fixed_ids - fixed_people.keys():
+                    self.last_error = '部分固定接收人暂不可用，请核对在岗状态及本楼检查权限；未改发给排班人员。'
         active_ids = set()
         for group in groups:
-            people = self._people_for(conn, group['day'], scope, group['shift'])
+            rostered = self._people_for(conn, group['day'], scope, group['shift'])
             due = group['due']
             task_id = self._task_id(group['day'], scope, group['shift'], due)
             active_ids.add(task_id)
-            subset = [{'id': iid, 'text': all_items[iid]['text']} for iid in group['ids'] if iid in all_items]
+            subset, people = [], {}
+            routed = any(all_items[iid].get('fixed_recipients') for iid in group['ids'] if iid in all_items)
+            for iid in group['ids']:
+                if iid not in all_items:
+                    continue
+                item = all_items[iid]
+                assigned = ([fixed_people[oid] for oid in item['fixed_recipients'] if oid in fixed_people]
+                            if item.get('fixed_recipients') else rostered)
+                people.update((p['open_id'], p) for p in assigned)
+                subset.append({'id': iid, 'text': item['text'],
+                               **({'recipient_ids': [p['open_id'] for p in assigned]} if routed else {})})
             if not subset:
                 continue
             items = dump(subset)
             due_ts = due.timestamp()
             deadline_ts = group['deadline'].timestamp()
-            ppl = dump(people)
+            ppl = dump(list(people.values()))
             row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
             if row and row['submitted']:
                 continue  # immutable submitted/past snapshot
@@ -360,13 +396,15 @@ class CheckService:
             for scope in [r['scope'] for r in conn.execute("SELECT scope FROM definitions WHERE items!='[]'")]:
                 definition = self.definition(scope, conn)
                 for day in (today, prior):
-                    groups = self._occurrence_groups(definition['items'], scope, day, current + dt.timedelta(seconds=REMINDER_LEAD_SECONDS))
+                    groups = self._occurrence_groups([i for i in definition['items'] if not i.get('fixed_recipients')], scope, day, current + dt.timedelta(seconds=REMINDER_LEAD_SECONDS))
                     if any(g['due'] - dt.timedelta(seconds=REMINDER_LEAD_SECONDS) <= current < g['deadline'] and g['day'] == prior for g in groups):
                         return True
         return False
 
     def _ensure_roster(self, current, day):
-        configured = set(self.configured_scopes())
+        configured = set(self.configured_scopes(roster_only=True))
+        if not configured:
+            return
         with self.connection() as conn:
             row = conn.execute('SELECT * FROM rosters WHERE day=?', (day,)).fetchone()
             # Recheck once on entering each reminder window, not on every worker tick.
@@ -396,21 +434,23 @@ class CheckService:
 
     def prepare(self, current):
         configured = self.configured_scopes()
-        if not configured or not self.roster:
+        if not configured:
             return
         # Previous-night tasks remain durable through midnight; do not re-read yesterday's changing view
         # unless there is an open prior-day occurrence with no cached roster yet.
         today = current.date().isoformat()
         prior = (current.date() - dt.timedelta(days=1)).isoformat()
-        self._ensure_roster(current, today)
-        if self._needs_prior(current, prior):
-            self._ensure_roster(current, prior)
+        if self.roster:
+            self._ensure_roster(current, today)
+            if self._needs_prior(current, prior):
+                self._ensure_roster(current, prior)
         with self.connection(True) as conn:
             self.prepare_local(conn, current, configured)
 
-    def configured_scopes(self):
+    def configured_scopes(self, *, roster_only=False):
         with self.connection() as conn:
-            return [row['scope'] for row in conn.execute("SELECT scope FROM definitions WHERE items!='[]'")]
+            return [row['scope'] for row in conn.execute("SELECT scope,items FROM definitions WHERE items!='[]'")
+                    if not roster_only or any(not i.get('fixed_recipients') for i in json.loads(row['items']))]
 
     @classmethod
     def can_submit(cls, actor, task, current):
@@ -485,6 +525,8 @@ class CheckService:
             roster_error = roster['error'] if roster else ''
             if roster_error.startswith('{'):
                 roster_error = json.loads(roster_error).get(scope, '')
+            if not any(not item.get('fixed_recipients') for item in definition['items']):
+                roster_error = ''
             return {'scope': scope, 'scopes': scopes_for(actor), 'can_manage': can_manage(actor),
                     'definition': definition, 'tasks': tasks,
                     'roster_ready': roster_ready, 'roster_error': (roster_error or self.last_error) if definition['items'] else '',
@@ -1246,6 +1288,10 @@ class CheckService:
                             or latest['definition_version'] != definition['version']
                             or not any(item['id'] in configured for item in json.loads(latest['items']))):
                         break
+                    items = [item for item in json.loads(latest['items'])
+                             if 'recipient_ids' not in item or person['open_id'] in item['recipient_ids']]
+                    if not items or person['open_id'] not in {p['open_id'] for p in json.loads(latest['people'])}:
+                        continue
                     row = conn.execute('SELECT * FROM deliveries WHERE id=?', (key,)).fetchone()
                     if row and (row['sent'] or row['lease'] > current.timestamp()):
                         if not row['sent'] and row['error']:
@@ -1259,7 +1305,6 @@ class CheckService:
                     conn.execute('UPDATE deliveries SET lease=?,first_attempt=CASE WHEN first_attempt=0 THEN ? ELSE first_attempt END WHERE id=?',
                                  (current.timestamp() + 300, current.timestamp(), key))
                 label = '班前检查预提醒' if slot == 0 and current.timestamp() < task['due'] else '班前检查' if slot == 0 else '班前检查未完成提醒'
-                items = json.loads(latest['items'])
                 summary = '\n'.join(f"{index + 1}. {item['text']}" for index, item in enumerate(items[:8]))
                 if len(items) > 8:
                     summary += f'\n其余{len(items) - 8}项请打开清单查看。'

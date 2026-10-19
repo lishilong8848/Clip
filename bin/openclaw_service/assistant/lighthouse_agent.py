@@ -1004,6 +1004,11 @@ class PortalAgent:
                       and actor.get('channel') == 'feishu:' + str(grant.get('chat_id')))
         if not plan or plan.get("owner") != actor["id"] and not shared:
             raise AssistantError("操作计划不存在或无权访问。", 404)
+        topic_id = (actor.get('_feishu_topic') or {}).get('id')
+        if plan.get('topic_id') != topic_id and not (shared and topic_id and grant.get('topic_id') == topic_id):
+            raise AssistantError('操作计划不属于当前话题或个人会话。', 404)
+        if topic_id and actor.get('_topic_capabilities'):
+            self._topic_plan_permissions(actor, plan, shared=shared)
         scopes = set(plan.get('scopes', []))
         if shared:
             from .lighthouse_sources import codes
@@ -1016,7 +1021,7 @@ class PortalAgent:
                 if modules and not modules & set(actor.get('modules', [])):
                     raise AssistantError('当前操作人没有该业务模块权限，未代为处理。', 403)
             scopes = required or scopes
-        if scopes - set(actor["scopes"]):
+        if scopes - set(actor["scopes"]) and not (topic_id and actor.get('_topic_capabilities')):
             raise AssistantError("当前账号已无权访问此操作计划。", 403)
         state = self.assistant._state({**actor, 'id': plan['owner']} if shared else actor)
         if plan.get("assistant_run_id"):
@@ -1031,6 +1036,25 @@ class PortalAgent:
         if not current:
             raise AssistantError("原会话已清空，请在当前会话重新准备操作。", 409)
         return plan
+
+    @staticmethod
+    def _topic_plan_permissions(actor, plan, *, shared=False):
+        from lan_bitable_template_portal.portal_auth import topic_capability, topic_capable
+        from lan_bitable_template_portal.portal_service import PortalError
+        evidence = []
+        for operation in plan.get('operations', []):
+            try:
+                capability = topic_capability(operation, actor.get('_personal_scopes', plan.get('scopes', [])))
+            except PortalError:
+                # Personal operations cannot acquire another participant's account identity.
+                if shared or plan.get('owner') != actor['id']:
+                    raise AssistantError('该个人操作只允许原本人办理。', 403) from None
+                continue
+            sponsor = next((p for p in actor.get('_topic_capabilities', []) if topic_capable(p, capability)), None)
+            if not sponsor:
+                raise AssistantError('没有一位当前有效话题参与人具备本项操作的完整权限。', 403)
+            evidence.append({'operator': actor['id'], 'authorized_by': sponsor['id'], 'capability': capability})
+        return evidence
 
     def _validate(self, operation):
         result = self.catalog.validate_operation(operation)
@@ -1978,6 +2002,8 @@ class PortalAgent:
         plan = {"id": identity, "owner": actor["id"], "scopes": actor["scopes"], "turn_id": turn_id, "conversation_id": self.assistant._state(actor)["id"], "title": safe_text(decision.get("title") or "业务操作")[:120],
                 "explanation": safe_text(decision.get("explanation", ""))[:1000], "operations": normalized, "fields": fields, "file_ids": file_ids,
                 "risk": risk, "version": 1, "status": "needs_input" if fields else "awaiting_confirmation", "created_at": time.time(), "results": [], "error": "", "_references": references or {}, "_queries": {**{key: queries[key] for key in used_queries if key in (queries or {})}, **form_queries}}
+        if (actor.get('_feishu_topic') or {}).get('id'):
+            plan['topic_id'] = actor['_feishu_topic']['id']
         if fields and all(field.get("type") == "file" and (field.get("value") or not field.get("required")) for field in fields):
             plan.update(fields=[], status="awaiting_confirmation", _review_fields=copy.deepcopy(fields), _review_operations=copy.deepcopy(normalized))
         if (fields and len(ready_workpartner_messages) == len(normalized) and all(field.get('value') for field in fields)):
@@ -3544,6 +3570,8 @@ class PortalAgent:
 
     def _mark_running(self, actor, plan):
         previous = copy.deepcopy(plan)
+        if actor.get('_topic_capabilities'):
+            plan['delegation_audit'] = self._topic_plan_permissions(actor, plan, shared=plan.get('owner') != actor['id'])
         plan['confirmed_by'] = {'id': actor['id'], 'name': actor.get('name', ''), 'at': time.time()}
         plan.pop("_review_fields", None)
         plan.pop("_review_operations", None)

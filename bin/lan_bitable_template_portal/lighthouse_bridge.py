@@ -70,6 +70,11 @@ class PortalAuthority:
         from .assistant_read_consent import ReadConsent
         self.read_consent = ReadConsent(runtime.state_store)
         self.tables = None
+        from .portal_auth import TopicDelegations
+        auth = getattr(runtime, 'auth_manager', None)
+        self.delegations = getattr(auth, '_topic_delegations', None)
+        if auth is not None and self.delegations is None:
+            self.delegations = auth._topic_delegations = TopicDelegations(auth, runtime.state_store)
 
     def get_catalog(self):
         with self.catalog_lock:
@@ -86,9 +91,12 @@ class PortalAuthority:
         if len(self.contexts) >= 1024:
             raise AssistantError('助手请求较多，请稍后继续。', 429)
         identity = secrets.token_urlsafe(32)
-        self.contexts[identity] = {'request': request, 'actor': copy.deepcopy(actor),
+        personal = {**actor, 'scopes': list(actor.get('_personal_scopes', actor['scopes'])),
+                    'modules': list(actor.get('_personal_modules', actor.get('modules', [])))}
+        self.contexts[identity] = {'request': request, 'actor': copy.deepcopy(personal),
             'expires': now + 1800, 'plan_id': plan_id, 'lease': self.client.lease,
             'shared_plan': copy.deepcopy(shared_plan),
+            'topic_evidence_pending': bool(getattr(getattr(request, 'state', None), 'feishu_topic_evidence_pending', False)),
             'feishu_topic': copy.deepcopy(getattr(getattr(request, 'state', None), 'feishu_topic', None))}
         return identity
 
@@ -117,8 +125,61 @@ class PortalAuthority:
         channel = current.get('channel', '')
         if (isinstance(topic, dict) and channel.startswith('feishu:')
                 and str(topic.get('id', '')).startswith(channel.removeprefix('feishu:') + ':om_')):
-            current['_feishu_topic'] = {'id': topic['id'], 'context': str(topic.get('context', ''))[:5000]}
+            current['_feishu_topic'] = {'id': topic['id'], 'context': str(topic.get('context', ''))[:12000]}
+            if self.delegations is None:
+                raise AssistantError('话题授权服务尚未就绪，未执行委派操作。', 503)
+            from .portal_service import PortalError
+            try:
+                if not context.get('topic_evidence_pending'):
+                    current = await asyncio.to_thread(self.delegations.enrich, current, topic['id'])
+            except PortalError:
+                raise AssistantError('话题参与人或权限已失效，请重新操作。', 403) from None
+            current['_topic_access'] = copy.deepcopy(context.get('topic_access') or topic.get('access') or [])
+            from .portal_auth import topic_access_allowed
+            if not topic_access_allowed({'capabilities': current['_topic_access']}, current):
+                raise AssistantError('话题资料权限已变化，未继续读取或回复旧资料。', 403)
         return context, current
+
+    @staticmethod
+    def record_access(context, capability):
+        values = context.setdefault('topic_access', copy.deepcopy((context.get('feishu_topic') or {}).get('access') or []))
+        if capability not in values:
+            if len(values) >= 128:
+                raise AssistantError('本话题资料范围较多，请分话题查询。', 409)
+            values.append(copy.deepcopy(capability))
+
+    @staticmethod
+    def personal_actor(actor):
+        return {**actor, 'scopes': list(actor.get('_personal_scopes', actor['scopes'])),
+                'modules': list(actor.get('_personal_modules', actor.get('modules', [])))}
+
+    def learning_summary(self, execution, operation):
+        import datetime as dt
+        from contextlib import closing
+        from .learning_engagement import weekly_stats
+        execution.validate()
+        service = getattr(self.runtime, 'learning_service', None)
+        if service is None:
+            raise AssistantError('画像学练资料暂未就绪。', 503)
+        params = dict(operation.get('params') or {})
+        today = dt.date.today()
+        dates = service._date_filters(params)
+        first, last = dates.get('from') or (today - dt.timedelta(days=6)).isoformat(), dates.get('to') or today.isoformat()
+        if not 0 <= (dt.date.fromisoformat(last) - dt.date.fromisoformat(first)).days <= 366:
+            raise AssistantError('学练汇总日期范围无效，单次最多366天。')
+        people = {p['id']: p for p in service._all('person')}
+        rows = []
+        with closing(service._connect()) as db:
+            for scope in execution.scopes:
+                for identity, row in weekly_stats(service, first, last, db, scope).items():
+                    rows.append({'name': people.get(identity, {}).get('name', '人员信息待核对'), 'scope': scope,
+                                 **{k: row[k] for k in ('answered', 'correct', 'wrong', 'choices', 'accuracy')}})
+        execution.audit('read')
+        summary = {key: sum(row[key] for row in rows) for key in ('answered', 'correct', 'wrong', 'choices')}
+        summary['accuracy'] = round(summary['correct'] * 100 / summary['choices'], 1) if summary['choices'] else None
+        data = {'scope': params.get('scope'), 'from': first, 'to': last, 'summary': summary, 'people': rows,
+                'read_only': True, 'aggregate_only': True}
+        return {'ok': True, 'status': 200, 'data': data, '_raw': data, 'api_id': operation['api_id'], 'truncated': False}
 
     @staticmethod
     def narrowed(actor, scopes):
@@ -137,6 +198,9 @@ class PortalAuthority:
         for item in uploads:
             if not isinstance(item, dict) or item.get('owner') != actor['id'] and item.get('id') not in shared_ids or item.get('id') not in wanted:
                 raise AssistantError('附件不存在或没有访问权限。', 403)
+            topic_id = (actor.get('_feishu_topic') or {}).get('id')
+            if item.get('topic_id') != topic_id and not (item.get('id') in shared_ids and topic_id and grant.get('topic_id') == topic_id):
+                raise AssistantError('附件不属于本话题，未用于业务上传。', 403)
             identity = item['id']
             if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity) or identity in files:
                 raise AssistantError('附件编号无效。', 403)
@@ -160,6 +224,36 @@ class PortalAuthority:
         if not isinstance(operation, dict):
             raise AssistantError('业务操作参数无效。')
         descriptor = catalog.get(operation.get('api_id', ''))
+        execution = None
+        gateway_request = context['request']
+        topic = actor.get('_feishu_topic') or {}
+        if topic.get('id') and actor.get('_topic_capabilities'):
+            from .portal_auth import topic_capability
+            from .portal_service import PortalError
+            normalized, missing = await asyncio.to_thread(catalog.validate_operation, operation)
+            if missing:
+                raise AssistantError('缺少必填字段，请先补全后再执行。', 422)
+            try:
+                capability = topic_capability(normalized, actor.get('_personal_scopes', []))
+            except PortalError:
+                # Nondelegable personal/admin APIs still use the real account's original guards.
+                actor = self.personal_actor(actor)
+            else:
+                try:
+                    execution = await asyncio.to_thread(self.delegations.issue, topic['id'], actor['id'], capability)
+                except PortalError:
+                    raise AssistantError('没有一位有效话题参与人具备本项业务的完整权限，未执行。', 403) from None
+                from starlette.requests import Request
+                gateway_request = Request({**context['request'].scope,
+                    'state': {**context['request'].scope.get('state', {}), 'lighthouse_topic_execution': execution}})
+                await asyncio.to_thread(execution.audit, 'authorized', operation_id=str(payload.get('operation_id') or ''))
+                self.record_access(context, capability)
+                if capability['module'] == 'learning':
+                    return await asyncio.to_thread(self.learning_summary, execution, normalized)
+        if topic.get('id') and execution is None:
+            personal = self.personal_actor(actor)
+            self.record_access(context, {'legacy': {k: personal.get(k) for k in ('scopes', 'modules', 'is_admin')},
+                                         'source_owner': actor['id']})
         from .module_access import required_modules
         needed = required_modules(descriptor['path'], (operation.get('body') or {}).get('work_type') or (operation.get('params') or {}).get('work_type', ''))
         if needed and not needed & set(actor.get('modules', [])):
@@ -172,13 +266,13 @@ class PortalAuthority:
                 raise AssistantError(consent['message'], 409)
         provider = await asyncio.to_thread(self.files, actor, operation, payload.get('uploads') or [])
         if descriptor['read_only']:
-            return await catalog.invoke(operation, context['request'], file_provider=provider.get)
+            return await catalog.invoke(operation, gateway_request, file_provider=provider.get)
         operation_id = payload.get('operation_id')
         plan_id = context.get('plan_id')
         if not plan_id or not isinstance(operation_id, str) or not re.fullmatch('plan:' + re.escape(plan_id) + r':[0-9]{1,3}', operation_id):
             raise AssistantError('业务写入须由本人在助手中确认，未执行操作。', 403)
         fingerprint = hashlib.sha256(json.dumps(operation, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        key = (actor['id'], operation_id, fingerprint)
+        key = ('topic:' + topic['id'] if topic.get('id') else actor['id'], operation_id, fingerprint)
         task = self.writes.get(key)
         if task is None:
             if len(self.writes) >= 4096:
@@ -187,11 +281,11 @@ class PortalAuthority:
                 from .feishu_workpartner import CONFIRMED_EXECUTION
                 token = CONFIRMED_EXECUTION.set((actor['id'], operation_id))
                 try:
-                    task = asyncio.create_task(catalog.invoke(operation, context['request'], file_provider=provider.get))
+                    task = asyncio.create_task(catalog.invoke(operation, gateway_request, file_provider=provider.get))
                 finally:
                     CONFIRMED_EXECUTION.reset(token)
             else:
-                task = asyncio.create_task(catalog.invoke(operation, context['request'], file_provider=provider.get))
+                task = asyncio.create_task(catalog.invoke(operation, gateway_request, file_provider=provider.get))
             self.writes[key] = task
         # Dropping the chat connection must not cancel an already submitted write.
         return copy.deepcopy(await asyncio.shield(task))
@@ -208,6 +302,12 @@ class PortalAuthority:
         context, actor = await self.authorize(message.get('context_id'))
         if action == 'authorize':
             return actor
+        if action in {'feishu_document', 'table_catalog', 'table_records', 'staff_count', 'question_bank', 'question_material', 'search'}:
+            actor = self.personal_actor(actor)
+            actor.pop('_topic_capabilities', None)
+            if context.get('feishu_topic'):
+                self.record_access(context, {'legacy': {k: actor.get(k) for k in ('scopes', 'modules', 'is_admin')},
+                                             'source_owner': actor['id']})
         if action == 'feishu_document':
             from openclaw_service.assistant.lighthouse_documents import read_document
             if set(payload) - {'url', 'offset', 'scopes'}:
@@ -271,9 +371,21 @@ class PortalAuthority:
                 getattr(context['request'].state, 'feishu_question', ''))
             if consent:
                 raise AssistantError(consent['message'], 409)
-            hits, warnings = await asyncio.to_thread(LocalAssistantSources(self.runtime.state_store), payload.get('question', ''), scoped)
             from .module_access import visible_url
-            hits = [hit for hit in hits if visible_url(actor.get('modules', []), hit.get('url', ''))]
+            profiles = actor.get('_topic_capabilities') or [actor]
+            hits, warnings, eligible = [], [], False
+            for profile in profiles:
+                if set(scoped['scopes']) - set(profile.get('scopes', [])):
+                    continue
+                eligible = True
+                view = {**scoped, 'modules': profile.get('modules', [])}
+                rows, notes = await asyncio.to_thread(LocalAssistantSources(self.runtime.state_store), payload.get('question', ''), view)
+                warnings.extend(notes)
+                for hit in rows:
+                    if visible_url(view['modules'], hit.get('url', '')) and hit not in hits:
+                        hits.append(hit)
+            if not eligible:
+                raise AssistantError('没有一位有效话题参与人具备该完整查询范围。', 403)
             return {'hits': hits, 'warnings': warnings}
         if action == 'cached':
             modules = {'events': {'event'}, 'orders': {'maintenance', 'polling', 'adjust'}, 'mops': {'engineer_mop'}}.get(payload.get('kind', ''), set())
@@ -281,7 +393,19 @@ class PortalAuthority:
                 raise AssistantError('当前账号尚未获授该业务模块权限。', 403)
             from openclaw_service.assistant.lighthouse_pending import cached_items
             scoped = self.narrowed(actor, payload.get('scopes'))
-            return await asyncio.to_thread(cached_items, payload.get('kind', ''), scoped['scopes'], self.runtime, allowed=actor['scopes'])
+            result = await asyncio.to_thread(cached_items, payload.get('kind', ''), scoped['scopes'], self.runtime, allowed=actor['scopes'])
+            from urllib.parse import parse_qs, urlsplit
+            profiles = actor.get('_topic_capabilities') or [actor]
+            def visible(row):
+                values = parse_qs(urlsplit(row.get('url', '')).query)
+                module = values.get('work_type', ['maintenance'])[0] if payload.get('kind') == 'orders' else next(iter(modules))
+                scopes = set(row.get('scopes') or [])
+                permit = bool(scopes) and module in modules and any(module in profile.get('modules', []) and scopes <= set(profile.get('scopes', [])) for profile in profiles)
+                if permit and context.get('feishu_topic'):
+                    self.record_access(context, {'module': module, 'scopes': sorted(scopes), 'action': 'read', 'method': 'READ',
+                        'path': 'cached:' + payload.get('kind', ''), 'resource': hashlib.sha256(str(row.get('url', '')).encode()).hexdigest(), 'admin': False})
+                return permit
+            return ([row for row in result[0] if visible(row)], *result[1:])
         from openclaw_service.assistant.lighthouse_sources import question_bank, question_material_file, work_order_records
         query = payload.get('query') or {}
         if not isinstance(query, dict):
@@ -301,7 +425,13 @@ class PortalAuthority:
         if action == 'work_orders':
             if not set(actor.get('modules', [])) & {'maintenance', 'polling', 'adjust'}:
                 raise AssistantError('当前账号尚未获授工单所属功能权限。', 403)
-            return await asyncio.to_thread(work_order_records, self.runtime.state_store, actor, query)
+            result = await asyncio.to_thread(work_order_records, self.runtime.state_store, actor, query)
+            if context.get('feishu_topic'):
+                from openclaw_service.assistant.lighthouse_sources import codes
+                for row in result.get('items', []):
+                    self.record_access(context, {'module': row.get('work_type') or 'polling', 'scopes': sorted(codes(row.get('scope'))),
+                        'action': 'read', 'method': 'READ', 'path': 'work_orders', 'resource': hashlib.sha256(str(row.get('group_id', '')).encode()).hexdigest(), 'admin': False})
+            return result
         raise AssistantError('业务桥入口不存在。', 404)
 
     async def close(self):

@@ -110,6 +110,14 @@ def model_provider_error(status, body=b''):
     return {'code': code, 'message': message}
 
 
+def model_provider_id(profile):
+    if not profile.get('_fallback_model'):
+        return 'lighthouse'
+    # A failed upstream key must not cool down the alternative's loopback route.
+    identity = json.dumps([profile.get(key) for key in ('endpoint', 'model', 'key_cipher')], sort_keys=True)
+    return 'lighthouse-fallback-' + hashlib.sha256(identity.encode()).hexdigest()[:20]
+
+
 def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(), max_concurrent=OPENCLAW_MAX_CONCURRENT):
     """Only the private loopback broker credential reaches the Node process.
 
@@ -117,10 +125,10 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
     ``agents.defaults.maxConcurrent`` (zod: number().int().positive()). The
     unlimited sentinel 0 is never used here; pass a positive runtime value.
     """
-    entries, models = {}, []
-    provider = 'lighthouse'
+    entries, model_groups = {}, {'lighthouse': []}
     for key, item in accounts.items():
         profile = item['profile']
+        provider = model_provider_id(profile)
         from .lighthouse_ai import model_capabilities
         capabilities = model_capabilities(profile)
         model = {
@@ -133,7 +141,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
             model["compat"].update(supportsReasoningEffort=True,
                 supportedReasoningEfforts=capabilities["reasoning_efforts"])
         ref = provider + '/' + model['id']
-        models.append(model)
+        model_groups.setdefault(provider, []).append(model)
         entries[item['agent_id']] = {
             'name': item['config_fingerprint'], 'workspace': str(item['root'] / 'workspace'),
             'agentDir': str(item['root'] / 'agent'), 'model': ref,
@@ -149,7 +157,8 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
                     "auth": {"mode": "token", "token": "${LIGHTHOUSE_GATEWAY_TOKEN}"},
                     "controlUi": {"enabled": False}},
         "models": {"mode": "replace", "catalogRefresh": {"enabled": False}, "providers": {provider: {
-            'baseUrl': model_url, 'api': 'openai-completions', 'apiKey': '${LIGHTHOUSE_GATEWAY_TOKEN}', 'models': models}}},
+            'baseUrl': model_url, 'api': 'openai-completions', 'apiKey': '${LIGHTHOUSE_GATEWAY_TOKEN}', 'models': models}
+            for provider, models in model_groups.items()}},
         "agents": {"entries": entries,
                    "defaults": {"maxConcurrent": max_concurrent, "heartbeat": {"every": "0m"},
                                 "compaction": {"mode": "safeguard"}, "skipBootstrap": True, "timeoutSeconds": 180}},
@@ -311,6 +320,7 @@ class OpenClawRuntime:
                 from .lighthouse_ai import model_capabilities
                 config_fingerprint = hashlib.sha256(json.dumps({'context': profile.get('context_window') or 64000,
                     'capabilities': model_capabilities(profile), 'plugin': plugin_hash, 'tools': list(tool_names),
+                    'provider': model_provider_id(profile),
                     'parameters': model_parameters}, sort_keys=True).encode()).hexdigest()
                 item = {"key": key, "agent_id": agent_id(actor['id']), "root": root, "fingerprint": fingerprint,
                         'config_fingerprint': config_fingerprint,

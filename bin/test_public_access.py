@@ -860,6 +860,8 @@ class LoopbackFlowTests(unittest.TestCase):
             public_url = start_server(proxy)
             with httpx.Client(base_url=public_url, trust_env=False, timeout=3,
                               headers={'Host': 'portal.example.com'}) as browser:
+                # Cold client/TLS setup is separate from the live-stream response budget.
+                self.assertEqual(browser.get('/api/auth/status', timeout=15).status_code, 200)
                 with browser.stream('GET', '/api/assistant/live') as response:
                     chunks = response.iter_raw()
                     first = next(chunks)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import html
 import json
 import re
@@ -1373,17 +1374,17 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
         "specialty": _record_specialty(record),
         "maintenance_cycle": _first(record.get("maintenance_cycle"), _field(record, "维护周期")),
         "execution_party": _first(record.get("execution_party"), _field(record, "执行方")),
-        "level": _first(record.get("level"), _field(record, "变更等级（阿里）", "紧急程度"), "I3" if work == "change" else ""),
+        "level": _first(record.get("level"), _field(record, "变更等级（阿里）", "紧急程度")),
         "start_time": _datetime_local(_first(record.get("start_time"), _field(record, "计划开始时间", "计划开始", "变更开始日期（阿里）"))),
         "end_time": _datetime_local(_first(record.get("end_time"), _field(record, "计划结束时间", "计划结束", "变更结束日期（阿里）"))),
         "location": location,
         "content": _first(record.get("content"), _field(record, "内容", "标题/补充内容", "标题补充内容")),
         "reason": _first(record.get("reason"), _field(record, "原因", "故障原因", "故障维修原因")),
         "impact": _first(record.get("impact"), _field(record, "影响", "影响范围")),
-        "progress": _first(record.get("progress"), _field(record, "进度", "维修进展描述", "当前维修进度"), "准备工作已完成，人员已就位，是否可以操作？"),
+        "progress": _first(record.get("progress"), _field(record, "进度", "维修进展描述", "当前维修进度")),
         "repair_device": _first(record.get("repair_device"), _field(record, "维修设备")),
         "repair_fault": _first(record.get("repair_fault"), _field(record, "维修故障", "故障维修原因")),
-        "fault_type": _first(record.get("fault_type"), _field(record, "故障类型"), "设备故障" if work == "repair" else ""),
+        "fault_type": _first(record.get("fault_type"), _field(record, "故障类型")),
         "repair_mode": _first(record.get("repair_mode"), _field(record, "维修方式", "维修方", "供应商名称")),
         "discovery": _first(record.get("discovery"), _field(record, "故障发现方式", "对应来源")),
         "symptom": _first(record.get("symptom"), _field(record, "故障现象", "故障发生现象描述")),
@@ -1401,7 +1402,7 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
     if memory_applied:
         for key in HISTORY_MEMORY_DRAFT_FIELDS:
             value = str(memory.get(key) or "").strip()
-            if value:
+            if value and not str(draft.get(key) or "").strip():
                 draft[key] = value
         if not str(record.get("active_item_id") or "").strip():
             today = dt.date.today()
@@ -1413,6 +1414,12 @@ def _draft_from_record(record: dict[str, Any], *, manual: bool = False, work_typ
                 draft.get("end_time"),
                 today,
             )
+    if not draft["progress"]:
+        draft["progress"] = "准备工作已完成，人员已就位，是否可以操作？"
+    if work == "change" and not draft["level"]:
+        draft["level"] = "I3"
+    if work == "repair" and not draft["fault_type"]:
+        draft["fault_type"] = "设备故障"
     source_work_type = str(record.get("source_work_type") or "").strip()
     converted_from = str(record.get("converted_from_work_type") or "").strip()
     converted_to = str(record.get("converted_to_work_type") or "").strip()
@@ -2560,8 +2567,15 @@ def _detail_form(
         f' data-parsed-keys="{_e(_json_dumps(list(parsed_draft)))}"'
         if work != "event" and parsed_draft else ""
     )
+    draft_context = hashlib.sha256(_json_dumps({
+        "scope": scope, "work_type": work, "notice_type": notice_type_value,
+        "source_record_id": source_record_id, "target_record_id": target_record_id,
+        "active_item_id": active_item_id, "month": source_month,
+        "title": _record_title(source), "building": _record_building(source),
+        "cycle": _first(source.get("maintenance_cycle"), _field(source, "维护周期", "维保周期")),
+    }).encode("utf-8")).hexdigest()
     return f"""
-      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}"{parsed_keys_attr}>
+      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}" data-draft-context="{draft_context}"{parsed_keys_attr}>
         {datalists}
         <input type="hidden" name="scope" value="{_e(scope)}">
         <input type="hidden" name="source_month" value="{_e(source_month)}">

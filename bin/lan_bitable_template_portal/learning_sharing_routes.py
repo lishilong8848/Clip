@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from contextlib import closing
 
 from fastapi import Request
@@ -167,12 +168,15 @@ class SharingRuntime:
                     job['record_id'] = await asyncio.to_thread(upload)
                     mid = ''
                 elif job['kind'] == 'weekly':
+                    from .feishu_delivery import FeishuDeliveryError, send_agent_message
                     url = core.learning.portal_url()
                     if not url: raise LearningError('学练入口尚未配置。')
-                    result = await asyncio.to_thread(core.learning._send, WEEKLY_CHAT_ID, weekly_card(job, batch, url), job['id'])
-                    if not (result[0] if isinstance(result, tuple) else bool(result)):
-                        raise LearningError('分享会群汇总发送失败。', 503)
-                    mid = ''
+                    try:
+                        receipt = await send_agent_message(self.runtime, WEEKLY_CHAT_ID, weekly_card(job, batch, url),
+                            receive_id_type='chat_id', message_uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, job['id'])))
+                    except FeishuDeliveryError as exc:
+                        raise LearningError(str(exc), 503) from None
+                    mid = receipt['message_id']
                 else:
                     bot = self.bot()
                     if batch['app_id'] != bot.config['app_id']:
@@ -192,7 +196,7 @@ class SharingRuntime:
                 job.update(status='sent', message_id=mid, sent_at=stamp(), error='')
         except Exception as exc:
             job['failures'] += 1
-            job.update(status='failed' if job['failures'] >= 5 else 'pending',
+            job.update(status='failed' if job['failures'] >= 5 and job['kind'] != 'weekly' else 'pending',
                        due_at=now().timestamp() + min(600, 30 * 2 ** job['failures']),
                        error=str(exc)[:500] if isinstance(exc, LearningError) else
                        '题库入库暂未确认，将核验原题后重试；已发答题卡不重发。' if job['kind'] == 'bank' else '消息发送结果未确认，将用原任务标识核验重试。')

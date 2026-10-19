@@ -368,6 +368,11 @@ def work_order_records(store, actor, query):
     from lan_bitable_template_portal.polling_work_orders import PollingWorkOrderService
 
     allowed = set(actor.get("scopes") or []) & SCOPES
+    profiles = actor.get('_topic_capabilities') or [actor]
+    def can_read(item):
+        found = record_codes(item)
+        module = item.get('work_type', 'polling')
+        return bool(found) and any(module in profile.get('modules', []) and found <= set(profile.get('scopes', [])) for profile in profiles)
     scope = str(query.get("scope") or "ALL").upper()
     selected = codes(scope)
     if not allowed or not selected or (scope not in {"ALL", "CAMPUS"} and selected - allowed):
@@ -391,7 +396,7 @@ def work_order_records(store, actor, query):
         item = store.get_document("polling_work_order", identity)
         if not isinstance(item, dict):
             raise AssistantError("工单不存在。", 404)
-        if not record_codes(item) or record_codes(item) - allowed or not record_codes(item) & selected:
+        if not record_codes(item) or record_codes(item) - allowed or not record_codes(item) & selected or not can_read(item):
             raise AssistantError("无权查询该工单。", 403)
         documents = [{"key": identity, "payload": item}]
     else:
@@ -400,7 +405,7 @@ def work_order_records(store, actor, query):
     for document in documents:
         item = document.get("payload") or {}
         found = record_codes(item)
-        if not found or found - allowed or not found & selected or item.get("deleted_at"):
+        if not found or found - allowed or not found & selected or item.get("deleted_at") or not can_read(item):
             continue
         if state == "pending" and item.get("state") not in {"active", "upload_pending"} or state not in {"all", "pending"} and item.get("state") != state:
             continue

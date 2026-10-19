@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from bin.test_learning import learning, FakeCloud
 from lan_bitable_template_portal.learning_weekly_cards import WeeklyCards, render
@@ -230,6 +230,87 @@ class WeeklyCardsTests(unittest.TestCase):
         self.assertEqual(json.loads(sent['json']['content'])['schema'], '2.0')
         ticket = self.feature.prepare(self.job, 'oc_new', 'cli_fixture')
         self.assertEqual((ticket['message_id'], ticket['chat_id']), ('om_new', 'oc_new'))
+
+    def test_group_rejection_includes_code_and_can_retry_after_permission_is_fixed(self):
+        client = SimpleNamespace(post=AsyncMock(side_effect=[
+            SimpleNamespace(status_code=400, json=lambda: {'code': 230002, 'msg': 'not in group'}),
+            SimpleNamespace(status_code=200, json=lambda: {'code': 0, 'data': {'message_id': 'om_recovered', 'chat_id': 'oc_recovery'}})]))
+        self.runtime.feishu_assistant_channel = SimpleNamespace(config={'app_id': 'cli_fixture'}, messenger=SimpleNamespace(
+            client=AsyncMock(return_value=client), headers=AsyncMock(return_value={})))
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaisesRegex(learning.LearningError, '230002'):
+                asyncio.run(self.feature.send(self.job, 'oc_recovery', 'same-operation'))
+            self.assertNotIn('attempted_at', self.feature.prepare(self.job, 'oc_recovery', 'cli_fixture'))
+            self.assertTrue(asyncio.run(self.feature.send(self.job, 'oc_recovery', 'same-operation')))
+        self.assertEqual(client.post.call_args_list[0].kwargs['json']['uuid'], client.post.call_args_list[1].kwargs['json']['uuid'])
+
+    def test_personal_report_uses_agent_recipient_mapping_not_old_app_contact(self):
+        from upload_event_module.services.robot_webhook import DeliveryAttempt
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,
+            json=lambda: {'code': 0, 'data': {'message_id': 'om_personal', 'chat_id': 'oc_personal'}})))
+        bot = SimpleNamespace(config={'app_id': 'cli_fixture'}, messenger=SimpleNamespace(
+            client=AsyncMock(return_value=client), headers=AsyncMock(return_value={})),
+            permission_cards=SimpleNamespace(union_id=Mock(side_effect=AssertionError('old contact forbidden'))))
+        resolver = SimpleNamespace(closing=False, recipient=AsyncMock(return_value=('open_id', 'ou_agentPerson')))
+        self.runtime.feishu_assistant_channel = bot
+        self.runtime.feishu_public_sender = resolver
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            self.assertTrue(asyncio.run(self.feature.send(self.job, 'ou_portalPerson', 'person-weekly')))
+            resolver.recipient.return_value = DeliveryAttempt('blocked', '人员已停用')
+            with self.assertRaisesRegex(learning.LearningError, '人员已停用'):
+                asyncio.run(self.feature.send(self.job, 'ou_blockedPerson', 'person-weekly'))
+        client.post.assert_awaited_once()
+        self.assertEqual(client.post.call_args.kwargs['params'], {'receive_id_type': 'open_id'})
+        self.assertEqual(client.post.call_args.kwargs['json']['receive_id'], 'ou_agentPerson')
+        self.assertNotIn('attempted_at', self.feature.prepare(self.job, 'ou_blockedPerson', 'cli_fixture'))
+
+    def test_ambiguous_group_send_does_not_retry_beyond_dedup_window_or_use_old_app(self):
+        client = SimpleNamespace(post=AsyncMock(side_effect=OSError('response lost')))
+        self.runtime.feishu_assistant_channel = SimpleNamespace(config={'app_id': 'cli_fixture'}, messenger=SimpleNamespace(
+            client=AsyncMock(return_value=client), headers=AsyncMock(return_value={})))
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaises(OSError):
+                asyncio.run(self.feature.send(self.job, 'oc_uncertain', 'same-operation'))
+            ticket = self.feature.prepare(self.job, 'oc_uncertain', 'cli_fixture')
+            with patch('lan_bitable_template_portal.learning_weekly_cards.time.time', return_value=ticket['attempted_at'] + 3600):
+                with self.assertRaisesRegex(learning.LearningError, '去重窗口'):
+                    asyncio.run(self.feature.send(self.job, 'oc_uncertain', 'same-operation'))
+        client.post.assert_awaited_once()
+
+    def test_sync_sender_not_initialized_reports_actionable_failure(self):
+        with self.assertRaisesRegex(learning.LearningError, '尚未就绪'):
+            self.feature.send_from_worker(self.job, 'oc_fixture', 'fixture')
+
+    def test_unsent_ticket_can_change_to_agent_app_but_uncertain_ticket_cannot(self):
+        target = 'oc_migrating'
+        ticket = self.feature.prepare(self.job, target, 'cli_old')
+        migrated = self.feature.prepare(self.job, target, 'cli_agent')
+        self.assertEqual(migrated['app_id'], 'cli_agent')
+        self.assertEqual(migrated['id'], ticket['id'])
+        with self.service.transaction() as conn:
+            migrated['attempted_at'] = 100
+            self.service._put('engagement', migrated['id'], migrated, conn)
+        with self.assertRaises(learning.LearningError):
+            self.feature.prepare(self.job, target, 'cli_another')
+
+    def test_timeout_and_wrong_group_receipts_remain_uncertain(self):
+        responses = [
+            SimpleNamespace(status_code=408, json=lambda: {'code': 230000}),
+            SimpleNamespace(status_code=200, json=lambda: {'code': 0,
+                'data': {'message_id': 'om_other', 'chat_id': 'oc_other'}}),
+        ]
+        for index, response in enumerate(responses):
+            with self.subTest(status=response.status_code):
+                target = 'oc_unknown' + str(index)
+                client = SimpleNamespace(post=AsyncMock(return_value=response))
+                self.runtime.feishu_assistant_channel = SimpleNamespace(config={'app_id': 'cli_fixture'},
+                    messenger=SimpleNamespace(client=AsyncMock(return_value=client), headers=AsyncMock(return_value={})))
+                with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+                    with self.assertRaises(learning.LearningError):
+                        asyncio.run(self.feature.send(self.job, target, 'same-operation'))
+                ticket = self.feature.prepare(self.job, target, 'cli_fixture')
+                self.assertIn('attempted_at', ticket)
+                self.assertFalse(ticket['message_id'])
 
     def test_callback_returns_same_message_card_after_resolving_actor(self):
         bot = SimpleNamespace(config={'app_id': 'cli_fixture'}, messenger=object(),

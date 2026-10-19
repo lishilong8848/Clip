@@ -1,7 +1,9 @@
 import json
 import re
+import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import config
@@ -13,6 +15,50 @@ from .http_client import FeishuHTTPError, FeishuHttpClient
 _CHAT_CACHE: Dict[str, Any] = {"timestamp": 0.0, "items": []}
 _CHAT_CACHE_TTL_SEC = 300
 _HTTP_CLIENT = FeishuHttpClient()
+_SENDER_LOCK = threading.Lock()
+_AGENT_SENDER = None
+
+
+@dataclass
+class DeliveryAttempt:
+    # Only not_sent permits switching applications; uncertain never does.
+    status: str
+    message: str = ""
+    receipt: dict[str, Any] = field(default_factory=dict)
+    code: int | None = None
+
+
+def register_agent_sender(sender):
+    global _AGENT_SENDER
+    with _SENDER_LOCK:
+        _AGENT_SENDER = sender
+
+
+def unregister_agent_sender(sender):
+    global _AGENT_SENDER
+    with _SENDER_LOCK:
+        if _AGENT_SENDER is sender:
+            _AGENT_SENDER = None
+
+
+def card_requires_agent(value: Any) -> bool:
+    """URL buttons and static tables need no callback; forms and actions do."""
+    if isinstance(value, list):
+        return any(card_requires_agent(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    tag = str(value.get("tag") or "")
+    if (value.get("type") in ("callback", "request") or value.get("form_action_type")
+            or tag in {"form", "input", "overflow", "checker"}
+            or tag.startswith(("select_", "multi_select", "picker_", "date_picker"))):
+        return True
+    if tag == "button":
+        links = value.get("url") or value.get("multi_url") or any(
+            isinstance(item, dict) and item.get("type") == "open_url"
+            for item in (value.get("behaviors") or []))
+        if "value" in value or not links:
+            return True
+    return any(card_requires_agent(item) for item in value.values())
 
 
 def _request_json(
@@ -24,6 +70,22 @@ def _request_json(
     json_payload: Any = None,
     retries: int = 2,
 ) -> dict[str, Any]:
+    if method.upper() == "POST" and url == "https://open.feishu.cn/open-apis/im/v1/messages":
+        # Keep HTTP uncertainty: a timeout body may still contain a Feishu error code.
+        try:
+            response = _HTTP_CLIENT.request(method, url, headers=headers, params=params, json=json_payload)
+            status = response.status_code
+            if status == 408 or status >= 500 or 300 <= status < 400:
+                raise FeishuHTTPError(f"飞书消息响应 HTTP {status}，发送结果未确认", category="remote")
+            result = response.json()
+            if (not isinstance(result, dict) or type(result.get("code")) is not int
+                    or status >= 400 and result["code"] == 0):
+                raise FeishuHTTPError("飞书消息响应不完整，发送结果未确认")
+            return result
+        except FeishuHTTPError:
+            raise
+        except Exception:
+            raise FeishuHTTPError("飞书消息发送结果未确认，未自动重试", category="network") from None
     return _HTTP_CLIENT.request_json(
         method,
         url,
@@ -164,6 +226,8 @@ def _send_message_to_chat(
     text: str,
     *,
     message_uuid: str = "",
+    receipt: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> Tuple[bool, str]:
     return _send_message_to_receive_id(
         tenant_access_token,
@@ -171,14 +235,19 @@ def _send_message_to_chat(
         text,
         receive_id_type="chat_id",
         message_uuid=message_uuid,
+        receipt=receipt,
+        outcome=outcome,
     )
 
 
 def _send_message_to_open_id(
-    tenant_access_token: str, open_id: str, text: str, *, message_uuid: str = ""
+    tenant_access_token: str, open_id: str, text: str, *, message_uuid: str = "",
+    receipt: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> Tuple[bool, str]:
     return _send_message_to_receive_id(
-        tenant_access_token, open_id, text, receive_id_type="open_id", message_uuid=message_uuid
+        tenant_access_token, open_id, text, receive_id_type="open_id", message_uuid=message_uuid,
+        receipt=receipt, outcome=outcome
     )
 
 
@@ -189,7 +258,14 @@ def _send_message_to_receive_id(
     *,
     receive_id_type: str,
     message_uuid: str = "",
+    receipt: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> Tuple[bool, str]:
+    if receipt is not None:
+        receipt.clear()
+    if outcome is not None:
+        outcome.clear()
+        outcome["status"] = "uncertain"
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
         "Authorization": f"Bearer {tenant_access_token}",
@@ -212,13 +288,16 @@ def _send_message_to_receive_id(
             headers=headers,
             params=params,
             json_payload=payload,
-            retries=2,
+            # The durable caller owns retries; a hidden retry can erase an uncertain write.
+            retries=0,
         )
-        if _is_token_error_result(result):
+        if type(result.get("code")) is int and result["code"] != 0 and _is_token_error_result(result):
             tenant_access_token, token_err = _get_tenant_access_token(
                 force_refresh=True
             )
             if token_err:
+                if outcome is not None:
+                    outcome.update(status="not_sent", code=result["code"])
                 return False, token_err
             headers["Authorization"] = f"Bearer {tenant_access_token}"
             result = _request_json(
@@ -227,10 +306,25 @@ def _send_message_to_receive_id(
                 headers=headers,
                 params=params,
                 json_payload=payload,
-                retries=2,
+                retries=0,
             )
-        if result.get("code", 0) != 0:
-            return False, result.get("msg", "unknown error")
+        if type(result.get("code")) is not int:
+            return False, "飞书响应缺少有效错误码，发送结果未确认"
+        if result["code"] != 0:
+            if outcome is not None:
+                outcome.update(status="not_sent", code=result["code"])
+            return False, f"{result['code']} - {result.get('msg') or 'unknown error'}"
+        if receipt is not None:
+            data = result.get("data")
+            if not isinstance(data, dict) or not all(
+                isinstance(data.get(key), str) and re.fullmatch(pattern, data[key])
+                for key, pattern in (("message_id", r"om_[A-Za-z0-9]+"), ("chat_id", r"oc_[A-Za-z0-9]+"))
+            ):
+                return False, "飞书响应缺少有效消息ID或会话ID，发送结果未确认"
+            receipt.update(message_id=data["message_id"], chat_id=data["chat_id"],
+                           sender_app_id=str(config.app_id), message_uuid=payload["uuid"], accepted_at=time.time())
+        if outcome is not None:
+            outcome["status"] = "sent"
         return True, "ok"
     except FeishuHTTPError as exc:
         return False, str(exc)
@@ -244,9 +338,13 @@ def _send_interactive_to_receive_id(
     receive_id_type: str,
     message_uuid: str = "",
     receipt: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
 ) -> Tuple[bool, str]:
     if receipt is not None:
         receipt.clear()
+    if outcome is not None:
+        outcome.clear()
+        outcome["status"] = "uncertain"
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
         "Authorization": f"Bearer {tenant_access_token}",
@@ -266,13 +364,15 @@ def _send_interactive_to_receive_id(
             headers=headers,
             params=params,
             json_payload=payload,
-            retries=2,
+            retries=0,
         )
-        if _is_token_error_result(result):
+        if type(result.get("code")) is int and result["code"] != 0 and _is_token_error_result(result):
             tenant_access_token, token_err = _get_tenant_access_token(
                 force_refresh=True
             )
             if token_err:
+                if outcome is not None:
+                    outcome.update(status="not_sent", code=result["code"])
                 return False, token_err
             headers["Authorization"] = f"Bearer {tenant_access_token}"
             result = _request_json(
@@ -281,11 +381,13 @@ def _send_interactive_to_receive_id(
                 headers=headers,
                 params=params,
                 json_payload=payload,
-                retries=2,
+                retries=0,
             )
         if type(result.get("code")) is not int:
             return False, "飞书响应缺少有效错误码，发送结果未确认"
         if result["code"] != 0:
+            if outcome is not None:
+                outcome.update(status="not_sent", code=result["code"])
             return False, f"{result['code']} - {result.get('msg') or 'unknown error'}"
         data = result.get("data")
         if not isinstance(data, dict) or not all(
@@ -297,9 +399,103 @@ def _send_interactive_to_receive_id(
             receipt.update(message_id=data["message_id"], chat_id=data["chat_id"],
                            sender_app_id=str(config.app_id), message_uuid=payload["uuid"],
                            accepted_at=time.time())
+        if outcome is not None:
+            outcome["status"] = "sent"
         return True, "ok"
     except FeishuHTTPError as exc:
         return False, str(exc)
+
+
+def _deliver_many(kind, content, recipients, receive_type, message_uuid):
+    with _SENDER_LOCK:
+        sender = _AGENT_SENDER
+    # Standalone legacy callers retain their existing upstream write guard.
+    blocked_reason = ""
+    if sender:
+        from lan_bitable_template_portal.portal_service import external_real_write_guard
+        guard = external_real_write_guard()
+        if not guard.get("real_write_allowed"):
+            blocked_reason = guard.get("reason") or "当前运行模式不允许真实飞书消息发送。"
+    requires_agent = kind == "interactive" and card_requires_agent(content)
+    token, token_error, results = None, "", []
+    for recipient in recipients:
+        # Preserve singleton UUIDs, and keep batch retry identities stable by recipient.
+        identity = (str(uuid.uuid5(uuid.NAMESPACE_URL, message_uuid + ':' + recipient))
+                    if message_uuid and len(recipients) > 1 else str(message_uuid or uuid.uuid4()))
+        try:
+            attempt = (DeliveryAttempt("blocked", blocked_reason) if blocked_reason else
+                       sender(recipient, kind, content, receive_type, identity) if sender else
+                       DeliveryAttempt("not_sent", "当前进程未注册飞书智能体运行时（例如独立Qt进程），尚未发送。"))
+            if not isinstance(attempt, DeliveryAttempt):
+                attempt = DeliveryAttempt("uncertain", "公共发送器未返回有效回执，发送结果未确认。")
+        except Exception:
+            attempt = DeliveryAttempt("uncertain", "公共发送器异常，发送结果未确认，未跨应用补发。")
+        ok, message, receipt = attempt.status == "sent", attempt.message, dict(attempt.receipt)
+        failure_kind = "" if ok else attempt.status
+        code = attempt.code
+        if attempt.status == "not_sent" and requires_agent:
+            message += " 回调交互卡片必须由飞书智能体发送，已保留失败，未使用备用应用。"
+            failure_kind = "agent_required"
+        elif attempt.status == "not_sent":
+            # Lazy legacy authentication: an unavailable old application cannot block the agent.
+            failure_kind, code, receipt, posted = "not_sent", None, {}, False
+            if token is None:
+                token, token_error = _get_tenant_access_token()
+            if token_error:
+                ok, message = False, "备用应用认证未就绪，尚未发送。"
+            elif sender and not external_real_write_guard().get("real_write_allowed"):
+                ok, message = False, "真实消息写入已禁用，尚未发送。"
+                failure_kind = "blocked"
+            else:
+                outcome = {}
+                try:
+                    claim = getattr(sender, "legacy_started", None)
+                    if claim and not claim(recipient, receive_type, identity, str(config.app_id)):
+                        ok, message = False, "原任务已绑定其他发送应用，未跨应用补发。"
+                    else:
+                        posted = True
+                        if kind == "interactive":
+                            kwargs = ({"receipt": receipt, "outcome": outcome}
+                                      if sender or receive_type != "chat_id" else {})
+                            ok, message = _send_interactive_to_receive_id(token, recipient, content,
+                                receive_id_type=receive_type,
+                                message_uuid=identity if kwargs else message_uuid, **kwargs)
+                        else:
+                            send = _send_message_to_chat if receive_type == "chat_id" else _send_message_to_open_id
+                            ok, message = send(token, recipient, content["text"], message_uuid=identity,
+                                               receipt=receipt, outcome=outcome)
+                        failure_kind = "" if ok else outcome.get("status", "uncertain")
+                        code = outcome.get("code") if failure_kind == "not_sent" else None
+                        # Preserve the original SDK-style unavailable result used by legacy callers.
+                        if not ok and not outcome and "no availability" in message.lower():
+                            failure_kind = "not_sent"
+                        receipt.update(delivery_channel="legacy", primary_error=attempt.message)
+                        finish = getattr(sender, "legacy_finished", None)
+                        if ok and finish:
+                            finish(recipient, receive_type, identity, dict(receipt))
+                        log_info("飞书智能体未发送，已尝试备用应用：" + attempt.message)
+                except Exception:
+                    ok, message = False, "备用应用发送或回执保存未完成，结果未确认；请继续原任务。"
+                    failure_kind, code = "uncertain", None
+            if not ok and failure_kind == "not_sent":
+                try:
+                    mark = getattr(sender, "legacy_not_sent", None)
+                    if mark and not mark(recipient, receive_type, identity, posted=posted, code=code):
+                        failure_kind, code = "uncertain", None
+                        message = "原发送结果仍未确认，未将本次失败视为可跨应用重发。"
+                except Exception:
+                    failure_kind, code = "uncertain", None
+                    message = "未发送状态保存失败，结果待核验；未跨应用补发。"
+        if not ok and failure_kind == "not_sent" and "no availability" in message.lower():
+            failure_kind = "bot_unavailable"
+            message += "。飞书返回机器人对该用户不可用，请核对应用可用范围。"
+        results.append({receive_type: recipient, "ok": ok, "message": message,
+                        "failure_kind": failure_kind, "message_uuid": identity,
+                        **({"code": code} if code is not None else {}), **receipt})
+    failed = [item for item in results if not item["ok"]]
+    if failed:
+        return False, "；".join(item[receive_type] + ": " + item["message"] for item in failed), results
+    return True, "ok", results
 
 
 def send_text_to_open_ids(
@@ -307,54 +503,12 @@ def send_text_to_open_ids(
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
     """发送文本给一个或多个 open_id。任一收件人失败则整体失败。"""
     text = str(text or "").strip()
-    recipients = list(dict.fromkeys([str(open_id or "").strip() for open_id in open_ids]))
-    recipients = [open_id for open_id in recipients if open_id]
+    recipients = list(dict.fromkeys(str(item or "").strip() for item in open_ids if str(item or "").strip()))
     if not text:
         return False, "消息内容为空", []
     if not recipients:
         return False, "收件人为空", []
-
-    token, err = _get_tenant_access_token()
-    if err:
-        return False, err, []
-
-    results: List[Dict[str, Any]] = []
-    all_ok = True
-    for open_id in recipients:
-        ok, msg = (
-            _send_message_to_open_id(token, open_id, text, message_uuid=message_uuid)
-            if message_uuid else _send_message_to_open_id(token, open_id, text)
-        )
-        failure_kind = (
-            "bot_unavailable"
-            if not ok and "no availability" in str(msg or "").lower()
-            else ""
-        )
-        results.append(
-            {
-                "open_id": open_id,
-                "ok": ok,
-                "message": msg,
-                "failure_kind": failure_kind,
-            }
-        )
-        if not ok:
-            all_ok = False
-
-    if all_ok:
-        log_info(f"个人消息发送成功: recipients={len(recipients)}")
-        return True, "ok", results
-    failed = [item for item in results if not item.get("ok")]
-    detail = "；".join(
-        f"{item.get('open_id')}: {item.get('message')}" for item in failed
-    )
-    if "NO availability" in detail or "no availability" in detail.lower():
-        detail = (
-            f"{detail}。已按 open_id 发送，但飞书返回机器人对该用户不可用；"
-            "请在飞书应用后台确认机器人已启用且应用可用范围包含该用户。"
-        )
-    log_error(f"个人消息发送失败: {detail}")
-    return False, detail or "发送失败", results
+    return _deliver_many("text", {"text": text}, recipients, "open_id", message_uuid)
 
 
 def send_interactive_to_open_ids(
@@ -370,44 +524,7 @@ def send_interactive_to_open_ids(
     recipients = [item for item in recipients if item]
     if not recipients:
         return False, "收件人为空", []
-    token, err = _get_tenant_access_token()
-    if err:
-        return False, err, []
-    results: List[Dict[str, Any]] = []
-    for open_id in recipients:
-        receipt: dict[str, Any] = {}
-        ok, message = _send_interactive_to_receive_id(
-            token,
-            open_id,
-            card,
-            receive_id_type="open_id",
-            # Keep singleton UUIDs compatible with retries queued before an update.
-            message_uuid=(str(uuid.uuid5(uuid.NAMESPACE_URL, message_uuid + ':' + open_id))
-                          if message_uuid and len(recipients) > 1 else message_uuid),
-            receipt=receipt,
-        )
-        results.append(
-            {
-                "open_id": open_id,
-                "ok": ok,
-                "message": message,
-                **receipt,
-                "failure_kind": (
-                    "bot_unavailable"
-                    if not ok and "no availability" in str(message or "").lower()
-                    else ""
-                ),
-            }
-        )
-    failed = [item for item in results if not item.get("ok")]
-    if not failed:
-        log_info(f"个人交互卡片发送成功: recipients={len(recipients)}")
-        return True, "ok", results
-    detail = "；".join(
-        f"{item.get('open_id')}: {item.get('message')}" for item in failed
-    )
-    log_error(f"个人交互卡片发送失败: {detail}")
-    return False, detail or "发送失败", results
+    return _deliver_many("interactive", card, recipients, "open_id", message_uuid)
 
 
 def send_interactive_to_chat_id(
@@ -419,16 +536,7 @@ def send_interactive_to_chat_id(
         return False, "卡片内容为空"
     if not chat_id:
         return False, "群 chat_id 为空"
-    token, err = _get_tenant_access_token()
-    if err:
-        return False, err
-    ok, message = _send_interactive_to_receive_id(
-        token,
-        chat_id,
-        card,
-        receive_id_type="chat_id",
-        message_uuid=message_uuid,
-    )
+    ok, message, _ = _deliver_many("interactive", card, [chat_id], "chat_id", message_uuid)
     if ok:
         log_info(f"群交互卡片发送成功: chat_id={chat_id}")
     else:
@@ -436,7 +544,7 @@ def send_interactive_to_chat_id(
     return ok, message
 
 
-def send_text_to_chat_id(text: str, chat_id: str) -> Tuple[bool, str]:
+def send_text_to_chat_id(text: str, chat_id: str, *, message_uuid: str = "") -> Tuple[bool, str]:
     """按 chat_id 发送文本群消息。"""
     text = str(text or "").strip()
     chat_id = str(chat_id or "").strip()
@@ -445,11 +553,7 @@ def send_text_to_chat_id(text: str, chat_id: str) -> Tuple[bool, str]:
     if not chat_id:
         return False, "群 chat_id 为空"
 
-    token, err = _get_tenant_access_token()
-    if err:
-        return False, err
-
-    ok, message = _send_message_to_chat(token, chat_id, text)
+    ok, message, _ = _deliver_many("text", {"text": text}, [chat_id], "chat_id", message_uuid)
     if ok:
         log_info(f"群消息发送成功: chat_id={chat_id}")
     else:
@@ -477,17 +581,8 @@ def send_robot_title_and_content(
     if err:
         return False, err
 
-    token, err = _get_tenant_access_token()
-    if err:
-        return False, err
-
     text = f"{title}\n{content}" if title and content else (title or content)
-    ok, msg = _send_message_to_chat(
-        token,
-        chat_id,
-        text,
-        message_uuid=message_uuid,
-    )
+    ok, msg = send_text_to_chat_id(text, chat_id, message_uuid=message_uuid)
     if ok:
         log_info(f"群消息发送成功: {group_name}")
     else:
@@ -505,13 +600,9 @@ def send_event_prompt_message(building: str, content: str) -> Tuple[bool, str]:
     if err:
         return False, err
 
-    token, err = _get_tenant_access_token()
-    if err:
-        return False, err
-
     prefix = f"此事件距更新通告超时还剩【1】分钟，请及时更新或补位！事件信息如下："
     text = f"{prefix}\n{content}" if content else prefix
-    ok, msg = _send_message_to_chat(token, chat_id, text)
+    ok, msg = send_text_to_chat_id(text, chat_id)
     if ok:
         log_info(f"事件提示群消息发送成功: {group_name}")
     else:
