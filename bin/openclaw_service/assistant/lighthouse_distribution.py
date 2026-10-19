@@ -41,7 +41,7 @@ def validate_spec(spec, *, published=True, component='runtime'):
         if not isinstance(files, dict) or set(files) != {'frpc.exe', 'LICENSE'} or any(
                 not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value) for value in files.values()):
             raise AssistantError('公网组件文件清单无效。', 503)
-    elif component == 'public_access_profile':
+    elif component in {'public_access_profile', 'photo_location_profile'}:
         version_ok = isinstance(spec, dict) and spec.get('component') == component \
             and spec.get('version') == spec.get('sha256') and spec.get('platform') == 'windows_amd64' \
             and isinstance(spec.get('parts'), list) and len(spec['parts']) == 1
@@ -120,7 +120,7 @@ def create_archive(runtime, output):
 
 class FeishuRuntimeMirror:
     """Only the designated dependency and patch tables are allowed; no record deletion."""
-    def __init__(self, *, client=None, headers=None, table=TABLE):
+    def __init__(self, *, client=None, headers=None, table=TABLE, timeout=None):
         if table not in {TABLE, PATCH_TABLE}:
             raise AssistantError('未授权的分发表。', 403)
         self.table = table
@@ -135,8 +135,9 @@ class FeishuRuntimeMirror:
                 raise AssistantError('助手依赖镜像认证失败：' + str(exc), 503) from None
             if not token:
                 raise AssistantError('飞书依赖镜像认证不可用。', 503)
-            client, headers = FeishuHttpClient(timeout=60, retries=1), {'Authorization': 'Bearer ' + token}
+            client, headers = FeishuHttpClient(timeout=timeout or 60, retries=1), {'Authorization': 'Bearer ' + token}
         self.client, self.headers = client, headers
+        self.timeout = timeout
         self._download_client = None
 
     def request(self, method, suffix='', **kwargs):
@@ -171,6 +172,7 @@ class FeishuRuntimeMirror:
         model = component == 'knowledge_model'
         frpc = component == 'frpc'
         profile = component == 'public_access_profile'
+        location = component == 'photo_location_profile'
         self.ensure_fields()
         journal = Path(journal)
         state = json.loads(journal.read_text(encoding='utf-8')) if journal.is_file() else {}
@@ -194,10 +196,10 @@ class FeishuRuntimeMirror:
                 entry['file_token'] = response['data']['file_token']
                 save()
             fields = {'文本': 'Lighthouse-' + spec['version'] + '-' + str(part['index']),
-                '组件名称': '灯塔完整更新补丁' if portal_patch else '灯塔公网部署凭据（受限）' if profile else '公网客户端 FRPC' if frpc else '知识库模型 bge-small-zh-v1.5' if model else '灯塔助手运行环境', '版本': spec['version'], '平台': 'ONNX CPU' if model else 'Windows x64',
+                '组件名称': '灯塔完整更新补丁' if portal_patch else '灯塔照片地点解析配置（受限）' if location else '灯塔公网部署凭据（受限）' if profile else '公网客户端 FRPC' if frpc else '知识库模型 bge-small-zh-v1.5' if model else '灯塔助手运行环境', '版本': spec['version'], '平台': 'ONNX CPU' if model else 'Windows x64',
                 '安装包': [{'file_token': entry['file_token']}], '分片序号': part['index'], '分片总数': len(spec['parts']),
                 '分片SHA256': part['sha256'], '整包SHA256': spec['sha256'], '文件大小': part['size'], '启用': True,
-                '更新说明': ('完整程序补丁；按分片顺序合并，核对整包大小和SHA256后才可安装。更新保留用户数据与配置。' if portal_patch else '仅限指定正式部署机使用。附件包含隧道认证信息，请限制表格及附件读取权限，不得分享或转发。' if profile else '仅含 FRPC 及许可证，不含服务器配置、认证令牌或业务数据。' if frpc else '仅含 BGE 中文嵌入模型及分词器，不含公司文档、账号或凭证。' if model
+                '更新说明': ('完整程序补丁；按分片顺序合并，核对整包大小和SHA256后才可安装。更新保留用户数据与配置。' if portal_patch else '附件含地图服务 Key，仅供灯塔服务端自动配置。请限制表格及附件读取权限，不得公开分享。补丁仅包含下载清单，不含此 Key。' if location else '仅限指定正式部署机使用。附件包含隧道认证信息，请限制表格及附件读取权限，不得分享或转发。' if profile else '仅含 FRPC 及许可证，不含服务器配置、认证令牌或业务数据。' if frpc else '仅含 BGE 中文嵌入模型及分词器，不含公司文档、账号或凭证。' if model
                              else '仅含固定 Node/OpenClaw 依赖，不含账号、凭证、会话或业务数据。')}
             if not entry.get('record_id'):
                 result = self.request('POST', '/records', params={'client_token': entry['client_token']}, json_payload={'fields': fields})
@@ -229,7 +231,7 @@ class FeishuRuntimeMirror:
         if self._download_client is None:
             # Feishu attachments must not inherit an unrelated system proxy.
             self._download_client = httpx.Client(
-                timeout=httpx.Timeout(connect=10, read=90, write=30, pool=10),
+                timeout=self.timeout or httpx.Timeout(connect=10, read=90, write=30, pool=10),
                 trust_env=False, follow_redirects=False, verify=verified_tls_context())
         for attempt in range(4):
             # Never forward the API bearer to an attachment CDN.

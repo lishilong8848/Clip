@@ -50,7 +50,7 @@
       </div>
       <NAlert v-if="state.roster_error" type="warning" :bordered="false">{{ state.roster_error }}</NAlert>
     </template>
-    <NModal v-model:show="editing" preset="card" title="班前检查清单" class="v2-check-editor" :mask-closable="false" :closable="!saving" :close-on-esc="!saving">
+    <NModal v-model:show="editing" preset="card" title="班前检查清单" class="v2-check-editor" :mask-closable="false" :closable="!saving&&!locationSaving" :close-on-esc="!saving&&!locationSaving">
       <p class="v2-check-edit-note">{{ scope }}楼 · 保存后立即更新未提交的班次；已提交和历史清单保持原样。</p>
       <NAlert v-if="editError" type="error" :bordered="false">{{ editError }}</NAlert>
       <section v-for="(item,index) in items" :key="item.id" class="v2-check-definition"><div class="v2-check-edit-row" data-v2-navigation>
@@ -58,7 +58,8 @@
         <NButton quaternary circle :disabled="saving" :aria-label="'删除检查项'+(index+1)" @click="items.splice(index,1)"><Trash2 :size="17" /></NButton>
       </div><CheckFrequency v-model="item.frequency" :disabled="saving" /></section>
       <NButton data-v2-navigation dashed :disabled="saving || items.length>=50" @click="items.push({id:randomHexId(),text:'',frequency:defaultFrequency()})"><template #icon><Plus :size="16" /></template>添加检查项</NButton>
-      <template #footer><div class="v2-check-editor-actions"><NButton :disabled="saving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving" data-v2-submit @click="saveDefinition">保存清单</NButton></div></template>
+      <PhotoLocationSettings v-if="editing&&state?.can_configure_location" @busy="locationSaving=$event" />
+      <template #footer><div class="v2-check-editor-actions"><NButton :disabled="saving||locationSaving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving||locationSaving" data-v2-submit @click="saveDefinition">保存清单</NButton></div></template>
     </NModal>
   </section>
 </template>
@@ -74,11 +75,12 @@ import CheckFrequency from './CheckFrequency.vue';
 import CheckAttachments from './CheckAttachments.vue';
 import CheckOverview from './CheckOverview.vue';
 import CheckHistory from './CheckHistory.vue';
+import PhotoLocationSettings from './PhotoLocationSettings.vue';
 const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
 const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
-const editing=ref(false),saving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict}[]>([]),version=ref(0);
+const editing=ref(false),saving=ref(false),locationSaving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict}[]>([]),version=ref(0);
 const overviewOpen=ref(false);let firstState=true;
 const historyOpen=ref(false);
 const compact=document.documentElement.classList.contains('workspace-v2');
@@ -111,6 +113,7 @@ function changeScope(value:string){if(dirty.value||busy.value||uploading.value)r
 function openBuilding(value:string){overviewOpen.value=false;changeScope(value);}
 function edit(){if(uploading.value)return;items.value=(state.value?.definition.items||[]).map((item:Dict)=>({id:item.id,text:item.text,frequency:{...(item.frequency||defaultFrequency())}}));version.value=state.value?.definition.version||0;editError.value='';editing.value=true;}
 async function saveDefinition(){
+  if(locationSaving.value)return;
   if(items.value.some(item=>!item.text.trim())){editError.value='请填写检查内容，或删除空白项。';return;}
   for(const [index,item] of items.value.entries()){const f=item.frequency,shift=f.kind==='shift'||f.kind==='temporary'&&f.cadence==='shift';let issue='';if(!f.start_date)issue='请选择生效日期';else if(shift&&(!f.day_time||f.day_time<'08:00'||f.day_time>='18:00'))issue='白班时间须在08:00至18:00之间';else if(shift&&(!f.night_time||f.night_time>='08:00'&&f.night_time<'17:50'))issue='夜班时间须在17:50至次日08:00之间';else if(!shift&&!f.time)issue='请选择执行时间';else if(f.kind==='interval'&&!f.every_days||f.kind==='temporary'&&!f.limit)issue='请填写有效的次数或天数';if(issue){editError.value=`第${index+1}项：${issue}。`;return;}}
   saving.value=true;editError.value='';
@@ -122,7 +125,7 @@ async function submit(){
   const row=task.value;busy.value=true;error.value='';
   try{const result=await requestJson('/api/pre-shift-checks/submit',{method:'POST',body:JSON.stringify({task_id:row.id,version:row.definition_version,answers:row.items.map((item:Dict)=>({id:item.id,...answer(item.id)}))})});delete drafts.value[row.id];message.success(result.already_completed?'本次清单已由'+result.actor_name+'提交，无需重复提交':'本次清单已提交，飞书后台同步');window.dispatchEvent(new Event('clipflow-business-changed'));await load(true);}catch(e){error.value=e instanceof Error?e.message:'提交暂未确认，请重试；不会重复新增。';}finally{busy.value=false;}
 }
-const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
+const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
 function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||busy.value||saving.value||editing.value||uploading.value){event.preventDefault();event.returnValue='';}}
 function refresh(){if(!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value)void load();}
 onMounted(()=>{void load();timer=setInterval(refresh,30000);window.addEventListener('clipflow-business-changed',refresh);window.addEventListener('beforeunload',beforeUnload);document.addEventListener('visibilitychange',refresh);});

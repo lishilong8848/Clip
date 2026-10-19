@@ -30,7 +30,7 @@
           </div>
           <label>标题<NInput v-model:value="form.title" :maxlength="100" :disabled="fieldsLocked" :input-props="{'aria-label':'水印标题'}" /></label>
           <label>施工区域<NInput v-model:value="form.area" :maxlength="80" :disabled="fieldsLocked" :input-props="{'aria-label':'施工区域'}" /></label>
-          <label class="v2-photo-editor-time">拍照时间<NDatePicker v-model:formatted-value="form.time" type="datetime" value-format="yyyy-MM-dd HH:mm" format="yyyy-MM-dd HH:mm" clearable :disabled="fieldsLocked" aria-label="拍照时间" /></label>
+          <label class="v2-photo-editor-time">拍照时间<NDatePicker :formatted-value="form.time || null" type="datetime" value-format="yyyy-MM-dd HH:mm" format="yyyy-MM-dd HH:mm" clearable :disabled="fieldsLocked" aria-label="拍照时间" @update:formatted-value="value=>form.time=value||''" /></label>
           <small class="v2-photo-editor-hint" :class="{'is-edited':timeModified}">{{timeHint}}</small>
           <label>天气<NInput v-model:value="form.weather" :maxlength="100" :disabled="fieldsLocked" placeholder="留空则不显示" :input-props="{'aria-label':'水印天气'}" /></label>
           <label>地点<NInput v-model:value="form.location" :maxlength="200" :disabled="fieldsLocked" placeholder="留空则不显示" :input-props="{'aria-label':'水印地点'}" /></label>

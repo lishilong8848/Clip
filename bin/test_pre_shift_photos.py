@@ -377,7 +377,10 @@ class WatermarkTests(unittest.TestCase):
         self.assertEqual(stamp['time_label'], '拍照时间')
         self.assertEqual(stamp['time'], '2026.10.14 08:56')
         self.assertEqual(stamp['weather'], '多云 25℃')
-        self.assertIn('32.01670', stamp['location'])
+        self.assertEqual(stamp['location'], '', 'unresolved GPS must not become watermark text')
+        self.assertEqual(watermark_details('B',current,capture={**capture,'_location_name':'江苏省南通市崇川区中央路'})['location'],
+                         '江苏省南通市崇川区中央路')
+        self.assertEqual(watermark_details('B',current,capture={'_location_name':'未定位的地址'})['location'], '')
         self.assertEqual(watermark_details('B',current,capture=capture)['time'],'2026.10.14 09:00')
         for bad in ({'source_state':'stale'},{'weather':{**weather['weather'],'observed_at':(current-dt.timedelta(hours=1)).isoformat()}},
                     {'weather':{**weather['weather'],'temperature':None}}, {'weather':{}}):
@@ -759,6 +762,44 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PhotoRouteTests(Base):
+    def test_location_settings_are_admin_only_private_and_persistent(self):
+        from fastapi import FastAPI
+        import httpx
+        from lan_bitable_template_portal import pre_shift_routes
+        from lan_bitable_template_portal.pre_shift_location import PhotoLocation
+        self.save('A',0,[{'id':'x','text':'检查'}]);self.prepare(at(DAY+'T09:00:00'))
+        user={**self.worker,'open_id':self.worker['id'],'modules':['maintenance']}
+        async def read_json(request,**kwargs):
+            return await request.json()
+        controller=SimpleNamespace(_current_session=lambda _: {'user':user},_request_base_url=lambda _:'http://fixture',_read_json_request=read_json)
+        runtime=SimpleNamespace(service=Mock(),auth_manager=SimpleNamespace(public_user=lambda _:user));app=FastAPI()
+        with patch.object(pre_shift_routes,'CheckService',return_value=self.service):
+            pre_shift_routes.install_pre_shift_routes(app,controller,runtime)
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://fixture') as client:
+                    endpoint='/api/pre-shift-checks/location-settings'
+                    for level in ('L4','L3','L2'):
+                        user['level']=level
+                        self.assertEqual((await client.get(endpoint)).status_code,403)
+                        self.assertEqual((await client.put(endpoint,json={})).status_code,403)
+                    user['level']='L1'
+                    settings=(await client.get(endpoint)).json()['data']
+                    key='0'*32;body={'key':key,'revision':settings['revision']}
+                    self.assertFalse(settings['configured'])
+                    self.assertEqual((await client.put(endpoint,json=body,headers={'Origin':'https://other.example'})).status_code,403)
+                    self.assertEqual((await client.put(endpoint,json={**body,'key':'wrong'})).status_code,400)
+                    response=await client.put(endpoint,json=body)
+                    self.assertEqual(response.status_code,200,response.text)
+                    self.assertTrue(response.json()['data']['configured'])
+                    self.assertNotIn(key,response.text)
+                    self.assertEqual((await client.put(endpoint,json=body)).status_code,409)
+                    restarted=PhotoLocation(self.service.db.parent/'location_settings.json')
+                    self.assertEqual(restarted.settings(),response.json()['data'])
+                    self.assertNotIn(key,restarted.path.read_text())
+                    user['modules']=[]
+                    self.assertEqual((await client.get(endpoint)).status_code,403)
+            asyncio.run(exercise())
+
     def test_retained_preview_confirm_cancel_and_permissions_via_real_routes(self):
         from fastapi import FastAPI
         import httpx
@@ -771,13 +812,22 @@ class PhotoRouteTests(Base):
         runtime=SimpleNamespace(service=Mock(),auth_manager=SimpleNamespace(public_user=lambda _:user));app=FastAPI()
         raw=io.BytesIO();Image.new('RGB',(900,700)).save(raw,format='JPEG')
         params={'task_id':DAY+':A:白','item_id':'x','kind':'item','name':'现场.jpg','retain':'1'}
+        def resolve(capture):
+            self.assertNotIn('_location_name',capture,'untrusted browser address is discarded before geocoding')
+            return '江苏省南通市崇川区中央路'
         with patch.object(pre_shift_routes,'CheckService',return_value=self.service),patch(
-            'openclaw_service.assistant.lighthouse_files.recognize_text',return_value=''):
+            'openclaw_service.assistant.lighthouse_files.recognize_text',return_value=''),patch(
+            'lan_bitable_template_portal.pre_shift_location.PhotoLocation.resolve',side_effect=resolve):
             pre_shift_routes.install_pre_shift_routes(app,controller,runtime)
             async def exercise():
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app),base_url='http://fixture') as client:
-                    response=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue())
+                    current=at(DAY+'T09:00:00')
+                    position={'latitude':32.0167,'longitude':120.8667,'accuracy':15,'timestamp':current.timestamp()*1000}
+                    from urllib.parse import quote
+                    response=await client.post('/api/pre-shift-checks/photo-preview',params=params,content=raw.getvalue(),
+                        headers={'X-Photo-Context':quote(json.dumps({'position':position,'_location_name':'伪造地址'}))})
                     self.assertEqual(response.status_code,200,response.text);info=response.json()['data']
+                    self.assertEqual(info['options']['location'],'江苏省南通市崇川区中央路')
                     self.assertEqual(len(list(self.service.staging_dir.glob('*.upload'))),1)
                     body={'preview_id':info['preview_id'],'watermark':info['options'],'remember_style':True}
                     denied=await client.post('/api/pre-shift-checks/files',json=body,headers={'Origin':'https://other.example'})
@@ -807,6 +857,74 @@ class PhotoRouteTests(Base):
                     self.assertEqual(response.json()['data']['actor_name'],'本楼主管')
             asyncio.run(exercise())
 
+
+class PhotoLocationTests(Base):
+    def mapper(self,client=None):
+        from lan_bitable_template_portal.pre_shift_location import PhotoLocation
+        mapper=PhotoLocation(Path(self.temp)/'location_settings.json',client=client)
+        mapper.save({'key':'0'*32,'revision':mapper.settings()['revision']})
+        self.addCleanup(mapper.close)
+        return mapper
+
+    def position(self,**values):
+        return {'position':{'latitude':32.0167,'longitude':120.8667,'accuracy':15,
+                            'timestamp':at(DAY+'T09:00:00').timestamp()*1000,**values}}
+
+    def test_convert_then_geocode_and_bounded_cached_lookup(self):
+        client=Mock();client.request_json.side_effect=[{'status':'1','locations':'120.870000,32.019000'},
+            {'status':'1','regeocode':{'formatted_address':'江苏省南通市崇川区中央路'}}]
+        mapper=self.mapper(client);current=at(DAY+'T09:00:00')
+        address=mapper.resolve(self.position(),current)
+        self.assertEqual(address,'江苏省南通市崇川区中央路')
+        first,second=client.request_json.call_args_list
+        self.assertTrue(first.args[1].endswith('/coordinate/convert'))
+        self.assertEqual(first.kwargs['params']['locations'],'120.866700,32.016700')
+        self.assertEqual(first.kwargs['params']['coordsys'],'gps')
+        self.assertTrue(second.args[1].endswith('/geocode/regeo'))
+        self.assertEqual(second.kwargs['params']['location'],'120.870000,32.019000')
+        self.assertEqual(mapper.resolve(self.position(),current),address)
+        self.assertEqual(client.request_json.call_count,2)
+        for values in ({'accuracy':2000},{'latitude':float('nan')},{'longitude':181},{'timestamp':0}):
+            self.assertEqual(mapper.resolve(self.position(**values),current),'')
+        self.assertEqual(client.request_json.call_count,2)
+        client.request_json.side_effect=TimeoutError('transient failure')
+        with patch('lan_bitable_template_portal.pre_shift_location.time.monotonic',return_value=1_000_000_000):
+            for number in range(260):
+                mapper.resolve(self.position(longitude=121+number/10000),current)
+        self.assertLessEqual(len(mapper.cache),256)
+        mapper.save({'key':'1'*32,'revision':mapper.settings()['revision']})
+        self.assertEqual(len(mapper.cache),0,'key replacement clears previously cached addresses')
+
+    def test_provider_errors_never_become_coordinates_or_block_upload(self):
+        client=Mock();mapper=self.mapper(client);current=at(DAY+'T09:00:00')
+        cases=[TimeoutError('key=private'),[{'status':'0','info':'INVALID_USER_KEY'}],
+            [{'status':'1','locations':'999,999'}],[{'status':'1','locations':'120.8,32;121,32'}],
+            [{'status':'1','locations':'120.8,32'},{'status':'0','regeocode':{'formatted_address':'错误'}}],
+            [{'status':'1','locations':'120.8,32'},{'status':'1','regeocode':{'formatted_address':'GPS 32.01670, 120.86670'}}],
+            [{'status':'1','locations':'120.8,32'},{'status':'1','regeocode':{'formatted_address':[]}}]]
+        for result in cases:
+            with self.subTest(result=str(result)),mapper.lock:
+                mapper.cache.clear();client.request_json.side_effect=result
+                self.assertEqual(mapper.resolve(self.position(),current),'')
+        mapper.path.write_text('{broken')
+        self.assertEqual(mapper.resolve(self.position(),current),'')
+
+    def test_requests_redact_key_and_coordinates_from_normal_http_logging(self):
+        import httpx
+        from upload_event_module.services.http_client import FeishuHttpClient
+        def response(request):
+            data=({'status':'1','locations':'120.870000,32.019000'} if request.url.path.endswith('/convert')
+                  else {'status':'1','regeocode':{'formatted_address':'江苏省南通市崇川区中央路'}})
+            return httpx.Response(200,json=data)
+        mapper=self.mapper(FeishuHttpClient(transport=httpx.MockTransport(response),retries=0))
+        with self.assertLogs('httpx',level='INFO') as logs:
+            self.assertTrue(mapper.resolve(self.position(),at(DAY+'T09:00:00')))
+        for message in logs.output:
+            self.assertNotIn('0'*32,message)
+            self.assertNotIn('120.866700',message)
+            self.assertNotIn('32.019000',message)
+
+class PhotoUploadRouteTests(Base):
     def test_photo_editor_preview_never_commits_and_no_stamp_preserves_original(self):
         from fastapi import FastAPI
         import httpx

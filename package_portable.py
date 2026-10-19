@@ -200,6 +200,8 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/lan_bitable_template_portal/lighthouse_routes.py"),
     Path("bin/lan_bitable_template_portal/lighthouse_icon_weather.py"),
     Path("bin/lan_bitable_template_portal/pre_shift_photo.py"),
+    Path("bin/lan_bitable_template_portal/pre_shift_location.py"),
+    Path("bin/lan_bitable_template_portal/pre_shift_location_distribution.py"),
     Path("bin/lan_bitable_template_portal/lighthouse_bridge.py"),
     Path("bin/openclaw_service/assistant/openclaw/runtime.json"),
     Path("bin/openclaw_service/assistant/openclaw/native-paths.mjs"),
@@ -417,6 +419,8 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.lighthouse_public",
     "lan_bitable_template_portal.lighthouse_distribution",
     "lan_bitable_template_portal.pre_shift_photo",
+    "lan_bitable_template_portal.pre_shift_location",
+    "lan_bitable_template_portal.pre_shift_location_distribution",
     "lan_bitable_template_portal.lighthouse_skills",
     "clipflow_backend.main",
     "clipflow_backend.process_controller",
@@ -1826,7 +1830,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_learning_update_flow",
          "bin.test_workspace_layouts",
          "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
-         "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_roster", "bin.test_learning_weekly_cards",
+         "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_location_distribution", "bin.test_pre_shift_roster", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
@@ -2918,6 +2922,16 @@ def build_patch(
 
 
 
+def _ensure_photo_location_distribution(python_exe, *, publish=True):
+    if not publish:
+        log('已跳过上传：不发布地点解析配置，保留已有下载清单。')
+        return
+    subprocess.run([str(python_exe), '-c',
+        "import sys;sys.path.insert(0,'bin');from lan_bitable_template_portal.pre_shift_location_distribution import publish_location_config;publish_location_config()"],
+        cwd=PROJECT_ROOT, check=True)
+    log('地点解析配置已上传飞书并通过下载校验；补丁仅携带下载清单，不包含地图 Key。')
+
+
 def _ensure_lighthouse_distribution(python_exe):
     subprocess.run([str(python_exe), '-c',
         "import json,sys;sys.path.insert(0,'bin');from openclaw_service.assistant.lighthouse_distribution import validate_spec;from openclaw_service.assistant.lighthouse_knowledge_model import SPEC;validate_spec(json.loads(SPEC.read_text(encoding='utf-8')),component='knowledge_model')"],
@@ -3175,6 +3189,7 @@ def main() -> None:
         log("未找到可用的打包解释器，跳过运行时依赖安装。")
 
     _ensure_lighthouse_distribution(build_python or sys.executable)
+    _ensure_photo_location_distribution(build_python or sys.executable, publish=not args.skip_upload)
 
     current_venv_hash = ""
 

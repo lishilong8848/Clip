@@ -288,7 +288,9 @@ class CheckTests(unittest.TestCase):
             before.submit(self.worker,DAY+':A:白',1,[{'id':'x','status':'normal','note':''}],self.current)
             night=at(DAY+'T17:50:00');before.notify(night-dt.timedelta(minutes=10))
             self.assertEqual(sender.call_count,2)
+            location_config=data/'location_settings.json';location_config.write_bytes(b'{"key_cipher":"isolated fixture"}')
             protected={str(data.relative_to(client)/'checks.sqlite3'):before.db.read_bytes(),
+                       str(location_config.relative_to(client)):location_config.read_bytes(),
                        str(Path(before.get_file(self.worker,photo['id'])['path']).relative_to(client)):b'original evidence',
                        'bin/data/config.json':b'{"fixture":"preserve account settings"}'}
             config=client/'bin/data/config.json';config.write_bytes(protected['bin/data/config.json'])
@@ -297,7 +299,10 @@ class CheckTests(unittest.TestCase):
                 packaging.build_patch(root/'unused',client,name,force_ui_update=True)
             payload=output/(name+'_patch_only')
             expected=['bin/lan_bitable_template_portal/'+part+'.py' for part in
-                      ('pre_shift_checks','pre_shift_schedule','pre_shift_routes','pre_shift_cloud','pre_shift_photo')]
+                      ('pre_shift_checks','pre_shift_schedule','pre_shift_routes','pre_shift_cloud','pre_shift_photo','pre_shift_location','pre_shift_location_distribution')]
+            location_spec='bin/lan_bitable_template_portal/photo-location-distribution.json'
+            if (packaging.PROJECT_ROOT/location_spec).exists():
+                expected.append(location_spec)
             expected+=['bin/clipflow_backend/main.py','bin/lan_bitable_template_portal/frontend/dist/index.html',
                        'bin/lan_bitable_template_portal/frontend/dist/assets/workspace-v2/index.html']
             for relative in expected:

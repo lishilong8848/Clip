@@ -220,6 +220,17 @@ def _font(size, bold=False):
     raise ValueError('系统缺少中文水印字体，请管理员安装微软雅黑或黑体。')
 
 
+def photo_position(capture, current):
+    position = capture.get('position') if isinstance(capture, dict) else None
+    if isinstance(position, dict):
+        values = [position.get(k) for k in ('latitude', 'longitude', 'accuracy', 'timestamp')]
+        if (all(type(v) in (int, float) and math.isfinite(v) for v in values)
+                and -90 <= values[0] <= 90 and -180 <= values[1] <= 180 and 0 <= values[2] <= 1000
+                and -60 <= current.timestamp() - values[3] / 1000 <= 600):
+            return position
+    return None
+
+
 def watermark_details(scope, current, weather=None, exif=None, *, handover=True, capture=None):
     if scope not in ('110', 'A', 'B', 'C', 'D', 'E', 'H'):
         raise ValueError('交接班照片楼栋无效。')
@@ -245,27 +256,26 @@ def watermark_details(scope, current, weather=None, exif=None, *, handover=True,
     location, description = '', ''
     local_weather = True
     weather = weather if isinstance(weather, dict) else {}
-    position = capture.get('position')
-    if isinstance(position, dict):
-        lat, lon, accuracy, located = [position.get(k) for k in ('latitude','longitude','accuracy','timestamp')]
-        if (all(type(v) in (int,float) and math.isfinite(v) for v in (lat,lon,accuracy,located))
-                and -90 <= lat <= 90 and -180 <= lon <= 180 and 0 <= accuracy <= 1000
-                and -60 <= current.timestamp() - located / 1000 <= 600):
-            location = f'GPS {lat:.5f}, {lon:.5f}（±{accuracy:.0f}米）'
-            # The existing live weather feed covers Nantong only, never another location.
-            local_weather = abs(lat - 32.0167) <= .15 and abs(lon - 120.8667) <= .15
-            if local_weather:
-                live = weather.get('weather') if isinstance(weather.get('weather'), dict) else {}
-                try:
-                    observed = dt.datetime.fromisoformat(live.get('observed_at') or '')
-                    temperature, condition = live.get('temperature'), live.get('condition')
-                    if (weather.get('source_state') == 'fresh' and observed.tzinfo is not None
-                            and -60 <= current.timestamp() - observed.timestamp() <= 1800
-                            and isinstance(condition,str) and 0 < len(condition.strip()) <= 40
-                            and type(temperature) in (int,float) and math.isfinite(temperature) and -70 <= temperature <= 65):
-                        description = f'{condition.strip()} {temperature:g}℃'
-                except (TypeError,ValueError):
-                    pass
+    position = photo_position(capture, current)
+    if position:
+        lat, lon = position['latitude'], position['longitude']
+        location = capture.get('_location_name', '')
+        if not isinstance(location, str) or len(location) > 200:
+            location = ''
+        # The existing live weather feed covers Nantong only, never another location.
+        local_weather = abs(lat - 32.0167) <= .15 and abs(lon - 120.8667) <= .15
+        if local_weather:
+            live = weather.get('weather') if isinstance(weather.get('weather'), dict) else {}
+            try:
+                observed = dt.datetime.fromisoformat(live.get('observed_at') or '')
+                temperature, condition = live.get('temperature'), live.get('condition')
+                if (weather.get('source_state') == 'fresh' and observed.tzinfo is not None
+                        and -60 <= current.timestamp() - observed.timestamp() <= 1800
+                        and isinstance(condition,str) and 0 < len(condition.strip()) <= 40
+                        and type(temperature) in (int,float) and math.isfinite(temperature) and -70 <= temperature <= 65):
+                    description = f'{condition.strip()} {temperature:g}℃'
+            except (TypeError,ValueError):
+                pass
     forecast = weather.get('forecast') if isinstance(weather.get('forecast'), dict) else {}
     fetched = forecast.get('fetched_at')
     if (not description and local_weather and forecast.get('available') is True

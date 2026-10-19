@@ -1,7 +1,9 @@
 """Authenticated pre-shift routes and an independent lightweight worker."""
 import asyncio
 import json
+import logging
 import threading
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
 
@@ -11,10 +13,13 @@ from fastapi.responses import JSONResponse, FileResponse
 from .pre_shift_checks import CheckError, CheckService, scopes_for
 
 _IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
+_LOCATION_RETRY_SECONDS = 300
 
 
 def install_pre_shift_routes(app, controller, runtime):
     service = None
+    location_service = None
+    location_bootstrap = None
     lock = threading.Lock()
     from .pre_shift_cloud import CheckSender
     sender = CheckSender(runtime)
@@ -29,11 +34,40 @@ def install_pre_shift_routes(app, controller, runtime):
                     portal_url=lambda: runtime.service._critical_guard_public_base_url())
             return service
 
+    def get_location():
+        nonlocal location_service
+        svc = get_service()
+        with lock:
+            if location_service is None:
+                from .pre_shift_location import PhotoLocation
+                location_service = PhotoLocation(svc.db.parent / 'location_settings.json')
+            return location_service
+
+    async def bootstrap_location():
+        while True:
+            try:
+                from .pre_shift_location_distribution import provision_location
+                mapper = await asyncio.to_thread(get_location)
+                if mapper.closed or await asyncio.to_thread(provision_location, mapper):
+                    return
+            except Exception:
+                logging.warning('地点解析自动配置暂未完成，保留本机原配置，5分钟后自动重试。')
+            await asyncio.sleep(_LOCATION_RETRY_SECONDS)
+
     async def startup():
+        nonlocal location_bootstrap
         sender.loop = asyncio.get_running_loop()
         await asyncio.to_thread(lambda: get_service().start())
+        if location_bootstrap is None or location_bootstrap.done():
+            location_bootstrap = asyncio.create_task(bootstrap_location())
 
     async def shutdown():
+        if location_service:
+            await asyncio.to_thread(location_service.close)
+        if location_bootstrap:
+            location_bootstrap.cancel()
+            with suppress(asyncio.CancelledError):
+                await location_bootstrap
         if service:
             await asyncio.to_thread(service.stop)
 
@@ -81,6 +115,15 @@ def install_pre_shift_routes(app, controller, runtime):
             scope = request.query_params.get('scope') or actor.get('home_scope') or scopes_for(actor)[0]
             if operation == 'state':
                 data = await asyncio.to_thread(svc.state, actor, scope)
+                data['can_configure_location'] = actor.get('level') in ('L0', 'L1')
+            elif operation == 'location-settings':
+                if actor.get('level') not in ('L0', 'L1'):
+                    raise CheckError('仅 L0/L1 管理员可配置全局地点解析。', 403)
+                mapper = await asyncio.to_thread(get_location)
+                if request.method == 'GET':
+                    data = await asyncio.to_thread(mapper.settings)
+                else:
+                    data = await asyncio.to_thread(mapper.save, body)
             elif operation == 'history':
                 data = await asyncio.to_thread(svc.history, actor, scope,
                     request.query_params.get('page', '1'), request.query_params.get('page_size', '20'))
@@ -103,6 +146,10 @@ def install_pre_shift_routes(app, controller, runtime):
     @app.put('/api/pre-shift-checks/definition')
     async def definition(request: Request):
         return await handle(request, 'definition')
+
+    @app.api_route('/api/pre-shift-checks/location-settings', methods=['GET', 'PUT'])
+    async def location_settings(request: Request):
+        return await handle(request, 'location-settings')
 
     @app.get('/api/pre-shift-checks/history')
     async def history(request: Request):
@@ -164,6 +211,7 @@ def install_pre_shift_routes(app, controller, runtime):
             if capture != '1':
                 photo_capture.pop('captured_at', None)
             photo_capture.pop('_time_audit', None)
+            photo_capture.pop('_location_name', None)
             session = await asyncio.to_thread(svc.stage_upload, actor, task_id, item_id, kind, name, captured=capture == '1')
             session['photo_capture'] = photo_capture
             stage = Path(session['path'])
@@ -180,6 +228,8 @@ def install_pre_shift_routes(app, controller, runtime):
                 finally:
                     await asyncio.to_thread(fp.close)
                 if kind == 'handover' or capture == '1' or request.url.path.endswith('/photo-preview') or 'watermark' in photo_capture:
+                    mapper = await asyncio.to_thread(get_location)
+                    photo_capture['_location_name'] = await asyncio.to_thread(mapper.resolve, photo_capture)
                     try:
                         state = await asyncio.to_thread(runtime.service._state_store.get_critical_guard_weather_state)
                         if isinstance(state, dict) and isinstance(state.get('snapshot'), dict):
