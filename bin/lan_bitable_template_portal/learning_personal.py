@@ -16,6 +16,7 @@ from .learning import BANKS, QUOTAS, SCOPES, LearningError, digest, stamp
 
 _PARTICIPATION_CACHE_GUARD = threading.Lock()
 _PARTICIPATION_CACHES = {}
+_PARTICIPATION_CACHE_VERSION = '3'
 
 
 def _participation_readonly(path):
@@ -54,11 +55,11 @@ def _participation_entity(kind, key, value):
                 'bank': q['bank'], 'type': q['type'], 'stem': '', 'invalid': bool(q.get('invalid'))}
                 for q in value.get('questions', [])]}
     def attempt(item):
-        submitted = item['submitted_at']
-        dt.datetime.fromisoformat(submitted)
+        submitted = dt.datetime.fromisoformat(item['submitted_at'])
+        submitted = submitted.replace(tzinfo=core.TZ) if submitted.tzinfo is None else submitted.astimezone(core.TZ)
         if item.get('correct') not in (None, True, False):
             raise ValueError('invalid grade')
-        return {'submitted_at': submitted, 'correct': item.get('correct'),
+        return {'submitted_at': submitted.isoformat(), 'correct': item.get('correct'),
                 **({'operation_id': item['operation_id']} if item.get('operation_id') else {})}
     return {'id': key, 'entries': {qid: {'attempt': attempt(entry['attempt']) if entry.get('attempt') else None,
         'needs_review': bool(entry.get('needs_review')), 'practice': [attempt(item) for item in entry.get('practice', [])]}
@@ -90,7 +91,8 @@ def _participation_cache(service, schema, *, missing_names, need_data, end):
             with closing(_participation_readonly(path)) as cached:
                 try:
                     fetched = cached.execute("SELECT value FROM metadata WHERE key='fetched_at'").fetchone()
-                    if fetched:
+                    version = cached.execute("SELECT value FROM metadata WHERE key='projection_version'").fetchone()
+                    if fetched and version and version[0] == _PARTICIPATION_CACHE_VERSION:
                         age = (core.now() - dt.datetime.fromisoformat(fetched[0])).total_seconds()
                         if (0 <= age < 300 and fetched[0][:10] >= min(end, core.now().date().isoformat())
                                 or not need_data and all(_participation_name(service, cached, pid) for pid in missing_names)):
@@ -135,6 +137,7 @@ def _participation_cache(service, schema, *, missing_names, need_data, end):
                         if kind == 'paper':
                             service._index_paper(value, cached)
                     cached.execute("INSERT OR REPLACE INTO metadata VALUES('fetched_at',?)", (core.now().isoformat(),))
+                    cached.execute("INSERT OR REPLACE INTO metadata VALUES('projection_version',?)", (_PARTICIPATION_CACHE_VERSION,))
             state['retry_at'] = 0
             return path
         except Exception:
@@ -150,9 +153,12 @@ def _participation_projection(service, source, cached, start, end, access):
         for sql in _participation_schema(source):
             conn.execute(sql)
         papers = set()
-        for db in (source, cached):
+        # Adjacent index days may move into this range after timezone normalization.
+        bounds = ((dt.date.fromisoformat(start) - dt.timedelta(days=1)).isoformat(),
+                  (dt.date.fromisoformat(end) + dt.timedelta(days=1)).isoformat())
+        for db in ((source, cached) if cached is not None else (source,)):
             for table in ('learning_results', 'learning_practice'):
-                papers.update(row[0] for row in db.execute('SELECT DISTINCT paper_id FROM ' + table + ' WHERE day BETWEEN ? AND ?', (start, end)))
+                papers.update(row[0] for row in db.execute('SELECT DISTINCT paper_id FROM ' + table + ' WHERE day BETWEEN ? AND ?', bounds))
         # An existing local answer index remains authoritative even if its paper document is absent.
         local_ids = set()
         for table in ('learning_results', 'learning_practice'):
@@ -163,11 +169,13 @@ def _participation_projection(service, source, cached, start, end, access):
             paper = service._get('paper', identity, source)
             if paper is None and identity in local_ids:
                 continue
-            paper = paper if paper is not None else service._get('paper', identity, cached)
+            paper = paper if paper is not None or cached is None else service._get('paper', identity, cached)
             if not paper or access['scope'] and paper.get('scope') != access['scope'] or access['person_id'] and paper.get('person_id') != access['person_id']:
                 continue
             record = service._get('record', identity, source)
-            record = record if record is not None else service._get('record', identity, cached)
+            record = record if record is not None or cached is None else service._get('record', identity, cached)
+            if record is None and identity in local_ids and not paper.get('deleted_at'):
+                continue
             if record is not None:
                 _participation_put(conn, 'record', identity, _participation_entity('record', identity, record))
             service._index_paper(_participation_entity('paper', identity, paper), conn)
@@ -204,8 +212,9 @@ def participation(service, actor, query):
     def read(conn):
         refresh = service._get('local', 'refresh', conn) or {}
         ready = service._restored or bool(refresh.get('at'))
-        stats = weekly_stats(service, start.isoformat(), end.isoformat(), conn,
-                             access['scope'], person_id=access['person_id'])
+        with closing(_participation_projection(service, conn, None, start.isoformat(), end.isoformat(), access)) as projection:
+            stats = weekly_stats(service, start.isoformat(), end.isoformat(), projection,
+                                 access['scope'], person_id=access['person_id'])
         names = {pid: _participation_name(service, conn, pid) for pid in stats}
         return ready, refresh, stats, names
     with closing(_participation_readonly(service.db)) as conn:

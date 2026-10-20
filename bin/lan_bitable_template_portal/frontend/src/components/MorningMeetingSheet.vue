@@ -65,10 +65,12 @@ function temperatureText(value: unknown): string {
 .morning-logo {
   position: absolute;
   z-index: 2;
-  top: 4mm;
+  top: 2mm;
   left: 5mm;
   width: 66mm;
-  height: auto;
+  height: 7mm;
+  object-fit: contain;
+  object-position: left center;
   pointer-events: none;
 }
 table { width: 100%; height: 100%; border-collapse: collapse; table-layout: fixed; }

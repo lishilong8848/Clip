@@ -33,6 +33,7 @@ export const auditPages=[
 export function auditUrl(origin,version,logical){
   const url=new URL(logical,origin);
   if(version==='v2'){const pathname=url.pathname;url.pathname='/assets/workspace-v2/index.html';url.searchParams.set('__page',pathname);}
+  else url.searchParams.set('frontend','legacy');
   return url.href;
 }
 

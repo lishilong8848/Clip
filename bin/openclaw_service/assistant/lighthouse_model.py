@@ -412,9 +412,38 @@ def public_catalog(found):
     return public
 
 
+_PROGRESS_REPLY_STARTS = tuple(start + action for start in ('我先', '让我先', '我来', '正在', '现在先')
+    for action in ('查询', '查看', '检索', '核对', '读取', '搜索', '整理', '分析', '统计')) + ('我直接拉',)
+
+
+def incomplete_reply(value, question='', *, partial=False):
+    text = value.strip()
+    symbolic = bool(text) and not any(char.isalnum() for char in text)
+    for clause in [question, *re.split(r'[，,。！？!?；;\n]+', question)]:
+        clause = clause.strip().removeprefix('请')
+        literal = re.fullmatch(r'(?:只(?:需|要)?|仅(?:需|要)?|原样)(?:回复|回答|输出|回)\s*[:：]?\s*(.+)', clause)
+        if text and literal and literal[1].strip(' \t“”\"\'「」『』`') == text:
+            return False
+        if symbolic and (re.fullmatch(r'(?:只|仅)?用(?:一个|1个|个)?(?:表情(?:符号)?|emoji)(?:回复|回答|回应)(?:我)?', clause, re.I)
+                or re.fullmatch(r'(?:只|仅)?(?:回复|回答|回|发|给|需要|要)(?:我)?(?:一个|1个|个)?(?:表情(?:符号)?|emoji)(?:就好|就行|即可)?', clause, re.I)):
+            return False
+    if re.fullmatch(r'我直接拉[^。！？\n]*(?:。\s*(?:并行发起|并行发|并行|并)?\s*[:：]?)?', text):
+        if partial or re.search(r'并行发起\s*[:：]$', text):
+            return True
+    parts = [part.strip(' \t#>*_`-… .') for part in re.split(r'[。！？\n]+', value)]
+    parts = [part for part in parts if part]
+    return not parts or all(
+        not any(char.isalnum() for char in part)
+        or part.upper() in {'NO_REPLY', 'HEARTBEAT_OK'}
+        or re.fullmatch(r'(?:我先|让我先|我来|正在|现在先)(?:查询|查看|检索|核对|读取|搜索|整理|分析|统计)[^，,:：;；]*', part)
+        or partial and any(start.casefold().startswith(part.casefold()) for start in (*_PROGRESS_REPLY_STARTS, 'NO_REPLY', 'HEARTBEAT_OK'))
+        for part in parts)
+
+
 class PublicText:
     """Release complete sentences, so private identifiers cannot cross SSE chunks."""
-    def __init__(self):
+    def __init__(self, question=''):
+        self.question = question
         self.pending = ""
         self.text = ""
 
@@ -423,6 +452,8 @@ class PublicText:
         # Thinking parts are ignored separately; do not forward tagged reasoning.
         self.pending = re.sub(r"<think>.*?</think>", "", self.pending, flags=re.S | re.I)
         if "<think>" in self.pending.lower():
+            return ""
+        if incomplete_reply(self.pending, self.question, partial=not final):
             return ""
         ends = list(re.finditer(r"[\n。！？]", self.pending))
         end = len(self.pending) if final else ends[-1].end() if ends else 0
@@ -1822,6 +1853,8 @@ class LighthouseModel:
                                if allowed_public_pages else '请调用 weather 或 public_search 查询原问题。')
                             + '这是公开资料问题，不要调用灯塔业务接口。读取失败时明确说明未知。')
                     raise ModelRetry("未查询真实" + material_label + "，不能回答数量或状态。请先调用相应只读工具，失败须说明未知。")
+                if incomplete_reply(result, question):
+                    raise ModelRetry('请直接完整回答原问题，不要仅回复表情、静默标记或将要处理的过程文字。需要事实时依据本轮已取得的工具证据；未知内容明确说明，不能编造。')
                 if knowledge_question and sources and re.search(r'是什么|解释|介绍|定义|原理|作用|\bwhat\s+is\b|\bexplain\b', question, re.I):
                     lines = [re.sub(r'\*\*|__', '', line).lstrip(' \t#>-').strip()
                              for line in result.splitlines() if line.strip()]
@@ -1895,7 +1928,7 @@ class LighthouseModel:
                         return {'answer': answer, 'sources': []}
             for part in image_parts:
                 prompt.append(BinaryContent(data=base64.b64decode(part["image_url"]["url"].split(",", 1)[1]), media_type="image/jpeg"))
-            text, final_answer = PublicText(), ""
+            text, final_answer = PublicText(question), ""
             # A text part before a tool call is not a final answer, even when the
             # provider marks it final_result early. Business runs stream progress
             # first and release only the validated final answer, not tool-loop prose.
@@ -1914,6 +1947,7 @@ class LighthouseModel:
                             final_answer = "请核对下方填写项，确认后执行。" if plan["status"] == "needs_input" else "操作清单已准备，请核对后确认。"
                             break
                         if event.event_kind == "part_start" and getattr(event.part, "part_kind", "") == "text":
+                            text = PublicText(question)
                             delta = event.part.content
                         elif event.event_kind == "part_delta" and getattr(event.delta, "part_delta_kind", "") == "text":
                             delta = event.delta.content_delta

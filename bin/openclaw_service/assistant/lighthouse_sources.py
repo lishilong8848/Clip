@@ -69,7 +69,9 @@ def learning_participation_request(question, previous=None, *, now=None):
     if re.fullmatch(r'\d{4}-\d{2}-\d{2}', last):
         query = {'from': dates[-2] if len(dates) > 1 and re.fullmatch(r'\d{4}-\d{2}-\d{2}', dates[-2]) else last, 'to': last}
     elif last in {'今天', '今日', '昨天', '昨日', '前天'}:
-        today = (now or dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))).date()
+        timezone = dt.timezone(dt.timedelta(hours=8))
+        current = now or dt.datetime.now(timezone)
+        today = (current.replace(tzinfo=timezone) if current.tzinfo is None else current.astimezone(timezone)).date()
         day = today - dt.timedelta(days={'昨天': 1, '昨日': 1, '前天': 2}.get(last, 0))
         query = {'from': day.isoformat(), 'to': day.isoformat()}
     elif re.fullmatch(r'上(?:一|个)?(?:周|星期)', last):
@@ -85,6 +87,8 @@ def learning_participation_request(question, previous=None, *, now=None):
 
 async def collect_learning_participation(actor, query, invoke):
     """Read every authorized building; never derive totals from history samples."""
+    from .lighthouse_queries import query_result_state
+
     if 'learning' not in actor.get('modules', []):
         raise AssistantError('当前账号尚未获授画像学练权限。', 403)
     allowed = set(actor.get('scopes') or []) & set(actor.get('learning_scopes') or []) & set('ABCDEH')
@@ -109,10 +113,16 @@ async def collect_learning_participation(actor, query, invoke):
         result = await invoke({'api_id': 'GET /api/learning/profile',
                                'params': {**query, 'scope': scope, 'view': 'participation'}})
         data = result.get('_raw', result.get('data'))
-        if not result.get('ok') or not isinstance(data, dict) or data.get('kind') != 'learning_participation' or data.get('complete') is not True or data.get('truncated') is not False:
+        if (not result.get('ok') or not isinstance(data, dict) or data.get('kind') != 'learning_participation'
+                or data.get('complete') is not True or data.get('truncated') is not False
+                or query_result_state(result)[0] == 'partial'):
             raise AssistantError(scope + '楼学练参与资料未完整返回，暂不能确认完整名单和人数。', 503)
         rows = data.get('participants')
-        if not isinstance(rows, list) or len(rows) != (data.get('summary') or {}).get('participants'):
+        summary = data.get('summary')
+        if (not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows)
+                or not isinstance(summary, dict) or type(summary.get('participants')) is not int
+                or len(rows) != summary['participants']
+                or 'total' in data and (type(data['total']) is not int or data['total'] != len(rows))):
             raise AssistantError(scope + '楼学练参与名单与人数不一致，未生成统计。', 502)
         if len({row.get('person_id') for row in rows}) != len(rows):
             raise AssistantError(scope + '楼学练参与人员重复，未生成统计。', 502)
@@ -120,6 +130,10 @@ async def collect_learning_participation(actor, query, invoke):
             values = [row.get(key) for row in rows]
             if any(type(value) is not int or value < 0 for value in values) or sum(values) != data['summary'].get(key):
                 raise AssistantError(scope + '楼学练题数与明细不一致，未生成统计。', 502)
+        if any(row['answer_attempts'] != row['answered'] + row['practice'] or row['answer_attempts'] == 0
+               or row['correct'] + row['wrong'] != row['choices']
+               or row['choices'] + row['interviews'] > row['answered'] for row in rows):
+            raise AssistantError(scope + '楼学练作答口径与参与明细不一致，未生成统计。', 502)
         if not data.get('self_only') and any(set(row.get('scopes') or []) - {scope} for row in rows):
             raise AssistantError('学练统计返回了查询楼栋之外的数据，未提供。', 403)
         if reports and (data.get('from'), data.get('to')) != (reports[0]['from'], reports[0]['to']):

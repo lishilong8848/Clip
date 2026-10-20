@@ -1945,6 +1945,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .followup-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   padding: 14px 16px 16px;
   border: 1px solid #cfe5e2;
@@ -2029,6 +2030,7 @@ onBeforeUnmount(() => {
 }
 
 .followup-title strong {
+  display: block;
   overflow: hidden;
   color: #102848;
   text-overflow: ellipsis;

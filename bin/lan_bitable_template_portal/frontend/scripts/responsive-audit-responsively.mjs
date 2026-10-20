@@ -10,7 +10,7 @@ export async function connectResponsively(targetId){
   const ws=new WebSocket(app.webSocketDebuggerUrl),pending=new Map();let seq=0;
   await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
   ws.addEventListener('message',e=>{const result=JSON.parse(e.data),p=pending.get(result.id);if(!p)return;pending.delete(result.id);clearTimeout(p.timer);result.error?p.reject(new Error(result.error.message)):p.resolve(result.result);});
-  const command=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(new Error('Responsively command timed out: '+method));},120000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
+  const command=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(new Error('Responsively command timed out: '+method+' '+String(params.expression||'').slice(0,100)));},30000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
   const evaluate=async expression=>{const result=await command('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(result.exceptionDetails.exception?.description||result.exceptionDetails.text);return result.result.value;};
   return {evaluate,command,close:()=>ws.close()};
 }
@@ -33,11 +33,8 @@ export async function captureResponsively(url,output,{navigate=true}={}){
     await client.evaluate(`{window.__lighthouseAuditSizes?.forEach(o=>o.disconnect());window.__lighthouseAuditSizes=[];const sizes={'iPhone 17 Pro':[402,874],'iPhone 17 Pro Max':[440,956],'MacBook Pro':[1440,900]};for(const view of document.querySelectorAll('webview')){const size=sizes[view.id];if(size){view.style.width=size[0]+'px';view.style.height=size[1]+'px';}}true;}`);
     const views=await client.evaluate(`Array.from(document.querySelectorAll('webview'),v=>({id:v.id,width:parseInt(v.style.width),height:parseInt(v.style.height)})).filter(v=>!/ipad|tablet/i.test(v.id))`);
     if(navigate){
-      const targets=await(await fetch('http://127.0.0.1:'+(process.env.RESPONSIVELY_PORT||9224)+'/json/list')).json();
-      for(const target of targets.filter(target=>target.type==='webview')){
-        const preview=await connectResponsively(target.id);
-        try{await preview.command('Page.navigate',{url});}finally{preview.close();}
-      }
+      // Let Electron own navigation; direct CDP navigation can detach its webview target.
+      await client.evaluate(`document.querySelector('webview').loadURL(${JSON.stringify(url)}).catch(error=>{if(!error.message.includes('ERR_ABORTED'))throw error;})`);
       await new Promise(resolve=>setTimeout(resolve,1500));
     }
     const records=[];
@@ -83,7 +80,7 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     else if(mode==='setup'){
       console.log(await client.evaluate(`JSON.stringify(Array.from(document.querySelectorAll('webview'),v=>{const sizes={'iPhone 17 Pro':[402,874],'iPhone 17 Pro Max':[440,956],'iPad':[768,1024],'MacBook Pro':[1440,900]};const size=sizes[v.id];if(size){v.style.width=size[0]+'px';v.style.height=size[1]+'px';}return {id:v.id,width:v.style.width,height:v.style.height};}))`));
     }else if(mode==='eval')console.log(await client.evaluate(args.join(' ')));
-    else if(mode==='capture'){client.close();console.log(await captureResponsively(args[0],args[1],{navigate:args[2]!=='current'}));}
+    else if(mode==='capture'){client.close();console.log((await captureResponsively(args[0],args[1],{navigate:args[2]!=='current'})).map(({text,...record})=>record));}
     else throw new Error('Usage: inspect | setup | eval <expression> | capture <url> <folder> [current]');
   }finally{client.close();}
 }

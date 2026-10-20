@@ -2242,6 +2242,7 @@ textarea { resize: vertical; min-height: 82px; padding-block: 10px; line-height:
 .empty-panel { min-width: 0; display: grid; gap: 15px; border: 1px solid #d8e5f7; border-radius: 22px; padding: 18px; background: rgba(255,255,255,.9); box-shadow: 0 14px 34px rgba(0,47,135,.08); }
 .configuration-panel__header,
 .execution-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.execution-header > .status-chip { flex-shrink: 0; white-space: nowrap; }
 .configuration-panel__header small { display: block; margin-top: 6px; color: #64748b; }
 fieldset, details { min-width: 0; border: 1px solid #dbe7f5; border-radius: 17px; padding: 14px; background: #fbfdff; }
 fieldset { margin: 0; }

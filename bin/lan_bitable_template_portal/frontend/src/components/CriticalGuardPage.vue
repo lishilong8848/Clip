@@ -2529,7 +2529,7 @@ input[readonly] { background: #f3f7fc; color: #536987; }
 .template-editor-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1120;
+  z-index: var(--cf-z-modal, 840);
   display: grid;
   place-items: center;
   padding: 24px;

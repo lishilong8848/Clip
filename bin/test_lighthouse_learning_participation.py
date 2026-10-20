@@ -318,6 +318,82 @@ class ParticipationTests(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertIsNone(learning_participation_request(question))
 
+    def test_participation_rejects_partial_transport_and_pagination_metadata(self):
+        self.prepare()
+        self.person('p1')
+        self.paper('p1-paper', 'p1')
+        report = self.report(scope='A')
+        actor = {'modules': ['learning'], 'scopes': ['A'], 'learning_scopes': ['A']}
+        results = [
+            {'ok': True, 'data': report, 'truncated': True},
+            {'ok': True, '_raw': report, 'scope_warning': 'incomplete'},
+            {'ok': True, '_raw': {**report, 'has_more': True}},
+            {'ok': True, '_raw': {**report, 'total': 55}},
+            {'ok': True, '_raw': {**report, 'total': 0}},
+            {'ok': True, '_raw': {**self.report(scope='B'), 'scope': 'A', 'total': 55}},
+        ]
+        for result in results:
+            with self.subTest(result=result), self.assertRaises(AssistantError):
+                asyncio.run(collect_learning_participation(actor, {'scope': 'A'}, AsyncMock(return_value=result)))
+        # Display truncation is harmless when the full raw report is retained.
+        result = asyncio.run(collect_learning_participation(actor, {'scope': 'A'},
+            AsyncMock(return_value={'ok': True, '_raw': report, 'truncated': True})))
+        self.assertEqual(result['summary']['participants'], 1)
+
+    def test_pending_and_inconsistent_attempt_counts_cannot_be_participation(self):
+        self.prepare()
+        self.person('p1')
+        self.paper('p1-paper', 'p1')
+        actor = {'modules': ['learning'], 'scopes': ['A'], 'learning_scopes': ['A']}
+        for changes in (
+            {'answered': 0, 'practice': 0, 'answer_attempts': 0, 'choices': 0, 'correct': 0},
+            {'answer_attempts': 99}, {'choices': 2}, {'correct': 0, 'wrong': 0},
+        ):
+            report = self.report(scope='A')
+            report['participants'][0].update(changes)
+            report['summary'].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(AssistantError):
+                asyncio.run(collect_learning_participation(actor, {'scope': 'A'},
+                    AsyncMock(return_value={'ok': True, '_raw': report})))
+
+    def test_relative_day_uses_beijing_calendar_for_offset_clock(self):
+        clock = dt.datetime(2026, 10, 18, 17, tzinfo=dt.timezone.utc)
+        self.assertEqual(learning_participation_request('今天哪些人答题', now=clock),
+                         {'from': '2026-10-19', 'to': '2026-10-19', 'scope': 'ALL'})
+
+    def test_local_offset_history_is_normalized_without_changing_business_index(self):
+        self.prepare()
+        for pid, submitted in (('last-week', '2026-10-11T16:30:00Z'),
+                               ('next-week', '2026-10-18T16:30:00+00:00')):
+            self.person(pid)
+            self.paper(pid, pid, practice=('2026-10-15',))
+            with self.service.transaction() as conn:
+                record = self.service._get('record', pid, conn)
+                entry = next(iter(record['entries'].values()))
+                entry['attempt']['submitted_at'] = submitted
+                entry['practice'][0]['submitted_at'] = submitted
+                self.service._put('record', pid, record, conn, False)
+        with closing(learning_personal._participation_readonly(self.service.db)) as conn:
+            before = list(conn.iterdump())
+        report = self.report()
+        self.assertEqual([row['person_id'] for row in report['participants']], ['last-week'])
+        self.assertEqual(report['summary']['answered'], 1)
+        self.assertEqual(report['summary']['practice'], 1)
+        with closing(learning_personal._participation_readonly(self.service.db)) as conn:
+            self.assertEqual(list(conn.iterdump()), before)
+        self.assertEqual(self.cloud.calls, [])
+
+    def test_missing_record_document_does_not_erase_authoritative_local_index(self):
+        self.prepare()
+        self.person('p1')
+        self.paper('p1-paper', 'p1')
+        with self.service.transaction() as conn:
+            conn.execute("DELETE FROM documents WHERE kind='record'")
+        report = self.report()
+        self.assertEqual(report['summary']['answered'], 1)
+        self.assertEqual(report['summary']['participants'], 1)
+        self.assertEqual(self.cloud.calls, [])
+
     def test_legacy_chat_first_question_is_complete_without_calling_model(self):
         self.prepare()
         self.person('p1', '测试人员')
@@ -676,6 +752,92 @@ class ParticipationReadCacheTests(unittest.TestCase):
         self.assertEqual(len(self.cloud.calls), 1)
         with self.assertRaises(learning.LearningError):
             self.report(actor, person_id='other')
+
+    def test_readonly_projection_normalizes_answer_and_practice_dates_to_beijing(self):
+        self.prepare()
+        self.person('p1')
+        self.paper('p1-paper', 'p1', practice=('2026-10-15', '2026-10-18'))
+        self.person('next-week')
+        self.paper('next-week-paper', 'next-week')
+        self.cloud_snapshot()
+        first = next(iter(self.cloud.entities['record', 'p1-paper']['entries'].values()))
+        first['attempt']['submitted_at'] = '2026-10-11T16:30:00Z'
+        first['practice'][0]['submitted_at'] = '2026-10-11T16:45:00+00:00'
+        first['practice'][1]['submitted_at'] = '2026-10-18T16:30:00Z'
+        last = next(iter(self.cloud.entities['record', 'next-week-paper']['entries'].values()))
+        last['attempt']['submitted_at'] = '2026-10-18T16:30:00Z'
+        before = self.native_dump()
+        report = self.report()
+        self.assertEqual([row['person_id'] for row in report['participants']], ['p1'])
+        self.assertEqual(report['summary']['answered'], 1)
+        self.assertEqual(report['summary']['practice'], 1)
+        self.assertEqual(self.native_dump(), before)
+
+    def test_old_projection_cache_is_refetched_before_reuse(self):
+        self.prepare()
+        self.person('p1')
+        self.paper('p1-paper', 'p1')
+        self.cloud_snapshot()
+        self.report()
+        path = self.root / 'assistant-participation.sqlite3'
+        for version in ('2', None):
+            with closing(sqlite3.connect(path)) as conn, conn:
+                if version is None:
+                    conn.execute("DELETE FROM metadata WHERE key='projection_version'")
+                else:
+                    conn.execute("UPDATE metadata SET value=? WHERE key='projection_version'", (version,))
+            self.assertEqual(self.report()['summary']['participants'], 1)
+        self.assertEqual(len(self.cloud.calls), 3)
+
+    def test_native_paginated_reader_and_shared_cache_keep_all_55_people(self):
+        from lan_bitable_template_portal.learning_cloud import LearningCloud
+
+        self.prepare()
+        for n in range(55):
+            pid = 'p' + str(n)
+            self.person(pid)
+            self.paper(pid, pid, scope='A' if n < 48 else 'B')
+        for n in range(20):
+            self.paper('pending' + str(n), 'pending', pending=True)
+        self.cloud_snapshot()
+        entities = [{'record_id': 'rec' + str(n), 'fields': {'类别': kind, '业务键': key, '内容': json.dumps(payload)}}
+                    for n, ((kind, key), payload) in enumerate(self.cloud.entities.items())]
+        pages = [{'items': entities[:150], 'has_more': True, 'page_token': 'fixture-next', 'total': len(entities)},
+                 {'items': entities[150:], 'has_more': False, 'total': len(entities)}]
+        native = LearningCloud(enabled=False, http_client=Mock())
+        before = self.native_dump()
+        with patch.object(self.service, '_cloud', native), \
+                patch.object(native, '_find_entity_table', return_value='fixture'), \
+                patch.object(native, '_headers', side_effect=AssertionError('must not access credentials')), \
+                patch.object(native, '_request', side_effect=pages) as read:
+            async def invoke(operation):
+                return {'ok': True, '_raw': self.report(**operation['params'])}
+            report = asyncio.run(collect_learning_participation(
+                {'modules': ['learning'], 'scopes': ['A', 'B'], 'learning_scopes': ['A', 'B']},
+                {'period': 'last_week', 'scope': 'ALL'}, invoke))
+            self.assertEqual(report['summary']['participants'], 55)
+            self.assertEqual(report['summary']['answered'], 55)
+            self.assertEqual(len(report['participants']), 55)
+            self.assertEqual(read.call_count, 2)
+            self.assertEqual(read.call_args_list[1].args[3]['page_token'], 'fixture-next')
+            path = self.root / 'assistant-participation.sqlite3'
+            cached = path.read_bytes()
+            failures = [
+                [pages[0], OSError('fixture second page failed')],
+                [{'items': entities[:1], 'has_more': False, 'total': 55}],
+                [pages[0], {**pages[1], 'total': len(entities) + 1}],
+                [pages[0], {**pages[1], 'items': [{**entities[150], 'record_id': entities[0]['record_id']}, *entities[151:]]}],
+            ]
+            tick = time.monotonic()
+            for n, failure in enumerate(failures):
+                self.now.return_value = MONDAY + dt.timedelta(minutes=10 + n)
+                read.side_effect = failure
+                with self.subTest(failure=n), patch.object(learning_personal.time, 'monotonic', return_value=tick + 61 * n), \
+                        self.assertRaisesRegex(learning.LearningError, '未按零人统计'):
+                    self.report()
+                self.assertEqual(path.read_bytes(), cached)
+        self.assertEqual(before, self.native_dump())
+        self.assertEqual(self.sender.calls, [])
 
 
 class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):

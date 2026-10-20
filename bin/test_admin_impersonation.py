@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
-import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
@@ -72,7 +71,7 @@ class AdminImpersonationTests(_TempDirTestCase, unittest.IsolatedAsyncioTestCase
         self.enterContext(patch('lan_bitable_template_portal.portal_auth.config',
             SimpleNamespace(app_id='cli_fixture_impersonation', app_secret='synthetic-not-real')))
         self.enterContext(patch.object(socket.socket, 'connect', side_effect=AssertionError('No real network')))
-        self.enterContext(patch.object(requests.Session, 'request', side_effect=AssertionError('No Feishu network')))
+        self.enterContext(patch('requests.Session.request', side_effect=AssertionError('No Feishu network')))
         self.h = PersonnelLoginHarness(self.root)
         self.addCleanup(self.h.close)
         self.auth, self.store = self.h.auth, self.h.auth._state_store

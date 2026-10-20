@@ -1609,9 +1609,21 @@ onBeforeUnmount(() => {
     justify-content: stretch;
   }
 
-  .event-command-actions > *,
-  .event-list-tools > * {
+  .event-command-actions > .month-picker,
+  .event-list-tools > input {
     width: 100%;
+  }
+
+  .event-command-actions > button,
+  .event-list-tools > select,
+  .event-list-tools > :deep(.vnet-select) {
+    flex: 1 1 calc(50% - 8px);
+    min-width: 0;
+    width: auto;
+  }
+
+  .event-command-actions > button {
+    white-space: nowrap;
   }
 
   .detail-grid {

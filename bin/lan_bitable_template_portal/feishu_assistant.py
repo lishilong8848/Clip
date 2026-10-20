@@ -100,8 +100,19 @@ def parse_message(payload, app_id, bot_id, *, inbox=None):
         question = content.get("text") or ""
     elif message.get("message_type") == "post":
         post = content.get("zh_cn") or content
-        question = "\n".join([post.get("title") or ""] + ["".join(str(cell.get("text") or "")
-            for cell in row if cell.get("tag") in {"text", "a", "md"}) for row in post.get("content", [])])
+        lines = [str(post.get('title') or '')]
+        for row in post.get('content', []):
+            fragments = []
+            for cell in row:
+                if cell.get('tag') not in {'text', 'a', 'md'}:
+                    continue
+                text = str(cell.get('text') or '')
+                href = str(cell.get('href') or '') if cell.get('tag') == 'a' else ''
+                if re.fullmatch(r'https?://[^\s]+', href) and href not in text:
+                    text += ' (' + href + ')'
+                fragments.append(text)
+            lines.append(''.join(fragments))
+        question = '\n'.join(lines)
     for mention in mentions:
         question = question.replace(str(mention.get("key") or "\x00"), "")
     question = question.strip()
@@ -588,6 +599,9 @@ class FeishuMessenger:
                          for index, chunk in enumerate(_reply_chunks(text)))
         if card:
             parts.append((prefix + ':0', 'interactive', card))
+        if reply.get('file_notice'):
+            parts.append(('attachment-stopped', 'interactive',
+                          {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': reply['file_notice']}]}}))
         if reply.get('long_text_file_key'):
             parts.append(('long-text', 'file', {'file_key': reply['long_text_file_key']}))
         parts.extend(('file:' + file['id'], 'file', {'file_key': file['file_key']}) for file in reply.get('files', []) if file.get('file_key'))
@@ -641,7 +655,7 @@ class FeishuMessenger:
                     'thread_id': delivered['thread_id']}
                 if delivered.get('message_id'):
                     reply.setdefault('thread_messages', []).append(delivered['message_id'])
-                    if kind == 'interactive':
+                    if kind == 'interactive' and content is card:
                         reply['card_message_id'] = delivered['message_id']
             reply.setdefault('sent_parts', []).append(part)
             if checkpoint: await checkpoint()
@@ -1241,7 +1255,8 @@ class FeishuAssistant:
         referenced = await asyncio.to_thread(self.inbox.referenced_plan, message)
         if referenced.get('plan_id') and not any(p['id'] == referenced['plan_id'] and b['ticket'] == referenced['ticket'] for b, p in candidates):
             return empty, '你回复的卡片已更新或结束，请核对最新卡片后再操作，未提交业务。'
-        exact = [item for item in candidates if reference and item[0].get('card_id') == reference]
+        exact = [item for item in candidates if reference and (item[0].get('card_id') == reference
+                 or item[1]['id'] == referenced.get('plan_id') and item[0]['ticket'] == referenced.get('ticket'))]
         picked = self.picked_plan.get(_plan_key(message, actor))
         chosen = exact or [item for item in candidates if item[1]['id'] == picked]
         if not chosen and len(candidates) == 1:
@@ -1283,12 +1298,13 @@ class FeishuAssistant:
         return request, actor
 
     async def _prepare_reply_files(self, message, reply):
-        if not reply.get('files'):
+        pending = [file for file in reply.get('files', []) if 'file:' + file['id'] not in reply.get('sent_parts', [])]
+        if not pending:
             return
         request, actor = await self._reply_file_context(message, reply)
         from .feishu_assistant_files import _assistant_download
         uploaded = False
-        for file in reply['files']:
+        for file in pending:
             metadata = await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
             if not file.get('file_key'):
                 content = await _assistant_download(self, request, actor, file['id'])
@@ -1298,7 +1314,7 @@ class FeishuAssistant:
         if uploaded:
             # A slow cloud upload can outlive the original conversation or authorization.
             request, actor = await self._reply_file_context(message, reply)
-            for file in reply['files']:
+            for file in pending:
                 await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
 
     async def _feishu_plan_command(self, message, request, actor, plans, conversation=None):
@@ -1874,18 +1890,19 @@ class FeishuAssistant:
                     reply = await self._recover_answer(message, reply)
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
                 await self._validate_delivery(message, reply)
-                if not reply.get('awaiting_turn'):
-                    await self._sync_reply_history(message, reply)
                 await self._prepare_reply_files(message, reply)
                 if reply.get('files'):
                     await self._validate_delivery(message, reply)
                 async def checkpoint():
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
                 await self.messenger.send(message, reply, checkpoint=checkpoint, authorize=lambda: self._validate_delivery(message, reply))
+                if not reply.get('awaiting_turn'):
+                    await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)
+                    # A history outage must not hold back an already authorized answer.
+                    await self._sync_reply_history(message, reply)
             if reply.get('awaiting_turn'):
                 await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply, delay=15)
                 return
-            await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)
             if reply.get('topic_plan_id') and reply.get('topic_plan_status') in {'completed', 'cancelled', 'superseded'}:
                 route_message = {**message, **(reply.get('thread_route') or {})}
                 await asyncio.to_thread(self.inbox.retire_topic_plan, route_message, reply['topic_plan_id'])
@@ -1899,8 +1916,13 @@ class FeishuAssistant:
                         'text': '原回复无法通过当前权限及会话校验，旧内容已停止发送。请重新提问。', 'attachment_stopped': True}, delay=0)
                 return
             upload_denied = isinstance(exc, AssistantError) and exc.category == 'feishu_file_upload_permission'
-            if isinstance(exc, AssistantError) and (upload_denied or exc.status in {401, 403, 404, 410} and reply.get('files')):
-                stopped = {'text': str(exc) if upload_denied else '原会话或文件访问权限已变化，本次文件发送已停止。请在当前会话重新提出需要。',
+            if upload_denied:
+                reply.pop('files', None)
+                reply['file_notice'] = safe_text(str(exc))
+                await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply, delay=5)
+                return
+            if isinstance(exc, AssistantError) and exc.status in {401, 403, 404, 410} and reply.get('files'):
+                stopped = {'text': '原会话或文件访问权限已变化，本次文件发送已停止。请在当前会话重新提出需要。',
                            'attachment_stopped': True}
                 await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', stopped, delay=5)
                 return

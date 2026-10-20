@@ -227,7 +227,7 @@ class LearningCloudTests(unittest.TestCase):
         with self.assertRaisesRegex(cloud.LearningCloudError, '不一致'):
             self.remote.save_sharing_question(batch, q, 'job')
         self.assertFalse(self.fake.mutations())
-        self.fake.records[cloud.SHARING_TABLE_ID].append(copy.deepcopy(record))
+        self.fake.records[cloud.SHARING_TABLE_ID].append({**copy.deepcopy(record), 'record_id': 'recDuplicate'})
         with self.assertRaisesRegex(cloud.LearningCloudError, '多条'):
             self.remote.save_sharing_question(batch, q, 'job')
         self.assertFalse(self.fake.mutations())
@@ -457,6 +457,72 @@ class LearningCloudTests(unittest.TestCase):
         self.fake.before = lambda request: self.fake.response({"has_more": False, "total": 0}) if request.url.params.get("page_token") else None
         with self.assertRaises(cloud.LearningCloudError):
             self.remote._list_all(path)
+
+    def test_pagination_total_must_match_accumulation_and_stay_consistent(self):
+        first, last = {'record_id': 'rec1'}, {'record_id': 'rec2'}
+        cases = [
+            [{'items': [first], 'has_more': False, 'total': total}]
+            for total in (55, 0, -1, True, '1', None)
+        ] + [
+            [{'items': [first], 'has_more': True, 'page_token': 'next', 'total': 3},
+             {'items': [last], 'has_more': False}],
+            [{'items': [first], 'has_more': True, 'page_token': 'next', 'total': 2},
+             {'items': [last], 'has_more': False, 'total': 3}],
+            [{'items': [first], 'has_more': True, 'page_token': 'next', 'total': 1}],
+            [{'items': [first], 'has_more': True, 'page_token': 'next'},
+             {'items': [last], 'has_more': False, 'total': 1}],
+        ]
+        for pages in cases:
+            with self.subTest(pages=pages), patch.object(self.remote, '_request', side_effect=pages), \
+                    self.assertRaises(cloud.LearningCloudError):
+                self.remote._list_all('tables/fixture/records')
+        for totals in ((2, 2), (2, None), (None, 2), (None, None)):
+            pages = [{'items': [first], 'has_more': True, 'page_token': 'next'},
+                     {'items': [last], 'has_more': False}]
+            for page, total in zip(pages, totals):
+                if total is not None:
+                    page['total'] = total
+            with self.subTest(totals=totals), patch.object(self.remote, '_request', side_effect=pages):
+                self.assertEqual(self.remote._list_all('tables/fixture/records'), [first, last])
+        self.assertFalse(self.fake.mutations())
+
+    def test_duplicate_ids_in_one_or_multiple_pages_are_rejected(self):
+        for path, field in (('tables', 'table_id'), ('tables/fixture/fields', 'field_id'),
+                            ('tables/fixture/records', 'record_id'), ('tables/fixture/records/search', 'record_id')):
+            first, last = {field: 'same', 'field_name': 'first'}, {field: 'same', 'field_name': 'last'}
+            for pages in ([{'items': [first, last], 'has_more': False, 'total': 2}],
+                          [{'items': [first], 'has_more': True, 'page_token': 'next'},
+                           {'items': [last], 'has_more': False}]):
+                with self.subTest(path=path, pages=pages), patch.object(self.remote, '_request', side_effect=pages), \
+                        self.assertRaises(cloud.LearningCloudError):
+                    self.remote._list_all(path, {} if path.endswith('/search') else None)
+        self.assertFalse(self.fake.mutations())
+
+    def test_missing_total_requires_progress_and_a_finite_page_budget(self):
+        for pages in (
+            [{'items': [], 'has_more': True, 'page_token': 'next'}],
+            [{'items': [{'record_id': 'rec1'}], 'has_more': True}],
+            [{'items': [{'record_id': 'rec1'}], 'has_more': True, 'page_token': 'again'},
+             {'items': [{'record_id': 'rec2'}], 'has_more': True, 'page_token': 'again'}],
+        ):
+            with self.subTest(pages=pages), patch.object(self.remote, '_request', side_effect=pages), \
+                    self.assertRaises(cloud.LearningCloudError):
+                self.remote._list_all('tables/fixture/records')
+        pages = ({'items': [{'record_id': 'rec' + str(i)}], 'has_more': True, 'page_token': 'next' + str(i)}
+                 for i in range(1001))
+        with patch.object(self.remote, '_request', side_effect=pages) as read, \
+                self.assertRaisesRegex(cloud.LearningCloudError, '上限'):
+            self.remote._list_all('tables/fixture/records')
+        self.assertEqual(read.call_count, 1000)
+        self.assertFalse(self.fake.mutations())
+
+    def test_invalid_ids_and_oversized_pages_are_rejected(self):
+        batches = [[{'record_id': identity}] for identity in (None, '', True, [])]
+        batches.append([{'record_id': 'rec' + str(i)} for i in range(501)])
+        for batch in batches:
+            with self.subTest(size=len(batch)), patch.object(self.remote, '_request',
+                    return_value={'items': batch, 'has_more': False}), self.assertRaises(cloud.LearningCloudError):
+                self.remote._list_all('tables/fixture/records')
 
     def test_upsert_roundtrips_full_document_and_updates_the_unique_key(self):
         payload = {"questions": [self.question(), self.question(id="immutable-q2")], "nested": {"answer": "原始快照"}}

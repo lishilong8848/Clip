@@ -12,7 +12,7 @@ from contextlib import closing
 from unittest.mock import AsyncMock, patch
 
 from bin.test_feishu_assistant import Memory, event
-from lan_bitable_template_portal.feishu_assistant import FeishuAssistant, FeishuMessenger, Inbox, parse_message
+from lan_bitable_template_portal.feishu_assistant import FeishuAssistant, FeishuMessenger, Inbox, parse_message, _plan_key
 from lan_bitable_template_portal.feishu_notice_cards import _issue_ticket
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 
@@ -115,6 +115,31 @@ class TopicTests(unittest.IsolatedAsyncioTestCase):
         scoped, prompt = await self.bot._topic_plan(message, self.request, self.actor, self.conversation, self.route)
         self.assertIn('已更新或结束', prompt)
         self.assertFalse(scoped['turns'])
+
+    async def test_file_notice_keeps_card_identity_and_explicit_replies_choose_their_plan(self):
+        ticket = self.bind('A')
+        self.bind('B')
+        reply = {'text': 'A计划完整说明', 'card': {'body': {'elements': [{'tag': 'markdown', 'content': 'A表单'}]}},
+                 'ticket': ticket, 'topic_plan_id': 'A', 'file_notice': '附件未上传，请检查权限。'}
+        receipts = iter(('om_BodyA', 'om_CardA', 'om_NoticeA'))
+        messenger = FeishuMessenger({})
+        client = SimpleNamespace(post=AsyncMock(side_effect=lambda *a, **kw: SimpleNamespace(json=lambda: {
+            'code': 0, 'data': {'message_id': next(receipts), 'chat_id': 'oc_Chat',
+                                'root_id': self.route['root_id'], 'thread_id': 'omt_Topic'}})))
+        messenger.client = AsyncMock(return_value=client)
+        messenger.headers = AsyncMock(return_value={})
+        async def checkpoint():
+            self.bot.inbox.set(self.message['message_id'], 'reply', reply)
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            await messenger.send(self.message, reply, checkpoint=checkpoint)
+        self.assertEqual(reply['card_message_id'], 'om_CardA')
+        for reference in ('om_CardA', 'om_BodyA', 'om_NoticeA'):
+            message = self.followup('确认执行')
+            message['parent_id'] = reference
+            self.bot.picked_plan[_plan_key(message, self.actor)] = 'B'
+            scoped, prompt = await self.bot._topic_plan(message, self.request, self.actor, self.conversation, self.route)
+            self.assertIsNone(prompt)
+            self.assertEqual(scoped['turns'][0]['plan']['id'], 'A')
 
     async def test_selection_numbers_use_previously_shown_snapshot(self):
         self.bind('B'); self.bind('C')

@@ -279,7 +279,6 @@ class SharedSnapshotTests(unittest.TestCase):
 
     def test_reader_has_no_network_background_work_or_business_writes(self):
         import httpx
-        import requests
         self.ongoing('readonly-notice')
         self.repair('readonly-project')
         before = hashlib.sha256(self.path.read_bytes()).hexdigest()
@@ -296,7 +295,7 @@ class SharedSnapshotTests(unittest.TestCase):
             stack.enter_context(patch('sqlite3.connect', side_effect=read_only_connect))
             stack.enter_context(patch.object(socket.socket, 'connect', side_effect=AssertionError('No network')))
             stack.enter_context(patch.object(threading.Thread, 'start', side_effect=AssertionError('No background work')))
-            stack.enter_context(patch.object(requests.Session, 'request', side_effect=AssertionError('No Feishu request')))
+            stack.enter_context(patch('requests.Session.request', side_effect=AssertionError('No Feishu request')))
             stack.enter_context(patch.object(httpx.Client, 'request', side_effect=AssertionError('No HTTP request')))
             for query in ('A楼柴发', 'A楼未完成工作'):
                 self.assertTrue(self.search(self.actor({'maintenance', 'repair_management'}), query)[0])

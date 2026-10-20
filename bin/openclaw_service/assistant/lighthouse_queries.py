@@ -156,14 +156,21 @@ def query_result_state(result):
     raw = result.get("_raw", result.get("data"))
     if result.get("scope_warning") or result.get("truncated") and "_raw" not in result:
         return "partial", "结果不完整，不能按已展示条数报全量或回答没有记录。"
+    learning_note = (" 学练history含待答题单，total是题单条数，不是参与人数；参与名单及人数须查询GET /api/learning/profile（view=participation），不能从history推算。"
+                     if result.get("api_id") == "GET /api/learning/history" else "")
     if isinstance(raw, dict):
-        if raw.get("complete") is False:
-            return "partial", "部分资料尚未取得，分别说明已取得和无法确认的内容。"
-        lists = [raw[key] for key in ("records", "items", "rows", "tasks", "pending", "ongoing") if isinstance(raw.get(key), list)]
+        if (raw.get("complete") is False or raw.get("truncated") or raw.get("has_more")
+                or raw.get("next_offset") is not None):
+            return "partial", "资料尚未读取完整，保留原查询条件继续读取后页；不能按当前名单或total推断完整人数。" + learning_note
+        lists = [raw[key] for key in ("records", "items", "rows", "tasks", "pending", "ongoing", "participants") if isinstance(raw.get(key), list)]
         if lists and not any(lists):
-            return "empty_page", "本次筛选或当前页没有记录，不等于全库没有。先检查分页、日期和业务分类；若有search/keyword可换一次核心词，必须保留用户的楼栋、日期、状态约束。不要反复调用同一查询。"
+            return "empty_page", "本次筛选或当前页没有记录，不等于全库没有。先检查分页、日期和业务分类；若有search/keyword可换一次核心词，必须保留用户的楼栋、日期、状态约束。不要反复调用同一查询。" + learning_note
         if lists:
-            return "found", "有候选记录，请核对标题和条件；完整数量以接口统计或完整分页为准。"
+            if (type(raw.get("total")) is int and raw["total"] > max(map(len, lists))
+                    or type(raw.get("page")) is int and raw["page"] > 1
+                    or type(raw.get("remaining")) is int and raw["remaining"] > 0):
+                return "partial", "当前只取得部分记录，须按原条件读取完整分页；total只代表接口声明的记录数，不是完整名单或去重人数。" + learning_note
+            return "found", "有候选记录，请核对标题和条件；完整数量以接口统计或完整分页为准。" + learning_note
     return "read", "已取得本次接口结果；不要把资料目录、字段配置或样本长度当业务数量。"
 
 

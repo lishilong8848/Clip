@@ -47,6 +47,7 @@ API_ROOT = "https://open.feishu.cn/open-apis"
 TYPE_LABELS = {"single": "单选题", "multiple": "多选题", "interview": "面试题"}
 TOKEN_ERRORS = {99991663, 99991664, 99991665, 99991668, 99991677}
 READ_RETRY_CODES = {1255001, 1255002, 1254290, 1254291, 1254607}
+MAX_READ_PAGES = 1000
 
 
 class LearningCloudError(RuntimeError):
@@ -218,10 +219,12 @@ class LearningCloud:
             return payload["data"]
 
     def _list_all(self, path, body=None, params=None):
-        items, seen = [], set()
-        token = None
+        items, seen, identities = [], set(), set()
+        token, expected_total = None, None
+        id_field = 'table_id' if path == 'tables' else 'field_id' if path.endswith('/fields') else 'record_id'
         base_params = dict(params or {})
-        while True:
+        # Bound unique cursor streams even when the server omits total.
+        for _ in range(MAX_READ_PAGES):
             params = {**base_params, "page_size": 100 if path == "tables" or path.endswith("/fields") else 500}
             if token:
                 params["page_token"] = token
@@ -229,17 +232,34 @@ class LearningCloud:
             batch = page.get("items")
             if batch is None and token is None and page.get("has_more") is False and type(page.get("total")) is int and page["total"] == 0:
                 batch = []
-            if not isinstance(batch, list) or not all(isinstance(item, dict) for item in batch):
+            if not isinstance(batch, list) or len(batch) > params['page_size'] or not all(isinstance(item, dict) for item in batch):
                 raise LearningCloudError("飞书分页内容无效，未返回部分数据")
             if not isinstance(page.get("has_more"), bool):
                 raise LearningCloudError("飞书分页标志缺失，未返回部分数据")
+            if 'total' in page:
+                total = page['total']
+                if type(total) is not int or total < 0 or expected_total is not None and total != expected_total:
+                    raise LearningCloudError("飞书分页总条数无效或发生变化，未返回部分数据")
+                expected_total = total
+            for item in batch:
+                identity = item.get(id_field, item.get('field_name') if id_field == 'field_id' else None)
+                if not isinstance(identity, str) or not identity.strip() or identity in identities:
+                    raise LearningCloudError("飞书分页记录标识缺失或重复，未返回部分数据")
+                identities.add(identity)
             items.extend(batch)
+            if expected_total is not None and (len(items) > expected_total
+                    or not page['has_more'] and len(items) != expected_total
+                    or page['has_more'] and len(items) >= expected_total):
+                raise LearningCloudError("飞书分页累计条数与total不一致，未返回部分数据")
             if not page["has_more"]:
                 return items
+            if not batch:
+                raise LearningCloudError("飞书分页未取得新记录，未返回部分数据")
             token = page.get("page_token")
             if not isinstance(token, str) or not token or token in seen:
                 raise LearningCloudError("飞书分页游标异常，未返回部分数据")
             seen.add(token)
+        raise LearningCloudError("飞书分页超过只读页数上限，未返回部分数据")
 
     def fetch_questions(self):
         result = []

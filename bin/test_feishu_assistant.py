@@ -54,6 +54,20 @@ class ParsingTests(unittest.TestCase):
         payload["event"]["message"].update(message_type="post", content=json.dumps({"title": "问题", "content": [[{"tag": "text", "text": "通告多少条"}]]}))
         self.assertIn("通告多少条", parse_message(payload, "cliTest", "ouBot")["question"])
 
+    def test_post_link_keeps_the_document_address_and_label(self):
+        payload = event()
+        url = 'https://vnet.feishu.cn/docx/FixtureMinutes'
+        payload['event']['message'].update(message_type='post', content=json.dumps({'zh_cn': {
+            'title': '请总结会议纪要', 'content': [[{'tag': 'a', 'text': '设备故障排查分享', 'href': url}]]}}))
+        question = parse_message(payload, 'cliTest', 'ouBot')['question']
+        self.assertIn('设备故障排查分享', question)
+        self.assertIn(url, question)
+        payload['event']['message']['content'] = json.dumps({'content': [[
+            {'tag': 'a', 'text': url, 'href': url}, {'tag': 'a', 'text': '无效链接', 'href': 'javascript:bad()'}]]})
+        question = parse_message(payload, 'cliTest', 'ouBot')['question']
+        self.assertEqual(question.count(url), 1)
+        self.assertNotIn('javascript:', question)
+
     def test_private_data_not_persisted(self):
         question = parse_message(event(content="请查询身份证号"), "cliTest", "ouBot")["question"]
         self.assertIn("敏感查询", question)
@@ -278,13 +292,19 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.channel._validate_delivery = AsyncMock()
         self.channel._request_context = AsyncMock(return_value=(None, {'id': 'ou_A', 'channel': 'feishu:oc_Chat'}))
         self.channel._call = AsyncMock(side_effect=[TimeoutError(), {'recorded': True}])
-        self.channel.messenger = SimpleNamespace(send=AsyncMock(), react=AsyncMock())
+        delivered = []
+        async def send(message, reply, **kwargs):
+            if 'answer:0' not in reply.get('sent_parts', []):
+                delivered.append(reply['text'])
+                reply.setdefault('sent_parts', []).append('answer:0')
+                await kwargs['checkpoint']()
+        self.channel.messenger = SimpleNamespace(send=AsyncMock(side_effect=send), react=AsyncMock())
         await self.channel._drain(message['union_id'])
-        self.channel.messenger.send.assert_not_awaited()
+        self.assertEqual(delivered, ['操作已完成'])
         self.channel.inbox.set(message['message_id'], 'reply', delay=0)
         await self.channel._drain(message['union_id'])
         self.channel.answer.assert_awaited_once()
-        self.channel.messenger.send.assert_awaited_once()
+        self.assertEqual(delivered, ['操作已完成'])
         calls = self.channel._call.await_args_list
         self.assertEqual(calls[0].args[2], 'channel-replies')
         self.assertEqual(calls[0].args[3], calls[1].args[3])
@@ -297,6 +317,70 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.channel._call = AsyncMock(side_effect=AssistantError('会话已变化', 409))
         await self.channel._sync_reply_history(message, reply)
         self.assertNotIn('sync_history', reply)
+
+    async def test_delivered_topic_context_survives_web_history_outage(self):
+        message = parse_message(event(chat_type='group', message_id='topicHistory'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        actor = {'id': 'ou_A', 'scopes': ['A'], 'modules': ['assistant'], 'is_admin': False}
+        reply = {'text': '当前正在进行的通告有4条。', 'actor_id': actor['id'], 'conversation_id': 'same',
+                 'delivery_access': self.channel._delivery_access(actor)}
+        self.channel.answer = AsyncMock(return_value=reply)
+        self.channel._react = AsyncMock()
+        self.channel._validate_delivery = AsyncMock()
+        self.channel._sync_reply_history = AsyncMock(side_effect=TimeoutError())
+        async def send(message, reply, **kwargs):
+            reply['thread_route'] = {'chat_id': message['chat_id'], 'chat_type': 'group',
+                                     'root_id': message['message_id'], 'thread_id': 'omt_History'}
+            reply['sent_parts'] = ['answer:0']
+            await kwargs['checkpoint']()
+        self.channel.messenger = SimpleNamespace(send=AsyncMock(side_effect=send))
+        await self.channel._drain(message['union_id'])
+        followup = {**message, 'message_id': 'om_Followup', 'root_id': message['message_id'], 'thread_id': 'omt_History'}
+        self.assertIn('正在进行的通告有4条', self.channel.inbox.topic_context(followup, actor))
+        self.assertEqual(self.channel.inbox.topic_context({**followup, 'chat_id': 'oc_Other'}, actor), '')
+        self.channel.answer.assert_awaited_once()
+
+    async def test_history_retry_after_restart_skips_already_delivered_expired_file(self):
+        message = parse_message(event(message_id='historyFile'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        actor = {'id': 'ou_A', 'scopes': ['A'], 'modules': ['assistant']}
+        reply = {'text': '完整附件说明', 'sync_history': True, 'actor_id': actor['id'], 'conversation_id': 'same',
+                 'files': [{'id': 'a' * 32, 'file_key': 'fixture-key'}]}
+        self.channel.answer = AsyncMock(return_value=reply)
+        self.channel._react = AsyncMock()
+        self.channel._validate_delivery = AsyncMock()
+        self.channel._request_context = AsyncMock(return_value=(None, actor))
+        self.channel._reply_file_context = AsyncMock(return_value=(None, actor))
+        delivered, reads, syncs = [], [], []
+        async def call(request, actor, path, *a, **kw):
+            if path.startswith('files/'):
+                reads.append(path)
+                if syncs:
+                    raise AssistantError('附件已过期', 404)
+                return {'name': '说明.txt'}
+            if path == 'channel-replies':
+                syncs.append(path)
+                if len(syncs) == 1:
+                    raise AssistantError('暂不可用', 503)
+                return {'recorded': True}
+            raise AssertionError(path)
+        async def send(message, reply, **kw):
+            for part in ('answer:0', 'file:' + 'a' * 32):
+                if part not in reply.get('sent_parts', []):
+                    delivered.append(part)
+                    reply.setdefault('sent_parts', []).append(part)
+                    await kw['checkpoint']()
+        self.channel._call = AsyncMock(side_effect=call)
+        self.channel.messenger = SimpleNamespace(send=AsyncMock(side_effect=send))
+        await self.channel._drain(message['union_id'])
+        self.channel.inbox = Inbox(self.channel.inbox.path)
+        self.channel.inbox.set(message['message_id'], 'reply', delay=0)
+        await self.channel._drain(message['union_id'])
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(syncs), 2)
+        self.assertEqual(delivered, ['answer:0', 'file:' + 'a' * 32])
+        self.assertEqual(self.channel.inbox.owners(), [])
+        self.channel.answer.assert_awaited_once()
 
     async def test_stopped_attachment_reply_retains_distinct_notice_until_delivery(self):
         message = parse_message(event(message_id='filestopped'), 'cliTest', 'ouBot')
@@ -320,7 +404,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.channel.messenger.send.call_args.args[1]['attachment_stopped'])
         self.assertEqual(self.channel.inbox.owners(), [])
 
-    async def test_missing_file_upload_scope_sends_a_short_notice_without_reasking_model(self):
+    async def test_missing_file_upload_scope_preserves_answer_without_reasking_model(self):
         message = parse_message(event(message_id='uploadscope'), 'cliTest', 'ouBot')
         self.channel.inbox.add(message)
         self.channel.answer = AsyncMock(return_value={'text': '完整说明。' * 900})
@@ -329,13 +413,39 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         await self.channel._drain(message['union_id'])
         with self.channel.inbox.connect() as db:
             saved = json.loads(db.execute('SELECT reply FROM messages WHERE id=?', (message['message_id'],)).fetchone()[0])
-        self.assertTrue(saved.get('attachment_stopped'))
-        self.assertLess(len(saved['text']), 400)
-        self.assertIn('文件上传权限', saved['text'])
+        self.assertEqual(saved['text'], '完整说明。' * 900)
+        self.assertIn('文件上传权限', saved['file_notice'])
         self.channel.inbox.set(message['message_id'], 'reply', saved, delay=0)
         self.channel.messenger.send = AsyncMock()
         await self.channel._drain(message['union_id'])
         self.assertEqual(self.channel.answer.await_count, 1)
+        self.assertEqual(self.channel.inbox.owners(), [])
+
+    async def test_denied_file_preserves_full_answer_and_one_distinct_notice(self):
+        message = parse_message(event(message_id='filebody'), 'cliTest', 'ouBot')
+        self.channel.inbox.add(message)
+        text = '完整业务说明。\n' * 900
+        self.channel.answer = AsyncMock(return_value={'text': text, 'files': [{'id': 'a' * 32}]})
+        self.channel._react = AsyncMock()
+        denied = AssistantError('飞书应用缺少文件上传权限，请联系管理员。', 403,
+                                category='feishu_file_upload_permission')
+        self.channel._prepare_reply_files = AsyncMock(side_effect=[denied, None])
+        messenger = FeishuMessenger({})
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(
+            json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})))
+        messenger.client = AsyncMock(return_value=client)
+        messenger.headers = AsyncMock(return_value={})
+        self.channel.messenger = messenger
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            await self.channel._drain(message['union_id'])
+            self.channel.inbox.set(message['message_id'], 'reply', delay=0)
+            await self.channel._drain(message['union_id'])
+        sent = [json.loads(call.kwargs['json']['content'])['body']['elements'][0]['content']
+                for call in client.post.await_args_list]
+        self.assertEqual(''.join(sent[:-1]), text.strip())
+        self.assertIn('缺少文件上传权限', sent[-1])
+        self.assertEqual(len({call.kwargs['json']['uuid'] for call in client.post.await_args_list}), len(sent))
+        self.channel.answer.assert_awaited_once()
         self.assertEqual(self.channel.inbox.owners(), [])
 
     async def test_untrusted_callback_cannot_submit(self):

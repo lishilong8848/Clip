@@ -76,7 +76,7 @@ html.workspace-v2:has(.v2-repair-workspace) .picker-confirm{background:#0071e3;c
   .v2-repair-workspace .record-followup-button{min-height:44px}
   .v2-repair-workspace :is(.v2-repair-detail-body,.v2-repair-detail-footer) .n-button{min-height:44px}
   .v2-repair-workspace .n-radio-button{min-height:44px;display:inline-flex;align-items:center;justify-content:center}
-  .v2-repair-workspace .v2-repair-detail-body>.n-radio-group{display:flex;width:100%}
+  .v2-repair-workspace .v2-repair-detail-body>.n-radio-group{display:flex;width:100%;min-height:44px}
   .v2-repair-workspace .v2-repair-detail-body>.n-radio-group .n-radio-button{flex:1}
   .v2-repair-workspace :is(.n-input:not(.n-input--textarea),.n-base-selection,.repair-people-search){min-height:44px}
   .v2-repair-workspace :is(.n-input__input-el,.n-input__textarea-el,.n-input__textarea-mirror,.n-base-selection-input,.repair-people-search input){font-size:16px!important;scroll-margin-block:140px}

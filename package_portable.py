@@ -1836,7 +1836,7 @@ def _run_packaging_preflight_tests() -> None:
         [test_python, "-m", "unittest",
          "bin.test_robot_webhook",
          "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
-         "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
+         "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_model_completion", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
          "bin.test_lighthouse_shared_snapshot",
          "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery",

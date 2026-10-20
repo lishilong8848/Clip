@@ -180,11 +180,12 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                     await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
                         'run_id': self.agent.run_id, 'tool': 'lighthouse_submit', 'call_id': 'first-call', 'params': {}})
                 self.fail(hook=hook)
-                with self.assertRaises(AssistantError):
-                    await self.run_agent()
+                events = await self.run_agent()
                 self.assertEqual(calls, [result])
-                self.assertEqual(self.selected, ['current'])
+                self.assertEqual(self.selected, ['current', 'backup'])
                 self.assertIn('first-call', self.agent.results)
+                if result != 'success':
+                    self.assertIn('未知', events[-1].result.output)
 
     async def test_partial_reply_does_not_mix_in_another_model_answer(self):
         self.fail()
