@@ -12,11 +12,30 @@ import uuid
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from .risk_inspection import RiskError, RiskInspections, SCOPES, can_scope, manager, text
+from .risk_inspection import RiskError, RiskInspections, SCOPES, can_scope, final_manager, manager, text
 from .risk_inspection_cloud import RiskCloud
 
 MAX_FILE = 20 * 1024 * 1024
 EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.md', '.txt', '.csv', '.jpg', '.jpeg', '.png', '.webp'}
+
+
+def risk_task_access(runtime, session, rid=''):
+    from .cabinet_guest import is_cabinet_guest
+    if not session or is_cabinet_guest(session):
+        return False
+    actor_for = getattr(runtime, 'risk_inspection_actor', None)
+    service = getattr(runtime, 'risk_inspections', None)
+    if not callable(actor_for) or not callable(service):
+        return False
+    try:
+        user = runtime.auth_manager.public_user(session)
+        actor = actor_for(str(user.get('open_id') or ''), str(user.get('name') or ''))
+        return service().has_task_access(actor, rid)
+    except RiskError:
+        return False
+    except Exception:
+        logging.exception('Risk inspection task access could not be verified')
+        return False
 
 
 def install_risk_inspection_routes(app, controller, runtime):
@@ -31,6 +50,9 @@ def install_risk_inspection_routes(app, controller, runtime):
         person = auth.directory_person(open_id)
         if person.get('inactive') or person and not person.get('selectable'):
             raise RiskError('当前人员已离职或身份不可用。', 403)
+        disabled = getattr(auth, '_open_id_explicitly_disabled', None)
+        if callable(disabled) and disabled(open_id):
+            raise RiskError('当前账号已停用，不能处理排查任务。', 403)
         profile = auth.account_profile(open_id)
         actor = {**profile, 'id': person.get('id') or 'account:' + open_id,
                  'open_id': open_id, 'name': person.get('name') or name or '当前人员'}
@@ -65,6 +87,7 @@ def install_risk_inspection_routes(app, controller, runtime):
         return service, cloud
 
     runtime.risk_inspections = lambda: get_services()[0]
+    runtime.risk_inspection_actor = actor_for
 
     def read_actor(request):
         session = controller._current_session(request)
@@ -94,13 +117,34 @@ def install_risk_inspection_routes(app, controller, runtime):
             svc, remote = await asyncio.to_thread(get_services)
             path = request.url.path.removeprefix('/api/risk-inspections').strip('/')
             body = {}
+            if path == 'base-templates/import-file' and request.method == 'POST':
+                same_origin(request)
+                if not manager(actor):
+                    raise RiskError('仅管理员或楼栋主管可导入基础模板。', 403)
+                from .risk_inspection_imports import preview_file
+                content, size = [], 0
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_FILE:
+                        raise RiskError('导入表格不能超过20MB。', 413)
+                    content.append(chunk)
+                data = await asyncio.to_thread(preview_file, request.query_params.get('name', ''), b''.join(content),
+                                               sheet=request.query_params.get('sheet'), title_field=request.query_params.get('title_field'))
+                return response(data)
             if request.method != 'GET':
                 same_origin(request)
                 body = await controller._read_json_request(request, max_bytes=2 * 1024 * 1024)
                 if not isinstance(body, dict):
                     raise RiskError('请求内容无效。')
             rid = request.path_params.get('rid', '')
-            if path == 'base-templates':
+            if path == 'base-templates/import-bitable':
+                if not manager(actor):
+                    raise RiskError('仅管理员或楼栋主管可导入基础模板。', 403)
+                if set(body) - {'url', 'title_field'} or not isinstance(body.get('url'), str):
+                    raise RiskError('请填写需要导入的多维表链接。')
+                from .risk_inspection_imports import preview_bitable
+                data = await asyncio.to_thread(preview_bitable, remote, body['url'], title_field=body.get('title_field'), actor=actor)
+            elif path == 'base-templates':
                 if not manager(actor):
                     raise RiskError('仅管理员或楼栋主管可使用基础模板。', 403)
                 if request.method == 'POST':
@@ -142,14 +186,17 @@ def install_risk_inspection_routes(app, controller, runtime):
                             person = person_for(row['record_id'])
                         except RiskError:
                             continue
-                        scopes = [s for s in SCOPES if can_scope(actor, s) and can_scope(person, s)]
-                        if scopes:
-                            result.append({'id': person['id'], 'name': person['name'], 'employee_no': row.get('employee_no', ''),
-                                           'scopes': scopes, 'home_scope': person.get('home_scope', ''), 'can_review': manager(person)})
+                        scopes = [s for s in SCOPES if can_scope(actor, s)]
+                        result.append({'id': person['id'], 'name': person['name'], 'employee_no': row.get('employee_no', ''),
+                                       'scopes': scopes, 'home_scope': person.get('home_scope', ''), 'can_review': True,
+                                       'final_scopes': [s for s in scopes if can_scope(person, s)],
+                                       'category': person.get('category', ''), 'can_receive_final': final_manager(person)})
                     if not any(p['id'] == actor['id'] for p in result):
                         result.insert(0, {'id': actor['id'], 'name': actor['name'], 'employee_no': '',
                                          'scopes': [s for s in SCOPES if can_scope(actor, s)],
-                                         'home_scope': actor.get('home_scope', ''), 'can_review': manager(actor)})
+                                         'home_scope': actor.get('home_scope', ''), 'can_review': True,
+                                         'final_scopes': [s for s in SCOPES if can_scope(actor, s)],
+                                         'category': actor.get('category', ''), 'can_receive_final': final_manager(actor)})
                     return {'items': result, 'self_id': actor['id'], 'scopes': [s for s in SCOPES if can_scope(actor, s)]}
                 data = await asyncio.to_thread(people)
             elif path == 'template':
@@ -188,16 +235,17 @@ def install_risk_inspection_routes(app, controller, runtime):
             return response(error=RiskError('排查操作暂未确认完成；已保存内容保留，请重新读取核对。', 503))
 
     for path, methods in (('', ['GET', 'POST']), ('/people', ['GET']), ('/template', ['GET', 'POST']), ('/templates', ['GET']), ('/templates/{tid}', ['GET', 'PUT']),
+                          ('/base-templates/import-file', ['POST']), ('/base-templates/import-bitable', ['POST']),
                           ('/base-templates', ['GET', 'POST']), ('/base-templates/{tid}', ['GET', 'PUT']), ('/base-templates/{tid}/retry', ['POST']),
                           ('/{rid}', ['GET', 'DELETE']), ('/{rid}/retry', ['POST']), ('/{rid}/reviewer', ['POST']), ('/{rid}/claim', ['POST']), ('/{rid}/people/{pid}/actions', ['POST'])):
         app.add_api_route('/api/risk-inspections' + path, endpoint, methods=methods)
 
-    def editable(db, actor, rid, item_id, field_id):
+    def editable(svc, db, actor, rid, item_id, field_id):
         release = RiskInspections._release(db, rid)
         person = RiskInspections._person(db, rid, actor['id'])
         item = next((i for i in person['items'] if i['id'] == item_id), None)
         field = next((f for f in release['fields'] if f['key'] == field_id), None)
-        if release['status'] != 'active' or person['revoked'] or not can_scope(actor, person['scope']) or not item or item['status'] not in {'pending', 'returned'}:
+        if release['status'] != 'active' or person['revoked'] or not item or not svc._visible(actor, release, person, item=item) or item['status'] not in {'pending', 'returned'}:
             raise RiskError('当前事项不能上传附件。', 409)
         if not field or field['type'] != 17 or field['role'] != 'input':
             raise RiskError('附件字段无效。')
@@ -211,7 +259,7 @@ def install_risk_inspection_routes(app, controller, runtime):
             svc, _ = await asyncio.to_thread(get_services)
             item_id, field_id = request.query_params.get('item_id', ''), request.query_params.get('field_id', '')
             with svc.connect() as db:
-                editable(db, actor, rid, item_id, field_id)
+                editable(svc, db, actor, rid, item_id, field_id)
             name = Path(text(request.query_params.get('name', ''), 240, True).replace('\\', '/')).name
             if Path(name).suffix.lower() not in EXTENSIONS:
                 raise RiskError('请选择照片、PDF、Word、Excel或文本文件。')
@@ -231,7 +279,7 @@ def install_risk_inspection_routes(app, controller, runtime):
             actor = await asyncio.to_thread(read_actor, request)
             def commit():
                 with svc.connect(True) as db:
-                    editable(db, actor, rid, item_id, field_id)
+                    editable(svc, db, actor, rid, item_id, field_id)
                     total = db.execute('SELECT COUNT(*),COALESCE(SUM(size),0) FROM risk_files WHERE release_id=? AND person_id=?', (rid, actor['id'])).fetchone()
                     if total[0] >= 100 or total[1] + size > 200 * 1024 * 1024:
                         raise RiskError('每人每次排查最多100个附件，合计200MB。', 413)
@@ -266,7 +314,8 @@ def install_risk_inspection_routes(app, controller, runtime):
                 if not row:
                     raise RiskError('附件不存在。', 404)
                 release, person = svc._release(db, row['release_id']), svc._person(db, row['release_id'], row['person_id'])
-                if not svc._visible(actor, release, person):
+                item = next((i for i in person['items'] if i['id'] == row['item_id']), None)
+                if not item or not svc._visible(actor, release, person, item=item):
                     raise RiskError('无权读取该人员附件。', 403)
             return FileResponse(svc.db_path.parent / 'risk_inspection_files' / row['id'], filename=row['name'],
                                 media_type='application/octet-stream', headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})

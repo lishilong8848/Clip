@@ -15,7 +15,8 @@ SCOPES = ('110', 'A', 'B', 'C', 'D', 'E', 'H')
 FIELD_TYPES = {1, 2, 3, 4, 5, 7, 13, 15, 17}
 SYSTEM_NAMES = {'排查任务编号': 'number', '排查进度': 'status', '楼栋': 'scope',
                 '排查人': 'person', '复核人': 'reviewer', '复核结果': 'review',
-                '复核日期': 'reviewed_at', '最终推送': 'sync'}
+                '复核日期': 'reviewed_at', '最终推送': 'sync', '排查日期': 'inspected_at'}
+STATUS = {'pending': '未提交', 'submitted': '待审核', 'approved': '审核通过', 'returned': '退回修改', 'revoked': '已撤销'}
 
 
 class RiskError(Exception):
@@ -45,6 +46,91 @@ def manager(actor):
     return MODULE in actor.get('modules', []) and actor.get('level') in {'L0', 'L1', 'L3'}
 
 
+def final_manager(actor):
+    return manager(actor) and actor.get('category') == 'manager'
+
+
+def reviewer_list(release):
+    return release.get('reviewers') or ([release['reviewer']] if release.get('reviewer') else [])
+
+
+def person_scopes(person):
+    return list(dict.fromkeys(person.get('scopes') or [person['scope']]))
+
+
+def item_scope(person, item):
+    return item.get('scope') or person['scope']
+
+
+def scoped_people(people):
+    """Expand only for presentation; the persisted person and item IDs never change."""
+    return [{**p, 'scope': scope, 'scopes': [scope],
+             'items': [i for i in p['items'] if item_scope(p, i) == scope]}
+            for p in people for scope in person_scopes(p)]
+
+
+def system_fields(fields):
+    """Keep historical keys, but never let template settings make reserved fields editable."""
+    result = deepcopy(fields)
+    for field in result:
+        field['role'] = SYSTEM_NAMES.get(field['field_name'], field.get('role', 'input'))
+        if not isinstance(field['role'], str) or field['role'] not in {'input', *SYSTEM_NAMES.values()}:
+            raise RiskError('模板字段填写方式无效。')
+        if field['role'] != 'input':
+            field['required'] = False
+    roles = {f['role'] for f in result}
+    keys = {f['key'] for f in result}
+    for name, role in SYSTEM_NAMES.items():
+        if role in roles:
+            continue
+        key = 'system_' + role
+        while key in keys:
+            key += '_'
+        kind = 5 if role in {'reviewed_at', 'inspected_at'} else 1
+        result.append({'key': key, 'field_id': key, 'field_name': name, 'type': kind,
+                       'role': role, 'required': False, 'is_primary': False,
+                       'property': {'auto_fill': False, 'date_formatter': 'yyyy/MM/dd HH:mm'} if kind == 5 else {}})
+        keys.add(key)
+    return result
+
+
+def completion_key(people):
+    items = [(p['id'], i['id'], i.get('reviewed_at'), i.get('scope', '')) for p in people if not p['revoked']
+             for i in p['items'] if i['status'] != 'revoked']
+    if not items or any(i['status'] != 'approved' for p in people if not p['revoked']
+                        for i in p['items'] if i['status'] != 'revoked'):
+        return ''
+    # Keep already queued legacy completion keys valid.
+    if not any(i[3] for i in items):
+        items = [i[:3] for i in items]
+    return digest(sorted(items))[:24]
+
+
+def system_values(release, person, item):
+    scope = item_scope(person, item)
+    active = [i for i in person['items'] if i['status'] != 'revoked' and item_scope(person, i) == scope]
+    submitted = sum(i['status'] in {'submitted', 'approved'} for i in active)
+    progress = f'{round(100 * submitted / len(active)) if active else 0}%（{submitted}/{len(active)}项已反馈）'
+    targets = [p for p in release.get('final_managers', []) if scope in p['scopes']]
+    final = release['cloud'].get('final_push', {})
+    if 'scope_versions' in final:
+        version = digest(sorted((scope, i['id'], i.get('reviewed_at')) for i in active))
+        saved = final['scope_versions'].get(person['id'] + ':' + scope)
+    else:
+        version = digest(sorted((i['id'], i.get('reviewed_at')) for i in active))
+        saved = final.get('person_versions', {}).get(person['id']) if len(person_scopes(person)) == 1 else None
+    current = bool(active) and all(i['status'] == 'approved' for i in active) and saved == version
+    sent = [p['name'] for p in targets if current and p['id'] in final.get('delivered', [])]
+    push = ('已推送：' + '、'.join(sent) if targets and len(sent) == len(targets)
+            else '部分已推送，等待重试' if sent else '待全部复核通过后推送' if targets else '未配置接收经理')
+    return {'number': release['id'] + ':' + person['id'] + ':' + item['id'],
+            'status': progress, 'scope': scope + ('站' if scope == '110' else '楼'),
+            'person': person['name'], 'reviewer': item.get('reviewed_by') or '、'.join(p['name'] for p in reviewer_list(release)),
+            'review': (STATUS[item['status']] + ('：' + item['reason'] if item.get('reason') else '')) if item.get('reviewed_at') else '',
+            'reviewed_at': int(item.get('reviewed_at', 0) * 1000) or None,
+            'inspected_at': int(item.get('submitted_at', 0) * 1000) or None, 'sync': push}
+
+
 def schema_fields(fields, settings=None):
     settings = settings or {}
     result = []
@@ -52,8 +138,8 @@ def schema_fields(fields, settings=None):
         field = {k: deepcopy(source[k]) for k in ('field_id', 'field_name', 'type', 'property', 'is_primary') if k in source}
         field['key'] = field['field_id']
         options = settings.get(field['key'], {})
-        field['role'] = options.get('role') or SYSTEM_NAMES.get(field['field_name'], 'input')
-        field['required'] = bool(options.get('required', field['field_name'] in {'排查结果', '排查日期'}))
+        field['role'] = SYSTEM_NAMES.get(field['field_name']) or options.get('role') or 'input'
+        field['required'] = field['role'] == 'input' and bool(options.get('required', field['field_name'] == '排查结果'))
         if field['role'] == 'input' and field['type'] not in FIELD_TYPES:
             field['unsupported'] = True
         result.append(field)
@@ -149,7 +235,8 @@ class RiskInspections:
 
     @staticmethod
     def check(actor):
-        if not actor.get('id') or not actor.get('open_id') or MODULE not in actor.get('modules', []) or actor.get('role') in {'guest', 'temporary'}:
+        if (not actor.get('id') or not actor.get('open_id') or actor.get('role') in {'guest', 'temporary'}
+                or actor.get('explicit_disabled') or actor.get('inactive')):
             raise RiskError('当前账号没有风险排查权限。', 403)
 
     def template(self):
@@ -200,11 +287,26 @@ class RiskInspections:
     def brief(actor):
         return {k: actor.get(k, '') for k in ('id', 'name', 'open_id')}
 
+    def _reviewers(self, body, default=''):
+        ids = body.get('reviewer_ids', [body.get('reviewer_id') or default])
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 500
+                or any(not isinstance(pid, str) or not pid.strip() for pid in ids)
+                or len(set(ids)) != len(ids)):
+            raise RiskError('请选择有效且不重复的审核人。')
+        result = []
+        for pid in ids:
+            person = self.person_for(text(pid, 100, True))
+            self.check(person)
+            result.append(self.brief(person))
+        if len({p['id'] for p in result}) != len(result):
+            raise RiskError('审核人不能重复。')
+        return result
+
     def publish(self, actor, body, template):
         self.check(actor)
         if not manager(actor):
             raise RiskError('仅管理员或授权楼栋主管可发布排查。', 403)
-        if set(body) - {'id', 'name', 'deadline', 'reviewer_id', 'people', 'items', 'template_version', 'history_template_id', 'base_template_id'}:
+        if not isinstance(body, dict) or set(body) - {'id', 'name', 'deadline', 'reviewer_id', 'reviewer_ids', 'manager_ids', 'people', 'items', 'template_version', 'history_template_id', 'base_template_id'}:
             raise RiskError('发布参数无效。')
         rid = text(body.get('id'), 32, True)
         if not re.fullmatch('[a-f0-9]{32}', rid):
@@ -234,12 +336,10 @@ class RiskInspections:
         items = body.get('items')
         if not isinstance(recipients, list) or not 1 <= len(recipients) <= 500 or not isinstance(items, list) or not 1 <= len(items) <= 100:
             raise RiskError('请选择1至500名人员，并设置1至100项排查事项。')
-        if any(not isinstance(p, dict) or set(p) != {'id', 'scope'} or not isinstance(p['id'], str) or not isinstance(p['scope'], str) for p in recipients) or len({p['id'] for p in recipients}) != len(recipients):
+        if any(not isinstance(p, dict) or set(p) - {'id', 'scope', 'scopes'} or not isinstance(p.get('id'), str)
+               or not ('scope' in p or 'scopes' in p) for p in recipients) or len({p['id'] for p in recipients}) != len(recipients):
             raise RiskError('人员不能重复分配。')
-        reviewer = self.person_for(text(body.get('reviewer_id'), 100, True))
-        self.check(reviewer)
-        if not manager(reviewer):
-            raise RiskError('审核人需为有权限的管理员或楼栋主管。')
+        reviewers = self._reviewers(body, default=actor['id'])
         deadline = body.get('deadline')
         if type(deadline) not in {int, float} or not math.isfinite(deadline) or not time.time() * 1000 < deadline <= 32503680000000:
             raise RiskError('截止时间需晚于当前时间。')
@@ -253,20 +353,41 @@ class RiskInspections:
         for selected in recipients:
             person = self.person_for(text(selected['id'], 100, True))
             self.check(person)
-            scope = selected['scope']
-            if not all(can_scope(a, scope) for a in (actor, reviewer, person)):
-                raise RiskError('发布人、审核人及接收人必须都有对应楼栋的风险排查权限。', 403)
-            if person['id'] == reviewer['id']:
-                raise RiskError('审核人不能审核自己的排查，请选择其他审核人。')
-            people.append({**self.brief(person), 'scope': scope, 'version': 1, 'revoked': False,
-                           'items': deepcopy(base_items), 'updated': time.time()})
+            if any(p['id'] == person['id'] for p in people):
+                raise RiskError('人员不能重复分配。')
+            scopes = selected.get('scopes', [selected.get('scope')])
+            if (not isinstance(scopes, list) or not scopes or len(scopes) > len(SCOPES)
+                    or any(not isinstance(s, str) or s not in SCOPES for s in scopes)
+                    or len(set(scopes)) != len(scopes)):
+                raise RiskError('请选择有效且不重复的接收楼栋。')
+            if not all(can_scope(actor, s) for s in scopes):
+                raise RiskError('发布人需有全部接收楼栋的风险排查权限。', 403)
+            people.append({**self.brief(person), 'scope': scopes[0], 'scopes': scopes, 'version': 1, 'revoked': False,
+                           'items': [{**deepcopy(i), 'id': uuid.uuid4().hex, 'scope': s}
+                                     for s in scopes for i in base_items], 'updated': time.time()})
+        manager_ids = body.get('manager_ids', [])
+        if not isinstance(manager_ids, list) or len(manager_ids) > 50 or any(not isinstance(pid, str) for pid in manager_ids) or len(set(manager_ids)) != len(manager_ids):
+            raise RiskError('接收经理列表无效。')
+        if 'manager_ids' in body and not manager_ids:
+            raise RiskError('请选择最终汇总的接收经理。')
+        final_managers = []
+        for pid in manager_ids:
+            target = self.person_for(text(pid, 100, True))
+            self.check(target)
+            scopes = sorted({item_scope(p, i) for p in people for i in p['items'] if can_scope(target, item_scope(p, i))}, key=SCOPES.index)
+            if not final_manager(target) or not scopes:
+                raise RiskError('接收经理需有对应楼栋的风险排查权限。', 403)
+            final_managers.append({**self.brief(target), 'scopes': scopes})
+        if manager_ids and any(not any(item_scope(p, i) in m['scopes'] for m in final_managers) for p in people for i in p['items']):
+            raise RiskError('请为每个接收楼栋选择至少一名有权限的经理。')
         data = {'id': rid, 'name': text(body.get('name'), 120, True), 'deadline': deadline,
-                'owner': self.brief(actor), 'reviewer': self.brief(reviewer), 'created': time.time(),
+                'owner': self.brief(actor), 'reviewer': reviewers[0], 'reviewers': reviewers,
+                'task_grants_version': 2, 'created': time.time(),
                 'status': 'publishing', 'fields': fields, 'template_version': template['version'],
                 'original_items': [{'title': i['title'], 'values': deepcopy(i['values'])} for i in base_items],
                 'source_template': {'id': template_id, 'kind': 'base' if base_id else 'history',
                                     'revision': template['revision'], 'name': template['name']} if template_id else None,
-                'cloud': {}, 'request_hash': digest(body)}
+                'final_managers': final_managers, 'cloud': {}, 'request_hash': digest(body)}
         with self.connect(True) as db:
             if template_id:
                 current = self.history.read(db, template_id)
@@ -299,11 +420,44 @@ class RiskInspections:
                      and target.get('level') == 'L4' and target.get('category') in MANAGED_CATEGORIES))
 
     def controls(self, actor, release):
-        return manager(actor) and (actor['id'] in {release['owner']['id'], release['reviewer']['id']}
+        return manager(actor) and (actor['id'] == release['owner']['id']
+                                   or release.get('task_grants_version') != 2 and any(p['id'] == actor['id'] for p in reviewer_list(release))
                                    or self.superior(actor, release['owner']['id']))
 
-    def _visible(self, actor, release, person):
-        return can_scope(actor, person['scope']) and (actor['id'] == person['id'] or self.controls(actor, release))
+    def view_scopes(self, actor, release, person):
+        try:
+            self.check(actor)
+        except RiskError:
+            return []
+        if release.get('status') == 'deleted':
+            return []
+        scopes = list(dict.fromkeys(item_scope(person, i) for i in person['items']))
+        if actor['id'] == person['id'] or any(p['id'] == actor['id'] for p in reviewer_list(release)):
+            return scopes
+        return [s for s in scopes if can_scope(actor, s)] if self.controls(actor, release) else []
+
+    def _visible(self, actor, release, person, item=None):
+        scopes = self.view_scopes(actor, release, person)
+        return item_scope(person, item) in scopes if item is not None else bool(scopes)
+
+    def has_task_access(self, actor, rid=''):
+        try:
+            self.check(actor)
+        except RiskError:
+            return False
+        with self.connect() as db:
+            rows = db.execute("SELECT id,data FROM risk_releases WHERE json_extract(data,'$.status')='active'"
+                              + (' AND id=?' if rid else ''), (rid,) if rid else ())
+            for row in rows:
+                release = json.loads(row['data'])
+                if any(p['id'] == actor['id'] for p in reviewer_list(release)):
+                    return True
+                person = db.execute('SELECT data FROM risk_people WHERE release_id=? AND person_id=?', (row['id'], actor['id'])).fetchone()
+                if person:
+                    person = json.loads(person[0])
+                    if not person['revoked'] and any(i['status'] != 'revoked' for i in person['items']):
+                        return True
+        return False
 
     def get(self, actor, rid):
         self.check(actor)
@@ -311,17 +465,30 @@ class RiskInspections:
             release = self._release(db, rid)
             people = [json.loads(r[0]) for r in db.execute('SELECT data FROM risk_people WHERE release_id=? ORDER BY scope,person_id', (rid,))]
             controls = self.controls(actor, release)
-            visible = [p for p in people if can_scope(actor, p['scope']) and (p['id'] == actor['id'] or controls)]
+            visible = []
+            for person in people:
+                scopes = self.view_scopes(actor, release, person)
+                items = [i for i in person['items'] if item_scope(person, i) in scopes]
+                if items:
+                    visible.append({**person, 'items': items, 'scopes': scopes, 'scope': scopes[0]})
             if not visible:
                 raise RiskError('没有查看本次排查的权限。', 403)
+            full_control = controls and all(can_scope(actor, item_scope(p, i)) for p in people for i in p['items'])
+            is_reviewer = any(p['id'] == actor['id'] for p in reviewer_list(release))
             public = {k: deepcopy(release[k]) for k in ('id', 'name', 'created', 'deadline', 'status', 'fields')}
-            public.update({'owner': release['owner']['name'], 'reviewer': release['reviewer']['name'], 'people': visible,
-                           'url': release['cloud'].get('url', '') if controls and len(visible) == len(people) else '',
-                           'is_manager': controls, 'is_reviewer': manager(actor) and actor['id'] == release['reviewer']['id'], 'self_id': actor['id']})
-            public['can_claim'] = (controls and actor['id'] == release['owner']['id'] and actor['id'] != release['reviewer']['id']
+            public['fields'] = system_fields(public['fields'])
+            input_keys = {f['key'] for f in public['fields'] if f['role'] == 'input'}
+            public['final_managers'] = [{k: p[k] for k in ('id', 'name')} for p in release.get('final_managers', [])
+                                        if any(s in p['scopes'] for v in visible for s in person_scopes(v))]
+            public.update({'owner': release['owner']['name'], 'reviewer': reviewer_list(release)[0]['name'], 'people': visible,
+                           'reviewers': [{k: p[k] for k in ('id', 'name')} for p in reviewer_list(release)],
+                           'reviewer_ids': [p['id'] for p in reviewer_list(release)],
+                           'url': release['cloud'].get('url', '') if full_control else '',
+                           'is_manager': controls, 'is_reviewer': is_reviewer, 'self_id': actor['id']})
+            public['can_claim'] = (controls and actor['id'] == release['owner']['id']
                                    and release['status'] == 'active' and all(p['id'] != actor['id'] for p in people))
-            public['claim_scopes'] = sorted({p['scope'] for p in visible}, key=SCOPES.index) if public['can_claim'] else []
-            public['reviewer_id'] = release['reviewer']['id']
+            public['claim_scopes'] = sorted({s for p in visible for s in person_scopes(p) if can_scope(actor, s)}, key=SCOPES.index) if public['can_claim'] else []
+            public['reviewer_id'] = reviewer_list(release)[0]['id']
             public['reviewer_version'] = release.get('reviewer_version', 1)
             visible_ids = {p['id'] for p in visible}
             placeholders = ','.join('?' for _ in visible_ids)
@@ -332,16 +499,37 @@ class RiskInspections:
                 p.pop('open_id', None)
                 for i in p['items']:
                     i['files'] = files.get((p['id'], i['id']), [])
-            jobs = db.execute("SELECT id,kind,status,error,COALESCE(json_extract(payload,'$.subject_id'),json_extract(payload,'$.person_id')) AS subject FROM risk_jobs WHERE release_id=? AND status!='done'", (rid,))
-            public['can_manage_release'] = controls and len(visible) == len(people)
+                    automatic = system_values(release, p, i)
+                    i['system_values'] = {f['key']: automatic[f['role']] for f in public['fields'] if f['role'] != 'input'}
+                    i['values'] = {k: v for k, v in i['values'].items() if k in input_keys}
+            jobs = db.execute("SELECT id,kind,status,error,json_extract(payload,'$.item_id') AS item_id,COALESCE(json_extract(payload,'$.subject_id'),json_extract(payload,'$.person_id')) AS subject FROM risk_jobs WHERE release_id=? AND status!='done'", (rid,))
+            public['can_manage_release'] = full_control
             public['can_delete_release'] = public['can_manage_release']
             public['jobs'] = []
             for job in jobs:
-                if (job['subject'] in visible_ids and (manager(actor) or job['kind'] != 'review_notice')
-                        or public['can_manage_release']):
+                subject = next((p for p in visible if p['id'] == job['subject']), None)
+                whole_subject = subject and len(subject['items']) == len(next(p for p in people if p['id'] == subject['id'])['items'])
+                if (full_control or subject and (whole_subject or job['item_id'] in {i['id'] for i in subject['items']})
+                        and (manager(actor) or is_reviewer or job['kind'] != 'review_notice')):
                     public['jobs'].append({k: job[k] for k in ('id', 'kind', 'status', 'error')})
             audit_ids = [*visible_ids, *([''] if public['can_manage_release'] else [])]
-            public['audit'] = [dict(r) for r in db.execute('SELECT person_id,action,at,data FROM risk_audit WHERE release_id=? AND person_id IN (' + ','.join('?' for _ in audit_ids) + ') ORDER BY id DESC LIMIT 100', [rid, *audit_ids])]
+            public['audit'] = []
+            visible_items = {p['id']: {i['id'] for i in p['items']} for p in visible}
+            for row in db.execute('SELECT person_id,action,at,data FROM risk_audit WHERE release_id=? AND person_id IN (' + ','.join('?' for _ in audit_ids) + ') ORDER BY id DESC', [rid, *audit_ids]):
+                audit = dict(row)
+                data = json.loads(audit['data'])
+                if audit['person_id']:
+                    allowed = visible_items[audit['person_id']]
+                    if data.get('item_id') and data['item_id'] not in allowed:
+                        continue
+                    if not data.get('item_id') and len(allowed) != len(next(p for p in people if p['id'] == audit['person_id'])['items']):
+                        continue
+                    if 'items' in data:
+                        data['items'] = [i for i in data['items'] if i['id'] in allowed]
+                audit['data'] = json.dumps(data, ensure_ascii=False)
+                public['audit'].append(audit)
+                if len(public['audit']) == 100:
+                    break
             return public
 
     def list(self, actor, page=1, scope='', view='all'):
@@ -350,39 +538,49 @@ class RiskInspections:
             page = max(1, int(page))
         except (TypeError, ValueError):
             raise RiskError('页码无效。') from None
-        scopes = [s for s in SCOPES if can_scope(actor, s)]
         if view not in {'all', 'published', 'mine'}:
             raise RiskError('排查列表范围无效。')
         if view == 'published' and not manager(actor):
             view = 'mine'
-        if scope and scope != 'ALL':
-            if scope not in scopes:
-                raise RiskError('没有该楼栋风险排查的查看权限。', 403)
-            scopes = [scope]
+        if scope and scope != 'ALL' and scope not in SCOPES:
+            raise RiskError('没有该楼栋风险排查的查看权限。', 403)
         result = []
         with self.connect() as db:
             owners = [actor['id']]
             if manager(actor) and view != 'mine':
                 owners += [row[0] for row in db.execute('SELECT DISTINCT owner FROM risk_releases')
                            if row[0] != actor['id'] and self.superior(actor, row[0])]
-            scope_sql = 'p.scope IN (' + ','.join('?' for _ in scopes) + ')'
-            control_sql = '(r.owner IN (' + ','.join('?' for _ in owners) + ") OR json_extract(r.data,'$.reviewer.id')=?)"
-            control_args = [*owners, actor['id']] if manager(actor) else []
-            if not manager(actor):
-                control_sql = '0'
-            visible, args = scope_sql, list(scopes)
+            scopes = [s for s in SCOPES if can_scope(actor, s)]
+            item_scope_sql = "COALESCE(json_extract(i.value,'$.scope'),p.scope)"
+            scope_sql = item_scope_sql + ' IN (' + ','.join('?' for _ in scopes) + ')'
+            control_sql = 'r.owner IN (' + ','.join('?' for _ in owners) + ')' if manager(actor) else '0'
+            control_args = owners if manager(actor) else []
+            reviewer_sql = "EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(r.data,'$.reviewers'),json_array(json_extract(r.data,'$.reviewer')))) rv WHERE json_extract(rv.value,'$.id')=?)"
+            grants = '(p.person_id=? OR ' + reviewer_sql + ')'
+            grant_args = [actor['id'], actor['id']]
+            managed = '(' + scope_sql + ' AND ' + control_sql + ')'
             if view == 'mine':
-                visible += ' AND (p.person_id=? OR r.owner=?)'
-                args += [actor['id'], actor['id']]
+                visible, args = grants, grant_args
+                candidate = '(' + visible + ' OR (r.owner=? AND ' + managed + '))'
+                candidate_args = [*args, actor['id'], *scopes, *control_args]
             elif view == 'published':
-                visible += ' AND ' + control_sql
-                args += control_args
+                visible, args = managed, [*scopes, *control_args]
+                candidate, candidate_args = visible, args
             else:
-                visible += ' AND (p.person_id=? OR ' + control_sql + ')'
-                args += [actor['id'], *control_args]
-            sql = " FROM risk_releases r WHERE json_extract(r.data,'$.status')!='deleted' AND EXISTS(SELECT 1 FROM risk_people p WHERE p.release_id=r.id AND " + visible + ')'
-            total = db.execute('SELECT COUNT(*)' + sql, args).fetchone()[0]
-            rows = db.execute('SELECT r.data' + sql + ' ORDER BY r.created DESC,r.id LIMIT 20 OFFSET ?', args + [(page - 1) * 20]).fetchall()
+                visible, args = '(' + grants + ' OR ' + managed + ')', [*grant_args, *scopes, *control_args]
+                candidate, candidate_args = visible, args
+            if scope and scope != 'ALL':
+                authorized = db.execute("SELECT 1 FROM risk_people p JOIN risk_releases r ON r.id=p.release_id,json_each(p.data,'$.items') i WHERE json_extract(r.data,'$.status')!='deleted' AND "
+                                        + grants + ' AND ' + item_scope_sql + '=? LIMIT 1', [*grant_args, scope]).fetchone()
+                if not can_scope(actor, scope) and not authorized:
+                    raise RiskError('没有该楼栋风险排查的查看权限。', 403)
+                visible += ' AND ' + item_scope_sql + '=?'
+                candidate += ' AND ' + item_scope_sql + '=?'
+                args = [*args, scope]
+                candidate_args = [*candidate_args, scope]
+            sql = " FROM risk_releases r WHERE json_extract(r.data,'$.status')!='deleted' AND EXISTS(SELECT 1 FROM risk_people p,json_each(p.data,'$.items') i WHERE p.release_id=r.id AND " + candidate + ')'
+            total = db.execute('SELECT COUNT(*)' + sql, candidate_args).fetchone()[0]
+            rows = db.execute('SELECT r.data' + sql + ' ORDER BY r.created DESC,r.id LIMIT 20 OFFSET ?', [*candidate_args, (page - 1) * 20]).fetchall()
             for row in rows:
                 data = json.loads(row[0])
                 counts = db.execute("""SELECT COUNT(*) AS total, COUNT(DISTINCT p.person_id) AS people_count,
@@ -390,15 +588,19 @@ class RiskInspections:
                     COALESCE(SUM(json_extract(i.value,'$.status')='approved'),0) AS approved
                     FROM risk_people p JOIN risk_releases r ON r.id=p.release_id,json_each(p.data,'$.items') i
                     WHERE p.release_id=? AND NOT json_extract(p.data,'$.revoked')
-                    AND json_extract(i.value,'$.status')!='revoked' AND """ + visible + (' AND p.person_id=?' if view == 'mine' else ''),
-                    [data['id'], *args, *([actor['id']] if view == 'mine' else [])]).fetchone()
+                    AND json_extract(i.value,'$.status')!='revoked' AND """ + visible,
+                    [data['id'], *args]).fetchone()
+                full_control = self.controls(actor, data) and all(can_scope(actor, r[0]) for r in db.execute(
+                    "SELECT DISTINCT COALESCE(json_extract(i.value,'$.scope'),p.scope) FROM risk_people p,json_each(p.data,'$.items') i WHERE p.release_id=?", (data['id'],)))
                 result.append({**{k: data[k] for k in ('id', 'name', 'deadline', 'status')},
-                               'owner': data['owner']['name'], 'reviewer': data['reviewer']['name'], **dict(counts),
-                               'can_delete_release': self.controls(actor, data) and all(can_scope(actor, p[0]) for p in db.execute('SELECT scope FROM risk_people WHERE release_id=?', (data['id'],))),
-                               'can_claim': manager(actor) and data['owner']['id'] == actor['id'] and data['reviewer']['id'] != actor['id']
+                               'owner': data['owner']['name'], 'reviewer': '、'.join(p['name'] for p in reviewer_list(data)), **dict(counts),
+                               'reviewers': [{k: p[k] for k in ('id', 'name')} for p in reviewer_list(data)],
+                               'is_reviewer': any(p['id'] == actor['id'] for p in reviewer_list(data)),
+                               'can_manage_release': full_control, 'can_delete_release': full_control,
+                               'can_claim': manager(actor) and data['owner']['id'] == actor['id']
                                    and data['status'] == 'active' and not db.execute('SELECT 1 FROM risk_people WHERE release_id=? AND person_id=?', (data['id'], actor['id'])).fetchone()})
         return {'items': result, 'total': total, 'page': page, 'is_manager': manager(actor),
-                'can_edit_template': actor.get('level') in {'L0', 'L1'}}
+                'can_edit_template': manager(actor) and actor.get('level') in {'L0', 'L1'}}
 
     def delete(self, actor, rid, body):
         self.check(actor)
@@ -406,7 +608,7 @@ class RiskInspections:
             raise RiskError('删除参数无效。')
         with self.connect(True) as db:
             release = self._release(db, rid, include_deleted=True)
-            scopes = [row[0] for row in db.execute('SELECT scope FROM risk_people WHERE release_id=?', (rid,))]
+            scopes = [row[0] for row in db.execute("SELECT DISTINCT COALESCE(json_extract(i.value,'$.scope'),p.scope) FROM risk_people p,json_each(p.data,'$.items') i WHERE p.release_id=?", (rid,))]
             if not self.controls(actor, release) or not all(can_scope(actor, scope) for scope in scopes):
                 raise RiskError('没有删除本次排查任务的权限。', 403)
             if release['status'] == 'deleted':
@@ -438,20 +640,22 @@ class RiskInspections:
             item = next((i for i in person['items'] if i['id'] == body.get('item_id')), None)
             if action != 'revoke_person' and (not item or item['status'] == 'revoked'):
                 raise RiskError('该排查事项不存在或已撤销。', 409)
+            if item is not None and not self._visible(actor, release, person, item=item):
+                raise RiskError('无权处理该楼栋的排查事项。', 403)
             reason = text(body.get('reason', ''), 2000)
             if action in {'save', 'submit'}:
                 if actor['id'] != pid or item['status'] not in {'pending', 'returned'}:
                     raise RiskError('仅本人可填写未提交或退回的事项。', 403)
                 def file_check(field, fid):
                     return bool(db.execute('SELECT 1 FROM risk_files WHERE id=? AND release_id=? AND person_id=? AND item_id=? AND field_id=?', (fid, rid, pid, item['id'], field)).fetchone())
-                item['values'] = validate_values(release['fields'], body.get('values', {}), complete=action == 'submit', file_check=file_check)
+                item['values'] = validate_values(system_fields(release['fields']), body.get('values', {}), complete=action == 'submit', file_check=file_check)
                 if action == 'submit':
                     item.update(status='submitted', submitted_at=time.time(), submitted_by=actor['name'], reason='')
                     item.pop('reviewed_at', None)
                     item.pop('reviewed_by', None)
             elif action in {'approve', 'return'}:
-                if not manager(actor) or actor['id'] != release['reviewer']['id'] or actor['id'] == pid or item['status'] != 'submitted':
-                    raise RiskError('仅指定审核人可审核当前待审反馈，不能自审。', 403)
+                if not any(p['id'] == actor['id'] for p in reviewer_list(release)) or item['status'] != 'submitted':
+                    raise RiskError('仅指定审核人可审核当前待审反馈。', 403)
                 if action == 'return' and not reason:
                     raise RiskError('退回时请说明需要补充或修改的内容。')
                 item.update(status='approved' if action == 'approve' else 'returned', reason=reason,
@@ -459,6 +663,9 @@ class RiskInspections:
             elif action in {'revoke_person', 'revoke_item'}:
                 if not self.controls(actor, release) or not reason:
                     raise RiskError('仅管理员可撤销，请填写原因。', 403)
+                affected = person['items'] if action == 'revoke_person' else [item]
+                if not all(can_scope(actor, item_scope(person, i)) for i in affected):
+                    raise RiskError('撤销需要覆盖相关事项的全部楼栋。', 403)
                 if action == 'revoke_person':
                     person['revoked'] = True
                     for i in person['items']:
@@ -474,49 +681,56 @@ class RiskInspections:
             self._put_person(db, rid, person)
             self._audit(db, rid, pid, actor, action, {'item_id': body.get('item_id'), 'reason': reason, 'version': person['version'], 'items': person['items']})
             if action != 'save':
-                self.enqueue(db, rid, 'sync', {'person_id': pid, 'person': deepcopy(person), 'actor': self.brief(actor)}, f'sync:{rid}:{pid}:{person["version"]}')
+                snapshot = deepcopy(person)
+                snapshot['items'] = [i for i in snapshot['items'] if self._visible(actor, release, person, item=i)]
+                self.enqueue(db, rid, 'sync', {'person_id': pid, 'person': snapshot, 'actor': self.brief(actor)}, f'sync:{rid}:{pid}:{person["version"]}')
             if action in {'submit', 'return', 'approve'}:
-                target = release['reviewer']['id'] if action == 'submit' else pid
-                self.enqueue(db, rid, 'review_notice', {'person_id': target, 'subject_id': pid, 'action': action,
-                            'item_id': item['id'], 'version': person['version']}, f'review:{rid}:{pid}:{person["version"]}')
+                targets = [p['id'] for p in reviewer_list(release)] if action == 'submit' else [pid]
+                for target in targets:
+                    self.enqueue(db, rid, 'review_notice', {'person_id': target, 'subject_id': pid, 'action': action,
+                                'item_id': item['id'], 'version': person['version'], 'reviewer_version': release.get('reviewer_version', 1)},
+                                 f'review:{rid}:{pid}:{person["version"]}:{target}')
+            if action in {'approve', 'revoke_item', 'revoke_person'} and release.get('final_managers'):
+                people = [json.loads(r[0]) for r in db.execute('SELECT data FROM risk_people WHERE release_id=?', (rid,))]
+                batch = completion_key(people)
+                if batch:
+                    self.enqueue(db, rid, 'final_push', {'batch': batch}, f'final:{rid}:{batch}')
         return self.get(actor, rid)
 
     def change_reviewer(self, actor, rid, body):
         self.check(actor)
         if not manager(actor):
             raise RiskError('仅有权限的管理员或主管可更换审核人。', 403)
-        if not isinstance(body, dict) or set(body) != {'reviewer_id', 'version'} or type(body['version']) is not int:
+        if (not isinstance(body, dict) or set(body) - {'reviewer_id', 'reviewer_ids', 'version'}
+                or not ('reviewer_id' in body or 'reviewer_ids' in body) or type(body.get('version')) is not int):
             raise RiskError('审核人变更参数无效。')
-        reviewer = self.person_for(text(body['reviewer_id'], 100, True))
-        self.check(reviewer)
-        if not manager(reviewer):
-            raise RiskError('请选择有对应权限的管理员或主管作为审核人。', 403)
+        reviewers = self._reviewers(body)
         with self.connect(True) as db:
             release = self._release(db, rid)
             if not self.controls(actor, release):
                 raise RiskError('无权管理他人发布的排查。', 403)
             people = [json.loads(r[0]) for r in db.execute('SELECT data FROM risk_people WHERE release_id=?', (rid,))]
-            if not all(can_scope(actor, p['scope']) and can_scope(reviewer, p['scope']) for p in people):
+            if not all(can_scope(actor, item_scope(p, i)) for p in people for i in p['items']):
                 raise RiskError('更换审核人需要覆盖本次排查的全部楼栋。', 403)
             if release['status'] != 'active' or release.get('reviewer_version', 1) != body['version']:
                 raise RiskError('任务或审核人已变化，请重新读取核对。', 409)
-            if any(p['id'] == reviewer['id'] and not p['revoked'] for p in people):
-                raise RiskError('审核人不能同时作为本次排查接收人。')
-            if reviewer['id'] == release['reviewer']['id']:
+            if [p['id'] for p in reviewers] == [p['id'] for p in reviewer_list(release)]:
                 return self.get(actor, rid)
-            previous = release['reviewer']
-            release.update(reviewer=self.brief(reviewer), reviewer_version=body['version'] + 1)
+            previous = reviewer_list(release)
+            release.update(reviewer=reviewers[0], reviewers=reviewers, reviewer_version=body['version'] + 1)
             self._put_release(db, release)
-            self._audit(db, rid, '', actor, '更换审核人', {'previous': previous, 'reviewer': self.brief(reviewer)})
+            self._audit(db, rid, '', actor, '更换审核人', {'previous': previous, 'reviewers': reviewers})
             self.enqueue(db, rid, 'registry', {'actor': self.brief(actor)}, f'registry:{rid}:{release["reviewer_version"]}')
             for person in people:
                 if person['revoked']:
                     continue
                 for item in person['items']:
                     if item['status'] == 'submitted':
-                        self.enqueue(db, rid, 'review_notice', {'person_id': reviewer['id'], 'subject_id': person['id'],
-                            'action': 'submit', 'item_id': item['id'], 'version': item.get('notice_version', person['version'])},
-                            f'reviewer:{rid}:{release["reviewer_version"]}:{person["id"]}:{item["id"]}')
+                        for reviewer in reviewers:
+                            self.enqueue(db, rid, 'review_notice', {'person_id': reviewer['id'], 'subject_id': person['id'],
+                                'action': 'submit', 'item_id': item['id'], 'version': item.get('notice_version', person['version']),
+                                'reviewer_version': release['reviewer_version']},
+                                f'reviewer:{rid}:{release["reviewer_version"]}:{person["id"]}:{item["id"]}:{reviewer["id"]}')
         return self.get(actor, rid)
 
     def claim(self, actor, rid, body):
@@ -525,10 +739,10 @@ class RiskInspections:
             raise RiskError('请选择本次领取的楼栋。')
         with self.connect(True) as db:
             release = self._release(db, rid)
-            if not manager(actor) or actor['id'] != release['owner']['id'] or actor['id'] == release['reviewer']['id']:
-                raise RiskError('仅发布人可领取本人的排查任务；审核人不能同时参与本人审核。', 403)
+            if not manager(actor) or actor['id'] != release['owner']['id']:
+                raise RiskError('仅发布人可领取本人的排查任务。', 403)
             scope = body['scope']
-            scopes = {r[0] for r in db.execute('SELECT scope FROM risk_people WHERE release_id=?', (rid,))}
+            scopes = {r[0] for r in db.execute("SELECT DISTINCT COALESCE(json_extract(i.value,'$.scope'),p.scope) FROM risk_people p,json_each(p.data,'$.items') i WHERE p.release_id=?", (rid,))}
             if not isinstance(scope, str) or scope not in scopes or not can_scope(actor, scope):
                 raise RiskError('没有该楼栋的领取权限。', 403)
             if release['status'] != 'active':
@@ -542,8 +756,8 @@ class RiskInspections:
                 if originals is None:
                     originals = [{'title': i['title'], 'values': {}} for i in self._person(db, rid,
                         db.execute('SELECT person_id FROM risk_people WHERE release_id=? LIMIT 1', (rid,)).fetchone()[0])['items']]
-                person = {**self.brief(actor), 'scope': scope, 'version': 1, 'revoked': False, 'updated': time.time(),
-                          'items': [{'id': uuid.uuid4().hex, 'title': i['title'], 'values': deepcopy(i['values']), 'status': 'pending', 'reason': ''} for i in originals]}
+                person = {**self.brief(actor), 'scope': scope, 'scopes': [scope], 'version': 1, 'revoked': False, 'updated': time.time(),
+                          'items': [{'id': uuid.uuid4().hex, 'scope': scope, 'title': i['title'], 'values': deepcopy(i['values']), 'status': 'pending', 'reason': ''} for i in originals]}
                 self._put_person(db, rid, person)
                 self._audit(db, rid, actor['id'], actor, '领取本人任务', {})
                 self.enqueue(db, rid, 'registry', {'actor': self.brief(actor)}, f'claim-registry:{rid}:{actor["id"]}')
@@ -578,7 +792,7 @@ class RiskInspections:
                 AND NOT EXISTS(SELECT 1 FROM risk_jobs owner WHERE owner.status='running' AND owner.lease>=?)
                 AND NOT EXISTS(SELECT 1 FROM risk_jobs earlier WHERE earlier.release_id=j.release_id
                     AND earlier.status NOT IN ('done','cancelled') AND earlier.id!=j.id AND
-                    (earlier.kind='publish' OR (j.kind='sync' AND earlier.kind='sync'
+                    (earlier.kind='publish' OR (j.kind='final_push' AND earlier.kind IN ('sync','registry')) OR (j.kind='sync' AND earlier.kind='sync'
                     AND json_extract(earlier.payload,'$.person.version')<json_extract(j.payload,'$.person.version')
                     AND json_extract(earlier.payload,'$.person_id')=json_extract(j.payload,'$.person_id'))))
                 ORDER BY j.created,j.id LIMIT 1""", (time.time(), time.time(), time.time())).fetchone()
@@ -609,7 +823,7 @@ class RiskInspections:
         if not detail['can_manage_release']:
             raise RiskError('仅管理员可重试云端同步。', 403)
         _, people = self.raw(rid)
-        if not all(can_scope(actor, p['scope']) for p in people):
+        if not all(can_scope(actor, item_scope(p, i)) for p in people for i in p['items']):
             raise RiskError('不能重试超出楼栋权限的任务。', 403)
         with self.connect(True) as db:
             if template_only:

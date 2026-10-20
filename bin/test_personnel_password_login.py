@@ -16,8 +16,8 @@ Covers the current implementations of:
 All fake personnel rows carry a synthetic, unique real Feishu user field
 (员工姓名) with an ``ou_fixture*`` open_id; all passwords and identity numbers
 are synthetic. The session principal is the real open_id from the selected HR
-row (员工姓名 user-field, falling back to the 飞书 open_id field only when the
-user field is absent) - never a fabricated ``personnel_`` portal account.
+row (员工姓名 user-field only, never legacy 飞书 open_id text). Only an external
+person without a current Feishu ID uses the stable ``person:record_id`` principal.
 
 Everything runs against a temp SQLite/data directory with the real
 PortalAuthManager (get_data_file_path patched to temp) and a mocked Feishu
@@ -68,6 +68,7 @@ from lan_bitable_template_portal.portal_auth import (  # noqa: E402
     PortalAuthManager,
 )
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
+from lan_bitable_template_portal.feishu_identity import TARGET_APP_ID  # noqa: E402
 
 
 def _rec(row_id: str):
@@ -240,6 +241,8 @@ class _TempDirTestCase(unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.enterContext(_sqlite_write_sync_env())
+        self.enterContext(patch("lan_bitable_template_portal.portal_auth.config",
+                                SimpleNamespace(app_id=TARGET_APP_ID, app_secret="fixture-secret")))
         self._tmp = tempfile.TemporaryDirectory(
             prefix=self._tmp_prefix, ignore_cleanup_errors=True
         )
@@ -258,7 +261,7 @@ class _TempDirTestCase(unittest.TestCase):
 class PersonnelLoginHarness:
     """Builds a real PortalAuthManager + real PersonnelPasswordLogin + fake Feishu."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, migrated_grants=True):
         self.root = Path(root)
         self.patcher = patch(
             "lan_bitable_template_portal.portal_auth.get_data_file_path",
@@ -266,6 +269,15 @@ class PersonnelLoginHarness:
         )
         self.patcher.start()
         self.auth = PortalAuthManager()
+        if migrated_grants:
+            from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID
+            payload = self.auth._default_permissions()
+            payload['users'] = {oid: {'name': code, 'role': 'admin' if code == 'H' else 'building',
+                'scopes': self.auth._admin_scopes() if code == 'H' else [code], 'enabled': True}
+                for code, oid in BUILDING_OPEN_ID_MAP.items()}
+            payload['users'][LI_SHILONG_OPEN_ID] = {'name': 'Synthetic administrator', 'role': 'admin',
+                'scopes': self.auth._admin_scopes(), 'enabled': True, 'locked': True}
+            self.auth._save_permissions_locked(payload)
         self.service = FakePortalService()
         self.login = PersonnelPasswordLogin(
             lambda: self.service,
@@ -364,7 +376,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
     def test_fresh_persisted_directory_initializes_permissions_once_without_cloud_read(self):
         person=self.harness.login.person({'record_id':'recCached','fields':{'姓名':'缓存人员',
             '机楼/专业':'A楼','体系岗位':'电气工程师','员工姓名':_user('缓存人员','ou_fixtureCached')}})
-        self.harness.login.snapshot={'schema':3,'loaded_at':time.time(),'people':{person['id']:person}}
+        self.harness.login.snapshot={'schema':4,'app_id':TARGET_APP_ID,'loaded_at':time.time(),'people':{person['id']:person}}
         self.assertNotIn('work_handover',self.harness.auth.account_profile('ou_fixtureCached')['modules'])
         with patch.object(self.harness.auth,'sync_directory_permissions',wraps=self.harness.auth.sync_directory_permissions) as sync:
             self.harness.login.permission_people()
@@ -379,7 +391,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
     def test_cached_directory_permission_initialization_preserves_explicit_revocation(self):
         person=self.harness.login.person({'record_id':'recRevoked','fields':{'姓名':'撤权人员',
             '机楼/专业':'B楼','员工姓名':_user('撤权人员','ou_fixtureRevoked')}})
-        self.harness.login.snapshot={'schema':3,'loaded_at':time.time(),'people':{person['id']:person}}
+        self.harness.login.snapshot={'schema':4,'app_id':TARGET_APP_ID,'loaded_at':time.time(),'people':{person['id']:person}}
         with self.harness.auth._lock:
             data=self.harness.auth._load_permissions_locked()
             data['users']['ou_fixtureRevoked']={'enabled':True,'name':'撤权人员','access_version':1,
@@ -394,7 +406,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
     def test_cached_directory_survives_permission_store_write_failure_and_retries_without_grant_bypass(self):
         person=self.harness.login.person({'record_id':'recRetry','fields':{'姓名':'重试人员',
             '机楼/专业':'A楼','员工姓名':_user('重试人员','ou_fixtureRetry')}})
-        self.harness.login.snapshot={'schema':3,'loaded_at':time.time(),'people':{person['id']:person}}
+        self.harness.login.snapshot={'schema':4,'app_id':TARGET_APP_ID,'loaded_at':time.time(),'people':{person['id']:person}}
         with patch.object(self.harness.auth,'sync_directory_permissions',side_effect=OSError('synthetic write failure')):
             with self.assertLogs(level='WARNING'):
                 data=self.harness.login.permission_people()
@@ -1101,21 +1113,17 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         self.assertEqual(caught.exception.status, 403)
 
     # ---- missing / duplicated OpenID --------------------------------------
-    def test_missing_open_id_person_cannot_login(self):
-        # No 员工姓名 user field and no 飞书 open_id -> cannot authenticate.
+    def test_missing_open_id_person_keeps_password_login_without_feishu_identity(self):
         self._open("recMiss", {"姓名": "无OpenID", "机楼/专业": "A楼",
                                "身份证号": IDENTITY_NUMBER, PASSWORD_FIELD: hash_password("Pass1234")})
         self.harness.service._pages = [_page([_rec("recMiss")])]
-        with self.assertRaises(PasswordLoginError) as caught:
-            self.harness.login.login(
-                {"person_id": "recMiss", "password": "Pass1234"}, "127.0.0.1"
-            )
-        self.assertEqual(caught.exception.status, 403)
+        _, sid = self.harness.login.login(
+            {"person_id": "recMiss", "password": "Pass1234"}, "127.0.0.1")
+        self.assertEqual(self.harness.auth.get_session(sid)["user"]["open_id"], "person:recMiss")
+        self.assertEqual(self.harness.login.snapshot["people"]["recMiss"]["login_ids"], [])
         self.assertEqual(self.harness.service._patch_calls, 0)
 
-    def test_fallback_open_id_text_field_used_when_user_field_missing(self):
-        # When the 员工姓名 user field is absent, the row-level 飞书 open_id text
-        # field is the identity fallback (both are synthetic in this fixture).
+    def test_legacy_open_id_text_field_is_not_a_feishu_identity_fallback(self):
         stored = hash_password("Pass1234")
         rid = "recFallback"
         self._open(rid, {"姓名": "回退", "机楼/专业": "A楼",
@@ -1127,7 +1135,8 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
         )
         self.assertTrue(session_id)
         session = self.harness.auth.get_session(session_id)
-        self.assertEqual((session["user"] or {}).get("open_id"), "ou_fixtureF1")
+        self.assertEqual((session["user"] or {}).get("open_id"), "person:recFallback")
+        self.assertEqual(self.harness.login.snapshot["people"][rid]["login_ids"], [])
         self.assertIn("scope=A", data["redirect_url"])
 
     def test_multifloor_and_nofloor_login_authenticate_but_no_autogrant(self):
@@ -1448,7 +1457,7 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
             "needs_setup": False, "password_revision": "rev-1", "account_nature": "外部账号",
             "login_ids": [open_id],
         }
-        snapshot = {"people": {rid: person}, "loaded_at": time.time(), "schema": 3}
+        snapshot = {"people": {rid: person}, "loaded_at": time.time(), "schema": 4, "app_id": TARGET_APP_ID}
         self.harness.auth._state_store.put_document(ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, snapshot)
         self.harness.login.snapshot = snapshot
         if disabled:
@@ -1460,9 +1469,9 @@ class PersonnelPasswordLoginTests(_TempDirTestCase):
     def test_change_out_of_view_removed_inactive_or_disabled_fail(self):
         # out-of-view / removed: no directory entry for this person.
         self.harness.auth._state_store.put_document(
-            ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, {"people": {}, "loaded_at": time.time(), "schema": 3}
+            ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, {"people": {}, "loaded_at": time.time(), "schema": 4, "app_id": TARGET_APP_ID}
         )
-        self.harness.login.snapshot = {"people": {}, "loaded_at": time.time(), "schema": 3}
+        self.harness.login.snapshot = {"people": {}, "loaded_at": time.time(), "schema": 4, "app_id": TARGET_APP_ID}
         session = {"source": "personnel_password", "user": {"personnel_record_id": "recNope"}}
         with self.assertRaises(PasswordLoginError) as caught:
             self.harness.login.change(
@@ -1579,16 +1588,17 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
             "disabled_reason": "",
             "needs_setup": False,
             "password_revision": "rev-1",
+            "account_nature": "外部账号",
             "login_ids": [open_id],
         }
 
     def _seed_directory(self, mgr, person):
         store = mgr._state_store
-        payload = {"people": {person["id"]: dict(person)}, "loaded_at": time.time(), "schema": 3}
+        payload = {"people": {person["id"]: dict(person)}, "loaded_at": time.time(), "schema": 4, "app_id": TARGET_APP_ID}
         store.put_document(ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY, payload)
         # The modernized auth manager derives roles/scopes from the real roster
         # snapshot (机楼/专业 home, 体系岗位 job) - never from an invented flag.
-        snapshot = {"people": {person["id"]: dict(person)}, "loaded_at": time.time(), "schema": 3}
+        snapshot = payload
         mgr._account_directory_provider = lambda snap=snapshot: snap
 
     def test_creates_building_principal_real_open_id_exact_floor_absolute_ttl_and_restart(self):
@@ -1783,7 +1793,7 @@ class PersonnelAuthSessionTests(_TempDirTestCase):
         self._seed_directory(mgr, person)
         session_id = mgr.create_personnel_session(person)
         session = mgr.get_session(session_id)
-        # The session principal is the real open_id, not a fabricated personnel_ id.
+        # A unique current Feishu ID remains the password principal.
         self.assertEqual(session["user"]["open_id"], "ou_fixtureN")
         self.assertFalse(session["user"]["open_id"].startswith(ppl.PRINCIPAL_PREFIX))
         users = {u["open_id"]: u for u in mgr.get_permissions_payload()["users"]}
@@ -1911,7 +1921,7 @@ class PortalFeishuSessionMappingTests(_TempDirTestCase):
         # The Feishu identity is an H-department manager: HR home H + 体系岗位 经理
         # resolves to L1 (admin) - the authority comes from the roster, not from
         # the saved session role.
-        mgr._account_directory_provider = lambda: {"people": {"recAdmin": {
+        mgr._account_directory_provider = lambda: {"schema": 4, "app_id": TARGET_APP_ID, "people": {"recAdmin": {
             "id": "recAdmin", "name": "管理员", "scopes": ["H"], "position": "项目经理",
             "selectable": True, "inactive": False, "login_ids": [open_id]}}}
         mgr.upsert_permission_user(
@@ -1945,7 +1955,7 @@ class PortalFeishuSessionMappingTests(_TempDirTestCase):
         open_id = "ou_fixture_building"
         # The Feishu identity is an ordinary operator whose HR home (机楼/专业) is
         # exactly E; the authority is derived from the roster snapshot.
-        mgr._account_directory_provider = lambda: {"people": {"recBuilding": {
+        mgr._account_directory_provider = lambda: {"schema": 4, "app_id": TARGET_APP_ID, "people": {"recBuilding": {
             "id": "recBuilding", "name": "楼栋用户", "scopes": ["E"], "position": "运维值班员",
             "selectable": True, "inactive": False, "login_ids": [open_id]}}}
         mgr.upsert_permission_user(
@@ -2024,7 +2034,7 @@ class PersonnelPasswordRouteTests(_TempDirTestCase):
         }
         self.auth._state_store.put_document(
             ppl.DIRECTORY_NS, ppl.DIRECTORY_KEY,
-            {"people": {rid: person}, "loaded_at": time.time(), "schema": 3},
+            {"people": {rid: person}, "loaded_at": time.time(), "schema": 4, "app_id": TARGET_APP_ID},
         )
         return self.auth.create_personnel_session(person)
 

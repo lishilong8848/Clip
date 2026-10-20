@@ -188,6 +188,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('未知', events[-1].result.output)
 
     async def test_partial_reply_does_not_mix_in_another_model_answer(self):
+        self.agent._live_text_only = True
         self.fail()
         self.scripts['current']['events'].insert(0, {'event': 'agent', 'payload': {'runId': 'run-1',
             'stream': 'assistant', 'data': {'delta': 'partial original answer'}}})

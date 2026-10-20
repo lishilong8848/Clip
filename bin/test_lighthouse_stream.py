@@ -208,7 +208,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         replay = ''.join([chunk async for chunk in self.runtime.stream(self.actor, ack['run_id'], self.authorize)])
         self.assertIn('0123456789', replay)
 
-    async def test_long_answer_is_inline_on_feishu_and_durable_file_on_web(self):
+    async def test_long_answer_is_a_durable_markdown_file_on_both_channels(self):
         text = '二分查找需要有序序列，每次将查找范围减半。\n' * 250
         async def answer(*args): return {'answer': text, 'sources': []}
         self.engine.answer = answer
@@ -221,10 +221,6 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
                 conversation = await self.runtime.conversation(self.actor)
                 turn = conversation['turns'][-1]
                 self.assertEqual(turn['status'], 'completed', turn.get('error'))
-                if channel:
-                    self.assertEqual(turn['answer'], text)
-                    self.assertFalse(turn.get('output_files'))
-                    continue
                 self.assertLess(len(turn['answer']), 200)
                 output = turn['output_files'][0]
                 self.assertEqual(Path(self.portal.files.get(self.actor, output['id'])['path']).read_text(encoding='utf-8'), text)
@@ -514,6 +510,35 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(model_calls), 4, 'an empty image with vision off must not start model inference')
         self.assertEqual(self.reads, [])
 
+    async def test_known_text_only_models_read_ocr_without_raw_image_even_if_old_flag_enabled(self):
+        import io
+        from PIL import Image
+        from pydantic_ai.messages import BinaryContent
+        image = io.BytesIO()
+        Image.new('RGB', (16, 16), 'green').save(image, format='PNG')
+        file = self.portal.files.upload(self.actor, '文字截图.png', image.getvalue(), extract=False)
+        for name in ('GLM', 'Qwen', 'Deepseek'):
+            with self.subTest(model=name):
+                async def stream(messages, info):
+                    values = [part.content for message in messages for part in message.parts
+                              if getattr(part, 'part_kind', '') == 'user-prompt']
+                    self.assertIn('可靠OCR文字', str(values))
+                    self.assertFalse(any(isinstance(item, BinaryContent)
+                        for value in values if isinstance(value, list) for item in value))
+                    yield '图片中提取的文字：可靠OCR文字。'
+                @asynccontextmanager
+                async def factory(*_):
+                    yield FunctionModel(stream_function=stream)
+                async def emit(*_):
+                    pass
+                engine = LighthouseModel(self.portal, model_factory=factory)
+                with patch.object(self.portal.files, 'text', return_value={'text': '可靠OCR文字', 'error': ''}):
+                    result = await engine.answer(self.actor, {'question': '这张图片上写着什么文字？',
+                        'file_ids': [file['id']], 'operation_id': 'known_text_only_image',
+                        '_profile': {'name': name, 'model': f'WanWu/{name}-Auto', 'image_input': True}},
+                        [], self.request, emit, self.authorize, {})
+                self.assertIn('可靠OCR文字', result['answer'])
+
     async def test_archived_search_preserves_answer_and_file_source_scopes(self):
         from openclaw_service.assistant.lighthouse_stream import MESSAGES
         self.actor['scopes'] = ['A', 'D']
@@ -783,7 +808,10 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.engine.started.wait(), 5)
         await self.runtime.stop(self.actor, first["run_id"])
         self.assertEqual((await self.runtime.conversation(self.actor))["turns"][-1]["status"], "stopped")
-        self.assertIn("处理中", (await self.runtime.conversation(self.actor))["turns"][-1]["answer"])
+        saved = self.assistant.conversation(self.actor)["turns"][-1]
+        self.assertEqual(saved["answer"], "")
+        self.assertIn("处理中", saved["_draft_answer"])
+        self.assertNotIn("_draft_answer", (await self.runtime.conversation(self.actor))['turns'][-1])
         second = await self.submit("等待第二个")
         await self.runtime.stop(self.actor, first["run_id"])
         self.assertFalse(self.runtime.workers[self.actor["id"]].done())

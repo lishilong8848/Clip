@@ -1,11 +1,13 @@
-"""Admin-only configuration for the separate Feishu message application."""
+"""Admin channel switch; Feishu credentials are owned by Qt settings."""
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import re
 import secrets
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Request
@@ -18,16 +20,34 @@ from openclaw_service.protocol import atomic_json
 def read_config(path):
     if path is None:
         raise AssistantError("当前运行环境无法保存飞书智能体配置。", 503)
+    from upload_event_module.utils import DATA_DIR
+    from upload_event_module.config import config as qt_config
+    from upload_event_module.services.feishu_app_migration import sync_agent_config
+    canonical = Path(path).resolve() == (Path(DATA_DIR) / 'feishu_assistant.json').resolve()
+    if canonical:
+        try:
+            qt_config.refresh_credentials()
+            sync_agent_config(qt_config.app_id, qt_config.app_secret)
+        except Exception:
+            raise AssistantError('Qt 飞书鉴权同步尚未完成，未使用旧应用。', 503) from None
     raw = path.read_bytes() if path.exists() else b"{}"
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise AssistantError("飞书智能体配置文件格式不正确。", 503)
+    if canonical and data.get('app_id'):
+        try:
+            secret_matches = hmac.compare_digest(unprotect_key(data.get('secret_cipher') or '').encode(),
+                                                  qt_config.app_secret.encode())
+        except Exception:
+            secret_matches = False
+        if data['app_id'] != qt_config.app_id or not secret_matches:
+            raise AssistantError('飞书鉴权已变化，等待 Qt 配置同步；未使用旧应用。', 503)
     return data, hashlib.sha256(raw).hexdigest()
 
 
 def validate_app_id(app_id):
-    if app_id == 'cli_a9d1c9fe9d381cee':
-        raise AssistantError('表单交互与长连接必须使用飞书智能体专用应用，不能使用灯塔登录和业务数据应用。')
+    if not isinstance(app_id, str) or not re.fullmatch(r'cli_[A-Za-z0-9]{1,120}', app_id):
+        raise AssistantError('飞书应用标识无效，请核对 Qt 设置中的飞书鉴权。')
 
 
 def public_config(path, active):
@@ -41,6 +61,30 @@ def public_config(path, active):
 def save_config(path, payload, active):
     if not isinstance(payload, dict) or set(payload) - {"app_id", "app_secret", "enabled", "revision"}:
         raise AssistantError("配置内容无效。")
+    from upload_event_module.utils import DATA_DIR
+    if Path(path).resolve() == (Path(DATA_DIR) / 'feishu_assistant.json').resolve():
+        from upload_event_module.services.feishu_app_migration import qt_settings_transaction, read_credentials
+        if type(payload.get('enabled')) is not bool:
+            raise AssistantError('启用状态必须为开关。')
+        with qt_settings_transaction(DATA_DIR) as connection:
+            credentials = read_credentials(connection)
+            raw = path.read_bytes()
+            config = json.loads(raw)
+            if hashlib.sha256(raw).hexdigest() != payload.get('revision'):
+                raise AssistantError('配置已变化，请重新读取后保存。', 409)
+            secret = payload.get('app_secret', '')
+            if (payload.get('app_id') != credentials['feishu_app_id'] or not isinstance(secret, str)
+                    or secret and not hmac.compare_digest(secret.encode(), credentials['feishu_app_secret'].encode())):
+                raise AssistantError('飞书鉴权统一取自 Qt 设置，请重新读取。', 409)
+            try:
+                matching = config.get('app_id') == credentials['feishu_app_id'] and hmac.compare_digest(
+                    unprotect_key(config.get('secret_cipher') or '').encode(), credentials['feishu_app_secret'].encode())
+            except Exception:
+                matching = False
+            if not matching:
+                raise AssistantError('Qt 飞书鉴权正在同步，请重新读取后保存。', 409)
+            atomic_json(path, {**config, 'enabled': payload['enabled']})
+        return public_config(path, active)
     config, revision = read_config(path)
     if payload.get("revision") != revision:
         raise AssistantError("配置已被其他管理员修改，请重新读取后保存。", 409)
@@ -107,6 +151,12 @@ def install_feishu_assistant_settings(app, controller, runtime, channel):
                         payload = json.loads(body)
                     except (ValueError, UnicodeError, RecursionError):
                         raise AssistantError("配置格式无效。") from None
+                    from upload_event_module.config import config as qt_config
+                    await asyncio.to_thread(qt_config.load)
+                    if (not isinstance(payload, dict) or payload.get('app_id') != qt_config.app_id
+                            or payload.get('app_secret') and (not isinstance(payload['app_secret'], str)
+                                or not hmac.compare_digest(payload['app_secret'].encode(), qt_config.app_secret.encode()))):
+                        raise AssistantError('飞书应用统一取自 Qt 设置中的飞书鉴权，请在那里修改 App ID 和密钥。')
                     data = await asyncio.to_thread(save_config, channel.config_path, payload, channel.config)
             return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
         except AssistantError as exc:

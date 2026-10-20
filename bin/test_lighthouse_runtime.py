@@ -314,6 +314,18 @@ class ModelProviderErrorTests(unittest.TestCase):
         for body in (b'invalid-json', b'[]', b'{"error":null}', b'{"error":"invalid"}'):
             self.assertEqual(lrt.model_provider_error(400, body)['code'], 'model_request_rejected')
 
+    def test_reported_context_embedding_and_text_only_errors_are_classified_without_details(self):
+        for message, code in (
+            ('Requested token count exceeds the maximum context length of 149952 tokens. You requested 150220.', 'context_length_exceeded'),
+            ("The input (150042 tokens) is longer than the model's context length (149952 tokens).", 'context_length_exceeded'),
+            ('This model does not appear to be an embedding model by default. Please add --is-embedding.', 'embedding_unsupported'),
+            ("Model only supports text input; received unsupported content type 'image_url'.", 'vision_unsupported'),
+        ):
+            with self.subTest(code=code):
+                result = lrt.model_provider_error(400, json.dumps({'error': {'message': message}}).encode())
+                self.assertEqual(result['code'], code)
+                self.assertNotIn(message, json.dumps(result))
+
 
 class ModelTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -767,6 +779,112 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 403)
                 client.send.assert_not_called()
                 client.build_request.assert_not_called()
+
+    async def test_provider_output_budget_is_bounded_before_request(self):
+        item = await self.acquire('budget', {**_profile(), 'model': 'WanWu/MiniMax-Auto', 'context_window': 200000})
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'],
+                'messages': [{'role': 'user', 'content': 'a' * 84684}], 'max_tokens': 65536,
+                'max_completion_tokens': 65536})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(bodies), 1)
+        self.assertLessEqual(bodies[0]['max_tokens'], 5000)
+        self.assertNotIn('max_completion_tokens', bodies[0])
+        config = lrt.build_configuration(self.runtime.root, self.runtime.accounts, item['port'],
+            model_url='http://127.0.0.1/internal', plugin=Path('fixture'))
+        self.assertEqual(config['models']['providers']['lighthouse']['models'][0]['contextWindow'], 149952)
+
+    async def test_oversized_current_request_and_tools_never_reach_provider(self):
+        item = await self.acquire('huge', {**_profile(), 'model': 'WanWu/GLM-Auto', 'context_window': 200000})
+        calls = []
+        async def upstream(request):
+            calls.append(request)
+            return httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        too_long = 'a' * 150042
+        payloads = [
+            {'messages': [{'role': 'user', 'content': too_long}]},
+            {'messages': [{'role': 'system', 'content': 'You are a context summarization assistant.'},
+                          {'role': 'user', 'content': too_long}]},
+            {'messages': [{'role': 'user', 'content': 'hello'}],
+             'tools': [{'type': 'function', 'function': {'name': 'fixture', 'description': too_long}}]},
+        ]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            for payload in payloads:
+                with self.subTest(section=list(payload)):
+                    response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                        headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'], **payload})
+                    self.assertEqual(response.status_code, 413)
+                    self.assertEqual(response.json()['error']['code'], 'context_length_exceeded')
+        self.assertEqual(calls, [])
+
+    async def test_normal_business_schemas_and_tool_reply_fit_without_delaying_sdk_compaction(self):
+        profile = {**_profile(), 'model': 'WanWu/MiniMax-Auto'}
+        profile.pop('context_window')
+        item = await self.acquire('normal-business-budget', profile)
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        messages = [{'role': 'system', 'content': 'policy ' * 3700},
+                    {'role': 'user', 'content': 'current'},
+                    {'role': 'assistant', 'tool_calls': [{'id': 'original', 'type': 'function',
+                        'function': {'name': 'query', 'arguments': '{}'}}]},
+                    {'role': 'tool', 'tool_call_id': 'original', 'content': 'r' * 10000}]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'],
+                'messages': messages, 'tools': [{'type': 'function', 'function': {
+                    'name': 'query', 'description': 'd' * 24000}}]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(bodies[0]['messages'], messages)
+        config = lrt.build_configuration(self.runtime.root, self.runtime.accounts, item['port'],
+            model_url='http://127.0.0.1/internal', plugin=Path('fixture'))
+        self.assertEqual(config['models']['providers']['lighthouse']['models'][0]['contextWindow'], 64000)
+
+    async def test_known_text_only_models_cannot_send_images_from_stale_profiles(self):
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            for name in ('GLM', 'Qwen', 'Deepseek'):
+                item = await self.acquire(name, {**_profile(), 'model': f'WanWu/{name}-Auto', 'image_input': True})
+                response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'],
+                    'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': 'OCR text'},
+                        {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,Zml4dHVyZQ=='}}]}]})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(bodies[-1]['messages'][0]['content'], [{'type': 'text', 'text': 'OCR text'}])
+
+    async def test_stale_embedding_endpoint_is_rejected_without_network(self):
+        item = await self.acquire('embedding', {**_profile(), 'endpoint': 'https://provider.example/v1/embeddings'})
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        client = Mock(send=AsyncMock(), build_request=Mock())
+        with patch.object(self.runtime, 'model_client', AsyncMock(return_value=client)):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+                response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id']})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['error']['code'], 'embedding_unsupported')
+        client.send.assert_not_called()
 
 
     async def test_model_proxy_preserves_safe_context_error_without_provider_details(self):

@@ -46,8 +46,9 @@ const makePaper = person_id => ({
 function publicPaper(p) { return { ...structuredClone(p), stats: { total: p.questions.length, answered: p.questions.filter(q => q.attempt).length, shortage: 0 } }; }
 const papers = new Map();
 const practicePapers = new Map();
+const shiftPapers = new Map();
 let published = true;
-const allPapers = () => [...papers.values(), ...practicePapers.values()];
+const allPapers = () => [...papers.values(), ...practicePapers.values(), ...shiftPapers.values()];
 function paperFor(person_id) { if (!papers.has(person_id)) papers.set(person_id, makePaper(person_id)); return papers.get(person_id); }
 const requests = [];
 const unexpected = [];
@@ -102,6 +103,14 @@ try {
     if (p === "/api/learning/bootstrap") return ok({ ...currentActor, scope: url.searchParams.get("scope") || "A", settings: { enabled: true, publish_time: "08:00", reminder_enabled: false }, sync: { status: "ready", pending: 0 }, today, question_problem_count: currentActor.is_admin ? 1 : 0 });
     if (p === "/api/learning/papers/claim") {
       claims.push(body);
+      if (body.shift) {
+        assert.equal(body.date, '2026-10-08');
+        assert.equal(body.shift, '夜');
+        const key = `${body.date}:${body.person_id}`;
+        if (!shiftPapers.has(key)) shiftPapers.set(key, { ...makePaper(body.person_id),
+          id: `paper-night-${body.person_id}`, scope: currentActor.self_scope, date: body.date });
+        return ok(publicPaper(shiftPapers.get(key)));
+      }
       if (body.mode === 'practice') {
         const key = `${body.person_id}:${body.operation_id}`;
         if (!practicePapers.has(key)) {
@@ -437,6 +446,23 @@ try {
   assert.equal(await page.locator('.table-wrap tbody tr').count(), 3);
   assert.equal(await page.locator('.table-wrap tbody tr').filter({hasText:'自主练习'}).count(), 2);
   assert.equal(await page.locator('.table-wrap tbody tr').filter({hasText:'每日题单'}).count(), 1);
+
+  currentActor = { ...actors.personal, self_person: {...actors.personal.self_person, id:'night-learner', name:'夜班人员'} };
+  const nextDayPaper = paperFor('night-learner');
+  const requestStart = requests.length;
+  await page.goto(`${base}/learning?view=practice&date=2026-10-08&shift=${encodeURIComponent('夜')}`);
+  await page.getByRole('button', {name:'确认作答', exact:true}).waitFor();
+  assert.equal(claims.at(-1).date, '2026-10-08');
+  assert.equal(claims.at(-1).shift, '夜');
+  assert.equal(shiftPapers.size, 1);
+  assert.equal(papers.get('night-learner'), nextDayPaper, 'next-day paper remains untouched');
+  assert.ok(!requests.slice(requestStart).some(r => r.p === '/api/learning/papers' && r.query.today === '1'), 'night entry cannot load next-day daily paper');
+  await page.locator('.learning-page .toolbar').getByText('2026-10-08 · B楼', {exact:true}).waitFor();
+  await page.reload();
+  await page.getByRole('button', {name:'确认作答', exact:true}).waitFor();
+  assert.equal(shiftPapers.size, 1, 'night reload reuses the same roster-day paper');
+  assert.equal(claims.at(-1).date, '2026-10-08');
+  await page.screenshot({path:path.join(output, 'night-roster-day.png'), fullPage:true, animations:'disabled'});
 
   assert.deepEqual(pageErrors, [], `browser errors: ${pageErrors.join("\n")}`);
   assert.deepEqual(unexpected, [], `unexpected requests: ${unexpected.join(", ")}`);

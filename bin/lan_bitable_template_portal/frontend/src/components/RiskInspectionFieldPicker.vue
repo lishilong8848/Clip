@@ -10,19 +10,19 @@
             <Check v-if="selectedKeys.has(field.key)" :size="17" /><Plus v-else :size="17" />
             <span><strong>{{ field.field_name }}</strong><small>{{ riskTypeName(field.type) }} · {{ field.is_primary?'主字段':riskRoleName(field.role) }}{{ field.unsupported?' · 暂不支持':'' }}</small></span>
           </button>
-          <div v-if="canEdit" class="risk-field-tools"><NButton quaternary circle :disabled="disabled||loading" :title="'修改字段 '+field.field_name" :aria-label="'修改字段 '+field.field_name" @click="$emit('edit',field)"><Pencil :size="15" /></NButton><NButton quaternary circle type="error" :disabled="disabled||loading||field.is_primary" :title="field.is_primary?'主字段不可删除':'删除库字段 '+field.field_name" :aria-label="'删除库字段 '+field.field_name" @click="$emit('delete',field)"><Trash2 :size="15" /></NButton></div>
+          <div v-if="canEdit&&!riskSystemField(field)" class="risk-field-tools"><NButton quaternary circle :disabled="disabled||loading" :title="'修改字段 '+field.field_name" :aria-label="'修改字段 '+field.field_name" @click="$emit('edit',field)"><Pencil :size="15" /></NButton><NButton quaternary circle type="error" :disabled="disabled||loading||field.is_primary" :title="field.is_primary?'主字段不可删除':'删除库字段 '+field.field_name" :aria-label="'删除库字段 '+field.field_name" @click="$emit('delete',field)"><Trash2 :size="15" /></NButton></div>
         </div>
         <NEmpty v-if="!loading&&!visibleFields.length" size="small" :description="library?'没有匹配的字段':'字段库尚未读取'" />
       </div></NSpin>
     </section>
     <section class="risk-field-pane risk-selected-pane" aria-label="当前模板字段">
-      <header><div><h3>已选字段</h3><span>{{ workspaceV2 ? selectedFields.length+' 个填写字段' : fields.length+' / 80' }}</span></div></header>
+      <header><div><h3>已选字段</h3><span>{{ selectedFields.length }} 个填写字段</span></div></header>
       <slot name="settings" />
       <ol class="risk-field-list risk-selected-fields">
         <li v-for="(field,index) in selectedFields" :key="field.key" class="risk-field-row">
           <span class="risk-field-order">{{ index+1 }}</span><div class="risk-selected-name"><strong>{{ field.field_name }}</strong><small>{{ riskTypeName(field.type) }} · {{ field.is_primary?'主字段':riskRoleName(field.role) }}</small></div>
           <label v-if="field.role==='input'" class="risk-field-required"><NSwitch :value="!!field.required" :disabled="disabled" :aria-label="field.field_name+'是否必填'" @update:value="value=>$emit('required',field,value)" /><span>必填</span></label>
-          <LockKeyhole v-if="field.is_primary" :size="16" aria-label="主字段不可移除" />
+          <LockKeyhole v-if="field.is_primary||riskSystemField(field)" :size="16" aria-label="固定字段不可移除" />
           <NButton v-else data-v2-navigation quaternary circle :disabled="disabled" :title="'移除已选字段 '+field.field_name" :aria-label="'移除已选字段 '+field.field_name" @click="$emit('remove',field)"><X :size="17" /></NButton>
         </li>
       </ol>
@@ -37,15 +37,15 @@ import {computed,ref} from 'vue';
 import {NAlert,NButton,NEmpty,NInput,NSpin,NSwitch} from 'naive-ui';
 import {Check,LockKeyhole,Pencil,Plus,Trash2,X} from 'lucide-vue-next';
 import type {Dict} from '../api/client';
-import {riskRoleName,riskTypeName} from './riskInspectionUi';
+import {riskPresentationFields,riskRoleName,riskSystemField,riskTypeName} from './riskInspectionUi';
 const props=defineProps<{library:Dict|null;fields:Dict[];loading:boolean;disabled:boolean;canEdit:boolean;error:string;workspaceV2?:boolean}>();
 defineEmits<{(e:'add'|'reload'):void;(e:'select'|'edit'|'delete'|'remove',field:Dict):void;(e:'required',field:Dict,value:boolean):void}>();
 const search=ref('');
 const selectedKeys=computed(()=>new Set(props.fields.map(field=>field.key)));
 // Filter presentation only; the parent retains the complete schema for saves.
-const editableField=(field:Dict)=>!props.workspaceV2||!field.is_primary&&field.role==='input';
-const libraryFields=computed<Dict[]>(()=>props.library?.fields.filter(editableField)||[]);
-const selectedFields=computed(()=>props.fields.filter(editableField));
+const editableField=(field:Dict)=>!field.is_primary&&field.role==='input';
+const libraryFields=computed<Dict[]>(()=>riskPresentationFields(props.library?.fields||[]).filter(editableField));
+const selectedFields=computed(()=>riskPresentationFields(props.fields).filter(editableField));
 const visibleFields=computed(()=>libraryFields.value.filter(field=>field.field_name.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())));
 </script>
 <style scoped>

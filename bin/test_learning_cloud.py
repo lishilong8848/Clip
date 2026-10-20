@@ -594,7 +594,8 @@ class LearningCloudTests(unittest.TestCase):
         with self.assertRaises(cloud.LearningCloudWriteUncertain):
             self.remote.save_question(self.question(), "same-operation")
         creates = [c for c in self.fake.calls if c[1] == path and c[0] == "POST"]
-        self.assertEqual(len(creates), 2)
+        # An uncertain POST must not be replayed before explicit recovery.
+        self.assertEqual(len(creates), 1)
         self.fake.after = None
         saved = self.new_remote().save_question(self.question(), "same-operation")
         creates = [c for c in self.fake.calls if c[1] == path and c[0] == "POST"]

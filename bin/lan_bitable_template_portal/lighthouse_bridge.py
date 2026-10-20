@@ -58,6 +58,11 @@ async def actor_for(controller, runtime, request):
     channel = getattr(request.state, 'lighthouse_channel', '')
     if isinstance(channel, str) and re.fullmatch(r'feishu:oc_[A-Za-z0-9]+', channel):
         actor['channel'] = channel
+    client = request.headers.get('x-lighthouse-client', '')
+    if client and not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', client):
+        raise AssistantError('助手客户端标识无效。')
+    if client and not actor.get('channel'):
+        actor['_execution_lane'] = 'web:' + client
     return actor
 
 

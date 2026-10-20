@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from bin.test_learning import learning, FakeCloud
-from lan_bitable_template_portal.learning_weekly_cards import WeeklyCards, render
+from lan_bitable_template_portal.learning_weekly_cards import WeeklyCards, render, key
 
 
 class WeeklyCardsTests(unittest.TestCase):
@@ -322,6 +322,105 @@ class WeeklyCardsTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertIn('card', result)
         bot._resolve_user.assert_awaited_once_with({'sender_id': 'ou_bot_app', 'union_id': 'on_person'})
+
+    def guarded_sender(self, secret='fixture-old-secret'):
+        from pathlib import Path
+        from lan_bitable_template_portal.feishu_assistant import FeishuMessenger
+        from lan_bitable_template_portal.feishu_assistant_settings import read_config
+        configuration = {'app_id': 'cli_fixture', 'enabled': True, 'secret_cipher': secret}
+        config_path = Path(self.temp.name) / 'weekly-agent.json'
+        config_path.write_text(json.dumps(configuration), encoding='utf-8')
+        messenger = FeishuMessenger(configuration)
+        messenger.config_path, messenger.config_revision = config_path, read_config(config_path)[1]
+        client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(status_code=200,
+            json=lambda: {'code': 0, 'data': {'message_id': 'om_guarded', 'chat_id': 'oc_guarded'}})))
+        messenger.client = AsyncMock(return_value=client)
+        messenger.headers = AsyncMock(return_value={'Authorization': 'Bearer fixture-old-token'})
+        bot = SimpleNamespace(config=configuration, messenger=messenger, closing=False,
+                              _require_current_config=AsyncMock(side_effect=messenger._check_config))
+        self.runtime.feishu_assistant_channel = bot
+        return bot, client, config_path
+
+    def test_headers_configuration_or_connection_changes_cannot_post_old_ticket_with_new_token(self):
+        for changed in ('disk-app', 'disk-secret', 'bot-app', 'bot-secret', 'messenger', 'bot'):
+            with self.subTest(changed=changed):
+                bot, client, config_path = self.guarded_sender()
+                messenger = bot.messenger
+                async def headers():
+                    if changed.startswith('disk-'):
+                        updated = {**bot.config, ('app_id' if changed == 'disk-app' else 'secret_cipher'): 'fixture-new'}
+                        config_path.write_text(json.dumps(updated), encoding='utf-8')
+                    elif changed.startswith('bot-'):
+                        bot.config['app_id' if changed == 'bot-app' else 'secret_cipher'] = 'fixture-new'
+                    elif changed == 'messenger':
+                        bot.messenger = SimpleNamespace()
+                    else:
+                        self.runtime.feishu_assistant_channel = SimpleNamespace(config=bot.config, messenger=messenger)
+                    return {'Authorization': 'Bearer fixture-new-token'}
+                messenger.headers.side_effect = headers
+                target = 'oc_guarded' + changed.replace('-', '')
+                with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+                    with self.assertRaisesRegex(learning.LearningError, '配置已变化'):
+                        asyncio.run(self.feature.send(self.job, target, 'guard-' + changed))
+                client.post.assert_not_awaited()
+                ticket = self.service._get('engagement', 'weekly-card:' + key(self.job['id'], target))
+                self.assertNotIn('attempted_at', ticket)
+
+    def test_configuration_change_after_attempt_persistence_still_cannot_post(self):
+        bot, client, config_path = self.guarded_sender()
+        put = self.service._put
+        def changing_put(kind, identity, value, conn, *args):
+            put(kind, identity, value, conn, *args)
+            if value.get('attempted_at'):
+                config_path.write_text(json.dumps({**bot.config, 'secret_cipher': 'fixture-new'}), encoding='utf-8')
+        with patch.object(self.service, '_put', side_effect=changing_put), \
+             patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaisesRegex(learning.LearningError, '配置已变化'):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'same-operation'))
+        client.post.assert_not_awaited()
+        self.assertIn('attempted_at', self.feature.prepare(self.job, 'oc_guarded', 'cli_fixture'))
+
+    def test_uncertain_write_cannot_replay_after_secret_change_or_with_new_operation_id(self):
+        bot, client, _ = self.guarded_sender()
+        client.post.side_effect = OSError('response lost')
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaises(OSError):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'original-operation'))
+            with self.assertRaisesRegex(learning.LearningError, '操作编号不一致'):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'new-operation'))
+            _, replacement, _ = self.guarded_sender('fixture-new-secret')
+            with self.assertRaisesRegex(learning.LearningError, '发送配置已变化'):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'original-operation'))
+        client.post.assert_awaited_once()
+        replacement.post.assert_not_awaited()
+
+    def test_configuration_change_during_rejected_post_does_not_clear_uncertainty(self):
+        bot, client, config_path = self.guarded_sender()
+        async def post(*args, **kwargs):
+            config_path.write_text(json.dumps({**bot.config, 'secret_cipher': 'fixture-new'}), encoding='utf-8')
+            return SimpleNamespace(status_code=400, json=lambda: {'code': 230002})
+        client.post.side_effect = post
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaisesRegex(learning.LearningError, '配置已变化'):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'original-operation'))
+        ticket = self.feature.prepare(self.job, 'oc_guarded', 'cli_fixture')
+        self.assertIn('attempted_at', ticket)
+        self.assertEqual(ticket['send_identity'], 'original-operation')
+        self.assertFalse(ticket['message_id'])
+
+    def test_uncertain_write_cannot_replay_with_changed_card_content(self):
+        _, client, _ = self.guarded_sender()
+        client.post.side_effect = OSError('response lost')
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            with self.assertRaises(OSError):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'original-operation'))
+            ticket = self.feature.prepare(self.job, 'oc_guarded', 'cli_fixture')
+            with self.service.transaction() as conn:
+                ticket['report']['items'][0]['answered'] += 1
+                self.service._put('engagement', ticket['id'], ticket, conn)
+            with self.assertRaisesRegex(learning.LearningError, '接收人或内容已变化'):
+                asyncio.run(self.feature.send(self.job, 'oc_guarded', 'original-operation'))
+        client.post.assert_awaited_once()
 
 
 if __name__ == '__main__':

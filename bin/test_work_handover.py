@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import datetime as dt
+import hashlib
 import json
 import sys
 import tempfile
@@ -19,10 +20,13 @@ from lan_bitable_template_portal.work_handover_cards import HandoverCards,card,p
 from lan_bitable_template_portal.work_handover_routes import install_work_handover_routes
 from lan_bitable_template_portal.work_handover_sources import HandoverSources,explicit_participation,responsibility_modules
 from lan_bitable_template_portal.module_access import required_modules
+from upload_event_module.config import config
+from bin.test_feishu_delivery import TARGET_APP_ID, PREVIOUS_APP_ID, active_config, qt_credentials_fixture
 
 
 class HandoverTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(qt_credentials_fixture())
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.actors={name:{'id':name,'open_id':'ou_'+name,'name':'人员'+name,'role':'building','level':'L4',
@@ -224,16 +228,20 @@ class HandoverTests(unittest.TestCase):
         data=self.pending()
         with self.store.connect(True) as db:
             db.execute("UPDATE work_handover_outbox SET state='sent',message_id='om_original'")
+            row=db.execute('SELECT id,payload FROM work_handover_outbox').fetchone()
+            payload=json.loads(row['payload'])
+            payload['_delivery']={'sender_app_id':'cli_bot','status':'sent'}
+            db.execute('UPDATE work_handover_outbox SET payload=? WHERE id=?',(json.dumps(payload),row['id']))
         withdrawn=self.store.action(self.a,data['id'],data['version'],'withdraw')
         saved=self.store.save(self.a,data['id'],withdrawn['version'],{'title':'另一份交接内容','notes':'不应发给原接收人',
             'recipient_id':'eve','items':[{'id':'c'*32,'title':'新资料','scope':'A','kind':'reference','notes':'','source_id':''}]})
         self.store.action(self.a,data['id'],saved['version'],'send')
         with self.store.connect() as db:
             refresh=dict(db.execute("SELECT * FROM work_handover_outbox WHERE kind='refresh'").fetchone())
-        client=SimpleNamespace(patch=AsyncMock(return_value=SimpleNamespace(json=lambda:{'code':0})))
-        bot=SimpleNamespace(messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={})),
+        client=SimpleNamespace(patch=AsyncMock(return_value=SimpleNamespace(status_code=200,json=lambda:{'code':0})))
+        bot=SimpleNamespace(config=active_config('cli_bot'),messenger=SimpleNamespace(client=AsyncMock(return_value=client),headers=AsyncMock(return_value={})),
             runtime=SimpleNamespace(service=SimpleNamespace(_critical_guard_public_base_url=lambda:'https://portal')))
-        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+        with patch.object(config,'app_id','cli_bot'), patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
             mid=asyncio.run(HandoverCards(bot).deliver(self.store,refresh))
         self.assertEqual(mid,'om_original')
         call=client.patch.call_args
@@ -245,46 +253,47 @@ class HandoverTests(unittest.TestCase):
         self.assertNotIn('form_action_type',content)
 
     def test_bot_uses_app_scoped_verified_binding_not_login_open_id(self):
-        directory=Mock(return_value=[{'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}])
+        directory=Mock(return_value=[{'key':'cli_bot:ou_bob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}])
         union=Mock(return_value='on_bob')
         bot=SimpleNamespace(config={'app_id':'cli_bot'},runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=directory)),
             permission_cards=SimpleNamespace(union_id=union))
         cards=HandoverCards(bot)
-        self.assertEqual(cards.recipient_id(self.b),('open_id','ou_botBob'))
+        self.assertEqual(cards.recipient_id(self.b),('open_id','ou_bob'))
         union.assert_not_called()
         directory.return_value=[{'key':'cli_bot:ou_wrong','payload':{'open_id':'ou_bob','record_id':'eve','matched_by':'record_id'}}]
-        self.assertEqual(cards.recipient_id(self.b),('union_id','on_bob'))
+        with self.assertRaises(HandoverError): cards.recipient_id(self.b)
+        union.assert_not_called()
 
     def test_name_only_binding_cannot_send_and_record_evidence_can_send(self):
         self.pending()
         with self.store.connect() as db:
             row=dict(db.execute("SELECT * FROM work_handover_outbox WHERE kind='invite'").fetchone())
-        binding={'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'name'}}
+        binding={'key':'cli_bot:ou_bob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'name'}}
         union=Mock(side_effect=HandoverError('没有可信身份关联',403))
-        post=AsyncMock(return_value=SimpleNamespace(json=lambda:{'code':0,'data':{'message_id':'om_verified'}}))
-        bot=SimpleNamespace(config={'app_id':'cli_bot'},
+        post=AsyncMock(return_value=SimpleNamespace(status_code=200,json=lambda:{'code':0,'data':{'message_id':'om_verified'}}))
+        bot=SimpleNamespace(config=active_config('cli_bot'),
             permission_cards=SimpleNamespace(union_id=union),
             runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=Mock(return_value=[binding])),
                 service=SimpleNamespace(_critical_guard_public_base_url=lambda:'https://portal.invalid')),
             messenger=SimpleNamespace(client=AsyncMock(return_value=SimpleNamespace(post=post)),
                                       headers=AsyncMock(return_value={'Authorization':'fixture'})))
         cards=HandoverCards(bot)
-        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
-            with self.assertRaisesRegex(HandoverError,'可信身份'):
+        with patch.object(config,'app_id','cli_bot'), patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            with self.assertRaises(HandoverError):
                 asyncio.run(cards.deliver(self.store,row))
             post.assert_not_awaited()
-            union.assert_called_once_with('ou_bob')
+            union.assert_not_called()
             union.reset_mock()
             binding['payload']['matched_by']='record_id'
             self.assertEqual(asyncio.run(cards.deliver(self.store,row)),'om_verified')
         union.assert_not_called()
         post.assert_awaited_once()
         self.assertEqual(post.call_args.kwargs['params'],{'receive_id_type':'open_id'})
-        self.assertEqual(post.call_args.kwargs['json']['receive_id'],'ou_botBob')
-        self.assertNotEqual(post.call_args.kwargs['json']['receive_id'],self.b['open_id'])
+        self.assertEqual(post.call_args.kwargs['json']['receive_id'],'ou_bob')
+        self.assertEqual(post.call_args.kwargs['json']['receive_id'],self.b['open_id'])
 
     def test_recipient_binding_requires_trusted_provenance_and_exact_current_app(self):
-        binding={'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'bob'}}
+        binding={'key':'cli_bot:ou_bob','payload':{'open_id':'ou_bob','record_id':'bob'}}
         directory=Mock(return_value=[binding])
         union=Mock(return_value='on_bob')
         cards=HandoverCards(SimpleNamespace(config={'app_id':'cli_bot'},
@@ -295,30 +304,31 @@ class HandoverTests(unittest.TestCase):
                 binding['payload']['matched_by']=method
                 union.reset_mock()
                 trusted=method in {'record_id','union_id','admin'}
-                self.assertEqual(cards.recipient_id(self.b),('open_id','ou_botBob') if trusted else ('union_id','on_bob'))
                 if trusted:
+                    self.assertEqual(cards.recipient_id(self.b),('open_id','ou_bob'))
                     union.assert_not_called()
                 else:
-                    union.assert_called_once_with('ou_bob')
+                    with self.assertRaises(HandoverError): cards.recipient_id(self.b)
+                    union.assert_not_called()
         binding['key']='cli_old:ou_oldBob'
         binding['payload']['matched_by']='record_id'
-        self.assertEqual(cards.recipient_id(self.b),('union_id','on_bob'))
+        with self.assertRaises(HandoverError): cards.recipient_id(self.b)
         directory.assert_called_with('feishu_assistant_sender',key_prefix='cli_bot:')
 
     def test_untrusted_name_binding_does_not_override_or_ambiguate_trusted_binding(self):
         directory=Mock(return_value=[
             {'key':'cli_bot:ou_nameOnly','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'name'}},
-            {'key':'cli_bot:ou_verified','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}])
+            {'key':'cli_bot:ou_bob','payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}])
         union=Mock(side_effect=AssertionError('A unique verified binding needs no union lookup'))
         cards=HandoverCards(SimpleNamespace(config={'app_id':'cli_bot'},
             runtime=SimpleNamespace(state_store=SimpleNamespace(list_documents=directory)),
             permission_cards=SimpleNamespace(union_id=union)))
-        self.assertEqual(cards.recipient_id(self.b),('open_id','ou_verified'))
+        self.assertEqual(cards.recipient_id(self.b),('open_id','ou_bob'))
         union.assert_not_called()
 
     def test_gateway_recipient_fallback_rejects_name_only_binding(self):
         from lan_bitable_template_portal.feishu_delivery import PublicFeishuSender
-        binding={'key':'cli_bot:ou_botBob','payload':{'open_id':'ou_bob','record_id':'recBob','matched_by':'name'}}
+        binding={'key':'cli_bot:ou_bob','payload':{'open_id':'ou_bob','record_id':'recBob','matched_by':'name'}}
         union=Mock(side_effect=HandoverError('没有可信身份关联',403))
         runtime=SimpleNamespace(auth_manager=SimpleNamespace(directory_person=Mock(
             return_value={'id':'recBob','selectable':True})),
@@ -328,12 +338,11 @@ class HandoverTests(unittest.TestCase):
             messenger=SimpleNamespace(recipient_open_id=AsyncMock(return_value=None)))
         bot.handover_cards=HandoverCards(bot)
         gateway=PublicFeishuSender(runtime)
-        with self.assertRaisesRegex(HandoverError,'可信身份'):
-            asyncio.run(gateway.recipient(bot,'ou_bob'))
-        bot.messenger.recipient_open_id.assert_awaited_once_with('recBob')
+        self.assertEqual(asyncio.run(gateway.recipient(bot,'ou_bob')).status,'blocked')
+        bot.messenger.recipient_open_id.assert_not_awaited()
         binding['payload']['matched_by']='record_id'
         union.reset_mock()
-        self.assertEqual(asyncio.run(gateway.recipient(bot,'ou_bob')),('open_id','ou_botBob'))
+        self.assertEqual(asyncio.run(gateway.recipient(bot,'ou_bob')),('open_id','ou_bob'))
         union.assert_not_called()
 
     def test_sources_skip_missing_ids_and_preserve_zero_reading(self):
@@ -455,6 +464,375 @@ class HandoverTests(unittest.TestCase):
             self.assertEqual(retry['notification_failures'],[])
         with self.assertRaises(HandoverError):self.store.action(self.e,data['id'],data['version'],'retry-notification')
         with self.assertRaises(HandoverError):self.store.action(self.a,data['id'],data['version'],'retry-notification')
+
+
+class HandoverNotificationTests(unittest.TestCase):
+    draft=HandoverTests.draft
+    pending=HandoverTests.pending
+
+    def setUp(self):
+        HandoverTests.setUp(self)
+        self.data=self.pending()
+        self.base_payload=self.row()['payload']
+        for item in (patch.object(config,'app_id',TARGET_APP_ID),
+                     patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True})):
+            item.start()
+            self.addCleanup(item.stop)
+        self.post=AsyncMock(return_value=self.response())
+        self.patch=AsyncMock(return_value=self.response({'code':0}))
+        self.headers=AsyncMock(return_value={'Authorization':'offline-token'})
+        self.bindings=Mock(side_effect=lambda _ns,*,key_prefix:[{
+            'key':key_prefix+'ou_'+name,
+            'payload':{'open_id':'ou_'+name,'record_id':name,'matched_by':'record_id'}} for name in ('alice','bob','eve')])
+        self.bot=SimpleNamespace(config=active_config(),
+            runtime=SimpleNamespace(work_handovers=lambda:self.store,
+                work_handover_actor=lambda open_id,_name:self.actors[open_id.removeprefix('ou_')],
+                state_store=SimpleNamespace(list_documents=self.bindings),
+                service=SimpleNamespace(_critical_guard_public_base_url=lambda:'https://portal.invalid')),
+            permission_cards=SimpleNamespace(union_id=Mock(return_value='on_verified')),
+            messenger=SimpleNamespace(client=AsyncMock(return_value=SimpleNamespace(post=self.post,patch=self.patch)),headers=self.headers))
+        self.cards=HandoverCards(self.bot)
+
+    @staticmethod
+    def response(value=None,status=200):
+        return SimpleNamespace(status_code=status,json=lambda:value if value is not None else {
+            'code':0,'data':{'message_id':'om_current','chat_id':'oc_private'}})
+
+    def row(self,kind='invite'):
+        with self.store.connect() as db:
+            return dict(db.execute('SELECT * FROM work_handover_outbox WHERE kind=? ORDER BY rowid DESC LIMIT 1',(kind,)).fetchone())
+
+    def delivery(self,kind='invite'):
+        return json.loads(self.row(kind)['payload']).get('_delivery',{})
+
+    def send(self,kind='invite'):
+        return asyncio.run(self.cards.deliver(self.store,self.row(kind)))
+
+    def switch_app(self,app_id='cli_future'):
+        config.app_id=app_id
+        self.bot.config['app_id']=app_id
+
+    def due(self):
+        with self.store.connect(True) as db:
+            db.execute('UPDATE work_handover_outbox SET next_at=0')
+
+    def test_producer_invite_initializes_unsent_marker_and_drains_once(self):
+        self.assertEqual(self.delivery(),{'sender_app_id':'','status':'not_sent'})
+        self.assertEqual(self.row()['state'],'queued')
+        self.assertEqual(self.row()['attempts'],0)
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.row()['state'],'sent')
+        self.assertEqual(self.delivery()['status'],'sent')
+        self.assertEqual(self.delivery()['sender_app_id'],TARGET_APP_ID)
+        self.assertEqual(self.post.call_args.kwargs['json']['uuid'],
+                         hashlib.sha256(self.row()['id'].encode()).hexdigest()[:32])
+        asyncio.run(self.cards.drain())
+        self.post.assert_awaited_once()
+        self.patch.assert_not_awaited()
+
+    def test_producer_accept_initializes_result_and_refresh_and_drains_once(self):
+        self.send()
+        original=self.row()
+        self.post.reset_mock()
+        self.store.action(self.b,self.data['id'],self.data['version'],'accept')
+        for kind in ('result','refresh'):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.delivery(kind),{'sender_app_id':'','status':'not_sent'})
+                self.assertEqual(self.row(kind)['state'],'queued')
+                self.assertEqual(self.row(kind)['attempts'],0)
+        self.post.return_value=self.response({'code':0,'data':{'message_id':'om_result','chat_id':'oc_private'}})
+        asyncio.run(self.cards.drain())
+        for kind in ('result','refresh'):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.row(kind)['state'],'sent')
+                self.assertEqual(self.delivery(kind)['status'],'sent')
+                self.assertEqual(self.delivery(kind)['sender_app_id'],TARGET_APP_ID)
+        self.assertEqual(self.row('result')['message_id'],'om_result')
+        self.assertEqual(self.row('refresh')['message_id'],'om_current')
+        self.assertEqual(self.post.call_args.kwargs['json']['uuid'],
+                         hashlib.sha256(self.row('result')['id'].encode()).hexdigest()[:32])
+        self.assertTrue(self.patch.call_args.args[0].endswith('/om_current'))
+        self.assertEqual(self.row(),original)
+        asyncio.run(self.cards.drain())
+        self.post.assert_awaited_once()
+        self.patch.assert_awaited_once()
+        self.assertEqual(self.store.get(self.b,self.data['id'])['status'],'accepted')
+
+    def test_producer_withdraw_initializes_refresh_and_patches_once(self):
+        self.send()
+        original=self.row()
+        self.post.reset_mock()
+        self.store.action(self.a,self.data['id'],self.data['version'],'withdraw')
+        self.assertEqual(self.delivery('refresh'),{'sender_app_id':'','status':'not_sent'})
+        self.assertEqual(self.row('refresh')['state'],'queued')
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.row('refresh')['state'],'sent')
+        self.assertEqual(self.row('refresh')['message_id'],'om_current')
+        self.assertEqual(self.delivery('refresh')['sender_app_id'],TARGET_APP_ID)
+        self.assertTrue(self.patch.call_args.args[0].endswith('/om_current'))
+        self.assertEqual(self.row(),original)
+        asyncio.run(self.cards.drain())
+        self.patch.assert_awaited_once()
+        self.post.assert_not_awaited()
+
+    def test_first_send_persists_app_before_http_and_keeps_original_uuid(self):
+        async def inspect(*_args,**kwargs):
+            stored=self.delivery()
+            self.assertEqual(stored['sender_app_id'],TARGET_APP_ID)
+            self.assertEqual(stored['status'],'posting')
+            self.assertEqual(stored['target'],['open_id','ou_bob'])
+            self.assertEqual(kwargs['json']['uuid'],hashlib.sha256(self.row()['id'].encode()).hexdigest()[:32])
+            return self.response()
+        self.post.side_effect=inspect
+        self.assertEqual(self.send(),'om_current')
+        self.assertEqual(self.row()['state'],'sent')
+        self.assertEqual(self.delivery()['sender_app_id'],TARGET_APP_ID)
+        self.assertGreater(self.delivery()['accepted_at'],0)
+        self.switch_app()
+        self.assertEqual(self.send(),'om_current')
+        self.post.assert_awaited_once()
+
+    def test_permission_failure_is_definitely_unsent_and_may_use_future_app_once(self):
+        self.actors['bob']['scope_rules']=[]
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.delivery()['status'],'not_sent')
+        self.post.assert_not_awaited()
+        self.headers.assert_not_awaited()
+        self.actors['bob']['scope_rules']=['A']
+        self.switch_app()
+        self.due()
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.row()['state'],'sent')
+        self.assertEqual(self.delivery()['sender_app_id'],'cli_future')
+        self.assertEqual(self.post.call_args.kwargs['json']['receive_id'],'ou_bob')
+        self.assertEqual(self.send(),'om_current')
+        self.post.assert_awaited_once()
+
+    def test_initialized_previous_not_sent_can_bind_current_app_but_stale_bot_never_sends(self):
+        payload=json.loads(self.base_payload)
+        payload['_delivery']={'sender_app_id':PREVIOUS_APP_ID,'status':'not_sent'}
+        with self.store.connect(True) as db:
+            db.execute('UPDATE work_handover_outbox SET payload=?',(json.dumps(payload),))
+        self.bot.config['app_id']=PREVIOUS_APP_ID
+        with self.assertRaises(HandoverError):self.send()
+        self.post.assert_not_awaited()
+        self.headers.assert_not_awaited()
+        self.switch_app(TARGET_APP_ID)
+        self.assertEqual(self.send(),'om_current')
+        self.assertEqual(self.delivery()['sender_app_id'],TARGET_APP_ID)
+        self.post.assert_awaited_once()
+
+    def test_same_app_secret_rotation_requires_bot_and_messenger_to_match_qt(self):
+        with patch.object(config,'app_secret','fixture-rotated-secret'):
+            with self.assertRaises(HandoverError):self.send()
+            self.bot.config=active_config(secret='fixture-rotated-secret')
+            self.bot.messenger.config=active_config()
+            with self.assertRaises(HandoverError):self.send()
+            self.post.assert_not_awaited()
+            self.headers.assert_not_awaited()
+            self.assertEqual(self.delivery()['status'],'not_sent')
+            self.bot.messenger.config=dict(self.bot.config)
+            self.assertEqual(self.send(),'om_current')
+        self.post.assert_awaited_once()
+
+    def test_secret_change_during_post_keeps_original_unknown_outcome(self):
+        async def send(*args,**kwargs):
+            config.app_secret='fixture-rotated-secret'
+            return self.response()
+        self.post.side_effect=send
+        with self.assertRaises(HandoverError):self.send()
+        self.assertEqual(self.delivery()['status'],'posting')
+        self.assertEqual(self.row()['message_id'],'')
+        self.post.assert_awaited_once()
+
+    def test_timeout_cannot_repost_in_a_different_app(self):
+        self.post.side_effect=TimeoutError('offline uncertain request')
+        with self.assertRaises(TimeoutError):self.send()
+        original=self.delivery()
+        self.switch_app()
+        with self.assertRaisesRegex(HandoverError,'未换应用重发'):self.send()
+        self.assertEqual(self.delivery(),original)
+        self.assertEqual(self.row()['message_id'],'')
+        self.post.assert_awaited_once()
+        self.headers.assert_awaited_once()
+
+    def test_manual_retry_cannot_clear_persisted_unknown_app_ownership(self):
+        self.post.side_effect=TimeoutError('offline uncertain request')
+        asyncio.run(self.cards.drain())
+        original=self.delivery()
+        with self.store.connect(True) as db:
+            db.execute("UPDATE work_handover_outbox SET state='failed',attempts=6,next_at=0")
+        self.store.action(self.a,self.data['id'],self.data['version'],'retry-notification')
+        self.switch_app()
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.row()['state'],'failed')
+        self.assertEqual(self.delivery(),original)
+        self.assertEqual(self.store.get(self.b,self.data['id'])['status'],'pending')
+        self.post.assert_awaited_once()
+
+    def test_legacy_attempts_without_app_scope_are_held_even_after_retry_reset(self):
+        legacy=json.loads(self.base_payload)
+        legacy.pop('_delivery')
+        for state,attempts,next_at,error in [('queued',0,0,''),('queued',1,0,''),('failed',6,0,''),('queued',0,50,''),('queued',0,0,'unknown')]:
+            with self.subTest(state=state,attempts=attempts,next_at=next_at,error=error):
+                with self.store.connect(True) as db:
+                    db.execute('UPDATE work_handover_outbox SET state=?,attempts=?,next_at=?,error=?,payload=?',
+                               (state,attempts,next_at,error,json.dumps(legacy)))
+                with self.assertRaisesRegex(HandoverError,'未换应用重发'):self.send()
+                self.assertEqual(self.delivery(),{'sender_app_id':'','status':'uncertain'})
+                with self.store.connect(True) as db:
+                    db.execute("UPDATE work_handover_outbox SET state='queued',attempts=0,next_at=0,error=''")
+                with self.assertRaises(HandoverError):self.send()
+        self.post.assert_not_awaited()
+        self.headers.assert_not_awaited()
+
+    def test_legacy_sent_receipts_are_read_only_with_or_without_known_app(self):
+        for scoped in (False,True):
+            with self.subTest(scoped=scoped):
+                payload=json.loads(self.base_payload)
+                payload.pop('_delivery')
+                if scoped:payload['_delivery']={'sender_app_id':PREVIOUS_APP_ID,'status':'sent'}
+                with self.store.connect(True) as db:
+                    db.execute("UPDATE work_handover_outbox SET state='sent',message_id='om_historical',error='history',payload=?",(json.dumps(payload),))
+                original=self.row()
+                self.assertEqual(self.send(),'om_historical')
+                self.assertEqual(self.row(),original)
+        self.post.assert_not_awaited()
+        self.headers.assert_not_awaited()
+
+    def test_refresh_never_patches_another_apps_sent_card(self):
+        self.send()
+        self.store.action(self.a,self.data['id'],self.data['version'],'withdraw')
+        original=self.row()
+        self.post.reset_mock()
+        self.headers.reset_mock()
+        self.switch_app()
+        with self.assertRaisesRegex(HandoverError,'未跨应用更新'):self.send('refresh')
+        self.assertEqual(self.row(),original)
+        self.patch.assert_not_awaited()
+        self.post.assert_not_awaited()
+        self.headers.assert_not_awaited()
+
+    def test_refresh_cannot_guess_app_for_unscoped_legacy_sent_card(self):
+        legacy=json.loads(self.base_payload)
+        legacy.pop('_delivery')
+        with self.store.connect(True) as db:
+            db.execute("UPDATE work_handover_outbox SET state='sent',message_id='om_old',payload=?",(json.dumps(legacy),))
+        self.store.action(self.a,self.data['id'],self.data['version'],'withdraw')
+        original=self.row()
+        with self.assertRaisesRegex(HandoverError,'未跨应用更新'):self.send('refresh')
+        self.assertEqual(self.row(),original)
+        self.patch.assert_not_awaited()
+        self.post.assert_not_awaited()
+
+    def test_first_explicit_rejection_can_retry_current_app_with_original_uuid(self):
+        self.post.return_value=self.response({'code':230013},400)
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.delivery()['status'],'not_sent')
+        self.switch_app()
+        self.due()
+        self.post.return_value=self.response()
+        asyncio.run(self.cards.drain())
+        self.assertEqual(self.row()['state'],'sent')
+        self.assertEqual(self.delivery()['sender_app_id'],'cli_future')
+        self.assertEqual(len({call.kwargs['json']['uuid'] for call in self.post.call_args_list}),1)
+        self.assertEqual(self.post.await_count,2)
+
+    def test_later_rejection_cannot_erase_an_earlier_unknown_request(self):
+        self.post.side_effect=TimeoutError('offline uncertain request')
+        with self.assertRaises(TimeoutError):self.send()
+        self.post.side_effect=None
+        self.post.return_value=self.response({'code':230013},400)
+        with self.assertRaises(HandoverError):self.send()
+        self.assertEqual(self.delivery()['status'],'uncertain')
+        self.switch_app()
+        with self.assertRaisesRegex(HandoverError,'未换应用重发'):self.send()
+        self.assertEqual(self.delivery()['sender_app_id'],TARGET_APP_ID)
+        self.assertEqual(self.post.await_count,2)
+
+    def test_unknown_request_cannot_change_mapped_person(self):
+        self.post.side_effect=TimeoutError('offline uncertain request')
+        with self.assertRaises(TimeoutError):self.send()
+        original=self.delivery()
+        self.bindings.side_effect=None
+        self.bindings.return_value=[{'key':TARGET_APP_ID+':ou_changed',
+            'payload':{'open_id':'ou_bob','record_id':'bob','matched_by':'record_id'}}]
+        with self.assertRaisesRegex(HandoverError,'接收人或内容已变化'):self.send()
+        self.assertEqual(self.delivery(),original)
+        self.post.assert_awaited_once()
+
+    def test_app_change_during_headers_is_unsent_and_during_post_is_uncertain(self):
+        async def headers():
+            self.switch_app()
+            return {'Authorization':'offline-token'}
+        self.headers.side_effect=headers
+        with self.assertRaises(HandoverError):self.send()
+        self.assertEqual(self.delivery()['status'],'not_sent')
+        self.post.assert_not_awaited()
+        self.headers.side_effect=None
+        async def post(*_args,**_kwargs):
+            self.switch_app('cli_later')
+            return self.response()
+        self.post.side_effect=post
+        with self.assertRaises(HandoverError):self.send()
+        self.assertEqual(self.delivery()['status'],'posting')
+        self.assertEqual(self.delivery()['sender_app_id'],'cli_future')
+        with self.assertRaisesRegex(HandoverError,'未换应用重发'):self.send()
+        self.post.assert_awaited_once()
+
+    def test_http408_or_invalid_receipt_cannot_claim_success_or_clear_app(self):
+        for body,status in [({'code':230013},408),({'code':0,'data':{'message_id':'om_maybe'}},408),
+                            ({'code':0,'data':{'message_id':'om_redirect'}},302),
+                            ({'code':False},200),({'code':0,'data':{'message_id':'invalid'}},200),({'code':230013},503)]:
+            with self.subTest(body=body,status=status):
+                with self.store.connect(True) as db:
+                    db.execute("UPDATE work_handover_outbox SET state='queued',payload=?",(self.base_payload,))
+                self.post.return_value=self.response(body,status)
+                with self.assertRaises(HandoverError):self.send()
+                self.assertEqual(self.delivery()['status'],'posting')
+                self.assertEqual(self.delivery()['sender_app_id'],TARGET_APP_ID)
+                self.assertEqual(self.row()['message_id'],'')
+
+    def test_same_app_retry_is_bounded_and_keeps_uuid(self):
+        self.post.side_effect=TimeoutError('offline uncertain request')
+        with self.assertRaises(TimeoutError):self.send()
+        with patch('lan_bitable_template_portal.work_handover_cards.time.time',return_value=self.delivery()['attempted_at']+3600):
+            with self.assertRaisesRegex(HandoverError,'超出去重安全时限'):self.send()
+        self.post.assert_awaited_once()
+        self.post.side_effect=None
+        self.assertEqual(self.send(),'om_current')
+        self.assertEqual(len({call.kwargs['json']['uuid'] for call in self.post.call_args_list}),1)
+
+    def test_receipt_store_failure_keeps_app_pin(self):
+        with patch.object(self.cards,'_finish',side_effect=OSError('offline receipt store failed')):
+            with self.assertRaises(OSError):self.send()
+        self.assertEqual(self.delivery()['status'],'posting')
+        self.assertNotEqual(self.row()['state'],'sent')
+        self.switch_app()
+        with self.assertRaisesRegex(HandoverError,'未换应用重发'):self.send()
+        self.post.assert_awaited_once()
+
+    def test_config_change_after_claim_but_before_http_remains_definitely_unsent(self):
+        claim=self.cards._claim
+        def changed(*args):
+            claim(*args)
+            self.switch_app()
+        with patch.object(self.cards,'_claim',side_effect=changed):
+            with self.assertRaises(HandoverError):self.send()
+        self.assertEqual(self.delivery()['status'],'not_sent')
+        self.post.assert_not_awaited()
+        self.assertEqual(self.send(),'om_current')
+        self.assertEqual(self.delivery()['sender_app_id'],'cli_future')
+        self.post.assert_awaited_once()
+
+    def test_cancelled_http_attempt_retains_ownership_after_restart(self):
+        self.post.side_effect=asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):self.send()
+        self.assertEqual(self.delivery()['status'],'posting')
+        self.switch_app()
+        self.cards=HandoverCards(self.bot)
+        with self.assertRaisesRegex(HandoverError,'未换应用重发'):self.send()
+        self.post.assert_awaited_once()
 
 
 class HandoverRouteTests(HandoverTests):

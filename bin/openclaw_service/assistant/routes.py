@@ -296,6 +296,8 @@ def install_assistant_routes(app, host):
                     return JSONResponse({"ok": True, "data": {"files": results}}, headers={"Cache-Control": "no-store"})
                 body = bytearray()
                 body_limit = 128000 if action in {"agent", "messages"} or action.startswith("plans/") else 16000
+                if action == 'workspace':
+                    body_limit = 512 * 1024
                 if action == 'channel-replies':
                     body_limit = 1024 * 1024
                 if action.startswith("plans/") and (request.method == "PATCH" or action.endswith("/cabinet-text-preview")):
@@ -319,6 +321,55 @@ def install_assistant_routes(app, host):
                 data = await asyncio.to_thread(read_appearance, *args) if request.method == "GET" else await asyncio.to_thread(save_appearance, *args, payload)
                 warm_authenticated(actor)
                 return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
+            if action == 'workspace':
+                from .lighthouse_workspace import Workspace
+                current_agent = await ready_agent()
+                operation = payload if request.method == 'POST' else {'action': str(request.query_params.get('action', 'document.list'))}
+                confirmed = operation.pop('confirm_memory', False) is True
+                if 'sources' in operation or 'query_refs' in operation:
+                    raise AssistantError('业务快照只能由本轮已授权的助手查询保存，不能从客户端提交。')
+                data = await asyncio.to_thread(Workspace(host.store, current_agent.files).dispatch, actor, operation, confirmed=confirmed)
+                fresh = await actor_for(request)
+                if fresh['id'] != actor['id'] or set(actor['scopes']) - set(fresh['scopes']) \
+                        or set(actor.get('modules', [])) - set(fresh.get('modules', [])):
+                    raise AssistantError('登录权限已变化，未返回原资料。', 403)
+                return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
+            if action in {'voice', 'intelligence-capabilities'}:
+                from .lighthouse_voice import Voice
+                current_agent = await ready_agent()
+                voice = Voice(host.store, current_agent.files)
+                capabilities = voice.capabilities()
+                if action == 'voice' and request.method == 'PUT':
+                    data = await asyncio.to_thread(voice.configure, actor, payload)
+                elif action == 'voice' and request.method == 'POST':
+                    if payload.get('action') == 'transcribe' and set(payload) == {'action', 'file_id'}:
+                        data = await voice.transcribe(actor, payload['file_id'])
+                    elif payload.get('action') == 'synthesize' and set(payload) == {'action', 'text'}:
+                        data = await voice.synthesize(actor, payload['text'])
+                    else:
+                        raise AssistantError('语音操作格式无效。')
+                else:
+                    data = {**capabilities,
+                        'transcription': {'available': capabilities['stt'], 'note': capabilities['unsupported_message']},
+                        'synthesis': {'available': capabilities['tts'], 'note': '语音播报尚未配置，请联系管理员配置独立语音服务。'},
+                        'can_manage': bool(actor.get('is_admin'))}
+                    if actor.get('is_admin'):
+                        data['configuration'] = voice.configuration(actor)
+                    if action == 'intelligence-capabilities':
+                        from .lighthouse_sandbox import status
+                        from .lighthouse_ai import model_capabilities
+                        state = await asyncio.to_thread(current_agent.assistant._state, actor)
+                        selected = await asyncio.to_thread(current_agent.assistant.model_for(actor).profile, state.get('model_id', ''))
+                        data = {'voice': data, 'sandbox': await asyncio.to_thread(status),
+                            'vision': model_capabilities(selected)['image_input'],
+                            'documents': True, 'packages': True, 'memory': True, 'research': True,
+                            'video': {'available': False, 'note': '尚未接入视频理解服务，可上传关键帧。'},
+                            'image_generation': {'available': False, 'note': '尚未接入图像生成服务。'}}
+                fresh = await actor_for(request)
+                if fresh['id'] != actor['id'] or set(actor['scopes']) - set(fresh['scopes']) \
+                        or set(actor.get('modules', [])) - set(fresh.get('modules', [])):
+                    raise AssistantError('登录权限已变化，未返回原资料。', 403)
+                return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
             if action == 'commands':
                 from .lighthouse_commands import commands
                 current_agent = await ready_agent()
@@ -368,6 +419,9 @@ def install_assistant_routes(app, host):
             if action.startswith("runs/"):
                 current_streams = await ready_streams()
                 run_id = action.split("/")[1]
+                if action.endswith('/resume'):
+                    data = await current_streams.resume_research(actor, run_id, request, lambda: actor_for(request))
+                    return JSONResponse({'ok': True, 'data': data}, status_code=202, headers={'Cache-Control': 'no-store'})
                 if action.endswith("/cancel"):
                     data = await current_streams.stop(actor, run_id)
                     return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
@@ -416,7 +470,8 @@ def install_assistant_routes(app, host):
                 # It uses the same worker, permissions and operation ID as SSE.
                 current_streams = await ready_streams()
                 await current_streams.submit(actor, payload, request, lambda: actor_for(request))
-                task = current_streams.workers.get(actor["id"])
+                from .lighthouse_context import execution_key
+                task = current_streams.workers.get(execution_key(actor))
                 if task:
                     await asyncio.shield(task)
                 data = await current_streams.conversation(actor)
@@ -505,6 +560,10 @@ def install_assistant_routes(app, host):
     app.add_api_route('/api/assistant/channel-replies', endpoint, methods=['POST'], name='lighthouse_channel_replies')
     app.add_api_route('/api/assistant/conversation/stamp', endpoint, methods=['GET'], name='lighthouse_conversation_stamp')
     app.add_api_route('/api/assistant/extensions', endpoint, methods=['GET', 'PUT'], name='lighthouse_extensions')
+    app.add_api_route('/api/assistant/runs/{run_id}/resume', endpoint, methods=['POST'], name='lighthouse_research_resume')
+    app.add_api_route('/api/assistant/workspace', endpoint, methods=['GET', 'POST'], name='lighthouse_workspace')
+    app.add_api_route('/api/assistant/voice', endpoint, methods=['GET', 'POST', 'PUT'], name='lighthouse_voice')
+    app.add_api_route('/api/assistant/intelligence-capabilities', endpoint, methods=['GET'], name='lighthouse_intelligence_capabilities')
     app.add_api_route('/api/assistant/extensions/{server_id}/test', endpoint, methods=['POST'], name='lighthouse_extensions_test')
     async def disconnect():
         pending = list(agent.tasks) if agent is not None else []

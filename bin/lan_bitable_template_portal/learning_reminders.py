@@ -108,9 +108,10 @@ def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
     """Use exact names and unique live identities, never substitute a linked stranger."""
     from .learning_personal import _hr_active
     from .portal_service import BUILDING_OPEN_ID_MAP
+    from .feishu_identity import TARGET_DUTY_OPEN_IDS
 
     owners = Counter(oid for row in directory.values() for oid in set(row.get('login_ids') or []))
-    shared = set(BUILDING_OPEN_ID_MAP.values())
+    shared = set(BUILDING_OPEN_ID_MAP.values()) | set(TARGET_DUTY_OPEN_IDS.values())
     names = defaultdict(list)
     for row in directory.values():
         names[str(row.get('name') or '').strip()].append(row)
@@ -134,6 +135,59 @@ def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
     return list(resolved.values()), warnings
 
 
+def roster_snapshot(service, day):
+    snapshot = service._get('local', 'shift_roster') or {}
+    if snapshot.get('date') != day:
+        snapshot = service._get('local', 'shift_roster:' + day) or {}
+    if snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION:
+        retry = service._get('local', 'shift_roster_retry:' + day) or service._get('local', 'shift_roster_retry') or {}
+        if retry.get('date') == day and retry.get('retry_at', 0) > time.time():
+            return
+        try:
+            people = service._shift_roster_reader(day)
+        except Exception:
+            with service.transaction() as conn:
+                service._put('local', 'shift_roster_retry', {'date': day, 'retry_at': time.time() + 300}, conn, False)
+                service._put('local', 'shift_roster_retry:' + day, {'date': day, 'retry_at': time.time() + 300}, conn, False)
+            service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
+            return
+        snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION}
+        with service.transaction() as conn:
+            service._put('local', 'shift_roster', snapshot, conn, False)
+            service._put('local', 'shift_roster:' + day, snapshot, conn, False)
+    return snapshot
+
+
+def shift_learners(service, day, shift):
+    from .learning_personal import _login_directory, _hr_learning_scopes, resolve_self
+
+    if not service._shift_roster_reader:
+        return None
+    try:
+        directory, valid = _login_directory(service)
+    except Exception:
+        return None
+    if not valid:
+        return None
+    snapshot = roster_snapshot(service, day)
+    if snapshot is None:
+        return None
+    roster, warnings = resolve_roster(snapshot['people'], directory)
+    if warnings:
+        service._last_error = '学练排班待核对：' + '；'.join(warnings)
+    learners = []
+    for duty in roster:
+        if duty['shift'] != shift:
+            continue
+        rows = [rid for rid, row in directory.items() if str(row.get('name') or '').strip() == duty['name']
+                and _hr_learning_scopes(row) == [duty['scope']] and duty['open_id'] in (row.get('login_ids') or [])]
+        if len(rows) == 1:
+            resolved = resolve_self(service, 'personnel_' + rows[0])
+            if resolved.get('person_id'):
+                learners.append((duty, resolved['person']))
+    return learners
+
+
 def enqueue_shift_reminders(service, current):
     from .learning_personal import _login_directory
 
@@ -148,21 +202,9 @@ def enqueue_shift_reminders(service, current):
         service._last_error = '本地人员目录暂未就绪，个人学练提醒等待核对后发送。'
         return
     day = current.date().isoformat()
-    snapshot = service._get('local', 'shift_roster') or {}
-    if snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION:
-        retry = service._get('local', 'shift_roster_retry') or {}
-        if retry.get('date') == day and retry.get('retry_at', 0) > time.time():
-            return
-        try:
-            people = service._shift_roster_reader(day)
-        except Exception:
-            with service.transaction() as conn:
-                service._put('local', 'shift_roster_retry', {'date': day, 'retry_at': time.time() + 300}, conn, False)
-            service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
-            return
-        snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION}
-        with service.transaction() as conn:
-            service._put('local', 'shift_roster', snapshot, conn, False)
+    snapshot = roster_snapshot(service, day)
+    if snapshot is None:
+        return
     people, warnings = resolve_roster(snapshot['people'], directory)
     if warnings:
         service._last_error = '学练排班待核对：' + '；'.join(warnings)

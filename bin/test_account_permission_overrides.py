@@ -376,7 +376,23 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
 
     def test_restricted_manager_cannot_grant_unowned_defaults_by_omitting_modules(self):
         self.manager.update({"changes": [self.override_change("AE", level="L1", modules=["accounts", "maintenance"])]}, {"open_id":LI_SHILONG_OPEN_ID})
+        profile = self.h.auth.account_profile('ou_fixtureAE')
+        self.assertEqual(profile['level'], 'L1')
+        self.assertEqual(set(profile['modules']), {'accounts', 'maintenance'})
+        change = self.override_change("BE", level="L1")
+        # Compare committed snapshots, not cache-only updated_by metadata that SQLite omits.
+        self.h.auth._permissions_cache_until = 0.0
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
-        with self.assertRaises(PasswordLoginError):
-            self.manager.update({"changes": [self.override_change("BE", level="L1")]}, self.actor("AE"))
-        self.assertEqual(self.h.auth._load_permissions_locked(), before)
+        persisted_before = self.h.auth._state_store.get_auth_permissions()
+        self.assertEqual(persisted_before, before)
+        for reload_cache in (False, True):
+            with self.subTest(reload_cache=reload_cache):
+                if reload_cache:
+                    self.h.auth._permissions_cache_until = 0.0
+                with patch.object(self.h.auth, '_save_permissions_locked',
+                                  wraps=self.h.auth._save_permissions_locked) as save:
+                    with self.assertRaises(PasswordLoginError):
+                        self.manager.update({"changes": [change]}, self.actor("AE"))
+                    save.assert_not_called()
+                self.assertEqual(self.h.auth._load_permissions_locked(), before)
+                self.assertEqual(self.h.auth._state_store.get_auth_permissions(), persisted_before)

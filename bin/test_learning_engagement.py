@@ -48,6 +48,10 @@ class EngagementTests(unittest.TestCase):
     def start(self, paper):
         return self.dispatch('paper.start', {'id': paper['id'], 'person_id': paper['person_id']}, self.self_actor(paper['person_id']))
 
+    def practice_timer(self):
+        return self.dispatch('paper.claim', {'person_id': 'p1', 'mode': 'practice',
+            'operation_id': 'timer-fixture'}, self.self_actor())
+
     def send(self, current):
         if not callable(getattr(self.service, '_weekly_card_sender', None)):
             self.service._weekly_card_sender = lambda job, target, identity: self.service._send(target, engagement.make_card(job, self.service.portal_url()), identity)
@@ -79,7 +83,7 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual(first['version'], paper['version'])
 
     def test_timeout_once_with_partial_submission_restart_and_lost_response(self):
-        paper = self.claim(); self.start(paper); self.answer(paper)
+        paper = self.practice_timer(); self.answer(paper)
         self.send(CURRENT + dt.timedelta(hours=1, minutes=59))
         self.assertFalse(self.sender.calls)
         self.sender.fail_once = True
@@ -93,7 +97,7 @@ class EngagementTests(unittest.TestCase):
         self.send(CURRENT + dt.timedelta(days=1))
         self.assertEqual(len(self.sender.calls), 2)
         self.assertEqual(self.sender.calls[0][2], self.sender.calls[1][2])
-        self.assertIn('paper_id=personal%3A', json.dumps(self.sender.calls[1][1]))
+        self.assertIn('paper_id=practice%3A', json.dumps(self.sender.calls[1][1]))
 
     def test_finished_or_deleted_paper_never_reminds(self):
         first = self.claim(); self.start(first)
@@ -125,7 +129,7 @@ class EngagementTests(unittest.TestCase):
     def test_cross_day_and_timezone_deadline(self):
         current = CURRENT.replace(hour=23)
         with patch.object(learning, 'now', return_value=current):
-            paper = self.claim(); self.start(paper)
+            paper = self.practice_timer()
         self.send((current + dt.timedelta(hours=2)).astimezone(dt.timezone.utc))
         self.assertEqual(len(self.sender.calls), 1)
 
@@ -188,7 +192,7 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual({p['person_id'] for p in group['items']}, {'p1', 'p2', 'p3'})
 
     def test_pending_timeout_and_weekly_recheck_changed_role_before_retry(self):
-        paper = self.claim(); self.start(paper)
+        paper = self.practice_timer()
         self.sender.fail_once = True
         self.send(CURRENT + dt.timedelta(hours=2))
         self.hr['people']['p1']['position'] = '工程师'
@@ -262,13 +266,13 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual(self.mistakes()['total'], 0)
 
     def test_worker_notifier_runs_despite_cloud_failure(self):
-        paper = self.claim(); self.start(paper)
+        paper = self.practice_timer()
         with patch.object(self.service, '_tick', side_effect=OSError('offline')):
             with self.assertRaises(OSError): self.service.tick(CURRENT + dt.timedelta(hours=2))
         self.assertEqual(len(self.sender.calls), 1)
 
     def test_concurrent_start_and_remind_do_not_duplicate(self):
-        paper = self.claim()
+        paper = self.practice_timer()
         with patch('threading.Thread.start', REAL_THREAD_START):
             with ThreadPoolExecutor(max_workers=4) as pool:
                 list(pool.map(lambda _: self.start(paper), range(8)))
@@ -277,7 +281,7 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual(len(self.service._all('engagement')), 1)
 
     def test_missing_identity_waits_then_sends_without_changing_job_id(self):
-        paper = self.claim(); self.start(paper)
+        paper = self.practice_timer()
         with self.service.transaction() as conn:
             person = self.service._get('person', 'p1', conn)
             self.service._put('person', 'p1', {**person, 'login_ids': []}, conn, False)
@@ -289,7 +293,7 @@ class EngagementTests(unittest.TestCase):
         self.assertEqual(self.sender.calls[0][2], 'timeout:' + paper['id'])
 
     def test_completed_during_failed_delivery_cancels_retry(self):
-        paper = self.claim(); self.start(paper)
+        paper = self.practice_timer()
         self.sender.fail_once = True
         self.send(CURRENT + dt.timedelta(hours=2))
         with self.service.transaction() as conn:

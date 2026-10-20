@@ -114,6 +114,7 @@ class Handovers:
     def _queue(db, data, kind, target):
         key = f"handover:{data['id']}:{data['version']}:{kind}"
         snapshot = {k:v for k,v in data.items() if k != 'sent_snapshot'}
+        snapshot['_delivery'] = {'sender_app_id': '', 'status': 'not_sent'}
         db.execute('INSERT OR IGNORE INTO work_handover_outbox(id,handover_id,version,kind,target,payload) VALUES(?,?,?,?,?,?)',
                    (key, data['id'], data['version'], kind, target, json.dumps(snapshot,ensure_ascii=False)))
 

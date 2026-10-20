@@ -7,10 +7,13 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,7 @@ from .portal_service import (
 )
 from .state_store import DEFAULT_STATE_DB_NAME, LanPortalStateStore
 from .cabinet_guest import GUEST_SCOPES, GUEST_SESSION_PREFIX, is_cabinet_guest
+from .feishu_identity import TARGET_APP_ID
 from .account_policy import (
     MODULE_IDS,
     default_modules,
@@ -280,6 +284,11 @@ class PortalAuthStateError(PortalError):
         self.next_path = str(next_path or "/")
 
 
+class PortalAuthUnavailableError(PortalError):
+    status = 503
+    status_code = 503
+
+
 class _LazyTokenManager:
     def __init__(self) -> None:
         self._manager: Any = None
@@ -326,6 +335,11 @@ class PortalAuthManager:
 
     @staticmethod
     def configured() -> bool:
+        if callable(getattr(config, 'refresh_credentials', None)) or callable(getattr(config, 'load', None)):
+            try:
+                token_manager._credentials()
+            except Exception:
+                return False
         return bool(str(config.app_id or "").strip() and str(config.app_secret or "").strip())
 
     @staticmethod
@@ -393,17 +407,6 @@ class PortalAuthManager:
 
     def _default_permissions(self) -> dict[str, Any]:
         users: dict[str, dict[str, Any]] = {}
-        for code, open_id in BUILDING_OPEN_ID_MAP.items():
-            users[open_id] = {
-                "name": self.scope_label(code),
-                "role": "admin" if code == "H" else "building",
-                "scopes": self._admin_scopes() if code == "H" else [code],
-            }
-        users[LI_SHILONG_OPEN_ID] = {
-            "name": "李世龙",
-            "role": "admin",
-            "scopes": self._admin_scopes(),
-        }
         return {
             "version": 2,
             "updated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -418,32 +421,7 @@ class PortalAuthManager:
         if not isinstance(users, dict):
             users = {}
             payload["users"] = users
-        changed = False
-        for open_id, name in REQUIRED_ADMIN_USERS.items():
-            existing = users.get(open_id) if isinstance(users.get(open_id), dict) else {}
-            desired = {
-                **existing,
-                "name": str(existing.get("name") or name),
-                "role": "admin",
-                "scopes": self._admin_scopes(),
-                "enabled": True,
-                "locked": True,
-            }
-            if users.get(open_id) != desired:
-                users[open_id] = desired
-                changed = True
-        for code, open_id in BUILDING_OPEN_ID_MAP.items():
-            existing = users.get(open_id) if isinstance(users.get(open_id), dict) else {}
-            desired = {**existing, "name": existing.get("name") or self.scope_label(code), "role": "admin" if code == "H" else "building",
-                       "scopes": self._admin_scopes() if code == "H" else [code],
-                       "enabled": existing.get("enabled") is not False, "locked": False}
-            if existing != desired:
-                users[open_id] = desired
-                changed = True
-        if changed:
-            payload["version"] = 2
-            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self._save_permissions_locked(payload)
+        # Startup migration owns grants; loading must not recreate or elevate them.
         return payload
 
     def _load_permissions_locked(self) -> dict[str, Any]:
@@ -605,13 +583,13 @@ class PortalAuthManager:
         enabled = bool(cfg) and cfg.get("enabled") is not False and not self.directory_block_reason(open_id)
 
         level = "L4"
-        if open_id == LI_SHILONG_OPEN_ID:
-            level = "L0"
-        elif duty == "H":
-            level = "L1"
-        elif overridden and str(cfg.get("level") or "").strip() in {"L1", "L2", "L3", "L4"}:
+        if overridden and str(cfg.get("level") or "").strip() in {"L1", "L2", "L3", "L4"}:
             level = str(cfg.get("level")).strip()
-        elif duty == "H" or (home == "H" and category == "manager"):
+        elif open_id == LI_SHILONG_OPEN_ID and cfg.get("role") == "admin":
+            level = "L0"
+        elif duty == "H" and cfg.get("role") == "admin":
+            level = "L1"
+        elif home == "H" and category == "manager":
             level = "L1"
         elif home == "H" and category == "engineer":
             level = "L2"
@@ -623,11 +601,10 @@ class PortalAuthManager:
 
         # Scope rules: L0/L1/H duty are effectively full-ALL; manual override wins
         # for L2-L4; legacy records always follow HR home.
-        if level in {"L0", "L1"} or duty == "H":
+        if overridden and isinstance(cfg.get("scopes"), list):
+            scope_rules = self._scopes_from_raw(cfg.get("scopes"))
+        elif level in {"L0", "L1"}:
             scope_rules = self._admin_scopes()
-        elif overridden and isinstance(cfg.get("scopes"), list):
-            manual = self._scopes_from_raw(cfg.get("scopes"))
-            scope_rules = manual or ([home] if home else [])
         else:
             scope_rules = [home] if home else []
 
@@ -638,8 +615,6 @@ class PortalAuthManager:
         if not enabled:
             # Disabled / blocked identity fails closed: no module grants at all.
             modules = []
-        elif level == "L0" or duty == "H":
-            modules = list(default_modules(level))
         elif overridden and isinstance(cfg.get("modules"), list):
             # Empty is a valid explicit full revocation and must NOT fall back to
             # the level defaults. Only a genuinely absent module field would keep
@@ -649,7 +624,7 @@ class PortalAuthManager:
             # Materialized in an earlier directory sync / migration. Empty set is
             # preserved as an explicit full revocation.
             modules = [str(module) for module in cfg.get("modules") if str(module) in MODULE_IDS]
-        elif bool(person) or bool(duty):
+        elif bool(person) or bool(duty) or open_id in REQUIRED_ADMIN_USERS:
             # Valid, currently-known, enabled identity: default to the level's
             # capability.
             modules = list(default_modules(level))
@@ -678,23 +653,65 @@ class PortalAuthManager:
             return False
         if self.directory_block_reason(open_id):
             return True
-        return self._permission_user(open_id).get("enabled") is False
+        if self._permission_user(open_id).get("enabled") is False:
+            return True
+        return False
+
+    @staticmethod
+    def current_feishu_app_id() -> str:
+        refresher = getattr(config, "refresh_credentials", None)
+        if callable(refresher):
+            refresher()
+        return str(config.app_id or "").strip()
+
+    def canonical_feishu_identity(self, open_id: str, app_id: str) -> str:
+        """Validate an already verified OAuth identity without translating it."""
+        if app_id != self.current_feishu_app_id() or self._open_id_explicitly_disabled(open_id):
+            raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
+        return open_id
+
+    def current_feishu_open_id(self, identity: str, app_id: str) -> str | None:
+        """Read verified current-app recipients without fetching another HR snapshot."""
+        if not re.fullmatch(r"ou_[A-Za-z0-9]+", identity) or app_id != self.current_feishu_app_id():
+            return None
+        if app_id == TARGET_APP_ID and identity in {LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, *BUILDING_OPEN_ID_MAP.values()}:
+            return identity if self._permission_user(identity) and not self._open_id_explicitly_disabled(identity) else None
+        provider = getattr(self, "_account_directory_provider", None)
+        snapshot = provider() if provider else {}
+        if snapshot.get("schema") != 4 or snapshot.get("app_id") != app_id or time.time() - float(snapshot.get("loaded_at") or 0) >= 300:
+            return None
+        person = self.directory_person(identity)
+        if not person.get("selectable") or person.get("inactive") or self._open_id_explicitly_disabled(identity):
+            return None
+        return identity if person.get("login_ids") == [identity] else None
 
     def directory_person(self, open_id: str) -> dict[str, Any]:
         provider = getattr(self, "_account_directory_provider", None)
         snapshot = provider() if provider else {}
-        cached = getattr(self, "_account_index_cache", (None, {}))
-        if cached[0] is not snapshot:
+        app_id = self.current_feishu_app_id()
+        if snapshot.get("schema") != 4 or snapshot.get("app_id") != app_id:
+            return {}
+        cached = getattr(self, "_account_index_cache", (None, {}, None))
+        if cached[0] is not snapshot or len(cached) < 3 or cached[2] != app_id:
             index = {}
             for person in snapshot.get("people", {}).values():
-                for identity in person.get("login_ids", []):
+                identities = list(person.get("login_ids", []))
+                if not identities and person.get("account_nature", "").upper() != "VNET" and person.get("id"):
+                    identities.append("person:" + person["id"])
+                for identity in identities:
                     if identity not in index or not person.get("inactive"):
-                        index[identity] = person
-            cached = (snapshot, index)
+                        previous = index.get(identity)
+                        if previous and not previous.get("inactive") and not person.get("inactive") and previous.get("id") != person.get("id"):
+                            index[identity] = {**person, "selectable": False, "disabled_reason": "人员账号关联重复，请管理员核对"}
+                        else:
+                            index[identity] = person
+            cached = (snapshot, index, app_id)
             self._account_index_cache = cached
         return cached[1].get(open_id, {})
 
     def directory_block_reason(self, open_id: str) -> str:
+        if self._identity_quarantined(open_id):
+            return "该账号尚未通过当前飞书应用的身份迁移核验"
         # Shared duty accounts and recovery administrators are not personal HR records.
         if open_id in REQUIRED_ADMIN_USERS or open_id in BUILDING_OPEN_ID_MAP.values():
             return ""
@@ -704,6 +721,18 @@ class PortalAuthManager:
         provider = getattr(self, "_account_directory_provider", None)
         snapshot = provider() if provider else {}
         return snapshot.get("removed_identities", {}).get(open_id, "")
+
+    def _identity_quarantined(self, open_id: str) -> bool:
+        if not open_id:
+            return False
+        try:
+            from .feishu_identity_migration import is_identity_quarantined
+            with closing(sqlite3.connect(self._state_store.db_path.absolute().as_uri() + "?mode=ro",
+                                         uri=True, timeout=1.0)) as connection:
+                return is_identity_quarantined(connection, open_id)
+        except Exception as exc:
+            logging.warning("Identity quarantine verification unavailable: %s", type(exc).__name__)
+            raise PortalAuthUnavailableError("身份暂不可验证，请稍后重试。") from None
 
     def _hr_derived_modules(self, identity: str, person: dict[str, Any]) -> list[str]:
         """Modules a *valid* HR identity is entitled to before any explicit grant.
@@ -733,15 +762,18 @@ class PortalAuthManager:
         return list(default_modules(level))
 
     def sync_directory_permissions(self, people, *, on_login=False) -> None:
+        from .personnel_password_login import personnel_principal, PasswordLoginError
         with self._lock:
             payload = self._load_permissions_locked()
             users = payload.setdefault("users", {})
             changed = False
             for person in people:
-                identities = person.get("login_ids") or []
-                if not person.get("selectable") or len(identities) != 1:
+                if not person.get("selectable") or person.get("inactive"):
                     continue
-                identity = identities[0]
+                try:
+                    identity = personnel_principal(person)
+                except PasswordLoginError:
+                    continue
                 if identity in REQUIRED_ADMIN_USERS or identity in BUILDING_OPEN_ID_MAP.values():
                     continue
                 previous = users.get(identity) or {}
@@ -752,21 +784,13 @@ class PortalAuthManager:
                 # Manually configured access (access_version=1) must survive an
                 # HR directory sync: only identity/name/enabled stay HR-managed.
                 if previous.get("access_version") == 1:
-                    following = {**previous, "name": person["name"],
-                                 "enabled": previous.get("enabled") is not False,
-                                 "directory_scopes": scopes, "denied_scopes": [],
-                                 "locked": False}
+                    following = {**previous, "name": person["name"], "directory_scopes": scopes}
                 elif previous.get("module_access_version") == 1 and isinstance(previous.get("modules"), list):
-                    # Legacy modules already materialized in an earlier migration:
-                    # keep them and only refresh the HR-managed identity fields
-                    # (without ever promoting the old role/scopes to access_version).
                     following = {**previous, "name": person["name"],
                                  "role": "admin" if manager else "building",
                                  "enabled": previous.get("enabled") is not False,
                                  "scopes": scopes, "directory_scopes": scopes,
-                                 "denied_scopes": [], "locked": False,
-                                 "modules": list(previous["modules"]),
-                                 "module_access_version": 1}
+                                 "modules": list(previous["modules"]), "module_access_version": 1}
                 else:
                     # First sight of this valid identity: actually persist the
                     # HR-derived modules into the store and mark module_access_version.
@@ -1467,7 +1491,7 @@ class PortalAuthManager:
             return permissions
 
     def is_admin(self, session: dict[str, Any] | None) -> bool:
-        if not isinstance(session, dict):
+        if not isinstance(session, dict) or is_cabinet_guest(session):
             return False
         identity = (session.get("user") or {}).get("open_id")
         if identity:
@@ -1616,7 +1640,7 @@ class PortalAuthManager:
             return {}
         user = dict(session.get("user") or {})
         open_id = str(user.get("open_id") or "")
-        person = self.directory_person(open_id) if open_id not in BUILDING_OPEN_ID_MAP.values() else {}
+        person = self.directory_person(open_id) if not is_cabinet_guest(session) and open_id not in BUILDING_OPEN_ID_MAP.values() else {}
         if person.get("selectable"):
             user.update(name=person.get("name") or user.get("name"), employee_no=person.get("employee_no", ""))
         return {
@@ -1658,10 +1682,10 @@ class PortalAuthManager:
                     session["_last_personnel_check"] = 0
 
     def create_personnel_session(self, person: dict[str, Any]) -> str:
-        identities = person.get("login_ids") or []
-        if not person.get("selectable") or person.get("needs_setup") or not person.get("password_revision") or len(identities) != 1:
+        from .personnel_password_login import personnel_principal
+        if not person.get("selectable") or person.get("inactive") or person.get("account_nature", "").upper() == "VNET" or person.get("needs_setup") or not person.get("password_revision"):
             raise PortalError("人员已停用或身份不明确，无法登录。")
-        identity = identities[0]
+        identity = personnel_principal(person)
         session_id = secrets.token_urlsafe(32)
         now = time.time()
         session = {"user": {"open_id": identity, "name": person["name"], "employee_no": person.get("employee_no", ""),
@@ -1756,6 +1780,8 @@ class PortalAuthManager:
         open_id = str(user.get("open_id") or "").strip()
         if not open_id:
             raise PortalError("飞书登录未返回 open_id。")
+        app_id = str(config.app_id or "").strip()
+        provider_open_id = open_id
         loader = getattr(self, "_account_directory_loader", None)
         if loader:
             directory_ready = False
@@ -1770,7 +1796,16 @@ class PortalAuthManager:
                 raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
             if person and directory_ready:
                 self.sync_directory_permissions([person], on_login=True)
+        if self._open_id_explicitly_disabled(provider_open_id):
+            raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
+        open_id = self.canonical_feishu_identity(provider_open_id, app_id)
+        if self._open_id_explicitly_disabled(open_id):
+            raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
+        user = {**user, "open_id": open_id}
         if user.get("union_id"):
+            known = self._state_store.get_document("feishu_assistant_identity", user["union_id"]) or {}
+            if known.get("open_id") and known["open_id"] != open_id:
+                raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
             self._state_store.put_document("feishu_assistant_identity", user["union_id"], {
                 key: user.get(key, "") for key in ("open_id", "union_id", "name", "employee_no")})
         allowed_scopes = self.scopes_for_open_id(open_id)
@@ -1818,6 +1853,9 @@ class PortalAuthManager:
                 self._state_store.revoke_auth_session(self._secret_hash(session_id))
                 return None
             open_id = str((session.get("user") or {}).get("open_id") or "").strip()
+            if not is_cabinet_guest(session) and self._identity_quarantined(open_id):
+                self._sessions.pop(session_id, None)
+                return None
             if is_cabinet_guest(session):
                 session["allowed_scopes"] = list(GUEST_SCOPES)
             elif open_id:
@@ -1830,13 +1868,22 @@ class PortalAuthManager:
                 session["allowed_scopes"] = self.scopes_for_open_id(open_id)
                 session["role"] = self.role_for_open_id(open_id)
             if session.get("source") == "personnel_password":
-                from .personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY
+                from .personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY, personnel_principal, PasswordLoginError
                 rid = str((session.get("user") or {}).get("personnel_record_id") or "")
-                valid = bool(open_id.startswith("ou_") and rid) and now < float(session.get("created_at_ts") or 0) + AUTH_SESSION_TTL_SECONDS
+                valid = bool(rid) and (open_id == "person:" + rid or bool(re.fullmatch(r"ou_[A-Za-z0-9]+", open_id))) and now < float(session.get("created_at_ts") or 0) + AUTH_SESSION_TTL_SECONDS
                 if now - float(session.get("_last_personnel_check") or 0) >= 30:
                     snapshot = self._state_store.get_document(DIRECTORY_NS, DIRECTORY_KEY) or {}
                     person = (snapshot.get("people") or {}).get(rid) or {}
-                    valid = valid and person.get("selectable") and person.get("password_revision") == session.get("password_revision") and person.get("login_ids") == [open_id]
+                    try:
+                        principal = personnel_principal(person)
+                    except PasswordLoginError:
+                        principal = ""
+                    current_id = (snapshot.get("schema") == 4 and snapshot.get("app_id") == self.current_feishu_app_id()
+                                  and principal == open_id)
+                    duplicate = any(row.get("id") != rid and not row.get("inactive")
+                                    and open_id in row.get("login_ids", [])
+                                    for row in (snapshot.get("people") or {}).values())
+                    valid = valid and current_id and not duplicate and person.get("selectable") and not person.get("inactive") and person.get("password_revision") == session.get("password_revision")
                     session["_last_personnel_check"] = now
                 if not valid:
                     self._sessions.pop(session_id, None)

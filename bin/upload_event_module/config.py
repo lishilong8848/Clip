@@ -1,11 +1,20 @@
 ﻿import os
 import json
 import os
+import sqlite3
+import threading
+import math
+from contextlib import closing
+from pathlib import Path
 from .utils import (
     get_data_file_path,
     migrate_legacy_data_file,
 )
 from .logger import log_info, log_error
+from .services.feishu_app_migration import (
+    CREDENTIAL_FIELDS, TARGET_APP_ID, MIGRATION_MARKER, FeishuAppMigrationError, cleanup_legacy_configs,
+    migrate_config, migration_complete, qt_settings_transaction, read_credentials, sync_agent_config, write_settings,
+)
 
 # 飞书 SDK 默认配置
 DEFAULT_FEISHU_APP_TOKEN = ""
@@ -66,6 +75,7 @@ CONFIG_FILE = get_data_file_path("config.json")
 
 class ConfigManager:
     def __init__(self):
+        self._credential_lock = threading.RLock()
         self.app_token = DEFAULT_FEISHU_APP_TOKEN
         self.user_token = DEFAULT_FEISHU_USER_TOKEN
         self.app_id = DEFAULT_FEISHU_APP_ID
@@ -156,17 +166,74 @@ class ConfigManager:
             log_error(f"系统: SQLite配置读取失败: {exc}")
             return None
 
-    def _save_config_to_sqlite(self, config_data: dict) -> bool:
+    def _save_config_to_sqlite(self, config_data: dict, *, expected_credentials=None, bootstrap=False) -> bool:
         if not isinstance(config_data, dict):
             return False
         try:
-            from lan_bitable_template_portal.state_store import LanPortalStateStore
-
-            LanPortalStateStore().put_settings(config_data)
+            with self._credential_lock, qt_settings_transaction(os.path.dirname(CONFIG_FILE)) as connection:
+                if bootstrap and connection.execute("SELECT 1 FROM settings LIMIT 1").fetchone():
+                    return True
+                current = read_credentials(connection)
+                identity = current["feishu_app_id"], current["feishu_app_secret"]
+                changes = dict(config_data)
+                changing_auth = bool({"feishu_app_id", "feishu_app_secret"} & changes.keys())
+                writing_token = bool({"feishu_user_token", "token_expire_time"} & changes.keys())
+                if writing_token and not changing_auth and expected_credentials != identity:
+                    return False
+                if writing_token and not changing_auth and identity[0].startswith("cli_") and identity[0] != TARGET_APP_ID and not migration_complete(connection):
+                    return False
+                candidate = {**current, **{key: value for key, value in changes.items() if key in CREDENTIAL_FIELDS}}
+                if changing_auth and not bootstrap and (not identity[0] or identity[0] == TARGET_APP_ID):
+                    write_settings(connection, {MIGRATION_MARKER: 2})
+                migrated = migrate_config(candidate, data_dir=os.path.dirname(CONFIG_FILE), _connection=connection)
+                if migrated is not candidate or (not bootstrap and
+                        (migrated["feishu_app_id"], migrated["feishu_app_secret"]) != identity):
+                    changes.update({key: migrated[key] for key in CREDENTIAL_FIELDS})
+                    changes.update(feishu_user_token="", token_expire_time=0)
+                write_settings(connection, changes)
             return True
+        except FeishuAppMigrationError:
+            raise
         except Exception as exc:
-            log_error(f"系统: SQLite配置保存失败: {exc}")
+            log_error(f"系统: SQLite配置保存失败 ({type(exc).__name__})")
             return False
+
+    def refresh_credentials(self) -> tuple[str, str]:
+        """Read only authoritative auth rows; never fall back to an old snapshot."""
+        with self._credential_lock:
+            try:
+                database = Path(CONFIG_FILE).with_name("lan_portal_state.sqlite3")
+                with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                    current = read_credentials(connection, include_migration=True)
+                if current["feishu_app_id"].startswith("cli_") and current["feishu_app_id"] != TARGET_APP_ID and current[MIGRATION_MARKER] != 2:
+                    raise FeishuAppMigrationError("migration_pending")
+                self.app_id, self.app_secret, self.user_token, self.token_expire_time = (
+                    current[key] for key in CREDENTIAL_FIELDS)
+                self.feishu_app_migration_error = ""
+                return self.app_id, self.app_secret
+            except Exception as exc:
+                self.app_id = self.app_secret = self.user_token = ""
+                self.token_expire_time = 0
+                self.feishu_app_migration_error = exc.code if isinstance(exc, FeishuAppMigrationError) else "settings_read_failed"
+                raise FeishuAppMigrationError(self.feishu_app_migration_error) from None
+
+    def save_tenant_token(self, token, expire, expected_credentials) -> bool:
+        """Persist token and absolute expiry only if the issuing credentials match."""
+        if (not isinstance(expected_credentials, (tuple, list)) or len(expected_credentials) != 2
+                or not all(isinstance(value, str) and value for value in expected_credentials)
+                or not isinstance(token, str) or not token
+                or type(expire) not in (int, float) or (isinstance(expire, float) and not math.isfinite(expire)) or expire <= 0):
+            return False
+        with self._credential_lock:
+            try:
+                if not self._save_config_to_sqlite({"feishu_user_token": token, "token_expire_time": expire},
+                                                  expected_credentials=tuple(expected_credentials)):
+                    return False
+                self.refresh_credentials()
+                return (self.app_id, self.app_secret) == tuple(expected_credentials)
+            except Exception:
+                log_error("系统: 飞书令牌保存失败 (token_persist_failed)")
+                return False
 
     def polling_work_order_relay_url_change_block_reason(self, new_url: str) -> str:
         current = str(self.polling_work_order_public_relay_url or "").strip().rstrip("/")
@@ -195,6 +262,10 @@ class ConfigManager:
         return ""
 
     def load(self):
+        with self._credential_lock:
+            self._load()
+
+    def _load(self):
         """加载配置文件"""
         try:
             config_data = self._load_config_from_sqlite()
@@ -202,8 +273,29 @@ class ConfigManager:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     config_data = json.load(f)
                 if isinstance(config_data, dict):
-                    self._save_config_to_sqlite(config_data)
+                    if not self._save_config_to_sqlite(config_data, bootstrap=True):
+                        raise FeishuAppMigrationError("settings_persist_failed")
+                    config_data = self._load_config_from_sqlite()
             if isinstance(config_data, dict):
+                    try:
+                        migrated = config_data
+                        if str(config_data.get("feishu_app_id", "")).startswith("cli_"):
+                            if not self._save_config_to_sqlite({}):
+                                raise FeishuAppMigrationError("settings_persist_failed")
+                        if str(config_data.get("feishu_app_id", "")).startswith("cli_"):
+                            self.refresh_credentials()
+                            migrated = {**config_data, **dict(zip(CREDENTIAL_FIELDS, (
+                                self.app_id, self.app_secret, self.user_token, self.token_expire_time)))}
+                        sync_agent_config(migrated.get("feishu_app_id", ""), migrated.get("feishu_app_secret", ""),
+                                          data_root=os.path.dirname(CONFIG_FILE))
+                        cleanup_legacy_configs(migrated.get("feishu_app_id", ""), data_root=os.path.dirname(CONFIG_FILE))
+                        config_data = migrated
+                        self.feishu_app_migration_error = ""
+                    except FeishuAppMigrationError as exc:
+                        self.feishu_app_migration_error = exc.code
+                        log_error(str(exc))
+                        config_data = {**config_data, "feishu_app_id": "", "feishu_app_secret": "",
+                                       "feishu_user_token": "", "token_expire_time": 0}
                     self.app_token = config_data.get(
                         "feishu_app_token", self.app_token
                     )
@@ -398,7 +490,10 @@ class ConfigManager:
                     ).strip().rstrip("/")
                     log_info("系统: SQLite配置加载成功")
         except Exception as e:
-            log_error(f"系统: 配置加载失败: {e}")
+            log_error(f"系统: 配置加载失败 ({type(e).__name__})")
+            self.app_id = self.app_secret = self.user_token = ""
+            self.token_expire_time = 0
+            self.feishu_app_migration_error = getattr(e, "code", "settings_load_failed")
 
     def save(
         self,
@@ -447,6 +542,9 @@ class ConfigManager:
         dependency_bootstrap_allow_get_pip=None,
     ):
         """保存配置文件"""
+        provided = {name for name, value in locals().items() if name != "self" and value is not None}
+        with self._credential_lock:
+            expected_credentials = self.app_id, self.app_secret
         try:
             # 使用现有值作为默认值
             new_app_token = app_token if app_token is not None else self.app_token
@@ -725,70 +823,23 @@ class ConfigManager:
                     new_dependency_bootstrap_allow_get_pip
                 ),
             }
-            if not self._save_config_to_sqlite(cfg):
-                return False
-
-            # 更新实例变量
-            self.app_token = new_app_token
-            self.user_token = new_user_token
-            self.app_id = new_app_id
-            self.app_secret = new_app_secret
-            self.token_expire_time = new_expire_time
-            self.table_id_weibao = new_table_id_weibao
-            self.table_id_biangeng = new_table_id_biangeng
-            self.table_id_tiaozheng = new_table_id_tiaozheng
-            self.table_id_shijian = new_table_id_shijian
-            self.table_id_power = new_table_id_power
-            self.table_id_polling = new_table_id_polling
-            self.table_id_overhaul = new_table_id_overhaul
-            self.group_name_change_i3 = new_group_name_change_i3
-            self.group_name_maintenance = new_group_name_maintenance
-            self.group_name_event_i2 = new_group_name_event_i2
-            self.group_name_event_i3 = new_group_name_event_i3
-            self.group_name_event_prompt = new_group_name_event_prompt
-            self.lan_template_portal_host = new_lan_template_portal_host
-            self.lan_template_portal_port = new_lan_template_portal_port
-            self.lan_template_public_host = new_lan_template_public_host
-            self.lan_low_performance_mode = new_lan_low_performance_mode
-            self.polling_work_order_public_relay_enabled = (
-                new_polling_work_order_public_relay_enabled
-            )
-            self.polling_work_order_public_relay_url = (
-                new_polling_work_order_public_relay_url
-            )
-            self.disable_hot_reload = new_disable_hot_reload
-            self.disable_alerts = new_disable_alerts
-            self.disable_speech = new_disable_speech
-            self.disable_clipboard_listener = new_disable_clipboard_listener
-            self.relay_enabled = new_relay_enabled
-            self.relay_webhook = new_relay_webhook
-            self.relay_webhook_format = new_relay_webhook_format
-            self.relay_bind_host = new_relay_bind_host
-            self.relay_allow_lan = new_relay_allow_lan
-            self.relay_allowed_origins = new_relay_allowed_origins
-            self.relay_enable_proxy_dingtalk = new_relay_enable_proxy_dingtalk
-            self.remote_update_enabled = new_remote_update_enabled
-            self.remote_update_interval_seconds = new_remote_update_interval_seconds
-            self.remote_update_manifest_url = new_remote_update_manifest_url
-            self.remote_update_auto_apply_non_ui = (
-                new_remote_update_auto_apply_non_ui
-            )
-            self.auto_install_dependencies = new_auto_install_dependencies
-            self.dependency_mirrors = new_dependency_mirrors
-            self.dependency_install_timeout_seconds = (
-                new_dependency_install_timeout_seconds
-            )
-            self.dependency_install_retries_per_mirror = (
-                new_dependency_install_retries_per_mirror
-            )
-            self.dependency_bootstrap_allow_get_pip = (
-                new_dependency_bootstrap_allow_get_pip
-            )
-
+            parameter_names = {"feishu_app_token": "app_token", "feishu_user_token": "user_token",
+                               "feishu_app_id": "app_id", "feishu_app_secret": "app_secret"}
+            cfg = {key: value for key, value in cfg.items() if parameter_names.get(key, key) in provided}
+            with self._credential_lock:
+                if cfg and not self._save_config_to_sqlite(cfg, expected_credentials=expected_credentials):
+                    return False
+                self.load()
+                if getattr(self, "feishu_app_migration_error", ""):
+                    return False
             log_info("系统: SQLite配置保存成功")
             return True
+        except FeishuAppMigrationError as exc:
+            self.feishu_app_migration_error = exc.code
+            log_error(str(exc))
+            return False
         except Exception as e:
-            log_error(f"系统: 配置保存失败: {e}")
+            log_error(f"系统: 配置保存失败 ({type(e).__name__})")
             return False
 
 # ========== UI Constants ==========

@@ -265,18 +265,36 @@ class CheckCloud:
 
     def request(self, method, path, body=None, params=None):
         from .portal_service import TOKEN_ERROR_CODES, external_real_write_guard, refresh_feishu_token
+        from upload_event_module.services.feishu_token_manager import token_manager
         read = method == 'GET' or path == 'records/search'
         if not read:
             guard = external_real_write_guard()
             if not guard.get('real_write_allowed'):
                 raise CheckError(guard.get('reason') or '未允许飞书写入。')
         url = f'https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/{path}'
+        try:
+            credentials = token_manager._credentials()
+        except Exception:
+            raise CheckError('Qt 飞书鉴权暂不可用，未发送班前检查请求。') from None
+
+        def check_credentials():
+            try:
+                matching = token_manager._credentials() == credentials
+            except Exception:
+                matching = False
+            if not matching:
+                raise CheckError('Qt 飞书鉴权已变化，未跨应用重试班前检查请求。') from None
+
         for attempt in range(2):
-            payload = self.service._http_client.request_json(method, url, headers=self.service._auth_headers(),
+            check_credentials()
+            headers = self.service._auth_headers()
+            check_credentials()
+            payload = self.service._http_client.request_json(method, url, headers=headers,
                 params=params or {}, json_payload=body, retries=1 if read else 0)
             if not isinstance(payload, dict) or type(payload.get('code')) is not int:
                 raise CheckError('飞书返回不完整，已保留本地结果。')
             if payload['code'] in TOKEN_ERROR_CODES and not attempt:
+                check_credentials()
                 refresh_feishu_token()
                 continue
             if payload['code'] != 0 or not isinstance(payload.get('data'), dict):

@@ -231,7 +231,7 @@ class DownloadWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ack = await runtime.submit(ACTOR, payload, self.fixture.request, authorize)
         await asyncio.wait_for(asyncio.gather(*runtime.workers.values()), 15)
         state = await runtime.conversation(ACTOR)
-        self.assertEqual(len(state["turns"][-1]["downloads"]), 1)
+        self.assertEqual(len(state["turns"][-1]["downloads"]), 1, state["turns"][-1])
         # Simulate terminal SSE saved, but the separate conversation save lost.
         stored = self.fixture.assistant._state(ACTOR)
         stored["active_run_id"] = ack["run_id"]
@@ -244,6 +244,14 @@ class DownloadWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored["turns"][-1]["downloads"], state["turns"][-1]["downloads"])
         denied = await fresh.conversation({**ACTOR, "scopes": ["A"]})
         self.assertEqual(denied["turns"], [])
+
+        self.execution["generated_version"] = 2
+        await runtime.submit(ACTOR, {**payload, "operation_id": "fixture_downloads_unready"}, self.fixture.request, authorize)
+        await asyncio.wait_for(asyncio.gather(*runtime.workers.values()), 15)
+        unready = (await runtime.conversation(ACTOR))["turns"][-1]
+        self.assertEqual(unready["status"], "failed", unready)
+        self.assertEqual(unready["downloads"], [])
+        self.assertNotIn("已生成", unready["answer"])
         self.assertEqual(self.writes, [])
 
 

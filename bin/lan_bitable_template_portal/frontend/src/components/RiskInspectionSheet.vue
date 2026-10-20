@@ -12,12 +12,13 @@ import { NButton, NDataTable, NEmpty, NInput, NSwitch, NTag, type DataTableColum
 import { Pencil, Trash2 } from 'lucide-vue-next';
 import type { Dict } from '../api/client';
 import RiskInspectionFields from './RiskInspectionFields.vue';
-import { riskRoleName, riskTypeName } from './riskInspectionUi';
+import { riskPresentationFields, riskRoleName, riskSystemField, riskTypeName } from './riskInspectionUi';
 
 type Row = { key: string; index: number; label?: string; item?: Dict };
 const props = defineProps<{ fields: Dict[]; items?: Dict[]; schema?: boolean; canEdit?: boolean; disabled?: boolean; history?: boolean }>();
 const emit = defineEmits<{ 'update:items': [items: Dict[]]; edit: [field: Dict]; removeField: [field: Dict]; requiredChange: [field: Dict, required: boolean] }>();
 const page = ref(1), keys = new WeakMap<object, string>();
+const fields = computed(() => riskPresentationFields(props.fields).filter(field => field.role === 'input' && !field.is_primary));
 const query = window.matchMedia('(max-width:700px)'), mobile = ref(query.matches);
 const resize = (event: MediaQueryListEvent) => { mobile.value = event.matches; };
 query.addEventListener('change', resize);
@@ -44,21 +45,21 @@ function schemaValue(field: Dict, index: number) {
   if (index === 2) return field.role !== 'input' ? '自动生成' : field.required ? '必填' : '不必填';
   return [3, 4].includes(field.type) ? (field.property?.options || []).map((option: Dict) => option.name).join(' / ') || '尚未配置选项' : '—';
 }
-const width = (field: Dict) => field.type === 1 ? 260 : field.type === 17 ? 200 : 180;
+const width = (field: Dict) => mobile.value ? 180 : field.type === 1 ? 260 : field.type === 17 ? 200 : 180;
 const firstWidth = computed(() => props.schema ? 116 : mobile.value ? 180 : 260);
-const tableWidth = computed(() => firstWidth.value + props.fields.reduce((sum, field) => sum + width(field), 0));
+const tableWidth = computed(() => firstWidth.value + fields.value.reduce((sum, field) => sum + width(field), 0));
 const columns = computed<DataTableColumns<Row>>(() => [
-  { key: 'item', title: props.schema ? '模板设置' : '排查事项', width: firstWidth.value, fixed: 'left', render: row => props.schema ? h('strong', row.label) : h('div', { class: 'risk-sheet-item' }, [
+  { key: 'item', title: props.schema ? '模板设置' : '排查事项', width: firstWidth.value, fixed: mobile.value ? undefined : 'left', render: row => props.schema ? h('strong', row.label) : h('div', { class: 'risk-sheet-item' }, [
     h('span', { class: 'risk-sheet-number' }, String(row.index + 1).padStart(2, '0')),
     h(NInput, { value: row.item!.title, disabled: props.disabled, maxlength: 300, type: 'textarea', autosize: { minRows: 1, maxRows: 4 },
       placeholder: `事项 ${row.index + 1}：设备、部件或需要检查的内容`, inputProps: { 'aria-label': `排查事项 ${row.index + 1}` }, 'onUpdate:value': value => update(row, { title: value }) }),
     h(NButton, { text: true, disabled: props.disabled || props.items!.length <= 1, 'aria-label': `移除事项 ${row.index + 1}`, onClick: () => remove(row) }, () => h(Trash2, { size: 15 })),
   ]) },
-  ...props.fields.map(field => ({ key: field.key, width: width(field), title: () => h('div', { class: 'risk-sheet-heading' }, [
+  ...fields.value.map(field => ({ key: field.key, width: width(field), title: () => h('div', { class: 'risk-sheet-heading' }, [
     h('strong', field.field_name),
     h('div', { class: 'risk-sheet-heading-meta' }, [h('small', riskTypeName(field.type)), field.is_primary ? h(NTag, { size: 'small', bordered: false }, () => '主字段') : null,
       field.unsupported ? h(NTag, { size: 'small', type: 'warning', bordered: false }, () => '需调整类型') : field.role === 'input' ? h('small', field.required ? '必填' : '选填') : h('small', '系统填写')]),
-    props.schema && props.canEdit ? h('div', { class: 'risk-sheet-heading-actions' }, [
+    props.schema && props.canEdit && !riskSystemField(field) ? h('div', { class: 'risk-sheet-heading-actions' }, [
       h(NButton, { size: 'small', disabled: props.disabled, 'aria-label': `修改字段 ${field.field_name}`, onClick: () => emit('edit', field) }, () => [h(Pencil, { size: 14 }), '修改']),
       !field.is_primary ? h(NButton, { size: 'small', quaternary: true, type: 'error', disabled: props.disabled, 'aria-label': `删除字段 ${field.field_name}`, onClick: () => emit('removeField', field) }, () => h(Trash2, { size: 14 })) : null,
     ]) : null,

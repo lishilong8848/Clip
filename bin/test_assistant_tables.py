@@ -226,32 +226,43 @@ class ConsentTests(unittest.TestCase):
 
 
 class ModelCountTests(unittest.IsolatedAsyncioTestCase):
-    async def test_headcount_uses_tool_without_model_and_retains_source(self):
+    async def test_headcount_native_tool_retains_source_and_consent(self):
         from contextlib import asynccontextmanager
+        from pydantic_ai.models.function import DeltaToolCall, FunctionModel
         from bin import test_lighthouse_stream as fixtures
         from openclaw_service.assistant.lighthouse_model import LighthouseModel
         holder = fixtures.StreamTests()
         await holder.asyncSetUp()
         self.addAsyncCleanup(holder.runtime.close)
         self.addCleanup(holder.tmp.cleanup)
+        async def stream_model(messages, info):
+            receipts = [part.content for message in messages for part in message.parts
+                        if getattr(part, 'part_kind', '') == 'tool-return']
+            if not receipts:
+                yield {0: DeltaToolCall(name='staff_headcount', json_args='{}')}
+            else:
+                receipt = receipts[-1]
+                yield receipt['message'] if receipt.get('confirmation_required') else f"在职人员共{receipt['unique_people']}人。"
+
         @asynccontextmanager
-        async def forbidden(*_):
-            raise AssertionError('Simple headcount must not start a model/gateway')
-            yield
+        async def model_factory(*_):
+            yield FunctionModel(stream_function=stream_model)
         bridge = SimpleNamespace(acall=AsyncMock(return_value={'unique_people': 92, 'raw_active_records': 92,
             'observed_at': 1791532689, 'source_url': PERSONNEL_URL}))
         holder.portal.catalog.bridge = bridge
-        engine = LighthouseModel(holder.portal, model_factory=forbidden)
+        engine = LighthouseModel(holder.portal, model_factory=model_factory)
         result = await engine.answer(ADMIN, {'question': '南通基地总共有多少人在职？', '_profile': holder.model.profile()},
             [], holder.request, AsyncMock(), AsyncMock(return_value=ADMIN), {})
         self.assertIn('92', result['answer'])
-        self.assertEqual(bridge.acall.await_args.args[0], 'staff_count')
+        bridge.acall.assert_awaited_once_with('staff_count', {'scopes': ADMIN['scopes']}, None)
         self.assertEqual(result['sources'][0]['url'], PERSONNEL_URL)
+        bridge.acall.reset_mock()
         bridge.acall.return_value = {'confirmation_required': True, 'message': '确认查询 abcdef12'}
         result = await engine.answer(ADMIN, {'question': '在职人数', '_profile': holder.model.profile()},
             [], holder.request, AsyncMock(), AsyncMock(return_value=ADMIN), {})
         self.assertEqual(result['answer'], '确认查询 abcdef12')
         self.assertEqual(result['sources'], [])
+        bridge.acall.assert_awaited_once_with('staff_count', {'scopes': ADMIN['scopes']}, None)
 
 
 class BridgeReadTests(unittest.IsolatedAsyncioTestCase):

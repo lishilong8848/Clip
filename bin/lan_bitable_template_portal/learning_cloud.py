@@ -185,16 +185,30 @@ class LearningCloud:
         return {"Authorization": "Bearer " + token}
 
     def _request(self, method, path, body=None, params=None):
+        from upload_event_module.services.feishu_token_manager import token_manager
         read = method == "GET" or (method == "POST" and path.endswith("/records/search"))
         if not read:
             self._require_write()
-        retryable = read or method == "PUT" or bool((params or {}).get("client_token"))
+        try:
+            credentials = token_manager._credentials()
+        except Exception:
+            raise LearningCloudError("Qt 飞书鉴权暂不可用，未发送学练请求") from None
+
+        def check_credentials():
+            try:
+                matching = token_manager._credentials() == credentials
+            except Exception:
+                matching = False
+            if not matching:
+                raise LearningCloudError("Qt 飞书鉴权已变化，未跨应用重试学练请求") from None
+
         headers = self._headers()
         for attempt in range(2):
+            check_credentials()
             try:
                 payload = self._http.request_json(
                     method, f"{self._root}/{path}", headers=headers, params=params,
-                    json_payload=body, retries=1 if retryable else 0,
+                    json_payload=body, retries=1 if read else 0,
                 )
             except (FeishuHTTPError, httpx.HTTPError, OSError):
                 error = LearningCloudError if read else LearningCloudWriteUncertain
@@ -204,6 +218,7 @@ class LearningCloud:
                 raise error("飞书返回无效响应，无法确认结果")
             code = payload["code"]
             if code in TOKEN_ERRORS and not attempt:
+                check_credentials()
                 headers = self._headers(force_refresh=True)
                 continue
             if read and code in READ_RETRY_CODES and not attempt:
@@ -617,16 +632,35 @@ class LearningCloud:
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("max_bytes 必须是正整数")
         headers = self._headers()
-        try:
-            content, _ = self._http.request_bytes(
-                "GET", f"{API_ROOT}/drive/v1/medias/{token}/download",
-                headers=headers, retries=1, max_bytes=max_bytes,
-            )
-        except (FeishuHTTPError, httpx.HTTPError, OSError):
-            raise LearningCloudError("附件下载失败或超过 max_bytes") from None
-        if len(content) > max_bytes:
-            raise LearningCloudError("附件超过 max_bytes")
-        return content
+        for attempt in range(2):
+            try:
+                content, _ = self._http.request_bytes(
+                    "GET", f"{API_ROOT}/drive/v1/medias/{token}/download",
+                    headers=headers, retries=0, max_bytes=max_bytes,
+                )
+                if len(content) > max_bytes:
+                    raise LearningCloudError("附件超过 max_bytes")
+                try:
+                    payload = json.loads(content) if len(content) <= 65536 else {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] not in TOKEN_ERRORS:
+                    return content
+                if attempt:
+                    raise LearningCloudError("附件下载授权已失效")
+            except FeishuHTTPError as exc:
+                response = getattr(exc.__cause__, "response", None)
+                try:
+                    payload = response.json() if response is not None else {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                expired = exc.category == "token" or (isinstance(payload, dict)
+                    and type(payload.get("code")) is int and payload["code"] in TOKEN_ERRORS)
+                if attempt or not expired:
+                    raise LearningCloudError("附件下载失败或超过 max_bytes") from None
+            except (httpx.HTTPError, OSError):
+                raise LearningCloudError("附件下载失败或超过 max_bytes") from None
+            headers = self._headers(force_refresh=True)
 
     def close(self):
         self._http.close()

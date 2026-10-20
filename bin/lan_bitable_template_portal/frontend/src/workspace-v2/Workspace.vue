@@ -22,7 +22,7 @@
           <NResult v-else-if="denied" status="403" title="没有该功能权限" description="当前账号未获授此功能，请申请权限或联系管理员。"><template #footer><NButton type="primary" @click="navigate('/?view=permission')">申请权限</NButton></template></NResult>
           <NResult v-else-if="loggedIn && unsupportedScope" status="info" :title="scopeLabel + '尚未接入此业务'" description="原业务目前仅支持 A–E 楼，未使用其他楼栋的数据代替。"><template #footer><NButton v-if="user.role === 'admin' && ['drills','critical_guard'].includes(activeModule)" type="primary" @click="navigate(route.pathname+'?mode=admin')"><Settings :size="16" />管理员入口</NButton></template></NResult>
           <AccessRequest v-else-if="loggedIn && permissionPage" :key="String(user.open_id)" :user="user" @back="navigate('/?view=my')" @changed="loadAuth" />
-          <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge'].includes(activeModule))"
+          <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge'].includes(activeModule) && !assignedRiskPage)"
             :checking="false" :logged-in="loggedIn" :user="user" :login-url="loginUrl" :busy="permissionBusy" :request="permission" :requestable-scopes="requestableScopes" :password-settings="passwordPage" :show-back="loggedIn" :title="permissionPage?'申请楼栋权限':''" @back="navigate('/?view=my')" @update-request="Object.assign(permission, $event)" @submit="submitPermission" @confirm="submitPermission" />
           <template v-else>
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
@@ -150,7 +150,8 @@ const view = computed(() => route.value.searchParams.get('view') || 'home');
 const homeViews = ['home', 'tasks', 'functions'];
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
-const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(activeModule.value)) || !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
+const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(activeModule.value)) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
 const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');

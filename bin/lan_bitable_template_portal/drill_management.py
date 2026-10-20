@@ -41,7 +41,7 @@ DRILL_MIN_SIGNATURE_SLOT_HEIGHT_PX = 48
 DRILL_MAX_PREVIEW_IMAGE_BYTES = 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES_BYTES = 2 * 1024 * 1024
 DRILL_MAX_PREVIEW_IMAGES = 20
-DRILL_GENERATION_RULE_VERSION = 6
+DRILL_GENERATION_RULE_VERSION = 7
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -1269,11 +1269,11 @@ def _derived_values(
     evaluation_time = _parse_evaluation_time(execution.get("evaluation_time"))
     evaluation_time_text = (
         evaluation_time.strftime("%Y年%m月%d日 %H时%M分")
-        if evaluation_time else ""
+        if evaluation_time else "年 月 日 时 分"
     )
     if review_enabled:
         record_values[_cell_target(mapping["reviewer_signature"])] = ""
-        record_values[_cell_target(mapping["review_time"])] = signature_time.strftime("%Y年%m月%d日 %H时%M分") if signature_time else ""
+        record_values[_cell_target(mapping["review_time"])] = signature_time.strftime("%Y年%m月%d日 %H时%M分") if signature_time else "年 月 日 时 分"
     assessment_values: dict[str, str | int | float] = {
         _cell_target(assessment["participants"]): "",
         _cell_target(assessment["total_score"]): 100,

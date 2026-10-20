@@ -8,16 +8,16 @@
     <div v-if="loading" class="preview-state" role="status"><Loader2 class="spin" :size="22" />正在读取文件</div>
     <div v-else-if="error" class="preview-state" role="alert"><AlertCircle :size="22" /><p>{{ error }}</p><button type="button" @click="load">重试</button></div>
     <template v-else>
-      <div v-if="data.kind === 'html'" class="preview-modes" role="group" aria-label="网页查看方式">
+      <div v-if="['html', 'markdown'].includes(data.kind)" class="preview-modes" role="group" aria-label="文件查看方式">
         <button type="button" :aria-pressed="!source" @click="source = false">预览</button>
-        <button type="button" :aria-pressed="source" @click="source = true">源码</button>
+        <button type="button" :aria-pressed="source" @click="source = true">{{ data.kind === 'markdown' ? '原文' : '源码' }}</button>
       </div>
       <div v-if="data.truncated" class="preview-warning">当前显示部分内容，下载文件可查看完整内容。</div>
       <div v-if="data.kind === 'spreadsheet'" class="sheet-tabs" role="tablist" aria-label="工作表">
         <button v-for="(sheet, index) in data.sheets" :key="sheet.name" type="button" role="tab" :aria-selected="sheetIndex === index" @click="sheetIndex = index">{{ sheet.name }}</button>
       </div>
       <div class="preview-body" tabindex="0">
-        <LighthouseReply v-if="data.kind === 'markdown'" :text="data.text" />
+        <LighthouseReply v-if="data.kind === 'markdown' && !source" :text="data.text" />
         <iframe v-else-if="data.kind === 'html' && !source" title="网页文件预览（禁止脚本及外部请求）" sandbox="" referrerpolicy="no-referrer" :srcdoc="html" />
         <iframe v-else-if="data.kind === 'pdf'" title="PDF文件预览" :src="url + '?inline=1'" />
         <img v-else-if="data.kind === 'image'" :src="url" :alt="file.name" />

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 from . import test_account_levels as levels
+from .test_feishu_delivery import qt_credentials_fixture
 
 from clipflow_backend.main import FastAPIPortalController
 from lan_bitable_template_portal.server import PortalRuntime
@@ -18,7 +19,18 @@ from openclaw_service.assistant.lighthouse_ai import AssistantError
 
 class PermissionReviewTests(levels.AccountLevelTests):
     def setUp(self):
+        self.enterContext(qt_credentials_fixture())
         super().setUp()
+        # Migration preserves existing grants; empty test stores no longer bootstrap them.
+        auth = self.h.auth
+        payload = auth._load_permissions_locked()
+        for home, oid in BUILDING_OPEN_ID_MAP.items():
+            payload['users'][oid] = {'enabled': True, 'role': 'admin' if home == 'H' else 'building',
+                'scopes': auth._admin_scopes() if home == 'H' else [home]}
+        for oid in (LI_SHILONG_OPEN_ID, 'ou_fixtureHM1', 'ou_fixtureHM2'):
+            payload['users'][oid] = {**payload['users'].get(oid, {}),
+                'enabled': True, 'role': 'admin', 'scopes': auth._admin_scopes()}
+        auth._save_permissions_locked(payload)
         self.controller = SimpleNamespace(_clear_read_cache=Mock(), _notify_permission_review_result=Mock())
         self.bot = SimpleNamespace(runtime=SimpleNamespace(auth_manager=self.h.auth, state_store=self.h.auth._state_store, service=self.h.service),
             controller=self.controller, messenger=None,
@@ -131,19 +143,20 @@ class PermissionReviewTests(levels.AccountLevelTests):
         data["status"] = "approved"
         self.assertFalse(any(e["tag"] == "form" for e in card(data)["body"]["elements"]))
 
-    def test_notification_uses_cross_application_union_and_stable_uuid(self):
+    def test_notification_uses_unified_sender_and_stable_uuid(self):
         data = self.application()
-        http = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda:{"code":0,"data":{"message_id":"om_Approval"}})))
-        self.bot.messenger = SimpleNamespace(client=AsyncMock(return_value=http), headers=AsyncMock(return_value={}))
-        self.cards.union_id = Mock(return_value="on_Review")
-        with patch("lan_bitable_template_portal.portal_service.external_real_write_guard", return_value={"real_write_allowed":True}):
+        self.bot.messenger = SimpleNamespace()
+        sender = AsyncMock(return_value={'message_id': 'om_Approval', 'sender_app_id': 'cli_fixture'})
+        with patch("lan_bitable_template_portal.portal_service.external_real_write_guard", return_value={"real_write_allowed":True}), \
+                patch('lan_bitable_template_portal.feishu_delivery.send_agent_message', sender):
             asyncio.run(self.cards.notify(data["request_id"]))
             self.cards.update(data["request_id"], notification_status="failed")
             asyncio.run(self.cards.notify(data["request_id"]))
-        first, second = http.post.call_args_list
-        self.assertEqual(first.kwargs["params"], {"receive_id_type":"union_id"})
-        self.assertEqual(first.kwargs["json"]["receive_id"], "on_Review")
-        self.assertEqual(first.kwargs["json"]["uuid"], second.kwargs["json"]["uuid"])
+        first, second = sender.call_args_list
+        self.assertIs(first.args[0], self.bot.runtime)
+        self.assertEqual(first.args[1], LI_SHILONG_OPEN_ID)
+        self.assertEqual(first.kwargs['message_uuid'], second.kwargs['message_uuid'])
+        self.assertEqual(self.cards.request(data['request_id'])['review_sender_app_id'], 'cli_fixture')
 
     def test_supervisor_card_applies_exact_self_access_request(self):
         data=self.h.auth.create_permission_request(open_id='ou_fixtureAO',name='测试AO',reason='隔离权限申请',approver_open_id='ou_fixtureAS',

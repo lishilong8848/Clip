@@ -8,6 +8,7 @@ import stat
 import threading
 import uuid
 import zipfile
+from itertools import chain
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -125,25 +126,46 @@ class FeishuRuntimeMirror:
             raise AssistantError('未授权的分发表。', 403)
         self.table = table
         self.api = 'https://open.feishu.cn/open-apis/bitable/v1/apps/' + BASE + '/tables/' + table
+        self._managed_auth = client is None and headers is None
         if client is None:
-            from upload_event_module.services.feishu_token_manager import FeishuTokenError, token_manager
             from upload_event_module.services.http_client import FeishuHttpClient
-            try:
-                token = token_manager.get_tenant_token()
-            except FeishuTokenError as exc:
-                startup_log('runtime_auth_failed')
-                raise AssistantError('助手依赖镜像认证失败：' + str(exc), 503) from None
-            if not token:
-                raise AssistantError('飞书依赖镜像认证不可用。', 503)
-            client, headers = FeishuHttpClient(timeout=timeout or 60, retries=1), {'Authorization': 'Bearer ' + token}
+            client = FeishuHttpClient(timeout=timeout or 60, retries=1)
         self.client, self.headers = client, headers
         self.timeout = timeout
         self._download_client = None
+        if self._managed_auth:
+            self._auth_headers()
+
+    def _auth_headers(self, *, force_refresh=False):
+        if not self._managed_auth:
+            return self.headers
+        from upload_event_module.services.feishu_token_manager import token_manager
+        try:
+            token = token_manager.get_tenant_token(**({'force_refresh': True} if force_refresh else {}))
+        except Exception:
+            startup_log('runtime_auth_failed')
+            raise AssistantError('助手依赖镜像认证失败，未使用缓存令牌。', 503) from None
+        if not token:
+            raise AssistantError('飞书依赖镜像认证不可用。', 503)
+        self.headers = {'Authorization': 'Bearer ' + token}
+        return self.headers
+
+    def _refresh_rejected_token(self, value):
+        from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES
+        if self._managed_auth and isinstance(value, dict) and type(value.get('code')) is int and value['code'] in TOKEN_ERROR_CODES:
+            self._auth_headers(force_refresh=True)
+            return True
+        return False
 
     def request(self, method, suffix='', **kwargs):
-        value = self.client.request_json(method, self.api + suffix, headers=self.headers, **kwargs)
-        if value.get('code') != 0:
-            raise AssistantError('依赖镜像请求未完成（code=' + str(value.get('code')) + '）。', 503)
+        read_only = method.upper() in {'GET', 'HEAD'}
+        if not read_only:
+            kwargs['retries'] = 0
+        value = self.client.request_json(method, self.api + suffix, headers=self._auth_headers(), **kwargs)
+        if self._refresh_rejected_token(value) and read_only:
+            value = self.client.request_json(method, self.api + suffix, headers=self._auth_headers(), **kwargs)
+        if not isinstance(value, dict) or type(value.get('code')) is not int or value['code'] != 0:
+            raise AssistantError('依赖镜像请求未完成。', 503)
         return value.get('data') or {}
 
     def ensure_fields(self):
@@ -189,8 +211,9 @@ class FeishuRuntimeMirror:
                 if checksum(path) != part['sha256']:
                     raise ValueError('Local runtime part hash mismatch.')
                 response = self.client.request_file_json('POST', 'https://open.feishu.cn/open-apis/drive/v1/medias/upload_all',
-                    headers=self.headers, file_path=str(path), file_name=part['name'], data={
+                    headers=self._auth_headers(), file_path=str(path), file_name=part['name'], retries=0, data={
                         'file_name': part['name'], 'parent_type': 'bitable_file', 'parent_node': BASE, 'size': str(part['size'])})
+                self._refresh_rejected_token(response)
                 if response.get('code') != 0 or not response.get('data', {}).get('file_token'):
                     raise AssistantError('依赖分片上传未完成。', 503)
                 entry['file_token'] = response['data']['file_token']
@@ -225,6 +248,10 @@ class FeishuRuntimeMirror:
         if not any(value.get('file_token') == part['file_token'] for value in attachments):
             raise AssistantError('依赖镜像附件已变化，未安装。', 409)
         url = 'https://open.feishu.cn/open-apis/drive/v1/medias/' + quote(part['file_token'], safe='') + '/download'
+        download_path = urlsplit(url).path
+        if self._managed_auth:
+            from upload_event_module.config import config
+            download_app = config.app_id
         # Stream directly; do not buffer an arbitrary remote body into memory.
         import httpx
         from upload_event_module.services.http_client import verified_tls_context
@@ -233,9 +260,15 @@ class FeishuRuntimeMirror:
             self._download_client = httpx.Client(
                 timeout=self.timeout or httpx.Timeout(connect=10, read=90, write=30, pool=10),
                 trust_env=False, follow_redirects=False, verify=verified_tls_context())
-        for attempt in range(4):
+        auth_retried, force_refresh, redirects = False, False, 0
+        for attempt in range(5):
+            current_headers = self._auth_headers(force_refresh=force_refresh)
+            force_refresh = False
+            if self._managed_auth and config.app_id != download_app:
+                raise AssistantError('下载期间 Qt 飞书应用已变化，请重新核验镜像。', 409)
             # Never forward the API bearer to an attachment CDN.
-            headers = self.headers if urlsplit(url).netloc == 'open.feishu.cn' else {}
+            api_download = urlsplit(url).netloc == 'open.feishu.cn' and urlsplit(url).path == download_path
+            headers = current_headers if api_download else {}
             with self._download_client.stream('GET', url, headers=headers) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     redirected = urljoin(url, response.headers.get('location', ''))
@@ -243,15 +276,34 @@ class FeishuRuntimeMirror:
                     host = parsed.hostname or ''
                     if not response.headers.get('location') or parsed.scheme != 'https' or parsed.username or parsed.password \
                             or parsed.port not in (None, 443) or not any(host == domain or host.endswith('.' + domain)
-                                for domain in ('feishu.cn', 'feishucdn.com', 'feishu-attachment.com')):
+                                for domain in ('feishu.cn', 'feishucdn.com', 'feishu-attachment.com')) \
+                            or host == 'open.feishu.cn' and parsed.path != download_path:
                         raise AssistantError('依赖下载跳转不安全，未安装。', 502)
+                    redirects += 1
+                    if redirects >= 4:
+                        raise AssistantError('依赖下载跳转次数过多。', 502)
                     url = redirected
                     continue
+                chunks = response.iter_bytes(1024 * 1024)
+                if api_download and (response.status_code != 200 or 'json' in str(response.headers.get('content-type', '')).lower()):
+                    from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES
+                    chunks = response.iter_bytes(8192)
+                    prefix = next(chunks, b'')
+                    try:
+                        value = json.loads(prefix)
+                    except (TypeError, ValueError, UnicodeDecodeError):
+                        value = {}
+                    if isinstance(value, dict) and type(value.get('code')) is int and value['code'] in TOKEN_ERROR_CODES:
+                        if self._managed_auth and not auth_retried:
+                            auth_retried, force_refresh = True, True
+                            continue
+                        raise AssistantError('依赖分片下载认证未完成。', 503)
+                    chunks = chain((prefix,), chunks)
                 if response.status_code != 200:
                     raise AssistantError('依赖分片下载未完成（HTTP ' + str(response.status_code) + '）。', 502)
                 size = 0
                 with Path(target).open('wb') as output:
-                    for chunk in response.iter_bytes(1024 * 1024):
+                    for chunk in chunks:
                         size += len(chunk)
                         if size > part['size']:
                             raise AssistantError('依赖分片大小异常，未安装。', 502)

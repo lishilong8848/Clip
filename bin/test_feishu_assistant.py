@@ -1,6 +1,7 @@
 """Feishu transport isolation tests: no network, messages or real business writes."""
 import asyncio
 import copy
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -14,12 +15,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lan_bitable_template_portal.feishu_assistant import FeishuAssistant, FeishuMessenger, Inbox, parse_message, _reply_text
 from openclaw_service.assistant.lighthouse_ai import LighthouseAssistant, AssistantError
 from lan_bitable_template_portal.lighthouse_bridge import actor_for
+from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from starlette.requests import Request
 
 
-def event(owner="onPerson", *, chat_type="p2p", bot="ouBot", message_id="omMessage", content="今天有哪些通告"):
-    return {"header": {"app_id": "cliTest", "event_type": "im.message.receive_v1"}, "event": {
-        "sender": {"sender_type": "user", "sender_id": {"open_id": "ou_Person", "union_id": "on_"+owner}},
+def event(owner="onPerson", *, chat_type="p2p", bot="ouBot", message_id="omMessage", content="今天有哪些通告",
+          app_id="cliTest", sender_id="ou_Person"):
+    return {"header": {"app_id": app_id, "event_type": "im.message.receive_v1"}, "event": {
+        "sender": {"sender_type": "user", "sender_id": {"open_id": sender_id, "union_id": "on_"+owner}},
         "message": {"message_id": "om_"+message_id, "chat_id": "oc_Chat", "chat_type": chat_type,
             "message_type": "text", "content": json.dumps({"text": content}),
             "mentions": [{"key": "@_user_1", "id": {"open_id": bot}}]}}}
@@ -243,11 +246,15 @@ class InboxTests(unittest.TestCase):
 class ChannelTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.settings = SimpleNamespace(app_id='cliTest', app_secret='fixture-current-secret')
+        self.enterContext(patch('lan_bitable_template_portal.portal_auth.config', self.settings))
         self.store = Memory(Path(self.temp.name)/"portal.sqlite3")
         self.runtime = SimpleNamespace(state_store=self.store, auth_manager=SimpleNamespace(
+            current_feishu_app_id=PortalAuthManager.current_feishu_app_id,
             _open_id_explicitly_disabled=lambda _:False))
         self.controller = SimpleNamespace(bound_port=18766, preferred_port=18766)
         self.channel = FeishuAssistant(self.controller, self.runtime, AsyncMock())
+        self.channel.config = {'app_id': self.settings.app_id}
         self.channel.inbox = Inbox(Path(self.temp.name)/"messages.sqlite3")
 
     async def test_parallel_people_and_same_person_fifo(self):
@@ -483,6 +490,8 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(AssistantError): await authority.authorize(key)
 
     async def test_user_mapping_uses_union_not_names_or_sender_open_id(self):
+        self.sender_directory([{'id': 'recOriginal', 'name': '同名员工',
+                                'login_ids': ['ou_Original'], 'selectable': True}])
         self.store.put_document("feishu_assistant_identity", "on_user", {"union_id": "on_user", "open_id": "ou_Original", "name": "同名员工"})
         user = self.channel._user("on_user")
         self.assertEqual(user["open_id"], "ou_Original")
@@ -491,12 +500,55 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
 
     def sender_directory(self, people):
         import time
-        snapshot = {'loaded_at': time.time(), 'people': {person['id']: person for person in people}}
+        snapshot = {'schema': 4, 'app_id': self.settings.app_id, 'loaded_at': time.time(),
+                    'people': {person['id']: person for person in people}}
         self.runtime.auth_manager._account_directory_provider = lambda: snapshot
-        self.runtime.auth_manager.directory_person = lambda identity: next(
-            (person for person in snapshot['people'].values() if identity in person['login_ids']), {})
-        self.channel.config = {'app_id': 'cliTest'}
+        self.runtime.auth_manager.directory_person = PortalAuthManager.directory_person.__get__(self.runtime.auth_manager)
+        self.channel.config = {'app_id': self.settings.app_id}
         return snapshot
+
+    def migrate_fixture(self, person, current_open_id):
+        import time
+        from lan_bitable_template_portal.feishu_identity_migration import migrate_identity_databases, TARGET_APP_ID
+        from lan_bitable_template_portal.personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY
+
+        root = Path(self.temp.name) / 'migration'
+        with patch('lan_bitable_template_portal.portal_auth.get_data_file_path',
+                   return_value=str(root / 'lan_portal_auth.json')):
+            auth = PortalAuthManager()
+        self.addCleanup(auth.shutdown)
+        self.addCleanup(auth._state_store.shutdown_write_worker)
+        self.store = self.runtime.state_store = auth._state_store
+        self.runtime.auth_manager = auth
+        previous = person['login_ids'][0]
+        permission = {'enabled': True, 'role': 'building', 'level': 'L4', 'category': 'engineer',
+                      'access_version': 1, 'modules': ['assistant'], 'scopes': ['A']}
+        self.store.put_auth_permissions({'version': 2, 'users': {previous: permission}})
+        self.store.put_document(DIRECTORY_NS, DIRECTORY_KEY, {
+            'schema': 3, 'app_id': 'cliRetired', 'loaded_at': time.time(), 'people': {person['id']: person}})
+        history = {'id': 'fixture-existing-conversation', 'unified_person': True, 'turns': [{
+            'operation_id': 'fixture-existing-turn', 'question': 'Fixture question', 'answer': 'Fixture saved answer',
+            'status': 'completed', 'access_scopes': ['A'], 'access_modules': ['assistant'],
+        }]}
+        self.store.put_document('lighthouse_ai', 'conversation:' + previous, history)
+        profile = {'version': 1, 'target_app_id': TARGET_APP_ID, 'mappings': [{
+            'old_open_id': previous, 'new_open_id': current_open_id, 'record_ids': [person['id']],
+            'evidence': ['personnel_snapshot', 'target_hr_person_field'],
+        }], 'unresolved': []}
+        self.assertTrue(migrate_identity_databases(root, manifest=profile)['ready'])
+        self.settings.app_id = TARGET_APP_ID
+        self.channel.config = {'app_id': TARGET_APP_ID}
+        auth._account_directory_provider = lambda: self.store.get_document(DIRECTORY_NS, DIRECTORY_KEY)
+        snapshot = auth._account_directory_provider()
+        self.assertEqual((snapshot['schema'], snapshot['app_id']), (4, TARGET_APP_ID))
+        self.assertEqual(snapshot['people'][person['id']]['login_ids'], [current_open_id])
+        self.assertEqual(auth.scopes_for_open_id(current_open_id), ['A'])
+        self.assertEqual(auth.account_profile(current_open_id)['modules'], ['assistant'])
+        self.assertIsNone(self.channel._sender_user({'sender_id': previous}))
+        self.assertFalse(self.store.get_document('lighthouse_ai', 'conversation:' + previous))
+        with closing(sqlite3.connect(self.store.db_path)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM auth_sessions').fetchone()[0], 0)
+        return history
 
     async def test_known_sender_open_id_needs_current_app_hr_evidence_not_union_login(self):
         person = {'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Person'], 'selectable': True}
@@ -509,16 +561,16 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(user['open_id'], 'ou_Person')
         self.channel.messenger.sender_name.assert_not_awaited()
 
-    async def test_current_app_hr_binding_survives_restart_and_chat_change(self):
+    async def test_migrated_current_app_identity_survives_restart_and_chat_change(self):
         person = {'id': 'recA', 'name': '王彦博', 'employee_no': '12345',
                   'login_ids': ['ou_Web'], 'selectable': True}
-        self.sender_directory([person])
+        history = self.migrate_fixture(person, 'ou_Person')
         self.channel._user = Mock(side_effect=AssistantError('unmapped', 403, category='feishu_identity_unmapped'))
         self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value='recA'),
                                                 sender_name=AsyncMock(return_value='王彦博'))
-        message = parse_message(event(content='我叫别的人'), 'cliTest', 'ouBot')
+        message = parse_message(event(content='我叫别的人', app_id=self.settings.app_id), self.settings.app_id, 'ouBot')
         user = await self.channel._resolve_user(message)
-        self.assertEqual(user['open_id'], 'ou_Web')
+        self.assertEqual(user['open_id'], 'ou_Person')
         self.assertEqual(user['employee_no'], '12345')
         restarted = FeishuAssistant(self.controller, self.runtime, AsyncMock())
         restarted.config = dict(self.channel.config)
@@ -526,8 +578,12 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         other_room = {**message, 'chat_id': 'oc_Other', 'chat_type': 'group'}
         self.assertEqual(await restarted._resolve_user(other_room), user)
         self.channel.messenger.sender_name.assert_not_awaited()
+        self.channel.messenger.sender_record.assert_not_awaited()
         self.assertEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Other'}),
-                         LighthouseAssistant._key({'id': 'ou_Web'}))
+                         LighthouseAssistant._key({'id': 'ou_Person'}))
+        assistant = LighthouseAssistant(self.store, Mock(), model=Mock())
+        restored = assistant._state({'id': user['open_id'], 'channel': 'feishu:oc_Other'})
+        self.assertEqual((restored['id'], restored['turns']), (history['id'], history['turns']))
         self.runtime.auth_manager._open_id_explicitly_disabled = lambda _: True
         with self.assertRaisesRegex(AssistantError, '停用'):
             await restarted._resolve_user(other_room)
@@ -547,33 +603,46 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError):
             self.channel._sender_user(message, name='王彦博')
 
-    async def test_hr_record_resolves_other_app_sender_without_contact_name_and_reuses_web_context(self):
+    async def test_migrated_hr_record_uses_current_sender_without_login_and_reuses_web_context(self):
         person = {'id': 'recZheng', 'name': '郑帅', 'login_ids': ['ou_WebZheng'], 'selectable': True}
+        history = self.migrate_fixture(person, 'ou_Person')
+        person = {**person, 'login_ids': ['ou_Person']}
         self.sender_directory([person, {**person, 'id': 'recNamesake', 'login_ids': ['ou_Other']}])
         self.channel._user = Mock(side_effect=AssertionError('HR identity needs no contact permission'))
         self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value='recZheng'),
             sender_name=AsyncMock(side_effect=AssertionError('Name is not required')))
-        message = parse_message(event(chat_type='group', content='今天的热点新闻有哪些'), 'cliTest', 'ouBot')
+        message = parse_message(event(chat_type='group', content='今天的热点新闻有哪些',
+                                      app_id=self.settings.app_id), self.settings.app_id, 'ouBot')
         user = await self.channel._resolve_user(message)
-        self.assertEqual(user['open_id'], 'ou_WebZheng')
+        self.assertEqual(user['open_id'], 'ou_Person')
         self.assertEqual(user['name'], '郑帅')
-        binding = self.store.get_document('feishu_assistant_sender', 'cliTest:ou_Person')
-        self.assertEqual(binding['matched_by'], 'record_id')
+        self.assertFalse(self.store.get_document('feishu_assistant_sender', self.settings.app_id + ':ou_Person'))
         restarted = FeishuAssistant(self.controller, self.runtime, AsyncMock())
         restarted.config = dict(self.channel.config)
         self.assertEqual(await restarted._resolve_user({**message, 'chat_type': 'p2p', 'chat_id': 'oc_Other'}), user)
         self.assertEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Chat'}),
-                         LighthouseAssistant._key({'id': 'ou_WebZheng'}))
+                         LighthouseAssistant._key({'id': 'ou_Person'}))
+        self.controller._current_session = lambda _: {'user': user}
+        request = Request({'type': 'http', 'headers': [], 'state': {'lighthouse_channel': 'feishu:oc_Chat'}})
+        actor = await actor_for(self.controller, self.runtime, request)
+        model = Mock()
+        model.settings.return_value = {'models': [], 'enabled': True}
+        conversation = LighthouseAssistant(self.store, Mock(), model=model).conversation(actor)
+        self.assertEqual(conversation['conversation_id'], history['id'])
+        self.assertEqual(conversation['turns'][0]['answer'], history['turns'][0]['answer'])
+        with self.assertRaises(AssistantError):
+            await self.channel._resolve_user({**message, 'sender_id': 'ou_WebZheng'})
         self.channel.messenger.sender_name.assert_not_awaited()
         self.runtime.auth_manager._open_id_explicitly_disabled = lambda _: True
         with self.assertRaisesRegex(AssistantError, '停用'):
             await restarted._resolve_user(message)
 
     async def test_record_mapping_rejects_invalid_local_person_instead_of_name_fallback(self):
-        person = {'id': 'recZheng', 'name': '郑帅', 'login_ids': ['ou_WebZheng'], 'selectable': True}
+        person = {'id': 'recZheng', 'name': '郑帅', 'login_ids': ['ou_Person'], 'selectable': True}
         message = parse_message(event(), 'cliTest', 'ouBot')
         for people in ([], [{**person, 'inactive': True}], [{**person, 'selectable': False}],
-                       [{**person, 'login_ids': ['ou_WebZheng', 'ou_Other']}],
+                       [person, {**person, 'id': 'recDuplicate'}],
+                       [{**person, 'login_ids': ['ou_Person', 'ou_Other']}],
                        [{**person, 'login_ids': []}]):
             with self.subTest(people=people):
                 self.sender_directory(people)
@@ -599,24 +668,34 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.auth_manager._account_directory_loader.assert_called_once()
 
     async def test_existing_sender_binding_survives_hr_network_outage_without_extra_reads(self):
-        person = {'id': 'recKnown', 'name': '已关联人员', 'login_ids': ['ou_Web'], 'selectable': True}
+        person = {'id': 'recKnown', 'name': '已关联人员', 'login_ids': ['ou_Person'], 'selectable': True}
         snapshot = self.sender_directory([person])
         message = parse_message(event(), 'cliTest', 'ouBot')
         self.channel._sender_user(message, record_id='recKnown')
         snapshot['loaded_at'] = 0
         self.runtime.auth_manager._account_directory_loader = Mock(side_effect=OSError('offline'))
         self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(), sender_name=AsyncMock())
-        self.assertEqual((await self.channel._resolve_user(message))['open_id'], 'ou_Web')
+        self.assertEqual((await self.channel._resolve_user(message))['open_id'], 'ou_Person')
         self.channel.messenger.sender_record.assert_not_awaited()
         self.runtime.auth_manager._account_directory_loader.assert_not_called()
 
-    async def test_fixed_accounts_without_hr_person_preserve_union_identity_fallback(self):
+    async def test_fixed_current_accounts_without_hr_person_need_no_union_login(self):
+        from lan_bitable_template_portal.feishu_identity import TARGET_APP_ID
+        from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP
+        self.settings.app_id = TARGET_APP_ID
         self.sender_directory([])
         self.runtime.auth_manager._account_directory_loader = Mock(side_effect=OSError('offline'))
-        expected = {'open_id': 'ou_DutyH', 'name': 'H楼值班账号'}
-        self.channel._user = Mock(return_value=expected)
+        duty = BUILDING_OPEN_ID_MAP['H']
+        expected = {'open_id': duty, 'name': 'H楼值班账号', 'employee_no': ''}
+        auth = self.runtime.auth_manager
+        auth._permission_user = lambda identity: {'enabled': True, 'name': expected['name']} if identity == duty else {}
+        auth.scopes_for_open_id = lambda identity: ['H'] if identity == duty else []
+        auth.account_profile = lambda _: {'modules': ['assistant']}
+        self.channel._user = Mock(side_effect=AssertionError('Current duty account needs no union login'))
         self.channel.messenger = SimpleNamespace(sender_record=AsyncMock(return_value=None), sender_name=AsyncMock())
-        self.assertEqual(await self.channel._resolve_user(parse_message(event(), 'cliTest', 'ouBot')), expected)
+        message = parse_message(event(app_id=TARGET_APP_ID, sender_id=duty), TARGET_APP_ID, 'ouBot')
+        self.assertEqual(await self.channel._resolve_user(message), expected)
+        self.channel.messenger.sender_record.assert_not_awaited()
         self.channel.messenger.sender_name.assert_not_awaited()
         self.runtime.auth_manager._account_directory_loader.assert_not_called()
 
@@ -675,15 +754,20 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_record_bindings_are_scoped_to_bot_application_and_cannot_follow_a_reused_record(self):
         message = parse_message(event(), 'cliTest', 'ouBot')
-        person = {'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Web'], 'selectable': True}
-        snapshot = self.sender_directory([person])
+        person = {'id': 'recA', 'name': '王彦博', 'login_ids': ['ou_Person'], 'selectable': True}
+        self.sender_directory([person])
         self.channel._sender_user(message, record_id='recA')
+        binding = {'open_id': 'ou_Person', 'record_id': 'recA', 'matched_by': 'record_id'}
+        self.store.put_document('feishu_assistant_sender', 'cliTest:ou_Person', binding)
         self.channel.config['app_id'] = 'cliOther'
-        self.assertIsNone(self.channel._sender_user(message))
-        self.channel.config['app_id'] = 'cliTest'
-        snapshot['people'] = {'recOther': {**person, 'id': 'recOther'}}
-        with self.assertRaisesRegex(AssistantError, '记录发生变化'):
+        with self.assertRaises(AssistantError):
             self.channel._sender_user(message)
+        self.channel.config['app_id'] = 'cliTest'
+        self.sender_directory([{**person, 'login_ids': ['ou_Replacement']}])
+        self.assertIsNone(self.channel._sender_user(message))
+        with self.assertRaisesRegex(AssistantError, '人员账号不一致'):
+            self.channel._sender_user(message, record_id='recA')
+        self.assertEqual(self.store.get_document('feishu_assistant_sender', 'cliTest:ou_Person'), binding)
 
     async def test_sender_name_uses_api_identity_and_external_group_pagination(self):
         messenger = FeishuMessenger({})

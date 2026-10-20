@@ -90,9 +90,11 @@ class ShiftReminderTests(TestCase):
 
     def test_real_card_adapter_requires_receipt_before_marking_sent(self):
         from upload_event_module.services import robot_webhook
+        from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
         self.service._sender = None
         key = 'shift:2026-10-10:白:ou_external'
-        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}), \
+        with standalone_delivery_fixture('ou_external'), \
+             patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}), \
              patch.object(robot_webhook, '_get_tenant_access_token', return_value=('fixture', '')), \
              patch.object(robot_webhook, '_request_json', side_effect=[{'code': 0},
                  {'code': 0, 'data': {'message_id': 'om_realreceipt', 'chat_id': 'oc_private'}}]) as transport:
@@ -322,10 +324,16 @@ class ShiftReminderTests(TestCase):
 
     def test_group_transport_passes_uuid_to_feishu_and_old_call_still_works(self):
         from upload_event_module.services import robot_webhook
-        with patch.object(robot_webhook, '_get_tenant_access_token', return_value=('fixture', '')), \
-             patch.object(robot_webhook, '_send_interactive_to_receive_id', return_value=(True, 'ok')) as send:
+        from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
+        from uuid import UUID
+        with standalone_delivery_fixture(), \
+             patch.object(robot_webhook, '_get_tenant_access_token', return_value=('fixture', '')), \
+             patch.object(robot_webhook, '_request_json', return_value={
+                 'code': 0, 'data': {'message_id': 'om_group', 'chat_id': 'oc_group'}}) as send:
             card = reminders.reminder_card('周报', 'http://portal.test/learning')
-            robot_webhook.send_interactive_to_chat_id(card, 'oc_group', message_uuid='stable')
-            self.assertEqual(send.call_args.kwargs, {'receive_id_type': 'chat_id', 'message_uuid': 'stable'})
-            robot_webhook.send_interactive_to_chat_id(card, 'oc_group')
-            self.assertEqual(send.call_args.kwargs['message_uuid'], '')
+            self.assertTrue(robot_webhook.send_interactive_to_chat_id(card, 'oc_group', message_uuid='stable')[0])
+            self.assertEqual(send.call_args.kwargs['params'], {'receive_id_type': 'chat_id'})
+            self.assertEqual(send.call_args.kwargs['json_payload']['uuid'], 'stable')
+            self.assertTrue(robot_webhook.send_interactive_to_chat_id(card, 'oc_group')[0])
+            self.assertEqual(str(UUID(send.call_args.kwargs['json_payload']['uuid'])),
+                             send.call_args.kwargs['json_payload']['uuid'])

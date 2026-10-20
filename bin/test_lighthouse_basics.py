@@ -201,8 +201,7 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_general_question_uses_model_without_unrelated_business_reads(self):
         async def stream(messages, info):
-            self.assertIn('calculate', {tool.name for tool in info.function_tools})
-            self.assertIn('date_time', {tool.name for tool in info.function_tools})
+            self.assertEqual(info.function_tools, [])
             yield 'Hello 的中文是你好。'
         @asynccontextmanager
         async def factory(*_):

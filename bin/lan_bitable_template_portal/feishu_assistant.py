@@ -36,6 +36,7 @@ _PLAN_STATUS_MAX_ATTEMPTS = 64  # 64 polls, most at the 15s cap ≈ 16 minutes.
 _PLAN_STATUS_TERMINAL = frozenset({"completed", "failed", "cancelled", "superseded"})
 _PLAN_STATUS_FEEDBACK = frozenset({"needs_input", "awaiting_confirmation", "awaiting_second_confirmation"})
 _MESSAGE_TIMEOUT = 330
+_LIVE_REPLY_INTERVAL = 1.0
 
 
 def _uncertain_reply(identity):
@@ -71,6 +72,31 @@ def _card_text(card):
     if isinstance(card, list):
         return '\n'.join(_card_text(value) for value in card)
     return ''
+
+
+def _live_card(reply):
+    text = _reply_text(reply.get('text'))
+    if reply.get('awaiting_turn') and len(text) > 3500:
+        text = text[:3500] + '\n\n[内容较长，本卡片仅展示开头。]'
+    elements = [{'tag': 'markdown', 'content': chunk} for chunk in _reply_chunks(text)]
+    notice = ('正在生成，以上为未完成的回答。' if reply.get('awaiting_turn')
+              else reply['live_reply'].get('notice', ''))
+    if notice:
+        elements.append({'tag': 'markdown', 'content': notice})
+    return {'schema': '2.0', 'config': {'update_multi': True}, 'body': {'elements': elements}}
+
+
+def _live_result(previous, result, *, incomplete=False):
+    live = previous.get('live_reply')
+    if isinstance(live, dict):
+        result['live_reply'] = live
+        for key in ('thread_route', 'thread_messages', 'thread_fallback', 'sent_parts'):
+            if key in previous:
+                result.setdefault(key, copy.deepcopy(previous[key]))
+        live['notice'] = '本轮未完成，以上仅为已生成的部分内容。' if incomplete else ''
+        if incomplete and live.get('partial') and live['partial'] not in result['text']:
+            result['text'] = live['partial'] + '\n\n' + result['text']
+    return result
 
 
 def parse_message(payload, app_id, bot_id, *, inbox=None):
@@ -116,11 +142,18 @@ def parse_message(payload, app_id, bot_id, *, inbox=None):
     for mention in mentions:
         question = question.replace(str(mention.get("key") or "\x00"), "")
     question = question.strip()
-    from .feishu_assistant_files import parse_resources
+    from .feishu_assistant_files import parse_resources, parse_audio_resource
     try:
         resources = parse_resources(message, content)
     except AssistantError:
         resources, problem = [], 'oversize'
+    audio = message.get('message_type') == 'audio'
+    if audio:
+        try:
+            parse_audio_resource(message, content)
+            question = '请识别这条语音。'
+        except AssistantError:
+            problem = 'unsupported'
     if resources and not question:
         question = '请读取附件，结合当前会话继续处理。'
     if not question:
@@ -133,8 +166,9 @@ def parse_message(payload, app_id, bot_id, *, inbox=None):
             **({'root_id': root} if root else {}), **({'thread_id': thread} if thread else {}),
              **({'parent_id': parent} if parent else {}),
             "sender_id": ids["open_id"], "union_id": str(ids.get("union_id") or ""), "problem": problem,
+            **({'message_type': 'audio'} if audio else {}),
             "question": safe_text(question, limit=12000) or "[内容已隐去]",
-            'content': {**({key: content[key] for key in ('file_key', 'file_name') if key in content} if any(r['kind'] == 'file' for r in resources) else {}),
+            'content': {**({key: content[key] for key in ('file_key', 'file_name') if key in content} if audio or any(r['kind'] == 'file' for r in resources) else {}),
                         'content': [[{'tag': 'img', 'image_key': r['key']} for r in resources if r['kind'] == 'image']]}}
 
 
@@ -220,11 +254,30 @@ class Inbox:
                 "SELECT DISTINCT owner FROM messages WHERE state IN ('pending','reply') AND retry_at<=? "
                 "AND COALESCE(json_extract(payload,'$.kind'),'')<>'plan_status'", (time.time(),))]
 
-    def take(self, owner):
+    def queue_key(self, message):
+        topic = self.context_topic(message) if message.get('chat_type') == 'group' else None
+        return (message.get('app_id', ''), message.get('chat_id', ''),
+                (topic or {}).get('root_id', '') if topic else 'p2p')
+
+    def queues(self):
         with self.connect() as db:
-            row = db.execute("SELECT id,payload,state,reply FROM messages WHERE owner=? AND state IN ('pending','reply') "
+            rows = db.execute("SELECT owner,payload FROM messages WHERE state IN ('pending','reply') AND retry_at<=? "
+                              "AND COALESCE(json_extract(payload,'$.kind'),'')<>'plan_status' ORDER BY rowid",
+                              (time.time(),)).fetchall()
+        return list(dict.fromkeys((owner, self.queue_key(json.loads(payload))) for owner, payload in rows))
+
+    def next_delay(self):
+        with self.connect() as db:
+            due = db.execute("SELECT MIN(retry_at) FROM messages WHERE state IN ('pending','reply')").fetchone()[0]
+        return min(10, max(_LIVE_REPLY_INTERVAL, due - time.time())) if due is not None else 10
+
+    def take(self, owner, lane=None):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute("SELECT id,payload,state,reply FROM messages WHERE owner=? AND state IN ('pending','reply') "
                              "AND retry_at<=? AND COALESCE(json_extract(payload,'$.kind'),'')<>'plan_status' "
-                             "ORDER BY rowid LIMIT 1", (owner, time.time())).fetchone()
+                             "ORDER BY rowid", (owner, time.time())).fetchall()
+            row = next((row for row in rows if lane is None or self.queue_key(json.loads(row[1])) == lane), None)
             if not row: return None
             db.execute("UPDATE messages SET state='processing' WHERE id=?", (row[0],))
             return {**json.loads(row[1]), "reply": json.loads(row[3]) if row[3] else None}
@@ -367,11 +420,17 @@ class Inbox:
                        (attempts, 'stopped' if stopped else 'reply', time.time() + min(300, 5 * 2 ** min(attempts, 6)), time.time(), safe_text(reason, limit=240), identity))
             return stopped
 
-    def recover_processing(self, owner):
+    def recover_processing(self, owner, lane=None):
         with self.connect() as db:
-            for row in db.execute("SELECT id FROM messages WHERE owner=? AND state='processing'", (owner,)).fetchall():
+            for row in db.execute("SELECT id,payload FROM messages WHERE owner=? AND state='processing'", (owner,)).fetchall():
+                if lane is not None and self.queue_key(json.loads(row[1])) != lane:
+                    continue
                 db.execute("UPDATE messages SET state='reply',reply=COALESCE(reply,?),retry_at=?,updated_at=? WHERE id=?",
                     (json.dumps(_uncertain_reply(row[0]), ensure_ascii=False), time.time() + 5, time.time(), row[0]))
+
+    def stop_pending(self):
+        with self.connect() as db:
+            db.execute("UPDATE messages SET state='stopped',updated_at=? WHERE state IN ('pending','processing','reply')", (time.time(),))
 
     def cleanup(self, now=None):
         now = time.time() if now is None else now
@@ -419,18 +478,32 @@ class FeishuMessenger:
         self.lock = asyncio.Lock()
         self.http_lock = asyncio.Lock()
         self.directory_lock = asyncio.Lock()
+        self.update_lock, self.next_update = asyncio.Lock(), 0.0
         self.directory_records, self.directory_expires = {}, 0
+        self.closed, self.config_path, self.config_revision = False, None, None
 
     async def client(self):
         async with self.http_lock:
+            if self.closed:
+                raise AssistantError('飞书消息连接已更新，请稍后重试。', 503)
             if self.http is None:
                 import httpx
                 self.http = await asyncio.to_thread(httpx.AsyncClient, timeout=20,
                     limits=httpx.Limits(max_connections=40, max_keepalive_connections=10))
         return self.http
 
+    async def _check_config(self):
+        if self.closed:
+            raise AssistantError('飞书消息连接已更新，请稍后重试。', 503)
+        if self.config_path is not None:
+            from .feishu_assistant_settings import read_config
+            _, revision = await asyncio.to_thread(read_config, self.config_path)
+            if self.closed or revision != self.config_revision:
+                raise AssistantError('飞书配置已更新，正在切换连接。', 503, category='feishu_config_changed')
+
     async def headers(self):
         async with self.lock:
+            await self._check_config()
             if time.monotonic() >= self.expires:
                 client = await self.client()
                 response = await client.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -438,6 +511,7 @@ class FeishuMessenger:
                 data = response.json()
                 if data.get("code") != 0 or not data.get("tenant_access_token"):
                     raise AssistantError("飞书消息应用认证失败，请检查应用凭证。", 503)
+                await self._check_config()
                 self.token, self.expires = data["tenant_access_token"], time.monotonic() + max(60, data.get("expire", 7200) - 120)
             return {"Authorization": "Bearer " + self.token}
 
@@ -479,6 +553,7 @@ class FeishuMessenger:
                                      PERMISSION_DIRECTORY_TABLE_ID)
         import httpx
         async with self.directory_lock:
+            await self._check_config()
             if time.monotonic() >= self.directory_expires:
                 records, seen_rows, token, seen_tokens = {}, set(), '', set()
                 client, headers = await self.client(), await self.headers()
@@ -520,6 +595,7 @@ class FeishuMessenger:
                     raise AssistantError('飞书智能体暂未完整读取人员关联，请稍后重试；若持续失败，请管理员检查智能体读取人员表的权限。',
                                          503, category='feishu_sender_directory_unavailable') from exc
                 # Publish only a complete snapshot; concurrent senders share one read.
+                await self._check_config()
                 self.directory_records, self.directory_expires = records, time.monotonic() + 300
             return self.directory_records
 
@@ -591,8 +667,16 @@ class FeishuMessenger:
                   else 'answer:fallback' if reply.get('card_rejected')
                   else 'answer:inline' if reply.get('long_text_file_key') else 'answer')
         parts = []
+        live = reply.get('live_reply')
+        if isinstance(live, dict):
+            if live.get('message_id'):
+                if reply.get('awaiting_turn') or not (reply.get('files') or reply.get('long_text_file_key')):
+                    await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
+            else:
+                placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {}}
+                parts.append(('live:0', 'interactive', _live_card(placeholder)))
         # A form is supplementary: it must not replace the answer or its sources.
-        if not card or text not in _card_text(card):
+        if live is None and (not card or text not in _card_text(card)):
             parts.extend((prefix if not card and index == 0 and prefix in {'attachment-stopped', 'answer:fallback'}
                           else prefix + (':text:' if card else ':') + str(index), 'interactive',
                           {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': chunk}]}})
@@ -612,6 +696,13 @@ class FeishuMessenger:
                 kind, content = 'text', {'text': _card_text(content)}
             if authorize:
                 await authorize()
+            if part == 'live:0':
+                if live.get('create_started') and time.time() - live['create_started'] >= 3600:
+                    raise AssistantError('原占位回复发送结果尚未确认，已停止补发，避免产生重复消息。',
+                                         403, category='feishu_delivery_permanent')
+                if not live.get('create_started'):
+                    live['create_started'] = time.time()
+                    if checkpoint: await checkpoint()
             body = {"msg_type": kind, "content": json.dumps(content, ensure_ascii=False),
                 "reply_in_thread": not reply.get('thread_fallback', False),
                 "uuid": hashlib.sha256((message["message_id"] + ":" + part).encode()).hexdigest()[:32]}
@@ -619,11 +710,16 @@ class FeishuMessenger:
             url = "https://open.feishu.cn/open-apis/im/v1/messages/" + target + "/reply"
             response = await client.post(url, headers=await self.headers(), json=body)
             data = response.json()
+            if part == 'live:0' and getattr(response, 'status_code', 200) >= 400 and data.get('code') == 0:
+                raise AssistantError('飞书占位回复未确认，保留原发送标识重试。', 503)
             if data.get("code") != 0:
                 if data.get('code') in {230071, 230072} and not reply.get('thread_fallback'):
                     reply['thread_fallback'] = True
                     if checkpoint: await checkpoint()
                     return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize)
+                if part == 'live:0' and data.get('code') in {230001, 230099}:
+                    raise AssistantError('飞书拒绝可更新的占位卡片，未发送不能继续更新的替代消息。',
+                                         403, category='feishu_delivery_permanent')
                 if card and content is card and data.get('code') in {230001, 230099}:
                     reply.pop('card', None)
                     reply['card_rejected'] = True
@@ -648,6 +744,13 @@ class FeishuMessenger:
                 raise AssistantError('飞书未返回有效消息回执，保留原回复重试。', 503)
             if delivered.get('chat_id') and delivered['chat_id'] != message['chat_id']:
                 raise AssistantError('飞书回复回执会话不匹配，已停止自动重试。', 403, category='feishu_delivery_permanent')
+            if part == 'live:0':
+                if ((delivered.get('root_id') and delivered['root_id'] != target)
+                        or (message.get('thread_id') and delivered.get('thread_id')
+                            and delivered['thread_id'] != message['thread_id'])):
+                    raise AssistantError('飞书占位回复回执话题不匹配，已停止自动重试。',
+                                         403, category='feishu_delivery_permanent')
+                live.update(message_id=delivered['message_id'], updated_at=time.time())
             if delivered.get('thread_id'):
                 reply['thread_route'] = {'chat_id': message['chat_id'],
                     'chat_type': message['chat_type'],
@@ -659,9 +762,54 @@ class FeishuMessenger:
                         reply['card_message_id'] = delivered['message_id']
             reply.setdefault('sent_parts', []).append(part)
             if checkpoint: await checkpoint()
+        if isinstance(live, dict) and not reply.get('awaiting_turn'):
+            await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
+
+    async def update(self, message, reply, *, checkpoint=None, authorize=None):
+        from .portal_service import external_real_write_guard
+        live = reply['live_reply']
+        if not re.fullmatch(r'om_[A-Za-z0-9]+', str(live.get('message_id') or '')):
+            raise AssistantError('原占位回复缺少有效回执，未新发替代消息。', 503)
+        card = _live_card(reply)
+        content = json.dumps(card, ensure_ascii=False)
+        if len(json.dumps({'content': content}, ensure_ascii=False).encode('utf-8')) > 27000:
+            raise AssistantError('完整回答超过单卡片容量，全文文件尚未准备完成，原回答已保留。', 503)
+        if live.get('content') == content or (reply.get('awaiting_turn')
+                and time.time() - live.get('updated_at', 0) < _LIVE_REPLY_INTERVAL):
+            return
+        async with self.update_lock:
+            now = time.monotonic()
+            delay = max(0, self.next_update - now)
+            self.next_update = max(now, self.next_update) + .1
+        if delay:
+            await asyncio.sleep(delay)
+        if authorize:
+            await authorize()
+        if not external_real_write_guard()['real_write_allowed']:
+            raise AssistantError('当前运行模式不允许更新真实飞书消息。', 403)
+        client = await self.client()
+        response = await client.patch('https://open.feishu.cn/open-apis/im/v1/messages/' + live['message_id'],
+                                      headers=await self.headers(), json={'content': content})
+        data = response.json()
+        if data.get('code') != 0 or getattr(response, 'status_code', 200) >= 400:
+            if data.get('code') in {99991663, 99991664, 99991665}: self.expires = 0
+            permanent = data.get('code') in {230001, 230002, 230006, 230013, 230038, 230050,
+                                            230054, 230055, 230075, 230099, 230110, 230111, 232009,
+                                            99991672, 99991679}
+            raise AssistantError('原飞书回复更新未确认，保留原消息重试，未新发消息。',
+                                 403 if permanent else 503,
+                                 category='feishu_delivery_permanent' if permanent else '')
+        live.update(content=content, updated_at=time.time())
+        if checkpoint: await checkpoint()
 
     async def close(self):
-        if self.http is not None: await self.http.aclose()
+        self.closed = True
+        self.token, self.expires = '', 0
+        self.directory_records, self.directory_expires = {}, 0
+        async with self.http_lock:
+            if self.http is not None:
+                await self.http.aclose()
+                self.http = None
 
 
 class FeishuAssistant:
@@ -684,42 +832,181 @@ class FeishuAssistant:
         self.event = asyncio.Event()
         self.starts = []
         self.next_cleanup = 0
+        self._config_managed, self._config_revision, self._next_config_check = False, None, 0
+        self._isolated_inbox = False
+        self._reload_lock, self._worker_lock = asyncio.Lock(), asyncio.Lock()
+
+    async def _stop_process(self):
+        process = self.process
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                await asyncio.to_thread(process.wait, 5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                await asyncio.to_thread(process.wait, 5)
+        self.process = None
+
+    async def _stop_transport(self):
+        try:
+            async with self._worker_lock:
+                await self._stop_process()
+        finally:
+            pending = [task for task in [*self.tasks.values(), *self.reactions.values(), *self.plan_tasks.values()]
+                       if not task.done() and task is not asyncio.current_task()]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            self.tasks.clear()
+            self.reactions.clear()
+            self.plan_tasks.clear()
+            for name in ('handover_cards', 'permission_cards'):
+                service = getattr(self, name, None)
+                if service:
+                    try:
+                        await service.close()
+                    except Exception as exc:
+                        logging.warning('Feishu notification shutdown deferred: %s', type(exc).__name__)
+            if self.messenger:
+                await self.messenger.close()
+                self.messenger = None
+            self.bot_id = ''
+
+    async def _configuration_current(self):
+        if not self._config_managed:
+            return True
+        if self.closing or not self.config.get('enabled') or self.messenger is None:
+            return False
+        from .feishu_assistant_settings import read_config
+        try:
+            _, revision = await asyncio.to_thread(read_config, self.config_path)
+            if revision == self._config_revision:
+                return True
+        except (OSError, ValueError, AssistantError):
+            pass
+        self._next_config_check = 0
+        self.event.set()
+        return False
+
+    async def _require_current_config(self):
+        if not await self._configuration_current():
+            raise AssistantError('飞书配置已更新，正在切换连接；原消息已保留。', 503, category='feishu_config_changed')
+
+    async def _refresh_config(self, *, force=False):
+        if not self._config_managed and not force:
+            return True
+        if not force and time.monotonic() < self._next_config_check:
+            return self.messenger is not None and self.config.get('enabled')
+        async with self._reload_lock:
+            if self.closing:
+                return False
+            self._next_config_check = time.monotonic() + 3
+            from .feishu_assistant_settings import read_config, validate_app_id
+            stopping = False
+            try:
+                if not self.config_path.is_file():
+                    raise FileNotFoundError('missing Feishu configuration')
+                config, revision = await asyncio.to_thread(read_config, self.config_path)
+                if revision == self._config_revision:
+                    if not config.get('enabled'):
+                        return False
+                    if self.inbox is not None and self.messenger is not None:
+                        return True
+                if config.get('enabled'):
+                    validate_app_id(config.get('app_id'))
+                    if not isinstance(config.get('app_id'), str) or not config['app_id'].strip():
+                        raise ValueError('missing app id')
+                    if not unprotect_key(config.get('secret_cipher') or ''):
+                        raise ValueError('missing app secret')
+                    bridge = unprotect_key(config.get('bridge_cipher') or '')
+                    if not bridge:
+                        raise ValueError('missing bridge')
+                else:
+                    bridge = ''
+                    if self.config.get('app_id') and not config.get('app_id'):
+                        raise ValueError('missing app id')
+                keys = ('app_id', 'enabled', 'secret_cipher', 'bridge_cipher')
+                if self.inbox is not None and self.messenger is not None and all(config.get(key) == self.config.get(key) for key in keys):
+                    self.config, self._config_revision = config, revision
+                    self.messenger.config, self.messenger.config_revision = config, revision
+                    return True
+                from .portal_service import external_real_write_guard
+                allowed = external_real_write_guard()['real_write_allowed'] if config.get('enabled') else False
+                changed_app = bool(self.config.get('app_id')) and config.get('app_id') != self.config['app_id']
+                stopping = True
+                await self._stop_transport()
+                if changed_app and self.inbox is not None:
+                    await asyncio.to_thread(self.inbox.stop_pending)
+                    self.inbox = None
+                    self.picked_plan.clear()
+                    self.topic_choices.clear()
+                self._isolated_inbox = self._isolated_inbox or changed_app or bool(config.get('isolated_inbox'))
+                # Retain the latest target, but retry failed local setup at the same revision.
+                self.config, self.secret = config, bridge
+                if not config.get('enabled') or not allowed:
+                    self._config_revision = revision
+                    return False
+                if self.inbox is None or changed_app:
+                    suffix = '_' + hashlib.sha256(config['app_id'].encode()).hexdigest()[:24] if self._isolated_inbox else ''
+                    self.inbox = await asyncio.to_thread(Inbox, self.root / ('feishu_assistant' + suffix + '.sqlite3'))
+                self.messenger = FeishuMessenger(config)
+                self.messenger.config_path, self.messenger.config_revision = self.config_path, revision
+                self._config_revision = revision
+                self.starts.clear()
+                try:
+                    await self._start_worker()
+                except Exception as exc:
+                    logging.warning('Feishu connection restart deferred: %s', type(exc).__name__)
+                return True
+            except Exception as exc:
+                if not stopping:
+                    await self._stop_transport()
+                logging.warning('Feishu configuration reload deferred: %s', type(exc).__name__)
+                return False
 
     async def _start_worker(self):
         from upload_event_module.services.process_lifetime import register_child_process
         from openclaw_service.protocol import atomic_json
-        # A saved configuration takes effect next startup, not on a worker retry.
-        worker_config = self.root / "feishu_assistant_active.json"
-        await asyncio.to_thread(atomic_json, worker_config, self.config)
-        callback = f"http://127.0.0.1:{self.controller.bound_port or self.controller.preferred_port}/api/assistant/feishu-event"
-        flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
-        self.starts.append(time.monotonic())
-        self.process = await asyncio.to_thread(subprocess.Popen,
-            [sys.executable, "-m", "lan_bitable_template_portal.feishu_assistant_worker", "--config", str(worker_config), "--callback", callback],
-            cwd=str(Path(__file__).resolve().parents[1]), creationflags=flags)
-        if not register_child_process(self.process.pid):
-            self.process.terminate()
-            await asyncio.to_thread(self.process.wait, 5)
-            raise RuntimeError("Unable to bind Feishu worker lifetime")
+        async with self._worker_lock:
+            if self.closing or self.process and self.process.poll() is None:
+                return
+            if self._config_managed and not await self._configuration_current():
+                return
+            worker_config = self.root / "feishu_assistant_active.json"
+            await asyncio.to_thread(atomic_json, worker_config, self.config)
+            callback = f"http://127.0.0.1:{self.controller.bound_port or self.controller.preferred_port}/api/assistant/feishu-event"
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
+            self.starts.append(time.monotonic())
+            spawn = asyncio.create_task(asyncio.to_thread(subprocess.Popen,
+                [sys.executable, "-m", "lan_bitable_template_portal.feishu_assistant_worker", "--config", str(worker_config), "--callback", callback],
+                cwd=str(Path(__file__).resolve().parents[1]), creationflags=flags))
+            try:
+                self.process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                self.process = await spawn
+                await self._stop_process()
+                raise
+            if not register_child_process(self.process.pid):
+                await self._stop_process()
+                raise RuntimeError("Unable to bind Feishu worker lifetime")
+            if self._config_managed and not await self._configuration_current():
+                await self._stop_process()
 
     async def start(self):
         if not self.config_path or not self.config_path.is_file(): return
+        if self.runner and not self.runner.done(): return
+        self._config_managed = True
         try:
-            self.config = await asyncio.to_thread(lambda: json.loads(self.config_path.read_text(encoding="utf-8")))
-            if not self.config.get("enabled"): return
-            from .feishu_assistant_settings import validate_app_id
-            validate_app_id(self.config.get('app_id'))
-            from .portal_service import external_real_write_guard
-            if not external_real_write_guard()["real_write_allowed"]: return
-            self.secret = unprotect_key(self.config["bridge_cipher"])
-            suffix = "_" + hashlib.sha256(self.config["app_id"].encode()).hexdigest()[:24] if self.config.get("isolated_inbox") else ""
-            self.inbox = await asyncio.to_thread(Inbox, self.root / ("feishu_assistant" + suffix + ".sqlite3"))
-            self.messenger = FeishuMessenger(self.config)
-            await self._start_worker()
-            if getattr(self, "permission_cards", None):
+            active = await self._refresh_config(force=True)
+            if not active and self._config_revision is None and not self.config:
+                return
+            if active and getattr(self, "permission_cards", None):
                 await self.permission_cards.recover()
+            if self.closing or self.runner and not self.runner.done():
+                return
             self.runner = asyncio.create_task(self._run())
-            print("[ClipFlow][FeishuAssistant] 飞书智能体正在后台建立消息长连接，不影响其他业务", flush=True)
+            if active:
+                print("[ClipFlow][FeishuAssistant] 飞书智能体正在后台建立消息长连接，不影响其他业务", flush=True)
         except Exception as exc:
             logging.error("Feishu assistant initialization failed: %s", str(exc) if isinstance(exc, AssistantError) else type(exc).__name__)
 
@@ -728,10 +1015,15 @@ class FeishuAssistant:
         if (not self.inbox or not request.client or request.client.host != "127.0.0.1" or request.headers.get("origin")
                 or not token.isascii() or not hmac.compare_digest(token, "Bearer " + self.secret)):
             return JSONResponse({"ok": False}, status_code=403)
+        if not await self._configuration_current():
+            return JSONResponse({'ok': False}, status_code=503)
+        inbox, app_id, bridge = self.inbox, self.config['app_id'], self.secret
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > 128000: return JSONResponse({"ok": False}, status_code=413)
+        if self.inbox is not inbox or self.secret != bridge or not await self._configuration_current():
+            return JSONResponse({'ok': False}, status_code=503)
         try:
             data = json.loads(body)
             if data.get("kind") == "ready":
@@ -762,7 +1054,10 @@ class FeishuAssistant:
                 if not message and (data.get('header') or {}).get('event_type') == 'card.action.trigger':
                     return JSONResponse({'ok': False}, status_code=400)
                 if message:
-                    added = await asyncio.to_thread(self.inbox.add, message)
+                    if self.inbox is not inbox or self.secret != bridge or not await self._configuration_current():
+                        return JSONResponse({'ok': False}, status_code=503)
+                    message.setdefault('app_id', app_id)
+                    added = await asyncio.to_thread(inbox.add, message)
                     if added and not message.get('kind'):
                         mid = message['message_id']
                         self.reactions[mid] = asyncio.create_task(self._react(message))
@@ -786,6 +1081,8 @@ class FeishuAssistant:
         if not user or user.get("union_id") != union_id or not re.fullmatch(r"ou_[A-Za-z0-9]+", str(user.get("open_id") or "")):
             raise AssistantError("飞书账号尚未关联灯塔人员。", 403, category='feishu_identity_unmapped')
         if auth._open_id_explicitly_disabled(user["open_id"]): raise AssistantError("当前灯塔账号已停用。", 403)
+        if not self._sender_user({'sender_id': user['open_id']}):
+            raise AssistantError("飞书账号尚未关联灯塔人员。", 403, category='feishu_identity_unmapped')
         user = {key: user.get(key, "") for key in ("open_id", "union_id", "name", "employee_no")}
         if user != cached: store.put_document("feishu_assistant_identity", union_id, user)
         return user
@@ -795,28 +1092,25 @@ class FeishuAssistant:
         sender = str(message.get('sender_id') or '')
         if not re.fullmatch(r'ou_[A-Za-z0-9]+', sender):
             raise AssistantError('飞书消息缺少有效的发送人标识。', 403)
+        if str(self.config.get('app_id') or '') != auth.current_feishu_app_id():
+            raise AssistantError('飞书消息连接已更新，请稍后重试。', 503)
         if auth._open_id_explicitly_disabled(sender):
             raise AssistantError('当前灯塔账号已停用。', 403)
-        lookup = getattr(auth, 'directory_person', lambda _: {})
-        person = lookup(sender)
-        if person:
-            identity = sender
-        else:
+        from .feishu_identity import TARGET_APP_ID
+        from .portal_auth import REQUIRED_ADMIN_USERS
+        from .portal_service import BUILDING_OPEN_ID_MAP
+        if (self.config.get('app_id') == TARGET_APP_ID
+                and (sender in REQUIRED_ADMIN_USERS or sender in BUILDING_OPEN_ID_MAP.values())):
             configured = getattr(auth, '_permission_user', lambda _: {})(sender)
             if (configured and configured.get('enabled') is not False
                     and auth.scopes_for_open_id(sender)
                     and 'assistant' in getattr(auth, 'account_profile', lambda _: {})(sender).get('modules', [])):
                 return {'open_id': sender, 'name': str(configured.get('name') or sender), 'employee_no': ''}
-            key = str(self.config.get('app_id') or '') + ':' + sender
-            binding = store.get_document('feishu_assistant_sender', key) or {}
-            if binding.get('matched_by') not in {'record_id', 'union_id', 'admin'}:
-                binding = {}
-            if binding:
-                identity = str(binding.get('open_id') or '')
-                person = lookup(identity)
-                if not person or person.get('id') != binding.get('record_id'):
-                    raise AssistantError('已关联的人员记录发生变化，请管理员核对账号关联。', 403)
-            elif name is not None or record_id is not None:
+            raise AssistantError('当前灯塔账号尚未获得智能体或楼栋权限。', 403)
+        lookup = getattr(auth, 'directory_person', lambda _: {})
+        person = lookup(sender)
+        if not person:
+            if name is not None or record_id is not None:
                 if record_id is None:
                     raise AssistantError('仅凭飞书姓名不能认证灯塔账号，请管理员按智能体应用的人员记录关联；无需重新创建账号。',
                                          403, category='feishu_identity_evidence_required')
@@ -827,7 +1121,8 @@ class FeishuAssistant:
                     if loader:
                         loader()
                         snapshot = provider() if provider else {}
-                if not snapshot.get('loaded_at'):
+                if (snapshot.get('schema') != 4 or snapshot.get('app_id') != self.config.get('app_id')
+                        or not snapshot.get('loaded_at')):
                     raise AssistantError('灯塔人员目录暂未就绪，请稍后重试。', 503)
                 people = [item for item in snapshot.get('people', {}).values()
                           if not item.get('inactive') and (item.get('id') == record_id if record_id is not None
@@ -838,20 +1133,14 @@ class FeishuAssistant:
                     raise AssistantError('灯塔在岗目录存在重名，无法确定对应账号，请管理员核对。' if people
                                          else '灯塔在岗目录未找到与你的飞书姓名一致的人员，请管理员核对人员姓名。', 403)
                 person = people[0]
-                identities = person.get('login_ids') or []
-                if len(identities) != 1 or not re.fullmatch(r'ou_[A-Za-z0-9]+', str(identities[0])):
-                    raise AssistantError('该人员缺少唯一有效的灯塔账号，请管理员核对。', 403)
-                identity = identities[0]
-                if not person.get('selectable') or auth._open_id_explicitly_disabled(identity):
-                    raise AssistantError('当前灯塔账号已停用或人员身份待核对。', 403)
-                store.put_document('feishu_assistant_sender', key, {'open_id': identity,
-                    'record_id': person['id'], 'name': person['name'],
-                    'matched_by': 'record_id' if record_id is not None else 'name'})
             else:
                 return None
-        if not person.get('selectable') or person.get('inactive') or auth._open_id_explicitly_disabled(identity):
+        if person.get('login_ids') != [sender]:
+            raise AssistantError('飞书发送人与当前人员账号不一致，请管理员核对。', 403,
+                                 category='feishu_identity_unmapped')
+        if not person.get('selectable') or person.get('inactive') or person.get('disabled_reason') or auth._open_id_explicitly_disabled(sender):
             raise AssistantError('当前灯塔账号已停用或人员身份待核对。', 403)
-        return {'open_id': identity, 'name': person['name'], 'employee_no': person.get('employee_no', '')}
+        return {'open_id': sender, 'name': person['name'], 'employee_no': person.get('employee_no', '')}
 
     async def _resolve_user(self, message):
         user = await asyncio.to_thread(self._sender_user, message)
@@ -868,7 +1157,9 @@ class FeishuAssistant:
             if record_id:
                 return await asyncio.to_thread(self._sender_user, message, record_id=record_id)
         try:
-            return await asyncio.to_thread(self._user, str(message.get('union_id') or ''))
+            user = await asyncio.to_thread(self._user, str(message.get('union_id') or ''))
+            if user['open_id'] == message.get('sender_id'):
+                return user
         except AssistantError as exc:
             if exc.category != 'feishu_identity_unmapped':
                 raise
@@ -891,6 +1182,7 @@ class FeishuAssistant:
         return token
 
     async def _request_context(self, message):
+        await self._require_current_config()
         if message.get('app_id') and self.config.get('app_id') and message['app_id'] != self.config['app_id']:
             raise AssistantError('该消息属于此前的飞书应用，本应用未执行其操作。', 403)
         user = await self._resolve_user(message)
@@ -997,6 +1289,7 @@ class FeishuAssistant:
             return result
 
     async def _call_once(self, request, actor, path, body=None, plan_id=None, *, method=None, params=None):
+        await self._require_current_config()
         current, authority = await self.ready()
         shared = getattr(getattr(request, 'state', None), 'feishu_shared_plan', None)
         sharing = shared and (path == 'plans/' + shared['id'] or path.startswith('plans/' + shared['id'] + '/'))
@@ -1014,6 +1307,7 @@ class FeishuAssistant:
             # Creating the transport is part of the guarded call: if it fails we
             # must still release the non-execution context created above.
             client = await current.http_client()
+            await self._require_current_config()
             submitted = True
             response = await client.request(http_method,
                 f"http://127.0.0.1:{current.descriptor['port']}/api/assistant/" + path, headers=headers,
@@ -1060,6 +1354,13 @@ class FeishuAssistant:
             from .feishu_notice_cards import handle_card, bind_shared_card
             card_conversation = await bind_shared_card(self, message, request, actor, conversation)
             return direct_reply(await handle_card(self, message, request, actor, card_conversation))
+        if message.get('message_type') == 'audio':
+            from .feishu_assistant_files import transcribe_message
+            speech = await transcribe_message(self, message, request, actor)
+            if not speech or 'text' in speech:
+                return direct_reply(speech or {'text': '语音未识别成功，请改发文字。'})
+            message = {**message, 'question': speech['question'], 'content': {}, 'message_type': 'text'}
+            request.state.feishu_question = message['question']
         from .assistant_read_consent import ReadConsent
         consent = ReadConsent(self.runtime.state_store)
         if message['question'].strip() == '取消查询':
@@ -1105,6 +1406,16 @@ class FeishuAssistant:
                 await self._attach_form_card(reply, message, request, actor, conversation, current)
             return reply
         operation = "feishu_" + hashlib.sha256(message["message_id"].encode()).hexdigest()[:40]
+        resume = None
+        if question == '继续研究' and not file_ids:
+            topic_id = (topic or {}).get('id', '')
+            candidate = next((turn for turn in reversed(conversation.get('turns', []))
+                if turn.get('resume_available') and turn.get('feishu_topic', '') == topic_id), None)
+            if not candidate:
+                return direct_reply({'text': '当前会话没有可恢复的研究，请在原话题中继续，或输入 /深入研究 加问题。'})
+            resume = candidate['run_id']
+            operation = candidate['operation_id']
+            question = candidate['question']
         waiting = {'awaiting_turn': operation, 'actor_id': actor['id'],
                    'conversation_id': conversation['conversation_id'], 'wait_started': time.time(),
                    'query_question': question, 'has_input_files': bool(file_ids), 'delivery_access': self._delivery_access(actor),
@@ -1112,19 +1423,49 @@ class FeishuAssistant:
         if self.inbox:
             # Persist the read-back key before POST; a lost response must not replay tools.
             await asyncio.to_thread(self.inbox.set, message['message_id'], 'processing', waiting)
-        data = await self._call(request, actor, "chat", {"conversation_id": conversation["conversation_id"], "operation_id": operation,
+        if resume:
+            await self._call(request, actor, 'runs/' + resume + '/resume', {})
+            return waiting
+        call = asyncio.create_task(self._call(request, actor, "chat", {"conversation_id": conversation["conversation_id"], "operation_id": operation,
             "attempt_id": operation, "question": question, "file_ids": file_ids,
-            **({'clarification_operation_id': clarification_id} if clarification_id else {})})
+            **({'clarification_operation_id': clarification_id} if clarification_id else {})}))
+        try:
+            while not call.done():
+                done, _ = await asyncio.wait({call}, timeout=_LIVE_REPLY_INTERVAL)
+                if done:
+                    break
+                try:
+                    recovered = await asyncio.wait_for(self._recover_answer(message, waiting), 5)
+                except AssistantError as exc:
+                    if exc.status < 500:
+                        raise
+                    continue
+                except (OSError, TimeoutError):
+                    continue
+                if not recovered.get('awaiting_turn'):
+                    return recovered
+                if recovered.get('live_reply') is not None:
+                    async def checkpoint():
+                        await asyncio.to_thread(self.inbox.set, message['message_id'], 'processing', waiting)
+                    await checkpoint()
+                    await self.messenger.send(message, waiting, checkpoint=checkpoint,
+                                              authorize=lambda: self._validate_delivery(message, waiting))
+            data = await call
+        finally:
+            if not call.done():
+                call.cancel()
+            await asyncio.gather(call, return_exceptions=True)
         turn = next((turn for turn in data.get("turns", []) if turn.get("operation_id") == operation), None)
         if not turn: raise AssistantError("助手没有返回本条消息的处理结果，请稍后重试。", 503)
         if turn.get('status') in {'pending', 'queued', 'running'}:
             return waiting
-        return await self._turn_reply(message, request, actor, conversation, turn, question, has_input_files=bool(file_ids))
+        final = await self._turn_reply(message, request, actor, conversation, turn, question, has_input_files=bool(file_ids))
+        return _live_result(waiting, final, incomplete=turn.get('status') in {'failed', 'stopped', 'cancelled', 'superseded'})
 
     async def _turn_reply(self, message, request, actor, conversation, turn, question, *, has_input_files=False):
         from .assistant_read_consent import ReadConsent
         consent = ReadConsent(self.runtime.state_store)
-        if turn.get('status') in {'failed', 'stopped', 'superseded'}:
+        if turn.get('status') in {'failed', 'stopped', 'cancelled', 'superseded'}:
             from openclaw_service.assistant.lighthouse_context import reply_failure
             text = reply_failure(turn.get('error'), turn.get('error_code', ''), question)
         elif turn.get('status') == 'pending':
@@ -1172,12 +1513,18 @@ class FeishuAssistant:
         if not turn:
             if time.time() - reply.get('wait_started', 0) < 60:
                 return reply
-            return _uncertain_reply(message['message_id'])
+            return _live_result(reply, _uncertain_reply(message['message_id']), incomplete=True)
         if turn.get('status') in {'pending', 'queued', 'running'}:
+            if (turn.get('reply_mode') == 'live' and not reply.get('has_input_files')
+                    and not any(turn.get(key) for key in ('plan', 'sources', 'output_files', 'clarification'))):
+                live = reply.setdefault('live_reply', {})
+                live['partial'] = safe_text(turn.get('answer'), limit=120000).strip()
+                reply['text'] = live['partial'] or '正在生成回答，请稍候。'
             return reply
-        return await self._turn_reply(message, request, actor, conversation, turn,
+        final = await self._turn_reply(message, request, actor, conversation, turn,
                                       reply.get('query_question') or message['question'],
                                       has_input_files=reply.get('has_input_files', False))
+        return _live_result(reply, final, incomplete=turn.get('status') in {'failed', 'stopped', 'cancelled', 'superseded'})
 
     async def _attach_form_card(self, reply, message, request, actor, conversation, plan):
         reply['topic_plan_id'] = plan.get('id')
@@ -1203,6 +1550,9 @@ class FeishuAssistant:
                 'is_admin': bool(actor.get('is_admin'))}
 
     async def _validate_delivery(self, message, reply):
+        await self._require_current_config()
+        if message.get('app_id') and self.config.get('app_id') and message['app_id'] != self.config['app_id']:
+            raise AssistantError('原消息属于此前的飞书应用，已停止发送。', 403, category='delivery_revoked')
         if not reply.get('actor_id'):
             return  # Transport/authentication error notices contain no model result.
         request, actor = await self._request_context(message)
@@ -1298,6 +1648,18 @@ class FeishuAssistant:
         return request, actor
 
     async def _prepare_reply_files(self, message, reply):
+        if (reply.get('live_reply') is not None and not reply.get('awaiting_turn')
+                and len(json.dumps({'content': json.dumps(_live_card(reply), ensure_ascii=False)},
+                                   ensure_ascii=False).encode('utf-8')) > 27000):
+            request, actor = await self._reply_file_context(message, reply)
+            from .feishu_assistant_files import _upload
+            name = '未完成的回答.md' if reply['live_reply'].get('notice') else '完整回答.md'
+            fid = await _upload(self, request, actor, name, _reply_text(reply['text']).encode('utf-8'))
+            if not re.fullmatch(r'[a-f0-9]{32}', str(fid)):
+                raise AssistantError('完整回答文件未返回有效回执，原回答已保留。', 503)
+            reply.setdefault('files', []).append({'id': fid, 'name': name})
+            reply['text'] = '完整内容已保存为「' + name + '」，请查看本会话附件。'
+            await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
         pending = [file for file in reply.get('files', []) if 'file:' + file['id'] not in reply.get('sent_parts', [])]
         if not pending:
             return
@@ -1836,6 +2198,7 @@ class FeishuAssistant:
     async def _react(self, message):
         async def send():
             async with self.reaction_slots:
+                await self._require_current_config()
                 await self.messenger.react(message)
         try:
             if not await asyncio.to_thread(self.inbox.claim_reaction, message['message_id']):
@@ -1845,19 +2208,22 @@ class FeishuAssistant:
             logging.warning('Feishu typing reaction unavailable; answer continues: %s',
                             str(exc) if isinstance(exc, AssistantError) else type(exc).__name__)
 
-    async def _drain(self, owner):
+    async def _drain(self, owner, lane=None):
+        inbox = self.inbox
         try:
-            await self._drain_messages(owner)
+            await self._drain_messages(owner, lane)
         except asyncio.CancelledError:
-            await asyncio.shield(asyncio.to_thread(self.inbox.recover_processing, owner))
+            await asyncio.shield(asyncio.to_thread(inbox.recover_processing, owner, lane))
             raise
         except Exception as exc:
             logging.warning('Feishu message lifecycle interrupted: type=%s', type(exc).__name__)
-            await asyncio.to_thread(self.inbox.recover_processing, owner)
+            await asyncio.to_thread(inbox.recover_processing, owner, lane)
 
-    async def _drain_messages(self, owner):
+    async def _drain_messages(self, owner, lane=None):
         while not self.closing:
-            message = await asyncio.to_thread(self.inbox.take, owner)
+            if not await self._configuration_current():
+                return
+            message = await asyncio.to_thread(self.inbox.take, owner, lane)
             if not message: return
             async with self._topic_serial(message):
                 await self._process_message(message)
@@ -1880,6 +2246,10 @@ class FeishuAssistant:
                 self.topic_locks.pop(key, None)
 
     async def _process_message(self, message):
+        await self._require_current_config()
+        if message.get('app_id') and self.config.get('app_id') and message['app_id'] != self.config['app_id']:
+            await asyncio.to_thread(self.inbox.set, message['message_id'], 'stopped')
+            return
         reply = message.get("reply")
         if reply is None:
             reply = await self._answer_message(message)
@@ -1901,7 +2271,8 @@ class FeishuAssistant:
                     # A history outage must not hold back an already authorized answer.
                     await self._sync_reply_history(message, reply)
             if reply.get('awaiting_turn'):
-                await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply, delay=15)
+                await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply,
+                                        delay=_LIVE_REPLY_INTERVAL if reply.get('live_reply') is not None else 15)
                 return
             if reply.get('topic_plan_id') and reply.get('topic_plan_status') in {'completed', 'cancelled', 'superseded'}:
                 route_message = {**message, **(reply.get('thread_route') or {})}
@@ -1912,11 +2283,15 @@ class FeishuAssistant:
                 if exc.category == 'feishu_delivery_permanent':
                     await asyncio.to_thread(self.inbox.defer_delivery, message['message_id'], permanent=True, reason=str(exc))
                 else:
-                    await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', {
-                        'text': '原回复无法通过当前权限及会话校验，旧内容已停止发送。请重新提问。', 'attachment_stopped': True}, delay=0)
+                    stopped = _live_result(reply, {
+                        'text': '原回复无法通过当前权限及会话校验，旧内容已停止发送。请重新提问。', 'attachment_stopped': True})
+                    await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', stopped, delay=0)
                 return
             upload_denied = isinstance(exc, AssistantError) and exc.category == 'feishu_file_upload_permission'
             if upload_denied:
+                if reply.get('live_reply') is not None:
+                    await asyncio.to_thread(self.inbox.defer_delivery, message['message_id'], permanent=True, reason=str(exc))
+                    return
                 reply.pop('files', None)
                 reply['file_notice'] = safe_text(str(exc))
                 await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply, delay=5)
@@ -1924,7 +2299,7 @@ class FeishuAssistant:
             if isinstance(exc, AssistantError) and exc.status in {401, 403, 404, 410} and reply.get('files'):
                 stopped = {'text': '原会话或文件访问权限已变化，本次文件发送已停止。请在当前会话重新提出需要。',
                            'attachment_stopped': True}
-                await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', stopped, delay=5)
+                await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', _live_result(reply, stopped), delay=5)
                 return
             logging.warning("Feishu assistant reply deferred: %s", type(exc).__name__)
             if reply.get('awaiting_turn') and not (isinstance(exc, AssistantError) and exc.category == 'feishu_delivery_permanent'):
@@ -1962,8 +2337,8 @@ class FeishuAssistant:
             if saved and saved.get('awaiting_turn') and (not isinstance(exc, AssistantError) or exc.status >= 500):
                 return saved
             from openclaw_service.assistant.lighthouse_context import reply_failure
-            return {'text': reply_failure(safe_text(str(exc)) if isinstance(exc, AssistantError) else '',
-                getattr(exc, 'category', ''), message.get('question', ''))}
+            return _live_result(saved or {}, {'text': reply_failure(safe_text(str(exc)) if isinstance(exc, AssistantError) else '',
+                getattr(exc, 'category', ''), message.get('question', ''))})
 
     async def schedule_plan_status(self, message, plan, conversation=None, actor_id=None):
         """Register one deduplicated pending-result poll per person+plan.
@@ -1999,6 +2374,8 @@ class FeishuAssistant:
 
     async def _run_plan_status(self, identity, payload):
         try:
+            if not await self._configuration_current():
+                return
             async with self.plan_status_slots:
                 await self._poll_plan_status(identity, payload)
         except asyncio.CancelledError:
@@ -2175,6 +2552,10 @@ class FeishuAssistant:
     async def _run(self):
         while not self.closing:
             self.event.clear()
+            if not await self._refresh_config() or not await self._configuration_current():
+                try: await asyncio.wait_for(self.event.wait(), 3)
+                except asyncio.TimeoutError: pass
+                continue
             if getattr(self, 'handover_cards', None):
                 self.handover_cards.tick()
             if time.monotonic() >= self.next_cleanup:
@@ -2184,13 +2565,14 @@ class FeishuAssistant:
                     logging.warning('Feishu inbox cleanup deferred')
                 self.next_cleanup = time.monotonic() + 3600
             self.starts = [stamp for stamp in self.starts if time.monotonic() - stamp < 600]
-            if self.process and self.process.poll() is not None and len(self.starts) < 3 and (
+            if (self.process is None or self.process.poll() is not None) and self._config_managed and len(self.starts) < 3 and (
                     not self.starts or time.monotonic() - self.starts[-1] > 120):
                 try: await self._start_worker()
                 except Exception as exc: logging.warning("Feishu connection restart deferred: %s", type(exc).__name__)
-            for owner in await asyncio.to_thread(self.inbox.owners):
-                if owner not in self.tasks or self.tasks[owner].done():
-                    self.tasks[owner] = asyncio.create_task(self._drain(owner))
+            for owner, lane in await asyncio.to_thread(self.inbox.queues):
+                key = (owner, lane)
+                if key not in self.tasks or self.tasks[key].done():
+                    self.tasks[key] = asyncio.create_task(self._drain(owner, lane))
             for owner in list(self.tasks):
                 if self.tasks[owner].done():
                     task = self.tasks.pop(owner)
@@ -2203,20 +2585,20 @@ class FeishuAssistant:
             for identity in list(self.plan_tasks):
                 if self.plan_tasks[identity].done():
                     self.plan_tasks.pop(identity, None)
-            try: await asyncio.wait_for(self.event.wait(), 10)
+            delay = await asyncio.to_thread(self.inbox.next_delay)
+            if self._config_managed:
+                delay = min(delay, max(.1, self._next_config_check - time.monotonic()))
+            try: await asyncio.wait_for(self.event.wait(), delay)
             except asyncio.TimeoutError: pass
 
     async def close(self):
         self.closing = True
-        if getattr(self, 'handover_cards', None):
-            await self.handover_cards.close()
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            await asyncio.to_thread(self.process.wait, 5)
-        pending = [task for task in [self.runner, *self.tasks.values(), *self.reactions.values(), *self.plan_tasks.values()] if task and not task.done()]
-        for task in pending: task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        if self.messenger: await self.messenger.close()
+        self.event.set()
+        if self.runner and not self.runner.done() and self.runner is not asyncio.current_task():
+            self.runner.cancel()
+            await asyncio.gather(self.runner, return_exceptions=True)
+        async with self._reload_lock:
+            await self._stop_transport()
 
 
 def _plan_key(message, actor=None):

@@ -40,6 +40,15 @@ class PasswordLoginError(PortalError):
         self.status = status
 
 
+def personnel_principal(person):
+    identities = person.get("login_ids") or []
+    if isinstance(identities, list) and len(identities) == 1 and isinstance(identities[0], str) and re.fullmatch(r"ou_[A-Za-z0-9]+", identities[0]):
+        return identities[0]
+    if not identities and person.get("account_nature", "").upper() != "VNET" and re.fullmatch(r"rec[A-Za-z0-9]+", str(person.get("id") or "")):
+        return "person:" + person["id"]
+    raise PasswordLoginError("缺少唯一可用的当前人员登录身份，请管理员核对人员记录。", 403)
+
+
 def _derive(password, salt):
     if not KDF_SLOTS.acquire(blocking=False):
         raise PasswordLoginError("正在处理其他登录，请稍后重试。", 429)
@@ -108,10 +117,10 @@ class PersonnelPasswordLogin:
         legacy_initial = bool(stored) and bool(INITIAL_PASSWORD_PATTERN.fullmatch(stored))
         initial = not stored or legacy_initial
         user = service._signature_user_info(fields.get("员工姓名"))
-        open_id = user.get("open_id", "") or service._mop_field_text(fields, ["飞书 open_id"])
-        if not reason and not re.fullmatch(r"ou_[A-Za-z0-9]+", open_id):
+        open_id = user.get("open_id", "")
+        if not reason and service._mop_field_text(fields, ["账号性质"]).upper() == "VNET" and not re.fullmatch(r"ou_[A-Za-z0-9]+", open_id):
             reason = "缺少飞书OpenID，请管理员核对人员记录"
-        return {"id": rid, "name": name, "employee_no": service._mop_field_text(fields, ["员工工号"]),
+        item = {"id": rid, "name": name, "employee_no": service._mop_field_text(fields, ["员工工号"]),
                 "building": service._building_label_from_codes(scopes), "scopes": scopes,
                 "inactive": inactive, "selectable": not reason, "disabled_reason": reason,
                 "needs_setup": initial,
@@ -120,14 +129,18 @@ class PersonnelPasswordLogin:
                 "specialties": [item for item in assignments if item in PERMISSION_DIRECTORY_SPECIALTY_LABELS],
                 "login_ids": [open_id] if re.fullmatch(r"ou_[A-Za-z0-9]+", open_id) else [],
                 "password_revision": "" if initial or not stored else hashlib.sha256(stored.encode("utf-8")).hexdigest()}
+        if isinstance(fields.get("员工姓名"), list) and len(fields["员工姓名"]) > 1:
+            item.update(selectable=False, disabled_reason="人员记录关联多个飞书账号，请管理员核对")
+        return item
 
     def directory(self, force=False):
         with self.directory_lock:
-            if force or self.snapshot.get("schema") != 3 or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
+            app_id = self.auth.current_feishu_app_id()
+            if force or self.snapshot.get("schema") != 4 or self.snapshot.get("app_id") != app_id or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
                 service = self.service()
                 records, token, seen = {}, "", set()
                 for _ in range(20):
-                    params = {"page_size": 500}
+                    params = {"page_size": 500, "user_id_type": "open_id"}
                     if token:
                         params["page_token"] = token
                     payload = service._request_payload("POST",
@@ -150,19 +163,23 @@ class PersonnelPasswordLogin:
                     seen.add(token)
                 else:
                     raise PasswordLoginError("人员名单超出读取范围，请联系管理员。", 503)
-                identities = Counter(oid for item in records.values() if not item["inactive"] for oid in item["login_ids"])
+                identities = Counter(oid for item in records.values() if not item["inactive"]
+                                     for oid in item["login_ids"])
                 for item in records.values():
                     if any(identities[oid] > 1 for oid in item["login_ids"]):
                         item.update(selectable=False, disabled_reason="多人使用同一OpenID，请管理员核对人员记录")
                 removed = dict(self.snapshot.get("removed_identities") or {})
-                current_ids = {oid for item in records.values() for oid in item["login_ids"]}
+                current_ids = {oid for item in records.values()
+                               for oid in item["login_ids"]}
                 for old in self.snapshot.get("people", {}).values():
-                    for oid in old.get("login_ids", []):
+                    for oid in old.get("login_ids", []) + list(old.get("feishu_open_ids", {}).values()):
                         if oid not in current_ids:
                             removed[oid] = "人员已从目录移除，请管理员核对"
                 for oid in current_ids:
                     removed.pop(oid, None)
-                snapshot = {"people": records, "loaded_at": time.time(), "schema": 3,
+                if self.auth.current_feishu_app_id() != app_id:
+                    raise PasswordLoginError("飞书应用已切换，请重新读取人员名单。", 503)
+                snapshot = {"people": records, "loaded_at": time.time(), "schema": 4, "app_id": app_id,
                             "removed_identities": removed}
                 self.store.put_document(DIRECTORY_NS, DIRECTORY_KEY, snapshot)
                 self.snapshot = snapshot
@@ -219,7 +236,13 @@ class PersonnelPasswordLogin:
         return result
 
     def record(self, rid):
-        payload = self.service()._request_json("records/" + rid, app_token=APP_TOKEN, table_id=TABLE_ID)
+        app_id = self.auth.current_feishu_app_id()
+        if self.snapshot.get("app_id") != app_id:
+            raise PasswordLoginError("飞书应用已切换，请重新读取人员名单。", 503)
+        payload = self.service()._request_json("records/" + rid, app_token=APP_TOKEN, table_id=TABLE_ID,
+                                               params={"user_id_type": "open_id"})
+        if self.auth.current_feishu_app_id() != app_id:
+            raise PasswordLoginError("飞书应用已切换，请重新读取人员名单。", 503)
         row = (payload.get("data") or {}).get("record")
         if not isinstance(row, dict) or row.get("record_id") != rid:
             raise PasswordLoginError("无法核验所选人员，请重新读取名单。", 503)
@@ -227,13 +250,11 @@ class PersonnelPasswordLogin:
 
     def login_identity(self, person):
         identities = person.get("login_ids") or []
-        if len(identities) != 1:
-            raise PasswordLoginError("缺少可用飞书OpenID，请管理员核对人员记录。", 403)
-        identity = identities[0]
-        if any(item["id"] != person["id"] and not item["inactive"] and identity in item["login_ids"]
+        if len(identities) > 1 or any(item["id"] != person["id"] and not item["inactive"]
+               and set(identities).intersection(item["login_ids"])
                for item in self.snapshot.get("people", {}).values()):
             raise PasswordLoginError("多人使用同一OpenID，请管理员核对人员记录。", 403)
-        return identity
+        return personnel_principal(person)
 
     def remember(self, item):
         with self.directory_lock:
@@ -287,11 +308,12 @@ class PersonnelPasswordLogin:
                 raise PasswordLoginError("所选人员不在当前名单中，请重新选择。", 403)
             row = self.record(rid)
             person = self.person(row)
+            self.login_identity(person)
+            self.remember(person)
             if not person["selectable"] or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
                 raise PasswordLoginError(person["disabled_reason"] or "当前账号已停用。", 403)
-            self.remember(person)
             from .portal_auth import BUILDING_OPEN_ID_MAP
-            if person["account_nature"].upper() == "VNET" or self.login_identity(person) in BUILDING_OPEN_ID_MAP.values():
+            if person["account_nature"].upper() == "VNET" or any(oid in BUILDING_OPEN_ID_MAP.values() for oid in person["login_ids"]):
                 raise PasswordLoginError("VNET人员请使用飞书登录授权。", 403)
             stored = self.service()._mop_field_text(row["fields"], [PASSWORD_FIELD])
             if person["needs_setup"]:
@@ -356,8 +378,10 @@ class PersonnelPasswordLogin:
                 raise PasswordLoginError("所选人员不在当前名单中，请重新选择。", 403)
             row = self.record(rid)
             person = self.person(row)
+            self.login_identity(person)
+            self.remember(person)
             from .portal_auth import BUILDING_OPEN_ID_MAP
-            if not person["account_nature"] or person["account_nature"].upper() == "VNET" or self.login_identity(person) in BUILDING_OPEN_ID_MAP.values():
+            if not person["account_nature"] or person["account_nature"].upper() == "VNET" or any(oid in BUILDING_OPEN_ID_MAP.values() for oid in person["login_ids"]):
                 raise PasswordLoginError("忘记密码仅适用于外部人员，其他人员请使用飞书登录。", 403)
             if not person["selectable"] or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
                 raise PasswordLoginError(person["disabled_reason"] or "当前账号已停用。", 403)
@@ -387,7 +411,10 @@ class PersonnelPasswordLogin:
                 raise PasswordLoginError("当前人员已不在登录名单中。", 403)
             row = self.record(rid)
             person = self.person(row)
-            if not person["selectable"] or self.login_identity(person) != (session.get("user") or {}).get("open_id") or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
+            self.login_identity(person)
+            self.remember(person)
+            session_identity = (session.get("user") or {}).get("open_id")
+            if not person["selectable"] or self.login_identity(person) != session_identity or self.auth._open_id_explicitly_disabled(self.login_identity(person)):
                 raise PasswordLoginError("当前人员已停用或所属楼栋需核对。", 403)
             stored = self.service()._mop_field_text(row["fields"], [PASSWORD_FIELD])
             if not verify_password(password, stored):

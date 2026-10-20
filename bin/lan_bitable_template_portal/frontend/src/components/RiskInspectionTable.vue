@@ -12,8 +12,8 @@
       <div class="risk-feedback-cards">
         <article v-for="row in mobileRows" :key="row.key" class="risk-feedback-card" :class="rowClass(row)" v-bind="rowProps(row)">
           <header><strong class="risk-feedback-title">{{row.item.title}}</strong><NTag size="small" :bordered="false" :type="row.item.status==='approved'?'success':row.item.status==='returned'?'warning':row.item.status==='submitted'?'info':'default'">{{statusNames[row.item.status]||row.item.status}}</NTag></header>
-          <div class="risk-feedback-meta"><NButton text :disabled="busy" data-v2-navigation :aria-label="'查看 '+row.person.name+'的反馈 · '+row.item.title" @click="emit('open',row)">{{row.person.name}} · {{scopeLabel(row.person.scope)}}</NButton><NTag v-if="overdue(row)" size="small" :bordered="false" type="error">已逾期</NTag><NButton size="small" secondary :disabled="busy" data-v2-navigation :aria-label="'处理 '+row.person.name+' · '+row.item.title" @click="emit('open',row)">{{actionLabel(row)}}<ArrowUpRight :size="14" /></NButton></div>
-          <dl class="risk-feedback-summary"><div v-for="field in summaryFields" :key="field.key"><dt>{{field.field_name}}</dt><dd>{{readable(field,row.item.values[field.key])}}</dd></div></dl>
+          <div class="risk-feedback-meta"><NButton text :disabled="busy" data-v2-navigation :aria-label="'查看 '+row.person.name+'的反馈 · '+row.item.title" @click="emit('open',row)">{{row.person.name}} · {{scopeLabel(row.item.scope||row.person.scope)}}</NButton><NTag v-if="overdue(row)" size="small" :bordered="false" type="error">已逾期</NTag><NButton size="small" secondary :disabled="busy" data-v2-navigation :aria-label="'处理 '+row.person.name+' · '+row.item.title" @click="emit('open',row)">{{actionLabel(row)}}<ArrowUpRight :size="14" /></NButton></div>
+          <dl class="risk-feedback-summary"><div v-for="field in summaryFields" :key="field.key"><dt>{{field.field_name}}</dt><dd>{{fieldText(field,row)}}</dd></div></dl>
           <p v-if="row.item.reason" class="risk-feedback-reason">{{row.item.status==='revoked'?'撤销原因':'审核意见'}}：{{row.item.reason}}</p>
           <div v-if="attachments(row).length" class="risk-table-files"><a v-for="file in attachments(row).slice(0,2)" :key="file.id" :href="'/api/risk-inspections/files/'+encodeURIComponent(file.id)" target="_blank" rel="noopener noreferrer"><FileText :size="14" /><span>{{file.name}}</span></a><small v-if="attachments(row).length>2">另 {{attachments(row).length-2}} 个附件</small></div>
         </article>
@@ -33,7 +33,7 @@ import {NButton,NDataTable,NEmpty,NInput,NPagination,NSelect,NTag,type DataTable
 import {ArrowUpRight,FileText,Search} from 'lucide-vue-next';
 import type {Dict} from '../api/client';
 import {activateCard} from '../workspace-v2/cardActivation';
-import {riskFeedbackPriority} from './riskInspectionUi';
+import {riskFeedbackPriority,riskPresentationFields,riskSystemText} from './riskInspectionUi';
 
 type Row={key:string;person:Dict;item:Dict};
 const props=defineProps<{detail:Dict;busy:boolean}>();
@@ -47,10 +47,11 @@ const statusNames:Record<string,string>={pending:'未提交',submitted:'待审�
 const statusOptions=Object.entries(statusNames).map(([value,label])=>({value,label}));
 const scopeLabel=(scope:string)=>scope==='110'?'110站':scope+'楼';
 const rows=computed<Row[]>(()=>props.detail.people.flatMap((person:Dict)=>(person.items||[]).map((item:Dict)=>({key:person.id+':'+item.id,person,item}))));
-const inputs=computed<Dict[]>(()=>props.detail.fields.filter((field:Dict)=>field.role==='input'));
+const fields=computed<Dict[]>(()=>riskPresentationFields(props.detail.fields).filter(field=>field.role==='input'&&!field.is_primary));
+const inputs=computed(()=>fields.value.filter(field=>field.role==='input'));
 const summaryFields=computed(()=>inputs.value.filter(field=>field.type!==17).slice(0,2));
 const peopleCount=computed(()=>props.detail.people.length);
-const buildings=computed(()=>[...new Set<string>(props.detail.people.map((p:Dict)=>p.scope))].map(value=>({value,label:scopeLabel(value)})));
+const buildings=computed(()=>[...new Set<string>(rows.value.map(row=>row.item.scope||row.person.scope).filter(Boolean))].map(value=>({value,label:scopeLabel(value)})));
 const count=(state:string)=>rows.value.filter(row=>row.item.status===state).length;
 function readable(field:Dict,value:any):string{
   if(value===undefined||value===null||value===''||Array.isArray(value)&&!value.length)return '未填写';
@@ -58,15 +59,16 @@ function readable(field:Dict,value:any):string{
   if(field.type===5){const date=new Date(value);return Number.isFinite(date.getTime())?new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai'}).format(date):'日期无效';}
   return Array.isArray(value)?value.join('、'):String(value);
 }
+function fieldText(field:Dict,row:Row){return field.role==='input'?readable(field,row.item.values[field.key]):riskSystemText(field,row.item.system_values);}
 function files(row:Row,field:Dict):Dict[]{return (row.item.values[field.key]||[]).map((id:string)=>({id,name:(row.item.files||[]).find((file:Dict)=>file.id===id)?.name||'排查附件'}));}
 function attachments(row:Row){return inputs.value.filter(field=>field.type===17).flatMap(field=>files(row,field));}
 function overdue(row:Row){return props.detail.status==='active'&&!row.person.revoked&&!['approved','revoked'].includes(row.item.status)&&props.detail.deadline<Date.now();}
 function actionLabel(row:Row){return props.detail.status==='active'&&!row.person.revoked&&props.detail.self_id===row.person.id&&['pending','returned'].includes(row.item.status)?'填写':props.detail.is_reviewer&&row.item.status==='submitted'&&!row.person.revoked?'审核':'查看';}
 const filtered=computed(()=>{
   const needle=search.value.trim().toLocaleLowerCase();
-  return rows.value.filter(row=>(!building.value||row.person.scope===building.value)&&(!status.value||row.item.status===status.value)&&(!needle||[
-    row.person.name,scopeLabel(row.person.scope),row.item.title,row.item.reason,
-    ...inputs.value.map(field=>field.type===17?files(row,field).map(file=>file.name).join(' '):readable(field,row.item.values[field.key])),
+  return rows.value.filter(row=>(!building.value||(row.item.scope||row.person.scope)===building.value)&&(!status.value||row.item.status===status.value)&&(!needle||[
+    row.person.name,scopeLabel(row.item.scope||row.person.scope),row.item.title,row.item.reason,
+    ...fields.value.map(field=>field.role==='input'&&field.type===17?files(row,field).map(file=>file.name).join(' '):fieldText(field,row)),
   ].join(' ').toLocaleLowerCase().includes(needle))).sort((a,b)=>riskFeedbackPriority(a.item,props.detail.is_reviewer,a.person.revoked)-riskFeedbackPriority(b.item,props.detail.is_reviewer,b.person.revoked));
 });
 const mobileRows=computed(()=>filtered.value.slice((page.value-1)*20,page.value*20));
@@ -77,14 +79,14 @@ const rowKey=(row:Row)=>row.key;
 function rowProps(row:Row){return {class:props.busy?'':'risk-clickable-row',onClick:(event:MouseEvent)=>{if(!props.busy&&activateCard(event))emit('open',row);}};}
 const rowClass=(row:Row)=>row.item.status==='returned'?'risk-row-returned':row.item.status==='revoked'?'risk-row-revoked':'';
 const fieldWidth=(field:Dict)=>field.type===1?240:field.type===17?190:150;
-const tableWidth=computed(()=>(mobile.value?108:132)+220+112+188+104+inputs.value.reduce((sum,field)=>sum+fieldWidth(field),0));
+const tableWidth=computed(()=>(mobile.value?108:132)+220+112+188+104+fields.value.reduce((sum,field)=>sum+fieldWidth(field),0));
 const columns=computed<DataTableColumns<Row>>(()=>[
-  {key:'person',title:'排查人 / 楼栋',width:mobile.value?108:132,fixed:'left',render:row=>h('div',{class:'risk-table-person'},[h(NButton,{text:true,disabled:props.busy,onClick:()=>emit('open',row),'data-v2-navigation':true,'aria-label':'查看 '+row.person.name+'的反馈 · '+row.item.title},()=>row.person.name),h('small',scopeLabel(row.person.scope))])},
+  {key:'person',title:'排查人 / 楼栋',width:mobile.value?108:132,fixed:'left',render:row=>h('div',{class:'risk-table-person'},[h(NButton,{text:true,disabled:props.busy,onClick:()=>emit('open',row),'data-v2-navigation':true,'aria-label':'查看 '+row.person.name+'的反馈 · '+row.item.title},()=>row.person.name),h('small',scopeLabel(row.item.scope||row.person.scope))])},
   {key:'item',title:'检查项',width:220,render:row=>h('div',{class:'risk-table-text',title:row.item.title},row.item.title)},
   {key:'status',title:'状态',width:112,render:row=>h(NTag,{size:'small',bordered:false,type:row.item.status==='approved'?'success':row.item.status==='returned'?'warning':row.item.status==='submitted'?'info':'default'},()=>statusNames[row.item.status]||row.item.status)},
-  ...inputs.value.map(field=>({key:'field:'+field.key,title:field.field_name,width:fieldWidth(field),render:(row:Row)=>field.type===17
+  ...fields.value.map(field=>({key:'field:'+field.key,title:field.field_name,width:fieldWidth(field),render:(row:Row)=>field.role==='input'&&field.type===17
     ?h('div',{class:'risk-table-files'},files(row,field).length?files(row,field).map(file=>h('a',{href:'/api/risk-inspections/files/'+encodeURIComponent(file.id),target:'_blank',rel:'noopener noreferrer'},[h(FileText,{size:14}),h('span',file.name)])):h('span',{class:'risk-table-empty'},'未上传'))
-    :h('div',{class:['risk-table-text',row.item.values[field.key]==null||row.item.values[field.key]===''?'risk-table-empty':''],title:readable(field,row.item.values[field.key])},readable(field,row.item.values[field.key]))})),
+    :h('div',{class:'risk-table-text',title:fieldText(field,row)},fieldText(field,row))})),
   {key:'review',title:'审核意见',width:188,render:row=>h('div',{class:'risk-table-text'},[row.item.reason||'—',row.item.reviewed_by?h('small',row.item.reviewed_by):null])},
   {key:'action',title:'操作',width:104,fixed:mobile.value?undefined:'right',render:row=>h(NButton,{size:'small',disabled:props.busy,onClick:()=>emit('open',row),'data-v2-navigation':true,'aria-label':'处理 '+row.person.name+' · '+row.item.title},()=>[
     actionLabel(row),h(ArrowUpRight,{size:14}),

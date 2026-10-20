@@ -414,26 +414,51 @@ class PollingSopCloudStore:
             raise PortalError("SOP附件缺少有效的飞书文件标识。")
         download_url = str(attachment.get("_cloud_download_url") or "").strip()
         if download_url:
-            parsed = urlsplit(download_url)
-            if (
-                parsed.scheme != "https"
-                or parsed.hostname != "open.feishu.cn"
-                or not parsed.path.startswith("/open-apis/drive/v1/medias/")
-            ):
-                raise PortalError("SOP附件下载地址无效。")
+            try:
+                parsed = urlsplit(download_url)
+                if (parsed.scheme != "https" or parsed.hostname != "open.feishu.cn"
+                        or parsed.username is not None or parsed.password is not None or parsed.port not in (None, 443)
+                        or any(ord(char) < 32 for char in download_url)
+                        or not parsed.path.startswith("/open-apis/drive/v1/medias/")):
+                    raise ValueError("invalid attachment URL")
+            except ValueError:
+                raise PortalError("SOP附件下载地址无效。") from None
         url = download_url or "https://open.feishu.cn/open-apis/drive/v1/medias/" + quote(file_token, safe="") + "/download"
-        if destination is not None:
-            self.client.download_to_file(url, destination, headers={"Authorization": "Bearer " + self._token()},
-                                         max_bytes=POLLING_SOP_MAX_FILE_BYTES)
-            return None
-        content, _ = self.client.request_bytes(
-            "GET",
-            url,
-            headers={"Authorization": "Bearer " + self._token()},
-            retries=1,
-            max_bytes=POLLING_SOP_MAX_FILE_BYTES,
-        )
-        return content
+        from upload_event_module.services.http_client import FeishuHTTPError
+        from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES, token_manager
+        headers = {"Authorization": "Bearer " + self._token()}
+        for attempt in range(2):
+            try:
+                if destination is not None:
+                    self.client.download_to_file(url, destination, headers=headers, max_bytes=POLLING_SOP_MAX_FILE_BYTES)
+                    content = Path(destination).read_bytes() if Path(destination).stat().st_size <= 65536 else b""
+                else:
+                    content, _ = self.client.request_bytes("GET", url, headers=headers, retries=0,
+                                                         max_bytes=POLLING_SOP_MAX_FILE_BYTES)
+                try:
+                    payload = json.loads(content) if len(content) <= 65536 else {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] not in TOKEN_ERROR_CODES:
+                    return None if destination is not None else content
+                if destination is not None:
+                    Path(destination).unlink(missing_ok=True)
+                if attempt:
+                    raise PortalError("SOP附件下载授权已失效。")
+            except FeishuHTTPError as exc:
+                response = getattr(exc.__cause__, "response", None)
+                try:
+                    payload = response.json() if response is not None else {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                expired = exc.category == "token" or (isinstance(payload, dict)
+                    and type(payload.get("code")) is int and payload["code"] in TOKEN_ERROR_CODES)
+                if attempt or not expired:
+                    raise
+            refreshed = token_manager.get_tenant_token(force_refresh=True)
+            if not refreshed:
+                raise PortalError("SOP附件授权刷新未完成。")
+            headers = {"Authorization": "Bearer " + refreshed}
 
     def delete_sop(self, sop: dict) -> None:
         record_id = str(sop.get("_cloud_record_id") or "")

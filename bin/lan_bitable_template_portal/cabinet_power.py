@@ -145,16 +145,23 @@ class CabinetFeishu:
         self._lock=threading.RLock()
         self._http=None
 
-    def token(self):
+    def token(self,*,force_refresh=False):
         with self._lock:
-            if self._token and time.monotonic()<self._expires: return self._token
-            from upload_event_module.config import config
             from upload_event_module.services.feishu_token_manager import token_manager
-            try: token=token_manager.get_tenant_token()
-            except Exception as exc: raise CabinetError("机柜台账授权失败，请检查飞书应用配置与表权限") from exc
+            try: token=token_manager.get_tenant_token(**({'force_refresh':True} if force_refresh else {}))
+            except Exception as exc:
+                self._token=''; self._expires=0
+                raise CabinetError("机柜台账授权失败，请检查飞书应用配置与表权限") from exc
             if not token: raise CabinetError("机柜台账授权失败，请检查飞书应用配置与表权限")
-            self._token=token; self._expires=time.monotonic()+3000
+            self._token=token; self._expires=0
             return token
+
+    def _refresh_rejected_token(self,payload):
+        from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES
+        if type(payload.get('code')) is int and payload['code'] in TOKEN_ERROR_CODES:
+            self.token(force_refresh=True)
+            return True
+        return False
 
     @staticmethod
     def require_write():
@@ -171,8 +178,12 @@ class CabinetFeishu:
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         root=f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}"
         url=f"{root}/tables/{self.table_id}/{path}" if self.table_id else f"{root}/{path}"
+        auth_refreshed=False
         for attempt in range(5):
             data=self._http.request_json(method,url,headers={"Authorization":"Bearer "+self.token()},params=params,json_payload=body,retries=1 if read_request else 0)
+            if not auth_refreshed and self._refresh_rejected_token(data):
+                auth_refreshed=True
+                if read_request: continue
             # A duplicate write may already exist; let the journal read it back
             # before sending it again. Reads can safely use the short retry loop.
             retryable=data.get("code")==1254608 or read_request and data.get("code") in (1255002,1254290,1254291,1254607)
@@ -181,7 +192,6 @@ class CabinetFeishu:
             time.sleep((1 if data.get("code")==1254608 else 0.5)*(2**attempt))
         if data.get("code"):
             if data["code"]==1254608: raise CabinetRetryLater("飞书暂时拒绝重复请求（1254608），请稍后继续原任务，不要重复新增。",503)
-            if data["code"] in (99991663,99991664,99991665): self._expires=0
             raise CabinetError(f"机柜台账请求失败：code={data['code']}，{data.get('msg','')}")
         return data.get("data",{})
 
@@ -227,19 +237,15 @@ class CabinetFeishu:
             import httpx
             from upload_event_module.services.http_client import FeishuHttpClient
             self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
-        payload={}
-        for attempt in range(2):
-            try:
-                payload=self._http.request_file_json(
-                    "POST","https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
-                    headers={"Authorization":"Bearer "+self.token()},
-                    data={"file_name":file_name,"parent_type":"bitable_file","parent_node":self.app_token,"size":str(path.stat().st_size)},
-                    file_path=str(path),file_name=file_name,retries=1,
-                )
-            except Exception as exc: raise CabinetError(f"机柜导出附件上传失败：{exc}") from exc
-            code=int(payload.get("code") or 0)
-            if code not in (99991663,99991664,99991665) or attempt: break
-            self._expires=0
+        try:
+            payload=self._http.request_file_json(
+                "POST","https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+                headers={"Authorization":"Bearer "+self.token()},
+                data={"file_name":file_name,"parent_type":"bitable_file","parent_node":self.app_token,"size":str(path.stat().st_size)},
+                file_path=str(path),file_name=file_name,retries=0,
+            )
+        except Exception as exc: raise CabinetError(f"机柜导出附件上传失败：{exc}") from exc
+        self._refresh_rejected_token(payload)
         token=str((payload.get("data") or {}).get("file_token") or "").strip()
         if int(payload.get("code") or 0)==1254608:
             raise CabinetRetryLater("飞书附件正在处理重复请求（1254608），稍后继续原批次。",503)
@@ -253,6 +259,7 @@ class CabinetFeishu:
         if self._http is None: self._http=FeishuHttpClient(timeout=httpx.Timeout(connect=5,read=60,write=60,pool=10),retries=0)
         url=f"https://open.feishu.cn/open-apis/base/v3/bases/{self.app_token}/tables/{self.table_id}/records/share_links/batch"
         data=self._http.request_json("POST",url,headers={"Authorization":"Bearer "+self.token()},json_payload={"record_ids":[record_id]},retries=0)
+        self._refresh_rejected_token(data)
         if data.get("code")==1254608:
             raise CabinetRetryLater("飞书归档链接正在处理重复请求（1254608），稍后核验原记录。",503)
         if data.get("code"): raise CabinetError(f"归档记录链接获取失败：{data.get('msg') or data['code']}")

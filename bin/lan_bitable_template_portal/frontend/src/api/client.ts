@@ -10,6 +10,44 @@ export type Dict = Record<string, any>;
 let impersonationContext = '';
 export function setImpersonationContext(id: string): void { impersonationContext = id || ''; }
 
+let assistantClient = '';
+let assistantClientReady: Promise<string> | undefined;
+function isAssistantPath(path: string): boolean { return path === '/api/assistant' || path.startsWith('/api/assistant/'); }
+export function assistantClientId(): Promise<string> {
+  if (assistantClientReady) return assistantClientReady;
+  try { assistantClient = window.sessionStorage.getItem('lighthouse_client') || ''; } catch { /* Retain the channel in memory when storage is unavailable. */ }
+  const inherited = /^[A-Za-z0-9_-]{16,80}$/.test(assistantClient);
+  const renew = () => {
+    assistantClient = window.crypto?.randomUUID?.() || Array.from(window.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+    try { window.sessionStorage.setItem('lighthouse_client', assistantClient); } catch { /* The channel still lasts for this document. */ }
+  };
+  if (!inherited) renew();
+  assistantClientReady = new Promise(resolve => {
+    let settled = false, timer = 0;
+    const settle = () => { settled = true; window.clearTimeout(timer); resolve(assistantClient); };
+    try {
+      if (typeof BroadcastChannel === 'undefined') { settle(); return; }
+      const channel = new BroadcastChannel('lighthouse-execution-clients');
+      const nonce = window.crypto.getRandomValues(new Uint32Array(4)).join('-'), started = performance.timeOrigin;
+      const claim = () => {
+        window.clearTimeout(timer);
+        channel.postMessage({ type: 'claim', id: assistantClient, nonce, started });
+        timer = window.setTimeout(settle, 180);
+      };
+      channel.onmessage = ({ data }) => {
+        if (!data || data.id !== assistantClient || data.nonce === nonce) return;
+        if (data.type === 'claim' && typeof data.nonce === 'string' && typeof data.started === 'number') {
+          // Established documents keep their running channel; simultaneous copies prefer the older document.
+          if (settled || started < data.started || started === data.started && nonce < data.nonce) channel.postMessage({ type: 'occupied', id: assistantClient, nonce, target: data.nonce });
+          else { renew(); claim(); }
+        } else if (!settled && data.type === 'occupied' && data.target === nonce) { renew(); claim(); }
+      };
+      if (inherited) claim(); else settle();
+    } catch { settle(); }
+  });
+  return assistantClientReady;
+}
+
 export const NETWORK_ERROR_MESSAGE = '暂时无法连接服务，请检查网络连接后重试。';
 function readableError(message: string): string {
   return /^(?:TypeError:\s*)?(?:Failed to fetch|fetch failed|Load failed|Network request failed|NetworkError(?: when attempting to fetch resource)?)[.!]?$/i.test(message.trim())
@@ -73,8 +111,9 @@ export class ApiError extends Error {
   }
 }
 
-function buildHeaders(options: RequestInit, json = true): Headers {
+function buildHeaders(options: RequestInit, json = true, path = ''): Headers {
   const headers = new Headers(options.headers || {});
+  if (isAssistantPath(path)) headers.set('X-Lighthouse-Client', assistantClient);
   headers.delete('X-Clipflow-Impersonation');
   headers.set('X-Clipflow-Impersonation', impersonationContext);
   const body = options.body;
@@ -150,6 +189,7 @@ export async function requestJson(
   options: ApiRequestOptions = {},
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
+  if (isAssistantPath(path)) await assistantClientId();
   const { fresh, ...request } = options;
   const method = String(request.method || 'GET').toUpperCase();
   if (impersonationContext && !['GET', 'HEAD'].includes(method) && path.startsWith('/api/workspace-layouts/')) {
@@ -162,7 +202,7 @@ export async function requestJson(
   if (key && (fresh || request.cache === 'reload')) invalidateReadCache();
   const stamp = readCacheGeneration();
   const flightKey = key + ':' + stamp;
-  const load = () => requestResponseJson(path, request, hooks, buildHeaders(request));
+  const load = () => requestResponseJson(path, request, hooks, buildHeaders(request, true, path));
   if (!key || fresh || request.cache === 'reload') {
     const data = await load(); saveRead(key, data, stamp); return data;
   }
@@ -171,7 +211,7 @@ export async function requestJson(
     if (!request.signal?.aborted && Date.now() - hit.at > 3000) {
       let task = readRevalidations.get(flightKey);
       if (!task) {
-        task = requestResponseJson(path, { ...request, signal: undefined }, {}, buildHeaders(request))
+        task = requestResponseJson(path, { ...request, signal: undefined }, {}, buildHeaders(request, true, path))
           .then(data => { saveRead(key, data, stamp); return data; })
           .finally(() => { if (readRevalidations.get(flightKey) === task) readRevalidations.delete(flightKey); });
         readRevalidations.set(flightKey, task);
@@ -263,12 +303,13 @@ async function requestResponseJson(
 export type RemoteSourceRefreshKind = "maintenance" | "repair" | "change" | "event";
 
 export async function requestFile(path: string, options: ApiRequestOptions = {}): Promise<File> {
+  if (isAssistantPath(path)) await assistantClientId();
   const { timeoutMs = 180_000, ...fetchOptions } = options;
   const requestSignal = requestSignalWithTimeout(fetchOptions.signal, timeoutMs);
   try {
     const response = await fetch(path, {
       ...fetchOptions, credentials: fetchOptions.credentials || "same-origin",
-      headers: buildHeaders(fetchOptions), signal: requestSignal.signal,
+      headers: buildHeaders(fetchOptions, true, path), signal: requestSignal.signal,
     });
     if (!response.ok || response.headers.get("Content-Type")?.includes("json")) {
       const payload = await response.json().catch(() => ({} as Dict));
@@ -407,9 +448,10 @@ export async function requestBinaryJson(
   options: RequestInit = {},
   hooks: ApiClientHooks = {},
 ): Promise<Dict> {
+  if (isAssistantPath(path)) await assistantClientId();
   return requestResponseJson(path, {
     ...options, method: options.method || "POST", body, timeoutMs: 120_000,
-  }, hooks, buildHeaders({ ...options, body }, false));
+  }, hooks, buildHeaders({ ...options, body }, false, path));
 }
 
 export interface UploadProgressEvent {
@@ -428,6 +470,7 @@ export type UploadJsonOptions = {
 // buffering the whole body into memory.  Reuses the centralized auth/error/offline handling
 // of requestJson.  Never retries (uploads must not be re-sent automatically).
 export async function uploadJson(path: string, body: FormData, options: UploadJsonOptions = {}): Promise<Dict> {
+  if (isAssistantPath(path)) await assistantClientId();
   const { timeoutMs = 600_000, signal: externalSignal, onProgress, hooks = {} } = options;
   const controller = new AbortController();
   let timedOut = false;
@@ -446,10 +489,11 @@ export async function uploadJson(path: string, body: FormData, options: UploadJs
     externalSignal?.removeEventListener("abort", abortFromExternal);
   };
   try {
+    const headers = buildHeaders({ body }, true, path);
     return await new Promise<Dict>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", path);
-      buildHeaders({ body }).forEach((value, name) => xhr.setRequestHeader(name, value));
+      headers.forEach((value, name) => xhr.setRequestHeader(name, value));
       xhr.withCredentials = true;
       xhr.responseType = "json";
       xhr.timeout = timeoutMs;

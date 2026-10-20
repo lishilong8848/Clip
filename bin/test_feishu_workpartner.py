@@ -1,6 +1,7 @@
 """Isolated collaboration contracts: no real credentials, servers or Feishu writes."""
 import asyncio
 from contextlib import contextmanager
+import copy
 import json
 from pathlib import Path
 import sys
@@ -23,6 +24,7 @@ from lan_bitable_template_portal.lighthouse_bridge import PortalAuthority
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_api import PortalAPICatalog
+from upload_event_module.services import feishu_token_manager as qt_auth
 
 ALICE = {'id': 'ou_portalAlice', 'name': '测试甲', 'scopes': ['A'], 'modules': ['assistant'], 'is_admin': False}
 BOB = {**ALICE, 'id': 'ou_portalBob', 'name': '测试乙'}
@@ -60,7 +62,17 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
             headers=AsyncMock(return_value={'Authorization': 'Bearer test-only'}),
             sender_record=AsyncMock(return_value=None),
             directory_records={f'ou_bot{name}': {f'rec{name}'} for name in ('Alice', 'Bob', 'Charlie')})
-        self.channel = SimpleNamespace(config={'enabled': True, 'app_id': 'cli_testAgent'}, messenger=messenger)
+        config = {'enabled': True, 'app_id': 'cli_testAgent', 'secret_cipher': 'fixture-cipher'}
+        messenger.config = dict(config)
+        self.channel = SimpleNamespace(config=config, messenger=messenger)
+        self.qt_credentials = ('cli_testAgent', 'fixture-secret')
+        self.bot_secret = 'fixture-secret'
+        for setting in (
+            patch.object(qt_auth, 'token_manager', SimpleNamespace(_credentials=lambda: self.qt_credentials)),
+            patch('lan_bitable_template_portal.feishu_assistant.unprotect_key', side_effect=lambda _: self.bot_secret),
+        ):
+            setting.start()
+            self.addCleanup(setting.stop)
         self.runtime = SimpleNamespace(state_store=self.store, auth_manager=self.auth)
         self.service = wp.Workpartner(self.runtime, self.channel)
         self.guard = patch('lan_bitable_template_portal.portal_service.external_real_write_guard',
@@ -125,6 +137,234 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
     def message(self, **extra):
         return MessageSend(**{'operation_id': 'message-test', 'text': '确认后的消息', 'recipient': '我', **extra})
 
+    def rotate_identity(self, field):
+        app, secret = self.qt_credentials
+        if field == 'app':
+            app = 'cli_fixtureNext'
+        elif field == 'secret':
+            secret = 'fixture-rotated-secret'
+        self.qt_credentials = app, secret
+        self.bot_secret = secret
+        self.channel.config = {**self.channel.config, 'app_id': app,
+                               'secret_cipher': 'fixture-rotated-cipher' if field == 'secret' else self.channel.config['secret_cipher']}
+        messenger = SimpleNamespace(**vars(self.channel.messenger))
+        messenger.config = dict(self.channel.config)
+        messenger.headers = AsyncMock(return_value={'Authorization': 'Bearer fixture-rotated-token'})
+        self.channel.messenger = messenger
+
+    async def assert_rotation_after_claim(self, field):
+        model = DocumentCreate(operation_id='rotation-after-claim', title='synthetic document')
+        original_app = self.qt_credentials[0]
+        original_claim = self.service._claim
+
+        def claim(actor, action, model):
+            value = original_claim(actor, action, model)
+            self.rotate_identity(field)
+            return value
+
+        with patch.object(self.service, '_claim', side_effect=claim), self.assertRaises(AssistantError) as caught:
+            await self.service.create_document(ALICE, model)
+        self.assertEqual(caught.exception.category, 'feishu_workpartner_rejected')
+        self.assertFalse(self.writes())
+        original_key = 'operation:' + wp.digest([original_app, ALICE['id'], model.operation_id])
+        saved = self.store.get_document(wp.NS, original_key)
+        self.assertEqual((saved['app'], saved['status']), (original_app, 'rejected'))
+        self.assertNotIn('fixture-secret', json.dumps(saved))
+        self.assertNotIn('fixture-rotated-secret', json.dumps(saved))
+        self.assertIsNone(wp._OPERATION.get())
+        restarted = wp.Workpartner(self.runtime, self.channel)
+        self.assertEqual(restarted.status(ALICE, model.operation_id)['status'], 'rejected')
+        before = len(self.requests)
+        if field == 'app':
+            for service in (self.service, restarted):
+                with self.assertRaises(AssistantError) as retry:
+                    await service.create_document(ALICE, model)
+                self.assertEqual(retry.exception.status, 409)
+            self.assertEqual(len(self.requests), before)
+            self.assertEqual(self.store.get_document(wp.NS, original_key), saved)
+            self.assertEqual(len(self.store.list_documents(wp.NS)), 1)
+        else:
+            result = await restarted.create_document(ALICE, model)
+            self.assertTrue(result['created'])
+            self.assertEqual(len(self.writes()), 1)
+            before = len(self.requests)
+            self.assertEqual(await restarted.create_document(ALICE, model), result)
+            self.assertEqual(len(self.requests), before)
+            self.assertEqual(self.store.get_document(wp.NS, original_key)['status'], 'completed')
+
+    async def test_application_rotation_after_claim_never_executes_under_new_application(self):
+        await self.assert_rotation_after_claim('app')
+
+    async def test_secret_rotation_after_claim_stops_then_safely_retries_same_application(self):
+        await self.assert_rotation_after_claim('secret')
+
+    async def test_bot_replacement_after_claim_stops_before_execute(self):
+        await self.assert_rotation_after_claim('bot')
+
+    async def test_rotation_while_getting_write_headers_stops_before_http(self):
+        model = DocumentCreate(operation_id='rotation-in-headers', title='synthetic document')
+        original_claim = self.service._claim
+
+        async def headers():
+            self.rotate_identity('secret')
+            return {'Authorization': 'Bearer fixture-old-token'}
+
+        def claim(actor, action, model):
+            value = original_claim(actor, action, model)
+            self.channel.messenger.headers = AsyncMock(side_effect=headers)
+            return value
+
+        with patch.object(self.service, '_claim', side_effect=claim), self.assertRaises(AssistantError):
+            await self.service.create_document(ALICE, model)
+        self.assertFalse(self.writes())
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['status'], 'rejected')
+
+    async def assert_rotation_during_acknowledged_write(self, field):
+        model = DocumentCreate(operation_id='rotation-with-receipt', title='synthetic document')
+        original_app = self.qt_credentials[0]
+
+        def acknowledge(request):
+            if request.method == 'POST':
+                self.rotate_identity(field)
+                return httpx.Response(200, json={'code': 0, 'data': {'document': {'document_id': 'docOriginal'}}})
+
+        self.response = acknowledge
+        result = await self.service.create_document(ALICE, model)
+        self.assertTrue(result['created'])
+        original_key = 'operation:' + wp.digest([original_app, ALICE['id'], model.operation_id])
+        receipt = self.store.get_document(wp.NS, original_key)
+        self.assertEqual((receipt['status'], receipt['app'], receipt['result']), ('completed', original_app, result))
+        resource_key = 'resource:' + wp.digest([original_app, 'document', 'docOriginal'])
+        self.assertEqual(self.store.get_document(wp.NS, resource_key)['app'], original_app)
+        before = len(self.requests)
+        restarted = wp.Workpartner(self.runtime, self.channel)
+        for service in (self.service, restarted):
+            self.assertEqual(service.status(ALICE, model.operation_id)['result'], result)
+            self.assertEqual(await service.create_document(ALICE, model), result)
+        self.assertEqual(len(self.requests), before)
+        self.assertEqual(len(self.writes()), 1)
+        self.assertEqual(self.store.get_document(wp.NS, original_key), receipt)
+        if field == 'app':
+            new_key = 'operation:' + wp.digest([self.qt_credentials[0], ALICE['id'], model.operation_id])
+            self.assertIsNone(self.store.get_document(wp.NS, new_key))
+        self.assertIsNone(wp._OPERATION.get())
+
+    async def test_success_receipt_survives_application_rotation_during_http(self):
+        await self.assert_rotation_during_acknowledged_write('app')
+
+    async def test_success_receipt_survives_secret_rotation_during_http(self):
+        await self.assert_rotation_during_acknowledged_write('secret')
+
+    async def test_completed_history_does_not_require_current_bot_or_credentials(self):
+        model = self.message()
+        result = await self.service.send(ALICE, model)
+        before = len(self.requests)
+        self.channel.messenger = None
+        self.qt_credentials = ('', '')
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['result'], result)
+        self.assertEqual(await self.service.send(ALICE, model), result)
+        self.assertEqual(len(self.requests), before)
+
+    async def assert_rotation_with_uncertain_result(self, field, *, incomplete=False):
+        model = DocumentCreate(operation_id='rotation-unknown-result', title='synthetic document')
+        original_app = self.qt_credentials[0]
+
+        def fail(request):
+            if request.method == 'POST':
+                self.rotate_identity(field)
+                if incomplete:
+                    return httpx.Response(200, json={'code': 0, 'data': {}})
+                raise httpx.ReadTimeout('fixture-private-detail', request=request)
+
+        self.response = fail
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.create_document(ALICE, model)
+        self.assertEqual(caught.exception.category, 'feishu_workpartner_uncertain')
+        original_key = 'operation:' + wp.digest([original_app, ALICE['id'], model.operation_id])
+        receipt = self.store.get_document(wp.NS, original_key)
+        self.assertEqual((receipt['app'], receipt['status']), (original_app, 'uncertain'))
+        self.assertNotIn('fixture-private-detail', json.dumps(receipt))
+        before = len(self.requests)
+        restarted = wp.Workpartner(self.runtime, self.channel)
+        for service in (self.service, restarted):
+            self.assertEqual(service.status(ALICE, model.operation_id)['status'], 'uncertain')
+            with self.assertRaises(AssistantError) as retry:
+                await service.create_document(ALICE, model)
+            self.assertEqual(retry.exception.category, 'feishu_workpartner_uncertain')
+        self.assertEqual(len(self.requests), before)
+        self.assertEqual(len(self.writes()), 1)
+        self.assertEqual(self.store.get_document(wp.NS, original_key), receipt)
+        if field == 'app':
+            self.assertIsNone(self.store.get_document(wp.NS, 'operation:' + wp.digest(
+                [self.qt_credentials[0], ALICE['id'], model.operation_id])))
+        self.assertIsNone(wp._OPERATION.get())
+
+    async def test_timeout_during_application_rotation_remains_original_uncertain_without_replay(self):
+        await self.assert_rotation_with_uncertain_result('app')
+
+    async def test_timeout_during_secret_rotation_remains_original_uncertain_without_replay(self):
+        await self.assert_rotation_with_uncertain_result('secret')
+
+    async def test_incomplete_receipt_during_application_rotation_is_not_success_or_retried(self):
+        await self.assert_rotation_with_uncertain_result('app', incomplete=True)
+
+    async def test_rotation_after_read_prevents_the_following_mutation(self):
+        self.service._created(ALICE, 'document', 'docTest', 'synthetic document')
+        model = DocumentAppend(operation_id='rotation-between-calls', text='original paragraph', expected_revision=4)
+
+        def rotate_after_read(request):
+            if request.url.path.endswith('/docTest') and request.method == 'GET':
+                self.rotate_identity('app')
+                return httpx.Response(200, json={'code': 0, 'data': {'document': {'document_id': 'docTest', 'revision_id': 4}}})
+
+        self.response = rotate_after_read
+        with self.assertRaises(AssistantError):
+            await self.service.append_document(ALICE, 'docTest', model)
+        self.assertFalse(self.writes())
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['status'], 'rejected')
+        before = len(self.requests)
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.append_document(ALICE, 'docTest', model)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(len(self.requests), before)
+
+    async def test_rotation_during_recipient_resolution_stops_before_claim_or_send(self):
+        async def rotate_sender(*args):
+            self.rotate_identity('app')
+        self.channel.messenger.sender_record = AsyncMock(side_effect=rotate_sender)
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.send(ALICE, self.message())
+        self.assertEqual(caught.exception.category, 'feishu_workpartner_rejected')
+        self.assertFalse(self.writes())
+        self.assertFalse([row for row in self.store.list_documents(wp.NS) if row['key'].startswith('operation:')])
+        self.assertIsNone(wp._OPERATION.get())
+
+    async def test_cross_application_history_matches_exact_owner_operation_and_payload(self):
+        model = DocumentCreate(operation_id='original-document-op', title='synthetic document')
+
+        def receipt(request):
+            if request.method == 'POST':
+                return httpx.Response(200, json={'code': 0, 'data': {
+                    'document': {'document_id': 'FixtureDoc' + str(len(self.writes()))}}})
+
+        self.response = receipt
+        original = await self.service.create_document(ALICE, model)
+        self.rotate_identity('app')
+        before = len(self.requests)
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.create_document(ALICE, model.model_copy(update={'title': 'different payload'}))
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(len(self.requests), before)
+        self.assertEqual(await self.service.create_document(ALICE, model), original)
+        self.assertEqual(len(self.requests), before)
+        other_operation = await self.service.create_document(ALICE, model.model_copy(update={'operation_id': 'another-document-op'}))
+        other_owner = await self.service.create_document(BOB, model)
+        self.assertEqual(len(self.writes()), 3)
+        self.assertNotEqual(original['document_id'], other_operation['document_id'])
+        self.assertNotEqual(original['document_id'], other_owner['document_id'])
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['result'], original)
+        self.assertEqual(self.service.status(BOB, model.operation_id)['result'], other_owner)
+
     async def test_capabilities_are_cached_without_credentials(self):
         first = await self.service.capabilities()
         self.assertTrue(all(row['enabled'] for row in first['items']))
@@ -147,9 +387,10 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_bot_and_invalid_raw_api_path_are_blocked(self):
         with self.assertRaises(AssistantError):
             await self.service.call('GET', '//attacker.test/api')
-        self.channel.config['app_id'] = 'cli_a9d1c9fe9d381cee'
-        with self.assertRaisesRegex(AssistantError, '专用应用'):
+        self.channel.config['app_id'] = 'cli_fixturePrevious'
+        with self.assertRaisesRegex(AssistantError, 'Qt 设置中的飞书鉴权') as caught:
             await self.service.capabilities()
+        self.assertEqual(caught.exception.status, 503)
         self.assertFalse(self.requests)
 
     async def test_people_exact_hr_identity_and_building_boundaries(self):
@@ -248,6 +489,112 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.status(ALICE, 'message-test')['status'], 'rejected')
         self.response = None
         self.assertTrue((await self.service.send(ALICE, self.message()))['sent'])
+
+    async def test_unknown_operation_history_stays_404_on_an_empty_store(self):
+        with self.assertRaises(AssistantError) as caught:
+            self.service.status(ALICE, 'unknown-operation')
+        self.assertEqual(caught.exception.status, 404)
+        self.assertFalse(self.requests)
+
+    async def test_migration_blocked_operations_keep_history_without_claim_or_execute(self):
+        model = self.message()
+        key, original, _ = self.service._claim(ALICE, 'message.send', model)
+        execute = AsyncMock(return_value={'sent': True})
+        restarted = wp.Workpartner(self.runtime, self.channel)
+        for marker in ({'blocked': True}, {'archived': True}, {'resume_allowed': False}):
+            for status in ('rejected', 'completed'):
+                with self.subTest(marker=marker, status=status):
+                    saved = {**original, 'status': status, 'identity_migration': marker,
+                             'result': {'message_id': 'om_OriginalReceipt'}, 'error': 'original history'}
+                    self.store.put_document(wp.NS, key, saved)
+                    before = copy.deepcopy(saved)
+                    for service in (self.service, restarted):
+                        with self.assertRaises(AssistantError) as caught:
+                            await service.write(ALICE, 'message.send', model, execute)
+                        self.assertEqual(caught.exception.status, 409)
+                        self.assertEqual(caught.exception.category, 'feishu_workpartner_uncertain')
+                        history = service.status(ALICE, model.operation_id)
+                        self.assertEqual(history['status'], status)
+                        self.assertEqual(history['result'], before['result'])
+                    self.assertEqual(self.store.get_document(wp.NS, key), before)
+        execute.assert_not_awaited()
+        self.assertFalse(self.requests)
+
+    async def test_actual_transformer_blocked_rejected_target_key_cannot_execute(self):
+        from lan_bitable_template_portal.feishu_identity_documents import transform_document
+        model = self.message()
+        key, previous, _ = self.service._claim(ALICE, 'message.send', model)
+        previous.update(owner=BOB['id'], app='cli_fixturePrevious', status='rejected',
+                        result={'message_id': 'om_Historical'})
+        identity, saved = transform_document(wp.NS, key, previous, {BOB['id']: ALICE['id']})
+        self.assertTrue(saved['identity_migration']['blocked'])
+        self.assertTrue(saved['identity_migration']['opaque_key'])
+        self.store.put_document(wp.NS, identity, saved)
+        execute = AsyncMock()
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.write(ALICE, 'message.send', model, execute)
+        self.assertEqual(caught.exception.status, 409)
+        execute.assert_not_awaited()
+        self.assertEqual(self.store.get_document(wp.NS, identity), saved)
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['result'], saved['result'])
+        self.assertFalse(self.requests)
+
+    async def test_opaque_blocked_key_remains_a_guard_for_exact_owner_and_operation(self):
+        model = self.message()
+        target, previous, _ = self.service._claim(ALICE, 'message.send', model)
+        self.store.delete_document(wp.NS, target)
+        identity = 'operation:' + 'f' * 64
+        saved = {**previous, 'status': 'rejected', 'identity_migration': {'blocked': True, 'opaque_key': True},
+                 'result': {'message_id': 'om_Historical'}}
+        self.store.put_document(wp.NS, identity, saved)
+        execute = AsyncMock(return_value={'sent': True})
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.write(ALICE, 'message.send', model, execute)
+        self.assertEqual(caught.exception.status, 409)
+        execute.assert_not_awaited()
+        self.assertIsNone(self.store.get_document(wp.NS, target))
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['result'], saved['result'])
+        shadow = {**previous, 'status': 'rejected', 'result': {'message_id': 'om_Shadow'}}
+        self.store.put_document(wp.NS, target, shadow)
+        with self.assertRaises(AssistantError) as caught:
+            await self.service.write(ALICE, 'message.send', model, execute)
+        self.assertEqual(caught.exception.status, 409)
+        execute.assert_not_awaited()
+        self.assertEqual(self.store.get_document(wp.NS, target), shadow)
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['result'], saved['result'])
+        with self.assertRaises(AssistantError):
+            self.service.status(BOB, model.operation_id)
+        self.assertTrue((await self.service.write(BOB, 'message.send', model, execute))['sent'])
+        other = self.message(operation_id='different-operation')
+        self.assertTrue((await self.service.write(ALICE, 'message.send', other, execute))['sent'])
+        self.assertEqual(execute.await_count, 2)
+        self.assertEqual(self.store.get_document(wp.NS, identity), saved)
+        self.assertFalse(self.requests)
+
+    async def test_opaque_blocked_ledger_without_operation_id_fails_closed_without_hiding_history(self):
+        model = self.message()
+        key, previous, _ = self.service._claim(ALICE, 'message.send', model)
+        history = {**previous, 'status': 'completed', 'result': {'message_id': 'om_Original'}}
+        self.store.put_document(wp.NS, key, history)
+        unknown = {**previous, 'status': 'rejected', 'identity_migration': {'blocked': True, 'opaque_key': True}}
+        execute = AsyncMock(return_value={'sent': True})
+        for operation in (None, '', 7):
+            with self.subTest(operation=operation):
+                unknown['operation_id'] = operation
+                if operation is None:
+                    unknown.pop('operation_id')
+                self.store.put_document(wp.NS, 'operation:' + 'f' * 64, unknown)
+                with self.assertRaises(AssistantError) as caught:
+                    await self.service.write(ALICE, 'message.send', self.message(operation_id='another-operation'), execute)
+                self.assertEqual(caught.exception.status, 409)
+                execute.assert_not_awaited()
+                self.assertEqual(self.store.get_document(wp.NS, 'operation:' + 'f' * 64), unknown)
+        self.assertEqual(self.service.status(ALICE, model.operation_id)['result'], history['result'])
+        self.assertEqual(self.store.get_document(wp.NS, key), history)
+        self.assertEqual(len(self.store.list_documents(wp.NS)), 2)
+        self.assertTrue((await self.service.write(BOB, 'message.send', model, execute))['sent'])
+        execute.assert_awaited_once()
+        self.assertFalse(self.requests)
 
     async def test_sqlite_claim_is_atomic_across_service_instances(self):
         model = self.message()

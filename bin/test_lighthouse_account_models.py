@@ -525,7 +525,7 @@ class SharedDefaultModelsTests(unittest.TestCase):
             self.service.model_for(self.user).profile('shared_Deepseek')
 
     def test_all_shared_capabilities_follow_admin_for_existing_and_new_accounts(self):
-        self.shared()
+        self.shared(model='WanWu/MiniMax-Auto')
         actors = [self.user, {'id': 'second', 'scopes': ['B']},
                   {**self.user, 'channel': 'feishu:group'}]
         for actor in actors:
@@ -537,7 +537,7 @@ class SharedDefaultModelsTests(unittest.TestCase):
             changes = {'image_input': image_input, 'tool_calls': False, 'custom_protocol': True,
                        'reasoning': True, 'reasoning_only': image_input, 'allow_reasoning_off': True,
                        'reasoning_efforts': ['medium', 'high', 'xhigh'], 'reasoning_effort': effort}
-            self.shared(**changes)
+            self.shared(model='WanWu/MiniMax-Auto', **changes)
             for actor in [*actors, {'id': 'new-user', 'scopes': ['H']}]:
                 bound = self.service.model_for(actor)
                 self.assertEqual(model_capabilities(bound.profile('shared_first')), model_capabilities(changes))

@@ -752,14 +752,24 @@ class PatchUpdateMixin:
                 "ui_version": target_ui_version or meta.get("ui_version", ""),
             }
         )
+        meta_dir = root_dir / "bin"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        temporary = None
         try:
-            meta_dir = root_dir / "bin"
-            meta_dir.mkdir(parents=True, exist_ok=True)
-            (meta_dir / "build_meta.json").write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=meta_dir, prefix=".build-meta-", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(meta, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, meta_dir / "build_meta.json")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    log_warning("版本信息临时文件清理失败")
 
     def _show_patch_toast(self, text: str, success: bool = True):
         return
@@ -1032,6 +1042,13 @@ class PatchUpdateMixin:
             expected_hashes = patch_meta.get("file_sha256") if isinstance(patch_meta, dict) else {}
             verified_hashes = {src: self._sha256_file(src) for src in patch_files}
             if isinstance(expected_hashes, dict) and expected_hashes:
+                present = {src.relative_to(patch_dir).as_posix() for src in patch_files}
+                missing = [rel for rel in expected_hashes if rel not in present
+                    and Path(rel).name not in ("patch_manifest.txt", "patch_meta.json")
+                    and not self._is_runtime_data_patch_path(Path(rel))]
+                if missing:
+                    self._discard_invalid_patch(patch_dir, "补丁缺少运行文件: " + "、".join(missing[:20]))
+                    return
                 for src in patch_files:
                     rel = src.relative_to(patch_dir).as_posix()
                     expected = str(expected_hashes.get(rel) or "").lower()
@@ -1154,7 +1171,12 @@ class PatchUpdateMixin:
                     report(False, f"补丁清理失败，已回退: {rel}")
                     return
 
-            self._update_build_meta(root_dir, self._last_patch_meta if hasattr(self, "_last_patch_meta") else {})
+            try:
+                self._update_build_meta(root_dir, patch_meta)
+            except Exception as exc:
+                self._rollback_patch(backup_dir, new_files)
+                report(False, f"版本信息写入失败，已回退: {exc}")
+                return
             applied = True
             patch_meta = self._last_patch_meta or {}
             self._last_patch_requires_restart = bool(

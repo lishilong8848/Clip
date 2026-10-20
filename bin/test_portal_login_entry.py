@@ -81,6 +81,19 @@ def _no_directory(manager) -> None:
     manager._account_directory_loader = lambda: None
 
 
+def _seed_migrated_permissions(manager) -> None:
+    # Login preserves explicit migrated grants; it does not bootstrap them.
+    payload = manager._load_permissions_locked()
+    users = payload.setdefault("users", {})
+    for code, oid in BUILDING_OPEN_ID_MAP.items():
+        users[oid] = {"name": code, "role": "admin" if code == "H" else "building",
+                      "scopes": manager._admin_scopes() if code == "H" else [code], "enabled": True}
+    for oid, name in REQUIRED_ADMIN_USERS.items():
+        users[oid] = {"name": name, "role": "admin", "scopes": manager._admin_scopes(),
+                      "enabled": True, "locked": True}
+    manager._save_permissions_locked(payload)
+
+
 def _request(params=None, cookies=None) -> Request:
     headers = [(b"host", b"portal.test")]
     if cookies:
@@ -376,6 +389,7 @@ class PortalAuthCallbackSuccessTests(unittest.TestCase):
         with _isolated_manager() as make:
             m = make()
             _no_directory(m)
+            m._state_store.put_auth_permissions({'version': 2, 'users': {}, 'default_scopes': []})
             self.assertEqual(m.scopes_for_open_id("ou_brand_new"), [])
             self.assertEqual(m.role_for_open_id("ou_brand_new"), "building")
             _seed_oauth_state(m, state="new-user-state", next_path="/learning?scope=A")
@@ -391,6 +405,8 @@ class PortalAuthCallbackSuccessTests(unittest.TestCase):
         with _isolated_manager() as make:
             m = make()
             _no_directory(m)
+            _seed_migrated_permissions(m)
+            before = m._load_permissions_locked()
             _seed_oauth_state(m, state="grant-attack-state", next_path="/learning?scope=A")
             m._exchange_login_code = Mock(return_value={"open_id": "ou_browser_attacker", "name": "真实提供方姓名"})
             response, _stub = _callback(m, {"code": "valid-code", "state": "grant-attack-state",
@@ -404,6 +420,7 @@ class PortalAuthCallbackSuccessTests(unittest.TestCase):
             self.assertEqual(session["allowed_scopes"], [])
             payload = m._load_permissions_locked()
             self.assertNotIn("ou_hacker", payload.get("users", {}))
+            self.assertEqual(payload, before)
             for required in REQUIRED_ADMIN_USERS:
                 self.assertEqual(payload["users"][required]["role"], "admin", f"fixed admin {required} must stay admin")
 
@@ -440,6 +457,7 @@ class PortalAuthCallbackSuccessTests(unittest.TestCase):
         with _isolated_manager() as make:
             m = make()
             _no_directory(m)
+            _seed_migrated_permissions(m)
             m._state_store.put_document("fixture_history", "history", {"keep": True})
             before = m._load_permissions_locked()
             for _code, duty_oid in BUILDING_OPEN_ID_MAP.items():

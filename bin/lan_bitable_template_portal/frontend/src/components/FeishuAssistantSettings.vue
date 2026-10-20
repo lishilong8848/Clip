@@ -4,20 +4,19 @@
       <h3>飞书智能体</h3>
       <button type="button" class="icon-button" aria-label="重新读取飞书智能体配置" title="重新读取" :disabled="busy" @click="load"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
     </header>
-    <p class="scope-note">独立消息应用，不修改灯塔的飞书登录或多维表应用凭证。保存后重启程序生效。</p>
+    <p class="scope-note">鉴权来源：Qt 设置 · 飞书鉴权</p>
     <p v-if="loading" role="status"><Loader2 :size="16" class="spin" />正在读取配置…</p>
     <fieldset :disabled="busy || !loaded">
       <label class="toggle"><input v-model="enabled" type="checkbox" /><span>启用飞书智能体长连接</span></label>
-      <label>App ID<input v-model="appId" type="text" maxlength="124" autocomplete="off" spellcheck="false" placeholder="cli_…" /></label>
-      <label>App Secret<input v-model="appSecret" type="password" maxlength="500" autocomplete="new-password" spellcheck="false" :placeholder="hasSecret ? '已配置，留空保留原密钥' : '填写消息应用的 App Secret'" @copy.prevent @cut.prevent @contextmenu.prevent @dragstart.prevent /></label>
-      <p class="scope-note">{{ hasSecret ? '密钥已保存，不向浏览器返回原值。' : '尚未配置密钥。' }}更换 App ID 时需重新填写对应密钥。</p>
+      <label>App ID<input :value="appId" type="text" readonly aria-readonly="true" autocomplete="off" spellcheck="false" /></label>
+      <p class="scope-note">{{ hasSecret ? 'Qt 密钥已配置' : 'Qt 密钥尚未配置' }}</p>
     </fieldset>
     <p v-if="error" class="failure" role="alert"><AlertCircle :size="16" />{{ error }}</p>
     <p v-if="message" class="saved" role="status"><CheckCircle2 :size="16" />{{ message }}</p>
-    <p v-else-if="restartRequired" class="pending" role="status">配置已保存，等待程序重启后生效。</p>
+    <p v-else-if="restartRequired" class="pending" role="status">配置已保存，正在自动切换连接。</p>
     <footer>
       <span class="scope-note">飞书开放平台需启用机器人，长连接订阅 im.message.receive_v1 与卡片回调 card.action.trigger，并发布应用。</span>
-      <button type="submit" class="primary" :disabled="busy || !loaded || !appId.trim() || ((!hasSecret || appId.trim() !== savedAppId) && !appSecret.trim())"><Loader2 v-if="saving" :size="16" class="spin" /><Save v-else :size="16" />{{ saving ? '保存中…' : '保存配置' }}</button>
+      <button type="submit" class="primary" :disabled="busy || !loaded || !appId.trim() || (enabled && !hasSecret)"><Loader2 v-if="saving" :size="16" class="spin" /><Save v-else :size="16" />{{ saving ? '保存中…' : '保存配置' }}</button>
     </footer>
   </form>
 </template>
@@ -27,7 +26,7 @@ import { onBeforeUnmount, onMounted, ref, computed } from 'vue';
 import { AlertCircle, CheckCircle2, Loader2, RefreshCw, Save } from 'lucide-vue-next';
 import { requestJson } from '../api/client';
 
-const enabled = ref(false), appId = ref(''), appSecret = ref(''), savedAppId = ref('');
+const enabled = ref(false), appId = ref('');
 const hasSecret = ref(false), restartRequired = ref(false), loaded = ref(false);
 const revision = ref(''), loading = ref(false), saving = ref(false), error = ref(''), message = ref('');
 const busy = computed(() => loading.value || saving.value);
@@ -35,8 +34,7 @@ let disposed = false;
 
 function apply(data: Record<string, any>): void {
   enabled.value = data.enabled === true;
-  appId.value = savedAppId.value = String(data.app_id || '');
-  appSecret.value = '';
+  appId.value = String(data.app_id || '');
   hasSecret.value = !!data.has_secret;
   restartRequired.value = !!data.restart_required;
   revision.value = String(data.revision || '');
@@ -60,11 +58,11 @@ async function save(): Promise<void> {
   error.value = message.value = '';
   try {
     const data = await requestJson('/api/assistant/feishu-settings', { method: 'POST', body: JSON.stringify({
-      app_id: appId.value.trim(), app_secret: appSecret.value, enabled: enabled.value, revision: revision.value,
+      app_id: appId.value.trim(), enabled: enabled.value, revision: revision.value,
     }) });
     if (!disposed) {
       apply(data);
-      message.value = data.restart_required ? '配置已保存，请重启程序后使用新配置。当前会话未中断。' : '配置已保存。';
+      message.value = data.restart_required ? '配置已保存，正在自动切换连接。' : '配置已保存。';
     }
   } catch (cause) {
     if (!disposed) error.value = cause instanceof Error ? cause.message : '配置保存失败';
@@ -72,7 +70,7 @@ async function save(): Promise<void> {
 }
 
 onMounted(() => { void load(); });
-onBeforeUnmount(() => { disposed = true; appSecret.value = ''; });
+onBeforeUnmount(() => { disposed = true; });
 </script>
 
 <style scoped>

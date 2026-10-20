@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import sys
 import threading
@@ -16,6 +17,29 @@ from lan_bitable_template_portal.feishu_delivery import (
     FeishuDeliveryError, PublicFeishuSender, send_agent_message,
 )
 from upload_event_module.services import robot_webhook as robot
+
+TARGET_APP_ID = 'cli_fixtureCurrent'
+PREVIOUS_APP_ID = 'cli_fixturePrevious'
+FIXTURE_SECRET = 'fixture-app-secret'
+
+
+def active_config(app_id=TARGET_APP_ID, secret=FIXTURE_SECRET):
+    return {'app_id': app_id, 'secret_cipher': 'fixture:' + secret}
+
+
+@contextmanager
+def qt_credentials_fixture():
+    def unprotect(value):
+        if not isinstance(value, str) or not value.startswith('fixture:'):
+            raise ValueError('invalid fixture cipher')
+        return value[len('fixture:'):]
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(robot.config, 'app_id', TARGET_APP_ID))
+        stack.enter_context(patch.object(robot.config, 'app_secret', FIXTURE_SECRET))
+        stack.enter_context(patch.object(robot.config, 'refresh_credentials',
+            side_effect=lambda: (robot.config.app_id, robot.config.app_secret)))
+        stack.enter_context(patch('openclaw_service.assistant.lighthouse_ai.unprotect_key', side_effect=unprotect))
+        yield
 
 
 STATIC = {'schema': '2.0', 'body': {'elements': [
@@ -33,6 +57,7 @@ class Store:
     def __init__(self):
         self.data = {}
         self.lock = threading.Lock()
+        self.db_path = Path('nonexistent-offline-fixture.sqlite3')
 
     def get_document(self, ns, key):
         with self.lock:
@@ -41,6 +66,12 @@ class Store:
     def put_document(self, ns, key, value):
         with self.lock:
             self.data[ns, key] = copy.deepcopy(value)
+
+    def list_documents(self, ns, *, key_prefix=''):
+        with self.lock:
+            return [{'key': key, 'payload': copy.deepcopy(value)}
+                    for (namespace, key), value in self.data.items()
+                    if namespace == ns and key.startswith(key_prefix)]
 
 
 def response(payload=None, status=200):
@@ -51,6 +82,7 @@ def response(payload=None, status=200):
 
 class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.enterContext(qt_credentials_fixture())
         self.guard = patch('lan_bitable_template_portal.portal_service.external_real_write_guard',
                            return_value={'real_write_allowed': True})
         self.guard_mock = self.guard.start()
@@ -68,13 +100,20 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
             headers=AsyncMock(return_value={'Authorization': 'fixture'}),
             recipient_open_id=AsyncMock(return_value='ou_agent'))
         self.auth = SimpleNamespace(directory_person=Mock(return_value={'id': 'recPerson', 'selectable': True}))
-        self.bot = SimpleNamespace(config={'app_id': 'cli_agent'}, messenger=self.messenger, closing=False,
+        self.bot = SimpleNamespace(config=active_config(), messenger=self.messenger, closing=False,
             handover_cards=SimpleNamespace(recipient_id=Mock(return_value=('union_id', 'on_verified'))),
             permission_cards=SimpleNamespace(union_id=Mock(return_value='on_verified')))
         self.runtime = SimpleNamespace(auth_manager=self.auth, state_store=Store(), feishu_assistant_channel=self.bot)
+        for app_id in (TARGET_APP_ID, 'cli_future'):
+            for open_id in ('ou_portal', 'ou_one', 'ou_two'):
+                self.runtime.state_store.put_document('feishu_assistant_sender', app_id + ':' + open_id,
+                    {'open_id': open_id, 'record_id': 'recPerson', 'matched_by': 'record_id'})
         self.sender = PublicFeishuSender(self.runtime, timeout=1)
         self.sender.start()
         self.addAsyncCleanup(self.sender.close)
+        direct = patch('lan_bitable_template_portal.feishu_delivery.standalone_sender', return_value=self.sender)
+        direct.start()
+        self.addCleanup(direct.stop)
 
     async def text(self, identity='stable', people=None):
         return await asyncio.to_thread(robot.send_text_to_open_ids, '测试', people or ['ou_portal'], message_uuid=identity)
@@ -84,16 +123,63 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.token.assert_not_called()
         self.bot.handover_cards.recipient_id.assert_not_called()
-        self.messenger.recipient_open_id.assert_awaited_once_with('recPerson')
+        self.messenger.recipient_open_id.assert_not_awaited()
         sent = self.post.call_args.kwargs
         self.assertEqual(sent['params'], {'receive_id_type': 'open_id'})
-        self.assertEqual(sent['json']['receive_id'], 'ou_agent')
+        self.assertEqual(sent['json']['receive_id'], 'ou_portal')
         self.assertEqual(sent['json']['uuid'], 'stable')
         self.assertEqual(rows[0]['open_id'], 'ou_portal')
-        self.assertEqual(rows[0]['sender_app_id'], 'cli_agent')
+        self.assertEqual(rows[0]['sender_app_id'], TARGET_APP_ID)
         self.assertEqual(rows[0]['message_id'], 'om_agent')
         self.assertEqual(rows[0]['chat_id'], 'oc_original')
         self.assertGreater(rows[0]['accepted_at'], 0)
+
+    async def test_agent_accepts_future_qt_app_but_rejects_stale_app_or_secret(self):
+        with patch.object(robot.config, 'app_id', 'cli_future'):
+            ok, _, _ = await self.text('stale')
+            self.assertFalse(ok)
+            self.post.assert_not_awaited()
+            self.bot.config['app_id'] = 'cli_future'
+            ok, _, rows = await self.text('future')
+            self.assertTrue(ok)
+            self.assertEqual(rows[0]['sender_app_id'], 'cli_future')
+        self.post.reset_mock()
+        self.bot.config = active_config(PREVIOUS_APP_ID)
+        self.assertFalse((await self.text('stale-bot'))[0])
+        self.bot.config = active_config(secret='fixture-independent-secret')
+        self.assertFalse((await self.text('stale-secret'))[0])
+        self.post.assert_not_awaited()
+        self.token.assert_not_called()
+
+    async def test_secret_rotation_requires_current_bot_and_transport_before_sending(self):
+        with patch.object(robot.config, 'app_secret', 'fixture-rotated-secret'):
+            self.assertFalse((await self.text('rotated-stale-bot'))[0])
+            self.bot.config = active_config(secret='fixture-rotated-secret')
+            self.messenger.config = active_config()
+            self.assertFalse((await self.text('rotated-stale-transport'))[0])
+            self.post.assert_not_awaited()
+            self.messenger.config = dict(self.bot.config)
+            self.assertTrue((await self.text('rotated-ready'))[0])
+        self.post.assert_awaited_once()
+        self.token.assert_not_called()
+
+    async def test_authoritative_qt_read_failure_blocks_agent_before_headers(self):
+        with patch.object(robot.config, 'refresh_credentials', side_effect=OSError('fixture Qt unavailable')):
+            self.assertFalse((await self.text())[0])
+        self.post.assert_not_awaited()
+        self.messenger.headers.assert_not_awaited()
+
+    async def test_secret_change_during_agent_post_preserves_unconfirmed_route(self):
+        async def send(*args, **kwargs):
+            robot.config.app_secret = 'fixture-rotated-secret'
+            return response()
+        self.post.side_effect = send
+        ok, _, rows = await self.text()
+        self.assertFalse(ok)
+        self.assertEqual(rows[0]['failure_kind'], 'uncertain')
+        self.post.assert_awaited_once()
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        self.assertEqual(self.sender.route(key)['status'], 'posting')
 
     async def test_multirecipient_dedup_and_stable_individual_uuids(self):
         ok, _, first = await self.text('batch', ['ou_one', 'ou_one', ' ou_two ', ''])
@@ -115,42 +201,50 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.post.call_args.kwargs['params'], {'receive_id_type': 'chat_id'})
         self.assertEqual(self.post.call_args.kwargs['json']['receive_id'], 'oc_original')
 
-    async def test_safely_mapped_union_id_for_fixed_duty_account(self):
+    async def test_current_fixed_duty_open_id_is_sent_unchanged_without_union_lookup(self):
+        from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP
+        open_id = BUILDING_OPEN_ID_MAP['A']
         self.auth.directory_person.return_value = {}
-        ok, _, _ = await self.text()
+        with patch('lan_bitable_template_portal.feishu_identity.TARGET_APP_ID', TARGET_APP_ID):
+            ok, _, _ = await self.text(people=[open_id])
         self.assertTrue(ok)
         self.messenger.recipient_open_id.assert_not_awaited()
-        self.assertEqual(self.post.call_args.kwargs['json']['receive_id'], 'on_verified')
-        self.assertEqual(self.post.call_args.kwargs['params']['receive_id_type'], 'union_id')
+        self.assertEqual(self.post.call_args.kwargs['json']['receive_id'], open_id)
+        self.assertEqual(self.post.call_args.kwargs['params']['receive_id_type'], 'open_id')
 
     async def test_existing_binding_used_when_directory_temporarily_unavailable(self):
         from openclaw_service.assistant.lighthouse_ai import AssistantError
         self.messenger.recipient_open_id.side_effect = AssistantError('fixture', category='feishu_sender_directory_unavailable')
+        self.auth.directory_person.return_value = {}
         ok, _, _ = await self.text()
         self.assertTrue(ok)
-        self.assertEqual(self.post.call_args.kwargs['json']['receive_id'], 'on_verified')
+        self.assertEqual(self.post.call_args.kwargs['json']['receive_id'], 'ou_portal')
+        self.messenger.recipient_open_id.assert_not_awaited()
 
-    async def test_unready_unmapped_and_explicit_rejection_allow_plain_fallback(self):
+    async def test_unready_unmapped_and_explicit_rejection_never_fallback(self):
         for mode in ('unready', 'unmapped', 'rejected'):
             with self.subTest(mode=mode):
                 self.bot.messenger = None if mode == 'unready' else self.messenger
+                self.auth.directory_person.side_effect = ValueError('fixture') if mode == 'unmapped' else None
                 self.messenger.recipient_open_id.return_value = None if mode == 'unmapped' else 'ou_agent'
                 self.bot.handover_cards.recipient_id.side_effect = ValueError('fixture') if mode == 'unmapped' else None
                 self.post.return_value = response({'code': 230013}, 400) if mode == 'rejected' else response()
-                with patch.object(robot, '_send_message_to_open_id', return_value=(True, 'ok')) as legacy:
+                with patch.object(robot, '_send_message_to_receive_id') as direct:
                     ok, _, rows = await self.text(mode)
-                self.assertTrue(ok)
-                legacy.assert_called_once()
-                self.assertEqual(legacy.call_args.args[1], 'ou_portal')
-                self.assertEqual(legacy.call_args.kwargs['message_uuid'], mode)
-                self.assertEqual(rows[0]['delivery_channel'], 'legacy')
+                self.assertFalse(ok)
+                direct.assert_not_called()
+                self.assertEqual(rows[0]['failure_kind'], 'not_sent')
+                self.assertEqual(rows[0].get('code'), 230013 if mode == 'rejected' else None)
+        self.token.assert_not_called()
 
-    async def test_static_url_card_may_fallback_after_explicit_rejection(self):
+    async def test_static_url_card_never_fallback_after_explicit_rejection(self):
         self.post.return_value = response({'code': 230013}, 400)
-        with patch.object(robot, '_send_interactive_to_receive_id', return_value=(True, 'ok')) as legacy:
-            ok, _, _ = await asyncio.to_thread(robot.send_interactive_to_open_ids, STATIC, ['ou_portal'], message_uuid='static')
-        self.assertTrue(ok)
-        legacy.assert_called_once()
+        with patch.object(robot, '_send_interactive_to_receive_id') as direct:
+            ok, _, rows = await asyncio.to_thread(robot.send_interactive_to_open_ids, STATIC, ['ou_portal'], message_uuid='static')
+        self.assertFalse(ok)
+        self.assertEqual(rows[0]['code'], 230013)
+        direct.assert_not_called()
+        self.token.assert_not_called()
 
     async def test_callback_forms_never_use_legacy_even_when_explicitly_rejected(self):
         self.post.return_value = response({'code': 230013}, 400)
@@ -214,22 +308,21 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.post.assert_not_awaited()
 
     async def test_legacy_timeout_retry_does_not_switch_back_to_agent(self):
-        self.bot.messenger = None
-        with patch.object(robot, '_send_message_to_open_id', return_value=(False, '结果未确认')):
-            ok, _, _ = await self.text()
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        original = {'channel': 'legacy', 'app_id': PREVIOUS_APP_ID, 'status': 'posting', 'attempted_at': 10000.}
+        self.sender.save_route(key, original)
+        ok, _, rows = await self.text()
         self.assertFalse(ok)
-        self.bot.messenger = self.messenger
-        with patch.object(robot, '_send_message_to_open_id', return_value=(True, 'ok')) as legacy:
-            ok, _, _ = await self.text()
-        self.assertTrue(ok)
-        legacy.assert_called_once()
+        self.assertEqual(rows[0]['failure_kind'], 'uncertain')
+        self.assertEqual(self.sender.route(key), original)
         self.post.assert_not_awaited()
+        self.token.assert_not_called()
 
     async def test_async_agent_only_contract_for_group_and_text(self):
         receipt = await send_agent_message(self.runtime, 'oc_original', STATIC,
             receive_id_type='chat_id', message_uuid='weekly')
         self.assertEqual(receipt['message_uuid'], 'weekly')
-        self.assertEqual(receipt['sender_app_id'], 'cli_agent')
+        self.assertEqual(receipt['sender_app_id'], TARGET_APP_ID)
         await send_agent_message(self.runtime, 'ou_portal', {'text': 'text'}, msg_type='text', message_uuid='asyncText')
         self.assertEqual(self.post.call_args.kwargs['json']['msg_type'], 'text')
         self.post.return_value = response({'code': 230013}, 400)
@@ -248,6 +341,10 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_and_inactive_person_are_blocked_not_fallback(self):
         from openclaw_service.assistant.lighthouse_ai import AssistantError
         self.messenger.recipient_open_id.side_effect = AssistantError('fixture', category='feishu_recipient_ambiguous')
+        from lan_bitable_template_portal.personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY
+        self.runtime.state_store.put_document(DIRECTORY_NS, DIRECTORY_KEY, {'app_id': TARGET_APP_ID, 'people': {
+            'recOne': {'login_ids': ['ou_portal'], 'selectable': True},
+            'recTwo': {'login_ids': ['ou_portal'], 'selectable': True}}})
         ok, _, rows = await self.text()
         self.assertFalse(ok)
         self.assertEqual(rows[0]['failure_kind'], 'blocked')
@@ -299,16 +396,20 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.post.await_count, 1)
         self.token.assert_not_called()
 
-    async def test_no_runtime_qt_scope_is_explicit_and_callbacks_cannot_use_legacy(self):
+    async def test_no_runtime_qt_scope_is_explicit_and_callbacks_cannot_send_direct(self):
         await self.sender.close()
         ok, message, _ = await asyncio.to_thread(robot.send_interactive_to_open_ids, CALLBACKS[0], ['ou_portal'])
         self.assertFalse(ok)
         self.assertIn('独立Qt进程', message)
         self.token.assert_not_called()
-        with patch.object(robot, '_send_message_to_open_id', return_value=(True, 'ok')):
-            ok, _, rows = await self.text()
+        self.legacy_wire.side_effect = None
+        self.legacy_wire.return_value = {'code': 0, 'data': {'message_id': 'om_direct', 'chat_id': 'oc_private'}}
+        ok, _, rows = await self.text()
         self.assertTrue(ok)
-        self.assertIn('未注册', rows[0]['primary_error'])
+        self.assertEqual(rows[0]['delivery_channel'], 'direct')
+        self.assertEqual(rows[0]['sender_app_id'], TARGET_APP_ID)
+        self.assertEqual(self.legacy_wire.call_args.kwargs['json_payload']['receive_id'], 'ou_portal')
+        self.post.assert_not_awaited()
 
     async def test_old_lifecycle_cleanup_cannot_unregister_new_sender(self):
         other = PublicFeishuSender(self.runtime)
@@ -372,8 +473,10 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.post.reset_mock()
         self.bot.config['app_id'] = 'cli_other'
         self.assertFalse((await self.text())[0])
-        self.bot.config['app_id'] = 'cli_agent'
+        self.bot.config['app_id'] = TARGET_APP_ID
         self.messenger.recipient_open_id.return_value = 'ou_other'
+        self.runtime.state_store.put_document('feishu_assistant_sender', TARGET_APP_ID + ':ou_portal',
+            {'open_id': 'ou_other', 'matched_by': 'record_id'})
         self.assertFalse((await self.text())[0])
         self.post.assert_not_awaited()
         self.token.assert_not_called()
@@ -399,14 +502,16 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.token.assert_not_called()
 
     async def test_async_agent_only_cannot_adopt_legacy_receipt(self):
-        self.bot.messenger = None
-        with patch.object(robot, '_send_message_to_open_id', return_value=(True, 'ok')):
-            self.assertTrue((await self.text())[0])
-        self.bot.messenger = self.messenger
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        receipt = {'delivery_channel': 'legacy', 'sender_app_id': PREVIOUS_APP_ID, 'message_id': 'om_old'}
+        self.sender.save_route(key, {'channel': 'legacy', 'app_id': PREVIOUS_APP_ID, 'status': 'sent', 'receipt': receipt})
+        ok, _, rows = await self.text()
+        self.assertTrue(ok)
+        self.assertEqual(rows[0]['sender_app_id'], PREVIOUS_APP_ID)
         with self.assertRaises(FeishuDeliveryError):
-            await send_agent_message(self.runtime, 'ou_portal', {'text': '测试'},
-                msg_type='text', message_uuid='stable')
+            await send_agent_message(self.runtime, 'ou_portal', {'text': '测试'}, msg_type='text', message_uuid='stable')
         self.post.assert_not_awaited()
+        self.token.assert_not_called()
 
     async def test_legacy_token_failure_is_definitely_not_sent(self):
         self.bot.messenger = None
@@ -420,12 +525,12 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route['status'], 'not_sent')
         self.assertNotIn('attempted_at', route)
 
-    async def test_legacy_claim_refused_before_any_post_is_not_sent(self):
-        self.bot.messenger = None
-        with patch.object(self.sender, 'legacy_started', return_value=False):
+    async def test_direct_claim_refused_before_any_post_is_uncertain(self):
+        await self.sender.close()
+        with patch.object(self.sender, 'claim', return_value=False):
             ok, _, rows = await self.text()
         self.assertFalse(ok)
-        self.assertEqual(rows[0]['failure_kind'], 'not_sent')
+        self.assertEqual(rows[0]['failure_kind'], 'uncertain')
         self.legacy_wire.assert_not_called()
 
     async def test_guard_denials_are_blocked_not_legacy_failed(self):
@@ -434,15 +539,14 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         ok, _, rows = await self.text('blockedBefore')
         self.assertFalse(ok)
         self.assertEqual(rows[0]['failure_kind'], 'blocked')
-        self.bot.messenger = None
         self.guard_mock.side_effect = [allow, allow, deny]
         ok, _, rows = await self.text('blockedFallback')
         self.assertFalse(ok)
         self.assertEqual(rows[0]['failure_kind'], 'blocked')
         self.legacy_wire.assert_not_called()
 
-    async def test_legacy_explicit_text_and_static_card_rejections_reset_routes(self):
-        self.bot.messenger = None
+    async def test_direct_explicit_text_and_static_card_rejections_reset_routes(self):
+        await self.sender.close()
         self.legacy_wire.side_effect = None
         self.legacy_wire.return_value = {'code': 230013, 'msg': 'fixture rejected'}
         for kind in ('text', 'interactive'):
@@ -459,8 +563,8 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('attempted_at', route)
         self.assertTrue(all(call.kwargs['retries'] == 0 for call in self.legacy_wire.call_args_list))
 
-    async def test_legacy_token_refresh_failure_after_rejection_retains_code(self):
-        self.bot.messenger = None
+    async def test_direct_token_refresh_failure_after_rejection_retains_code(self):
+        await self.sender.close()
         self.legacy_wire.side_effect = None
         self.legacy_wire.return_value = {'code': 99991663, 'msg': 'fixture expired'}
         self.token.side_effect = [('fixture', ''), ('', 'fixture unavailable')]
@@ -470,59 +574,57 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]['code'], 99991663)
         self.assertEqual(self.legacy_wire.call_count, 1)
 
-    async def test_primary_rejection_code_does_not_leak_into_uncertain_legacy_result(self):
-        from upload_event_module.services.http_client import FeishuHTTPError
+    async def test_primary_rejection_keeps_code_without_attempting_direct(self):
         self.post.return_value = response({'code': 230013}, 400)
-        self.legacy_wire.side_effect = FeishuHTTPError('fixture timed out')
         ok, _, rows = await self.text()
         self.assertFalse(ok)
-        self.assertEqual(rows[0]['failure_kind'], 'uncertain')
-        self.assertNotIn('code', rows[0])
+        self.assertEqual(rows[0]['failure_kind'], 'not_sent')
+        self.assertEqual(rows[0]['code'], 230013)
         route = self.sender.route(self.sender.route_key('ou_portal', 'open_id', 'stable'))
-        self.assertEqual(route['status'], 'posting')
-        self.assertEqual(route['channel'], 'legacy')
+        self.assertEqual(route['status'], 'not_sent')
+        self.legacy_wire.assert_not_called()
+        self.token.assert_not_called()
 
     async def test_later_legacy_rejection_cannot_erase_prior_unknown_delivery(self):
-        from upload_event_module.services.http_client import FeishuHTTPError
-        self.bot.messenger = None
-        self.legacy_wire.side_effect = [FeishuHTTPError('fixture timed out'),
-                                        {'code': 230013, 'msg': 'fixture rejected'}]
-        self.assertFalse((await self.text())[0])
-        route_key = self.sender.route_key('ou_portal', 'open_id', 'stable')
-        first = self.sender.route(route_key)
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        original = {'channel': 'legacy', 'app_id': PREVIOUS_APP_ID, 'status': 'posting', 'attempted_at': 10000.}
+        self.sender.save_route(key, original)
+        self.post.return_value = response({'code': 230013}, 400)
         ok, _, rows = await self.text()
         self.assertFalse(ok)
         self.assertEqual(rows[0]['failure_kind'], 'uncertain')
         self.assertNotIn('code', rows[0])
-        last = self.sender.route(route_key)
-        self.assertEqual(last['status'], 'posting')
-        self.assertEqual(last['attempted_at'], first['attempted_at'])
+        self.assertEqual(self.sender.route(key), original)
+        self.post.assert_not_awaited()
+        self.legacy_wire.assert_not_called()
 
     async def test_later_token_failure_cannot_erase_prior_unknown_legacy_delivery(self):
-        from upload_event_module.services.http_client import FeishuHTTPError
-        self.bot.messenger = None
-        self.legacy_wire.side_effect = FeishuHTTPError('fixture timed out')
-        await self.text()
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        original = {'channel': 'legacy', 'app_id': PREVIOUS_APP_ID, 'status': 'posting', 'attempted_at': 10000.}
+        self.sender.save_route(key, original)
         self.token.return_value = ('', 'fixture unavailable')
         ok, _, rows = await self.text()
         self.assertFalse(ok)
         self.assertEqual(rows[0]['failure_kind'], 'uncertain')
         self.assertNotIn('code', rows[0])
-        self.assertEqual(self.legacy_wire.call_count, 1)
+        self.assertEqual(self.sender.route(key), original)
+        self.token.assert_not_called()
+        self.legacy_wire.assert_not_called()
 
-    async def test_accepted_legacy_message_then_receipt_save_failure_stays_uncertain(self):
-        self.bot.messenger = None
+    async def test_accepted_direct_message_then_receipt_save_failure_stays_uncertain(self):
+        await self.sender.close()
         self.legacy_wire.side_effect = None
         self.legacy_wire.return_value = {'code': 0, 'data': {'message_id': 'om_accepted', 'chat_id': 'oc_original'}}
-        finish = self.sender.legacy_finished
+        finish = self.sender.save_route
         for committed in (False, True):
             with self.subTest(committed=committed):
                 identity = 'saved' if committed else 'unsaved'
-                def fail(*args):
-                    if committed:
-                        finish(*args)
-                    raise OSError('fixture receipt store unavailable')
-                with patch.object(self.sender, 'legacy_finished', side_effect=fail):
+                def fail(key, value):
+                    if value.get('status') != 'sent' or committed:
+                        finish(key, value)
+                    if value.get('status') == 'sent':
+                        raise OSError('fixture receipt store unavailable')
+                with patch.object(self.sender, 'save_route', side_effect=fail):
                     ok, _, rows = await self.text(identity)
                 self.assertFalse(ok)
                 self.assertEqual(rows[0]['failure_kind'], 'uncertain')
@@ -537,10 +639,13 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.post.assert_not_awaited()
 
     async def test_rejection_route_save_failure_is_uncertain_without_code(self):
-        self.bot.messenger = None
-        self.legacy_wire.side_effect = None
-        self.legacy_wire.return_value = {'code': 230013, 'msg': 'fixture rejected'}
-        with patch.object(self.sender, 'legacy_not_sent', side_effect=OSError('fixture')):
+        self.post.return_value = response({'code': 230013}, 400)
+        save = self.sender.save_route
+        def fail(key, value):
+            if value.get('status') == 'not_sent':
+                raise OSError('fixture')
+            save(key, value)
+        with patch.object(self.sender, 'save_route', side_effect=fail):
             ok, _, rows = await self.text()
         self.assertFalse(ok)
         self.assertEqual(rows[0]['failure_kind'], 'uncertain')
@@ -562,14 +667,12 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_convergence_safe_window_resets_for_auth_failures_and_remote_rejections(self):
         from lan_bitable_template_portal.plan_convergence_notifications import NoticePlanChecks
         checks = NoticePlanChecks(None, self.runtime.state_store, None, robot.send_text_to_open_ids)
-        self.bot.messenger = None
         for mode in ('auth', 'reject'):
             with self.subTest(mode=mode):
                 clock = [10000.]
                 document = {'id': 'alert-' + mode, 'recipients': ['ou_portal']}
-                self.legacy_wire.side_effect = None
-                self.legacy_wire.return_value = {'code': 230013, 'msg': 'fixture rejected'}
-                self.token.return_value = ('', 'fixture unavailable') if mode == 'auth' else ('fixture', '')
+                self.bot.messenger = None if mode == 'auth' else self.messenger
+                self.post.return_value = response({'code': 230013}, 400)
                 with patch('lan_bitable_template_portal.plan_convergence_notifications.time.time', side_effect=lambda: clock[0]):
                     for _ in range(2):
                         self.assertFalse(await asyncio.to_thread(checks._deliver, document, '检查提醒'))
@@ -578,26 +681,21 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(saved['uncertain'])
                         self.assertEqual(saved['failure_kind'], 'not_sent')
                         clock[0] += 4000
-                    self.token.return_value = ('fixture', '')
-                    self.legacy_wire.return_value = {'code': 0, 'data': {'message_id': 'om_recovered', 'chat_id': 'oc_original'}}
+                    self.bot.messenger = self.messenger
+                    self.post.return_value = response()
                     self.assertTrue(await asyncio.to_thread(checks._deliver, document, '检查提醒'))
-                    self.assertEqual(document['receipts']['ou_portal']['message_id'], 'om_recovered')
-        self.post.assert_not_awaited()
+                    self.assertEqual(document['receipts']['ou_portal']['message_id'], 'om_agent')
+        self.token.assert_not_called()
 
     async def test_definitely_rejected_legacy_route_can_return_to_agent_after_an_hour(self):
-        self.bot.messenger = None
-        self.legacy_wire.side_effect = None
-        self.legacy_wire.return_value = {'code': 230013, 'msg': 'fixture rejected'}
-        clock = [10000.]
-        with patch('lan_bitable_template_portal.feishu_delivery.time.time', side_effect=lambda: clock[0]):
-            self.assertFalse((await self.text())[0])
-            clock[0] += 4000
-            self.bot.messenger = self.messenger
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        self.sender.save_route(key, {'status': 'not_sent', 'code': 230013})
+        with patch('lan_bitable_template_portal.feishu_delivery.time.time', return_value=14000.):
             ok, _, rows = await self.text()
         self.assertTrue(ok)
         self.assertEqual(rows[0]['delivery_channel'], 'agent')
         self.assertNotIn('code', rows[0])
-        self.assertEqual(self.legacy_wire.call_count, 1)
+        self.legacy_wire.assert_not_called()
         self.assertEqual(self.post.call_args.kwargs['json']['uuid'], 'stable')
 
     async def test_later_agent_rejection_cannot_export_a_definite_code_for_unknown_write(self):
@@ -611,14 +709,19 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('code', rows[0])
         self.token.assert_not_called()
 
-    async def test_convergence_keeps_window_when_legacy_was_accepted_but_receipt_save_failed(self):
+    async def test_convergence_keeps_window_when_direct_was_accepted_but_receipt_save_failed(self):
         from lan_bitable_template_portal.plan_convergence_notifications import NoticePlanChecks
         checks = NoticePlanChecks(None, self.runtime.state_store, None, robot.send_text_to_open_ids)
-        self.bot.messenger = None
+        await self.sender.close()
         self.legacy_wire.side_effect = None
         self.legacy_wire.return_value = {'code': 0, 'data': {'message_id': 'om_accepted', 'chat_id': 'oc_original'}}
         document = {'id': 'accepted-alert', 'recipients': ['ou_portal']}
-        with patch.object(self.sender, 'legacy_finished', side_effect=OSError('fixture')):
+        save = self.sender.save_route
+        def fail(key, value):
+            if value.get('status') == 'sent':
+                raise OSError('fixture')
+            save(key, value)
+        with patch.object(self.sender, 'save_route', side_effect=fail):
             self.assertFalse(await asyncio.to_thread(checks._deliver, document, '检查提醒'))
         receipt = document['receipts']['ou_portal']
         self.assertTrue(receipt['uncertain'])
@@ -645,8 +748,8 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.token.assert_not_called()
         self.legacy_wire.assert_not_called()
 
-    async def test_legacy_http408_preserves_pin_for_text_and_card_without_token_retry(self):
-        self.bot.messenger = None
+    async def test_direct_http408_preserves_pin_for_text_and_card_without_token_retry(self):
+        await self.sender.close()
         bodies = [{'code': 230013, 'msg': 'Bot has NO availability'},
                   {'code': 99991663, 'msg': 'token expired'},
                   {'code': 0, 'data': {'message_id': 'om_possible', 'chat_id': 'oc_original'}}]
@@ -669,13 +772,13 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn('message_id', rows[0])
                     route = self.sender.route(self.sender.route_key('ou_portal', 'open_id', identity))
                     self.assertEqual(route['status'], 'posting')
-                    self.assertEqual(route['channel'], 'legacy')
+                    self.assertEqual(route['channel'], 'direct')
                     wire.assert_called_once()
                     self.token.assert_called_once()
         self.post.assert_not_awaited()
 
-    async def test_shared_legacy_transport_distinguishes_400_rejection_from_uncertain_http(self):
-        self.bot.messenger = None
+    async def test_shared_direct_transport_distinguishes_400_rejection_from_uncertain_http(self):
+        await self.sender.close()
         with patch.object(robot, '_request_json', self.request_json):
             for status in (400, 408, 500, 503):
                 with self.subTest(status=status), patch.object(robot._HTTP_CLIENT, 'request',
@@ -685,17 +788,16 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rows[0]['failure_kind'], 'not_sent' if status == 400 else 'uncertain')
                     self.assertEqual(rows[0].get('code'), 230013 if status == 400 else None)
 
-    async def test_legacy_http408_cannot_switch_back_to_agent_on_recovery(self):
-        self.bot.messenger = None
-        with patch.object(robot, '_request_json', self.request_json), \
-             patch.object(robot._HTTP_CLIENT, 'request', side_effect=[response({'code': 230013}, 408), response()]) as wire:
-            self.assertFalse((await self.text())[0])
-            self.bot.messenger = self.messenger
-            ok, _, rows = await self.text()
-        self.assertTrue(ok)
-        self.assertEqual(rows[0]['delivery_channel'], 'legacy')
-        self.assertEqual([call.kwargs['json']['uuid'] for call in wire.call_args_list], ['stable', 'stable'])
+    async def test_old_app_http408_cannot_switch_back_to_agent_on_recovery(self):
+        key = self.sender.route_key('ou_portal', 'open_id', 'stable')
+        original = {'status': 'posting', 'channel': 'legacy', 'app_id': PREVIOUS_APP_ID, 'attempted_at': 10000.}
+        self.sender.save_route(key, original)
+        ok, _, rows = await self.text()
+        self.assertFalse(ok)
+        self.assertEqual(rows[0]['failure_kind'], 'uncertain')
+        self.assertEqual(self.sender.route(key), original)
         self.post.assert_not_awaited()
+        self.token.assert_not_called()
 
 
 if __name__ == '__main__':

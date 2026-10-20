@@ -829,15 +829,40 @@ def claim(service, actor, payload):
     if mode != 'daily':
         raise LearningError('学练类型无效。')
     scope, self_person = service._claim_context(actor, payload)
-    day = core.now().date()
+    current = core.now()
+    day = current.date()
     date = day.isoformat()
-    if payload.get('date', date) != date:
+    requested = payload.get('date', date)
+    shift = payload.get('shift')
+    if requested != date and not shift:
         raise LearningError('只能领取今日题单。')
     if not service._restored:
         service._restore_requested = True
         service._wake.set()
         raise LearningError('学习记录正在恢复，完成后即可领取；不会重复分配。', 503)
+    if shift:
+        from .learning_reminders import shift_learners
+        from .pre_shift_checks import windows
+        if shift not in ('白', '夜'):
+            raise LearningError('排班日期或班次无效。')
+        try:
+            day = dt.date.fromisoformat(requested)
+            if requested != day.isoformat():
+                raise ValueError('invalid date')
+            beginning, end = windows(day.isoformat(), shift)
+        except (TypeError, ValueError):
+            raise LearningError('排班日期或班次无效。') from None
+        if not beginning <= current < end:
+            raise LearningError('对应班次已结束或尚未开始，不能领取该排班日题单。', 409)
+        learners = shift_learners(service, day.isoformat(), shift)
+        if learners is None:
+            raise LearningError('对应排班名单暂不可用，请稍后重试。', 503)
+        if not any(duty['scope'] == scope and learner['id'] == self_person['id'] for duty, learner in learners):
+            raise LearningError('只能领取本人当前值班楼栋和排班日的题单。', 403)
+        date = day.isoformat()
     with service.transaction() as conn:
+        if shift and not beginning <= core.now() < end:
+            raise LearningError('对应班次已结束或尚未开始，不能领取该排班日题单。', 409)
         learner = person(service, self_person['id'], scope=scope, active=True, conn=conn)
         identity = 'personal:' + date + ':' + learner['id']
         existing = service._get('paper', identity, conn)

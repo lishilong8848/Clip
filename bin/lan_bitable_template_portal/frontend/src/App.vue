@@ -95,7 +95,7 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage)"
+      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage && !assignedRiskPage)"
       :checking="authChecking || auth.directoryPending"
       :logged-in="auth.loggedIn"
       :user="auth.user"
@@ -467,6 +467,7 @@ const signatureLinkMode = computed(() => isSignaturePage.value && Boolean(routeP
 const isAdmin = computed(() => String(auth.user?.role || "").toLowerCase() === "admin");
 const canManageAccounts = computed(() => isAdmin.value || auth.user?.can_manage_accounts === true);
 const isGuest = computed(() => auth.user?.role === 'guest');
+const assignedRiskPage = computed(() => routePath.value === '/risk-inspections' && auth.user?.risk_inspection_assigned === true);
 
 // ---- Module-based authorisation ----
 const userModules = computed(() => {

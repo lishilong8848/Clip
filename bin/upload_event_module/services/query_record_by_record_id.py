@@ -13,13 +13,8 @@ except ImportError:
 
 _HTTP_CLIENT = FeishuHttpClient(retries=3)
 _LOG = logging.getLogger(__name__)
-TENANT_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 
 # === input params start
-app_id = os.getenv("APP_ID")               # app_id, required, 应用 ID
-# 应用唯一标识，创建应用后获得。有关app_id 的详细介绍。请参考通用参数https://open.feishu.cn/document/ukTMukTMukTM/uYTM5UjL2ETO14iNxkTN/terminology。
-app_secret = os.getenv("APP_SECRET")       # app_secret, required, 应用 secret
-# 应用秘钥，创建应用后获得。有关 app_secret 的详细介绍，请参考https://open.feishu.cn/document/ukTMukTMukTM/uYTM5UjL2ETO14iNxkTN/terminology。
 base_url = os.getenv("BASE_URL")          # string, required, 多维表格 URL
 # 多维表格的完整URL，用于解析出app_token和table_id。URL格式可以是feishu.cn/base或feishu.cn/wiki开头。
 record_id = os.getenv("RECORD_ID")        # string, required, 记录ID
@@ -28,34 +23,17 @@ user_id_type = os.getenv("USER_ID_TYPE", "open_id")  # string, optional, 用户I
 # 指定返回的用户ID类型，可选值：open_id、union_id、user_id。默认为open_id。
 # === input params end
 
-def get_tenant_access_token(app_id: str, app_secret: str) -> Tuple[str, Exception]:
+def get_tenant_access_token(app_id=None, app_secret=None) -> Tuple[str, Exception]:
     """获取 tenant_access_token
 
-    Args:
-        app_id: 应用ID
-        app_secret: 应用密钥
+    Deprecated credential arguments are ignored; Qt owns the active application.
 
     Returns:
         Tuple[str, Exception]: (access_token, error)
     """
-    url = TENANT_TOKEN_URL
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-    payload = {"app_id": app_id, "app_secret": app_secret}
     try:
-        result = _HTTP_CLIENT.request_json(
-            "POST",
-            url,
-            headers=headers,
-            json_payload=payload,
-        )
-        if int(result.get("code") or 0) != 0:
-            message = result.get("msg") or f"code={result.get('code')}"
-            _LOG.warning("tenant_token failed code=%s", result.get("code"))
-            return "", Exception(str(message))
-        token = str(result.get("tenant_access_token") or "").strip()
-        if not token:
-            return "", Exception("empty tenant_access_token")
-        return token, None
+        from upload_event_module.services.feishu_token_manager import token_manager
+        return token_manager.get_tenant_token(), None
     except Exception as err:
         _LOG.warning("tenant_token failed error_type=%s", type(err).__name__)
         return "", err
@@ -169,12 +147,6 @@ def get_bitable_record(tenant_access_token: str, app_token: str, table_id: str, 
 
 if __name__ == "__main__":
     # 验证必要参数
-    if not app_id:
-        print("ERROR: APP_ID is required", file=sys.stderr)
-        exit(1)
-    if not app_secret:
-        print("ERROR: APP_SECRET is required", file=sys.stderr)
-        exit(1)
     if not base_url:
         print("ERROR: BASE_URL is required", file=sys.stderr)
         exit(1)
@@ -183,7 +155,7 @@ if __name__ == "__main__":
         exit(1)
 
     # 获取 tenant_access_token
-    tenant_access_token, err = get_tenant_access_token(app_id, app_secret)
+    tenant_access_token, err = get_tenant_access_token()
     if err:
         print(f"ERROR: getting tenant_access_token: {err}", file=sys.stderr)
         exit(1)

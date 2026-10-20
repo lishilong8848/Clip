@@ -15,10 +15,12 @@ from clipflow_backend.main import FastAPIPortalController, PortalRuntime
 from lan_bitable_template_portal.portal_auth import PortalAuthManager, AUTH_COOKIE_NAME
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
 from lan_bitable_template_portal.state_store import LanPortalStateStore
+from bin.test_feishu_delivery import TARGET_APP_ID, qt_credentials_fixture
 
 
 class PortalAccessBoundaries(unittest.TestCase):
     def setUp(self):
+        self.enterContext(qt_credentials_fixture())
         self.session = None
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -47,7 +49,8 @@ class PortalAccessBoundaries(unittest.TestCase):
                 # H 项目经理 -> L1 manager (admin). This is the only way an
                 # identity legitimately becomes admin under the new rules.
                 person.update(position='项目经理', scopes=['H'], building='H楼')
-            return {'people': {'recFixture': person}, 'loaded_at': time.time(), 'schema': 3}
+            return {'people': {'recFixture': person}, 'loaded_at': time.time(),
+                    'schema': 4, 'app_id': TARGET_APP_ID}
 
         self.state = Mock()
         self.state.get_document.return_value = None

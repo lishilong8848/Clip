@@ -14,6 +14,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError, Time
 from ..config import SPECIALTY_FIRE, config
 from ..logger import log_error, log_info, log_warning
 from .feishu_token_manager import (
+    TOKEN_ERROR_CODES,
     TOKEN_REFRESH_MARGIN_SECONDS,
     FeishuCredentialError,
     FeishuTokenError,
@@ -148,7 +149,7 @@ def _info_logging_enabled() -> bool:
 
 def _is_token_error(response) -> bool:
     msg = response.msg.lower() if getattr(response, "msg", None) else ""
-    return response.code in [99991663, 99991664, 99991665, 99991677] or "token" in msg
+    return response.code in TOKEN_ERROR_CODES or "token" in msg
 
 
 def _build_client(*, timeout: float = 30.0) -> Any:
@@ -200,22 +201,22 @@ def _record_path(table_id, record_id="", endpoint=""):
     return path + ("/" + quote(record_id, safe="") if record_id else "") + ("/" + endpoint if endpoint else "")
 
 
-def _with_token_retry(request_fn: Callable[[str], object]):
+def _with_token_retry(request_fn: Callable[[str], object], *, read_only=True):
     response = request_fn(config.user_token)
     if response.success():
         return response
     if _is_token_error(response):
         log_info(f"Token 可能过期(code={response.code})，尝试刷新...")
         new_token = refresh_feishu_token()
-        if new_token:
+        if new_token and read_only:
             response = request_fn(new_token)
     return response
 
 
-def _with_bitable_data_ready_retry(request_fn: Callable[[str], object]):
+def _with_bitable_data_ready_retry(request_fn: Callable[[str], object], *, read_only=True):
     """Retry idempotent bitable reads/deletes while Feishu is still calculating."""
 
-    response = _with_token_retry(request_fn)
+    response = _with_token_retry(request_fn, read_only=read_only)
     for delay in BITABLE_DATA_NOT_READY_RETRY_DELAYS:
         try:
             code = int(getattr(response, "code", 0) or 0)
@@ -227,14 +228,14 @@ def _with_bitable_data_ready_retry(request_fn: Callable[[str], object]):
             f"飞书多维表数据未就绪(code={code})，{delay:g} 秒后重试..."
         )
         time.sleep(delay)
-        response = _with_token_retry(request_fn)
+        response = _with_token_retry(request_fn, read_only=read_only)
     return response
 
 
 def _with_rejected_bitable_write_retry(request_fn: Callable[[str], object]):
     """Retry only Feishu's explicit 'write was rejected as concurrent' result."""
 
-    response = _with_token_retry(request_fn)
+    response = _with_token_retry(request_fn, read_only=False)
     for delay in BITABLE_WRITE_CONFLICT_RETRY_DELAYS:
         try:
             code = int(getattr(response, "code", 0) or 0)
@@ -244,7 +245,7 @@ def _with_rejected_bitable_write_retry(request_fn: Callable[[str], object]):
             return response
         log_warning(f"飞书多维同表写入冲突(code={code})，{delay:g} 秒后重试...")
         time.sleep(delay)
-        response = _with_token_retry(request_fn)
+        response = _with_token_retry(request_fn, read_only=False)
     return response
 
 
@@ -531,13 +532,17 @@ def _token_refresh_needed(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS)
 
 
 def ensure_feishu_token(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -> str | None:
-    """Return a usable tenant token, refreshing once if it is missing or near expiry."""
-    if not _token_refresh_needed(margin_seconds=margin_seconds):
-        return str(config.user_token or "").strip()
+    """Revalidate Qt credentials even when the cached token has not expired."""
     with _token_refresh_lock:
-        if not _token_refresh_needed(margin_seconds=margin_seconds):
-            return str(config.user_token or "").strip()
-        return refresh_feishu_token()
+        if _token_refresh_needed(margin_seconds=margin_seconds):
+            return refresh_feishu_token()
+        try:
+            return token_manager.get_tenant_token(margin_seconds=margin_seconds)
+        except FeishuCredentialError:
+            return None
+        except FeishuTokenError:
+            log_error("Qt 飞书鉴权复核失败，未使用缓存令牌。")
+            return None
 
 
 def _get_tenant_access_token_with_credentials(
@@ -582,10 +587,7 @@ def resolve_bitable_app_token(
 def check_token_status():
     """检查 Token 状态，如果过期或即将过期则刷新"""
     try:
-        if _token_refresh_needed():
-            log_info("Token 已过期或即将过期，正在刷新...")
-            return ensure_feishu_token()
-        return str(config.user_token or "").strip()
+        return ensure_feishu_token()
     except Exception as e:
         log_info(f"Token 检查/刷新异常: {e}")
         return None
@@ -624,7 +626,7 @@ def upload_media_to_feishu(image_bytes, file_name="screenshot.jpg", file_size=No
                           "parent_node": config.app_token, "size": str(file_size)},
                     files={"file": (file_name, file, "application/octet-stream")})
 
-        response = _with_token_retry(attempt_upload)
+        response = _with_token_retry(attempt_upload, read_only=False)
 
         if not response.success():
             error_msg = f"上传失败: {response.code} - {response.msg}"
@@ -1025,7 +1027,7 @@ def delete_bitable_record(record_id: str, notice_type: str):
     def do_delete(token: str):
         return _feishu_request("DELETE", _record_path(table_id, record_id), token)
 
-    response = _with_bitable_data_ready_retry(do_delete)
+    response = _with_bitable_data_ready_retry(do_delete, read_only=False)
 
     if not response.success():
         if response.code == 1254043:

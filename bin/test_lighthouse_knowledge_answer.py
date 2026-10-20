@@ -25,6 +25,8 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         self.engine = SimpleNamespace(portal=SimpleNamespace(get_knowledge=lambda: self.kb), assistant=SimpleNamespace(model_for=lambda actor: self.model))
         self.profile = {'endpoint': 'https://approved.example/chat/completions', 'model': 'fixture'}
         self.emit = AsyncMock()
+        self.reviewer = SimpleNamespace(run=AsyncMock(side_effect=lambda actor, turn, history, result, authorize: {
+            **result, 'answer_review': {'status': 'passed', 'repairs': 0}}))
 
     async def test_web_and_feishu_use_identical_fresh_retrieval_without_business_tools(self):
         with patch('pydantic_ai.Agent') as factory:
@@ -201,7 +203,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response['sources'], [])
 
     async def test_explicit_company_route_precedes_general_model_and_business_in_both_channels(self):
-        engine = LighthouseModel(Mock())
+        engine = LighthouseModel(Mock(), answer_reviewer=self.reviewer)
         for channel in ('', 'feishu:oc_group'):
             actor = {**self.actor, 'channel': channel}
             for turn in ({'question': '/公司知识库 变压器故障怎么应急?给我一个精简的步骤'},
@@ -210,8 +212,10 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(channel=channel, turn=turn), patch(
                         'openclaw_service.assistant.lighthouse_knowledge_answer.answer_company',
                         new_callable=AsyncMock, return_value={'answer': 'source reply'}) as query:
+                    self.reviewer.run.reset_mock()
                     result = await engine.answer(actor, turn, [], None, self.emit, AsyncMock(return_value=actor), {})
                     self.assertEqual(result['answer'], 'source reply')
+                    self.reviewer.run.assert_awaited_once()
                     query.assert_awaited_once()
                     self.assertEqual(query.call_args.args[3], '变压器故障怎么应急?给我一个精简的步骤')
 
@@ -257,12 +261,14 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         question = '还有个机房高温的你这里只说了一个变压器的'
         for channel in ('', 'feishu:oc_group'):
             actor = {**self.actor, 'channel': channel}
-            engine = LighthouseModel(Mock())
+            engine = LighthouseModel(Mock(), answer_reviewer=self.reviewer)
             with patch('openclaw_service.assistant.lighthouse_knowledge_answer.answer_company',
                        new_callable=AsyncMock, return_value={'answer': '两种故障的安全概述'}) as query:
+                self.reviewer.run.reset_mock()
                 result = await engine.answer(actor, {'question': question, 'submitted_commands': []}, [unrelated, first],
                     None, self.emit, AsyncMock(return_value=actor), {'summary': '以前聊鱼缸。'})
             self.assertEqual(result['answer'], '两种故障的安全概述')
+            self.reviewer.run.assert_awaited_once()
             query.assert_awaited_once()
             combined = query.call_args.args[3]
             self.assertIn('变压器故障同时机房高温', combined)
@@ -287,7 +293,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
                 query.assert_not_awaited()
 
     async def test_bare_command_asks_question_without_loading_library(self):
-        engine = LighthouseModel(Mock())
+        engine = LighthouseModel(Mock(), answer_reviewer=self.reviewer)
         result = await engine.answer(self.actor, {'question': '/公司知识库'}, [], None, self.emit, AsyncMock(return_value=self.actor), {})
         self.assertIn('填写要查询的问题', result['answer'])
         engine.portal.get_knowledge.assert_not_called()
@@ -361,7 +367,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
     async def test_stale_prompt_cannot_force_company_route_in_either_channel(self):
         for channel in ('', 'feishu:oc_group'):
             actor = {**self.actor, 'channel': channel, 'name': '真实登录人'}
-            engine = LighthouseModel(Mock())
+            engine = LighthouseModel(Mock(), answer_reviewer=self.reviewer)
             with patch('openclaw_service.assistant.lighthouse_knowledge_answer.answer_company', new_callable=AsyncMock) as query:
                 result = await engine.answer(actor, {
                     'question': '当前登录人是谁', 'prompt': '我们公司报销流程是什么\n当前登录人是谁',
@@ -371,7 +377,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
             self.assertIn('真实登录人', result['answer'])
 
     async def test_new_document_question_does_not_use_old_business_prompt(self):
-        engine = LighthouseModel(Mock())
+        engine = LighthouseModel(Mock(), answer_reviewer=self.reviewer)
         with patch('openclaw_service.assistant.lighthouse_knowledge_answer.answer_company', new_callable=AsyncMock, return_value={'answer': 'source reply'}) as query:
             await engine.answer(self.actor, {'question': '/公司知识库 我们公司报销规定', 'prompt': '今天的通告\n我们公司报销规定'},
                                 [], None, self.emit, AsyncMock(return_value=self.actor), {})

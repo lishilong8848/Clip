@@ -1,4 +1,4 @@
-"""Risk inspection cloud adapter. Uses only the separately configured agent app."""
+"""Risk inspection cloud adapter using the agent credential mirror of Qt settings."""
 from copy import deepcopy
 import hashlib
 import io
@@ -14,7 +14,10 @@ import httpx
 from upload_event_module.services.http_client import FeishuHttpClient
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 
-from .risk_inspection import RiskError, SCOPES, SYSTEM_NAMES, can_scope, digest, manager, schema_fields, text
+from .risk_inspection import (RiskError, SCOPES, SYSTEM_NAMES, can_scope, completion_key,
+                              digest, final_manager, item_scope, manager, reviewer_list, scoped_people,
+                              schema_fields, system_fields, system_values, text)
+from .risk_inspection_templates import clean_fields
 
 API = 'https://open.feishu.cn/open-apis/'
 TEMPLATE_NODE = 'VOSVwomkaiFM3OkSXU5csVU8nBe'
@@ -45,6 +48,12 @@ def field_spec(field):
     if prop:
         result['property'] = prop
     return result
+
+
+def result_specs(release):
+    return [field_spec(f) for f in sorted(system_fields(release['fields']), key=lambda f: not f.get('is_primary'))] + [
+        {'field_name': n, 'type': t} for n, t in ((KEY, 1), ('灯塔排查事项', 1), ('灯塔人员标识', 1),
+                                                ('灯塔审核状态', 1), ('灯塔审核意见', 1), ('灯塔提交时间', 5))]
 
 
 class RiskCloud:
@@ -104,15 +113,26 @@ class RiskCloud:
             return value
 
     def headers(self):
-        from openclaw_service.assistant.lighthouse_ai import unprotect_key
-        config = json.loads(self.config_path.read_text(encoding='utf-8-sig'))
-        if config.get('app_id') != 'cli_aa42dc770a381cb3' or not config.get('secret_cipher'):
-            raise CloudRejected('风险排查需要已配置的飞书智能体应用；不会回退使用登录应用。', 503)
+        from openclaw_service.assistant.lighthouse_ai import AssistantError, unprotect_key
+        from .feishu_assistant_settings import read_config, validate_app_id
+        try:
+            config, revision = read_config(self.config_path)
+            validate_app_id(config.get('app_id'))
+        except AssistantError as exc:
+            raise CloudRejected(str(exc), 503) from None
+        if not re.fullmatch(r'cli_[A-Za-z0-9]+', str(config.get('app_id', ''))) or not config.get('secret_cipher'):
+            raise CloudRejected('请在 Qt 设置的飞书鉴权中配置应用；风险排查不使用独立或备用应用。', 503)
         signature = digest([config['app_id'], config['secret_cipher']])
         if self.token and self.expiry > time.time() and self.config_hash == signature:
             return {'Authorization': 'Bearer ' + self.token}
         reply = self.http.request('POST', API + 'auth/v3/tenant_access_token/internal', json={
             'app_id': config['app_id'], 'app_secret': unprotect_key(config['secret_cipher'])}, timeout=httpx.Timeout(25, connect=10)).json()
+        try:
+            current_revision = read_config(self.config_path)[1]
+        except AssistantError as exc:
+            raise CloudRejected(str(exc), 503) from None
+        if current_revision != revision:
+            raise CloudRejected('Qt 飞书鉴权已变化，已丢弃旧应用令牌，请重试。', 503)
         if reply.get('code') or not reply.get('tenant_access_token'):
             raise CloudRejected('飞书智能体身份验证失败，请检查应用配置。', 503)
         self.token, self.expiry, self.config_hash = reply['tenant_access_token'], time.time() + reply.get('expire', 7200) - 90, signature
@@ -182,7 +202,7 @@ class RiskCloud:
             fields = self.all(self.table_path(TEMPLATE_APP, TEMPLATE_TABLE) + '/fields')
             previous = self.store.template() or {}
             settings = previous.get('settings', {})
-            data = {'fields': schema_fields(fields, settings), 'settings': settings, 'read_at': time.time()}
+            data = {'fields': clean_fields(schema_fields(fields, settings)), 'settings': settings, 'read_at': time.time()}
             data['version'] = digest(data['fields'])
             self.store.save_template(data)
             return data
@@ -201,6 +221,8 @@ class RiskCloud:
             path = self.table_path(TEMPLATE_APP, TEMPLATE_TABLE) + '/fields'
             if action not in {'add', 'update', 'delete'} or action != 'add' and not old:
                 raise RiskError('字段不存在或操作无效。')
+            if old and (old['field_name'] in SYSTEM_NAMES or old['role'] != 'input'):
+                raise RiskError('固定系统字段不可修改或删除。')
             if action == 'delete':
                 if old.get('is_primary'):
                     raise RiskError('不能删除多维表主字段。')
@@ -212,17 +234,15 @@ class RiskCloud:
                 name, kind = text(body.get('field_name'), 80, True), body.get('type')
                 if type(kind) is not int or kind not in {1, 2, 3, 4, 5, 7, 13, 15, 17}:
                     raise RiskError('请选择支持的字段类型。')
-                if name.startswith('灯塔') or any(f['field_name'] == name and f['key'] != fid for f in current['fields']):
+                if name in SYSTEM_NAMES or name.startswith('灯塔') or any(f['field_name'] == name and f['key'] != fid for f in current['fields']):
                     raise RiskError('字段名重复或使用了系统保留名称。')
                 if old and old.get('is_primary') and kind != 1:
                     raise RiskError('主字段需保留文本类型。')
                 if old and old['type'] != kind and body.get('confirmed') is not True:
                     raise RiskError('更改类型可能转换或清空模板数据，请确认后继续。')
                 role = body.get('role', 'input')
-                if not isinstance(role, str) or role not in {'input', *SYSTEM_NAMES.values()}:
-                    raise RiskError('字段用途无效。')
-                if role != 'input' and kind != (5 if role == 'reviewed_at' else 1):
-                    raise RiskError('系统字段需使用文本类型，复核日期需使用日期类型。')
+                if role != 'input':
+                    raise RiskError('自定义字段只能用于填写。')
                 spec = {'field_name': name, 'type': kind}
                 if kind in {3, 4}:
                     options = body.get('options', [])
@@ -258,6 +278,15 @@ class RiskCloud:
     def records(self, app, table):
         return self.all(self.table_path(app, table) + '/records', user_id_type='union_id')
 
+    def ensure_result_fields(self, release):
+        specs = result_specs(release)
+        signature = digest(specs)
+        cloud = release['cloud']
+        if cloud.get('result_fields') != signature:
+            self.ensure_fields(cloud['app'], cloud['table'], specs)
+            self.store.checkpoint(release['id'], result_fields=signature)
+            cloud['result_fields'] = signature
+
     @staticmethod
     def field_text(value):
         return ''.join(str(v.get('text', '')) for v in value) if isinstance(value, list) else str(value or '')
@@ -280,19 +309,18 @@ class RiskCloud:
         return self.request('POST', path, params=params, json={'fields': {KEY: key, **fields}})['record']['record_id']
 
     def create_release(self, release, people):
+        release, people = self.store.raw(release['id'])
         owner = self.store.person_for(release['owner']['id'])
-        if not manager(owner) or not all(can_scope(owner, p['scope']) for p in people):
+        self.store.check(owner)
+        if not manager(owner) or not all(can_scope(owner, item_scope(p, i)) for p in people for i in p['items']):
             raise RiskError('发布人权限已变化，暂停发布，请管理员核对。', 403)
-        reviewer = self.store.person_for(release['reviewer']['id'])
-        if not manager(reviewer) or not all(can_scope(reviewer, p['scope']) for p in people):
-            raise RiskError('审核人权限已变化，暂停发布，请管理员核对。', 403)
+        for reviewer in reviewer_list(release):
+            self.store.check(self.store.person_for(reviewer['id']))
         for person in people:
-            if not can_scope(self.store.person_for(person['id']), person['scope']):
-                raise RiskError('接收人权限已变化，暂停发布，请管理员核对。', 403)
+            self.store.check(self.store.person_for(person['id']))
         cloud = release['cloud']
         rid = release['id']
-        specs = [field_spec(f) for f in sorted(release['fields'], key=lambda f: not f.get('is_primary'))] + [
-            {'field_name': n, 'type': t} for n, t in [(KEY, 1), ('灯塔排查事项', 1), ('灯塔人员标识', 1), ('灯塔审核状态', 1), ('灯塔审核意见', 1), ('灯塔提交时间', 5)]]
+        specs = result_specs(release)
         if not cloud.get('table'):
             path = f'bitable/v1/apps/{TEMPLATE_APP}/tables'
             # The visible release suffix makes a timed-out create discoverable without guessing by title.
@@ -321,7 +349,12 @@ class RiskCloud:
             self.store.checkpoint(rid, **cloud)
         if cloud['app'] != TEMPLATE_APP or cloud['table'] == TEMPLATE_TABLE:
             raise RiskError('发布目标不能指向模板表或其它多维表。', 409)
-        self.ensure_fields(cloud['app'], cloud['table'], specs)
+        self.ensure_result_fields(release)
+        if not cloud.get('initialized'):
+            for person in people:
+                self.sync(release, person)
+            self.store.checkpoint(rid, initialized=True)
+            cloud['initialized'] = True
         self.registry(release, people)
         self.store.activate(rid)
 
@@ -333,7 +366,8 @@ class RiskCloud:
         approved = sum(i['status'] == 'approved' for i in items)
         submitted = sum(any(i['status'] in {'submitted', 'approved'} for i in p['items']) for p in active)
         completed = [p for p in active if all(i['status'] in {'approved', 'revoked'} for i in p['items'])]
-        scopes = sorted({p['scope'] for p in active}, key=lambda s: SCOPES.index(s))
+        expanded = [p for p in scoped_people(active) if any(i['status'] != 'revoked' for i in p['items'])]
+        scopes = sorted({p['scope'] for p in expanded}, key=SCOPES.index)
         label = lambda s: '110站' if s == '110' else s + '楼'
         # User fields use union_id, never an open_id from another application.
         identities = dict(release['cloud'].get('identities', {}))
@@ -350,8 +384,8 @@ class RiskCloud:
             '排查发布时间': int(release['created'] * 1000), '发布人': [{'id': identities[release['owner']['id']]}],
             '现场排查人': recipients, '楼栋': [label(s) for s in scopes],
             '任务完成情况': approved / len(items) if items else 0,
-            '已完成楼栋': [label(s) for s in scopes if all(p in completed for p in active if p['scope'] == s)],
-            '灯塔审核人': release['reviewer']['name'], '灯塔提交人数': submitted, '灯塔通过人数': len(completed),
+            '已完成楼栋': [label(s) for s in scopes if all(i['status'] in {'approved', 'revoked'} for p in expanded if p['scope'] == s for i in p['items'])],
+            '灯塔审核人': '、'.join(p['name'] for p in reviewer_list(release)), '灯塔提交人数': submitted, '灯塔通过人数': len(completed),
             '来源模板编号': (release.get('source_template') or {}).get('id', ''),
             '来源模板版本': (release.get('source_template') or {}).get('revision'), '历史模板编号': release['id'],
             '灯塔任务状态': '结果待同步' if pending else '已撤销' if not items else '已完成' if approved == len(items) else '进行中', '灯塔截止时间': release['deadline']})
@@ -437,17 +471,15 @@ class RiskCloud:
         self.store.checkpoint(release['id'], files=tokens)
         return {'file_token': tokens[fid]}
 
-    def sync(self, release, person):
+    def sync(self, release, person, *, system_only=False):
+        fields = system_fields(release['fields'])
         for item in person['items']:
-            if item['status'] == 'pending':
-                continue
             key = release['id'] + ':' + person['id'] + ':' + item['id']
             values = {}
-            system = {'number': key, 'status': STATUS[item['status']], 'scope': person['scope'] + ('站' if person['scope'] == '110' else '楼'),
-                      'person': person['name'], 'reviewer': item.get('reviewed_by', ''),
-                      'review': (STATUS[item['status']] + ('：' + item['reason'] if item.get('reason') else '')) if item.get('reviewed_at') else '',
-                      'reviewed_at': int(item.get('reviewed_at', 0) * 1000) or None, 'sync': '已落表'}
-            for field in release['fields']:
+            system = system_values(release, person, item)
+            for field in fields:
+                if (system_only or item['status'] == 'pending') and field['role'] == 'input':
+                    continue
                 value = system.get(field['role']) if field['role'] != 'input' else item['values'].get(field['key'])
                 if field['role'] == 'input' and value is not None:
                     if field['type'] == 17:
@@ -455,9 +487,133 @@ class RiskCloud:
                     elif field['type'] == 15:
                         value = {'link': value, 'text': value}
                 values[field['field_name']] = value
-            values.update({'灯塔排查事项': item['title'], '灯塔人员标识': person['id'], '灯塔审核状态': STATUS[item['status']],
-                           '灯塔审核意见': item.get('reason', ''), '灯塔提交时间': int(item.get('submitted_at', 0) * 1000) or None})
+            if not system_only:
+                values.update({'灯塔排查事项': item['title'], '灯塔人员标识': person['id'], '灯塔审核状态': STATUS[item['status']],
+                               '灯塔审核意见': item.get('reason', ''), '灯塔提交时间': int(item.get('submitted_at', 0) * 1000) or None})
             self.upsert(release['cloud']['app'], release['cloud']['table'], key, values)
+
+    def final_cards(self, release, people, target):
+        self.store.check(target)
+        if not final_manager(target):
+            raise RiskError('接收经理身份或权限已变化。', 403)
+        selected = next((p for p in release.get('final_managers', []) if p['id'] == target['id']), None)
+        people = [p for p in scoped_people(people) if not p['revoked'] and can_scope(target, p['scope'])
+                  and (selected is None or p['scope'] in selected['scopes'])
+                  and any(i['status'] != 'revoked' for i in p['items'])]
+        if release.get('task_grants_version') == 2:
+            people.sort(key=lambda p: (SCOPES.index(p['scope']), p['id']))
+        total = sum(i['status'] != 'revoked' for p in people for i in p['items'])
+        approved = sum(i['status'] == 'approved' for p in people for i in p['items'])
+        summary = f'共{len({p["id"] for p in people})}人 · {total}项 · 已复核{approved}项\n' + '\n'.join(
+            ('110站' if scope == '110' else scope + '楼') + '：' +
+            str(sum(p['scope'] == scope for p in people)) + '人 / ' +
+            str(sum(i['status'] != 'revoked' for p in people if p['scope'] == scope for i in p['items'])) + '项'
+            for scope in SCOPES if any(p['scope'] == scope for p in people))
+        button = {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary',
+            'text': {'tag': 'plain_text', 'content': '查看排查结果'},
+            'url': self.base_url().rstrip('/') + '/risk-inspections?id=' + release['id']}]}
+
+        def card(elements, part, *, last=False, measure=False):
+            heading = summary + f'\n明细第{part}片，' + ('本片为末片。' if last else '后续明细见下一片。')
+            return {'config': {'wide_screen_mode': True}, 'header': {'title': {'tag': 'plain_text',
+                    'content': '风险排查汇总 · ' + release['name']}, 'template': 'green'},
+                    'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': heading}}, *elements,
+                                 *([button] if measure or self.store.controls(target, release) else [])]}
+
+        elements, part = [], 1
+        fields = [f for f in system_fields(release['fields']) if f['role'] == 'input']
+        for person in people:
+            for item in person['items']:
+                if item['status'] == 'revoked':
+                    continue
+                feedback = []
+                for field in fields:
+                    value = item['values'].get(field['key'])
+                    if value is None:
+                        continue
+                    if field['type'] == 17:
+                        value = str(len(value)) + '个附件'
+                    elif isinstance(value, bool):
+                        value = '是' if value else '否'
+                    elif isinstance(value, list):
+                        value = '、'.join(str(v) for v in value)
+                    feedback.append(field['field_name'] + '：' + str(value))
+                review = system_values(release, person, item)
+                prefix = review['scope'] + ' · ' + person['name'] + '\n事项：' + item['title'] + '\n'
+                content = ('反馈：' + ('\n'.join(feedback) or '无填写内容') + '\n复核人：' + review['reviewer'] +
+                           '\n复核：' + review['review'])
+                # Split long answers as well as large assignments; never silently truncate feedback.
+                for start in range(0, len(content), 2400):
+                    element = {'tag': 'div', 'text': {'tag': 'plain_text',
+                               'content': prefix + ('（接上段）\n' if start else '') + content[start:start + 2400]}}
+                    candidate = card([*elements, element], part, measure=True)
+                    if elements and (len(elements) >= 20 or len(json.dumps(candidate, ensure_ascii=False).encode('utf-8')) >= 24000):
+                        yield card(elements, part)
+                        elements, part = [], part + 1
+                    elements.append(element)
+        yield card(elements, part, last=True)
+
+    def final_push(self, job):
+        release, people = self.store.raw(job['release_id'])
+        batch = job['payload']['batch']
+        if release.get('status') == 'deleted' or not batch or completion_key(people) != batch or not release.get('final_managers'):
+            return
+        active = [p for p in people if not p['revoked'] and any(i['status'] != 'revoked' for i in p['items'])]
+        expanded = [p for p in scoped_people(active) if any(i['status'] != 'revoked' for i in p['items'])]
+        owner = self.store.person_for(release['owner']['id'])
+        self.store.check(owner)
+        if not manager(owner) or not all(can_scope(owner, p['scope']) for p in expanded):
+            raise RiskError('发布人权限已变化，暂停最终推送。', 403)
+        final = release['cloud'].get('final_push', {})
+        if final.get('batch') != batch:
+            final = {'batch': batch, 'delivered': [], 'person_versions': {
+                p['id']: digest(sorted((i['id'], i.get('reviewed_at')) for i in p['items'] if i['status'] != 'revoked'))
+                for p in active}, 'scope_versions': {
+                    p['id'] + ':' + p['scope']: digest(sorted((p['scope'], i['id'], i.get('reviewed_at'))
+                        for i in p['items'] if i['status'] != 'revoked')) for p in expanded},
+                'status': 'pending', 'sent_at': None}
+        final = deepcopy(final)
+        self.store.checkpoint(release['id'], final_push=final)
+        try:
+            for selected in release['final_managers']:
+                target = self.store.person_for(selected['id'])
+                self.store.check(target)
+                visible = [p for p in expanded if p['scope'] in selected['scopes']]
+                if (not final_manager(target) or not any(can_scope(target, s) for s in selected['scopes'])
+                        or not all(can_scope(target, p['scope']) for p in visible)):
+                    raise RiskError('接收经理身份或楼栋权限已变化，暂停最终推送。', 403)
+                if target['id'] in final['delivered']:
+                    continue
+                for part, card in enumerate(self.final_cards(release, visible, target), 1):
+                    fresh, fresh_people = self.store.raw(release['id'])
+                    if fresh.get('status') == 'deleted' or completion_key(fresh_people) != batch:
+                        return
+                    owner = self.store.person_for(release['owner']['id'])
+                    target = self.store.person_for(selected['id'])
+                    self.store.check(owner)
+                    self.store.check(target)
+                    if not manager(owner) or not all(can_scope(owner, p['scope']) for p in expanded):
+                        raise RiskError('发布人权限已变化，暂停最终推送。', 403)
+                    if (not final_manager(target) or not any(can_scope(target, s) for s in selected['scopes'])
+                            or not all(can_scope(target, p['scope']) for p in visible)):
+                        raise RiskError('接收经理身份或楼栋权限已变化，暂停最终推送。', 403)
+                    if not self.store.controls(target, release):
+                        card['elements'] = [e for e in card['elements'] if e['tag'] != 'action']
+                    self.notify({**job, 'id': f'{job["id"]}:{target["id"]}:{part}'}, release, target, card=card)
+                final['delivered'].append(target['id'])
+                self.store.checkpoint(release['id'], final_push=final)
+            fresh, fresh_people = self.store.raw(release['id'])
+            if fresh.get('status') == 'deleted' or completion_key(fresh_people) != batch:
+                return
+            final.update(status='sent', sent_at=final.get('sent_at') or time.time())
+            self.store.checkpoint(release['id'], final_push=final)
+        finally:
+            fresh, fresh_people = self.store.raw(release['id'])
+            if fresh.get('status') != 'deleted' and completion_key(fresh_people) == batch:
+                self.ensure_result_fields(fresh)
+                for person in fresh_people:
+                    if not person['revoked']:
+                        self.sync(fresh, person, system_only=True)
 
     def process(self, job):
         self.work.job = job if job.get('status') == 'running' else None
@@ -472,19 +628,30 @@ class RiskCloud:
         if job['kind'] == 'template_sync':
             self.sync_history(job)
             return
+        if job['kind'] == 'final_push':
+            self.final_push(job)
+            return
         release, people = self.store.raw(job['release_id'])
         if job['kind'] == 'publish':
             self.create_release(release, people)
         elif job['kind'] == 'registry':
             actor = self.store.person_for(job['payload']['actor']['id'])
-            if not self.store.controls(actor, release) or not all(can_scope(actor, p['scope']) for p in people):
+            self.store.check(actor)
+            if not self.store.controls(actor, release) or not all(can_scope(actor, item_scope(p, i)) for p in people for i in p['items']):
                 raise RiskError('操作人权限已变化，暂未更新登记信息。', 403)
             self.registry(release, people)
+            self.ensure_result_fields(release)
+            for person in people:
+                self.sync(release, person, system_only=True)
         elif job['kind'] == 'sync':
             actor = self.store.person_for((job['payload'].get('retry_authorized_by') or job['payload']['actor'])['id'])
+            self.store.check(actor)
             person = job['payload']['person']
-            if not can_scope(actor, person['scope']) or actor['id'] != person['id'] and not self.store.controls(actor, release):
+            current = next((p for p in people if p['id'] == person['id']), None)
+            if (current is None or not person['items']
+                    or not all(self.store._visible(actor, release, current, item=i) for i in person['items'])):
                 raise RiskError('原操作人楼栋权限已撤销，反馈保留，待管理员核对。', 403)
+            self.ensure_result_fields(release)
             self.sync(release, person)
             self.registry(*self.store.raw(release['id']), finished_job=job['id'])
         elif job['kind'] == 'notify':
@@ -492,12 +659,12 @@ class RiskCloud:
             target = self.store.person_for(person['id'])
             if person['revoked'] or not any(i['status'] in {'pending', 'returned'} for i in person['items']):
                 return
-            if not can_scope(target, person['scope']):
-                raise RiskError('接收人权限已变化，暂不发送排查消息。', 403)
+            self.store.check(target)
             self.notify(job, release, target)
         elif job['kind'] == 'review_notice':
             payload = job['payload']
-            if payload['action'] == 'submit' and payload['person_id'] != release['reviewer']['id']:
+            if payload['action'] == 'submit' and (payload['person_id'] not in {p['id'] for p in reviewer_list(release)}
+                    or payload.get('reviewer_version', 1) != release.get('reviewer_version', 1)):
                 return
             person = next(p for p in people if p['id'] == payload['subject_id'])
             item = next(i for i in person['items'] if i['id'] == payload['item_id'])
@@ -505,11 +672,12 @@ class RiskCloud:
             if person['revoked'] or item.get('notice_version', person['version']) != payload['version'] or item['status'] != expected:
                 return
             target = self.store.person_for(payload['person_id'])
-            if not can_scope(target, person['scope']) or payload['action'] == 'submit' and not manager(target):
+            self.store.check(target)
+            if not self.store._visible(target, release, person, item=item):
                 raise RiskError('通知接收人权限已变化。', 403)
-            self.notify(job, release, target, note=person['name'] + ' · ' + item['title'] + '：' + STATUS[item['status']])
+            self.notify(job, release, target, note=item_scope(person, item) + ' · ' + person['name'] + ' · ' + item['title'] + '：' + STATUS[item['status']])
 
-    def notify(self, job, release, target, note=''):
+    def notify(self, job, release, target, note='', card=None):
         cloud = self.store.raw(release['id'])[0]['cloud']
         receipts = dict(cloud.get('messages', {}))
         receipt_key = job['id']
@@ -523,7 +691,8 @@ class RiskCloud:
             raise RiskError('消息投递结果需人工核验，已停止自动重发以避免重复通知。', 409)
         receipts[receipt_key] = {'attempted_at': attempt}
         self.store.checkpoint(release['id'], messages=receipts)
-        card = {'config': {'wide_screen_mode': True}, 'header': {'title': {'tag': 'plain_text', 'content': '风险排查 · ' + release['name']}, 'template': 'blue'},
+        if card is None:
+            card = {'config': {'wide_screen_mode': True}, 'header': {'title': {'tag': 'plain_text', 'content': '风险排查 · ' + release['name']}, 'template': 'blue'},
                 'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': note or '请完成分配给你的排查事项，并在灯塔提交反馈供审核。'}},
                              {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '查看排查' if note else '开始排查'}, 'url': url}]}]}
         try:

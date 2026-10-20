@@ -21,6 +21,8 @@ def main():
     from openclaw_service.assistant.lighthouse_ai import unprotect_key
     from openclaw_service.protocol import InstanceLock
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    from .feishu_assistant_settings import validate_app_id
+    validate_app_id(config.get('app_id'))
     secret, bridge = unprotect_key(config["secret_cipher"]), unprotect_key(config["bridge_cipher"])
     lock = InstanceLock()
     lock.name = "Local\\ClipFlowFeishuAssistant-" + hashlib.sha256(config["app_id"].encode()).hexdigest()[:24]

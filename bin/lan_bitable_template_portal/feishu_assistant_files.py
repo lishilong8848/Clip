@@ -17,11 +17,23 @@ Hook contract (caller side):
           None                              -> not a resource command
           {"text": ...}                     -> reply to send
           {"file_ids": [...], "question": .}-> continue model flow with files
+  * transcribe_message(bot, message, request, actor)
+        Voice-only preprocessing; None for other messages, {"text": ...} for
+        an explicit failure, or {"question": transcript, "file_ids": []}.
+        The parent parser must preserve message_type="audio" and file_key.
+        Call after _request_context (including topic ACL resolution), BEFORE
+        consent/command/topic-plan dispatch. On success replace only question,
+        clear audio content/message_type/problem, set request.state.feishu_question,
+        and continue the ORIGINAL answer() flow with the same actor/message IDs.
+        Requires GET voice (data.stt), POST files and POST voice with action
+        transcribe/file_id on the existing authenticated assistant bridge. This
+        hook does not call chat(), select a conversation, or send a reply.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import mimetypes
 import re
 import time
@@ -78,7 +90,7 @@ def parse_resources(message, content):
     the caller must enforce MAX_ITEMS explicitly so an over-limit message can
     fail loudly instead of being silently sliced.
     """
-    if not isinstance(content, dict):
+    if message.get('message_type') == 'audio' or not isinstance(content, dict):
         return []
     mid = str(message.get("message_id") or "")
     if not re.fullmatch(r"om_[A-Za-z0-9]+", mid):
@@ -104,6 +116,65 @@ def parse_resources(message, content):
     push("image", content.get("image_key"))
     push("file", content.get("file_key"), content.get("file_name"))
     return found
+
+
+def parse_audio_resource(message, content):
+    """Only an explicit Feishu audio message is a voice recording."""
+    if message.get('message_type') != 'audio' or not isinstance(content, dict):
+        return None
+    mid, key = str(message.get('message_id') or ''), str(content.get('file_key') or '')
+    if not re.fullmatch(r'om_[A-Za-z0-9]+', mid) or not _KEY.fullmatch(key) or not key.startswith('file_'):
+        raise AssistantError('语音附件编号无效，请重新发送语音。', 400)
+    return {'kind': 'file', 'type': 'audio', 'key': key, 'original_mid': mid}
+
+
+async def transcribe_message(bot, message, request, actor):
+    if message.get('message_type') != 'audio':
+        return None
+    from openclaw_service.assistant.lighthouse_voice import UNSUPPORTED, validate_audio
+    try:
+        resource = parse_audio_resource(message, message.get('content'))
+    except AssistantError:
+        return {'text': '语音附件编号无效，请重新发送语音。'}
+    if resource is None:
+        return {'text': '语音附件为空，请重新发送语音。'}
+    try:
+        data = await bot._call(request, actor, 'voice')
+    except AssistantError as exc:
+        if exc.status in {404, 405, 503}:
+            return {'text': UNSUPPORTED}
+        raise
+    except Exception:
+        return {'text': '语音服务暂不可用，请稍后重试，或改发文字。'}
+    if not isinstance(data, dict) or data.get('stt') is not True:
+        return {'text': UNSUPPORTED}
+    try:
+        async with _heavy():
+            async with asyncio.timeout(30):
+                content = await _download(bot, message, resource)
+            name, _ = validate_audio(content)
+            file_id = await _upload(bot, request, actor, name, content)
+            result = await bot._call(request, actor, 'voice', {'action': 'transcribe', 'file_id': file_id})
+    except AssistantError as exc:
+        if exc.status in {401, 403}:
+            raise
+        if exc.category == 'voice_unconfigured':
+            return {'text': UNSUPPORTED}
+        return {'text': '语音识别未完成，请检查音频格式和大小后重试，或改发文字。'}
+    except Exception:
+        return {'text': '语音下载或识别未完成，请稍后重试，或改发文字。'}
+    question = result.get('text') if isinstance(result, dict) else None
+    if not isinstance(question, str) or not question.strip():
+        return {'text': '未识别到有效语音，请重新录音或改发文字。'}
+    if len(question) > 12000:
+        return {'text': '语音转写超过12000字，请分段发送。'}
+    from openclaw_service.assistant.lighthouse_ai import private_identifier
+    if private_identifier(question):
+        return {'text': '语音包含受保护信息，请调整内容后改发文字。'}
+    question = safe_text(question, limit=12000).strip()
+    if not question:
+        return {'text': '语音包含受保护信息，请调整内容后改发文字。'}
+    return {'question': question, 'file_ids': []}
 
 
 def _identity(actor, message):
@@ -283,24 +354,40 @@ async def _confirm_read(bot, message, request, actor, store, owner, actor_id, ch
 
 
 async def _download(bot, message, res):
-    client = await bot.messenger.client()
-    headers = await bot.messenger.headers()
+    if not re.fullmatch(r"om_[A-Za-z0-9]+", str(res.get("original_mid") or "")) or not _KEY.fullmatch(str(res.get("key") or "")):
+        raise AssistantError("飞书附件编号无效，请重新发送附件。", 400)
+    messenger = bot.messenger
+    client = await messenger.client()
+    headers = await messenger.headers()
     url = ("https://open.feishu.cn/open-apis/im/v1/messages/" + res["original_mid"]
            + "/resources/" + res["key"])
     kind = "image" if res["kind"] == "image" else "file"
-    buffer, total = bytearray(), 0
-    async with client.stream("GET", url, headers=headers, params={"type": kind},
+    from upload_event_module.services.feishu_token_manager import TOKEN_ERROR_CODES
+    for attempt in range(2):
+        buffer, total = bytearray(), 0
+        async with client.stream("GET", url, headers=headers, params={"type": kind},
                                  follow_redirects=False) as response:
-        if response.status_code != 200:
+            status = response.status_code
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > (MAX_FILE if status == 200 else 65536):
+                    raise AssistantError("附件超过20MiB，未读取。" if status == 200 else "飞书附件下载未完成。", 413 if status == 200 else 502)
+                buffer.extend(chunk)
+        try:
+            payload = json.loads(buffer) if len(buffer) <= 65536 else {}
+        except (ValueError, UnicodeError):
+            payload = {}
+        expired = status == 401 or (isinstance(payload, dict)
+            and type(payload.get("code")) is int and payload["code"] in TOKEN_ERROR_CODES)
+        if expired and not attempt:
+            messenger.expires = 0
+            headers = await messenger.headers()
+            continue
+        if status != 200 or expired:
             raise AssistantError("飞书附件下载未完成，请重新发送附件。", 502)
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > MAX_FILE:
-                raise AssistantError("附件超过20MiB，未读取。", 413)
-            buffer.extend(chunk)
-    if not buffer:
-        raise AssistantError("飞书附件为空，未读取。", 422)
-    return bytes(buffer)
+        if not buffer:
+            raise AssistantError("飞书附件为空，未读取。", 422)
+        return bytes(buffer)
 
 
 def _image_extension(content):

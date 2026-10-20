@@ -23,7 +23,7 @@ try{
    const fields=[{key:'f1',field_name:'排查结果',type:1,role:'input',required:true},
     {key:'f2',field_name:'风险等级',type:3,role:'input',property:{options:[{name:'无异常'},{name:'有风险'}]}},
     {key:'f3',field_name:'现场照片',type:17,role:'input'},
-    {key:'f4',field_name:'排查日期',type:5,role:'input'},
+    {key:'f4',field_name:'排查日期',type:5,role:'inspected_at'},
     {key:'f5',field_name:'发现异常',type:7,role:'input'},
     {key:'f6',field_name:'异常数量',type:2,role:'input'}];
    if(width===1440)fields[1].property.options.push({name:'跨行\n选项'});
@@ -76,13 +76,13 @@ try{
     }
     if(p==='/templates')return ok({items:[{...history,item_count:history.items.length,field_count:history.fields.length}],total:1,page:1});
     if(p==='/templates/'+history.id){if(req.method()==='PUT'){const body=req.postDataJSON();assert.equal(body.version,history.version);assert.equal(body.fields.find(field=>field.key==='f1').required,false,'History keeps the explicitly optional requirement');assert.deepEqual(body.fields.find(field=>field.key==='f2').property.options,history.fields.find(field=>field.key==='f2').property.options,'History requirement changes must preserve existing options');if(width===1440)assert.equal(body.fields.find(field=>field.key==='f2').required,true);if(rejectHistorySave){rejectHistorySave=false;return route.fulfill({status:503,json:{ok:false,error:'模板保存暂未确认，请稍后重试'}});}Object.assign(history,body,{revision:history.revision+1,version:'history-v'+(history.revision+1)});}return ok(history);}
-    if(p==='/people')return ok({items:[{id:'alice',name:'排查人员甲',employee_no:'001',scopes:['A'],home_scope:'H',can_review:false},{id:'reviewer',name:'审核主管',employee_no:'002',scopes:['A','B'],home_scope:'A',can_review:true},{id:'admin',name:'发布管理员',employee_no:'003',scopes:['A','B'],home_scope:'A',can_review:true}]});
+    if(p==='/people')return ok({self_id:role,items:[{id:'alice',name:'排查人员甲',employee_no:'001',scopes:['A'],home_scope:'A',can_review:false},{id:'reviewer',name:'审核主管',employee_no:'002',scopes:['A','B'],home_scope:'A',can_review:true,category:'manager',can_receive_final:true},{id:'admin',name:'发布管理员',employee_no:'003',scopes:['A','B'],home_scope:'A',can_review:true,can_receive_final:false}]});
     if(!p&&req.method()==='GET')return ok({items:deleted?[]:[{id:rid,name:'十月设备专项风险排查',can_delete_release:role!=='alice',deadline:Date.now()+86400000,status:'active',total:2,submitted:0,approved:0,people_count:2,reviewer:'审核主管',can_claim:data().can_claim}],total:deleted?0:1,page:1,is_manager:role!=='alice',can_edit_template:role==='admin'});
-    if(!p&&req.method()==='POST'){const body=req.postDataJSON();assert.match(body.id,/^[a-f0-9]{32}$/);assert.equal(body.template_version,body.history_template_id?history.version:basics.find(template=>template.id===body.base_template_id)?.version);assert.equal(body.reviewer_id,'reviewer');assert.deepEqual(body.people,[{id:'alice',scope:'A'}]);assert.equal(body.items[0].title,body.history_template_id?'复用检查项':'现场设备状态检查');if(body.history_template_id){assert.equal(body.items[0].values.f1,'检查接线与标识');assert(!body.items[0].values.f3);assert(!body.items[0].values.f4);}if(losePublication){losePublication=false;frozenPublication=body;return route.fulfill({status:503,json:{ok:false,error:'隔离测试发布回执丢失'}});}if(frozenPublication){assert.deepEqual(body,frozenPublication,'Uncertain publication retries the exact same identity and payload');frozenPublication=null;}return ok(data());}
+    if(!p&&req.method()==='POST'){const body=req.postDataJSON();assert.match(body.id,/^[a-f0-9]{32}$/);assert.equal(body.template_version,body.history_template_id?history.version:basics.find(template=>template.id===body.base_template_id)?.version);assert.deepEqual(body.reviewer_ids,['admin']);assert.deepEqual(body.manager_ids,['reviewer']);assert.deepEqual(body.people,[{id:'alice',scopes:['A']}]);assert.equal(body.items[0].title,body.history_template_id?'复用检查项':'现场设备状态检查');if(body.history_template_id){assert.equal(body.items[0].values.f1,'检查接线与标识');assert(!body.items[0].values.f3);assert(!body.items[0].values.f4);}if(losePublication){losePublication=false;frozenPublication=body;return route.fulfill({status:503,json:{ok:false,error:'隔离测试发布回执丢失'}});}if(frozenPublication){assert.deepEqual(body,frozenPublication,'Uncertain publication retries the exact same identity and payload');frozenPublication=null;}return ok(data());}
     if(frozenPublication&&p==='/'+frozenPublication.id)return route.fulfill({status:503,json:{ok:false,error:'隔离测试发布暂无法核验'}});
     if(p.endsWith('/files'))return ok({id:'f'.repeat(32),name:u.searchParams.get('name'),size:req.postDataBuffer().length,field_id:'f3'});
     if(p.endsWith('/claim')){assert.equal(role,'admin');assert.deepEqual(req.postDataJSON(),{scope:'A'});if(!people.some(person=>person.id==='admin'))people.push({id:'admin',name:'发布管理员',scope:'A',version:1,revoked:false,items:[{id:'own-item',title:'本人检查项',status:'pending',values:{},files:[]}]});return ok(data());}
-    if(p.endsWith('/reviewer')){const body=req.postDataJSON();assert.equal(body.version,reviewerVersion);reviewerId=body.reviewer_id;reviewerVersion++;return ok(data());}
+    if(p.endsWith('/reviewer')){const body=req.postDataJSON();assert.equal(body.version,reviewerVersion);assert.equal(body.reviewer_ids.length,1,'Replacing reviewers after clearing the selector must send only the new reviewer: '+JSON.stringify(body));reviewerId=body.reviewer_ids[0];reviewerVersion++;return ok(data());}
     if(p.endsWith('/retry')){assert.deepEqual(req.postDataJSON(),{kind:'template_sync'},'Backup retry must not retry messages');return ok(data());}
     if(p.endsWith('/actions')){
      const body=req.postDataJSON(),person=people.find(v=>p.includes('/people/'+v.id+'/'));
@@ -141,11 +141,11 @@ try{
    assert.equal(detailReads,keyboardReads+1,'The existing keyboard action opens once without row bubbling');
    await page.getByRole('button',{name:'排查列表',exact:true}).click();
    await page.getByRole('button',{name:'基础模板',exact:true}).click();
-   if(version==='legacy'){await page.locator('.risk-field-picker').waitFor();assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Legacy creation retains its primary field');await page.getByRole('button',{name:'模板列表',exact:true}).click();}
+   assert.equal(await page.locator('.risk-field-picker').count(),0,'Both versions enter the template list');
    await page.locator('.history-list article').nth(1).waitFor();
    assert.equal(await page.locator('.history-list article').count(),2,'Multiple base templates are independently selectable');
    await page.locator('.history-list article').first().getByRole('button',{name:'查看 / 编辑',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
-   assert.deepEqual(await page.locator('.risk-selected-name strong').allTextContents(),basics[0].fields.filter(field=>version==='legacy'||!field.is_primary&&field.role==='input').map(field=>field.field_name),'Existing templates retain editable field selection and order');
+   assert.deepEqual(await page.locator('.risk-selected-name strong').allTextContents(),basics[0].fields.filter(field=>!field.is_primary&&field.role==='input').map(field=>field.field_name),'Existing templates retain editable field selection and order');
    const panes=await page.locator('.risk-field-pane').evaluateAll(nodes=>nodes.map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,right:r.right};}));
    if(width===1440){assert(Math.abs(panes[0].y-panes[1].y)<2);assert(panes[0].right<panes[1].x,'Desktop library is left, selected fields are right');}else assert(panes[1].y>panes[0].y,'Mobile panels stack in reading order');
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Field picker stays inside the page');
@@ -166,7 +166,7 @@ try{
    }
    await page.getByRole('button',{name:'修改字段 排查结果',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).waitFor();assert.equal(await page.getByRole('switch',{name:'字段库是否必填',exact:true}).getAttribute('aria-checked'),'true');await page.locator('.risk-history-field-modal').getByRole('button',{name:'取消',exact:true}).click();
    const requiredSwitch=page.getByRole('switch',{name:'排查结果是否必填',exact:true});
-   await requiredSwitch.waitFor();assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');assert.equal(await page.locator('.risk-field-required>span').count(),6,'Each selected input field retains a labelled required control');
+   await requiredSwitch.waitFor();assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');assert.equal(await page.locator('.risk-field-required>span').count(),5,'Each input retains a required control; automatic dates have none');
    await requiredSwitch.click();assert.equal(requiredWrites,0,'Template edits remain local until saved');await cancelNavigation();
    for(const expected of [false,true]){if(expected)await requiredSwitch.click();await page.getByRole('button',{name:'保存新版本',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});assert.equal(await requiredSwitch.getAttribute('aria-checked'),String(expected));}
    await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
@@ -177,7 +177,7 @@ try{
    await page.getByRole('button',{name:'添加字段',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('现场说明');await page.getByRole('button',{name:'保存字段',exact:true}).click();
    await page.locator('.risk-history-field-modal').getByText('字段库暂未保存，请重试',{exact:true}).waitFor();assert.equal(libraryWrites,0);assert.equal(await page.getByRole('textbox',{name:'字段库名称',exact:true}).inputValue(),'现场说明','Failed library saves retain the field draft');
    await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
-   assert.equal(libraryWrites,1);assert.equal(await page.locator('.risk-selected-fields>li').count(),version==='v2'?0:1,'Saving a library field does not implicitly select it');
+   assert.equal(libraryWrites,1);assert.equal(await page.locator('.risk-selected-fields>li').count(),0,'Saving a library field does not implicitly select it; fixed fields stay hidden in both versions');
    await page.getByRole('button',{name:'修改字段 现场说明',exact:true}).click();await page.getByRole('textbox',{name:'字段库名称',exact:true}).fill('现场补充说明');await page.getByRole('button',{name:'保存字段',exact:true}).click();await page.locator('.risk-history-field-modal').waitFor({state:'hidden'});
    await page.getByRole('button',{name:'模板列表',exact:true}).click();await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.getByRole('button',{name:'添加字段 现场补充说明',exact:true}).waitFor();
    assert.equal(libraryWrites,2,'Added and edited library fields survive reopening');
@@ -192,7 +192,7 @@ try{
    if(version==='v2'&&width<700){const button=await generate.boundingBox(),nav=await page.locator('.v2-mobile-nav').boundingBox();assert(button.y>=56&&button.y+button.height<=nav.y-2,'Generate button stays above mobile navigation');}
    await page.screenshot({path:path.join(output,`${version}-${width}-field-picker.png`),fullPage:width>=700});
    await generate.click();await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});assert.equal(basics.length,3);
-   assert.deepEqual(basics[2].fields.map(field=>field.field_name),['排查任务编号','排查结果','现场补充说明'],'Generated templates contain exactly the selected fields');
+   assert.deepEqual(basics[2].fields.map(field=>field.field_name),['排查任务编号','排查日期','排查结果','现场补充说明'],'Generated templates retain fixed fields and selected inputs');
    assert.equal(writes.filter(write=>write.version===version&&write.width===width&&write.path==='').length,0,'Saving a base template must not publish an inspection');
    await page.getByRole('button',{name:'选用并填写',exact:true}).click();await page.locator('.risk-publish').waitFor();await page.getByText('基础模板：第三个基础模板 · V1',{exact:true}).waitFor();
    await page.getByRole('button',{name:'更换基础模板',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.history-list article').nth(2).waitFor();
@@ -201,8 +201,10 @@ try{
    await page.getByPlaceholder('例如：10月电气设备专项排查').fill('隔离测试发布');
    const due=new Date(Date.now()+86400000*7);const dueText=`${due.getFullYear()}-${String(due.getMonth()+1).padStart(2,'0')}-${String(due.getDate()).padStart(2,'0')} 18:00:00`;
    await page.locator('.risk-publish>.risk-fields .n-date-picker input').fill(dueText);await page.locator('.risk-publish>.risk-fields .n-date-picker input').press('Enter');
-   await page.locator('.risk-publish>.risk-fields>label').nth(2).locator('.n-base-selection').click();await page.getByText('审核主管 · A楼、B楼',{exact:true}).click();
+   assert.match(await page.locator('.n-select[aria-label="审核人"]').innerText(),/发布管理员/);
    await page.locator('.risk-publish>.risk-fields>label').nth(3).locator('.n-base-selection').click();await page.getByText('排查人员甲 · 001',{exact:true}).click();await page.keyboard.press('Escape');
+   await page.locator('.n-base-select-option:visible').first().waitFor({state:'hidden'});
+   await page.locator('.n-select[aria-label="接收经理"] .n-base-selection').click();await page.getByText('审核主管 · A楼、B楼',{exact:true}).click();await page.keyboard.press('Escape');
    await page.getByPlaceholder('事项 1：设备、部件或需要检查的内容').fill('现场设备状态检查');
    await page.locator('.risk-publish .risk-sheet').getByRole('textbox',{name:'排查结果',exact:true}).pressSequentially('本次统一检查要求');
    assert.equal(await page.locator('.risk-publish .risk-sheet').getByRole('textbox',{name:'排查结果',exact:true}).inputValue(),'本次统一检查要求','Editing a cell retains focus through immutable row updates');
@@ -211,7 +213,7 @@ try{
    assert.equal(await page.getByRole('textbox',{name:'排查事项 1',exact:true}).inputValue(),'现场设备状态检查','Removing another row cannot change the first item');
    if(version==='v2'&&width===1440){for(let i=0;i<10;i++)await page.getByRole('button',{name:'添加事项',exact:true}).click();await page.getByRole('textbox',{name:'排查事项 11',exact:true}).fill('最后一项');assert.equal(await page.locator('.risk-publish .risk-sheet tbody tr').count(),1,'Only the current sheet page is rendered');await page.getByRole('button',{name:'移除事项 11',exact:true}).click();for(let i=10;i>1;i--)await page.getByRole('button',{name:'移除事项 '+i,exact:true}).click();assert.equal(await page.getByRole('textbox',{name:'排查事项 1',exact:true}).inputValue(),'现场设备状态检查');}
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Publishing table cannot widen the page');
-   if(width===1440){const tops=await page.locator('.risk-publish>.risk-fields>label').evaluateAll(nodes=>nodes.map(el=>el.getBoundingClientRect().top));assert(Math.max(...tops)-Math.min(...tops)<2,'Publishing controls share one desktop row');}
+   if(width===1440){const tops=await page.locator('.risk-publish>.risk-fields').first().locator(':scope>label').evaluateAll(nodes=>nodes.map(el=>el.getBoundingClientRect().top));assert(Math.max(...tops)-Math.min(...tops)<2,'Core publishing controls share one desktop row');}
    if(version==='v2'&&width<700){const button=page.getByRole('button',{name:'确认发布',exact:true});await button.scrollIntoViewIfNeeded();const action=await button.boundingBox(),nav=await page.locator('.v2-mobile-nav').boundingBox();assert(action.y>=56&&action.y+action.height<=nav.y-2,'The entire publish button stays above the mobile navigation');}
    await page.screenshot({path:path.join(output,`${version}-${width}-publish.png`),fullPage:width>=700});
    await page.getByRole('button',{name:'确认发布',exact:true}).click();
@@ -237,8 +239,10 @@ try{
    assert.equal(await page.locator('.risk-publish>.risk-fields .n-date-picker input').inputValue(),'');
    assert(await page.getByRole('button',{name:'确认发布',exact:true}).isDisabled(),'Recipients, reviewer and deadline must be selected again');
    await page.locator('.risk-publish>.risk-fields .n-date-picker input').fill(dueText);await page.locator('.risk-publish>.risk-fields .n-date-picker input').press('Enter');
-   await page.locator('.risk-publish>.risk-fields>label').nth(2).locator('.n-base-selection').click();await page.getByText('审核主管 · A楼、B楼',{exact:true}).click();
+   assert.match(await page.locator('.n-select[aria-label="审核人"]').innerText(),/发布管理员/);
    await page.locator('.risk-publish>.risk-fields>label').nth(3).locator('.n-base-selection').click();await page.getByText('排查人员甲 · 001',{exact:true}).click();await page.keyboard.press('Escape');
+   await page.locator('.n-base-select-option:visible').first().waitFor({state:'hidden'});
+   await page.locator('.n-select[aria-label="接收经理"] .n-base-selection').click();await page.getByText('审核主管 · A楼、B楼',{exact:true}).click();await page.keyboard.press('Escape');
    await page.getByRole('button',{name:'确认发布',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'排查列表',exact:true}).click();
    await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.locator('.risk-feedback-table').waitFor();
@@ -247,7 +251,7 @@ try{
    assert.equal(await feedbackRows().count(),2,'Both people are visible at once');
    assert.match(await table.innerText(),/B楼接线检查正常/);
    const bobRow=feedbackRows().filter({hasText:'排查人员乙'});
-   if(width>=700){assert.equal(await bobRow.locator('td').nth(7).innerText(),'否','False is a real answer, not missing');assert.equal(await bobRow.locator('td').nth(8).innerText(),'0','Zero is a real answer, not missing');}
+   if(width>=700){assert.equal(await bobRow.locator('td').nth(6).innerText(),'否','False is a real answer, not missing');assert.equal(await bobRow.locator('td').nth(7).innerText(),'0','Zero is a real answer, not missing');assert.equal(await table.getByRole('columnheader',{name:'排查日期',exact:true}).count(),0,'Automatic dates stay hidden');}
    else{assert.equal(await table.locator('table').count(),0,'Mobile feedback uses summaries instead of a horizontally scrolling table');assert.equal(await bobRow.locator('.risk-feedback-summary>div').count(),2);const controls=await bobRow.locator('.risk-feedback-meta button').evaluateAll(nodes=>nodes.map(node=>{const rect=node.getBoundingClientRect();return rect.y+rect.height/2;}));assert(Math.abs(controls[0]-controls[1])<2,'Person and action share a compact row');}
    await page.getByRole('textbox',{name:'搜索排查反馈',exact:true}).fill('现场标识');
    assert.equal(await feedbackRows().count(),1,'Feedback text participates in local filtering');
@@ -261,15 +265,19 @@ try{
    await bobRow.getByRole('link',{name:'接线照片.png',exact:true}).click();assert.equal(await page.locator('.risk-feedback').count(),0,'Opening an attachment does not open its feedback drawer');
    await bobItem.click();await page.locator('.risk-feedback').waitFor();
    assert.match(await page.locator('.risk-feedback-drawer').innerText(),/排查人员乙/);
-   assert.deepEqual((await page.locator('.risk-feedback .risk-readonly').allTextContents()).slice(-2),['否','0'],'Complete feedback values remain available behind the summary');
+   assert.equal(await page.locator('.risk-feedback [data-risk-field="f5"] .risk-readonly').innerText(),'否','False remains an explicit answer');
+   assert.equal(await page.locator('.risk-feedback [data-risk-field="f6"] .risk-readonly').innerText(),'0','Zero remains an explicit answer');
    assert.equal(await page.getByRole('button',{name:'提交审核',exact:true}).count(),0,'Row activation preserves read-only permissions for another person');
    await page.keyboard.press('Escape');await page.locator('.risk-feedback').waitFor({state:'hidden'});await page.locator('.n-drawer-mask').waitFor({state:'hidden'});
    for(const next of ['发布管理员','审核主管']){
     await page.getByRole('button',{name:'更换审核人',exact:true}).click();
-    await page.locator('.risk-confirm .n-base-selection').click();await page.getByText(next+' · A楼、B楼',{exact:true}).click();
+    await page.locator('.risk-confirm .n-select[aria-label="新审核人"]').waitFor();
+    while(await page.locator('.risk-confirm .n-tag__close').count())await page.locator('.risk-confirm .n-tag__close').last().click();await page.locator('.risk-confirm .n-base-suffix').click();await page.getByText(next+' · '+(next==='发布管理员'?'003':'002'),{exact:true}).click();await page.keyboard.press('Escape');
+    assert.deepEqual(await page.locator('.risk-confirm .n-tag').allTextContents(),[next+' · '+(next==='发布管理员'?'003':'002')],'Cleared reviewer selection contains only the chosen reviewer');
     await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
     await page.getByText('审核人已更换，待审核事项将通知新审核人。',{exact:true}).waitFor();
     await page.locator('.risk-confirm').waitFor({state:'hidden'});
+    assert.equal(reviewerId,next==='发布管理员'?'admin':'reviewer','Reviewer selection must be committed before changing accounts');
    }
    await page.screenshot({path:path.join(output,`${version}-${width}-management.png`),fullPage:width>=700});
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'No page overflow');
@@ -319,9 +327,9 @@ try{
    await page.locator('.risk-response .n-tag').filter({hasText:'审核通过'}).waitFor();
    assert.equal(people[0].items[0].status,'approved');
    await page.screenshot({path:path.join(output,`${version}-${width}-review.png`),fullPage:width>=700});
-   await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();if(version==='v2')await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
+   await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
    assert.equal(await page.getByRole('button',{name:'添加字段',exact:true}).count(),0,'Building managers cannot add shared library fields');assert.equal(await page.locator('.risk-field-tools').count(),0,'Building managers cannot edit or delete shared library fields');
-   await page.getByRole('button',{name:'添加字段 排查结果',exact:true}).click();assert.equal(await page.locator('.risk-selected-fields>li').count(),version==='v2'?1:2,'Building managers can select fields for their template');
+   await page.getByRole('button',{name:'添加字段 排查结果',exact:true}).click();assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Both versions hide fixed fields while retaining the full schema');
    await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.n-modal-mask').waitFor({state:'hidden'});
    role='admin';
    people[0].items.push({id:'second-item',title:'另一设备检查',status:'approved',values:{f1:'这是同一人员的第二项独立反馈。'},files:[]});
@@ -376,5 +384,14 @@ try{
  }
  assert.deepEqual(errors,[]);assert.equal(writes.filter(w=>w.path.endsWith('/actions')).length,versions.length*widths.length*4);
  console.log(`PASS risk inspection ${versions.join('/')} at ${widths.join(', ')}px: selected browser workflows and screenshots. No real cloud writes.`);
-}catch(e){if(page&&!page.isClosed())await page.screenshot({path:path.join(output,'failure.png'),fullPage:false});throw e;}
+}catch(e){
+ if(page&&!page.isClosed()){
+  await page.screenshot({path:path.join(output,'failure.png'),fullPage:false});
+  console.error(await page.evaluate(()=>Array.from(document.querySelectorAll('.v2-main,.v2-mobile-nav,.risk-page,.risk-publish,.risk-footer,.risk-footer button')).map(el=>{
+   const r=el.getBoundingClientRect(),s=getComputedStyle(el);
+   return {class:el.className,text:el.matches('button')?el.textContent:undefined,x:r.x,y:r.y,width:r.width,height:r.height,client:el.clientHeight,scroll:el.scrollHeight,top:el.scrollTop,overflow:s.overflow,position:s.position,paddingBottom:s.paddingBottom,marginBottom:s.marginBottom};
+  })));
+ }
+ throw e;
+}
 finally{await browser.close();await server.httpServer.close();}

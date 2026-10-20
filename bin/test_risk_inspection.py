@@ -92,14 +92,16 @@ class RiskTests(unittest.TestCase):
         self.assertEqual(error.exception.status, 403)
 
     def test_schema_and_scopes_required(self):
-        for change in ({'template_version':'old'}, {'people':[{'id':'other','scope':'A'}]}, {'reviewer_id':'alice'}):
+        for change in ({'template_version':'old'}, {'people':[{'id':'other','scope':'invalid'}]}, {'reviewer_ids': []}):
             with self.subTest(change=change), self.assertRaises(RiskError):
                 self.store.publish(self.people['admin'], {**self.body, **change}, self.template)
 
-    def test_cannot_assign_reviewer_to_self(self):
+    def test_can_assign_reviewer_to_self(self):
         self.body['people'] = [{'id':'reviewer','scope':'A'}]
-        with self.assertRaises(RiskError):
-            self.store.publish(self.people['admin'], self.body, self.template)
+        self.publish()
+        self.act('reviewer', 'submit', pid='reviewer')
+        data = self.act('reviewer', 'approve', pid='reviewer')
+        self.assertEqual(data['people'][0]['items'][0]['status'], 'approved')
 
     def test_person_isolation_no_other_results(self):
         self.publish()
@@ -121,7 +123,7 @@ class RiskTests(unittest.TestCase):
         self.act('alice','submit',values={'result':'已再次检查'})
         data = self.act('reviewer','approve',reason='核实完成')
         self.assertEqual(data['people'][0]['items'][0]['status'], 'approved')
-        self.assertEqual(len(data['audit']), 5)
+        self.assertEqual(len(data['audit']), 4)
 
     def test_validation_failure_never_commits(self):
         self.publish()
@@ -224,11 +226,11 @@ class RiskTests(unittest.TestCase):
         data = self.act('admin', 'approve')
         self.assertEqual(data['people'][0]['items'][0]['status'], 'approved')
 
-    def test_reviewer_reassignment_rejects_assignee_and_partial_scope_manager(self):
+    def test_reviewer_reassignment_accepts_assignee_but_rejects_partial_scope_manager(self):
         self.people['alice']['level'] = 'L3'
         self.publish()
-        with self.assertRaises(RiskError):
-            self.store.change_reviewer(self.people['admin'], self.body['id'], {'reviewer_id': 'alice', 'version': 1})
+        data = self.store.change_reviewer(self.people['admin'], self.body['id'], {'reviewer_id': 'alice', 'version': 1})
+        self.assertEqual(data['reviewer_id'], 'alice')
         self.people['reviewer']['scope_rules'] = ['ALL']
         self.people['superA'] = actor('superA', 'L3')
         self.body['id'] = 'b'*32
@@ -300,20 +302,22 @@ class RiskTests(unittest.TestCase):
 
     def test_live_revocation_blocks_old_session(self):
         self.publish()
-        self.people['alice']['modules']=[]
+        self.people['alice']['explicit_disabled']=True
         with self.assertRaises(RiskError):
             self.store.get(self.people['alice'],self.body['id'])
 
-    def test_reviewer_demotion_blocks_approval(self):
+    def test_reviewer_demotion_preserves_task_approval(self):
         self.publish();self.act('alice','submit')
         self.people['reviewer']['level']='L4'
-        with self.assertRaises(RiskError):self.act('reviewer','approve')
+        data = self.act('reviewer','approve')
+        self.assertEqual(data['people'][0]['items'][0]['status'], 'approved')
 
-    def test_demoted_reviewer_cannot_keep_reading_others_feedback(self):
+    def test_demoted_reviewer_keeps_only_task_review_access(self):
         self.publish(); self.act('alice', 'submit')
         self.people['reviewer']['level'] = 'L4'
-        with self.assertRaises(RiskError):
-            self.store.get(self.people['reviewer'], self.body['id'])
+        data = self.store.get(self.people['reviewer'], self.body['id'])
+        self.assertTrue(data['is_reviewer'])
+        self.assertFalse(data['can_manage_release'])
 
     def test_other_users_audit_volume_does_not_hide_own_history(self):
         self.publish(); self.act('alice', 'submit')
@@ -395,7 +399,7 @@ class CloudTests(unittest.TestCase):
             {'id':'d'*32, 'name':'选定字段的基础模板', 'enabled':True, 'fields':chosen, 'items':[]})
         restarted = RiskInspections(self.store.db_path, self.store.person_for)
         self.assertTrue(restarted.template()['settings']['library_field']['required'])
-        self.assertEqual([field['key'] for field in saved['fields']], ['primary','library_field'])
+        self.assertEqual([field['key'] for field in saved['fields'] if field['role'] == 'input' or field.get('is_primary')], ['primary','library_field'])
         current = cloud.edit_field(self.people['admin'], {**body,'action':'update',
             'version':current['version'],'field_id':'library_field','field_name':'改名后的说明'})
         current = cloud.edit_field(self.people['admin'],
@@ -478,10 +482,11 @@ class CloudTests(unittest.TestCase):
         remote.attachment=Mock(return_value={'file_token':'file'})
         remote.upsert=Mock()
         remote.sync(release,people[0])
-        fields=remote.upsert.call_args.args[3]
+        fields=next(call.args[3] for call in remote.upsert.call_args_list if '排查结果' in call.args[3])
         self.assertEqual(fields['排查结果'],'检查反馈')
         self.assertEqual(fields['现场附件'],[{'file_token':'file'}])
         self.assertEqual(fields['灯塔人员标识'],'alice')
+        self.assertEqual({call.args[3]['排查进度'] for call in remote.upsert.call_args_list}, {'50%（1/2项已反馈）'})
 
     def test_create_timeout_does_not_create_second_table(self):
         self.store.publish(self.people['admin'],self.body,self.template)
@@ -501,6 +506,7 @@ class CloudTests(unittest.TestCase):
         remote.request=Mock(return_value={'table_id':'tblnew','default_view_id':'viewnew'})
         remote.ensure_fields=Mock()
         remote.registry=Mock()
+        remote.sync=Mock()
         remote.create_release(*self.store.raw(self.body['id']))
         call=remote.request.call_args
         self.assertEqual(call.args,('POST',f'bitable/v1/apps/{TEMPLATE_APP}/tables'))
@@ -517,6 +523,7 @@ class CloudTests(unittest.TestCase):
         remote.request=Mock()
         remote.ensure_fields=Mock()
         remote.registry=Mock()
+        remote.sync=Mock()
         remote.create_release(*self.store.raw(self.body['id']))
         remote.request.assert_not_called()
         self.assertEqual(self.store.raw(self.body['id'])[0]['cloud']['table'],'tblrecovered')
@@ -642,7 +649,7 @@ class CloudTests(unittest.TestCase):
         self.publish()
         self.act('admin', 'revoke_person', reason='不再需要')
         self.act('admin', 'revoke_person', pid='bob', reason='不再需要')
-        self.store.checkpoint(self.body['id'], url='https://example.test/table')
+        self.store.checkpoint(self.body['id'], app='fixtureApp', table='fixtureTable', url='https://example.test/table')
         with self.store.connect(True) as db:
             db.execute("UPDATE risk_jobs SET status='done'")
         remote = self.remote(); remote.ensure_fields = Mock(); remote.upsert = Mock()
@@ -669,7 +676,7 @@ class CloudTests(unittest.TestCase):
         with self.store.connect() as db:
             row = db.execute("SELECT * FROM risk_jobs WHERE kind='sync'").fetchone()
         job = {**dict(row), 'payload': json.loads(row['payload'])}
-        self.store.checkpoint(self.body['id'], url='https://example.test/table')
+        self.store.checkpoint(self.body['id'], app='fixtureApp', table='fixtureTable', url='https://example.test/table')
         original = self.store.person_for
         def current(identity):
             if identity == 'alice':
@@ -826,12 +833,19 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(client.post('/api/risk-inspections',json={},headers={'x-person':'admin','Origin':'https://untrusted.test'}).status_code,403)
 
     def test_people_directory_minimizes_personal_information(self):
+        self.people['reviewer'].update(category='manager', home_scope='A')
         client=self.client()
         self.assertEqual(client.get('/api/risk-inspections/people',headers={'x-person':'alice'}).status_code,403)
         result=client.get('/api/risk-inspections/people',headers={'x-person':'admin'})
         self.assertEqual(result.status_code,200)
         self.assertNotIn('open_id',result.text)
         self.assertNotIn('secret',result.text)
+        directory = result.json()['data']
+        self.assertEqual(directory['self_id'], 'admin')
+        reviewer = next(person for person in directory['items'] if person['id'] == 'reviewer')
+        self.assertEqual(reviewer['home_scope'], 'A')
+        self.assertTrue(reviewer['can_receive_final'])
+        self.assertFalse(next(person for person in directory['items'] if person['id'] == 'admin')['can_receive_final'])
 
     def test_history_api_requires_manager_and_preserves_source(self):
         self.publish();client=self.client()
@@ -1084,6 +1098,7 @@ class CloudRecoveryTests(unittest.TestCase):
         remote = self.remote(); remote.all = Mock(return_value=[])
         remote.request = Mock(return_value={'table_id': 'tblExisting', 'default_view_id': 'viewExisting'})
         remote.ensure_fields = Mock()
+        remote.sync = Mock()
         remote.registry = Mock(side_effect=[CloudRejected('HTTP 400: 1254037', 503), None, None])
         with self.assertRaises(CloudRejected):
             remote.create_release(*self.store.raw(self.body['id']))

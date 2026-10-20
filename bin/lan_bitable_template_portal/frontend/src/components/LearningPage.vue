@@ -899,6 +899,12 @@ async function bootstrap(): Promise<void> {
         const entry = new URLSearchParams(window.location.search);
         if (entry.get('tab') === 'review') { tab.value = 'review'; await loadView(); }
         else if (entry.get('paper_id')) { tab.value = 'history'; await loadPaper(entry.get('paper_id')!); }
+        else if (entry.has('date') || entry.has('shift')) {
+          const claimed = await requestLearning(learningOptions, '/papers/claim', 'POST', {
+            scope: scope.value, person_id: learner.value.id, date: entry.get('date'), shift: entry.get('shift'),
+          });
+          tab.value = 'history'; await loadPaper(claimed.id);
+        }
         else await enterPracticeToday();
       } else if (viewMode.value === 'overview') {
         const entry = new URLSearchParams(window.location.search);

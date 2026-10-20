@@ -213,6 +213,8 @@ class SignatureManagement:
                       ("姓名", "员工姓名", "员工工号", "楼栋", ORIGIN_FIELD)])
 
     def ensure_fields(self):
+        from upload_event_module.services.feishu_token_manager import token_manager
+        from upload_event_module.services.http_client import FeishuHTTPError
         with self.lock("schema"):
             if self._schema_ready:
                 return self._temporary_field_metas
@@ -221,17 +223,38 @@ class SignatureManagement:
                 table_id=self.d.TEMP_SIGNATURE_TABLE_ID,
             )
             created = False
+            credentials = None
+
+            def check_credentials():
+                try:
+                    matching = token_manager._credentials() == credentials
+                except Exception:
+                    matching = False
+                if not matching:
+                    raise SignatureManagementError("Qt 飞书鉴权已变化，未跨应用重试签名字段创建。", 503) from None
+
             for name in (ORIGIN_FIELD, ALIASES_FIELD):
                 if metas.get(name) is None:
+                    if credentials is None:
+                        try:
+                            credentials = token_manager._credentials()
+                        except Exception:
+                            raise SignatureManagementError("Qt 飞书鉴权暂不可用，未发送签名字段创建。", 503) from None
                     url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.d.SIGNATURE_APP_TOKEN}/tables/{self.d.TEMP_SIGNATURE_TABLE_ID}/fields"
-                    result = self.s._request_payload("POST", url, context="签名关联字段创建",
-                        headers={**self.s._auth_headers(), "Content-Type": "application/json"},
-                        json_payload={"field_name": name, "type": 1}, http_client=self.s._write_http_client)
-                    if int(result.get("code") or 0) in self.d.TOKEN_ERROR_CODES:
-                        self.d.refresh_feishu_token()
-                        result = self.s._request_payload("POST", url, context="签名关联字段创建重试",
-                            headers={**self.s._auth_headers(), "Content-Type": "application/json"},
-                            json_payload={"field_name": name, "type": 1}, http_client=self.s._write_http_client)
+                    for attempt in range(2):
+                        check_credentials()
+                        headers = {**self.s._auth_headers(), "Content-Type": "application/json"}
+                        check_credentials()
+                        try:
+                            result = self.s._write_http_client.request_json("POST", url, headers=headers,
+                                json_payload={"field_name": name, "type": 1}, retries=0)
+                        except (FeishuHTTPError, OSError):
+                            raise SignatureManagementError("签名关联字段创建结果尚未确认，请核对原字段后再试。", 503) from None
+                        if int(result.get("code") or 0) in self.d.TOKEN_ERROR_CODES and not attempt:
+                            check_credentials()
+                            self.d.refresh_feishu_token()
+                            continue
+                        break
                     if int(result.get("code") or 0) not in {0, 1254014}:
                         raise SignatureManagementError(f"创建签名关联字段失败：{name}。")
                     created = True

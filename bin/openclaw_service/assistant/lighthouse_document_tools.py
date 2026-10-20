@@ -111,24 +111,10 @@ def run_local(kind, payload, timeout=45):
 
 
 def document_markdown(content, suffix):
-    from .lighthouse_files import _check_archive, safe_document
+    from .lighthouse_files import extract_document
     if suffix not in DOCUMENT_SUFFIXES:
         raise AssistantError('增强阅读支持Word、Excel、PPT及PDF；其他文本使用附件阅读。')
-    if suffix == '.pdf':
-        from pypdf import PdfReader
-        reader = PdfReader(io.BytesIO(content))
-        if reader.is_encrypted or len(reader.pages) > 100:
-            raise AssistantError('仅支持未加密且不超过100页的PDF。')
-    else:
-        _check_archive(content)
-    # The known extension selects a converter directly: no URL, plugins or format-detection model.
-    from markitdown import StreamInfo
-    from markitdown.converters import DocxConverter, XlsxConverter, PptxConverter, PdfConverter
-    converter = {'.docx': DocxConverter, '.xlsx': XlsxConverter, '.xlsm': XlsxConverter,
-                 '.pptx': PptxConverter, '.pdf': PdfConverter}[suffix]()
-    result = converter.convert(io.BytesIO(content), StreamInfo(extension='.xlsx' if suffix == '.xlsm' else suffix))
-    return {'text': safe_document(result.markdown), 'method': 'MarkItDown',
-            'note': '仅提取文档文字与表格，不运行宏、不访问外链。扫描件未提取到文字时可使用本地OCR。'}
+    return {**extract_document(content, suffix, markdown=True), 'method': 'Local document extraction'}
 
 
 def ocr_text(content, suffix, page=1):
@@ -173,27 +159,30 @@ def ocr_text(content, suffix, page=1):
         result = engine(np.asarray(image))
     finally:
         image.close()
-    return {'text': safe_document('\n'.join(result.txts or ())), 'method': 'PP-OCR / ONNX CPU',
+    text = safe_document('\n'.join(result.txts or ()))
+    return {'text': text, 'method': 'PP-OCR / ONNX CPU',
+            'references': [{'kind': 'page_ocr', 'page': page, 'start': 0, 'end': len(text)}] if text else [],
+            'extraction_complete': total == 1 and bool(text), 'empty': not text.strip(),
             'page': page, 'total_pages': total, 'next_page': page + 1 if page < total else None,
             'low_confidence_count': sum(float(score) < .8 for score in (result.scores or ())),
             'note': 'OCR可能识别错误；设备编号、金额和安全操作参数须核对原件。仅识别本页，不代表已读取其他页。'}
 
 
 def read_attachment(files, actor, file_id, mode='markdown', offset=0, page=1):
+    from .lighthouse_files import EXTRACTION_VERSION, text_excerpt
     if mode not in {'markdown', 'ocr'} or type(offset) is not int or not 0 <= offset <= 100000 or type(page) is not int or not 1 <= page <= 100:
         raise AssistantError('请选择markdown或ocr，读取位置须为非负整数，页码为1至100。')
     item = files.get(actor, file_id)
-    key = f'{file_id}:{item["sha256"]}:{mode}:{page}'
+    key = f'{file_id}:{item["sha256"]}:{mode}:{page}:v{EXTRACTION_VERSION}'
     result = files.store.get_document(_CACHE, key)
     if result is None:
         result = run_local(mode, {'path': item['path'], 'sha256': item['sha256'], 'page': page})
         files.get(actor, file_id)
         files.store.put_document(_CACHE, key, result)
-    text = result['text']
-    end = min(len(text), offset + 6000)
-    return {**result, 'ok': True, 'file_id': file_id, 'name': item['name'], 'text': text[offset:end],
-            'offset': offset, 'total_characters': len(text), 'next_offset': end if end < len(text) else None,
-            'truncated': end < len(text), 'empty': not text.strip(), 'untrusted_document': True}
+    excerpt = text_excerpt(result, offset, 6000)
+    if mode == 'ocr' and result.get('total_pages', 1) > 1:
+        excerpt['partial'] = True
+    return {**result, 'ok': True, 'file_id': file_id, 'name': item['name'], **excerpt}
 
 
 def chart_png(kind, title, labels, series, unit=''):

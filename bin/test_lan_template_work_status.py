@@ -25315,15 +25315,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_robot_webhook_uses_shared_tenant_token_manager(self):
         from upload_event_module.services import robot_webhook
+        from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
 
-        with patch.object(
+        with standalone_delivery_fixture('ou_one', 'ou_two'), patch.object(
             robot_webhook.token_manager,
             "get_tenant_token",
             return_value="shared-token",
         ) as get_token, patch.object(
             robot_webhook,
-            "_send_message_to_open_id",
-            return_value=(True, "ok"),
+            "_request_json",
+            return_value={"code": 0, "data": {"message_id": "om_fixture", "chat_id": "oc_fixture"}},
         ) as send_message:
             ok, message, results = robot_webhook.send_text_to_open_ids(
                 "测试消息",
@@ -25332,10 +25333,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(message, "ok")
         self.assertEqual(len(results), 2)
-        get_token.assert_called_once()
+        self.assertEqual(get_token.call_count, 2)
         self.assertEqual(send_message.call_count, 2)
         for call_args in send_message.call_args_list:
-            self.assertEqual(call_args.args[0], "shared-token")
+            self.assertEqual(call_args.kwargs['headers']['Authorization'], "Bearer shared-token")
 
     def test_robot_webhook_refreshes_token_once_on_message_token_error(self):
         from upload_event_module.services import robot_webhook

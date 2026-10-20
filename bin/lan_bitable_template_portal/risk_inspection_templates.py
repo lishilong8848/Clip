@@ -4,12 +4,17 @@ import json
 import re
 import time
 
-from .risk_inspection import FIELD_TYPES, SCOPES, SYSTEM_NAMES, RiskError, can_scope, digest, manager, text, validate_values
+from .risk_inspection import FIELD_TYPES, SCOPES, SYSTEM_NAMES, RiskError, can_scope, digest, manager, person_scopes, system_fields, text, validate_values
 
 
 def clean_fields(fields):
     if not isinstance(fields, list) or not 1 <= len(fields) <= 80:
         raise RiskError('模板需保留1至80个字段。')
+    if any(not isinstance(f, dict) or not isinstance(f.get('field_name'), str) or not isinstance(f.get('key'), str) for f in fields):
+        raise RiskError('模板字段格式无效。')
+    fields = system_fields(fields)
+    if len(fields) > 80:
+        raise RiskError('包含系统默认字段后，模板不得超过80个字段。')
     result, keys, names = [], set(), set()
     for f in fields:
         if not isinstance(f, dict):
@@ -20,8 +25,8 @@ def clean_fields(fields):
             raise RiskError('模板字段标识或名称重复、无效。')
         if type(kind) is not int or kind not in FIELD_TYPES or not isinstance(role, str) or role not in {'input', *SYSTEM_NAMES.values()}:
             raise RiskError('模板字段类型或填写方式无效。')
-        if role != 'input' and kind != (5 if role == 'reviewed_at' else 1):
-            raise RiskError('系统字段需使用文本类型，复核日期需使用日期类型。')
+        if role != 'input' and kind != (5 if role in {'reviewed_at', 'inspected_at'} else 1):
+            raise RiskError('系统字段需使用文本类型，复核日期和排查日期需使用日期类型。')
         prop = f.get('property') or {}
         if not isinstance(prop, dict):
             raise RiskError('字段属性格式无效。')
@@ -104,7 +109,7 @@ class RiskTemplates:
         data = {'id': tid, 'source_release_id': tid, 'source_name': release['name'],
                 'source_url': release.get('cloud', {}).get('url', ''), 'name': release['name'],
                 'revision': 1, 'enabled': True, 'fields': fields, 'items': reusable_items(fields, items),
-                'scopes': sorted({p['scope'] for p in people}), 'legacy': legacy,
+                'scopes': sorted({scope for p in people for scope in person_scopes(p)}, key=SCOPES.index), 'legacy': legacy,
                 'created': release['created'], 'updated': time.time(),
                 'creator': {k: release['owner'][k] for k in ('id', 'name')},
                 'updated_by': release['owner']['id'], 'cloud': {}}
@@ -130,6 +135,7 @@ class RiskTemplates:
             if usable and not data['enabled']:
                 raise RiskError('该历史模板已停用，请选择其它模板。', 409)
             public = deepcopy(data)
+            public['fields'] = system_fields(public['fields'])
             public['kind'] = data.get('kind', 'history')
             public.pop('updated_by', None)
             public['creator'] = data['creator']['name']
@@ -216,6 +222,12 @@ class RiskTemplates:
                 raise RiskError('无权修改该模板。', 403)
             if data['version'] != body['version']:
                 raise RiskError('历史模板已被修改，请重新读取后核对。', 409)
+            for old in system_fields(data['fields']):
+                if old['role'] == 'input':
+                    continue
+                new = next((f for f in fields if f['key'] == old['key']), None)
+                if not new or any(new[k] != old[k] for k in ('field_name', 'role', 'type')):
+                    raise RiskError('系统默认字段不能修改或删除：' + old['field_name'])
             data.update(name=text(body['name'], 120, True), enabled=body['enabled'], fields=fields, items=items,
                         revision=data['revision']+1, updated=time.time(), updated_by=actor['id'])
             self.put(db, data)

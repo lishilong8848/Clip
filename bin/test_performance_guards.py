@@ -76,7 +76,8 @@ class PerformanceGuardTests(unittest.TestCase):
                     service._put('notification', str(i), {'id': str(i), 'status': 'sent'}, conn, False)
                 service._put('notification', 'future', {'id': 'future', 'status': 'pending',
                              'retry_at': time.time() + 3600}, conn, False)
-            with patch.object(service, 'settings', return_value={'enabled': True, 'reminder_enabled': False}) as settings:
+            with patch('lan_bitable_template_portal.learning_reminders.enqueue_shift_reminders', return_value={}), \
+                    patch.object(service, 'settings', return_value={'enabled': True, 'reminder_enabled': False}) as settings:
                 service.send_notifications(now())
                 settings.assert_called_once_with()
             sender.assert_not_called()

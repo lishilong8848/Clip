@@ -529,7 +529,7 @@ async def collect_pending(actor, query, invoke, read_cached, *, groups_only=None
             "complete": all(group["available"] for group in groups), "groups": groups}
 
 
-async def collect_repair_overview(actor, invoke, *, only_keys=None):
+async def collect_repair_overview(actor, invoke, *, only_keys=None, item_limit=30):
     """Read native repair projections; group counts are never an independent-work total.
 
     Workbench records include started plans. Its pending count excludes linked
@@ -537,6 +537,8 @@ async def collect_repair_overview(actor, invoke, *, only_keys=None):
     overrides. Require both full paging and agreement with that native count;
     a mismatch is unknown, not a fabricated complete plan count.
     """
+    if type(item_limit) is not int or not 1 <= item_limit <= 2000:
+        raise AssistantError('维修明细读取上限无效。')
     from upload_event_module.core.parser import is_notice_confirmed_ended
     from lan_bitable_template_portal.identity_utils import canonical_source_record_id
     from .lighthouse_scope import resolve_scopes
@@ -702,7 +704,7 @@ async def collect_repair_overview(actor, invoke, *, only_keys=None):
         group["warnings"] = list(dict.fromkeys(group["warnings"]))
         available = not group["error"] and not group["warnings"]
         group.update(count=len(items) if available else None, known_count=len(items), available=available,
-                     items=items[:30], remaining=max(0, len(items) - 30))
+                     items=items[:item_limit], remaining=max(0, len(items) - item_limit))
         group["url"] = ("/repair-management?" if group is repairs else "/workbench-lite?work_type=repair&") + urlencode({"scope": scopes[0] if len(scopes) == 1 else "ALL"})
     return {"kind": "repair", "scopes": scopes, "queried_at": dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds"),
             "coverage": "检修计划、检修通告、维修项目分别计数；各组可能关联同一工作，不相加为独立工作总数。",

@@ -159,6 +159,9 @@ def model_capabilities(profile):
         if not isinstance(value, bool):
             raise AssistantError("模型能力选项必须是开关。")
         options[key] = value
+    if str(profile.get("model") or "").strip().casefold() in {
+            "wanwu/glm-auto", "wanwu/qwen-auto", "wanwu/deepseek-auto"}:
+        options["image_input"] = False
     levels = profile.get("reasoning_efforts", ["xhigh"])
     if not isinstance(levels, list) or not levels or len(levels) > 4 or any(
             not isinstance(level, str) or level not in {"low", "medium", "high", "xhigh"} for level in levels):
@@ -269,8 +272,9 @@ class CustomModel:
         if not profile or not profile.get("key_cipher"):
             raise AssistantError("所选模型未配置凭证，请在模型设置中补充或选择其他模型。", 503)
         profile = copy.deepcopy(profile)
-        # User-declared input capabilities, not an expiring offline probe, control delivery.
+        # Explicit opt-ins apply within the provider's known input constraints.
         profile.update(model_capabilities(profile))
+        profile["endpoint"] = self._endpoint(profile["endpoint"], custom_protocol=profile["custom_protocol"])
         return profile
 
     @staticmethod
@@ -286,6 +290,8 @@ class CustomModel:
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
                 raise ValueError()
             if parsed.port is not None and not (1 <= parsed.port <= 65535):
+                raise ValueError()
+            if unquote(parsed.path).rstrip("/").casefold().endswith("/embeddings"):
                 raise ValueError()
             if not custom_protocol and not parsed.path.rstrip("/").endswith("/chat/completions"):
                 raise ValueError()
@@ -340,6 +346,8 @@ class CustomModel:
                 if any(not p.get('shared') and p["id"] != identity and p["name"] == profile["name"] for p in saved["models"]):
                     raise AssistantError("模型显示名称已存在，请使用不同名称。")
                 profile.update(model_capabilities({**(old or {}), **item}))
+                if old and type(old.get("context_window")) is int and old["context_window"] > 0:
+                    profile["context_window"] = old["context_window"]
                 profile["endpoint"] = self._endpoint(item.get("endpoint"), custom_protocol=profile["custom_protocol"])
                 key, clear = item.get("api_key", ""), item.get("clear_key", False)
                 if not isinstance(clear, bool) or not isinstance(key, str) or len(key) > 500 or (key and any(c.isspace() or ord(c) < 32 for c in key)):
@@ -378,14 +386,17 @@ class CustomModel:
         if not self._config()["enabled"]:
             raise AssistantError("灯塔助手暂未启用。", 503)
         selected = profile or self.profile()
+        endpoint = self._endpoint(selected["endpoint"], custom_protocol=selected.get("custom_protocol", False))
+        from .lighthouse_context import bound_model_payload
+        request = bound_model_payload({"model": selected["model"], "messages": messages, "stream": False,
+            "max_tokens": max(128, min(4000, int(max_tokens))), **model_reasoning_options(selected)}, selected)
         try:
             key = self.unprotect(selected["key_cipher"])
         except Exception:
             raise AssistantError("当前系统账号无法读取模型凭证，请在本人模型设置中重新配置。", 503) from None
         try:
-            payload = self.client.request_json("POST", selected["endpoint"], headers={"Authorization": "Bearer " + key},
-                json_payload={"model": selected["model"], "messages": messages, "stream": False, "max_tokens": max(128, min(4000, int(max_tokens))),
-                              **model_reasoning_options(selected)}, retries=0,
+            payload = self.client.request_json("POST", endpoint, headers={"Authorization": "Bearer " + key},
+                json_payload=request, retries=0,
                 **({'timeout': timeout} if timeout is not None else {}))
         except FeishuHTTPError as exc:
             category = exc.category
@@ -504,7 +515,23 @@ class LighthouseAssistant:
             from lan_bitable_template_portal.portal_auth import topic_access_allowed
             return topic_access_allowed({'capabilities': turn['topic_access']}, actor)
         return (set(turn.get("access_scopes", turn.get("scopes", []))) <= set(actor.get("allowed_scopes", actor["scopes"]))
-                and (not (turn.get('feishu_topic') or turn.get('display_only')) or set(turn.get('access_modules', [])) <= set(actor.get('modules', []))))
+                and set(turn.get('access_modules', [])) <= set(actor.get('modules', []))
+                and LighthouseAssistant._source_modules_allowed(turn.get('sources', []), actor))
+
+    @staticmethod
+    def _source_modules_allowed(sources, actor):
+        if 'modules' not in actor:
+            return True  # Legacy internal callers have no module dimension; HTTP actors always do.
+        from lan_bitable_template_portal.module_access import required_modules
+        for source in sources:
+            if set(source.get('access_modules', [])) - set(actor['modules']):
+                return False
+            link = urlsplit(str(source.get('url') or ''))
+            if not link.scheme and link.path.startswith('/'):
+                needed = required_modules(link.path, parse_qs(link.query).get('work_type', [''])[0])
+                if needed and not needed & set(actor['modules']):
+                    return False
+        return True
 
     def _state(self, actor):
         with self._lock:
@@ -651,7 +678,7 @@ class LighthouseAssistant:
     def conversation(self, actor):
         with self._lock:
             data = self._state(actor)
-            if actor["id"] not in self._active:
+            if actor["id"] not in self._active and not data.get('streaming'):
                 changed = False
                 for turn in data.get("turns", []):
                     if turn.get("status") == "pending":
@@ -697,7 +724,8 @@ class LighthouseAssistant:
             previous = self._state(actor)
             if any((turn.get("plan") or {}).get("status") in {"running", "submitted"} for turn in previous.get("turns", [])):
                 raise AssistantError("业务操作仍在处理，请完成后再清空会话。", 409)
-            self.store.put_document(NAMESPACE, self._key(actor), {"id": uuid.uuid4().hex, "turns": [], "model_id": previous.get("model_id", ""), "unified_person": True})
+            self.store.put_document(NAMESPACE, self._key(actor), {"id": uuid.uuid4().hex, "turns": [], "model_id": previous.get("model_id", ""), "unified_person": True,
+                "reply_preferences": previous.get('reply_preferences', {})})
             return self.conversation(actor)
 
     def _save_state(self, actor, state):
@@ -720,9 +748,12 @@ class LighthouseAssistant:
     @staticmethod
     def _trim_turns(state):
         turns = state["turns"]
-        active = [turn for turn in turns[:-100] if (turn.get("plan") or {}).get("status") in {"running", "submitted"}]
-        # ponytail: keep 100 turns, but preserve the unresolved business plan.
-        state["turns"] = active + turns[-max(1, 100 - len(active)):]
+        active = {turn['operation_id'] for turn in turns if turn.get('status') == 'pending'
+                  or (turn.get('plan') or {}).get('status') in {'running', 'submitted'}}
+        count = max(0, 100 - len(active))
+        recent = [turn['operation_id'] for turn in turns if turn['operation_id'] not in active]
+        retained = active | set(recent[-count:] if count else [])
+        state['turns'] = [turn for turn in turns if turn['operation_id'] in retained]
 
     def _reserve(self, actor):
         if actor["id"] in self._active:

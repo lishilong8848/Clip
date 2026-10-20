@@ -422,12 +422,13 @@ class DrillManagementTests(unittest.TestCase):
             printed = service.print_model(definition["drill_id"], "A", "record")
             self.assertFalse(any("image_data_url" in item for item in printed["signature_cells"]))
 
-    def test_optional_review_fields_stay_blank_when_saved_cleared_and_generated(self):
+    def test_optional_review_times_restore_handwriting_placeholders_when_cleared(self):
+        source = _fixture_xlsx(with_evaluator=True)
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
             service = DrillManagementService(store, data_root=Path(temporary) / "drills")
             definition = service.create_definition(name="可选评估", year=2026, month=9,
-                file_name="test.xlsx", source=_fixture_xlsx(with_evaluator=True))
+                file_name="test.xlsx", source=source)
             definition = service.publish(definition["drill_id"], expected_version=definition["version"])
             commander = {"record_id": "p1", "name": "指挥人"}
             reviewer = {"record_id": "p2", "name": "评估人"}
@@ -436,8 +437,16 @@ class DrillManagementTests(unittest.TestCase):
                 "step_signers": {str(step["row"]): ["p1"] for step in definition["configuration"]["steps"]}}
             blank = service.save_execution(definition["drill_id"], "A", payload, expected_version=0)
             self.assertEqual(blank["status"], "ready")
+            for sheet_type, row, col in (("record", 17, 6), ("assessment", 11, 7)):
+                preview = service.preview_model(definition["drill_id"], "A", sheet_type)
+                self.assertEqual(preview["rows"][row][col], "年 月 日 时 分")
             for fields in ({"evaluator": reviewer}, {"signature_time": "2026-09-29T10:15"}, {"evaluation_time": "2026-09-29T11:32"}):
                 self.assertEqual(_validate_execution(definition, {**blank, **fields}), [])
+                derived = _derived_values(definition, {**blank, **fields})
+                self.assertEqual(derived["record_values"]["G18"],
+                    "2026年09月29日 10时15分" if "signature_time" in fields else "年 月 日 时 分")
+                self.assertEqual(derived["assessment_values"]["H12"],
+                    "2026年09月29日 11时32分" if "evaluation_time" in fields else "年 月 日 时 分")
             filled = service.save_execution(definition["drill_id"], "A", {**payload,
                 "evaluator": reviewer, "signature_time": "2026-09-29T10:15", "evaluation_time": "2026-09-29T11:32"}, expected_version=blank["version"])
             cleared = service.save_execution(definition["drill_id"], "A", {**payload,
@@ -453,9 +462,34 @@ class DrillManagementTests(unittest.TestCase):
                     self.assertEqual(cell["signers"], [])
             generated = service.generate(definition["drill_id"], "A", signatures={"p1": _signature_png()})
             sheets = {sheet["name"]: sheet for sheet in _parse_workbook(Path(generated["generated"]["path"]))["sheets"]}
-            for sheet, cells in (("本月记录", ("C18", "G18")), ("评估表", ("D12", "H12"))):
-                for cell in cells:
-                    self.assertEqual(sheets[sheet]["cells"].get(cell, ""), "")
+            for sheet, signature, time in (("本月记录", "C18", "G18"), ("评估表", "D12", "H12")):
+                self.assertEqual(sheets[sheet]["cells"].get(signature, ""), "")
+                self.assertEqual(sheets[sheet]["cells"][time], "年 月 日 时 分")
+            for sheet_type, row, col in (("record", 17, 6), ("assessment", 11, 7)):
+                printed = service.print_model(definition["drill_id"], "A", sheet_type)
+                self.assertEqual(printed["rows"][row][col], "年 月 日 时 分")
+            self.assertEqual(Path(definition["source"]["path"]).read_bytes(), source)
+
+    def test_missing_review_times_do_not_reuse_dates_in_uploaded_template(self):
+        source = _fixture_xlsx(with_evaluator=True)
+        for part in ("xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"):
+            source = _replace_zip_part(source, part, lambda content: content.replace(
+                "年 月 日 时 分".encode(), "2025年01月01日 10时30分".encode()))
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            service = DrillManagementService(store, data_root=Path(temporary) / "drills")
+            definition, execution, signatures = self._ready_drill(service, source)
+            generated = service.generate(definition["drill_id"], "A", signatures=signatures)
+            sheets = {sheet["name"]: sheet for sheet in _parse_workbook(Path(generated["generated"]["path"]))["sheets"]}
+            self.assertEqual(sheets["本月记录"]["cells"]["G18"], "年 月 日 时 分")
+            self.assertEqual(sheets["评估表"]["cells"]["H12"], "年 月 日 时 分")
+            saved = store.get_document(DRILL_EXECUTION_NAMESPACE, execution["key"])
+            saved["generated"]["rule_version"] = DRILL_GENERATION_RULE_VERSION - 1
+            store.put_document(DRILL_EXECUTION_NAMESPACE, execution["key"], saved)
+            with self.assertRaisesRegex(DrillConflictError, "重新生成"):
+                service.print_model(definition["drill_id"], "A", "record")
+            with self.assertRaisesRegex(DrillConflictError, "重新生成"):
+                service.generated_file(definition["drill_id"], "A")
 
     def test_step_signature_slots_allow_zero_or_partial_selection(self):
         definition = {

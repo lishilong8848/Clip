@@ -211,9 +211,11 @@ class HandoverSources:
                         continue
                     task = inspections.get(actor, release['id'])
                     for person in task['people']:
-                        if person.get('revoked') or person['scope'] != scope:
+                        if person.get('revoked'):
                             continue
                         for item in person['items']:
+                            if item.get('scope', person['scope']) != scope:
+                                continue
                             status = item.get('status')
                             if status not in statuses:
                                 continue

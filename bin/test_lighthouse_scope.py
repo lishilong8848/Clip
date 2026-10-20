@@ -162,6 +162,12 @@ class RepairOverviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["complete"])
         for group in data["groups"]:
             self.assertEqual((group["count"], group["known_count"], len(group["items"]), group["remaining"]), (37, 37, 30, 7))
+        expanded = await collect_repair_overview(D_ACTOR, self.invoke, item_limit=2000)
+        for group in expanded['groups']:
+            self.assertEqual((group['count'], len(group['items']), group['remaining']), (37, 37, 0))
+        for limit in (True, 0, 2001):
+            with self.assertRaises(AssistantError):
+                await collect_repair_overview(D_ACTOR, self.invoke, item_limit=limit)
 
     async def test_empty_scope_never_invokes_callback(self):
         invoke = AsyncMock(side_effect=AssertionError("No reads for empty scope"))

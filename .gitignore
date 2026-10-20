@@ -115,6 +115,8 @@ bin/crash_trace.log.legacy_conflict_20260212_113720
 bin/history.json.legacy_conflict_20260212_113720
 bin/upload_event_module/app_log.txt
 /output/
+/bin/upload_event_module/services/feishu_app_profile.json
+/bin/lan_bitable_template_portal/feishu_identity_profile.json
 
 # Duplicate local copies; canonical cabinet templates stay versioned.
 /bin/lan_bitable_template_portal/templates/cabinet_power/* - 副本.xlsm

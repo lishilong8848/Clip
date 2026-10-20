@@ -1223,18 +1223,18 @@ def external_real_write_guard() -> dict[str, Any]:
         "real_write_allowed": allowed,
         "reason": reason,
     }
-LI_SHILONG_OPEN_ID = "ou_902e364a6c2c6c20893c02abe505a7b2"
-MA_JINYU_OPEN_ID = "ou_a6644e62a43b916c6bc26148cf74f208"
+LI_SHILONG_OPEN_ID = "ou_083f6c32c2cd3da8ccfd62d800e742fd"
+MA_JINYU_OPEN_ID = "ou_cee45ea48df99def799710e782f5434c"
 HANDOVER_PASSWORD_RESET_TTL_SECONDS = 10 * 60
 HANDOVER_PASSWORD_RESET_MAX_ATTEMPTS = 5
 BUILDING_OPEN_ID_MAP = {
-    "110": "ou_913ff495ae8f5a0a55ae5670fd148bbd",
-    "A": "ou_3e0a9399a037276f8449cc778f18bb8a",
-    "B": "ou_160e991b0fd811cda7260de056d8a363",
-    "C": "ou_99391b00c1406917930483d8500af400",
-    "D": "ou_b9c26b4da3721c2de11ee175c707e756",
-    "E": "ou_f0fe7137818e8b422b0594e51eab13f3",
-    "H": "ou_55647926b7fbfe46507ef7e8afa76315",
+    "110": "ou_ca8103bc15b06b448ab94958d5cfef43",
+    "A": "ou_822759df685e2807d538fb9cf5465465",
+    "B": "ou_ac4e1a554a6cabab4d8eea7e3956bec3",
+    "C": "ou_f2879fa04399d43bff26f92616678b6d",
+    "D": "ou_18396043dc393fafd3b7f43f0e284396",
+    "E": "ou_fb53efe356466339f4f3cc22f2c7f9fb",
+    "H": "ou_3e7a45be43f809cd54e277243e9821ab",
 }
 SCOPE_OPTIONS = [
     {"value": "110", "label": "110站"},
@@ -1252,6 +1252,23 @@ BUILDING_SCOPE_CODES = ("110", "A", "B", "C", "D", "E", "H")
 
 class PortalError(RuntimeError):
     pass
+
+
+def _feishu_write_auth(auth_headers):
+    from upload_event_module.services.feishu_token_manager import token_manager
+    credentials = token_manager._credentials()
+
+    def check():
+        if token_manager._credentials() != credentials:
+            raise PortalError("Qt 飞书凭据已变化，未重发，请核验原请求。")
+
+    def headers():
+        check()
+        value = auth_headers()
+        check()
+        return value
+
+    return check, headers
 
 
 class NoticeSourcePending(PortalError):
@@ -2792,6 +2809,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     def ensure_deletion_audit_schema(self) -> dict[str, Any]:
         """Create the append-only deletion log fields when they are missing."""
 
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         with self._deletion_audit_schema_lock:
             if self._deletion_audit_schema_ready:
                 return {
@@ -2834,15 +2852,17 @@ class MaintenancePortalService(RepairOperationsMixin):
                         fields_url,
                         context=f"删除日志字段创建({name})",
                         headers={
-                            **self._auth_headers(),
+                            **write_headers(),
                             "Content-Type": "application/json",
                         },
                         json_payload={"field_name": name, "type": 1},
                         http_client=self._write_http_client,
+                        retries=0,
                     )
 
                 payload = do_create()
                 if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+                    check_credentials()
                     refresh_feishu_token()
                     payload = do_create()
                 code = int(payload.get("code") or 0)
@@ -2882,6 +2902,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     def ensure_maintenance_work_order_schema(self) -> dict[str, Any]:
         """Ensure the maintenance target can persist work-order completion."""
 
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         expected_types = {
             MAINTENANCE_NOTICE_FIELDS["work_order_required"]: 7,
             MAINTENANCE_NOTICE_FIELDS["work_order_operator"]: 1,
@@ -2922,15 +2943,17 @@ class MaintenancePortalService(RepairOperationsMixin):
                         url,
                         context="维保工单附件字段创建",
                         headers={
-                            **self._auth_headers(),
+                            **write_headers(),
                             "Content-Type": "application/json",
                         },
                         json_payload={"field_name": attachment_name, "type": 17},
                         http_client=self._write_http_client,
+                        retries=0,
                     )
 
                 result = create_attachment_field()
                 if int(result.get("code") or 0) in TOKEN_ERROR_CODES:
+                    check_credentials()
                     refresh_feishu_token()
                     result = create_attachment_field()
                 by_name = load_by_name()
@@ -3272,6 +3295,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         params: dict[str, Any] | None = None,
         json_payload: Any = None,
         http_client: FeishuHttpClient | None = None,
+        retries: int | None = None,
     ) -> dict[str, Any]:
         try:
             return (http_client or self._http_client).request_json(
@@ -3280,6 +3304,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 headers=headers,
                 params=params or {},
                 json_payload=json_payload,
+                **({"retries": retries} if retries is not None else {}),
             )
         except FeishuHTTPError as exc:
             raise PortalError(f"{context} HTTP失败: {exc}") from exc
@@ -3389,6 +3414,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         record_id: str,
         fields: dict[str, Any],
     ) -> dict[str, Any]:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         app_token = str(app_token or "").strip()
         table_id = str(table_id or "").strip()
         record_id = str(record_id or "").strip()
@@ -3406,14 +3432,16 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "PUT",
                 url,
                 context="飞书记录更新",
-                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                headers={**write_headers(), "Content-Type": "application/json"},
                 json_payload={"fields": fields},
                 http_client=self._write_http_client,
+                retries=0,
             )
 
         checkpoint = self._repair_before_write(table_id, fields, record_id)
         payload = do_update()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            check_credentials()
             refresh_feishu_token()
             payload = do_update()
         code = payload.get("code", 0)
@@ -3489,6 +3517,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         property_payload: dict[str, Any] | None = None,
         options: list[dict[str, Any]] | None = None,
     ) -> None:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         field_name = str(raw_field.get("field_name") or "").strip()
         field_id = str(raw_field.get("field_id") or "").strip()
         if not field_name or not field_id:
@@ -3527,12 +3556,14 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "PUT",
                 url,
                 context=f"{context}({field_name})",
-                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                headers={**write_headers(), "Content-Type": "application/json"},
                 json_payload=request_body,
+                retries=0,
             )
 
         payload = do_update()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            check_credentials()
             refresh_feishu_token()
             payload = do_update()
         code = int(payload.get("code") or 0)
@@ -3617,6 +3648,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         self,
         raw_field: dict[str, Any],
     ) -> None:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         field_name = str(raw_field.get("field_name") or "").strip()
         field_id = str(raw_field.get("field_id") or "").strip()
         if not field_name or not field_id:
@@ -3632,11 +3664,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "DELETE",
                 url,
                 context=f"维修跟进重复字段删除({field_name})",
-                headers=self._auth_headers(),
+                headers=write_headers(),
+                retries=0,
             )
 
         payload = do_delete()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            check_credentials()
             refresh_feishu_token()
             payload = do_delete()
         code = int(payload.get("code") or 0)
@@ -4068,6 +4102,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             ) or {"status": "complete"}
 
     def initialize_repair_followup_schema(self) -> dict[str, Any]:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         with self._repair_followup_schema_lock:
             started_at = time.time()
             self._state_store.put_backend_runtime(
@@ -4097,7 +4132,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                             url,
                             context="维修跟进汇总ID字段创建",
                             headers={
-                                **self._auth_headers(),
+                                **write_headers(),
                                 "Content-Type": "application/json",
                             },
                             json_payload={
@@ -4107,10 +4142,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                                 ),
                                 "type": 1,
                             },
+                            retries=0,
                         )
 
                     payload = do_create()
                     if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+                        check_credentials()
                         refresh_feishu_token()
                         payload = do_create()
                     code = int(payload.get("code") or 0)
@@ -4235,6 +4272,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         table_id: str = REPAIR_FOLLOWUP_TABLE_ID,
         context_label: str = "维修跟进",
     ) -> tuple[list[FieldMeta], dict[str, FieldMeta]]:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         desired_by_name: dict[str, list[str]] = {}
         for field_name, value in (fields or {}).items():
             meta = meta_by_name.get(str(field_name or "").strip())
@@ -4335,14 +4373,16 @@ class MaintenancePortalService(RepairOperationsMixin):
                         url,
                         context=f"{context_label}字段选项更新({field_name})",
                         headers={
-                            **self._auth_headers(),
+                            **write_headers(),
                             "Content-Type": "application/json",
                         },
                         json_payload=request_body,
+                        retries=0,
                     )
 
                 update_payload = do_update()
                 if int(update_payload.get("code") or 0) in TOKEN_ERROR_CODES:
+                    check_credentials()
                     refresh_feishu_token()
                     update_payload = do_update()
                 code = int(update_payload.get("code") or 0)
@@ -4369,6 +4409,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError("创建多维记录缺少 app_token/table_id。")
         if not isinstance(fields, dict) or not fields:
             raise PortalError("创建多维记录字段不能为空。")
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         fields = self._repair_physical_record_fields(table_id, fields)
         client_token = self._repair_create_client_token(table_id, fields)
         url = (
@@ -4381,15 +4422,17 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "POST",
                 url,
                 context="飞书记录创建",
-                headers={**self._auth_headers(), "Content-Type": "application/json"},
+                headers={**write_headers(), "Content-Type": "application/json"},
                 **({"params": {"client_token": client_token}} if client_token else {}),
                 json_payload={"fields": fields},
                 http_client=self._write_http_client,
+                retries=0,
             )
 
         checkpoint = self._repair_before_write(table_id, fields, client_token=client_token)
         payload = do_create()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            check_credentials()
             refresh_feishu_token()
             payload = do_create()
         code = payload.get("code", 0)
@@ -4414,6 +4457,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         table_id: str,
         record_id: str,
     ) -> dict[str, Any]:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         app_token = str(app_token or "").strip()
         table_id = str(table_id or "").strip()
         record_id = str(record_id or "").strip()
@@ -4429,13 +4473,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "DELETE",
                 url,
                 context="飞书记录删除",
-                headers=self._auth_headers(),
+                headers=write_headers(),
                 http_client=self._write_http_client,
+                retries=0,
             )
 
         checkpoint = self._repair_before_write(table_id, {}, record_id, delete=True)
         payload = do_delete()
         if int(payload.get("code") or 0) in TOKEN_ERROR_CODES:
+            check_credentials()
             refresh_feishu_token()
             payload = do_delete()
         code = int(payload.get("code") or 0)
@@ -37192,6 +37238,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         size: int,
         context: str,
     ) -> str:
+        check_credentials, _ = _feishu_write_auth(self._auth_headers)
         token = str(ensure_feishu_token() or config.user_token or "").strip()
         if not token:
             raise PortalError(f"未配置有效的飞书 user_token，无法{context}。")
@@ -37204,6 +37251,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError(f"{context}失败：待上传文件为空。")
 
         def attempt_upload(upload_token: str) -> dict[str, Any]:
+            check_credentials()
             try:
                 return self._http_client.request_file_json(
                     "POST",
@@ -37217,6 +37265,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     },
                     file_path=str(path),
                     file_name=upload_name,
+                    retries=0,
                 )
             except FeishuHTTPError as exc:
                 raise PortalError(f"{context} HTTP失败: {exc}") from exc
@@ -37224,7 +37273,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         payload = attempt_upload(token)
         code = int(payload.get("code") or 0)
         if code in TOKEN_ERROR_CODES:
-            token = str(refresh_feishu_token() or config.user_token or "").strip()
+            check_credentials()
+            token = str(refresh_feishu_token() or "").strip()
             if not token:
                 raise PortalError(f"{context}失败：飞书登录凭证已失效。")
             payload = attempt_upload(token)
@@ -37693,6 +37743,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> str:
         """Upload a Bitable attachment with Feishu's multipart media API."""
 
+        check_credentials, _ = _feishu_write_auth(self._auth_headers)
         import zlib
 
         import lark_oapi as lark
@@ -37725,25 +37776,24 @@ class MaintenancePortalService(RepairOperationsMixin):
         def call(label: str, fn):
             nonlocal token
             last_message = ""
-            for attempt in range(3):
+            for attempt in range(2):
+                check_credentials()
                 try:
                     response = fn(token)
-                    if response.success():
-                        return response
-                    code = int(getattr(response, "code", 0) or 0)
-                    last_message = (
-                        f"code={code}, msg={getattr(response, 'msg', '') or 'unknown'}"
-                    )
-                    if code in TOKEN_ERROR_CODES:
-                        token = str(
-                            refresh_feishu_token() or config.user_token or ""
-                        ).strip()
-                        if not token:
-                            break
-                except Exception as exc:
-                    last_message = str(exc)
-                if attempt < 2:
-                    time.sleep(0.4 * (2**attempt))
+                    accepted = response.success()
+                except Exception:
+                    raise PortalError(f"演练文件{label}结果未确认，未自动重发，请核验原上传。") from None
+                if accepted:
+                    return response
+                code = int(getattr(response, "code", 0) or 0)
+                last_message = f"code={code}, msg={getattr(response, 'msg', '') or 'unknown'}"
+                if code in TOKEN_ERROR_CODES and not attempt:
+                    check_credentials()
+                    token = str(refresh_feishu_token() or "").strip()
+                    check_credentials()
+                    if token:
+                        continue
+                break
             raise PortalError(f"演练文件{label}失败：{last_message or 'unknown'}")
 
         prepare_body = (
@@ -37900,6 +37950,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         return canonical
 
     def _ensure_drill_archive_schema(self, *, year: str) -> dict[str, FieldMeta]:
+        check_credentials, write_headers = _feishu_write_auth(self._auth_headers)
         raw_fields = self._load_raw_table_fields(
             app_token=DRILL_ARCHIVE_APP_TOKEN,
             table_id=DRILL_ARCHIVE_TABLE_ID,
@@ -37939,13 +37990,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "POST",
                     url,
                     context=f"演练归档字段创建({field_name})",
-                    headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    headers={**write_headers(), "Content-Type": "application/json"},
                     json_payload=body,
                     http_client=self._write_http_client,
+                    retries=0,
                 )
 
             result = create_field()
             if int(result.get("code") or 0) in TOKEN_ERROR_CODES:
+                check_credentials()
                 refresh_feishu_token()
                 result = create_field()
             if int(result.get("code") or 0) not in {0, 1254014}:
@@ -38010,13 +38063,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "PUT",
                     url,
                     context="演练归档年份选项更新",
-                    headers={**self._auth_headers(), "Content-Type": "application/json"},
+                    headers={**write_headers(), "Content-Type": "application/json"},
                     json_payload=body,
                     http_client=self._write_http_client,
+                    retries=0,
                 )
 
             result = update_year()
             if int(result.get("code") or 0) in TOKEN_ERROR_CODES:
+                check_credentials()
                 refresh_feishu_token()
                 result = update_year()
             if int(result.get("code") or 0) != 0:
@@ -40952,15 +41007,48 @@ class MaintenancePortalService(RepairOperationsMixin):
                 return cached
         url = str(attachment.get("url") or "").strip()
         token = str(attachment.get("file_token") or "").strip()
-        headers = self._auth_headers()
-        if url:
-            content, content_type = self._http_client.request_bytes("GET", url, headers=headers)
-        else:
+        if not url:
             if not token:
                 raise PortalError("MOP附件缺少 file_token 或下载地址。")
             encoded = quote(token, safe="")
-            download_url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{encoded}/download"
-            content, content_type = self._http_client.request_bytes("GET", download_url, headers=headers)
+            url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{encoded}/download"
+        try:
+            parsed = urlparse(url)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or any(ord(char) < 32 for char in url)):
+                raise ValueError("invalid attachment URL")
+            trusted = (parsed.scheme == "https" and parsed.hostname == "open.feishu.cn"
+                       and parsed.port in (None, 443) and parsed.path.startswith("/open-apis/"))
+        except ValueError:
+            raise PortalError("附件下载地址无效。") from None
+        # Signed CDN links need no API bearer; the shared client never follows redirects.
+        headers = self._auth_headers() if trusted else {}
+        for attempt in range(2):
+            try:
+                content, content_type = self._http_client.request_bytes("GET", url, headers=headers, retries=0)
+                try:
+                    payload = json.loads(content) if trusted and len(content) <= 65536 else {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] not in TOKEN_ERROR_CODES:
+                    break
+                if attempt:
+                    raise PortalError("飞书附件授权已失效，请检查应用配置。")
+            except FeishuHTTPError as exc:
+                response = getattr(exc.__cause__, "response", None)
+                try:
+                    payload = response.json() if response is not None else {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                expired = exc.category == "token" or (isinstance(payload, dict)
+                    and type(payload.get("code")) is int and payload["code"] in TOKEN_ERROR_CODES)
+                if not trusted or attempt or not expired:
+                    raise
+            refreshed = str(refresh_feishu_token() or "").strip()
+            if not refreshed:
+                raise PortalError("飞书附件授权刷新未完成，请检查应用配置。")
+            headers = {"Authorization": "Bearer " + refreshed}
         if cache_category and app_token and table_id and record_id:
             self._write_cached_attachment(
                 category=cache_category,

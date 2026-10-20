@@ -162,4 +162,13 @@ async def module_denial(request, controller, runtime):
     request.state.allowed_modules = allowed
     if needed & allowed:
         return None
+    if needed == frozenset({'risk_inspection'}):
+        from .risk_inspection_routes import risk_task_access
+        rid = request.query_params.get('id', '') if path.startswith('/risk-inspections') else ''
+        match = re.match(r'^/api/risk-inspections/([a-f0-9]{32})(?:/|$)', path)
+        if match:
+            rid = match[1]
+        if await asyncio.to_thread(risk_task_access, runtime, session, rid):
+            request.state.allowed_modules = allowed | {'risk_inspection'}
+            return None
     return JSONResponse({"ok": False, "error": "当前账号尚未获授该功能权限，请联系管理员。", "error_code": "module_access_denied"}, status_code=403)

@@ -866,6 +866,19 @@ class FastAPIPortalController:
         # streaming responses do not surface as false application errors.
         app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
+        from lan_bitable_template_portal.portal_auth import PortalAuthUnavailableError
+
+        @app.middleware("http")
+        async def retain_session_on_auth_outage(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except PortalAuthUnavailableError:
+                return JSONResponse(
+                    {"ok": False, "error": "账号校验暂不可用，登录状态已保留，请稍后重试。"},
+                    status_code=503,
+                    headers={"Cache-Control": "no-store", "Retry-After": "2"},
+                )
+
         @app.get("/")
         async def root(request: Request):
             oauth_response = self._root_oauth_callback_response(request)
@@ -1969,6 +1982,12 @@ class FastAPIPortalController:
                     redirect_uri=f"{self._request_base_url(request)}/api/auth/feishu/callback",
                 ),
             }
+            status_user = payload['data'].get('user') or {}
+            if session:
+                from lan_bitable_template_portal.risk_inspection_routes import risk_task_access
+                if await asyncio.to_thread(risk_task_access, PortalRuntime, session):
+                    status_user['modules'] = list(dict.fromkeys([*status_user.get('modules', []), 'risk_inspection']))
+                    status_user['risk_inspection_assigned'] = True
             response = self._json_response(request, session, payload)
             response.headers["Cache-Control"] = "no-store"
             return response
@@ -9526,6 +9545,7 @@ class FastAPIPortalController:
                 )
                 same_target = (
                     isinstance(previous_service, MaintenancePortalService)
+                    and not getattr(self, "_identity_migration_requires_reload", False)
                     and bool(
                         getattr(previous_service, "_repair_snapshots_enabled", False)
                     )
@@ -13925,7 +13945,22 @@ class FastAPIPortalController:
             raise RuntimeError(f"Uvicorn 不可用: {exc}") from exc
 
         stage_started_at = time.perf_counter()
+        from lan_bitable_template_portal.feishu_identity_migration import (
+            identity_migration_pending, migrate_identity_databases,
+        )
+        identity_root = Path(PortalRuntime.state_store.db_path).parent
+        with PortalRuntime.action_queue_lock, PortalRuntime.message_queue_lock:
+            if (PortalRuntime.action_running_job_ids or PortalRuntime.message_running_job_ids
+                    or PortalRuntime.message_scope_inflight) and identity_migration_pending(identity_root):
+                raise RuntimeError("后台任务尚未结束，未迁移账号；请等待任务结束后重启程序。")
+            identity_report = migrate_identity_databases(identity_root) or {}
+        identity_plan = identity_report.get('plan_hash')
+        self._identity_migration_requires_reload = bool(identity_report.get('changed_rows')) or (
+            identity_plan != getattr(PortalRuntime.service, '_identity_migration_plan_hash', None)
+        )
         self._initialize_portal_handler_state()
+        PortalRuntime.service._identity_migration_plan_hash = identity_plan
+        self._identity_migration_requires_reload = False
         init_ms = (time.perf_counter() - stage_started_at) * 1000.0
         stage_started_at = time.perf_counter()
         PortalRuntime.ensure_message_workers()

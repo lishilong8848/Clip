@@ -187,6 +187,8 @@ class AccountManagementTests(_TempDirTestCase):
                 self.assertEqual(second.status_code, 200, second.text)
                 session = self.h.auth.get_session(client.cookies['lan_portal_session'])
                 self.assertEqual(session['user']['open_id'], 'ou_fixtureAccount')
+                self.assertEqual(session['user']['personnel_record_id'], 'recAccount')
+                self.assertEqual(session['source'], 'personnel_password')
                 self.assertEqual(set(session['allowed_scopes']), {'A'})
                 self.assertNotIn('requires_password_change', second.json()['data'])
         with _allow_real_writes():

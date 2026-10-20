@@ -15,7 +15,7 @@ const reports=[],browser=await chromium.launch({headless:true});
 const built=process.argv.includes('--dist');
 const fixed=[
   {key:'primary',field_id:'primary',field_name:'任务编号',role:'number',type:1,is_primary:true},
-  ...['status','scope','person','reviewer','review','reviewed_at','sync'].map((role,index)=>({key:role,field_id:role,field_name:['排查状态','楼栋','排查人','复核人','审核意见','复核日期','落表状态'][index],role,type:role==='reviewed_at'?5:1})),
+  ...['status','scope','person','reviewer','review','reviewed_at','sync','inspected_at'].map((role,index)=>({key:role,field_id:role,field_name:['排查进度','楼栋','排查人','复核人','复核结果','复核日期','最终推送','排查日期'][index],role,type:['reviewed_at','inspected_at'].includes(role)?5:1})),
 ];
 const inputs=[
   {key:'result',field_id:'result',field_name:'排查结果',role:'input',type:1,required:true,property:{}},
@@ -81,7 +81,7 @@ async function run(version){
     optimizeDeps:{noDiscovery:true,include:['vue','naive-ui','lucide-vue-next']},logLevel:'error'});
   try{
     if(!built)await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port;
-    const cases=version==='v2'?[{width:1440,height:900},{width:360,height:640},{width:390,height:844},{width:390,height:667,dark:true,reduced:true}]:[{width:1440,height:900}];
+    const cases=version==='v2'?[{width:1440,height:900},{width:402,height:874},{width:440,height:956},{width:390,height:667,dark:true,reduced:true}]:[{width:1440,height:900}];
     for(const scenario of process.env.CLIPFLOW_RISK_VIEWPORT_AUDIT?cases.filter(c=>version==='v2'&&c.width===390&&!c.dark):cases){
       const context=await browser.newContext({viewport:{width:scenario.width,height:scenario.height},reducedMotion:scenario.reduced?'reduce':'no-preference',serviceWorkers:'block'});
       const page=await context.newPage(),errors=[],requests=[],writes=[],viewports=[],layouts=layoutApiFixture();
@@ -123,13 +123,17 @@ async function run(version){
         await page.goto(url);
         await page.getByRole('button',{name:'基础模板',exact:true}).click();
         if(version==='legacy'){
+          await page.locator('.history-list article').waitFor();
+          assert.equal(await page.locator('.risk-field-picker').count(),0,'Legacy also opens the list first');
+          await page.getByRole('button',{name:'新建基础模板',exact:true}).click();
           await page.locator('.risk-field-picker').waitFor();
-          assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Legacy entry still opens creation with its primary field');
-          assert.equal(await page.getByRole('button',{name:'添加字段 楼栋',exact:true}).count(),1,'Legacy fixed fields remain visible');
+          assert.equal(await page.locator('.risk-selected-fields>li').count(),0,'Legacy hides all fixed fields in a new draft');
+          for(const field of fixed){assert.equal(await page.getByRole('button',{name:'修改字段 '+field.field_name,exact:true}).count(),0);assert.equal(await page.getByRole('button',{name:'移除已选字段 '+field.field_name,exact:true}).count(),0);}
+          assert.equal(await page.getByRole('button',{name:'添加字段 楼栋',exact:true}).count(),0,'Legacy fixed fields are absent from the library');
           assert.equal(await page.locator('.risk-v2-field-modal').count(),0);
           assert.deepEqual(errors,[]);
           await page.screenshot({path:path.join(output,tag+'-legacy.png'),animations:'disabled',fullPage:true});
-          reports.push({tag,checks:'legacy default presentation unchanged'});continue;
+          reports.push({tag,checks:'legacy list-first and hidden fixed fields'});continue;
         }
         await page.locator('.history-list article').waitFor();
         assert.equal(await page.locator('.risk-field-picker').count(),0,'Base entry opens the library, not creation');
@@ -207,7 +211,7 @@ async function run(version){
         await page.getByRole('button',{name:'添加字段 现场检查结论',exact:true}).click();
         await page.getByRole('button',{name:'生成基础模板',exact:true}).click();
         await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});
-        assert.deepEqual(templates[1].fields.map(f=>f.key),['primary','result','new-field'],'New template retains required primary schema and only user-selected inputs');
+        assert.deepEqual(templates[1].fields.map(f=>f.key),[...fixed.map(field=>field.key),'result','new-field'],'New template retains every fixed field plus selected inputs');
         assert.equal(writes.filter(r=>r.endpoint==='/api/risk-inspections').length,0,'Editing templates cannot publish inspections');
         canEditLibrary=false;await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();
         await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();

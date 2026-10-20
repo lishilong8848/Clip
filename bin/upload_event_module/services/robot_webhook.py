@@ -1,4 +1,5 @@
 import json
+import hmac
 import re
 import threading
 import time
@@ -19,9 +20,39 @@ _SENDER_LOCK = threading.Lock()
 _AGENT_SENDER = None
 
 
+def current_app_credentials(*, refresh=True):
+    try:
+        if refresh:
+            pair = config.refresh_credentials()
+        else:
+            pair = config.app_id, config.app_secret
+        return tuple(pair) if isinstance(pair, (tuple, list)) and len(pair) == 2 and all(
+            isinstance(value, str) and value.strip() for value in pair) else ('', '')
+    except Exception:
+        return '', ''
+
+
+def active_bot_matches(bot, credentials, messenger=None):
+    """A channel is current only when its secret also matches authoritative Qt."""
+    try:
+        from openclaw_service.assistant.lighthouse_ai import unprotect_key
+        if (not all(credentials)
+                or messenger is not None and bot.messenger is not messenger
+                or getattr(bot.messenger, 'closed', False)):
+            return False
+        configurations = [bot.config]
+        transport_config = getattr(bot.messenger, 'config', None)
+        if isinstance(transport_config, dict):
+            configurations.append(transport_config)
+        return all(active.get('app_id') == credentials[0] and hmac.compare_digest(
+            unprotect_key(active.get('secret_cipher') or '').encode(), credentials[1].encode()) for active in configurations)
+    except Exception:
+        return False
+
+
 @dataclass
 class DeliveryAttempt:
-    # Only not_sent permits switching applications; uncertain never does.
+    # A rejection never selects another application; uncertain writes stay pinned.
     status: str
     message: str = ""
     receipt: dict[str, Any] = field(default_factory=dict)
@@ -172,7 +203,9 @@ def _get_bot_chats(
 
 def _get_chat_cache() -> Tuple[List[Dict[str, Any]], str]:
     now = time.time()
-    if _CHAT_CACHE["items"] and now - _CHAT_CACHE["timestamp"] < _CHAT_CACHE_TTL_SEC:
+    app_id = str(config.app_id)
+    if (_CHAT_CACHE.get("app_id") == app_id and _CHAT_CACHE["items"]
+            and now - _CHAT_CACHE["timestamp"] < _CHAT_CACHE_TTL_SEC):
         return _CHAT_CACHE["items"], ""
 
     token, err = _get_tenant_access_token()
@@ -183,6 +216,9 @@ def _get_chat_cache() -> Tuple[List[Dict[str, Any]], str]:
     if err:
         return [], err
 
+    if str(config.app_id) != app_id:
+        return [], "Qt应用配置已变化，请重新查询群列表"
+    _CHAT_CACHE["app_id"] = app_id
     _CHAT_CACHE["items"] = chats
     _CHAT_CACHE["timestamp"] = now
     return chats, ""
@@ -266,6 +302,13 @@ def _send_message_to_receive_id(
     if outcome is not None:
         outcome.clear()
         outcome["status"] = "uncertain"
+    # The authenticated caller has already loaded Qt; retain both fields across I/O.
+    credentials = current_app_credentials(refresh=False)
+    app_id = credentials[0]
+    if not app_id:
+        if outcome is not None:
+            outcome["status"] = "not_sent"
+        return False, "当前Qt飞书应用不可用，未发送"
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
         "Authorization": f"Bearer {tenant_access_token}",
@@ -292,6 +335,8 @@ def _send_message_to_receive_id(
             retries=0,
         )
         if type(result.get("code")) is int and result["code"] != 0 and _is_token_error_result(result):
+            if current_app_credentials(refresh=False) != credentials:
+                return False, "Qt应用配置已变化，发送结果未确认，未换应用重发"
             tenant_access_token, token_err = _get_tenant_access_token(
                 force_refresh=True
             )
@@ -299,6 +344,8 @@ def _send_message_to_receive_id(
                 if outcome is not None:
                     outcome.update(status="not_sent", code=result["code"])
                 return False, token_err
+            if current_app_credentials(refresh=False) != credentials:
+                return False, "Qt应用配置已变化，发送结果未确认，未换应用重发"
             headers["Authorization"] = f"Bearer {tenant_access_token}"
             result = _request_json(
                 "POST",
@@ -308,6 +355,8 @@ def _send_message_to_receive_id(
                 json_payload=payload,
                 retries=0,
             )
+        if current_app_credentials(refresh=False) != credentials:
+            return False, "Qt应用配置已变化，发送结果未确认，未换应用重发"
         if type(result.get("code")) is not int:
             return False, "飞书响应缺少有效错误码，发送结果未确认"
         if result["code"] != 0:
@@ -322,7 +371,7 @@ def _send_message_to_receive_id(
             ):
                 return False, "飞书响应缺少有效消息ID或会话ID，发送结果未确认"
             receipt.update(message_id=data["message_id"], chat_id=data["chat_id"],
-                           sender_app_id=str(config.app_id), message_uuid=payload["uuid"], accepted_at=time.time())
+                           sender_app_id=app_id, message_uuid=payload["uuid"], accepted_at=time.time())
         if outcome is not None:
             outcome["status"] = "sent"
         return True, "ok"
@@ -345,6 +394,12 @@ def _send_interactive_to_receive_id(
     if outcome is not None:
         outcome.clear()
         outcome["status"] = "uncertain"
+    credentials = current_app_credentials(refresh=False)
+    app_id = credentials[0]
+    if not app_id:
+        if outcome is not None:
+            outcome["status"] = "not_sent"
+        return False, "当前Qt飞书应用不可用，未发送"
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {
         "Authorization": f"Bearer {tenant_access_token}",
@@ -367,6 +422,8 @@ def _send_interactive_to_receive_id(
             retries=0,
         )
         if type(result.get("code")) is int and result["code"] != 0 and _is_token_error_result(result):
+            if current_app_credentials(refresh=False) != credentials:
+                return False, "Qt应用配置已变化，发送结果未确认，未换应用重发"
             tenant_access_token, token_err = _get_tenant_access_token(
                 force_refresh=True
             )
@@ -374,6 +431,8 @@ def _send_interactive_to_receive_id(
                 if outcome is not None:
                     outcome.update(status="not_sent", code=result["code"])
                 return False, token_err
+            if current_app_credentials(refresh=False) != credentials:
+                return False, "Qt应用配置已变化，发送结果未确认，未换应用重发"
             headers["Authorization"] = f"Bearer {tenant_access_token}"
             result = _request_json(
                 "POST",
@@ -383,6 +442,8 @@ def _send_interactive_to_receive_id(
                 json_payload=payload,
                 retries=0,
             )
+        if current_app_credentials(refresh=False) != credentials:
+            return False, "Qt应用配置已变化，发送结果未确认，未换应用重发"
         if type(result.get("code")) is not int:
             return False, "飞书响应缺少有效错误码，发送结果未确认"
         if result["code"] != 0:
@@ -397,7 +458,7 @@ def _send_interactive_to_receive_id(
             return False, "飞书响应缺少有效消息ID或会话ID，发送结果未确认"
         if receipt is not None:
             receipt.update(message_id=data["message_id"], chat_id=data["chat_id"],
-                           sender_app_id=str(config.app_id), message_uuid=payload["uuid"],
+                           sender_app_id=app_id, message_uuid=payload["uuid"],
                            accepted_at=time.time())
         if outcome is not None:
             outcome["status"] = "sent"
@@ -409,7 +470,7 @@ def _send_interactive_to_receive_id(
 def _deliver_many(kind, content, recipients, receive_type, message_uuid):
     with _SENDER_LOCK:
         sender = _AGENT_SENDER
-    # Standalone legacy callers retain their existing upstream write guard.
+    # Standalone Qt callers retain their existing upstream write guard.
     blocked_reason = ""
     if sender:
         from lan_bitable_template_portal.portal_service import external_real_write_guard
@@ -417,15 +478,23 @@ def _deliver_many(kind, content, recipients, receive_type, message_uuid):
         if not guard.get("real_write_allowed"):
             blocked_reason = guard.get("reason") or "当前运行模式不允许真实飞书消息发送。"
     requires_agent = kind == "interactive" and card_requires_agent(content)
-    token, token_error, results = None, "", []
+    direct, results = None, []
     for recipient in recipients:
         # Preserve singleton UUIDs, and keep batch retry identities stable by recipient.
         identity = (str(uuid.uuid5(uuid.NAMESPACE_URL, message_uuid + ':' + recipient))
                     if message_uuid and len(recipients) > 1 else str(message_uuid or uuid.uuid4()))
         try:
-            attempt = (DeliveryAttempt("blocked", blocked_reason) if blocked_reason else
-                       sender(recipient, kind, content, receive_type, identity) if sender else
-                       DeliveryAttempt("not_sent", "当前进程未注册飞书智能体运行时（例如独立Qt进程），尚未发送。"))
+            if blocked_reason:
+                attempt = DeliveryAttempt("blocked", blocked_reason)
+            elif sender:
+                attempt = sender(recipient, kind, content, receive_type, identity)
+            elif requires_agent:
+                attempt = DeliveryAttempt("not_sent", "当前进程未注册飞书智能体运行时（例如独立Qt进程），尚未发送。")
+            else:
+                from lan_bitable_template_portal.feishu_delivery import standalone_sender
+                if direct is None:
+                    direct = standalone_sender()
+                attempt = direct.send_direct(recipient, kind, content, receive_type, identity)
             if not isinstance(attempt, DeliveryAttempt):
                 attempt = DeliveryAttempt("uncertain", "公共发送器未返回有效回执，发送结果未确认。")
         except Exception:
@@ -434,58 +503,8 @@ def _deliver_many(kind, content, recipients, receive_type, message_uuid):
         failure_kind = "" if ok else attempt.status
         code = attempt.code
         if attempt.status == "not_sent" and requires_agent:
-            message += " 回调交互卡片必须由飞书智能体发送，已保留失败，未使用备用应用。"
+            message += " 回调交互卡片必须由飞书智能体长连接处理，已保留失败，未直接发送。"
             failure_kind = "agent_required"
-        elif attempt.status == "not_sent":
-            # Lazy legacy authentication: an unavailable old application cannot block the agent.
-            failure_kind, code, receipt, posted = "not_sent", None, {}, False
-            if token is None:
-                token, token_error = _get_tenant_access_token()
-            if token_error:
-                ok, message = False, "备用应用认证未就绪，尚未发送。"
-            elif sender and not external_real_write_guard().get("real_write_allowed"):
-                ok, message = False, "真实消息写入已禁用，尚未发送。"
-                failure_kind = "blocked"
-            else:
-                outcome = {}
-                try:
-                    claim = getattr(sender, "legacy_started", None)
-                    if claim and not claim(recipient, receive_type, identity, str(config.app_id)):
-                        ok, message = False, "原任务已绑定其他发送应用，未跨应用补发。"
-                    else:
-                        posted = True
-                        if kind == "interactive":
-                            kwargs = ({"receipt": receipt, "outcome": outcome}
-                                      if sender or receive_type != "chat_id" else {})
-                            ok, message = _send_interactive_to_receive_id(token, recipient, content,
-                                receive_id_type=receive_type,
-                                message_uuid=identity if kwargs else message_uuid, **kwargs)
-                        else:
-                            send = _send_message_to_chat if receive_type == "chat_id" else _send_message_to_open_id
-                            ok, message = send(token, recipient, content["text"], message_uuid=identity,
-                                               receipt=receipt, outcome=outcome)
-                        failure_kind = "" if ok else outcome.get("status", "uncertain")
-                        code = outcome.get("code") if failure_kind == "not_sent" else None
-                        # Preserve the original SDK-style unavailable result used by legacy callers.
-                        if not ok and not outcome and "no availability" in message.lower():
-                            failure_kind = "not_sent"
-                        receipt.update(delivery_channel="legacy", primary_error=attempt.message)
-                        finish = getattr(sender, "legacy_finished", None)
-                        if ok and finish:
-                            finish(recipient, receive_type, identity, dict(receipt))
-                        log_info("飞书智能体未发送，已尝试备用应用：" + attempt.message)
-                except Exception:
-                    ok, message = False, "备用应用发送或回执保存未完成，结果未确认；请继续原任务。"
-                    failure_kind, code = "uncertain", None
-            if not ok and failure_kind == "not_sent":
-                try:
-                    mark = getattr(sender, "legacy_not_sent", None)
-                    if mark and not mark(recipient, receive_type, identity, posted=posted, code=code):
-                        failure_kind, code = "uncertain", None
-                        message = "原发送结果仍未确认，未将本次失败视为可跨应用重发。"
-                except Exception:
-                    failure_kind, code = "uncertain", None
-                    message = "未发送状态保存失败，结果待核验；未跨应用补发。"
         if not ok and failure_kind == "not_sent" and "no availability" in message.lower():
             failure_kind = "bot_unavailable"
             message += "。飞书返回机器人对该用户不可用，请核对应用可用范围。"

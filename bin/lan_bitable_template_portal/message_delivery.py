@@ -38,10 +38,16 @@ def digest(value):
 class FeishuDeliveryTransport:
     def _call(self, path, *, payload=None, file=None):
         from upload_event_module.services import robot_webhook as robot
+        from upload_event_module.services.feishu_token_manager import token_manager
+        credentials = token_manager._credentials()
         for refresh in (False, True):
+            if token_manager._credentials() != credentials:
+                raise DeliveryError("Qt 飞书凭据已变化，未重发，请核验原请求。", 503)
             token, error = robot._get_tenant_access_token(force_refresh=refresh)
-            if error:
+            if error or not token:
                 raise DeliveryError("飞书凭证暂不可用，请稍后继续发送。", 503)
+            if token_manager._credentials() != credentials:
+                raise DeliveryError("Qt 飞书凭据已变化，未重发，请核验原请求。", 503)
             headers = {"Authorization": "Bearer " + token}
             url = "https://open.feishu.cn/open-apis/im/v1/" + path
             if file:
@@ -90,33 +96,66 @@ class MessageDelivery:
         return bool(person.get("can_receive_message") and person.get("open_id") and
                     str(person.get("account_nature") or "").strip().upper() == "VNET")
 
+    def _self_person(self, owner, rows):
+        from .personnel_password_login import DIRECTORY_NS as LOGIN_NS, DIRECTORY_KEY
+        people = (self.store.get_document(LOGIN_NS, DIRECTORY_KEY) or {}).get("people") or {}
+        links = [(rid, person) for rid, person in people.items() if owner in (person.get("login_ids") or [])]
+        if links and (len(links) != 1 or links[0][1].get("selectable") is not True
+                      or links[0][1].get("inactive") or links[0][1].get("disabled_reason")
+                      or len(links[0][1].get("login_ids") or []) != 1):
+            return None
+        matches = [person for person in rows if person.get("open_id") == owner
+                   or links and person.get("record_id") == links[0][0]]
+        if len(matches) != 1 or not self._eligible(matches[0]):
+            return None
+        person = matches[0]
+        if sum(row.get("open_id") == person["open_id"] for row in rows) != 1:
+            return None
+        trusted = people.get(person.get("record_id"))
+        if trusted:
+            identities = trusted.get("login_ids") or []
+            if (trusted.get("selectable") is not True or trusted.get("inactive") or trusted.get("disabled_reason")
+                    or len(identities) != 1 or sum(
+                    identities[0] in (entry.get("login_ids") or []) for entry in people.values()) != 1):
+                return None
+        return person
+
     def directory(self):
+        from upload_event_module.services.feishu_token_manager import token_manager
         with self._directory_lock:
+            credentials = token_manager._credentials()
+            app_id = credentials[0]
             cached = self._directory or self.store.get_document(DIRECTORY_NS, "staff") or {}
             shared = getattr(self.service, "_signature_people_cache", None) or {}
-            if shared.get("loaded_ts", 0) > cached.get("loaded_at", 0):
-                cached = {"loaded_at": shared["loaded_ts"], "people": [self._person(p) for p in shared.get("people", [])]}
+            refresh = bool(cached and cached.get("app_id") != app_id or shared and shared.get("app_id") != app_id)
+            if not refresh and shared.get("app_id") == app_id and shared.get("loaded_ts", 0) > cached.get("loaded_at", 0):
+                cached = {"app_id": app_id, "loaded_at": shared["loaded_ts"], "people": [self._person(p) for p in shared.get("people", [])]}
                 self.store.put_document(DIRECTORY_NS, "staff", cached)
-            if "people" not in cached or self.clock() - cached.get("loaded_at", 0) > 3600:
-                people = self.service._load_signature_people(force=False)
-                cached = {"loaded_at": self.clock(), "people": [self._person(p) for p in people]}
+            if refresh or "people" not in cached or self.clock() - cached.get("loaded_at", 0) > 3600:
+                people = self.service._load_signature_people(force=refresh)
+                if token_manager._credentials() != credentials:
+                    raise DeliveryError("Qt 飞书凭据已变化，请重新读取投递目录。", 503)
+                shared = getattr(self.service, "_signature_people_cache", None)
+                if isinstance(shared, dict) and shared.get("people") == people:
+                    shared["app_id"] = app_id
+                cached = {"app_id": app_id, "loaded_at": self.clock(), "people": [self._person(p) for p in people]}
                 self.store.put_document(DIRECTORY_NS, "staff", cached)
             self._directory = cached
             return cached
 
     def recipients(self, owner, q=""):
         snapshot = self.directory()
+        me = self._self_person(owner, snapshot["people"])
         terms = str(q or "").casefold().split()
         rows = []
         for person in snapshot["people"]:
             if not self._eligible(person):
                 continue
-            if not person.get("name") or not person.get("employee_no") and person["open_id"] != owner:
+            if not person.get("name") or not person.get("employee_no") and person is not me:
                 continue
             if terms and not all(term in (person["name"] + " " + str(person["employee_no"])).casefold() for term in terms):
                 continue
             rows.append({key: person.get(key, "") for key in ("record_id", "name", "employee_no", "account_nature")})
-        me = next((p for p in snapshot["people"] if p.get("open_id") == owner and self._eligible(p)), None)
         return {"people": rows[:100], "total": len(rows), "loaded_at": snapshot["loaded_at"],
                 "self": {key: me.get(key, "") for key in ("record_id", "name", "employee_no", "account_nature")} if me else None}
 
@@ -124,7 +163,11 @@ class MessageDelivery:
         rows = self.directory()["people"]
         selected = []
         for identity in dict.fromkeys(ids):
-            matches = [p for p in rows if (p.get("open_id") == owner if identity == "__self__" else p["record_id"] == identity)]
+            if identity == "__self__":
+                me = self._self_person(owner, rows)
+                matches = [me] if me is not None else []
+            else:
+                matches = [p for p in rows if p["record_id"] == identity]
             if len(matches) != 1:
                 raise DeliveryError("收件人不存在或有重复身份，请按姓名和工号重新选择。")
             person = matches[0]
@@ -148,6 +191,35 @@ class MessageDelivery:
         if open_id != person["open_id"] or name != person["name"] or s._mop_field_text(fields, ["员工工号", "工号"]) != person["employee_no"]:
             raise DeliveryError("收件人身份已变化，请重新选择；未改发给其他人。")
 
+    def _migrated_operation(self, owner, operation_id):
+        matches = []
+        for row in self.store.list_documents(NS):
+            job = row.get('payload') or {}
+            migration = job.get('identity_migration') or {}
+            previous = migration.get('previous_owner') if isinstance(migration, dict) else None
+            # This proof addresses an existing operation, never another login identity.
+            if (job.get('owner') == owner and isinstance(previous, str) and previous
+                    and job.get('id') == row.get('key') == digest([previous, operation_id])):
+                if job.get('operation_id') not in (None, operation_id):
+                    raise DeliveryError('原发送任务的操作号记录不一致，未创建新任务。', 409)
+                matches.append(job)
+        if len(matches) > 1:
+            raise DeliveryError('原操作号对应多条迁移记录，请先核验；未创建新任务。', 409)
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _origin_app(job, part=None):
+        if part and part.get('sender_app_id'):
+            return part['sender_app_id']
+        migration = job.get('identity_migration')
+        values = [job.get('origin_app_id')]
+        if isinstance(migration, dict):
+            values.extend((migration.get('source_app_id'), migration.get('origin_app_id')))
+        else:
+            values.append(job.get('app_id'))
+        origins = {value for value in values if isinstance(value, str) and value}
+        return next(iter(origins)) if len(origins) == 1 else None
+
     def prepare(self, owner, payload, files):
         model = MessageDeliveryRequest.model_validate(payload)
         if not model.text.strip() and not files:
@@ -162,8 +234,12 @@ class MessageDelivery:
         identity = digest([owner, model.operation_id])
         with self._lock:
             old = self.store.get_document(NS, identity)
+            if old and (old.get('owner') != owner or old.get('id') != identity):
+                raise DeliveryError('发送任务不存在或无权访问。', 404)
+            if not old:
+                old = self._migrated_operation(owner, model.operation_id)
             if old:
-                if old["fingerprint"] != stamp:
+                if old.get('operation_id') not in (None, model.operation_id) or old.get("fingerprint") != stamp:
                     raise DeliveryError("原发送内容已变化，请重新核对后创建新的发送任务。", 409)
                 return self.public(old)
             selected = self._selected(owner, model.recipient_ids)
@@ -179,7 +255,8 @@ class MessageDelivery:
                 path = directory / sha
                 path.write_bytes(content)
                 attachments.append({"name": name, "sha256": sha, "path": str(path), "size": len(content)})
-            job = {"id": identity, "owner": owner, "fingerprint": stamp, "text": model.text, "recipients": selected,
+            job = {"id": identity, "owner": owner, "operation_id": model.operation_id,
+                   "origin_app_id": self.directory()['app_id'], "fingerprint": stamp, "text": model.text, "recipients": selected,
                    "files": attachments, "parts": {}, "status": "queued", "created_at": self.clock(), "error": ""}
             self.store.put_document(NS, identity, job)
             return self.public(job)
@@ -190,7 +267,7 @@ class MessageDelivery:
                 "recipients": [{k: p.get(k, "") for k in ("name", "employee_no")} for p in job["recipients"]],
                 "files": [{k: f[k] for k in ("name", "size")} for f in job["files"]],
                 "sent_count": sum(p.get("status") == "sent" for p in job["parts"].values()),
-                "failed_count": sum(p.get("status") in {"failed", "sending"} for p in job["parts"].values())}
+                "failed_count": sum(p.get("status") in {"failed", "sending", "uncertain"} for p in job["parts"].values())}
 
     def get(self, owner, identity):
         with self._lock:
@@ -210,20 +287,51 @@ class MessageDelivery:
             self._running.add(identity)
         try:
             job = self.store.get_document(NS, identity)
-            if job["status"] == "completed":
+            if job["status"] in {"completed", "migration_blocked"}:
+                return
+            migration = job.get('identity_migration') or {}
+            if isinstance(migration, dict) and (migration.get('blocked') or migration.get('archived')
+                                                 or migration.get('resume_allowed') is False):
+                job.update(status='migration_blocked', error='原发送任务已暂停待核验，历史回执已保留；未自动重发。')
+                self.store.put_document(NS, identity, job)
+                return
+            from upload_event_module.services.feishu_token_manager import token_manager
+            credentials = token_manager._credentials()
+            app_id = credentials[0]
+            if not app_id:
+                raise DeliveryError('当前飞书应用未就绪，原发送任务已保留。', 503)
+            labels = (['text'] if job['text'].strip() else []) + ['file:' + f['sha256'] for f in job['files']]
+            expected = {digest([person['open_id'], label]) for person in job['recipients'] for label in labels}
+            if any((part.get('status') in {'sending', 'uncertain'} and self._origin_app(job, part) != app_id)
+                   or (job.get('identity_migration') and key not in expected
+                       and part.get('status') in {'sent', 'sending', 'uncertain'}) for key, part in job['parts'].items()):
+                job.update(status='migration_blocked', error='原应用的发送结果或分片身份尚未核实，请先在飞书核验；未自动重发。')
+                self.store.put_document(NS, identity, job)
                 return
             job.update(status="running", error="")
             self.store.put_document(NS, identity, job)
-            labels = (['text'] if job['text'].strip() else []) + ['file:' + f['sha256'] for f in job['files']]
             for person in job["recipients"]:
                 if any(job['parts'].get(digest([person['open_id'], label]), {}).get('status') != 'sent' for label in labels):
                     self._verify_person(owner, person)
             for file in job["files"]:
+                if all(job['parts'].get(digest([person['open_id'], 'file:' + file['sha256']]), {}).get('status') == 'sent'
+                       for person in job['recipients']):
+                    continue
+                if file.get('file_key') and (file.get('file_key_app_id') or self._origin_app(job)) != app_id:
+                    file.pop('file_key')
+                    file.pop('file_key_app_id', None)
                 if not file.get("file_key"):
+                    path = Path(file['path'])
+                    if (path.stat().st_size != file['size'] or not 0 < file['size'] <= MAX_FILE
+                            or hashlib.sha256(path.read_bytes()).hexdigest() != file['sha256']):
+                        raise DeliveryError('原附件内容已变化，未重新上传或发送。', 409)
+                    if token_manager._credentials() != credentials:
+                        raise DeliveryError('Qt飞书凭据已变化，原任务已保留，未继续发送。', 503)
                     file["file_key"] = self.transport.upload(file)
+                    file['file_key_app_id'] = app_id
                     self.store.put_document(NS, identity, job)
             parts = ([('text', {"text": job["text"]})] if job["text"].strip() else []) + [
-                ('file:' + file["sha256"], {"file_key": file["file_key"]}) for file in job["files"]]
+                ('file:' + file["sha256"], {"file_key": file.get("file_key")}) for file in job["files"]]
             failures = []
             for person in job["recipients"]:
                 for label, content in parts:
@@ -231,14 +339,19 @@ class MessageDelivery:
                     part = job["parts"].setdefault(key, {})
                     if part.get("status") == "sent":
                         continue
-                    if part.get("status") == "sending" and self.clock() - part["attempted_at"] > 3500:
-                        failures.append("上次发送结果未确认且已超出去重时限，请先在飞书核对；未重复发送。")
-                        continue
-                    part.update(status="sending", attempted_at=part.get("attempted_at") or self.clock())
+                    if part.get("status") in {"sending", "uncertain"}:
+                        attempted = part.get('attempted_at')
+                        if type(attempted) not in (int, float) or not 0 <= self.clock() - attempted <= 3500:
+                            failures.append("上次发送结果未确认且已超出去重时限，请先在飞书核对；未重复发送。")
+                            continue
+                    if token_manager._credentials() != credentials:
+                        raise DeliveryError('Qt飞书凭据已变化，原任务已保留，未继续发送。', 503)
+                    part.update(status="sending", sender_app_id=app_id,
+                                attempted_at=part.get("attempted_at") or self.clock())
                     self.store.put_document(NS, identity, job)
                     try:
                         message_id = self.transport.send(person["open_id"], 'text' if label == 'text' else 'file', content,
-                                                         str(uuid.uuid5(uuid.NAMESPACE_URL, identity + key)))
+                                                         part.get('message_uuid') or str(uuid.uuid5(uuid.NAMESPACE_URL, identity + key)))
                         part.update(status="sent", message_id=message_id)
                     except Exception as exc:
                         if isinstance(exc, DeliveryError) and exc.status < 500:

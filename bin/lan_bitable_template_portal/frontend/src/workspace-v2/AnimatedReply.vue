@@ -3,15 +3,16 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import LegacyReply from '../components/LighthouseReply.vue';
 import { followBottom } from './chatMotion';
-const props=defineProps<{text:string}>();
+const props=defineProps<{text:string;streaming?:boolean}>();
 const host=ref<HTMLElement>();
 const reduced=window.matchMedia('(prefers-reduced-motion: reduce)');
 let previous='',revealed=0,timer=0,height=0,disposed=false,animation:Animation|undefined,observer:ResizeObserver|undefined;
 let queue:{node:HTMLElement;end:number}[]=[],caret:HTMLElement|undefined;
+let fading=new Map<number,number>();
 function reveal(){
   window.clearTimeout(timer);if(disposed||!host.value)return;
   // Catch up buffered answers in bounded batches, without slowing real model streaming.
-  for(let i=0,count=reduced.matches?queue.length:Math.max(1,Math.ceil(queue.length/60));i<count;i++){
+  for(let i=0,count=reduced.matches||props.streaming?queue.length:Math.max(1,Math.ceil(queue.length/60));i<count;i++){
     const part=queue.shift();if(!part)break;
     part.node.hidden=false;revealed=part.end;part.node.after(caret!);
   }
@@ -32,6 +33,7 @@ function decorate(animate:boolean){
   const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),nodes:Text[]=[];
   for(let node=walker.nextNode();node;node=walker.nextNode())nodes.push(node as Text);
   let offset=0,words=0,lastVisible:Node|undefined;
+  const now=performance.now(),nextFading=new Map<number,number>();
   for(const node of nodes){
     const value=node.textContent||'';
     if(!value.trim()||node.parentElement?.closest('pre,code,table,.v2-word')){offset+=value.length;lastVisible=node;continue;}
@@ -40,15 +42,23 @@ function decorate(animate:boolean){
     for(let index=0;index<parts.length;index++){
       const part=words>=600?parts.slice(index).join(''):parts[index]!;
       if(words>=600)index=parts.length;
-      offset+=part.length;
-      if(animate&&offset>revealed){
-        const span=document.createElement('span');span.textContent=part;span.hidden=true;
+      const start=offset;offset+=part.length;
+      const began=offset<=revealed?fading.get(start):undefined;
+      if(animate&&(offset>revealed||began!==undefined&&now-began<380)){
+        const span=document.createElement('span');span.textContent=part;span.hidden=offset>revealed;
         if(words++<600)span.className='v2-word cword';
-        fragment.append(span);queue.push({node:span,end:offset});
+        if(props.streaming){
+          const at=began??now;nextFading.set(start,at);
+          // Keep an in-flight fade at its elapsed time when Markdown replaces the DOM.
+          span.style.animationDelay=Math.min(0,at-now)+'ms';
+        }
+        fragment.append(span);
+        if(span.hidden)queue.push({node:span,end:offset});else lastVisible=span;
       }else{lastVisible=document.createTextNode(part);fragment.append(lastVisible);}
     }
     node.replaceWith(fragment);
   }
+  fading=nextFading;
   if(!text)return;
   if(queue.length)queue[0]!.node.before(caret);
   else if(lastVisible?.parentNode)lastVisible.parentNode.appendChild(caret);

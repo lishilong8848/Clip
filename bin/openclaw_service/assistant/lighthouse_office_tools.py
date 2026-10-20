@@ -78,8 +78,9 @@ def _table(item, inspect=False):
             raise AssistantError('工作表名称格式无效。')
         if not sheet and len(names) > 1:
             if inspect:
-                return {'name': item['name'], 'sheets': names[:40], 'total_sheets': len(names),
-                        'truncated': len(names) > 40, 'requires_sheet': True}
+                return {'file_id': item['file_id'], 'name': item['name'], 'sheets': names[:40], 'total_sheets': len(names),
+                        'truncated': len(names) > 40, 'partial': True, 'requires_sheet': True,
+                        'coverage': 'sheet_catalog_only'}
             raise AssistantError('附件有多个工作表，请先选择工作表：' + '、'.join(names[:20]))
         sheet = sheet or names[0]
         if sheet not in names:
@@ -126,8 +127,12 @@ def _table(item, inspect=False):
                 raise AssistantError('每次分析最多5000条非空数据，请拆分文件。', 413)
         if headers is None:
             raise AssistantError('没有找到指定表头行。')
-        return {'name': item['name'], 'sheet': sheet, 'headers': headers, 'rows': data,
-                'row_count': len(data), 'note': '使用文件中保存的值；公式读取缓存，不重新计算。'}
+        from openpyxl.utils import get_column_letter
+        return {'file_id': item['file_id'], 'name': item['name'], 'sheet': sheet, 'headers': headers, 'rows': data,
+                'header_row': header_row, 'column_letters': [get_column_letter(i + 1) for i in indexes],
+                'first_data_row': data[0]['line'] if data else None, 'last_data_row': data[-1]['line'] if data else None,
+                'row_count': len(data), 'partial': False, 'coverage': 'selected_sheet',
+                'note': '使用完整所选工作表中保存的值；公式读取缓存，不重新计算。不代表读取了其他工作表。'}
     finally:
         for book in books:
             book.close()
@@ -156,6 +161,7 @@ def analyze_tables(inputs, operation, keys=None, group_by=None, value_column='',
             raise AssistantError('关键列或分组列须为各表共有的1至3个不同列名。')
     rows = [(table, row) for table in tables for row in table['rows']]
     sheets, summary = [], {'input_rows': len(rows), 'operation': operation,
+        'sources': [{k: v for k, v in table.items() if k != 'rows'} for table in tables],
         'note': '使用完整所选数据，关键列按原值及类型匹配，不删除前导零；缺失值不当作0。'}
     if operation == 'merge':
         if {'来源文件', '来源工作表', '原始行号'} & set(columns):

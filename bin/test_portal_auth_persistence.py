@@ -7,6 +7,7 @@ import unittest
 from urllib.parse import urlencode
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -260,6 +261,7 @@ class PortalAuthPersistenceTests(unittest.TestCase):
     def test_disabling_user_revokes_a_persisted_session_immediately(self):
         with auth_test_directory() as tmp:
             root = Path(tmp)
+            current_app_id = "cli_fixture_persistence"
 
             def fake_data_path(name):
                 return str(root / name)
@@ -267,12 +269,16 @@ class PortalAuthPersistenceTests(unittest.TestCase):
             with patch(
                 "lan_bitable_template_portal.portal_auth.get_data_file_path",
                 side_effect=fake_data_path,
+            ), patch(
+                "lan_bitable_template_portal.portal_auth.config",
+                SimpleNamespace(app_id=current_app_id, app_secret="fixture-only-not-a-real-secret"),
             ):
                 session_id = "disabled-user-session"
                 manager = PortalAuthManager()
                 # A realistic roster identity with HR home E so upsert validates
                 # against the trusted directory (authority comes from roster).
-                manager._account_directory_provider = lambda: {"people": {"recDisabled": {
+                manager._account_directory_provider = lambda: {"schema": 4, "app_id": current_app_id,
+                    "loaded_at": time.time(), "people": {"recDisabled": {
                     "id": "recDisabled", "name": "禁用测试用户", "scopes": ["E"],
                     "building": "E楼", "position": "运维值班员", "selectable": True,
                     "inactive": False, "needs_setup": False, "password_revision": "rev-1",
@@ -295,6 +301,7 @@ class PortalAuthPersistenceTests(unittest.TestCase):
                         "expires_at": time.time() + AUTH_SESSION_TTL_SECONDS,
                     },
                 )
+                self.assertIsNotNone(manager.get_session(session_id))
                 manager.upsert_permission_user(
                     open_id="ou_disabled_session",
                     name="禁用测试用户",

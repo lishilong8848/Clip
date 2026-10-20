@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).parent))
 from test_lighthouse_stream import Store
 from openclaw_service.assistant.lighthouse_files import LighthouseFiles
-from openclaw_service.assistant.lighthouse_artifacts import create_document, document_bytes, package_long_reply, preview_file
+from openclaw_service.assistant.lighthouse_artifacts import LONG_REPLY, create_document, document_bytes, package_long_reply, preview_file
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from lan_bitable_template_portal.feishu_assistant import FeishuMessenger, FeishuAssistant
 
@@ -71,8 +71,8 @@ class ArtifactTests(unittest.TestCase):
         self.assertLess(len(result['answer']), 200)
         file = result['output_files'][0]
         original = Path(self.files.get(ACTOR, file['id'])['path']).read_text(encoding='utf-8')
-        self.assertTrue(original.startswith(text))
-        self.assertIn('[1] 原业务记录', original)
+        self.assertEqual(original, text)
+        self.assertEqual(result['sources'], [source])
         self.assertEqual(result['plan']['status'], 'needs_input')
         self.assertEqual(result['file_ids'], ['existing', file['id']])
 
@@ -81,10 +81,33 @@ class ArtifactTests(unittest.TestCase):
         with self.assertRaises(AssistantError): create_document(self.files, ACTOR, '不允许.docx', {'paragraphs': ['身份证号：11010519491231002X']})
         self.assertFalse(self.files.store.docs)
 
-    def test_feishu_long_answer_stays_inline_without_requiring_file_upload_permission(self):
+    def test_feishu_long_answer_is_a_complete_markdown_attachment(self):
         result = {'answer': '完整名单与统计。' * 900, 'sources': [{'number': 1, 'title': '学练记录'}]}
-        self.assertEqual(package_long_reply(self.files, {**ACTOR, 'channel': 'feishu:oc_Test'}, result), result)
-        self.assertFalse(self.files.store.docs)
+        packaged = package_long_reply(self.files, {**ACTOR, 'channel': 'feishu:oc_Test'}, result)
+        self.assertLess(len(packaged['answer']), LONG_REPLY)
+        file = packaged['output_files'][0]
+        self.assertEqual(Path(self.files.get(ACTOR, file['id'])['path']).read_text(encoding='utf-8'), result['answer'])
+
+    def test_threshold_counts_unicode_characters_and_reuses_only_identical_markdown(self):
+        import hashlib
+        for char in ('中', 'a', '\U0001f31e'):
+            text = char * LONG_REPLY
+            self.assertNotIn('output_files', package_long_reply(self.files, ACTOR, {'answer': text}))
+            full = text + '\n'
+            result = package_long_reply(self.files, ACTOR, {'answer': full})
+            self.assertEqual(result['answer_document']['characters'], LONG_REPLY + 1)
+            self.assertEqual(result['answer_document']['sha256'], hashlib.sha256(full.encode()).hexdigest())
+            repeated = package_long_reply(self.files, ACTOR, {**result, 'answer': full})
+            self.assertEqual(repeated['file_ids'], result['file_ids'])
+            self.assertEqual(len(repeated['output_files']), 1)
+
+    def test_full_markdown_preview_retains_headings_lists_code_and_non_ascii(self):
+        text = '# 标题\n\n- 项目甲\n- 项目乙\n\n```python\nprint("保留中文")\n```\n' + '长段落。\n' * 18000
+        result = package_long_reply(self.files, ACTOR, {'answer': text})
+        preview = preview_file(self.files, ACTOR, result['answer_document']['id'])
+        self.assertEqual(preview['kind'], 'markdown')
+        self.assertFalse(preview['truncated'])
+        self.assertEqual(preview['text'], text)
 
     def test_long_reply_file_inherits_referenced_file_scope(self):
         result = package_long_reply(self.files, {**ACTOR, 'scopes': ['D'], 'allowed_scopes': ['A', 'D']},
@@ -92,6 +115,15 @@ class ArtifactTests(unittest.TestCase):
         identity = result['output_files'][0]['id']
         self.assertEqual(self.files.get({**ACTOR, 'scopes': ['A', 'D']}, identity)['source_scopes'], ['A', 'D'])
         with self.assertRaises(AssistantError): self.files.get({**ACTOR, 'scopes': ['D']}, identity)
+
+    def test_long_reply_attachment_cannot_escape_its_feishu_topic(self):
+        actor = {**ACTOR, 'channel': 'feishu:oc_fixture', '_feishu_topic': {'id': 'topic-a'}}
+        result = package_long_reply(self.files, actor, {'answer': '# 原话题资料\n' + '内容。' * 1500})
+        identity = result['answer_document']['id']
+        self.assertEqual(preview_file(self.files, actor, identity)['kind'], 'markdown')
+        for topic in ('topic-b', ''):
+            with self.subTest(topic=topic), self.assertRaises(AssistantError):
+                preview_file(self.files, {**actor, '_feishu_topic': {'id': topic}}, identity)
 
     def test_preview_and_download_are_owner_and_scope_isolated(self):
         file = create_document(self.files, ACTOR, 'test.docx', {'paragraphs': ['原始内容']})
@@ -116,6 +148,48 @@ class ArtifactTests(unittest.TestCase):
 
 
 class FeishuArtifactTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_markdown_delivered_to_original_topic_or_private_message_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            files = LighthouseFiles(Store(Path(root) / 'fixture.sqlite3'))
+            text = '# 完整答复\n\n- 要点\n\n```python\nprint("原文")\n```\n' + '正文。\n' * 1200
+            for chat_type in ('group', 'p2p'):
+                with self.subTest(chat_type=chat_type):
+                    actor = {**ACTOR, 'channel': 'feishu:oc_fixture'}
+                    packaged = package_long_reply(files, actor, {'answer': text})
+                    bot = object.__new__(FeishuAssistant)
+                    bot.runtime = SimpleNamespace(state_store=files.store)
+                    bot._request_context = AsyncMock(return_value=(None, actor))
+                    async def call(request, current, path, **kwargs):
+                        return {'conversation_id': 'same'} if path == 'conversation' else {'name': '完整回答.md'}
+                    bot._call = AsyncMock(side_effect=call)
+                    bot.inbox = SimpleNamespace(set=Mock())
+                    messenger = FeishuMessenger({})
+                    bot.messenger = messenger
+                    messenger.upload_file = AsyncMock(return_value='file_fixture_markdown')
+                    client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(json=lambda: {
+                        'code': 0, 'data': {'message_id': 'om_Receipt'}})))
+                    messenger.client, messenger.headers = AsyncMock(return_value=client), AsyncMock(return_value={})
+                    message = {'message_id': 'om_question', 'chat_id': 'oc_fixture', 'chat_type': chat_type,
+                               **({'root_id': 'om_topic'} if chat_type == 'group' else {})}
+                    with patch('lan_bitable_template_portal.assistant_read_consent.ReadConsent.pending', return_value=[]), \
+                            patch('lan_bitable_template_portal.feishu_assistant_questions.prepare_question_card', return_value=None):
+                        reply = await bot._turn_reply(message, None, actor, {'conversation_id': 'same'},
+                            {**packaged, 'status': 'completed'}, '说明细节')
+                    self.assertLess(len(reply['text']), 200)
+                    raw = Path(files.get(actor, packaged['answer_document']['id'])['path']).read_bytes()
+                    self.assertEqual(raw.decode(), text)
+                    with patch('lan_bitable_template_portal.feishu_assistant_files._assistant_download', AsyncMock(return_value=raw)), \
+                            patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+                        for _ in range(2):
+                            await bot._prepare_reply_files(message, reply)
+                            await messenger.send(message, reply)
+                    messenger.upload_file.assert_awaited_once_with('完整回答.md', raw)
+                    self.assertEqual(client.post.await_count, 2)
+                    posts = client.post.call_args_list
+                    self.assertTrue(all(c.args[0].endswith('/' + message.get('root_id', message['message_id']) + '/reply') for c in posts))
+                    self.assertEqual([c.kwargs['json']['msg_type'] for c in posts], ['interactive', 'file'])
+                    self.assertTrue(all(c.kwargs['json']['reply_in_thread'] for c in posts))
+
     async def test_document_workers_bound_concurrent_cpu_work(self):
         import threading
         import time

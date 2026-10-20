@@ -847,11 +847,15 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from bin.test_feishu_topic_delegation import Auth
         from contextlib import asynccontextmanager
+        from lan_bitable_template_portal import portal_auth
         from lan_bitable_template_portal.lighthouse_bridge import actor_for
         from openclaw_service.assistant.lighthouse_model import LighthouseModel
+        from upload_event_module.services.feishu_app_migration import TARGET_APP_ID
 
         await streaming.StreamTests.asyncSetUp(self)
         self.addAsyncCleanup(self.runtime.close)
+        self.settings = SimpleNamespace(app_id=TARGET_APP_ID, app_secret='fixture-current-secret')
+        self.enterContext(patch.object(portal_auth, 'config', self.settings))
         self.root = Path(self.tmp.name) / 'learning'
         self.cloud, self.sender = fixtures.FakeCloud(enabled=False), fixtures.FakeSender()
         self.service = learning.LearningService(self.root, self.cloud, self.sender)
@@ -864,6 +868,14 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
             self.auth.add(identity, ['A', 'B'] if identity == 'ou_Admin' else ['A'], ['assistant', 'learning'])
         self.auth.profiles['ou_Admin']['role'] = 'admin'
         self.auth.profiles['ou_Duty']['category'] = 'duty'
+        self.auth._account_directory_provider = lambda: {
+            'schema': 4, 'app_id': TARGET_APP_ID, 'loaded_at': time.time(),
+            'people': {'rec' + identity: {
+                'id': 'rec' + identity, 'name': identity, 'login_ids': [identity],
+                'selectable': identity not in self.auth.inactive, 'inactive': identity in self.auth.inactive,
+            } for identity in self.auth.profiles},
+        }
+        self.auth.directory_person = portal_auth.PortalAuthManager.directory_person.__get__(self.auth)
         from lan_bitable_template_portal import portal_service
         building = patch.object(portal_service, 'BUILDING_OPEN_ID_MAP', {'A': 'ou_Duty'})
         building.start()
@@ -880,12 +892,29 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         learning_routes.install_learning_routes(self.app, self.controller, self.backend)
         self.portal.catalog = PortalAPICatalog(self.app)
 
+        self.participation_params = {'period': 'last_week'}
         @asynccontextmanager
-        async def no_model(*args):
-            raise AssertionError('complete participation must not ask a model to count history samples')
-            yield
+        async def scripted_model(*args):
+            from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+            report, reference = None, ''
+            async def script(messages, info):
+                nonlocal report, reference
+                if report is None:
+                    if not any(getattr(part, 'tool_name', '') == 'learning_participants' for message in messages for part in message.parts):
+                        yield {0: DeltaToolCall(name='learning_participants', json_args=json.dumps(self.participation_params))}
+                        return
+                    receipt = messages[-1].parts[0].content
+                    report, reference = copy.deepcopy(receipt['data']), receipt['query_ref']
+                elif getattr(messages[-1].parts[0], 'tool_name', '') == 'read_query':
+                    report['participants'].extend(messages[-1].parts[0].content['data']['items'])
+                if len(report['participants']) < report['summary']['participants']:
+                    yield {0: DeltaToolCall(name='read_query', json_args=json.dumps({
+                        'query_ref': reference, 'path': ['participants'], 'offset': len(report['participants']), 'limit': 40}))}
+                    return
+                yield learning_participation_reply(report)
+            yield FunctionModel(stream_function=script)
 
-        self.engine = LighthouseModel(self.portal, model_factory=no_model)
+        self.engine = LighthouseModel(self.portal, model_factory=scripted_model)
         self.runtime.engine = self.engine
         self.actor_for = actor_for
         self.actor = await actor_for(self.controller, self.backend, self.request)
@@ -904,7 +933,8 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
     async def submit(self, question):
         return await self.runtime.submit(self.actor, self.payload(question), self.request, self.authorize)
 
-    async def test_today_repeat_and_short_followup_have_full_names_without_model(self):
+    async def test_today_repeat_and_short_followup_use_model_selected_authoritative_tool(self):
+        self.participation_params = {'start_date': '2026-10-19', 'end_date': '2026-10-19'}
         from openclaw_service.assistant import lighthouse_sources
         original = lighthouse_sources.learning_participation_request
         self.person('today', '今天的参与人')
@@ -927,6 +957,7 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.sender.calls)
 
     async def test_today_topic_followup_uses_same_authorized_complete_query(self):
+        self.participation_params = {'start_date': '2026-10-19', 'end_date': '2026-10-19'}
         from openclaw_service.assistant import lighthouse_sources
         original = lighthouse_sources.learning_participation_request
         self.person('today-topic', '话题中的答题人员')
@@ -1059,15 +1090,15 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         from lan_bitable_template_portal.portal_auth import TopicDelegations
 
         self.identity = 'ou_Low'
-        self.topic_id = TopicDelegationTests.topic_id()
+        self.topic_id = TopicDelegationTests.topic_id(app=self.settings.app_id)
         self.request.state.lighthouse_channel = 'feishu:oc_Group'
         self.request.state.feishu_topic = {'id': self.topic_id, 'context': ''}
         self.registry = self.auth._topic_delegations = TopicDelegations(self.auth, self.store)
         for identity in ('ou_Low', 'ou_Duty'):
-            self.registry.register(self.topic_id, {'id': identity, 'channel': 'feishu:oc_Group'}, {
-                'app_id': 'cli_fixture', 'chat_id': 'oc_Group', 'root_id': 'om_Root',
+            self.assertTrue(self.registry.register(self.topic_id, {'id': identity, 'channel': 'feishu:oc_Group'}, {
+                'app_id': self.settings.app_id, 'chat_id': 'oc_Group', 'root_id': 'om_Root',
                 'chat_type': 'group', 'message_id': 'om_' + identity.replace('_', ''),
-                'sender_id': 'ou_Agent' + identity.replace('_', '')})
+                'sender_id': 'ou_Agent' + identity.replace('_', '')}))
         self.authority = PortalAuthority(self.app, self.controller, self.backend,
                                          SimpleNamespace(root=self.root, lease='fixture', instance='fixture'))
         original = await self.authorize()
@@ -1134,9 +1165,9 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.auth.profiles['ou_OtherDutyB']['category'] = 'duty'
         await self.topic()
         for identity in ('ou_EngineerB', 'ou_OtherDutyB'):
-            self.registry.register(self.topic_id, {'id': identity, 'channel': 'feishu:oc_Group'}, {
-                'app_id': 'cli_fixture', 'chat_id': 'oc_Group', 'root_id': 'om_Root', 'chat_type': 'group',
-                'message_id': 'om_' + identity.replace('_', ''), 'sender_id': 'ou_Agent' + identity.replace('_', '')})
+            self.assertTrue(self.registry.register(self.topic_id, {'id': identity, 'channel': 'feishu:oc_Group'}, {
+                'app_id': self.settings.app_id, 'chat_id': 'oc_Group', 'root_id': 'om_Root', 'chat_type': 'group',
+                'message_id': 'om_' + identity.replace('_', ''), 'sender_id': 'ou_Agent' + identity.replace('_', '')}))
         self.actor = await self.authorize()
         self.assertIn('B', self.actor['scopes'])
         ack = await self.submit('上周B楼哪些人员参与答题 每周学练')
@@ -1157,7 +1188,7 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
             'context_id': self.context, 'action': 'invoke', 'payload': {'operation': operation}})
         self.assertTrue(result['ok'])
         other = Request({**self.request.scope, 'state': {**self.request.scope.get('state', {}),
-            'feishu_topic': {'id': TopicDelegationTests.topic_id(root='om_Other'), 'context': ''}}})
+            'feishu_topic': {'id': TopicDelegationTests.topic_id(app=self.settings.app_id, root='om_Other'), 'context': ''}}})
         actor = await self.actor_for(self.controller, self.backend, other)
         context = self.authority.context(other, actor)
         with self.assertRaises(AssistantError):
@@ -1168,17 +1199,18 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.paper('own', 'self')
         original = self.portal.learning_participation_answer
 
-        async def query(*args):
-            result = await original(*args)
+        async def query(*args, **kwargs):
+            result = await original(*args, **kwargs)
             self.auth.profiles['ou_Admin']['modules'] = ['assistant']
             return result
 
-        self.portal.learning_participation_answer = query
+        self.portal.learning_participation_answer = AsyncMock(side_effect=query)
         ack = await self.submit('上周哪些人员参与答题 每周学练')
         await self.finish()
         run = self.runtime.get_run(self.actor, ack['run_id'])
         self.assertEqual(run['status'], 'failed')
         self.assertNotIn('实际参与', run.get('answer', ''))
+        self.portal.learning_participation_answer.assert_awaited_once()
 
 
 if __name__ == '__main__':

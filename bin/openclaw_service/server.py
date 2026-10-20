@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import secrets
 import time
+import unicodedata
 import uuid
 from fastapi import Request
 
@@ -161,6 +162,8 @@ class Host:
                     legacy_files=legacy.parent / 'lighthouse_assistant/files' if legacy else None)
                 self.portal_bridge = PortalBridge(self)
                 self.catalog = RemoteCatalog(self.portal_bridge)
+            from lan_bitable_template_portal.feishu_identity_migration import migrate_identity_databases
+            await asyncio.to_thread(migrate_identity_databases, self.state.parent)
             descriptors = await self.portal_bridge.acall('catalog')
             await asyncio.to_thread(self.catalog.replace, descriptors)
             self.current_lease(payload)
@@ -196,15 +199,27 @@ class Host:
     async def acquire(self, payload):
         from lan_bitable_template_portal.lighthouse_runtime import account_key
         from lan_bitable_template_portal.lighthouse_ai import unprotect_key
+        from .assistant.lighthouse_context import execution_key
         lease = self.current_lease(payload)
         actor = payload.get('actor')
         if not isinstance(actor, dict) or not isinstance(actor.get('scopes'), list) or not actor['scopes'] \
                 or any(scope not in {'A', 'B', 'C', 'D', 'E', 'H', '110'} for scope in actor['scopes']):
             raise ServiceError('助手账号范围无效。', 400, 'invalid_actor')
-        key = account_key(text(actor.get('id'), 'actor', 200))
+        owner = {'id': text(actor.get('id'), 'actor', 200), 'scopes': actor['scopes']}
+        if '_execution_lane' in actor:
+            lane = actor['_execution_lane']
+            if not isinstance(lane, str) or not lane.strip() or len(lane) > 512 \
+                    or any(unicodedata.category(char).startswith('C') for char in lane):
+                raise ServiceError('助手会话范围无效。', 400, 'invalid_actor')
+            owner['_execution_lane'] = lane
+        actor = owner
+        key = account_key(execution_key(actor))
         request_id = text(payload.get('request_id'), 'request_id', 64)
+        if 'text_only' in payload and not isinstance(payload['text_only'], bool):
+            raise ServiceError('助手网关配置无效。', 400, 'invalid_profile')
+        text_only = payload.get('text_only') is True and payload.get('warm_only') is not True
         profile, definitions = payload.get('profile'), payload.get('definitions')
-        if not isinstance(profile, dict) or not isinstance(definitions, list) or not 1 <= len(definitions) <= 40:
+        if not isinstance(profile, dict) or not isinstance(definitions, list) or not 1 <= len(definitions) <= 64:
             raise ServiceError('助手网关配置无效。', 400, 'invalid_profile')
         for field in ('id', 'model', 'name', 'endpoint', 'key_cipher'):
             text(profile.get(field), field, 8192 if field == 'key_cipher' else 2000)
@@ -217,10 +232,16 @@ class Host:
             if existing and existing.get('busy'):
                 raise ServiceError('当前账号已有正在处理的会话，请稍后继续。', 409, 'account_busy')
             plugin = self.manager.root / key / 'plugin' if hasattr(self.manager, 'root') else self.state / 'accounts' / key / 'plugin'
+            catalog = None
+            if text_only:
+                catalog = plugin.with_name('plugin-catalog')
+                await asyncio.to_thread(prepare_tool_plugin,
+                    self.project / 'bin/openclaw_service/assistant/openclaw/plugin', catalog, definitions)
             await asyncio.to_thread(prepare_tool_plugin,
-                self.project / 'bin/openclaw_service/assistant/openclaw/plugin', plugin, definitions)
+                self.project / 'bin/openclaw_service/assistant/openclaw/plugin', plugin, [] if text_only else definitions)
             model = type('UserModel', (), {'unprotect': staticmethod(unprotect_key)})()
-            item = await self.manager.acquire(actor, model, profile, plugin=plugin, tool_names=names,
+            item = await self.manager.acquire(actor, model, profile, plugin=plugin,
+                **({'plugin_catalog': catalog} if text_only else {}), tool_names=[] if text_only else names,
                 bridge_token=self.bridge_key(key), bridge_url=f'http://127.0.0.1:{self.port}/bridge',
                 model_parameters=payload.get('model_parameters'))
             if self.lease is not lease:
@@ -261,7 +282,7 @@ class Host:
             if item:
                 item['busy'], item['used_at'] = payload.get('final') is not True, time.monotonic()
         reservation = self.reservations.get(payload.get('reservation'))
-        if reservation and reservation['lease'] == payload['lease'] and payload.get('final') is True:
+        if reservation and reservation['lease'] == payload['lease'] and reservation['account'] == key and payload.get('final') is True:
             self.reservations.pop(payload['reservation'], None)
             item = self.manager.accounts.get(reservation['account'])
             if item and reservation['account'] not in self.runs:
@@ -281,6 +302,9 @@ class Host:
             run = next((entry for key, entry in self.runs.items() if hmac.compare_digest(token, self.bridge_key(key))), None)
         if not run or not lease or run['lease'] != lease['id'] \
                 or payload.get('run_id') != run['run_id'] or payload.get('session_key') != run['session_key']:
+            raise ServiceError('助手工具调用已失效，未调用业务。', 403, 'run_expired')
+        item = self.manager.accounts.get(run['account'])
+        if not item or item.get('blocked') or item.get('text_only'):
             raise ServiceError('助手工具调用已失效，未调用业务。', 403, 'run_expired')
         self.current_lease({'lease': lease['id']})
         import httpx

@@ -46,6 +46,10 @@ def fake_service(store):
 
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
+        credentials = patch('upload_event_module.services.feishu_token_manager.token_manager._credentials',
+                            return_value=('cli_message_fixture', 'synthetic-message-secret'))
+        credentials.start()
+        self.addCleanup(credentials.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = LanPortalStateStore(Path(temp.name) / 'state.sqlite3')
@@ -135,6 +139,10 @@ class DeliveryTests(unittest.TestCase):
 
 class MessageWorkflowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        credentials = patch('upload_event_module.services.feishu_token_manager.token_manager._credentials',
+                            return_value=('cli_message_fixture', 'synthetic-message-secret'))
+        credentials.start()
+        self.addCleanup(credentials.stop)
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = LanPortalStateStore(Path(temp.name) / 'state.sqlite3')

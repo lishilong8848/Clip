@@ -1,6 +1,7 @@
 """Visitor auth and cabinet API boundaries, with no real cloud access."""
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +14,16 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.cabinet_guest import install_cabinet_guest_access
 from lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
+from lan_bitable_template_portal import portal_auth as auth_module
 from lan_bitable_template_portal.portal_auth import AUTH_COOKIE_NAME, PortalAuthManager, LI_SHILONG_OPEN_ID
 
 
 class CabinetGuestTests(unittest.TestCase):
     def setUp(self):
+        config = patch.object(auth_module, 'config', SimpleNamespace(
+            app_id='cli_fixtureCabinet', app_secret='synthetic-secret'))
+        config.start()
+        self.addCleanup(config.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -98,6 +104,99 @@ class CabinetGuestTests(unittest.TestCase):
         self.assertIsNone(self.auth.get_session(sid))
         self.assertEqual(self.client.get('/api/cabinet-power/overview?scope=E').status_code, 401)
 
+    def test_guest_local_reads_do_not_require_configured_feishu(self):
+        with patch.object(auth_module, 'config', SimpleNamespace(app_id='', app_secret='')):
+            sid = self.login()
+            session = self.auth.get_session(sid)
+            with patch.object(self.auth, 'directory_person', side_effect=AssertionError('guest needs no HR')):
+                self.assertFalse(self.auth.is_admin(session))
+                self.assertEqual(self.auth.public_user(session)['modules'], ['cabinet'])
+                status = self.client.get('/api/auth/status')
+                self.assertEqual(status.status_code, 200, status.text)
+                self.assertFalse(status.json()['configured'])
+                self.assertEqual(status.json()['user']['role'], 'guest')
+                self.assertEqual(self.client.get('/api/cabinet-power/overview?scope=E').status_code, 200)
+            self.assertEqual(self.auth.session_scopes(session), list('ABCDE'))
+            self.assertFalse(self.auth.scope_allowed(session, 'H'))
+            self.assertFalse(self.auth.scope_allowed(session, 'ALL'))
+
+    def test_qt_read_failure_keeps_guest_local_and_does_not_exempt_real_accounts(self):
+        sid = self.login()
+        self.auth._sessions.clear()
+        refresh = Mock(side_effect=RuntimeError('synthetic Qt settings unavailable'))
+        unavailable = SimpleNamespace(app_id='cli_fixtureCabinet', app_secret='synthetic-secret',
+                                      refresh_credentials=refresh)
+        with patch.object(auth_module, 'config', unavailable), patch.object(
+                auth_module.token_manager, '_credentials', side_effect=RuntimeError('synthetic Qt settings unavailable')):
+            session = self.auth.get_session(sid)
+            self.assertFalse(self.auth.is_admin(session))
+            self.assertEqual(self.auth.public_user(session)['modules'], ['cabinet'])
+            status = self.client.get('/api/auth/status')
+            self.assertEqual(status.status_code, 200, status.text)
+            self.assertFalse(status.json()['configured'])
+            self.assertEqual({s['value'] for s in status.json()['scope_options']}, set('ABCDE'))
+            for path in ('buildings', 'overview', 'rooms', 'racks', 'operations', 'rooms/201/layout', 'export-history'):
+                with self.subTest(path=path):
+                    result = self.client.get('/api/cabinet-power/' + path, params={'scope': 'E'})
+                    self.assertEqual(result.status_code, 200, result.text)
+            for scope in ('H', 'ALL'):
+                self.assertEqual(self.client.get('/api/cabinet-power/overview', params={'scope': scope}).status_code, 403)
+            self.assertEqual(self.client.post('/api/cabinet-power/operations', json={'scope': 'E'}).status_code, 403)
+            self.assertEqual(self.client.get('/api/assistant/pending').status_code, 403)
+            self.service.save_operation.assert_not_called()
+            self.service.upload_export.assert_not_called()
+            refresh.assert_not_called()
+
+            employee = {'user': {'open_id': 'ou_fixtureEmployee'}, 'role': 'building', 'allowed_scopes': ['E']}
+            with self.assertRaisesRegex(RuntimeError, 'synthetic Qt settings unavailable'):
+                self.auth.public_user(employee)
+            with self.assertRaisesRegex(RuntimeError, 'synthetic Qt settings unavailable'):
+                self.auth.is_admin(employee)
+            self.auth._sessions['employee-session'] = {**employee, 'expires_at': 9999999999}
+            with self.assertRaisesRegex(RuntimeError, 'synthetic Qt settings unavailable'):
+                self.auth.get_session('employee-session')
+
+    def test_guest_cannot_inherit_employee_permissions_or_extra_scopes(self):
+        sid = self.login()
+        session = self.auth.get_session(sid)
+        identity = session['user']['open_id']
+        self.auth._save_permissions_locked({'version': 2, 'default_scopes': [], 'users': {
+            identity: {'role': 'admin', 'enabled': True, 'access_version': 1,
+                       'level': 'L1', 'scopes': ['ALL'], 'modules': ['accounts', 'assistant', 'cabinet']},
+        }})
+        session['allowed_scopes'] = ['ALL', 'H']
+        self.auth._state_store.put_auth_session(self.auth._secret_hash(sid), session)
+        self.auth._sessions.clear()
+        restored = self.auth.get_session(sid)
+        with patch.object(self.auth, 'directory_person', side_effect=AssertionError('guest needs no HR')):
+            self.assertFalse(self.auth.is_admin(restored))
+            self.assertEqual(self.auth.public_user(restored)['modules'], ['cabinet'])
+        self.assertEqual(self.auth.session_scopes(restored), list('ABCDE'))
+        self.assertFalse(self.auth.scope_allowed(restored, 'H'))
+        self.assertFalse(self.auth.scope_allowed(restored, 'ALL'))
+
+    def test_qt_read_failure_cannot_replace_employee_cookie_with_guest(self):
+        identity, sid = 'ou_fixtureEmployee', 'employee-session'
+        self.auth._save_permissions_locked({'version': 2, 'default_scopes': [], 'users': {
+            identity: {'role': 'building', 'enabled': True, 'access_version': 1,
+                       'level': 'L4', 'scopes': ['E'], 'modules': ['cabinet']},
+        }})
+        original = {'user': {'open_id': identity}, 'role': 'building', 'allowed_scopes': ['E'],
+                    'created_at_ts': time.time(), 'expires_at': time.time() + 3600}
+        cookie_hash = self.auth._secret_hash(sid)
+        self.auth._state_store.put_auth_session(cookie_hash, original)
+        unavailable = SimpleNamespace(app_id='cli_fixtureCabinet', app_secret='synthetic-secret',
+            refresh_credentials=Mock(side_effect=RuntimeError('synthetic Qt settings unavailable')))
+        with patch.object(auth_module, 'config', unavailable), patch.object(self.auth, 'create_guest_session') as create:
+            with self.assertRaisesRegex(RuntimeError, 'synthetic Qt settings unavailable'):
+                self.client.post('/api/auth/guest', headers={'Cookie': AUTH_COOKIE_NAME + '=' + sid})
+            create.assert_not_called()
+        self.assertEqual(self.auth._state_store.get_auth_session(cookie_hash), original)
+        self.auth._sessions.clear()
+        restored = self.auth.get_session(sid)
+        self.assertEqual(restored['user']['open_id'], identity)
+        self.assertEqual(restored['allowed_scopes'], ['E'])
+
     def test_reads_use_existing_data_without_starting_bootstrap_or_writes(self):
         self.login()
         for path in ('buildings', 'overview', 'rooms', 'racks', 'operations', 'rooms/201/layout', 'export-history'):
@@ -171,8 +270,10 @@ class CabinetGuestTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_guest_entry_does_not_replace_employee_login(self):
-        self.auth.upsert_permission_user(open_id=LI_SHILONG_OPEN_ID, name='Fixture Admin', role='admin',
-                                         scopes=['ALL'], enabled=True, updated_by='fixture')
+        # Fixed administrators retain explicit migrated grants, not implicit defaults.
+        self.auth._save_permissions_locked({'version': 2, 'default_scopes': [], 'users': {
+            LI_SHILONG_OPEN_ID: {'name': 'Fixture Admin', 'role': 'admin', 'scopes': ['ALL'], 'enabled': True},
+        }})
         self.auth._sessions['employee-session'] = {
             'role': 'admin', 'allowed_scopes': ['ALL'], 'expires_at': 9999999999,
             'user': {'open_id': LI_SHILONG_OPEN_ID, 'name': 'Fixture Admin'},

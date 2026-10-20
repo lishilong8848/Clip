@@ -527,7 +527,8 @@ class DailyTaskChecklistTests(unittest.TestCase):
         self.assertEqual(sender.call_args.kwargs["message_uuid"], "stable-uuid")
 
     def test_interactive_sender_forwards_stable_uuid(self) -> None:
-        with patch.object(
+        from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
+        with standalone_delivery_fixture('ou_test'), patch.object(
             robot_webhook,
             "_get_tenant_access_token",
             return_value=("token", ""),

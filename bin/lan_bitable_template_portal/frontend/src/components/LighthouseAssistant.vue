@@ -1,6 +1,6 @@
 <template>
   <Teleport :to="nativeModal || 'body'">
-    <div ref="launcherLayer" class="lighthouse-launcher" :popover="nativeModal ? 'manual' : undefined">
+    <div v-show="!workspaceOpen" ref="launcherLayer" class="lighthouse-launcher" :popover="nativeModal ? 'manual' : undefined">
       <button ref="launcher" class="assistant-launcher" :aria-label="open ? '收起灯塔助手' : '打开灯塔助手'" :aria-pressed="open" title="灯塔助手" @click="onLauncherClick">
         <LighthouseBot :appearance="launcherView.appearance" :position="launcherView.position" :mood="botMood" :motion-key="userId" interactive @moved="saveBotPosition" />
       </button>
@@ -19,7 +19,7 @@
         '--artifact-panel-width': artifactWidth + 'px',
         '--notice-panel-height': conversationHeight + 'px'
       }"
-      :class="{ resizing: panelResizing, 'size-active': resizeActive, 'drag-active': dragActive, 'is-open': open, 'sidebar-visible': sidebarVisible }"
+      :class="{ resizing: panelResizing, 'size-active': resizeActive, 'drag-active': dragActive, 'is-open': open, 'sidebar-visible': sidebarVisible, 'artifact-open': !!artifactFile }"
       @keydown.esc.stop="requestPanelClose"
       @dragover="onFileDragOver"
       @drop="onFileDrop"
@@ -54,6 +54,7 @@
             <span class="header-status" :class="{ active: loading || busy || activePlans.length, warning: !loading && !!error, awaiting: headerStatus.startsWith('待你') }" role="status">{{ headerStatus }}</span></div>
           </div>
           <div class="tools">
+            <button type="button" class="icon" data-v2-navigation title="助手工作区" aria-label="助手工作区" aria-haspopup="dialog" :aria-expanded="workspaceOpen" @click="workspaceOpen = true"><FolderOpen :size="17" /></button>
             <button class="icon" :disabled="appearanceLoading" title="图标设置" aria-label="图标设置" :aria-pressed="appearanceOpen" @click="showAppearanceSettings"><Palette :size="17" /></button>
             <button class="icon" :disabled="settingsOpen" title="技能与工具" aria-label="技能与工具" :aria-pressed="skillsOpen" @click="skillsOpen = !skillsOpen"><BookOpen :size="17" /></button>
             <button v-if="state.can_manage_settings" class="icon" :disabled="busy || settingsLoading" :aria-pressed="settingsOpen" title="模型设置" aria-label="模型设置" @click="showSettings">
@@ -126,10 +127,11 @@
                 <legend>能力配置</legend>
                 <div class="capability-row">
                   <label><input type="checkbox" name="tool_calls" v-model="editProfile.tool_calls" /><span>工具调用</span></label>
-                  <label><input type="checkbox" name="image_input" v-model="editProfile.image_input" /><span>图片输入</span></label>
+                  <label :title="textOnlyProfile ? '此模型仅支持文字，可使用图片 OCR' : ''"><input type="checkbox" name="image_input" v-model="editProfile.image_input" :disabled="textOnlyProfile" :aria-describedby="textOnlyProfile ? 'image-input-limit' : undefined" /><span>图片输入</span></label>
                   <label><input type="checkbox" name="reasoning" :checked="editProfile.reasoning" @change="onReasoningToggle" /><span>思考模式</span></label>
                   <label><input type="checkbox" name="custom_protocol" v-model="editProfile.custom_protocol" /><span>自定义协议</span></label>
                 </div>
+                <p v-if="textOnlyProfile" id="image-input-limit" class="effort-label">此模型仅支持文字；图片可提取 OCR 文字，场景识别请切换 MiniMax。</p>
               </fieldset>
               <fieldset v-if="editProfile.reasoning" class="capabilities-fieldset" :disabled="busy || settingBusy">
                 <legend>思考选项</legend>
@@ -185,7 +187,7 @@
                     </ol>
                   </details>
                   <div v-if="turn.status === 'pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span><span>正在思考</span></div>
-                  <LighthouseReply v-if="(turn.answer || turn.status === 'pending') && turn.plan?.status !== 'failed'" :text="turn.answer || ''" />
+                  <LighthouseReply v-if="(turn.answer || turn.status === 'pending') && turn.plan?.status !== 'failed'" :text="turn.answer || ''" :streaming="!!turn.run_id && turn.run_id === state.active_run_id" />
                   <p v-if="!turn.answer && turn.status === 'superseded'" class="muted">已结合补充信息继续处理</p>
                   <p v-else-if="!turn.answer && turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
                   <p v-if="turn.answer && ['stopped', 'failed'].includes(turn.status)" class="muted">{{ turn.error || '回答未完成' }}</p>
@@ -269,7 +271,11 @@
                   <div class="message-actions">
                     <button v-if="turn.answer" type="button" class="icon" title="复制回答" aria-label="复制回答" @click="copyAnswer(turn)"><Copy :size="15" /></button>
                     <button type="button" class="icon" title="编辑后重新提问" aria-label="编辑后重新提问" @click="editQuestion(turn)"><Pencil :size="15" /></button>
-                    <button v-if="['failed', 'stopped'].includes(turn.status) && !sending" type="button" class="retry" @click="send(turn)"><RotateCcw :size="14" />{{ turn.status === 'stopped' ? '继续回答' : '重试' }}</button>
+                    <button v-if="turn.resume_available && turn.run_id" type="button" class="retry" data-v2-navigation :disabled="!!resumeRun || sending || state.busy" @click="resumeResearch(turn)"><Loader2 v-if="resumeRun === turn.run_id" :size="14" class="spin" /><RotateCcw v-else :size="14" />继续研究</button>
+                    <button v-else-if="['failed', 'stopped'].includes(turn.status) && !sending" type="button" class="retry" @click="send(turn)"><RotateCcw :size="14" />{{ turn.status === 'stopped' ? '继续回答' : '重试' }}</button>
+                    <span v-if="turnIsComplete(turn)" :title="synthesisReason || (playingId === turn.operation_id ? '停止播报' : '朗读回复')">
+                      <button type="button" class="icon voice-control" data-v2-navigation :aria-label="playingId === turn.operation_id ? '停止播报' : '朗读回复'" :aria-pressed="playingId === turn.operation_id" :disabled="!!synthesisReason || !['idle', 'playing'].includes(voicePhase)" @click="readReply(turn.operation_id, turn.answer)"><Square v-if="playingId === turn.operation_id" :size="15" /><Volume2 v-else :size="15" /></button>
+                    </span>
                     <button v-if="turn.status === 'completed' && !turn.plan && !state.busy" type="button" class="icon" title="重新生成回答" aria-label="重新生成回答" @click="send(turn, true)"><RefreshCw :size="15" /></button>
                     <span v-if="turn.model_name && turn.answer" class="used-model" :title="'由 ' + turn.model_name + ' 回答'">{{ turn.model_name }}</span>
                   </div>
@@ -280,6 +286,8 @@
           <button v-if="hasNewContent" type="button" class="new-content" @click="scrollBottom()"><ArrowDown :size="14" />新消息</button>
           <div v-if="error" class="assistant-error" role="alert"><span>{{ error }}</span><button v-if="!sending" class="icon" title="重新读取会话" aria-label="重新读取会话" @click="readState(true, true)"><RefreshCw :size="16" /></button></div>
           <p v-if="draftWarning" class="assistant-error" role="status">{{ draftWarning }}</p>
+          <p v-if="voiceError" class="assistant-error" role="alert">{{ voiceError }}</p>
+          <p v-if="voicePhase === 'recording' || voicePhase === 'permission' || voicePhase === 'transcribing'" class="voice-status" role="status">{{ voicePhase === 'recording' ? '正在录音 ' + voiceElapsed + ' / 120 秒' : voicePhase === 'permission' ? '等待麦克风授权' : '正在转写录音' }}</p>
           <div v-if="!loading && (!state.configured || !state.enabled)" class="config-warning">{{ state.enabled === false ? '助手暂未启用' : '请在模型设置中配置你的模型' }}</div>
 
           <form ref="composerElement" class="composer" @submit.prevent="send()">
@@ -290,6 +298,10 @@
             <div class="composer-footer">
               <div class="composer-model"><button type="button" class="icon" title="添加图片或文件" aria-label="添加图片或文件" :disabled="sending || uploading" @click="attachmentInput?.click()"><Paperclip :size="18" /></button><input ref="attachmentInput" class="sr-only" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.pdf,.txt,.md,.csv,.log,.json,.xml,.docx,.xlsx,.xlsm,.pptx,.py,.js,.ts,.jsx,.tsx,.html,.css,.sql,.sh,.ps1,.bat,.yaml,.yml,.toml,.ini,.c,.cpp,.h,.java,.go,.rs,.rb" @change="onAttachmentChange" />
               <button type="button" class="icon" title="选择技能或工具" aria-label="选择技能或工具" :disabled="sending || loading" @click="insertCommand"><Slash :size="17" /></button>
+              <button type="button" class="icon voice-control" data-v2-navigation :title="researchReason || '深入研究（复杂问题会自动使用）'" aria-label="深入研究" :disabled="sending || loading || !!researchReason" @click="insertResearch"><Search :size="17" /></button>
+              <span :title="microphoneReason || (voicePhase === 'recording' ? '停止录音并转写' : '语音输入')">
+                <button type="button" class="icon voice-control" data-v2-navigation :aria-label="voicePhase === 'recording' ? '停止录音并转写' : '语音输入'" :aria-pressed="voicePhase === 'recording'" :disabled="voicePhase !== 'recording' && (!!microphoneReason || !['idle'].includes(voicePhase) || sending || loading)" @click="toggleRecording"><Square v-if="voicePhase === 'recording'" :size="17" /><Mic v-else :size="17" /></button>
+              </span>
               <div v-if="modelNames.length" class="model-select-small">
                 <label class="sr-only" for="assistant-model">选择模型</label>
                 <select id="assistant-model" class="native-model-select" :value="state.model_name || ''" :title="state.model_name || '选择模型'" :disabled="sending || selecting" @change="switchModel(($event.target as HTMLSelectElement).value)"><option v-for="name in modelNames" :key="name" :value="name">{{ name }}</option></select>
@@ -324,6 +336,7 @@
       <ConfirmDialog :open="editSwitchOpen" title="切换编辑模型" message="当前编辑有未保存的内容，切换后这些修改将被丢弃。" tone="warning" @resolve="confirmEditSwitch" />
       <ConfirmDialog :open="settingsExitOpen" title="返回会话" message="当前编辑有未保存的内容，返回后这些修改将被丢弃。" tone="warning" @resolve="confirmSettingsExit" />
       <ConfirmDialog :open="panelExitOpen" title="收起助手" message="当前编辑有未保存的内容，收起后这些修改将被丢弃。" tone="warning" @resolve="confirmPanelExit" />
+      <LighthouseWorkspace v-if="open && workspaceOpen" :key="userId" :user-id="userId" :files="workspaceFiles" :voice-configuration="voiceConfiguration" @voice-configured="refreshVoiceCapabilities" @close="workspaceOpen = false" />
     </aside>
     <LighthouseBotSettings :open="appearanceOpen" :appearance="appearance" :theme-source="root" :target="assistantLayer || 'body'" @close="appearanceOpen = false" @saved="saveAppearance" @preview="previewAppearance = $event" />
     </div>
@@ -334,8 +347,8 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import type { Chat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, ListChecks, Loader2, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Wrench, X } from 'lucide-vue-next';
-import { requestJson, type Dict } from '../api/client';
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, FolderOpen, ListChecks, Loader2, Mic, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Volume2, Wrench, X } from 'lucide-vue-next';
+import { assistantClientId, requestJson, type Dict } from '../api/client';
 import { canUseModule } from '../api/modulePermissions';
 import { repairDeviceDependentPatch, repairDraftInputValue } from '../repairManagementUtils';
 import { navigate } from '../navigation';
@@ -354,6 +367,8 @@ import VnetSelect from './VnetSelect.vue';
 import { labelledOptions, selectedLabel, selectedValue, smallSingleChoice } from '../lighthouseSelect';
 import { readAssistantDraft, writeAssistantDraft, planDraftValues } from '../lighthouseDrafts';
 import { footerSafePosition, temporaryLauncherPlacement, type FooterRect } from '../assistantFooterAvoidance';
+import { useLighthouseVoice } from '../lighthouseVoice';
+const LighthouseWorkspace = defineAsyncComponent(() => import('./LighthouseWorkspace.vue'));
 const LighthouseSkills = defineAsyncComponent({ loader: () => import('./LighthouseSkills.vue'), loadingComponent: LoadingIndicator, delay: 0 });
 const LighthouseNoticePanel = defineAsyncComponent(() => import('./LighthouseNoticePanel.vue'));
 const LighthouseKnowledge = defineAsyncComponent({ loader: () => import('./LighthouseKnowledge.vue'), loadingComponent: LoadingIndicator, delay: 0 });
@@ -456,7 +471,7 @@ function normalizeProfileCapabilities(raw: Dict): ProfileCapabilities {
   if (effort === 'off' && (!raw.allow_reasoning_off || raw.reasoning_only)) effort = efforts[efforts.length - 1] || 'xhigh';
   return {
     tool_calls: raw.tool_calls !== false,
-    image_input: raw.image_input === true,
+    image_input: raw.image_input === true && !/^wanwu\/(?:glm|qwen|deepseek)-auto$/i.test(String(raw.model || '').trim()),
     reasoning,
     reasoning_only: reasoning && !!raw.reasoning_only,
     allow_reasoning_off: reasoning && !!raw.allow_reasoning_off,
@@ -473,6 +488,51 @@ const state = ref<Dict>({ turns: [], can_manage_settings: false }), modelSetting
 const draft = ref(''), error = ref(''), settingsError = ref('');
 const skillsOpen = ref(false), selectedCommands = ref<Dict[]>([]), commandsMenu = ref<InstanceType<typeof LighthouseCommands> | null>(null);
 const draftFiles = ref<DraftFile[]>([]), attachmentInput = ref<HTMLInputElement | null>(null);
+const workspaceOpen = ref(false), intelligence = ref<Dict | null>(null), resumeRun = ref('');
+const workspaceFiles = computed<Dict[]>(() => [...new Map([...draftFiles.value, ...(state.value.turns || []).flatMap((turn: Dict) => [...(turn.attachments || []), ...(turn.output_files || [])])].filter(file => file.id && !file.uploading && !file.error).map(file => [file.id, file])).values()]);
+const { phase: voicePhase, elapsed: voiceElapsed, error: voiceError, microphoneReason, synthesisReason, playingId, configuration: voiceConfiguration, toggleRecording, readReply, refreshCapabilities: refreshVoiceCapabilities } = useLighthouseVoice({
+  owner: () => props.userId,
+  active: () => open.value && !settingsOpen.value && !skillsOpen.value && !workspaceOpen.value,
+  onTranscript: text => {
+    const next = draft.value + (draft.value && !/\s$/.test(draft.value) ? '\n' : '') + text;
+    if (next.length > 12000) { voiceError.value = '转写后草稿超过12000字，请先缩短已有草稿再录音。'; return; }
+    draft.value = next; focusComposer();
+  },
+});
+const researchReason = computed(() => {
+  if (!intelligence.value) return '研究能力尚未确认';
+  const feature = intelligence.value.research ?? intelligence.value.features?.research ?? intelligence.value.feature_flags?.research;
+  return feature === false || feature?.available === false ? feature?.note || '深入研究暂不可用' : '';
+});
+let intelligenceController: AbortController | undefined, resumeController: AbortController | undefined;
+watch([open, () => props.userId], ([visible]) => {
+  intelligenceController?.abort(); resumeController?.abort(); resumeRun.value = ''; intelligence.value = null;
+  if (!visible || !props.userId) { workspaceOpen.value = false; return; }
+  const current = new AbortController(), owner = props.userId; intelligenceController = current;
+  void requestJson('/api/assistant/intelligence-capabilities', { signal: current.signal, timeoutMs: 12000, cache: 'no-store' }).then(data => {
+    if (!disposed && !current.signal.aborted && owner === props.userId && open.value) intelligence.value = data;
+  }).catch(() => undefined);
+}, { flush: 'sync' });
+watch(() => props.userId, () => { workspaceOpen.value = false; }, { flush: 'sync' });
+function insertResearch(): void {
+  if (researchReason.value) return;
+  if (!draft.value.startsWith('/深入研究 ')) draft.value = '/深入研究 ' + draft.value;
+  focusComposer();
+}
+async function resumeResearch(turn: Dict): Promise<void> {
+  if (!turn.resume_available || !turn.run_id || resumeRun.value || sending.value || state.value.busy) return;
+  const current = new AbortController(), owner = props.userId; resumeController = current; resumeRun.value = turn.run_id; error.value = '';
+  try {
+    const result = await call(`runs/${encodeURIComponent(turn.run_id)}/resume`, 'POST', {}, 20000, current.signal);
+    if (disposed || current.signal.aborted || owner !== props.userId || !open.value) return;
+    if (!result.run_id || !result.turn || result.conversation_id !== state.value.conversation_id) throw new Error('研究恢复响应不完整，请重新读取会话');
+    const index = state.value.turns.findIndex((item: Dict) => item.operation_id === result.turn.operation_id);
+    if (index >= 0) state.value.turns.splice(index, 1, result.turn); else state.value.turns.push(result.turn);
+    state.value.active_run_id = result.run_id; state.value.busy = true;
+    void attachStream(result.run_id); await readState(false, true);
+  } catch (cause) { if (!disposed && !current.signal.aborted && owner === props.userId) error.value = cause instanceof Error ? cause.message : '研究恢复未完成'; }
+  finally { if (resumeController === current) { resumeController = undefined; resumeRun.value = ''; } }
+}
 const planBusy = reactive<Record<string, boolean>>({}), planErrors = reactive<Record<string, string>>({});
 const planOptionStates = reactive<Record<string, { loading: boolean; error: string }>>({});
 function isPlanBusy(plan: Dict): boolean { return !!planBusy[plan.id]; }
@@ -552,6 +612,8 @@ watch(() => [...planTurns.value.values()].map(turn => turn.plan), plans => {
 });
 const clearOpen = ref(false);
 const editProfile = ref<EditProfile | null>(null), editingExisting = ref(false);
+const textOnlyProfile = computed(() => /^wanwu\/(?:glm|qwen|deepseek)-auto$/i.test(editProfile.value?.model.trim() || ''));
+watch(() => editProfile.value?.model, () => { if (textOnlyProfile.value && editProfile.value) editProfile.value.image_input = false; });
 const deleteModelOpen = ref(false), deleteTarget = ref<Dict | null>(null);
 const editSwitchOpen = ref(false);
 const settingsExitOpen = ref(false), panelExitOpen = ref(false);
@@ -898,6 +960,12 @@ function onThreadScroll(): void { if (isNearBottom()) hasNewContent.value = fals
 function isNearBottom(): boolean {
   return !thread.value || thread.value.scrollHeight - thread.value.scrollTop - thread.value.clientHeight < 80;
 }
+function preservePendingTurn(turn: Dict, live?: Dict): void {
+  if (turn.status !== 'pending' || !live || live.run_id !== turn.run_id) return;
+  if (live.status !== 'pending' && !live.client_pending) { Object.assign(turn, live); return; }
+  if (!String(turn.answer || '').startsWith(live.answer || '')) turn.answer = live.answer;
+  if (Number(live.process?.at(-1)?.at || 0) > Number(turn.process?.at(-1)?.at || 0)) turn.process = live.process;
+}
 function replaceState(result: Dict): void {
   const previousTurns = new Map<string, Dict>((state.value.turns || []).map((turn: Dict) => [turn.operation_id, turn]));
   const contentChanged = (result.turns || []).some((turn: Dict) => {
@@ -921,9 +989,7 @@ function replaceState(result: Dict): void {
   const pending = changedConversation ? [] : (state.value.turns || []).filter((turn: Dict) => turn.client_pending && !received.has(turn.operation_id));
   for (const turn of result.turns || []) {
     const live = changedConversation ? undefined : previousTurns.get(turn.operation_id);
-    if (!live || live.run_id !== turn.run_id) continue;
-    if (turn.status === 'pending' && (live.answer || '').length > (turn.answer || '').length) turn.answer = live.answer;
-    if (turn.status === 'pending' && Number(live.process?.at(-1)?.at || 0) > Number(turn.process?.at(-1)?.at || 0)) turn.process = live.process;
+    preservePendingTurn(turn, live);
   }
   const older = changedConversation ? [] : (state.value.turns || []).filter((turn: Dict) => turn.history_loaded && !received.has(turn.operation_id));
   result.turns = [...older, ...(result.turns || []), ...pending].sort((a: Dict, b: Dict) => Number(a.at || 0) - Number(b.at || 0));
@@ -1073,6 +1139,7 @@ async function send(retry?: Dict, regenerate = false, clarification?:{operationI
   saveDrafts();
   scrollBottom();
   scheduleRead();
+  const previousRun = state.value.active_run_id;
   try {
     const result = await call('messages', 'POST', { question, commands: submittedCommands, file_ids: attachments.map((file: Dict) => file.id), preview_file_id: previewFile?.id || '', operation_id: operation, attempt_id: attempt, conversation_id: state.value.conversation_id, ...(clarificationOperationId?{clarification_operation_id:clarificationOperationId}:{}) }, 20000);
     if (disposed) return;
@@ -1080,7 +1147,7 @@ async function send(retry?: Dict, regenerate = false, clarification?:{operationI
     forgetOutgoing(operation, attempt);
     for (const turn of state.value.turns) {
       if (turn.operation_id === operation) Object.assign(turn, result.turn, { client_pending: false });
-      else if (turn.status === 'pending') turn.status = 'superseded';
+      else if (previousRun && turn.run_id === previousRun && turn.status === 'pending') turn.status = 'superseded';
     }
     state.value.active_run_id = result.run_id;
     state.value.busy = result.turn.status === 'pending';
@@ -1137,14 +1204,14 @@ function renderStream(): void {
     const turn = state.value.turns?.find((item: Dict) => item.run_id === metadata?.run_id);
     if (!turn || turn.status !== 'pending') continue;
     const answer = message.parts.filter(part => part.type === 'text').map(part => part.text).join('');
-    if (answer !== turn.answer && answer.length >= (turn.answer || '').length) { turn.answer = answer; changed = true; }
+    if (answer !== turn.answer && answer.startsWith(turn.answer || '')) { turn.answer = answer; changed = true; }
   }
   if (changed) { if (follow) scrollBottom(); else hasNewContent.value = true; }
 }
 // The SDK replaces the active message for every chunk; do not traverse all its parts.
 watch(() => { const messages = streamChat.value?.messages; return messages?.[messages.length - 1]; }, () => {
   lastStreamUpdateAt = performance.now();
-  if (!document.hidden && !renderTimer) renderTimer = window.setTimeout(() => { renderTimer = 0; renderStream(); }, 160);
+  if (!document.hidden && !renderTimer) renderTimer = window.setTimeout(() => { renderTimer = 0; renderStream(); }, 32);
 });
 function resumeStreamRendering(): void { if (!document.hidden && open.value) { renderStream(); scheduleRead(); } }
 async function attachStream(runId: string): Promise<void> {
@@ -1158,7 +1225,7 @@ async function attachStream(runId: string): Promise<void> {
   const client = new ChatClient<UIMessage>({
     id: String(state.value.conversation_id),
     transport: new DefaultChatTransport({
-      api: '/api/assistant/messages', credentials: 'same-origin',
+      api: '/api/assistant/messages', credentials: 'same-origin', headers: async () => ({ 'X-Lighthouse-Client': await assistantClientId() }),
       prepareReconnectToStreamRequest: () => ({ api: `/api/assistant/runs/${encodeURIComponent(runId)}/stream` }),
     }),
     onData: part => {
@@ -1173,7 +1240,8 @@ async function attachStream(runId: string): Promise<void> {
       } else if (part.type === 'data-turn' && turn) {
         const follow = isNearBottom();
         const newFiles = (value.output_files?.length || 0) > (turn.output_files?.length || 0);
-        Object.assign(turn, value);
+        const incoming = { ...value }; preservePendingTurn(incoming, turn);
+        Object.assign(turn, incoming);
         if (newFiles) { if (follow) scrollBottom(); else hasNewContent.value = true; }
       }
     },
@@ -2453,6 +2521,7 @@ onMounted(async () => {
   if (open.value) await readState(true, true);
 });
 onBeforeUnmount(() => {
+  intelligenceController?.abort(); resumeController?.abort();
   saveDrafts();
   window.removeEventListener('pagehide', saveDrafts);
   document.removeEventListener('visibilitychange', resumeStreamRendering);
@@ -2564,6 +2633,10 @@ onBeforeUnmount(() => {
 .assistant-sidebar :deep(.lighthouse-knowledge) { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; opacity: 0; transform: translateX(-8px); transition: opacity 180ms ease, transform 320ms cubic-bezier(.22, 1, .36, 1); }
 .assistant-sidebar.expanded :deep(.lighthouse-knowledge) { opacity: 1; transform: translateX(0); }
 @media (max-width: 700px) { .assistant-shell { height: min(var(--notice-panel-height, 700px), calc(100dvh - max(112px, env(safe-area-inset-bottom) + 88px))); } }
+@media (max-width: 700px) {
+  .artifact-open .assistant-shell > .assistant-panel { display: none; }
+  .artifact-open .assistant-shell > :deep(.artifact-preview) { width: calc(100vw - 50px); border-left: 0; }
+}
 @media (prefers-reduced-motion: reduce) { .assistant-shell, .assistant-sidebar, .assistant-sidebar :deep(.notice-panel), .assistant-sidebar :deep(.lighthouse-knowledge) { transition: none; } }
 .lighthouse :deep(.confirm-backdrop) { background: rgba(12, 18, 14, .5); backdrop-filter: blur(4px); }
 .lighthouse :deep(.confirm-modal) { background: var(--lh-surface); border-color: var(--lh-border-strong); border-radius: 12px; color: var(--lh-charcoal); box-shadow: 0 20px 70px rgba(0, 0, 0, .3); }
@@ -2939,4 +3012,7 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
   .model-card .list-name, .model-card .list-model { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
   .model-actions { margin-left: auto; }
 }
+.voice-status { margin: 4px 14px; color: var(--lh-muted); font-size: 12px; }
+.voice-control[aria-pressed="true"] { color: var(--lh-danger); background: var(--lh-danger-soft); }
+@media (max-width: 480px) { .assistant-header { flex-wrap: wrap; gap: 4px; } .assistant-header .tools { margin-left: auto; } .voice-control { min-width: 36px; min-height: 44px; } .composer-footer { flex-wrap: wrap; row-gap: 6px; } }
 </style>

@@ -1,6 +1,7 @@
 """Bounded document creation and content previews. Generated code is never executed."""
 import asyncio
 import io
+import hashlib
 import json
 import math
 import re
@@ -172,19 +173,27 @@ def package_long_reply(files, actor, result):
     if len(text) <= LONG_REPLY:
         return result
     check_content(text)
-    if str(actor.get('channel') or '').startswith('feishu:'):
-        # Feishu delivers long answers in resumable message parts, not hidden attachments.
-        return result
-    sources = result.get('sources') or []
-    source_lines = ['\n\n## 参考资料'] if sources else []
-    for source in sources:
-        source_lines.append(f"[{source.get('number', '')}] {source.get('title', '')} {source.get('url', '')}")
-    full = text + '\n'.join(source_lines)
-    check_content(full)
     scopes = sorted(set(actor['scopes']) | set(result.get('_artifact_source_scopes') or []))
-    file = files.upload(actor, '完整回答.md', full.encode('utf-8'), extract=False, source_scopes=scopes)
-    return {**result, 'answer': '内容较长，已整理为「完整回答.md」，可在文件预览中查看或下载。',
-            'output_files': [*(result.get('output_files') or []), file],
+    content = text.encode('utf-8')
+    digest = hashlib.sha256(content).hexdigest()
+    file = None
+    for saved in result.get('output_files') or []:
+        if str(saved.get('name', '')).lower().endswith('.md'):
+            try:
+                item = files.get(actor, saved['id'])
+                if set(scopes) <= set(item.get('source_scopes', [])) and hashlib.sha256(Path(item['path']).read_bytes()).hexdigest() == digest:
+                    file = saved
+                    break
+            except (AssistantError, OSError):
+                continue
+    if file is None:
+        file = files.upload(actor, '完整回答.md', content, extract=False, source_scopes=scopes)
+    outputs = list(result.get('output_files') or [])
+    if not any(saved.get('id') == file['id'] for saved in outputs):
+        outputs.append(file)
+    return {**result, 'answer': f'回复超过{LONG_REPLY}字符，完整内容已保存为「{file["name"]}」，请打开附件查看。',
+            'answer_document': {'id': file['id'], 'characters': len(text), 'threshold': LONG_REPLY, 'sha256': digest},
+            'output_files': outputs,
             'file_ids': list(dict.fromkeys([*(result.get('file_ids') or []), file['id']]))}
 
 
@@ -194,10 +203,11 @@ def preview_file(files, actor, identity):
     suffix = path.suffix.lower()
     result = {'id': identity, 'name': item['name'], 'kind': 'download', 'truncated': False}
     if suffix in CODE_EXTENSIONS | {'.txt', '.md', '.csv', '.log', '.json', '.xml'}:
+        limit = MAX_CONTENT if suffix == '.md' else PREVIEW_CHARS
         with path.open('rb') as source:
-            content = source.read(PREVIEW_CHARS + 1)
+            content = source.read(limit + 1)
         result.update(kind='html' if suffix == '.html' else 'markdown' if suffix == '.md' else 'text',
-                      text=content[:PREVIEW_CHARS].decode('utf-8-sig', errors='replace'), truncated=len(content) > PREVIEW_CHARS)
+                      text=content[:limit].decode('utf-8-sig', errors='replace'), truncated=len(content) > limit)
     elif suffix in {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.pdf'}:
         result['kind'] = 'pdf' if suffix == '.pdf' else 'image'
     elif suffix in {'.docx', '.xlsx', '.xlsm', '.pptx'}:

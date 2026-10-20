@@ -13,11 +13,13 @@ import sys
 import time
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from ..gateway_log import GatewayLog
 from ..protocol import MAX_CONCURRENT_ACCOUNTS, OPENCLAW_MAX_CONCURRENT
 from ..protocol import atomic_json
 from .lighthouse_ai import AssistantError
+from .lighthouse_context import execution_key
 from .lighthouse_startup_log import emit as startup_log
 
 
@@ -89,8 +91,10 @@ def model_provider_error(status, body=b''):
         if code in {'context_length_exceeded', 'context_window_exceeded', 'max_context_length'} or \
                 'maximum context length' in message or 'prompt is too long' in message or \
                 any(term in message for term in ('context length', 'context window')) and \
-                any(term in message for term in ('exceed', 'too long', 'limit')):
+                any(term in message for term in ('exceed', 'too long', 'longer than', 'limit')):
             return {'code': 'context_length_exceeded', 'message': 'Context length exceeded'}
+        if 'embedding' in message and re.search(r'not.*embedding|is.embedding|embedding.*(?:only|unsupported)', message):
+            return {'code': 'embedding_unsupported', 'message': 'Chat models cannot provide embeddings'}
         if code in {'vision_unsupported', 'unsupported_image', 'image_not_supported', 'invalid_image', 'invalid_image_url', 'invalid_image_format'} or \
                 re.search(r'image|vision|multimodal|multi.modal|图像|图片|视觉', message) and \
                 re.search(r'unsupported|not support|invalid|not enabled|disabled|不支持|无效|未启用', message):
@@ -126,6 +130,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
     unlimited sentinel 0 is never used here; pass a positive runtime value.
     """
     entries, model_groups = {}, {'lighthouse': []}
+    from .lighthouse_context import model_context_limit
     for key, item in accounts.items():
         profile = item['profile']
         provider = model_provider_id(profile)
@@ -134,7 +139,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
         model = {
             "id": item['agent_id'], "name": 'Lighthouse account model', "reasoning": capabilities["reasoning"],
             "input": ["text", "image"] if capabilities["image_input"] else ["text"],
-            "contextWindow": int(profile.get("context_window") or 64000), "maxTokens": 5000,
+            "contextWindow": model_context_limit(profile) if 'context_window' in profile else 64000, "maxTokens": 5000,
             "compat": {"maxTokensField": "max_tokens", "supportsDeveloperRole": False},
         }
         if capabilities["reasoning"]:
@@ -147,7 +152,9 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
             'agentDir': str(item['root'] / 'agent'), 'model': ref,
             'modelPolicy': {'allow': [ref]}, 'skills': [],
         }
-        if not capabilities["tool_calls"]:
+        if item.get('text_only'):
+            entries[item['agent_id']]['tools'] = {'deny': ['*']}
+        elif not capabilities["tool_calls"]:
             entries[item['agent_id']]['tools'] = {'deny': list(tool_names)}
         if item.get('model_parameters'):
             entries[item['agent_id']]['models'] = {ref: {'params': item['model_parameters']}}
@@ -221,6 +228,7 @@ class OpenClawRuntime:
         self.http = None
         self.http_lock = asyncio.Lock()
         self.plugin_hash = None
+        self.tool_names = None
 
     async def prepare(self, *, progress=lambda _: None):
         """Verify/install dependencies before a question, without account credentials."""
@@ -272,15 +280,19 @@ class OpenClawRuntime:
         finally:
             self.starting.pop(task, None)
 
-    async def _acquire(self, actor, model, profile, *, plugin=None, tool_names=(), bridge_token="", bridge_url="", model_parameters=None, progress=lambda _: None):
-        key = account_key(actor["id"])
+    async def _acquire(self, actor, model, profile, *, plugin=None, plugin_catalog=None, tool_names=(), bridge_token="", bridge_url="", model_parameters=None, progress=lambda _: None):
+        identity = execution_key(actor)
+        key = account_key(identity)
         async with self.locks.setdefault(key, asyncio.Lock()):
             if self.closing:
                 raise AssistantError("助手服务正在关闭。", 503)
-            plugin_hash = hashlib.sha256(b''.join(file.read_bytes() for file in sorted(Path(plugin).iterdir()) if file.is_file())).hexdigest() if plugin else ''
+            shared_plugin = plugin_catalog or plugin
+            plugin_hash = hashlib.sha256(b''.join(file.read_bytes() for file in sorted(Path(shared_plugin).iterdir()) if file.is_file())).hexdigest() if shared_plugin else ''
+            catalog_names = [item['name'] for item in json.loads((Path(plugin_catalog) / 'tools.json').read_text(encoding='utf-8'))] if plugin_catalog else list(tool_names)
+            text_only = plugin_catalog is not None and not tool_names
             fingerprint = hashlib.sha256(json.dumps({"profile": profile, "scopes": actor.get("allowed_scopes", actor["scopes"]),
                 "tools": list(tool_names), "plugin": plugin_hash, "bridge_url": bridge_url,
-                "bridge_token": bridge_token, "parameters": model_parameters}, sort_keys=True).encode()).hexdigest()
+                "bridge_token": bridge_token, "parameters": model_parameters, 'text_only': text_only}, sort_keys=True).encode()).hexdigest()
             existing = self.accounts.get(key)
             if existing and existing.get('blocked'):
                 await self._recover_blocked(existing)
@@ -318,12 +330,14 @@ class OpenClawRuntime:
                 except Exception:
                     raise AssistantError('当前系统无法读取本人模型凭证，请在模型设置中重新配置。', 503) from None
                 from .lighthouse_ai import model_capabilities
-                config_fingerprint = hashlib.sha256(json.dumps({'context': profile.get('context_window') or 64000,
+                from .lighthouse_context import model_context_limit
+                config_fingerprint = hashlib.sha256(json.dumps({'context': model_context_limit(profile),
                     'capabilities': model_capabilities(profile), 'plugin': plugin_hash, 'tools': list(tool_names),
                     'provider': model_provider_id(profile),
-                    'parameters': model_parameters}, sort_keys=True).encode()).hexdigest()
-                item = {"key": key, "agent_id": agent_id(actor['id']), "root": root, "fingerprint": fingerprint,
+                    'parameters': model_parameters, 'text_only': text_only}, sort_keys=True).encode()).hexdigest()
+                item = {"key": key, "agent_id": agent_id(identity), "root": root, "fingerprint": fingerprint,
                         'config_fingerprint': config_fingerprint,
+                        'text_only': text_only,
                         "used_at": time.monotonic(), "busy": True, "profile": dict(profile),
                         "model_key": model_key, "model_parameters": model_parameters}
                 if existing and existing.get('configured') and not existing.get('stopped') and existing.get('config_fingerprint') == config_fingerprint:
@@ -332,7 +346,8 @@ class OpenClawRuntime:
                 self.starting[asyncio.current_task()] = item
                 if self.startup is None:
                     self.plugin_hash = plugin_hash
-                    self.startup = asyncio.create_task(self._start_shared(node, entry, plugin, tool_names, bridge_url))
+                    self.tool_names = catalog_names
+                    self.startup = asyncio.create_task(self._start_shared(node, entry, shared_plugin, catalog_names, bridge_url))
                 startup = self.startup
             # One cold startup is shared; cancelling one caller cannot cancel
             # the process startup awaited by the other nineteen accounts.
@@ -352,6 +367,7 @@ class OpenClawRuntime:
 
     async def _write_configuration(self, tool_names, accounts=None):
         gateway = self.gateway
+        tool_names = self.tool_names if self.tool_names is not None else tool_names
         config = build_configuration(gateway['root'], self.accounts if accounts is None else accounts, gateway['port'], model_url=self.model_url(),
                                      plugin=gateway['plugin'], tool_names=tool_names, max_concurrent=self._openclaw_max_concurrent)
         digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
@@ -614,17 +630,25 @@ class OpenClawRuntime:
         if not item or item.get('blocked') or not item.get('busy') or alias != item['agent_id']:
             return JSONResponse({'error': {'message': 'Model identity mismatch'}}, status_code=403)
         payload['model'] = item['profile']['model']
+        if unquote(urlsplit(item['profile']['endpoint']).path).rstrip('/').lower().endswith('/embeddings'):
+            return JSONResponse({'error': {'code': 'embedding_unsupported',
+                'message': 'Chat models cannot provide embeddings'}}, status_code=400)
         from .lighthouse_ai import model_capabilities, model_reasoning_options
         capabilities = model_capabilities(item['profile'])
         # Enforce the account profile even if the SDK cached another effort or tool policy.
         for name in ('reasoning_effort', 'thinking', 'enable_thinking'):
             payload.pop(name, None)
         payload.update(model_reasoning_options(item['profile']))
-        if not capabilities['tool_calls']:
+        if item.get('text_only') or not capabilities['tool_calls']:
             for name in ('tools', 'tool_choice', 'parallel_tool_calls'):
                 payload.pop(name, None)
         if isinstance(payload.get('messages'), list):
             for message in payload['messages']:
+                if isinstance(message, dict) and isinstance(message.get('content'), list) and any(
+                        isinstance(part, dict) and part.get('type') in {'input_audio', 'audio', 'input_video', 'video'}
+                        for part in message['content']):
+                    return JSONResponse({'error': {'code': 'unsupported_media',
+                        'message': 'Audio/video input is not supported by this chat endpoint; use configured speech tools.'}}, status_code=400)
                 if isinstance(message, dict) and not capabilities['image_input'] and isinstance(message.get('content'), list):
                     message['content'] = [part for part in message['content'] if not isinstance(part, dict)
                                           or part.get('type') not in {'image_url', 'input_image', 'image'}]
@@ -634,11 +658,19 @@ class OpenClawRuntime:
                 message.get('role') == 'system' and isinstance(message.get('content'), str) and
                 message['content'].startswith('You are a context summarization assistant.') for message in messages):
             item['compaction_run_id'] = item['run_id']
-        from .lighthouse_context import compact_model_messages
+        from .lighthouse_context import bound_model_payload, compact_model_messages
         compacted = compact_model_messages(payload)
         if compacted is not payload and item.get('run_id'):
             item['compaction_run_id'] = item['run_id']
         payload = compacted
+        try:
+            bounded = bound_model_payload(payload, item['profile'])
+        except AssistantError as exc:
+            return JSONResponse({'error': {'code': 'context_length_exceeded' if exc.category == 'model_context' else 'model_request_rejected',
+                'message': 'Context length exceeded' if exc.category == 'model_context' else 'Model provider rejected request'}}, status_code=exc.status)
+        if bounded.get('messages') != payload.get('messages') and item.get('run_id'):
+            item['compaction_run_id'] = item['run_id']
+        payload = bounded
         for attempt in range(2):
             try:
                 client = await self.model_client()
@@ -673,7 +705,11 @@ class OpenClawRuntime:
                 budget = max(2000, len(json.dumps(payload.get('messages', []), ensure_ascii=False)) // 2)
                 compacted = compact_model_messages(payload, budget)
                 if compacted is not payload:
-                    payload = compacted
+                    try:
+                        payload = bound_model_payload(compacted, item['profile'])
+                    except AssistantError:
+                        return JSONResponse({'error': {'code': 'context_length_exceeded',
+                            'message': 'Context length exceeded'}}, status_code=413)
                     if item.get('run_id'):
                         item['compaction_run_id'] = item['run_id']
                     continue

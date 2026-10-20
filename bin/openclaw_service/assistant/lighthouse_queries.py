@@ -1,8 +1,10 @@
 """Business meanings and exact event counts for the assistant, not business writes."""
 import asyncio
 import calendar
+import copy
 import datetime as dt
 import html
+import json
 import re
 import time
 from typing import Literal
@@ -151,19 +153,47 @@ def past_action_question(text):
 
 def query_result_state(result):
     """Describe only the returned page; an empty page is not an empty database."""
-    if not result.get("ok"):
+    if not result.get("ok") or result.get("available") is False:
         return "unavailable", "此次读取未成功，不代表没有记录；权限错误不要重试扩大范围。"
     raw = result.get("_raw", result.get("data"))
-    if result.get("scope_warning") or result.get("truncated") and "_raw" not in result:
-        return "partial", "结果不完整，不能按已展示条数报全量或回答没有记录。"
     learning_note = (" 学练history含待答题单，total是题单条数，不是参与人数；参与名单及人数须查询GET /api/learning/profile（view=participation），不能从history推算。"
                      if result.get("api_id") == "GET /api/learning/history" else "")
+    if result.get("scope_warning") or result.get("complete") is False or result.get("truncated") and "_raw" not in result:
+        return "partial", "结果不完整，不能按已展示条数报全量或回答没有记录。" + learning_note
     if isinstance(raw, dict):
+        if raw.get("available") is False:
+            return "unavailable", "此次资料未取得，不代表没有记录。" + learning_note
+        collected = raw.get("query_completeness")
+        if isinstance(collected, dict):
+            lists = collected.get("lists")
+            if (collected.get("complete") is not True or not isinstance(lists, dict) or not lists
+                    or any(not isinstance(item, dict) or item.get("complete") is not True
+                           or type(item.get("count")) is not int or item["count"] < 0
+                           or item["count"] != item.get("declared_total") or item["count"] != item.get("loaded_count")
+                           or not isinstance(raw.get(key), list) or len(raw[key]) != item["count"] for key, item in lists.items())):
+                return "partial", "分页尚未完整读取，只能报告已知记录下限；完整数量未知。" + learning_note
+            if lists and all(item.get("count") == 0 for item in lists.values()):
+                return "empty", "本次授权范围和筛选条件已完整读取，结果确认为零；不代表其他范围或日期没有记录。" + learning_note
+            return "found", "已完整读取本次筛选的记录；记录数、去重人数、作答题次和题目数量须分别报告。" + learning_note
+        if raw.get("snapshot_exists") is False or raw.get("source_snapshot_ready") is False:
+            return "unavailable", "来源快照尚未就绪，不能把资料缺失解释为零条。" + learning_note
+        if raw.get("warnings") or raw.get("schema_warnings"):
+            return "partial", "来源存在资料警告，完整数量未知；不能把缺失资料当零条。" + learning_note
+        if raw.get("list_complete") is False:
+            return "partial", "当前名单未完整保留；统计完整性另看complete和count，不能把已展示样本当完整名单。" + learning_note
+        for key in ("records", "ongoing"):
+            rows, meta = raw.get(key), raw.get(key + "_pagination")
+            if isinstance(rows, list) and isinstance(meta, dict) and (
+                    meta.get("has_more") or type(meta.get("total")) is int and meta["total"] > len(rows)
+                    or type(meta.get("page")) is int and meta["page"] > 1):
+                return "partial", "当前工作台列表只是一页，请保留楼栋、类型及日期条件补读缺失页；计划与进行中通告分别计数。"
         if (raw.get("complete") is False or raw.get("truncated") or raw.get("has_more")
                 or raw.get("next_offset") is not None):
             return "partial", "资料尚未读取完整，保留原查询条件继续读取后页；不能按当前名单或total推断完整人数。" + learning_note
         lists = [raw[key] for key in ("records", "items", "rows", "tasks", "pending", "ongoing", "participants") if isinstance(raw.get(key), list)]
         if lists and not any(lists):
+            if raw.get("complete") is True and type(raw.get("total")) is int and raw["total"] == 0 and raw.get("page", 1) == 1:
+                return "empty", "本次条件已完整读取，结果确认为零；范围与来源日期仍以本次查询为准。" + learning_note
             return "empty_page", "本次筛选或当前页没有记录，不等于全库没有。先检查分页、日期和业务分类；若有search/keyword可换一次核心词，必须保留用户的楼栋、日期、状态约束。不要反复调用同一查询。" + learning_note
         if lists:
             if (type(raw.get("total")) is int and raw["total"] > max(map(len, lists))
@@ -172,6 +202,225 @@ def query_result_state(result):
                 return "partial", "当前只取得部分记录，须按原条件读取完整分页；total只代表接口声明的记录数，不是完整名单或去重人数。" + learning_note
             return "found", "有候选记录，请核对标题和条件；完整数量以接口统计或完整分页为准。" + learning_note
     return "read", "已取得本次接口结果；不要把资料目录、字段配置或样本长度当业务数量。"
+
+
+# Only native list contracts whose pagination has been checked here may be followed.
+# (list key, pagination key, position parameter, size parameter, count unit)
+QUERY_PAGE_SCHEMAS = {
+    "GET /api/workbench": (
+        ("records", "records_pagination", "records_page", "records_page_size", "source_records"),
+        ("ongoing", "ongoing_pagination", "ongoing_page", "ongoing_page_size", "notices"),
+    ),
+    "GET /api/repair-management/records": (("records", "", "offset", "limit", "repair_records"),),
+    "GET /api/assistant/work-orders": (("items", "", "page", "page_size", "work_orders"),),
+    "GET /api/assistant/question-bank": (("items", "", "page", "page_size", "question_versions"),),
+    "GET /api/learning/history": (("items", "", "page", "page_size", "papers"),),
+    "GET /api/learning/papers": (("items", "", "page", "page_size", "papers"),),
+}
+
+
+async def collect_query_pages(operation, invoke, *, first_result=None, max_pages=20,
+                              max_items=2000, timeout=35):
+    """Complete a native list through the caller's scoped/authenticated read callback.
+
+    Returns the ordinary result envelope, retaining full lists in _raw and a safe
+    display sample in data. first_result must be THIS operation's freshly authorized
+    result from this turn, never another user's or a persisted/global cached result.
+    There is no cache here: the callback owns authentication on every missing page.
+    Limits apply across all requested lists; authorization failures discard prior data.
+    """
+    op = operation.model_dump() if isinstance(operation, PortalOperation) else copy.deepcopy(operation)
+    op = PortalOperation.model_validate(op).model_dump()
+    specs = QUERY_PAGE_SCHEMAS.get(op["api_id"])
+    if not specs or op["body"] or op["files"] or op["path_params"]:
+        raise AssistantError("此接口没有受支持的只读完整分页规则，请使用原查询或read_query。", 422)
+    if any(key in op["params"] and str(op["params"][key]).lower() not in {"", "0", "false", "none"}
+           for key in ("refresh", "force_refresh", "reload", "force_reload", "sync")):
+        raise AssistantError("完整读取不能触发管理刷新或业务同步。", 403)
+    if (type(max_pages) is not int or not 1 <= max_pages <= 20
+            or type(max_items) is not int or not 1 <= max_items <= 2000
+            or isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 35):
+        raise AssistantError("完整分页读取预算无效。")
+    if op["api_id"] == "GET /api/workbench" and op["params"].get("sections"):
+        sections = {section.strip() for section in str(op["params"]["sections"]).split(",")}
+        specs = tuple(spec for spec in specs if spec[0] in sections)
+        if not specs:
+            raise AssistantError("所选工作台区段不支持完整列表读取。", 422)
+    if first_result is not None and not isinstance(first_result, dict):
+        raise AssistantError("已有分页结果格式无效。", 422)
+    for _, pagination, position, size_param, _ in specs:
+        initial = (first_result or {}).get("_raw", (first_result or {}).get("data"))
+        initial_meta = initial.get(pagination) if pagination and isinstance(initial, dict) else initial
+        default_size = initial_meta.get("page_size", initial_meta.get("limit")) if isinstance(initial_meta, dict) else None
+        op["params"].setdefault(size_param, default_size if type(default_size) is int and default_size > 0 else 40)
+        for param, minimum in ((position, 0 if position == "offset" else 1), (size_param, 1)):
+            value = op["params"].get(param, minimum)
+            if isinstance(value, str) and value.isascii() and value.isdigit():
+                value = int(value)
+            if type(value) is not int or value < minimum:
+                raise AssistantError("分页位置或大小无效。", 422)
+            op["params"][param] = value
+    deadline, calls, item_count = time.monotonic() + timeout, int(first_result is not None), 0
+    base, envelope, summaries, freshness, warnings = {}, {}, {}, [], []
+    snapshot = None
+
+    def raw_page(result):
+        if not isinstance(result, dict):
+            raise AssistantError("分页未返回有效读取结果。", 502)
+        if not result.get("ok") or result.get("available") is False:
+            raise AssistantError(safe_text(result.get("error") or "分页读取失败。"), result.get("status") or 503)
+        if result.get("complete") is False or result.get("scope_warning") or result.get("truncated") and "_raw" not in result:
+            raise AssistantError("分页范围不完整或内容已截断，完整数量未知。", 502)
+        data = result.get("_raw", result.get("data"))
+        if (not isinstance(data, dict) or data.get("available") is False or data.get("complete") is False or data.get("truncated")
+                or data.get("snapshot_exists") is False or data.get("source_snapshot_ready") is False):
+            raise AssistantError("来源快照缺失或不完整，不能按零条统计。", 503)
+        if data.get("warnings") or data.get("schema_warnings"):
+            raise AssistantError("来源报告了资料警告，完整数量待核对。", 503)
+        return data
+
+    # Reuse a supplied first page for every workbench section it already contains.
+    available = {}
+    if first_result is not None:
+        if isinstance(first_result, dict) and first_result.get("api_id", op["api_id"]) != op["api_id"]:
+            raise AssistantError("已有结果与本次查询接口不一致。", 403)
+        for key, _, position, _, _ in specs:
+            available[key, str(op["params"].get(position, 0 if position == "offset" else 1))] = first_result
+
+    for key, pagination, position, size_param, unit in specs:
+        rows, identities, expected, size = [], set(), None, None
+        cursor, complete = (0 if position == "offset" else 1), False
+        while True:
+            params = {**op["params"], position: cursor}
+            if pagination:
+                params["sections"] = key
+            summary = {"complete": False, "count": None, "loaded_count": len(rows),
+                       "declared_total": expected, "unit": unit, "next_params": params}
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssistantError("已达完整读取时间上限，剩余资料尚未读取。", 503)
+                cached = available.pop((key, str(cursor)), None)
+                if cached is not None:
+                    result = cached
+                else:
+                    if item_count >= max_items:
+                        raise AssistantError("已达完整读取条数上限，剩余资料尚未读取。", 503)
+                    if calls >= max_pages:
+                        raise AssistantError("已达完整读取页数上限，剩余资料尚未读取。", 503)
+                    calls += 1
+                    result = await asyncio.wait_for(invoke({**op, "params": params}), min(10, remaining))
+                data = result.get("_raw", result.get("data")) if isinstance(result, dict) else None
+                source = {"requested_scope": op["params"].get("scope"), **{name: data[name] for name in ("scope", "scopes", "month", "from", "to", "source",
+                          "last_loaded_at", "last_refreshed_at", "updated_at", "cache_updated_at", "source_freshness",
+                          "source_cache_ttl_seconds", "payload_version") if isinstance(data, dict) and name in data}}
+                source["queried_at"] = dt.datetime.now(TZ).isoformat(timespec="seconds")
+                if source not in freshness:
+                    freshness.append(source)
+                data = raw_page(result)
+                if not base:
+                    excluded = {spec[0] for spec in QUERY_PAGE_SCHEMAS[op["api_id"]]}
+                    excluded.update(spec[1] for spec in QUERY_PAGE_SCHEMAS[op["api_id"]] if spec not in specs and spec[1])
+                    base = copy.deepcopy({name: value for name, value in data.items() if name not in excluded})
+                    envelope = dict(result)
+                version = tuple(data.get(name) for name in ("payload_version", "version", "last_loaded_at", "last_refreshed_at", "updated_at"))
+                if snapshot is not None and snapshot != version:
+                    raise AssistantError("分页期间来源快照发生变化，完整数量待核对。", 409)
+                snapshot = version
+                page, meta = data.get(key), data.get(pagination) if pagination else data
+                if not isinstance(page, list) or any(not isinstance(row, dict) for row in page) or not isinstance(meta, dict):
+                    raise AssistantError("分页列表或分页元数据缺失。", 502)
+                total = meta.get("total")
+                if type(total) is not int or total < 0 or expected is not None and total != expected:
+                    raise AssistantError("分页总数缺失、无效或发生变化。", 502)
+                expected = total
+                if position in meta and (type(meta[position]) is not int or meta[position] != cursor):
+                    raise AssistantError("分页位置与请求不一致。", 502)
+                if pagination and "page" in meta and (type(meta["page"]) is not int or meta["page"] != cursor):
+                    raise AssistantError("工作台分页位置与请求不一致。", 502)
+                if "offset" in meta and (type(meta["offset"]) is not int or meta["offset"] != len(rows)):
+                    raise AssistantError("分页偏移与已读取条数不一致。", 502)
+                page_size = meta.get("page_size", meta.get("limit", op["params"].get(size_param, len(page))))
+                if type(page_size) is not int or page_size < len(page) or size is not None and page_size != size:
+                    raise AssistantError("分页大小发生变化或无效。", 502)
+                size = page_size
+                marks = []
+                for row in page:
+                    identity = next((row[name] for name in ("record_id", "id", "group_id", "batch_id", "active_item_id") if row.get(name)), None)
+                    marks.append(json.dumps([row.get("work_type"), identity, row.get("version") if unit == "question_versions" else None]
+                                            if identity is not None else row, sort_keys=True, ensure_ascii=False))
+                if len(set(marks)) != len(marks) or identities.intersection(marks):
+                    raise AssistantError("分页记录重复，未把重复页当作完整名单。", 502)
+                loaded = len(rows) + len(page)
+                if (loaded > total or not page and loaded < total
+                        or "has_more" in meta and (type(meta["has_more"]) is not bool or meta["has_more"] != (loaded < total))
+                        or "next_offset" in meta and (meta["next_offset"] != (loaded if loaded < total else None)
+                            or meta["next_offset"] is not None and type(meta["next_offset"]) is not int)
+                        or loaded < total and position != "offset" and len(page) != size):
+                    raise AssistantError("分页条数与总数或后续页标记不一致。", 502)
+                take = min(len(page), max_items - item_count)
+                rows.extend(copy.deepcopy(page[:take]))
+                item_count += take
+                identities.update(marks)
+                if take != len(page):
+                    raise AssistantError("已达完整读取条数上限，剩余资料尚未读取。", 503)
+                if loaded == total:
+                    complete = True
+                    break
+                cursor = loaded if position == "offset" else cursor + 1
+            except (AssistantError, asyncio.TimeoutError) as exc:
+                if isinstance(exc, AssistantError) and exc.status in {401, 403}:
+                    return {"ok": False, "status": exc.status, "api_id": op["api_id"],
+                            "error": safe_text(str(exc)), "available": False, "complete": False, "data": None}
+                warnings.append(safe_text(str(exc)) or "分页读取超时，完整数量未知。")
+                break
+        summary.update(complete=complete, count=len(rows) if complete else None,
+                       loaded_count=len(rows), declared_total=expected,
+                       next_params=None if complete else {**op["params"], position: cursor, **({"sections": key} if pagination else {})})
+        summaries[key] = summary
+        base[key] = rows
+    complete = all(summary["complete"] for summary in summaries.values())
+    declared_count = base.get("count")
+    for key, pagination, _, _, _ in specs:
+        summary = summaries[key]
+        meta = base.get(pagination) if pagination else base
+        summary["declared_pagination"] = {name: meta[name] for name in
+            ("total", "count", "page", "page_size", "offset", "returned", "total_pages", "has_more", "next_offset", "remaining")
+            if isinstance(meta, dict) and name in meta}
+        if not isinstance(meta, dict):
+            meta = {}
+            if pagination:
+                base[pagination] = meta
+        meta.update(complete=summary["complete"], has_more=not summary["complete"],
+                    next_offset=None if summary["complete"] else summary["loaded_count"])
+        if "page" in meta:
+            meta["page"] = 1
+        if "offset" in meta:
+            meta["offset"] = 0
+        if "returned" in meta:
+            meta["returned"] = summary["loaded_count"]
+        if "page_size" in meta:
+            meta["page_size"] = summary["loaded_count"]
+        if "total_pages" in meta:
+            meta["total_pages"] = 1 if summary["complete"] else None
+        if "remaining" in meta:
+            meta["remaining"] = max(0, summary["declared_total"] - summary["loaded_count"]) if summary["declared_total"] is not None else None
+        if "count" in meta:
+            meta["count"] = summary["count"]
+    if op["api_id"] == "GET /api/workbench" and "count" in base:
+        base["count"] = summaries.get("records", next(iter(summaries.values())))["count"]
+    remaining_rows = (sum(max(0, summary["declared_total"] - summary["loaded_count"]) for summary in summaries.values())
+                      if all(summary["declared_total"] is not None for summary in summaries.values()) else None)
+    base.update(available=bool(envelope.get("ok")), complete=complete, list_complete=complete, remaining=remaining_rows,
+                has_more=not complete, next_offset=None if complete else
+                next(summary["loaded_count"] for summary in summaries.values() if not summary["complete"]))
+    base["query_completeness"] = {"complete": complete, "lists": summaries, "pages_read": calls,
+                                  "declared_count": declared_count, "warnings": list(dict.fromkeys(warnings)), "source_freshness": freshness}
+    sample_limited = any(summary["loaded_count"] > 40 for summary in summaries.values())
+    return {**envelope, "api_id": op["api_id"], "ok": bool(envelope.get("ok")), "available": bool(envelope.get("ok")),
+            "complete": complete, "list_complete": complete, "remaining": remaining_rows,
+            "_raw": base, "data": safe_data(base), "truncated": sample_limited, "sample_limited": sample_limited,
+            "error": None if complete else "; ".join(dict.fromkeys(warnings))}
 
 
 def current_pending_query(text, today=None):
@@ -285,7 +534,10 @@ def event_date(value):
         return None
 
 
-async def collect_events(actor, query: EventQuery, invoke):
+async def collect_events(actor, query: EventQuery, invoke, *, item_limit=20):
+    """Retain bounded known rows; complete gates counts, list_complete gates omissions."""
+    if type(item_limit) is not int or not 1 <= item_limit <= 2000:
+        raise AssistantError("事件明细保留条数须为1至2000。")
     scopes = sorted(set(actor["scopes"]) & SCOPES)
     if not scopes:
         raise AssistantError("当前账号没有可查询的楼栋。", 403)
@@ -361,7 +613,8 @@ async def collect_events(actor, query: EventQuery, invoke):
     stats = MaintenancePortalService._event_stats_for_records(rows)
     return {"kind": "event_notices", "scopes": scopes, "query": query.model_dump(mode="json"),
         "count": len(rows) if not warnings else None, "known_count": len(rows), "complete": not warnings,
-        "items": rows[:20], "remaining": max(0, len(rows) - 20), "warnings": list(dict.fromkeys(warnings)),
+        "items": rows[:item_limit], "remaining": max(0, len(rows) - item_limit),
+        "list_complete": len(rows) <= item_limit, "warnings": list(dict.fromkeys(warnings)),
         "stats": {key: stats[key] for key in ("total", "processing", "pending", "ended", "statuses")},
         "last_refreshed_at": min(refreshed) if refreshed else None,
         "url": "/event-management?" + urlencode({"scope": scopes[0] if len(scopes) == 1 else "ALL", "month": query.start_date.strftime("%Y-%m")})}
@@ -401,8 +654,97 @@ def sent_notice_question(text):
     return bool(re.search(r"发了|已发|发出|发送|发布|发起", text))
 
 
-async def collect_notice_sends(actor, start_date, end_date, invoke, *, work_types=()):
+class NoticeQuery(BaseModel):
+    """Current planned/open notices or successful sends within explicit dates."""
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["planned", "open", "sent"]
+    work_types: list[Literal["maintenance", "change", "repair", "power", "polling", "adjust"]] = Field(default_factory=list)
+    start_date: dt.date | None = None
+    end_date: dt.date | None = None
+
+    @model_validator(mode="after")
+    def valid_dates(self):
+        if self.status == "sent":
+            if self.start_date is None or self.end_date is None:
+                raise ValueError("发送统计须提供实际发送日期范围")
+            EventQuery(start_date=self.start_date, end_date=self.end_date)
+        elif self.start_date is not None or self.end_date is not None:
+            raise ValueError("待发和未结束查询反映当前状态，不能代替指定日期的历史状态")
+        return self
+
+
+async def collect_notices(actor, query: NoticeQuery, invoke):
+    """Typed convenience over the existing notice collectors, without a second chain.
+
+    invoke must reauthenticate and enforce scopes/modules on EVERY read. No caches,
+    refreshes or writes are introduced. Counts are distinct notices; send_count is
+    successful actions and remains separate. Current plans/open work has no date cut.
+    """
+    from .lighthouse_pending import collect_pending
+
+    scopes = set(actor.get("scopes") or []) & set(actor.get("allowed_scopes", actor.get("scopes") or [])) & SCOPES
+    profiles = actor.get("_topic_capabilities") or [actor]
+    grants = {kind: sorted(scopes & set().union(*(set(profile.get("scopes") or [])
+              for profile in profiles if kind in profile.get("modules", [])))) for kind in NOTICE_TYPES}
+    kinds = list(dict.fromkeys(query.work_types)) or [kind for kind in NOTICE_TYPES if grants[kind]]
+    if not kinds or any(not grants[kind] for kind in kinds):
+        raise AssistantError("当前账号没有所选通告类型和楼栋的查询权限。", 403)
+    deadline, calls, denied = time.monotonic() + 35, 0, None
+    freshness, reports = [], []
+
+    async def read(op):
+        nonlocal calls, denied
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or calls >= 20:
+            raise AssistantError("本轮通告读取已达预算，完整数量未知。", 503)
+        calls += 1
+        try:
+            result = await asyncio.wait_for(invoke(op), min(10, remaining))
+        except AssistantError as exc:
+            if exc.status in {401, 403}:
+                denied = exc
+            raise
+        if not isinstance(result, dict):
+            raise AssistantError("通告读取结果无效。", 502)
+        if result.get("status") in {401, 403}:
+            denied = AssistantError("通告查询权限已变化，请重新查询。", result["status"])
+            raise denied
+        data = result.get("_raw", result.get("data"))
+        if isinstance(data, dict):
+            freshness.append({"scope": op.get("params", {}).get("scope"),
+                              **{key: data[key] for key in ("last_loaded_at", "last_refreshed_at", "source_freshness", "payload_version") if key in data}})
+            if (data.get("complete") is False or data.get("available") is False or data.get("warnings")
+                    or data.get("schema_warnings") or result.get("scope_warning") or result.get("complete") is False
+                    or result.get("available") is False or data.get("snapshot_exists") is False or data.get("source_snapshot_ready") is False):
+                raise AssistantError("通告来源尚未完整返回，完整数量未知。", 503)
+        return result
+
+    for kind in kinds:
+        scoped = {**actor, "scopes": grants[kind]}
+        if query.status == "sent":
+            data = await collect_notice_sends(scoped, query.start_date, query.end_date, read, work_types=[kind], item_limit=2000)
+            reports.append({"work_type": kind, **data})
+        else:
+            group = "plans" if query.status == "planned" else "notices"
+            data = await collect_pending(scoped, "", read, None, groups_only={group}, notice_type=kind, item_limit=2000)
+            reports.append({"work_type": kind, **data["groups"][0], "list_complete": data["groups"][0]["remaining"] == 0})
+        if denied is not None:
+            raise denied
+    complete = all(row.get("complete", row.get("available", False)) for row in reports)
+    return {"kind": "notice_query", "query": query.model_dump(mode="json"), "scopes": sorted(set().union(*(set(grants[kind]) for kind in kinds))),
+            "complete": complete, "count": sum(row["count"] for row in reports) if complete else None,
+            "list_complete": all(row["remaining"] == 0 for row in reports),
+            "remaining": sum(row["remaining"] for row in reports),
+            "known_count": sum(row["known_count"] for row in reports), "unit": "distinct_notices",
+            "date_basis": "action.time" if query.status == "sent" else "current_status",
+            "send_count": sum(row["send_count"] for row in reports) if query.status == "sent" and complete else None,
+            "groups": reports, "source_freshness": freshness, "queried_at": dt.datetime.now(TZ).isoformat(timespec="seconds")}
+
+
+async def collect_notice_sends(actor, start_date, end_date, invoke, *, work_types=(), item_limit=20):
     # The native history contains successful Qt/web actions, not unsent plans.
+    if type(item_limit) is not int or not 1 <= item_limit <= 2000:
+        raise AssistantError("通告明细保留条数须为1至2000。")
     try:
         query = EventQuery(start_date=start_date, end_date=end_date)
     except ValueError:
@@ -474,7 +816,8 @@ async def collect_notice_sends(actor, start_date, end_date, invoke, *, work_type
         "complete": not warnings, "count": len(notices) if not warnings else None, "known_count": len(notices),
         "send_count": len(actions), "actions": {kind: sum(value == kind for value in actions.values()) for kind in ("start", "update", "end")},
         "by_type": {NOTICE_TYPES[kind]: sum(key[0] == kind for key in notices) for kind in NOTICE_TYPES if kind in kinds},
-        "items": list(notices.values())[:20], "remaining": max(0, len(notices)-20), "warnings": list(dict.fromkeys(warnings)),
+        "items": list(notices.values())[:item_limit], "remaining": max(0, len(notices)-item_limit),
+        "list_complete": len(notices) <= item_limit, "warnings": list(dict.fromkeys(warnings)),
         "url": "/daily-tasks?" + urlencode({"scope": scopes[0] if len(scopes) == 1 else "ALL", "date": query.start_date.isoformat()})}
 
 
@@ -497,23 +840,12 @@ def notice_sends_reply(data, *, details=False):
     return "\n\n".join(lines)
 
 
-def query_result_page(data, path, offset=0, limit=20):
-    """Bounded page over an already-loaded native list, with per-key safe traversal.
-
-    No fetching, network, writes, eval, SQL or snapshot store. loaded_count is the
-    number of items already present in ``data``, not a database total. Traversal
-    follows source references without copying; only the returned slice is sanitized.
-    """
+def _query_value(data, path):
     from .lighthouse_agent import _read_path
-
     if not isinstance(path, list) or len(path) > 12:
         raise AssistantError("查询路径无效。")
     if not all(isinstance(seg, str) and seg and len(seg) <= 200 for seg in path):
         raise AssistantError("查询路径段无效。")
-    if type(offset) is not int or isinstance(offset, bool) or offset < 0:
-        raise AssistantError("分页偏移无效。")
-    if type(limit) is not int or isinstance(limit, bool) or not 1 <= limit <= 40:
-        raise AssistantError("分页大小无效。")
     selected = data
     for name in path:
         if isinstance(selected, dict) and name in selected:
@@ -527,6 +859,16 @@ def query_result_page(data, path, offset=0, limit=20):
             selected = selected[int(name)]
         else:
             raise AssistantError("未返回需要的关联字段：" + name)
+    return selected
+
+
+def query_result_page(data, path, offset=0, limit=20):
+    """Page over an authorized snapshot, not native API pagination or fresh data."""
+    if type(offset) is not int or offset < 0:
+        raise AssistantError("分页偏移无效。")
+    if type(limit) is not int or not 1 <= limit <= 40:
+        raise AssistantError("分页大小无效。")
+    selected = _query_value(data, path)
     if not isinstance(selected, (list, tuple)):
         raise AssistantError("查询结果必须是列表。")
     total = len(selected)
@@ -534,3 +876,57 @@ def query_result_page(data, path, offset=0, limit=20):
     next_offset = offset + limit if offset + limit < total else None
     return {"items": page, "loaded_count": total, "offset": offset, "next_offset": next_offset,
             "has_more": next_offset is not None}
+
+
+def query_statistics(data, path, operation='count', field=None):
+    """Deterministic snapshot aggregates. Missing/partial data never become zero totals."""
+    import math
+    from decimal import Decimal
+    if operation not in {'count', 'distinct', 'group_count', 'sum', 'mean'}:
+        raise AssistantError('不支持此统计方式。')
+    rows = _query_value(data, path)
+    if not isinstance(rows, (list, tuple)) or len(rows) > 5000:
+        raise AssistantError('统计需要不超过5000项的已授权列表，请先缩小范围。')
+    values, missing = [], 0
+    if operation != 'count':
+        if not field:
+            raise AssistantError('请指定原记录中实际存在的统计字段路径。')
+        for row in rows:
+            try:
+                value = _query_value(row, field)
+            except AssistantError as exc:
+                if not str(exc).startswith('未返回需要的关联字段：'):
+                    raise
+                missing += 1
+                continue
+            if value is None or value == '':
+                missing += 1
+                continue
+            if not isinstance(value, (str, int, float)) or isinstance(value, bool) \
+                    or isinstance(value, float) and not math.isfinite(value):
+                raise AssistantError('统计字段必须是有限数值或文本标识，不接受嵌套对象。')
+            if safe_data({field[-1]: value}).get(field[-1]) != value:
+                raise AssistantError('统计字段含受限资料，不能用于分组或计算。')
+            values.append(value)
+    complete = query_result_state({'ok': True, 'data': data})[0] in {'found', 'empty'}
+    result = {'operation': operation, 'loaded_count': len(rows), 'missing_count': missing,
+              'complete': complete and not missing, 'snapshot_only': True,
+              'scope': 'loaded_snapshot', 'note': '仅统计本轮已读取快照；不代表完整数据库或刚同步云端。'}
+    if operation == 'count':
+        result['value'] = len(rows)
+    elif operation == 'distinct':
+        result['value'] = len(set(values)) if values or not rows else None
+    elif operation == 'group_count':
+        from collections import Counter
+        counts = Counter(values)
+        if len(counts) > 200:
+            raise AssistantError('分组超过200组，请先缩小范围。')
+        result['groups'] = [{'value': value, 'count': count} for value, count in counts.items()]
+    else:
+        if any(type(value) not in {int, float} for value in values):
+            raise AssistantError('数值统计只接受原字段中的数值，不猜测文本、百分号或单位。')
+        total = sum((Decimal(str(value)) for value in values), Decimal(0))
+        result['value'] = float(total / len(values) if operation == 'mean' and values else total) if values else None
+        if result['value'] is not None and not math.isfinite(result['value']):
+            raise AssistantError('统计结果超出有效数值范围。')
+    return safe_data(result, list_limit=None)

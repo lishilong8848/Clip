@@ -166,7 +166,7 @@ def install_lighthouse_routes(app, controller, runtime):
                     headers[name] = request.headers[name]
             # knowledge/files streams large multipart batches (300MiB + framing overhead); ordinary
             # assistant attachments keep their original 100MiB ceiling with the same auth.
-            limit = 300 * 1024 * 1024 + 65536 if action == 'knowledge/files' else 100 * 1024 * 1024 + 65536 if action == 'files' else 10 * 1024 * 1024 + 65536 if action == 'skills/install' else 4 * 1024 * 1024 if action.startswith('plans/') else 128000 if action in {'messages', 'agent', 'chat'} else 16000
+            limit = 300 * 1024 * 1024 + 65536 if action == 'knowledge/files' else 100 * 1024 * 1024 + 65536 if action == 'files' else 10 * 1024 * 1024 + 65536 if action == 'skills/install' else 4 * 1024 * 1024 if action.startswith('plans/') else 512 * 1024 if action == 'workspace' else 128000 if action in {'messages', 'agent', 'chat'} else 16000
             async def content():
                 size = 0
                 async for chunk in request.stream():
@@ -213,7 +213,9 @@ def install_lighthouse_routes(app, controller, runtime):
         ('plans/{plan_id}/cabinet-text-preview', ['POST']), ('plans/{plan_id}/repair-prefill', ['POST']),
         ('plans/{plan_id}/notice-prefill', ['POST']), ('commands', ['GET']), ('skills', ['GET']),
         ('skills/install', ['POST']), ('skills/{skill_name}', ['GET', 'DELETE']))
-    paths += (('extensions', ['GET', 'PUT']), ('extensions/{server_id}/test', ['POST']))
+    paths += (('extensions', ['GET', 'PUT']), ('extensions/{server_id}/test', ['POST']),
+              ('runs/{run_id}/resume', ['POST']), ('workspace', ['GET', 'POST']), ('voice', ['GET', 'POST', 'PUT']),
+              ('intelligence-capabilities', ['GET']))
     from openclaw_service.assistant.lighthouse_knowledge_routes import KNOWLEDGE_ROUTES
     for path, methods in (*paths, *KNOWLEDGE_ROUTES):
         app.add_api_route('/api/assistant/' + path, endpoint, methods=methods, name='lighthouse_' + path.replace('/', '_'))

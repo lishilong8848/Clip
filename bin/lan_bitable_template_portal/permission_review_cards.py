@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import closing
 import hashlib
 import hmac
 import json
 import logging
 import re
-import sqlite3
 import time
 
 from fastapi import Request
@@ -98,15 +96,15 @@ class PermissionCards:
                 auth._state_store.put_permission_request(data)
 
     def union_id(self, open_id):
-        with closing(sqlite3.connect(self.bot.runtime.state_store.db_path, timeout=5)) as db:
-            values = {row[0] for row in db.execute("SELECT DISTINCT json_extract(user_json,'$.union_id') FROM auth_sessions WHERE json_extract(user_json,'$.open_id')=?", (open_id,)) if row[0]}
-        if len(values) == 1:
-            return values.pop()
         service = self.bot.runtime.service
-        result = service._request_payload("GET", "https://open.feishu.cn/open-apis/contact/v3/users/" + open_id,
+        from upload_event_module.config import config
+        from .feishu_delivery import current_recipient_open_id
+        app_id = str(getattr(self.bot, 'config', {}).get('app_id') or config.app_id or '')
+        current_id = current_recipient_open_id(self.bot.runtime, open_id, app_id)
+        result = service._request_payload("GET", "https://open.feishu.cn/open-apis/contact/v3/users/" + current_id,
             context="权限审批人身份核对", headers=service._auth_headers(), params={"user_id_type": "open_id"})
         user = (result.get("data") or {}).get("user") or {}
-        if result.get("code") or user.get("open_id") != open_id or not re.fullmatch(r"on_[A-Za-z0-9]+", str(user.get("union_id") or "")):
+        if result.get("code") or user.get("open_id") != current_id or not re.fullmatch(r"on_[A-Za-z0-9]+", str(user.get("union_id") or "")):
             raise AssistantError("无法核对审批人的飞书身份，请该管理员先登录灯塔。", 400)
         return user["union_id"]
 
@@ -156,19 +154,15 @@ class PermissionCards:
             messenger = self.bot.messenger
             if not messenger:
                 raise AssistantError("飞书智能体未连接，申请仍可在网页审批。", 503)
-            union_id = await asyncio.to_thread(self.union_id, data["approver_open_id"])
             current = await asyncio.to_thread(self.request, request_id)
             if current.get("status") != "pending":
                 return
-            client = await messenger.client()
-            response = await client.post("https://open.feishu.cn/open-apis/im/v1/messages", params={"receive_id_type": "union_id"},
-                headers=await messenger.headers(), json={"receive_id": union_id, "msg_type": "interactive", "content": json.dumps(card(data), ensure_ascii=False),
-                "uuid": hashlib.sha256(("permission:" + request_id).encode()).hexdigest()[:32]})
-            result = response.json()
-            mid = (result.get("data") or {}).get("message_id")
-            if result.get("code") != 0 or not mid:
-                raise AssistantError("飞书审批卡片发送未完成，申请仍可在网页审批。", 503)
-            await asyncio.to_thread(self.update, request_id, notification_status="sent", notification_error="", review_message_id=mid, review_union_id=union_id)
+            from .feishu_delivery import send_agent_message
+            receipt = await send_agent_message(self.bot.runtime, data['approver_open_id'], card(data),
+                message_uuid=hashlib.sha256(('permission:' + request_id).encode()).hexdigest()[:32])
+            mid = receipt['message_id']
+            await asyncio.to_thread(self.update, request_id, notification_status="sent", notification_error="",
+                review_message_id=mid, review_sender_app_id=receipt['sender_app_id'])
             current = await asyncio.to_thread(self.request, request_id)
             if current.get("status") != "pending":
                 await self.update_card(current)
@@ -218,6 +212,8 @@ class PermissionCards:
 
     async def update_card(self, data):
         if not data.get("review_message_id") or not self.bot.messenger:
+            return
+        if data.get('review_sender_app_id') and data['review_sender_app_id'] != getattr(self.bot, 'config', {}).get('app_id'):
             return
         try:
             from .portal_service import external_real_write_guard

@@ -61,6 +61,8 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         self.config_path = self.root / "feishu_assistant.json"
         self.active = make_active()
+        self.qt = SimpleNamespace(app_id='cli_running', app_secret='running-secret', load=Mock())
+        self.enterContext(patch('upload_event_module.config.config', self.qt))
         atomic_json(self.config_path, self.active)
         self.controller = SimpleNamespace(
             bound_port=18766,
@@ -98,6 +100,8 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.auth_manager.is_admin.return_value = True
 
     def seed_config(self, value):
+        self.qt.app_id = value['app_id']
+        self.qt.app_secret = _unprotect(value['secret_cipher'])
         atomic_json(self.config_path, value)
 
     def file_content(self):
@@ -249,24 +253,24 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             "app_id": "cli_other", "enabled": True, "app_secret": "",
             "revision": self.revision()})
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("必须填写", response.json()["error"])
+        self.assertIn("Qt", response.json()["error"])
         self.assertEqual(self.snapshot(), before)
 
     async def test_login_app_cannot_be_enabled_as_form_callback_app(self):
         self.set_admin({'user': 'admin'})
         before = self.snapshot()
         response = await self.client.post(ROUTE, headers={'origin': BASE}, json={
-            'app_id': 'cli_a9d1c9fe9d381cee', 'enabled': True,
+            'app_id': 'cli_fixturePrevious', 'enabled': True,
             'app_secret': 'fixture-secret', 'revision': self.revision()})
         self.assertEqual(response.status_code, 400)
-        self.assertIn('专用应用', response.json()['error'])
+        self.assertIn('Qt', response.json()['error'])
         self.assertEqual(self.snapshot(), before)
 
     async def test_misconfigured_login_app_can_still_be_disabled(self):
         self.set_admin({'user': 'admin'})
-        self.seed_config(make_active('cli_a9d1c9fe9d381cee'))
+        self.seed_config(make_active('cli_fixturePrevious'))
         response = await self.client.post(ROUTE, headers={'origin': BASE}, json={
-            'app_id': 'cli_a9d1c9fe9d381cee', 'enabled': False,
+            'app_id': 'cli_fixturePrevious', 'enabled': False,
             'app_secret': '', 'revision': self.revision()})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertFalse(self.file_content()['enabled'])
@@ -295,6 +299,7 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
 
         # Changing the app id forces isolated_inbox so old-app retries never
         # receive new-app credentials.
+        self.qt.app_id, self.qt.app_secret = 'cli_b', 'b-secret'
         response = await self.client.post(ROUTE, headers={"origin": BASE}, json={
             "app_id": "cli_b", "enabled": True, "app_secret": "b-secret",
             "revision": self.revision()})
@@ -308,6 +313,7 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(initial.json()["data"]["restart_required"])
 
         # Save a new secret for the same app -> file differs from running active.
+        self.qt.app_secret = 'rotated-secret'
         response = await self.client.post(ROUTE, headers={"origin": BASE}, json={
             "app_id": "cli_running", "enabled": True, "app_secret": "rotated-secret",
             "revision": self.revision()})
@@ -318,6 +324,16 @@ class SettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.config["app_id"], "cli_running")
         after = await self.client.get(ROUTE)
         self.assertTrue(after.json()["data"]["restart_required"])
+
+    async def test_web_settings_cannot_override_qt_credentials(self):
+        self.set_admin({'user': 'admin'})
+        before = self.snapshot()
+        for app_id, secret in (('cli_other', 'other-secret'), ('cli_running', 'wrong-secret')):
+            response = await self.client.post(ROUTE, headers={'origin': BASE}, json={
+                'app_id': app_id, 'app_secret': secret, 'enabled': True, 'revision': self.revision()})
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('Qt', response.json()['error'])
+            self.assertEqual(self.snapshot(), before)
 
 
 class ConfigHelperTests(unittest.TestCase):
@@ -494,7 +510,7 @@ class FeishuAssistantStartTests(unittest.IsolatedAsyncioTestCase):
         messenger.assert_called_once_with(config)
 
     async def test_wrong_app_saved_by_old_version_starts_no_worker_or_messenger(self):
-        config = make_active('cli_a9d1c9fe9d381cee')
+        config = make_active('invalid-app')
         guard, start_worker, run, unprotect, messenger = await self._run_start(config)
         guard.assert_not_called()
         start_worker.assert_not_called()

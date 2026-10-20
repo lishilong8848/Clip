@@ -176,6 +176,12 @@ KNOWN_DYNAMIC_BINDINGS = [
         note="预加载的是新版静态资源 entry.json,不是业务 API;保留审计记录,不加入助手业务目录。",
     ),
     dict(
+        source="lan_bitable_template_portal/frontend/src/lighthouseVoice.ts",
+        line=34, kind="unresolved", method_paths=[], window=4,
+        needles=["requestJson(path, { timeoutMs: 180000", "async function request(path: string"],
+        note="语音请求包装的三个真实调用者在 WRAPPER_REVIEW 核验；不将助手自身接口暴露为原生业务工具。",
+    ),
+    dict(
         source="lan_bitable_template_portal/frontend/src/components/LighthouseArtifactPreview.vue",
         line=58, kind="excluded",
         method_paths=[("GET", "/api/assistant/files/{param}")],
@@ -529,6 +535,20 @@ KNOWN_DYNAMIC_BINDINGS = [
 #   caller_source       —— 调用者所在文件,缺省时为 wrapper 所在 source
 # 测试先用 marker 断言端点确实出现在真实源码(再对 native 目录 + _route_excluded 分类)。
 WRAPPER_REVIEW = [
+    dict(
+        source="lan_bitable_template_portal/frontend/src/lighthouseVoice.ts",
+        line=34, label="语音文件上传、转写与播报传输包装",
+        anchor="async function request(path: string",
+        callers=[
+            dict(method="POST", path="/api/assistant/files", caller_line=78,
+                 marker="request('/api/assistant/files', { method: 'POST', body }, value)"),
+            dict(method="POST", path="/api/assistant/voice", caller_line=82,
+                 marker="JSON.stringify({ action: 'transcribe', file_id: id })"),
+            dict(method="POST", path="/api/assistant/voice", caller_line=153,
+                 marker="JSON.stringify({ action: 'synthesize', text })"),
+        ],
+        note="三个 POST 均保留当前账号及取消校验；助手自身接口沿用 /api/assistant/ 排除边界，不扩大原生工具权限。",
+    ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/TaskWorkspace.vue",
         line=121, label="工作台按楼栋读取包装", anchor="const read=async(path:string",

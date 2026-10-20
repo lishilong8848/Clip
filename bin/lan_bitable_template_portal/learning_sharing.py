@@ -109,15 +109,19 @@ def validate_questions(questions, source, types=None):
 
 
 def read_source(portal, url):
-    from openclaw_service.assistant.lighthouse_documents import document_url
+    from openclaw_service.assistant.lighthouse_ai import AssistantError
+    from openclaw_service.assistant.lighthouse_documents import document_reader, document_url
     target = document_url(url)
     if not target:
         raise LearningError('请输入 vnet.feishu.cn/docx/ 开头的纪要链接。')
     base = 'https://open.feishu.cn/open-apis/docx/v1/documents/' + target.rsplit('/', 1)[1]
-    headers = portal._auth_headers()
+    request = document_reader(portal, '分享会练习读取纪要')
 
     def get(suffix='', params=None):
-        value = portal._request_payload('GET', base + suffix, context='分享会练习读取纪要', headers=headers, params=params or {})
+        try:
+            value = request(base + suffix, params)
+        except AssistantError as exc:
+            raise LearningError(str(exc), exc.status) from None
         if not isinstance(value, dict) or value.get('code') != 0 or not isinstance(value.get('data'), dict):
             raise LearningError('飞书纪要读取失败，请核对应用的文档读取权限及此文档的访问授权。', 502)
         return value['data']

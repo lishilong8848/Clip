@@ -187,6 +187,13 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/openclaw_service/launcher.py"),
     Path("bin/openclaw_service/client.py"),
     Path("bin/openclaw_service/protocol.py"),
+    Path("bin/upload_event_module/services/feishu_app_migration.py"),
+    Path("bin/upload_event_module/services/feishu_app_profile.json"),
+    Path("bin/lan_bitable_template_portal/feishu_identity.py"),
+    Path("bin/lan_bitable_template_portal/feishu_identity_migration.py"),
+    Path("bin/lan_bitable_template_portal/feishu_identity_documents.py"),
+    Path("bin/lan_bitable_template_portal/feishu_identity_manifest.py"),
+    Path("bin/lan_bitable_template_portal/feishu_identity_profile.json"),
     Path("bin/openclaw_service/update.py"),
     Path("bin/openclaw_service/assistant/lighthouse_extensions.py"),
     Path("bin/openclaw_service/assistant/lighthouse_mcp_builtin.py"),
@@ -401,6 +408,7 @@ SMOKE_IMPORT_MODULES = [
     "upload_event_module.ui.main_window_runtime",
     "lan_bitable_template_portal.portal_service",
     "lan_bitable_template_portal.server",
+    "lan_bitable_template_portal.risk_inspection_imports",
     "lan_bitable_template_portal.plan_convergence",
     "lan_bitable_template_portal.lighthouse_routes",
     "lan_bitable_template_portal.lighthouse_appearance",
@@ -1697,6 +1705,10 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "account_policy.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "personnel_password_login.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "portal_auth.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "feishu_identity.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "feishu_identity_manifest.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "feishu_identity_documents.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "feishu_identity_migration.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "signature_print.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "repair_operations.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning.py",
@@ -1745,6 +1757,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_templates.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_cloud.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_routes.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_imports.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_orders.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "polling_work_order_relay.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "server.py",
@@ -1837,6 +1850,25 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_robot_webhook",
          "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
          "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_model_completion", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
+         "bin.test_lighthouse_task_context", "bin.test_lighthouse_business_semantics", "bin.test_lighthouse_model_routing", "bin.test_lighthouse_file_provenance", "bin.test_lighthouse_intelligence_evaluation",
+         "bin.test_lighthouse_workspace", "bin.test_lighthouse_workspace_integration", "bin.test_lighthouse_research",
+         "bin.test_lighthouse_sandbox", "bin.test_lighthouse_visual", "bin.test_lighthouse_media_bridge", "bin.test_lighthouse_voice",
+         "bin.test_lighthouse_request_budget", "bin.test_lighthouse_model_policy", "bin.test_lighthouse_system_messages",
+         "bin.test_lighthouse_live_concurrency", "bin.test_lighthouse_runtime_lanes", "bin.test_feishu_live_reply",
+         "bin.test_feishu_app_migration",
+         "bin.test_feishu_unified_settings",
+         "bin.test_feishu_cloud_auth",
+         "bin.test_feishu_cached_auth",
+         "bin.test_feishu_write_auth_isolation", "bin.test_feishu_cloud_token_guard",
+         "bin.test_feishu_attachment_auth",
+         "bin.test_feishu_directory_identity",
+         "bin.test_feishu_identity_manifest", "bin.test_feishu_identity_documents",
+         "bin.test_feishu_identity_migration", "bin.test_feishu_identity_delivery",
+         "bin.test_feishu_identity_startup",
+         "bin.test_feishu_current_recipients",
+         "bin.test_learning_weekly_questions",
+         "bin.test_learning_repeated_reminders",
+         "bin.test_feishu_single_app_delivery", "bin.test_feishu_config_reload",
          "bin.test_lighthouse_shared_snapshot",
          "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery",
@@ -1844,7 +1876,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_workspace_layouts",
          "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_location_distribution", "bin.test_pre_shift_roster", "bin.test_pre_shift_recipients", "bin.test_learning_weekly_cards",
-         "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
+         "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_risk_inspection_delete", "bin.test_risk_inspection_system_fields", "bin.test_risk_inspection_final_push", "bin.test_risk_inspection_assignments", "bin.test_risk_inspection_task_access", "bin.test_risk_inspection_imports", "bin.test_risk_inspection_update_compatibility", "bin.test_account_bulk_modules", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
@@ -2935,6 +2967,13 @@ def build_patch(
 
 
 
+def _ensure_feishu_app_profile(python_exe):
+    log("正在校验新飞书应用及账号归属的离线迁移配置（不发送消息、不写业务表）。")
+    subprocess.run([os.fspath(python_exe), "-c",
+        "import sys;sys.path.insert(0,'bin');from upload_event_module.services.feishu_app_migration import prepare_deployment_profile;prepare_deployment_profile();from lan_bitable_template_portal.feishu_identity_manifest import load_identity_manifest;load_identity_manifest()"],
+        cwd=PROJECT_ROOT, check=True)
+
+
 def _ensure_photo_location_distribution(python_exe, *, publish=True):
     if not publish:
         log('已跳过上传：不发布地点解析配置，保留已有下载清单。')
@@ -3156,6 +3195,7 @@ def main() -> None:
         return
 
     _ensure_mcp_frontend_assets()
+    _ensure_feishu_app_profile(_find_build_python() or sys.executable)
 
     if args.preflight_test:
 

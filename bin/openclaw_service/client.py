@@ -162,11 +162,17 @@ class ResidentRuntime:
             self.retry_after = time.monotonic() + (60 if exc.code in {
                 'service_updating', 'service_recovery_limited', 'service_restart_required', 'service_owner_active'} else 15)
 
-    async def acquire(self, actor, model, profile, *, definitions=(), warm_only=False, **_):
+    async def acquire(self, actor, model, profile, *, definitions=(), warm_only=False, text_only=False, **_):
+        from .assistant.lighthouse_context import execution_lane
         await self.prepare()
         identity = uuid.uuid4().hex
-        value = await self._request('acquire', {'actor': {'id': actor['id'], 'scopes': actor.get('allowed_scopes', actor['scopes'])},
-            'profile': profile, 'definitions': definitions, 'request_id': identity, 'warm_only': warm_only}, timeout=210)
+        owner = {'id': actor['id'], 'scopes': actor.get('allowed_scopes', actor['scopes'])}
+        lane = execution_lane(actor)
+        if lane:
+            owner['_execution_lane'] = lane
+        value = await self._request('acquire', {'actor': owner,
+            'profile': profile, 'definitions': definitions, 'request_id': identity, 'warm_only': warm_only,
+            'text_only': text_only and not warm_only}, timeout=210)
         item = {**value, 'busy': not warm_only, 'used_at': time.monotonic(), 'root': self.root / value['key']}
         item['process'] = RemoteProcess(value['pid'], self)
         self.accounts[item['key']] = item

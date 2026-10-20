@@ -44,7 +44,9 @@ export default definePluginEntry({
           const result = await response.json();
           signal?.throwIfAborted();
           context.assertInvocationCurrent?.();
-          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
+          const { _tool_media: media, ...details } = result;
+          const images = definition.name === 'lighthouse_prepare_image' && Array.isArray(media) ? media : [];
+          return { content: [{ type: 'text', text: JSON.stringify(details) }, ...images], details };
         },
       }), { name: definition.name });
     }

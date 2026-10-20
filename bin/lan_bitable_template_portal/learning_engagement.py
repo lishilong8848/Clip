@@ -4,10 +4,11 @@ import json
 import re
 from collections import defaultdict
 from contextlib import closing
+from fractions import Fraction
 from urllib.parse import quote
 
 from . import learning as core
-from .learning_reminders import duty_recipients, reminder_card
+from .learning_reminders import duty_recipients, reminder_card, shift_learners, shift_times
 
 WEEKLY_CHAT_ID = 'oc_3bc648b9b761f24a65366a9b04b32eb2'
 WEEKLY_SUPERVISOR_SCOPES = tuple('ABCDE')
@@ -74,6 +75,91 @@ def supervisors(service):
     return result
 
 
+def repeated_reminders(service, current):
+    from .learning_personal import candidates
+    from .pre_shift_checks import windows
+
+    contexts, unavailable = {}, set()
+    if not service._restored or not service.settings()['timeout_reminder_enabled']:
+        return contexts, unavailable
+    if not service._shift_roster_reader:
+        return contexts, {current.date().isoformat(), (current.date() - dt.timedelta(days=1)).isoformat()}
+    times = shift_times(service.settings())
+    for date in (current.date() - dt.timedelta(days=1), current.date()):
+        day = date.isoformat()
+        publication = service._get('publication', service._publication_key(day))
+        if not publication:
+            continue
+        try:
+            published = dt.datetime.fromisoformat(publication.get('created_at', ''))
+        except (TypeError, ValueError):
+            unavailable.add(day)
+            service._last_error = '题单发布时间缺失或无效，个人学练提醒等待核对。'
+            continue
+        published = published.astimezone(core.TZ) if published.tzinfo else published.replace(tzinfo=core.TZ)
+        for shift, clock in times.items():
+            beginning, end = windows(day, shift)
+            start = dt.datetime.combine(date, dt.time.fromisoformat(clock), core.TZ)
+            if shift == '夜' and start < beginning:
+                start += dt.timedelta(days=1)
+            start = max(start, beginning, published)
+            period = int((current - start).total_seconds() // 7200)
+            if period < 1 or current >= end:
+                continue
+            learners = shift_learners(service, day, shift)
+            if learners is None:
+                unavailable.add(day)
+                continue
+            due = start + dt.timedelta(hours=2 * period)
+            expires = min(due + dt.timedelta(hours=2), end)
+            with service.transaction() as conn:
+                reserves = [service._get('reserve', rid, conn) for rid in publication.get('reserve_ids', [])]
+                available = candidates(service, conn)
+                for duty, person in learners:
+                    if (person.get('scopes') != [duty['scope']]
+                            or str(person.get('name') or '').strip() != duty['name']):
+                        continue
+                    papers = [p for p in service._documents('paper', person_id=person['id'], start=day, end=day, conn=conn)
+                              if p.get('mode') != 'practice']
+                    paper = next((p for p in papers if p['scope'] == duty['scope']), None)
+                    record = service._get('record', paper['id'], conn) or {} if paper else {}
+                    if papers and (not paper or paper.get('deleted_at') or not paper.get('questions') or service._completed(paper, record)):
+                        continue
+                    if not paper:
+                        recent = {r[0] for r in conn.execute('SELECT family_id FROM learning_usage WHERE person_id=? AND day BETWEEN ? AND ?',
+                                  (person['id'], (date - dt.timedelta(days=6)).isoformat(), day))}
+                        if (not reserves or any(r is None for r in reserves)
+                                or not any(r.get('scope') == duty['scope'] and r.get('date') == day for r in reserves)
+                                or not any(q['family_id'] not in recent for q in available)):
+                            continue
+                    assignment = f"unfinished:{day}:{shift}:{duty['scope']}:{person['id']}"
+                    context = {'paper': paper, 'person_id': person['id'], 'open_id': duty['open_id']}
+                    contexts[assignment] = context
+                    identity = assignment + ':' + str(int(due.timestamp()))
+                    if service._get('engagement', identity, conn):
+                        continue
+                    legacy = service._get('engagement', 'timeout:' + paper['id'], conn) if paper else None
+                    notice = service._get('notification', f"shift:{day}:{shift}:{duty['open_id']}", conn)
+                    delivered = False
+                    for old in (legacy, notice):
+                        if not old or not (old.get('status') == 'sent' or old.get('sent_to')):
+                            continue
+                        if old.get('sent_at'):
+                            sent = dt.datetime.fromisoformat(old['sent_at'])
+                            sent = sent.astimezone(core.TZ) if sent.tzinfo else sent.replace(tzinfo=core.TZ)
+                        elif old.get('due_at'):
+                            sent = dt.datetime.fromtimestamp(old['due_at'] - 300, core.TZ)
+                        else:
+                            continue
+                        delivered |= due <= sent < expires
+                    service._put('engagement', identity, {'id': identity, 'kind': 'shift_timeout',
+                        'assignment': assignment, 'person_id': person['id'], 'open_id': duty['open_id'],
+                        'paper_id': paper['id'] if paper else '', 'scope': duty['scope'], 'date': day, 'shift': shift,
+                        'status': 'skipped_delivered' if delivered else 'pending',
+                        'due_at': due.timestamp(), 'expires_at': expires.timestamp()}, conn)
+    return contexts, unavailable
+
+
 def weekly_stats(service, start, end, conn, scope=None, *, person_id=None):
     rows = {}
     def row(pid):
@@ -108,6 +194,46 @@ def weekly_stats(service, start, end, conn, scope=None, *, person_id=None):
         item['accuracy'] = round(item['correct'] * 100 / item['choices'], 1) if item['choices'] else None
         item['error_rate'] = round(item['wrong'] * 100 / item['choices'], 1) if item['choices'] else None
     return rows
+
+
+def weekly_questions(service, start, end, conn, scope=None):
+    params = [start, end]
+    clause = ''
+    if scope:
+        clause = ' AND scope=?'
+        params.append(scope)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT question_id,COUNT(*) AS total,SUM(correct=0) AS wrong FROM learning_results "
+        "WHERE day BETWEEN ? AND ? AND invalid=0 AND needs_review=0 AND type<>'interview' "
+        "AND correct IN (0,1) AND submitted_at<>'' AND question_id<>''" + clause +
+        ' GROUP BY question_id', params)]
+    rows.sort(key=lambda r: (-Fraction(r['wrong'], r['total']), -r['total'], r['question_id']))
+    for row in rows[:3]:
+        sample = conn.execute(
+            'SELECT paper_id,stem FROM learning_results WHERE question_id=? AND day BETWEEN ? AND ? '
+            "AND invalid=0 AND needs_review=0 AND type<>'interview' AND correct IN (0,1) AND submitted_at<>''" + clause +
+            ' ORDER BY submitted_at DESC,paper_id LIMIT 1', [row['question_id'], *params]).fetchone()
+        paper = service._get('paper', sample['paper_id'], conn) or {}
+        question = next((q for q in paper.get('questions', []) if q['id'] == row['question_id']), {})
+        row.update(stem=sample['stem'], options=question.get('options', []))
+    return rows[:3]
+
+
+def weekly_question_elements(report, scope=''):
+    if report.get('audience') != 'group' or report.get('scope'):
+        return []
+    questions = (report.get('question_buildings') or {}).get(scope, []) if scope else report.get('questions', [])
+    if not questions:
+        return [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': '本周暂无有效选择题首答统计。'}}]
+    lines = ['本周错误率最高的3道题（最多3道）']
+    for index, q in enumerate(questions[:3], 1):
+        stem = ' '.join(q['stem'].split())
+        lines.append(f"{index}. {stem[:120]}{'...' if len(stem) > 120 else ''}\n"
+                     f"错误率 {q['wrong'] * 100 / q['total']:.1f}% · 错误 {q['wrong']} / 首答样本 {q['total']} 次")
+        options = [' '.join(str(o.get('text', '')).split()) for o in q.get('options', [])]
+        if options:
+            lines.append('；'.join(f"{chr(65 + i)}. {value[:36]}{'...' if len(value) > 36 else ''}" for i, value in enumerate(options[:6])))
+    return [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': '\n'.join(lines)}}]
 
 
 def enqueue_weekly(service, current, duties):
@@ -158,6 +284,9 @@ def enqueue_weekly(service, current, duties):
                     'scope': scope, 'items': participants, 'part': 1, 'parts': 1, 'participants': len(participants)}, conn)
                 report = service._get('engagement', key, conn)
                 report['buildings'] = {scope: by_building[scope]} if scope else by_building
+                if audience == 'group':
+                    report['questions'] = weekly_questions(service, start, end, conn)
+                    report['question_buildings'] = {s: weekly_questions(service, start, end, conn, s) for s in by_building}
                 service._put('engagement', key, report, conn)
         service._put('engagement', identity, {'id': identity, 'date': start, 'kind': 'weekly_batch', 'job_count': job_count, 'status': 'prepared'}, conn)
         service._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
@@ -230,6 +359,7 @@ def summary_card(job, url):
                     for key, label, kind, width in [('name', '姓名', 'text', '24%'), ('answered', '答题数量', 'number', '19%'),
                         ('correct', '答对数量', 'number', '19%'), ('accuracy', '正确率', 'text', '19%'), ('score', '评分', 'text', '19%')]],
                 'rows': details}])
+    elements.extend(weekly_question_elements(job, job.get('scope', '')))
     explanation = f'正确率按有选择题成绩的 {len(scores)} 人等权平均，仅计首次作答；问答及复习不计入。'
     explanation += ' 自动评分＝选择题首答正确数÷首答题数×100，按评分升序，无成绩置后。曲线按1个百分点分组，100%单列。'
     if job.get('parts', 1) > 1:
@@ -241,11 +371,16 @@ def summary_card(job, url):
 
 
 def make_card(job, url, paper=None, record=None):
-    if job['kind'] == 'timeout':
+    if job['kind'] == 'shift_timeout' and not paper:
+        message = f"{job['date']} · {job['scope']}楼{job['shift']}班\n每日题单已发布，尚未开始作答，请完成本班学练。"
+        card = reminder_card(message, url + '/learning?view=practice&date=' + quote(job['date'], safe='') + '&shift=' + quote(job['shift'], safe=''))
+        title = '学练待完成提醒'
+    elif job['kind'] in {'timeout', 'shift_timeout'}:
         remaining = sum(bool(not q.get('invalid') and (not (record or {}).get('entries', {}).get(q['id'], {}).get('attempt')
             or (record or {}).get('entries', {}).get(q['id'], {}).get('needs_review'))) for q in paper['questions'])
         mode = '自主练习' if paper.get('mode') == 'practice' else '每日题单'
-        message = f"{paper['date']} · {mode}\n开始作答已满2小时，还有{remaining}题未提交。已提交答案和草稿不受影响，请继续完成。"
+        message = (f"{paper['date']} · {mode}\n" + ('本班学练尚未完成，' if job['kind'] == 'shift_timeout' else '开始作答已满2小时，')
+                   + f"还有{remaining}题未提交。已提交答案和草稿不受影响，请继续完成。")
         card = reminder_card(message, url + '/learning?view=practice&paper_id=' + quote(paper['id'], safe=''))
         title = '学练待完成提醒'
     elif job['kind'] == 'weekly':
@@ -284,6 +419,7 @@ def send_due(service, current):
     current = current.astimezone(core.TZ) if current.tzinfo else current.replace(tzinfo=core.TZ)
     settings = service.settings()
     duties = duty_recipients(service)
+    assignments, unavailable = repeated_reminders(service, current)
     if settings['weekly_report_enabled']:
         enqueue_weekly(service, current, duties)
     with closing(service._connect()) as conn:
@@ -303,10 +439,25 @@ def send_due(service, current):
     for job in jobs:
         if service._stop.is_set():
             break
-        enabled = service.settings()['timeout_reminder_enabled' if job['kind'] == 'timeout' else 'weekly_report_enabled']
+        if job['kind'] == 'shift_timeout':
+            if not service._restored:
+                continue
+            with service.transaction() as conn:
+                job = service._get('engagement', job['id'], conn)
+                if job['status'] != 'pending' or job['due_at'] > current.timestamp() or job.get('sending_until', 0) > current.timestamp():
+                    continue
+                # The durable lease also serializes schedulers in separate service instances.
+                job['sending_until'] = current.timestamp() + 60
+                service._put('engagement', job['id'], job, conn)
+        enabled = service.settings()['timeout_reminder_enabled' if job['kind'] in {'timeout', 'shift_timeout'} else 'weekly_report_enabled']
         paper = service._get('paper', job.get('paper_id', ''))
         record = service._get('record', job.get('paper_id', '')) or {}
         person = people_by_id.get(job.get('person_id'))
+        if job['kind'] == 'shift_timeout':
+            context = assignments.get(job['assignment']) or {}
+            paper = context.get('paper') or paper
+            paper = service._get('paper', paper['id']) if paper else None
+            record = service._get('record', paper['id']) or {} if paper else {}
         if not enabled:
             job['status'] = 'cancelled'
         elif job['kind'] == 'weekly_summary' and not (job.get('audience') == 'group'
@@ -315,6 +466,14 @@ def send_due(service, current):
             job['status'] = 'cancelled'
         elif job.get('expires_at', float('inf')) <= current.timestamp():
             job['status'] = 'expired'
+        elif job['kind'] == 'timeout' and paper and paper.get('mode') != 'practice':
+            job['status'] = 'superseded'
+        elif job['kind'] == 'shift_timeout' and job['date'] in unavailable:
+            job['due_at'] = current.timestamp() + 300
+        elif job['kind'] == 'shift_timeout' and paper and (paper.get('deleted_at') or service._completed(paper, record)):
+            job['status'] = 'skipped_completed'
+        elif job['kind'] == 'shift_timeout' and (not context or context['open_id'] != job.get('open_id')):
+            job['status'] = 'skipped_roster'
         elif job['kind'] == 'timeout' and (not paper or paper.get('deleted_at') or service._completed(paper, record)):
             job['status'] = 'skipped_completed'
         elif job.get('person_id') and person and not person.get('active'):
@@ -322,7 +481,9 @@ def send_due(service, current):
         elif job['kind'] in {'weekly', 'timeout'} and duties is not None and targets.get(job.get('person_id')) and targets[job['person_id']] not in duties:
             job['status'] = 'skipped_role'
         else:
-            if job['kind'] == 'weekly_summary' and url:
+            if job['kind'] == 'shift_timeout':
+                recipients_for_job = [context['open_id']]
+            elif job['kind'] == 'weekly_summary' and url:
                 if job.get('audience') == 'group':
                     recipients_for_job = [WEEKLY_CHAT_ID]
                 else:
@@ -343,7 +504,7 @@ def send_due(service, current):
                 for target in recipients_for_job:
                     if target in sent_to or service._stop.is_set():
                         continue
-                    identity = job['id'] + ':' + target if job.get('scope') else job['id']
+                    identity = job['id'] + ':' + target if job.get('scope') and job['kind'] != 'shift_timeout' else job['id']
                     try:
                         interactive = getattr(service, '_weekly_card_sender', None)
                         if job['kind'] == 'weekly_summary':
@@ -372,6 +533,7 @@ def send_due(service, current):
                 if complete:
                     job.update(status='sent', sent_at=current.isoformat(timespec='seconds'))
         with service.transaction() as conn:
+            job.pop('sending_until', None)
             service._put('engagement', job['id'], job, conn)
             if not (service._get('local', 'self_practice_sync', conn) or {}).get('enabled'):
                 service._put('local', 'self_practice_sync', {'enabled': True}, conn, False)

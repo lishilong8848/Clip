@@ -16,7 +16,8 @@ import httpx
 from lan_bitable_template_portal.portal_auth import (
     PortalAuthManager, TopicDelegations, TOPIC_EXECUTION, topic_capability,
 )
-from lan_bitable_template_portal.portal_service import PortalError
+from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP, PortalError
+from upload_event_module.services.feishu_app_migration import TARGET_APP_ID
 from lan_bitable_template_portal.module_access import allowed_modules, require_module
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.lighthouse_bridge import PortalAuthority
@@ -72,6 +73,8 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.tmp.name)
         self.store = LanPortalStateStore(self.root / 'state.sqlite3')
         self.addCleanup(self.store.shutdown_write_worker)
+        self.settings = SimpleNamespace(app_id=TARGET_APP_ID, app_secret='fixture-current-secret')
+        self.enterContext(patch('lan_bitable_template_portal.portal_auth.config', self.settings))
         self.auth = Auth()
         self.registry = self.auth._topic_delegations = TopicDelegations(self.auth, self.store)
         self.topic = self.topic_id()
@@ -101,7 +104,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.authority.catalog = self.catalog
 
     @staticmethod
-    def topic_id(app='cli_fixture', chat='oc_Group', root='om_Root'):
+    def topic_id(app=TARGET_APP_ID, chat='oc_Group', root='om_Root'):
         return chat + ':' + root + ':app:' + hashlib.sha256(app.encode()).hexdigest()[:16]
 
     def actor(self, identity='ou_Low', topic=None):
@@ -110,7 +113,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
                 'is_admin': False, 'learning_scopes': [], 'channel': 'feishu:oc_Group', '_feishu_topic': {'id': topic or self.topic, 'context': ''}}
 
     def register(self, identity, topic=None, **route):
-        values = {'app_id': 'cli_fixture', 'chat_id': 'oc_Group', 'root_id': 'om_Root', 'chat_type': 'group',
+        values = {'app_id': TARGET_APP_ID, 'chat_id': 'oc_Group', 'root_id': 'om_Root', 'chat_type': 'group',
                   'message_id': 'om_' + identity.replace('_', ''), 'sender_id': 'ou_Agent' + identity.replace('_', '')}
         values.update(route)
         return self.registry.register(topic or self.topic, self.actor(identity, topic), values)
@@ -281,31 +284,44 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_display_name_is_not_authentication_but_hr_mapping_needs_no_login(self):
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
-        bot.config = {'app_id': 'cli_fixture'}
+        bot.config = {'app_id': TARGET_APP_ID}
         message = {'sender_id': 'ou_NewExternal', 'union_id': '', 'chat_id': 'oc_Group'}
         with self.assertRaises(AssistantError):
             bot._sender_user(message, name='Same display name')
         with self.assertRaises(AssistantError):
             bot._sender_user({**message, 'sender_id': 'ou_SecondExternal'}, name='Same display name')
-        provider = {'loaded_at': __import__('time').time(), 'people': {'person': self.auth.directory_person('ou_Maint')}}
-        provider['people']['person']['name'] = 'Same display name'
+        person = {**self.auth.directory_person('ou_Maint'), 'login_ids': [message['sender_id']]}
+        provider = {'schema': 4, 'app_id': TARGET_APP_ID, 'loaded_at': __import__('time').time(),
+                    'people': {person['id']: person}}
         self.auth._account_directory_provider = lambda: provider
+        self.auth.profiles[message['sender_id']] = {**self.auth.profiles.pop('ou_Maint'), 'id': message['sender_id']}
+        self.auth.directory_person = PortalAuthManager.directory_person.__get__(self.auth)
         user = bot._sender_user(message, record_id='recou_Maint')
-        self.assertEqual(user['open_id'], 'ou_Maint')
-        self.assertEqual(bot._sender_user(message)['open_id'], 'ou_Maint')
-        self.assertEqual(self.store.get_document('feishu_assistant_sender', 'cli_fixture:ou_NewExternal')['matched_by'], 'record_id')
+        self.assertEqual(user['open_id'], message['sender_id'])
+        self.assertEqual(bot._sender_user(message)['open_id'], message['sender_id'])
+        self.assertEqual(self.auth.scopes_for_open_id(user['open_id']), ['A'])
+        self.assertIn('maintenance', self.auth.account_profile(user['open_id'])['modules'])
+        self.assertIsNone(bot._sender_user({'sender_id': 'ou_Maint'}))
+        with self.assertRaises(AssistantError):
+            bot._sender_user({**message, 'sender_id': 'ou_SecondExternal'}, name=person['name'])
+        with self.assertRaises(AssistantError):
+            bot._sender_user({**message, 'sender_id': 'ou_SecondExternal'}, record_id=person['id'])
+        self.assertFalse(self.store.get_document('feishu_assistant_sender', TARGET_APP_ID + ':ou_NewExternal'))
 
     async def test_old_name_binding_and_old_app_network_cannot_authenticate(self):
         old_service = SimpleNamespace(_request_payload=Mock(side_effect=AssertionError('old app network')),
                                       _auth_headers=Mock(side_effect=AssertionError('old app token')))
         self.runtime.service = old_service
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
-        bot.config = {'app_id': 'cli_fixture'}
-        self.store.put_document('feishu_assistant_sender', 'cli_fixture:ou_Impersonator',
+        bot.config = {'app_id': TARGET_APP_ID}
+        self.store.put_document('feishu_assistant_sender', TARGET_APP_ID + ':ou_Impersonator',
             {'open_id': 'ou_Maint', 'record_id': 'recou_Maint', 'matched_by': 'name'})
         self.assertIsNone(bot._sender_user({'sender_id': 'ou_Impersonator'}))
         with self.assertRaises(AssistantError):
             bot._user('on_NotLocallyBound')
+        self.settings.app_id = 'cli_nextFixture'
+        with self.assertRaises(AssistantError):
+            bot._sender_user({'sender_id': 'ou_Maint'})
         old_service._request_payload.assert_not_called()
         old_service._auth_headers.assert_not_called()
 
@@ -372,7 +388,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
             if index == 2:
                 access['source_owner'] = 'ou_Other'
             message = {'message_id': 'om_post%d' % index, 'chat_id': 'oc_Group', 'chat_type': 'group',
-                       'root_id': 'om_Root', 'app_id': 'cli_fixture', 'question': 'question-%d' % index}
+                       'root_id': 'om_Root', 'app_id': TARGET_APP_ID, 'question': 'question-%d' % index}
             inbox.remember_public_reply(message, {'text': ('HIDDEN' if index == 2 else 'public-%d' % index) + 'x' * 1000,
                 'delivery_access': access, 'thread_route': {'chat_id': 'oc_Group', 'root_id': 'om_Root'}})
         context = inbox.topic_context(message, self.actor())
@@ -383,11 +399,11 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_enrich_and_double_prepare_never_promote_personal_permissions(self):
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
-        bot.config = {'app_id': 'cli_fixture'}
+        bot.config = {'app_id': TARGET_APP_ID}
         bot.inbox = Inbox(self.root / 'inbox.sqlite3')
         request, actor = self.request(), self.actor()
         message = {'message_id': 'om_LowAgain', 'root_id': 'om_Root', 'chat_id': 'oc_Group', 'chat_type': 'group',
-                   'app_id': 'cli_fixture', 'sender_id': 'ou_Low'}
+                   'app_id': TARGET_APP_ID, 'sender_id': 'ou_Low'}
         await bot._prepare_topic(message, request, actor)
         await bot._prepare_topic(message, request, actor)
         self.assertEqual(actor['_personal_scopes'], ['D'])
@@ -409,7 +425,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
     async def test_mixed_complete_capabilities_remain_context_without_cartesian_leak(self):
         inbox = Inbox(self.root / 'inbox.sqlite3')
         capabilities = [topic_capability(self.operation()), topic_capability(self.operation('B', 'repair'))]
-        message = {'message_id': 'om_Mixed', 'root_id': 'om_Root', 'chat_id': 'oc_Group', 'chat_type': 'group', 'app_id': 'cli_fixture'}
+        message = {'message_id': 'om_Mixed', 'root_id': 'om_Root', 'chat_id': 'oc_Group', 'chat_type': 'group', 'app_id': TARGET_APP_ID}
         inbox.remember_public_reply(message, {'text': 'A maintenance and B repair public results',
             'delivery_access': FeishuAssistant._delivery_access(self.actor(), capabilities),
             'thread_route': {'chat_id': 'oc_Group', 'root_id': 'om_Root'}})
@@ -420,17 +436,20 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_openid_and_explicit_fixed_duty_reuse_owner_without_network(self):
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
-        bot.config = {'app_id': 'cli_fixture'}
+        bot.config = {'app_id': TARGET_APP_ID}
         bot.messenger = SimpleNamespace(sender_record=AsyncMock(side_effect=AssertionError('no HR lookup')),
                                         sender_name=AsyncMock(side_effect=AssertionError('no name lookup')))
         bot._user = Mock(side_effect=AssertionError('no union lookup'))
         direct = await bot._resolve_user({'sender_id': 'ou_Low'})
         self.assertEqual(direct['open_id'], 'ou_Low')
-        self.auth.explicit['ou_Low'] = {'name': 'H duty configured', 'enabled': True}
+        duty = BUILDING_OPEN_ID_MAP['H']
+        self.auth.add(duty, ['H'], ['assistant'])
+        self.auth.explicit[duty] = {'name': 'H duty configured', 'enabled': True}
         self.auth.directory_person = lambda _: {}
-        fixed = await bot._resolve_user({'sender_id': 'ou_Low'})
-        self.assertEqual(fixed['open_id'], direct['open_id'])
+        fixed = await bot._resolve_user({'sender_id': duty})
+        self.assertEqual(fixed['open_id'], duty)
         self.assertEqual(fixed['name'], 'H duty configured')
+        self.auth.explicit['ou_Unknown'] = {'name': 'H duty configured', 'enabled': True}
         self.assertIsNone(bot._sender_user({'sender_id': 'ou_Unknown'}))
         bot.messenger.sender_record.assert_not_awaited()
         bot.messenger.sender_name.assert_not_awaited()
@@ -447,13 +466,13 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_card_operator_enrolled_only_after_verified_topic_ticket(self):
         from lan_bitable_template_portal.feishu_notice_cards import _NAMESPACE
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
-        bot.config = {'app_id': 'cli_fixture'}
+        bot.config = {'app_id': TARGET_APP_ID}
         bot.inbox = SimpleNamespace(thread_for=lambda message: {'chat_id': message['chat_id'], 'chat_type': 'group', 'root_id': message['root_id']})
         self.auth.add('ou_New', ['D'], ['assistant'])
         actor = self.actor('ou_New')
         message = {'kind': 'card_action', 'message_id': 'crd_fixture', 'reply_to_message_id': 'om_Card',
                    'sender_id': 'ou_New', 'chat_id': 'oc_Group', 'chat_type': 'group', 'root_id': 'om_Root',
-                   'app_id': 'cli_fixture', 'card': {'value': {'ticket': 'trusted-ticket'}}}
+                   'app_id': TARGET_APP_ID, 'card': {'value': {'ticket': 'trusted-ticket'}}}
         self.assertFalse(self.registry.register(self.topic, actor, message))
         request = self.request('ou_New')
         shared = {'id': 'plan-one', 'owner': 'ou_Low', 'conversation_id': 'conversation'}

@@ -32,6 +32,44 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
 
+    async def test_missing_deliverable_is_completed_from_receipts_without_repeating_tools(self):
+        agent, effects, attempts = self.fixture.agent, [], []
+        agent._buffered_reply = True
+        partial, complete = '共有2人。', '共有2人：测试甲、测试乙。'
+        async def read():
+            effects.append('read')
+            return {'ok': True, 'data': {'participants': [{'name': '测试甲'}, {'name': '测试乙'}]}}
+        agent.tools['lighthouse_query'] = Tool(read)
+        async def validate(answer):
+            if answer == partial:
+                raise ModelRetry('请补充原回执中已经提供的两个人名。')
+            return answer
+        agent.validators.append(validate)
+        async def hook(client):
+            submissions = [params for method, params in client.calls if method == 'agent']
+            if not effects:
+                await self.fixture.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                    'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'first-read', 'params': {}})
+            if len(submissions) == 2:
+                attempts.append(submissions[-1])
+                client.wait = {'status': 'ok', 'terminalReply': {'disposition': 'visible', 'text': complete}}
+                with self.assertRaises(AssistantError):
+                    await self.fixture.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                        'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'must-not-requery', 'params': {}})
+        self.fixture.scripts['current'] = {'hook': hook, 'wait': {'status': 'ok',
+            'terminalReply': {'disposition': 'visible', 'text': partial}}, 'events': [
+            {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'assistant', 'data': {'delta': partial}}}]}
+        events = await self.fixture.run_agent()
+        self.assertEqual(events[-1].result.output, complete)
+        self.assertEqual(effects, ['read'])
+        self.assertEqual(len(attempts), 1)
+        self.assertIn('测试乙', attempts[0]['message'])
+        visible = ''.join(event.part.content if event.event_kind == 'part_start' else event.delta.content_delta
+                          for event in events if event.event_kind in {'part_start', 'part_delta'})
+        self.assertEqual(visible, complete)
+        self.assertEqual(agent.calls, 1)
+        self.assertFalse(agent._evidence_only)
+
     async def test_suppressed_terminal_reply_uses_existing_backup_chain(self):
         self.fixture.scripts['current'] = {'wait': {
             'status': 'ok', 'terminalReply': {'disposition': 'suppressed'}}}
@@ -243,6 +281,7 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(''.join(event.delta.content_delta for event in events if event.event_kind == 'part_delta'), answer)
 
     async def test_incomplete_terminal_after_real_output_cannot_retry_or_claim_success(self):
+        self.fixture.agent._live_text_only = True
         self.fixture.scripts['current'] = {'wait': {'status': 'ok', 'terminalReply': {
             'disposition': 'visible', 'text': 'NO_REPLY'}}, 'events': [
                 {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'assistant',
@@ -366,6 +405,7 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(missing=missing):
                 self.fixture.setUp()
                 agent = self.fixture.agent
+                agent._live_text_only = True
                 agent.calls = 1
                 if not missing:
                     agent.results['receipt'] = ('signature', {'ok': True, 'job_id': 'accepted'})
@@ -613,7 +653,12 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
         flow.fail(hook=first)
         flow.scripts['backup'] = {'hook': backup}
         self.fixture.emit_log.clear()
-        await self.fixture._run_answer(factory, '查询D楼人员明细', [])
+        if revoke:
+            with self.assertRaisesRegex(AssistantError, '权限已变化') as caught:
+                await self.fixture._run_answer(factory, '查询D楼人员明细', [])
+            self.assertEqual(caught.exception.status, 403)
+        else:
+            await self.fixture._run_answer(factory, '查询D楼人员明细', [])
         self.assertEqual(flow.selected, ['current', 'backup'])
         self.assertEqual(reads, [('D', 'participation')])
         self.assertEqual(len(tails), 1)
@@ -621,7 +666,7 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.writes, [])
         text = ''.join(value['delta'] for kind, value in self.fixture.emit_log if kind == 'text')
         if revoke:
-            self.assertIn('未知', text)
+            self.assertEqual(text, '')
             self.assertNotIn('测试姓名55', text)
             self.assertNotIn('已查全', text)
         else:

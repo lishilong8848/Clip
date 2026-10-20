@@ -27,12 +27,21 @@
       <nav class="category-tabs" aria-label="岗位分类筛选">
         <button v-for="option in categoryTabs" :key="option.value || 'all'" type="button" :class="{ active: category === option.value }" :aria-pressed="category === option.value" @click="category = option.value">{{ option.label }}<span>{{ option.count }}</span></button>
       </nav>
+      <div v-if="items.some(canSelectModules) || selectedIds.size" class="account-bulk-bar" aria-label="模块权限批量操作">
+        <label class="check"><input type="checkbox" aria-label="选择本页可管理人员" :checked="pageSelectable.length > 0 && pageSelectable.every(item => selectedIds.has(item.id))" :indeterminate="pageSelectable.some(item => selectedIds.has(item.id)) && !pageSelectable.every(item => selectedIds.has(item.id))" :disabled="loading || saving || !pageSelectable.length" @change="selectModulePage(($event.target as HTMLInputElement).checked)" />本页可管理人员</label>
+        <span role="status">已选 {{ selectedIds.size }} / 300 人</span>
+        <button type="button" :disabled="!selectedIds.size || loading || saving" @click="openBulkModules"><Settings2 :size="16" />批量设置模块</button>
+        <button type="button" :disabled="!selectedIds.size || loading || saving" @click="selectedIds = new Set(); selectionNotice = ''"><X :size="16" />清空选择</button>
+        <small v-if="items.some(item => canEditAccess(item) && !item.enabled)" class="account-bulk-limit">停用账号未返回已保存的模块，暂不可批量修改。</small>
+      </div>
+      <p v-if="selectionNotice" class="warning" role="status">{{ selectionNotice }}</p>
       <LoadingIndicator v-if="loading && !items.length">正在读取账号</LoadingIndicator>
       <div v-else class="table-wrap">
         <table>
-          <thead><tr><th>人员 / 账号</th><th>岗位分类</th><th>类型</th><th>所属楼栋</th><th>级别</th><th>角色</th><th>可访问楼栋</th><th>状态</th><th v-if="myLevel !== 'L2'">最近登录</th><th>操作</th></tr></thead>
+          <thead><tr><th>选择</th><th>人员 / 账号</th><th>岗位分类</th><th>类型</th><th>所属楼栋</th><th>级别</th><th>角色</th><th>可访问楼栋</th><th>状态</th><th v-if="myLevel !== 'L2'">最近登录</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="item in pageItems" :key="item.id">
+              <td class="account-select-cell"><label class="account-select-target" :title="!item.enabled ? '停用账号未返回已保存的模块，暂不可批量修改' : !canSelectModules(item) ? '当前账号无权设置此人员模块' : ''"><input type="checkbox" :aria-label="`选择${item.name}`" :checked="selectedIds.has(item.id)" :disabled="loading || saving || !canSelectModules(item) || (!selectedIds.has(item.id) && selectedIds.size >= 300)" @change="selectModuleAccount(item, ($event.target as HTMLInputElement).checked)" /></label></td>
               <td><b>{{ item.name }}</b><small v-if="myLevel !== 'L2'">{{ item.employee_no || (item.kind === 'duty' ? '固定值班账号' : '工号未填') }}</small></td>
               <td class="category-cell"><span class="tag">{{ categoryLabel(item.category) }}</span><small v-if="item.position" :title="item.position">原岗位：{{ item.position }}</small><small v-else>原岗位未填写</small></td>
               <td><span class="tag">{{ kinds[item.kind] }}</span></td><td>{{ scopesLabel(item.own_scopes) }}</td>
@@ -43,7 +52,7 @@
               <td v-if="myLevel !== 'L2'" class="muted">{{ formatTime(item.last_login) }}</td>
               <td class="account-actions"><button type="button" class="link-button" :disabled="saving" :aria-label="`管理${item.name}`" @click="openAccount(item)"><Settings2 :size="15" />管理</button><button type="button" class="link-button" data-v2-navigation :disabled="saving||loading||item.can_impersonate!==true" :title="item.can_impersonate?'临时以该人员身份查看':'当前账号不可临时代登录'" :aria-label="`临时代登录${item.name}`" @click="requestImpersonation(item)"><UserRoundCog :size="15" />临时代登录</button><button v-if="item.can_delete" type="button" class="link-button danger" :disabled="saving" :aria-label="`撤销${item.name}的登录权限`" @click="deleteAccount(item)"><Trash2 :size="15" />撤销</button></td>
             </tr>
-            <tr v-if="!filtered.length"><td :colspan="myLevel !== 'L2' ? 10 : 9" class="empty">没有匹配的账号</td></tr>
+            <tr v-if="!filtered.length"><td :colspan="myLevel !== 'L2' ? 11 : 10" class="empty">没有匹配的账号</td></tr>
           </tbody>
         </table>
       </div>
@@ -56,6 +65,32 @@
         <tbody><tr v-for="row in audits" :key="row.audit_id"><td>{{ formatTime(row.updated_at) }}</td><td>{{ row.actor_name || '管理员' }}</td><td>{{ actionLabel(row.action) }}</td><td><template v-if="row.metadata?.impersonation">代办账号：{{ row.metadata.impersonation.target_name }}<div v-if="row.metadata.path">{{ row.metadata.method }} {{ row.metadata.path }}</div></template><template v-else-if="row.action === 'password' || row.action === 'delete'">{{ row.metadata?.name }}</template><div v-for="(change, i) in row.metadata?.changes || []" :key="i">{{ change.name }}：{{ scopesLabel(change.before?.scopes || []) }} → {{ scopesLabel(change.after?.scopes || []) }}；{{ change.after?.enabled === false ? '停用' : change.after?.role === 'admin' ? '管理员' : '普通用户' }}</div></td><td>{{ statusLabel(row.status) }}</td></tr><tr v-if="!audits.length"><td colspan="5" class="empty">暂无变更记录</td></tr></tbody></table></div>
     </template>
     <Teleport to="body"><div style="--cf-z-confirm:5100" data-v2-inline-feedback><ConfirmDialog :open="!!impersonationTarget" tone="warning" kicker="管理员临时代办" :title="`临时以${impersonationTarget?.name||''}身份查看？`" message="临时代登录有效期20分钟，所有操作仍以真实管理员作为实际操作人记录。" :details="['不能代签、代审批、代答题，也不能读取该人员的私人聊天。需本人操作的事项请交由本人完成。','确认后将整页进入当前版本首页，当前页面未提交的填写不会保留。']" confirm-label="确认临时代登录" @resolve="confirmImpersonation" /></div></Teleport>
+    <Teleport to="body">
+      <UiTransition name="ui-overlay">
+        <div v-if="bulkOpen" class="account-overlay" @click.self="closeBulkModules">
+          <section ref="bulkEditor" class="account-editor account-bulk-editor" data-v2-inline-feedback role="dialog" aria-modal="true" aria-labelledby="account-bulk-title" tabindex="-1">
+            <header><div><h2 id="account-bulk-title">批量设置模块</h2><span class="muted">已选 {{ selectedAccounts.length }} 人 · {{ bulkPreview ? '提交前预览' : '选择模块操作' }}</span></div><button type="button" class="icon" aria-label="关闭批量模块设置" :disabled="saving" @click="closeBulkModules"><X :size="20" /></button></header>
+            <div class="account-bulk-body">
+              <p v-if="bulkError" class="error" role="alert">{{ bulkError }}</p>
+              <p v-if="selectionNotice" class="warning" role="status">{{ selectionNotice }}</p>
+              <fieldset class="account-bulk-mode" :disabled="saving || loading"><legend>模块操作</legend><label class="check"><input v-model="bulkMode" type="radio" value="add" name="account-module-mode" />添加模块</label><label class="check"><input v-model="bulkMode" type="radio" value="remove" name="account-module-mode" />移除模块</label></fieldset>
+              <div class="module-groups">
+                <fieldset v-for="group in bulkModuleGroups" :key="group.label" class="module-group" :disabled="saving || loading"><legend><label class="check"><input type="checkbox" :aria-label="`选择${group.label}全部模块`" :checked="group.selectable.length > 0 && group.selectedCount === group.selectable.length" :indeterminate="group.selectedCount > 0 && group.selectedCount < group.selectable.length" :disabled="saving || loading || !group.selectable.length" @change="selectBulkGroup(group.selectable.map(option => option.value), ($event.target as HTMLInputElement).checked)" />{{ group.label }}</label></legend>
+                  <div class="module-options"><label v-for="mod in group.options" :key="mod.value" class="check" :class="{ granted: bulkModules.includes(mod.value) }"><input v-model="bulkModules" type="checkbox" :value="mod.value" :disabled="bulkMode === 'add' && mod.value === 'accounts' && selectedAccounts.some(item => item.level === 'L4')" />{{ mod.label }}</label></div>
+                </fieldset>
+              </div>
+              <p v-if="bulkMode === 'add' && selectedAccounts.some(item => item.level === 'L4')" class="muted">所选人员含 L4，不能添加账号与设置模块。</p>
+              <section ref="bulkSummary" class="account-bulk-preview" aria-label="模块操作预览" tabindex="-1">
+                <h3>{{ bulkMode === 'add' ? '添加' : '移除' }}：{{ moduleLabel(bulkModules) }}</h3>
+                <p class="muted">仅调整指定模块；其他模块、级别、角色、楼栋、启用状态、密码、签名及历史记录保留。</p>
+                <ul aria-label="所选人员"><li v-for="item in selectedAccounts" :key="item.id"><span>{{ item.name }}<small>{{ item.employee_no || item.open_id }} · {{ levelLabel(item.level) }}</small></span><span v-if="bulkPreview" class="muted">{{ moduleDelta(item) }} 项变更</span></li></ul>
+              </section>
+            </div>
+            <footer class="editor-footer"><button v-if="bulkNeedsRefresh" type="button" :disabled="loading || saving" @click="load(true)"><RefreshCw :size="16" />刷新账号</button><button type="button" :disabled="saving" @click="closeBulkModules">取消</button><button v-if="bulkPreview" type="button" class="primary" :disabled="saving || loading || bulkNeedsRefresh" @click="saveBulkModules"><Save :size="16" />{{ saving ? '正在提交' : `确认提交 ${bulkPreview.length} 人` }}</button><button v-else type="button" class="primary" :disabled="saving || loading || bulkNeedsRefresh || !selectedAccounts.length || !bulkModules.length" @click="previewBulkModules">预览变更<ChevronRight :size="16" /></button></footer>
+          </section>
+        </div>
+      </UiTransition>
+    </Teleport>
     <Teleport to="body">
       <UiTransition name="ui-overlay">
         <div v-if="draft" class="account-overlay" @click.self="closeEditor">
@@ -123,7 +158,8 @@ import { acquireModal } from '../modalState';
 import AccountSignature from './AccountSignature.vue';
 import ConfirmDialog from './ConfirmDialog.vue';
 import { finishImpersonation } from './ImpersonationBanner.vue';
-type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; home_scope?: string; can_impersonate?: boolean };
+type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; home_scope?: string; can_impersonate?: boolean; is_self?: boolean };
+type ModuleChange = Pick<Account, 'id' | 'revision' | 'enabled'> & { modules: string[] };
 const props = defineProps<{ pendingCount: number; permissions: Dict[] }>();
 const emit = defineEmits<{ changed: [] }>();
 const kinds: Record<string, string> = { vnet: 'VNET人员', external: '非VNET人员', duty: '值班账号', legacy: '历史账号', unknown: '类型待核对' };
@@ -183,11 +219,97 @@ function canEditAccess(item: Account) { return item.can_edit_access === true; }
 // anything else the access panel offers.
 const isFixedDuty = computed(() => draft.value?.kind === 'duty' && (draft.value.home_scope === 'H' || draft.value.own_scopes?.includes('H')));
 const actorModules = computed(() => Array.isArray(policy.value?.modules) ? policy.value.modules as string[] : []);
+const selectedIds = ref(new Set<string>()), selectionNotice = ref('');
+const selectedAccounts = computed(() => items.value.filter(item => selectedIds.value.has(item.id)));
+const pageSelectable = computed(() => pageItems.value.filter(canSelectModules));
+const bulkOpen = ref(false), bulkEditor = ref<HTMLElement | null>(null), bulkMode = ref('add');
+const bulkSummary = ref<HTMLElement | null>(null);
+const bulkModules = ref<string[]>([]), bulkPreview = ref<ModuleChange[] | null>(null), bulkError = ref(''), bulkNeedsRefresh = ref(false);
+function canSelectModules(item: Account) {
+  // Disabled profiles expose effective [] instead of saved modules; merging would lose grants.
+  return canEditAccess(item) && item.enabled && !!item.open_id && !item.is_self && item.open_id !== policy.value.open_id && !item.locked && !item.blocked_reason;
+}
+function selectModuleAccount(item: Account, checked: boolean) {
+  if (saving.value || loading.value || !canSelectModules(item)) return;
+  if (checked && selectedIds.value.size >= 300) return;
+  const next = new Set(selectedIds.value);
+  if (checked) next.add(item.id); else next.delete(item.id);
+  selectedIds.value = next;
+}
+function selectModulePage(checked: boolean) {
+  if (saving.value || loading.value) return;
+  const next = new Set(selectedIds.value);
+  if (checked && next.size + pageSelectable.value.filter(item => !next.has(item.id)).length > 300) {
+    selectionNotice.value = '最多同时设置 300 人，请减少选择后再选本页。'; return;
+  }
+  for (const item of pageSelectable.value) { if (checked) next.add(item.id); else next.delete(item.id); }
+  selectedIds.value = next;
+}
+function openBulkModules() {
+  if (saving.value || loading.value || !selectedAccounts.value.length) return;
+  bulkMode.value = 'add'; bulkModules.value = []; bulkPreview.value = null; bulkError.value = ''; bulkNeedsRefresh.value = false;
+  notice.value = ''; bulkOpen.value = true;
+}
+function closeBulkModules() { if (!saving.value) bulkOpen.value = false; }
+function selectBulkGroup(modules: string[], checked: boolean) {
+  if (saving.value || loading.value) return;
+  bulkModules.value = checked ? [...new Set([...bulkModules.value, ...modules])] : bulkModules.value.filter(module => !modules.includes(module));
+}
+function moduleDelta(item: Account) {
+  const final = bulkPreview.value?.find(change => change.id === item.id)?.modules || [];
+  const current = item.modules || [];
+  return final.filter(module => !current.includes(module)).length + current.filter(module => !final.includes(module)).length;
+}
+function previewBulkModules() {
+  bulkPreview.value = null; bulkError.value = '';
+  if (saving.value || loading.value || bulkNeedsRefresh.value) return;
+  const people = selectedAccounts.value, modules = bulkModules.value;
+  if (!people.length || people.length > 300 || people.length !== selectedIds.value.size || people.some(item => !canSelectModules(item))) {
+    bulkError.value = '请选择 1 至 300 名可管理人员；人员权限变化后请刷新重试。'; return;
+  }
+  if (!modules.length || modules.some(module => !accessModuleOptions.value.some(option => option.value === module))) {
+    bulkError.value = '请选择本人拥有权限的模块。'; return;
+  }
+  const changes: ModuleChange[] = people.map(item => ({ id: item.id, revision: item.revision, enabled: item.enabled,
+    modules: bulkMode.value === 'add' ? [...new Set([...(item.modules || []), ...modules])] : (item.modules || []).filter(module => !modules.includes(module)) }));
+  const invalid = changes.find((change, index) => change.modules.some(module => !actorModules.value.includes(module) || (module === 'accounts' && people[index].level === 'L4')));
+  if (invalid) { bulkError.value = `${people.find(item => item.id === invalid.id)?.name}的模块权限超出可设置范围，请交由上级处理；未删除其他模块。`; return; }
+  if (changes.every((change, index) => JSON.stringify(change.modules) === JSON.stringify(people[index].modules || []))) {
+    bulkError.value = '所选账号已符合此模块设置，无需提交。'; return;
+  }
+  bulkPreview.value = changes;
+  void nextTick(() => bulkSummary.value?.focus());
+}
+async function saveBulkModules() {
+  if (saving.value || loading.value || bulkNeedsRefresh.value || !bulkPreview.value) return;
+  const changes = bulkPreview.value;
+  saving.value = true; bulkError.value = ''; notice.value = '';
+  try {
+    const result = await requestJson('/api/auth/accounts/permissions', { method: 'POST', body: JSON.stringify({ changes }), signal: abort.signal });
+    if (result.changed !== changes.length) throw new Error('服务未确认全部账号保存成功，请刷新核对结果。');
+    notice.value = `已为 ${changes.length} 人${bulkMode.value === 'add' ? '添加' : '移除'}指定模块`;
+    bulkOpen.value = false; bulkPreview.value = null;
+    await load(); emit('changed'); dispatchAuthChanged();
+  } catch (e: any) {
+    if (!abort.signal.aborted) {
+      bulkError.value = `${e.message || '模块设置未完成'} 未确认整批成功，选择已保留。若有版本冲突，请刷新账号后重新预览。`;
+      bulkPreview.value = null; bulkNeedsRefresh.value = true;
+    }
+  } finally { saving.value = false; }
+}
+watch([bulkMode, bulkModules, selectedIds], () => { bulkPreview.value = null; }, { deep: true });
+watch([bulkMode, selectedAccounts], () => {
+  if (bulkMode.value === 'add' && selectedAccounts.value.some(item => item.level === 'L4')) bulkModules.value = bulkModules.value.filter(module => module !== 'accounts');
+});
 const isSuperAdmin = computed(() => ['L0', 'L1'].includes(myLevel.value));
 const accessLevelOptions = computed(() => levelOptions.value);
 const accessCategoryOptions = computed(() => categoryOptions.value);
 const accessModuleOptions = computed(() => moduleOptions.value.filter(option => actorModules.value.includes(option.value)));
 const moduleGroups = computed(() => ['业务管理', '通告办理', '协作与资料', '系统管理', '功能模块'].map(label => ({ label, options: accessModuleOptions.value.filter(option => (option.group || '功能模块') === label) })).filter(group => group.options.length));
+const bulkModuleGroups = computed(() => moduleGroups.value.map(group => {
+  const selectable = group.options.filter(option => bulkMode.value !== 'add' || option.value !== 'accounts' || !selectedAccounts.value.some(item => item.level === 'L4'));
+  return { ...group, selectable, selectedCount: selectable.filter(option => bulkModules.value.includes(option.value)).length };
+}));
 const accessScopeOptions = computed(() => {
   const options = scopeOptions.value;
   if (!draft.value) return options;
@@ -228,11 +350,18 @@ async function load(refresh = false) {
   if (loading.value) return;
   loading.value = true; error.value = '';
   try {
-    const data = await requestJson(`/api/auth/accounts${refresh ? '?refresh=true' : ''}`, { signal: abort.signal });
+    const data = await requestJson(`/api/auth/accounts${refresh ? '?refresh=true' : ''}`, { signal: abort.signal, fresh: true });
+    const previousSelection = selectedAccounts.value;
     items.value = data.items || []; scopeOptions.value = data.scope_options || []; categoryOptions.value = data.category_options || [];
     moduleOptions.value = data.module_options || []; levelOptions.value = data.level_options || [];
     policy.value = data.policy || {};
     loadedAt.value = data.loaded_at || 0; warning.value = data.warning || '';
+    const removed = previousSelection.filter(old => !items.value.some(item => item.id === old.id && item.open_id === old.open_id && canSelectModules(item)));
+    if (removed.length) {
+      selectedIds.value = new Set([...selectedIds.value].filter(id => !removed.some(item => item.id === id)));
+      selectionNotice.value = `已移除不可管理、身份变化或已离开名单的 ${removed.length} 人：${removed.map(item => item.name).join('、')}；其余选择保留。`;
+    } else if (previousSelection.length) selectionNotice.value = `已刷新账号，保留 ${selectedIds.value.size} 人选择，请重新预览模块操作。`;
+    bulkPreview.value = null; bulkNeedsRefresh.value = false;
     // Permission reload downgrade guard: switch stale tabs back to accounts and close a
     // stale editor when the acting profile no longer has access to the open target.
     const available = tabs.value.map(option => option.value);
@@ -318,18 +447,20 @@ async function savePassword() {
   finally { saving.value = false; }
 }
 function escape(event: KeyboardEvent) {
-  if (!modal?.isTop(event, editor.value)) return;
-  if (event.key === 'Escape') { event.stopImmediatePropagation(); closeEditor(); }
+  const activeEditor = bulkOpen.value ? bulkEditor.value : editor.value;
+  if (!modal?.isTop(event, activeEditor)) return;
+  if (event.key === 'Escape') { event.stopImmediatePropagation(); if (bulkOpen.value) closeBulkModules(); else closeEditor(); }
   if (event.key === 'Tab') {
-    const controls = Array.from(editor.value?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)') || []);
+    const controls = Array.from(activeEditor?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)') || []).filter(control => !control.matches(':disabled'));
     const first = controls[0], last = controls[controls.length - 1];
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === editor.value)) { event.preventDefault(); last?.focus(); }
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === activeEditor)) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   }
 }
-watch(() => !!draft.value, async open => {
-  if (open) { modal = acquireModal(); await nextTick(); editor.value?.focus(); }
-  else { modal?.release(); modal = null; }
+let modalTrigger: HTMLElement | null = null;
+watch(() => !!draft.value || bulkOpen.value, async open => {
+  if (open) { modalTrigger = document.activeElement as HTMLElement; modal = acquireModal(); await nextTick(); (bulkOpen.value ? bulkEditor.value : editor.value)?.focus(); }
+  else { modal?.release(); modal = null; modalTrigger?.focus(); }
 });
 watch([search, kind, building, state, category], () => { page.value = 1; });
 watch(pageCount, value => page.value = Math.min(page.value, value));
@@ -348,6 +479,32 @@ onBeforeUnmount(() => { abort.abort(); newPassword.value = ''; confirmPassword.v
 
 <style scoped>
 .accounts { display: grid; gap: 16px; color: #203650; }
+.account-bulk-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 10px 0; border-block: 1px solid var(--v2-border, #dce6f0); font-size: 13px; }
+.account-bulk-bar>span { margin-right: auto; font-variant-numeric: tabular-nums; }
+.account-bulk-limit { flex-basis: 100%; }
+.account-select-cell { width: 44px; padding: 0; }
+.account-select-target { display: flex; align-items: center; justify-content: center; width: 44px; min-height: 44px; }
+.account-editor.account-bulk-editor { width: min(720px, 100%); }
+.account-bulk-body { overflow: auto; min-height: 0; display: grid; gap: 16px; padding: 16px 24px; }
+.account-bulk-mode { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.account-bulk-body .check { min-height: 44px; overflow-wrap: anywhere; }
+.account-bulk-body input { flex: none; }
+.account-bulk-body input[type=radio] { accent-color: #2563eb; width: 16px; height: 16px; }
+.account-bulk-body p { margin: 0; }
+.account-bulk-preview h3 { font-size: 14px; margin: 0 0 8px; overflow-wrap: anywhere; }
+.account-bulk-preview ul { list-style: none; margin: 10px 0 0; padding: 0; max-height: 180px; overflow: auto; }
+.account-bulk-preview li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--v2-border, #dce6f0); font-size: 13px; }
+.account-bulk-preview li>span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.account-bulk-preview li>span:last-child:not(:first-child) { flex: none; }
+.account-bulk-preview small { display: block; overflow-wrap: anywhere; }
+@media(max-width:760px) {
+  .account-bulk-bar>.check { flex-basis: 100%; min-height: 44px; }
+  .account-bulk-bar>button { min-height: 44px; }
+  .account-bulk-editor .account-bulk-body { padding: 14px 16px; }
+  .account-bulk-editor .editor-footer { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .account-bulk-editor .editor-footer>button { min-width: 0; white-space: normal; }
+  .account-bulk-editor .editor-footer>.primary { justify-self: stretch; }
+}
 @media(max-width:600px){
   .account-editor .editor-footer:has(.impersonate-action){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:10px 14px;gap:8px}
   .account-editor .editor-footer:has(.impersonate-action)>span{margin:0}

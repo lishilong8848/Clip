@@ -13,6 +13,7 @@ from .lighthouse_ai import AssistantError, NAMESPACE, private_identifier, safe_t
 from .lighthouse_model import LighthouseModel
 from .lighthouse_scope import resolve_scopes
 from .lighthouse_queries import DATE_TOKEN, query_refinement, named_clarification_reply
+from .lighthouse_context import task_context, task_followup, reply_preferences, execution_key, execution_lane
 
 RUNS = "lighthouse_runs"
 MESSAGES = "lighthouse_messages"
@@ -61,6 +62,7 @@ class LighthouseStream:
         self.engine = engine or LighthouseModel(portal_agent, cached_reader=cached_reader)
         # ponytail: one resident process owns runs; shared coordination is needed before enabling multiple workers.
         self.workers, self.live, self.locks = {}, {}, {}
+        self.resume_lock = asyncio.Lock()
         # 0 / negative max_parallel means unlimited task admission (our sentinel);
         # a bare Semaphore(0) would deadlock, so skip the global cap in that case.
         max_parallel = getattr(self.engine, 'max_parallel', 3)
@@ -69,6 +71,13 @@ class LighthouseStream:
 
     def _lock(self, actor):
         return self.locks.setdefault(actor["id"], asyncio.Lock())
+
+    @staticmethod
+    def _lane(state, actor):
+        if not execution_lane(actor) or (not state.get('execution_lanes') and state.get('active_run_id')):
+            return state
+        return state.setdefault('execution_lanes', {}).setdefault(execution_key(actor), {
+            'context': copy.deepcopy(state.get('context') or {})})
 
     def _read(self, actor):
         with self.assistant._lock:
@@ -92,11 +101,13 @@ class LighthouseStream:
             turn.update(copy.deepcopy(changes))
             turn["process"] = copy.deepcopy(run.get("process", []))
             self.store.put_document(MESSAGES, state["id"] + ":" + turn["operation_id"], turn)
-            if state.get("active_run_id") == run["id"]:
-                state["phase"] = "" if finish else run.get("label", "正在处理")
+            lane = self._lane(state, actor)
+            if lane.get("active_run_id") == run["id"]:
+                lane["phase"] = "" if finish else run.get("label", "正在处理")
                 if finish:
-                    state["active_run_id"] = ""
-                    self.assistant._active.discard(actor["id"])
+                    lane["active_run_id"] = ""
+                    if not any(item['owner'] == actor['id'] and item['status'] in ACTIVE for item in tuple(self.live.values())):
+                        self.assistant._active.discard(actor["id"])
             state["revision"] = state.get("revision", 0) + 1
             self.store.put_document(NAMESPACE, self.assistant._key(actor), state)
             return True
@@ -122,11 +133,14 @@ class LighthouseStream:
         selections = payload.get('commands', [])
         with self.assistant._lock:
             state = self.assistant._state(actor)
+            lane = self._lane(state, actor)
             if state["id"] != payload.get("conversation_id"):
                 raise AssistantError("会话已变化，请重新读取，原输入未提交。", 409)
             old = next((item for item in state["turns"] if item["operation_id"] == operation), None)
             if old and not self.assistant._allowed(old, actor):
                 raise AssistantError("当前权限已无法读取此消息，请重新提问。", 403)
+            if old and old.get('status') == 'pending' and old.get('execution_lane', '') != execution_lane(actor):
+                raise AssistantError('请在原浏览器标签或飞书话题中继续此消息。', 409)
             if old and old.get("attempt_id", operation) == attempt:
                 if (old["question"] != clean_question or old.get("submitted_file_ids", old.get("file_ids", [])) != files
                         or old.get('submitted_commands', []) != selections
@@ -138,8 +152,10 @@ class LighthouseStream:
             from .lighthouse_commands import resolve
             selected_commands, command_context = resolve(self.store, actor, getattr(self.portal, 'catalog', None), selections)
             from .lighthouse_planned import selection_reply
-            topic_turns = [item for item in state['turns'] if not topic_id or
-                           item.get('feishu_topic') == topic_id and self.assistant._allowed(item, actor)]
+            topic_turns = [item for item in state['turns'] if not item.get('display_only')
+                           and self.assistant._allowed(item, actor)
+                           and item.get('execution_lane', execution_lane(actor)) == execution_lane(actor)
+                           and (not topic_id or item.get('feishu_topic') == topic_id)]
             previous = next((item for item in reversed(topic_turns) if item is not old and item.get('question')), None)
             awaiting_clarification = bool(previous and previous.get('status') == 'completed' and previous.get('clarification')
                 and self.assistant._allowed(previous, actor))
@@ -150,8 +166,8 @@ class LighthouseStream:
                 and (clarification_id or DATE_TOKEN.fullmatch(clean_question.rstrip('呢？?。！! ')) or selection_reply(clean_question)
                      or clean_question in previous['clarification'].get('options', [])
                      or named_clarification_reply(clean_question, previous)))
-            refining = clarification_reply or query_refinement(clean_question) and not awaiting_clarification
-            prior_scopes = previous.get('scopes') if topic_id and previous else None if topic_id else state.get('query_scopes')
+            refining = clarification_reply or task_followup(clean_question) and not awaiting_clarification
+            prior_scopes = previous.get('scopes') if previous else lane.get('query_scopes')
             scopes = resolve_scopes(actor, question, prior_scopes if refining else None)
             from .lighthouse_ai import is_business_query
             from .lighthouse_knowledge import company_question
@@ -160,7 +176,7 @@ class LighthouseStream:
             model = self.assistant.model_for(actor)
             selected = self.assistant._selected(state, model.settings())
             profile = model.profile(selected["id"] if selected else "")
-            prior = next((item for item in state["turns"] if item.get("run_id") == state.get("active_run_id") and item.get("status") == "pending"), None)
+            prior = next((item for item in state["turns"] if item.get("run_id") == lane.get("active_run_id") and item.get("status") == "pending"), None)
             prompt = (old.get("prompt") if old and old["question"] == clean_question else "") or clean_question
             if clarification_reply:
                 prompt = (previous.get('prompt') or previous['question']) + '\n待补充问题：' + previous['answer'] + '\n用户补充：' + clean_question
@@ -199,6 +215,8 @@ class LighthouseStream:
             # New input invalidates only unsubmitted proposals, never submitted jobs.
             answering_selection = selection_reply(clean_question) is not None
             for item in state["turns"]:
+                if item.get('execution_lane', '') != execution_lane(actor):
+                    continue
                 plan = item.get("plan") or {}
                 if (answering_selection and plan.get("status") == "needs_input"
                         and plan.get("planned_notice", {}).get("stage") in {"scope", "candidate"}):
@@ -213,13 +231,24 @@ class LighthouseStream:
             turn = old or {"operation_id": operation, "at": time.time()}
             if old:
                 turn.setdefault("attempts", []).append({key: copy.deepcopy(old.get(key)) for key in ("run_id", "answer", "status", "error", "at")})
+            structured = task_context(clean_question, previous if refining and not files and not clarification_reply else None,
+                                      actor, topic_id=topic_id, scopes=scopes)
+            if not topic_id:
+                state['reply_preferences'] = reply_preferences(clean_question, state.get('reply_preferences'))
             turn.update(question=clean_question, prompt=prompt, file_ids=files, submitted_file_ids=payload.get("file_ids") or [], _private_request=private_request or bool(old and old.get("_private_request")),
+                        _research_mode=clean_question.startswith('/深入研究 ') or any(
+                            item.get('kind') == 'tool' and item.get('id') == 'research_public' for item in selected_commands)
+                            or bool(old and old['question'] == clean_question and old.get('_research_mode')),
+                        resume_available=False,
+                        _task_context=structured,
+                        _reply_preferences=copy.deepcopy(state.get('reply_preferences', {})) if not topic_id else {},
                         _learning_followup_query=copy.deepcopy(previous.get('learning_query')) if previous and refining and self.assistant._allowed(previous, actor) else None,
                         feishu_topic=topic_id,
+                        execution_lane=execution_lane(actor),
                         commands=selected_commands, submitted_commands=copy.deepcopy(selections), _command_context=command_context,
                         attachments=attachments, preview_file=preview_file, output_files=[], downloads=[], status="pending", answer="", error="", error_code="", process=[], sources=[], scopes=scopes,
                         access_scopes=actor["scopes"],
-                        access_modules=list(actor.get('modules', [])) if topic_id else [],
+                        access_modules=list(actor.get('modules', [])),
                         source_channel='feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
                         run_id=run_id, attempt_id=attempt, model_name=profile["name"], plan=None, clarification=None,
                         _clarification_reply=clarification_reply or bool(old and old['question'] == clean_question and old.get('_clarification_reply')))
@@ -233,18 +262,23 @@ class LighthouseStream:
             else:
                 self.store.put_document(MESSAGES, state["id"] + ":" + turn["operation_id"], turn)
             self.assistant._trim_turns(state)
-            state.update(active_run_id=run_id, query_scopes=scopes, streaming=True, phase="正在接收消息", revision=state.get("revision", 0) + 1)
+            lane.update(active_run_id=run_id, query_scopes=scopes, phase="正在接收消息")
+            state.update(streaming=True, revision=state.get("revision", 0) + 1)
             self.store.put_document(NAMESPACE, self.assistant._key(actor), state)
             self.assistant._active.add(actor["id"])
             run = {"id": run_id, "owner": actor["id"], "conversation_id": state["id"], "operation_id": operation,
-                   "scopes": scopes, "access_scopes": actor["scopes"], "status": "queued", "label": "等待处理", "events": [], "revision": 1,
-                   "answer": "", "process": [], "created_at": time.time(), "_turn": {**copy.deepcopy(turn), "_profile": profile},
+                   "execution_lane": execution_lane(actor),
+                   "scopes": scopes, "access_scopes": actor["scopes"], "access_modules": list(actor.get('modules', [])),
+                   "status": "queued", "label": "等待处理", "events": [], "revision": 1,
+                   "answer": "", "process": [], "created_at": time.time(), "_turn": {**copy.deepcopy(turn),
+                       "_profile": {**profile, '_automatic_selection': not bool(state.get('model_id'))}},
                    "_history": [] if topic_id else copy.deepcopy([t for t in state["turns"] if t is not turn and not t.get('display_only')
                        and (t.get("answer") and t.get("status") == "completed"
                             or t.get("output_files") and t.get("status") in {"completed", "failed", "stopped", "superseded"})
                        and self.assistant._allowed(t, actor)]),
-                   "_context": {} if topic_id else copy.deepcopy(state.get("context") or {})}
+                   "_context": {} if topic_id else copy.deepcopy(lane.get("context") or {})}
             self._save_run(run)
+            self.live[run_id] = run
             return run, {"conversation_id": state["id"], "run_id": run_id, "turn": public_turn(turn)}
 
     async def submit(self, actor, payload, request, authorize):
@@ -255,8 +289,8 @@ class LighthouseStream:
             run, result = await asyncio.to_thread(self._accept, actor, payload)
             if run is None:
                 return result
-            previous = self.workers.get(actor["id"])
-            previous_run = self.live.get(previous_state.get("active_run_id"))
+            previous = self.workers.get(execution_key(actor))
+            previous_run = self.live.get(self._lane(previous_state, actor).get("active_run_id"))
             if previous_run and previous_run["status"] in ACTIVE:
                 previous_run.update(status="stopped", label="已采用补充信息", revision=previous_run["revision"] + 1)
                 await asyncio.to_thread(self._save_run, previous_run)
@@ -264,7 +298,7 @@ class LighthouseStream:
                 previous.cancel()
             self.live[run["id"]] = run
             task = asyncio.create_task(self._execute(actor, run, request, authorize, previous))
-            self.workers[actor["id"]] = task
+            self.workers[execution_key(actor)] = task
             # Completed streams are persisted; only a bounded replay cache stays in RAM.
             for key in list(self.live):
                 if len(self.live) <= 32:
@@ -284,8 +318,11 @@ class LighthouseStream:
             run["revision"] += 1
         async def emit(kind, data):
             nonlocal last_flush
-            if self.workers.get(actor["id"]) is not owner_task:
+            if self.workers.get(execution_key(actor)) is not owner_task:
                 raise asyncio.CancelledError()
+            if kind == 'research':
+                run['_turn']['_research_mode'] = True
+                await asyncio.to_thread(self._patch_turn, actor, run, {'_research_mode': True})
             if kind == 'artifact':
                 current = await authorize()
                 if current['id'] != actor['id'] or set(actor['scopes']) - set(current['scopes']):
@@ -303,11 +340,19 @@ class LighthouseStream:
                                                        **public_turn(changes)}, transient=True))
                 await asyncio.to_thread(self._save_run, run)
                 return
+            if kind == 'reply-mode':
+                run['reply_mode'] = data['mode']
+                await asyncio.to_thread(self._patch_turn, actor, run, {'reply_mode': data['mode']})
+                return
             if kind == "text":
-                delta = data["delta"][:max(0, 16000 - len(run["answer"]))]
-                run["answer"] += delta
-                if delta:
-                    chunk(TextDeltaChunk(id=text_id, delta=delta))
+                run['_candidate_answer'] = run.get('_candidate_answer', '') + data['delta']
+                if run.get('reply_mode') == 'live':
+                    current = await authorize()
+                    if current['id'] != actor['id'] or set(actor['scopes']) - set(current['scopes']) \
+                            or set(actor.get('modules', [])) - set(current.get('modules', [])):
+                        raise AssistantError('登录权限已变化，已停止显示回答。', 403)
+                    run['answer'] += data['delta']
+                    chunk(TextDeltaChunk(id=text_id, delta=data['delta']))
             else:
                 run["label"] = safe_text(data.get("label", "正在处理"), limit=120) or "正在处理"
                 process = run.setdefault("process", [])
@@ -316,9 +361,11 @@ class LighthouseStream:
                     del process[:-24]
                 chunk(DataChunk(type="data-progress", data={"run_id": run["id"], "operation_id": run["operation_id"],
                     "label": run["label"], "process": copy.deepcopy(process)}, transient=True))
-            # Stream live from RAM; checkpoint partial text without rewriting SQLite per token burst.
+            # Checkpoint status without exposing drafts or rewriting SQLite per token burst.
             if time.monotonic() - last_flush > 2:
                 last_flush = time.monotonic()
+                if run.get('reply_mode') == 'live':
+                    await asyncio.to_thread(self._patch_turn, actor, run, {'answer': run['answer']})
                 await asyncio.to_thread(self._save_run, run)
         try:
             if previous:
@@ -348,18 +395,26 @@ class LighthouseStream:
                     except Exception:
                         await emit("status", {"label": "上下文整理暂未完成，保留原记录继续"})
                 result = await self.engine.answer(public_actor, run["_turn"], model_history, request, emit, authorize, context)
-                if not str(result.get('answer') or run['answer'] or '').strip() and not (
+                if not str(result.get('answer') or run.get('_candidate_answer') or '').strip() and not (
                         result.get('plan') or result.get('output_files') or run.get('output_files')):
                     raise AssistantError('模型未返回可见回答。', 502, category='model_protocol')
                 current = await authorize()
-                if current["id"] != actor["id"] or set(actor["scopes"]) - set(current["scopes"]):
+                if (current["id"] != actor["id"] or set(actor["scopes"]) - set(current["scopes"])
+                        or set(actor.get('modules', [])) - set(current.get('modules', []))):
                     raise AssistantError("登录权限已变化，请重新提问。", 403)
                 if actor.get('_feishu_topic'):
                     result['topic_access'] = copy.deepcopy(current.get('_topic_access', []))
                 from .lighthouse_artifacts import package_long_reply
+                result['answer'] = result.get('answer') or run.get('_candidate_answer', '')
                 result['file_ids'] = list(dict.fromkeys([*run['_turn'].get('file_ids', []), *result.get('file_ids', [])]))
-                result = await asyncio.to_thread(package_long_reply, self.portal.files, public_actor, result)
+                if run.get('reply_mode') != 'live':
+                    result = await asyncio.to_thread(package_long_reply, self.portal.files, public_actor, result)
+                published = run['answer']
                 run.update(status="completed", answer=result.get("answer") or run["answer"], label="回答完成")
+                if run['answer'] and run['answer'].startswith(published):
+                    remaining = run['answer'][len(published):]
+                    if remaining:
+                        chunk(TextDeltaChunk(id=text_id, delta=remaining))
                 changes = {**result, "status": "completed", "error": "", "error_code": "", "answer": run["answer"], "process": run["process"]}
                 await asyncio.to_thread(self._patch_turn, actor, run, changes, finish=True)
                 chunk(DataChunk(type="data-turn", data={"operation_id": run["operation_id"], "run_id": run["id"], **public_turn(changes)}, transient=True))
@@ -367,7 +422,10 @@ class LighthouseStream:
                 chunk(FinishChunk(finish_reason="stop"))
         except asyncio.CancelledError:
             run.update(status="stopped", label="已停止")
-            await asyncio.to_thread(self._patch_turn, actor, run, {"status": "stopped", "answer": run["answer"], "error": "回答已停止，可继续或重新提问。"}, finish=True)
+            await asyncio.to_thread(self._patch_turn, actor, run, {"status": "stopped", "answer": run["answer"],
+                "_draft_answer": run.get('_candidate_answer', ''),
+                "resume_available": bool(run['_turn'].get('_research_mode')),
+                "error": "回答已停止，可继续或重新提问。"}, finish=True)
             chunk(AbortChunk(reason="已停止当前回答"))
         except Exception as exc:
             error_code, error = failure_detail(exc)
@@ -377,13 +435,15 @@ class LighthouseStream:
             logging.getLogger(__name__).warning("Assistant run failed: run=%s category=%s type=%s http_status=%s frames=%s",
                 run["id"], error_code, type(exc).__name__, getattr(exc, "status_code", None), ",".join(frames))
             run.update(status="failed", label="处理未完成", error=error, error_code=error_code)
-            changes = {"status": "failed", "error": error, "error_code": error_code, "answer": run["answer"], "process": run["process"]}
+            changes = {"status": "failed", "error": error, "error_code": error_code, "answer": run["answer"], "process": run["process"],
+                       "_draft_answer": run.get('_candidate_answer', ''),
+                       "resume_available": bool(run['_turn'].get('_research_mode'))}
             await asyncio.to_thread(self._patch_turn, actor, run, changes, finish=True)
-            chunk(DataChunk(type="data-turn", data={"operation_id": run["operation_id"], "run_id": run["id"], **changes}, transient=True))
+            chunk(DataChunk(type="data-turn", data={"operation_id": run["operation_id"], "run_id": run["id"], **public_turn(changes)}, transient=True))
             chunk(TextEndChunk(id=text_id))
             chunk(FinishChunk(finish_reason="error"))
         finally:
-            for key in ('_turn', '_history', '_context'):
+            for key in ('_turn', '_history', '_context', '_candidate_answer'):
                 run.pop(key, None)
             run["revision"] += 1
             run["finished_at"] = time.time()
@@ -392,8 +452,9 @@ class LighthouseStream:
     def _save_context(self, actor, run, context):
         with self.assistant._lock:
             state = self.assistant._state(actor)
-            if state.get("active_run_id") == run["id"]:
-                state["context"] = context
+            lane = self._lane(state, actor)
+            if lane.get("active_run_id") == run["id"]:
+                lane["context"] = context
                 self.store.put_document(NAMESPACE, self.assistant._key(actor), state)
 
     def get_run(self, actor, identity, *, cancelling=False):
@@ -402,8 +463,12 @@ class LighthouseStream:
         run = self.live.get(identity) or self.store.get_document(RUNS, identity)
         if not run or run["owner"] != actor["id"]:
             raise AssistantError("回答任务不存在或无权访问。", 404)
+        if cancelling and run['status'] in ACTIVE and run.get('execution_lane') and run['execution_lane'] != execution_lane(actor):
+            raise AssistantError('请在原浏览器标签或飞书话题中操作此回答。', 403)
         if not cancelling and set(run.get("access_scopes", run["scopes"])) - set(actor["scopes"]):
             raise AssistantError("当前账号无权查看此回答。", 403)
+        if not cancelling and set(run.get('access_modules', [])) - set(actor.get('modules', [])):
+            raise AssistantError('当前账号已无权查看此任务。', 403)
         state = self._read(actor)
         if run["conversation_id"] not in [state['id'], *state.get('legacy_conversation_ids', [])]:
             raise AssistantError("原会话已清空。", 404)
@@ -413,8 +478,8 @@ class LighthouseStream:
         async with self._lock(actor):
             run = await asyncio.to_thread(self.get_run, actor, identity, cancelling=True)
             state = await asyncio.to_thread(self._read, actor)
-            if state.get("active_run_id") == identity:
-                task = self.workers.get(actor["id"])
+            if self._lane(state, actor).get("active_run_id") == identity:
+                task = self.workers.get(execution_key(actor)) or (self.workers.get(actor['id']) if not run.get('execution_lane') else None)
                 if task and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -424,22 +489,64 @@ class LighthouseStream:
                     await asyncio.to_thread(self._save_run, run)
             return {"run_id": identity, "status": "stopped" if run["status"] in ACTIVE else run["status"]}
 
+    async def resume_research(self, actor, identity, request, authorize):
+        """Resume only a read-only research turn, never replay an approved business plan."""
+        async with self.resume_lock:
+            return await self._resume_research(actor, identity, request, authorize)
+
+    async def _resume_research(self, actor, identity, request, authorize):
+        current = await authorize()
+        if current['id'] != actor['id']:
+            raise AssistantError('登录人员已变化。', 403)
+        run = await asyncio.to_thread(self.get_run, current, identity)
+        if run['status'] in ACTIVE and run.get('execution_lane', '') != execution_lane(actor):
+            raise AssistantError('原回答仍在另一个窗口处理中，请在原窗口继续。', 409)
+        state = await asyncio.to_thread(self._read, current)
+        turn = next((t for t in state['turns'] if t.get('run_id') == identity), None)
+        if not turn:
+            # A repeated click can name the previous attempt after the new run was accepted.
+            turn = next((t for t in state['turns'] if t.get('operation_id') == run['operation_id']), None)
+        if not turn or not turn.get('_research_mode') or turn.get('plan') or run['status'] == 'completed':
+            raise AssistantError('只有未完成的只读研究任务可恢复，业务操作请查看原任务。', 409)
+        if not self.assistant._allowed(turn, current):
+            raise AssistantError('当前账号已无权恢复原研究资料。', 403)
+        topic = (current.get('_feishu_topic') or {}).get('id', '') if current.get('channel', '').startswith('feishu:') else ''
+        if turn.get('feishu_topic', '') != topic:
+            raise AssistantError('请在发起研究的原话题或个人会话中恢复，不能跨话题。', 403)
+        if turn.get('run_id') != identity:
+            latest = await asyncio.to_thread(self.get_run, current, turn['run_id'])
+            return {'conversation_id': state['id'], 'run_id': latest['id'], 'turn': public_turn(turn)}
+        if run['status'] in ACTIVE and self.workers.get(execution_key(actor)) and not self.workers[execution_key(actor)].done():
+            return {'conversation_id': state['id'], 'run_id': identity, 'turn': public_turn(turn)}
+        if run['status'] in ACTIVE:
+            run.update(status='stopped', label='已保存研究检查点', revision=run['revision'] + 1)
+            await asyncio.to_thread(self._save_run, run)
+        return await self.submit(current, {'conversation_id': state['id'], 'operation_id': turn['operation_id'],
+            'attempt_id': uuid.uuid4().hex, 'question': turn['question'],
+            'file_ids': turn.get('submitted_file_ids', []), 'commands': turn.get('submitted_commands', [])}, request, authorize)
+
     async def conversation(self, actor, *, operation=None):
         if operation is not None and (not isinstance(operation, str) or not re.fullmatch(r'feishu_[a-f0-9]{40}', operation)):
             raise AssistantError('消息编号无效。')
-        state = await asyncio.to_thread(self._read, actor)
-        identity = state.get("active_run_id")
-        task = self.workers.get(actor["id"])
-        active = self.live.get(identity)
+        async with self._lock(actor):
+            state = await asyncio.to_thread(self._read, actor)
+            identity = self._lane(state, actor).get("active_run_id")
+            task = self.workers.get(execution_key(actor))
+            active = self.live.get(identity)
+            if not task and active and not active.get('execution_lane'):
+                task = self.workers.get(actor['id'])
         if active and set(active.get("access_scopes", active["scopes"])) - set(actor["scopes"]) and task and not task.done():
             await self.stop(actor, identity)
         if identity and (not task or task.done()):
             try:
                 run = await asyncio.to_thread(self.get_run, actor, identity)
                 if run["status"] in ACTIVE:
-                    await asyncio.to_thread(self._patch_turn, actor, run,
-                        {"status": "stopped", "answer": run.get("answer", ""), "error": "服务重启或上次回答中断，原消息已保留，可继续。"}, finish=True)
+                    pending = next((t for t in state['turns'] if t.get('run_id') == identity), {})
                     run.update(status="stopped", revision=run["revision"] + 1)
+                    await asyncio.to_thread(self._patch_turn, actor, run,
+                        {"status": "stopped", "answer": run.get("answer", ""),
+                         'resume_available': bool(pending.get('_research_mode')),
+                         "error": "服务重启或上次回答中断，原消息已保留，可继续。"}, finish=True)
                     await asyncio.to_thread(self._save_run, run)
                 else:
                     terminal = next((event["data"] for event in reversed(run["events"]) if event.get("type") == "data-turn"), {})
@@ -453,7 +560,10 @@ class LighthouseStream:
                 await asyncio.to_thread(self._clear_active, actor, identity)
         result = await asyncio.to_thread(self.assistant.conversation, actor)
         state = await asyncio.to_thread(self._read, actor)
-        result.update(active_run_id=state.get("active_run_id", ""), query_scopes=state.get("query_scopes") or actor["scopes"], revision=state.get("revision", 0), stream_protocol=1)
+        lane = self._lane(state, actor)
+        result.update(active_run_id=lane.get("active_run_id", ""), query_scopes=lane.get("query_scopes") or actor["scopes"],
+                      busy=bool(lane.get('active_run_id')), phase=lane.get('phase', ''),
+                      revision=state.get("revision", 0), stream_protocol=1)
         active = self.live.get(result["active_run_id"])
         if active and not set(active["scopes"]) - set(actor["scopes"]):
             result["phase"] = active.get("label", result["phase"])
@@ -468,15 +578,22 @@ class LighthouseStream:
                 turn = await asyncio.to_thread(self.store.get_document, MESSAGES, state['id'] + ':' + operation)
             if turn and not self.assistant._allowed(turn, actor):
                 raise AssistantError('当前账号无权查看原回答。', 403)
+            if turn and turn.get('status') == 'pending' and turn.get('execution_lane') and turn['execution_lane'] != execution_lane(actor):
+                raise AssistantError('请在原对话中查看此回答。', 403)
+            live = self.live.get((turn or {}).get('run_id'))
+            if live and turn.get('status') == 'pending':
+                turn = {**turn, 'answer': live.get('answer', ''), 'reply_mode': live.get('reply_mode', 'validated')}
             result['turns'] = [public_turn(turn)] if turn else []
         return result
 
     def _clear_active(self, actor, identity):
         with self.assistant._lock:
             state = self.assistant._state(actor)
-            if state.get("active_run_id") == identity:
-                state.update(active_run_id="", phase="")
-                self.assistant._active.discard(actor["id"])
+            lane = self._lane(state, actor)
+            if lane.get("active_run_id") == identity:
+                lane.update(active_run_id="", phase="")
+                if not any(item['owner'] == actor['id'] and item['status'] in ACTIVE for item in tuple(self.live.values())):
+                    self.assistant._active.discard(actor["id"])
                 self.store.put_document(NAMESPACE, self.assistant._key(actor), state)
 
     async def history(self, actor, before):
@@ -504,6 +621,8 @@ class LighthouseStream:
                 except AssistantError:
                     break
                 if current["id"] != actor["id"] or set(run.get("access_scopes", run["scopes"])) - set(current["scopes"]):
+                    break
+                if set(run.get('access_modules', [])) - set(current.get('modules', [])):
                     break
                 last_auth = time.monotonic()
             events = run["events"][cursor:]

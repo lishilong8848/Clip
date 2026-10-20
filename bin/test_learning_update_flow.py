@@ -17,20 +17,29 @@ from zipfile import ZipFile
 from bin.test_learning import FakeCloud, learning
 from upload_event_module.ui.main_window_patch import PatchUpdateMixin
 import package_portable as packaging
+from lan_bitable_template_portal.feishu_identity import TARGET_APP_ID
+from upload_event_module.services.feishu_app_migration import MIGRATION_MARKER
 
 
 class LearningUpdateFlowTests(TestCase):
+    def setUp(self):
+        self.enterContext(patch('lan_bitable_template_portal.portal_auth.config', SimpleNamespace(
+            app_id=TARGET_APP_ID, app_secret='synthetic-secret', **{MIGRATION_MARKER: 2})))
+        self.enterContext(patch('upload_event_module.services.feishu_token_manager.token_manager._credentials',
+                                return_value=(TARGET_APP_ID, 'synthetic-secret')))
+
     def test_full_patch_preserves_people_config_receipts_and_shift_delivery(self):
         with TemporaryDirectory(prefix='learning_update_') as directory:
             root = Path(directory)
             client, output = root / 'client', root / 'build'
             data = client / 'bin/data'
             protected = {
-                'bin/data/feishu_assistant.json': json.dumps({'app_id': 'cli_agent_fixture',
+                'bin/data/feishu_assistant.json': json.dumps({'app_id': TARGET_APP_ID,
                     'enabled': True, 'secret_cipher': 'fixture-cipher', 'bridge_cipher': 'fixture-bridge'}).encode(),
-                'bin/data/feishu_assistant_active.json': b'{"app_id":"cli_agent_fixture"}',
+                'bin/data/feishu_assistant_active.json': json.dumps({'app_id': TARGET_APP_ID}).encode(),
                 'bin/data/feishu_assistant.sqlite3': b'fixture-inbox',
-                'bin/data/config.json': b'{"feishu_app_id":"cli_login_fixture"}',
+                'bin/data/config.json': json.dumps({'feishu_app_id': TARGET_APP_ID,
+                                                   MIGRATION_MARKER: 2}).encode(),
             }
             for relative, content in protected.items():
                 path = client / relative
@@ -40,7 +49,7 @@ class LearningUpdateFlowTests(TestCase):
             from openclaw_service.assistant.lighthouse_ai import LighthouseAssistant
             from openclaw_service.store import AssistantStore
             self.enterContext(patch.dict(os.environ, {'CLIPFLOW_DISABLE_SQLITE_WRITE_WORKER': '1'}))
-            identity, sender_id = 'ou_fixtureIdentity', 'ou_fixtureAgentIdentity'
+            identity = sender_id = 'ou_fixtureIdentity'
             harness = PersonnelLoginHarness(data)
             try:
                 harness.service._pages = [_page([{'record_id': 'recFixture', 'fields': {
@@ -69,9 +78,11 @@ class LearningUpdateFlowTests(TestCase):
             for relative in ('bin/data/lan_portal_state.sqlite3',
                              'bin/data/lighthouse_openclaw/assistant.sqlite3'):
                 protected[relative] = (client / relative).read_bytes()
-            directory_rows = {'people': {
-                'white': {'name': '人员甲', 'scopes': ['A'], 'selectable': True, 'login_ids': ['ou_white']},
-                'night': {'name': '人员乙', 'scopes': ['A'], 'selectable': True, 'login_ids': ['ou_night']},
+            directory_rows = {'schema': 4, 'app_id': TARGET_APP_ID, 'loaded_at': time.time(), 'people': {
+                'white': {'id': 'white', 'name': '人员甲', 'scopes': ['A'], 'selectable': True,
+                          'inactive': False, 'login_ids': ['ou_white']},
+                'night': {'id': 'night', 'name': '人员乙', 'scopes': ['A'], 'selectable': True,
+                          'inactive': False, 'login_ids': ['ou_night']},
             }}
             roster = Mock(return_value=[
                 {'name': '人员甲', 'scope': 'A', 'shift': '白', 'open_id': ''},
@@ -191,7 +202,7 @@ class LearningUpdateFlowTests(TestCase):
                                                          client / identity_path)
             installed = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(installed)
-            harness = PersonnelLoginHarness(data)
+            harness = PersonnelLoginHarness(data, migrated_grants=False)
             try:
                 self.assertEqual(harness.auth.get_session(cookie)['user'], session['user'])
                 channel = installed.FeishuAssistant(SimpleNamespace(), SimpleNamespace(
@@ -239,6 +250,7 @@ class LearningUpdateFlowTests(TestCase):
 
     def test_legacy_pending_reminder_reuses_original_uuid_through_real_adapter(self):
         from bin.test_learning_shift_reminders import ShiftReminderTests
+        from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
         from upload_event_module.services import robot_webhook
         fixture = ShiftReminderTests()
         fixture.setUp()
@@ -249,10 +261,14 @@ class LearningUpdateFlowTests(TestCase):
         with service.transaction() as conn:
             service._put('notification', key, {'id': key, 'kind': 'shift', 'date': '2026-10-10',
                 'scope': '', 'open_id': 'ou_external', 'shift': '白', 'status': 'pending'}, conn, False)
-        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}), \
+        with standalone_delivery_fixture('ou_external'), \
+             patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}), \
              patch.object(robot_webhook, '_get_tenant_access_token', return_value=('fixture', '')), \
              patch.object(robot_webhook, '_request_json', return_value={'code': 0,
                  'data': {'message_id': 'om_original', 'chat_id': 'oc_original'}}) as transport:
             fixture.run_at(13)
+        transport.assert_called_once()
         self.assertEqual(transport.call_args.kwargs['json_payload']['uuid'], str(uuid5(NAMESPACE_URL, key)))
+        self.assertEqual(transport.call_args.kwargs['json_payload']['receive_id'], 'ou_external')
+        self.assertEqual(service._get('notification', key)['status'], 'sent')
         self.assertEqual(service._get('notification', key)['delivery'][0]['message_id'], 'om_original')

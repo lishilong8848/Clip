@@ -9,7 +9,7 @@ import secrets
 import time
 import uuid
 from .learning import LearningError
-from .learning_engagement import rate, summary_card, weekly_score, weekly_score_key
+from .learning_engagement import rate, summary_card, weekly_score, weekly_score_key, weekly_questions, weekly_question_elements
 
 
 def key(*parts):
@@ -88,6 +88,8 @@ def render(ticket, url, *, scope='', page=0, person_id=''):
         elements.append({'tag': 'column_set', 'columns': [{'tag': 'column', 'width': 'auto', 'elements': [b]} for b in (
             [button('上一页', 'view', page=page - 1)] if page else []) + (
             [button('下一页', 'view', page=page + 1)] if page + 1 < pages else [])]})
+    if not person_id:
+        elements.extend(weekly_question_elements(report, scope))
     elements.append({'tag': 'div', 'text': plain('自动评分＝本周有效选择题首答正确数÷首答题数×100，保留一位小数。问答题和复习不计入评分。')})
     return {'schema': '2.0', 'config': {'update_multi': True, 'wide_screen_mode': True},
             'header': base['header'], 'body': {'elements': [e for e in elements if e.get('columns', [True])]}}
@@ -129,6 +131,10 @@ class WeeklyCards:
                     report['buildings'] = {s: [{**r, 'name': people.get(pid, {}).get('name', '人员信息待核对')}
                                               for pid, r in weekly_stats(service, job['date'], job['end'], conn, s).items()]
                                            for s in ([job['scope']] if job.get('scope') else 'ABCDEH')}
+                if report.get('audience') == 'group' and not report.get('scope') and 'questions' not in report:
+                    report['questions'] = weekly_questions(service, job['date'], job['end'], conn)
+                    report['question_buildings'] = {s: weekly_questions(service, job['date'], job['end'], conn, s)
+                                                    for s in report['buildings']}
                 ticket = {'id': identity, 'kind': 'weekly_card', 'status': 'prepared', 'token': secrets.token_urlsafe(32),
                           'app_id': app_id, 'target': target, 'report': report, 'message_id': '', 'chat_id': '',
                           'view_scope': job.get('scope', ''), 'page': 0}
@@ -145,7 +151,44 @@ class WeeklyCards:
         if not external_real_write_guard().get('real_write_allowed'):
             raise LearningError('当前环境不允许真实周报发送，原任务保留。', 503)
         bot, service = self.bot(), self.get_learning()
-        ticket = await asyncio.to_thread(self.prepare, job, target, bot.config['app_id'])
+        messenger = bot.messenger
+        keys = ('app_id', 'secret_cipher', 'enabled')
+        configuration = tuple(bot.config.get(k) for k in keys)
+        fingerprint = hashlib.sha256(json.dumps(configuration).encode()).hexdigest()
+
+        async def require_current():
+            def same():
+                mirror = getattr(messenger, 'config', None)
+                return (self.bot() is bot and bot.messenger is messenger and not getattr(bot, 'closing', False)
+                        and not getattr(messenger, 'closed', False)
+                        and tuple(bot.config.get(k) for k in keys) == configuration
+                        and (not isinstance(mirror, dict) or tuple(mirror.get(k) for k in keys) == configuration))
+            try:
+                if not same():
+                    raise ValueError('configuration changed')
+                check = getattr(bot, '_require_current_config', None)
+                if callable(check):
+                    await check()
+                check = getattr(messenger, '_check_config', None)
+                if callable(check):
+                    await check()
+                if not same():
+                    raise ValueError('configuration changed')
+            except Exception:
+                raise LearningError('飞书鉴权配置已变化，原周报操作已保留，请核验原消息；未换应用重新发送。', 503) from None
+
+        def check_operation(value, payload_fingerprint=None):
+            if value.get('send_identity', identity) != identity:
+                raise LearningError('原周报发送操作编号不一致，未以新编号重复发送。', 409)
+            if value.get('attempted_at') and not value.get('message_id') and value.get('sender_config') != fingerprint:
+                raise LearningError('原周报发送配置已变化或记录不完整，请核验原消息；未重新发送。', 503)
+            if (value.get('attempted_at') and not value.get('message_id') and payload_fingerprint is not None
+                    and value.get('sender_payload') != payload_fingerprint):
+                raise LearningError('原周报接收人或内容已变化，请核验原消息；未重新发送。', 409)
+
+        await require_current()
+        ticket = await asyncio.to_thread(self.prepare, job, target, configuration[0])
+        check_operation(ticket)
         if ticket['message_id']:
             return True
         if ticket.get('attempted_at') and time.time() - ticket['attempted_at'] > 3500:
@@ -162,17 +205,32 @@ class WeeklyCards:
                 raise LearningError(recipient.message, 503)
             receive_type, receive_id = recipient
         card = render(ticket, service.portal_url(), scope=ticket['view_scope'])
-        client = await bot.messenger.client()
-        headers = await bot.messenger.headers()
+        payload_fingerprint = hashlib.sha256(json.dumps([receive_type, receive_id, card], sort_keys=True).encode()).hexdigest()
+        check_operation(ticket, payload_fingerprint)
+        await require_current()
+        client = await messenger.client()
+        headers = await messenger.headers()
+        await require_current()
         def attempted():
             with service.transaction() as conn:
-                ticket.setdefault('attempted_at', time.time())
-                service._put('engagement', ticket['id'], ticket, conn)
-        await asyncio.to_thread(attempted)
+                current = service._get('engagement', ticket['id'], conn)
+                check_operation(current, payload_fingerprint)
+                if current['app_id'] != configuration[0]:
+                    raise LearningError('周报所属飞书应用已变化，未重新发送。', 409)
+                if not current.get('message_id'):
+                    current.setdefault('attempted_at', time.time())
+                    current.update(send_identity=identity, sender_config=fingerprint, sender_payload=payload_fingerprint)
+                    service._put('engagement', current['id'], current, conn)
+                return current
+        ticket = await asyncio.to_thread(attempted)
+        if ticket.get('message_id'):
+            return True
+        await require_current()
         response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
             params={'receive_id_type': receive_type}, headers=headers,
             json={'receive_id': receive_id, 'msg_type': 'interactive', 'content': json.dumps(card, ensure_ascii=False),
                   'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, identity))})
+        await require_current()
         data = response.json()
         sent = data.get('data') or {}
         code = data.get('code')

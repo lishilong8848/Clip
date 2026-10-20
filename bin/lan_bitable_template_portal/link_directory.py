@@ -104,17 +104,35 @@ class LinkRemote:
 
     def request(self, method, path, body=None, params=None):
         from .portal_service import TOKEN_ERROR_CODES, external_real_write_guard, refresh_feishu_token
+        from upload_event_module.services.feishu_token_manager import token_manager
         if method != "GET":
             guard = external_real_write_guard()
             if not guard["real_write_allowed"]:
                 raise PortalError(guard["reason"])
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/{path}"
+        try:
+            credentials = token_manager._credentials()
+        except Exception:
+            raise PortalError("Qt 飞书鉴权暂不可用，未发送导航请求。") from None
+
+        def check_credentials():
+            try:
+                matching = token_manager._credentials() == credentials
+            except Exception:
+                matching = False
+            if not matching:
+                raise PortalError("Qt 飞书鉴权已变化，未跨应用重试导航请求。") from None
+
         for attempt in range(3):
+            check_credentials()
+            headers = self.service._auth_headers()
+            check_credentials()
             payload = self.service._http_client.request_json(
-                method, url, headers=self.service._auth_headers(), params=params or {},
+                method, url, headers=headers, params=params or {},
                 json_payload=body, retries=1 if method == "GET" else 0)
             code = int(payload.get("code") or 0)
             if code in TOKEN_ERROR_CODES and attempt == 0:
+                check_credentials()
                 refresh_feishu_token()
                 continue
             if code in {99991400, 1254608, 1254290, 1254291} and attempt < 2:

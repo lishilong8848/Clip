@@ -12,9 +12,15 @@ if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
 from upload_event_module.services import robot_webhook
+from bin.test_feishu_delivery import TARGET_APP_ID
+from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
 
 
 class RobotWebhookTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(standalone_delivery_fixture(
+            'ou_a', 'ou_b', 'ou_user', 'ou_externaluser', 'ou_currentuser'))
+
     def test_card_requires_complete_explicit_success_receipt(self):
         invalid = ({}, {'code': False}, {'code': 'invalid'}, {'code': 0},
                    {'code': 0, 'data': {'message_id': 'om_ok'}},
@@ -61,14 +67,13 @@ class RobotWebhookTests(unittest.TestCase):
             ok, _, receipts = robot_webhook.send_interactive_to_open_ids({'elements': []}, ['ou_a', 'ou_b'], message_uuid='batch')
             first = [c.kwargs['json_payload']['uuid'] for c in transport.call_args_list]
             transport.reset_mock()
-            robot_webhook.send_interactive_to_open_ids({'elements': []}, ['ou_b', 'ou_a'], message_uuid='batch')
-            second = [c.kwargs['json_payload']['uuid'] for c in transport.call_args_list]
-            robot_webhook.send_interactive_to_open_ids({'elements': []}, ['ou_b'], message_uuid=receipts[1]['message_uuid'])
-            retry_uuid = transport.call_args.kwargs['json_payload']['uuid']
+            _, _, second = robot_webhook.send_interactive_to_open_ids({'elements': []}, ['ou_b', 'ou_a'], message_uuid='batch')
+            _, _, retry = robot_webhook.send_interactive_to_open_ids({'elements': []}, ['ou_b'], message_uuid=receipts[1]['message_uuid'])
+            transport.assert_not_called()
         self.assertTrue(ok)
         self.assertEqual(len(set(first)), 2)
-        self.assertEqual(first, list(reversed(second)))
-        self.assertEqual(first[1], retry_uuid)
+        self.assertEqual(first, list(reversed([r['message_uuid'] for r in second])))
+        self.assertEqual(first[1], retry[0]['message_uuid'])
         self.assertEqual([r['message_id'] for r in receipts], ['om_a', 'om_b'])
         self.assertEqual([r['chat_id'] for r in receipts], ['oc_a', 'oc_b'])
 
@@ -96,8 +101,8 @@ class RobotWebhookTests(unittest.TestCase):
 
     @patch.object(
         robot_webhook,
-        "_send_message_to_open_id",
-        return_value=(False, "Bot has NO availability to this user."),
+        "_request_json",
+        return_value={'code': 230013, 'msg': "Bot has NO availability to this user."},
     )
     @patch.object(
         robot_webhook,
@@ -111,17 +116,25 @@ class RobotWebhookTests(unittest.TestCase):
     ) -> None:
         ok, message, results = robot_webhook.send_text_to_open_ids(
             "签名链接",
-            ["ou_external_user"],
+            ["ou_externaluser"],
         )
         self.assertFalse(ok)
         self.assertIn("机器人对该用户不可用", message)
+        self.assertIn("230013", message)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["failure_kind"], "bot_unavailable")
+        self.assertEqual(results[0]["code"], 230013)
+        self.assertEqual(results[0]["open_id"], "ou_externaluser")
+        self.assertFalse(results[0]["ok"])
+        self.assertNotIn("message_id", results[0])
+        _send_mock.assert_called_once()
+        self.assertEqual(_send_mock.call_args.kwargs['json_payload']['receive_id'], 'ou_externaluser')
+        self.assertEqual(_send_mock.call_args.kwargs['params']['receive_id_type'], 'open_id')
 
     @patch.object(
         robot_webhook,
-        "_send_message_to_open_id",
-        return_value=(True, "ok"),
+        "_request_json",
+        return_value={'code': 0, 'data': {'message_id': 'om_current', 'chat_id': 'oc_private'}},
     )
     @patch.object(
         robot_webhook,
@@ -135,10 +148,23 @@ class RobotWebhookTests(unittest.TestCase):
     ) -> None:
         ok, _message, results = robot_webhook.send_text_to_open_ids(
             "签名链接",
-            ["ou_current_user"],
+            ["ou_currentuser"],
+            message_uuid="webhook-success",
         )
         self.assertTrue(ok)
+        self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["failure_kind"], "")
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(results[0]["open_id"], "ou_currentuser")
+        self.assertEqual(results[0]["message_id"], "om_current")
+        self.assertEqual(results[0]["chat_id"], "oc_private")
+        self.assertEqual(results[0]["sender_app_id"], TARGET_APP_ID)
+        self.assertEqual(results[0]["message_uuid"], "webhook-success")
+        self.assertEqual(results[0]["delivery_channel"], "direct")
+        self.assertGreater(results[0]["accepted_at"], 0)
+        _send_mock.assert_called_once()
+        self.assertEqual(_send_mock.call_args.kwargs['json_payload']['receive_id'], 'ou_currentuser')
+        self.assertEqual(_send_mock.call_args.kwargs['params']['receive_id_type'], 'open_id')
 
 
 if __name__ == "__main__":

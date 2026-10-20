@@ -180,12 +180,12 @@ class BuildPlanTests(_ImporterTestCase):
 
     def test_hardcoded_credentials_exclude_skill(self):
         _make_skill(
-            self.src, "leaky", "leaky", body="app_id: `cli_a9d1c9fe9d381cee`\n")
+            self.src, "leaky", "leaky", body="app_id: `cli_syntheticPrivateApp`\n")
         excluded = [p for p in self.plan() if p["excluded"]]
         self.assertEqual(len(excluded), 1)
         self.assertIn("app id", excluded[0]["exclude_reason"])
         report = json.dumps(excluded[0]["excluded_files"])
-        self.assertNotIn("cli_a9d1c9fe9d381cee", report)
+        self.assertNotIn("cli_syntheticPrivateApp", report)
         self.assertEqual(excluded[0]["kind"], "workflow_guide")
 
     def test_credential_resource_file_excluded_not_skill(self):
@@ -528,11 +528,11 @@ class ApplyTests(_ImporterTestCase):
         # First run: two normal skills plus one that is entirely excluded.
         _make_skill(self.src, "keep", "keep", refs={"r.md": "keep\n"})
         _make_skill(self.src, "also", "also")
-        _make_skill(self.src, "leaky", "leaky", body="cli_a9d1c9fe9d381ceeappid\n")
+        _make_skill(self.src, "leaky", "leaky", body="cli_syntheticPrivateAppappid\n")
         self.apply()
         self.assertEqual(self.registry_sources(), {"keep", "also"})
         blob = (self.out / "workbuddy-registry.json").read_text(encoding="utf-8")
-        self.assertNotIn("cli_a9d1c9fe9d381cee", blob)
+        self.assertNotIn("cli_syntheticPrivateApp", blob)
         # Then re-apply with everything removed from source.
         for child in list(self.src.iterdir()):
             shutil.rmtree(child) if child.is_dir() else child.unlink()
@@ -540,7 +540,7 @@ class ApplyTests(_ImporterTestCase):
         self.assertEqual(self.registry_sources(), set())
         blob2 = (self.out / "workbuddy-registry.json").read_text(encoding="utf-8")
         self.assertEqual(json.loads(blob2), [])
-        self.assertNotIn("cli_a9d1c9fe9d381cee", blob2)
+        self.assertNotIn("cli_syntheticPrivateApp", blob2)
 
     def test_registry_json_guide_untouched(self):
         guide = self.out / "registry.json"
