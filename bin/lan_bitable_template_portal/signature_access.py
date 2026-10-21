@@ -1,13 +1,13 @@
 """Signature ownership and management reuse trusted account levels and scopes."""
 from .account_policy import account_allowed
-from .signature_management import SignatureManagementError
+from .signature_management import SignatureManagementError, public_person
 
 
 class SignatureAccess:
     def __init__(self, manager, auth, actor):
         self.manager, self.auth, self.actor = manager, auth, actor
         self.profile = auth.account_profile(actor)
-        if 'signatures' not in self.profile.get('modules', []):
+        if 'signatures' not in self.profile.get('modules', []) or auth.directory_block_reason(actor):
             raise SignatureManagementError('当前账号没有签名管理权限。', 403)
         self.data = None
         self.owners = {}
@@ -40,6 +40,19 @@ class SignatureAccess:
     def scopes(self):
         return [s for s in self.profile.get('scope_rules', []) if s in self.manager.d.BUILDING_OPEN_ID_MAP]
 
+    @property
+    def can_create_temporary(self):
+        return bool(self.scopes)
+
+    def shared_temporary(self, person):
+        self.ensure_directory()
+        effective = self.data['resolved'].get(person['person_key'], person)
+        # Account-linked signatures keep account permissions, including merged aliases.
+        return bool(person.get('source') == 'external' and effective.get('source') == 'external'
+                    and not person.get('origin_staff_record_id')
+                    and not effective.get('origin_staff_record_id')
+                    and not self.owners.get(effective['person_key']))
+
     def target(self, person):
         self.ensure_directory()
         effective = self.data['resolved'].get(person['person_key'], person)
@@ -64,10 +77,7 @@ class SignatureAccess:
             if target['is_self']:
                 return True
             return account_allowed(self.profile, target, action)
-        # Unlinked temporary visitors have no login account or management level.
-        return bool(self.global_manager and person.get('source') == 'external'
-                    and not person.get('origin_staff_record_id')
-                    and not self.owners.get(person['person_key']))
+        return action in {'view', 'edit'} and self.shared_temporary(person)
 
     def request_allowed(self, person):
         if self.allowed(person, 'edit'):
@@ -135,19 +145,29 @@ class SignatureAccess:
         person['request'] = self.manager._public_request(request) if request else None
         return {'person': person, 'reason': ''}
 
-    def recipient(self, value):
+    def recipient_people(self, person):
+        shared = self.shared_temporary(person)
+        return [row for row in self.manager.message_recipients(self.auth)
+                if shared or self.allowed(public_person(row, 'staff'), 'view')]
+
+    def recipient(self, value, *, person=None):
         value = str(value or '').strip()
         if not value:
             return
         if value.lower().startswith('staff:'):
-            self.require('staff', value.split(':', 1)[1], 'view')
+            record_id = value.split(':', 1)[1]
+            if person is not None and self.shared_temporary(person):
+                if not any(row['record_id'] == record_id for row in self.recipient_people(person)):
+                    raise SignatureManagementError('所选人员无法接收签名链接，请重新选择。', 403)
+            else:
+                self.require('staff', record_id, 'view')
         elif value.split(':', 1)[-1].upper() not in self.scopes:
             raise SignatureManagementError('不能把签名链接发送到管理范围之外的值班账号。', 403)
 
     def temporary(self, payload):
         scopes = set(self.manager.s._building_codes_from_value(payload.get('building')))
-        if not self.global_manager:
-            raise SignatureManagementError('新增或关联临时人员请联系全楼管理员。', 403)
+        if not self.can_create_temporary:
+            raise SignatureManagementError('当前账号未配置可新增临时人员的楼栋。', 403)
         if not scopes or not scopes.issubset(self.scopes):
             raise SignatureManagementError('人员楼栋超出当前管理范围。', 403)
 

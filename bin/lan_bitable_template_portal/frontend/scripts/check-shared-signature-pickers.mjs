@@ -10,6 +10,7 @@ const output=path.resolve(root,'../../../output/playwright/mop-signature-invitat
 const staff=Array.from({length:602},(_,i)=>({source:'staff',record_id:'person-'+i,name:'签名人员'+i,employee_no:'EMP'+i,
   building:i?'B楼':'A楼',open_id:'ou-'+i,has_signature:true,usage_confirmed:i===0,usage_confirmation_required:i!==0}));
 const external=[{source:'external',record_id:'external-cross',name:'跨楼外部人员',building:'H楼',has_signature:true,portable_signature:true}];
+const recipients=[{value:'duty:A',label:'A楼值班账号'},...staff.map(person=>({value:'staff:'+person.record_id,label:person.name+' · '+person.employee_no+' · '+person.building}))];
 const html=`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><div id="page-back-slot"></div><div id="app"></div>
 <script type="module">
 import {createApp,h,ref} from 'vue';
@@ -38,8 +39,8 @@ try{
       }}]});
     try{
       await server.listen();const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
-      for(const width of [1440,390]){
-        const context=await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce'}),errors=[],queries=[],invitations=[],invitationWrites=[];
+      for(const {width,height} of [{width:1440,height:900},{width:402,height:874},{width:440,height:956}]){
+        const context=await browser.newContext({viewport:{width,height},reducedMotion:'reduce'}),errors=[],queries=[],invitations=[],invitationWrites=[];
         let nextSendStatus='sent',loseNextReply=false;
         await context.route('**/*',async route=>{
           try {
@@ -47,11 +48,11 @@ try{
           if(url.origin!==origin)return route.abort();
           if(!p.startsWith('/api/'))return route.continue();
           const ok=data=>route.fulfill({json:{ok:true,data}});
-          if(p==='/api/signatures/management/mop-people')return ok({scope_options:[{value:'A',label:'A楼'}],recipients:[{value:'duty:A',label:'A楼值班账号'},{value:'staff:person-0',label:'签名人员0 · EMP0 · A楼'}]});
+          if(p==='/api/signatures/management/mop-people'){assert.equal(url.searchParams.get('scope'),'A','recipient expansion does not alter the MOP business scope');return ok({scope_options:[{value:'A',label:'A楼'}],recipients});}
           if(p==='/api/signatures/management/mop-list')return ok({items:invitations});
           if(p==='/api/signatures/management/mop-invite'){
             const payload=request.postDataJSON();invitationWrites.push(payload);
-            assert.equal(payload.scope,'A');assert.equal(payload.role,'implementer');assert.equal(payload.notice_key,'notice-a');assert.equal(payload.recipient,'duty:A');
+            assert.equal(payload.scope,'A');assert.equal(payload.role,'implementer');assert.equal(payload.notice_key,'notice-a');assert.equal(payload.recipient,payload.name==='临时测试人员'?'staff:person-601':'duty:A');
             assert(payload.operation_id&&payload.send_operation_id);
             const index=invitations.findIndex(person=>person.operation_id===payload.operation_id),previous=invitations[index];
             assert.equal(payload.expected_request_id,previous?.request_id||'','retry must name the current request');
@@ -114,7 +115,9 @@ try{
               await form.getByLabel('签名人员姓名 *',{exact:true}).fill('临时测试人员');
               assert(await form.getByRole('button',{name:'添加并发送签名链接',exact:true}).isDisabled(),'a recipient is required');
               await form.getByLabel('签名链接接收人',{exact:true}).click();
-              await page.locator('.n-base-select-option').getByText('A楼值班账号',{exact:true}).click();
+              await form.locator('.invitation-recipient input').fill('EMP601');
+              await page.locator('.n-base-select-option').getByText('签名人员601 · EMP601 · B楼',{exact:true}).click();
+              assert.match(await form.locator('.invitation-recipient').innerText(),/签名人员601.*B楼/,'a candidate beyond 500 in another building is searchable/selectable');
               assert(await form.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'inline form does not overflow');
               await page.screenshot({path:path.join(output,version+'-'+width+'-form.png')});
               await form.getByRole('button',{name:'添加并发送签名链接',exact:true}).click();await form.waitFor({state:'detached'});
@@ -200,5 +203,5 @@ try{
       }
     }finally{await server.close();}
   }
-  console.log('PASS: legacy/V2 and desktop/mobile MOP/guard pickers; inline invitations; failed delivery recovery after reload; expired-link renewal; unknown/lost reply read-only checks; stable creation IDs and no implicit resends. APIs mocked.');
+  console.log('PASS: legacy/V2 at 1440x900/402x874/440x956; 602 staff and cross-building recipient search beyond 500; shared temporary MOP/guard signatures; inline invitations; failed delivery recovery after reload; expired-link renewal; unknown/lost reply read-only checks; stable creation IDs and no implicit resends. APIs mocked.');
 }finally{await browser.close();}

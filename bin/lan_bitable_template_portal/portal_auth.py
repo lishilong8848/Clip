@@ -550,7 +550,7 @@ class PortalAuthManager:
         if self.directory_block_reason(open_id):
             return []
         user_cfg = self._permission_user(open_id)
-        if not user_cfg or user_cfg.get("enabled") is False:
+        if not user_cfg or (user_cfg.get("enabled") is False and open_id != LI_SHILONG_OPEN_ID):
             return []
         return self.account_profile(open_id)["scope_rules"]
 
@@ -572,7 +572,8 @@ class PortalAuthManager:
         """
         open_id = str(open_id or "").strip()
         cfg = self._permission_user(open_id)
-        overridden = bool(cfg) and cfg.get("access_version") == 1
+        fixed_superuser = open_id == LI_SHILONG_OPEN_ID
+        overridden = bool(cfg) and cfg.get("access_version") == 1 and not fixed_superuser
         duty = next((code for code, oid in BUILDING_OPEN_ID_MAP.items() if oid == open_id), "")
         person = {} if duty else self.directory_person(open_id)
         homes = [code for code in person.get("scopes", []) if code in BUILDING_SCOPE_CODES]
@@ -580,13 +581,13 @@ class PortalAuthManager:
         category = "duty" if duty else categorize_position(person.get("position"))
         if category == "other":
             category = categorize_position(" ".join(person.get("assignments") or []))
-        enabled = bool(cfg) and cfg.get("enabled") is not False and not self.directory_block_reason(open_id)
+        enabled = bool(cfg) and (fixed_superuser or cfg.get("enabled") is not False) and not self.directory_block_reason(open_id)
 
         level = "L4"
-        if overridden and str(cfg.get("level") or "").strip() in {"L1", "L2", "L3", "L4"}:
+        if fixed_superuser:
+            level = 'L0'
+        elif overridden and str(cfg.get("level") or "").strip() in {"L0", "L1", "L2", "L3", "L4"}:
             level = str(cfg.get("level")).strip()
-        elif open_id == LI_SHILONG_OPEN_ID and cfg.get("role") == "admin":
-            level = "L0"
         elif duty == "H" and cfg.get("role") == "admin":
             level = "L1"
         elif home == "H" and category == "manager":
@@ -615,6 +616,8 @@ class PortalAuthManager:
         if not enabled:
             # Disabled / blocked identity fails closed: no module grants at all.
             modules = []
+        elif fixed_superuser:
+            modules = list(default_modules('L0'))
         elif overridden and isinstance(cfg.get("modules"), list):
             # Empty is a valid explicit full revocation and must NOT fall back to
             # the level defaults. Only a genuinely absent module field would keep
@@ -637,6 +640,8 @@ class PortalAuthManager:
         role = "admin" if enabled and level in {"L0", "L1"} else "building"
         return {
             "level": level,
+            "open_id": open_id,
+            "is_fixed_superuser": fixed_superuser,
             "category": category,
             "home_scope": home,
             "role": role,
@@ -653,6 +658,8 @@ class PortalAuthManager:
             return False
         if self.directory_block_reason(open_id):
             return True
+        if open_id == LI_SHILONG_OPEN_ID and self._permission_user(open_id):
+            return False
         if self._permission_user(open_id).get("enabled") is False:
             return True
         return False
@@ -826,10 +833,10 @@ class PortalAuthManager:
             user_list.append(
                 {
                     "open_id": str(open_id or "").strip(),
-                    "name": str(user_cfg.get("name") or ""),
+                    "name": REQUIRED_ADMIN_USERS.get(open_id) or str(user_cfg.get("name") or ""),
                     "role": role,
                     "scopes": scopes,
-                    "enabled": user_cfg.get("enabled") is not False,
+                    "enabled": open_id in REQUIRED_ADMIN_USERS or user_cfg.get("enabled") is not False,
                     "locked": str(open_id or "").strip() in REQUIRED_ADMIN_USERS,
                     "directory_scopes": list(user_cfg.get("directory_scopes") or []),
                     "denied_scopes": list(user_cfg.get("denied_scopes") or []),
@@ -894,6 +901,8 @@ class PortalAuthManager:
                     continue
                 if open_id == "__meta__":
                     raise PortalError("__meta__ 是系统保留 open_id，不能作为用户。")
+                if open_id in REQUIRED_ADMIN_USERS:
+                    continue
                 name = str(raw.get("name") or "").strip()[:80]
                 role = str(raw.get("role") or "").strip().lower()
                 role = "admin" if role == "admin" else "building"
@@ -1022,6 +1031,8 @@ class PortalAuthManager:
                 open_id = str(raw.get("open_id") or "").strip()
                 if not open_id or open_id == "__meta__":
                     raise PortalError("批量授权人员缺少有效 open_id。")
+                if open_id in REQUIRED_ADMIN_USERS:
+                    raise PortalError("固定管理员权限不可修改。")
                 self._check_account_hierarchy_change(open_id, updated_by)
                 incoming_scopes = self._scopes_from_raw(raw.get("scopes"))
                 profile = self.account_profile(open_id)
@@ -1146,7 +1157,8 @@ class PortalAuthManager:
         if not applicant_id or not reviewer_id or applicant_id == reviewer_id or self._open_id_explicitly_disabled(applicant_id):
             return False
         actor, target = self.account_profile(reviewer_id), self.account_profile(applicant_id)
-        if actor['level'] == 'L2' or level_rank(actor['level']) >= level_rank(target['level']):
+        if actor['level'] == 'L2' or (level_rank(actor['level']) >= level_rank(target['level'])
+                                    and not actor['level'] == target['level'] == 'L0'):
             return False
         return account_allowed(actor, {**target, 'open_id': applicant_id,
             'own_scopes': [target['home_scope']] if target['home_scope'] else [],
@@ -1188,7 +1200,7 @@ class PortalAuthManager:
         reason = str(reason or "").strip()[:500]
         approver_open_id = str(approver_open_id or "").strip()
         if approver_open_id and not self.can_review_permission_request(open_id, approver_open_id):
-            raise PortalError("请选择有权管理本人且级别更高的审批人，不能自行审批或由同级审批。")
+            raise PortalError("请选择有权管理本人的审批人，不能自行审批；仅普通L0账号允许同级审批。")
         if approver_open_id and not set(requested_scopes).issubset(set(self.account_profile(approver_open_id)['scope_rules'])):
             raise PortalError('申请楼栋超出所选审批人的管理范围，请选择其他上级。')
         access = None
@@ -1283,7 +1295,7 @@ class PortalAuthManager:
                 raise PortalError("审批楼栋为空。")
             open_id = str(payload.get("open_id") or "").strip()
             if not self.can_review_permission_request(open_id, updated_by):
-                raise PortalError('只有仍有权管理申请人的上级可以审批，不能审批本人或同级申请。')
+                raise PortalError('只有仍有权管理申请人的人员可以审批，不能审批本人；仅普通L0账号允许同级审批。')
             if not set(requested_scopes).issubset(set(self.account_profile(updated_by)['scope_rules'])):
                 raise PortalError('审批楼栋超出本人管理范围，未修改权限。')
             current_scopes = self.scopes_for_open_id(open_id)

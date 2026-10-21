@@ -336,6 +336,9 @@ class SignatureManagement:
         return {"people": rows[(page - 1) * page_size:page * page_size], "count": len(rows), "page": page,
                 "page_size": page_size, "counts": counts, "sources": data["sources"],
                 "can_manage_directory": bool(access and access.global_manager),
+                "can_create_temporary": bool(access and access.can_create_temporary),
+                "create_scope_options": [{"value": scope, "label": '110站' if scope == '110' else scope + '楼'}
+                                         for scope in (access.scopes if access else [])],
                 "scope_options": [{"value": scope, "label": '110站' if scope == '110' else scope + '楼'} for scope in scopes],
                 "recipients": [
                     {"value": b, "label": "110站值班账号" if b == "110" else f"{b}楼值班账号"}
@@ -345,6 +348,14 @@ class SignatureManagement:
     def refresh(self) -> dict:
         data = self.directory(refresh=True)
         return {k: data[k] for k in ("people", "resolved", "sources", "revision")}
+
+    def message_recipients(self, auth):
+        data = self.directory()
+        if any(not info["ok"] for info in data["sources"].values()):
+            raise SignatureManagementError("人员表读取失败，请稍后重试。", 503)
+        return [person for person in data["staff"]
+                if person.get("can_receive_message") and person.get("open_id")
+                and not auth.directory_block_reason(person["open_id"])]
 
     def preview(self, payload) -> tuple[bytes, str]:
         person = self.person(payload.get("source"), payload.get("record_id"))
@@ -463,10 +474,11 @@ class SignatureManagement:
                     raise SignatureManagementError('人员表读取失败，不能核验签名归属，请稍后重试。', 503)
                 access.bind(directory)
                 if ('signatures' not in access.profile.get('modules', [])
+                        or access.auth.directory_block_reason(actor)
                         or not access.allowed(person, 'request')
                         or recipient and not access.allowed(person, 'edit')):
                     raise SignatureManagementError('人员归属或管理权限已变化，请刷新后重试。', 403)
-                access.recipient(recipient)
+                access.recipient(recipient, person=person)
                 owner = access.target(person) or {}
                 if local and not owner.get('is_self'):
                     raise SignatureManagementError('无法核验本人签名身份，请刷新后重试。', 403)
@@ -840,7 +852,7 @@ class SignatureManagement:
 
 def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, base_url="", send_text=None, auth=None):
     """Both HTTP servers use exactly the same authorization/operation boundary."""
-    allowed = {"GET": {"people", "request", "duplicates", "preview", "account", "mop-people", "mop-list"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate", "self-start", "mop-invite"}}
+    allowed = {"GET": {"people", "recipients", "request", "duplicates", "preview", "account", "mop-people", "mop-list"}, "POST": {"refresh", "requests", "temporary", "submit", "merge", "associate", "migrate", "self-start", "mop-invite"}}
     if operation not in allowed.get(method, set()):
         raise SignatureManagementError("接口不存在。", 404)
     if operation not in {"request", "submit"} and not actor:
@@ -874,6 +886,11 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         return manager.preview(payload)
     if operation in {'people', 'refresh'}:
         return manager.people({**payload, **({'refresh': True} if operation == 'refresh' else {})}, access=access)
+    if operation == 'recipients':
+        person = access.require(payload.get('source'), payload.get('record_id'), 'edit')
+        return {'people': [{key: row.get(key, '') for key in
+                           ('record_id', 'name', 'employee_no', 'building', 'position', 'team', 'specialty')}
+                          for row in access.recipient_people(person)]}
     if operation in {'duplicates', 'merge', 'associate', 'migrate'} and not access.global_manager:
         raise SignatureManagementError('只有全楼管理员可以核对、关联或清理人员。', 403)
     if operation == "temporary":
@@ -883,7 +900,7 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         person = access.require(payload.get('source'), payload.get('record_id'), 'request')
         if payload.get('recipient') and not access.allowed(person, 'edit'):
             raise SignatureManagementError('向上级发起的签名邀请只能发送给该人员本人，不能选择代收人。', 403)
-        access.recipient(payload.get('recipient'))
+        access.recipient(payload.get('recipient'), person=person)
         return manager.send(payload, actor=actor, base_url=base_url, send_text=send_text,
                             access=access)
     if operation == "duplicates":

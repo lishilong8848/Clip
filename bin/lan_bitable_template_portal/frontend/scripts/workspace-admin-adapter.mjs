@@ -14,7 +14,7 @@ export function adaptAccounts(source) {
     }
     if (node.type===1 && classes.includes('account-header')) {
       const at=node.loc.end.offset-'</header>'.length;
-      edits.push([at,at,`<button v-if="myLevel && myLevel !== 'L0'" type="button" :disabled="saving" @click="v2RequestAccess"><ShieldCheck :size="16" />申请修改本人权限</button>`]);
+      edits.push([at,at,`<button v-if="myLevel && !policy.is_fixed_superuser" type="button" :disabled="saving" @click="v2RequestAccess"><ShieldCheck :size="16" />申请修改本人权限</button>`]);
     }
     for (const child of node.children||[]) visit(child);
   }
@@ -35,7 +35,7 @@ import { navigate as v2Navigate, registerNavigationGuard } from '../workspace-v2
   const patch=(before,after)=>{if(!source.includes(before))throw new Error('Account workflow contract changed: '+before.slice(0,80));source=source.replace(before,after);};
   patch('<slot v-else-if="tab === \'requests\'" />', '<PermissionReview v-else-if="tab === \'requests\'" :scopes="scopeOptions" :modules="moduleOptions" :categories="categoryOptions" @changed="load();emit(\'changed\')" />');
   patch("if (level !== 'L3') list.push", 'list.push');
-  patch('if (isSuperAdmin.value) return options;', "if (isSuperAdmin.value) return options.filter(option=>option.value!=='ALL'||draft.value?.level==='L1');");
+  patch('if (isSuperAdmin.value) return options;', "if (isSuperAdmin.value) return options.filter(option=>option.value!=='ALL'||['L0','L1'].includes(draft.value?.level||''));");
   patch("function closeEditor() { if (saving.value) return;", "function closeEditor(force: unknown = false) { if (saving.value && force !== true) return; if(force !== true && v2Dirty.value){v2Discard(()=>closeEditor(true));return;} v2Baseline.value=''; v2Stale.value=false;");
   patch("saving.value = false; closeEditor(); await load();", "saving.value = false; closeEditor(true); await load();");
   patch('if (!fresh || !canEdit(fresh)) closeEditor();', 'if (!fresh || !canEdit(fresh)) closeEditor(true);');
@@ -47,9 +47,9 @@ import { navigate as v2Navigate, registerNavigationGuard } from '../workspace-v2
   patch("  draftOriginal = {", "  v2Stale.value=false; v2Baseline.value=JSON.stringify(accessChange(draft.value));\n  draftOriginal = {");
   patch('<p v-if="editorError" class="error" role="alert">{{ editorError }}</p>', '<p v-if="editorError" class="error" role="alert">{{ editorError }} <button v-if="v2Stale" type="button" :disabled="saving" @click="v2ReloadEditor">重新读取账号</button></p>');
   patch('class="account-editor" role="dialog"', 'class="account-editor" data-v2-inline-feedback role="dialog"');
-  patch(':disabled="saving" @click="saveAccess"', ':disabled="saving || v2Stale || !v2AccessDirty" @click="saveAccess"');
+  patch(':disabled="saving || !canSaveAccess(draft)" @click="saveAccess"', ':disabled="saving || !canSaveAccess(draft) || v2Stale || !v2AccessDirty" @click="saveAccess"');
   patch('@click="saveEnabled"', ':disabled="v2Stale || v2PermissionsDirty || !v2AccessDirty" @click="saveEnabled"');
-  patch('if (draft.value) void savePermissions([accessChange(draft.value)])', 'if (draft.value && !v2Stale.value && canEditAccess(draft.value)) void savePermissions([accessChange(draft.value)])');
+  patch('if (draft.value && canSaveAccess(draft.value)) void savePermissions([accessChange(draft.value)])', 'if (draft.value && !v2Stale.value && canSaveAccess(draft.value)) void savePermissions([accessChange(draft.value)])');
   patch('if (draft.value) void savePermissions([{ ...permissionChange(draft.value)', 'if (draft.value && !v2Stale.value && canEdit(draft.value)) void savePermissions([{ ...permissionChange(draft.value)');
   patch("if (!draft.value || saving.value) return;", "if (!draft.value || saving.value || v2Stale.value) return;");
   patch("} catch (e: any) { editorError.value = e.message || '密码修改未完成'; }", "} catch (e: any) { editorError.value = e.message || '密码修改未完成'; if([401,403,409].includes(e.status)||!e.status||e.status>=500){v2Stale.value=true;editorError.value+=' 请先核验账号状态，不要重复修改密码。';} }");

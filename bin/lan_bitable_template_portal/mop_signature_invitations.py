@@ -68,10 +68,7 @@ def dispatch(manager, operation, payload, *, actor, auth, base_url, send_text):
     available = [s for s in scopes if s in notice_scopes]
     if not notice or not available:
         raise SignatureManagementError("维保通告不存在或不在授权楼栋内，请重新读取。", 403)
-    directory = _directory(manager)
-    recipients = [p for p in directory["staff"] if p.get("can_receive_message")
-                  and set(manager.s._building_codes_from_value(p.get("building"))) & set(scopes)
-                  and not auth.directory_block_reason(p.get("open_id") or "")]
+    recipients = manager.message_recipients(auth)
     if operation == "mop-people":
         return {"scope_options": [{"value": s, "label": "110站" if s == "110" else s + "楼"} for s in available],
                 "recipients": [{"value": "duty:" + s, "label": "110站值班账号" if s == "110" else s + "楼值班账号"}
@@ -83,7 +80,7 @@ def dispatch(manager, operation, payload, *, actor, auth, base_url, send_text):
         raise SignatureManagementError("请选择该维保通告所属的具体楼栋。")
     recipient = _text(payload.get("recipient"))
     if recipient not in {"duty:" + s for s in scopes} | {"staff:" + p["record_id"] for p in recipients}:
-        raise SignatureManagementError("请选择授权范围内可接收签名链接的人员或值班账号。", 403)
+        raise SignatureManagementError("请选择可接收签名链接的人员或已授权楼栋的值班账号。", 403)
     role = _text(payload.get("role"))
     if role not in {"implementer", "auditor"}:
         raise SignatureManagementError("维护单签名角色无效。")

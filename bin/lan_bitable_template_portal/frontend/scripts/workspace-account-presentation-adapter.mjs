@@ -151,7 +151,7 @@ function adaptSignaturePage(source) {
         <div class="v2-signature-actions">
           <VnetBackButton to="/" />
           <button v-if="loggedIn" class="btn hero-ghost" :disabled="loading" @click="load(true)"><RefreshCw :size="16" :class="{ spin: loading }" />刷新签名</button>
-          <button v-if="loggedIn && canManageDirectory" class="btn hero-primary" @click="openCreate"><Plus :size="16" />新增临时人员</button>
+          <button v-if="loggedIn && canCreateTemporary" class="btn hero-primary" @click="openCreate"><Plus :size="16" />新增临时人员</button>
           <button v-if="loggedIn && canManageDirectory" class="btn hero-ghost" :disabled="duplicateBusy" @click="loadDuplicates"><UsersRound :size="16" />重复人员核对</button>
           <span data-v2-layout-tools="signatures" class="v2-signature-toolbar-anchor"></span>
         </div>

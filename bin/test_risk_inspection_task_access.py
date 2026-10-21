@@ -305,9 +305,9 @@ class TaskAccessTests(unittest.TestCase):
         self.assertEqual(self.store.raw(rid), before, 'Role views must never rewrite stored tasks')
 
     def test_assignee_reviewer_and_publisher_lists_do_not_mix_roles(self):
-        self.publish_role_task(reviewers=['reviewer'])
+        rid = self.publish_role_task(reviewers=['reviewer'])
         client = self.client()
-        for identity, expected in [('alice', (1, 0)), ('reviewer', (0, 1)), ('other', (0, 0))]:
+        for identity, expected in [('alice', (1, 0)), ('reviewer', (0, 1)), ('other', (0, 0)), ('admin', (0, 0))]:
             with self.subTest(identity=identity):
                 counts = []
                 for view in ['mine', 'review']:
@@ -315,12 +315,35 @@ class TaskAccessTests(unittest.TestCase):
                     self.assertEqual(result.status_code, 200, result.text)
                     counts.append(result.json()['data']['total'])
                 self.assertEqual(tuple(counts), expected)
-        self.assertEqual(self.store.list(self.people['admin'], view='published')['total'], 1)
+        published = self.store.list(self.people['admin'], view='published')
+        self.assertEqual(published['total'], 1)
+        self.assertEqual(self.store.list(self.people['admin'], view='all')['total'], 1)
         self.assertEqual(self.store.list(self.people['admin'], view='review')['total'], 0)
-        claim = self.store.list(self.people['admin'], view='mine')['items'][0]
-        self.assertTrue(claim['can_claim'], 'The original owner claim entry must remain available')
-        self.assertEqual(claim['total'], 0)
+        self.assertTrue(published['items'][0]['can_claim'])
+        self.assertTrue(self.store.get(self.people['admin'], rid)['can_claim'])
         self.assertEqual(client.get('/api/risk-inspections?view=bad', headers={'x-person': 'alice'}).status_code, 400)
+
+    def test_publisher_mine_requires_own_assignment_in_selected_scope(self):
+        unassigned = self.publish_role_task(reviewers=['admin'])
+        assigned = self.publish_role_task('b' * 32, reviewers=['admin'],
+                                         recipients=[{'id': 'admin', 'scopes': ['A']}, {'id': 'bob', 'scopes': ['B']}])
+        before = {rid: self.store.raw(rid) for rid in (unassigned, assigned)}
+        client = self.client()
+        for scope, expected in [('', [assigned]), ('ALL', [assigned]), ('A', [assigned]), ('B', [])]:
+            with self.subTest(scope=scope):
+                response = client.get('/api/risk-inspections?view=mine&scope=' + scope, headers={'x-person': 'admin'})
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()['data']
+                self.assertEqual(data['total'], len(expected))
+                self.assertEqual([row['id'] for row in data['items']], expected)
+                for row in data['items']:
+                    self.assertEqual((row['people_count'], row['total']), (1, 2))
+                    self.assertFalse(row['can_claim'])
+        for view in ['all', 'published', 'review']:
+            data = self.store.list(self.people['admin'], view=view, scope='B')
+            self.assertEqual(data['total'], 2)
+            self.assertEqual({row['id'] for row in data['items']}, {unassigned, assigned})
+        self.assertEqual({rid: self.store.raw(rid) for rid in before}, before)
 
     def test_role_filter_is_applied_before_pagination(self):
         expected = {'mine': set(), 'review': set()}
@@ -357,7 +380,10 @@ class TaskAccessTests(unittest.TestCase):
         before = self.store.raw(rid)
         self.assertEqual(self.store.list(self.people['reviewer'], view='review')['items'][0]['total'], 2)
         self.assertEqual(self.store.list(self.people['reviewer'], view='mine')['total'], 0)
+        self.assertEqual(self.store.list(self.people['admin'], view='mine')['total'], 0)
+        self.assertEqual(self.store.list(self.people['admin'], view='published')['total'], 1)
         self.assertEqual(self.store.list(self.people['bob'], view='mine')['items'][0]['total'], 2)
+        self.assertEqual(self.store.list(self.people['bob'], view='mine', scope='A')['items'][0]['total'], 2)
         self.assertTrue(self.store.get(self.people['reviewer'], rid)['is_reviewer'])
         self.assertEqual(self.store.raw(rid), before)
 

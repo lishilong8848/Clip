@@ -4,19 +4,25 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { preview } from 'vite';
+import { layoutApiFixture } from './layout-api-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.resolve(root, '../../../output/playwright/signature-management');
+const workspace = process.argv.includes('--workspace');
+const output = path.resolve(root, '../../../output/playwright/signature-management', workspace ? 'v2' : 'legacy');
 await mkdir(output, { recursive: true });
 const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
-const entry = process.argv.includes('--workspace') ? '/assets/workspace-v2/index.html?__page=/signature-management' : '/signature-management';
+const entry = workspace ? '/assets/workspace-v2/index.html?__page=/signature-management' : '/signature-management';
 const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, serviceWorkers: 'block', reducedMotion: 'reduce' });
 page.setDefaultTimeout(12000);
 const errors = [], requests = [], previewRequests = [], apiPosts = [];
 let role = 'admin';
 let previewFailNext = false;
+const layouts = layoutApiFixture(), creations = new Map(), deliveries = new Map(), recipientReads = [];
+let allowCreate = true, createScopes = [{ value: 'A', label: 'A楼' }], recipientFailure = '', recipientGate = null;
+let loseCreate = false, loseSend = false, sendStatus = 'sent';
+const relays = Array.from({length:602}, (_,i) => ({record_id:'relay-'+i,name:'代收人员'+i,employee_no:'EMP'+i,building:i?'B楼':'A楼',position:'工程师',team:'一班',specialty:'暖通'}));
 
 const PNG_SIGNATURE = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAMgAAABQCAYAAABcbTqwAAAAxUlEQVR4nO3bMQrAIAAEwfz/0wYsU2xKo5mB6wXd0usCAAAAAAAAAAAAAAB4NVYfAL5MIBAEAkEgEARyuGG2cBzOJUMQCASBQBAIBIFAEAgEgUAQCASBQBAIBIFAEAgEgUAQCASBQBAIBIFAEAgEgTCt/rtsew0mjwGCQCAIBIJAIAgEgkAgCASCQCAIBIJAIAgEgkAgCASCQCAIBIJAIAgEgkAgCOSHVv9nNnuOTbk8CAKBIBAIAgEAAAAAAAAAAAAAAMoNzMn+EJC9rUEAAAAASUVORK5CYII=',
@@ -46,12 +52,17 @@ const duplicateGroups = [{
 }];
 
 page.on('pageerror', error => errors.push(error.message));
-await page.route('**/api/**', async route => {
+await page.route('**/*', async route => {
   const req = route.request(), url = new URL(req.url());
+  if (url.origin !== origin) return route.abort();
   const pathname = url.pathname;
+  if (!pathname.startsWith('/api/')) return route.continue();
+  if (await layouts.handle(route,role)) return;
   requests.push([req.method(), pathname, url.search]);
   if (pathname === '/api/signatures/management/preview') {
     previewRequests.push([req.method(), pathname, url.search]);
+    if(role!=='admin')assert.equal(url.searchParams.get('source'),'external','ordinary staff must never request protected formal previews');
+    assert.notEqual(url.searchParams.get('record_id'),'linked-protected','linked temporary signatures remain protected');
     if (previewFailNext) {
       previewFailNext = false;
       return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ ok: false, error: '签名图片读取失败，请重试。' }) });
@@ -65,17 +76,47 @@ await page.route('**/api/**', async route => {
   if (req.method() === 'POST') apiPosts.push([req.method(), pathname, req.postDataJSON?.() || null]);
   const ok = data => route.fulfill({ json: { ok: true, data } });
   if (pathname === '/api/auth/status') return ok({
-    logged_in: true, user: { open_id: 'signature-fixture', role, modules:['signatures'], name: role === 'admin' ? '管理员' : '普通用户' },
+    logged_in: true, user: { open_id: 'signature-fixture', role, level:role==='admin'?'L0':'L4',category:'operator',home_scope:'A',scope_rules:['A'],modules:role==='denied'?[]:['signatures'], name: role === 'admin' ? '管理员' : '普通用户' },
     scope_options: [{ value: 'A', label: 'A楼' }], login_url: '/api/auth/login',
   });
   if (pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-signature' } });
   if (pathname === '/api/signatures/management/people') {
-    const rows=people.map(p=>({...p,can_preview:role==='admin',can_request:role==='admin'}));
-    if(role==='user')rows.push({person_key:'staff:recBoss',record_id:'recBoss',name:'验收上级',source:'staff',building:'H楼',position:'经理',signature_status:'restricted',invite_only:true,can_request:true,can_preview:false,can_receive_message:true});
-    return ok({people:rows,can_manage_directory:role==='admin',scope_options:[{value:'A',label:'A楼'},{value:'H',label:'H楼'}],recipients:[{value:'A',label:'A楼值班账号'}],sources:{staff:{ok:true,loaded_at:1791510000},external:{ok:true,loaded_at:1791510000}},counts:{signed:2,unsigned:1,resign:0},count:rows.length});
+    assert.equal(url.searchParams.has('message_capable'),false,'relay selection must not reuse the scoped/paginated directory');
+    const rows=people.map(p=>({...p,can_preview:role==='admin'||p.source==='external',can_request:role==='admin'||p.source==='external'}));
+    if(role==='user')rows.push(
+      {person_key:'staff:recBoss',record_id:'recBoss',name:'验收上级',source:'staff',building:'H楼',position:'经理',signature_status:'restricted',invite_only:true,can_request:true,can_preview:false,can_receive_message:true},
+      {person_key:'external:shared-other',record_id:'shared-other',name:'其他人员创建的临时签名',source:'external',building:'C楼',has_signature:false,signature_status:'unsigned',can_request:true,can_preview:false},
+      {person_key:'external:linked-protected',record_id:'linked-protected',name:'受保护的已关联签名',source:'external',building:'H楼',origin_staff_record_id:'recBoss',has_signature:true,signature_status:'restricted',can_request:false,can_preview:false},
+    );
+    rows.push(...creations.values());
+    return ok({people:rows,can_manage_directory:role==='admin',can_create_temporary:allowCreate,create_scope_options:createScopes,scope_options:['A','B','C','H'].map(value=>({value,label:value+'楼'})),recipients:[{value:'A',label:'A楼值班账号'}],sources:{staff:{ok:true,loaded_at:1791510000},external:{ok:true,loaded_at:1791510000}},counts:{signed:2,unsigned:1,resign:0},count:rows.length});
   }
-  if(pathname==='/api/signatures/management/requests')return ok({status:'sent',recipient_label:'验收上级'});
-  if (pathname === '/api/signatures/management/duplicates') return ok({ groups: duplicateGroups.map(group=>({...group,people:group.people.map(p=>({...p,can_preview:true,can_request:true}))})) });
+  if(pathname==='/api/signatures/management/recipients'){
+    assert.equal(req.method(),'GET');
+    assert.deepEqual([...url.searchParams.keys()].sort(),['record_id','source'],'recipient query contains the subject, not the sender building or a pagination cutoff');
+    const id=url.searchParams.get('record_id');assert(id);assert.notEqual(id,'recBoss','upward invitations never fetch relay people');recipientReads.push({source:url.searchParams.get('source'),id});
+    const candidates=url.searchParams.get('source')==='external'&&id!=='linked-protected'?relays:relays.slice(0,1);
+    if(recipientGate){const gate=recipientGate;recipientGate=null;gate.started();await gate.promise;return ok({people:candidates}).catch(()=>{});}
+    if(recipientFailure==='error')return route.fulfill({status:503,json:{ok:false,error:'隔离测试：接收人员读取失败'}});
+    if(recipientFailure==='malformed')return ok({});
+    return ok({people:candidates});
+  }
+  if(pathname==='/api/signatures/management/temporary'){
+    const body=req.postDataJSON();assert.equal(req.method(),'POST');assert(allowCreate);assert(createScopes.some(scope=>scope.label===body.building));assert(body.operation_id);
+    if(!creations.has(body.operation_id))creations.set(body.operation_id,{...body,person_key:'external:new-'+creations.size,record_id:'new-'+creations.size,source:'external',has_signature:false,signature_status:'unsigned',can_request:true,can_preview:false});
+    if(loseCreate){loseCreate=false;return route.fulfill({status:503,json:{ok:false,error:'隔离测试：新增回执未取得'}});}
+    return ok(creations.get(body.operation_id));
+  }
+  if(pathname==='/api/signatures/management/requests'){
+    const body=req.postDataJSON();assert.equal(req.method(),'POST');assert(body.operation_id);
+    if(body.record_id==='recBoss')assert.equal(body.recipient,'','upward requests must go directly to the subject');
+    if(!deliveries.has(body.operation_id))deliveries.set(body.operation_id,body);
+    else assert.deepEqual(body,deliveries.get(body.operation_id),'an uncertain retry must retain the original operation and recipient');
+    if(loseSend){loseSend=false;return route.fulfill({status:503,json:{ok:false,error:'隔离测试：发送回执未取得'}});}
+    return ok({status:sendStatus,recipient_label:body.record_id==='recBoss'?'验收上级':'跨楼代收人员',...(sendStatus==='sent'?{}:{error:'隔离测试：发送结果待核验'})});
+  }
+  if (pathname === '/api/signatures/management/duplicates') {assert.equal(role,'admin');return ok({ groups: duplicateGroups.map(group=>({...group,people:group.people.map(p=>({...p,can_preview:true,can_request:true}))})) });}
+  assert.equal(req.method(),'GET','No unexpected business action');
   return ok({});
 });
 
@@ -191,7 +232,9 @@ try {
   role = 'user';
   await page.goto(origin + entry);
   await page.getByText('张三', { exact: true }).first().waitFor();
-  assert.equal(await page.getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'normal user gets no preview controls');
+  assert.equal(await page.locator('.person-card').filter({hasText:'张三'}).getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'normal user gets no unauthorized formal preview');
+  assert.equal(await page.locator('.person-card').filter({hasText:'受保护的已关联签名'}).getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'linked temporary signatures keep formal authority');
+  assert.equal(await page.getByRole('button', { name: '查看签名', exact: true }).count(), 1, 'shared unlinked temporary signature remains usable');
   assert.equal(previewRequests.length, previewCountBeforeUserNav, 'normal user triggers no additional signature image requests');
   assert.equal(await page.locator('.preview-area img').count(), 0, 'normal user renders no preview image');
   const superior=page.locator('.person-card').filter({hasText:'验收上级'});
@@ -209,7 +252,103 @@ try {
   await page.getByText('签名链接已发送至验收上级，等待本人签名。',{exact:true}).waitFor();
   await page.screenshot({ path: path.join(output, 'normal-user-no-preview.png'), fullPage: true });
 
-  console.log(JSON.stringify({ ok: true, screenshots: output, checks: 'admin no initial preview requests, unsigned rows expose no preview controls/images, synthetic 200x80 preview with visible naturalWidth and aspect, modal close clears DOM, submit on preview form does not POST, re-sign opens send form for correct person without POST, retry on failed read with distinct cache-busters, duplicate-row preview without merge toggle, normal user no preview controls/images and no extra requests, full + narrow(1280x800) desktop screenshots' }));
+  const sharedCard=()=>page.locator('.person-card').filter({hasText:'李四'});
+  const sendDialog=()=>page.getByRole('dialog',{name:'发送签名链接',exact:true});
+  const candidate=dialog=>dialog.locator('.staff-results > button').filter({hasText:'EMP601'});
+  async function waitRecipients(dialog){await page.waitForFunction(()=>document.querySelectorAll('dialog[open] .staff-results > button').length===602);assert.equal(await dialog.locator('.staff-results > button').count(),602,'all eligible recipients, including beyond 500, are available');}
+  async function selectCrossBuilding(dialog){await dialog.getByPlaceholder('搜索姓名、工号、岗位或楼栋',{exact:true}).fill('EMP601');await candidate(dialog).click();assert.equal(await dialog.locator('.staff-results > button').count(),1);assert.match(await candidate(dialog).innerText(),/B楼/);}
+  async function doubleSubmit(dialog){await dialog.locator('form').evaluate(form=>{form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});}
+  for(const viewport of [{width:1440,height:900},{width:402,height:874},{width:440,height:956}]){
+    await page.setViewportSize(viewport);await page.goto(origin+entry);await sharedCard().waitFor();
+    assert.equal(await page.getByRole('button',{name:'重复人员核对',exact:true}).count(),0,'creation permission does not expose directory merge');
+    assert.equal(await page.getByRole('button',{name:'关联正式人员',exact:true}).count(),0,'creation permission does not expose association');
+    await page.getByText('其他人员创建的临时签名',{exact:true}).waitFor();
+    assert.equal(await sharedCard().getByRole('button',{name:'查看签名',exact:true}).count(),1,'another creator/building does not hide shared unlinked signatures');
+    await sharedCard().getByRole('button',{name:'查看签名',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('.preview-area img')?.naturalWidth===200);
+    await page.getByRole('dialog',{name:/签名预览/}).locator('footer').getByRole('button',{name:'关闭',exact:true}).click();
+    await page.getByRole('button',{name:'新增临时人员',exact:true}).click();
+    const create=page.getByRole('dialog',{name:'新增临时人员',exact:true});await create.waitFor();
+    const building=create.locator('select');
+    assert.deepEqual(await building.locator('option').allTextContents(),['请选择','A楼'],'creation uses actor scopes, never B/C/H scopes from the shared directory');
+    await create.getByLabel('姓名',{exact:true}).fill('新增临时'+viewport.width);
+    if(workspace){
+      await create.getByRole('combobox',{name:'楼栋',exact:true}).click();
+      const option=page.locator('.n-base-select-option').getByText('A楼',{exact:true});await option.waitFor();
+      assert(await option.evaluate(el=>Boolean(el.closest('dialog[open]'))),'building menu stays in the native dialog top layer');
+      await option.click();
+    }
+    else await building.selectOption('A楼');
+    await create.getByLabel('专业',{exact:true}).fill('暖通');
+    const createPosts=()=>apiPosts.filter(row=>row[1].endsWith('/temporary'));
+    const beforeCreatePosts=createPosts().length,beforeCreations=creations.size;
+    loseCreate=true;await doubleSubmit(create);await create.getByText('隔离测试：新增回执未取得',{exact:true}).waitFor();
+    assert.equal(createPosts().length,beforeCreatePosts+1,'double submit starts one create request');
+    const createId=createPosts().at(-1)[2].operation_id;
+    await create.getByRole('button',{name:'新增并继续',exact:true}).click();
+    const send=sendDialog();await send.waitFor();await waitRecipients(send);
+    assert.equal(createPosts().at(-1)[2].operation_id,createId,'lost create receipt reuses its operation');
+    assert.equal(creations.size,beforeCreations+1,'create recovery never duplicates the person');
+    assert.equal(await send.getByRole('group',{name:'值班账号代收'}).getByRole('button').count(),1,'pinned duty choices remain scoped');
+    await selectCrossBuilding(send);
+    const submit=send.getByRole('button',{name:'发送链接',exact:true});await submit.scrollIntoViewIfNeeded();await submit.click({trial:true});
+    await submit.evaluate(el=>Promise.all(el.getAnimations().map(animation=>animation.finished.catch(()=>{}))));
+    const contrast=await submit.evaluate(el=>{
+      const light=color=>color.match(/[\d.]+/g).slice(0,3).map(Number).map(value=>value/255).map(value=>value<=0.04045?value/12.92:((value+0.055)/1.055)**2.4).reduce((sum,value,index)=>sum+value*[0.2126,0.7152,0.0722][index],0);
+      const s=getComputedStyle(el),a=light(s.color),b=light(s.backgroundColor);return (Math.max(a,b)+0.05)/(Math.min(a,b)+0.05);
+    });
+    assert(contrast>=4.5,'hovered primary signature button keeps readable text');
+    assert(await send.evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1;}),'send dialog fits viewport');
+    await page.screenshot({path:path.join(output,'cross-building-'+viewport.width+'.png')});
+    const beforePosts=apiPosts.length,beforeDeliveries=deliveries.size;
+    loseSend=true;await doubleSubmit(send);await send.getByText('隔离测试：发送回执未取得',{exact:true}).waitFor();
+    assert.equal(apiPosts.length,beforePosts+1,'double submit starts one send request');
+    const original=apiPosts.at(-1)[2];assert.equal(original.recipient,'staff:relay-601');
+    for(sendStatus of ['send_unknown','sending','saving']){
+      await submit.click();await send.getByText('隔离测试：发送结果待核验',{exact:true}).waitFor();
+      assert.deepEqual(apiPosts.at(-1)[2],original,'unknown/in-flight send retries preserve the operation ID and subject');
+      assert.equal(deliveries.size,beforeDeliveries+1,'unknown retries create no second delivery side effect');
+      assert.equal(await send.isVisible(),true,'uncertain outcomes never report success');
+    }
+    sendStatus='sent';await submit.click();await send.waitFor({state:'hidden'});
+    assert.equal(deliveries.size,beforeDeliveries+1);assert.equal(creations.size,beforeCreations+1);
+    await page.getByText('签名链接已发送至跨楼代收人员，等待本人签名。',{exact:true}).waitFor();
+
+    await sharedCard().getByRole('button',{name:'重新签名',exact:true}).click();await waitRecipients(send);await selectCrossBuilding(send);
+    await send.getByRole('button',{name:'取消',exact:true}).click();
+    recipientFailure='error';await sharedCard().getByRole('button',{name:'重新签名',exact:true}).click();
+    await send.getByRole('alert').filter({hasText:'隔离测试：接收人员读取失败'}).waitFor();
+    assert.equal(await send.locator('.staff-results > button').count(),0,'failed fetch discards previous candidates');
+    assert(await submit.isDisabled(),'failed fetch cannot submit a previously selected recipient');
+    recipientFailure='';await send.getByRole('button',{name:'重新读取接收人',exact:true}).click();await waitRecipients(send);
+    assert(await submit.isDisabled(),'retry requires a fresh deliberate recipient selection');
+    await send.getByRole('button',{name:'取消',exact:true}).click();
+    recipientFailure='malformed';await sharedCard().getByRole('button',{name:'重新签名',exact:true}).click();
+    await send.getByRole('alert').filter({hasText:'接收人员信息不完整，请重新读取。'}).waitFor();assert(await submit.isDisabled());
+    await send.getByRole('button',{name:'取消',exact:true}).click();recipientFailure='';
+
+    let release,started;const readStarted=new Promise(resolve=>{started=resolve;});
+    recipientGate={started,promise:new Promise(resolve=>{release=resolve;})};
+    await sharedCard().getByRole('button',{name:'重新签名',exact:true}).click();await readStarted;
+    await send.getByRole('button',{name:'取消',exact:true}).click();
+    const beforeUpward=recipientReads.length;
+    await page.locator('.person-card').filter({hasText:'验收上级'}).getByRole('button',{name:'发送签名邀请',exact:true}).click();release();
+    await send.getByRole('button',{name:/发送给本人/}).waitFor();
+    assert.equal(await send.locator('.staff-results,.recipient-pinned').count(),0,'late external directory never appears in an upward invitation');
+    assert.equal(recipientReads.length,beforeUpward,'upward invitation never queries relay data');
+    await send.getByRole('button',{name:'取消',exact:true}).click();
+    assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+    console.log('PASS '+(workspace?'v2':'legacy')+' '+viewport.width+'x'+viewport.height+': shared temporary rows, scoped create, cross-building relay, stale/failure isolation, idempotent retries and upward protection');
+  }
+  allowCreate=false;await page.goto(origin+entry);await sharedCard().waitFor();
+  assert.equal(await page.getByRole('button',{name:'新增临时人员',exact:true}).count(),0,'server permission controls create entry');
+  allowCreate=true;createScopes=[];await page.goto(origin+entry);await sharedCard().waitFor();
+  assert.equal(await page.getByRole('button',{name:'新增临时人员',exact:true}).count(),0,'no allowed creation building means no entry');
+  role='denied';const beforeDenied=apiPosts.length;await page.goto(origin+entry);await page.getByText('没有该功能权限',{exact:true}).waitFor();
+  assert.equal(await page.locator('.signature-management').count(),0,'without the signature module no signature-management surface mounts');assert.equal(apiPosts.length,beforeDenied);
+  assert.deepEqual(errors,[]);
+
+  console.log(JSON.stringify({ ok: true, screenshots: output, checks: 'admin preview/retry and merge selection preserved; scoped non-admin creation; shared unlinked temporary signatures; 602 cross-building recipient candidates; no unauthorized formal/linked preview; upward direct-only invitation; failed/malformed/late recipient isolation; stable create/send IDs through lost and uncertain receipts; 1440x900,402x874,440x956' }));
 } catch (error) {
   await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true });
   throw error;

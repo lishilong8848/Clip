@@ -348,7 +348,8 @@ export function accountManagementAccess(manager: AccountLike, target: AccountLik
   if (manager.enabled !== true || manager.blocked_reason || !Array.isArray(manager.modules) || !manager.modules.includes('accounts') || !['L0', 'L1', 'L2', 'L3'].includes(level)) return denied;
   if (!personKey(manager) || !personKey(target) || personKey(manager) === personKey(target)) return denied;
   const rank = (value?: string) => LEVEL_RANK[String(value || '').trim()] ?? 99;
-  if (rank(target.level) <= rank(level)) return denied;
+  const l0Peer = level === 'L0' && target.level === 'L0';
+  if (rank(target.level) <= rank(level) && !l0Peer) return denied;
   const editable = !target.locked && !target.blocked_reason;
   if (level === 'L0' || level === 'L1') return {view: true, edit: editable};
   if (target.role === 'admin' || ['L0', 'L1', 'L3'].includes(String(target.level))) return denied;
@@ -375,16 +376,18 @@ export function buildAccountManagementTree<T extends AccountLike>(
     }));
     return managed.get(identity)!;
   }
-  function decorate(nodes: AccountTreeNode<T>[], path: string[], offset: number, managementDepth: number): AccountTreeNode<T>[] {
+  function decorate(nodes: AccountTreeNode<T>[], path: string[], offset: number, managementDepth: number, ancestors: ReadonlySet<string>): AccountTreeNode<T>[] {
     return nodes.map(node => {
       const key = JSON.stringify([...path, node.key]);
       if (node.type !== 'person') return {...node, key, depth: offset + node.depth,
-        children: decorate(node.children, path, offset, managementDepth)};
-      const people = members(node.source);
+        children: decorate(node.children, path, offset, managementDepth, ancestors)};
+      // L0 peers may manage each other; exclude only this branch's ancestors.
+      const nextAncestors = new Set([...ancestors, personKey(node.source)]);
+      const people = members(node.source).filter(person => !nextAncestors.has(personKey(person)));
       return {...node, key, depth: offset + node.depth, managementDepth, managementCount: people.length, isLeaf: !people.length,
         children: people.length && options.loadedPeople?.has(key)
           ? decorate(buildGroupedAccountHierarchy(people, {...options, groupBy: 'building', depth: 3}),
-            [...path, node.key], offset + node.depth, managementDepth + 1)
+            [...path, node.key], offset + node.depth, managementDepth + 1, nextAncestors)
           : undefined};
     });
   }
@@ -393,5 +396,5 @@ export function buildAccountManagementTree<T extends AccountLike>(
     const canonical = byIdentity.get(personKey(account));
     return canonical ? [canonical] : [];
   });
-  return decorate(buildGroupedAccountHierarchy(roots, options), [], 0, 0) as AccountGroupNode<T>[];
+  return decorate(buildGroupedAccountHierarchy(roots, options), [], 0, 0, new Set()) as AccountGroupNode<T>[];
 }

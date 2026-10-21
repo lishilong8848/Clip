@@ -76,6 +76,151 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         self.assertFalse(auth.is_admin({"user": self.actor("AE"), "role": "admin"}))
         self.assertEqual(auth.session_scopes({"user": self.actor("AE"), "allowed_scopes": ["ALL"]}), ["A"])
 
+    def test_all_existing_account_manager_levels_can_grant_l0_to_editable_targets(self):
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        for actor, target in ((root, 'AE'), (self.actor('HM1'), 'AE'),
+                              (self.actor('HE1'), 'AE'), (self.actor('AS'), 'AO')):
+            with self.subTest(actor=actor['open_id']):
+                profile = self.h.auth.account_profile(actor['open_id'])
+                listing = self.manager.accounts(actor=actor)
+                self.assertIn('L0', {option['value'] for option in listing['level_options']})
+                row = next(row for row in listing['items'] if row['id'] == 'rec' + target)
+                self.assertTrue(row['can_grant_l0'])
+                self.manager.update({'changes': [self.override_change(target, level='L0', role='admin',
+                    modules=list(profile['modules']), scopes=list(profile['scope_rules']))]}, actor)
+                granted = self.h.auth.account_profile('ou_fixture' + target)
+                self.assertEqual((granted['level'], granted['role']), ('L0', 'admin'))
+                self.assertTrue(granted['can_manage_accounts'])
+                self.assertEqual(set(granted['scope_rules']), set(profile['scope_rules']))
+                self.h.auth._permissions_cache = None
+                self.assertEqual(self.h.auth.account_profile('ou_fixture' + target)['level'], 'L0')
+                self.assertTrue(self.h.auth.is_admin({'user': self.actor(target), 'role': 'building'}))
+                self.manager.update({'changes': [self.override_change(target, level='L4')]}, root)
+
+    def test_l0_grant_does_not_bypass_edit_target_scope_self_or_module_checks(self):
+        for actor, target in ((self.actor('AS'), 'BE'), (self.actor('HE1'), 'AO'),
+                              (self.actor('HM1'), 'HM1'), (self.actor('HM1'), 'HM2'),
+                              (self.actor('AO'), 'AE')):
+            with self.subTest(actor=actor, target=target):
+                before = copy.deepcopy(self.h.auth._load_permissions_locked())
+                with self.assertRaises(PasswordLoginError):
+                    self.manager.update({'changes': [self.override_change(target, level='L0')]}, actor)
+                self.assertEqual(self.h.auth._load_permissions_locked(), before)
+        self.manager.update({'changes': [self.override_change('AS', modules=['learning'])]}, {'open_id': LI_SHILONG_OPEN_ID})
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes': [self.override_change('AO', level='L0')]}, self.actor('AS'))
+
+    def test_l0_peers_edit_each_other_but_fixed_superuser_stays_locked(self):
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.override_change(key, level='L0') for key in ('AE', 'BE')]}, root)
+        for actor, target in (('AE', 'BE'), ('BE', 'AE')):
+            rows = self.manager.accounts(actor=self.actor(actor))['items']
+            peer = next(row for row in rows if row['id'] == 'rec' + target)
+            self.assertTrue(peer['can_edit_access'])
+            fixed = next(row for row in rows if row['open_id'] == LI_SHILONG_OPEN_ID)
+            for flag in ('can_edit', 'can_edit_access', 'can_grant_l0', 'can_delete', 'can_set_password', 'can_impersonate'):
+                self.assertFalse(fixed[flag], flag)
+            self.manager.update({'changes': [self.override_change(target, category='manager')]}, self.actor(actor))
+            self.assertEqual(self.h.auth.account_profile('ou_fixture' + target)['category'], 'manager')
+        self.assertTrue(self.h.auth.can_review_permission_request('ou_fixtureAE', 'ou_fixtureBE'))
+        self.assertFalse(self.h.auth.can_review_permission_request('ou_fixtureAE', 'ou_fixtureAE'))
+        self.assertFalse(self.h.auth.can_review_permission_request(LI_SHILONG_OPEN_ID, 'ou_fixtureBE'))
+        self.manager.update({'changes': [self.override_change('BE', level='L1')]}, root)
+        self.assertEqual(self.h.auth.account_profile('ou_fixtureBE')['level'], 'L1')
+
+    def test_protected_identity_cannot_be_changed_by_other_l0_through_any_entry(self):
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.override_change('AE', level='L0')]}, root)
+        actor = self.actor('AE')
+        fixed = next(row for row in self.manager.accounts()['items'] if row['open_id'] == LI_SHILONG_OPEN_ID)
+        before = copy.deepcopy(self.h.auth._load_permissions_locked())
+        for operation in (
+            lambda: self.manager.update({'changes': [{key: fixed[key] for key in ('id', 'revision')} | {'enabled': False, 'level': 'L4'}]}, actor),
+            lambda: self.manager.delete(fixed['id'], {'revision': fixed['revision']}, actor),
+        ):
+            with self.assertRaises(PasswordLoginError):
+                operation()
+        from lan_bitable_template_portal.account_impersonation import can_impersonate
+        self.assertFalse(can_impersonate(self.h.auth, actor['open_id'], LI_SHILONG_OPEN_ID))
+        self.h.auth.upsert_permission_user(open_id=LI_SHILONG_OPEN_ID, name='不可改名', role='building', scopes=['A'], enabled=False, updated_by=actor['open_id'])
+        with self.assertRaises(PortalError):
+            self.h.auth.remove_permission_user(LI_SHILONG_OPEN_ID, updated_by=actor['open_id'])
+        with self.assertRaises(PortalError):
+            self.h.auth.bulk_merge_permission_users([{'open_id': LI_SHILONG_OPEN_ID, 'name': '不可改名', 'scopes': self.h.auth._admin_scopes()}])
+        self.h.auth.save_permissions_payload([{'open_id': LI_SHILONG_OPEN_ID, 'name': '不可改名', 'role': 'building', 'scopes': ['A'], 'enabled': False}], updated_by=actor['open_id'])
+        self.assertEqual(self.h.auth._permission_user(LI_SHILONG_OPEN_ID), before['users'][LI_SHILONG_OPEN_ID])
+
+    def test_l0_resolver_rejects_self_even_without_http_boundary(self):
+        self.manager.update({'changes': [self.override_change('AE', level='L0')]}, {'open_id': LI_SHILONG_OPEN_ID})
+        profile = self.h.auth.account_profile('ou_fixtureAE')
+        with self.assertRaises(PolicyViolation):
+            resolve_access_change(profile, profile, level='L1')
+
+    def test_fixed_superuser_retains_all_permissions_despite_stale_overrides(self):
+        payload = self.h.auth._load_permissions_locked()
+        payload['users'][LI_SHILONG_OPEN_ID].update(access_version=1, level='L4', role='building', enabled=False,
+                                                   scopes=['A'], modules=[], module_access_version=1)
+        self.h.auth._save_permissions_locked(payload)
+        profile = self.h.auth.account_profile(LI_SHILONG_OPEN_ID)
+        self.assertTrue(profile['is_fixed_superuser'])
+        self.assertEqual((profile['level'], profile['role']), ('L0', 'admin'))
+        self.assertEqual(set(profile['modules']), set(MODULE_IDS))
+        self.assertEqual(profile['scope_rules'], self.h.auth._admin_scopes())
+        self.assertEqual(self.h.auth.scopes_for_open_id(LI_SHILONG_OPEN_ID), self.h.auth._admin_scopes())
+        self.assertFalse(self.h.auth._open_id_explicitly_disabled(LI_SHILONG_OPEN_ID))
+        self.assertTrue(self.h.auth.is_admin({'user': {'open_id': LI_SHILONG_OPEN_ID}}))
+
+    def test_unversioned_l0_text_does_not_grant_authority_by_itself(self):
+        payload = self.h.auth._load_permissions_locked()
+        payload['users']['ou_fixtureAO'].update(level='L0', role='admin')
+        payload['users']['ou_fixtureAO'].pop('access_version', None)
+        self.h.auth._save_permissions_locked(payload)
+        self.assertEqual(self.h.auth.account_profile('ou_fixtureAO')['level'], 'L4')
+
+    def test_promoted_l1_can_view_peer_details_without_changing_job(self):
+        self.manager.update({'changes': [self.override_change('AE', level='L1')]}, {'open_id': LI_SHILONG_OPEN_ID})
+        self.assertEqual(self.h.auth.account_profile('ou_fixtureAE')['category'], 'engineer')
+        for category in (None, 'manager'):
+            if category:
+                self.manager.update({'changes': [self.override_change('AE', category=category)]}, {'open_id': LI_SHILONG_OPEN_ID})
+            with self.subTest(category=category):
+                rows = self.manager.accounts(actor=self.actor('AE'))['items']
+                peer = next(row for row in rows if row['id'] == 'recHM1')
+                self.assertEqual(peer['level'], 'L1')
+                self.assertEqual(peer['name'], '测试HM1')
+                for flag in ('can_edit', 'can_edit_access', 'can_delete', 'can_set_password', 'can_impersonate', 'can_access_signature'):
+                    self.assertFalse(peer[flag], flag)
+                self.assertNotIn(LI_SHILONG_OPEN_ID, {row['open_id'] for row in rows})
+                # Refreshing the directory cannot undo the saved promotion.
+                refreshed = self.manager.accounts(refresh=True, actor=self.actor('AE'))['items']
+                self.assertIn('recHM1', {row['id'] for row in refreshed})
+
+    def test_peer_details_do_not_allow_mutation_or_impersonation(self):
+        before = copy.deepcopy(self.h.auth._load_permissions_locked())
+        actor = self.actor('HM1')
+        peer = self.item('HM2')
+        for operation in (
+            lambda: self.manager.update({'changes': [self.override_change('HM2', enabled=False)]}, actor),
+            lambda: self.manager.password('recHM2', {'new_password': 'SyntheticPass123', 'confirm_password': 'SyntheticPass123'}, actor),
+            lambda: self.manager.delete('recHM2', {'revision': peer['revision']}, actor),
+        ):
+            with self.assertRaises(PasswordLoginError) as error:
+                operation()
+            self.assertEqual(error.exception.status, 403)
+        from lan_bitable_template_portal.account_impersonation import can_impersonate
+        self.assertFalse(can_impersonate(self.h.auth, actor['open_id'], peer['open_id']))
+        self.assertEqual(self.h.auth._load_permissions_locked(), before)
+
+    def test_l1_peer_visibility_is_removed_after_downgrade_or_module_revocation(self):
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.override_change('AE', level='L1')]}, root)
+        self.assertIn('recHM1', {row['id'] for row in self.manager.accounts(actor=self.actor('AE'))['items']})
+        self.manager.update({'changes': [self.override_change('AE', level='L3')]}, root)
+        self.assertNotIn('recHM1', {row['id'] for row in self.manager.accounts(actor=self.actor('AE'))['items']})
+        self.manager.update({'changes': [self.override_change('AE', level='L1', modules=['learning'])]}, root)
+        self.assertFalse(self.h.auth.account_profile('ou_fixtureAE')['can_manage_accounts'])
+        self.assertEqual(self.manager.accounts(actor=self.actor('AE'))['items'], [])
+
     def test_l2_cannot_promote_to_l1_or_l3_and_no_partial_write(self):
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
         # L2 may never hand out a higher (L1/L3) level, nor even override an L4
@@ -209,7 +354,7 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
             self.assertIn("can_edit_access", item)
         # L2 remains base-edit only; no assignable access levels.
         l2_listing = self.manager.accounts(actor=self.actor("HE1"))
-        self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, set())
+        self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, {'L0'})
         self.assertEqual({opt["value"] for opt in l2_listing["category_options"]}, {"engineer"})
         # L2 can base-edit engineers but can_edit_access is False (no override UI).
         self.assertTrue(all(item["can_edit"] for item in l2_listing["items"] if not item['is_self']))
@@ -231,7 +376,8 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         with self.assertRaises(PortalError):
             self.h.auth.upsert_permission_user(open_id='ou_fixtureHM2',role='admin',scopes=self.h.auth._admin_scopes(),enabled=False,updated_by=actor['open_id'])
         listing=self.manager.accounts(actor=actor)
-        self.assertNotIn('ou_fixtureHM2',{item['open_id'] for item in listing['items']})
+        peer = next(item for item in listing['items'] if item['open_id'] == 'ou_fixtureHM2')
+        self.assertFalse(peer['can_edit_access']); self.assertFalse(peer['can_edit'])
         mine=next(item for item in listing['items'] if item['is_self'])
         self.assertFalse(mine['can_edit_access']);self.assertFalse(mine['can_edit'])
         self.assertEqual(self.h.auth._load_permissions_locked(),before)

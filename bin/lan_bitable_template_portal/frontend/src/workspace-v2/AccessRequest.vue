@@ -17,7 +17,7 @@ function matchesRequest(){
 }
 const approver=computed<Dict|undefined>(()=>data.value.items?.find((row:Dict)=>row.open_id===form.approver));
 const people=computed(()=> (data.value.items||[]).map((row:Dict)=>({value:row.open_id,label:row.name+' · '+row.level})));
-const scopeOptions=computed(()=> (data.value.scope_options||[]).filter((row:Dict)=>approver.value?.scopes?.includes(row.value)&&(row.value!=='ALL'||form.level==='L1')));
+const scopeOptions=computed(()=> (data.value.scope_options||[]).filter((row:Dict)=>approver.value?.scopes?.includes(row.value)&&(row.value!=='ALL'||['L0','L1'].includes(form.level))));
 const moduleOptions=computed(()=> (data.value.module_options||[]).filter((row:Dict)=>approver.value?.modules?.includes(row.value)&&!(row.value==='accounts'&&form.level==='L4')));
 const groups=computed(()=>[...new Set(moduleOptions.value.map((row:Dict)=>row.group||'功能模块'))].map(group=>({label:String(group),items:moduleOptions.value.filter((row:Dict)=>(row.group||'功能模块')===group)})));
 let timer=0,disposed=false;
@@ -30,7 +30,7 @@ watch(()=>form.approver,()=>{
   form.scopes=(own.scope_rules||[]).filter((value:string)=>scopeOptions.value.some((row:Dict)=>row.value===value));
   form.modules=(own.modules||[]).filter((value:string)=>moduleOptions.value.some((row:Dict)=>row.value===value));
 });
-watch(()=>form.level,()=>{form.modules=form.modules.filter(value=>moduleOptions.value.some((row:Dict)=>row.value===value));form.scopes=form.level==='L1'?scopeOptions.value.map((row:Dict)=>row.value):form.scopes.filter(value=>scopeOptions.value.some((row:Dict)=>row.value===value));});
+watch(()=>form.level,()=>{form.modules=form.modules.filter(value=>moduleOptions.value.some((row:Dict)=>row.value===value));form.scopes=['L0','L1'].includes(form.level)?scopeOptions.value.map((row:Dict)=>row.value):form.scopes.filter(value=>scopeOptions.value.some((row:Dict)=>row.value===value));});
 async function load(){
   if(busy.value||loading.value)return;loading.value=true;error.value='';
   try{data.value=await requestJson('/api/auth/permission-approvers',{signal:abort.signal,cache:'no-store'});await status();
@@ -79,10 +79,10 @@ onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onB
     <p v-if="request.reject_reason">{{request.reject_reason}}</p>
     <p v-if="request.notification_status==='failed'">{{request.notification_error}} <NButton text :disabled="busy" @click="retry">重试发送审批表单</NButton></p>
    </NAlert>
-   <NEmpty v-if="!loading&&!people.length" :description="data.current?.level==='L0'?'超级管理员已拥有全楼栋及全部功能权限':'暂无符合管理范围的上级审批人，请联系超级管理员'" />
+   <NEmpty v-if="!loading&&!people.length" :description="data.current?.is_fixed_superuser?'固定超级管理员已拥有全楼栋及全部功能权限':'暂无符合管理范围的审批人，请联系超级管理员'" />
    <NForm v-else label-placement="top" :disabled="busy" @submit.prevent="submit">
     <div class="v2-access-fields"><NFormItem label="上级审批人" required><NSelect v-model:value="form.approver" :options="people" filterable placeholder="选择上级审批人" aria-label="上级审批人" /></NFormItem><NFormItem label="目标级别" required><NSelect v-model:value="form.level" :options="approver?.level_options||[]" :disabled="!approver||busy" aria-label="目标级别" /></NFormItem><NFormItem label="岗位" required><NSelect v-model:value="form.category" :options="approver?.category_options||[]" :disabled="!approver||busy" aria-label="申请岗位" /></NFormItem></div>
-    <NFormItem label="可访问楼栋" required><NCheckboxGroup v-model:value="form.scopes" :disabled="busy||form.level==='L1'"><NCheckbox v-for="item in scopeOptions" :key="item.value" :value="item.value">{{item.label}}</NCheckbox></NCheckboxGroup></NFormItem>
+    <NFormItem label="可访问楼栋" required><NCheckboxGroup v-model:value="form.scopes" :disabled="busy||['L0','L1'].includes(form.level)"><NCheckbox v-for="item in scopeOptions" :key="item.value" :value="item.value">{{item.label}}</NCheckbox></NCheckboxGroup></NFormItem>
     <fieldset v-for="group in groups" :key="group.label"><legend>{{group.label}}</legend><NCheckboxGroup v-model:value="form.modules" :disabled="busy"><NCheckbox v-for="item in group.items" :key="item.value" :value="item.value">{{item.label}}</NCheckbox></NCheckboxGroup></fieldset>
     <NFormItem label="申请原因" required><NInput v-model:value="form.reason" type="textarea" :autosize="{minRows:2,maxRows:5}" maxlength="500" :input-props="{'aria-label':'申请原因'}" /></NFormItem>
     <footer><NButton type="primary" attr-type="submit" :loading="busy" :disabled="busy||uncertain||(!dirty&&request.status==='pending')||!approver||!form.level||!form.category||!form.scopes.length||!form.reason.trim()"><Send :size="16" />提交并发送飞书审批</NButton></footer>

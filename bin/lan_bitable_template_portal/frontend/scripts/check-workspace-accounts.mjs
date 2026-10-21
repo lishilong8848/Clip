@@ -4,10 +4,11 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {preview} from 'vite';
 import {chromium} from 'playwright';
+import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url)),output=path.resolve(root,'../../../output/playwright/account-workflow');
 await mkdir(output,{recursive:true});
 const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
-const browser=await chromium.launch({headless:true}),context=await browser.newContext({viewport:{width:1440,height:900}}),errors=[],writes=[],reads=[];
+const browser=await chromium.launch({headless:true}),context=await browser.newContext({viewport:{width:1440,height:900},reducedMotion:'reduce'}),errors=[],writes=[],reads=[],layouts=layoutApiFixture();
 const user={open_id:'accounts-fixture',name:'隔离验收主管',role:'building',level:'L3',category:'supervisor',modules:['accounts','maintenance','learning'],can_manage_accounts:true};
 const scopes=[{value:'A',label:'A楼'},{value:'B',label:'B楼'}],modules=[{value:'maintenance',label:'维保通告',group:'通告办理'},{value:'learning',label:'画像学练',group:'业务管理'}];
 const categories=[{value:'operator',label:'值班员'},{value:'engineer',label:'工程师'}],levels=[{value:'L4',label:'L4 本楼基础'}];
@@ -16,6 +17,7 @@ const application=id=>({request_id:id,name:id==='rich'?'完整权限申请人':'
 let requests=[application('rich'),application('scope')],saveFailure=0,reviewFailure=0,delayReview,selfRequest=null;
 await context.route('**/*',async route=>{
  const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(!url.pathname.startsWith('/api/'))return route.continue();
+ if(await layouts.handle(route,user.open_id))return;
  const ok=data=>route.fulfill({json:{ok:true,data}}),fail=(status,message)=>route.fulfill({status,json:{ok:false,error:message}});
  if(req.method()==='GET')reads.push(url.pathname);else writes.push({path:url.pathname,body:req.postDataJSON()});
  if(url.pathname==='/api/auth/status')return ok({logged_in:true,user,scope_options:scopes});
@@ -104,6 +106,26 @@ try{
  assert(await page.getByRole('button',{name:'提交并发送飞书审批',exact:true}).isDisabled(),'recovered pending request must not be sent twice');
  assert.equal(writes.filter(row=>row.path==='/api/auth/permission-requests').length,1);
  selfRequest.status='approved';await page.locator('.v2-access-current .n-tag').filter({hasText:'L3'}).waitFor();
+ Object.assign(user,{level:'L1',role:'admin',category:'engineer',modules:['accounts','maintenance','learning','signatures']});
+ Object.assign(account,{name:'同级只读人员',level:'L1',role:'admin',category:'manager',can_edit:false,can_edit_access:false,
+  can_set_password:false,can_delete:false,can_impersonate:false,can_access_signature:false});
+ for(const version of ['legacy','v2']) for(const viewport of [{width:402,height:874},{width:440,height:956},{width:1440,height:900}]){
+  await page.setViewportSize(viewport);await page.goto(version==='v2'?entry+'?__page=/admin/settings':origin+'/admin/settings');
+  const beforeReads=reads.length,beforeWrites=writes.length;
+  await page.getByRole('button',{name:'管理同级只读人员',exact:true}).click();
+  const readonly=page.getByRole('dialog',{name:'同级只读人员'});await readonly.waitFor();
+  await readonly.evaluate(el=>Promise.all(el.getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{}))));
+  assert(await readonly.getByRole('button',{name:'保存启用状态',exact:true}).isDisabled());
+  assert.equal(await readonly.getByRole('button',{name:'保存权限',exact:true}).count(),0);
+  assert.equal(await readonly.locator('.account-password,.account-signature-editor').count(),0);
+  assert.match(await readonly.locator('dl').innerText(),/姓名密码登录/,'login method is not determined by password-edit permission');
+  assert.doesNotMatch(await readonly.innerText(),/未关联可使用密码登录/,'readonly access is not a missing login identity');
+  assert(!reads.slice(beforeReads).some(path=>path.startsWith('/api/signatures/')),'personnel view must not read peer signatures');
+  assert.equal(writes.length,beforeWrites,'viewing a peer must not write anything');
+  assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+  await page.screenshot({path:path.join(output,'peer-readonly-'+version+'-'+viewport.width+'.png')});
+  await readonly.getByRole('button',{name:'关闭账号详情'}).click();
+ }
  assert.deepEqual(errors,[]);
  console.log('PASS: scoped supervisor review, complete grants preview, cancel/confirm, busy/unknown result guards, editor dirty protection and failure recovery, no legacy directory fetch, desktop/mobile. All writes mocked.');
 }catch(error){await page.screenshot({path:path.join(output,'failure.png')});console.error(errors);throw error;}

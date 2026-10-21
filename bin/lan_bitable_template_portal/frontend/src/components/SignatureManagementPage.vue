@@ -11,7 +11,7 @@
         <button v-if="loggedIn" class="btn hero-ghost" :disabled="loading" @click="load(true)">
           <RefreshCw :size="16" :class="{ spin: loading }" />刷新签名
         </button>
-        <button v-if="loggedIn && canManageDirectory" class="btn hero-primary" @click="openCreate">
+        <button v-if="loggedIn && canCreateTemporary" class="btn hero-primary" @click="openCreate">
           <Plus :size="16" />新增临时人员
         </button>
         <button v-if="loggedIn && canManageDirectory" class="btn hero-ghost" :disabled="duplicateBusy" @click="loadDuplicates">
@@ -143,13 +143,13 @@
       </section>
     </template>
 
-    <dialog ref="dialog" :aria-label="dialogAriaLabel" @cancel.prevent="closeModal">
+    <dialog ref="dialog" data-v2-inline-feedback :aria-label="dialogAriaLabel" @cancel.prevent="closeModal">
       <form @submit.prevent="submitModal">
         <header><div><span class="dialog-kicker">签名管理</span><h3>{{ modalTitle }}</h3></div><button type="button" class="icon-btn" aria-label="关闭" :disabled="sending" @click="closeModal"><X :size="19" /></button></header>
         <template v-if="modal === 'create'">
           <div class="form-grid">
             <label><span>姓名</span><input v-model="draft.name" required maxlength="80" autofocus /></label>
-            <label><span>楼栋</span><select v-model="draft.building" required><option value="">请选择</option><option v-for="b in buildings" :key="b" :value="buildingLabel(b)">{{ buildingLabel(b) }}</option></select></label>
+            <label><span>楼栋</span><select v-model="draft.building" required><option value="">请选择</option><option v-for="option in createScopeOptions" :key="option.value" :value="option.label">{{ option.label }}</option></select></label>
             <label><span>工号</span><input v-model="draft.employee_no" maxlength="80" /></label>
             <label><span>专业</span><input v-model="draft.specialty" maxlength="80" /></label>
           </div>
@@ -187,7 +187,7 @@
         </template>
         <template v-else>
           <div class="selected-summary"><span class="avatar">{{ personInitial(selectedPerson || {}) }}</span><div><small>签名人员</small><strong>{{ selectedPerson?.name }}　{{ selectedPerson?.building }}</strong></div></div>
-          <p v-if="!selectedPerson?.can_receive_message" class="hint warning-hint">该人员未关联可用接收账号，请选择同一管理范围内的代收方式。</p>
+          <p v-if="!selectedPerson?.can_receive_message" class="hint warning-hint">该人员未关联可用接收账号，请选择可用的代收人员或值班账号。</p>
           <button v-if="selectedPerson?.can_receive_message" type="button" class="recipient-direct" :class="{ selected: recipient === 'direct' }" @click="recipient = 'direct'">
             <span><strong>发送给本人</strong><small>使用已关联的飞书账号接收</small></span><CheckCircle2 v-if="recipient === 'direct'" :size="18" />
           </button>
@@ -200,6 +200,7 @@
           <label v-if="!selectedPerson?.invite_only"><span>其他 VNET 人员代收</span><div class="search-input"><Search :size="17" /><input v-model="relayQuery" type="search" autocomplete="off" placeholder="搜索姓名、工号、岗位或楼栋" /><button v-if="relayQuery" type="button" aria-label="清空代收人员搜索" @click="relayQuery = ''"><X :size="16" /></button></div></label>
           <div v-if="!selectedPerson?.invite_only" class="staff-results" aria-live="polite">
             <div v-if="relayLoading" class="staff-state"><RefreshCw :size="17" class="spin" />正在读取 VNET 人员…</div>
+            <div v-else-if="relayError" class="staff-state error" role="alert">{{ relayError }}<button type="button" class="btn" :disabled="sending" @click="searchRelayPeople">重新读取接收人</button></div>
             <div v-else-if="!relayPeople.length" class="staff-state">没有匹配的可接收人员。</div>
             <button v-for="person in relayPeople" :key="person.record_id" type="button" :class="{ selected: recipient === `staff:${person.record_id}` }" @click="recipient = `staff:${person.record_id}`">
               <span class="avatar small">{{ personInitial(person) }}</span><span><strong>{{ person.name }}</strong><small>{{ person.employee_no || '无工号' }}　{{ person.building || '楼栋未填写' }}　{{ person.position || '' }}</small></span><CheckCircle2 v-if="recipient === `staff:${person.record_id}`" :size="18" />
@@ -236,6 +237,8 @@ import { requestJson, type Dict } from "../api/client";
 
 const props = defineProps<{ checking: boolean; loggedIn: boolean; loginUrl: string; isAdmin: boolean }>();
 const buildings = ref<string[]>([]), relayBuildings = ref<string[]>([]), canManageDirectory = ref(false);
+const createScopeOptions = ref<{ value: string; label: string }[]>([]), createAllowed = ref(false);
+const canCreateTemporary = computed(() => props.loggedIn && createAllowed.value && createScopeOptions.value.length > 0);
 const people = ref<Dict[]>([]), sources = ref<Dict>({}), counts = ref<Dict>({});
 const query = ref(""), source = ref(""), status = ref(""), scope = ref(""), page = ref(1), count = ref(0);
 const loading = ref(false), notice = ref(""), noticeError = ref(false);
@@ -243,12 +246,13 @@ const sending = ref(false), modal = ref(""), modalError = ref(""), dialog = ref<
 const selectedPerson = ref<Dict | null>(null), operationId = ref("");
 const previewSrc = ref(""), previewLoading = ref(false), previewError = ref("");
 const recipient = ref("");
-const relayQuery = ref(""), relayDirectory = ref<Dict[]>([]), relayLoading = ref(false);
+const relayQuery = ref(""), relayDirectory = ref<Dict[]>([]), relayLoading = ref(false), relayError = ref(""), relayReady = ref(false);
 const draft = ref({ name: "", building: "", employee_no: "", specialty: "" });
 const staffQuery = ref(""), staffDirectory = ref<Dict[]>([]), staffId = ref(""), samePerson = ref(false), staffLoading = ref(false);
 const duplicateBusy = ref(false), showDuplicates = ref(false), duplicateGroups = ref<Dict[]>([]), confirmMerge = ref<Dict | null>(null);
 let seq = 0, searchTimer: ReturnType<typeof setTimeout> | undefined, pollTimer: ReturnType<typeof setTimeout> | undefined;
 let disposed = false, staffSeq = 0, relaySeq = 0;
+let relayRead: AbortController | undefined;
 
 const uuid = () => crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16)).join("");
 const post = (op: string, payload: Dict) => requestJson("/api/signatures/management/" + op, { method: "POST", body: JSON.stringify(payload) });
@@ -258,9 +262,17 @@ const totalPages = computed(() => Math.max(1, Math.ceil(count.value / 50)));
 const resultRange = computed(() => !count.value ? "0 人" : `${(page.value - 1) * 50 + 1}–${Math.min(page.value * 50, count.value)} / ${count.value} 人`);
 const modalTitle = computed(() => modal.value === "create" ? "新增临时人员" : modal.value === "associate" ? "关联正式人员" : modal.value === "preview" ? "签名预览" : "发送签名链接");
 const modalSubmitLabel = computed(() => modal.value === "create" ? "新增并继续" : modal.value === "associate" ? "确认关联" : "发送链接");
-const modalSubmitDisabled = computed(() => sending.value
+const validRecipient = computed(() => {
+  if (!selectedPerson.value || !props.loggedIn) return false;
+  if (recipient.value === 'direct') return selectedPerson.value.can_receive_message === true;
+  if (selectedPerson.value.invite_only) return false;
+  if (recipient.value.startsWith('duty:')) return relayBuildings.value.includes(recipient.value.slice(5));
+  return relayReady.value && !relayLoading.value && relayDirectory.value.some(person => recipient.value === `staff:${person.record_id}`);
+});
+const modalSubmitDisabled = computed(() => sending.value || !props.loggedIn
+  || (modal.value === "create" && (!canCreateTemporary.value || !draft.value.name.trim() || !createScopeOptions.value.some(option => option.label === draft.value.building)))
   || (modal.value === "associate" && (!staffId.value || !samePerson.value))
-  || (modal.value === "send" && !recipient.value));
+  || (modal.value === "send" && !validRecipient.value));
 const dialogAriaLabel = computed(() => {
   if (modal.value === "create") return "新增临时人员";
   if (modal.value === "associate") return "关联正式人员";
@@ -300,6 +312,8 @@ async function load(refresh = false) {
     relayBuildings.value = (data.recipients || []).map((item: Dict) => String(item.value));
     buildings.value = (data.scope_options || data.recipients || []).map((item: Dict) => String(item.value));
     canManageDirectory.value = data.can_manage_directory === true;
+    createAllowed.value = data.can_create_temporary === true;
+    createScopeOptions.value = Array.isArray(data.create_scope_options) ? data.create_scope_options.filter((item: Dict) => typeof item?.value === 'string' && item.value && typeof item.label === 'string' && item.label) : [];
     if (refresh) { noticeError.value = Object.values(sources.value).some((s: any) => !s.ok); notice.value = noticeError.value ? "部分人员表刷新失败，当前保留最近一次成功数据。" : "两张人员表的签名状态已刷新。"; }
   } catch (error: any) { if (n === seq) { noticeError.value = true; notice.value = error.message || "读取失败，已保留原列表。"; } }
   finally {
@@ -309,9 +323,15 @@ async function load(refresh = false) {
   }
 }
 
-async function showModal(kind: string) { modal.value = kind; modalError.value = ""; operationId.value = uuid(); await nextTick(); if (dialog.value && !dialog.value.open) dialog.value.showModal(); }
-function closeModal() { if (!sending.value) { clearPreview(); dialog.value?.close(); modal.value = ""; } }
-function openCreate() { draft.value = { name: "", building: "", employee_no: "", specialty: "" }; void showModal("create"); }
+async function showModal(kind: string) {
+  // Mount conditional dropdowns after entering the native dialog's top layer.
+  if (dialog.value && !dialog.value.open) dialog.value.showModal();
+  modal.value = kind; modalError.value = ""; operationId.value = uuid();
+  await nextTick(); dialog.value?.querySelector<HTMLElement>('[autofocus]')?.focus();
+}
+function clearRelay() { ++relaySeq; relayRead?.abort(); relayRead = undefined; relayDirectory.value = []; relayReady.value = false; relayLoading.value = false; relayError.value = ''; relayQuery.value = ''; recipient.value = ''; }
+function closeModal() { if (!sending.value) { clearPreview(); clearRelay(); dialog.value?.close(); modal.value = ""; } }
+function openCreate() { if (!canCreateTemporary.value) return; clearRelay(); draft.value = { name: "", building: "", employee_no: "", specialty: "" }; void showModal("create"); }
 function openPreview(person: Dict) {
   if (!props.loggedIn || !person.can_preview || !person.has_signature || !person.record_id) return;
   selectedPerson.value = person;
@@ -348,7 +368,8 @@ function switchPreviewToSend() {
   if (selectedPerson.value) openSend(selectedPerson.value);
 }
 function openSend(person: Dict) {
-  if (!person.can_request) return;
+  if (!props.loggedIn || !person.can_request) return;
+  clearRelay();
   selectedPerson.value = person;
   recipient.value = person.can_receive_message ? "direct" : "";
   relayQuery.value = ""; relayDirectory.value = [];
@@ -369,15 +390,21 @@ async function searchStaff() {
 }
 
 async function searchRelayPeople() {
+  const person = selectedPerson.value;
+  if (!props.loggedIn || modal.value !== 'send' || !person?.record_id || person.invite_only) return;
+  relayRead?.abort();
+  const controller = new AbortController(); relayRead = controller;
   const n = ++relaySeq;
-  relayLoading.value = true;
-  modalError.value = "";
+  relayLoading.value = true; relayReady.value = false; relayError.value = ''; relayDirectory.value = [];
+  if (recipient.value.startsWith('staff:')) recipient.value = '';
   try {
-    const data = await requestJson("/api/signatures/management/people?" + new URLSearchParams({
-      source: "staff", message_capable: "1", page: "1", page_size: "500",
-    }));
-    if (n === relaySeq && !disposed) relayDirectory.value = data.people || [];
-  } catch (error: any) { if (n === relaySeq) modalError.value = error.message || "VNET代收人员搜索失败。"; }
+    const data = await requestJson("/api/signatures/management/recipients?" + new URLSearchParams({
+      source: person.source, record_id: person.record_id,
+    }), { signal: controller.signal, cache: 'no-store' });
+    if (n !== relaySeq || disposed || controller.signal.aborted) return;
+    if (!Array.isArray(data.people) || data.people.some((row: Dict) => !row || typeof row.record_id !== 'string' || !row.record_id || typeof row.name !== 'string')) throw new Error('接收人员信息不完整，请重新读取。');
+    relayDirectory.value = data.people; relayReady.value = true;
+  } catch (error: any) { if (n === relaySeq && !disposed && !controller.signal.aborted) relayError.value = error.message || "VNET代收人员搜索失败。"; }
   finally { if (n === relaySeq) relayLoading.value = false; }
 }
 
@@ -388,8 +415,7 @@ async function submitModal() {
   try {
     if (modal.value === "create") {
       selectedPerson.value = await post("temporary", { ...draft.value, operation_id: operationId.value });
-      recipient.value = ""; relayQuery.value = ""; relayDirectory.value = []; void searchRelayPeople();
-      modal.value = "send"; operationId.value = uuid(); void load(true); return;
+      clearRelay(); modal.value = "send"; operationId.value = uuid(); void searchRelayPeople(); void load(true); return;
     }
     if (modal.value === "associate") {
       await post("associate", { record_id: selectedPerson.value?.record_id, staff_record_id: staffId.value,
@@ -401,12 +427,12 @@ async function submitModal() {
       if (result.status !== "sent") {
         modalError.value = result.error || requestLabel(result.status);
         if (result.failure_kind === "bot_unavailable") modalError.value += " 请选择VNET人员或值班账号代收。";
-        operationId.value = uuid();
+        if (['send_failed', 'expired', 'revoked'].includes(result.status)) operationId.value = uuid();
         return;
       }
       notice.value = "签名链接已发送至" + result.recipient_label + "，等待本人签名。";
     }
-    noticeError.value = false; dialog.value?.close(); modal.value = ""; void load();
+    noticeError.value = false; clearRelay(); dialog.value?.close(); modal.value = ""; void load();
   } catch (error: any) { modalError.value = error.message || "操作失败，请重试。"; }
   finally { sending.value = false; }
 }
@@ -441,11 +467,11 @@ watch(recipient, () => { operationId.value = uuid(); });
 watch(() => props.loggedIn, value => { if (value) void load(); }, { immediate: true });
 watch(() => props.loggedIn, loggedIn => {
   if (!loggedIn) {
-    clearPreview();
-    if (modal.value === "preview") { dialog.value?.close(); modal.value = ""; }
+    clearPreview(); clearRelay(); createAllowed.value = false; createScopeOptions.value = [];
+    dialog.value?.close(); modal.value = "";
   }
 });
-onBeforeUnmount(() => { disposed = true; ++seq; ++staffSeq; ++relaySeq; if (searchTimer) clearTimeout(searchTimer); if (pollTimer) clearTimeout(pollTimer); });
+onBeforeUnmount(() => { disposed = true; ++seq; ++staffSeq; clearRelay(); if (searchTimer) clearTimeout(searchTimer); if (pollTimer) clearTimeout(pollTimer); });
 </script>
 
 <style scoped>
@@ -463,6 +489,7 @@ onBeforeUnmount(() => { disposed = true; ++seq; ++staffSeq; ++relaySeq; if (sear
 .preview-state{display:flex;align-items:center;gap:8px;color:#60748e;font-size:13px;text-align:center}
 .preview-state.error{color:#b42332}
 .preview-retry{min-height:34px}
+.btn.blue:hover:not(:disabled),.btn.hero-primary:hover:not(:disabled){background:#1554df;color:#fff;border-color:transparent}
 @media(max-width:1200px){.stats{grid-template-columns:repeat(2,1fr)}.filters{grid-template-columns:minmax(240px,1fr) repeat(3,minmax(120px,.6fr))}.clear-filter{grid-column:1/-1;justify-self:start}.person-card{grid-template-columns:1.2fr .8fr 1fr auto}.request-state{grid-column:2/4}.row-actions{grid-column:4;grid-row:1/3}}
 @media(max-width:760px){.signature-management{padding:14px}.signature-hero{display:grid;padding:22px;border-radius:20px}.signature-hero h2{font-size:24px}.hero-actions{justify-content:flex-start}.hero-actions .btn{flex:1 1 140px}.stats{gap:8px;margin:13px 0}.stats article{min-height:76px;padding:12px}.filters{grid-template-columns:1fr 1fr;padding:0 14px 14px}.search-field{grid-column:1/-1}.section-head{padding:16px 15px 12px}.source-status{padding:9px 14px}.people{padding:9px}.person-card{grid-template-columns:1fr 1fr;padding:13px}.person-info,.person-tags,.signature-state,.request-state,.row-actions{grid-column:1/-1}.row-actions{grid-row:auto;display:flex}.row-actions .btn{flex:1}.pagination{align-items:flex-start}.duplicate-options,.form-grid{grid-template-columns:1fr}dialog form{padding:18px}dialog footer{bottom:-18px;margin:2px -18px -18px;padding:13px 18px}}
 @media(max-width:440px){.stats{grid-template-columns:1fr 1fr}.stats b{font-size:21px}.stat-icon{width:36px;height:36px}.filters{grid-template-columns:1fr}.search-field{grid-column:auto}.pagination{display:grid;justify-items:center}.pagination>div{width:100%;justify-content:space-between}.signature-preview{width:100%}.recipient-pinned{grid-template-columns:repeat(2,minmax(0,1fr))}}

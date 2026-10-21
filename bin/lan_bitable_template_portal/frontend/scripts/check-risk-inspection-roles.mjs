@@ -68,9 +68,9 @@ async function mock(context, s) {
       let view = url.searchParams.get('view') || 'all';
       if (view === 'published' && s.actor !== 'owner') view = 'mine';
       const people = view === 'mine' ? s.people.filter(p => p.id === s.actor) : view === 'review' ? s.reviewers.includes(s.actor) ? s.people : [] : s.actor === 'owner' ? s.people : [];
-      const items = people.flatMap(p => p.items), canClaim = s.actor === 'owner' && view === 'mine';
-      const row = {...detail(s), people_count: people.length, total: items.length, submitted: items.filter(i => ['submitted', 'approved'].includes(i.status)).length, approved: items.filter(i => i.status === 'approved').length, can_claim: canClaim};
-      return ok({view, items: items.length || canClaim ? [row] : [], total: items.length || canClaim ? 1 : 0, page: 1,
+      const items = people.flatMap(p => p.items);
+      const row = {...detail(s), people_count: people.length, total: items.length, submitted: items.filter(i => ['submitted', 'approved'].includes(i.status)).length, approved: items.filter(i => i.status === 'approved').length};
+      return ok({view, items: items.length ? [row] : [], total: items.length ? 1 : 0, page: 1,
         is_manager: s.actor === 'owner', can_edit_template: s.actor === 'owner'});
     }
     if (url.pathname === '/api/risk-inspections/release') return ok(detail(s));
@@ -171,7 +171,10 @@ try {
       await page.goto(url(version, 'review', 'release')); await page.getByText('你不是本次排查的当前审核人', {exact: true}).waitFor();
       await page.goto(url(version, 'mine', 'release')); await page.locator('.risk-feedback-table').waitFor();
       assert.equal(await page.getByRole('button', {name: '进入审核任务', exact: true}).count(), 0, 'Revoking review does not revoke the own assignment');
-      s.actor = 'owner'; await page.goto(url(version, 'published')); await page.getByRole('button', {name: '发布排查', exact: true}).waitFor();
+      s.actor = 'owner'; await page.goto(url(version, 'mine'));
+      await page.locator('.risk-list-footer').getByText('共 0 个排查任务', {exact: true}).waitFor();
+      assert.equal(await page.locator('.risk-task-name:visible').count(), 0, 'An unassigned publisher must not appear in My inspections, even at L0');
+      await page.goto(url(version, 'published')); await page.getByRole('button', {name: '发布排查', exact: true}).waitFor();
       await page.locator('.risk-task-name:visible').click(); await page.locator('.risk-feedback-table').waitFor();
       assert.equal(await page.getByRole('button', {name: '领取本人任务', exact: true}).count(), 0);
       await page.getByRole('button', {name: '切换到我的排查', exact: true}).click(); await page.getByRole('button', {name: '领取本人任务', exact: true}).waitFor();

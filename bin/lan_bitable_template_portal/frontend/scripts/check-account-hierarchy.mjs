@@ -180,6 +180,46 @@ const revokedBoss = visit(hierarchy.buildAccountManagementTree(revoked, revoked,
 assert.equal(revokedBoss.managementCount, 0);assert.equal(revokedBoss.children, undefined, 'revocation removes already-loaded management ranges');
 console.log('PASS: lazy multi-person levels, stable paths, root filtering, current-login flags, scoped directory and revocation');
 
+const peers = [
+  manager('fixed-root', 'L0', ['H'], {name: '李世龙', locked: true, can_edit: false, can_grant_l0: false}),
+  manager('peer-a', 'L0', ['H'], {can_edit: true, can_grant_l0: true}),
+  manager('peer-b', 'L0', ['A'], {can_edit: true, can_grant_l0: true}),
+  manager('member', 'L4', ['A'], {category: 'engineer', modules: ['learning'], can_edit: false}),
+];
+const peersBefore = structuredClone(peers);
+assert.deepEqual(hierarchy.accountManagementAccess(peers[1], peers[2]), {view: true, edit: true});
+assert.deepEqual(hierarchy.accountManagementAccess(peers[2], peers[1]), {view: true, edit: true});
+assert.deepEqual(hierarchy.accountManagementAccess(peers[1], peers[0]), {view: true, edit: false}, 'fixed root remains read-only');
+assert.deepEqual(hierarchy.accountManagementAccess(peers[1], peers[1]), {view: false, edit: false}, 'no self-management branch');
+// Simulate expanding every branch: mutual L0 access must still terminate.
+const allLoaded = {has: () => true};
+const peerTree = hierarchy.buildAccountManagementTree(peers, peers, {loadedPeople: allLoaded});
+function checkAncestry(nodes, ancestors = new Set()) {
+  for (const node of nodes) {
+    const next = new Set(ancestors);
+    if (node.type === 'person') {
+      const identity = hierarchy.personKey(node.source);
+      assert(!next.has(identity), 'no repeated person in a management path');
+      next.add(identity);
+      assert(node.managementDepth < peers.length, 'expansion depth is bounded by distinct people');
+      if (node.id === 'fixed-root') {
+        assert.equal(node.source.can_edit, false);
+        assert.equal(node.source.can_grant_l0, false);
+      }
+    }
+    checkAncestry(node.children || [], next);
+  }
+}
+checkAncestry(peerTree);
+const peerNodes = visit(peerTree);
+assert.equal(new Set(peerNodes.map(node => node.key)).size, peerNodes.length);
+for (const [parent, child] of [['peer-a', 'peer-b'], ['peer-b', 'peer-a']]) {
+  const branch = peerNodes.find(node => node.id === parent && node.managementDepth === 0);
+  assert(visit(branch.children).some(node => node.id === child), 'ancestry guard must not suppress independent peer branches');
+}
+assert.deepEqual(peers, peersBefore, 'tree expansion never alters protected or editable account flags');
+console.log('PASS: paired L0 peer editing, locked root, self exclusion and fully expanded cycle-safe paths');
+
 // ---- 2. Vue component compiles -------------------------------------------
 const componentSource = readFileSync(path.join(v2Dir, 'AccountHierarchy.vue'), 'utf8');
 const comp = parse(componentSource, { filename: 'AccountHierarchy.vue' });

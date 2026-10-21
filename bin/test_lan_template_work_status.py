@@ -694,6 +694,22 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         # Drop any cached directory index so later lookups use the fresh snapshot.
         manager._account_index_cache = (None, {})
 
+    def _attach_current_account_hr(self, manager, people):
+        from lan_bitable_template_portal.feishu_identity import TARGET_APP_ID
+        snapshot = {**self._portal_hr_snapshot(people), 'schema': 4, 'app_id': TARGET_APP_ID}
+        app = patch.object(manager, 'current_feishu_app_id', return_value=TARGET_APP_ID)
+        app.start()
+        self.addCleanup(app.stop)
+        manager._account_directory_provider = lambda: snapshot
+        payload = manager._default_permissions()
+        payload['users'] = {oid: {'name': scope, 'role': 'admin' if scope == 'H' else 'building',
+            'scopes': manager._admin_scopes() if scope == 'H' else [scope], 'enabled': True}
+            for scope, oid in portal_server_module.BUILDING_OPEN_ID_MAP.items()}
+        payload['users'][LI_SHILONG_OPEN_ID] = {'name': '李世龙', 'role': 'admin',
+            'scopes': manager._admin_scopes(), 'enabled': True}
+        manager._save_permissions_locked(payload)
+        manager.sync_directory_permissions(list(people.values()))
+
     def _person(self, rid, open_id, name, scopes, position, *, selectable=True,
                 inactive=False, disabled_reason=""):
         return {
@@ -21635,7 +21651,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 manager = PortalAuthManager()
                 # Trusted HR identities: account_profile derives the disabled
                 # A-floor engineer (building, own A) and the H manager (L1 admin).
-                self._attach_portal_hr(manager, {
+                self._attach_current_account_hr(manager, {
                     "recDisabled": self._person(
                         "recDisabled", "ou_disabled", "禁用用户", ["A"], "暖通工程师"),
                     "recAdmin": self._person(
@@ -21658,12 +21674,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                             "enabled": True,
                         },
                     ],
-                    updated_by="ou_actor",
+                    updated_by=LI_SHILONG_OPEN_ID,
                 )
 
                 users = {item["open_id"]: item for item in payload["users"]}
-                self.assertIn("ou_902e364a6c2c6c20893c02abe505a7b2", users)
-                self.assertTrue(users["ou_902e364a6c2c6c20893c02abe505a7b2"]["locked"])
+                self.assertIn(LI_SHILONG_OPEN_ID, users)
+                self.assertTrue(users[LI_SHILONG_OPEN_ID]["locked"])
                 # Fixed H duty account remains an L1 full-access administrator.
                 h_id = portal_server_module.BUILDING_OPEN_ID_MAP["H"]
                 self.assertIn(h_id, users)
@@ -21691,7 +21707,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ):
                 manager = PortalAuthManager()
                 # Trusted HR identity: an A-floor engineer has own-floor ["A"] only.
-                self._attach_portal_hr(manager, {
+                self._attach_current_account_hr(manager, {
                     "recDirectory": self._person(
                         "recDirectory", "ou_directory_user", "目录人员", ["A"], "暖通工程师"),
                 })
@@ -21699,7 +21715,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     open_id="ou_directory_user",
                     name="目录人员",
                     scopes=["A"],
-                    updated_by="ou_admin",
+                    updated_by=LI_SHILONG_OPEN_ID,
                 )
 
                 # Cross-building extension (A -> B/C) is explicitly rejected and
@@ -21713,7 +21729,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                                 "scopes": ["B", "C"],
                             }
                         ],
-                        updated_by="ou_admin",
+                        updated_by=LI_SHILONG_OPEN_ID,
                     )
 
                 existing = next(
@@ -21729,6 +21745,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     name="目录人员新名称",
                     scopes=["B"],
                     reason="临时支援B楼",
+                    approver_open_id=LI_SHILONG_OPEN_ID,
                 )
                 self.assertEqual(request["requested_scopes"], ["B"])
                 self.assertEqual(request["status"], "pending")
@@ -21750,7 +21767,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ):
                 manager = PortalAuthManager()
                 # Trusted HR identity: A-floor engineer eligible to be removed.
-                self._attach_portal_hr(manager, {
+                self._attach_current_account_hr(manager, {
                     "recRemove": self._person(
                         "recRemove", "ou_remove_me", "待删除用户", ["A"], "暖通工程师"),
                 })
@@ -21758,12 +21775,12 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     open_id="ou_remove_me",
                     name="待删除用户",
                     scopes=["A"],
-                    updated_by="ou_admin",
+                    updated_by=LI_SHILONG_OPEN_ID,
                 )
 
                 payload, removed = manager.remove_permission_user(
                     "ou_remove_me",
-                    updated_by="ou_admin",
+                    updated_by=LI_SHILONG_OPEN_ID,
                 )
 
                 self.assertTrue(removed)
@@ -21797,7 +21814,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 # Required admin and fixed H duty are undeletable.
                 with self.assertRaisesRegex(PortalError, "固定管理员和值班账号不能删除"):
                     manager.remove_permission_user(
-                        "ou_902e364a6c2c6c20893c02abe505a7b2"
+                        LI_SHILONG_OPEN_ID
                     )
                 with self.assertRaisesRegex(PortalError, "固定管理员和值班账号不能删除"):
                     manager.remove_permission_user(

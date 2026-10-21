@@ -209,7 +209,7 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
             self.assertEqual(session["user"]["open_id"], oid)
             self.assertEqual(session["allowed_scopes"], [scope])
 
-    def test_nine_shared_hr_rows_do_not_override_fixed_duty_or_l0_saved_grants(self):
+    def test_shared_hr_rows_preserve_duty_grants_and_fixed_superuser_full_access(self):
         for scope, oid in [*TARGET_DUTY_OPEN_IDS.items(), ("A", LI_SHILONG_OPEN_ID)]:
             with self.subTest(identity=oid):
                 snapshot = self.load([self.row("recShared" + str(i), oid) for i in range(9)])
@@ -227,8 +227,9 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
                 self.assertEqual(sender["open_id"], oid)
                 for session in (oauth_session, bot_session):
                     self.assertEqual(session["user"]["open_id"], oid)
-                    self.assertEqual(session["allowed_scopes"], [scope])
-                self.assertEqual(self.auth.account_profile(oid)["modules"], ["assistant"])
+                    self.assertEqual(session["allowed_scopes"], self.auth._admin_scopes() if oid == LI_SHILONG_OPEN_ID else [scope])
+                self.assertEqual(self.auth.account_profile(oid)["modules"],
+                                 list(auth_module.default_modules('L0')) if oid == LI_SHILONG_OPEN_ID else ["assistant"])
                 self.assertEqual(self.auth._state_store.get_auth_permissions(), saved)
                 self.assertTrue(all(not person["selectable"] for person in snapshot["people"].values()))
 
@@ -304,7 +305,7 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
     def test_loading_does_not_add_reenable_or_promote_administrators(self):
         self.load([])
         self.assertEqual(self.auth.get_permissions_payload()["users"], [])
-        for oid in (LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, TARGET_DUTY_OPEN_IDS["H"]):
+        for oid in (MA_JINYU_OPEN_ID, TARGET_DUTY_OPEN_IDS["H"]):
             self.grant(oid, enabled=False, modules=[], scopes=[])
             self.auth._permissions_cache = None
             self.assertFalse(self.auth._permission_user(oid)["enabled"])
@@ -314,6 +315,15 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
             self.assertEqual(profile["level"], "L4")
             self.assertEqual(profile["scope_rules"], [])
             self.assertFalse(profile["can_manage_accounts"])
+        self.grant(LI_SHILONG_OPEN_ID, enabled=False, modules=[], scopes=[])
+        saved = copy.deepcopy(self.auth._state_store.get_auth_permissions())
+        self.auth._permissions_cache = None
+        profile = self.auth.account_profile(LI_SHILONG_OPEN_ID)
+        self.assertEqual(profile['level'], 'L0')
+        self.assertEqual(profile['scope_rules'], self.auth._admin_scopes())
+        self.assertEqual(set(profile['modules']), set(auth_module.default_modules('L0')))
+        self.assertTrue(profile['can_manage_accounts'])
+        self.assertEqual(self.auth._state_store.get_auth_permissions(), saved)
 
     def test_sender_bindings_never_override_current_hr_id(self):
         from openclaw_service.assistant.lighthouse_ai import AssistantError

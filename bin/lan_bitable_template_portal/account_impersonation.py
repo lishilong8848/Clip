@@ -52,7 +52,7 @@ def draft_identity(session):
 
 
 def can_impersonate(auth, operator_id, target_id):
-    if not operator_id or not target_id or operator_id == target_id:
+    if not operator_id or not target_id or operator_id == target_id or target_id in REQUIRED_ADMIN_USERS:
         return False
     operator, target = auth.account_profile(operator_id), auth.account_profile(target_id)
     if not operator.get('can_manage_accounts') or not target.get('modules') or not auth.scopes_for_open_id(target_id):
@@ -63,7 +63,7 @@ def can_impersonate(auth, operator_id, target_id):
         person = auth.directory_person(target_id)
         if not person.get('selectable') or person.get('inactive') or person.get('login_ids') != [target_id]:
             return False
-    if operator['level'] == 'L0':
+    if operator.get('is_fixed_superuser'):
         return True
     candidate = {**target, 'own_scopes': [target['home_scope']] if target.get('home_scope') else []}
     # L2's edit-only personnel selector is not permission to view another account.

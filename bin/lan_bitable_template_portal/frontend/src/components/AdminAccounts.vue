@@ -98,34 +98,34 @@
             <header><div><h2 id="account-editor-title">{{ draft?.name }}</h2><span class="muted">{{ draft ? kinds[draft.kind] : '' }}</span></div><button type="button" class="icon" aria-label="关闭账号详情" :disabled="saving" @click="closeEditor"><X :size="20" /></button></header>
             <p v-if="editorError" class="error" role="alert">{{ editorError }}</p>
             <p v-if="notice" class="success" role="status">{{ notice }}</p>
-            <div v-if="draft" class="editor-body" :class="{ 'access-readonly': !canEditAccess(draft) }">
-              <dl><template v-if="myLevel !== 'L2'"><dt>工号</dt><dd>{{ draft.employee_no || '未填写' }}</dd></template><dt>所属楼栋</dt><dd>{{ scopesLabel(draft.own_scopes) }}</dd><dt>权限级别</dt><dd>{{ levelLabel(draft.level) }}</dd><dt>角色</dt><dd>{{ draft.role === 'admin' ? '管理员' : '普通用户' }}</dd><dt>可访问楼栋</dt><dd>{{ scopesLabel(draft.scopes) }}</dd><dt>可用模块</dt><dd :title="moduleLabel(draft.modules)">{{ (draft.modules || []).length }} 项</dd><dt>登录方式</dt><dd>{{ draft.can_set_password ? '姓名密码登录' : '飞书登录' }}</dd><dt>OpenID</dt><dd class="identity">{{ draft.open_id || '未关联' }}</dd></dl>
+            <div v-if="draft" class="editor-body" :class="{ 'access-readonly': !canChooseAccess(draft) }">
+              <dl><template v-if="myLevel !== 'L2'"><dt>工号</dt><dd>{{ draft.employee_no || '未填写' }}</dd></template><dt>所属楼栋</dt><dd>{{ scopesLabel(draft.own_scopes) }}</dd><dt>权限级别</dt><dd>{{ levelLabel(draft.level) }}</dd><dt>角色</dt><dd>{{ draft.role === 'admin' ? '管理员' : '普通用户' }}</dd><dt>可访问楼栋</dt><dd>{{ scopesLabel(draft.scopes) }}</dd><dt>可用模块</dt><dd :title="moduleLabel(draft.modules)">{{ (draft.modules || []).length }} 项</dd><dt>登录方式</dt><dd>{{ draft.kind === 'external' ? '姓名密码登录' : '飞书登录' }}</dd><dt>OpenID</dt><dd class="identity">{{ draft.open_id || '未关联' }}</dd></dl>
               <p v-if="draft.blocked_reason" class="warning">{{ draft.blocked_reason }}</p>
               <fieldset class="account-state" :disabled="saving || !canEdit(draft)"><legend>账号状态</legend>
                 <label class="check"><input v-model="draft.enabled" type="checkbox" />启用登录</label>
-                <p v-if="!canEdit(draft)" class="warning">当前级别只能查看该账号，不能修改。角色与可访问楼栋由HR统一管理。</p>
+                <p v-if="!canEdit(draft)" class="warning">当前账号仅可查看此人员信息，同级或上级账号不能修改；本人权限需向上级申请。</p>
                 <button type="button" class="primary" @click="saveEnabled"><Save :size="16" />{{ saving ? '正在保存' : '保存启用状态' }}</button>
               </fieldset>
-              <fieldset v-if="canEditAccess(draft)" class="account-access" :disabled="saving"><legend>访问权限</legend>
+              <fieldset v-if="canChooseAccess(draft)" class="account-access" :disabled="saving"><legend>访问权限</legend>
                 <p class="muted">此处设置的级别、岗位、楼栋与模块会覆盖HR默认授权。</p>
                 <label><span>权限级别</span>
                   <select v-model="draft.level" aria-label="权限级别" :disabled="isFixedDuty" @change="changeLevel">
-                    <option v-for="opt in accessLevelOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                    <option v-for="opt in accessLevelOptions" :key="opt.value" :value="opt.value" :disabled="opt.disabled">{{ opt.label }}</option>
                   </select>
                   <small v-if="isFixedDuty" class="muted">固定值班账号级别不可修改。</small>
                 </label>
                 <label><span>岗位分类</span>
-                  <select v-model="draft.category" aria-label="岗位分类">
+                  <select v-model="draft.category" aria-label="岗位分类" :disabled="!canSaveAccess(draft)">
                     <option v-for="opt in accessCategoryOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
                   </select>
                 </label>
-                <fieldset class="check-group" :disabled="draft.level === 'L1'"><legend>可访问楼栋（多选）</legend>
+                <fieldset class="check-group" :disabled="!canSaveAccess(draft) || ['L0', 'L1'].includes(draft.level || '')"><legend>可访问楼栋（多选）</legend>
                   <label class="check" v-for="scope in accessScopeOptions" :key="scope.value">
                     <input type="checkbox" :value="scope.value" v-model="draft.scopes" />{{ scope.label }}
                   </label>
                 </fieldset>
                 <div class="module-groups">
-                  <fieldset v-for="group in moduleGroups" :key="group.label" class="module-group"><legend>{{ group.label }}</legend>
+                  <fieldset v-for="group in moduleGroups" :key="group.label" class="module-group" :disabled="!canSaveAccess(draft)"><legend>{{ group.label }}</legend>
                     <div class="module-options"><label class="check" v-for="mod in group.options" :key="mod.value" :class="{ granted: draft.modules?.includes(mod.value) }">
                       <input type="checkbox" :value="mod.value" v-model="draft.modules" :disabled="mod.value === 'accounts' && draft.level === 'L4'" />{{ mod.label }}
                     </label></div>
@@ -139,10 +139,10 @@
                   <button type="submit" class="primary"><KeyRound :size="16" />{{ saving ? '正在保存' : '确认修改密码' }}</button>
                 </fieldset>
               </form>
-              <p v-else class="muted">{{ draft.kind === 'vnet' || draft.kind === 'duty' ? '飞书账号密码请在飞书中修改。' : '该账号未关联可使用密码登录的在岗人员。' }}</p>
-              <AccountSignature v-if="draft.open_id && actorModules.includes('signatures') && draft.kind !== 'duty'" :key="draft.open_id" :open-id="draft.open_id" class="account-signature-editor" />
+              <p v-else-if="canEdit(draft) || draft.kind === 'vnet' || draft.kind === 'duty'" class="muted">{{ draft.kind === 'vnet' || draft.kind === 'duty' ? '飞书账号密码请在飞书中修改。' : '该账号未关联可使用密码登录的在岗人员。' }}</p>
+              <AccountSignature v-if="draft.open_id && draft.can_access_signature !== false && actorModules.includes('signatures') && draft.kind !== 'duty'" :key="draft.open_id" :open-id="draft.open_id" class="account-signature-editor" />
             </div>
-            <footer class="editor-footer"><span class="muted">{{ (draft?.modules || []).length }} 项模块权限</span><button v-if="draft?.can_impersonate" class="impersonate-action" type="button" data-v2-navigation :disabled="saving" @click="requestImpersonation(draft)"><UserRoundCog :size="15" />临时代登录</button><button type="button" :disabled="saving" @click="closeEditor">关闭</button><button v-if="draft && canEditAccess(draft)" type="button" class="primary" :disabled="saving" @click="saveAccess"><Save :size="16" />{{ saving ? '正在保存' : '保存权限' }}</button></footer>
+            <footer class="editor-footer"><span class="muted">{{ (draft?.modules || []).length }} 项模块权限</span><button v-if="draft?.can_impersonate" class="impersonate-action" type="button" data-v2-navigation :disabled="saving" @click="requestImpersonation(draft)"><UserRoundCog :size="15" />临时代登录</button><button type="button" :disabled="saving" @click="closeEditor">关闭</button><button v-if="draft && canChooseAccess(draft)" type="button" class="primary" :disabled="saving || !canSaveAccess(draft)" @click="saveAccess"><Save :size="16" />{{ saving ? '正在保存' : '保存权限' }}</button></footer>
           </section>
         </div>
       </UiTransition>
@@ -158,7 +158,7 @@ import { acquireModal } from '../modalState';
 import AccountSignature from './AccountSignature.vue';
 import ConfirmDialog from './ConfirmDialog.vue';
 import { finishImpersonation } from './ImpersonationBanner.vue';
-type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; home_scope?: string; can_impersonate?: boolean; is_self?: boolean };
+type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; can_grant_l0?: boolean; home_scope?: string; can_impersonate?: boolean; can_access_signature?: boolean; is_self?: boolean };
 type ModuleChange = Pick<Account, 'id' | 'revision' | 'enabled'> & { modules: string[] };
 const props = defineProps<{ pendingCount: number; permissions: Dict[] }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -215,6 +215,8 @@ function canEdit(item: Account) { return item.can_edit === true; }
 // Access grants (level/category/scopes/modules) are governed by the backend's
 // per-account `can_edit_access` flag, which already incorporates `can_edit`.
 function canEditAccess(item: Account) { return item.can_edit_access === true; }
+function canChooseAccess(item: Account) { return canEditAccess(item) || item.can_grant_l0 === true; }
+function canSaveAccess(item: Account) { return canEditAccess(item) || (item.can_grant_l0 === true && item.level === 'L0'); }
 // H-building fixed duty accounts never have their level changed, regardless of
 // anything else the access panel offers.
 const isFixedDuty = computed(() => draft.value?.kind === 'duty' && (draft.value.home_scope === 'H' || draft.value.own_scopes?.includes('H')));
@@ -302,7 +304,14 @@ watch([bulkMode, selectedAccounts], () => {
   if (bulkMode.value === 'add' && selectedAccounts.value.some(item => item.level === 'L4')) bulkModules.value = bulkModules.value.filter(module => module !== 'accounts');
 });
 const isSuperAdmin = computed(() => ['L0', 'L1'].includes(myLevel.value));
-const accessLevelOptions = computed(() => levelOptions.value);
+const accessLevelOptions = computed(() => {
+  const options = levelOptions.value.map(option => ({ ...option, disabled: false }));
+  const current = draft.value?.level;
+  if (current && !options.some(option => option.value === current)) {
+    return [{ value: current, label: `${levelLabel(current)}（当前）`, disabled: true }, ...options];
+  }
+  return options;
+});
 const accessCategoryOptions = computed(() => categoryOptions.value);
 const accessModuleOptions = computed(() => moduleOptions.value.filter(option => actorModules.value.includes(option.value)));
 const moduleGroups = computed(() => ['业务管理', '通告办理', '协作与资料', '系统管理', '功能模块'].map(label => ({ label, options: accessModuleOptions.value.filter(option => (option.group || '功能模块') === label) })).filter(group => group.options.length));
@@ -314,6 +323,10 @@ const accessScopeOptions = computed(() => {
   const options = scopeOptions.value;
   if (!draft.value) return options;
   if (isSuperAdmin.value) return options;
+  if (draft.value.level === 'L0') {
+    const allowed = new Set(policy.value.scope_rules || []);
+    return options.filter(option => allowed.has(option.value));
+  }
   const own = new Set(draft.value.own_scopes || []);
   return options.filter(option => own.has(option.value) || option.value === draft.value?.home_scope);
 });
@@ -324,12 +337,12 @@ function modulesForLevel(level?: string): string[] {
 function scopesForLevel(level?: string): string[] {
   const d = draft.value;
   if (!d) return [];
-  if (level === 'L1') return accessScopeOptions.value.map(option => option.value);
+  if (['L0', 'L1'].includes(level || '')) return accessScopeOptions.value.map(option => option.value);
   const own = new Set([...(d.own_scopes || []), ...(d.home_scope ? [d.home_scope] : [])]);
   return accessScopeOptions.value.filter(option => own.has(option.value)).map(option => option.value);
 }
 function roleForLevel(level?: string): string {
-  return level === 'L1' ? 'admin' : 'building';
+  return ['L0', 'L1'].includes(level || '') ? 'admin' : 'building';
 }
 
 // Snapshot of the opened account's access fields so a rejected save can restore
@@ -418,7 +431,7 @@ async function savePermissions(changes: ReturnType<typeof permissionChange>[]) {
   finally { saving.value = false; }
 }
 function saveEnabled() { if (draft.value) void savePermissions([{ ...permissionChange(draft.value), role: draftOriginal?.role || draft.value.role, scopes: [...(draftOriginal?.scopes || draft.value.scopes)] }]); }
-function saveAccess() { if (draft.value) void savePermissions([accessChange(draft.value)]); }
+function saveAccess() { if (draft.value && canSaveAccess(draft.value)) void savePermissions([accessChange(draft.value)]); }
 async function deleteAccount(item: Account) {
   if (saving.value) return;
   const target = item.name;

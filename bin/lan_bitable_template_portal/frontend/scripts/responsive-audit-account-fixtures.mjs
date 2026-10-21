@@ -260,8 +260,21 @@ export async function accountFixture({url, method = 'GET', body} = {}) {
       && terms.every(term => [person.name, person.employee_no, person.building, person.position].join(' ').toLowerCase().includes(term)));
     const page = Math.max(1, Number(query.get('page')) || 1), pageSize = Math.max(1, Math.min(500, Number(query.get('page_size')) || 50));
     return ok({people: rows.slice((page - 1) * pageSize, page * pageSize), count: rows.length, page, page_size: pageSize,
-      can_manage_directory: true, scope_options: scopeOptions, recipients: scopeOptions.map(row => ({value: row.value, label: row.label + '值班账号'})),
+      can_manage_directory: true, can_create_temporary: true, create_scope_options: scopeOptions,
+      scope_options: scopeOptions, recipients: scopeOptions.map(row => ({value: row.value, label: row.label + '值班账号'})),
       sources: signatureSources, counts: Object.fromEntries(['signed', 'unsigned', 'resign'].map(status => [status, people.filter(row => row.signature_status === status).length]))});
+  }
+  if (path === signature + 'recipients' && method === 'GET') return ok({people: people.filter(row => row.source === 'staff' && row.can_receive_message)
+    .map(row => Object.fromEntries(['record_id', 'name', 'employee_no', 'building', 'position', 'team', 'specialty'].map(key => [key, row[key] || ''])))});
+  if (path === signature + 'temporary' && method === 'POST') {
+    const record_id = 'audit-temporary-' + payload.operation_id;
+    let person = people.find(row => row.record_id === record_id);
+    if (!person) {
+      person = {source: 'external', record_id, person_key: 'external:' + record_id, name: payload.name, building: payload.building,
+        employee_no: payload.employee_no, specialty: payload.specialty, has_signature: false, signature_status: 'unsigned', can_preview: false, can_request: true};
+      people.push(person);
+    }
+    return ok(person);
   }
   if (path === signature + 'preview' && method === 'GET') {
     const person = people.find(row => row.source === query.get('source') && row.record_id === query.get('record_id'));

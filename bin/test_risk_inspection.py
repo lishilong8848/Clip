@@ -990,8 +990,8 @@ class PublicationIsolationTests(unittest.TestCase):
         self.body['items'][0]['values'] = {'result': '原始排查要求'}
         self.publish_as()
         data = self.store.list(self.people['publisher'], view='mine')
-        self.assertTrue(data['items'][0]['can_claim'])
-        self.assertEqual(data['items'][0]['total'], 0)
+        self.assertEqual((data['total'], data['items']), (0, []))
+        self.assertTrue(self.store.get(self.people['publisher'], 'a' * 32)['can_claim'])
         def claim(_):
             return self.store.claim(self.people['publisher'], 'a' * 32, {'scope': 'A'})
         with ThreadPoolExecutor(max_workers=2) as pool:

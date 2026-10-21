@@ -561,8 +561,7 @@ class RiskInspections:
             managed = '(' + scope_sql + ' AND ' + control_sql + ')'
             if view == 'mine':
                 visible, args = 'p.person_id=?', [actor['id']]
-                candidate = '(' + visible + ' OR (r.owner=? AND ' + managed + '))'
-                candidate_args = [*args, actor['id'], *scopes, *control_args]
+                candidate, candidate_args = visible, args
             elif view == 'review':
                 visible, args = reviewer_sql, [actor['id']]
                 candidate, candidate_args = visible, args

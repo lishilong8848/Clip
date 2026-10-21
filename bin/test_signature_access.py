@@ -350,6 +350,10 @@ class MopSignatureInvitationTests(unittest.TestCase):
         self.manager = self.service.manager
         self.service.add('recReceiver', name='接收人', open_id='receiver', building='E楼')
         self.service.add('recOther', name='其他楼接收人', open_id='other', building='A楼')
+        # Eligible staff outside the actor's building stay selectable as MOP recipients.
+        self.service.add('recCross', name='跨楼正式人员', open_id='cross', building='A楼')
+        self.service.add('recExternal', name='非VNET人员', open_id='nonVnet', building='A楼', account_nature='外部账号')
+        self.service.add('recNoOpenId', name='缺少身份人员', open_id='', building='A楼')
         self.service._engineer_month_maintenance_notices = Mock(return_value=[
             {'notice_key': 'noticeE', 'building': 'E楼', 'building_codes': ['E']},
             {'notice_key': 'noticeA', 'building': 'A楼', 'building_codes': ['A']}])
@@ -367,10 +371,19 @@ class MopSignatureInvitationTests(unittest.TestCase):
                         self.payload if payload is None else payload, actor=actor, auth=self.auth,
                         send_text=self.sender, base_url='http://localhost:18766')
 
+    def recipient_values(self, payload=None, *, actor='mopOperator'):
+        options = self.call('mop-people', payload, actor=actor)
+        for item in options['recipients']:
+            self.assertEqual(set(item), {'value', 'label'})
+            self.assertNotIn('open_id', str(item))
+        return {item['value'] for item in options['recipients']}
+
     def test_mop_only_user_can_create_invite_and_sign_without_directory_management(self):
         options = self.call('mop-people')
         self.assertEqual(options['scope_options'], [{'value': 'E', 'label': 'E楼'}])
-        self.assertEqual({p['value'] for p in options['recipients']}, {'duty:E', 'staff:recReceiver'})
+        # Anyone eligible can receive the invitation, not only the sender's own building.
+        self.assertEqual({p['value'] for p in options['recipients']},
+                         {'duty:E', 'staff:recReceiver', 'staff:recCross', 'staff:recOther'})
         self.assertNotIn('open_id', str(options))
         result = self.call('mop-invite')
         self.assertEqual(result['request']['status'], 'sent')
@@ -429,20 +442,32 @@ class MopSignatureInvitationTests(unittest.TestCase):
         self.assertEqual(self.service.creates, 1)
 
     def test_module_scope_notice_recipient_and_actor_checks_precede_writes(self):
-        for changes in ({'scope': 'A'}, {'notice_key': 'noticeA'}, {'notice_key': 'missing'},
-                        {'recipient': 'staff:recOther'}, {'recipient': 'duty:A'}, {'recipient': 'ou_arbitrary'},
+        for changes in ({'scope': 'A'}, {'scope': 'C'}, {'notice_key': 'noticeA'}, {'notice_key': 'missing'},
+                        {'recipient': 'duty:A'}, {'recipient': 'duty:missing'}, {'recipient': 'staff:missing'},
+                        {'recipient': 'staff:recExternal'}, {'recipient': 'staff:recNoOpenId'},
+                        {'recipient': 'ou_arbitrary'}, {'recipient': ''},
                         {'role': 'inspector'}, {'name': ''}, {'operation_id': 'x' * 128}):
             with self.subTest(changes=changes), self.assertRaises(SignatureManagementError):
                 self.call('mop-invite', {**self.payload, **changes})
+        # A valid recipient from another building is accepted only when every other
+        # guard passes; the notice/building scoping still rejects it first.
+        self.assertTrue({'staff:recOther', 'staff:recCross'} <= self.recipient_values())
         self.modules = ['signatures']
         with self.assertRaises(SignatureManagementError):
             self.call('mop-invite')
         self.modules = ['engineer_mop']
-        for blocked in ('mopOperator', 'receiver'):
-            self.blocked = {blocked}
-            with self.assertRaises(SignatureManagementError):
-                self.call('mop-invite')
+        # A blocked actor is rejected at the entry check, on a notice that would otherwise
+        # resolve, so the denial cannot be mistaken for a notice/building failure.
+        self.blocked = {'mopOperator'}
+        with self.assertRaises(SignatureManagementError) as error:
+            self.call('mop-invite', {**self.payload, 'recipient': 'staff:recCross'})
+        self.assertEqual(error.exception.status, 403)
+        # Blocking one recipient does not remove the other eligible recipients.
+        self.blocked = {'receiver', 'cross'}
+        self.assertEqual(self.staff_recipients(), ['staff:recOther'])
+        self.blocked = set()
         self.assertEqual(self.service.creates, 0)
+        self.assertEqual(self.store.list_documents('signature_management_request'), [])
         self.sender.assert_not_called()
 
     def test_invitation_lists_remain_account_and_notice_isolated_after_reload(self):
@@ -573,6 +598,130 @@ class MopSignatureInvitationTests(unittest.TestCase):
         self.assertEqual(repeated['request']['request_id'], first['request']['request_id'])
         self.assertEqual(self.call('mop-list')['items'][0]['recipient'], self.payload['recipient'])
         self.assertEqual(self.sender.call_count, 1)
+
+    def staff_recipients(self, payload=None, *, actor='mopOperator'):
+        return sorted(value for value in self.recipient_values(payload, actor=actor)
+                      if value.startswith('staff:'))
+
+    def test_recipients_include_every_eligible_staff_member_regardless_of_building(self):
+        eligible = ['staff:recCross', 'staff:recOther', 'staff:recReceiver']
+        for actor in ('mopOperator', 'otherBuildingOperator'):
+            with self.subTest(actor=actor):
+                self.assertEqual(self.staff_recipients(actor=actor), eligible)
+        # Missing identity and non-message-capable staff stay out even though they are VNET rows.
+        self.assertEqual(self.service.staff['recNoOpenId']['fixture_open_id'], '')
+        self.assertEqual(self.service.staff['recExternal']['账号性质'], '外部账号')
+        # Blocking is per person: one blocked colleague does not hide the others.
+        for blocked, remaining in (('receiver', ['staff:recCross', 'staff:recOther']),
+                                   ('cross', ['staff:recOther', 'staff:recReceiver']),
+                                   ('other', ['staff:recCross', 'staff:recReceiver'])):
+            self.blocked = {blocked}
+            with self.subTest(blocked=blocked):
+                self.assertEqual(self.staff_recipients(), remaining)
+        self.blocked = set()
+        # The signer's agent stays scoped to the sender's own building.
+        self.assertEqual(self.call('mop-people')['scope_options'], [{'value': 'E', 'label': 'E楼'}])
+
+    def test_cross_building_recipient_receives_invitation_but_subject_building_stays_scoped(self):
+        result = self.call('mop-invite', {**self.payload, 'recipient': 'staff:recCross',
+                                          'building': 'A楼', 'operation_id': 'crossBuilding'})
+        self.assertEqual(result['request']['status'], 'sent')
+        self.assertEqual(self.sender.call_args.args[1], ['cross'])
+        self.assertEqual(result['person']['building'], 'E楼')
+        self.assertEqual(self.sender.call_args.args[0].splitlines()[2], '楼栋：E楼')
+        self.assertEqual((result['person']['scope'], result['person']['building']), ('E', 'E楼'))
+        self.assertEqual(result['request']['building'], 'E楼')
+        row = self.call('mop-list')['items'][0]
+        self.assertEqual((row['recipient'], row['building'], row['scope']),
+                         ('staff:recCross', 'E楼', 'E'))
+        self.assertEqual(len(self.store.list_documents('mop_signature_invitation')), 1)
+        # Inviting does not turn the recipient into a signer agent for this scope.
+        self.assertEqual(self.staff_recipients(),
+                         ['staff:recCross', 'staff:recOther', 'staff:recReceiver'])
+        self.assertEqual(self.service.creates, 1)
+
+    def test_ineligible_recipients_are_not_listed_or_invited_across_buildings(self):
+        listed = self.staff_recipients()
+        for record_id in ('recExternal', 'recNoOpenId'):
+            with self.subTest(record_id=record_id):
+                self.assertNotIn('staff:' + record_id, listed)
+        self.blocked = {'cross'}
+        self.assertNotIn('staff:recCross', self.staff_recipients())
+        self.blocked = set()
+        for recipient in ('staff:recExternal', 'staff:recNoOpenId', 'staff:missing'):
+            with self.subTest(recipient=recipient), self.assertRaises(SignatureManagementError) as error:
+                self.call('mop-invite', {**self.payload, 'recipient': recipient})
+            self.assertEqual(error.exception.status, 403)
+        # A blocked colleague is rejected as a recipient without hiding the others.
+        self.blocked = {'receiver'}
+        with self.assertRaises(SignatureManagementError) as error:
+            self.call('mop-invite')
+        self.assertEqual(error.exception.status, 403)
+        self.assertIn('staff:recCross', self.staff_recipients())
+        self.assertEqual(self.service.creates, 0)
+        self.assertEqual(self.store.list_documents('signature_management_request'), [])
+        self.sender.assert_not_called()
+
+    def test_cross_building_recipient_does_not_bypass_notice_or_building_authorization(self):
+        for changes in ({'scope': 'A'}, {'scope': 'C'}, {'notice_key': 'noticeA'}, {'notice_key': 'missing'},
+                        {'recipient': 'duty:A'}):
+            with self.subTest(changes=changes), self.assertRaises(SignatureManagementError) as error:
+                self.call('mop-invite', {**self.payload, 'recipient': 'staff:recCross', **changes})
+            self.assertEqual(error.exception.status, 403)
+        for modules in ([], ['engineer_mop']):
+            self.modules = modules
+            self.blocked = {'mopOperator'}
+            with self.subTest(modules=modules), self.assertRaises(SignatureManagementError) as error:
+                self.call('mop-invite', {**self.payload, 'recipient': 'staff:recCross'})
+            self.assertEqual(error.exception.status, 403)
+        self.modules = ['engineer_mop']
+        self.blocked = set()
+        self.service.creates = 0
+        self.sender.reset_mock()
+        result = self.call('mop-invite', {**self.payload, 'recipient': 'staff:recCross',
+                                          'operation_id': 'afterDenied'})
+        self.assertEqual(result['request']['status'], 'sent')
+        self.assertEqual((self.service.creates, self.sender.call_count), (1, 1))
+        # The invitation stays bound to its account and notice even though the
+        # recipient lives in another building.
+        self.assertEqual(len(self.call('mop-list')['items']), 1)
+        self.assertEqual(self.call('mop-list', actor='otherBuildingOperator')['items'], [])
+        self.assertEqual(self.call('mop-list', {**self.payload, 'notice_key': 'noticeA'})['items'], [])
+        with self.assertRaises(SignatureManagementError) as error:
+            self.call('mop-people', {**self.payload, 'notice_key': 'other'})
+        self.assertEqual(error.exception.status, 403)
+
+    def test_cross_building_duplicate_retry_reuses_one_person_and_one_message(self):
+        payload = {**self.payload, 'recipient': 'staff:recCross', 'operation_id': 'crossDuplicate'}
+        first = self.call('mop-invite', payload)
+        repeated = self.call('mop-invite', payload)
+        self.assertEqual(repeated['request']['request_id'], first['request']['request_id'])
+        self.assertEqual(repeated['person']['record_id'], first['person']['record_id'])
+        rows = self.call('mop-list', payload)['items']
+        self.assertEqual((len(rows), rows[0]['recipient'], rows[0]['building']),
+                         (1, 'staff:recCross', 'E楼'))
+        self.assertEqual((self.service.creates, self.sender.call_count), (1, 1))
+
+    def test_cross_building_failed_retry_reuses_person_and_keeps_saved_recipient(self):
+        payload = {**self.payload, 'recipient': 'staff:recCross', 'operation_id': 'crossFailed'}
+        self.sender.return_value = (False, '发送失败', [])
+        first = self.call('mop-invite', payload)
+        self.assertEqual(first['request']['status'], 'send_failed')
+        self.sender.return_value = (True, '', [])
+        # The same retry is repeated (double click on "retry"): one new link, one message.
+        retry = {**payload, 'send_operation_id': 'crossResend',
+                 'expected_request_id': first['request']['request_id']}
+        retried = self.call('mop-invite', retry)
+        self.assertEqual(self.call('mop-invite', retry)['request']['request_id'],
+                         retried['request']['request_id'])
+        self.assertEqual(retried['request']['status'], 'sent')
+        self.assertEqual(retried['person']['record_id'], first['person']['record_id'])
+        self.assertEqual(self.sender.call_count, 2)
+        self.assertEqual(self.sender.call_args.args[1], ['cross'])
+        row = self.call('mop-list', payload)['items'][0]
+        self.assertEqual((row['recipient'], row['request_id'], row['building']),
+                         ('staff:recCross', retried['request']['request_id'], 'E楼'))
+        self.assertEqual(self.service.creates, 1)
 
 
 if __name__ == '__main__':

@@ -19,6 +19,7 @@ from .account_policy import (
     LEVEL_OPTIONS,
     PolicyViolation,
     account_allowed,
+    account_details_allowed,
     categorize_position,
     category_options_for,
     level_options_for,
@@ -113,13 +114,16 @@ class AccountManagement:
             item["role"] = target.get("role") or ("admin" if target["level"] in {"L0", "L1"} else "building")
             item['is_self'] = bool(actor and item['open_id'] == actor.get('open_id'))
             item["can_edit"] = not profile or account_allowed(profile, item, "edit")
+            item["can_access_signature"] = not profile or any(account_allowed(profile, item, action) for action in ('view', 'edit'))
             item["can_edit_access"] = bool(item["can_edit"]) and self._access_editable(profile, item)
+            item["can_grant_l0"] = bool(profile and item["can_edit"] and profile['level'] in {'L0', 'L1', 'L2', 'L3'}
+                                        and not (item.get('category') == 'duty' and item.get('home_scope') == 'H'))
             item["can_delete"] = bool(profile and account_allowed(profile, item, "delete") and item["open_id"] != actor.get("open_id"))
             item["can_set_password"] = item["can_set_password"] and item["can_edit"]
             from .account_impersonation import can_impersonate
             item['can_impersonate'] = bool(actor and can_impersonate(self.auth, actor.get('open_id'), item['open_id']))
         if profile:
-            items = [item for item in items if account_allowed(profile, item, "view") or account_allowed(profile, item, "edit")]
+            items = [item for item in items if account_details_allowed(profile, item) or account_allowed(profile, item, "edit")]
             if profile["level"] == "L2":
                 # This is an edit selector, not a general personnel directory or activity report.
                 for item in items:
@@ -140,14 +144,15 @@ class AccountManagement:
     def _access_editable(profile, item):
         """Whether the acting profile may edit the item's access override.
 
-        Fixed H duty and L0 accounts are never editable, the enabled toggle is
-        governed separately by ``can_edit``. L2 remains base-edit only and L3
+        Fixed H duty and protected accounts are never editable; other L0 peers are.
+        The enabled toggle is governed separately by ``can_edit``. L2 ordinary
+        access editing remains disabled (its L0 promotion uses ``can_grant_l0``); L3
         may configure L4 accounts inside its current managed building scope.
         """
         if profile is None:
             return False
         target_level = str(item.get("level") or "")
-        if target_level == "L0" or item.get('is_self'):
+        if item.get('locked') or item.get('is_self'):
             return False
         if item.get("category") == "duty" and list(item.get("own_scopes") or []) == ["H"]:
             return False  # fixed H duty
@@ -238,11 +243,12 @@ class AccountManagement:
                                 "directory_scopes": [scope for scope in before.get("directory_scopes", []) if scope in scopes],
                                 "denied_scopes": [scope for scope in own if scope not in scopes]}
                 else:
-                    if not self._access_editable(actor_profile, item):
+                    if not self._access_editable(actor_profile, item) and not (
+                            actor_profile['level'] == 'L2' and change.get('level') == 'L0'):
                         raise PasswordLoginError("当前账号不能修改此人员的级别、岗位或访问权限。", 403)
                     if "role" in change and change["role"] not in ("admin", "building"):
                         raise PasswordLoginError("角色无效。")
-                    if "level" in change and str(change["level"]).strip() not in {"L1", "L2", "L3", "L4"}:
+                    if "level" in change and str(change["level"]).strip() not in {"L0", "L1", "L2", "L3", "L4"}:
                         raise PasswordLoginError("无效的管理级别。")
                     if "category" in change and not any(option["value"] == str(change["category"]).strip() for option in CATEGORY_OPTIONS):
                         raise PasswordLoginError("无效的业务岗位。")
@@ -379,7 +385,8 @@ class AccountManagement:
         rows = self.store.list_business_operation_audits(domain="accounts", limit=100)
         if profile["level"] == "L0":
             return rows
-        visible = self.accounts(actor=actor)["items"]
+        visible = [item for item in self.accounts(actor=actor)["items"]
+                   if account_allowed(profile, item, 'view') or account_allowed(profile, item, 'edit')]
         ids = {item["id"] for item in visible}
         oids = {item["open_id"] for item in visible}
         result = []
