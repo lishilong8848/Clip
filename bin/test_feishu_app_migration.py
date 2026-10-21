@@ -88,6 +88,12 @@ class MigrationTests(unittest.TestCase):
             setting = patch.object(module, name, value)
             setting.start()
             self.addCleanup(setting.stop)
+        from upload_event_module.services.feishu_token_manager import token_manager
+        verified = patch.object(token_manager, "get_tenant_token_for_credentials", side_effect=lambda app, secret:
+                                ("fixture-verified-token", "") if (app, secret) == (migration.TARGET_APP_ID, NEW_SECRET)
+                                else ("", "fixture-invalid-credentials"))
+        verified.start()
+        self.addCleanup(verified.stop)
         return module
 
     def store_settings(self, value):
@@ -142,7 +148,7 @@ class MigrationTests(unittest.TestCase):
                                                migration.MIGRATION_MARKER: 2})
         self.assertEqual((manager.user_token, manager.token_expire_time), ("", 0))
 
-    def test_pending_target_new_qt_install_validates_profile_and_clears_input_token(self):
+    def test_pending_target_new_qt_install_validates_credentials_and_clears_input_token(self):
         module = self.config_module()
         self.build()
         store = self.store_settings({})
@@ -253,7 +259,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertFalse(manager.save(app_id=migration.TARGET_APP_ID, app_secret="fixture-wrong-candidate",
                                                table_id_weibao="must-not-commit"))
                 self.assertEqual(store.get_settings(), initial)
-                self.assertEqual(manager.last_save_error["code"], "settings_credentials_blocked")
+                self.assertEqual(manager.last_save_error["code"], "settings_credentials_verification_failed")
         self.assertFalse(self.agent_path.exists())
 
     def test_pending_target_cannot_save_token_before_migration_finishes(self):
@@ -448,7 +454,7 @@ class MigrationTests(unittest.TestCase):
                                           table_id_weibao="must-not-save"))
         self.assertEqual(store.get_settings(), initial)
         self.assertEqual(self.agent_path.read_bytes(), mirror)
-        self.assertEqual(manager.last_save_error["code"], "settings_credentials_blocked")
+        self.assertEqual(manager.last_save_error["code"], "settings_credentials_verification_failed")
         manager.load()
         self.assertEqual((manager.app_secret, manager.user_token), (NEW_SECRET, ""))
         self.assertEqual(store.get_settings()["table_id_weibao"], initial["table_id_weibao"])

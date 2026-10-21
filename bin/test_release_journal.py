@@ -209,7 +209,7 @@ class ReleaseJournalTests(unittest.TestCase):
     def test_preflight_exits_before_draft_or_dialog(self):
         with patch.object(sys, "argv", ["package_portable.py", "--preflight-test"]), \
                 patch.object(packaging, "_ensure_mcp_frontend_assets"), \
-                patch.object(packaging, "_ensure_feishu_app_profile"), \
+                patch.object(packaging, "_ensure_feishu_identity_manifest"), \
                 patch.object(packaging, "_find_build_python", return_value=None), \
                 patch.object(packaging, "_run_packaging_preflight_tests") as preflight, \
                 patch.object(packaging, "_prepare_release_notes") as prepare:
@@ -241,7 +241,7 @@ class ReleaseJournalTests(unittest.TestCase):
                 patch.object(packaging, "find_base_dist", return_value=baseline), \
                 patch.object(packaging, "_find_build_python", return_value=None), \
                 patch.object(packaging, "_ensure_mcp_frontend_assets"), \
-                patch.object(packaging, "_ensure_feishu_app_profile"), \
+                patch.object(packaging, "_ensure_feishu_identity_manifest"), \
                 patch.object(packaging, "_ensure_lighthouse_distribution"), \
                 patch.object(packaging, "_ensure_photo_location_distribution"), \
                 patch.object(packaging, "_run_packaging_preflight_tests") as preflight, \

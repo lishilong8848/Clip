@@ -559,7 +559,7 @@ def _safe_auth_error(error) -> str:
     if getattr(config, "feishu_app_migration_error", "") in {
         "profile_authentication", "profile_target_mismatch", "profile_format", "profile_missing", "migration_pending"
     }:
-        return "飞书新应用配置迁移尚未通过校验，已停止使用旧应用和旧令牌。请管理员核对更新包与本机鉴权资料；重新扫码或手填用户令牌不能修复此问题。"
+        return "飞书新应用配置迁移尚未通过校验，已停止使用旧应用和旧令牌。请管理员在 Qt 设置中填写新应用的 App ID 和 App Secret 并保存；无需重新扫码或手工填写用户令牌。"
     message = str(error).lower()
     if "未配置 app id 或 app secret" in message:
         return "飞书应用鉴权未配置完整，请管理员在 Qt 设置中填写 App ID 和 App Secret；无需手工填写用户令牌。"

@@ -84,6 +84,7 @@ _SAVE_ERRORS = {
     "settings_invalid": "配置未保存：设置内容格式无效，请检查输入。",
     "settings_credentials_changed": "配置未保存：飞书凭据已变化，请重新打开设置后再保存。",
     "settings_credentials_blocked": "配置未保存：飞书凭据校验未通过，请检查当前应用 ID 和密钥。",
+    "settings_credentials_verification_failed": "配置未保存：新飞书应用核验未通过，请检查 App ID、App Secret 和程序网络后重试；无需填写用户令牌。",
     "settings_worker_unavailable": "配置未保存：后台保存任务不可用，请重新打开设置。",
     "settings_saved_reload_failed": "配置已保存，但运行时加载失败，请重启程序；无需重复保存。",
     "settings_saved_mirror_failed": "配置已保存，Qt 鉴权已加载，但飞书智能体配置同步失败，请检查数据目录权限后重新加载。",
@@ -228,7 +229,7 @@ class ConfigManager:
         status = "配置已保存，后续处理失败" if self._save_status.error["code"].startswith("settings_saved_") else "配置保存失败"
         log_error(f"系统: {status} [{self._save_status.error['code']}] ({kind}){location}")
 
-    def _save_config_to_sqlite(self, config_data: dict, *, expected_credentials=None, bootstrap=False) -> bool:
+    def _save_config_to_sqlite(self, config_data: dict, *, expected_credentials=None, bootstrap=False, verified_credentials=None) -> bool:
         if not isinstance(config_data, dict):
             self._record_save_failure(code="settings_invalid")
             return False
@@ -236,11 +237,20 @@ class ConfigManager:
             with self._credential_lock, qt_settings_transaction(os.path.dirname(CONFIG_FILE)) as connection:
                 if bootstrap and connection.execute("SELECT 1 FROM settings LIMIT 1").fetchone():
                     return True
+                if verified_credentials is not None:
+                    if (bootstrap or verified_credentials != (config_data.get("feishu_app_id"), config_data.get("feishu_app_secret"))
+                            or verified_credentials[0] != TARGET_APP_ID):
+                        raise FeishuAppMigrationError("manual_credentials_mismatch")
+                    # A verified manual replacement must not depend on the old migration capsule or corrupt auth rows.
+                    write_settings(connection, {"feishu_app_id": verified_credentials[0], "feishu_app_secret": verified_credentials[1],
+                                                "feishu_user_token": "", "token_expire_time": 0, MIGRATION_MARKER: 2})
                 current = read_credentials(connection)
                 identity = current["feishu_app_id"], current["feishu_app_secret"]
                 was_complete = migration_complete(connection)
                 allow_agent_recovery = bootstrap or not config_data
                 changes = dict(config_data)
+                if verified_credentials is not None:
+                    changes.update(feishu_user_token="", token_expire_time=0)
                 changing_auth = bool({"feishu_app_id", "feishu_app_secret"} & changes.keys())
                 writing_token = bool({"feishu_user_token", "token_expire_time"} & changes.keys())
                 if writing_token and not changing_auth and expected_credentials != identity:
@@ -648,6 +658,20 @@ class ConfigManager:
             expected_credentials = self.app_id, self.app_secret
         committed = False
         try:
+            verified_credentials = None
+            if (app_id == TARGET_APP_ID and app_secret is not None
+                    and (getattr(self, "feishu_app_migration_error", "") or not self.app_id)):
+                from .services.feishu_app_migration import _secret
+                from .services.feishu_token_manager import token_manager
+                _secret(app_secret, "qt_secret_invalid")
+                try:
+                    token, verification_error = token_manager.get_tenant_token_for_credentials(app_id, app_secret)
+                except Exception:
+                    token, verification_error = "", "verification_failed"
+                if not isinstance(token, str) or not token.strip() or verification_error:
+                    self._record_save_failure(code="settings_credentials_verification_failed")
+                    return False
+                verified_credentials = (app_id, app_secret)
             # 使用现有值作为默认值
             new_app_token = app_token if app_token is not None else self.app_token
             new_user_token = user_token if user_token is not None else self.user_token
@@ -929,7 +953,8 @@ class ConfigManager:
                                "feishu_app_id": "app_id", "feishu_app_secret": "app_secret"}
             cfg = {key: value for key, value in cfg.items() if parameter_names.get(key, key) in provided}
             with self._credential_lock:
-                if cfg and not self._save_config_to_sqlite(cfg, expected_credentials=expected_credentials):
+                if cfg and not self._save_config_to_sqlite(cfg, expected_credentials=expected_credentials,
+                                                          verified_credentials=verified_credentials):
                     if not self.last_save_error:
                         self._record_save_failure()
                     return False

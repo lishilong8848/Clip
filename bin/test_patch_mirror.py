@@ -235,6 +235,7 @@ class PatchMirrorTests(unittest.TestCase):
                 self.assertEqual(value['update_source'], 'feishu')
                 sequence.append('published-manifest')
             with patch.object(packaging, 'BUILD_DIR', root), patch.object(patch_mirror, 'publish_patch', side_effect=mirror), \
+                    patch.object(packaging, '_assert_no_feishu_credentials_in_archive'), \
                     patch.object(patch_mirror, 'publish_manifest', side_effect=publish), \
                     patch.object(packaging.subprocess, 'run') as run, patch('requests.get') as get:
                 packaging._publish_patch(archive, manifest_path, manifest)
@@ -384,6 +385,7 @@ class PatchMirrorTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
             for stage in ('archive', 'manifest'):
                 with self.subTest(stage=stage), patch.object(packaging, 'BUILD_DIR', root), \
+                        patch.object(packaging, '_assert_no_feishu_credentials_in_archive'), \
                         patch.object(patch_mirror, 'publish_patch', return_value={'fixture': 'verified'}) as upload, \
                         patch.object(patch_mirror, 'publish_manifest') as publish:
                     (upload if stage == 'archive' else publish).side_effect = OSError('fixture failure')
@@ -396,6 +398,7 @@ class PatchMirrorTests(unittest.TestCase):
                     self.assertEqual(archive.read_bytes(), b'patch')
                     self.assertNotIn('feishu_patch', manifest)
             with patch.object(packaging, 'BUILD_DIR', root), \
+                    patch.object(packaging, '_assert_no_feishu_credentials_in_archive'), \
                     patch.object(patch_mirror, 'publish_patch', return_value={'fixture': 'verified'}), \
                     patch.object(patch_mirror, 'publish_manifest') as publish:
                 packaging._publish_patch(archive, manifest_path, manifest)

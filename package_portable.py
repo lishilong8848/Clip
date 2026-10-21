@@ -73,6 +73,8 @@ VERSION_NAMING = "base_simple"
 DEFAULT_FORCE_UI_UPDATE = True  # 是否强制用户重启程序以更新UI界面
 
 EXCLUDE_FILES = {
+    "feishu_app_profile.json",
+    "feishu_bootstrap.json",
 
     "vc_redist.x64.exe",
 
@@ -189,7 +191,6 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/openclaw_service/client.py"),
     Path("bin/openclaw_service/protocol.py"),
     Path("bin/upload_event_module/services/feishu_app_migration.py"),
-    Path("bin/upload_event_module/services/feishu_app_profile.json"),
     Path("bin/lan_bitable_template_portal/feishu_identity.py"),
     Path("bin/lan_bitable_template_portal/feishu_identity_migration.py"),
     Path("bin/lan_bitable_template_portal/feishu_identity_documents.py"),
@@ -1864,7 +1865,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_live_concurrency", "bin.test_lighthouse_runtime_lanes", "bin.test_feishu_live_reply",
          "bin.test_feishu_app_migration",
          "bin.test_feishu_unified_settings",
-         "bin.test_qt_settings_save_pipeline",
+         "bin.test_qt_settings_save_pipeline", "bin.test_feishu_manual_configuration", "bin.test_feishu_manual_packaging",
          "bin.test_feishu_cloud_auth",
          "bin.test_feishu_cached_auth",
          "bin.test_notice_connection",
@@ -2538,7 +2539,15 @@ def _load_existing_patch() -> tuple[Path, Path, dict]:
     return patch_zip, manifest_path, manifest
 
 
+def _assert_no_feishu_credentials_in_archive(patch_zip):
+    with zipfile.ZipFile(patch_zip) as archive:
+        if any(name.replace("\\", "/").split("/")[-1].casefold() in {"feishu_app_profile.json", "feishu_bootstrap.json"}
+               for name in archive.namelist()):
+            raise RuntimeError("该补丁仍包含飞书凭据下发文件，已停止上传；请重新运行 package_portable.py 打包，不要重试此旧 ZIP。")
+
+
 def _publish_patch(patch_zip: Path, manifest_path: Path, manifest: dict) -> None:
+    _assert_no_feishu_credentials_in_archive(patch_zip)
     if str(BIN_DIR) not in sys.path:
         sys.path.insert(0, str(BIN_DIR))
     from upload_event_module.services.patch_mirror import publish_patch, publish_manifest
@@ -2993,10 +3002,10 @@ def build_patch(
 
 
 
-def _ensure_feishu_app_profile(python_exe):
-    log("正在校验新飞书应用及账号归属的离线迁移配置（不发送消息、不写业务表）。")
+def _ensure_feishu_identity_manifest(python_exe):
+    log("正在校验账号归属清单；补丁不下发飞书凭据，应用 ID 和密钥由用户在 Qt 设置中保存。")
     subprocess.run([os.fspath(python_exe), "-c",
-        "import sys;sys.path.insert(0,'bin');from upload_event_module.services.feishu_app_migration import prepare_deployment_profile;prepare_deployment_profile();from lan_bitable_template_portal.feishu_identity_manifest import load_identity_manifest;load_identity_manifest()"],
+        "import sys;sys.path.insert(0,'bin');from lan_bitable_template_portal.feishu_identity_manifest import load_identity_manifest;load_identity_manifest()"],
         cwd=PROJECT_ROOT, check=True)
 
 
@@ -3244,7 +3253,7 @@ def main() -> None:
         return
 
     _ensure_mcp_frontend_assets()
-    _ensure_feishu_app_profile(_find_build_python() or sys.executable)
+    _ensure_feishu_identity_manifest(_find_build_python() or sys.executable)
 
     if args.preflight_test:
 

@@ -308,12 +308,16 @@ class UnifiedSettingsTests(unittest.TestCase):
 
     def test_patch_forces_migration_files_and_ignores_runtime_data(self):
         package = importlib.import_module('package_portable')
-        for name in ('feishu_app_migration.py', 'feishu_app_profile.json'):
+        for name in ('feishu_app_migration.py',):
             relative = Path('bin/upload_event_module/services') / name
             self.assertIn(relative, package.FORCE_PATCH_INCLUDE_FILES)
             self.assertFalse(package._is_excluded(package.PROJECT_ROOT / relative, root=package.PROJECT_ROOT))
         self.assertTrue(package._is_excluded(package.PROJECT_ROOT / 'bin/data/feishu_assistant.json',
                                             root=package.PROJECT_ROOT))
+        for name in ('feishu_app_profile.json', 'feishu_bootstrap.json'):
+            relative = Path('bin/upload_event_module/services') / name
+            self.assertNotIn(relative, package.FORCE_PATCH_INCLUDE_FILES)
+            self.assertTrue(package._is_excluded(package.PROJECT_ROOT / relative, root=package.PROJECT_ROOT))
 
 
 if __name__ == '__main__':
