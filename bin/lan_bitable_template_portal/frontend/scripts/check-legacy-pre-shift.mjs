@@ -76,12 +76,14 @@ try {
   await page.goto(origin + '/');
   const card = page.locator('.module-pre_shift');
   await card.locator('.module-check-alert').waitFor();
+  assert(await page.locator('.module-card').first().evaluate(el => el.classList.contains('module-pre_shift')), 'authorized checklist is the first home card');
   assert(await card.evaluate(el => el.classList.contains('needs-attention')));
   assert.match(await card.evaluate(el => getComputedStyle(el, '::after').animationName), /^homeCheckPulse/);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   assert.equal(await card.evaluate(el => getComputedStyle(el, '::after').animationName), 'none');
-  for (const width of [1440, 390]) {
-    await page.setViewportSize({ width, height: 960 });
+  for (const { width, height } of [{ width: 1440, height: 900 }, { width: 402, height: 874 }, { width: 440, height: 956 }, { width: 390, height: 960 }]) {
+    await page.setViewportSize({ width, height });
+    assert(await page.locator('.module-card').first().evaluate(el => el.classList.contains('module-pre_shift')), 'checklist order is unchanged across viewports');
     assert(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1));
     await page.screenshot({ path: path.join(output, `home-${width}.png`), fullPage: true });
   }

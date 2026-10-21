@@ -1682,6 +1682,19 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
             print(detail[start.start():] if start else detail[-6000:], end="\n", flush=True)
 
 
+def _run_frontend_notice_navigation_checks() -> None:
+    frontend = PROJECT_ROOT / "bin/lan_bitable_template_portal/frontend"
+    node = shutil.which("node")
+    if not node:
+        raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
+    for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
+                 "check-notice-photo-paste.mjs"):
+        script = frontend / "scripts" / name
+        if not script.is_file():
+            raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
+        _run_preflight_check([node, os.fspath(script)], cwd=frontend, check=True, timeout=300)
+
+
 def _run_packaging_preflight_tests() -> None:
 
     log("开始执行打包前自动测试。")
@@ -1828,6 +1841,9 @@ def _run_packaging_preflight_tests() -> None:
         log("发布就绪检查通过。")
     else:
         raise RuntimeError("缺少发布就绪检查脚本，已中止打包。")
+
+    _run_frontend_notice_navigation_checks()
+    log("新旧导航、照片粘贴隔离与草稿恢复专项检查通过。")
 
     notice_flow_smoke = PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py"
     if notice_flow_smoke.exists():

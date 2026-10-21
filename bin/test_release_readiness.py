@@ -292,11 +292,13 @@ class ReleaseReadinessTests(unittest.TestCase):
                 patch.object(package_portable, 'log'), \
                 patch.object(package_portable, '_assert_project_iterator_excludes_runtime_data'), \
                 patch.object(package_portable, '_cleanup_vue_dist_assets'), \
+                patch.object(package_portable, '_run_frontend_notice_navigation_checks') as frontend, \
                 patch.object(package_portable, '_ensure_packaging_preflight_dependencies') as ensure, \
                 patch.object(package_portable, '_verify_runtime_imports', return_value=True) as imports, \
                 patch.object(package_portable.subprocess, 'run') as run:
             package_portable._run_packaging_preflight_tests()
         ensure.assert_called_once_with(python)
+        frontend.assert_called_once_with()
         imports.assert_called_once_with(python, package_portable.PROJECT_ROOT)
         self.assertGreater(len(run.call_args_list), 5)
         self.assertTrue(all(call.args[0][0] == str(python) for call in run.call_args_list))

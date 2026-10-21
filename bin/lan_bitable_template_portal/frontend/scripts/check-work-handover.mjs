@@ -94,8 +94,15 @@ try{
     }
     const sender=await contexts[0].newPage();currentPage=sender;
     sender.on('pageerror',e=>errors.push(e.message));sender.on('dialog',dialog=>dialog.accept());
-    await sender.goto(version==='legacy'?origin+'/?entry=tools':entry());
-    if(version==='legacy')await sender.getByRole('button',{name:/人员工作交接/}).click();
+    await sender.goto(version==='legacy'?origin+'/?entry=special':entry());
+    if(version==='legacy'){
+      await sender.getByRole('heading',{name:'专项任务',exact:true}).waitFor();
+      assert.equal(await sender.locator('.tool-card').count(),1,'Work-handover permission alone exposes no other special task');
+      await sender.getByRole('button',{name:'选择人员工作交接',exact:true}).click();
+      await sender.getByRole('region',{name:'人员工作交接',exact:true}).getByRole('button',{name:'返回',exact:true}).click();
+      await sender.waitForURL(origin+'/?entry=special');
+      await sender.getByRole('button',{name:'选择人员工作交接',exact:true}).click();
+    }
     else await sender.locator('.v2-sidebar').getByText('人员工作交接',{exact:true}).waitFor();
     await sender.getByRole('button',{name:'发起交接',exact:true}).click();
     await sender.getByLabel('交接名称',{exact:true}).fill('A楼岗位工作交接');

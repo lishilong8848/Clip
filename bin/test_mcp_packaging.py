@@ -2,6 +2,7 @@
 import importlib.util
 import sys
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -14,6 +15,35 @@ spec.loader.exec_module(package)
 
 
 class PackagingTests(unittest.TestCase):
+    def test_notice_navigation_browser_checks_are_mandatory_and_failure_stops(self):
+        expected = ['check-workspace-navigation.mjs', 'check-legacy-module-entry.mjs',
+                    'check-notice-photo-paste.mjs']
+        frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
+        with patch.object(package.shutil, 'which', return_value='fixture-node'), \
+                patch.object(package, '_run_preflight_check') as run:
+            package._run_frontend_notice_navigation_checks()
+        self.assertEqual([Path(call.args[0][1]).name for call in run.call_args_list], expected)
+        for call in run.call_args_list:
+            self.assertEqual(call.args[0][0], 'fixture-node')
+            self.assertEqual(call.kwargs, {'cwd': frontend, 'check': True, 'timeout': 300})
+        with patch.object(package.shutil, 'which', return_value=None), \
+                patch.object(package, '_run_preflight_check') as run:
+            with self.assertRaisesRegex(RuntimeError, 'Node.js'):
+                package._run_frontend_notice_navigation_checks()
+            run.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(package, 'PROJECT_ROOT', Path(directory)), \
+                patch.object(package.shutil, 'which', return_value='fixture-node'), \
+                patch.object(package, '_run_preflight_check') as run:
+            with self.assertRaisesRegex(RuntimeError, 'check-workspace-navigation.mjs'):
+                package._run_frontend_notice_navigation_checks()
+            run.assert_not_called()
+        with patch.object(package.shutil, 'which', return_value='fixture-node'), \
+                patch.object(package, '_run_preflight_check', side_effect=subprocess.CalledProcessError(1, 'fixture-node')) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                package._run_frontend_notice_navigation_checks()
+            run.assert_called_once()
+
     def test_document_extras_and_knowledge_compatible_versions_are_checked(self):
         from bin.upload_event_module.services import dependency_bootstrap as dependencies
         with patch.object(dependencies.importlib.util, 'find_spec', side_effect=lambda name: None if name == 'dateutil' else object()), \

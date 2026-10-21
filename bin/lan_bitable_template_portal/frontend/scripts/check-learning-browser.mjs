@@ -74,7 +74,7 @@ async function fixture(route) {
   const ok = data => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, data }) });
   const fail = (message, status = 400) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ ok: false, error: message }) });
   if (p === "/api/health") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, service: "clipflow_backend", instance_id: "learning-fixture" }) });
-  if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: admin ? "admin-user" : "H-user", name: admin ? "管理员" : "H楼值班", role: admin ? "admin" : "user" }, scope_options: admin ? scopeOptions : [scopeOptions[5]] });
+  if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: admin ? "admin-user" : "H-user", name: admin ? "管理员" : "H楼值班", role: admin ? "admin" : "user", modules: ['learning'] }, scope_options: admin ? scopeOptions : [scopeOptions[5]] });
   if (p === "/api/scope-overview") return ok({ scopes: {} });
   if (p === "/api/assistant/appearance") return ok({ enabled: false });
   if (p === "/api/handover-links") return ok({ links: {} });
@@ -556,8 +556,9 @@ try {
   await page.getByRole("button", { name: "返回", exact: true }).click();
   await page.waitForURL(`${base}/learning?scope=H`);
   await page.getByRole("button", { name: "返回", exact: true }).click();
-  await page.waitForURL(`${base}/?entry=tools`);
-  await page.getByText("画像学练", { exact: true }).first().waitFor();
+  await page.waitForURL(`${base}/?entry=special`);
+  await page.getByRole("heading", { name: "专项任务", exact: true }).waitFor();
+  await page.getByRole("button", { name: "选择画像学练", exact: true }).waitFor();
   assert.deepEqual(unexpected, [], "all API traffic must be handled by isolated mocks");
   assert.deepEqual(pageErrors, [], "browser must have no uncaught errors");
   await context.close();

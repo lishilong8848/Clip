@@ -809,7 +809,7 @@ function handleBack(): void {
   if (viewMode.value === "overview" && learner.value?.id) {
     navigate(`/learning?view=overview&scope=${encodeURIComponent(scope.value)}`);
   } else {
-    navigate("/?entry=tools");
+    navigate("/?entry=special");
   }
 }
 function goPractice(): void {

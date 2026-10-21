@@ -81,7 +81,7 @@ async function run(version){
     optimizeDeps:{noDiscovery:true,include:['vue','naive-ui','lucide-vue-next']},logLevel:'error'});
   try{
     if(!built)await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port;
-    const cases=version==='v2'?[{width:1440,height:900},{width:402,height:874},{width:440,height:956},{width:390,height:667,dark:true,reduced:true}]:[{width:1440,height:900}];
+    const cases=[{width:1440,height:900},{width:402,height:874},{width:440,height:956},version==='v2'?{width:390,height:667,dark:true,reduced:true}:{width:360,height:640}];
     for(const scenario of process.env.CLIPFLOW_RISK_VIEWPORT_AUDIT?cases.filter(c=>version==='v2'&&c.width===390&&!c.dark):cases){
       const context=await browser.newContext({viewport:{width:scenario.width,height:scenario.height},reducedMotion:scenario.reduced?'reduce':'no-preference',serviceWorkers:'block'});
       const page=await context.newPage(),errors=[],requests=[],writes=[],viewports=[],layouts=layoutApiFixture();
@@ -131,9 +131,20 @@ async function run(version){
           for(const field of fixed){assert.equal(await page.getByRole('button',{name:'修改字段 '+field.field_name,exact:true}).count(),0);assert.equal(await page.getByRole('button',{name:'移除已选字段 '+field.field_name,exact:true}).count(),0);}
           assert.equal(await page.getByRole('button',{name:'添加字段 楼栋',exact:true}).count(),0,'Legacy fixed fields are absent from the library');
           assert.equal(await page.locator('.risk-v2-field-modal').count(),0);
+          await page.getByRole('button',{name:'添加字段',exact:true}).click();
+          const fieldModal=page.locator('.risk-history-field-modal');
+          await fieldModal.locator('.n-select .n-base-selection').click();
+          const fieldMenu=page.locator('.n-base-select-menu:visible');await fieldMenu.waitFor();
+          assert.equal(await fieldMenu.evaluate(el=>!!el.closest('.n-modal,.n-drawer')),false,'Legacy field menus must escape the modal scroll boundary');
+          await fieldMenu.getByText('附件 / 照片',{exact:true}).scrollIntoViewIfNeeded();
+          assert(await fieldMenu.getByText('附件 / 照片',{exact:true}).evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),'Last field option remains clickable outside the dialog');
+          await page.screenshot({path:path.join(output,tag+'-field-menu.png'),animations:'disabled'});
+          await fieldMenu.getByText('附件 / 照片',{exact:true}).click();
+          await fieldModal.locator('.n-select .n-base-selection').focus();await page.keyboard.press('ArrowDown');await fieldMenu.waitFor();
+          await page.keyboard.press('Escape');await fieldMenu.waitFor({state:'hidden'});assert(await fieldModal.isVisible());
           assert.deepEqual(errors,[]);
           await page.screenshot({path:path.join(output,tag+'-legacy.png'),animations:'disabled',fullPage:true});
-          reports.push({tag,checks:'legacy list-first and hidden fixed fields'});continue;
+          reports.push({tag,built,checks:'legacy list-first, hidden fixed fields, body-portalled field list, last-option hit and Escape without closing the modal'});continue;
         }
         await page.locator('.history-list article').waitFor();
         assert.equal(await page.locator('.risk-field-picker').count(),0,'Base entry opens the library, not creation');

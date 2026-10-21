@@ -186,8 +186,8 @@ try {
       const upload=page.locator('[data-notice-upload-kind='+uploadKind+']');await upload.getByText('本次新增 · 已就绪',{exact:true}).waitFor();
       const image=await upload.locator('figure').last().boundingBox(),picker=await upload.locator('.v2-notice-upload').boundingBox();
       assert(Math.abs(image.y-picker.y)<2&&picker.x>image.x,'screenshot picker stays beside the image');
-      assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' with an uploaded image fits the desktop viewport');
       await page.screenshot({path:path.join(output,'compact-'+kind+'-'+uploadKind+'-upload.png'),fullPage:true});
+      assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' with an uploaded image fits the desktop viewport: '+JSON.stringify(await body.evaluate(el=>({height:el.clientHeight,content:el.scrollHeight,uploads:[...el.querySelectorAll('.v2-notice-photo-uploader')].map(n=>n.getBoundingClientRect().toJSON())}))));
       await upload.getByRole('button',{name:'移除本次图片',exact:true}).click();
     }
     assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' common form fits a 1366x768 desktop viewport');

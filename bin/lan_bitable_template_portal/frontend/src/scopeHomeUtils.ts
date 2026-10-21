@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "risk" | "critical_guard" | "risk_inspection" | "drill" | "learning" | "knowledge" | "documents" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence" | "pre_shift" | "work_handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "risk" | "critical_guard" | "risk_inspection" | "drill" | "learning" | "knowledge" | "documents" | "cabinet_power" | "tools" | "special" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence" | "pre_shift" | "work_handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -49,6 +49,15 @@ export const SCOPE_HOME_DISPLAY_ORDER = ["110", "A", "B", "C", "D", "E", "H", "C
 
 export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
   {
+    key: "pre_shift",
+    tone: "blue",
+    icon: "repair",
+    badge: "班组协作",
+    title: "班前检查清单",
+    tags: ["逐项检查", "异常备注"],
+    primaryAction: { key: "pre_shift", label: "进入班前检查清单", primary: true },
+  },
+  {
     key: "event",
     tone: "orange",
     icon: "event",
@@ -96,7 +105,7 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     icon: "risk",
     badge: "闭环管理",
     title: "风险管理",
-    tags: ["重保任务", "风险排查", "结果汇总"],
+    tags: ["重保任务", "结果汇总"],
     primaryAction: { key: "risk", label: "进入风险管理", primary: true },
   },
   {
@@ -107,6 +116,15 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     title: "容量管理",
     tags: ["水耗管理", "机柜管理"],
     primaryAction: { key: "capacity", label: "进入容量管理", primary: true },
+  },
+  {
+    key: "special",
+    tone: "blue",
+    icon: "repair",
+    badge: "专项任务",
+    title: "专项功能",
+    tags: ["风险排查", "专项任务"],
+    primaryAction: { key: "special", label: "进入专项功能", primary: true },
   },
   {
     key: "tools",
@@ -126,20 +144,11 @@ export const SCOPE_HOME_MODULE_CARDS: ScopeHomeModuleCard[] = [
     tags: ["演练计划", "评估改进"],
     primaryAction: { key: "drill", label: "进入演练管理", primary: true },
   },
-  {
-    key: "pre_shift",
-    tone: "blue",
-    icon: "repair",
-    badge: "班组协作",
-    title: "班前检查清单",
-    tags: ["逐项检查", "异常备注"],
-    primaryAction: { key: "pre_shift", label: "进入班前检查清单", primary: true },
-  },
 ];
 
 export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, ScopeHomeEntryConfig> = {
   risk: { kicker: "风险管理", title: "选择风险管理业务", description: "", actionLabel: "选择业务" },
-  risk_inspection: { kicker: "风险管理", title: "选择楼栋进入风险排查", description: "", actionLabel: "进入风险排查" },
+  risk_inspection: { kicker: "专项功能", title: "选择楼栋进入风险排查", description: "", actionLabel: "进入风险排查" },
   pre_shift: { kicker: "班前检查", title: "班前检查清单", description: "", actionLabel: "进入班前检查清单" },
   learning: { kicker: "画像学练", title: "画像学练", description: "", actionLabel: "进入画像学练" },
   knowledge: { kicker: "其他工具", title: "共享知识库", description: "", actionLabel: "进入共享知识库" },
@@ -209,6 +218,7 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     description: "",
     actionLabel: "选择工具",
   },
+  special: { kicker: "专项功能", title: "专项任务", description: "", actionLabel: "选择任务" },
   daily: {
     kicker: "每日任务清单",
     title: "选择楼栋查看每日任务",
@@ -242,9 +252,9 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
     description: "按楼栋打开已配置的交接班审核页面。",
     actionLabel: "打开审核页",
   },
-  work_handover: { kicker: "其它工具", title: "人员工作交接", description: "", actionLabel: "进入工作交接" },
+  work_handover: { kicker: "专项功能", title: "人员工作交接", description: "", actionLabel: "进入工作交接" },
   plan_convergence: {
-    kicker: "其他工具",
+    kicker: "专项功能",
     title: "计划收敛审查",
     description: "",
     actionLabel: "进入计划收敛审查",
@@ -254,13 +264,17 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
 export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
   { key: "knowledge", title: "共享知识库", description: "", badge: "手动资料", icon: "library", tone: "blue" },
   { key: "documents", title: "南通文件", description: "", badge: "资料记录", icon: "documents", tone: "cyan" },
-  { key: "work_handover", title: "人员工作交接", description: "工作交接、接收确认和接续清单", badge: "交接", icon: "daily", tone: "blue" },
-  { key: "learning", title: "画像学练", description: "每日练习、错题复习与学习画像", badge: "学练", icon: "daily", tone: "emerald" },
   { key: "daily", title: "每日任务清单", description: "汇总当天通告、事件、检修和维护记录", badge: "今日", icon: "daily", tone: "blue" },
   { key: "power", title: "上/下电通告", description: "机柜上电、下电、数量和进度确认", badge: "通告", icon: "power", tone: "blue" },
   { key: "polling", title: "设备轮巡", description: "设备轮巡切换和影响确认", badge: "通告", icon: "polling", tone: "cyan" },
   { key: "adjust", title: "设备调整", description: "设备运行模式调整与现场进度", badge: "通告", icon: "adjust", tone: "emerald" },
   { key: "handover", title: "交接班审核页", description: "按楼栋跳转审核链接", badge: "链接", icon: "link", tone: "slate" },
+];
+
+export const SCOPE_HOME_SPECIAL_ENTRIES: ScopeHomeToolEntry[] = [
+  { key: "risk_inspection", title: "风险排查", description: "", badge: "排查反馈", icon: "risk", tone: "rose" },
+  { key: "work_handover", title: "人员工作交接", description: "工作交接、接收确认和接续清单", badge: "交接", icon: "daily", tone: "blue" },
+  { key: "learning", title: "画像学练", description: "每日练习、错题复习与学习画像", badge: "学练", icon: "daily", tone: "emerald" },
   { key: "plan_convergence", title: "计划收敛审查", description: "计划收敛与执行情况审查", badge: "审查", icon: "link", tone: "slate" },
 ];
 

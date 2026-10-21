@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "vite";
+import { createServer, preview } from "vite";
 import { chromium } from "playwright";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,12 +46,13 @@ const claims = [];
 let claimGate = null;
 let answerGate = null;
 
-const server = await createServer({
+const built = process.argv.includes('--built');
+const server = built ? await preview({ root, configFile: false, build: { outDir: 'dist' }, preview: { host: '127.0.0.1', port: 0 }, logLevel: 'error' }) : await createServer({
   root,
   server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false },
   logLevel: "error",
 });
-await server.listen();
+if (!built) await server.listen();
 const base = `http://127.0.0.1:${server.httpServer.address().port}`;
 
 const summary = person_id => {
@@ -78,7 +79,7 @@ try {
     const body = req.headers()["content-type"]?.includes("json") ? req.postDataJSON() : null;
     requests.push({ p, method, body, query: Object.fromEntries(url.searchParams) });
     const ok = data => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, data }) });
-    if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: "back-user", name: "测试用户", role: "user" }, scope_options: scopesValue.slice(0, 1) });
+    if (p === "/api/auth/status") return ok({ logged_in: true, user: { open_id: "back-user", name: "测试用户", role: "user", modules: ['learning'] }, scope_options: scopesValue.slice(0, 1) });
     if (p === "/api/scope-overview") return ok({ scopes: {} });
     if (p === "/api/assistant/appearance") return ok({ enabled: false });
     if (p === "/api/handover-links") return ok({ links: {} });
@@ -96,6 +97,13 @@ try {
       if (claimGate) await claimGate;
       if (!papers.has(body.person_id)) papers.set(body.person_id, makePaper(body.person_id));
       try { return await ok(publicPaper(papers.get(body.person_id))); } catch { /* request aborted by nav while gated */ }
+    }
+    if (p === `/api/learning/papers/paper-${selfPerson.id}/start` && method === 'POST') {
+      assert.deepEqual(body, { person_id: selfPerson.id }, 'only the current learner starts their own paper');
+      const paper = papers.get(selfPerson.id);
+      assert(paper, 'starting a paper never creates another person or paper');
+      paper.started_at ||= today + 'T09:00:00+08:00';
+      return ok({ started_at: paper.started_at });
     }
     const paperAnswer = p.match(/^\/api\/learning\/papers\/paper-[^/]+\/answer$/);
     if (paperAnswer && method === "POST") {
@@ -137,7 +145,8 @@ try {
   await page.goto(`${base}/learning?view=overview&scope=A`);
   await page.getByRole("heading", { name: "画像学练", exact: true }).waitFor();
   await page.getByRole("button", { name: "选择人员", exact: true }).waitFor();
-  assert.equal(await page.locator(".building-tabs button").count(), 6, "overview must render building tabs");
+  const expectedBuildingTabs=['全部画像全员',...scopesValue.map(scope=>scope.label+'人员学练')];
+  assert.deepEqual((await page.locator(".building-tabs button").allTextContents()).map(text=>text.replace(/\s/g,'')),expectedBuildingTabs,"admin overview renders exactly all-portrait plus the authorized building tabs");
   await page.getByRole("button", { name: "选择人员", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: /测试人员乙/ }).click();
   await page.waitForURL(/\/learning\?.*(?:view=overview.*person_id=p2|person_id=p2.*view=overview)/);
@@ -153,7 +162,7 @@ try {
   assert.equal(new URL(page.url()).searchParams.get("person_id"), null, "person_id removed on back");
   assert.equal(new URL(page.url()).searchParams.get("view"), "overview", "overview view preserved on back");
   await page.getByRole("button", { name: "选择人员", exact: true }).waitFor();
-  assert.equal(await page.locator(".building-tabs button").count(), 6, "building overview must render after overview back");
+  assert.deepEqual((await page.locator(".building-tabs button").allTextContents()).map(text=>text.replace(/\s/g,'')),expectedBuildingTabs,"overview back preserves the authorized building tabs");
   await page.screenshot({ path: path.join(output, "overview-picker-back.png"), fullPage: true });
 
   // Scenario B: direct URL person profile then back preserves overview
@@ -185,15 +194,19 @@ try {
   answerGate = null;
   await page.screenshot({ path: path.join(output, "busy-blocks-back.png"), fullPage: true });
 
-  // Scenario D: building overview (no person) back leaves to tools
+  // Scenario D: building overview (no person) back leaves to special tasks
   await page.goto(`${base}/learning?view=overview&scope=A`);
   await page.getByRole("button", { name: "选择人员", exact: true }).waitFor();
   await backButton().click();
-  await page.waitForURL("**/?entry=tools");
-  await page.screenshot({ path: path.join(output, "overview-back-tools.png"), fullPage: true });
+  await page.waitForURL("**/?entry=special");
+  await page.getByRole('heading', { name: '专项任务', exact: true }).waitFor();
+  await page.getByRole('button', { name: '选择画像学练', exact: true }).waitFor();
+  assert.equal(await page.locator('.tool-card').count(), 1, 'learning-only permission exposes no other special task');
+  await page.screenshot({ path: path.join(output, "overview-back-special.png"), fullPage: true });
 
   assert.deepEqual(pageErrors, [], `browser errors: ${pageErrors.join("\n")}`);
   assert.deepEqual(unexpected, [], `unexpected requests: ${unexpected.join(", ")}`);
+  assert.equal(requests.filter(request => request.p.endsWith('/start')).length, 1, 'overview navigation never starts another paper');
   console.log("[LearningBackBrowser] OK", { requests: requests.length, claims: claims.length, output });
 } catch (error) {
   console.error("[BrowserErrors]", pageErrors, unexpected);

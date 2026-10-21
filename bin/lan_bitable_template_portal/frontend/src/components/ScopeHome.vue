@@ -116,7 +116,7 @@
           :aria-label="`选择${tool.title}`"
           @click="selectEntry(tool.key)"
         >
-          <span v-if="activeMode==='risk'" class="risk-tool-icon" aria-hidden="true"><ClipboardCheck v-if="tool.key==='risk_inspection'" :size="24" /><ShieldCheck v-else :size="24" /></span>
+          <span v-if="tool.key==='risk_inspection'||tool.key==='critical_guard'" class="risk-tool-icon" aria-hidden="true"><ClipboardCheck v-if="tool.key==='risk_inspection'" :size="24" /><ShieldCheck v-else :size="24" /></span>
           <span v-else-if="tool.key==='knowledge'||tool.key==='documents'" class="risk-tool-icon" aria-hidden="true"><Library v-if="tool.key==='knowledge'" :size="24" /><FolderOpen v-else :size="24" /></span>
           <span v-else class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
           <span>
@@ -265,6 +265,7 @@ import {
   SCOPE_HOME_CAPACITY_ENTRIES as capacityEntries,
   SCOPE_HOME_MODULE_CARDS as moduleCards,
   SCOPE_HOME_TOOL_ENTRIES as toolEntries,
+  SCOPE_HOME_SPECIAL_ENTRIES as specialEntries,
   normalizeScopeValue,
   scopeCardClass,
   scopeDisplayLabel,
@@ -392,8 +393,8 @@ function entryModule(entry: string): string {
 }
 const toolsModule: Record<string, string> = {
   knowledge: "knowledge", documents: "knowledge",
-  learning: "learning", daily: "daily", power: "power", polling: "polling",
-  adjust: "adjust", handover: "handover", plan_convergence: "plan_convergence", work_handover: "work_handover",
+  daily: "daily", power: "power", polling: "polling",
+  adjust: "adjust", handover: "handover",
 };
 const capacityModule: Record<string, string> = { water: "water", cabinet_power: "cabinet" };
 const cardModules: Record<string, string[]> = {
@@ -401,9 +402,10 @@ const cardModules: Record<string, string[]> = {
   maintenance: ["maintenance", "engineer_mop"],
   change: ["change"],
   repair_management: ["repair_management", "repair"],
-  risk: ["critical_guard", "risk_inspection"],
+  risk: ["critical_guard"],
   capacity: ["water", "cabinet"],
-  tools: ["daily", "power", "polling", "adjust", "handover", "plan_convergence", "learning", "work_handover", "knowledge"],
+  tools: ["daily", "power", "polling", "adjust", "handover", "knowledge"],
+  special: ["risk_inspection", "work_handover", "learning", "plan_convergence"],
   drill: ["drills"],
 };
 const filteredModuleCards = computed(() =>
@@ -429,12 +431,11 @@ const isEntryAllowed = (entry: string): boolean => hasModule(entryModule(entry))
 
 const enabledModuleCount = computed(() => filteredModuleCards.value.filter((item) => !item.disabled).length);
 const activeConfig = computed(() => entryConfigs[activeMode.value || "tools"]);
-const isEntryMenu = computed(() => ["tools", "capacity", "risk"].includes(activeMode.value));
+const isEntryMenu = computed(() => ["tools", "capacity", "risk", "special"].includes(activeMode.value));
 const riskEntries: ScopeHomeToolEntry[] = [
-  { key: 'risk_inspection', title: '风险排查', description: '', badge: '排查反馈', icon: 'risk', tone: 'rose' },
   { key: 'critical_guard', title: '重保管理', description: '', badge: '重保任务', icon: 'risk', tone: 'blue' },
 ];
-const activeMenuEntries = computed(() => activeMode.value === 'risk' ? riskEntries.filter(entry => isEntryAllowed(entry.key)) : activeMode.value === "capacity" ? filteredCapacityEntries.value : filteredToolEntries.value);
+const activeMenuEntries = computed(() => activeMode.value === 'risk' ? riskEntries.filter(entry => isEntryAllowed(entry.key)) : activeMode.value === 'special' ? specialEntries.filter(entry => isEntryAllowed(entry.key)) : activeMode.value === "capacity" ? filteredCapacityEntries.value : filteredToolEntries.value);
 const isToolScopeMode = computed(() => ["daily", "power", "polling", "adjust", "handover"].includes(activeMode.value));
 const activeMetricWorkType = computed(() => {
   if (activeMode.value === "maintenance_mop") return "maintenance";
@@ -733,7 +734,7 @@ function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
 }
 
 function selectEntry(key: EntryKey): void {
-  if (key === 'risk' ? !cardModules.risk.some(hasModule) : !isEntryAllowed(key)) return;
+  if (key === 'risk' || key === 'special' ? !cardModules[key].some(hasModule) : !isEntryAllowed(key)) return;
   if (key === 'work_handover') { emit('work-handover'); return; }
   if (key === 'pre_shift') { emit('pre-shift'); return; }
   if (key === "learning") { emit("learning"); return; }
@@ -846,7 +847,7 @@ function selectModuleAction(action: ModuleAction, disabled?: boolean): void {
 
 function returnFromFeature(): void {
   if (activeMode.value === "water") clearWaterBuildingsPoll();
-  activeMode.value = isToolScopeMode.value ? "tools" : activeMode.value === "water" ? "capacity" : activeMode.value === 'risk_inspection' ? 'risk' : "";
+  activeMode.value = isToolScopeMode.value ? "tools" : activeMode.value === "water" ? "capacity" : activeMode.value === 'risk_inspection' ? 'special' : "";
   syncEntryUrl(activeMode.value);
   emit("dashboard-visible", !activeMode.value);
 }

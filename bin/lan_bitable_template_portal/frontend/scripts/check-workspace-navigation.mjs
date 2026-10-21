@@ -34,4 +34,28 @@ assert.equal(modulePermission('documents'),'knowledge');
 assert.deepEqual(navigationModules(['knowledge']).map(item=>item.id),['knowledge','documents']);
 assert.equal(navigationModules(['learning']).some(item=>['knowledge','documents'].includes(item.id)),false);
 assert.equal(moduleUrl(modules.find(item=>item.id==='documents'),'H'),'/document-library');
-console.log('PASS: navigation guards, independent document/knowledge entries with unchanged permission, module-only returns and scope/token preservation.');
+const specialIds=['risk_inspection','plan_convergence','work_handover'];
+assert.deepEqual(modules.filter(item=>item.group==='专项功能').map(item=>item.id),specialIds);
+assert.equal(modules.find(item=>item.id==='learning').group,'学习与资料');
+for(const [id,route,scoped] of [['risk_inspection','/risk-inspections',true],['plan_convergence','/plan-convergence',true],['work_handover','/work-handover',false],['learning','/learning',false]]){
+  const entries=navigationModules([id]);
+  assert.deepEqual(entries.map(item=>item.id),[id],id+': a single grant never exposes other modules');
+  assert.equal(entries[0].group,id==='learning'?'学习与资料':'专项功能');
+  assert.equal(modulePermission(id),id,id+': moving navigation never changes the required permission');
+  assert.equal(moduleForRoute(logical(route)),id);
+  assert.equal(moduleUrl(entries[0],'B'),route+(scoped?'?scope=B':''));
+  assert.equal(moduleBackTarget('/?entry=special',logical(route)),null,id+': legacy parent must not escape the V2 module');
+}
+for(const allowed of [[],['learning'],['critical_guard'],['daily'],['knowledge']]){
+  assert.deepEqual(navigationModules(allowed).filter(item=>item.group==='专项功能'),[],JSON.stringify(allowed)+': no special grant means no special navigation');
+}
+const legacy=await build({entryPoints:[fileURLToPath(new URL('../src/scopeHomeUtils.ts',import.meta.url))],bundle:true,write:false,format:'esm'});
+const {SCOPE_HOME_MODULE_CARDS:cards,SCOPE_HOME_SPECIAL_ENTRIES:special,SCOPE_HOME_TOOL_ENTRIES:tools,SCOPE_HOME_ENTRY_CONFIGS:configs}=await import('data:text/javascript;base64,'+Buffer.from(legacy.outputFiles[0].text).toString('base64'));
+assert.equal(cards[0].key,'pre_shift','legacy checklist remains the first card before permission filtering');
+assert.equal(cards.filter(item=>item.key==='pre_shift').length,1);
+assert.equal(cards.find(item=>item.key==='special').title,'专项功能');
+assert.deepEqual(special.map(item=>item.key),['risk_inspection','work_handover','learning','plan_convergence']);
+assert.deepEqual(tools.map(item=>item.key),['knowledge','documents','daily','power','polling','adjust','handover']);
+assert.equal(configs.special.title,'专项任务');
+assert.equal(configs.risk_inspection.kicker,'专项功能');
+console.log('PASS: navigation guards, special-group membership and single-grant isolation, legacy card/tool registry, unchanged routes/permissions, module-only returns and scope/token preservation.');

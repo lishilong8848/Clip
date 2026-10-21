@@ -114,13 +114,20 @@ try{
    }
    if(version==='legacy'){
     await page.goto(origin);await page.getByRole('button',{name:'进入风险管理',exact:true}).waitFor();
-    assert.equal(await page.locator('.module-risk .module-secondary-action').count(),0,'Risk entry is inside the risk menu, not under its home card');
+    assert.equal(await page.locator('.module-risk .module-secondary-action').count(),0,'Risk management has no inspection shortcut');
     assert.equal(await page.locator('.module-tools .module-secondary-action').count(),0,'Daily tasks are inside the tools menu');
-    await page.getByRole('button',{name:'进入风险管理',exact:true}).click();await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();
+    await page.getByRole('button',{name:'进入风险管理',exact:true}).click();
     await page.getByRole('button',{name:'选择重保管理',exact:true}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'选择风险排查',exact:true}).count(),0,'Inspection is removed from risk management');
+    await page.getByRole('button',{name:'返回',exact:true}).click();
+    await page.getByRole('button',{name:'进入专项功能',exact:true}).click();
+    await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'选择重保管理',exact:true}).count(),0,'Critical guard stays in risk management');
     await page.screenshot({path:path.join(output,`legacy-${width}-entry.png`),fullPage:width>=700});
     await page.getByRole('button',{name:'选择风险排查',exact:true}).click();await page.locator('.scope-card').first().getByRole('button',{name:'进入风险排查',exact:true}).click();await page.locator('.risk-task-list:visible,.risk-mobile-tasks:visible').waitFor();
     await page.getByRole('button',{name:'返回',exact:true}).click();await page.getByRole('heading',{name:'选择楼栋进入风险排查',exact:true}).waitFor();
+    await page.getByRole('button',{name:'返回',exact:true}).click();await page.waitForURL(origin+'/?entry=special');
+    await page.getByRole('heading',{name:'专项任务',exact:true}).waitFor();
     await page.goto(origin+'/?entry=tools');
     await page.getByRole('button',{name:'选择每日任务清单',exact:true}).waitFor();
    }
@@ -282,7 +289,7 @@ try{
    await page.screenshot({path:path.join(output,`${version}-${width}-management.png`),fullPage:width>=700});
    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'No page overflow');
    role='alice';fields[2].required=true;
-   if(version==='legacy'){await page.goto(origin+'/?entry=risk');await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'选择重保管理',exact:true}).count(),0,'Unassigned risk modules remain hidden');}
+   if(version==='legacy'){await page.goto(origin+'/?entry=special');await page.getByRole('button',{name:'选择风险排查',exact:true}).waitFor();assert.equal(await page.locator('.tool-card').count(),1,'Only the assigned inspection module is visible');assert.equal(await page.getByRole('button',{name:'选择重保管理',exact:true}).count(),0,'Unassigned risk modules remain hidden');}
    await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await feedbackRows().first().waitFor();
    assert.equal(await feedbackRows().count(),1);
    assert.equal(await page.getByText('排查人员乙',{exact:true}).count(),0,'Private rows must not leak to ordinary users');
@@ -309,7 +316,10 @@ try{
    await page.getByRole('button',{name:'继续填写',exact:true}).click();
    assert(await page.locator('.risk-feedback').isVisible(),'Cancelling close keeps the feedback form');
    assert.equal(await page.getByRole('textbox',{name:'排查结果',exact:true}).inputValue(),'绝缘、防护及连接状态已核对，无异常。','Unsaved input is preserved');
-   await page.locator('.risk-feedback .n-base-selection').click();await page.getByText('无异常',{exact:true}).last().click();
+   await page.locator('.risk-feedback .n-base-selection').click();
+   const answerMenu=page.locator('.n-base-select-menu:visible');await answerMenu.waitFor();
+   assert.equal(await answerMenu.evaluate(el=>!!el.closest('.n-modal,.n-drawer')),false,'Feedback select escapes the drawer even with dynamic aria bindings');
+   await answerMenu.getByText('无异常',{exact:true}).click();
    await page.locator('.risk-file-zone input[type=file]').setInputFiles({name:'fixture.png',mimeType:'image/png',buffer:Buffer.from('isolated attachment')});
    await page.locator('.risk-feedback').getByRole('link',{name:'fixture.png'}).waitFor();
    await page.locator('.risk-missing-summary').waitFor({state:'hidden'});

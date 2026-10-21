@@ -2,7 +2,7 @@
   <NConfigProvider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="{common:{primaryColor:'#2563eb',primaryColorHover:'#1d4ed8',primaryColorPressed:'#1e40af',primaryColorSuppl:'#2563eb',borderRadius:'6px'}}">
     <section class="work-handover" aria-label="人员工作交接" @paste="pasteFiles" @dragover.prevent @drop.prevent="dropFiles">
       <header class="handover-toolbar" data-v2-navigation>
-        <NButton v-if="legacy" :disabled="busy" aria-label="返回" @click="navigate('/?entry=tools')"><ArrowLeft :size="16" />返回</NButton>
+        <NButton v-if="legacy" :disabled="busy" aria-label="返回" @click="navigate('/?entry=special')"><ArrowLeft :size="16" />返回</NButton>
         <div class="handover-tabs" role="tablist" aria-label="交接范围">
           <button v-for="tab in views" :key="tab.value" type="button" role="tab" :aria-selected="view===tab.value" :disabled="busy" @click="changeView(tab.value)">{{tab.label}}</button>
         </div>

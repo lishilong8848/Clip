@@ -1,6 +1,6 @@
 <template>
   <section class="pc-page" :aria-busy="loading">
-    <VnetBackButton to="/?entry=tools" />
+    <VnetBackButton to="/?entry=special" />
     <header class="pc-head"><div class="pc-title"><ClipboardCheck :size="23" /><h2>计划收敛审查</h2></div><div class="pc-actions"><span v-if="loadedAt" class="muted">屏蔽列表 {{ timeText(loadedAt) }}</span><button v-if="tab === 'review'" :disabled="loading || listLoading" @click="loadBlocks"><RefreshCw :size="16" :class="{ spin: listLoading }" />刷新屏蔽记录</button><button v-if="boot.is_admin" class="pc-icon" title="平台设置" aria-label="平台设置" :disabled="loading" @click="openSettings"><Settings :size="18" /></button></div></header>
     <nav class="pc-tabs" aria-label="计划收敛功能"><button v-for="item in tabs" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" @click="switchTab(item.id)"><component :is="item.icon" :size="17" />{{ item.label }}</button></nav>
     <div class="pc-alert warning" role="status"><AlertCircle :size="18" /><span>智航查询需要运行灯塔的电脑连接 VPN。未连接时仅智航查询不可用，其他功能和本地规则配置不受影响。</span></div>

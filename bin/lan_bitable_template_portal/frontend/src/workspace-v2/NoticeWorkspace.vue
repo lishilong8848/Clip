@@ -79,7 +79,7 @@
           <NButton v-if="form?.canDelete&&!confirming" type="error" text :disabled="locked" @click="deleteNotice"><Trash2 :size="16" />删除通告</NButton>
           <span></span>
           <NButton v-if="confirming" data-v2-navigation :disabled="busy" @click="confirming=false">返回修改</NButton>
-          <NButton v-else data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor">{{ job&&!terminal?'后台处理，返回列表':job||ambiguous?'返回列表':'关闭' }}</NButton>
+          <NButton v-else class="v2-notice-close" type="warning" secondary data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor"><X :size="18" />{{ job&&!terminal?'后台处理，返回列表':job||ambiguous?'返回列表':'关闭' }}</NButton>
           <NButton v-if="succeeded&&nextRecord" type="primary" data-v2-navigation @click="openRecord(nextRecord)">办理下一条</NButton>
           <div v-if="form&&!job&&!ambiguous" class="v2-notice-submit-group" data-notice-section="action">
             <NRadioGroup v-if="!confirming" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
@@ -100,7 +100,7 @@ import { activateCard } from './cardActivation';
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
-import { ArrowRight,CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2 } from 'lucide-vue-next';
+import { ArrowRight,CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
 import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
@@ -251,7 +251,7 @@ function changeBuildings(values:string[]){
 function changePage(lane:string,page:number){pages.value[lane]=page;const q=query();q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(before===location.href)void load();}
 function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('specialty',specialty.value||'');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
 function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values.scope+':'+values.work_type+':'+(values.target_record_id||(values.manual==='1'?'manual':values.source_record_id)||'manual');}
-function persist(){if(!form.value||!formKey||job.value?.phase==='success')return;try{sessionStorage.setItem(formKey,JSON.stringify({schema:2,context:noticeDraftContext({...form.value,values:originalFields.value}),baseValues:originalFields.value,snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';}}
+function persist():boolean{if(!form.value||!formKey||job.value?.phase==='success')return true;try{sessionStorage.setItem(formKey,JSON.stringify({schema:2,context:noticeDraftContext({...form.value,values:originalFields.value}),baseValues:originalFields.value,snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));return true;}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';return false;}}
 function resetRejected(){if(job.value?.phase!=='failed'||job.value.error_category!=='field_or_payload'||busy.value)return;job.value=null;frozen=null;operationId='';ambiguous.value=false;persist();}
 async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtml='',manualType='',focusBinding=false){
   if(row&&lanes.value[0].rows.includes(row)&&rowUnknown(row)){message.warning('源表状态未取得，请重新读取后办理。');return;}
@@ -308,8 +308,8 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   }catch(e){if(!c.signal.aborted)detailError.value=e instanceof Error?e.message:'通告读取失败';}
   finally{if(detailAbort===c)detailLoading.value=false;}
 }
-function askLeave(proceed:()=>void){dialog.warning({title:'当前填写尚未保存',content:'继续将关闭当前填写区。本机恢复副本仍保留，未提交的内容不会发送。'+(pendingPhotos.value?'未上传成功的图片需要重新选择。':''),positiveText:'保留副本并离开',negativeText:'继续填写',onPositiveClick:()=>{persist();saved.value=snapshot();editing.value=false;proceed();}});}
-function closeEditor(){if(busy.value||uploading.value||saving.value)return;if(dirty.value&&!job.value){askLeave(()=>closeEditor());return;}persist();editing.value=false;detailAbort?.abort();window.clearTimeout(timer);}
+function askLeave(proceed:()=>void){dialog.warning({title:'当前填写尚未保存',content:'继续将关闭当前填写区。本机恢复副本仍保留，未提交的内容不会发送。'+(pendingPhotos.value?'未上传成功的图片需要重新选择。':''),positiveText:'保留副本并离开',negativeText:'继续填写',onPositiveClick:()=>{if(!persist()){message.error(detailError.value);return false;}saved.value=snapshot();editing.value=false;proceed();}});}
+function closeEditor(){if(busy.value||uploading.value||saving.value)return;const close=()=>{editing.value=false;detailAbort?.abort();window.clearTimeout(timer);};if(dirty.value&&!job.value){askLeave(close);return;}if(persist()||!dirty.value&&!job.value&&!ambiguous.value)close();}
 function changeAction(){
   const values=form.value?.values;
   if(values&&values.work_type!=='adjust'){
@@ -493,7 +493,7 @@ function undo(item:Dict){
     }catch(e){undoError.value=(e as Error).message;return false;}finally{busy.value=false;}
   }});
 }
-const stopGuard=registerNavigationGuard((_target,proceed)=>{if(!props.active)return true;if(busy.value||uploading.value||saving.value||parsing.value){message.warning('正在提交或上传，请等待结果。');return false;}if(editing.value&&dirty.value&&!job.value){askLeave(proceed);return false;}persist();return true;});
+const stopGuard=registerNavigationGuard((_target,proceed)=>{if(!props.active)return true;if(busy.value||uploading.value||saving.value||parsing.value){message.warning('正在提交或上传，请等待结果。');return false;}if(editing.value&&dirty.value&&!job.value){askLeave(proceed);return false;}return !editing.value||persist();});
 function visibility(){if(document.hidden){listAbort?.abort();window.clearTimeout(timer);window.clearTimeout(undoTimer);}else if(props.active){void load();void pollJob();void pollUndo();}}
 function beforeUnload(event:BeforeUnloadEvent){persist();if(busy.value||uploading.value||dirty.value){event.preventDefault();event.returnValue='';}}
 const contextKey=()=>JSON.stringify([props.scope,selectedBuildings.value,kind.value,applied.value]);
@@ -615,8 +615,8 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-submit-group>.n-radio-group{white-space:nowrap}
 .v2-notice-context-controls>:is([data-notice-section="relations"],[data-notice-section="binding"]){padding:8px 0}
 .v2-notice-context-row{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:start}.v2-notice-context-row.has-tags{grid-template-columns:minmax(0,1fr) minmax(260px,28%)}.v2-notice-context-controls{min-width:0}.v2-notice-top-tags{min-width:0;border-left:1px solid var(--v2-border);padding:4px 0 4px 16px}.v2-notice-top-tags .notice-tags{border:0;margin:0;padding:0;font-size:12px;line-height:1.5}.v2-notice-top-tags h4{font-size:12px;font-weight:500;margin:0 0 5px;color:var(--v2-muted)}.v2-notice-top-tags p{margin:3px 0;font-size:12px}.v2-notice-top-tags strong{font-size:13px}.v2-notice-pane-form>.v2-notice-field-section,.v2-notice-photo-columns>.v2-notice-field-section{padding-block:8px}.v2-notice-photo-columns h2{margin-bottom:6px}
-.v2-notice-top-tags>.v2-notice-field-section{padding:6px 0 0;margin-top:6px}.v2-notice-top-tags h2{font-size:12px;margin-bottom:4px}.v2-notice-top-tags .v2-notice-upload{min-height:48px}
-.v2-notice-top-tags .v2-notice-photo-strip .v2-notice-photos img{height:42px}.v2-notice-top-tags .v2-notice-photo-uploader:has(figure)>.v2-notice-upload{min-height:80px}
+.v2-notice-top-tags>.v2-notice-field-section{padding:6px 0 0;margin-top:6px}.v2-notice-top-tags h2{font-size:12px;margin-bottom:4px}
+.v2-notice-top-tags .v2-notice-photo-strip .v2-notice-photos img{height:42px}
 @media(max-width:1050px){.v2-notice-context-row.has-tags{grid-template-columns:minmax(0,1fr)}.v2-notice-top-tags{border-left:0;border-top:1px solid var(--v2-border);padding:8px 0}.v2-notice-context-row{gap:0}}
 .v2-notice-edit-surface [data-notice-section="binding"] .v2-notice-tools h2{margin:0}
 .v2-notice-relations .v2-notice-editor-context{margin:0;padding:0;flex:none}
@@ -626,6 +626,11 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-source-picker>.v2-notice-binding{display:grid;grid-template-columns:minmax(120px,320px) auto;margin:0;align-items:center;max-width:100%;min-width:0}
 @media(max-width:760px){.v2-notice-submit-group{flex:1 1 100%;justify-content:space-between;gap:6px}.v2-notice-submit-group .n-button,.v2-notice-submit-group .n-radio-button{min-height:44px}.v2-notice-submit-group .n-radio-button{display:inline-flex;align-items:center;padding-inline:9px}.v2-notice-submit-group>.n-button{padding-inline:10px}.v2-source-picker>.v2-notice-binding>.n-button{min-height:44px}}
 @media(max-width:760px){.v2-notice-editor.v2-notice-handling{width:calc(100vw - 12px);height:calc(100dvh - 12px);max-height:calc(100dvh - 12px)}.v2-notice-handling>.n-card-content{padding:8px 12px}.v2-notice-handling>.n-card-header{padding:14px 48px 12px 12px}.v2-notice-handling>.n-card__footer{padding:10px 12px}.v2-notice-page-fields>header{min-height:44px}}
+.workspace-v2 .v2-notice-handling>.n-card-header{padding-block:6px}
+.workspace-v2 .v2-notice-handling>.n-card-header .n-card-header__close{width:44px;height:44px;min-width:44px;min-height:44px;color:#854000;background:#ffedba;border:1px solid #e8b75b;border-radius:6px;font-size:24px}
+.workspace-v2 .v2-notice-handling>.n-card-header .n-card-header__close:hover{background:#ffe098;color:#653000}
+.workspace-v2 .v2-notice-handling .v2-notice-close:not(:disabled){color:#854000;background:#ffedba}
+@media(min-width:761px){.v2-notice-handling .v2-notice-close+.v2-notice-submit-group{border-left:1px solid var(--v2-border);padding-left:16px;margin-left:6px}}
 </style>
 <style>
 .v2-notice-section{container-type:inline-size;container-name:notice-lane}
