@@ -1,7 +1,7 @@
-import { Activity, BookOpen, Bot, CircleAlert, ClipboardList, Droplets, Library, Link, ScanLine, Server, Settings, ShieldCheck, Signature, Wrench } from 'lucide-vue-next';
+import { Activity, BookOpen, Bot, CircleAlert, ClipboardList, Droplets, FolderOpen, Library, Link, ScanLine, Server, Settings, ShieldCheck, Signature, Wrench } from 'lucide-vue-next';
 
-export type ModuleEntry = { id: string; label: string; group: string; path: string; icon: string };
-export const moduleIcons = { event: CircleAlert, notice: ClipboardList, wrench: Wrench, shield: ShieldCheck, task: ClipboardList, server: Server, water: Droplets, scan: ScanLine, activity: Activity, book: BookOpen, library: Library, link: Link, signature: Signature, assistant: Bot, settings: Settings };
+export type ModuleEntry = { id: string; label: string; group: string; path: string; icon: string; permission?: string };
+export const moduleIcons = { event: CircleAlert, notice: ClipboardList, wrench: Wrench, shield: ShieldCheck, task: ClipboardList, server: Server, water: Droplets, scan: ScanLine, activity: Activity, book: BookOpen, library: Library, documents: FolderOpen, link: Link, signature: Signature, assistant: Bot, settings: Settings };
 export const NOTICE_IDS = ['maintenance', 'change', 'repair', 'polling', 'adjust', 'power'];
 export const SOP_IDS = ['maintenance', 'polling', 'adjust'];
 export const modules: ModuleEntry[] = [
@@ -18,6 +18,7 @@ export const modules: ModuleEntry[] = [
   { id: 'drills', label: '演练管理', group: '学习与资料', path: '/drill-management', icon: 'activity' },
   { id: 'learning', label: '画像学练', group: '学习与资料', path: '/learning', icon: 'book' },
   { id: 'knowledge', label: '共享知识库', group: '学习与资料', path: '/knowledge-base', icon: 'library' },
+  { id: 'documents', label: '南通文件', group: '学习与资料', path: '/document-library', icon: 'documents', permission: 'knowledge' },
   { id: 'links', label: '多维表导航', group: '学习与资料', path: '/link-directory', icon: 'link' },
   { id: 'life_guide', label: '参考人生指南', group: '学习与资料', path: '/life-guide', icon: 'book' },
   { id: 'signatures', label: '签名管理', group: '账号与协作', path: '/signature-management', icon: 'signature' },
@@ -26,10 +27,11 @@ export const modules: ModuleEntry[] = [
   { id: 'assistant', label: '灯塔助手', group: '账号与协作', path: '/?view=assistant', icon: 'assistant' },
   { id: 'accounts', label: '账号与权限', group: '账号与协作', path: '/admin/settings', icon: 'settings' },
 ];
+export function modulePermission(id: string): string { return modules.find(item => item.id === id)?.permission || id; }
 export function navigationModules(permitted: string[]): ModuleEntry[] {
   const notices=NOTICE_IDS.filter(id=>permitted.includes(id));
   return modules.flatMap(item=>{
-    if(!permitted.includes(item.id)||item.id==='assistant')return [];
+    if(!permitted.includes(item.permission||item.id)||item.id==='assistant')return [];
     if(!NOTICE_IDS.includes(item.id))return [item];
     if(item.id!==notices[0])return [];
     return [{id:'notices',label:'通告办理',group:'运行管理',path:'/workbench-lite?work_type='+(notices.length===1?notices[0]:'all'),icon:'notice'},
@@ -37,7 +39,6 @@ export function navigationModules(permitted: string[]): ModuleEntry[] {
   });
 }
 export function moduleForRoute(url: URL): string {
-  if (url.pathname === '/document-library') return 'knowledge';
   if (url.pathname === '/workbench-lite') return url.searchParams.get('work_type') || 'maintenance';
   if (url.pathname === '/') {
     if (url.searchParams.get('mode') === 'events') return 'event';
@@ -53,7 +54,7 @@ export function moduleForRoute(url: URL): string {
 }
 export function moduleUrl(module: ModuleEntry, scope: string): string {
   const url = new URL(module.path, window.location.origin);
-  if (!['accounts', 'assistant', 'knowledge', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
+  if (!['accounts', 'assistant', 'knowledge', 'documents', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
   return url.pathname + url.search;
 }
 export function beijingDate(): string {

@@ -10,7 +10,7 @@
       <button type="submit" :disabled="loading"><Search :size="16" />查询</button>
       <button type="button" class="icon-button" title="刷新完成情况" aria-label="刷新完成情况" :disabled="loading" @click="load()"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
     </form>
-    <div v-if="error" class="completion-error" role="alert"><AlertCircle :size="17" />{{ error }}</div>
+    <div v-if="dateError || error" class="completion-error" role="alert"><AlertCircle :size="17" />{{ dateError || error }}</div>
     <div v-if="hasResult" class="completion-summary" aria-label="完成状态汇总"><span v-for="state in states" :key="state">{{ state }}<strong>{{ result.summary?.[state] || 0 }}</strong></span></div>
     <div v-if="loading" class="completion-loading" role="status"><Loader2 :size="17" class="spin" />正在读取完成情况</div>
     <div class="completion-table" tabindex="0" aria-label="每日完成记录">
@@ -29,7 +29,7 @@
           <td><time>{{ timeLabel(row.updated_at) }}</time></td>
         </tr></tbody>
       </table>
-      <div v-if="!loading && !error && !(result.items || []).length" class="completion-empty">暂无符合条件的记录</div>
+      <div v-if="!loading && !dateError && !error && !(result.items || []).length" class="completion-empty">暂无符合条件的记录</div>
     </div>
     <footer v-if="hasResult" class="completion-pagination"><span>共 {{ result.total || 0 }} 条</span><div><button type="button" class="icon-button" title="上一页" aria-label="上一页" :disabled="loading || page <= 1" @click="turn(-1)"><ChevronLeft :size="18" /></button><span>{{ page }} / {{ pageCount }}</span><button type="button" class="icon-button" title="下一页" aria-label="下一页" :disabled="loading || page >= pageCount" @click="turn(1)"><ChevronRight :size="18" /></button></div></footer>
   </section>
@@ -40,6 +40,8 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { AlertCircle, BookOpen, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from 'lucide-vue-next';
 import { getLearningCompletion } from '../api/learning';
 import { ApiError, type Dict } from '../api/client';
+import { completionDateError } from '../learningDates';
+import { beijingDate } from '../workspace-v2/eventPeriod';
 import VnetSelect from './VnetSelect.vue';
 
 const props = defineProps<{ scope?: string; personId?: string; canViewBuildings?: boolean; refreshKey?: number }>();
@@ -47,8 +49,9 @@ const emit=defineEmits<{ 'open-paper': [value:{paperId:string;person:Dict;date:s
 const states = ['未安排', '未到时', '待答', '答题中', '已完成', '逾期', '待核对'];
 const stateOptions = ['全部状态', ...states];
 const shiftOptions = ['全部班次', '白班', '夜班'];
-const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+const today = beijingDate();
 const filters = reactive({ from: today, to: today, status: '全部状态', shift: '全部班次', q: '' });
+const dateError = computed(() => completionDateError(filters.from, filters.to));
 const result = ref<Dict>({ items: [], summary: {}, total: 0 });
 const hasResult=ref(false);
 const page = ref(1), loading = ref(false), error = ref('');
@@ -60,7 +63,9 @@ function tone(state: string): string { return state === '已完成' ? 'success' 
 function paperTitle(row:Dict,id:string):string{const task=row.tasks.find((task:Dict)=>task.source==='paper'&&task.task_id===id);return task?`${task.shift?task.shift+'班 ':''}每日题单 ${task.answered}/${task.assigned ?? '待核对'}`:'练习与复习记录';}
 function timeLabel(value: string): string { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
 async function load(): Promise<void> {
-  request?.abort(); const controller = new AbortController(); request = controller;
+  request?.abort();
+  if (dateError.value) { request = undefined; loading.value = false; return; }
+  const controller = new AbortController(); request = controller;
   loading.value = true; error.value = '';
   try {
     const response = await getLearningCompletion({ ...filters, status: filters.status === '全部状态' ? '' : filters.status,
@@ -76,6 +81,7 @@ async function load(): Promise<void> {
 }
 function reload(): void { page.value = 1; void load(); }
 function turn(delta: number): void { page.value += delta; void load(); }
+watch(() => [filters.from, filters.to], () => { error.value = ''; });
 watch(() => [props.scope, props.personId], ()=>{result.value={items:[],summary:{},total:0};hasResult.value=false;reload();}, { immediate: true });
 watch(() => props.refreshKey, ()=>void load());
 onBeforeUnmount(() => request?.abort());

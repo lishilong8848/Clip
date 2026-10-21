@@ -59,12 +59,27 @@ try{
     await page.getByPlaceholder('搜索版本、问题或解决方法').fill('每日答题');
     await page.waitForFunction(()=>document.querySelectorAll('.release-entry').length===11);
     assert((await page.locator('.release-entry').allTextContents()).every(text=>text.includes('每日答题')));
-    await visit('/knowledge-base');
-    await page.getByRole('button',{name:'南通文件',exact:true}).click();
+    await visit(version==='v2'?'/?view=functions':'/?entry=tools');
+    const entry=name=>version==='v2'?page.locator('.v2-feature-entry').filter({hasText:name}):page.getByRole('button',{name:'选择'+name,exact:true});
+    await entry('南通文件').waitFor();
+    await entry('共享知识库').waitFor();
+    await check('independent-entries');
+    await entry('南通文件').click();
     await page.locator('.document-library').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('__page')||new URL(page.url()).pathname,'/document-library');
+    assert.equal(await page.getByRole('button',{name:'返回共享知识库',exact:true}).count(),0);
     await check('documents');
+    if(version==='legacy'){
+      await page.getByRole('button',{name:'返回',exact:true}).click();
+      await entry('共享知识库').waitFor();
+    }else await visit('/?view=functions');
+    await entry('共享知识库').click();
+    await page.locator('.kb-page').waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('__page')||new URL(page.url()).pathname,'/knowledge-base');
+    assert.equal(await page.getByRole('button',{name:'南通文件',exact:true}).count(),0);
+    await check('knowledge');
     await context.close();
   }
   assert.deepEqual(errors,[]);
-  console.log('PASS: both versions, three viewports, admin journal detail/search and knowledge document route.');
+  console.log('PASS: both versions, three viewports, admin journal detail/search and independent document/knowledge navigation.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

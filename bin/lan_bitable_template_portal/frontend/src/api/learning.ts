@@ -1,4 +1,5 @@
 import { requestJson, type Dict } from "./client";
+import { completionDateError } from "../learningDates";
 
 export type LearningApiOptions = {
   signal?: AbortSignal | null;
@@ -31,7 +32,9 @@ export type CompletionQuery = {
   status?: string; shift?: string; q?: string; page?: number; page_size?: number;
 };
 
-export function getLearningCompletion(query: CompletionQuery, signal?: AbortSignal): Promise<Dict> {
+export async function getLearningCompletion(query: CompletionQuery, signal?: AbortSignal): Promise<Dict> {
+  const error = completionDateError(query.from, query.to);
+  if (error) throw new Error(error);
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined && value !== '') params.set(key, String(value));

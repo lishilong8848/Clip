@@ -229,6 +229,18 @@ try {
   checks.push('all writable field controls emit original typed numbers/selections/dates/people/URLs/booleans; invalid links never write');
   await context.close();
 
+  reset();
+  fixture.records[0].knowledge_status = 'unsupported';
+  fixture.records[0].knowledge_items = [{ kind: 'attachment', name: '原始图纸.dwg', attachment_id: 'unsupported1', status: 'unsupported', error: '不支持此附件类型的正文解析，可下载原文件。' }];
+  context = await open(); await firstDetail();
+  await drawer().getByText('资料已保存，部分附件格式暂不支持正文解析。', { exact: true }).waitFor();
+  await drawer().locator('.document-index-issues summary').click();
+  await drawer().getByText('原始图纸.dwg', { exact: true }).waitFor();
+  await drawer().getByText('不支持此附件类型的正文解析，可下载原文件。', { exact: true }).waitFor();
+  assert.equal(await drawer().getByText('资料已保存，知识索引待重试。', { exact: true }).count(), 0);
+  checks.push('unsupported attachment parsing is explicit and does not masquerade as success or a retryable failure');
+  await context.close();
+
   for (const [version, dark] of [['legacy', false], ['v2', false], ['v2', true]]) {
     reset(); context = await open(version, dark);
     await page.getByRole('button', { name: '查看资料：A楼高压配电操作规程', exact: true }).waitFor();
@@ -249,11 +261,11 @@ try {
       await page.screenshot({ path: path.join(output, `${version}${dark ? '-dark' : ''}-detail-${width}x${height}.png`), fullPage: true });
     }
     await drawer().getByRole('button', { name: '关闭', exact: true }).click();
-    await page.getByRole('button', { name: '返回共享知识库', exact: true }).click();
-    assert.equal(new URL(page.url()).pathname, '/knowledge-base', 'Return uses the shared navigation adapter');
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    assert.equal(new URL(page.url()).searchParams.get('entry'), 'tools', 'Return uses the independent tools entry');
     await context.close();
   }
-  checks.push('legacy/v2/light/dark; 1440x900/768x1024/440x956/402x874/360x844 list and drawer; navigation adapter');
+  checks.push('legacy/v2/light/dark; 1440x900/440x956/402x874/360x844 list and drawer; independent tools return');
   assert.deepEqual(errors, [], 'No browser runtime errors');
   await writeFile(path.join(output, 'acceptance.json'), JSON.stringify({ checks, errors, viewports, syntheticOnly: true }, null, 2));
   console.log(`Document library: ${checks.length} workflow groups passed; screenshots in ${output}`);

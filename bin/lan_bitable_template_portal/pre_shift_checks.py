@@ -117,6 +117,7 @@ class CheckService:
         self.tick_lock = threading.Lock()
         self.thread = None
         self.last_error = ''
+        self.recipient_errors = {}
         with self.connection() as conn:
             conn.executescript('''
                 PRAGMA journal_mode=WAL;
@@ -307,20 +308,24 @@ class CheckService:
             conn.execute("UPDATE tasks SET items='[]' WHERE id=? AND submitted=''", (task_id,))
 
     def _reconcile_groups(self, conn, current, scope, groups, def_version):
+        self.recipient_errors.pop(scope, None)
         pending = conn.execute(
             "SELECT * FROM tasks WHERE scope=? AND submitted='' AND items!='[]' AND deadline>?",
             (scope, current.timestamp())).fetchall()
         all_items = {item['id']: item for item in self.definition(scope, conn)['items']}
         fixed_people = {}
+        fixed_error = ''
         fixed_ids = {oid for item in all_items.values() for oid in item.get('fixed_recipients', [])}
         if fixed_ids:
             try:
                 fixed_people = {p['open_id']: p for p in self.recipient_directory(scope)} if self.recipient_directory else {}
             except Exception:
-                self.last_error = '固定接收人目录暂未就绪，将自动重试；未改发给排班人员。'
+                fixed_error = '固定接收人目录暂未就绪，将自动重试；未改发给排班人员。'
             else:
                 if fixed_ids - fixed_people.keys():
-                    self.last_error = '部分固定接收人暂不可用，请核对在岗状态及本楼检查权限；未改发给排班人员。'
+                    fixed_error = '部分固定接收人暂不可用，请核对在岗状态及本楼检查权限；未改发给排班人员。'
+        self.recipient_errors[scope] = {iid: fixed_error for iid, item in all_items.items()
+            if fixed_error and set(item.get('fixed_recipients', [])) - fixed_people.keys()}
         active_ids = set()
         for group in groups:
             rostered = self._people_for(conn, group['day'], scope, group['shift'])
@@ -370,6 +375,7 @@ class CheckService:
             definition = self.definition(scope, conn)
             items = definition['items']
             if not items:
+                self.recipient_errors.pop(scope, None)
                 self._clear_open_tasks(conn, current, scope)
                 continue
             groups = {}
@@ -497,6 +503,24 @@ class CheckService:
         return conn.execute("SELECT id FROM tasks WHERE day=? AND scope=? AND shift=? AND submitted!='' LIMIT 1",
                             (day, scope, shift)).fetchone() is not None
 
+    def _reminder_errors(self, conn, tasks, current):
+        errors = []
+        for task in tasks:
+            recipients = {p['open_id'] for p in task['people'] if any(
+                'recipient_ids' not in item or p['open_id'] in item['recipient_ids'] for item in task['items'])}
+            slot = max(0, int((current.timestamp() - task['due']) // 7200))
+            latest = {}
+            for row in conn.execute("SELECT id,sent,error FROM deliveries WHERE id GLOB ? AND (sent=1 OR error!='')", (task['id'] + ':*',)):
+                task_id, number, recipient = row['id'].rsplit(':', 2)
+                if task_id != task['id'] or not number.isdecimal() or int(number) > slot or recipient not in recipients:
+                    continue
+                if recipient not in latest or int(number) > latest[recipient][0]:
+                    latest[recipient] = (int(number), row)
+            for _, row in latest.values():
+                if not row['sent'] and row['error']:
+                    errors.append(row['error'])
+        return errors
+
     def state(self, actor, scope, current=None):
         authorized(actor, scope)
         current = current or now()
@@ -527,9 +551,17 @@ class CheckService:
                 roster_error = json.loads(roster_error).get(scope, '')
             if not any(not item.get('fixed_recipients') for item in definition['items']):
                 roster_error = ''
+            configured = {item['id'] for item in definition['items']}
+            active = [task for task in tasks if not task['submitted'] and task['deadline'] > current.timestamp()
+                      and task['due'] <= current.timestamp() + REMINDER_LEAD_SECONDS
+                      and task['definition_version'] == definition['version']
+                      and any(item['id'] in configured for item in task['items'])]
+            errors = [roster_error]
+            errors.extend(self.recipient_errors.get(scope, {}).get(item['id'], '') for task in active for item in task['items'])
+            errors.extend(self._reminder_errors(conn, active, current))
             return {'scope': scope, 'scopes': scopes_for(actor), 'can_manage': can_manage(actor),
                     'definition': definition, 'tasks': tasks,
-                    'roster_ready': roster_ready, 'roster_error': (roster_error or self.last_error) if definition['items'] else '',
+                    'roster_ready': roster_ready, 'roster_error': '；'.join(dict.fromkeys(e for e in errors if e)) if definition['items'] else '',
                     'overview': self._overview(actor, conn, current) if can_manage(actor) else None,
                     'server_time': current.isoformat()}
 
@@ -1271,9 +1303,6 @@ class CheckService:
         if not tasks:
             return
         base = str(self.portal_url() or '').rstrip('/')
-        if not base.startswith(('http://', 'https://')):
-            self.last_error = '班前检查访问地址未配置，暂未推送。'
-            return
         for task in tasks:
             slot = max(0, int((current.timestamp() - task['due']) // 7200))
             for person in json.loads(task['people']):
@@ -1294,12 +1323,12 @@ class CheckService:
                         continue
                     row = conn.execute('SELECT * FROM deliveries WHERE id=?', (key,)).fetchone()
                     if row and (row['sent'] or row['lease'] > current.timestamp()):
-                        if not row['sent'] and row['error']:
-                            self.last_error = row['error']
                         continue
                     if row and row['first_attempt'] and current.timestamp() - row['first_attempt'] >= 50 * 60:
-                        self.last_error = '班前检查原消息回执未确认，请管理员核对；未重复新增同一轮消息。'
-                        conn.execute('UPDATE deliveries SET error=? WHERE id=?', (self.last_error, key))
+                        error = row['error'] or ''
+                        if not error.startswith('班前检查原消息回执未确认'):
+                            error = '班前检查原消息回执未确认，请管理员核对；未重复新增同一轮消息。' + error
+                        conn.execute('UPDATE deliveries SET error=? WHERE id=?', (error, key))
                         continue
                     conn.execute('INSERT OR IGNORE INTO deliveries(id) VALUES(?)', (key,))
                     conn.execute('UPDATE deliveries SET lease=?,first_attempt=CASE WHEN first_attempt=0 THEN ? ELSE first_attempt END WHERE id=?',
@@ -1316,6 +1345,8 @@ class CheckService:
                         {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '打开班前检查'},
                             'url': base + '/assets/workspace-v2/index.html?__page=/&pre_shift=1'}]}]}
                 try:
+                    if not base.startswith(('http://', 'https://')):
+                        raise CheckError('班前检查访问地址未配置，暂未推送。')
                     result = self.sender(person['open_id'], card, 'pre-shift:' + key)
                     if not result[0]:
                         raise CheckError(str(result[1] or '班前检查消息发送失败，稍后重试。'))
@@ -1329,10 +1360,10 @@ class CheckService:
                         conn.execute("UPDATE deliveries SET sent=1,lease=0,error='',message_id=?,sender_app_id=? WHERE id=?",
                                      (receipt['message_id'], receipt['sender_app_id'], key))
                 except Exception as exc:
-                    self.last_error = str(exc) if isinstance(exc, CheckError) else '班前检查消息暂未确认送达，后台将核验原任务。'
+                    error = str(exc) if isinstance(exc, CheckError) else '班前检查消息暂未确认送达，后台将核验原任务。'
                     with self.connection(True) as conn:
                         conn.execute('UPDATE deliveries SET error=?,first_attempt=CASE WHEN ? THEN 0 ELSE first_attempt END WHERE id=?',
-                                     (self.last_error, isinstance(exc, CheckError) and not isinstance(exc, CheckDeliveryUncertain), key))
+                                     (error, isinstance(exc, CheckError) and not isinstance(exc, CheckDeliveryUncertain), key))
 
     def deliver_photos(self, current):
         if not self.photo_sender:

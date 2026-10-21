@@ -1,8 +1,8 @@
 <template>
   <NConfigProvider :locale="zhCN" :date-locale="dateZhCN">
     <section class="document-library" :style="styles" aria-label="南通文件" data-v2-inline-feedback>
+      <VnetBackButton to="/?entry=tools" :disabled="busy" />
       <header class="document-toolbar" data-v2-navigation>
-        <NButton :disabled="busy" aria-label="返回共享知识库" @click="navigate('/knowledge-base')"><ArrowLeft :size="16" />共享知识库</NButton>
         <div class="document-heading"><FolderOpen :size="21" aria-hidden="true" /><h1>南通文件</h1></div>
         <div class="document-actions">
           <NButton v-if="canConfigure" :disabled="busy || tablesLoading || !!tablesError" title="接入数据表" aria-label="接入数据表" @click="openSettings(true)"><Plus :size="16" /><span>接入表</span></NButton>
@@ -50,7 +50,9 @@
             <NAlert v-if="pendingWrite || pendingUpload" type="warning" :bordered="false" role="alert">操作回执尚未确认，输入及原操作编号已保留。请核验后按原操作重试。</NAlert>
             <NAlert v-if="conflict" type="warning" :bordered="false" role="alert">资料已被更新，尚未保存的输入已保留。<NButton text :disabled="busy" @click="readLatest">读取最新版本，保留输入</NButton></NAlert>
             <NAlert v-if="detail && indexFailed(detail)" type="warning" :bordered="false" role="status">资料已保存，知识索引待重试。</NAlert>
+            <NAlert v-else-if="detail && indexState(detail) === 'unsupported'" type="warning" :bordered="false" role="status">资料已保存，部分附件格式暂不支持正文解析。</NAlert>
             <NAlert v-else-if="notice" type="success" :bordered="false" role="status">{{ notice }}</NAlert>
+            <details v-if="indexIssues.length" class="document-index-issues"><summary>索引详情 · {{ indexIssues.length }} 项需关注</summary><ul><li v-for="item in indexIssues" :key="item.kind + ':' + (item.attachment_id || item.name)"><strong>{{ item.kind === 'record' ? '记录字段' : item.name }}</strong><span>{{ item.error || '索引暂未完成，系统将自动重试。' }}</span></li></ul></details>
             <div v-if="detailLoading" class="document-loading" role="status" aria-label="正在读取详情"><NSkeleton v-for="index in 4" :key="index" height="44px" /></div>
             <template v-else-if="detail || creating">
               <div class="document-detail-bar"><NTag v-if="detail" :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail?.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="detail && !editing" :disabled="busy || !!pendingUpload" title="重新读取资料" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
@@ -86,13 +88,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NConfigProvider, NDrawer, NDrawerContent, NEmpty, NInput, NModal, NProgress, NSelect, NSkeleton, NSpin, NTab, NTabs, NTag, dateZhCN, zhCN, useThemeVars } from 'naive-ui';
-import { ArrowLeft, ChevronLeft, ChevronRight, ExternalLink, FileText, FolderOpen, History, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Upload } from 'lucide-vue-next';
-import { navigate, registerNavigationGuard } from '../navigation';
+import { ChevronLeft, ChevronRight, ExternalLink, FileText, FolderOpen, History, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Upload } from 'lucide-vue-next';
+import { registerNavigationGuard } from '../navigation';
 import { ApiError } from '../api/client';
 import { cloneLibraryValue as clone, documentLibraryApi as api, fieldKind, fieldValue, newLibraryOperationId, valueText, writableField,
   type LibraryAttachment, type LibraryField, type LibraryFields, type LibraryMutation, type LibraryRecord, type LibrarySchema, type LibraryTable, type LibraryTables } from '../api/documentLibrary';
 import DocumentLibraryField from './DocumentLibraryField.vue';
 import DocumentLibraryTableSettings from './DocumentLibraryTableSettings.vue';
+import VnetBackButton from './VnetBackButton.vue';
 
 const props = defineProps<{ scope?: string }>();
 const theme = useThemeVars();
@@ -126,7 +129,8 @@ function errorText(error: unknown) { return error instanceof Error ? error.messa
 function title(record: LibraryRecord) { return displayFields.value.length ? valueText(record.fields[displayFields.value[0].id]) : record.record_id; }
 function indexState(record: LibraryRecord) { return typeof record.knowledge_status === 'string' ? record.knowledge_status : record.knowledge_status?.state || ''; }
 function indexFailed(record: LibraryRecord) { return ['failed', 'error', 'pending_retry', 'retrying', 'partial', 'blocked'].includes(indexState(record)); }
-function indexLabel(record: LibraryRecord) { const state = indexState(record); return indexFailed(record) ? '待索引重试' : ['indexed', 'ready', 'succeeded', 'synced'].includes(state) ? '已索引' : state === 'none' ? '无待索引附件' : state ? '待索引' : '未提供索引状态'; }
+function indexLabel(record: LibraryRecord) { const state = indexState(record); return indexFailed(record) ? '待索引重试' : state === 'unsupported' ? '部分格式不支持' : ['indexed', 'ready', 'succeeded', 'synced'].includes(state) ? '已索引' : state === 'none' ? '等待索引同步' : state ? '待索引' : '未提供索引状态'; }
+const indexIssues = computed(() => (detail.value?.knowledge_items || []).filter(item => ['failed', 'blocked', 'retrying', 'unsupported'].includes(item.status)));
 function sizeText(size?: number) { return size === undefined ? '大小未提供' : size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(1) + ' KB' : (size / 1048576).toFixed(1) + ' MB'; }
 function fileUrl(file: LibraryAttachment) { return api.fileUrl(activeKey.value, detail.value!.record_id, file); }
 function hasUnsaved() { return settingsOpen.value || detailOpen.value && (editing.value && dirty.value || !!pickedFile.value || !!pendingWrite.value || !!pendingUpload.value); }
@@ -304,4 +308,10 @@ onBeforeUnmount(() => { disposed = true; tablesRead?.abort(); listRead?.abort();
 .document-detail {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+.document-index-issues { font-size: 13px; overflow-wrap: anywhere; }
+.document-index-issues summary { cursor: pointer; padding: 8px 0; }
+.document-index-issues ul { margin: 0; padding-left: 20px; }
+.document-index-issues li { padding: 6px 0; }
+.document-index-issues strong, .document-index-issues span { display: block; }
+.document-index-issues span { color: var(--doc-muted); margin-top: 4px; }
 </style>

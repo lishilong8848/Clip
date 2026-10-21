@@ -127,6 +127,12 @@ class LibraryFixture(unittest.TestCase):
     def record(self):
         return self.service.record(actor(), 'manuals', 'recOne')
 
+    def source_items(self, user=None):
+        user = user or actor()
+        hits = self.kb.search(user, 'policy')['items']
+        ids = dict.fromkeys(item['document_id'] for item in hits if item['name'] in {'alpha.txt', 'beta.txt'})
+        return [self.kb.document(user, identity, {})['document'] for identity in ids]
+
     def mutation(self, fields, **changes):
         return {'fields': fields, 'expected_revision': self.record()['revision'],
             'operation_id': 'fixture-operation-1', 'reason': 'verified fixture', **changes}
@@ -192,7 +198,7 @@ class LibraryTests(LibraryFixture):
                 self.service.save_record(actor(), 'manuals', payload, identity='recOne')
         self.assertEqual(self.remote.updates, 1)
         self.assertEqual(self.service.list_records(actor(), 'manuals', {})['items'], [])
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
 
     def test_write_guard_denial_does_not_poison_record_or_replay(self):
         payload = self.mutation({'fldNumber': 18})
@@ -203,7 +209,7 @@ class LibraryTests(LibraryFixture):
                 self.assertEqual(error.exception.status, 403)
             self.assertEqual(blocked.call_count, 1)
         self.assertEqual(self.record()['fields']['fldNumber'], 4)
-        self.assertEqual(len(self.kb.list(actor(), {})['items']), 1)
+        self.assertEqual(len(self.source_items()), 1)
 
     def test_attachment_replace_preserves_identity_versions_audit_and_old_bytes(self):
         old = self.record()
@@ -223,16 +229,16 @@ class LibraryTests(LibraryFixture):
         self.assertEqual(path.read_bytes(), b'Alpha policy service steps')
 
     def test_initial_incremental_source_deletion_and_partial_scan_recovery(self):
-        self.assertEqual(len(self.kb.list(actor(), {})['items']), 1)
+        self.assertEqual(len(self.source_items()), 1)
         del self.remote.rows['recOne']
         self.remote.fail_scan = True
         self.service.request_sync(actor(), 'manuals')
         self.service.process_one()
-        self.assertEqual(len(self.kb.list(actor(), {})['items']), 1)
+        self.assertEqual(len(self.source_items()), 1)
         self.remote.fail_scan = False
         self.now += 10
         self.drain()
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
         with self.assertRaises(AssistantError):
             self.service.record(actor(), 'manuals', 'recOne')
 
@@ -251,7 +257,7 @@ class LibraryTests(LibraryFixture):
     def test_acl_change_disables_index_without_waiting_for_worker(self):
         source = self.service.tables(self.admin)['items'][0]
         self.service.save_table(self.admin, configuration(read_scopes=['B'], write_scopes=['B'], expected_revision=source['revision']), key='manuals')
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
         self.assertFalse(self.kb.search(actor(), 'Alpha policy')['items'])
 
     def test_remote_scope_change_denies_old_cache_and_historical_download(self):
@@ -259,7 +265,7 @@ class LibraryTests(LibraryFixture):
         self.remote.rows['recOne']['fields']['Building'] = 'B'
         with self.assertRaises(AssistantError):
             self.record()
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
         with self.assertRaises(AssistantError):
             self.service.download(actor(('B',)), 'manuals', 'recOne', attachment, version=1)
 
@@ -287,7 +293,7 @@ class LibraryTests(LibraryFixture):
         self.assertEqual(self.service.tables(actor())['items'], [])
         with self.assertRaises(AssistantError):
             self.record()
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
         self.assertFalse(self.service.tables(self.admin)['items'][0]['capabilities']['create'])
 
     def test_record_scope_requires_every_component_to_be_known(self):
@@ -316,7 +322,7 @@ class LibraryTests(LibraryFixture):
         with self.assertRaises(AssistantError):
             self.record()
         self.assertEqual(self.service.list_records(actor(), 'manuals', {})['items'], [])
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
         self.assertFalse(self.kb.search(actor(), 'Alpha policy')['items'])
         with self.assertRaises(AssistantError):
             self.service.versions(actor(), 'manuals', 'recOne')
@@ -389,7 +395,8 @@ class KnowledgeSourceACLTests(LibraryFixture):
     def test_source_list_search_file_versions_groups_and_citation_revocation(self):
         a, b = actor(), actor(('B',))
         listed = self.kb.list(a, {})
-        identity = listed['items'][0]['id']
+        self.assertEqual(listed['items'], [])
+        identity = self.source_items(a)[0]['id']
         found = self.kb.search(a, 'Alpha policy')['items']
         self.assertTrue(found)
         profile = {'endpoint': 'https://company.example/v1'}
@@ -403,7 +410,7 @@ class KnowledgeSourceACLTests(LibraryFixture):
         group = self.kb.create_group(a, 'Private alpha')
         with self.kb.connect() as db:
             db.execute('INSERT INTO doc_group_members VALUES(?,?)', (identity, group['id']))
-        self.assertEqual(self.kb.groups(a)['groups'][0]['count'], 1)
+        self.assertEqual(self.kb.groups(a)['groups'], [])
         self.assertEqual(self.kb.groups(b)['groups'], [])
         self.service.refresh_actor = lambda prior: {**prior, 'modules': []}
         self.assertFalse(self.kb.evidence_current(found, profile, actor=a))
@@ -413,13 +420,13 @@ class KnowledgeSourceACLTests(LibraryFixture):
         uploaded = self.kb.upload(actor(), 'shared.txt', b'Alpha policy service steps')
         self.kb.process_one()
         self.assertFalse(uploaded.get('duplicate', False))
-        self.assertEqual(len(self.kb.list(actor(), {})['items']), 2)
-        self.assertEqual(len(self.kb.list(actor(('B',)), {})['items']), 2)
+        self.assertEqual(len(self.kb.list(actor(), {})['items']), 1)
+        self.assertEqual(len(self.kb.list(actor(('B',)), {})['items']), 1)
         self.service.refresh_actor = lambda prior: {**prior, 'modules': []}
         self.assertEqual([v['id'] for v in self.kb.list(actor(), {})['items']], [uploaded['id']])
 
     def test_source_cannot_be_edited_restored_or_regrouped_as_shared_even_by_admin(self):
-        item = self.kb.list(actor(), {})['items'][0]
+        item = self.source_items()[0]
         self.assertFalse(item['can_edit'])
         for action in ('delete', 'retry', 'restore'):
             with self.assertRaises(AssistantError):
@@ -431,14 +438,14 @@ class KnowledgeSourceACLTests(LibraryFixture):
 
     def test_missing_source_authority_or_provenance_fails_closed(self):
         self.kb.source_acl = None
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
         self.kb.source_acl = self.service.can_read_source
         with self.kb.connect() as db:
             db.execute('DELETE FROM document_sources')
-        self.assertEqual(self.kb.list(actor(), {})['items'], [])
+        self.assertEqual(self.source_items(), [])
 
     def test_unchanged_attachment_content_reuses_knowledge_version_on_record_edit(self):
-        identity = self.kb.list(actor(), {})['items'][0]['id']
+        identity = self.source_items()[0]['id']
         with self.kb.connect() as db:
             before = db.execute('SELECT count(*) FROM versions WHERE document_id=?', (identity,)).fetchone()[0]
         self.service.save_record(actor(), 'manuals', self.mutation({'fldNumber': 9}), identity='recOne')
@@ -450,7 +457,7 @@ class KnowledgeSourceACLTests(LibraryFixture):
 
     def test_old_ingestion_completion_is_rejected_after_new_canonical_revision(self):
         with self.kb.connect() as db:
-            old = dict(db.execute('SELECT * FROM document_sources WHERE document_id=?', (self.kb.list(actor(), {})['items'][0]['id'],)).fetchone())
+            old = dict(db.execute('SELECT * FROM document_sources WHERE document_id=?', (self.source_items()[0]['id'],)).fetchone())
         source = json.loads(old['payload'])
         self.service.save_record(actor(), 'manuals', self.mutation({'fldNumber': 9}), identity='recOne')
         self.drain()
@@ -477,6 +484,7 @@ class KnowledgeSourceACLTests(LibraryFixture):
             db.execute('UPDATE source_retry SET next_attempt=0')
             before = db.execute('SELECT count(*) FROM versions').fetchone()[0]
         self.assertTrue(self.kb.process_one())
+        self.drain()
         self.assertEqual(self.record()['knowledge_status'], 'ready')
         with self.kb.connect() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM versions').fetchone()[0], before)
@@ -506,8 +514,8 @@ class KnowledgeSourceACLTests(LibraryFixture):
         self.remote.rows['recTwo']['fields']['Files'] = [{'file_token': 'tokenFixtureNewBeta', 'name': 'beta.txt', 'size': 24}]
         self.service.request_sync(actor(), 'manuals')
         self.drain()
-        a = self.kb.list(actor(), {})['items']
-        b = self.kb.list(actor(('B',)), {})['items']
+        a = self.source_items()
+        b = self.source_items(actor(('B',)))
         self.assertEqual((len(a), len(b)), (1, 1))
         self.assertNotEqual(a[0]['id'], b[0]['id'])
 

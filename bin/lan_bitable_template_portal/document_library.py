@@ -361,12 +361,10 @@ class DocumentLibraryService:
         by_name = {field['field_name']: field['field_id'] for field in fields}
         by_id = {field['field_id']: field for field in fields}
         values = {key if key in by_id else by_name.get(key, key): value for key, value in (raw.get('fields') or {}).items()}
-        for fid, field in by_id.items():
-            if field.get('type') == 17 and fid not in source['attachment_fields']:
-                values[fid] = [{k: value.get(k) for k in ('name', 'size', 'type')} for value in values.get(fid) or []]
+        attachment_fields = [fid for fid, field in by_id.items() if field.get('type') == 17]
         old = {(a['field_id'], a['file_token']): a['attachment_id'] for a in (previous or {}).get('attachments', [])}
         attachments = []
-        for fid in source['attachment_fields']:
+        for fid in attachment_fields:
             for file in values.get(fid) or []:
                 if not isinstance(file, dict) or not file.get('file_token'):
                     raise AssistantError('来源附件信息无效。', 503)
@@ -378,14 +376,28 @@ class DocumentLibraryService:
                     'name': Path(str(file.get('name') or 'attachment').replace('\\', '/')).name,
                     'size': file.get('size', 0), 'type': file.get('type', '')})
         # Volatile signed URLs are not part of a source version or its conflict token.
-        for fid in source['attachment_fields']:
+        for fid in attachment_fields:
             values[fid] = [{'file_token': a['file_token'], 'name': a['name'], 'size': a['size'], 'type': a['type']}
                 for a in attachments if a['field_id'] == fid]
-        payload = {'record_id': raw['record_id'], 'fields': values, 'attachments': attachments,
+        field_names = {fid: field['field_name'] for fid, field in by_id.items()}
+        payload = {'record_id': raw['record_id'], 'fields': values, 'field_names': field_names, 'attachments': attachments,
             'scopes': self._record_scopes(source, values), 'config_revision': source['revision'],
             'origin': _digest([source['base_token'], source['table_id']])}
-        payload['revision'] = _digest({'fields': values, 'table_revision': source['revision']})
+        payload['revision'] = _digest({'fields': values, 'field_names': field_names, 'table_revision': source['revision']})
         return payload
+
+    @staticmethod
+    def _record_text(source, record):
+        names = record.get('field_names', {})
+        attachment_fields = {item['field_id'] for item in record['attachments']}
+        lines = [source['name'], record['record_id']]
+        for fid in sorted(set(names) | set(record['fields'])):
+            value = record['fields'].get(fid)
+            if fid in attachment_fields:
+                value = [{key: item[key] for key in ('name', 'size', 'type')}
+                    for item in record['attachments'] if item['field_id'] == fid]
+            lines.append(f"{names.get(fid, fid)} ({fid}): {value if isinstance(value, str) else _json(value)}")
+        return '\n\n'.join(lines)
 
     def _cached(self, key, identity, db=None):
         if db is None:
@@ -396,6 +408,7 @@ class DocumentLibraryService:
 
     def _remember(self, source, record, *, actor='', actor_name='', reason='source_sync', generation='', operation='', job=None):
         key, identity = source['id'], record['record_id']
+        indexed = self.knowledge.source_states(key + '/' + identity + '/') if self.knowledge else None
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             if self._table(key, db)['revision'] != source['revision']:
@@ -417,14 +430,18 @@ class DocumentLibraryService:
                 "generation=CASE WHEN excluded.generation<>'' THEN excluded.generation ELSE records.generation END,pending_operation='',observed_at=excluded.observed_at",
                 (key, identity, _json(record), record['revision'], generation, self.clock()))
             current_keys = set()
-            for attachment in record['attachments']:
-                source_key = key + '/' + identity + '/' + attachment['field_id'] + '/' + attachment['attachment_id']
+            # Rebuild desired tasks even for an unchanged snapshot, so older caches backfill.
+            entries = [('record', {'kind': 'record', 'name': identity + '.txt'}),
+                *((a['field_id'] + '/' + a['attachment_id'], a) for a in record['attachments'])]
+            for suffix, entry in entries:
+                source_key = key + '/' + identity + '/' + suffix
                 current_keys.add(source_key)
                 payload = {'table_key': key, 'record_id': identity, 'record_revision': record['revision'],
                     'config_revision': source['revision'], 'origin': _digest([source['base_token'], source['table_id']]),
-                    'scopes': record['scopes'], **attachment}
+                    'scopes': record['scopes'], **entry}
                 old = db.execute('SELECT payload,status FROM ingestion WHERE source_key=?', (source_key,)).fetchone()
-                if not old or json.loads(old[0]) != payload or old['status'] == 'removed':
+                missing = indexed is not None and (source_key not in indexed or indexed[source_key].get('missing'))
+                if not old or json.loads(old[0]) != payload or old['status'] == 'removed' or old['status'] == 'synced' and missing:
                     db.execute("INSERT INTO ingestion(source_key,table_key,record_id,record_revision,payload,status) VALUES(?,?,?,?,?,'queued') "
                         "ON CONFLICT(source_key) DO UPDATE SET record_revision=excluded.record_revision,payload=excluded.payload,status='queued',attempts=0,next_attempt=0,lease='',lease_until=0",
                         (source_key, key, identity, record['revision'], _json(payload)))
@@ -442,13 +459,25 @@ class DocumentLibraryService:
         for attachment in result['attachments']:
             attachment.pop('file_token', None)
             attachment['download_url'] = f"/api/document-library/tables/{source['id']}/records/{record['record_id']}/attachments/{attachment['attachment_id']}/file"
-        for fid in source['attachment_fields']:
+        for fid in set(source['attachment_fields']) | {a['field_id'] for a in result['attachments']}:
             result['fields'][fid] = [a for a in result['attachments'] if a['field_id'] == fid]
         with self.connect(readonly=True) as db:
-            states = [row[0] for row in db.execute('SELECT status FROM ingestion WHERE table_key=? AND record_id=? AND status<>?', (source['id'], record['record_id'], 'removed'))]
-        result['knowledge_status'] = 'retrying' if any(s == 'retrying' for s in states) else 'queued' if any(s in {'queued', 'running'} for s in states) else 'synced' if states else 'none'
-        if self.knowledge is not None and result['knowledge_status'] == 'synced':
-            result['knowledge_status'] = self.knowledge.source_status(source['id'] + '/' + record['record_id'] + '/')
+            tasks = db.execute('SELECT source_key,payload,status FROM ingestion WHERE table_key=? AND record_id=? AND status<>?',
+                (source['id'], record['record_id'], 'removed')).fetchall()
+        indexed = self.knowledge.source_states(source['id'] + '/' + record['record_id'] + '/') if self.knowledge else {}
+        items = []
+        for task in tasks:
+            payload = json.loads(task['payload'])
+            state = indexed.get(task['source_key'], {}) if task['status'] == 'synced' else {}
+            status = state.get('status') or ('queued' if task['status'] in {'running', 'synced'} else task['status'])
+            items.append({**{k: payload[k] for k in ('name', 'field_id', 'attachment_id') if k in payload},
+                'kind': payload.get('kind', 'attachment'), 'status': status,
+                'error': state.get('error', '') or ('不支持此附件类型的正文解析，可按来源权限下载原文件。' if status == 'unsupported'
+                    else '知识库索引缺失，等待补入。' if task['status'] == 'synced' and not state else '')})
+        result['knowledge_items'] = items
+        states = {item['status'] for item in items}
+        result['knowledge_status'] = next((state for state in ('blocked', 'failed', 'retrying', 'queued', 'indexing', 'unsupported', 'synced', 'ready')
+            if state in states), 'none')
         result['config_revision'] = source['revision']
         editable = self._allowed(actor, source, record['scopes'], write=True)
         result['capabilities'] = {'edit': editable, 'upload': editable, 'max_upload_bytes': MAX_FILE}
@@ -480,10 +509,13 @@ class DocumentLibraryService:
             record = json.loads(row[0])
             if (self._allowed(actor, source, record['scopes']) and (not scope or scope in record['scopes'])
                     and (not q or q in _json(record['fields']).casefold())):
-                public = self._public(source, record, actor)
-                public['capabilities'] = {'edit': self._allowed(actor, source, record['scopes'], write=True), 'upload': self._allowed(actor, source, record['scopes'], write=True)}
-                records.append(public)
-        return {'items': records[offset:offset + size], 'total': len(records), 'has_more': len(records) > offset + size,
+                records.append(record)
+        items = []
+        for record in records[offset:offset + size]:
+            public = self._public(source, record, actor)
+            public['capabilities'] = {'edit': self._allowed(actor, source, record['scopes'], write=True), 'upload': self._allowed(actor, source, record['scopes'], write=True)}
+            items.append(public)
+        return {'items': items, 'total': len(records), 'has_more': len(records) > offset + size,
             'cursor': str(offset + size) if len(records) > offset + size else '', 'page_size': size,
             'config_revision': source['revision'], 'sync_status': job[0] if job else 'pending'}
 
@@ -548,6 +580,7 @@ class DocumentLibraryService:
             source = self._table(provenance['table_key'])
             row = self._cached(provenance['table_key'], provenance['record_id'])
             return bool(source['enabled'] and row and not row['deleted'] and not row['pending_operation']
+                and provenance.get('origin') == _digest([source['base_token'], source['table_id']])
                 and row['revision'] == provenance['record_revision'] and source['revision'] == provenance['config_revision'])
         except Exception:
             return False
@@ -583,7 +616,7 @@ class DocumentLibraryService:
             raise AssistantError('附件版本不属于当前来源。', 404)
         self._require(actor, source, record['scopes'])
         attachment = next((a for a in record['attachments'] if a['attachment_id'] == attachment_id), None)
-        if not attachment or attachment['field_id'] not in source['attachment_fields']:
+        if not attachment:
             raise AssistantError('附件不存在或当前无权访问。', 404)
         path = self._content_path(source, attachment['file_token'])
         fresh_source = self._table(key)
@@ -968,19 +1001,22 @@ class DocumentLibraryService:
             provenance = json.loads(task['payload'])
             source = self._table(task['table_key'])
             cached = self._cached(task['table_key'], task['record_id'])
-            if (not cached or cached['deleted'] or cached['pending_operation'] or cached['revision'] != task['record_revision']
-                    or source['revision'] != provenance['config_revision']):
+            if not self.source_current(provenance):
                 with self.connect() as db:
                     db.execute("UPDATE ingestion SET status='removed',lease_until=0 WHERE source_key=? AND lease=?", (task['source_key'], task['lease']))
                 return
             from openclaw_service.assistant.lighthouse_knowledge import EXTENSIONS
-            path = self._content_path(source, provenance['file_token'])
             if Path(provenance['name']).suffix.lower() not in EXTENSIONS:
                 status = 'unsupported'
             else:
-                public_source = {key: provenance[key] for key in ('table_key', 'record_id', 'record_revision', 'config_revision', 'origin', 'scopes', 'attachment_id', 'field_id')}
-                with path.open('rb') as content:
+                public_source = {key: provenance[key] for key in ('table_key', 'record_id', 'record_revision', 'config_revision', 'origin', 'scopes', 'attachment_id', 'field_id', 'kind') if key in provenance}
+                if provenance.get('kind') == 'record':
+                    content = self._record_text(source, json.loads(cached['payload'])).encode('utf-8')
                     self.knowledge.upsert_source(task['source_key'], public_source, provenance['name'], content)
+                else:
+                    path = self._content_path(source, provenance['file_token'])
+                    with path.open('rb') as content:
+                        self.knowledge.upsert_source(task['source_key'], public_source, provenance['name'], content)
                 status = 'synced'
             with self.connect() as db:
                 db.execute("UPDATE ingestion SET status=?,lease='',lease_until=0 WHERE source_key=? AND lease=?", (status, task['source_key'], task['lease']))

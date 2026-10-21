@@ -1,6 +1,6 @@
 <template>
   <section ref="pageElement" class="kb-page" @dragover="onDragOver" @dragleave="onDragLeave" @drop="onDrop">
-    <VnetBackButton to="/" :disabled="uploadBusy" />
+    <VnetBackButton to="/?entry=tools" :disabled="uploadBusy" />
     <header class="kb-head">
       <div class="kb-title">
         <Database :size="22" aria-hidden="true" />
@@ -8,7 +8,6 @@
         <span v-if="isAdmin" class="kb-badge" :class="engineBadgeClass">{{ engineBadge }}</span>
       </div>
       <div class="kb-actions">
-        <button type="button" :disabled="uploadBusy" @click="navigate('/document-library')"><Database :size="16" />南通文件</button>
         <button type="button" class="primary" :disabled="uploadBusy" @click="openUpload()">
           <Upload :size="16" />上传文件
         </button>

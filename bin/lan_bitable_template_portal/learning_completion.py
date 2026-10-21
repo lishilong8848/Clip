@@ -390,7 +390,8 @@ def report(service, actor, query):
     if access['scope'] and access['scope'] not in core.SCOPES:
         raise core.LearningError('楼栋范围无效。')
     today = core.now().date().isoformat()
-    start, end = day(query.get('from') or query.get('date') or today), day(query.get('to') or query.get('date') or today)
+    default = query.get('date', today)
+    start, end = day(query.get('from', default)), day(query.get('to', default))
     span = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
     if span < 0 or span > 30:
         raise core.LearningError('一次最多查询31天，开始日期不能晚于结束日期。')

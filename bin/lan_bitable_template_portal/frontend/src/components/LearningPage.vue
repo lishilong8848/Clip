@@ -401,6 +401,7 @@ import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, Chevron
 import { ApiError, downloadFile, requestJson } from "../api/client";
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { requestLearning, type LearningApiOptions } from "../api/learning";
+import { beijingDate } from "../workspace-v2/eventPeriod";
 import { navigate, registerNavigationGuard } from "../navigation";
 import { acquireModal } from "../modalState";
 import VnetBackButton from "./VnetBackButton.vue";
@@ -909,7 +910,7 @@ async function bootstrap(): Promise<void> {
         learner.value = props.personId ? { id: props.personId } : null;
         if (learner.value && boot.value.self_person?.id === learner.value.id) learner.value = boot.value.self_person;
       }
-      date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
+      date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || beijingDate();
       Object.assign(settingsForm, boot.value.settings || {}); settingsSnapshot = JSON.stringify(settingsForm);
       ready.value = true;
       if (['sharing', 'completion'].includes(new URLSearchParams(window.location.search).get('tab') || '')) {

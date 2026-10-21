@@ -25,6 +25,7 @@ export type LibraryRecord = {
   record_id: string; fields: LibraryFields; revision: string;
   attachments: LibraryAttachment[]; capabilities: LibraryCapabilities;
   knowledge_status?: string | { state: string; error?: string };
+  knowledge_items?: Array<{ kind: string; name: string; status: string; error?: string; field_id?: string; attachment_id?: string }>;
 };
 export type LibrarySchema = {
   fields: LibraryField[]; display_fields: string[]; attachment_fields: string[];

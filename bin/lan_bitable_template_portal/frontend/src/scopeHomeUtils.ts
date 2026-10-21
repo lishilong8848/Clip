@@ -1,6 +1,6 @@
 import type { Dict } from "./api/client";
 
-export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "risk" | "critical_guard" | "risk_inspection" | "drill" | "learning" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence" | "pre_shift" | "work_handover";
+export type ScopeHomeEntryKey = "" | "event" | "maintenance" | "maintenance_mop" | "change" | "repair_management" | "repair" | "capacity" | "water" | "risk" | "critical_guard" | "risk_inspection" | "drill" | "learning" | "knowledge" | "documents" | "cabinet_power" | "tools" | "daily" | "power" | "polling" | "adjust" | "handover" | "plan_convergence" | "pre_shift" | "work_handover";
 export type ScopeHomeModuleAction = { key: ScopeHomeEntryKey; label: string; primary?: boolean; disabled?: boolean };
 export type ScopeHomeModuleMetric = {
   primaryLabel: string;
@@ -142,6 +142,8 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
   risk_inspection: { kicker: "风险管理", title: "选择楼栋进入风险排查", description: "", actionLabel: "进入风险排查" },
   pre_shift: { kicker: "班前检查", title: "班前检查清单", description: "", actionLabel: "进入班前检查清单" },
   learning: { kicker: "画像学练", title: "画像学练", description: "", actionLabel: "进入画像学练" },
+  knowledge: { kicker: "其他工具", title: "共享知识库", description: "", actionLabel: "进入共享知识库" },
+  documents: { kicker: "其他工具", title: "南通文件", description: "", actionLabel: "进入南通文件" },
   cabinet_power: { kicker: "机柜台账", title: "选择楼栋", description: "上下电记录与机柜平面图", actionLabel: "进入机柜上下电" },
   capacity: { kicker: "容量管理", title: "选择容量管理模板", description: "", actionLabel: "选择模板" },
   event: {
@@ -250,6 +252,8 @@ export const SCOPE_HOME_ENTRY_CONFIGS: Record<Exclude<ScopeHomeEntryKey, "">, Sc
 };
 
 export const SCOPE_HOME_TOOL_ENTRIES: ScopeHomeToolEntry[] = [
+  { key: "knowledge", title: "共享知识库", description: "", badge: "手动资料", icon: "library", tone: "blue" },
+  { key: "documents", title: "南通文件", description: "", badge: "资料记录", icon: "documents", tone: "cyan" },
   { key: "work_handover", title: "人员工作交接", description: "工作交接、接收确认和接续清单", badge: "交接", icon: "daily", tone: "blue" },
   { key: "learning", title: "画像学练", description: "每日练习、错题复习与学习画像", badge: "学练", icon: "daily", tone: "emerald" },
   { key: "daily", title: "每日任务清单", description: "汇总当天通告、事件、检修和维护记录", badge: "今日", icon: "daily", tone: "blue" },

@@ -132,6 +132,34 @@ class CheckSender:
     def __init__(self, runtime):
         self.runtime, self.loop = runtime, None
 
+    @staticmethod
+    def _diagnostic(app_id, person, recipient, receive_id, response=None, value=None):
+        def masked(identifier):
+            if isinstance(identifier, str) and re.fullmatch(r'(?:ou|on)_[A-Za-z0-9]+', identifier):
+                return identifier[:3] + '***' + (identifier[-4:] if len(identifier) > 7 else '')
+            return '***'
+
+        app_id = app_id if isinstance(app_id, str) and re.fullmatch(r'cli_[A-Za-z0-9]{1,64}', app_id) else '未知'
+        name = person.get('name') or '接收账号'
+        name = name if isinstance(name, str) and re.fullmatch(r'[\w\u4e00-\u9fff .·-]{1,40}', name) and not name.startswith(('ou_', 'on_')) else '接收账号'
+        parts = [f'应用ID={app_id}', f'接收人={name}', f'本账号={masked(recipient)}', f'投递账号={masked(receive_id)}']
+        if response is not None:
+            parts.append(f'HTTP {response.status_code}')
+            value = value if isinstance(value, dict) else {}
+            code = value.get('code')
+            valid_code = type(code) is int and -999999999 <= code <= 999999999
+            valid_code = valid_code or isinstance(code, str) and re.fullmatch(r'[0-9]{1,9}', code)
+            parts.append('code=' + (str(code) if valid_code else '未知'))
+            headers = getattr(response, 'headers', {})
+            error = value.get('error')
+            log_ids = [v for k, v in headers.items() if k.lower() in {'x-tt-logid', 'x-request-id'}]
+            if isinstance(error, dict):
+                log_ids.append(error.get('log_id'))
+            log_id = next((v for v in log_ids if isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', v)), '')
+            if log_id:
+                parts.append(f'request-logid={log_id}')
+        return '（' + '；'.join(parts) + '）'
+
     def __call__(self, recipient, card, identity):
         if self.loop is None or self.loop.is_closed():
             return False, '飞书智能体尚未就绪，提醒等待重试。', []
@@ -242,16 +270,30 @@ class CheckSender:
                 params={'receive_id_type': receive_type}, headers=headers,
                 json={'receive_id': receive_id, 'msg_type': kind, 'content': json.dumps(content, ensure_ascii=False),
                       'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, identity))})
+        except Exception:
+            raise CheckDeliveryUncertain('飞书发送回执未确认，等待原任务重试。' +
+                self._diagnostic(bot.config['app_id'], person, recipient, receive_id)) from None
+        try:
             value = response.json()
         except Exception:
-            raise CheckDeliveryUncertain('飞书发送回执未确认，等待原任务重试。') from None
+            value = None
+        diagnostic = self._diagnostic(bot.config['app_id'], person, recipient, receive_id, response, value)
         if response.status_code >= 500:
-            raise CheckDeliveryUncertain('飞书服务暂未确认发送结果，等待原任务重试。')
-        if response.status_code >= 400 or value.get('code') != 0:
-            raise CheckError(f"飞书拒绝提醒（HTTP {response.status_code}，code={value.get('code')}），请核对智能体应用可用范围及消息权限。")
-        mid = (value.get('data') or {}).get('message_id')
+            raise CheckDeliveryUncertain('飞书服务暂未确认发送结果，等待原任务重试。' + diagnostic)
+        code = value.get('code') if isinstance(value, dict) else None
+        if isinstance(code, str) and re.fullmatch(r'[0-9]{1,9}', code):
+            code = int(code)
+        if response.status_code >= 400 or (type(code) is int and code != 0):
+            if code == 230013:
+                raise CheckError('飞书拒绝提醒：接收人不在当前应用机器人的可用范围内（或被禁用、已离职）。'
+                    '请管理员核对该应用对该接收人的可用范围，使授权生效后将自动重试。' + diagnostic)
+            raise CheckError('飞书拒绝提醒，请管理员根据错误码及日志号核对；提醒保留并稍后重试。' + diagnostic)
+        if type(code) is not int or code != 0:
+            raise CheckDeliveryUncertain('飞书发送回执格式未确认，等待原任务重试。' + diagnostic)
+        data = value.get('data')
+        mid = data.get('message_id') if isinstance(data, dict) else None
         if not isinstance(mid, str) or not re.fullmatch(r'om_[A-Za-z0-9]+', mid):
-            raise CheckDeliveryUncertain('飞书智能体未返回有效发送回执，提醒等待原任务重试。')
+            raise CheckDeliveryUncertain('飞书智能体未返回有效发送回执，提醒等待原任务重试。' + diagnostic)
         if photo is not None:
             return mid
         return True, 'ok', [{'open_id': recipient, 'sender_app_id': bot.config['app_id'], 'message_id': mid}]

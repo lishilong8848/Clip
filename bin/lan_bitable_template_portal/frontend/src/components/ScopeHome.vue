@@ -117,6 +117,7 @@
           @click="selectEntry(tool.key)"
         >
           <span v-if="activeMode==='risk'" class="risk-tool-icon" aria-hidden="true"><ClipboardCheck v-if="tool.key==='risk_inspection'" :size="24" /><ShieldCheck v-else :size="24" /></span>
+          <span v-else-if="tool.key==='knowledge'||tool.key==='documents'" class="risk-tool-icon" aria-hidden="true"><Library v-if="tool.key==='knowledge'" :size="24" /><FolderOpen v-else :size="24" /></span>
           <span v-else class="tool-icon" :class="tool.icon" aria-hidden="true"></span>
           <span>
             <strong>{{ tool.title }}</strong>
@@ -256,7 +257,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ClipboardCheck, ShieldCheck } from 'lucide-vue-next';
+import { ClipboardCheck, FolderOpen, Library, ShieldCheck } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
 import { preShiftScopes, preShiftSummary } from '../preShiftUtils';
 import {
@@ -302,6 +303,8 @@ const emit = defineEmits<{
   "risk-inspection": [scope?: string];
   drill: [];
   learning: [];
+  knowledge: [];
+  documents: [];
   "cabinet-power": [];
   daily: [scope: string];
   "plan-convergence": [];
@@ -374,6 +377,8 @@ function entryModule(entry: string): string {
     case "risk_inspection": return "risk_inspection";
     case "drill": return "drills";
     case "learning": return "learning";
+    case "knowledge":
+    case "documents": return "knowledge";
     case "cabinet_power": return "cabinet";
     case "daily": return "daily";
     case "power": return "power";
@@ -386,6 +391,7 @@ function entryModule(entry: string): string {
   }
 }
 const toolsModule: Record<string, string> = {
+  knowledge: "knowledge", documents: "knowledge",
   learning: "learning", daily: "daily", power: "power", polling: "polling",
   adjust: "adjust", handover: "handover", plan_convergence: "plan_convergence", work_handover: "work_handover",
 };
@@ -397,7 +403,7 @@ const cardModules: Record<string, string[]> = {
   repair_management: ["repair_management", "repair"],
   risk: ["critical_guard", "risk_inspection"],
   capacity: ["water", "cabinet"],
-  tools: ["daily", "power", "polling", "adjust", "handover", "plan_convergence", "learning", "work_handover"],
+  tools: ["daily", "power", "polling", "adjust", "handover", "plan_convergence", "learning", "work_handover", "knowledge"],
   drill: ["drills"],
 };
 const filteredModuleCards = computed(() =>
@@ -731,6 +737,8 @@ function selectEntry(key: EntryKey): void {
   if (key === 'work_handover') { emit('work-handover'); return; }
   if (key === 'pre_shift') { emit('pre-shift'); return; }
   if (key === "learning") { emit("learning"); return; }
+  if (key === "knowledge") { emit("knowledge"); return; }
+  if (key === "documents") { emit("documents"); return; }
   if (!key) return;
   if (key === "event") {
     const scope = defaultEventScope();

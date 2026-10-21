@@ -45,6 +45,66 @@ class KnowledgeRoutes(unittest.IsolatedAsyncioTestCase):
         self.kb.close()
         self.tmp.cleanup()
 
+    async def test_manual_management_excludes_sources_but_both_channels_search_and_download(self):
+        base = '/api/assistant/knowledge'
+        self.kb.source_current = lambda source: True
+        self.kb.source_acl = lambda user, source: user['id'] == 'owner'
+        managed = self.kb.upsert_source('fixture/record/body', {'scopes': ['A']},
+            'managed.txt', b'Unifiedneedle source content')
+        manual = self.kb.upload(actor('owner'), 'manual.txt', b'Unifiedneedle manual content')
+        while self.kb.process_one():
+            pass
+        for params in ({}, {'source': 'all', 'select_all': '1'}, {'q': 'managed'}, {'deleted': '1'}):
+            response = await self.client.get(base, params=params, headers={'admin': '1'})
+            self.assertEqual(response.status_code, 200, response.text)
+            data = response.json()['data']
+            self.assertNotIn(managed['id'], [item['id'] for item in data['items']])
+            self.assertEqual(data['total'], 0 if params.get('q') or params.get('deleted') else 1)
+            if 'selection' in data:
+                self.assertEqual(data['selection']['count'], 1)
+        for channel in ('web', 'feishu'):
+            found = (await self.client.get(base + '/search', params={'q': 'Unifiedneedle'},
+                headers={'channel': channel})).json()['data']['items']
+            self.assertEqual({item['document_id'] for item in found}, {managed['id'], manual['id']})
+            other = (await self.client.get(base + '/search', params={'q': 'Unifiedneedle'},
+                headers={'channel': channel, 'user': 'other'})).json()['data']['items']
+            self.assertEqual({item['document_id'] for item in other}, {manual['id']})
+        path = base + '/documents/' + managed['id']
+        self.assertEqual((await self.client.get(path)).status_code, 200)
+        self.assertEqual((await self.client.get(path + '/file')).content, b'Unifiedneedle source content')
+        self.assertEqual((await self.client.get(path + '/file', headers={'user': 'other'})).status_code, 404)
+        self.assertEqual(self.kb.settings(actor('owner'))['vectors'], 1)
+        self.kb.upsert_source('fixture/record/pending', {'scopes': ['A']}, 'queued.txt', b'Awaiting index')
+        self.assertEqual(self.kb.settings(actor('owner'))['queued'], 0)
+
+    async def test_manual_folder_counts_selection_and_ancestors_exclude_managed_members(self):
+        base = '/api/assistant/knowledge'
+        self.kb.source_current = self.kb.source_acl = lambda *args: True
+        managed = self.kb.upsert_source('fixture/record/body', {}, 'managed.txt', b'Source fixture')
+        manual = self.kb.upload(actor('owner'), 'manual.txt', b'Manual fixture')
+        parent = self.kb.create_group(actor('owner'), 'Parent')
+        child = self.kb.create_group(actor('owner'), 'Child', parent_id=parent['id'])
+        hidden = self.kb.create_group(actor('owner'), 'Managed only')
+        with self.kb.connect() as db:
+            db.execute('INSERT INTO doc_group_members VALUES(?,?)', (managed['id'], parent['id']))
+        self.kb.set_documents_group(actor('owner'), child['id'], [manual['id']])
+        groups = (await self.client.get(base + '/groups')).json()['data']['groups']
+        by_id = {item['id']: item for item in groups}
+        self.assertEqual(by_id[parent['id']]['count'], 0)
+        self.assertEqual(by_id[child['id']]['count'], 1)
+        self.assertEqual(by_id[child['id']]['parent_id'], parent['id'])
+        with self.kb.connect() as db:
+            db.execute('UPDATE doc_group_members SET group_id=? WHERE document_id=?', (hidden['id'], managed['id']))
+        groups = (await self.client.get(base + '/groups')).json()['data']['groups']
+        self.assertNotIn(hidden['id'], [item['id'] for item in groups])
+        selection = (await self.client.get(base, params={'select_all': '1'}, headers={'admin': '1'})).json()['data']['selection']
+        moved = await self.client.put(base + '/groups/' + parent['id'] + '/documents',
+            headers={'admin': '1'}, json={'selection': selection})
+        self.assertEqual(moved.status_code, 200, moved.text)
+        self.assertEqual(moved.json()['data']['updated'], 1)
+        renamed = await self.client.patch(base + '/groups/' + parent['id'], json={'name': 'Renamed'})
+        self.assertEqual(renamed.json()['data']['count'], 1)
+
     async def test_web_upload_route_seeds_document(self):
         base = '/api/assistant/knowledge'
         response = await self.client.post(base + '/files', files={

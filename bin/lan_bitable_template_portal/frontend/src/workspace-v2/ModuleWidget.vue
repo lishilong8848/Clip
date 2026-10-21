@@ -35,6 +35,7 @@ const pages:Record<string,any>={event:lazy(()=>import('../components/EventManage
 pages.signature=lazy(()=>import('../components/SignaturePage.vue'));pages.history=lazy(()=>import('../components/HistoryMemoryPage.vue'));
 pages.work_handover=lazy(()=>import('../components/WorkHandoverPage.vue'));
 pages.risk_inspection=lazy(()=>import('../components/RiskInspectionPage.vue'));
+pages.documents=lazy(()=>import('../components/DocumentLibraryPage.vue'));
 function initial(){const entry=navigationModules(props.user.modules||[]).find(module=>module.id===props.item.module);const url=new URL(entry?.path||'/',location.origin);url.searchParams.set('scope',props.scope);if(props.item.module==='water')url.searchParams.set('water_view','records');if(props.initialUrl){const target=new URL(props.initialUrl,location.origin);const kind=moduleForRoute(target);if(target.origin===location.origin&&(kind===props.item.module||props.item.module==='notices'&&(NOTICE_IDS.includes(kind)||kind==='all'))&&(!target.searchParams.get('scope')||props.scopes.some(s=>s.value===target.searchParams.get('scope'))))return target;}return url;}
 const route=ref(initial()),history=ref<URL[]>([]),filterTarget=ref<HTMLElement|null>(null),error=ref('');
 const moduleId=computed(()=>{const id=moduleForRoute(route.value);return NOTICE_IDS.includes(id)||id==='all'?'notices':id;});

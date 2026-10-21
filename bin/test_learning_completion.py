@@ -2,9 +2,16 @@
 import copy
 import datetime as dt
 import json
+import sys
 import unittest
 from contextlib import closing
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
 from bin import test_learning as support
 from bin import test_learning_cloud as cloud_support
@@ -353,6 +360,92 @@ class CompletionTests(unittest.TestCase):
         self.assertIsNotNone(self.service._get('local', 'completion_pending:' + DATE))
         completion.refresh(self.service, AFTERNOON + dt.timedelta(days=3))
         self.assertIsNone(self.service._get('local', 'completion_pending:' + DATE))
+
+
+class CompletionRouteDateTests(unittest.TestCase):
+    def setUp(self):
+        from lan_bitable_template_portal.learning_routes import install_learning_routes
+
+        folder = TemporaryDirectory(prefix='completion_dates_')
+        self.addCleanup(folder.cleanup)
+        self.cloud, self.sender = support.FakeCloud(enabled=False), support.FakeSender()
+        self.service = learning.LearningService(folder.name, self.cloud, self.sender)
+        self.session = {'user': {'open_id': 'synthetic-admin'}, 'role': 'admin'}
+        controller = SimpleNamespace(
+            _current_session=lambda request: self.session,
+            _auth_required_response=lambda: JSONResponse({'ok': False}, status_code=401),
+            _json_ok=lambda request, session, data: JSONResponse({'ok': True, 'data': data}),
+        )
+        runtime = SimpleNamespace(auth_manager=SimpleNamespace(is_admin=lambda session: session.get('role') == 'admin'))
+        for guard in (
+            patch.object(learning, 'LearningService', return_value=self.service),
+            patch.object(learning, 'now', return_value=AFTERNOON),
+            patch.object(self.service, 'start', side_effect=AssertionError('No service workers')),
+            patch('socket.create_connection', side_effect=AssertionError('No network')),
+            patch('socket.getaddrinfo', side_effect=AssertionError('No DNS')),
+            patch.dict(sys.modules, {'lan_bitable_template_portal.portal_service': SimpleNamespace(
+                BUILDING_OPEN_ID_MAP={scope: 'synthetic-building-' + scope for scope in 'ABCDEH'})}),
+        ):
+            guard.start()
+            self.addCleanup(guard.stop)
+        app = FastAPI()
+        install_learning_routes(app, controller, runtime)
+        self.client = TestClient(app)  # No lifespan, therefore no workers or cloud startup.
+        self.addCleanup(self.client.close)
+
+    def get(self, params):
+        return self.client.get('/api/learning/completion', params=params)
+
+    def test_real_route_passes_scalar_query_to_real_service(self):
+        query = {'from': '2024-02-29', 'to': '2024-02-29', 'scope': 'A', 'person_id': 'synthetic-p1',
+                 'status': '已完成', 'shift': '白', 'q': 'Synthetic', 'page': '2', 'page_size': '10'}
+        with patch.object(self.service, 'dispatch', wraps=self.service.dispatch) as dispatch:
+            response = self.get(query)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(dispatch.call_args.args[3], query)
+        data = response.json()['data']
+        self.assertEqual((data['from'], data['to'], data['page'], data['page_size']),
+                         ('2024-02-29', '2024-02-29', 2, 10))
+        self.assertEqual(self.cloud.calls, [])
+        self.assertEqual(self.sender.calls, [])
+        self.assertEqual(self.service._all('local'), [])
+
+    def test_real_route_rejects_invalid_and_explicit_empty_dates(self):
+        for value in ('', '02/29/2024', '2024-2-29', '2026-02-29', '1900-02-29', '2100-02-29',
+                      '2024-04-31', '0000-01-01', '2024-02-29T00:00:00Z', ' 2024-02-29'):
+            for field in ('from', 'to', 'date'):
+                with self.subTest(value=value, field=field):
+                    response = self.get({field: value})
+                    self.assertEqual(response.status_code, 400, response.text)
+                    self.assertEqual(response.json()['error'], '请选择有效统计日期。')
+
+    def test_real_route_keeps_inclusive_31_day_limit(self):
+        for end, status in (('2024-03-02', 200), ('2024-03-03', 400), ('2024-01-31', 400)):
+            with self.subTest(end=end):
+                response = self.get({'from': '2024-02-01', 'to': end})
+                self.assertEqual(response.status_code, status, response.text)
+
+    def test_real_route_keeps_missing_date_default_and_last_query_value(self):
+        response = self.get({})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['data']['from'], DATE)
+        response = self.get([('from', 'bad'), ('from', '2024-02-29'), ('to', '2024-02-29')])
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['data']['from'], '2024-02-29')
+        response = self.get([('from', '2024-02-29'), ('from', 'bad'), ('to', '2024-02-29')])
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_real_route_keeps_permissions(self):
+        for session, query, status in (
+            (None, {'date': DATE}, 401),
+            ({'user': {'open_id': 'synthetic-guest'}, 'role': 'guest'}, {'date': DATE}, 403),
+            ({'user': {'open_id': 'synthetic-building-A'}}, {'date': DATE, 'scope': 'B'}, 403),
+            ({'user': {'open_id': 'synthetic-unmapped'}}, {'date': DATE}, 403),
+        ):
+            with self.subTest(session=session):
+                self.session = session
+                response = self.get(query)
+                self.assertEqual(response.status_code, status, response.text)
 
 
 class CompletionCloudTests(unittest.TestCase):

@@ -63,6 +63,7 @@ function fixturePlugin() {
         const params = new URLSearchParams(location.search), v2 = params.get('version') === 'v2', dark = params.has('dark');
         if (v2) { document.documentElement.classList.add('workspace-v2'); document.documentElement.dataset.v2Theme = dark ? 'dark' : 'light'; }
         document.body.style.margin = '0'; document.body.style.background = dark ? '#16191d' : '#ffffff';
+        const backSlot = document.createElement('div'); backSlot.id = 'page-back-slot'; document.body.prepend(backSlot);
         createApp({ render: () => h(NConfigProvider, { theme: dark ? darkTheme : null, themeOverrides: v2 ? dark ? nightTheme : theme : undefined }, {default: () => h(Page)}) }).mount('#app');`;
     },
     generateBundle(_options, bundle) {

@@ -238,6 +238,8 @@
       @risk-inspection="(scope?: string) => navigate('/risk-inspections' + (scope ? '?scope=' + encodeURIComponent(scope) : ''))"
       @drill="enterDrillManagement()"
       @learning="navigate('/learning')"
+      @knowledge="navigate('/knowledge-base')"
+      @documents="navigate('/document-library')"
       @plan-convergence="navigate('/plan-convergence')"
       @pre-shift="navigate('/?entry=pre_shift')"
       @work-handover="navigate('/work-handover')"
@@ -502,6 +504,8 @@ function homeEntryModule(entry: string): string {
     case "risk_inspection": return "risk_inspection";
     case "drill": return "drills";
     case "learning": return "learning";
+    case "knowledge":
+    case "documents": return "knowledge";
     case "cabinet_power": return "cabinet";
     case "daily": return "daily";
     case "power": return "power";

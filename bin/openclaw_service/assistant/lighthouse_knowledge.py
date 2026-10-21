@@ -520,8 +520,8 @@ class KnowledgeBase:
         runtime_ready = bool(runtime.get('ready', True)) if self.embedder is not None else False
         with self.connect(readonly=True) as db:
             self._acl_sql(db, actor)
-            queued = db.execute("SELECT count(*) FROM documents WHERE deleted=0 AND status IN ('queued','indexing') AND pending_version IS NOT NULL AND knowledge_visible(id)=1").fetchone()[0]
-            vectors = db.execute('SELECT count(*) FROM local_vectors lv JOIN chunks c ON c.id=lv.chunk_id JOIN documents d ON d.id=c.document_id WHERE d.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1').fetchone()[0] if snapshot is not None else 0
+            queued = db.execute("SELECT count(*) FROM documents WHERE source_key='' AND deleted=0 AND status IN ('queued','indexing') AND pending_version IS NOT NULL AND knowledge_visible(id)=1").fetchone()[0]
+            vectors = db.execute("SELECT count(*) FROM local_vectors lv JOIN chunks c ON c.id=lv.chunk_id JOIN documents d ON d.id=c.document_id WHERE d.source_key='' AND d.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1").fetchone()[0] if snapshot is not None else 0
         warning = ''
         if mode == MODE:
             if not index_ready:
@@ -678,7 +678,7 @@ class KnowledgeBase:
         # Qualify every column against `documents`: the FROM joins knowledge_groups,
         # whose columns (name/owner_name/owner) overlap and would otherwise make the
         # predicates below ambiguous when q/trash filters are present.
-        sql, values = 'documents.deleted=?', [int(deleted)]
+        sql, values = "documents.source_key='' AND documents.deleted=?", [int(deleted)]
         if deleted and not actor.get('is_admin'):
             sql += ' AND documents.owner=?'
             values.append(actor['id'])
@@ -765,12 +765,24 @@ class KnowledgeBase:
                 self._bump(db)
 
     def source_status(self, prefix):
-        with self.connect(readonly=True) as db:
-            states = [row[0] for row in db.execute('SELECT d.status FROM documents d JOIN document_sources s ON s.document_id=d.id WHERE substr(s.source_key,1,?)=? AND s.enabled=1', (len(prefix), prefix))]
+        states = [item['status'] for item in self.source_states(prefix).values()]
         for state in ('blocked', 'failed', 'indexing', 'queued'):
             if state in states:
                 return state
         return 'ready' if states else 'none'
+
+    def source_states(self, prefix):
+        with self.connect(readonly=True) as db:
+            result = {}
+            for row in db.execute('SELECT s.source_key,d.id,d.active_version,d.status,d.error FROM documents d JOIN document_sources s ON s.document_id=d.id WHERE substr(s.source_key,1,?)=? AND s.enabled=1 AND d.deleted=0', (len(prefix), prefix)):
+                missing = row['status'] == 'ready' and not self._source_index_ready(db, row['id'], row['active_version'])
+                result[row['source_key']] = {'status': 'queued' if missing else row['status'],
+                    'error': '知识库索引缺失，等待补入。' if missing else row['error'], 'missing': missing}
+            return result
+
+    def _source_index_ready(self, db, identity, version):
+        chunks, vectors = db.execute('SELECT count(*),count(lv.chunk_id) FROM chunks c LEFT JOIN local_vectors lv ON lv.chunk_id=c.id WHERE c.document_id=? AND c.version=?', (identity, version)).fetchone()
+        return bool(chunks and (not self._vector_mode(self._get_config(db)) or chunks == vectors))
 
     def _upload_file(self, actor, name, content, *, document_id='', revision=None, source_key='', source=None):
         """Stage bytes before the short metadata transaction; never lock while copying."""
@@ -830,11 +842,13 @@ class KnowledgeBase:
             if row and latest and latest['payload'] and latest['hash'] == hexdigest and latest['name'] == name:
                 prior = json.loads(latest['payload'])
                 if all(prior.get(key) == source.get(key) for key in policy_fields):
-                    if not unchanged_source:
-                        ready = bool(db.execute('SELECT 1 FROM chunks WHERE document_id=? AND version=? LIMIT 1', (document_id, latest['version'])).fetchone())
+                    ready = self._source_index_ready(db, document_id, latest['version'])
+                    if not unchanged_source or row['status'] == 'ready' and (not ready or row['active_version'] != latest['version']):
                         db.execute('UPDATE documents SET active_version=?,pending_version=?,status=?,revision=revision+1,error=\'\',updated_at=? WHERE id=?',
                             (latest['version'] if ready else None, None if ready else latest['version'], 'ready' if ready else 'queued', time.time(), document_id))
                         self._bump(db)
+                        if ready and row['active_version'] != latest['version']:
+                            self._bump_vector(db)
                     return {**self._public(db.execute('SELECT * FROM documents WHERE id=?', (document_id,)).fetchone(), actor), 'duplicate': True}, None
         if row:
             identical = db.execute('SELECT 1 FROM versions WHERE document_id=? AND hash=? AND version IN (?,?)',
@@ -1125,10 +1139,17 @@ class KnowledgeBase:
                 SELECT g.id, g.name, g.owner, g.owner_name, g.parent_id, g.created_at,
                        (SELECT count(*) FROM doc_group_members m
                         JOIN documents d ON d.id=m.document_id
-                         WHERE m.group_id=g.id AND d.deleted=0 AND knowledge_visible(d.id)=1) AS count
+                         WHERE m.group_id=g.id AND d.source_key='' AND d.deleted=0 AND knowledge_visible(d.id)=1) AS count
                 FROM knowledge_groups g ORDER BY g.created_at, g.id''').fetchall()
             hidden = {row[0] for row in db.execute('SELECT DISTINCT m.group_id FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE d.source_key<>\'\'')}
-        rows = [row for row in rows if row['count'] or row['id'] not in hidden]
+        visible = {row['id'] for row in rows if row['count'] or row['id'] not in hidden}
+        parents = {row['id']: row['parent_id'] for row in rows}
+        for identity in tuple(visible):
+            parent = parents.get(identity)
+            while parent and parent not in visible:
+                visible.add(parent)
+                parent = parents.get(parent)
+        rows = [row for row in rows if row['id'] in visible]
         return {'groups': [self._group_row(actor, row) for row in rows], 'total': len(rows), 'acl_revision': acl_revision}
 
     def create_group(self, actor, name, parent_id=None):
@@ -1179,7 +1200,7 @@ class KnowledgeBase:
                 db.execute('UPDATE knowledge_groups SET name=? WHERE id=?', (name, group_id))
             else:
                 db.execute('UPDATE knowledge_groups SET name=?,parent_id=? WHERE id=?', (name, normalized, group_id))
-            count = db.execute('SELECT count(*) FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE m.group_id=? AND d.deleted=0 AND knowledge_visible(d.id)=1', (group_id,)).fetchone()[0]
+            count = db.execute("SELECT count(*) FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE m.group_id=? AND d.source_key='' AND d.deleted=0 AND knowledge_visible(d.id)=1", (group_id,)).fetchone()[0]
             row = db.execute('SELECT id,name,owner,owner_name,parent_id,created_at FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
         return self._group_row(actor, dict(row, count=count))
 

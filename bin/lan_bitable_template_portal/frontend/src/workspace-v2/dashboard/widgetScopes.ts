@@ -4,7 +4,7 @@ export type ScopeOption = { value:string; label:string };
 export function widgetScopeOptions(item:Pick<Widget,'kind'|'module'>,options:ScopeOption[]):ScopeOption[]{
   if(['pre_shift','learning','shortcuts'].includes(item.kind))return [];
   const module=item.kind==='module'?item.module:item.kind;
-  if(['knowledge','links','signatures','accounts','life_guide','handover','learning'].includes(module))return [];
+  if(['knowledge','documents','links','signatures','accounts','life_guide','handover','learning'].includes(module))return [];
   const supported=['cabinet','drills','critical_guard'].includes(module)?'ABCDE'.split(''):module==='water'?'ABCDEH'.split(''):['110',...'ABCDEH'];
   return options.filter(option=>supported.includes(option.value));
 }

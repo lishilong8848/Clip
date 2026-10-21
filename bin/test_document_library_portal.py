@@ -470,15 +470,15 @@ class DocumentLibraryPortalTests(LibraryFixture):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertNotIn('Alpha policy service steps', response.text)
 
-    def test_removed_attachment_field_cannot_be_downloaded_through_history(self):
+    def test_attachment_selection_does_not_revoke_authorized_historical_download(self):
         versions = self.data(self.prefix + '/records/recOne/versions')
         url = versions['items'][0]['attachments'][0]['download_url']
         source = self.service._table('manuals')
         self.service.save_table(self.admin, configuration(attachment_fields=[],
             expected_revision=source['revision']), key='manuals')
         response = self.client.get(url)
-        self.assertEqual(response.status_code, 404, response.text)
-        self.assertNotIn('Alpha policy service steps', response.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.content, b'Alpha policy service steps')
 
     def test_vector_query_rechecks_revocation_after_embedding(self):
         self.data('/api/document-library/tables')

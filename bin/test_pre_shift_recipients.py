@@ -80,10 +80,26 @@ class FixedRecipientsTests(unittest.TestCase):
         self.service.tick(NOW)
         self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_roster'])
         self.assertNotIn('fixed检查',self.text(self.sender.call_args))
-        self.assertIn('固定接收人',self.service.last_error)
+        self.assertIn('固定接收人',self.service.state(ADMIN,'A',NOW)['roster_error'])
         self.directory.return_value=FIXED
         self.service.tick(NOW+dt.timedelta(minutes=5))
         self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_roster','ou_fixed'])
+        self.assertEqual(self.service.state(ADMIN,'A',NOW+dt.timedelta(minutes=5))['roster_error'], '')
+
+    def test_fixed_directory_error_is_limited_to_its_building_and_open_item(self):
+        self.save([self.item(), {**self.item('later', []), 'frequency': {
+            'kind': 'daily', 'time': '09:00', 'start_date': '2026-10-19'}}])
+        with patch('lan_bitable_template_portal.pre_shift_checks.now', return_value=NOW):
+            self.service.save_definition(ADMIN, 'B', 0, [self.item()])
+        self.directory.side_effect = lambda scope: [] if scope == 'A' else FIXED
+        self.service.tick(NOW)
+        self.assertIn('固定接收人', self.service.state(ADMIN, 'A', NOW)['roster_error'])
+        self.assertEqual(self.service.state(ADMIN, 'B', NOW)['roster_error'], '')
+        task = next(t for t in self.service.state(ADMIN, 'A', NOW)['tasks'] if any(i['id'] == 'fixed' for i in t['items']))
+        self.service.submit(ADMIN, task['id'], task['definition_version'],
+                            [{'id': 'fixed', 'status': 'normal', 'note': ''}], NOW)
+        self.service.tick(NOW + dt.timedelta(minutes=20))
+        self.assertEqual(self.service.state(ADMIN, 'A', NOW + dt.timedelta(minutes=20))['roster_error'], '')
 
     def test_validation_permissions_legacy_edits_and_clearing_back_to_roster(self):
         for ids in (['ou_stranger'],['bad-id'],'ou_fixed'):
