@@ -1,5 +1,5 @@
 <template>
-  <div ref="pasteArea" class="v2-notice-photo-uploader" :data-notice-upload-kind="ali?'ali':'site'" role="group" :aria-label="ali?'阿里确认截图上传区':'现场照片上传区'" :aria-disabled="locked||working" :aria-busy="working" :tabindex="locked||working?-1:0" @click="focusArea" @paste.stop="paste" @dragover.prevent @drop.prevent.stop="add($event.dataTransfer?.files)">
+  <div class="v2-notice-photo-uploader" :data-notice-upload-kind="ali?'ali':'site'" role="group" :aria-label="ali?'阿里确认截图上传区':'现场照片上传区'" :aria-disabled="locked||working" :aria-busy="working" :tabindex="locked||working?-1:0" @click="focusNoticePhotoArea($event, locked||working)" @paste="add(noticePhotoFiles($event))" @dragover.prevent @drop="add(noticePhotoFiles($event))">
     <div class="v2-notice-photo-strip"><NImageGroup><div class="v2-notice-photos"><slot /><figure v-for="photo in modelValue" :key="photo.upload_id"><NImage v-if="preview(photo)" :src="preview(photo)" :alt="photo.file_name||'新增图片'" width="108" /><span>{{ photo.file_name }}</span><small>本次新增 · 已就绪</small><NButton quaternary circle data-v2-navigation :disabled="locked" aria-label="移除本次图片" @click="removeReady(photo)"><X :size="15" /></NButton></figure></div></NImageGroup></div>
     <ul v-if="queue.length" class="v2-photo-queue" aria-live="polite"><li v-for="entry in queue" :key="entry.id"><NSpin v-if="entry.state==='uploading'" size="small" /><CircleAlert v-else-if="entry.state==='failed'" :size="16" /><ImagePlus v-else :size="16" /><span><strong>{{ entry.file.name }}</strong><small>{{ entry.state==='uploading'?'正在上传':entry.state==='queued'?'等待上传':entry.error }}</small></span><NButton v-if="entry.state==='failed'" size="small" data-v2-navigation :disabled="locked" @click="retry(entry)">重试此张</NButton><NButton v-if="entry.state!=='uploading'" quaternary circle data-v2-navigation :disabled="working" aria-label="移除未上传图片" @click="queue=queue.filter(v=>v.id!==entry.id)"><X :size="15" /></NButton></li></ul>
     <label class="v2-notice-upload"><ImagePlus :size="18" /><span>{{ working?'上传中…':ali?'选择截图':'选择照片' }}</span><input type="file" accept="image/*" :multiple="!ali" :disabled="locked||working" :aria-label="ali?'添加阿里确认截图':'添加现场照片'" @change="input" /></label>
@@ -12,11 +12,11 @@ import {NButton,NImage,NImageGroup,NSpin} from 'naive-ui';
 import {CircleAlert,ImagePlus,X} from 'lucide-vue-next';
 import {requestBinaryJson,type Dict} from './client';
 import type {NoticeForm} from './noticeForm';
+import {focusNoticePhotoArea,noticePhotoFiles} from '../noticePhotoInput';
 type Entry={id:number;file:File;state:'queued'|'uploading'|'failed';error:string};
 const props=defineProps<{form:NoticeForm;modelValue:Dict[];locked:boolean;ali?:boolean}>();
 const emit=defineEmits<{'update:modelValue':[value:Dict[]];busy:[value:boolean]}>();
 const queue=ref<Entry[]>([]),working=ref(false),error=ref('');let serial=0,disposed=false;
-const pasteArea=ref<HTMLElement>();
 const pending=computed(()=>queue.value.length);
 const preview=(p:Dict)=>/^\/api\/notice-images\/[a-f0-9]{32}$/.test(p.preview_url||'')?p.preview_url:'';
 function removeReady(photo:Dict){if(!props.locked)emit('update:modelValue',props.modelValue.filter(p=>p.upload_id!==photo.upload_id));}
@@ -43,8 +43,6 @@ async function run(){
 }
 function retry(entry:Entry){if(props.locked||working.value)return;entry.state='queued';entry.error='';void run();}
 function input(event:Event){const el=event.target as HTMLInputElement;add(el.files);el.value='';}
-function focusArea(event:MouseEvent){if(!props.locked&&!working.value&&!(event.target as HTMLElement).closest('button,a,input,label,.n-image'))pasteArea.value?.focus({preventScroll:true});}
-function paste(event:ClipboardEvent){const files=Array.from(event.clipboardData?.files||[]).filter(file=>file.type.startsWith('image/'));if(files.length){event.preventDefault();add(files);}}
 onBeforeUnmount(()=>{disposed=true;});
 defineExpose({add,pending});
 </script>

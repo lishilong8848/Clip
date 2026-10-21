@@ -3,8 +3,6 @@ import { createServer } from 'node:http';
 import { readFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from 'vite';
-import vue from '@vitejs/plugin-vue';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const output = path.resolve(root, '../../../output/playwright/document-library');
@@ -45,38 +43,13 @@ export function documentFixture() {
   return { tables: [table('electrical', '电气技术资料'), table('mechanical', '暖通技术资料', false)],
     records: [makeRecord('recDoc1', 'A楼高压配电操作规程'), makeRecord('recDoc2', 'A楼电气系统竣工图'), makeRecord('recDoc3', 'E楼运行资料', 'E')],
     calls: [], writes: [], applied: 0, receipts: new Map(), flags: { tablesFailure: false, schemaFailure: false, listFailure: false,
-      detailFailure: false, versionsFailure: false, conflict: false, loseReceipt: false, indexFailure: false, denyWrite: false },
-    canConfigure: true, personMultiple: false, listDelay: 0, version: 1, authReads: 0 };
-}
-function fixturePlugin() {
-  return {
-    name: 'isolated-document-library-preview',
-    enforce: 'post',
-    resolveId(id) { if (id === 'virtual:document-library-preview') return '\0document-library-preview'; },
-    load(id) {
-      if (id !== '\0document-library-preview') return;
-      return `import { createApp, h } from 'vue';
-        import { NConfigProvider, darkTheme } from 'naive-ui';
-        import Page from '/src/components/DocumentLibraryPage.vue';
-        import { theme, nightTheme } from '/src/workspace-v2/theme';
-        import '/src/global.css'; import '/src/workspace-v2/night.css';
-        const params = new URLSearchParams(location.search), v2 = params.get('version') === 'v2', dark = params.has('dark');
-        if (v2) { document.documentElement.classList.add('workspace-v2'); document.documentElement.dataset.v2Theme = dark ? 'dark' : 'light'; }
-        document.body.style.margin = '0'; document.body.style.background = dark ? '#16191d' : '#ffffff';
-        const backSlot = document.createElement('div'); backSlot.id = 'page-back-slot'; document.body.prepend(backSlot);
-        createApp({ render: () => h(NConfigProvider, { theme: dark ? darkTheme : null, themeOverrides: v2 ? dark ? nightTheme : theme : undefined }, {default: () => h(Page)}) }).mount('#app');`;
-    },
-    generateBundle(_options, bundle) {
-      const entry = Object.values(bundle).find(item => item.type === 'chunk' && item.isEntry);
-      const css = Object.values(bundle).filter(item => item.fileName.endsWith('.css'));
-      this.emitFile({ type: 'asset', fileName: 'index.html', source: `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>南通文件 · 隔离验收</title>${css.map(item => `<link rel="stylesheet" href="/${item.fileName}">`).join('')}</head><body><div id="app"></div><script type="module" src="/${entry.fileName}"></script></body></html>` });
-    },
-  };
+      detailFailure: false, versionsFailure: false, conflict: false, loseReceipt: false, indexFailure: false, denyWrite: false,
+      previewDenied: false, previewMalformed: false, previewEmptyFields: false, previewUnknownTable: false, previewNoTables: false, configLoseReceipt: false },
+    previewDelay: 0, canConfigure: true, personMultiple: false, listDelay: 0, version: 1, authReads: 0 };
 }
 export async function startDocumentLibraryPreview({ port = 0 } = {}) {
-  const outDir = path.join(output, 'site'); await mkdir(output, { recursive: true });
-  await build({ root, configFile: false, publicDir: false, logLevel: 'error', plugins: [fixturePlugin(), vue()],
-    build: { outDir, emptyOutDir: true, cssCodeSplit: false, rollupOptions: { input: 'virtual:document-library-preview' } } });
+  const outDir = path.join(root, 'dist'); await mkdir(output, { recursive: true });
+  await readFile(path.join(outDir, 'index.html'));
   const fixture = documentFixture();
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
@@ -84,18 +57,25 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
     try {
       if (url.pathname === '/api/auth/status' && request.method === 'GET') {
         fixture.authReads++;
-        return json({ logged_in: true, user: { open_id: 'ou_fixtureDoc', modules: ['knowledge'] }, scope_options: scopes });
+        return json({ logged_in: true, user: { open_id: 'ou_fixtureDoc', name: '隔离资料管理员', role: fixture.canConfigure ? 'admin' : 'building', level: fixture.canConfigure ? 'L1' : 'L4', home_scope: 'A', modules: ['knowledge'] }, scope_options: scopes });
       }
-      if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/document-library')) return json('隔离验收禁止访问其他接口', 403);
+      if (url.pathname === '/api/health') {
+        response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ ok: true, service: 'clipflow_backend', instance_id: 'isolated-documents' })); return;
+      }
+      if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/document-library')) return request.method === 'GET' ? json({ items: [], records: [], revision: 0, value: null }) : json('隔离验收禁止访问其他写入接口', 403);
       if (!url.pathname.startsWith('/api/')) {
+        if (url.pathname === '/' && url.searchParams.has('version')) {
+          response.writeHead(302, { Location: url.searchParams.get('version') === 'v2' ? '/assets/workspace-v2/index.html?__page=/document-library' : '/document-library' }); response.end(); return;
+        }
         const file = url.pathname.startsWith('/assets/') ? path.resolve(outDir, '.' + url.pathname) : path.join(outDir, 'index.html');
         assert(file.startsWith(outDir + path.sep));
-        const content = await readFile(file); response.setHeader('Content-Type', file.endsWith('.js') ? 'application/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html; charset=utf-8'); response.end(content); return;
+        const content = await readFile(file); response.setHeader('Content-Type', file.endsWith('.js') ? 'application/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.png') ? 'image/png' : 'text/html; charset=utf-8'); response.end(content); return;
       }
       const relative = url.pathname.slice('/api/document-library'.length);
       const match = /^\/tables\/([^/]+)(.*)$/.exec(relative);
       const key = match ? decodeURIComponent(match[1]) : '', resource = match?.[2] || '';
-      fixture.calls.push({ path: relative, method: request.method, table: key, query: Object.fromEntries(url.searchParams) });
+      const call = { path: relative, method: request.method, table: key, query: Object.fromEntries(url.searchParams) };
+      fixture.calls.push(call);
       const selected = fixture.tables.find(item => item.id === key);
       const capabilities = record => ({ edit: selected.write_scopes.includes(record.fields.fldScope), upload: selected.write_scopes.includes(record.fields.fldScope), max_upload_bytes: 104857600 });
       const fail = message => json(message, 503);
@@ -123,6 +103,24 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
         return record ? fixture.flags.detailFailure ? fail('资料详情暂时读取失败') : json({ ...record, capabilities: capabilities(record) }) : json('资料不存在', 404);
       }
       const chunks = []; for await (const chunk of request) chunks.push(chunk); const body = Buffer.concat(chunks);
+      if (relative === '/preview' && request.method === 'POST') {
+        const payload = JSON.parse(body.toString()); call.body = payload;
+        if (!fixture.canConfigure || fixture.flags.previewDenied) return json('没有读取此数据表的权限', 403);
+        let link; try { link = new URL(payload.url); } catch { return json('请输入有效的飞书 Base 或 Wiki 链接', 400); }
+        if (!['vnet.feishu.cn'].includes(link.hostname) || !/^\/(base|wiki)\//.test(link.pathname)) return json('请输入有效的飞书 Base 或 Wiki 链接', 400);
+        if (link.pathname.includes('notBitable')) return json('此 Wiki 节点不是多维表', 400);
+        const delay = fixture.previewDelay; if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+        if (fixture.flags.previewMalformed) return json({ url: payload.url, source: {}, tables: [], fields: [] });
+        if (fixture.flags.previewNoTables) return json({ url: payload.url, source: null, tables: [], fields: [] });
+        const tables = [{ table_id: 'tblSyntheticFixture', name: '测试归档资料' }, { table_id: 'tblSecondFixture', name: '第二张资料表' }];
+        if (payload.table_id && link.searchParams.get('table') && payload.table_id !== link.searchParams.get('table')) return json('链接中的数据表与选择的数据表不一致', 400);
+        const tableId = payload.table_id || link.searchParams.get('table');
+        if (!tableId) return json({ url: payload.url, source: null, tables, fields: [] });
+        const url = 'https://vnet.feishu.cn/base/baseSyntheticFixture?table=' + tableId;
+        const second = tableId === 'tblSecondFixture';
+        return json({ url, source: { id: second ? 'secondFixture' : 'fixtureTable', name: second ? '第二张资料表' : '测试归档资料', base_token: 'baseSyntheticFixture', table_id: fixture.flags.previewUnknownTable ? 'tblMissing' : tableId, url }, tables,
+          fields: (fixture.flags.previewEmptyFields ? [] : second ? [{ id: 'fldOther', name: '另一表标题', type: 1 }] : schema.fields).map(field => ({ field_id: field.id, field_name: field.name, type: field.type, property: { options: field.options || [] }, is_computed: field.read_only })) });
+      }
       if (relative === '/tables' || match && !resource) {
         if (!fixture.canConfigure) return json('没有配置权限', 403);
         const payload = JSON.parse(body.toString()); fixture.writes.push({ path: relative, body: payload });
@@ -135,6 +133,7 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
         if (request.method === 'PUT' && payload.expected_revision !== fixture.tables[existing]?.revision) return json('表配置版本冲突', 409);
         const result = { ...payload, revision: 'config' + (++fixture.version), capabilities: { create: !!payload.write_scopes.length, configure_tables: true } };
         if (existing >= 0) fixture.tables[existing] = result; else fixture.tables.push(result);
+        if (fixture.flags.configLoseReceipt) { fixture.flags.configLoseReceipt = false; return fail('表配置已提交，回执未确认'); }
         return json(result);
       }
       if (!selected || fixture.flags.denyWrite || !selected.write_scopes.length) return json('没有编辑此数据表的权限', 403);

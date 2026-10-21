@@ -3714,5 +3714,141 @@ const navigator={},setLiteStatus=text=>message=text;
             self.assertEqual(reloaded.content(saved["local_image_id"])[0], b"png-bytes")
 
 
+class AdjustSopTypeTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="adjust-sop-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.store = LanPortalStateStore(self.root / "state.sqlite3")
+        self.service = PollingWorkOrderService(self.store)
+        self.service.sop_root = self.root / "sops"
+        self.service.work_order_root = self.root / "orders"
+        self.people = [{"record_id": "operator", "name": "Operator", "open_id": "fixture_operator"},
+                       {"record_id": "reviewer", "name": "Reviewer", "open_id": "fixture_reviewer"}]
+
+    def payload(self, **changes):
+        return {"scope": "A", "work_type": "adjust", "name": uuid.uuid4().hex,
+                "adjust_sop_type": "cooling", "steps": [{"content": "Check the selected cooling unit.",
+                "operator_required": True, "reviewer_required": True}], **changes}
+
+    def ready(self, **changes):
+        sop = self.service.save_sop(self.payload(**changes))
+        return self.service.add_sop_attachment(sop["sop_id"], file_name="fixture.txt", content=b"fixture",
+                                               expected_version=sop["version"])
+
+    def prepare(self, sop, **changes):
+        body = {"scope": "A", "work_type": sop["work_type"], "action": "start", "_web_action_request": True,
+                "polling_sop_id": sop["sop_id"], "polling_sop_version": sop["version"], "polling_run_count": 1,
+                "polling_runs": [{"other_unit": "6#", "from_unit": "2#", "to_unit": "4#"}],
+                "polling_operator_record_id": "operator", "polling_reviewer_record_id": "reviewer", **changes}
+        return self.service.prepare_start(body, job_id="fixture-start", people=self.people)
+
+    def test_explicit_cooling_without_tokens_survives_model_save_reload_and_keeps_content(self):
+        from clipflow_backend.api_models import PollingSopRequest
+        model = PollingSopRequest(**self.payload())
+        saved = self.service.save_sop(model.to_payload())
+        reloaded = PollingWorkOrderService(LanPortalStateStore(self.root / "state.sqlite3")).get_sop(saved["sop_id"])
+        self.assertEqual(reloaded["adjust_sop_type"], "cooling")
+        self.assertFalse(reloaded["ready"])
+        with self.assertRaisesRegex(Exception, "缺少步骤或附件"):
+            self.prepare(saved)
+        ready = self.service.add_sop_attachment(saved["sop_id"], file_name="fixture.txt", content=b"fixture", expected_version=saved["version"])
+        result = self.prepare(ready)["polling_work_order_spec"]
+        self.assertEqual(result["steps"][0]["content"], model.steps[0]["content"])
+        self.assertEqual(result["runs"][0]["other_unit"], "6#")
+        self.assertIn("板换模式", result["runs"][0]["label"])
+        self.assertIn("制冷模式", result["runs"][0]["label"])
+        for runs in ([], [{"other_unit": "7#", "from_unit": "2#", "to_unit": "4#"}],
+                     [{"other_unit": "6#", "from_unit": "2#", "to_unit": "2#"}]):
+            with self.subTest(runs=runs), self.assertRaises(Exception):
+                self.prepare(ready, polling_runs=runs)
+
+    def test_cloud_roundtrip_preserves_array_schema_type_hash_and_reordered_steps(self):
+        sop = self.ready()
+        sop["steps"].insert(0, {**sop["steps"][0], "step_id": uuid.uuid4().hex, "content": "New first step"})
+        saved = self.service.save_sop({**sop, "expected_version": sop["version"]})
+        # Exercise the real serializer/save path with no transport or schema operations.
+        cloud = PollingSopCloudStore.__new__(PollingSopCloudStore)
+        cloud.ensure_schema = MagicMock()
+        cloud.list_sops = MagicMock(return_value=[])
+        cloud.invalidate = MagicMock()
+        cloud._request = MagicMock(return_value={"record": {"record_id": "fixture_record"}})
+        cloud.save_sop(saved, expected_version=0)
+        fields = cloud._request.call_args.args[2]["fields"]
+        encoded = json.loads(fields["步骤数据"])
+        self.assertIsInstance(encoded, list)
+        self.assertEqual(encoded[0]["adjust_sop_type"], "cooling")
+        decoded = cloud._decode({"record_id": "fixture_record", "fields": fields})
+        self.assertEqual(decoded["adjust_sop_type"], "cooling")
+        self.assertEqual(decoded["steps"], saved["steps"])
+        legacy = PollingSopCloudStore._fields({key: value for key, value in saved.items() if key != "adjust_sop_type"})
+        ordinary = PollingSopCloudStore._fields({**saved, "adjust_sop_type": "normal"})
+        self.assertEqual(set(fields), set(legacy))
+        self.assertNotEqual(fields["内容哈希"], ordinary["内容哈希"])
+        self.assertNotIn("adjust_sop_type", saved["steps"][0])
+        decoded["attachments"] = []
+        self.service._cache_cloud_sop(decoded)
+        self.assertEqual(self.service.get_sop(saved["sop_id"])["adjust_sop_type"], "cooling")
+
+    def test_legacy_classification_and_omitted_update_type_preserve_cooling(self):
+        for content, expected in (("Plain adjustment", "normal"), ("Inspect {{from}}", "cooling")):
+            payload = self.payload(steps=[{"content": content, "operator_required": True}])
+            payload.pop("adjust_sop_type")
+            saved = self.service.save_sop(payload)
+            legacy = self.service.get_sop(saved["sop_id"], public=False)
+            legacy.pop("adjust_sop_type")
+            self.store.put_document("polling_sop", saved["sop_id"], legacy)
+            self.assertEqual(self.service.get_sop(saved["sop_id"])["adjust_sop_type"], expected)
+            updated = self.service.save_sop({**payload, "sop_id": saved["sop_id"], "expected_version": saved["version"],
+                                            "steps": [{"content": "Now without placeholders", "operator_required": True}]})
+            self.assertEqual(updated["adjust_sop_type"], expected)
+        ready = self.ready(steps=[{"content": "Inspect {{from}} twice: {{from}}", "operator_required": True}])
+        self.assertEqual(self.prepare(ready)["polling_work_order_spec"]["steps"][0]["content"], "Inspect 6#制冷单元 twice: 6#制冷单元")
+
+    def test_cloud_type_conflict_preserves_local_cooling_even_when_steps_match(self):
+        saved = self.service.save_sop(self.payload())
+        local = self.service.get_sop(saved["sop_id"], public=False)
+        remote = {**local, "adjust_sop_type": "normal"}
+        for discovered_during_save in (False, True):
+            with self.subTest(discovered_during_save=discovered_during_save):
+                self.store.put_document("polling_sop", saved["sop_id"], local)
+                cloud = _FakePollingSopCloud([] if discovered_during_save else [remote])
+                self.service.cloud = cloud
+                def collide(*args, **kwargs):
+                    cloud.sops[saved["sop_id"]] = remote
+                    raise PortalConflictError("fixture conflict")
+                with patch.object(cloud, "save_sop", side_effect=collide):
+                    result = self.service.refresh_sops("A", "adjust")
+                self.assertEqual(result["pending_upload_count"], 1)
+                self.assertEqual(result["items"][0]["cloud_sync_status"], "conflict")
+                self.assertEqual(self.service.get_sop(saved["sop_id"])["adjust_sop_type"], "cooling")
+
+    def test_cooling_rejects_unsupported_tokens_and_existing_step_validation_remains(self):
+        for content in ("Use {{to}}", "Use {{other}}", "{{from}} to {{to}}", "", "   "):
+            with self.subTest(content=content), self.assertRaises(Exception):
+                self.service.save_sop(self.payload(steps=[{"content": content, "operator_required": True}]))
+        for change in ({"steps": []}, {"adjust_sop_type": "invalid"},
+                       {"steps": [{"content": "Check"}]},
+                       {"steps": [{"content": "Check", "operator_required": True, "time_limit_seconds": -1}]},
+                       {"steps": [{"content": "Check", "operator_required": True, "delay_reminder_minutes": 1441}]}):
+            with self.subTest(change=change), self.assertRaises(Exception):
+                self.service.save_sop(self.payload(**change))
+        with self.assertRaisesRegex(Exception, "普通设备调整"):
+            self.service.save_sop(self.payload(adjust_sop_type="normal", steps=[{"content": "{{from}}", "operator_required": True}]))
+
+    def test_ordinary_maintenance_and_polling_keep_original_selection_rules(self):
+        for work in ("adjust", "maintenance"):
+            sop = self.ready(work_type=work, adjust_sop_type="normal")
+            spec = self.prepare(sop, polling_runs=[], polling_run_count=0)["polling_work_order_spec"]
+            self.assertNotIn("other_unit", spec["runs"][0])
+            self.assertEqual(spec["steps"][0]["content"], sop["steps"][0]["content"])
+        sop = self.ready(work_type="polling", steps=[{"content": "{{from}} to {{to}}; {{other}}", "operator_required": True}])
+        self.assertNotIn("adjust_sop_type", sop)
+        spec = self.prepare(sop, polling_runs=[{"from_unit": "1#", "to_unit": "2#"}])["polling_work_order_spec"]
+        self.assertEqual(spec["runs"][0]["other_unit"], "3#")
+        with self.assertRaisesRegex(Exception, "不能跨越"):
+            self.prepare(sop, polling_runs=[{"from_unit": "1#", "to_unit": "6#"}])
+
+
 if __name__ == "__main__":
     unittest.main()

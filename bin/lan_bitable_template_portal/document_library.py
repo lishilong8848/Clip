@@ -64,7 +64,7 @@ def validate_source(payload, *, identity=None):
             raise AssistantError('仅支持 HTTPS 飞书多维表链接。')
         match = re.fullmatch(r'/base/([A-Za-z0-9]+)(?:/)?', parsed.path)
         if not match:
-            raise AssistantError('请提供多维表 Base 链接和数据表 ID，不支持知识库跳转链接。')
+            raise AssistantError('请先读取 Wiki 链接，取得对应的多维表 Base 和数据表 ID。')
         base = match[1]
         table = (parse_qs(parsed.query).get('table') or [''])[0]
         if result['base_token'] and result['base_token'] != base or result['table_id'] and table and result['table_id'] != table:
@@ -260,8 +260,18 @@ class DocumentLibraryService:
 
     def save_table(self, actor, payload, *, key=None):
         actor = self._actor(actor)
-        if not actor.get('is_admin'):
+        if not actor.get('is_admin') or actor.get('read_only'):
             raise AssistantError('仅管理员可配置资料表。', 403)
+        if isinstance(payload, dict) and payload.get('url'):
+            from .document_library_remote import parse_table_link
+            link = parse_table_link(payload['url'], payload.get('table_id') or '')
+            if link['kind'] == 'wiki':
+                resolved = self.preview_table(actor, {'url': payload['url'], 'table_id': link['table_id']})['source']
+                if not resolved:
+                    raise AssistantError('请先选择具体的数据表。')
+                if payload.get('base_token') and payload['base_token'] != resolved['base_token']:
+                    raise AssistantError('Wiki 链接与多维表标识不一致。')
+                payload = {**payload, 'base_token': resolved['base_token'], 'table_id': resolved['table_id'], 'url': resolved['url']}
         source = validate_source(payload, identity=key)
         revision = _digest(source)
         with self.connect() as db:
@@ -285,6 +295,19 @@ class DocumentLibraryService:
             self.knowledge.invalidate_sources(source['id'] + '/')
         self._enqueue_sync({**source, 'revision': revision}) if source['enabled'] else None
         return {**source, 'revision': revision}
+
+    def preview_table(self, actor, payload):
+        actor = self._actor(actor)
+        if not actor.get('is_admin') or actor.get('read_only'):
+            raise AssistantError('仅管理员可读取待接入数据表。', 403)
+        if not isinstance(payload, dict) or set(payload) - {'url', 'table_id'}:
+            raise AssistantError('数据表读取参数无效。')
+        from .document_library_remote import DocumentLibraryRemote
+        result = DocumentLibraryRemote.inspect_link(payload.get('url'), payload.get('table_id', ''))
+        fresh = self._actor(actor)
+        if not fresh.get('is_admin') or fresh.get('read_only'):
+            raise AssistantError('读取过程中管理权限已变化，请重新读取。', 403)
+        return result
 
     def schema(self, actor, key):
         source = self._table(key)
@@ -645,11 +668,13 @@ class DocumentLibraryService:
                 temporary.unlink(missing_ok=True)
         return path
 
-    def check_response(self, actor, key, result, *, configuration=False):
+    def check_response(self, actor, key, result, *, configuration=False, preview=False):
         actor = self._actor(actor)
-        if configuration:
+        if configuration or preview:
             if not actor.get('is_admin') or actor.get('read_only'):
                 raise AssistantError('仅管理员可配置资料表。', 403)
+            if preview:
+                return
             if result.get('revision') != self._table(key or result['id'])['revision']:
                 raise AssistantError('资料表配置已变化，请重新读取。', 409)
             return

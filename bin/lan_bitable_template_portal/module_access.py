@@ -9,7 +9,7 @@ MODULE_OPTIONS = [{"value": key, "label": label} for key, label in (
     ("polling", "设备轮巡"), ("adjust", "设备调整"), ("power", "上下电通告"),
     ("event", "事件管理"), ("engineer_mop", "维护单管理"), ("repair_management", "检修管理（维修单）"),
     ("cabinet", "机柜管理"), ("daily", "每日任务"), ("water", "水耗管理"),
-    ("critical_guard", "重保管理"), ("risk_inspection", "风险排查"), ("drills", "演练管理"), ("learning", "画像学练"),
+    ("critical_guard", "重保管理"), ("risk_inspection", "专项排查"), ("drills", "演练管理"), ("learning", "画像学练"),
     ("plan_convergence", "计划收敛审查"), ("signatures", "签名管理"),
     ("knowledge", "共享知识库"), ("links", "多维表导航"), ("life_guide", "参考人生指南"),
     ("handover", "交接班审核"), ("work_handover", "人员工作交接"), ("assistant", "灯塔助手与飞书智能体"), ("accounts", "账号与设置"),

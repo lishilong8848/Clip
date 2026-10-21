@@ -31,6 +31,7 @@ async def _try_acquire_upload_slot():
 
 KNOWLEDGE_ROUTES = (
     ('knowledge', ['GET']), ('knowledge/files', ['POST']),
+    ('knowledge/bulk-delete', ['POST']),
     ('knowledge/search', ['GET']), ('knowledge/settings', ['GET', 'PUT']),
     ('knowledge/documents/{document_id}', ['GET', 'DELETE']),
     ('knowledge/documents/{document_id}/file', ['GET']),
@@ -122,6 +123,8 @@ def install_knowledge_routes(app, authorize, get_knowledge):
                         raise AssistantError('提交格式无效。')
                 if not action:
                     data = await asyncio.to_thread(service.list, actor, query)
+                elif action == 'bulk-delete':
+                    data = await asyncio.to_thread(service.bulk_delete, actor, payload)
                 elif action == 'search':
                     data = await asyncio.to_thread(service.search, actor, query.get('q', ''))
                 elif action == 'settings':

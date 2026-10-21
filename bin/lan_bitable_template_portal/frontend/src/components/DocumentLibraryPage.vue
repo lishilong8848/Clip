@@ -45,7 +45,7 @@
 
       <NDrawer :show="detailOpen" width="min(800px, 100vw)" :mask-closable="!busy" :close-on-esc="!busy" @update:show="value => { if (!value) closeDetail() }">
         <NDrawerContent :title="creating ? '新建资料' : detail ? title(detail) : '资料详情'" :closable="!busy" :style="styles">
-          <div class="document-detail">
+          <div class="document-detail" data-v2-inline-feedback>
             <NAlert v-if="detailError" type="error" :bordered="false" role="alert">{{ detailError }} <NButton v-if="!detail && targetId" text :disabled="busy" @click="openRecord(targetId)">重试读取详情</NButton></NAlert>
             <NAlert v-if="pendingWrite || pendingUpload" type="warning" :bordered="false" role="alert">操作回执尚未确认，输入及原操作编号已保留。请核验后按原操作重试。</NAlert>
             <NAlert v-if="conflict" type="warning" :bordered="false" role="alert">资料已被更新，尚未保存的输入已保留。<NButton text :disabled="busy" @click="readLatest">读取最新版本，保留输入</NButton></NAlert>

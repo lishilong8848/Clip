@@ -46,6 +46,13 @@ from lan_bitable_template_portal.document_library_routes import install_document
 KNOWN_DYNAMIC_BINDINGS = [
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=86, kind="covered", method_paths=[("POST", "/api/document-library/preview")],
+        window=2, needles=["requestJson(endpoint('/preview'), {",
+                           "method: 'POST', body: JSON.stringify({ url, ...(tableId ? { table_id: tableId } : {}) }), signal"],
+        note="管理员接入预览使用只读解析 POST；后端注册 preview，权限与同源检查仍由路由执行。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
         line=77, kind="covered", method_paths=[("GET", "/api/document-library/tables")],
         window=1, needles=["requestJson(endpoint('/tables'), { signal, fresh: true })"],
         note="资料表列表使用 requestJson 默认 GET；由 document_library_routes 的 /tables 注册。",
@@ -1134,7 +1141,7 @@ class DynamicEndpointAuditTests(unittest.TestCase):
     def test_document_library_bindings_have_unique_helpers_and_mounted_backend_evidence(self):
         source = "lan_bitable_template_portal/frontend/src/api/documentLibrary.ts"
         bindings = [binding for binding in self.bindings if binding['source'] == source]
-        self.assertEqual(len(bindings), 8)
+        self.assertEqual(len(bindings), 9)
         text = _file_text(source)
         self.assertIn("const root = '/api/document-library';", text)
         self.assertIn("return root + (tableKey ? '/tables/' + encodeURIComponent(tableKey) : '') + path + "

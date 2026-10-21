@@ -10,7 +10,7 @@ NOTICE_TYPES = {'maintenance','change','repair','polling','adjust','power'}
 SOURCES = {'maintenance':'维保通告','change':'变更通告','repair':'检修通告','polling':'设备轮巡',
            'adjust':'设备调整','power':'上下电通告','repair_management':'维修项目','event':'事件',
            'engineer_mop':'维护单','water':'水耗记录','drills':'演练','critical_guard':'风险与重保',
-           'risk_inspection':'风险排查','cabinet':'机柜上下电'}
+           'risk_inspection':'专项排查','cabinet':'机柜上下电'}
 
 
 def responsibility_modules(actor):

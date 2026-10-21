@@ -150,6 +150,13 @@ def _adjust_cooling_sop_tokens(steps: list[dict]) -> set[str]:
     }
 
 
+def _adjust_sop_type(sop: dict) -> str:
+    value = sop.get("adjust_sop_type")
+    if value not in (None, "", "normal", "cooling"):
+        raise PortalError("调整 SOP 类型必须为 normal 或 cooling。")
+    return value or ("cooling" if _adjust_cooling_sop_tokens(sop.get("steps") or []) == {"{{from}}"} else "normal")
+
+
 class PollingSopCloudStore:
     _schema_ready = False
     _schema_lock = threading.Lock()
@@ -237,6 +244,9 @@ class PollingSopCloudStore:
             attachment_meta = json.loads(str(fields.get("附件元数据") or "[]"))
         except (TypeError, ValueError) as exc:
             raise PortalError(f"SOP云端数据格式错误：{sop_id}") from exc
+        adjust_type = steps[0].pop("adjust_sop_type", None) if isinstance(steps, list) and steps and isinstance(steps[0], dict) else None
+        if adjust_type is not None:
+            adjust_type = _adjust_sop_type({"adjust_sop_type": adjust_type})
         raw_attachments = fields.get("附件") if isinstance(fields.get("附件"), list) else []
         tokens = {
             str(item.get("file_token") or item.get("token") or ""): item
@@ -263,6 +273,7 @@ class PollingSopCloudStore:
             "scope": str(fields.get("楼栋") or "").replace("楼", "").upper(),
             "name": str(fields.get("文本") or ""),
             "steps": steps if isinstance(steps, list) else [],
+            **({"adjust_sop_type": adjust_type} if adjust_type is not None else {}),
             "attachments": attachments,
             "version": int(float(fields.get("记录版本") or 0)),
             "created_at": str(fields.get("创建时间") or ""),
@@ -294,6 +305,10 @@ class PollingSopCloudStore:
 
     @staticmethod
     def _fields(sop: dict) -> dict:
+        steps = copy.deepcopy(sop.get("steps") or [])
+        # Keep the legacy JSON array shape; subtype metadata never enters step content.
+        if steps and _stored_work_order_type(sop) == "adjust" and sop.get("adjust_sop_type"):
+            steps[0]["adjust_sop_type"] = _adjust_sop_type(sop)
         attachments = [
             {key: value for key, value in item.items() if key in {"attachment_id", "name", "size", "sha256", "file_token", "created_at", "created_by"}}
             for item in sop.get("attachments") or []
@@ -303,7 +318,7 @@ class PollingSopCloudStore:
             "SOP标识": str(sop.get("sop_id") or ""),
             "楼栋": str(sop.get("scope") or "") + "楼",
             "工单类型": str(sop.get("work_type") or "polling"),
-            "步骤数据": json.dumps(sop.get("steps") or [], ensure_ascii=False, separators=(",", ":")),
+            "步骤数据": json.dumps(steps, ensure_ascii=False, separators=(",", ":")),
             "附件": [{"file_token": item["file_token"]} for item in attachments if item.get("file_token")],
             "附件元数据": json.dumps(attachments, ensure_ascii=False, separators=(",", ":")),
             "记录版本": int(sop.get("version") or 0),
@@ -311,7 +326,7 @@ class PollingSopCloudStore:
             "更新时间": str(sop.get("updated_at") or ""),
             "创建人": str(sop.get("created_by") or ""),
             "更新人": str(sop.get("updated_by") or ""),
-            "内容哈希": hashlib.sha256(json.dumps([sop.get("steps") or [], attachments], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+            "内容哈希": hashlib.sha256(json.dumps([steps, attachments], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
             "状态": "启用",
         }
         return fields
@@ -496,6 +511,8 @@ class PollingWorkOrderService:
 
     def _public_sop(self, sop: dict) -> dict:
         result = copy.deepcopy(sop or {})
+        if _stored_work_order_type(result) == "adjust":
+            result["adjust_sop_type"] = _adjust_sop_type(result)
         result["cloud_sync_required"] = bool(self.cloud)
         result["cloud_sync_status"] = (
             "conflict" if sop.get("_cloud_sync_blocked")
@@ -533,6 +550,8 @@ class PollingWorkOrderService:
             "work_type": work_type,
             "steps": self._normalized_steps(remote.get("steps"), work_type=work_type),
         }
+        if work_type == "adjust":
+            _adjust_sop_type(remote)
         name = str(remote.get("name") or "").strip()
         if not name or len(name) > 160:
             raise PortalError("SOP 云端名称不能为空且不能超过 160 个字符。")
@@ -626,6 +645,10 @@ class PollingWorkOrderService:
                         if force:
                             raise PortalConflictError("本地 SOP 与多维存在版本冲突，本地资料未修改。")
                         keep_pending("本地 SOP 版本高于多维，请人工核对后再同步。", blocked="version_conflict")
+                    elif (int(local.get("version") or 0) == int(remote.get("version") or 0)
+                          and _stored_work_order_type(local) == _stored_work_order_type(remote) == "adjust"
+                          and _adjust_sop_type(local) != _adjust_sop_type(remote)):
+                        keep_pending("本地 SOP 类型与多维不一致，请人工核对后再同步。", blocked="content_conflict")
                     continue
                 if str(local.get("_cloud_record_id") or "").strip():
                     keep_pending("多维中的原 SOP 记录已不存在，请人工核对后再同步。", blocked="remote_missing")
@@ -700,7 +723,10 @@ class PollingWorkOrderService:
                     existing = self.cloud.get_sop(sop_id, force=True)
                     if existing:
                         remote_steps = self._normalized_steps(existing.get("steps"), work_type=_stored_work_order_type(existing))
-                        if int(local.get("version") or 0) >= int(existing.get("version") or 0) and local.get("steps") != remote_steps:
+                        if int(local.get("version") or 0) >= int(existing.get("version") or 0) and (
+                            local.get("steps") != remote_steps or _stored_work_order_type(local) == "adjust"
+                            and _adjust_sop_type(local) != _adjust_sop_type(existing)
+                        ):
                             keep_pending("本地步骤与多维同一 SOP 不一致，请人工核对后再同步。", blocked="content_conflict")
                         else:
                             known_ids.add(sop_id)
@@ -1088,6 +1114,21 @@ class PollingWorkOrderService:
                 "updated_at": now,
                 "updated_by": str(actor_open_id or ""),
             }
+            if work_type == "adjust":
+                adjust_type = payload.get("adjust_sop_type")
+                if adjust_type is None and existing and _stored_work_order_type(existing) == "adjust":
+                    adjust_type = _adjust_sop_type(existing)
+                sop["adjust_sop_type"] = _adjust_sop_type({"adjust_sop_type": adjust_type, "steps": steps})
+                tokens = _adjust_cooling_sop_tokens(steps)
+                if sop["adjust_sop_type"] == "cooling":
+                    if not steps:
+                        raise PortalError("制冷单元模式切换 SOP 至少需要一个有效步骤。")
+                    if tokens - {"{{from}}"}:
+                        raise PortalError("制冷单元模式切换 SOP 只允许使用 {{from}}，也可以不使用占位符。")
+                elif tokens:
+                    raise PortalError("普通设备调整 SOP 不能使用设备占位符。")
+            else:
+                sop.pop("adjust_sop_type", None)
             if existing and existing.get("_cloud_sync_blocked") == "name_conflict" and name.casefold() == str(existing.get("name") or "").strip().casefold():
                 raise PortalConflictError("同名 SOP 已在多维存在，请先修改本地 SOP 名称。")
             sop.pop("_cloud_sync_error", None)
@@ -1436,9 +1477,8 @@ class PollingWorkOrderService:
             raise PortalError("所选 SOP 不适用于当前工单类型，请重新选择。")
         sop_steps = [step for step in sop.get("steps") or [] if isinstance(step, dict)]
         adjust_tokens = _adjust_cooling_sop_tokens(sop_steps)
-        has_adjust_cooling_step = work_type == "adjust" and adjust_tokens == {"{{from}}"}
-        has_any_placeholder = bool(adjust_tokens)
-        has_unsupported_placeholder = has_any_placeholder and not has_adjust_cooling_step
+        has_adjust_cooling_step = work_type == "adjust" and _adjust_sop_type(sop) == "cooling"
+        has_unsupported_placeholder = bool(adjust_tokens - ({"{{from}}"} if has_adjust_cooling_step else set()))
         if work_type in {"maintenance", "adjust"} and has_unsupported_placeholder:
             if work_type == "maintenance":
                 raise PortalError("所选 SOP 包含轮巡设备指向占位符，不能用于维保工单。")

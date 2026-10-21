@@ -12,14 +12,16 @@ class SignatureAccess:
         self.data = None
         self.owners = {}
         self.profiles = {actor: self.profile}
+        self._targets = None
 
     def profile_for(self, identity):
         if identity not in self.profiles:
             self.profiles[identity] = self.auth.account_profile(identity)
         return self.profiles[identity]
 
-    def bind(self, data):
+    def bind(self, data, *, cache_targets=False):
         self.data = data
+        self._targets = {} if cache_targets else None
         self.owners = {}
         for row in data['staff']:
             identity = str(row.get('open_id') or '')
@@ -55,6 +57,14 @@ class SignatureAccess:
 
     def target(self, person):
         self.ensure_directory()
+        if self._targets is None:
+            return self._target(person)
+        key = person['person_key']
+        if key not in self._targets:
+            self._targets[key] = self._target(person)
+        return self._targets[key]
+
+    def _target(self, person):
         effective = self.data['resolved'].get(person['person_key'], person)
         identities = set(self.owners.get(effective['person_key'], set()))
         if person.get('open_id'):
@@ -62,12 +72,15 @@ class SignatureAccess:
         if len(identities) != 1:
             return None
         identity = next(iter(identities))
-        if identity in self.manager.d.BUILDING_OPEN_ID_MAP.values() or self.auth.directory_block_reason(identity):
+        if identity in self.manager.d.BUILDING_OPEN_ID_MAP.values():
+            return None
+        blocked = self.auth.directory_block_reason(identity)
+        if blocked:
             return None
         profile = self.profile_for(identity)
         return {**profile, 'open_id': identity, 'is_self': identity == self.actor,
                 'own_scopes': [profile['home_scope']] if profile.get('home_scope') else [],
-                'blocked_reason': self.auth.directory_block_reason(identity)}
+                'blocked_reason': blocked}
 
     def allowed(self, person, action):
         if action == 'request':

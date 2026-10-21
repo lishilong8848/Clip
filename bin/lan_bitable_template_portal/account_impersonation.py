@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from .account_policy import account_allowed
+from .account_policy import level_rank
 from .impersonation_context import CURRENT_IMPERSONATION, audit_metadata
 from .personnel_password_login import PasswordLoginError
 from .portal_auth import AUTH_COOKIE_NAME, BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
@@ -55,7 +55,10 @@ def can_impersonate(auth, operator_id, target_id):
     if not operator_id or not target_id or operator_id == target_id or target_id in REQUIRED_ADMIN_USERS:
         return False
     operator, target = auth.account_profile(operator_id), auth.account_profile(target_id)
-    if not operator.get('can_manage_accounts') or not target.get('modules') or not auth.scopes_for_open_id(target_id):
+    if (not operator.get('can_manage_accounts') or not target.get('modules') or not target.get('scope_rules')
+            or target.get('level') not in {'L0', 'L1', 'L2', 'L3', 'L4'}
+            or operator.get('level') not in {'L0', 'L1', 'L2', 'L3'}
+            or level_rank(target['level']) < level_rank(operator['level'])):
         return False
     if auth.directory_block_reason(target_id) or auth._open_id_explicitly_disabled(target_id):
         return False
@@ -63,12 +66,7 @@ def can_impersonate(auth, operator_id, target_id):
         person = auth.directory_person(target_id)
         if not person.get('selectable') or person.get('inactive') or person.get('login_ids') != [target_id]:
             return False
-    if operator.get('is_fixed_superuser'):
-        return True
-    candidate = {**target, 'own_scopes': [target['home_scope']] if target.get('home_scope') else []}
-    # L2's edit-only personnel selector is not permission to view another account.
-    return (account_allowed(operator, candidate, 'view') and account_allowed(operator, candidate, 'edit')
-            and set(target['scope_rules']).issubset(operator['scope_rules'])
+    return (set(target['scope_rules']).issubset(operator['scope_rules'])
             and set(target['modules']).issubset(operator['modules']))
 
 

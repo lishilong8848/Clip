@@ -235,7 +235,7 @@
                         <VnetSelect v-else-if="field.type === 'select'" :input-id="planFieldId(turn.plan, field)" :label="field.label" :model-value="selectedLabel(field.options || [], planValues[turn.plan.id + ':' + field.name])" :options="labelledOptions(field.options || []).filter(option => !option.disabled).map(option => option.label)" :disabled="isPlanBusy(turn.plan)" :required="!!field.required" :menu-z-index="10010" @update:model-value="choosePlanOption(turn.plan, field, selectedValue(field.options || [], $event))" />
                         <fieldset v-else-if="field.type === 'multiselect'" :id="planFieldId(turn.plan, field)" class="plan-choices" :disabled="isPlanBusy(turn.plan)"><legend class="sr-only">{{ field.label }}</legend><label v-for="option in field.options || []" :key="String(option.value)"><input type="checkbox" :checked="planChoices(turn.plan, field).includes(option.value)" :disabled="field.maxItems && planChoices(turn.plan, field).length >= field.maxItems && !planChoices(turn.plan, field).includes(option.value)" @change="togglePlanChoice(turn.plan, field, option.value, ($event.target as HTMLInputElement).checked)" /><span>{{ option.label }}</span></label><span v-if="!(field.options || []).length" class="muted">{{ field.options_source ? '候选待读取' : '暂无可选项' }}</span><div class="choice-summary"><span>已选 {{ planChoices(turn.plan, field).length }}{{ field.maxItems ? ' / ' + field.maxItems : '' }}</span><button v-if="planChoices(turn.plan, field).length" type="button" class="icon" title="清空选择" :aria-label="'清空' + field.label" @click="clearPlanChoice(turn.plan, field)"><X :size="14" /></button></div></fieldset>
                         <div v-else-if="['date', 'time', 'month', 'datetime-local'].includes(field.type)" class="plan-date"><input :id="planFieldId(turn.plan, field)" :aria-label="field.label" v-model="planValues[turn.plan.id + ':' + field.name]" :type="field.type" :disabled="isPlanBusy(turn.plan)" :required="field.required" :step="field.step" :min="field.min" :max="field.max" @change="planSelectionChanged(turn.plan, field)" /><button type="button" class="icon" :disabled="isPlanBusy(turn.plan)" :title="'选择' + field.label" :aria-label="'选择' + field.label" @click="openPlanPicker($event)"><Clock3 v-if="field.type === 'time'" :size="17" /><CalendarDays v-else :size="17" /></button></div>
-                        <div v-else-if="field.type === 'file'" class="plan-upload" :tabindex="field.native_water_photos ? 0 : undefined" :aria-label="field.label + '上传区域'" @paste="pastePlanFiles($event, turn.plan, field)" @dragover="onFileDragOver" @drop="dropPlanFiles($event, turn.plan, field)">
+                        <div v-else-if="field.type === 'file'" class="plan-upload" :class="{ 'plan-notice-photos': field.native_notice_photos }" :tabindex="field.native_notice_photos ? isPlanBusy(turn.plan) ? -1 : 0 : field.native_water_photos ? 0 : undefined" :role="field.native_notice_photos ? 'group' : undefined" :aria-disabled="isPlanBusy(turn.plan)" :aria-label="field.label + '上传区域'" @click="field.native_notice_photos && focusNoticePhotoArea($event, isPlanBusy(turn.plan))" @paste="pastePlanFiles($event, turn.plan, field)" @dragover="onFileDragOver" @drop="dropPlanFiles($event, turn.plan, field)">
                           <input class="sr-only" :id="planFieldId(turn.plan, field)" :aria-label="field.label" type="file" :accept="field.accept" :multiple="field.maxItems !== 1" :disabled="isPlanBusy(turn.plan)" @change="uploadPlanFiles($event, turn.plan, field)" />
                           <button type="button" :disabled="isPlanBusy(turn.plan)" @click="($event.currentTarget as HTMLElement).parentElement?.querySelector('input')?.click()"><Paperclip :size="15" />{{ field.maxItems === 1 && planChoices(turn.plan, field).length ? '替换附件' : '添加附件' }}</button>
                           <span v-if="planUploadProgress[turn.plan.id]?.key === turn.plan.id + ':' + field.name" class="muted" role="status">正在上传 {{ planUploadProgress[turn.plan.id]?.name }} · {{ planUploadProgress[turn.plan.id]?.done }}/{{ planUploadProgress[turn.plan.id]?.total }}</span>
@@ -345,6 +345,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
+import { focusNoticePhotoArea, noticePhotoFiles } from '../noticePhotoInput';
 import type { Chat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
 import { AlertCircle, ArrowDown, ArrowUp, ArrowUpRight, BookOpen, Bot, CalendarDays, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FileText, FolderOpen, ListChecks, Loader2, Mic, Palette, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings, Slash, Square, Star, Trash2, Volume2, Wrench, X } from 'lucide-vue-next';
@@ -1335,12 +1336,14 @@ async function uploadPlanFiles(event: Event, plan: Dict, field: Dict): Promise<v
   await addPlanFiles(files, plan, field);
 }
 function pastePlanFiles(event: ClipboardEvent, plan: Dict, field: Dict): void {
+  if (field.native_notice_photos) { void addPlanFiles(noticePhotoFiles(event), plan, field); return; }
   const files = Array.from(event.clipboardData?.files || []);
   if (!files.length) return;
   event.preventDefault(); event.stopPropagation();
   void addPlanFiles(files, plan, field);
 }
 function dropPlanFiles(event: DragEvent, plan: Dict, field: Dict): void {
+  if (field.native_notice_photos) { void addPlanFiles(noticePhotoFiles(event), plan, field); return; }
   const files = Array.from(event.dataTransfer?.files || []);
   if (!files.length) return;
   event.preventDefault(); event.stopPropagation();
@@ -1370,6 +1373,7 @@ async function addPlanFiles(files: File[], plan: Dict, field: Dict): Promise<voi
       planFiles[result.id] = result;
       selected.push(result.id);
       planValues[key] = [...selected];
+      if (field.native_notice_photos) saveDrafts();
       progress.done++;
     }
   }
@@ -2859,6 +2863,8 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .repair-prefill-state { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; color: var(--lh-warn); overflow-wrap: anywhere; }
 .repair-prefill-state:empty { display: none; }
 .plan-upload { display: grid; gap: 8px; min-width: 0; }
+.plan-notice-photos { min-height: 62px; padding: 8px; border: 1px dashed var(--lh-border-strong); border-radius: 6px; }
+.plan-notice-photos:focus,.plan-notice-photos:focus-within { outline: 2px solid var(--lh-accent); outline-offset: 2px; }
 .plan-upload > button { justify-self: start; }
 .plan-upload input[type=file] { width: 1px; min-height: 0; padding: 0; border: 0; }
 .plan-files { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none; }

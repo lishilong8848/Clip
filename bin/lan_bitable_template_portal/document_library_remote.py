@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 import zlib
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 READ_RETRIES = 1
 PAGE_SIZE = 100
@@ -158,6 +159,29 @@ def _record(payload):
     if not isinstance(record, dict):
         return None
     return record if _is_record_id(record.get("record_id")) else None
+
+
+def parse_table_link(value, table_id=""):
+    if not isinstance(value, str) or len(value) > 4096 or not isinstance(table_id, str):
+        raise _error("请粘贴有效的飞书多维表链接。")
+    value = value.strip()
+    try:
+        url = urlsplit(value)
+        match = re.fullmatch(r"/(base|wiki)/([A-Za-z0-9]{8,200})/?", url.path)
+        if (url.scheme != "https" or not url.hostname or url.username or url.password
+                or url.port not in (None, 443) or "\\" in value or any(c.isspace() or ord(c) < 32 for c in value)
+                or not (url.hostname == "feishu.cn" or url.hostname.endswith(".feishu.cn")) or not match):
+            raise ValueError()
+        query = parse_qs(url.query, keep_blank_values=True)
+        tables = query.get("table", [])
+        if len(tables) > 1 or tables and not re.fullmatch(r"tbl[A-Za-z0-9]+", tables[0]):
+            raise ValueError()
+        if table_id and (not re.fullmatch(r"tbl[A-Za-z0-9]+", table_id) or tables and tables[0] != table_id):
+            raise ValueError()
+    except ValueError:
+        raise _error("请提供有效的 HTTPS 飞书 Base 或 Wiki 多维表链接，数据表编号不能冲突。") from None
+    return {"kind": match[1], "token": match[2], "table_id": table_id or (tables[0] if tables else ""),
+            "origin": "https://" + url.hostname, "url": value}
 
 
 class DocumentLibraryRemote:
@@ -338,20 +362,97 @@ class DocumentLibraryRemote:
 
     # -- Bitable records ------------------------------------------------
 
-    def fields(self):
+    @classmethod
+    def inspect_link(cls, url, table_id=""):
+        link = parse_table_link(url, table_id)
+        remote = cls({"base_token": link["token"], "table_id": link["table_id"] or "tblPending"})
+        try:
+            manager, identity = remote._capture()
+
+            def read(endpoint, params=None):
+                remote._check(manager, identity)
+                payload = remote._call("GET", endpoint, params=params, retries=READ_RETRIES, operation="链接解析")
+                remote._check(manager, identity)
+                return _data(remote._parse(payload))
+
+            base = link["token"]
+            if link["kind"] == "wiki":
+                node = read("https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node",
+                            {"token": base}).get("node")
+                if not isinstance(node, dict) or not isinstance(node.get("obj_type"), str):
+                    raise _invalid_response()
+                if node.get("obj_type") != "bitable":
+                    kind = {"docx": "飞书文档", "doc": "飞书文档", "sheet": "电子表格"}.get(node.get("obj_type"), "非多维表内容")
+                    raise _error(f"此 Wiki 链接指向{kind}，不是多维表，请选择知识库中的多维表节点。")
+                base = node.get("obj_token")
+                if not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9]{8,200}", base):
+                    raise _invalid_response()
+            tables, cursor, seen, table_ids = [], "", set(), set()
+            for _ in range(MAX_PAGES):
+                data = read(f"{BITABLE_ROOT}/{base}/tables",
+                            {"page_size": 100, **({"page_token": cursor} if cursor else {})})
+                if not isinstance(data.get("items"), list) or type(data.get("has_more")) is not bool:
+                    raise _invalid_response()
+                for item in data["items"]:
+                    if (not isinstance(item, dict) or not re.fullmatch(r"tbl[A-Za-z0-9]+", str(item.get("table_id") or ""))
+                            or not isinstance(item.get("name"), str) or not item["name"].strip()
+                            or item["table_id"] in table_ids):
+                        raise _invalid_response()
+                    table_ids.add(item["table_id"])
+                    tables.append({"table_id": item["table_id"], "name": item["name"].strip()})
+                if not data["has_more"]:
+                    break
+                cursor = _text(data.get("page_token"))
+                if not cursor or cursor in seen:
+                    raise _invalid_response()
+                seen.add(cursor)
+            else:
+                raise _invalid_response()
+            if not tables:
+                raise _error("未读取到可访问的数据表，请检查智能体应用的文档访问权限。", 403)
+            selected = link["table_id"] or (tables[0]["table_id"] if len(tables) == 1 else "")
+            if not selected:
+                return {"url": link["url"], "source": None, "tables": tables, "fields": []}
+            table = next((item for item in tables if item["table_id"] == selected), None)
+            if not table:
+                raise _error("链接指定的数据表不存在或当前飞书应用无权读取。", 403)
+            remote.base_token, remote.table_id = base, selected
+            remote._records_url = f"{BITABLE_ROOT}/{base}/tables/{selected}"
+            fields = remote.fields(credentials=(manager, identity))
+            ids = set()
+            for field in fields:
+                fid = field.get("field_id")
+                if (not isinstance(fid, str) or not re.fullmatch(r"fld[A-Za-z0-9]+", fid) or fid in ids
+                        or not isinstance(field.get("field_name"), str) or not field["field_name"].strip()
+                        or type(field.get("type")) is not int):
+                    raise _invalid_response()
+                ids.add(fid)
+            if not fields:
+                raise _error("未取得数据表字段，请检查权限后重新读取。", 502)
+            canonical = f"{link['origin']}/base/{base}?" + urlencode({"table": selected})
+            key = "table_" + hashlib.sha256((base + ":" + selected).encode()).hexdigest()[:20]
+            return {"url": canonical, "source": {"id": key, "name": table["name"], "base_token": base,
+                    "table_id": selected, "url": canonical}, "tables": tables, "fields": fields}
+        finally:
+            remote.close()
+
+    def fields(self, *, credentials=None):
         """Return every field dict of this table, across all pages."""
+        manager, identity = credentials or self._capture()
         items = []
         page_token = ""
         seen = set()
         for _page in range(MAX_PAGES):
+            self._check(manager, identity)
             params = {"page_size": FIELD_PAGE_SIZE}
             if page_token:
                 params["page_token"] = page_token
             data = _data(self._parse(self._call(
                 "GET", self._records_url + "/fields", params=params,
                 retries=READ_RETRIES, operation="字段读取")))
+            self._check(manager, identity)
             page_items = data.get("items")
-            if not isinstance(page_items, list):
+            if not isinstance(page_items, list) or type(data.get("has_more")) is not bool:
                 raise _error("资料库来源字段信息不完整。", 502,
                              category="bad_response")
             for item in page_items:

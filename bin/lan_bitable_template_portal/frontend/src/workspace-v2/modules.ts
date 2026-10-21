@@ -10,7 +10,7 @@ export const modules: ModuleEntry[] = [
   { id: 'engineer_mop', label: '维护单管理', group: '运行管理', path: '/engineer/mop', icon: 'wrench' },
   { id: 'repair_management', label: '维修项目', group: '运行管理', path: '/repair-management', icon: 'wrench' },
   { id: 'critical_guard', label: '重保管理', group: '运行管理', path: '/critical-guard', icon: 'shield' },
-  { id: 'risk_inspection', label: '风险排查', group: '专项功能', path: '/risk-inspections', icon: 'shield' },
+  { id: 'risk_inspection', label: '专项排查', group: '专项功能', path: '/risk-inspections', icon: 'shield' },
   { id: 'daily', label: '每日任务', group: '运行管理', path: '/daily-tasks', icon: 'task' },
   { id: 'cabinet', label: '机柜管理', group: '设备与资源', path: '/cabinet-power', icon: 'server' },
   { id: 'water', label: '水耗管理', group: '设备与资源', path: '/water-management', icon: 'water' },

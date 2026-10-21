@@ -6,7 +6,7 @@ from .lighthouse_sources import codes
 from lan_bitable_template_portal.polling_work_orders import (
     ADJUST_COOLING_MODES, POLLING_H_DUTY_RECORD_ID, POLLING_SOP_SCOPES,
     POLLING_UNITS, POLLING_WORK_ORDER_MAX_EXPANDED_STEPS, WORK_ORDER_TYPES,
-    PollingWorkOrderService, _adjust_cooling_sop_tokens, _polling_unit_group,
+    PollingWorkOrderService, _adjust_cooling_sop_tokens, _adjust_sop_type, _polling_unit_group,
 )
 from lan_bitable_template_portal.portal_service import PortalError
 
@@ -39,11 +39,11 @@ def update_directory(field, scope, sops, people):
         if not isinstance(row, dict) or not row.get("sop_id") or row.get("scope") != scope or row.get("work_type", "polling") != field["work_type"]:
             raise AssistantError("SOP 目录内容或楼栋不一致，请重新读取。", 502)
         tokens = _adjust_cooling_sop_tokens(row.get("steps") or [])
-        mode = "polling" if field["work_type"] == "polling" else "cooling" if field["work_type"] == "adjust" and tokens == {"{{from}}"} else "normal"
+        mode = "polling" if field["work_type"] == "polling" else _adjust_sop_type(row) if field["work_type"] == "adjust" else "normal"
         blocked = ""
         if not row.get("ready") or not row.get("steps") or not row.get("attachments"):
             blocked = "缺少步骤或附件"
-        elif mode != "polling" and tokens and mode != "cooling":
+        elif mode != "polling" and tokens - ({"{{from}}"} if mode == "cooling" else set()):
             blocked = "包含当前工单不支持的设备占位符"
         elif row.get("cloud_sync_required") and row.get("cloud_sync_status") != "synced":
             blocked = row.get("cloud_sync_error") or "尚未同步多维"

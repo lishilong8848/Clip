@@ -14,6 +14,15 @@ from lan_bitable_template_portal.module_access import (
 
 
 class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
+    def test_inspection_entry_label_keeps_existing_module_and_route(self):
+        self.assertEqual(next(item['label'] for item in MODULE_OPTIONS if item['value'] == 'risk_inspection'), '专项排查')
+        for path in ('/risk-inspections', '/api/risk-inspections', '/api/risk-inspections/people'):
+            self.assertEqual(required_modules(path), frozenset({'risk_inspection'}))
+        frontend = Path(__file__).parent / 'lan_bitable_template_portal' / 'frontend' / 'src'
+        self.assertIn("id: 'risk_inspection', label: '专项排查'", (frontend / 'workspace-v2/modules.ts').read_text(encoding='utf-8-sig'))
+        self.assertIn('选择楼栋进入专项排查', (frontend / 'scopeHomeUtils.ts').read_text(encoding='utf-8-sig'))
+        self.assertIn('risk_inspection: "专项排查"', (frontend / 'App.vue').read_text(encoding='utf-8-sig'))
+
     async def asyncSetUp(self):
         self.modules = {"maintenance", "assistant"}
         self.called = []

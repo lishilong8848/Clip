@@ -118,6 +118,23 @@ class CloudTokenGuardTests(unittest.TestCase):
     def test_directory_cannot_retry_after_qt_app_or_secret_changes_during_refresh(self):
         self.assert_switched_refresh_is_blocked('directory')
 
+    def test_directory_rate_limit_retry_remains_bound_to_original_credentials(self):
+        for replacement in (None, *REPLACEMENTS):
+            with self.subTest(replacement=replacement), self.adapter('directory') as adapter, patch(
+                    'lan_bitable_template_portal.link_directory.time.sleep'):
+                self.responses = [1254608, 0]
+                if replacement:
+                    self.request_hook = lambda request: setattr(self, 'identity', replacement)
+                    with self.assertRaisesRegex(portal_service.PortalError, 'Qt.*鉴权.*变化'):
+                        adapter.invoke()
+                    self.assertEqual(len(self.calls), 1)
+                else:
+                    self.assertEqual(adapter.invoke(), SUCCESS['data'])
+                    self.assertEqual(len(self.calls), 2)
+                    self.assertEqual(self.calls[0].content, self.calls[1].content)
+                    self.assertEqual(self.calls[0].url, self.calls[1].url)
+                self.assertEqual(self.forced_count(adapter), 0)
+
     def test_signature_cannot_retry_after_qt_app_or_secret_changes_during_refresh(self):
         self.assert_switched_refresh_is_blocked('signature')
 

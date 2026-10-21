@@ -184,6 +184,7 @@ class LearningService:
         self._sender = send_message
         self._shift_roster_reader = get_shift_roster
         self._notification_lock = threading.Lock()
+        self._sync_lock = threading.RLock()
         self._portal_url = get_portal_url
         self._people_reader = get_people
         self._login_people_reader = get_login_people
@@ -530,6 +531,12 @@ class LearningService:
                 self.sync_pending(limit=40)
             if settings["enabled"] and self.settings()["enabled"]:
                 self.send_notifications(current)
+            if getattr(self.cloud, 'shift_storage_enabled', False) is True:
+                from .learning_shift_storage import backfill
+                try:
+                    backfill(self)
+                except Exception:
+                    self._last_error = '学练历史展示字段尚未补齐，原记录保留，后台稍后继续。'
         finally:
             if not settings["enabled"]:
                 self.cloud.enabled = False
@@ -545,8 +552,37 @@ class LearningService:
                         raise LearningError('云端每日完成记录格式无效，本次恢复已回滚。', 503)
                 if kind not in {"person", "reserve", "paper", "record", "issue", "settings", "publication", "notification", "engagement", "audit", "attachment", "sharing_batch", "sharing_attempt", "sharing_delivery", "daily_progress"} or not isinstance(value, dict):
                     continue
-                if self._get(kind, key, conn) is None:
+                local = self._get(kind, key, conn)
+                owner = item.get('storage_owner')
+                if isinstance(owner, list) and len(owner) == 3 and local:
+                    pid = local.get('person_id')
+                    previous_owner = (self._get('local', 'shift_owner:' + kind + ':' + key, conn) or {}).get('owner')
+                    if pid and pid != owner[2] or previous_owner and previous_owner != owner:
+                        raise LearningError('云端班次人员归属与本地记录冲突，本次恢复已回滚，原数据保留。', 503)
+                if local is None:
                     self._put(kind, key, value, conn, False)
+                if isinstance(owner, list) and len(owner) == 3:
+                    self._put('local', 'shift_owner:' + kind + ':' + key, {'owner': owner}, conn, False)
+                elif getattr(self.cloud, 'shift_storage_enabled', False) is True:
+                    self._put('local', 'shift_legacy:' + kind + ':' + key, {'legacy': True}, conn, False)
+            # Validate the final local graph, including records newly recovered beside existing papers.
+            for item in entities:
+                owner = item.get('storage_owner')
+                if not isinstance(owner, list) or len(owner) != 3:
+                    continue
+                kind, key = item['kind'], item['key']
+                value = self._get(kind, key, conn) or {}
+                linked_kind, linked_id = '', ''
+                if kind == 'record':
+                    linked_kind, linked_id = 'paper', key
+                elif kind in {'reserve', 'notification', 'engagement'} and value.get('paper_id'):
+                    linked_kind, linked_id = 'paper', value['paper_id']
+                elif kind == 'sharing_delivery' and value.get('attempt_id'):
+                    linked_kind, linked_id = 'sharing_attempt', value['attempt_id']
+                linked = self._get(linked_kind, linked_id, conn) if linked_id else None
+                if (value.get('person_id') not in (None, '', owner[2])
+                        or linked_id and (not linked or linked.get('person_id') != owner[2])):
+                    raise LearningError('云端班次人员与最终关联题单归属冲突，本次恢复已回滚。', 503)
             for paper in self._all("paper", conn):
                 if paper.get("person_id"):
                     reserve = self._get("reserve", paper.get("reserve_id", ""), conn)
@@ -564,7 +600,12 @@ class LearningService:
                     record["version"] += 1
                     self._put("record", paper["id"], record, conn)
                 from .learning_engagement import ensure_timeout
+                timeout_key = 'timeout:' + paper['id']
+                existing_timeout = self._get('engagement', timeout_key, conn)
                 ensure_timeout(self, paper, conn)
+                if (not existing_timeout and self._get('local', 'shift_legacy:paper:' + paper['id'], conn)
+                        and self._get('engagement', timeout_key, conn)):
+                    self._put('local', 'shift_legacy:engagement:' + timeout_key, {'legacy': True}, conn, False)
             for reserve in self._all("reserve", conn):
                 if reserve.get("person_id") and not self._get("paper", reserve.get("paper_id", ""), conn):
                     raise LearningError("个人题单云端恢复尚不完整，暂不分配新题，请稍后重试。", 503)
@@ -637,14 +678,24 @@ class LearningService:
         return {k: q.get(k) for k in ("stem", "type", "options", "correct_option_ids", "answer_text", "analysis", "hint", "topic", "specialty", "difficulty", "attachments", "status")}
 
     def sync_pending(self, limit=40, *, force=False):
+        with self._sync_lock:
+            return self._sync_pending(limit, force=force)
+
+    def _sync_pending(self, limit=40, *, force=False):
         with closing(self._connect()) as conn:
             rows = conn.execute("SELECT kind,key,revision FROM documents WHERE dirty=1 AND (? OR retry_at<=?) ORDER BY CASE kind WHEN 'attachment' THEN 0 WHEN 'question' THEN 1 WHEN 'paper' THEN 2 WHEN 'publication' THEN 9 ELSE 3 END,updated LIMIT ?", (int(force), time.time(), limit)).fetchall()
-        errors = []
+        errors, handled, legacy_fields = [], set(), {}
+        if getattr(self.cloud, 'shift_storage_enabled', False) is True:
+            from .learning_shift_storage import sync
+            handled, errors, legacy_fields = sync(self, rows, limit)
         for row in rows:
+            if (row[0], row[1]) in handled:
+                continue
             if self._stop.is_set():
                 break
             try:
-                deferred = self._sync_document(row) is False
+                fields = legacy_fields.get((row[0], row[1]))
+                deferred = self._sync_document(row, **({'display_fields': fields[0], 'expected_app_id': fields[1]} if fields is not None else {})) is False
             except Exception as exc:
                 deferred = True
                 errors.append(f"{row[0]}: {str(exc)[:180]}")
@@ -655,7 +706,7 @@ class LearningService:
             self._last_error = "；".join(errors[:3])
         return {"pending_errors": len(errors)}
 
-    def _sync_document(self, row):
+    def _sync_document(self, row, *, display_fields=None, expected_app_id=None):
         kind, key, revision = row
         value = self._get(kind, key)
         if not value or value["_revision"] != revision:
@@ -725,7 +776,8 @@ class LearningService:
             result = self.cloud.save_question(payload, operation_id)
             payload["record_id"] = result.get("record_id") or payload.get("record_id")
         else:
-            self.cloud.upsert_entity(kind, key, payload, operation_id)
+            self.cloud.upsert_entity(kind, key, payload, operation_id,
+                                     **({'display_fields': display_fields, 'expected_app_id': expected_app_id} if display_fields is not None else {}))
         with self.transaction() as conn:
             current = self._get(kind, key, conn)
             if current and current["_revision"] == revision:

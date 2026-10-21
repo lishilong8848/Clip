@@ -13,12 +13,12 @@ const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 const errors=[],riskScopes=[],writes=[],reads=[];
 const special=[
-  {id:'risk_inspection',label:'风险排查',path:'/risk-inspections',api:'/api/risk-inspections',surface:'.risk-page'},
+  {id:'risk_inspection',label:'专项排查',path:'/risk-inspections',api:'/api/risk-inspections',surface:'.risk-page'},
   {id:'work_handover',label:'人员工作交接',path:'/work-handover',api:'/api/work-handovers',surface:'.work-handover'},
   {id:'learning',label:'画像学练',path:'/learning',api:'/api/learning',surface:'.learning-page'},
   {id:'plan_convergence',label:'计划收敛审查',path:'/plan-convergence',api:'/api/plan-convergence',surface:'.pc-page'},
 ];
-const v2Labels=['风险排查','计划收敛审查','人员工作交接'];
+const v2Labels=['专项排查','计划收敛审查','人员工作交接'];
 const toolLabels=['共享知识库','南通文件','每日任务清单','上/下电通告','设备轮巡','设备调整','交接班审核页'];
 const fullModules=['maintenance','critical_guard','daily','knowledge','power','polling','adjust','handover',...special.map(item=>item.id)];
 const viewports=[{width:1440,height:900},{width:402,height:874},{width:440,height:956}];
@@ -115,12 +115,12 @@ try{
     await clickVisible(page.getByRole('button',{name:'进入专项功能',exact:true}),'special home card');
     await assertSpecialMenu(special.map(item=>item.label));
     await fitAndCapture('special-menu-'+width);
-    await clickVisible(page.getByRole('button',{name:'选择风险排查',exact:true}),'inspection entry');
-    await page.getByRole('heading',{name:'选择楼栋进入风险排查',exact:true}).waitFor();
+    await clickVisible(page.getByRole('button',{name:'选择专项排查',exact:true}),'inspection entry');
+    await page.getByRole('heading',{name:'选择楼栋进入专项排查',exact:true}).waitFor();
     assert.equal(await page.locator('.scope-card').count(),2);
     assert.equal(await page.locator('.scope-summary-strip').count(),0,'inspection must not show unrelated notice counts');
     await fitAndCapture('risk-buildings-'+width);
-    await clickVisible(page.locator('.scope-card').filter({hasText:'B楼'}).getByRole('button',{name:'进入风险排查',exact:true}),'B building inspection');
+    await clickVisible(page.locator('.scope-card').filter({hasText:'B楼'}).getByRole('button',{name:'进入专项排查',exact:true}),'B building inspection');
     await page.waitForURL('**/risk-inspections?scope=B');
     await page.getByRole('region',{name:'风险排查',exact:true}).waitFor();
     await page.getByRole('tab',{name:'发布管理',exact:true}).waitFor();
@@ -129,7 +129,7 @@ try{
     assert.equal((await scopedRead).status(),200,'manager publication list uses the selected B building');
     await fitAndCapture('risk-page-'+width);
     await clickVisible(page.getByRole('region',{name:'风险排查',exact:true}).getByRole('button',{name:'返回',exact:true}),'inspection back');
-    await page.getByRole('heading',{name:'选择楼栋进入风险排查',exact:true}).waitFor();
+    await page.getByRole('heading',{name:'选择楼栋进入专项排查',exact:true}).waitFor();
     await legacyBack('/?entry=special');
     await assertSpecialMenu(special.map(item=>item.label));
     for(const item of special.filter(item=>item.id!=='risk_inspection')){

@@ -489,7 +489,7 @@ const MODULE_LABELS: Record<string, string> = {
   maintenance: "维护管理", change: "变更管理", repair: "检修通告管理", polling: "设备轮巡",
   adjust: "设备调整", power: "上/下电通告", event: "事件管理", engineer_mop: "维护单管理",
   repair_management: "检修管理", cabinet: "机柜上下电", daily: "每日任务", water: "水耗管理",
-  critical_guard: "重保管理", risk_inspection: "风险排查", drills: "演练管理", learning: "画像学练", plan_convergence: "计划收敛审查",
+  critical_guard: "重保管理", risk_inspection: "专项排查", drills: "演练管理", learning: "画像学练", plan_convergence: "计划收敛审查",
   signatures: "签名管理", knowledge: "知识库", links: "多维表导航", life_guide: "人生指南",
   handover: "交接班审核", work_handover: "人员工作交接", assistant: "灯塔助手", accounts: "账号与权限",
 };

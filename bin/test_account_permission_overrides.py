@@ -1,6 +1,7 @@
 """Permission-override upgrade tests for account level/role/module/scope editing."""
 import copy
-from unittest.mock import patch
+import sqlite3
+from unittest.mock import patch, Mock
 
 from .test_personnel_password_login import _TempDirTestCase, PersonnelLoginHarness, _page, _user
 from lan_bitable_template_portal.account_management import AccountManagement
@@ -188,14 +189,17 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
                 peer = next(row for row in rows if row['id'] == 'recHM1')
                 self.assertEqual(peer['level'], 'L1')
                 self.assertEqual(peer['name'], '测试HM1')
-                for flag in ('can_edit', 'can_edit_access', 'can_delete', 'can_set_password', 'can_impersonate', 'can_access_signature'):
+                for flag in ('can_edit', 'can_edit_access', 'can_delete', 'can_set_password', 'can_access_signature'):
                     self.assertFalse(peer[flag], flag)
+                self.assertTrue(peer['can_impersonate'])
+                self.assertNotIn('password_set', peer)
+                self.assertNotIn('last_login', peer)
                 self.assertNotIn(LI_SHILONG_OPEN_ID, {row['open_id'] for row in rows})
                 # Refreshing the directory cannot undo the saved promotion.
                 refreshed = self.manager.accounts(refresh=True, actor=self.actor('AE'))['items']
                 self.assertIn('recHM1', {row['id'] for row in refreshed})
 
-    def test_peer_details_do_not_allow_mutation_or_impersonation(self):
+    def test_peer_details_allow_impersonation_without_mutation(self):
         before = copy.deepcopy(self.h.auth._load_permissions_locked())
         actor = self.actor('HM1')
         peer = self.item('HM2')
@@ -208,8 +212,104 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
                 operation()
             self.assertEqual(error.exception.status, 403)
         from lan_bitable_template_portal.account_impersonation import can_impersonate
-        self.assertFalse(can_impersonate(self.h.auth, actor['open_id'], peer['open_id']))
+        self.assertTrue(can_impersonate(self.h.auth, actor['open_id'], peer['open_id']))
         self.assertEqual(self.h.auth._load_permissions_locked(), before)
+
+    def test_l2_l3_peers_are_selectable_without_edit_or_private_account_data(self):
+        self.manager.update({'changes': [self.override_change('AO', level='L3')]}, {'open_id': LI_SHILONG_OPEN_ID})
+        before = copy.deepcopy(self.h.auth._load_permissions_locked())
+        for operator, target in [('HE1', 'HE2'), ('AS', 'AO')]:
+            with self.subTest(operator=operator):
+                rows = self.manager.accounts(actor=self.actor(operator))['items']
+                peer = next(row for row in rows if row['id'] == 'rec' + target)
+                self.assertTrue(peer['can_impersonate'])
+                for flag in ('can_edit', 'can_edit_access', 'can_delete', 'can_set_password', 'can_access_signature', 'can_grant_l0'):
+                    self.assertFalse(peer[flag], flag)
+                for key in ('last_login', 'password_set', 'password', 'password_hash'):
+                    self.assertNotIn(key, peer)
+                for operation in (
+                    lambda: self.manager.update({'changes': [self.override_change(target, enabled=False)]}, self.actor(operator)),
+                    lambda: self.manager.password(peer['id'], {'new_password': 'SyntheticPass123', 'confirm_password': 'SyntheticPass123'}, self.actor(operator)),
+                    lambda: self.manager.delete(peer['id'], {'revision': peer['revision']}, self.actor(operator)),
+                ):
+                    with self.assertRaises(PasswordLoginError) as error:
+                        operation()
+                    self.assertEqual(error.exception.status, 403)
+        self.assertEqual(self.h.auth._load_permissions_locked(), before)
+        self.assertEqual(self.manager.accounts(actor=self.actor('AE'))['items'], [])
+
+    def test_listing_derives_each_profile_once_and_uses_one_quarantine_connection(self):
+        auth = self.h.auth
+        snapshot = copy.deepcopy(self.h.login.snapshot)
+        permissions = auth._load_permissions_locked()
+        for index in range(160):
+            rid, oid = 'recLarge' + str(index), 'ou_fixtureLarge' + str(index)
+            snapshot['people'][rid] = {**copy.deepcopy(snapshot['people']['recAO']),
+                                       'id': rid, 'login_ids': [oid], 'name': 'fixture-' + str(index)}
+            permissions['users'][oid] = copy.deepcopy(permissions['users']['ou_fixtureAO'])
+        self.h.login.snapshot = snapshot
+        auth._save_permissions_locked(permissions)
+        identities = set(permissions['users']) | set(BUILDING_OPEN_ID_MAP.values()) | {oid for row in snapshot['people'].values() for oid in row['login_ids']}
+        provider = Mock(return_value=snapshot)
+        before = copy.deepcopy(permissions)
+        with patch.object(auth, '_account_directory_provider', provider), \
+                patch.object(auth, '_account_profile', wraps=auth._account_profile) as derive, \
+                patch('lan_bitable_template_portal.portal_auth.sqlite3.connect', wraps=sqlite3.connect) as connect:
+            listing = self.manager.accounts(actor={'open_id': LI_SHILONG_OPEN_ID})
+            self.assertGreaterEqual(len(listing['items']), 160)
+            self.assertLessEqual(derive.call_count, len(identities))
+            self.assertEqual(len({call.args[0] for call in derive.call_args_list}), derive.call_count)
+            reads = [call for call in connect.call_args_list if '?mode=ro' in str(call.args[0])]
+            self.assertEqual(len(reads), 1)
+            provider.assert_not_called()
+        self.assertIsNone(auth._account_read_state())
+        self.assertEqual(auth._load_permissions_locked(), before)
+
+    def test_listing_snapshot_does_not_survive_revocation_or_errors(self):
+        auth = self.h.auth
+        operator, target = self.actor('HM1'), self.actor('HM2')['open_id']
+        self.assertTrue(next(row for row in self.manager.accounts(actor=operator)['items'] if row['open_id'] == target)['can_impersonate'])
+        permissions = auth._load_permissions_locked()
+        permissions['users'][target]['enabled'] = False
+        auth._save_permissions_locked(permissions)
+        self.assertFalse(next(row for row in self.manager.accounts(actor=operator)['items'] if row['open_id'] == target)['can_impersonate'])
+        with patch.object(auth, 'get_permissions_payload', side_effect=RuntimeError('fixture failure')):
+            with self.assertRaises(RuntimeError):
+                self.manager.accounts(actor=operator)
+        self.assertIsNone(auth._account_read_state())
+        self.assertEqual(auth.account_profile(target)['modules'], [])
+        from lan_bitable_template_portal.account_impersonation import can_impersonate
+        self.assertFalse(can_impersonate(auth, operator['open_id'], target))
+        permissions['users'][operator['open_id']]['enabled'] = False
+        auth._save_permissions_locked(permissions)
+        with self.assertRaises(PasswordLoginError) as error:
+            self.manager.update({'changes': [self.override_change('AO', enabled=False)]}, operator)
+        self.assertEqual(error.exception.status, 403)
+        self.assertTrue(auth._permission_user('ou_fixtureAO')['enabled'])
+
+    def test_listing_rechecks_current_app_between_requests(self):
+        auth, actor = self.h.auth, self.actor('HM1')
+        self.assertTrue(self.manager.accounts(actor=actor)['items'])
+        with patch.object(auth, 'current_feishu_app_id', return_value='fixture-different-app'):
+            data = self.manager.accounts(actor=actor)
+            self.assertEqual(data['items'], [])
+            self.assertFalse(data['policy']['can_manage_accounts'])
+            self.assertEqual(auth.directory_person(actor['open_id']), {})
+        self.assertIsNone(auth._account_read_state())
+        self.assertTrue(self.manager.accounts(actor=actor)['items'])
+
+    def test_listing_keeps_automatic_hr_refresh_and_explicit_refresh(self):
+        self.h.login.snapshot['loaded_at'] = 0
+        page = _page([{'record_id': rid, 'fields': fields} for rid, fields in self.h.service._records.items()])
+        self.h.service._pages = [copy.deepcopy(page), copy.deepcopy(page)]
+        with patch.object(self.h.service, '_request_payload', wraps=self.h.service._request_payload) as remote:
+            self.manager.accounts(actor=self.actor('HM1'))
+            self.assertGreater(remote.call_count, 0)
+            remote.reset_mock()
+            self.manager.accounts(actor=self.actor('HM1'))
+            remote.assert_not_called()
+            self.manager.accounts(refresh=True, actor=self.actor('HM1'))
+            self.assertGreater(remote.call_count, 0)
 
     def test_l1_peer_visibility_is_removed_after_downgrade_or_module_revocation(self):
         root = {'open_id': LI_SHILONG_OPEN_ID}
@@ -357,7 +457,8 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, {'L0'})
         self.assertEqual({opt["value"] for opt in l2_listing["category_options"]}, {"engineer"})
         # L2 can base-edit engineers but can_edit_access is False (no override UI).
-        self.assertTrue(all(item["can_edit"] for item in l2_listing["items"] if not item['is_self']))
+        self.assertTrue(all(item["can_edit"] for item in l2_listing["items"] if item['level'] == 'L4' and item['category'] == 'engineer'))
+        self.assertTrue(all(not item['can_edit'] for item in l2_listing['items'] if item['level'] in {'L2', 'L3'}))
         self.assertTrue(all(item["can_edit_access"] is False for item in l2_listing["items"]))
 
     def test_l4_cannot_receive_accounts_module(self):

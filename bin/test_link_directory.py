@@ -6,7 +6,7 @@ import sys
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -66,6 +66,10 @@ class Remote:
 
 class DirectoryTests(unittest.TestCase):
     def setUp(self):
+        # HTTP and the Qt credential snapshot must both stay independent of local settings.
+        self.enterContext(patch(
+            "upload_event_module.services.feishu_token_manager.token_manager._credentials",
+            return_value=("cli_directory_fixture", "fixture-secret")))
         self.store, self.remote = Store(), Remote()
         self.service = LinkDirectory(self.store, self.remote)
 
@@ -386,23 +390,25 @@ class DirectoryTests(unittest.TestCase):
         updates = {"rec1": 1, "rec2": 2}
 
         def make_remote(records_value):
-            client = SimpleNamespace(request_json=lambda method, url, **kwargs: {"code": 0,
-                                                                                 "data": {"records": records_value}})
+            client = SimpleNamespace(request_json=Mock(return_value={"code": 0,
+                                                                      "data": {"records": records_value}}))
             service = SimpleNamespace(_http_client=client, _auth_headers=lambda: {})
             return LinkRemote(service)
 
         cases = [
-            None,  # 响应 records 不是 list
-            [],  # 返回记录缺失
-            [{"record_id": "rec1"}],  # 缺失一个 id
-            [{"record_id": "rec1"}, {"record_id": "rec1"}],  # 重复 id
-            [{"record_id": "rec1"}, "bad"],  # 记录不是 dict
-            [{"record_id": "rec1"}, {"fields": {}}],  # 缺少 record_id
+            (None, "返回缺少记录列表"),
+            ([], "返回的记录与请求不一致"),
+            ([{"record_id": "rec1"}], "返回的记录与请求不一致"),
+            ([{"record_id": "rec1"}, {"record_id": "rec1"}], "返回的记录与请求不一致"),
+            ([{"record_id": "rec1"}, "bad"], "返回记录格式异常"),
+            ([{"record_id": "rec1"}, {"fields": {}}], "返回缺少记录编号"),
         ]
-        for value in cases:
+        for value, reason in cases:
             with self.subTest(value=value), patch(
                     "lan_bitable_template_portal.portal_service.external_real_write_guard", return_value=guard):
-                with self.assertRaises(PortalError): make_remote(value).update_orders(updates)
+                remote = make_remote(value)
+                with self.assertRaisesRegex(PortalError, reason): remote.update_orders(updates)
+                remote.service._http_client.request_json.assert_called_once()
 
 
 class RouteTests(unittest.TestCase):

@@ -1,1 +1,0 @@
-import{cf as t,b0 as s,a$ as u,bu as c}from"./app-v2-DpW51_OP.js";function a(){const o=t(s,null);return u(()=>{if(o===null)return c;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||c;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{a as u};

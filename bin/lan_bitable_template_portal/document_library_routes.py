@@ -36,7 +36,9 @@ def install_document_library_routes(app, authorize, get_service):
                 payload = json.loads(body or b'{}')
                 if not isinstance(payload, dict):
                     raise AssistantError('请求内容必须是对象。')
-            if action == 'tables':
+            if action == 'preview':
+                data = await asyncio.to_thread(service.preview_table, actor, payload)
+            elif action == 'tables':
                 data = await asyncio.to_thread(service.tables, actor) if method == 'GET' else await asyncio.to_thread(service.save_table, actor, payload)
             elif action.endswith('/schema'):
                 data = await asyncio.to_thread(service.schema, actor, key)
@@ -103,7 +105,7 @@ def install_document_library_routes(app, authorize, get_service):
             fresh = await authorize(request)
             _same_actor(actor, fresh)
             await asyncio.to_thread(service.check_response, fresh, key, data,
-                configuration=method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'})
+                configuration=method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'}, preview=action == 'preview')
             return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
         except AssistantError as exc:
             return JSONResponse({'ok': False, 'error': str(exc), 'code': exc.category or 'document_library_error'}, status_code=exc.status, headers={'Cache-Control': 'no-store'})
@@ -113,6 +115,7 @@ def install_document_library_routes(app, authorize, get_service):
             return JSONResponse({'ok': False, 'error': '资料库暂时不可用，系统不会自动重复提交。'}, status_code=503, headers={'Cache-Control': 'no-store'})
 
     routes = (
+        ('/preview', ['POST']),
         ('/tables', ['GET', 'POST']), ('/tables/{table_key}', ['PUT']),
         ('/tables/{table_key}/schema', ['GET']), ('/tables/{table_key}/records', ['GET', 'POST']),
         ('/tables/{table_key}/records/{record_id}', ['GET', 'PATCH']),

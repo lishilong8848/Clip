@@ -4,7 +4,7 @@ import { waterNumber, waterPhotoCount, waterRecordState } from './water';
 
 export const todoCatalog = [
   { value:'notices', label:'通告' }, { value:'repair_management', label:'维修项目' },
-  { value:'critical_guard', label:'重保填写' }, { value:'risk_inspection', label:'风险排查' },
+  { value:'critical_guard', label:'重保填写' }, { value:'risk_inspection', label:'专项排查' },
   { value:'water', label:'水耗填写' }, { value:'learning', label:'我的学练' },
   { value:'signatures', label:'我的签名' },
 ] as const;

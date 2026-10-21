@@ -14,7 +14,7 @@ import json
 import re
 import threading
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from urllib.parse import urlencode
 
 from PIL import Image
@@ -104,8 +104,11 @@ def resolve_directory(staff: list[dict], external: list[dict]) -> tuple[list[dic
     for old_id, rows in aliases.items():
         if len(rows) == 1 and old_id != rows[0]["record_id"]:
             resolved[f"external:{old_id}"] = resolved.get(f"external:{rows[0]['record_id']}", rows[0])
+    aliases_by_person = {}
+    for key, target in resolved.items():
+        aliases_by_person.setdefault(target['person_key'], []).append(key)
     for person in result:
-        person["record_aliases"] = [key for key, target in resolved.items() if target["person_key"] == person["person_key"]]
+        person["record_aliases"] = aliases_by_person.get(person['person_key'], [])
     return result, resolved
 
 
@@ -289,29 +292,9 @@ class SignatureManagement:
             if f"{source}:{person.get('record_id')}" in visible_keys
         ]
         if access:
-            access.bind(data)
+            access.bind(data, cache_targets=True)
             rows = [access.decorate(row) for row in rows
                     if access.allowed(row, 'view') or access.allowed(row, 'request')]
-        raw_by_key = {
-            f"{source}:{person.get('record_id')}": person
-            for source in ("staff", "external")
-            for person in data[source]
-        }
-        latest = {r["key"]: r["payload"] for r in self.store.list_documents(PERSON_NS)}
-        request_by_id = {r["key"]: r["payload"] for r in self.store.list_documents(REQUEST_NS)}
-        for row in rows:
-            if row.get('invite_only'):
-                continue
-            effective = data["resolved"].get(row["person_key"], row)
-            row["effective_person_key"] = effective["person_key"]
-            row["effective_source"] = effective["source"]
-            row["effective_has_signature"] = effective.get("has_signature", False)
-            row["identity_version"] = self._identity_version(
-                (raw_by_key.get(row["person_key"]) or {}).get("raw_fields") or {}
-            )
-            request_id = (latest.get(row["person_key"]) or {}).get("request_id")
-            request = request_by_id.get(request_id) if request_id else None
-            row["request"] = self._public_request(request) if request else None
         counts = {state: sum(p["signature_status"] == state for p in rows) for state in ("signed", "unsigned", "resign")}
         scopes = sorted({scope for row in rows for scope in self.s._building_codes_from_value(row.get('building'))})
         rows = [p for p in rows if
@@ -333,7 +316,23 @@ class SignatureManagement:
         rows.sort(key=lambda p: (p.get("building") or "", p.get("name") or "", p["person_key"]))
         page = max(1, min(10000, int(payload.get("page") or 1)))
         page_size = max(1, min(500, int(payload.get("page_size") or 50)))
-        return {"people": rows[(page - 1) * page_size:page * page_size], "count": len(rows), "page": page,
+        selected = rows[(page - 1) * page_size:page * page_size]
+        raw_by_key = {f"{source}:{person.get('record_id')}": person
+                      for source in ("staff", "external") for person in data[source]}
+        latest = {r["key"]: r["payload"] for r in self.store.list_documents(PERSON_NS)}
+        request_by_id = {r["key"]: r["payload"] for r in self.store.list_documents(REQUEST_NS)}
+        for row in selected:
+            if row.get('invite_only'):
+                continue
+            effective = data["resolved"].get(row["person_key"], row)
+            row["effective_person_key"] = effective["person_key"]
+            row["effective_source"] = effective["source"]
+            row["effective_has_signature"] = effective.get("has_signature", False)
+            row["identity_version"] = self._identity_version((raw_by_key.get(row["person_key"]) or {}).get("raw_fields") or {})
+            request_id = (latest.get(row["person_key"]) or {}).get("request_id")
+            request = request_by_id.get(request_id) if request_id else None
+            row["request"] = self._public_request(request) if request else None
+        return {"people": selected, "count": len(rows), "page": page,
                 "page_size": page_size, "counts": counts, "sources": data["sources"],
                 "can_manage_directory": bool(access and access.global_manager),
                 "can_create_temporary": bool(access and access.can_create_temporary),
@@ -868,6 +867,18 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         return dispatch_mop(manager, operation, payload, actor=actor, auth=auth,
                             base_url=base_url, send_text=send_text)
     from .signature_access import SignatureAccess
+    if operation in {'people', 'refresh', 'recipients'}:
+        reader = getattr(auth, 'account_listing_read', None)
+        provider = getattr(auth, '_account_directory_provider', None)
+        # Reuse one trusted permission snapshot for this read, never for mutations.
+        with reader(provider()) if callable(reader) and callable(provider) else nullcontext():
+            access = SignatureAccess(manager, auth, actor)
+            if operation == 'recipients':
+                person = access.require(payload.get('source'), payload.get('record_id'), 'edit')
+                return {'people': [{key: row.get(key, '') for key in
+                                   ('record_id', 'name', 'employee_no', 'building', 'position', 'team', 'specialty')}
+                                  for row in access.recipient_people(person)]}
+            return manager.people({**payload, **({'refresh': True} if operation == 'refresh' else {})}, access=access)
     access = SignatureAccess(manager, auth, actor)
     if operation == 'account':
         return access.account(payload.get('open_id'))
@@ -884,13 +895,6 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
     if operation == 'preview':
         access.require(payload.get('source'), payload.get('record_id'), 'view')
         return manager.preview(payload)
-    if operation in {'people', 'refresh'}:
-        return manager.people({**payload, **({'refresh': True} if operation == 'refresh' else {})}, access=access)
-    if operation == 'recipients':
-        person = access.require(payload.get('source'), payload.get('record_id'), 'edit')
-        return {'people': [{key: row.get(key, '') for key in
-                           ('record_id', 'name', 'employee_no', 'building', 'position', 'team', 'specialty')}
-                          for row in access.recipient_people(person)]}
     if operation in {'duplicates', 'merge', 'associate', 'migrate'} and not access.global_manager:
         raise SignatureManagementError('只有全楼管理员可以核对、关联或清理人员。', 403)
     if operation == "temporary":

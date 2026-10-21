@@ -235,7 +235,7 @@ import { CheckCircle2, CircleAlert, Eye, Fingerprint, Link2, Plus, RefreshCw, Se
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { requestJson, type Dict } from "../api/client";
 
-const props = defineProps<{ checking: boolean; loggedIn: boolean; loginUrl: string; isAdmin: boolean }>();
+const props = defineProps<{ checking: boolean; loggedIn: boolean; loginUrl: string; isAdmin: boolean; userId?: string }>();
 const buildings = ref<string[]>([]), relayBuildings = ref<string[]>([]), canManageDirectory = ref(false);
 const createScopeOptions = ref<{ value: string; label: string }[]>([]), createAllowed = ref(false);
 const canCreateTemporary = computed(() => props.loggedIn && createAllowed.value && createScopeOptions.value.length > 0);
@@ -252,6 +252,7 @@ const staffQuery = ref(""), staffDirectory = ref<Dict[]>([]), staffId = ref(""),
 const duplicateBusy = ref(false), showDuplicates = ref(false), duplicateGroups = ref<Dict[]>([]), confirmMerge = ref<Dict | null>(null);
 let seq = 0, searchTimer: ReturnType<typeof setTimeout> | undefined, pollTimer: ReturnType<typeof setTimeout> | undefined;
 let disposed = false, staffSeq = 0, relaySeq = 0;
+let identityEpoch = 0, listRead: AbortController | undefined;
 let relayRead: AbortController | undefined;
 
 const uuid = () => crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16)).join("");
@@ -300,13 +301,16 @@ function personInitial(person: Dict) { return String(person.name || person.emplo
 function clearFilters() { query.value = ""; source.value = ""; status.value = ""; scope.value = ""; }
 
 async function load(refresh = false) {
-  if (!props.loggedIn || disposed) return;
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
+  if (!props.loggedIn || props.checking || disposed) return;
+  listRead?.abort();
+  const controller = new AbortController(); listRead = controller;
   const n = ++seq;
   loading.value = true;
   try {
     const params = new URLSearchParams({ q: query.value, source: source.value, status: status.value, scope: scope.value, page: String(page.value) });
     if (refresh) params.set("refresh", "1");
-    const data = await requestJson("/api/signatures/management/people?" + params, { cache: "no-store" });
+    const data = await requestJson("/api/signatures/management/people?" + params, { cache: "no-store", signal: controller.signal });
     if (n !== seq || disposed) return;
     people.value = data.people || []; sources.value = data.sources || {}; counts.value = data.counts || {}; count.value = data.count || 0;
     relayBuildings.value = (data.recipients || []).map((item: Dict) => String(item.value));
@@ -315,11 +319,18 @@ async function load(refresh = false) {
     createAllowed.value = data.can_create_temporary === true;
     createScopeOptions.value = Array.isArray(data.create_scope_options) ? data.create_scope_options.filter((item: Dict) => typeof item?.value === 'string' && item.value && typeof item.label === 'string' && item.label) : [];
     if (refresh) { noticeError.value = Object.values(sources.value).some((s: any) => !s.ok); notice.value = noticeError.value ? "部分人员表刷新失败，当前保留最近一次成功数据。" : "两张人员表的签名状态已刷新。"; }
-  } catch (error: any) { if (n === seq) { noticeError.value = true; notice.value = error.message || "读取失败，已保留原列表。"; } }
+  } catch (error: any) {
+    if (n === seq && !disposed && !controller.signal.aborted) {
+      if (error.status === 401 || error.status === 403) resetIdentity();
+      noticeError.value = true; notice.value = error.message || "读取失败，已保留原列表。";
+    }
+  }
   finally {
-    if (n === seq) loading.value = false;
-    if (pollTimer) clearTimeout(pollTimer);
-    if (!disposed && hasPending.value) pollTimer = setTimeout(() => { if (!document.hidden && !modal.value) void load(); }, 6000);
+    if (n === seq) {
+      loading.value = false;
+      if (pollTimer) clearTimeout(pollTimer);
+      if (!disposed && hasPending.value) pollTimer = setTimeout(() => { if (!document.hidden && !modal.value) void load(); }, 6000);
+    }
   }
 }
 
@@ -412,18 +423,23 @@ async function submitModal() {
   if (!["create", "associate", "send"].includes(modal.value)) return;
   if (modalSubmitDisabled.value) return;
   sending.value = true; modalError.value = "";
+  const identity = identityEpoch;
   try {
     if (modal.value === "create") {
-      selectedPerson.value = await post("temporary", { ...draft.value, operation_id: operationId.value });
+      const person = await post("temporary", { ...draft.value, operation_id: operationId.value });
+      if (disposed || identity !== identityEpoch) return;
+      selectedPerson.value = person;
       clearRelay(); modal.value = "send"; operationId.value = uuid(); void searchRelayPeople(); void load(true); return;
     }
     if (modal.value === "associate") {
       await post("associate", { record_id: selectedPerson.value?.record_id, staff_record_id: staffId.value,
         expected_version: selectedPerson.value?.identity_version, confirmed_same_person: samePerson.value });
+      if (disposed || identity !== identityEpoch) return;
       notice.value = "人员关联已保存，目录正在后台刷新。";
     } else {
       const relayRecipient = recipient.value === "direct" ? "" : recipient.value;
       const result = await post("requests", { source: selectedPerson.value?.source, record_id: selectedPerson.value?.record_id, recipient: relayRecipient, operation_id: operationId.value });
+      if (disposed || identity !== identityEpoch) return;
       if (result.status !== "sent") {
         modalError.value = result.error || requestLabel(result.status);
         if (result.failure_kind === "bot_unavailable") modalError.value += " 请选择VNET人员或值班账号代收。";
@@ -433,45 +449,62 @@ async function submitModal() {
       notice.value = "签名链接已发送至" + result.recipient_label + "，等待本人签名。";
     }
     noticeError.value = false; clearRelay(); dialog.value?.close(); modal.value = ""; void load();
-  } catch (error: any) { modalError.value = error.message || "操作失败，请重试。"; }
-  finally { sending.value = false; }
+  } catch (error: any) { if (!disposed && identity === identityEpoch) modalError.value = error.message || "操作失败，请重试。"; }
+  finally { if (identity === identityEpoch) sending.value = false; }
 }
 
 async function loadDuplicates() {
+  const identity = identityEpoch;
   duplicateBusy.value = true;
   try {
     const data = await requestJson("/api/signatures/management/duplicates");
+    if (disposed || identity !== identityEpoch) return;
     duplicateGroups.value = (data.groups || []).map((g: Dict) => ({ ...g, selected: g.people.map((p: Dict) => p.record_id), keep: g.people[0].record_id,
       signature: g.people.find((p: Dict) => p.has_signature)?.record_id || "", confirmed: false, upgraded: false, operation_id: uuid() }));
     showDuplicates.value = true;
-  } catch (error: any) { noticeError.value = true; notice.value = error.message || "重复人员读取失败。"; }
-  finally { duplicateBusy.value = false; }
+  } catch (error: any) { if (!disposed && identity === identityEpoch) { noticeError.value = true; notice.value = error.message || "重复人员读取失败。"; } }
+  finally { if (identity === identityEpoch) duplicateBusy.value = false; }
 }
 
 async function resolveMerge(confirmed: boolean) {
+  const identity = identityEpoch;
   const group = confirmMerge.value; confirmMerge.value = null;
   if (!confirmed || !group) return;
   duplicateBusy.value = true;
   try {
     const result = await post("merge", { operation_id: group.operation_id, record_ids: group.selected, keep_record_id: group.keep,
       signature_record_id: group.signature, expected_version: group.version, confirmed_same_person: group.confirmed, all_clients_upgraded: group.upgraded });
+    if (disposed || identity !== identityEpoch) return;
     noticeError.value = false; notice.value = "合并完成，已清理 " + result.deleted_ids.length + " 条重复记录。";
     await load(true); await loadDuplicates();
-  } catch (error: any) { noticeError.value = true; notice.value = error.message || "合并未完成，可重试。"; }
-  finally { duplicateBusy.value = false; }
+  } catch (error: any) { if (!disposed && identity === identityEpoch) { noticeError.value = true; notice.value = error.message || "合并未完成，可重试。"; } }
+  finally { if (identity === identityEpoch) duplicateBusy.value = false; }
 }
 
-watch([query, source, status, scope], () => { page.value = 1; if (searchTimer) clearTimeout(searchTimer); searchTimer = setTimeout(() => void load(), 250); });
-watch(page, () => void load());
+function resetIdentity() {
+  ++identityEpoch; ++seq; ++staffSeq; listRead?.abort(); listRead = undefined;
+  clearPreview(); clearRelay(); dialog.value?.close(); modal.value = ''; selectedPerson.value = null;
+  people.value = []; sources.value = {}; counts.value = {}; count.value = 0; page.value = 1;
+  buildings.value = []; relayBuildings.value = []; canManageDirectory.value = false;
+  createAllowed.value = false; createScopeOptions.value = []; staffDirectory.value = [];
+  duplicateGroups.value = []; showDuplicates.value = false; confirmMerge.value = null;
+  loading.value = false; staffLoading.value = false; sending.value = false; duplicateBusy.value = false;
+  notice.value = ''; modalError.value = '';
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = undefined; }
+  if (pollTimer) clearTimeout(pollTimer);
+}
+watch([query, source, status, scope], () => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => void load(), 250);
+  page.value = 1;
+}, { flush: 'sync' });
+watch(page, () => { if (!searchTimer) searchTimer = setTimeout(() => void load(), 0); }, { flush: 'sync' });
 watch(recipient, () => { operationId.value = uuid(); });
-watch(() => props.loggedIn, value => { if (value) void load(); }, { immediate: true });
-watch(() => props.loggedIn, loggedIn => {
-  if (!loggedIn) {
-    clearPreview(); clearRelay(); createAllowed.value = false; createScopeOptions.value = [];
-    dialog.value?.close(); modal.value = "";
-  }
-});
-onBeforeUnmount(() => { disposed = true; ++seq; ++staffSeq; clearRelay(); if (searchTimer) clearTimeout(searchTimer); if (pollTimer) clearTimeout(pollTimer); });
+watch([() => props.loggedIn, () => props.checking, () => props.userId], () => {
+  resetIdentity();
+  if (props.loggedIn && !props.checking) void load();
+}, { immediate: true });
+onBeforeUnmount(() => { disposed = true; resetIdentity(); });
 </script>
 
 <style scoped>

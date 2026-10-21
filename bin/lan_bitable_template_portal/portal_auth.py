@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,7 @@ REQUIRED_ADMIN_USERS = {
 
 
 TOPIC_EXECUTION = ContextVar('lighthouse_topic_execution', default=None)
+_ACCOUNT_READ = ContextVar('account_listing_read', default=None)
 TOPIC_NAMESPACE = 'lighthouse_topics'
 TOPIC_GRANTS = 'lighthouse_topic_grants'
 
@@ -462,6 +463,9 @@ class PortalAuthManager:
         self._permissions_cache_until = time.monotonic() + 5.0
 
     def _permission_user(self, open_id: str) -> dict[str, Any]:
+        read = self._account_read_state()
+        if read is not None:
+            return copy.deepcopy(read['permissions'].get('users', {}).get(open_id) or {})
         with self._lock:
             if self._permissions_cache is None or time.monotonic() >= self._permissions_cache_until:
                 self._load_permissions_locked()
@@ -561,7 +565,35 @@ class PortalAuthManager:
         profile = self.account_profile(open_id)
         return profile.get("role", "admin" if profile["level"] in {"L0", "L1"} and profile["can_manage_accounts"] else "building")
 
+    def _account_read_state(self):
+        read = _ACCOUNT_READ.get()
+        return read if read is not None and read['auth'] is self else None
+
+    @contextmanager
+    def account_listing_read(self, snapshot):
+        # Only list rendering reuses these reads; mutation/session checks stay live.
+        with self._lock:
+            permissions = self._load_permissions_locked()
+        with closing(sqlite3.connect(self._state_store.db_path.absolute().as_uri() + '?mode=ro',
+                                     uri=True, timeout=1.0)) as connection:
+            token = _ACCOUNT_READ.set({'auth': self, 'snapshot': snapshot,
+                'app_id': self.current_feishu_app_id(), 'permissions': permissions,
+                'connection': connection, 'profiles': {}, 'quarantined': {}})
+            try:
+                yield permissions
+            finally:
+                _ACCOUNT_READ.reset(token)
+
     def account_profile(self, open_id: str) -> dict[str, Any]:
+        identity = str(open_id or '').strip()
+        read = self._account_read_state()
+        if read is None:
+            return self._account_profile(identity)
+        if identity not in read['profiles']:
+            read['profiles'][identity] = self._account_profile(identity)
+        return copy.deepcopy(read['profiles'][identity])
+
+    def _account_profile(self, open_id: str) -> dict[str, Any]:
         """Derive management authority from trusted identity, HR and saved grants.
 
         ``access_version == 1`` marks an explicitly configured permission record
@@ -693,12 +725,13 @@ class PortalAuthManager:
         return identity if person.get("login_ids") == [identity] else None
 
     def directory_person(self, open_id: str) -> dict[str, Any]:
+        read = self._account_read_state()
         provider = getattr(self, "_account_directory_provider", None)
-        snapshot = provider() if provider else {}
-        app_id = self.current_feishu_app_id()
+        snapshot = read['snapshot'] if read is not None else provider() if provider else {}
+        app_id = read['app_id'] if read is not None else self.current_feishu_app_id()
         if snapshot.get("schema") != 4 or snapshot.get("app_id") != app_id:
             return {}
-        cached = getattr(self, "_account_index_cache", (None, {}, None))
+        cached = read.get('index', (None, {}, None)) if read is not None else getattr(self, "_account_index_cache", (None, {}, None))
         if cached[0] is not snapshot or len(cached) < 3 or cached[2] != app_id:
             index = {}
             for person in snapshot.get("people", {}).values():
@@ -713,7 +746,10 @@ class PortalAuthManager:
                         else:
                             index[identity] = person
             cached = (snapshot, index, app_id)
-            self._account_index_cache = cached
+            if read is not None:
+                read['index'] = cached
+            else:
+                self._account_index_cache = cached
         return cached[1].get(open_id, {})
 
     def directory_block_reason(self, open_id: str) -> str:
@@ -726,7 +762,8 @@ class PortalAuthManager:
         if person and not person.get("selectable"):
             return str(person.get("disabled_reason") or "人员身份待核对")
         provider = getattr(self, "_account_directory_provider", None)
-        snapshot = provider() if provider else {}
+        read = self._account_read_state()
+        snapshot = read['snapshot'] if read is not None else provider() if provider else {}
         return snapshot.get("removed_identities", {}).get(open_id, "")
 
     def _identity_quarantined(self, open_id: str) -> bool:
@@ -734,6 +771,11 @@ class PortalAuthManager:
             return False
         try:
             from .feishu_identity_migration import is_identity_quarantined
+            read = self._account_read_state()
+            if read is not None:
+                if open_id not in read['quarantined']:
+                    read['quarantined'][open_id] = is_identity_quarantined(read['connection'], open_id)
+                return read['quarantined'][open_id]
             with closing(sqlite3.connect(self._state_store.db_path.absolute().as_uri() + "?mode=ro",
                                          uri=True, timeout=1.0)) as connection:
                 return is_identity_quarantined(connection, open_id)
@@ -822,7 +864,8 @@ class PortalAuthManager:
 
     def get_permissions_payload(self) -> dict[str, Any]:
         with self._lock:
-            payload = copy.deepcopy(self._load_permissions_locked())
+            read = self._account_read_state()
+            payload = copy.deepcopy(read['permissions'] if read is not None else self._load_permissions_locked())
         users = payload.get("users") if isinstance(payload.get("users"), dict) else {}
         user_list = []
         for open_id, user_cfg in users.items():

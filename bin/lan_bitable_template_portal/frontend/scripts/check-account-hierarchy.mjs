@@ -256,6 +256,26 @@ function simulatePipeline(source, filename) {
   return code;
 }
 
+for (const version of ['legacy', 'v2']) {
+  const original = read('src/components/AdminTools.vue');
+  const source = version === 'v2' ? simulatePipeline(original, 'AdminTools.vue') : original;
+  const script = parse(source).descriptor.scriptSetup.content;
+  const start = script.indexOf('function selectAdminTab(');
+  const end = script.indexOf('function toggleAdvancedDiagnostics(', start);
+  assert(start >= 0 && end > start);
+  const code = buildSync({stdin: {contents: script.slice(start, end), loader: 'ts'}, write: false}).outputFiles[0].text;
+  const calls = {permissions: 0, requests: 0};
+  const select = new Function('props', 'tab', 'emit', 'advancedDiagnosticsVisible', 'loadStatus',
+    'loadPermissions', 'loadPermissionRequests', 'loadHandover', 'loadMopSettings',
+    'let initializedTab = false;\n' + code + '\nreturn selectAdminTab;')(
+    {systemAdmin: true}, {value: 'permissions'}, () => {}, {value: false}, () => {},
+    () => calls.permissions++, () => calls.requests++, () => {}, () => {});
+  select('permissions');
+  select('permissions');
+  assert.deepEqual(calls, {permissions: 0, requests: 1}, version + ': accounts owns the only initial account-directory read');
+}
+console.log('PASS: both admin entry routes avoid duplicate account loading and preserve request-slot loading');
+
 function compileSfc(source, filename) {
   const { descriptor, errors } = parse(source, { filename });
   assert.deepEqual(errors, [], `parse errors in ${filename}: ${errors.map(e => e.message).join('; ')}`);

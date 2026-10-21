@@ -69,12 +69,12 @@ class AccountLevelTests(_TempDirTestCase):
             self.assertEqual(auth.account_profile(oid)["can_delete_business"], home == "H")
             self.assertEqual(auth.account_profile(oid)["level"], "L1" if home == "H" else "L4")
 
-    def test_h_engineer_has_edit_selector_not_directory_view_or_delete(self):
+    def test_h_engineer_edit_selector_keeps_peers_and_lower_view_only_candidates_separate(self):
         actor = self.actor("HE1")
         listing = self.manager.accounts(actor=actor)
-        self.assertEqual({item["category"] for item in listing["items"]}, {"engineer"})
+        self.assertEqual({item["category"] for item in listing["items"]}, {"engineer", "supervisor"})
         for item in listing["items"]:
-            self.assertEqual(item["can_edit"], not item['is_self'])
+            self.assertEqual(item["can_edit"], item['level'] == 'L4' and item['category'] == 'engineer')
             self.assertFalse(item["can_delete"])
             self.assertNotIn("last_login", item)
             self.assertNotIn("employee_no", item)

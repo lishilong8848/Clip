@@ -2,8 +2,8 @@
   <section class="completion" aria-label="每日完成情况" :aria-busy="loading">
     <h2>每日完成</h2>
     <form class="completion-filters" @submit.prevent="reload()">
-      <label>开始日期<input v-model="filters.from" type="date" required :max="filters.to" /></label>
-      <label>结束日期<input v-model="filters.to" type="date" required :min="filters.from" /></label>
+      <label>开始日期<input v-model="filters.from" type="date" required :max="filters.to" @input="followToday = false" /></label>
+      <label>结束日期<input v-model="filters.to" type="date" required :min="filters.from" @input="followToday = false" /></label>
       <label for="completion-state">完成状态<VnetSelect v-model="filters.status" input-id="completion-state" :options="stateOptions" /></label>
       <label for="completion-shift">班次<VnetSelect v-model="filters.shift" input-id="completion-shift" :options="shiftOptions" /></label>
       <label v-if="canViewBuildings" class="search">姓名<input v-model="filters.q" type="search" maxlength="80" /></label>
@@ -36,7 +36,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { AlertCircle, BookOpen, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from 'lucide-vue-next';
 import { getLearningCompletion } from '../api/learning';
 import { ApiError, type Dict } from '../api/client';
@@ -49,7 +49,7 @@ const emit=defineEmits<{ 'open-paper': [value:{paperId:string;person:Dict;date:s
 const states = ['未安排', '未到时', '待答', '答题中', '已完成', '逾期', '待核对'];
 const stateOptions = ['全部状态', ...states];
 const shiftOptions = ['全部班次', '白班', '夜班'];
-const today = beijingDate();
+let today = beijingDate(), followToday = true;
 const filters = reactive({ from: today, to: today, status: '全部状态', shift: '全部班次', q: '' });
 const dateError = computed(() => completionDateError(filters.from, filters.to));
 const result = ref<Dict>({ items: [], summary: {}, total: 0 });
@@ -57,12 +57,18 @@ const hasResult=ref(false);
 const page = ref(1), loading = ref(false), error = ref('');
 const pageCount = computed(() => Math.max(1, Math.ceil((result.value.total || 0) / 30)));
 let request: AbortController | undefined;
+let todayTimer: number | undefined;
 function shifts(row: Dict): string { return [...new Set(row.tasks.map((t: Dict) => t.shift).filter(Boolean))].map(s => `${s}班`).join('、') || '未安排班次'; }
 function delivery(row: Dict): string { return [...new Set(row.tasks.map((t: Dict) => t.delivery_status).filter(Boolean))].join('、') || '未记录'; }
 function tone(state: string): string { return state === '已完成' ? 'success' : ['逾期', '待核对'].includes(state) ? 'warning' : ''; }
 function paperTitle(row:Dict,id:string):string{const task=row.tasks.find((task:Dict)=>task.source==='paper'&&task.task_id===id);return task?`${task.shift?task.shift+'班 ':''}每日题单 ${task.answered}/${task.assigned ?? '待核对'}`:'练习与复习记录';}
 function timeLabel(value: string): string { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
 async function load(): Promise<void> {
+  const currentDay = beijingDate();
+  if (followToday && currentDay !== today) {
+    today = currentDay;
+    filters.from = today; filters.to = today; page.value = 1;
+  }
   request?.abort();
   if (dateError.value) { request = undefined; loading.value = false; return; }
   const controller = new AbortController(); request = controller;
@@ -81,10 +87,25 @@ async function load(): Promise<void> {
 }
 function reload(): void { page.value = 1; void load(); }
 function turn(delta: number): void { page.value += delta; void load(); }
+function checkToday(): void {
+  if (!document.hidden && followToday && beijingDate() !== today) void load();
+}
 watch(() => [filters.from, filters.to], () => { error.value = ''; });
-watch(() => [props.scope, props.personId], ()=>{result.value={items:[],summary:{},total:0};hasResult.value=false;reload();}, { immediate: true });
-watch(() => props.refreshKey, ()=>void load());
-onBeforeUnmount(() => request?.abort());
+watch(() => [props.scope, props.personId, props.refreshKey], (value, previous) => {
+  if (!previous || value[0] !== previous[0] || value[1] !== previous[1]) {
+    result.value = { items: [], summary: {}, total: 0 }; hasResult.value = false; page.value = 1;
+  }
+  void load();
+}, { immediate: true });
+onMounted(() => {
+  document.addEventListener('visibilitychange', checkToday);
+  todayTimer = window.setInterval(checkToday, 60_000);
+});
+onBeforeUnmount(() => {
+  request?.abort();
+  window.clearInterval(todayTimer);
+  document.removeEventListener('visibilitychange', checkToday);
+});
 </script>
 
 <style scoped>

@@ -28,12 +28,12 @@ export async function requestLearning(
 }
 
 export type CompletionQuery = {
-  from: string; to: string; scope?: string; person_id?: string;
+  from?: string; to?: string; scope?: string; person_id?: string;
   status?: string; shift?: string; q?: string; page?: number; page_size?: number;
 };
 
 export async function getLearningCompletion(query: CompletionQuery, signal?: AbortSignal): Promise<Dict> {
-  const error = completionDateError(query.from, query.to);
+  const error = completionDateError(query.from, query.to, true);
   if (error) throw new Error(error);
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {

@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,6 +45,71 @@ class KnowledgeRoutes(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
         self.kb.close()
         self.tmp.cleanup()
+
+    async def test_bulk_delete_is_atomic_versioned_and_never_deletes_auto_sources(self):
+        base = '/api/assistant/knowledge'
+        self.kb.source_current = self.kb.source_acl = lambda *args: True
+        mine = self.kb.upload(actor('owner'), 'mine.txt', b'mine content')
+        other = self.kb.upload(actor('other'), 'other.txt', b'other content')
+        managed = self.kb.upsert_source('fixture/auto/body', {}, 'auto.txt', b'auto content')
+        def ref(doc, **extra):
+            return {'id': doc['id'], 'version': doc['version'], **extra}
+        for documents, headers, status in (
+            ([ref(mine), ref(other)], {}, 403),
+            ([ref(mine), ref(other, version=-1)], {'admin': '1'}, 409),
+            ([ref(mine), ref(managed)], {'admin': '1'}, 403),
+            ([ref(mine)], {'guest': '1'}, 403),
+            ([ref(mine), ref(mine)], {}, 400),
+        ):
+            with self.subTest(status=status, headers=headers):
+                reply = await self.client.post(base + '/bulk-delete', json={'documents': documents}, headers=headers)
+                self.assertEqual(reply.status_code, status, reply.text)
+                with self.kb.connect() as db:
+                    self.assertEqual(db.execute('SELECT SUM(deleted) FROM documents').fetchone()[0], 0)
+        original = self.kb._soft_delete
+        def fail_second(db, identity):
+            if identity == other['id']:
+                raise RuntimeError('fixture database failure')
+            original(db, identity)
+        with patch.object(self.kb, '_soft_delete', side_effect=fail_second):
+            reply = await self.client.post(base + '/bulk-delete', json={'documents': [ref(mine), ref(other)]}, headers={'admin': '1'})
+        self.assertEqual(reply.status_code, 503)
+        with self.kb.connect() as db:
+            self.assertEqual(db.execute('SELECT SUM(deleted) FROM documents').fetchone()[0], 0)
+        reply = await self.client.post(base + '/bulk-delete', json={'documents': [ref(mine)]})
+        self.assertEqual(reply.json()['data'], {'deleted': 1})
+        trash = (await self.client.get(base, params={'deleted': '1'})).json()['data']['items']
+        self.assertEqual([row['id'] for row in trash], [mine['id']])
+        restored = await self.client.post(base + '/documents/' + mine['id'] + '/restore', json={'version': trash[0]['version']})
+        self.assertEqual(restored.status_code, 200, restored.text)
+        with self.kb.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM versions').fetchone()[0], 3)
+
+    async def test_bulk_filtered_selection_freezes_members_and_revisions(self):
+        base = '/api/assistant/knowledge'
+        self.kb.source_current = self.kb.source_acl = lambda *args: True
+        own = [self.kb.upload(actor('owner'), f'guide-{i}.txt', f'guide {i}'.encode()) for i in range(3)]
+        self.kb.upload(actor('other'), 'guide-other.txt', b'other guide')
+        self.kb.upsert_source('fixture/auto/body', {}, 'guide-auto.txt', b'auto guide')
+        async def selected():
+            return (await self.client.get(base, params={'q': 'guide', 'select_all': '1'})).json()['data']['selection']
+        snapshot = await selected()
+        self.assertEqual(snapshot['count'], 3)
+        fresh = self.kb.upload(actor('owner'), 'guide-new.txt', b'new guide')
+        reply = await self.client.post(base + '/bulk-delete', json={'selection': snapshot})
+        self.assertEqual(reply.status_code, 409, reply.text)
+        snapshot = await selected()
+        self.kb.upload(actor('owner'), 'guide-new.txt', b'replaced guide', document_id=fresh['id'], revision=fresh['version'])
+        reply = await self.client.post(base + '/bulk-delete', json={'selection': snapshot})
+        self.assertEqual(reply.status_code, 409, reply.text)
+        snapshot = await selected()
+        reply = await self.client.post(base + '/bulk-delete', json={'selection': {**snapshot, 'excluded_ids': [own[0]['id']]}})
+        self.assertEqual(reply.status_code, 200, reply.text)
+        self.assertEqual(reply.json()['data'], {'deleted': 3})
+        remaining = (await self.client.get(base)).json()['data']['items']
+        self.assertEqual({row['name'] for row in remaining}, {'guide-0.txt', 'guide-other.txt'})
+        with self.kb.connect() as db:
+            self.assertEqual(db.execute("SELECT deleted FROM documents WHERE source_key<>''").fetchone()[0], 0)
 
     async def test_manual_management_excludes_sources_but_both_channels_search_and_download(self):
         base = '/api/assistant/knowledge'

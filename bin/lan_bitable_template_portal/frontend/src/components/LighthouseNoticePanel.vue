@@ -48,7 +48,7 @@
               <small v-if="!shownFields(item).length" class="notice-meta">暂无待补充字段</small>
             </div>
             <div class="notice-photos">
-              <div v-for="pfield in photoFields(item)" :key="pfield.key" class="notice-photo-block">
+              <div v-for="pfield in photoFields(item)" :key="pfield.key" class="notice-photo-block" role="group" :aria-label="pfield.label + '上传区域'" :aria-disabled="busy || uploading" :tabindex="busy || uploading ? -1 : 0" @click="focusNoticePhotoArea($event, busy || uploading)" @paste="addPhotoFiles(item, pfield, noticePhotoFiles($event))" @dragover.prevent @drop="addPhotoFiles(item, pfield, noticePhotoFiles($event))">
                 <div class="notice-photo-head"><span>{{ pfield.label }}</span><em v-if="pfield.maxItems">（最多 {{ pfield.maxItems }} 张）</em></div>
                 <div v-if="(item.draft?.[pfield.key] || []).length" class="notice-photo-grid">
                   <figure v-for="(photo, idx) in item.draft?.[pfield.key] || []" :key="String(photo.upload_id || photo.local_image_id || photo.file_token || idx)" class="notice-photo">
@@ -90,6 +90,7 @@ import { ApiError, requestBinaryJson, requestJson, type Dict } from '../api/clie
 import RepairFieldControl from './RepairFieldControl.vue';
 import LighthouseNoticeSop from './LighthouseNoticeSop.vue';
 import { repairDraftInputValue } from '../repairManagementUtils';
+import { focusNoticePhotoArea, noticePhotoFiles } from '../noticePhotoInput';
 
 const props = defineProps<{ userId: string; active: boolean }>();
 const emit = defineEmits<{ availability: [available: boolean]; edition: [id: string] }>();
@@ -188,9 +189,12 @@ async function uploadPhotoFile(item: Dict, field: Dict, file: File): Promise<Dic
   return { upload_id: data.upload_id, local_image_id: data.local_image_id, file_name: data.file_name || file.name, mime_type: data.mime_type || file.type, size: data.size || file.size, expires_at: data.expires_at, preview_url: data.preview_url || '' };
 }
 async function onPhotoFiles(item: Dict, field: Dict, input: HTMLInputElement): Promise<void> {
-  if (!run.value || busy.value || uploading.value) return;
   const files = Array.from(input.files || []);
   input.value = '';
+  await addPhotoFiles(item, field, files);
+}
+async function addPhotoFiles(item: Dict, field: Dict, files: File[]): Promise<void> {
+  if (!run.value || !editable.value || busy.value || uploading.value || !item.selected || item.blocked) return;
   if (!files.length) return;
   const maxItems = Number(field.maxItems || 0);
   const existing = Array.isArray(item.draft?.[field.key]) ? item.draft[field.key] : [];
@@ -202,20 +206,16 @@ async function onPhotoFiles(item: Dict, field: Dict, input: HTMLInputElement): P
   uploading.value = true;
   const runId = run.value.id;
   try {
-    const uploaded: Dict[] = [];
     for (const file of pending) {
       try {
         const receipt = await uploadPhotoFile(item, field, file);
         if (disposed || run.value?.id !== runId) return;
-        uploaded.push(receipt);
+        item.draft[field.key] = [...(item.draft[field.key] || []), receipt];
+        changed(); saveLocal();
       } catch (error) {
         showPhotoError(item, field, error instanceof Error ? error.message : '上传失败，已保留原有内容。');
         break;
       }
-    }
-    if (uploaded.length) {
-      item.draft[field.key] = (existing.slice()).concat(uploaded);
-      changed();
     }
   } finally {
     uploading.value = false;
@@ -449,7 +449,8 @@ input:disabled { cursor: not-allowed; }
 .notice-field :deep(.repair-field-label) { font-size: 12px; }
 .notice-field :deep(.lhs-people-cols) { grid-template-columns: minmax(0, 1fr); }
 .notice-photos { display: grid; gap: 10px; padding: 5px 4px 2px; border-top: 1px dashed var(--lh-border); }
-.notice-photo-block { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.notice-photo-block { display: flex; flex-direction: column; gap: 7px; min-width: 0; min-height: 62px; padding: 8px; border: 1px dashed var(--lh-border-strong); border-radius: 6px; }
+.notice-photo-block:focus,.notice-photo-block:focus-within { outline: 2px solid var(--lh-accent); outline-offset: 2px; }
 .notice-photo-head { display: flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--lh-muted); }
 .notice-photo-head span { color: var(--lh-charcoal); font-weight: 600; }
 .notice-photo-head em { font-style: normal; color: var(--lh-faint-muted); font-size: 11px; }

@@ -701,9 +701,11 @@ class KnowledgeBase:
         if not actor.get('is_admin'):
             sql += ' AND documents.owner=?'
             values.append(actor['id'])
-        ids = [row[0] for row in db.execute('SELECT documents.id FROM documents WHERE ' + sql + ' ORDER BY documents.id', values)]
+        rows = db.execute('SELECT documents.id,documents.revision FROM documents WHERE ' + sql + ' ORDER BY documents.id', values).fetchall()
+        ids = [row[0] for row in rows]
         fingerprint = hashlib.sha256(json.dumps(ids).encode()).hexdigest()
-        return ids, {**query, 'fingerprint': fingerprint, 'count': len(ids)}
+        revision_fingerprint = hashlib.sha256(json.dumps([list(row) for row in rows]).encode()).hexdigest()
+        return ids, {**query, 'fingerprint': fingerprint, 'revision_fingerprint': revision_fingerprint, 'count': len(ids)}
 
     def list(self, actor, query):
         check_actor(actor)
@@ -1044,6 +1046,64 @@ class KnowledgeBase:
                         db.execute('INSERT OR REPLACE INTO source_retry VALUES(?,?,?)', (doc['id'], attempts, time.time() + min(300, 30 * 2 ** min(attempts - 1, 4))))
                 return True
 
+    @staticmethod
+    def _soft_delete(db, identity):
+        for chunk in db.execute('SELECT id FROM chunks WHERE document_id=?', (identity,)).fetchall():
+            db.execute('DELETE FROM local_vectors WHERE chunk_id=?', (chunk[0],))
+        db.execute("UPDATE documents SET deleted=1,status='deleted',pending_version=NULL,revision=revision+1,updated_at=? WHERE id=?",
+                   (time.time(), identity))
+        db.execute('DELETE FROM index_staging WHERE document_id=?', (identity,))
+
+    def bulk_delete(self, actor, payload):
+        check_actor(actor)
+        if not isinstance(payload, dict) or set(payload) not in ({'documents'}, {'selection'}):
+            raise AssistantError('请选择要移入回收站的文件。')
+        selection = payload.get('selection')
+        documents = payload.get('documents')
+        if 'selection' in payload:
+            if (not isinstance(selection, dict) or not isinstance(selection.get('q'), str) or len(selection['q']) > 200
+                    or not isinstance(selection.get('group'), str) or len(selection['group']) > 64
+                    or type(selection.get('count')) is not int or selection['count'] < 1
+                    or any(not re.fullmatch(r'[a-f0-9]{64}', str(selection.get(key) or ''))
+                           for key in ('fingerprint', 'revision_fingerprint'))):
+                raise AssistantError('全部选择信息无效，请重新选择。')
+        elif (not isinstance(documents, list) or not documents or len(documents) > 100
+              or any(not isinstance(item, dict) or set(item) != {'id', 'version'}
+                     or not isinstance(item['id'], str) or not item['id'] or len(item['id']) > 64
+                     or type(item['version']) is not int for item in documents)
+              or len({item['id'] for item in documents}) != len(documents)):
+            raise AssistantError('请选择1至100个文件并提供当前版本。')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if selection is not None:
+                ids, snapshot = self._group_selection(db, actor, selection)
+                if any(snapshot[key] != selection[key] for key in ('fingerprint', 'revision_fingerprint', 'count')):
+                    raise AssistantError('搜索结果、权限或文件版本已变化，未删除任何文件，请重新选择。', 409)
+                excluded = selection.get('excluded_ids', [])
+                available = set(ids)
+                if not isinstance(excluded, list) or any(not isinstance(i, str) or i not in available for i in excluded):
+                    raise AssistantError('取消选择的文件无效，请重新选择。')
+                excluded = set(excluded)
+                documents = [{'id': identity, 'version': db.execute('SELECT revision FROM documents WHERE id=?', (identity,)).fetchone()[0]}
+                             for identity in ids if identity not in excluded]
+                if not documents:
+                    raise AssistantError('请选择要移入回收站的文件。')
+            for item in documents:
+                row = db.execute('SELECT * FROM documents WHERE id=?', (item['id'],)).fetchone()
+                self._editable(row, actor, item['version'])
+                self._require_visible(db, actor, row)
+                if row['deleted']:
+                    raise AssistantError('文件已在回收站，未删除任何文件，请重新选择。', 409)
+            for item in documents:
+                self._soft_delete(db, item['id'])
+            self._bump_vector(db)
+            self._bump(db)
+            new_rev = self._vector_revision(db)
+        self._publish_snapshot(new_rev)
+        self._ensure_worker()
+        self._wake.set()
+        return {'deleted': len(documents)}
+
     def change(self, actor, identity, action, revision):
         check_actor(actor)
         with self.connect() as db:
@@ -1053,11 +1113,7 @@ class KnowledgeBase:
             if action == 'delete':
                 if row['deleted']:
                     raise AssistantError('文件已在回收站。', 409)
-                for chunk in db.execute('SELECT id FROM chunks WHERE document_id=?', (identity,)).fetchall():
-                    db.execute('DELETE FROM local_vectors WHERE chunk_id=?', (chunk[0],))
-                db.execute("UPDATE documents SET deleted=1,status='deleted',pending_version=NULL,revision=revision+1,updated_at=? WHERE id=?",
-                    (time.time(), identity))
-                db.execute('DELETE FROM index_staging WHERE document_id=?', (identity,))
+                self._soft_delete(db, identity)
                 self._bump_vector(db)
                 new_rev = self._vector_revision(db)
             elif action in {'restore', 'retry'}:

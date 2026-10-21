@@ -115,7 +115,7 @@ try{
   assert(reads.some(r=>r.path==='/api/repair-management/status'&&r.query.offset==='50'));
   await page.screenshot({path:path.join(shots,'all-desktop.png'),fullPage:true});
   await page.locator('.v2-todo-toolbar .n-base-selection').click();
-  for(const name of ['通告','维修项目','重保填写','风险排查','水耗填写','我的学练','我的签名'])await page.locator('.n-base-select-option').filter({hasText:name}).click();
+  for(const name of ['通告','维修项目','重保填写','专项排查','水耗填写','我的学练','我的签名'])await page.locator('.n-base-select-option').filter({hasText:name}).click();
   for(const name of ['维修项目','通告'])await page.locator('.n-base-select-option').filter({hasText:name}).click();
   assert.match(await page.locator('.n-base-select-option').filter({hasText:'维修项目'}).innerText(),/1/);
   assert.match(await page.locator('.n-base-select-option').filter({hasText:'通告'}).innerText(),/2/);
@@ -140,7 +140,7 @@ try{
   await page.waitForFunction(()=>document.querySelector('.v2-todo-handler')?.textContent.includes('检查清单'));
   assert(reads.some(r=>r.path==='/api/critical-guard/tasks/guard-1'&&r.query.scope==='A'));
   await page.locator('.v2-todo-handler').getByRole('button',{name:'异常',exact:true}).click();await close(page);await page.getByText('当前表格有未保存修改',{exact:true}).waitFor();await page.getByRole('button',{name:'放弃并继续',exact:true}).click();
-  await group(page,'风险排查').getByRole('button',{name:/A楼风险排查/}).click();await page.locator('.v2-todo-handler').getByText('设备状态检查',{exact:true}).first().waitFor();
+  await group(page,'专项排查').getByRole('button',{name:/A楼风险排查/}).click();await page.locator('.v2-todo-handler').getByText('设备状态检查',{exact:true}).first().waitFor();
   assert(reads.some(r=>r.path==='/api/risk-inspections/risk-1'));await close(page);
   await group(page,'我的学练').getByRole('button',{name:/每日学练/}).click();await page.locator('.v2-todo-handler').getByRole('heading',{name:/隔离测试选择题/}).waitFor();await close(page);
   await group(page,'我的签名').getByRole('button',{name:/填写个人签名/}).click();await page.locator('.v2-todo-handler').getByRole('button',{name:'开始签名',exact:true}).click();
@@ -172,14 +172,14 @@ try{
   }
   await page.screenshot({path:path.join(shots,'workspace-desktop.png'),fullPage:true});
   const homeUrl=page.url();
-  for(const [label,title,readyText] of [['重保填写','A楼重保检查','检查清单'],['风险排查','A楼风险排查','设备状态检查'],['我的学练','每日学练','隔离测试选择题'],['水耗填写','A楼水表待填写','本次水表读数']]){
+  for(const [label,title,readyText] of [['重保填写','A楼重保检查','检查清单'],['专项排查','A楼风险排查','设备状态检查'],['我的学练','每日学练','隔离测试选择题'],['水耗填写','A楼水表待填写','本次水表读数']]){
     await group(page,label).getByRole('button',{name:new RegExp(title)}).click();await page.locator('.v2-todo-handler').getByText(readyText,{exact:false}).first().waitFor();assert.equal(page.url(),homeUrl);await close(page);
   }
   await group(page,'我的签名').getByRole('button',{name:/填写个人签名/}).click();await page.locator('.v2-todo-handler').getByRole('button',{name:'开始签名',exact:true}).click();await page.locator('.v2-todo-handler canvas').waitFor();assert.equal(page.url(),homeUrl);await close(page);
   for(const current of [home,phone]){
     page=current.page;
     await page.locator('.v2-todo-toolbar .n-base-selection').click();
-    for(const name of ['维修项目','重保填写','风险排查','水耗填写','我的学练','我的签名'])await page.locator('.n-base-select-option').filter({hasText:name}).click();
+    for(const name of ['维修项目','重保填写','专项排查','水耗填写','我的学练','我的签名'])await page.locator('.n-base-select-option').filter({hasText:name}).click();
     assert.deepEqual(await labels(page),['1通告']);
     const authReads=reads.filter(r=>r.path==='/api/auth/status').length;
     await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));

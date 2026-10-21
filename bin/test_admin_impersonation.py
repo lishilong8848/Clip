@@ -271,12 +271,50 @@ class AdminImpersonationTests(_TempDirTestCase, unittest.IsolatedAsyncioTestCase
                 self.assertEqual(grant_id, grant['id'])
                 self.assertIsNone(CURRENT_IMPERSONATION.get())
 
-    async def test_l1_cannot_enter_peer_or_l0_but_can_enter_lower_level(self):
+    async def test_l1_can_enter_peer_and_lower_but_not_fixed_self_or_higher(self):
         client = self.client_for(self.session('manager'))
         self.assertEqual(self.auth.account_profile(self.ids['manager'])['level'], 'L1')
-        for key in ('l0', 'h', 'manager2'):
+        for key in ('l0', 'manager'):
             await self.start(key, client, expected=403)
-        await self.start('a', client)
+        self.configure('manager2', level='L0')
+        await self.start('manager2', client, expected=403)
+        self.configure('manager2', level='L1')
+        for key in ('h', 'manager2', 'a'):
+            await self.start(key, self.client_for(self.session('manager')))
+
+    async def test_l2_l3_can_enter_same_and_lower_levels_within_scope_modules(self):
+        self.configure('engineer_h', scopes=['A', 'H'])
+        self.configure('supervisor', scopes=['A'])
+        await self.start('supervisor', self.client_for(self.session('engineer_h')))
+        self.configure('supervisor_b', scopes=['A'])
+        await self.start('supervisor_b', self.client_for(self.session('supervisor')))
+        await self.start('a', self.client_for(self.session('supervisor')))
+        await self.start('supervisor', self.client_for(self.session('a')), expected=403)
+
+    async def test_quarantine_and_peer_scope_module_changes_revoke_access_immediately(self):
+        client = self.client_for(self.session('manager'))
+        await self.start('manager2', client)
+        with patch.object(self.auth, '_identity_quarantined', side_effect=lambda oid: oid == self.ids['manager2']):
+            self.assertEqual((await client.get('/api/workbench')).status_code, 403)
+        self.configure('manager', scopes=['A'])
+        self.assertEqual((await client.get('/api/workbench')).status_code, 403)
+        self.configure('manager', scopes=self.auth._admin_scopes(), modules=['accounts', 'maintenance'])
+        self.assertEqual((await client.get('/api/workbench')).status_code, 403)
+
+    async def test_peer_delegation_keeps_private_and_account_routes_blocked(self):
+        client = self.client_for(self.session('manager'))
+        grant_id = await self.start('manager2', client)
+        for path in ('/api/signatures/management/request', '/api/signatures/management/submit',
+                     '/api/auth/accounts', '/api/auth/accounts/audit', '/api/auth/password/change',
+                     '/api/assistant/conversation', '/api/learning/answers'):
+            for method in ('GET', 'POST', 'DELETE'):
+                with self.subTest(path=path, method=method):
+                    result = await client.request(method, path, json={}, headers={HEADER: grant_id})
+                    self.assertEqual(result.status_code, 403, result.text)
+        self.assertEqual(self.ops, [])
+        self.assertEqual((await self.post(grant_id, client=client)).status_code, 200)
+        self.assertEqual(self.ops[-1]['actor'], self.ids['manager2'])
+        self.assertEqual(self.ops[-1]['audit']['actor_open_id'], self.ids['manager'])
 
     async def test_l3_requires_lower_level_home_and_full_target_scope_module_subset(self):
         parent = self.session('supervisor')

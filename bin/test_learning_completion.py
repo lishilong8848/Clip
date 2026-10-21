@@ -410,8 +410,8 @@ class CompletionRouteDateTests(unittest.TestCase):
         self.assertEqual(self.sender.calls, [])
         self.assertEqual(self.service._all('local'), [])
 
-    def test_real_route_rejects_invalid_and_explicit_empty_dates(self):
-        for value in ('', '02/29/2024', '2024-2-29', '2026-02-29', '1900-02-29', '2100-02-29',
+    def test_real_route_rejects_explicit_invalid_dates(self):
+        for value in (' ', '02/29/2024', '2024-2-29', '2026-02-29', '1900-02-29', '2100-02-29',
                       '2024-04-31', '0000-01-01', '2024-02-29T00:00:00Z', ' 2024-02-29'):
             for field in ('from', 'to', 'date'):
                 with self.subTest(value=value, field=field):
@@ -419,11 +419,49 @@ class CompletionRouteDateTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 400, response.text)
                     self.assertEqual(response.json()['error'], '请选择有效统计日期。')
 
+    def test_real_route_treats_empty_date_filters_as_unspecified(self):
+        for query in ({'from': '', 'to': ''}, {'date': ''}, {'from': '', 'to': '', 'date': ''},
+                      {'from': '', 'to': '', 'date': '2024-02-29'},
+                      {'from': '', 'to': DATE}, {'from': DATE, 'to': ''}):
+            with self.subTest(query=query):
+                response = self.get(query)
+                self.assertEqual(response.status_code, 200, response.text)
+                expected = query.get('date') or DATE
+                self.assertEqual((response.json()['data']['from'], response.json()['data']['to']),
+                                 (expected, expected))
+        self.assertEqual(self.cloud.calls, [])
+        self.assertEqual(self.sender.calls, [])
+        self.assertEqual(self.service._all('local'), [])
+
     def test_real_route_keeps_inclusive_31_day_limit(self):
         for end, status in (('2024-03-02', 200), ('2024-03-03', 400), ('2024-01-31', 400)):
             with self.subTest(end=end):
                 response = self.get({'from': '2024-02-01', 'to': end})
                 self.assertEqual(response.status_code, status, response.text)
+
+    def test_china_midnight_defaults_and_profile_periods(self):
+        for instant, expected in (
+            ('2024-02-28T15:59:59+00:00', '2024-02-28'),
+            ('2024-02-28T16:00:00+00:00', '2024-02-29'),
+            ('2024-02-29T16:00:00+00:00', '2024-03-01'),
+            ('2026-12-31T16:00:00+00:00', '2027-01-01'),
+        ):
+            current = dt.datetime.fromisoformat(instant).astimezone(learning.TZ)
+            with self.subTest(instant=instant), patch.object(learning, 'now', return_value=current):
+                response = self.get({'from': '', 'to': ''})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual((response.json()['data']['from'], response.json()['data']['to']),
+                                 (expected, expected))
+                today = dt.date.fromisoformat(expected)
+                for period, start in (
+                    ('7', today - dt.timedelta(days=6)), ('30', today - dt.timedelta(days=29)),
+                    ('week', today - dt.timedelta(days=today.weekday())),
+                    ('month', today.replace(day=1)), ('day', today),
+                ):
+                    query = self.service._date_filters({'period': period, 'from': '', 'to': ''})
+                    self.assertEqual((query['from'], query['to']), (start.isoformat(), expected))
+                custom = {'period': '30', 'from': '2024-02-01', 'to': '2024-02-29'}
+                self.assertEqual(self.service._date_filters(custom), custom)
 
     def test_real_route_keeps_missing_date_default_and_last_query_value(self):
         response = self.get({})
@@ -483,7 +521,7 @@ class CompletionCloudTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         fields = rows[0]['fields']
         self.assertEqual(json.loads(fields['内容']), value)
-        self.assertEqual(fields['类别'], completion.KIND)
+        self.assertEqual(fields['类别'], '每日完成情况')
         self.assertEqual(fields['人员标识'], 'p')
         self.assertEqual(fields['完成状态'], '未安排')
         restored = self.cloud.load_entities()

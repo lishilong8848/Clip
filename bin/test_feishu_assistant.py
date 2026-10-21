@@ -503,6 +503,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         snapshot = {'schema': 4, 'app_id': self.settings.app_id, 'loaded_at': time.time(),
                     'people': {person['id']: person for person in people}}
         self.runtime.auth_manager._account_directory_provider = lambda: snapshot
+        self.runtime.auth_manager._account_read_state = PortalAuthManager._account_read_state.__get__(self.runtime.auth_manager)
         self.runtime.auth_manager.directory_person = PortalAuthManager.directory_person.__get__(self.runtime.auth_manager)
         self.channel.config = {'app_id': self.settings.app_id}
         return snapshot

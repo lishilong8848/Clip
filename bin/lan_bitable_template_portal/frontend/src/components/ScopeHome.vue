@@ -167,7 +167,7 @@
               <span>本月记录 {{ waterScopeItem(scope.value).month_record_count || 0 }}</span>
               <span>最近 {{ formatWaterDate(waterScopeItem(scope.value).latest_date_ms) }}</span>
             </template>
-            <template v-else-if="activeMode === 'risk_inspection'"><span>本楼风险排查任务</span></template>
+            <template v-else-if="activeMode === 'risk_inspection'"><span>本楼专项排查任务</span></template>
             <template v-else-if="activeMode === 'daily'">
               <span>今日任务清单</span>
               <span>通告 · 事件 · 检修</span>
@@ -210,7 +210,7 @@
               v-else-if="activeMode === 'risk_inspection'"
               class="primary"
               @click="$emit('risk-inspection', scope.value)"
-            >进入风险排查</button>
+            >进入专项排查</button>
             <button type="button"
               v-else-if="activeMode === 'daily'"
               class="primary"

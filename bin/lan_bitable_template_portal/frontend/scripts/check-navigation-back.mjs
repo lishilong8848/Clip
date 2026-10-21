@@ -146,7 +146,7 @@ try {
     maintenance:'选择楼栋进入维护管理', maintenance_mop:'选择楼栋进入 MOP 填写',
     change:'选择楼栋进入变更管理', repair:'选择楼栋进入检修通告管理',
     repair_management:'选择楼栋进入检修单管理', capacity:'选择容量管理模板', water:'选择楼栋进入水耗管理',
-    tools:'选择其它功能入口', special:'专项任务', risk:'选择风险管理业务', risk_inspection:'选择楼栋进入风险排查', daily:'选择楼栋查看每日任务',
+    tools:'选择其它功能入口', special:'专项任务', risk:'选择风险管理业务', risk_inspection:'选择楼栋进入专项排查', daily:'选择楼栋查看每日任务',
     power:'选择楼栋进入上/下电通告', polling:'选择楼栋进入设备轮巡',
     adjust:'选择楼栋进入设备调整', handover:'选择楼栋打开交接班审核页',
   };
@@ -156,7 +156,7 @@ try {
     await assertBack(entry);
   }
   await page.goto(base+'/?entry=risk_inspection');
-  await page.getByRole('heading',{name:'选择楼栋进入风险排查',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'选择楼栋进入专项排查',exact:true}).waitFor();
   await (await assertBack('risk inspection returns to special tasks')).click();
   await page.waitForURL(base+'/?entry=special');
   await page.getByRole('heading',{name:'专项任务',exact:true}).waitFor();

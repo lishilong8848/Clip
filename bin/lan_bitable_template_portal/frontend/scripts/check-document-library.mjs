@@ -18,6 +18,7 @@ let page;
 function reset() { Object.assign(fixture, documentFixture()); }
 async function open(version = 'v2', dark = false) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
+  await context.addInitScript(dark => localStorage.setItem('clipflow:workspace-night-mode:ou_fixtureDoc', dark ? 'dark' : 'light'), dark);
   await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
   page = await context.newPage(); page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin + '/?version=' + version + (dark ? '&dark=1' : ''));
@@ -71,6 +72,7 @@ try {
   const before = fixture.applied;
   await drawer().getByRole('button', { name: '保存资料', exact: true }).click();
   await drawer().getByText('操作回执尚未确认，输入及原操作编号已保留。', { exact: false }).waitFor();
+  assert.equal(await drawer().locator('[role="alert"][popover]').count(), 0, 'recovery messages stay inline and never cover retry controls');
   const original = structuredClone(fixture.writes.at(-1).body);
   await page.waitForTimeout(300); assert.equal(fixture.applied, before + 1, 'No automatic write retry');
   assert.equal(await drawer().getByLabel('资料名称', { exact: true }).inputValue(), 'A楼回执丢失核验资料');
@@ -123,12 +125,15 @@ try {
   await page.getByRole('button', { name: '查询', exact: true }).click();
   await page.getByText('没有符合条件的资料', { exact: true }).waitFor();
   await page.getByLabel('搜索资料', { exact: true }).fill(''); await page.getByRole('button', { name: '查询', exact: true }).click();
+  await page.getByLabel('资料楼栋', { exact: true }).click();
+  await page.locator('.n-base-select-option:visible').filter({ hasText: '全部授权楼栋' }).click();
   await page.getByRole('button', { name: '下一页资料', exact: true }).click();
   await page.getByRole('button', { name: '查看资料：E楼运行资料', exact: true }).waitFor();
   await page.getByRole('button', { name: '上一页资料', exact: true }).click();
   await page.getByRole('button', { name: '查看资料：A楼回执丢失核验资料', exact: true }).waitFor();
   checks.push('search empty state and cursor navigation use actual server results');
 
+  const authReadsBeforeTableSwitch = fixture.authReads;
   await page.getByLabel('文件数据表', { exact: true }).click();
   await page.locator('.n-base-select-option').filter({ hasText: '暖通技术资料' }).click();
   await page.getByRole('button', { name: '查看资料：A楼回执丢失核验资料', exact: true }).click();
@@ -138,7 +143,7 @@ try {
   await drawer().getByRole('button', { name: '关闭', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: '新建资料', exact: true }).count(), 0);
   checks.push('readonly table capabilities never expose record or attachment writes');
-  assert.equal(fixture.authReads, 1, 'Actor context is read once per mounted page, never passed as props');
+  assert.equal(fixture.authReads, authReadsBeforeTableSwitch, 'Changing tables does not reload actor context');
   await context.close();
 
   reset(); context = await open();
@@ -154,17 +159,19 @@ try {
   await drawer().getByRole('button', { name: '关闭', exact: true }).click();
   await page.getByRole('button', { name: '接入数据表', exact: true }).click();
   const settings = page.locator('.n-drawer-content').filter({ has: page.locator('.document-settings') });
-  await settings.getByLabel('配置标识', { exact: true }).fill('fixtureTable');
-  await settings.getByLabel('数据表显示名称', { exact: true }).fill('测试归档资料');
-  await settings.getByLabel('多维表 Base Token', { exact: true }).fill('baseSyntheticFixture');
-  await settings.getByLabel('数据表 ID', { exact: true }).fill('tblSyntheticFixture');
+  await settings.getByLabel('飞书数据表链接', { exact: true }).fill('https://vnet.feishu.cn/wiki/wikiFixture?table=tblSyntheticFixture');
+  await settings.getByRole('button', { name: '读取数据表', exact: true }).click();
+  await settings.getByLabel('楼栋字段', { exact: true }).click();
+  await page.locator('.n-base-select-option').filter({ hasText: '所属楼栋' }).click();
   await settings.getByRole('button', { name: '接入数据表', exact: true }).click();
   await page.getByText('数据表已接入，请核对显示字段及编辑范围。', { exact: true }).waitFor();
   assert.equal(fixture.tables.length, 3);
+  assert.deepEqual(fixture.tables.at(-1).fixed_scopes, []);
+  assert.deepEqual(fixture.tables.at(-1).write_scopes, []);
   await page.getByRole('button', { name: '数据表配置', exact: true }).click();
   await settings.getByLabel('列表显示字段', { exact: true }).click();
-  await page.locator('.n-base-select-option').filter({ hasText: '资料名称' }).click();
-  await page.locator('.n-base-select-option').filter({ hasText: '资料分类' }).click();
+  await page.locator('.n-base-select-option').filter({ hasText: '所属楼栋' }).click();
+  await page.locator('.n-base-select-option').filter({ hasText: '文件页数' }).click();
   await page.keyboard.press('Escape');
   await settings.getByRole('button', { name: '上移资料分类', exact: true }).click();
   await settings.getByRole('button', { name: '保存配置', exact: true }).click();
@@ -261,11 +268,20 @@ try {
       await page.screenshot({ path: path.join(output, `${version}${dark ? '-dark' : ''}-detail-${width}x${height}.png`), fullPage: true });
     }
     await drawer().getByRole('button', { name: '关闭', exact: true }).click();
-    await page.getByRole('button', { name: '返回', exact: true }).click();
-    assert.equal(new URL(page.url()).searchParams.get('entry'), 'tools', 'Return uses the independent tools entry');
+    if (version === 'legacy') {
+      await page.getByRole('button', { name: '返回', exact: true }).click();
+      const returned = new URL(page.url());
+      assert.equal(returned.searchParams.get('entry'), 'tools', 'Legacy return uses the independent tools entry');
+    } else {
+      assert.equal(await page.getByRole('button', { name: '返回', exact: true }).count(), 0, 'V2 does not duplicate the legacy back control');
+      await page.getByRole('button', { name: '功能', exact: true }).click();
+      await page.getByRole('button', { name: '南通文件', exact: true }).click();
+      await page.getByRole('heading', { name: '南通文件', exact: true }).waitFor();
+      assert.equal(new URL(new URL(page.url()).searchParams.get('__page'), origin).pathname, '/document-library', 'V2 keeps its independent module route');
+    }
     await context.close();
   }
-  checks.push('legacy/v2/light/dark; 1440x900/440x956/402x874/360x844 list and drawer; independent tools return');
+  checks.push('legacy/v2/light/dark; 1440x900/440x956/402x874/360x844 list and drawer; legacy tools return and V2 module navigation');
   assert.deepEqual(errors, [], 'No browser runtime errors');
   await writeFile(path.join(output, 'acceptance.json'), JSON.stringify({ checks, errors, viewports, syntheticOnly: true }, null, 2));
   console.log(`Document library: ${checks.length} workflow groups passed; screenshots in ${output}`);

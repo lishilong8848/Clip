@@ -29,11 +29,12 @@
       </button>
     </div>
 
-    <div v-if="!recycle && selectedCount > 0" class="kb-batch-bar" role="toolbar" aria-label="批量分组">
+    <div v-if="!recycle && selectedCount > 0" class="kb-batch-bar" role="toolbar" aria-label="批量操作">
       <span class="kb-batch-count">已选 {{ selectedCount }} 个文件{{ allSelection ? '（全部搜索结果）' : '' }}</span>
       <KnowledgeGroupPicker v-model="assignGroupId" :groups="groups" :disabled="selectionDisabled" />
       <button type="button" class="primary" :disabled="!assignGroupId || selectionDisabled" @click="assignSelection"><Check :size="15" />应用分组</button>
       <button type="button" class="ghost-button" :disabled="selectionDisabled" @click="unassignSelection">移出分组</button>
+      <button type="button" class="ghost-button danger" :disabled="selectionDisabled" @click="askBulkDelete"><Trash2 :size="15" />批量删除</button>
       <button type="button" class="ghost-button" :disabled="groupBusy" @click="clearSelection">取消选择</button>
     </div>
 
@@ -100,6 +101,15 @@
           @delete="(g) => deleteGroupTarget = g" />
       </aside>
       <div class="kb-pane">
+        <div v-if="!recycle && items.length" class="kb-select-all">
+          <button type="button" class="checkbox-button" :class="{ checked: allPageSelected }" role="checkbox" :aria-checked="allPageSelected" :aria-label="allPageSelected ? '取消全选本页' : '全选本页'" :disabled="selectionDisabled || !editableOnPage.length" @click="toggleSelectAll">
+            <CheckSquare v-if="allPageSelected" :size="15" aria-hidden="true" />
+            <Square v-else :size="15" aria-hidden="true" />
+          </button>
+          <span>{{ allPageSelected ? '已全选本页' : '全选本页' }}</span>
+          <button type="button" class="ghost-button" :disabled="selectionDisabled" @click="selectAllMatching"><Loader2 v-if="selectionBusy" :size="14" class="spin" />全选全部</button>
+          <span v-if="allSelection">{{ allSelection.count }} 个可操作文件<span v-if="excludedIds.size">，已排除 {{ excludedIds.size }} 个</span></span>
+        </div>
         <div v-if="loadingList && !quietLoading" class="empty"><Loader2 :size="24" class="spin" aria-hidden="true" />正在读取文档…</div>
         <div v-else-if="!items.length" class="empty">
           {{ recycle ? '回收站是空的' : search.trim() ? '没有匹配的文档' : '尚未上传文档' }}
@@ -141,15 +151,6 @@
             <p v-if="item.error && !recycle" class="kb-row-error" role="alert">{{ item.error }}</p>
           </li>
         </ul>
-        <div v-if="!recycle && items.length" class="kb-select-all">
-          <button type="button" class="checkbox-button" :class="{ checked: allPageSelected }" role="checkbox" :aria-checked="allPageSelected" :aria-label="allPageSelected ? '取消全选本页' : '全选本页'" :disabled="selectionDisabled || !editableOnPage.length" @click="toggleSelectAll">
-            <CheckSquare v-if="allPageSelected" :size="15" aria-hidden="true" />
-            <Square v-else :size="15" aria-hidden="true" />
-          </button>
-          <span>{{ allPageSelected ? '已全选本页' : '全选本页' }}</span>
-          <button type="button" class="ghost-button" :disabled="selectionDisabled" @click="selectAllMatching"><Loader2 v-if="selectionBusy" :size="14" class="spin" />全选全部</button>
-          <span v-if="allSelection">{{ allSelection.count }} 个可移动文件<span v-if="excludedIds.size">，已排除 {{ excludedIds.size }} 个</span></span>
-        </div>
         <footer v-if="pages > 1" class="kb-pager">
           <span class="kb-total">共 {{ total }} 项</span>
           <nav class="kb-pager-nav" aria-label="分页">
@@ -205,6 +206,7 @@
 
     <ConfirmDialog :open="!!uploadConfirm" title="确认上传" :message="uploadConfirmMessage" tone="warning" @resolve="resolveUpload" />
     <ConfirmDialog :open="!!deleteTarget" title="移入回收站" :message="deleteTarget ? '将「' + deleteTarget.name + '」移入回收站？历史共享版本保留，之后可恢复。' : ''" tone="danger" @resolve="resolveDelete" />
+    <ConfirmDialog :open="!!bulkDeleteTarget" title="批量移入回收站" :message="`确认将选中的 ${bulkDeleteTarget?.count || 0} 个文件移入回收站？历史版本保留，之后可恢复。`" confirm-label="确认移入回收站" tone="danger" @resolve="resolveBulkDelete" />
     <ConfirmDialog :open="!!restoreTarget" title="恢复文档" :message="restoreTarget ? '恢复「' + restoreTarget.name + '」？恢复后需要重新索引才会再次共享。' : ''" tone="primary" @resolve="resolveRestore" />
     <ConfirmDialog :open="!!retryTarget" title="重新索引" :message="retryTarget ? '对「' + retryTarget.name + '」重新执行索引？' : ''" tone="primary" @resolve="resolveRetry" />
     <ConfirmDialog :open="!!deleteGroupTarget" title="删除分组" :message="deleteGroupTarget ? '删除分组「' + deleteGroupTarget.name + '」？其中文件将退回未分组，子文件夹移至上级目录；文件与索引不受影响。' : ''" tone="danger" @resolve="resolveDeleteGroup" />
@@ -305,6 +307,7 @@ const dragging = ref(false);
 const FILE_ACCEPT = KNOWLEDGE_FILE_ACCEPT;
 
 const deleteTarget = ref<DocumentItem | null>(null);
+const bulkDeleteTarget = ref<{count:number;payload:Record<string,unknown>}|null>(null);
 const restoreTarget = ref<DocumentItem | null>(null);
 const retryTarget = ref<DocumentItem | null>(null);
 const actionBusy = ref(false);
@@ -312,12 +315,13 @@ const actionBusy = ref(false);
 const groups = ref<GroupItem[]>([]);
 const groupFilter = ref<string>("all");
 const selectedIds = ref<Set<string>>(new Set());
-type Selection = {q:string;group:string;fingerprint:string;count:number};
+const selectedVersions = new Map<string,number>();
+type Selection = {q:string;group:string;fingerprint:string;revision_fingerprint:string;count:number};
 const allSelection = ref<Selection|null>(null);
 const excludedIds = ref<Set<string>>(new Set());
 const selectionBusy = ref(false);
 let selectionController:AbortController|undefined;
-const selectionDisabled = computed(()=>groupBusy.value || selectionBusy.value || loadingList.value);
+const selectionDisabled = computed(()=>groupBusy.value || actionBusy.value || selectionBusy.value || loadingList.value || !!bulkDeleteTarget.value);
 const selectedCount = computed(()=>allSelection.value ? allSelection.value.count - excludedIds.value.size : selectedIds.value.size);
 const groupOptions = computed(()=>folderOptions(groups.value));
 const assignGroupId = ref("");
@@ -428,8 +432,13 @@ async function loadList(spinner = true, clearError = true): Promise<void> {
   if (clearError) error.value = "";
   try {
     const params = listParams();
+    if(allSelection.value)params.set('select_all','1');
     const data = await requestJson(`${BASE}?${params}`, { signal: controller.signal, cache: "no-store" });
     if (listController !== controller || controller.signal.aborted) return;
+    if(allSelection.value &&
+       (!data.selection || data.selection.fingerprint!==allSelection.value.fingerprint || data.selection.revision_fingerprint!==allSelection.value.revision_fingerprint)){
+      clearSelection();notice.value='文件列表或版本已变化，已取消全部选择，请重新选择。';
+    }
     items.value = data.items || [];
     total.value = Number(data.total) || 0;
     page.value = Number(data.page) || page.value;
@@ -506,6 +515,7 @@ function toggleSelect(id: string): void {
   else set.add(id);
   if(allSelection.value)excludedIds.value = new Set(set);
   else selectedIds.value = new Set(set);
+  if(!allSelection.value){if(set.has(id))selectedVersions.set(id,Number(item.version));else selectedVersions.delete(id);}
 }
 function isSelected(item:DocumentItem):boolean {
   return item.can_edit && (allSelection.value ? !excludedIds.value.has(item.id) : selectedIds.value.has(item.id));
@@ -516,6 +526,7 @@ function toggleSelectAll(): void {
   for(const item of editableOnPage.value){
     if(allSelection.value ? remove : !remove)set.add(item.id);
     else set.delete(item.id);
+    if(!allSelection.value){if(remove)selectedVersions.delete(item.id);else selectedVersions.set(item.id,Number(item.version));}
   }
   if(allSelection.value)excludedIds.value=set;
   else selectedIds.value=set;
@@ -524,6 +535,7 @@ function clearSelection(): void {
   selectionController?.abort();selectionController=undefined;selectionBusy.value=false;
   allSelection.value=null;excludedIds.value=new Set();
   selectedIds.value = new Set();
+  selectedVersions.clear();
   assignGroupId.value = "";
 }
 function listParams():URLSearchParams {
@@ -550,13 +562,34 @@ function selectionPayload(){
   return allSelection.value?{selection:{...allSelection.value,excluded_ids:[...excludedIds.value]}}:{document_ids:[...selectedIds.value]};
 }
 
+function askBulkDelete():void {
+  if(selectionDisabled.value || !selectedCount.value)return;
+  const payload=allSelection.value?selectionPayload():{documents:[...selectedIds.value].map(id=>({id,version:selectedVersions.get(id)}))};
+  bulkDeleteTarget.value={count:selectedCount.value,payload:structuredClone(payload)};
+}
+async function resolveBulkDelete(confirmed:boolean):Promise<void> {
+  const target=bulkDeleteTarget.value;bulkDeleteTarget.value=null;
+  if(!confirmed || !target || groupBusy.value || actionBusy.value)return;
+  groupBusy.value=true;actionBusy.value=true;clearNotice();error.value='';
+  try{
+    const result=await requestJson(`${BASE}/bulk-delete`,{method:'POST',body:JSON.stringify(target.payload)});
+    if(result.deleted!==target.count || result.errors?.length)throw new Error('批量删除结果不完整，请刷新列表和回收站核对。');
+    closeDetail();clearSelection();
+    await loadGroups();await loadList(true,false);
+    notice.value=`已将 ${result.deleted} 个文件移入回收站。`;
+  }catch(cause){
+    error.value=(cause instanceof Error?cause.message:'批量删除未确认完成。')+' 请核对列表和回收站后重新选择。';
+    clearSelection();await loadList(true,false);
+  }finally{groupBusy.value=false;actionBusy.value=false;}
+}
+
 async function reloadAdjusted(): Promise<void> {
+  clearSelection();
   await loadList();
   if (page.value > pages.value) {
     page.value = pages.value;
     await loadList();
   }
-  clearSelection();
 }
 
 async function loadGroups(): Promise<void> {

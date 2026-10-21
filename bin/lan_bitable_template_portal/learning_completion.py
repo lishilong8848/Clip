@@ -389,6 +389,7 @@ def report(service, actor, query):
     access = service._access(actor, scope=query.get('scope'), person_id=query.get('person_id'))
     if access['scope'] and access['scope'] not in core.SCOPES:
         raise core.LearningError('楼栋范围无效。')
+    query = {key: value for key, value in query.items() if key not in {'date', 'from', 'to'} or value != ''}
     today = core.now().date().isoformat()
     default = query.get('date', today)
     start, end = day(query.get('from', default)), day(query.get('to', default))

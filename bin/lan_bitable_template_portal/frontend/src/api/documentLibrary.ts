@@ -30,6 +30,10 @@ export type LibraryRecord = {
 export type LibrarySchema = {
   fields: LibraryField[]; display_fields: string[]; attachment_fields: string[];
 };
+export type LibraryPreview = {
+  url: string; source: LibraryTable | null;
+  tables: Array<{ table_id: string; name: string }>; fields: LibraryField[];
+};
 export type LibraryTables = {
   items: LibraryTable[]; capabilities?: LibraryCapabilities; can_configure?: boolean;
   actor?: { can_configure?: boolean }; scopes?: Array<{ value: string; label: string }>;
@@ -58,6 +62,15 @@ function tableResult(source: Record<string, any>): LibraryTable {
   return { ...source, key: String(source.id || source.key), name: String(source.name), app_token: source.base_token || source.app_token,
     scopes: source.read_scopes || source.scopes || [] };
 }
+function fieldResults(data: Record<string, any>): LibraryField[] {
+  const fields = arrayResult<Record<string, any>>(data, 'fields').map(field => ({ ...field,
+    id: String(field.id || field.field_id || ''), name: String(field.name || field.field_name || ''),
+    options: field.options || field.property?.options || [], read_only: field.read_only === true || field.is_computed === true,
+    multiple: field.property?.multiple ?? field.multiple,
+  } as LibraryField));
+  if (fields.some(field => !field.id || !field.name)) throw new ApiError('字段结构不完整，请重新读取。', { status: 502 });
+  return fields;
+}
 function recordResult(data: Record<string, any>): LibraryRecord {
   const record = data.record || data;
   if (typeof record.record_id !== 'string' || !record.record_id || !record.fields || typeof record.fields !== 'object'
@@ -69,6 +82,19 @@ function recordResult(data: Record<string, any>): LibraryRecord {
 }
 
 export const documentLibraryApi = {
+  async preview(url: string, tableId?: string, signal?: AbortSignal): Promise<LibraryPreview> {
+    const data = await requestJson(endpoint('/preview'), {
+      method: 'POST', body: JSON.stringify({ url, ...(tableId ? { table_id: tableId } : {}) }), signal,
+    });
+    const tables = arrayResult<{ table_id: string; name: string }>(data, 'tables');
+    if (typeof data.url !== 'string' || !data.url || tables.some(table => !table.table_id || !table.name)
+        || data.source !== null && (!data.source?.base_token || !data.source?.table_id))
+      throw new ApiError('数据表读取结果不完整，请重新读取。', { status: 502 });
+    const fields = fieldResults(data);
+    if (data.source === null ? !tables.length : !fields.length || !tables.some(table => table.table_id === data.source.table_id))
+      throw new ApiError('数据表读取结果不完整，请重新读取。', { status: 502 });
+    return { url: data.url, source: data.source === null ? null : tableResult(data.source), tables, fields };
+  },
   async context(signal?: AbortSignal): Promise<{ scopes: Array<{ value: string; label: string }> }> {
     const data = await requestJson('/api/auth/status', { signal, fresh: true });
     const scopes = Array.isArray(data.scope_options) ? data.scope_options.filter((option: Record<string, unknown>) => ['A', 'B', 'C', 'D', 'E', 'H', '110'].includes(String(option.value))) : [];
@@ -80,13 +106,7 @@ export const documentLibraryApi = {
   },
   async schema(key: string, signal?: AbortSignal): Promise<LibrarySchema> {
     const data = await requestJson(endpoint('/schema', key), { signal, fresh: true });
-    const fields = arrayResult<Record<string, any>>(data, 'fields').map(field => ({ ...field,
-      id: String(field.id || field.field_id || ''), name: String(field.name || field.field_name || ''),
-      options: field.options || field.property?.options || [], read_only: field.read_only === true || field.is_computed === true,
-      multiple: field.property?.multiple ?? field.multiple,
-    } as LibraryField));
-    if (fields.some(field => !field.id || !field.name)) throw new ApiError('字段结构不完整，请重新读取。', { status: 502 });
-    return { fields,
+    return { fields: fieldResults(data),
       display_fields: arrayResult<string>(data, 'display_fields'), attachment_fields: arrayResult<string>(data, 'attachment_fields') };
   },
   async records(key: string, params: { scope?: string; q?: string; cursor?: string; page_size?: number }, signal?: AbortSignal): Promise<LibraryList> {

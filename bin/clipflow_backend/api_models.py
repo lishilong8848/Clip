@@ -54,6 +54,7 @@ class WorkbenchActionRequest(APIModel):
 class PollingSopRequest(APIModel):
     sop_id: str = Field(default="", max_length=80)
     work_type: str = Field(default="polling", max_length=24)
+    adjust_sop_type: str | None = Field(default=None, pattern="^(normal|cooling)$")
     scope: str = Field(min_length=1, max_length=16)
     name: str = Field(min_length=1, max_length=160)
     expected_version: int = 0

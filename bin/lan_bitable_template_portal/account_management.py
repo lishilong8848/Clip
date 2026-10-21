@@ -43,9 +43,13 @@ class AccountManagement:
         except Exception:
             snapshot = self.directory.snapshot
             warning = "人员目录同步失败，保留上次完整名单；请稍后重新同步。"
+        with self.auth.account_listing_read(snapshot) as raw_permissions:
+            return self._accounts(snapshot, warning, actor, raw_permissions)
+
+    def _accounts(self, snapshot, warning, actor, raw_permissions):
         with self.auth._lock:
             permissions = self.auth.get_permissions_payload()
-            raw_permissions = self.auth._load_permissions_locked().get("users", {})
+        raw_permissions = raw_permissions.get('users', {})
         by_id = {item["open_id"]: item for item in permissions["users"]}
         duties = {oid: scope for scope, oid in BUILDING_OPEN_ID_MAP.items()}
         for oid, scope in duties.items():
@@ -123,7 +127,12 @@ class AccountManagement:
             from .account_impersonation import can_impersonate
             item['can_impersonate'] = bool(actor and can_impersonate(self.auth, actor.get('open_id'), item['open_id']))
         if profile:
-            items = [item for item in items if account_details_allowed(profile, item) or account_allowed(profile, item, "edit")]
+            items = [item for item in items if account_details_allowed(profile, item)
+                     or account_allowed(profile, item, "edit") or item['can_impersonate']]
+            for item in items:
+                if not any(account_allowed(profile, item, action) for action in ('view', 'edit')):
+                    for key in ('last_login', 'password_set'):
+                        item.pop(key, None)
             if profile["level"] == "L2":
                 # This is an edit selector, not a general personnel directory or activity report.
                 for item in items:

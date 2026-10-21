@@ -326,7 +326,7 @@ function selectAdminTab(next: AdminTabKey): void {
   emit('select-tab', next);
   if (next === "status") void loadStatus();
   else if (next === "permissions") {
-    void loadPermissions();
+    void loadPermissionRequests(false);
   }
   else if (next === "handover") void loadHandover();
   else if (next === "mop") void loadMopSettings();

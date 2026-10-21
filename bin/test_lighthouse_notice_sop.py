@@ -93,6 +93,33 @@ class NoticeSopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(saved["polling_work_order_exempt"])
         self.assertEqual((saved["polling_sop_id"], saved["polling_operator_record_id"], saved["polling_runs"]), ("", "", []))
 
+    async def test_explicit_cooling_without_placeholders_keeps_assistant_and_native_mode(self):
+        sop = self.sops["adjust"]
+        self.sops["adjust"] = self.service.save_sop({**sop, "expected_version": sop["version"], "adjust_sop_type": "cooling",
+            "steps": [{"content": "Check the selected unit", "operator_required": True, "reviewer_required": True}]})
+        plan = await self.load(self.prepare("adjust"))
+        field = next(field for field in plan["fields"] if field.get("native_notice_sop"))
+        self.assertEqual(field["sops"][0]["mode"], "cooling")
+        with self.assertRaises(AssistantError):
+            self.select(plan, "adjust", runs=[])
+        runs = [{"other_unit": "6#", "from_unit": "2#", "to_unit": "4#"}]
+        self.select(plan, "adjust", runs=runs)
+        body = self.agent.get_plan(fixture.ACTOR, plan["id"])["operations"][0]["body"]
+        native = self.service.prepare_start({**body, **body["patch"], "_web_action_request": True}, job_id="no-placeholder", people=self.people)
+        self.assertEqual(native["polling_work_order_spec"]["steps"][0]["content"], "Check the selected unit")
+        self.assertEqual(native["polling_work_order_spec"]["runs"][0]["other_unit"], "6#")
+        self.assertEqual(self.fx.notice_writes, [])
+
+    def test_explicit_cooling_directory_still_blocks_unsupported_placeholders(self):
+        from openclaw_service.assistant.lighthouse_notice_sop import update_directory
+        for token in ("{{to}}", "{{other}}", "{{from}} {{to}}"):
+            with self.subTest(token=token):
+                row = {**self.sops["adjust"], "adjust_sop_type": "cooling", "steps": [{"content": token}]}
+                field = {"work_type": "adjust"}
+                update_directory(field, "A", [row], self.people)
+                self.assertEqual(field["sops"][0]["mode"], "cooling")
+                self.assertTrue(field["sops"][0]["blocked_reason"])
+
     async def test_return_to_edit_keeps_selection_and_stable_operation(self):
         plan = await self.load(self.prepare("adjust"))
         selected = self.select(plan, "adjust", runs=[{"from_unit": "1#", "to_unit": "4#", "other_unit": "6#"}])
