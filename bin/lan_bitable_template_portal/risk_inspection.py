@@ -538,7 +538,7 @@ class RiskInspections:
             page = max(1, int(page))
         except (TypeError, ValueError):
             raise RiskError('页码无效。') from None
-        if view not in {'all', 'published', 'mine'}:
+        if view not in {'all', 'published', 'mine', 'review'}:
             raise RiskError('排查列表范围无效。')
         if view == 'published' and not manager(actor):
             view = 'mine'
@@ -547,7 +547,7 @@ class RiskInspections:
         result = []
         with self.connect() as db:
             owners = [actor['id']]
-            if manager(actor) and view != 'mine':
+            if manager(actor) and view in {'all', 'published'}:
                 owners += [row[0] for row in db.execute('SELECT DISTINCT owner FROM risk_releases')
                            if row[0] != actor['id'] and self.superior(actor, row[0])]
             scopes = [s for s in SCOPES if can_scope(actor, s)]
@@ -560,9 +560,12 @@ class RiskInspections:
             grant_args = [actor['id'], actor['id']]
             managed = '(' + scope_sql + ' AND ' + control_sql + ')'
             if view == 'mine':
-                visible, args = grants, grant_args
+                visible, args = 'p.person_id=?', [actor['id']]
                 candidate = '(' + visible + ' OR (r.owner=? AND ' + managed + '))'
                 candidate_args = [*args, actor['id'], *scopes, *control_args]
+            elif view == 'review':
+                visible, args = reviewer_sql, [actor['id']]
+                candidate, candidate_args = visible, args
             elif view == 'published':
                 visible, args = managed, [*scopes, *control_args]
                 candidate, candidate_args = visible, args
@@ -599,7 +602,7 @@ class RiskInspections:
                                'can_manage_release': full_control, 'can_delete_release': full_control,
                                'can_claim': manager(actor) and data['owner']['id'] == actor['id']
                                    and data['status'] == 'active' and not db.execute('SELECT 1 FROM risk_people WHERE release_id=? AND person_id=?', (data['id'], actor['id'])).fetchone()})
-        return {'items': result, 'total': total, 'page': page, 'is_manager': manager(actor),
+        return {'items': result, 'total': total, 'page': page, 'view': view, 'is_manager': manager(actor),
                 'can_edit_template': manager(actor) and actor.get('level') in {'L0', 'L1'}}
 
     def delete(self, actor, rid, body):

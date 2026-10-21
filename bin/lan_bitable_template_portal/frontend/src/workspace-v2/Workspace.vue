@@ -216,13 +216,13 @@ watch(()=>route.value.pathname+':'+(componentName.value||view.value),()=>{
   if(window.matchMedia('(min-width:761px)').matches&&!window.matchMedia('(prefers-reduced-motion: reduce)').matches)
     requestAnimationFrame(()=>document.querySelector('.v2-main')?.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}));
 },{flush:'post'});
-const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (['learning','work_handover','risk_inspection'].includes(activeModule.value) ? route.value.search : currentScope.value) + (['drills','critical_guard'].includes(activeModule.value)?':'+moduleAdminMode.value:'') + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : ''));
+const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (['learning','work_handover'].includes(activeModule.value) ? route.value.search : currentScope.value) + (['drills','critical_guard'].includes(activeModule.value)?':'+moduleAdminMode.value:'') + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : ''));
 const componentProps = computed(() => {
   const p = route.value.searchParams, admin = user.value.role === 'admin';
   const common = { scope:currentScope.value, scopeOptions:scopes.value, isAdmin:admin, checking:false, loggedIn:loggedIn.value, loginUrl:loginUrl.value };
   switch(componentName.value) {
     case 'work_handover': return {handoverId:p.get('id')||''};
-    case 'risk_inspection': return {releaseId:p.get('id')||''};
+    case 'risk_inspection': return {releaseId:p.get('id')||'',view:p.get('view')||''};
     case 'event': return {...common, refreshNonce:0};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':

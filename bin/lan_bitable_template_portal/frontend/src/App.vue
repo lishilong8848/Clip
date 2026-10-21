@@ -88,9 +88,10 @@
     />
 
     <KeepAlive v-else-if="isRepairModulePage" :max="2">
-      <component
-        :is="repairModuleComponent"
-        v-bind="repairModuleProps"
+      <RepairModulePage
+        :key="routePath"
+        :page="repairModuleComponent"
+        :page-props="repairModuleProps"
       />
     </KeepAlive>
 
@@ -215,7 +216,7 @@
     />
 
     <PreShiftChecklistPage v-else-if="isPreShiftPage" :user="auth.user" />
-    <RiskInspectionPage v-else-if="routePath === '/risk-inspections'" :key="String(auth.user?.open_id)+':'+(routeParams.get('id')||'')+':'+(routeParams.get('scope')||'')" :release-id="routeParams.get('id') || ''" :scope="routeParams.get('scope') || ''" />
+    <RiskInspectionPage v-else-if="routePath === '/risk-inspections'" :key="String(auth.user?.open_id)+':'+(routeParams.get('scope')||'')" :release-id="routeParams.get('id') || ''" :view="routeParams.get('view') || ''" :scope="routeParams.get('scope') || ''" />
     <WorkHandoverPage v-else-if="routePath === '/work-handover'" :key="String(auth.user?.open_id)+':'+(routeParams.get('id')||'')" :handover-id="routeParams.get('id') || ''" />
 
     <ScopeHome
@@ -281,6 +282,7 @@ import { navigate, navigateHard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
 import { usePageReadRefresh } from './api/usePageReadRefresh';
 import type { LooseDict, ScopeOption } from "./types";
+import RepairModulePage from './components/RepairModulePage.vue';
 
 function asyncPage(loader: () => Promise<unknown>) {
   return defineAsyncComponent({
@@ -917,8 +919,13 @@ async function loadOverview(): Promise<void> {
 }
 
 async function loadHandoverLinks(): Promise<void> {
-  if (isGuest.value) return;
   const key = currentOverviewKey, serial = ++handoverRequest;
+  if (!auth.loggedIn || isGuest.value || !hasModule('handover')) {
+    handoverLinks.value = {};
+    delete homeReadIssues.value['/api/handover-links'];
+    homeReadLatest.delete('/api/handover-links');
+    return;
+  }
   try {
     const data = await portalRequest("/api/handover-links");
     if (appDisposed || key !== currentOverviewKey || serial !== handoverRequest) return;

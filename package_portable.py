@@ -1980,6 +1980,8 @@ def _ensure_mcp_frontend_assets() -> None:
         return
     inputs = [path for path in (frontend / 'src').rglob('*') if path.is_file()]
     inputs += [path for path in (frontend / 'public').rglob('*') if path.is_file()]
+    inputs += list((frontend / 'scripts').glob('workspace-*.mjs'))
+    inputs += [path for path in (frontend / 'scripts').glob('prune-dist-assets.mjs') if path.is_file()]
     inputs += [path for path in frontend.iterdir() if path.is_file() and
                (path.name.startswith('vite.') or path.name in {'package.json', 'package-lock.json', 'index.html', 'assistant.html'})]
     entries = [frontend / 'dist/assistant.html', frontend / 'dist/index.html']

@@ -37,7 +37,8 @@ class AccountBulkModuleTests(_TempDirTestCase):
         return {"id": item["id"], "revision": item["revision"], "enabled": item["enabled"], "modules": modules}
 
     def persisted(self):
-        return copy.deepcopy(self.h.auth._load_permissions_locked())
+        # Read SQLite, not the expiring cache with its unsaved updated_by metadata.
+        return self.h.auth._state_store.get_auth_permissions()
 
     def assert_rejected_atomically(self, changes, actor=None, message=None):
         before = self.persisted()
@@ -121,6 +122,18 @@ class AccountBulkModuleTests(_TempDirTestCase):
         change = {key: higher[key] for key in ("id", "revision", "enabled")}
         self.assert_rejected_atomically([self.change("A", ["change"]), {**change, "modules": ["accounts"]}], actor)
         self.assert_rejected_atomically([self.change("A", ["change"])], {"open_id": "ou_bulkHE"})
+
+    def test_rejected_batch_is_atomic_when_permission_cache_expires(self):
+        changes = [self.change("A", ["change"])]
+        update = self.manager.update
+
+        def expire_and_update(*args, **kwargs):
+            # Expire between the before-snapshot and rejection, without sleeping.
+            self.h.auth._permissions_cache_until = 0
+            return update(*args, **kwargs)
+
+        with patch.object(self.manager, "update", side_effect=expire_and_update):
+            self.assert_rejected_atomically(changes, {"open_id": "ou_bulkHE"})
 
     def test_blocked_second_identity_and_duplicate_target_fail_atomically(self):
         changes = [self.change("A", ["change"]), self.change("B", ["change"])]

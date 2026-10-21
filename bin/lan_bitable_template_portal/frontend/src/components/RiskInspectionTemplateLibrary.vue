@@ -118,10 +118,17 @@ async function previewImport(){
 }
 function useImport(){
  const data=importPreview.value;if(importBusy.value||!data||data.needs_selection||importStale.value)return;
- const apply=()=>{assign({id:crypto.randomUUID().replace(/-/g,''),name:data.name,enabled:true,fields:structuredClone(toRaw(data.fields)),items:structuredClone(toRaw(data.items)),source:data.source,warnings:data.warnings,version:'',revision:0,creator:'本人',created:Date.now()/1000});original.value='';closeImport();message.value='导入内容已带入新草稿，请核对后生成基础模板。';void loadFieldLibrary();};
+ const apply=()=>{
+  importError.value='';
+  try{
+   // Match manual creation: getRandomValues also works on ordinary LAN HTTP origins.
+   assign({id:Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join(''),name:data.name,enabled:true,fields:toRaw(data.fields),items:toRaw(data.items),source:data.source,warnings:data.warnings,version:'',revision:0,creator:'本人',created:Date.now()/1000});
+   original.value='';closeImport();message.value='导入内容已带入新草稿，请核对后生成基础模板。';void loadFieldLibrary();
+  }catch(e:any){importError.value='带入新草稿失败：'+(e?.message||'请重试。');}
+ };
  if(dirty.value)askDiscard('带入导入内容将放弃当前未保存的修改，并新建一份模板草稿。已保存模板保留。',apply,'带入新草稿','确认带入');else apply();
 }
-function assign(data:Dict){selected.value=data;Object.assign(form,{name:data.name,enabled:data.enabled,fields:structuredClone(data.fields),items:structuredClone(data.items)});original.value=JSON.stringify(form);}
+function assign(data:Dict){const next={name:data.name,enabled:data.enabled,fields:structuredClone(data.fields),items:structuredClone(data.items)},snapshot=JSON.stringify(next);selected.value=data;Object.assign(form,next);original.value=snapshot;}
 async function load(){if(busy.value)return;abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';try{const data=await requestJson(base+'?'+new URLSearchParams({page:String(page.value),search:search.value}),{cache:'no-store',signal:controller.signal});if(!controller.signal.aborted){rows.value=data.items;total.value=data.total;}}catch(e:any){if(!controller.signal.aborted)error.value=e.message;}finally{if(abort===controller){abort=undefined;loading.value=false;}}}
 async function open(id:string){if(!leaveAllowed(()=>void open(id)))return;abort?.abort();const controller=new AbortController();abort=controller;loading.value=true;error.value='';try{const data=await requestJson(base+'/'+id,{cache:'no-store',signal:controller.signal});if(!controller.signal.aborted){assign(data);if(baseMode.value)void loadFieldLibrary();}}catch(e:any){if(!controller.signal.aborted)error.value=e.message;}finally{if(abort===controller){abort=undefined;loading.value=false;}}}
 async function reuse(id:string){if(!leaveAllowed(()=>void reuse(id)))return;busy.value=true;error.value='';try{const data=await requestJson(base+'/'+id,{cache:'no-store'});if(!data.enabled)throw new Error('该模板已停用，请选择其它模板。');if(!disposed)emit('reuse',data);}catch(e:any){error.value=e.message;}finally{busy.value=false;}}

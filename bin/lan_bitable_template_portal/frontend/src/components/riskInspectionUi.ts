@@ -1,5 +1,8 @@
 import type { Dict } from '../api/client';
 
+export type RiskTaskView = 'published' | 'mine' | 'review';
+export const riskTaskView = (value: string | null): RiskTaskView | null => value === 'published' || value === 'mine' || value === 'review' ? value : null;
+
 export const riskTypeOptions = [
   { value: 1, label: '文本' }, { value: 2, label: '数字' }, { value: 3, label: '单选' },
   { value: 4, label: '多选' }, { value: 5, label: '日期' }, { value: 7, label: '勾选' },

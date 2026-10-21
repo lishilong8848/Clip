@@ -113,8 +113,11 @@ async function testFeedback(page,url,tag){
   await drawer.getByRole('button',{name:'保存草稿',exact:true}).click();await drawer.getByText('草稿已保存。',{exact:true}).waitFor();
   assert.deepEqual(people[0].items[0].values,{},'Saving B must not change A');assert.deepEqual(people[0].items[1].values,{answer:'第二楼独立反馈'});
   await drawer.getByRole('button',{name:'提交审核',exact:true}).click();await confirm(page);await noSystemFields(page);assert.equal(people[0].items[1].system_values.fixed_8,1792152000000);
+  assert.equal(await drawer.getByRole('button',{name:'审核通过',exact:true}).count(),0,'Filling never mixes review actions');
+  await page.keyboard.press('Escape');await drawer.waitFor({state:'hidden'});await page.getByRole('button',{name:'进入审核任务',exact:true}).click();await choose(page,'反馈楼栋','B楼');await page.getByRole('button',{name:'处理 排查人员甲 · 设备检查',exact:true}).click();
+  assert.equal(await drawer.getByRole('button',{name:'保存草稿',exact:true}).count(),0,'Review is a separate read-only page');
   await drawer.getByRole('button',{name:'审核通过',exact:true}).click();await confirm(page);assert.equal(people[0].items[1].status,'approved','Designated reviewers can self-review');await capture(page,tag+'-self-review');await page.keyboard.press('Escape');await drawer.waitFor({state:'hidden'});
-  actor='reviewer';await page.goto(url);await page.locator('.risk-task-name:visible').click();await page.getByRole('button',{name:'处理 排查人员乙 · 设备检查',exact:true}).click();await drawer.getByRole('button',{name:'审核通过',exact:true}).click();await confirm(page);assert.equal(people[1].items[0].status,'approved','Reviewer with no building permissions can review assigned tasks');await noSystemFields(page);await capture(page,tag+'-assigned-reviewer');
+  actor='reviewer';await page.goto(url+'?view=review');await page.locator('.risk-task-name:visible').click();await page.getByRole('button',{name:'处理 排查人员乙 · 设备检查',exact:true}).click();await drawer.getByRole('button',{name:'审核通过',exact:true}).click();await confirm(page);assert.equal(people[1].items[0].status,'approved','Reviewer with no building permissions can review assigned tasks');await noSystemFields(page);await capture(page,tag+'-assigned-reviewer');
   await page.keyboard.press('Escape');actor='alice';legacyResponse=true;delete people[0].items[0].scope;
   await page.goto(url);await page.locator('.risk-task-name:visible').click();await page.getByRole('button',{name:'处理 排查人员甲 · 设备检查',exact:true}).first().click();assert.match(await drawer.innerText(),/A楼/,'Legacy items fall back to person.scope');
 }

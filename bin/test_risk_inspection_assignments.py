@@ -90,7 +90,8 @@ class AssignmentTests(unittest.TestCase):
             self.store._put_release(db, release)
             self.store._put_person(db, self.body['id'], person)
         self.assertTrue(self.store.has_task_access(self.people['reviewer']))
-        self.assertEqual(self.store.list(self.people['reviewer'], view='mine')['items'][0]['total'], 2)
+        self.assertEqual(self.store.list(self.people['reviewer'], view='mine')['total'], 0)
+        self.assertEqual(self.store.list(self.people['reviewer'], view='review')['items'][0]['total'], 2)
         self.action('bob', 'submit', pid='bob')
         detail = self.action('reviewer', 'approve', pid='bob')
         self.assertEqual([i['id'] for i in detail['people'][0]['items']], ids)
@@ -145,13 +146,16 @@ class AssignmentTests(unittest.TestCase):
                             system_values(self.store.raw(self.body['id'])[0], person, b)['status'])
         self.assertEqual(person['items'][2]['values'], {})
 
-    def test_mine_includes_reviewer_all_people_and_second_scope_without_original_scope(self):
+    def test_mine_only_includes_self_and_review_includes_authorized_people_across_scopes(self):
         self.publish()
         for who in ('alice', 'reviewer'):
-            result = self.store.list(self.people[who], view='mine', scope='B')
+            result = self.store.list(self.people[who], view='review', scope='B')
             self.assertEqual(result['total'], 1)
             self.assertEqual((result['items'][0]['people_count'], result['items'][0]['total']), (2, 4))
-        all_items = self.store.list(self.people['reviewer'], view='mine')['items'][0]
+        own = self.store.list(self.people['alice'], view='mine', scope='B')['items'][0]
+        self.assertEqual((own['people_count'], own['total']), (1, 2))
+        self.assertEqual(self.store.list(self.people['reviewer'], view='mine', scope='B')['total'], 0)
+        all_items = self.store.list(self.people['reviewer'], view='review')['items'][0]
         self.assertEqual((all_items['people_count'], all_items['total']), (2, 6))
         with self.assertRaises(RiskError):
             self.store.list(self.people['reviewer'], scope='H')

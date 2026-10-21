@@ -69,7 +69,9 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);frontend=root/'bin/lan_bitable_template_portal/frontend'
             inputs=['src/components/LighthouseTools.vue','src/components/LighthouseSkills.vue',
-                    'src/workspace-v2/dashboard/PreShiftCheck.vue','src/preShiftUtils.ts']
+                    'src/workspace-v2/dashboard/PreShiftCheck.vue','src/preShiftUtils.ts',
+                    'scripts/workspace-build-adapter.mjs','scripts/workspace-night-theme.mjs',
+                    'scripts/prune-dist-assets.mjs']
             entries=['dist/assistant.html','dist/index.html','dist/assets/workspace-v2/index.html']
             for relative in inputs+entries+['dist/assets/tools.js']:
                 path=frontend/relative;path.parent.mkdir(parents=True,exist_ok=True)
@@ -82,9 +84,13 @@ class PackagingTests(unittest.TestCase):
                 for relative in entries:
                     os.utime(frontend/relative,(40,40));package._ensure_mcp_frontend_assets()
                     build.assert_called_once();build.reset_mock();os.utime(frontend/relative,(100,100))
-                os.utime(frontend/inputs[2],(110,110));package._ensure_mcp_frontend_assets();build.assert_called_once()
-                build.reset_mock();os.utime(frontend/inputs[2],(50,50))
-                os.utime(frontend/inputs[3],(120,120));package._ensure_mcp_frontend_assets();build.assert_called_once()
+                for relative in inputs[2:]:
+                    os.utime(frontend/relative,(110,110));package._ensure_mcp_frontend_assets()
+                    build.assert_called_once()
+                    self.assertEqual(build.call_args.args[0], ['fixture-npm', 'run', 'build'])
+                    build.reset_mock();os.utime(frontend/relative,(50,50))
+                (frontend/'scripts/check-navigation-back.mjs').touch()
+                package._ensure_mcp_frontend_assets();build.assert_not_called()
 
 
 if __name__ == '__main__':

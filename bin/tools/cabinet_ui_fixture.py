@@ -15,6 +15,7 @@ sys.path.insert(0,str(ROOT))
 sys.path.insert(0,str(ROOT/'bin'))
 from bin.test_cabinet_power import fixtures,MemoryStore,FakeExportFeishu,FakeFeishu
 from bin.lan_bitable_template_portal.cabinet_power_routes import install_cabinet_power_routes
+from bin.lan_bitable_template_portal.module_access import MODULE_IDS
 
 class FixtureStateStore(MemoryStore):
     def list_outbox_events(self, _channel, *, status="pending", limit=100):
@@ -55,7 +56,7 @@ controller._cabinet_power._exports=ThreadPoolExecutor(max_workers=5,thread_name_
 controller._cabinet_power.do_refresh('',{}, {})
 
 @app.get('/api/auth/status')
-def auth(): return {"ok":True,"data":{"logged_in":True,"user":{"name":"本地测试","role":"admin","is_admin":True},"scope_options":[{"value":s,"label":s+"楼"} for s in "ABCDE"]}}
+def auth(): return {"ok":True,"data":{"logged_in":True,"user":{"open_id":"fixture-user","name":"本地测试","role":"admin","is_admin":True,"modules":sorted(MODULE_IDS)},"scope_options":[{"value":s,"label":s+"楼"} for s in "ABCDE"]}}
 
 @app.get('/api/health')
 def health(): return {"ok":True,"service":"clipflow_backend","instance_id":"cabinet-ui-fixture"}

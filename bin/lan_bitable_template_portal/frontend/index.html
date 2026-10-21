@@ -3,6 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      window.addEventListener('unhandledrejection', event => {
+        const reason = event.reason;
+        if (reason instanceof DOMException && reason.name === 'AbortError' && reason.message === 'Transition was skipped') event.preventDefault();
+      });
+      for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
+        for (const state of ['ready', 'finished', 'updateCallbackDone']) event.viewTransition?.[state]?.catch(() => {});
+      });
+    </script>
     <link rel="icon" type="image/svg+xml" href="/assets/clipflow-favicon.svg" />
     <link rel="stylesheet" href="/assets/page-navigation.css" />
     <title>南通基地-运维灯塔工作台</title>

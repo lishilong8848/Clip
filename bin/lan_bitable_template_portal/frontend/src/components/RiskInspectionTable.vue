@@ -33,10 +33,10 @@ import {NButton,NDataTable,NEmpty,NInput,NPagination,NSelect,NTag,type DataTable
 import {ArrowUpRight,FileText,Search} from 'lucide-vue-next';
 import type {Dict} from '../api/client';
 import {activateCard} from '../workspace-v2/cardActivation';
-import {riskFeedbackPriority,riskPresentationFields,riskSystemText} from './riskInspectionUi';
+import {riskFeedbackPriority,riskPresentationFields,riskSystemText,type RiskTaskView} from './riskInspectionUi';
 
 type Row={key:string;person:Dict;item:Dict};
-const props=defineProps<{detail:Dict;busy:boolean}>();
+const props=defineProps<{detail:Dict;busy:boolean;view?:RiskTaskView}>();
 const emit=defineEmits<{open:[row:Row]}>();
 const search=ref(''),status=ref<string|null>(null),building=ref<string|null>(null),page=ref(1);
 const mobileQuery=window.matchMedia('(max-width:700px)'),mobile=ref(mobileQuery.matches);
@@ -63,13 +63,13 @@ function fieldText(field:Dict,row:Row){return field.role==='input'?readable(fiel
 function files(row:Row,field:Dict):Dict[]{return (row.item.values[field.key]||[]).map((id:string)=>({id,name:(row.item.files||[]).find((file:Dict)=>file.id===id)?.name||'排查附件'}));}
 function attachments(row:Row){return inputs.value.filter(field=>field.type===17).flatMap(field=>files(row,field));}
 function overdue(row:Row){return props.detail.status==='active'&&!row.person.revoked&&!['approved','revoked'].includes(row.item.status)&&props.detail.deadline<Date.now();}
-function actionLabel(row:Row){return props.detail.status==='active'&&!row.person.revoked&&props.detail.self_id===row.person.id&&['pending','returned'].includes(row.item.status)?'填写':props.detail.is_reviewer&&row.item.status==='submitted'&&!row.person.revoked?'审核':'查看';}
+function actionLabel(row:Row){if(props.detail.status!=='active'||row.person.revoked)return '查看';return props.view==='mine'&&props.detail.self_id===row.person.id&&['pending','returned'].includes(row.item.status)?'填写':props.view==='review'&&props.detail.is_reviewer&&row.item.status==='submitted'?'审核':'查看';}
 const filtered=computed(()=>{
   const needle=search.value.trim().toLocaleLowerCase();
   return rows.value.filter(row=>(!building.value||(row.item.scope||row.person.scope)===building.value)&&(!status.value||row.item.status===status.value)&&(!needle||[
     row.person.name,scopeLabel(row.item.scope||row.person.scope),row.item.title,row.item.reason,
     ...fields.value.map(field=>field.role==='input'&&field.type===17?files(row,field).map(file=>file.name).join(' '):fieldText(field,row)),
-  ].join(' ').toLocaleLowerCase().includes(needle))).sort((a,b)=>riskFeedbackPriority(a.item,props.detail.is_reviewer,a.person.revoked)-riskFeedbackPriority(b.item,props.detail.is_reviewer,b.person.revoked));
+  ].join(' ').toLocaleLowerCase().includes(needle))).sort((a,b)=>riskFeedbackPriority(a.item,props.view==='review'&&props.detail.is_reviewer,a.person.revoked)-riskFeedbackPriority(b.item,props.view==='review'&&props.detail.is_reviewer,b.person.revoked));
 });
 const mobileRows=computed(()=>filtered.value.slice((page.value-1)*20,page.value*20));
 watch([search,status,building],()=>{page.value=1;});

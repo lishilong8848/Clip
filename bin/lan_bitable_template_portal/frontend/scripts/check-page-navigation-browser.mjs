@@ -16,11 +16,11 @@ const moduleAssets = {};
 for (const filename of await readdir(assets)) {
   if (!filename.endsWith('.js')) continue;
   const content = await readFile(path.join(assets, filename), 'utf8');
-  for (const name of ['AdminTools', 'LighthouseStructuredField']) {
+  for (const name of ['AdminTools', 'LighthouseStructuredField', 'RepairManagementPage', 'RepairStatusPage']) {
     if (new RegExp(`__name:["']${name}["']`).test(content)) moduleAssets[name] = filename;
   }
 }
-assert(moduleAssets.AdminTools && moduleAssets.LighthouseStructuredField);
+assert(moduleAssets.AdminTools && moduleAssets.LighthouseStructuredField && moduleAssets.RepairManagementPage && moduleAssets.RepairStatusPage);
 const reservation = createServer();
 await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
 const port = reservation.address().port;
@@ -47,13 +47,23 @@ try {
   page.on('request', request => { if (request.resourceType() === 'script') scripts.add(new URL(request.url()).pathname); });
   let releaseRecords;
   const recordsGate = new Promise(resolve => { releaseRecords = resolve; });
+  let releasePage, releaseStatus, statusRequested;
+  const pageGate = new Promise(resolve => { releasePage = resolve; });
+  const statusGate = new Promise(resolve => { releaseStatus = resolve; });
+  const statusRequest = new Promise(resolve => { statusRequested = resolve; });
+  await page.route('**/assets/**', async route => {
+    const file = new URL(route.request().url()).pathname.split('/').pop();
+    if (file === moduleAssets.RepairManagementPage) await pageGate;
+    if (file === moduleAssets.RepairStatusPage) { statusRequested(); await statusGate; }
+    return route.continue();
+  });
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url());
     assert.equal(request.method(), 'GET', 'navigation tests never write business data');
     if (url.pathname === '/api/health') return route.fallback();
     calls.push(url.pathname);
     let data = {};
-    if (url.pathname === '/api/auth/status') data = { logged_in: true, user: { open_id: 'fixture-nav', name: '隔离测试', role: 'admin' }, scope_options: [{ value: 'D', label: 'D楼' }] };
+    if (url.pathname === '/api/auth/status') data = { logged_in: true, user: { open_id: 'fixture-nav', name: '隔离测试', role: 'admin', modules: ['repair_management', 'handover', 'assistant'] }, scope_options: [{ value: 'D', label: 'D楼' }] };
     else if (url.pathname === '/api/repair-management/records') {
       await recordsGate;
       data = { records: [], fields: [], total: 0 };
@@ -71,9 +81,12 @@ try {
   if (eager) await page.addInitScript(files => {
     // Reproduce the unnecessary eager imports without changing application code.
     window.eagerModules = Promise.all(files.map(file => import('/assets/' + file)));
-  }, Object.values(moduleAssets));
+  }, [moduleAssets.AdminTools, moduleAssets.LighthouseStructuredField]);
   const start = Date.now();
   await page.goto(base + '/repair-management?scope=D');
+  // Resolve the lazy page only after auth has replaced the keyed application shell.
+  await page.locator('#page-navigation .user-chip').filter({ hasText: '隔离测试' }).waitFor();
+  releasePage();
   await page.locator('.record-list').waitFor();
   const firstPageMs = Date.now() - start;
   await page.getByRole('button', { name: '打开灯塔助手', exact: true }).waitFor();
@@ -94,6 +107,7 @@ try {
   const loadedBytes = (await Promise.all([...scripts].filter(url => url.startsWith('/assets/')).map(async url => (await readFile(path.join(root, 'dist', url))).length))).reduce((sum, value) => sum + value, 0);
   releaseRecords();
   await page.waitForFunction(() => document.querySelector('.record-list')?.getAttribute('aria-busy') === 'false');
+  assert.equal(await page.locator('#page-back-slot .vnet-back-button').count(), 1, 'auth remount must not revive the obsolete cached page');
   const backStart = Date.now();
   await page.getByRole('button', { name: '返回', exact: true }).click();
   await page.locator('.home-shell').waitFor();
@@ -104,6 +118,31 @@ try {
     assert(calls.includes('/api/scope-overview'), 'homepage still loads its own statistics');
     assert(calls.includes('/api/handover-links'));
   }
+  assert.equal(await page.locator('.vnet-back-button').count(), 0, 'home has no stale module back button');
+  const navigate = url => page.evaluate(url => { history.pushState({}, '', url); window.dispatchEvent(new Event('popstate')); }, url);
+  await navigate('/repair-status?scope=D');
+  await statusRequest;
+  await navigate('/');
+  await page.locator('.home-shell').waitFor();
+  releaseStatus();
+  await page.waitForLoadState('networkidle');
+  assert.equal(await page.locator('.vnet-back-button').count(), 0, 'leaving a pending lazy page must not resurrect its back button');
+  await navigate('/repair-management?scope=D');
+  await page.locator('.record-list').waitFor();
+  await page.locator('.record-search input').fill('保留筛选');
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await page.locator('#page-back-slot .vnet-back-button').count(), 1);
+    await page.getByRole('button', { name: '检修状态', exact: true }).click();
+    await page.locator('.repair-status-page').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll('#page-back-slot .vnet-back-button').length === 1);
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    await page.locator('.record-list').waitFor();
+    assert.equal(await page.locator('.record-search input').inputValue(), '保留筛选', 'cached repair filters survive returning from status');
+  }
+  await page.waitForFunction(() => document.querySelectorAll('#page-back-slot .vnet-back-button').length === 1);
+  await page.getByRole('button', { name: '返回', exact: true }).click();
+  await page.locator('.home-shell').waitFor();
+  assert.equal(await page.locator('.vnet-back-button').count(), 0);
   const metrics = { firstPageMs, backMs, loadedBytes, scriptCount: scripts.size,
     adminLoaded: scripts.has('/assets/' + moduleAssets.AdminTools),
     formLoaded: scripts.has('/assets/' + moduleAssets.LighthouseStructuredField),

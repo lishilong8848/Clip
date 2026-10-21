@@ -53,6 +53,7 @@ try {
   await openHome();
   await page.waitForFunction(() => !document.querySelector('.overview-refreshing'));
   assert.equal(calls.get(overviewPath), 2, 'one transient read error retries once');
+  assert.equal(calls.get(linksPath) || 0, 0, 'homepage does not preload links without the handover grant');
   assert.equal(await notice.count(), 0, 'a recovered read leaves no global service error');
 
   failures.set(overviewPath, 100);
@@ -76,6 +77,7 @@ try {
 
   failures.set(overviewPath, 100);
   failures.set(linksPath, 100);
+  user.modules.push('handover');
   await openHome();
   await notice.getByText(/首页概览暂未读取.*交接班链接暂未读取|交接班链接暂未读取.*首页概览暂未读取/).waitFor();
   failures.set(overviewPath, 0);
@@ -86,9 +88,17 @@ try {
   });
   await page.waitForTimeout(3100);
   assert.match(await notice.innerText(), /交接班链接暂未读取/, 'another successful request cannot clear an outstanding data error');
-  failures.set(linksPath, 0);
-  await notice.getByRole('button', { name: '重新读取', exact: true }).click();
+  const beforeRevocation = calls.get(linksPath);
+  user.modules = ['maintenance'];
+  const revokedAuth = page.waitForResponse(response => new URL(response.url()).pathname === authPath);
+  await page.evaluate(() => dispatchEvent(new Event('auth-account-changed')));
+  await revokedAuth;
   await notice.waitFor({ state: 'detached' });
+  assert.equal(calls.get(linksPath), beforeRevocation, 'revoked grants clear stale errors without reloading forbidden links');
+  failures.set(linksPath, 0);
+  user.modules.push('handover');
+  await openHome();
+  assert.equal(calls.get(linksPath), 1, 'an authorized user still loads handover links');
 
   failures.set(authPath, 100);
   calls.clear();

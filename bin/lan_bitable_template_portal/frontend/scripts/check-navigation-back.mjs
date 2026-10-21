@@ -58,8 +58,9 @@ try {
       if(next!==undefined)assert(next>=rect.y+rect.height,`${label}: page content overlap`);
     }
     await view.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
-    const scrolled=await back.boundingBox();
-    const scrolledHeader=await view.locator('#page-navigation').boundingBox();
+    const [scrolled,scrolledHeader]=await back.evaluate(node=>[
+      node.getBoundingClientRect().toJSON(),document.querySelector('#page-navigation').getBoundingClientRect().toJSON(),
+    ]);
     assert(Math.abs(scrolled.y-scrolledHeader.y-scrolledHeader.height+14)<=2,`${label}: scroll boundary`);
     assert.equal(Math.round(scrolled.x-scrolledHeader.x-borderLeft),24,`${label}: scroll`);
     await view.evaluate(()=>window.scrollTo(0,0));
@@ -185,7 +186,7 @@ try {
   }
   await page.unroute('**/api/cabinet-power/batches?*');
   await page.route('**/api/auth/status*',route=>route.fulfill({json:{ok:true,data:{logged_in:true,
-    user:{name:'南通基地设施运行管理超长测试账户名称',open_id:'fixture-user',role:'admin',is_admin:true},
+    user:{name:'南通基地设施运行管理超长测试账户名称',open_id:'fixture-user',role:'admin',is_admin:true,modules:['event']},
     scope_options:['A','B','C','D','E'].map(value=>({value,label:value+'楼'})),
   }}}));
   for(const width of [1440,1024,921,390]){

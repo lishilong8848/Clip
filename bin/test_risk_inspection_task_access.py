@@ -237,6 +237,171 @@ class TaskAccessTests(unittest.TestCase):
                 self.assertEqual(reply.status_code, 403)
             remote.assert_not_called()
 
+    def test_import_and_save_base_template_keeps_existing_role_permissions(self):
+        self.people['publisher'] = fixtures.actor('publisher', 'L1')
+        self.people['no_module'] = {**fixtures.actor('no_module', 'L3'), 'modules': []}
+        content = '排查事项,排查结果\n检查设备,现场核对\n'.encode('utf-8-sig')
+        base = '/api/risk-inspections/base-templates'
+        remote = Mock()
+        # No lifespan/worker is started; all state is in the fixture's temporary database.
+        with patch('bin.lan_bitable_template_portal.risk_inspection_routes.RiskCloud', return_value=remote):
+            client = self.client()
+            for identity, can_edit in [('publisher', True), ('reviewer', False)]:
+                with self.subTest(identity=identity):
+                    headers = {'x-person': identity, 'content-type': 'application/octet-stream'}
+                    permissions = client.get('/api/risk-inspections', headers=headers).json()['data']
+                    self.assertTrue(permissions['is_manager'])
+                    self.assertEqual(permissions['can_edit_template'], can_edit)
+                    preview = client.post(base + '/import-file?name=checks.csv', content=content, headers=headers)
+                    self.assertEqual(preview.status_code, 200, preview.text)
+                    draft = preview.json()['data']
+                    with self.store.connect() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM risk_releases').fetchone()[0], 0)
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM risk_history_templates WHERE json_extract(data,\'$.creator.id\')=?', (identity,)).fetchone()[0], 0)
+                    body = {'id': ('b' if identity == 'publisher' else 'c') * 32, 'name': draft['name'],
+                            'enabled': True, 'fields': draft['fields'], 'items': draft['items']}
+                    saved = client.post(base, json=body, headers={'x-person': identity})
+                    self.assertEqual(saved.status_code, 200, saved.text)
+                    self.assertEqual(saved.json()['data']['scopes'], ['A'])
+                    self.assertEqual(saved.json()['data']['items'], draft['items'])
+                    retry = client.post(base, json=body, headers={'x-person': identity})
+                    self.assertEqual(retry.status_code, 200, retry.text)
+                    self.assertEqual(retry.json()['data']['id'], body['id'])
+            for identity in ['alice', 'no_module']:
+                for endpoint, kwargs in [('/import-file?name=checks.csv', {'content': content}),
+                                         ('', {'json': {**body, 'id': 'd' * 32}})]:
+                    with self.subTest(identity=identity, endpoint=endpoint):
+                        reply = client.post(base + endpoint, headers={'x-person': identity}, **kwargs)
+                        self.assertEqual(reply.status_code, 403, reply.text)
+                        self.assertTrue(reply.json().get('error'))
+            remote.assert_not_called()
+            self.assertEqual(remote.mock_calls, [], 'Import/save cannot read cloud data or send messages')
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM risk_history_templates').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM risk_releases').fetchone()[0], 0)
+
+    def publish_role_task(self, rid='a' * 32, reviewers=None, recipients=None):
+        body = {**self.body, 'id': rid, 'reviewer_ids': reviewers or ['alice'],
+                'people': recipients or [{'id': 'alice', 'scopes': ['A', 'B']}, {'id': 'bob', 'scopes': ['B']}]}
+        body.pop('reviewer_id')
+        self.store.publish(self.people['admin'], body, self.template)
+        self.store.activate(rid)
+        with self.store.connect(True) as db:
+            db.execute("UPDATE risk_jobs SET status='done' WHERE kind='publish'")
+        return rid
+
+    def test_dual_role_lists_have_independent_person_counts_and_same_task(self):
+        rid = self.publish_role_task()
+        before = self.store.raw(rid)
+        mine = self.store.list(self.people['alice'], view='mine')
+        review = self.store.list(self.people['alice'], view='review')
+        self.assertEqual((mine['view'], review['view']), ('mine', 'review'))
+        self.assertEqual((mine['total'], review['total']), (1, 1))
+        self.assertEqual((mine['items'][0]['id'], review['items'][0]['id']), (rid, rid))
+        self.assertEqual((mine['items'][0]['people_count'], mine['items'][0]['total']), (1, 4))
+        self.assertEqual((review['items'][0]['people_count'], review['items'][0]['total']), (2, 6))
+        self.assertEqual(self.store.list(self.people['alice'], view='mine', scope='B')['items'][0]['total'], 2)
+        self.assertEqual(self.store.list(self.people['alice'], view='review', scope='B')['items'][0]['total'], 4)
+        self.assertEqual(self.store.raw(rid), before, 'Role views must never rewrite stored tasks')
+
+    def test_assignee_reviewer_and_publisher_lists_do_not_mix_roles(self):
+        self.publish_role_task(reviewers=['reviewer'])
+        client = self.client()
+        for identity, expected in [('alice', (1, 0)), ('reviewer', (0, 1)), ('other', (0, 0))]:
+            with self.subTest(identity=identity):
+                counts = []
+                for view in ['mine', 'review']:
+                    result = client.get('/api/risk-inspections?view=' + view, headers={'x-person': identity})
+                    self.assertEqual(result.status_code, 200, result.text)
+                    counts.append(result.json()['data']['total'])
+                self.assertEqual(tuple(counts), expected)
+        self.assertEqual(self.store.list(self.people['admin'], view='published')['total'], 1)
+        self.assertEqual(self.store.list(self.people['admin'], view='review')['total'], 0)
+        claim = self.store.list(self.people['admin'], view='mine')['items'][0]
+        self.assertTrue(claim['can_claim'], 'The original owner claim entry must remain available')
+        self.assertEqual(claim['total'], 0)
+        self.assertEqual(client.get('/api/risk-inspections?view=bad', headers={'x-person': 'alice'}).status_code, 400)
+
+    def test_role_filter_is_applied_before_pagination(self):
+        expected = {'mine': set(), 'review': set()}
+        for index in range(44):
+            rid = format(index + 1, '032x')
+            is_assignee, is_reviewer = index <= 22, index >= 22
+            self.publish_role_task(rid, ['alice' if is_reviewer else 'reviewer'],
+                                   [{'id': 'alice' if is_assignee else 'bob', 'scopes': ['B']}])
+            for view, included in [('mine', is_assignee), ('review', is_reviewer)]:
+                if included:
+                    expected[view].add(rid)
+        for view, ids in expected.items():
+            with self.subTest(view=view):
+                first = self.store.list(self.people['alice'], page=1, view=view)
+                second = self.store.list(self.people['alice'], page=2, view=view)
+                self.assertEqual((first['total'], second['total']), (len(ids), len(ids)))
+                self.assertEqual((len(first['items']), len(second['items'])), (20, len(ids) - 20))
+                self.assertEqual({row['id'] for result in (first, second) for row in result['items']}, ids)
+                self.assertEqual(self.store.list(self.people['alice'], page=3, view=view)['items'], [])
+
+    def test_legacy_single_reviewer_and_single_scope_are_read_without_migration(self):
+        rid = self.publish_role_task(reviewers=['reviewer'], recipients=[{'id': 'bob', 'scopes': ['A']}])
+        release, people = self.store.raw(rid)
+        release.pop('reviewers')
+        release.pop('task_grants_version')
+        for person in people:
+            person.pop('scopes')
+            for item in person['items']:
+                item.pop('scope')
+        with self.store.connect(True) as db:
+            self.store._put_release(db, release)
+            for person in people:
+                self.store._put_person(db, rid, person)
+        before = self.store.raw(rid)
+        self.assertEqual(self.store.list(self.people['reviewer'], view='review')['items'][0]['total'], 2)
+        self.assertEqual(self.store.list(self.people['reviewer'], view='mine')['total'], 0)
+        self.assertEqual(self.store.list(self.people['bob'], view='mine')['items'][0]['total'], 2)
+        self.assertTrue(self.store.get(self.people['reviewer'], rid)['is_reviewer'])
+        self.assertEqual(self.store.raw(rid), before)
+
+    def test_reviewer_replacement_and_revocation_remove_only_the_corresponding_right(self):
+        rid = self.publish_role_task()
+        client = self.client()
+        self.store.change_reviewer(self.people['admin'], rid, {'version': 1, 'reviewer_ids': ['bob']})
+        self.assertEqual(self.store.list(self.people['alice'], view='review')['total'], 0)
+        self.assertEqual(self.store.list(self.people['alice'], view='mine')['total'], 1)
+        self.assertEqual(self.store.list(self.people['bob'], view='review')['total'], 1)
+        detail = self.store.get(self.people['alice'], rid)
+        person = detail['people'][0]
+        path = '/api/risk-inspections/' + rid + '/people/alice/actions'
+        submission = client.post(path, headers={'x-person': 'alice'}, json={'action': 'submit',
+            'version': person['version'], 'item_id': person['items'][0]['id'], 'values': {'result': '无异常'}})
+        self.assertEqual(submission.status_code, 200, submission.text)
+        version = submission.json()['data']['people'][0]['version']
+        denied = client.post(path, headers={'x-person': 'alice'}, json={'action': 'approve',
+            'version': version, 'item_id': person['items'][0]['id']})
+        self.assertEqual(denied.status_code, 403, denied.text)
+        revoked = self.store.action(self.people['admin'], rid, 'alice',
+                                   {'action': 'revoke_person', 'version': version, 'reason': '调整分配'})
+        person = next(p for p in revoked['people'] if p['id'] == 'alice')
+        write = client.post(path, headers={'x-person': 'alice'}, json={'action': 'submit',
+            'version': person['version'], 'item_id': person['items'][1]['id'], 'values': {'result': '无异常'}})
+        self.assertEqual(write.status_code, 409, write.text)
+        self.assertEqual(self.store.list(self.people['alice'], view='mine')['items'][0]['total'], 0)
+        self.disabled.add('bob')
+        for view in ['mine', 'review']:
+            self.assertEqual(client.get('/api/risk-inspections?view=' + view, headers={'x-person': 'bob'}).status_code, 403)
+
+    def test_task_grant_routes_do_not_grant_published_or_other_modules(self):
+        self.people['alice']['modules'] = []
+        self.publish_role_task()
+        client = self.client()
+        for view in ['mine', 'review']:
+            response = client.get('/api/risk-inspections?view=' + view, headers={'x-person': 'alice'})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['data']['total'], 1)
+        self.assertEqual(client.get('/api/risk-inspections?view=published', headers={'x-person': 'alice'}).json()['data']['view'], 'mine')
+        self.assertEqual(client.get('/api/events', headers={'x-person': 'alice'}).status_code, 403)
+        self.assertEqual(client.post('/api/risk-inspections', json={}, headers={'x-person': 'alice'}).status_code, 403)
+        self.assertEqual(self.people['alice']['modules'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

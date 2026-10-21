@@ -136,10 +136,10 @@ try{
    assert.equal(detailReads,initialReads,'Selecting row text does not navigate');
    await taskSurface().click();await page.locator('.risk-feedback-table').waitFor();
    assert.equal(detailReads,initialReads+1,'Clicking a task row or mobile card opens its original detail once');
-   await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.locator('.risk-task-name:visible').waitFor();
+   await page.getByRole('button',{name:'发布管理',exact:true}).click();await page.locator('.risk-task-name:visible').waitFor();
    const keyboardReads=detailReads;await page.locator('.risk-task-name:visible').focus();await page.keyboard.press('Enter');await page.locator('.risk-feedback-table').waitFor();
    assert.equal(detailReads,keyboardReads+1,'The existing keyboard action opens once without row bubbling');
-   await page.getByRole('button',{name:'排查列表',exact:true}).click();
+   await page.getByRole('button',{name:'发布管理',exact:true}).click();
    await page.getByRole('button',{name:'基础模板',exact:true}).click();
    assert.equal(await page.locator('.risk-field-picker').count(),0,'Both versions enter the template list');
    await page.locator('.history-list article').nth(1).waitFor();
@@ -169,7 +169,7 @@ try{
    await requiredSwitch.waitFor();assert.equal(await requiredSwitch.getAttribute('aria-checked'),'true');assert.equal(await page.locator('.risk-field-required>span').count(),5,'Each input retains a required control; automatic dates have none');
    await requiredSwitch.click();assert.equal(requiredWrites,0,'Template edits remain local until saved');await cancelNavigation();
    for(const expected of [false,true]){if(expected)await requiredSwitch.click();await page.getByRole('button',{name:'保存新版本',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).click();await page.getByRole('button',{name:'确认保存',exact:true}).waitFor({state:'hidden'});assert.equal(await requiredSwitch.getAttribute('aria-checked'),String(expected));}
-   await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
+   await page.getByRole('button',{name:'发布管理',exact:true}).click();await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().waitFor();
    await page.getByRole('button',{name:'发布排查',exact:true}).click();await page.locator('.history-list article').nth(1).waitFor();assert.equal(await page.locator('.risk-publish').count(),0,'Template must be explicitly selected before publication');
    await page.getByRole('button',{name:'新建基础模板',exact:true}).waitFor();assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Template creation entry fits the chooser');await page.screenshot({path:path.join(output,`${version}-${width}-choose-create.png`),fullPage:width>=700});
    await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
@@ -219,8 +219,8 @@ try{
    await page.getByRole('button',{name:'确认发布',exact:true}).click();
    assert((await page.locator('.risk-confirm').boundingBox()).width<=Math.min(500,width),'Confirmation dialog must remain compact on desktop and fit mobile');
    await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
-   if(version==='v2'&&width===1440){await page.getByText('发布结果尚未确认，原内容已锁定保留。',{exact:true}).waitFor();assert(await page.getByRole('textbox',{name:'排查表名',exact:true}).isDisabled(),'Uncertain publication is frozen');assert(await page.getByRole('button',{name:'排查列表',exact:true}).isDisabled(),'Cannot discard an unconfirmed publication');await page.getByRole('button',{name:'按原内容重试',exact:true}).click();}
-   await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'排查列表',exact:true}).click();
+   if(version==='v2'&&width===1440){await page.getByText('发布结果尚未确认，原内容已锁定保留。',{exact:true}).waitFor();assert(await page.getByRole('textbox',{name:'排查表名',exact:true}).isDisabled(),'Uncertain publication is frozen');assert(await page.getByRole('button',{name:'发布管理',exact:true}).isDisabled(),'Cannot discard an unconfirmed publication');await page.getByRole('button',{name:'按原内容重试',exact:true}).click();}
+   await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'发布管理',exact:true}).click();
    await page.getByRole('button',{name:'历史模板库',exact:true}).click();await page.getByRole('button',{name:'查看 / 编辑',exact:true}).click();
    await page.locator('.history-schema summary').click();
    assert((await page.locator('.history-schema').boundingBox()).width<=width,'History fields must scroll inside the template, not outside the viewport');
@@ -244,7 +244,7 @@ try{
    await page.locator('.n-base-select-option:visible').first().waitFor({state:'hidden'});
    await page.locator('.n-select[aria-label="接收经理"] .n-base-selection').click();await page.getByText('审核主管 · A楼、B楼',{exact:true}).click();await page.keyboard.press('Escape');
    await page.getByRole('button',{name:'确认发布',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
-   await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'排查列表',exact:true}).click();
+   await page.locator('.risk-feedback-table').waitFor();await page.getByRole('button',{name:'发布管理',exact:true}).click();
    await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.locator('.risk-feedback-table').waitFor();
    const table=page.locator('.risk-feedback-table');
    if(width===1440){const offset=await page.evaluate(()=>{const counts=document.querySelector('.risk-table-counts').getBoundingClientRect(),filters=document.querySelector('.risk-table-filters').getBoundingClientRect();return Math.abs(counts.y+counts.height/2-filters.y-filters.height/2);});assert(offset<2,'Counts and filters share one desktop row');}
@@ -322,7 +322,7 @@ try{
    await page.screenshot({path:path.join(output,`${version}-${width}-feedback.png`),fullPage:width>=700});
    await page.getByRole('button',{name:'提交审核',exact:true}).click();const before=detailReads;await page.clock.fastForward(16000);assert.equal(detailReads,before,'Confirmation must freeze background detail refresh');await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-response .n-tag').getByText('待审核',{exact:true}).waitFor();
-   role='reviewer';await page.goto(url);await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.getByRole('button',{name:/处理 排查人员甲/}).click();await page.locator('.risk-feedback').waitFor();
+   role='reviewer';await page.goto(url+(version==='v2'?'&':'?')+'view=review');await page.locator('.risk-task-list button:visible,.risk-mobile-tasks button:visible').first().click();await page.getByRole('button',{name:/处理 排查人员甲/}).click();await page.locator('.risk-feedback').waitFor();
    await page.getByRole('button',{name:'审核通过',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-response .n-tag').filter({hasText:'审核通过'}).waitFor();
    assert.equal(people[0].items[0].status,'approved');
@@ -330,7 +330,7 @@ try{
    await page.goto(url);await page.getByRole('button',{name:'基础模板',exact:true}).click();await page.getByRole('button',{name:'新建基础模板',exact:true}).click();await page.locator('.risk-field-picker').waitFor();
    assert.equal(await page.getByRole('button',{name:'添加字段',exact:true}).count(),0,'Building managers cannot add shared library fields');assert.equal(await page.locator('.risk-field-tools').count(),0,'Building managers cannot edit or delete shared library fields');
    await page.getByRole('button',{name:'添加字段 排查结果',exact:true}).click();assert.equal(await page.locator('.risk-selected-fields>li').count(),1,'Both versions hide fixed fields while retaining the full schema');
-   await page.getByRole('button',{name:'排查列表',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.n-modal-mask').waitFor({state:'hidden'});
+   await page.getByRole('button',{name:'发布管理',exact:true}).click();await page.getByRole('button',{name:'放弃修改',exact:true}).click();await page.locator('.n-modal-mask').waitFor({state:'hidden'});
    role='admin';
    people[0].items.push({id:'second-item',title:'另一设备检查',status:'approved',values:{f1:'这是同一人员的第二项独立反馈。'},files:[]});
    for(let index=0;index<6;index++)people.push({id:'preview-'+index,name:'示例人员'+(index+1),scope:index%2?'B':'A',version:1,revoked:false,items:[{id:'item',title:index%2?'冷却系统及环境检查':'配电柜状态检查',status:['pending','submitted','returned','approved'][index%4],values:{f1:index%3?'设备运行正常，现场标识完整。':'发现标识松动，已安排现场核对。',f2:index%3?'无异常':'有风险',f4:1792152000000,f5:index%3===0,f6:index%3?0:1},reason:index%4===2?'补充现场照片后重新提交。':'',files:[]}]});
@@ -353,7 +353,7 @@ try{
      await page.screenshot({path:path.join(output,'v2-360-summary-dark.png')});await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:ou_admin','light'));await page.goto(url);await page.locator('.risk-mobile-tasks button:visible').first().click();await feedbackRows().first().waitFor();
     }
    }
-   await page.getByRole('button',{name:'排查列表',exact:true}).click();
+   await page.getByRole('button',{name:'发布管理',exact:true}).click();
    await page.getByRole('tab',{name:'我的排查任务',exact:true}).click();await page.getByRole('button',{name:'领取并填写',exact:true}).click();
    await page.getByRole('button',{name:'领取本人任务',exact:true}).click();await page.locator('.risk-confirm').getByRole('button',{name:'确认',exact:true}).click();
    await page.locator('.risk-feedback').getByRole('textbox',{name:'排查结果',exact:true}).waitFor();
