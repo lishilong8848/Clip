@@ -111,6 +111,7 @@ const pages: Record<string, any> = {
   life_guide: lazy(() => import('../components/LifeGuidePage.vue')),
   links: lazy(() => import('../components/LinkDirectoryPage.vue')),
   knowledge: lazy(() => import('../components/KnowledgeBasePage.vue')),
+  documents: lazy(() => import('../components/DocumentLibraryPage.vue')),
   daily: lazy(() => import('../components/DailyTaskChecklistPage.vue')),
   water: lazy(() => import('./WaterWorkspace.vue')),
   critical_guard: lazy(() => import('../components/CriticalGuardPage.vue')),
@@ -207,7 +208,7 @@ async function onStatus(text: string) {
   const inline=[...document.querySelectorAll('.v2-main [role="alert"]:not(.v2-alert)')].some(el=>el.getClientRects().length&&el.textContent?.includes(text));
   if(!inline)operationError.value=text;
 }
-const componentName = computed(() => route.value.pathname === '/repair-status' ? 'repair_status' : route.value.pathname === '/cabinet-power/batches' ? 'cabinet_batch' : route.value.pathname === '/signature' ? 'signature' : route.value.pathname === '/admin/history-memory' ? 'history' : activeModule.value);
+const componentName = computed(() => route.value.pathname === '/document-library' ? 'documents' : route.value.pathname === '/repair-status' ? 'repair_status' : route.value.pathname === '/cabinet-power/batches' ? 'cabinet_batch' : route.value.pathname === '/signature' ? 'signature' : route.value.pathname === '/admin/history-memory' ? 'history' : activeModule.value);
 const activeComponent = computed(() => pages[componentName.value]);
 watch(()=>route.value.pathname+':'+(componentName.value||view.value),()=>{
   // The workspace, not the document, owns PC scrolling. A new page starts at its header.

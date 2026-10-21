@@ -181,6 +181,10 @@ def read_credentials(connection, *, include_migration=False):
     if not isinstance(result["token_expire_time"], (int, float, str)):
         raise FeishuAppMigrationError("settings_credentials_invalid")
     if include_migration:
+        if result["feishu_app_id"].startswith("cli_"):
+            if not _valid_app(result["feishu_app_id"]):
+                raise FeishuAppMigrationError("qt_app_invalid")
+            _secret(result["feishu_app_secret"], "qt_secret_invalid")
         result[MIGRATION_MARKER] = value.get(MIGRATION_MARKER)
     return result
 
@@ -333,7 +337,8 @@ def sync_agent_config(app_id, app_secret, *, data_root=None):
     return False
 
 
-def effective_credentials(app_id, app_secret, *, data_root=None, profile_path=None, _connection=None):
+def effective_credentials(app_id, app_secret, *, data_root=None, profile_path=None, _connection=None,
+                          _allow_agent_recovery=True):
     """Authenticate the installed secret once, then honor all future Qt choices."""
     if not _valid_app(app_id):
         return app_id, app_secret
@@ -344,7 +349,8 @@ def effective_credentials(app_id, app_secret, *, data_root=None, profile_path=No
                 write_settings(connection, _read_object(data_dir / "config.json", "source_config_unavailable",
                                                         max_bytes=CONFIG_MAX_BYTES))
             pair = effective_credentials(app_id, app_secret, data_root=data_dir,
-                                         profile_path=profile_path, _connection=connection)
+                                         profile_path=profile_path, _connection=connection,
+                                         _allow_agent_recovery=_allow_agent_recovery)
         sync_agent_config(*pair, data_root=data_dir)
         return pair
     canonical = read_credentials(_connection)
@@ -354,23 +360,37 @@ def effective_credentials(app_id, app_secret, *, data_root=None, profile_path=No
             raise FeishuAppMigrationError("qt_app_invalid")
         app_id = qt_app
         app_secret = canonical["feishu_app_secret"]
-    secret = _secret(app_secret, "qt_secret_invalid")
-    if app_id == TARGET_APP_ID:
-        if not migration_complete(_connection):
-            write_settings(_connection, {MIGRATION_MARKER: 2})
-        return app_id, secret
     if migration_complete(_connection):
-        return app_id, secret
+        return app_id, _secret(app_secret, "qt_secret_invalid")
     path = Path(profile_path or PROFILE_PATH)
-    if not path.is_file():
-        raise FeishuAppMigrationError("profile_missing")
-    secret = _decrypt(_profile(path), secret, app_id)
+    profile = _profile(path) if path.exists() else None
+    try:
+        secret = _secret(app_secret, "qt_secret_invalid")
+        if app_id == TARGET_APP_ID:
+            if profile is not None and not hmac.compare_digest(profile["target_fingerprint"], _fingerprint(secret)):
+                raise FeishuAppMigrationError("profile_target_mismatch")
+        elif profile is None:
+            raise FeishuAppMigrationError("profile_missing")
+        else:
+            secret = _decrypt(profile, secret, app_id)
+    except FeishuAppMigrationError as exc:
+        if not _allow_agent_recovery or profile is None or not (exc.code in {"profile_authentication", "profile_target_mismatch"}
+                                   or exc.code == "qt_secret_invalid" and not app_secret):
+            raise
+        # A matching protected local target secret may bootstrap Qt once, never replace completed Qt choices.
+        try:
+            secret = _agent_secret(_read_object(data_dir / "feishu_assistant.json", "agent_config_unavailable"))
+        except FeishuAppMigrationError:
+            raise exc from None
+        if not hmac.compare_digest(_fingerprint(secret), profile["target_fingerprint"]):
+            raise exc from None
+        _LOG.info("已核验本机新应用资料，准备迁入Qt。")
     write_settings(_connection, {"feishu_app_id": TARGET_APP_ID, "feishu_app_secret": secret,
                                  "feishu_user_token": "", "token_expire_time": 0, MIGRATION_MARKER: 2})
     return TARGET_APP_ID, secret
 
 
-def migrate_config(settings, *, data_dir=None, profile_path=None, _connection=None):
+def migrate_config(settings, *, data_dir=None, profile_path=None, _connection=None, _allow_agent_recovery=True):
     """One authenticated installation upgrade; leave unrelated settings untouched."""
     app_id = settings.get("feishu_app_id")
     if not _valid_app(app_id):
@@ -378,7 +398,8 @@ def migrate_config(settings, *, data_dir=None, profile_path=None, _connection=No
     if _connection is not None and migration_complete(_connection):
         return settings
     target, secret = effective_credentials(app_id, settings.get("feishu_app_secret"),
-                                           data_root=data_dir, profile_path=profile_path, _connection=_connection)
+                                           data_root=data_dir, profile_path=profile_path, _connection=_connection,
+                                           _allow_agent_recovery=_allow_agent_recovery)
     if (target, secret) == (app_id, settings.get("feishu_app_secret")):
         return settings
     return {**settings, "feishu_app_id": target, "feishu_app_secret": secret,

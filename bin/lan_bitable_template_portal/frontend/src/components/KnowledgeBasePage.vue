@@ -8,6 +8,7 @@
         <span v-if="isAdmin" class="kb-badge" :class="engineBadgeClass">{{ engineBadge }}</span>
       </div>
       <div class="kb-actions">
+        <button type="button" :disabled="uploadBusy" @click="navigate('/document-library')"><Database :size="16" />南通文件</button>
         <button type="button" class="primary" :disabled="uploadBusy" @click="openUpload()">
           <Upload :size="16" />上传文件
         </button>
@@ -219,6 +220,7 @@ import {
   Search, Square, Trash2, Upload, X,
 } from "lucide-vue-next";
 import { requestJson, downloadFile, uploadJson } from "../api/client";
+import { navigate } from "../navigation";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import { isAssistantEvent } from "../modalState";

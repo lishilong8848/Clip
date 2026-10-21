@@ -475,6 +475,8 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("paper.answer", {"id": "paper-H", "person_id": "person-H", "question_id": question["id"], "version": paper["version"], "operation_id": "contract-answer", "option_ids": ["o2"]}, actor)
             dispatch("review", who=actor, query={"scope": "", "person_id": "person-H"})
             dispatch("profile", query={"scope": ""})
+            daily = dispatch("completion", query={"date": "2026-09-29"})
+            self.assertEqual({row['person_id'] for row in daily['items']}, {'person-A', 'person-H'})
             dispatch("attempts", who=actor, query={})
             issue = dispatch("issue.create", {"paper_id": "paper-H", "person_id": "person-H", "question_id": question["id"], "description": "Check this question"}, actor)
             issue = dispatch("issue.update", {"id": issue["id"], "version": issue["version"], "remark": "More detail"}, actor)

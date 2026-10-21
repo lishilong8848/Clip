@@ -42,6 +42,7 @@ from upload_event_module.config import (
 from upload_event_module.building_normalizer import extract_building_codes
 from upload_event_module.services.service_registry import (
     ensure_feishu_token,
+    feishu_auth_error,
     refresh_feishu_token,
 )
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
@@ -3280,9 +3281,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         return audit
 
     def _auth_headers(self) -> dict[str, str]:
-        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        token = str(ensure_feishu_token() or "").strip()
         if not token:
-            raise PortalError("未配置有效的飞书 user_token。")
+            raise PortalError(feishu_auth_error())
         return {"Authorization": f"Bearer {token}"}
 
     def _request_payload(
@@ -37239,9 +37240,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         context: str,
     ) -> str:
         check_credentials, _ = _feishu_write_auth(self._auth_headers)
-        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        token = str(ensure_feishu_token() or "").strip()
         if not token:
-            raise PortalError(f"未配置有效的飞书 user_token，无法{context}。")
+            raise PortalError(feishu_auth_error())
         path = Path(str(file_path or "")).resolve()
         if not path.is_file():
             raise PortalError(f"{context}失败：待上传文件不存在。")
@@ -37763,9 +37764,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         if size <= 0:
             raise PortalError("演练归档文件为空。")
         upload_name = str(file_name or path.name).strip() or path.name
-        token = str(ensure_feishu_token() or config.user_token or "").strip()
+        token = str(ensure_feishu_token() or "").strip()
         if not token:
-            raise PortalError("未配置有效的飞书 user_token，无法上传演练文件。")
+            raise PortalError(feishu_auth_error())
         client = (
             lark.Client.builder()
             .enable_set_token(True)

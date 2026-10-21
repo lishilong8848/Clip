@@ -441,7 +441,7 @@ class World:
         replayed (launch always raises); otherwise a fake resident runtime avoids
         any process spawning for the routine proxy fixtures.
         """
-        stack = contextlib.ExitStack()
+        stack = contextlib.AsyncExitStack()
         loop = asyncio.get_running_loop()
         factory = real_runtime_factory_for(self) if real_runtime else self.runtime_factory
         stack.enter_context(patch.object(openclaw_client, "ResidentRuntime", factory))
@@ -451,25 +451,22 @@ class World:
         env_value = os.environ.get("LIGHTHOUSE_AGENT_ENGINE")
         os.environ["LIGHTHOUSE_AGENT_ENGINE"] = "legacy"
         stack.callback(lambda: _restore_env(env_value))
+        stack.push_async_callback(self.close_clients)
         try:
             yield self
         finally:
-            stack.close()
             if getattr(self, "real_runtime", None) is not None:
-                try:
-                    await self.real_runtime.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                stack.push_async_callback(self.real_runtime.close)
                 self.real_runtime = None
-            await self.close_clients()
+            # Workers must finish while the HTTP replacements and temp root still exist.
+            stack.push_async_callback(self.host.close)
+            await stack.aclose()
 
     async def close_clients(self):
-        for client in self._clients:
-            try:
-                await client.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-        self._clients.clear()
+        async with contextlib.AsyncExitStack() as stack:
+            for client in self._clients:
+                stack.push_async_callback(client.aclose)
+            self._clients.clear()
 
     # -- clients --------------------------------------------------------------
     def portal_client(self):
@@ -626,7 +623,7 @@ class BusinessWorld:
 
     @contextlib.asynccontextmanager
     async def activate(self):
-        stack = contextlib.ExitStack()
+        stack = contextlib.AsyncExitStack()
         loop = asyncio.get_running_loop()
         stack.enter_context(patch("httpx.AsyncClient", self.async_factory))
         stack.enter_context(patch("httpx.Client", _sync_factory(self._routed_async, loop=loop)))
@@ -651,14 +648,11 @@ class BusinessWorld:
             await self.host.setup_backend({"instance": self.client.instance, "lease": self.client.lease})
             yield self
         finally:
-            stack.close()
             for client in self._clients:
-                try:
-                    await client.aclose()
-                except Exception:  # noqa: BLE001
-                    pass
+                stack.push_async_callback(client.aclose)
             self._clients.clear()
-            await self.host.close()
+            stack.push_async_callback(self.host.close)
+            await stack.aclose()
 
     def make_context(self, *, sid="alice", plan_id=None):
         request = build_request(sid, base_port=self.portal_port)
@@ -786,12 +780,71 @@ class TestAssistantBackendProxy(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         host = getattr(self, "_host_for_cleanup", None)
-        if host is not None:
-            try:
+        try:
+            if host is not None and not host.closing:
                 await host.close()
-            except Exception:  # noqa: BLE001
-                pass
-        _restore_env(getattr(self, "_engine_env", None))
+        finally:
+            _restore_env(getattr(self, "_engine_env", None))
+
+    async def test_activate_closes_host_and_runtime_before_restoring_transports(self):
+        for fail_close in (False, True):
+            with self.subTest(fail_close=fail_close), tempfile.TemporaryDirectory() as directory:
+                world = World(directory)
+                closed = []
+                async def close_host():
+                    self.assertIs(httpx.AsyncClient, world.async_factory)
+                    self.assertTrue(Path(directory).is_dir())
+                    closed.append('host')
+                    if fail_close:
+                        raise PermissionError('fixture close failure')
+                async def close_runtime():
+                    self.assertIs(httpx.AsyncClient, world.async_factory)
+                    closed.append('runtime')
+                async def close_client():
+                    self.assertIs(httpx.AsyncClient, world.async_factory)
+                    closed.append('client')
+                async def exercise():
+                    with patch.object(world.host, 'close', side_effect=close_host):
+                        async with world.activate():
+                            world.real_runtime = SimpleNamespace(close=close_runtime)
+                            world._clients.append(SimpleNamespace(aclose=close_client))
+                if fail_close:
+                    with self.assertRaisesRegex(PermissionError, 'fixture close failure'):
+                        await exercise()
+                else:
+                    await exercise()
+                self.assertEqual(closed, ['host', 'runtime', 'client'])
+                self.assertIs(httpx.AsyncClient, _REAL_ASYNC)
+                self.assertIsNone(world.real_runtime)
+
+    async def test_activate_stops_eager_worker_before_database_cleanup(self):
+        import threading
+        from openclaw_service.assistant.lighthouse_knowledge import KnowledgeBase
+        from bin.test_lighthouse_knowledge import FakeEmbedder, FakeMemoryIndex
+        ready = threading.Event()
+        workers = []
+        def build_knowledge(root):
+            kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex)
+            workers.append(kb)
+            ready.set()
+            return kb
+        with tempfile.TemporaryDirectory() as directory:
+            world = World(directory)
+            self._host_for_cleanup = world.host
+            with patch('openclaw_service.assistant.lighthouse_knowledge.KnowledgeBase', side_effect=build_knowledge):
+                async with world.activate():
+                    await world.warm(world.portal_client())
+                    self.assertTrue(await asyncio.to_thread(ready.wait, 5))
+                    self.assertTrue(workers[0]._worker.is_alive())
+            self.assertTrue(world.host.closing)
+            self.assertFalse(workers[0]._worker.is_alive())
+            self.assertEqual(world.host.tasks, set())
+            paths = (world.service_state / 'knowledge_base' / 'knowledge.sqlite3',
+                     world.directory / 'data' / 'document_library' / 'document_library.sqlite3')
+            for path in paths:
+                self.assertTrue(path.is_file())
+                path.unlink()  # Windows refuses this while any SQLite handle remains open.
+                self.assertFalse(path.exists())
 
     # -- 1. appearance stored only in service assistant.sqlite3 ----------------
     async def test_appearance_stored_only_in_service_sqlite(self):

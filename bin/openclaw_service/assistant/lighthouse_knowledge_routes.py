@@ -140,7 +140,10 @@ def install_knowledge_routes(app, authorize, get_knowledge):
                     else:
                         raise AssistantError('知识库请求参数无效。')
                 elif action.endswith('/file'):
-                    path, name = await asyncio.to_thread(service.file, actor, identity, query.get('version'))
+                    fresh = await authorize(request)
+                    if fresh['id'] != actor['id']:
+                        raise AssistantError('登录身份已变化，请重新请求。', 403)
+                    path, name = await asyncio.to_thread(service.file, fresh, identity, query.get('version'))
                     return FileResponse(path, filename=name, media_type='application/octet-stream',
                         headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
                 elif request.method == 'GET':
@@ -148,6 +151,11 @@ def install_knowledge_routes(app, authorize, get_knowledge):
                 else:
                     operation = 'delete' if request.method == 'DELETE' else action.rsplit('/', 1)[-1]
                     data = await asyncio.to_thread(service.change, actor, identity, operation, payload.get('version'))
+            fresh = await authorize(request)
+            if (fresh['id'] != actor['id'] or set(actor.get('modules', [])) - set(fresh.get('modules', []))
+                    or set(actor.get('scopes', [])) - set(fresh.get('scopes', []))
+                    or 'acl_revision' in data and not await asyncio.to_thread(service.result_current, fresh, data)):
+                raise AssistantError('资料或授权已变化，请重新请求。', 403)
             return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
         except AssistantError as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status)

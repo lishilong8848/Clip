@@ -43,6 +43,7 @@ FEISHU_ERROR_SUGGESTIONS = {
 }
 
 _token_refresh_lock = threading.RLock()
+_token_status = threading.local()
 BITABLE_DATA_NOT_READY_CODE = 1254607
 BITABLE_DATA_NOT_READY_RETRY_DELAYS = (1.0, 2.5, 5.0)
 BITABLE_WRITE_CONFLICT_CODE = 1254291
@@ -513,17 +514,21 @@ def _log_record_action(
 def refresh_feishu_token():
     """刷新飞书 Token (Tenant Access Token)"""
     with _token_refresh_lock:
+        _token_status.error = ""
         log_info("正在尝试刷新飞书 Token...")
         try:
             return token_manager.refresh_tenant_token()
-        except FeishuCredentialError:
+        except FeishuCredentialError as exc:
+            _token_status.error = str(exc)
             # The token manager logs a rejected credential once per retry window.
             return None
         except FeishuTokenError as exc:
-            log_error(f"Token 刷新失败: {exc}")
+            _token_status.error = _safe_auth_error(exc)
+            log_error(f"Token 刷新失败: {_token_status.error}")
             return None
         except Exception as e:
-            log_error(f"Token 刷新异常: {e}")
+            _token_status.error = _safe_auth_error(e)
+            log_error(f"Token 刷新异常: {_token_status.error}")
             return None
 
 
@@ -534,15 +539,41 @@ def _token_refresh_needed(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS)
 def ensure_feishu_token(*, margin_seconds: int = TOKEN_REFRESH_MARGIN_SECONDS) -> str | None:
     """Revalidate Qt credentials even when the cached token has not expired."""
     with _token_refresh_lock:
+        _token_status.error = ""
         if _token_refresh_needed(margin_seconds=margin_seconds):
             return refresh_feishu_token()
         try:
             return token_manager.get_tenant_token(margin_seconds=margin_seconds)
-        except FeishuCredentialError:
+        except FeishuCredentialError as exc:
+            _token_status.error = str(exc)
             return None
-        except FeishuTokenError:
+        except FeishuTokenError as exc:
+            _token_status.error = _safe_auth_error(exc)
             log_error("Qt 飞书鉴权复核失败，未使用缓存令牌。")
             return None
+
+
+def _safe_auth_error(error) -> str:
+    if isinstance(error, FeishuCredentialError):
+        return str(error)
+    if getattr(config, "feishu_app_migration_error", "") in {
+        "profile_authentication", "profile_target_mismatch", "profile_format", "profile_missing", "migration_pending"
+    }:
+        return "飞书新应用配置迁移尚未通过校验，已停止使用旧应用和旧令牌。请管理员核对更新包与本机鉴权资料；重新扫码或手填用户令牌不能修复此问题。"
+    message = str(error).lower()
+    if "未配置 app id 或 app secret" in message:
+        return "飞书应用鉴权未配置完整，请管理员在 Qt 设置中填写 App ID 和 App Secret；无需手工填写用户令牌。"
+    if "鉴权配置已变化" in message or "鉴权已变化" in message:
+        return "飞书应用配置已变化或令牌保存未完成，请稍后重试；若持续出现，请管理员检查 Qt 设置保存结果。"
+    if "qt 飞书鉴权暂时无法读取" in message:
+        return "飞书应用配置暂不可读，请稍后重试；管理员可在 Qt 设置中查看保存失败原因。"
+    if isinstance(error, (RequestsTimeout, RequestsConnectionError)) or any(word in message for word in ("timeout", "timed out", "超时", "连接失败", "connection")):
+        return "连接飞书鉴权服务超时或中断，请检查程序所在电脑的网络后重试；无需重新填写用户令牌。"
+    return "飞书应用鉴权暂未成功，请稍后重试；管理员可检查 Qt 中的应用配置及飞书服务连接。"
+
+
+def feishu_auth_error() -> str:
+    return getattr(_token_status, "error", "") or "飞书应用令牌暂未获取成功，请稍后重试；无需手工填写用户令牌。"
 
 
 def _get_tenant_access_token_with_credentials(
@@ -589,7 +620,8 @@ def check_token_status():
     try:
         return ensure_feishu_token()
     except Exception as e:
-        log_info(f"Token 检查/刷新异常: {e}")
+        _token_status.error = _safe_auth_error(e)
+        log_info(f"Token 检查/刷新异常: {_token_status.error}")
         return None
 
 
@@ -601,10 +633,8 @@ def upload_media_to_feishu(image_bytes, file_name="screenshot.jpg", file_size=No
     :param file_size: 文件大小（字节）
     :return: (success, file_token or error_msg)
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
 
     temp_file_path = None
 
@@ -772,10 +802,8 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload, *
     """
     通过 NoticePayload 创建多维表记录
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
 
     handler, table_id, err = _resolve_handler(notice_type)
     if err:
@@ -828,10 +856,8 @@ def create_bitable_record_fields(
     Directly create a bitable record from already-captured target-table fields.
     This is used for local undo restore and intentionally does not send robot messages.
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
     if not isinstance(fields, dict) or not fields:
         return False, "创建字段不能为空"
 
@@ -877,13 +903,11 @@ def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[Not
     Falls back to per-item errors at the caller when the batch request fails.
     :return: list[(success, record_id_or_error)]
     """
-    check_token_status()
-
     payloads = [payload for payload in (payloads or []) if isinstance(payload, NoticePayload)]
     if not payloads:
         return []
-    if not config.user_token:
-        return [(False, "未配置飞书用户令牌") for _ in payloads]
+    if not check_token_status():
+        return [(False, feishu_auth_error()) for _ in payloads]
 
     handler, table_id, err = _resolve_handler(notice_type)
     if err:
@@ -942,8 +966,8 @@ def query_record_by_id(record_id, notice_type):
     根据 Record ID 查询记录
     :return: (success, record_data or error_msg)
     """
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
 
     handler, table_id, err = _resolve_handler(notice_type)
     if err:
@@ -1012,13 +1036,11 @@ def delete_bitable_record(record_id: str, notice_type: str):
     Delete a target bitable record by Record ID.
     Missing records are treated as already deleted so local cleanup can proceed.
     """
-    check_token_status()
-
     record_id = str(record_id or "").strip()
     if not record_id:
         return False, "缺少 record_id"
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
 
     _handler, table_id, err = _resolve_handler(notice_type)
     if err:
@@ -1092,10 +1114,8 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     """
     通过 NoticePayload 更新多维表记录
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
 
     handler, table_id, err = _resolve_handler(notice_type)
     if err:
@@ -1133,8 +1153,6 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
     Batch-update multiple independent bitable records in the same target table.
     :return: list[(success, record_id_or_error)]
     """
-    check_token_status()
-
     normalized = [
         (str(record_id or "").strip(), payload)
         for record_id, payload in (updates or [])
@@ -1142,8 +1160,8 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
     ]
     if not normalized:
         return []
-    if not config.user_token:
-        return [(False, "未配置飞书用户令牌") for _ in normalized]
+    if not check_token_status():
+        return [(False, feishu_auth_error()) for _ in normalized]
 
     handler, table_id, err = _resolve_handler(notice_type)
     if err:
@@ -1199,10 +1217,8 @@ def update_bitable_record_fields(record_id: str, notice_type: str, fields: dict)
     Directly update partial fields on a bitable record without rebuilding NoticePayload.
     :return: (success, record_id or error_msg)
     """
-    check_token_status()
-
-    if not config.user_token:
-        return False, "未配置飞书用户令牌"
+    if not check_token_status():
+        return False, feishu_auth_error()
 
     if not isinstance(fields, dict) or not fields:
         return False, "更新字段不能为空"

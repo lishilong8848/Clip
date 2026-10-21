@@ -34,7 +34,8 @@ from test_lighthouse_frontend_coverage import (  # noqa: E402
     run_audit,
     _shape_equal,
 )
-from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: E402
+from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog, _route_excluded  # noqa: E402
+from lan_bitable_template_portal.document_library_routes import install_document_library_routes  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,67 @@ from lan_bitable_template_portal.lighthouse_api import _route_excluded  # noqa: 
 # 命名占位符统一用 {param}(与 run_audit 归一一致);匹配目录时按 _shape_equal 形态比较。
 # 每个 covered/excluded 条目用 method_paths 逐条列(方法, 归一路径),避免方法×路径叉乘。
 KNOWN_DYNAMIC_BINDINGS = [
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=77, kind="covered", method_paths=[("GET", "/api/document-library/tables")],
+        window=1, needles=["requestJson(endpoint('/tables'), { signal, fresh: true })"],
+        note="资料表列表使用 requestJson 默认 GET；由 document_library_routes 的 /tables 注册。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=81, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/schema")],
+        window=1, needles=["requestJson(endpoint('/schema', key), { signal, fresh: true })"],
+        note="字段查询使用默认 GET；endpoint 将 key 编码为 /tables/{table_key}，后端注册 /schema。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=92, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/records")],
+        window=1, needles=["requestJson(endpoint('/records', key, params), { signal, fresh: true })"],
+        note="记录分页使用默认 GET；scope/q/cursor/page_size 仅进入查询串，后端注册 /records。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=98, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/records/{param}")],
+        window=1, needles=["requestJson(endpoint('/records/' + encodeURIComponent(id), key), { signal, fresh: true })"],
+        note="单条记录默认 GET；表标识和记录标识分别编码，匹配后端 records/{record_id}。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=101, kind="covered",
+        method_paths=[("POST", "/api/document-library/tables/{param}/records"),
+                      ("PATCH", "/api/document-library/tables/{param}/records/{param}")],
+        window=2, needles=["requestJson(endpoint('/records' + (id ? '/' + encodeURIComponent(id) : ''), key)",
+                           "method: id ? 'PATCH' : 'POST'"],
+        note="新建 POST、指定记录修改 PATCH 与后端注册一致；不推导其他表的写权限。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=110, kind="covered",
+        method_paths=[("POST", "/api/document-library/tables/{param}/records/{param}/attachments")],
+        window=1, needles=["uploadJson(endpoint('/records/' + encodeURIComponent(id) + '/attachments', key), data"],
+        definition_ref=dict(
+            source="lan_bitable_template_portal/frontend/src/api/client.ts",
+            definition_marker="export async function uploadJson(",
+            definition_needles=['xhr.open("POST", path)'],
+        ),
+        note="FormData 附件由 uploadJson 固定 POST；只匹配后端该记录的 attachments 路由。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=119, kind="covered",
+        method_paths=[("GET", "/api/document-library/tables/{param}/records/{param}/versions")],
+        window=1, needles=["requestJson(endpoint('/records/' + encodeURIComponent(id) + '/versions', key), { signal, fresh: true })"],
+        note="版本列表默认 GET，对应后端记录 versions 查询；不认领 fileUrl 下载或 sync 路由。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=134, kind="covered",
+        method_paths=[("POST", "/api/document-library/tables"),
+                      ("PUT", "/api/document-library/tables/{param}")],
+        window=2, needles=["requestJson(endpoint('/tables' + (existing ? '/' + encodeURIComponent(table.key) : ''))",
+                           "method: existing ? 'PUT' : 'POST'"],
+        note="新建配置 POST、修改配置 PUT 与后端注册一致；配置管理仍由后端管理员权限约束。",
+    ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningSharing.vue",
         line=37, kind="excluded",
@@ -806,6 +868,12 @@ WRAPPER_REVIEW = [
 # ---------------------------------------------------------------------------
 def _native_ids():
     cat = build_native_catalog()
+    # The shared AST fixture does not traverse this separately mounted router.
+    def metadata_only(*args, **kwargs):
+        raise AssertionError("route evidence must not authorize or execute document-library operations")
+
+    install_document_library_routes(cat.app, metadata_only, metadata_only)
+    cat = PortalAPICatalog(cat.app)
     first = cat.discover(page_size=50)
     total = first["total"]
     ids = []
@@ -1062,6 +1130,32 @@ class DynamicEndpointAuditTests(unittest.TestCase):
             self.assertGreaterEqual(index, 0, f"动态调用定义未找到: {ref}")
             for needle in ref['definition_needles']:
                 self.assertIn(needle, source[index:index + 4000], f"动态调用定义缺少证据: {needle}")
+
+    def test_document_library_bindings_have_unique_helpers_and_mounted_backend_evidence(self):
+        source = "lan_bitable_template_portal/frontend/src/api/documentLibrary.ts"
+        bindings = [binding for binding in self.bindings if binding['source'] == source]
+        self.assertEqual(len(bindings), 8)
+        text = _file_text(source)
+        self.assertIn("const root = '/api/document-library';", text)
+        self.assertIn("return root + (tableKey ? '/tables/' + encodeURIComponent(tableKey) : '') + path + "
+                      "(query.size ? '?' + query.toString() : '');", text)
+        client = _file_text("lan_bitable_template_portal/frontend/src/api/client.ts")
+        self.assertIn("const method = String(request.method || 'GET').toUpperCase();", client)
+        self.assertIn("install_document_library_portal(app, self, PortalRuntime)", _file_text("clipflow_backend/main.py"))
+        self.assertIn("install_document_library_routes(app, authorize, get_service)",
+                      _file_text("lan_bitable_template_portal/document_library_portal.py"))
+        routes = _file_text("lan_bitable_template_portal/document_library_routes.py")
+        self.assertIn("PREFIX = '/api/document-library'", routes)
+        self.assertIn("app.add_api_route(PREFIX + path, endpoint, methods=methods)", routes)
+        for binding in bindings:
+            with self.subTest(needle=binding['needles'][0]):
+                record = self._binding_record(binding)
+                self.assertIsNotNone(record)
+                self.assertEqual(_signature_lines(source, binding['needles'][0]), [record['line']])
+                self.assertEqual(binding['kind'], 'covered')
+                for method, path in binding['method_paths']:
+                    self.assertTrue(_in_catalog(self.native_ids, method, path))
+                    self.assertFalse(_route_excluded(path, method))
 
     def test_static_resource_manifest_is_not_a_business_endpoint(self):
         resources = [b for b in self.bindings if b['kind'] == 'static_asset']

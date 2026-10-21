@@ -40,6 +40,7 @@ ROUTES = {
     "attempts": {"GET": "attempts"},
     "review": {"GET": "review"},
     "profile": {"GET": "profile"},
+    "completion": {"GET": "completion"},
     "issues": {"GET": "issues.list", "POST": "issue.create"},
     "issues/{id}": {"PATCH": "issue.update"},
     "questions": {"GET": "questions.list", "POST": "question.save"},

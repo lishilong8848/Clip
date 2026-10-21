@@ -24,6 +24,8 @@ PREFIXES = (
     ("/api/risk-inspections", "risk_inspection"), ("/risk-inspections", "risk_inspection"),
     ("/api/work-handovers", "work_handover"), ("/work-handover", "work_handover"),
     ("/api/assistant/knowledge", "knowledge"), ("/knowledge-base", "knowledge"),
+    ("/api/document-library", "knowledge"), ("/document-library", "knowledge"),
+    ("/api/release-journal", "accounts"),
     ("/api/assistant", "assistant"), ("/assistant", "assistant"),
     ("/api/message-delivery", "assistant"),
     ("/api/feishu-workpartner", "assistant"),

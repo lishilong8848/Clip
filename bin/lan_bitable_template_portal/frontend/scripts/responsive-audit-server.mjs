@@ -5,6 +5,7 @@ import path from 'node:path';
 import {coreFixture} from './responsive-audit-core-fixtures.mjs';
 import {collabFixture} from './responsive-audit-collab-fixtures.mjs';
 import {accountFixture} from './responsive-audit-account-fixtures.mjs';
+import {workspaceExtensionFixture} from './workspace-extension-fixtures.mjs';
 
 // Development-only preview: every API is local fixture data, never a production proxy.
 const root=fileURLToPath(new URL('..',import.meta.url));
@@ -36,7 +37,7 @@ const api={name:'isolated-responsive-fixtures',configurePreviewServer(host){host
       if(req.method==='GET')return ok(saved);
       const following={revision:saved.revision+1,value:body.value};layouts.set(url.pathname,following);return ok(following);
     }
-    for(const fixture of [accountFixture,coreFixture,collabFixture]){
+    for(const fixture of [workspaceExtensionFixture,accountFixture,coreFixture,collabFixture]){
       const result=await fixture({url,method:req.method,body});if(result)return reply(result);
     }
     await appendFile(path.join(output,'unhandled.jsonl'),JSON.stringify({path:url.pathname,query:url.search,method:req.method,page:ref.pathname+ref.search})+'\n');

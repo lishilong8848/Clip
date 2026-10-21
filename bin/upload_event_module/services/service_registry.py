@@ -102,6 +102,11 @@ def ensure_feishu_token(*args, **kwargs):
     return service_registry.feishu_module.check_token_status()
 
 
+def feishu_auth_error():
+    reason = getattr(service_registry.feishu_module, "feishu_auth_error", None)
+    return reason() if callable(reason) else "飞书应用鉴权暂未就绪，请管理员检查 Qt 配置及迁移结果；无需手工填写用户令牌。"
+
+
 def resolve_bitable_app_token(app_id: str, app_secret: str, app_token: str):
     return service_registry.feishu_module.resolve_bitable_app_token(
         app_id, app_secret, app_token

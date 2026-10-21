@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import httpx
 import package_portable as packaging
 from openclaw_service.assistant import lighthouse_distribution as distribution
+from upload_event_module import logger as _app_logger  # Initialize before assertLogs can capture root handlers.
 from upload_event_module.services import patch_mirror
 from upload_event_module.services.remote_patch_updater import RemotePatchUpdater
 

@@ -26,6 +26,7 @@ _logging_initialized = False
 _logging_listener = None
 _orig_stdout = sys.stdout
 _orig_stderr = sys.stderr
+_stream_log_state = threading.local()
 
 
 def _stop_logging_listener():
@@ -266,21 +267,26 @@ class StreamLogger:
         return True
 
     def write(self, message):
-        if not message:
+        if not message or getattr(_stream_log_state, "writing", False):
             return
-        echoed = False
-        if self.stream:
-            try:
-                self.stream.write(message)
-                echoed = True
-            except Exception:
-                pass
-        text = message.strip()
-        if self._should_log_text(text):
-            try:
-                self.logger.log(self.level, text, extra={"stream_echoed": echoed})
-            except Exception:
-                pass
+        # A replacement console handler may write back into redirected stderr.
+        _stream_log_state.writing = True
+        try:
+            echoed = False
+            if self.stream:
+                try:
+                    self.stream.write(message)
+                    echoed = True
+                except Exception:
+                    pass
+            text = message.strip()
+            if self._should_log_text(text):
+                try:
+                    self.logger.log(self.level, text, extra={"stream_echoed": echoed})
+                except Exception:
+                    pass
+        finally:
+            _stream_log_state.writing = False
 
     def flush(self):
         if self.stream:

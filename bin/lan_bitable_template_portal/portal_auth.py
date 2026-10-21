@@ -1627,6 +1627,8 @@ class PortalAuthManager:
     def public_login_error(error: object) -> str:
         # Never render arbitrary provider/HTTP errors on an anonymous page.
         message = str(error)
+        if message == "未配置飞书 App ID 或 App Secret，无法启用扫码登录。":
+            return "飞书应用鉴权尚未就绪，请管理员在运行灯塔的电脑上检查 Qt 设置中的飞书鉴权及配置保存结果。无需填写用户令牌或反复扫码。"
         if message in {
             "登录状态已失效，请重新扫码。", "登录状态已过期，请重新扫码。",
             "登录回调地址与发起地址不一致。", "飞书登录回调缺少 code 或 state。",

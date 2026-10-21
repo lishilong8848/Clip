@@ -39,7 +39,7 @@ MAX_COLS = 100
 MAX_CHUNKS = 8_000
 BATCH_ROWS = 200
 SUPPORTED_EXTENSIONS = frozenset({
-    ".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".xlsm",
+    ".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx",
     ".png", ".jpg", ".jpeg", ".webp",
 })
 
@@ -417,6 +417,27 @@ def _image_sections(content, filename, ocr):
 # public API
 # ---------------------------------------------------------------------------
 
+def _pptx_sections(content, filename):
+    _check_archive(content)
+    from pptx import Presentation
+    slides = Presentation(io.BytesIO(content)).slides
+    if len(slides) > 100:
+        raise AssistantError('PPT最多读取100页，请拆分文件。', 413)
+    result, characters = [], 0
+    # Keep verbatim text for the caller's sensitive-document check, unlike chat previews.
+    for page, slide in enumerate(slides, 1):
+        for index, shape in enumerate(slide.shapes, 1):
+            text = shape.text if shape.has_text_frame else ''
+            if shape.has_table:
+                text = '\n'.join(' | '.join(cell.text for cell in row.cells) for row in shape.table.rows)
+            characters += len(text)
+            if characters > MAX_CHARS:
+                raise AssistantError('PPT文字超过读取上限，请拆分文件。', 413)
+            if text.strip():
+                result.append({'text': text, 'location': f'{filename} · 幻灯片{page} · 对象{index}'})
+    return result
+
+
 def extract_sections(content, filename, *, ocr=None):
     """Extract bounded, located sections from one in-memory document.
 
@@ -436,7 +457,7 @@ def extract_sections(content, filename, *, ocr=None):
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise AssistantError(
-            "不支持的文件类型，仅支持 txt/md/csv/pdf/docx/xlsx/xlsm 以及图片。")
+            "不支持的文件类型，仅支持 txt/md/csv/pdf/docx/xlsx/xlsm/pptx 以及图片。")
 
     if suffix in (".png", ".jpg", ".jpeg", ".webp"):
         sections = _image_sections(content, filename, ocr)
@@ -444,6 +465,8 @@ def extract_sections(content, filename, *, ocr=None):
         sections = _pdf_sections(content, filename)
     elif suffix == ".docx":
         sections = _docx_sections(content, filename)
+    elif suffix == '.pptx':
+        sections = _pptx_sections(content, filename)
     elif suffix in (".xlsx", ".xlsm"):
         sections = _xlsx_sections(content, filename)
     elif suffix == ".csv":

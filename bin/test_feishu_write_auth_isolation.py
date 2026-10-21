@@ -138,6 +138,7 @@ class WriteAuthIsolationTests(unittest.TestCase):
         robot_patch.start()
         self.addCleanup(robot_patch.stop)
         self.namespace.update(config=SimpleNamespace(user_token=""), ensure_feishu_token=lambda: self.token,
+                              feishu_auth_error=lambda: "Synthetic application authentication unavailable",
                               refresh_feishu_token=self.refresh)
 
     def refresh_token(self):

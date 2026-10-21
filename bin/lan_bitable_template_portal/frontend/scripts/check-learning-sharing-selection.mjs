@@ -62,10 +62,10 @@ try {
     const single=page.getByRole('checkbox',{name:'单选题',exact:true});
     assert(await single.isChecked());
     await page.getByLabel('飞书纪要链接').fill('https://vnet.feishu.cn/docx/fixture');
-    await single.uncheck();assert(await page.getByRole('button',{name:'读取纪要并生成题目'}).isDisabled());
+    await single.uncheck();assert(await page.getByRole('button',{name:'读取资料并生成题目'}).isDisabled());
     await single.check();await page.getByRole('checkbox',{name:'多选题',exact:true}).check();await page.getByRole('checkbox',{name:'问答题',exact:true}).check();
     await page.screenshot({path:path.join(output,'types-'+width+'.png'),fullPage:true});
-    await page.getByRole('button',{name:'读取纪要并生成题目'}).click();
+    await page.getByRole('button',{name:'读取资料并生成题目'}).click();
     await page.getByRole('heading',{name:'隔离测试纪要',exact:true}).waitFor();assert.equal(creates,1);
     await page.getByLabel('参考答案（问答题不自动判分）').fill('新的参考答案，按批准流程处理。');
     const first=page.getByRole('checkbox',{name:'参加答题：测试人员甲',exact:true});
@@ -85,7 +85,7 @@ try {
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
     await page.getByRole('button',{name:'核对后发布给参会人',exact:true}).click();
     const dialog=page.getByRole('dialog');await dialog.waitFor();assert.match(await dialog.innerText(),/向1位参会人/);assert.equal(sends,0);
-    assert.match(await dialog.innerText(),/全部5道题同步至纪要题库/);
+    assert.match(await dialog.innerText(),/全部题目同步至纪要题库/);
     await dialog.getByRole('button',{name:'确认',exact:true}).click();
     await page.getByRole('button',{name:'关闭本批',exact:true}).waitFor();assert.equal(sends,1);assert.equal(await first.count(),0);
     await page.getByText('免做，不推送',{exact:true}).waitFor();

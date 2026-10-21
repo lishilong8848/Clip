@@ -25,3 +25,16 @@ export async function requestLearning(
   if (method !== "GET" && result.sync_pending) options.onSyncPending?.();
   return result;
 }
+
+export type CompletionQuery = {
+  from: string; to: string; scope?: string; person_id?: string;
+  status?: string; shift?: string; q?: string; page?: number; page_size?: number;
+};
+
+export function getLearningCompletion(query: CompletionQuery, signal?: AbortSignal): Promise<Dict> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== '') params.set(key, String(value));
+  }
+  return requestLearning({ signal }, `/completion?${params}`);
+}

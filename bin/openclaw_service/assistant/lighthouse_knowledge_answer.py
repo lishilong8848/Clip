@@ -187,7 +187,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize):
     stamp = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
     sources = [{'number': i, 'kind': 'company_knowledge', 'title': f"{item['name']} · 版本{item['version']} · {item['location']}",
                 'url': item['url'], 'queried_at': stamp, 'scopes': [], 'available': True,
-                'data': {key: item[key] for key in ('document_id', 'version', 'ordinal', 'name', 'location')}}
+                'data': {key: item[key] for key in ('document_id', 'version', 'ordinal', 'name', 'location')}
+                    | {'source_kind': item.get('source_kind', 'shared')}}
                for i, item in enumerate(items, 1)]
     evidence = [{'number': i, 'name': item['name'], 'version': item['version'], 'location': item['location'], 'text': item['text']}
                 for i, item in enumerate(items, 1)]
@@ -197,7 +198,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize):
                       'warning': result.get('warning', '')} for result in topic_results] if compound else []
     current = await authorize()
     if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-            or not await asyncio.to_thread(knowledge.evidence_current, items, profile)):
+            or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
         return await reply('公司资料或授权已变化，旧内容未发送给模型，请重新查询。')
     # Stateless generation keeps removed documents out of native gateway history.
     model = model or engine.assistant.model_for(current)
@@ -217,7 +218,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize):
     answer = await asyncio.to_thread(model.complete, messages, profile=profile, max_tokens=3500)
     current = await authorize()
     if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-            or not await asyncio.to_thread(knowledge.evidence_current, items, profile)):
+            or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
         return await reply('回答期间公司资料或授权已变化，旧内容未用于回答，请重新查询。')
     answer = str(answer)
     if answer.strip() == '[NO_APPLICABLE_DOCUMENT]':

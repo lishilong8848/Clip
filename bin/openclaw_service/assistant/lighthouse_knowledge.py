@@ -11,6 +11,7 @@ parallel while only query embedding and index writes are serialized.
 from __future__ import annotations
 
 from contextlib import contextmanager, suppress
+import copy
 import hashlib
 import io
 import ipaddress
@@ -33,7 +34,7 @@ from .lighthouse_message_delivery import MESSAGE_INTENT
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_BATCH_BYTES = 300 * 1024 * 1024
-EXTENSIONS = {'.pdf', '.docx', '.xlsx', '.xlsm', '.txt', '.md', '.csv', '.png', '.jpg', '.jpeg', '.webp'}
+EXTENSIONS = {'.pdf', '.docx', '.xlsx', '.xlsm', '.pptx', '.txt', '.md', '.csv', '.png', '.jpg', '.jpeg', '.webp'}
 
 # Local FAISS configuration is fixed for every deployment.  No per-install
 # embedding endpoint, model name or credential is required anymore.
@@ -140,12 +141,15 @@ def _pack(vector, dim=DIMENSIONS):
 
 class KnowledgeBase:
     def __init__(self, root, *, embedder=None, protect=protect_key, extractor=None,
-                 start_worker=True, memory_index_factory=None):
+                 start_worker=True, memory_index_factory=None, source_acl=None, source_current=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root / 'knowledge.sqlite3'
         self.protect = protect
         self.extractor = extractor
+        self.source_acl = source_acl
+        self.source_current = source_current
+        self._worker_tasks = []
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._worker = None
@@ -278,7 +282,17 @@ class KnowledgeBase:
             CREATE TABLE IF NOT EXISTS doc_group_members(
                 document_id TEXT PRIMARY KEY,group_id TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS doc_group_members_group ON doc_group_members(group_id);
+            CREATE TABLE IF NOT EXISTS document_sources(
+                document_id TEXT PRIMARY KEY,source_key TEXT UNIQUE NOT NULL,
+                payload TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS source_versions(
+                document_id TEXT NOT NULL,version INTEGER NOT NULL,payload TEXT NOT NULL,
+                PRIMARY KEY(document_id,version));
+            CREATE TABLE IF NOT EXISTS source_artifacts(id TEXT PRIMARY KEY,sources TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS source_retry(document_id TEXT PRIMARY KEY,attempts INTEGER NOT NULL,next_attempt REAL NOT NULL);
         ''')
+        if 'source_key' not in {row[1] for row in db.execute('PRAGMA table_info(documents)')}:
+            db.execute("ALTER TABLE documents ADD COLUMN source_key TEXT NOT NULL DEFAULT ''")
         # Additive folder-tree migration: nested folders are groups whose parent_id
         # points at another group.  Existing flat groups keep parent_id NULL and remain
         # roots, so the API and all existing consumers stay compatible.  Referential
@@ -504,7 +518,10 @@ class KnowledgeBase:
             except Exception:
                 runtime = {'ready': False, 'queued': 0}
         runtime_ready = bool(runtime.get('ready', True)) if self.embedder is not None else False
-        queued = self._queued_count()
+        with self.connect(readonly=True) as db:
+            self._acl_sql(db, actor)
+            queued = db.execute("SELECT count(*) FROM documents WHERE deleted=0 AND status IN ('queued','indexing') AND pending_version IS NOT NULL AND knowledge_visible(id)=1").fetchone()[0]
+            vectors = db.execute('SELECT count(*) FROM local_vectors lv JOIN chunks c ON c.id=lv.chunk_id JOIN documents d ON d.id=c.document_id WHERE d.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1').fetchone()[0] if snapshot is not None else 0
         warning = ''
         if mode == MODE:
             if not index_ready:
@@ -521,7 +538,7 @@ class KnowledgeBase:
             'ready': bool(index_ready and runtime_ready),
             'indexready': bool(index_ready),
             'queued': queued,
-            'vectors': self._snapshot_count(),
+            'vectors': vectors,
             'budget': _MEMORY_BUDGET,
             'runtime': runtime,
             'warning': warning,
@@ -564,6 +581,73 @@ class KnowledgeBase:
         return self.settings(actor)
 
     # ------------------------------------------------------------------ public rows
+    def _acl_sql(self, db, actor):
+        allowed = {row[0]: False for row in db.execute("SELECT id FROM documents WHERE source_key<>''")}
+        for row in db.execute('SELECT document_id,payload,enabled FROM document_sources'):
+            try:
+                allowed[row['document_id']] = bool(actor and row['enabled'] and self.source_acl
+                    and self.source_acl(actor, json.loads(row['payload'])))
+            except Exception:
+                allowed[row['document_id']] = False
+        db.create_function('knowledge_visible', 1, lambda identity: int(allowed.get(identity, True)))
+        stamp = hashlib.sha256(json.dumps(allowed, sort_keys=True).encode()).hexdigest()
+        db.create_function('knowledge_acl_stamp', 0, lambda: stamp)
+        return 'knowledge_visible(documents.id)=1'
+
+    def result_current(self, actor, result):
+        check_actor(actor)
+        stamp = result.get('acl_revision') if isinstance(result, dict) else None
+        if stamp is None:
+            return True
+        with self.connect(readonly=True) as db:
+            self._acl_sql(db, actor)
+            return stamp == db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]
+
+    def cached_turn_current(self, actor, turn):
+        sources = [source for source in turn.get('sources', []) if source.get('kind') == 'company_knowledge']
+        if not sources:
+            return True
+        with self.connect(readonly=True) as db:
+            self._acl_sql(db, actor)
+            for source in sources:
+                data = source.get('data') or {}
+                row = db.execute('SELECT source_key,deleted,active_version,knowledge_visible(id) AS visible FROM documents WHERE id=?', (data.get('document_id'),)).fetchone()
+                if not row:
+                    if data.get('source_kind') == 'document_library':
+                        return False
+                    continue
+                if row['source_key'] and (not row['visible'] or row['deleted'] or row['active_version'] != data.get('version')):
+                    return False
+        return True
+
+    def filter_cached_turn(self, actor, turn):
+        if self.cached_turn_current(actor, turn):
+            return turn
+        result = copy.deepcopy(turn)
+        result.update(answer='来源文件或当前授权已变化，请重新查询。', sources=[], output_files=[], downloads=[],
+            process=[], file_ids=[], plan=None, answer_document=None, resume_available=False, knowledge_access_changed=True)
+        result.pop('_draft_answer', None)
+        return result
+
+    def bind_source_artifacts(self, result):
+        sources = [source for source in result.get('sources', []) if source.get('kind') == 'company_knowledge']
+        if not sources:
+            return
+        identities = {item['id'] for item in result.get('output_files', []) if isinstance(item, dict) and item.get('id')}
+        identities.update(item['id'] for item in result.get('downloads', []) if isinstance(item, dict) and item.get('id'))
+        with self.connect() as db:
+            for identity in identities:
+                db.execute('INSERT OR REPLACE INTO source_artifacts VALUES(?,?)', (identity, json.dumps(sources, ensure_ascii=False)))
+
+    def artifact_current(self, actor, identity):
+        with self.connect(readonly=True) as db:
+            row = db.execute('SELECT sources FROM source_artifacts WHERE id=?', (identity,)).fetchone()
+        return not row or self.cached_turn_current(actor, {'sources': json.loads(row[0])})
+
+    def _require_visible(self, db, actor, row):
+        if not row or not db.execute('SELECT 1 FROM documents WHERE id=? AND ' + self._acl_sql(db, actor), (row['id'],)).fetchone():
+            raise AssistantError('知识库文件不存在或当前无权访问。', 404)
+
     @staticmethod
     def _public(row, actor):
         result = {key: row[key] for key in ('id', 'name', 'owner_name', 'active_version', 'status', 'error', 'updated_at', 'size', 'chunks')} | {
@@ -572,12 +656,16 @@ class KnowledgeBase:
             result['group_id'] = row['group_id']
         if 'group_name' in row.keys():
             result['group_name'] = row['group_name']
+        if 'source_key' in row.keys() and row['source_key']:
+            result.update(can_edit=False, source_kind='document_library')
         return result
 
     @staticmethod
     def _editable(row, actor, revision):
         if not row:
             raise AssistantError('知识库文件不存在。', 404)
+        if 'source_key' in row.keys() and row['source_key']:
+            raise AssistantError('来源文件请在文件库中修改或替换版本。', 403)
         if not actor.get('is_admin') and row['owner'] != actor['id']:
             raise AssistantError('只有上传者或管理员可以修改此共享文件。', 403)
         if type(revision) is not int or revision != row['revision']:
@@ -609,6 +697,7 @@ class KnowledgeBase:
     def _group_selection(self, db, actor, query):
         query = {'q': str(query.get('q') or '').strip()[:200], 'group': str(query.get('group') or '')}
         sql, values = self._document_filter(actor, query)
+        sql += ' AND ' + self._acl_sql(db, actor)
         if not actor.get('is_admin'):
             sql += ' AND documents.owner=?'
             values.append(actor['id'])
@@ -627,6 +716,7 @@ class KnowledgeBase:
         sql, values = self._document_filter(actor, query)
         selection = None
         with self.connect() as db:
+            sql += ' AND ' + self._acl_sql(db, actor)
             if query.get('select_all') == '1' and str(query.get('deleted', '0')) != '1':
                 _, selection = self._group_selection(db, actor, query)
             total = db.execute('SELECT count(*) FROM documents WHERE ' + sql, values).fetchone()[0]
@@ -641,8 +731,10 @@ class KnowledgeBase:
                               'WHERE ' + sql + ' ORDER BY documents.updated_at DESC,documents.id LIMIT 20 OFFSET ?',
                               [*values, (page - 1) * 20]).fetchall()
             revision = self._revision(db)
+            acl_revision = db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]
         return {'items': [self._public(row, actor) for row in rows], 'total': total, 'page': page, 'page_size': 20,
                 'is_admin': bool(actor.get('is_admin')), 'settings': self.settings(actor), 'revision': revision,
+                'acl_revision': acl_revision,
                 **({'selection': selection} if selection is not None else {})}
 
     def upload(self, actor, name, content, *, document_id='', revision=None):
@@ -650,6 +742,37 @@ class KnowledgeBase:
         return self.upload_file(actor, name, content, document_id=document_id, revision=revision)
 
     def upload_file(self, actor, name, content, *, document_id='', revision=None):
+        return self._upload_file(actor, name, content, document_id=document_id, revision=revision)
+
+    def upsert_source(self, source_key, source, name, content):
+        """Internal ingestion only; source provenance never comes from an upload request."""
+        if not isinstance(source_key, str) or not source_key or not isinstance(source, dict):
+            raise AssistantError('来源文件信息无效。')
+        identity = uuid.uuid5(uuid.NAMESPACE_URL, 'document-library:' + source_key).hex
+        return self._upload_file({'id': '@document-library', 'name': 'Document Library'}, name, content,
+            document_id=identity, source_key=source_key, source=source)
+
+    def invalidate_sources(self, prefix):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT document_id,payload FROM document_sources WHERE substr(source_key,1,?)=? AND enabled=1', (len(prefix), prefix)).fetchall()
+            for row in rows:
+                if self.source_current is not None and self.source_current(json.loads(row['payload'])):
+                    continue
+                db.execute('UPDATE document_sources SET enabled=0 WHERE document_id=?', (row[0],))
+                db.execute('UPDATE documents SET active_version=NULL,revision=revision+1 WHERE id=?', (row[0],))
+            if rows:
+                self._bump(db)
+
+    def source_status(self, prefix):
+        with self.connect(readonly=True) as db:
+            states = [row[0] for row in db.execute('SELECT d.status FROM documents d JOIN document_sources s ON s.document_id=d.id WHERE substr(s.source_key,1,?)=? AND s.enabled=1', (len(prefix), prefix))]
+        for state in ('blocked', 'failed', 'indexing', 'queued'):
+            if state in states:
+                return state
+        return 'ready' if states else 'none'
+
+    def _upload_file(self, actor, name, content, *, document_id='', revision=None, source_key='', source=None):
         """Stage bytes before the short metadata transaction; never lock while copying."""
         check_actor(actor)
         name = str(name or '').replace('\\', '/').split('/')[-1].strip()
@@ -659,7 +782,7 @@ class KnowledgeBase:
             raise AssistantError('文件名包含疑似敏感信息，请修改后再上传。')
         if not isinstance(content, bytes) and not callable(getattr(content, 'read', None)):
             raise AssistantError('文件内容格式无效。')
-        if document_id:
+        if document_id and not source_key:
             with self.connect() as db:
                 self._editable(db.execute('SELECT * FROM documents WHERE id=?', (document_id,)).fetchone(), actor, revision)
         staging = self.root / 'uploads'
@@ -672,7 +795,8 @@ class KnowledgeBase:
             hexdigest = digest.hexdigest()
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
-                result, target = self._commit_upload(db, actor, name, temporary, size, hexdigest, document_id, revision)
+                result, target = self._commit_upload(db, actor, name, temporary, size, hexdigest, document_id, revision,
+                    source_key=source_key, source=source)
             committed = True
         finally:
             with suppress(OSError):
@@ -684,19 +808,38 @@ class KnowledgeBase:
         self._wake.set()
         return result
 
-    def _commit_upload(self, db, actor, name, temporary, size, hexdigest, document_id, revision):
+    def _commit_upload(self, db, actor, name, temporary, size, hexdigest, document_id, revision, *, source_key='', source=None):
+        if source_key and (self.source_current is None or not self.source_current(source)):
+            raise AssistantError('来源版本已变化，旧入库任务未覆盖当前文档。', 409)
         row = None
         if document_id:
             row = db.execute('SELECT * FROM documents WHERE id=?', (document_id,)).fetchone()
-            self._editable(row, actor, revision)
-            if row['deleted']:
+            if not source_key:
+                self._editable(row, actor, revision)
+            if row and row['deleted']:
                 raise AssistantError('文件已删除，请先恢复。', 409)
         if not document_id:
-            row = db.execute('SELECT d.* FROM documents d JOIN versions v ON v.document_id=d.id WHERE d.deleted=0 AND v.hash=? AND v.version IN (d.active_version,d.pending_version) LIMIT 1', (hexdigest,)).fetchone()
+            row = db.execute("SELECT d.* FROM documents d JOIN versions v ON v.document_id=d.id WHERE d.deleted=0 AND d.source_key='' AND v.hash=? AND v.version IN (d.active_version,d.pending_version) LIMIT 1", (hexdigest,)).fetchone()
+        if source_key:
+            prior_source = db.execute('SELECT payload,enabled FROM document_sources WHERE document_id=?', (document_id,)).fetchone()
+            unchanged_source = bool(prior_source and prior_source['enabled'] and json.loads(prior_source['payload']) == source)
+            db.execute('INSERT INTO document_sources VALUES(?,?,?,1) ON CONFLICT(document_id) DO UPDATE SET payload=excluded.payload,enabled=1',
+                (document_id, source_key, json.dumps(source, ensure_ascii=False)))
+            latest = db.execute('SELECT v.version,v.hash,v.name,s.payload FROM versions v LEFT JOIN source_versions s ON s.document_id=v.document_id AND s.version=v.version WHERE v.document_id=? ORDER BY v.version DESC LIMIT 1', (document_id,)).fetchone()
+            policy_fields = ('table_key', 'record_id', 'origin', 'scopes', 'attachment_id', 'field_id')
+            if row and latest and latest['payload'] and latest['hash'] == hexdigest and latest['name'] == name:
+                prior = json.loads(latest['payload'])
+                if all(prior.get(key) == source.get(key) for key in policy_fields):
+                    if not unchanged_source:
+                        ready = bool(db.execute('SELECT 1 FROM chunks WHERE document_id=? AND version=? LIMIT 1', (document_id, latest['version'])).fetchone())
+                        db.execute('UPDATE documents SET active_version=?,pending_version=?,status=?,revision=revision+1,error=\'\',updated_at=? WHERE id=?',
+                            (latest['version'] if ready else None, None if ready else latest['version'], 'ready' if ready else 'queued', time.time(), document_id))
+                        self._bump(db)
+                    return {**self._public(db.execute('SELECT * FROM documents WHERE id=?', (document_id,)).fetchone(), actor), 'duplicate': True}, None
         if row:
             identical = db.execute('SELECT 1 FROM versions WHERE document_id=? AND hash=? AND version IN (?,?)',
                 (row['id'], hexdigest, row['active_version'], row['pending_version'])).fetchone()
-            if identical:
+            if identical and (not source_key or unchanged_source):
                 return {**self._public(row, actor), 'duplicate': True}, None
         identity = document_id or uuid.uuid4().hex
         version = db.execute('SELECT COALESCE(MAX(version),0)+1 FROM versions WHERE document_id=?', (identity,)).fetchone()[0]
@@ -705,12 +848,16 @@ class KnowledgeBase:
         target.parent.mkdir(parents=True, exist_ok=True)
         stamp = time.time()
         db.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)', (identity, version, name, hexdigest, str(relative), size, stamp))
-        if document_id:
+        if source_key:
+            db.execute('INSERT INTO source_versions VALUES(?,?,?)', (identity, version, json.dumps(source, ensure_ascii=False)))
+        if row and document_id:
             db.execute("UPDATE documents SET name=?,pending_version=?,revision=revision+1,status='queued',error='',updated_at=?,size=? WHERE id=?",
                 (name, version, stamp, size, identity))
         else:
-            db.execute("INSERT INTO documents(id,owner,owner_name,name,pending_version,status,updated_at,size) VALUES(?,?,?,?,?,'queued',?,?)",
-                (identity, actor['id'], safe_text(actor.get('name') or '用户', limit=100), name, version, stamp, size))
+            db.execute("INSERT INTO documents(id,owner,owner_name,name,pending_version,status,updated_at,size,source_key) VALUES(?,?,?,?,?,'queued',?,?,?)",
+                (identity, actor['id'], safe_text(actor.get('name') or '用户', limit=100), name, version, stamp, size, source_key))
+        if source_key:
+            db.execute('UPDATE documents SET active_version=NULL WHERE id=?', (identity,))
         self._bump(db)
         result = self._public(db.execute('SELECT * FROM documents WHERE id=?', (identity,)).fetchone(), actor)
         os.replace(temporary, target)
@@ -747,12 +894,25 @@ class KnowledgeBase:
                 self._worker = threading.Thread(target=self._run, name='CompanyKnowledge', daemon=True)
                 self._worker.start()
 
+    def add_worker_task(self, task):
+        with self._worker_lock:
+            if task not in self._worker_tasks:
+                self._worker_tasks.append(task)
+        self._ensure_worker()
+        self._wake.set()
+
     def _run(self):
         from upload_event_module.services.process_lifetime import lower_current_thread_priority
         lower_current_thread_priority()
         while not self._stop.is_set():
             try:
-                if self.process_one():
+                worked = False
+                for task in tuple(self._worker_tasks):
+                    try:
+                        worked = bool(task()) or worked
+                    except Exception:
+                        logging.warning('Knowledge source synchronization failed; retry deferred')
+                if self.process_one() or worked:
                     continue
             except (OSError, sqlite3.Error):
                 pass
@@ -771,9 +931,14 @@ class KnowledgeBase:
         with self._index_lock:
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
-                row = db.execute("SELECT * FROM documents WHERE deleted=0 AND status='queued' AND pending_version IS NOT NULL ORDER BY updated_at LIMIT 1").fetchone()
+                row = db.execute("SELECT * FROM documents WHERE deleted=0 AND pending_version IS NOT NULL AND (status='queued' OR (status='failed' AND source_key<>'' AND EXISTS (SELECT 1 FROM source_retry r JOIN document_sources s ON s.document_id=r.document_id WHERE r.document_id=documents.id AND r.next_attempt<=? AND s.enabled=1))) ORDER BY updated_at LIMIT 1", (time.time(),)).fetchone()
                 if not row:
                     return False
+                if row['status'] == 'failed':
+                    provenance = db.execute('SELECT payload FROM document_sources WHERE document_id=?', (row['id'],)).fetchone()
+                    if self.source_current is None or not self.source_current(json.loads(provenance[0])):
+                        db.execute('UPDATE source_retry SET next_attempt=? WHERE document_id=?', (time.time() + 300, row['id']))
+                        return False
                 doc = dict(row)
                 cfg = self._get_config(db)
                 vector_on = self._vector_mode(cfg)
@@ -837,6 +1002,7 @@ class KnowledgeBase:
                         if vector_on:
                             db.execute('INSERT INTO local_vectors(chunk_id,embedding) SELECT ?,embedding FROM index_staging WHERE document_id=? AND ordinal=?', (identity, doc['id'], ordinal))
                     db.execute('DELETE FROM index_staging WHERE document_id=?', (doc['id'],))
+                    db.execute('DELETE FROM source_retry WHERE document_id=?', (doc['id'],))
                     db.execute("UPDATE documents SET active_version=?,pending_version=NULL,status='ready',error='',chunks=?,updated_at=?,name=?,size=? WHERE id=?",
                         (version['version'], len(chunks), time.time(), version['name'], version['size'], doc['id']))
                     self._bump(db)
@@ -858,6 +1024,10 @@ class KnowledgeBase:
                     db.execute('DELETE FROM index_staging WHERE document_id=?', (doc['id'],))
                     db.execute("UPDATE documents SET status=?,error=? WHERE id=? AND revision=? AND deleted=0 AND status='indexing'",
                         (status, safe_text(message, limit=600) or '文件包含不宜公开的信息，未入库。', doc['id'], doc['revision']))
+                    if doc['source_key'] and status == 'failed':
+                        previous = db.execute('SELECT attempts FROM source_retry WHERE document_id=?', (doc['id'],)).fetchone()
+                        attempts = (previous[0] if previous else 0) + 1
+                        db.execute('INSERT OR REPLACE INTO source_retry VALUES(?,?,?)', (doc['id'], attempts, time.time() + min(300, 30 * 2 ** min(attempts - 1, 4))))
                 return True
 
     def change(self, actor, identity, action, revision):
@@ -949,13 +1119,17 @@ class KnowledgeBase:
         """
         check_actor(actor)
         with self.connect() as db:
+            self._acl_sql(db, actor)
+            acl_revision = db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]
             rows = db.execute('''
                 SELECT g.id, g.name, g.owner, g.owner_name, g.parent_id, g.created_at,
                        (SELECT count(*) FROM doc_group_members m
                         JOIN documents d ON d.id=m.document_id
-                        WHERE m.group_id=g.id AND d.deleted=0) AS count
+                         WHERE m.group_id=g.id AND d.deleted=0 AND knowledge_visible(d.id)=1) AS count
                 FROM knowledge_groups g ORDER BY g.created_at, g.id''').fetchall()
-        return {'groups': [self._group_row(actor, row) for row in rows], 'total': len(rows)}
+            hidden = {row[0] for row in db.execute('SELECT DISTINCT m.group_id FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE d.source_key<>\'\'')}
+        rows = [row for row in rows if row['count'] or row['id'] not in hidden]
+        return {'groups': [self._group_row(actor, row) for row in rows], 'total': len(rows), 'acl_revision': acl_revision}
 
     def create_group(self, actor, name, parent_id=None):
         """Create a new organizational group/folder (any signed-in user can create).
@@ -992,6 +1166,7 @@ class KnowledgeBase:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
+            self._acl_sql(db, actor)
             if not row:
                 raise AssistantError('分组不存在。', 404)
             if not actor.get('is_admin') and row['owner'] != actor['id']:
@@ -1004,7 +1179,7 @@ class KnowledgeBase:
                 db.execute('UPDATE knowledge_groups SET name=? WHERE id=?', (name, group_id))
             else:
                 db.execute('UPDATE knowledge_groups SET name=?,parent_id=? WHERE id=?', (name, normalized, group_id))
-            count = db.execute('SELECT count(*) FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE m.group_id=? AND d.deleted=0', (group_id,)).fetchone()[0]
+            count = db.execute('SELECT count(*) FROM doc_group_members m JOIN documents d ON d.id=m.document_id WHERE m.group_id=? AND d.deleted=0 AND knowledge_visible(d.id)=1', (group_id,)).fetchone()[0]
             row = db.execute('SELECT id,name,owner,owner_name,parent_id,created_at FROM knowledge_groups WHERE id=?', (group_id,)).fetchone()
         return self._group_row(actor, dict(row, count=count))
 
@@ -1079,10 +1254,10 @@ class KnowledgeBase:
                 raise AssistantError('分组不存在。', 404)
             missing, forbidden = [], []
             for identity in ids:
-                row = db.execute('SELECT owner,deleted FROM documents WHERE id=?', (identity,)).fetchone()
+                row = db.execute('SELECT owner,deleted,source_key FROM documents WHERE id=?', (identity,)).fetchone()
                 if not row or row['deleted']:
                     missing.append(identity)
-                elif not actor.get('is_admin') and row['owner'] != actor['id']:
+                elif row['source_key'] or not actor.get('is_admin') and row['owner'] != actor['id']:
                     forbidden.append(identity)
             if forbidden:
                 raise AssistantError('存在无权操作的文件，未做任何修改。', 403)
@@ -1110,10 +1285,10 @@ class KnowledgeBase:
                 raise AssistantError('分组不存在。', 404)
             forbidden, missing = [], []
             for identity in ids_:
-                row = db.execute('SELECT owner,deleted FROM documents WHERE id=?', (identity,)).fetchone()
+                row = db.execute('SELECT owner,deleted,source_key FROM documents WHERE id=?', (identity,)).fetchone()
                 if not row or row['deleted']:
                     missing.append(identity)
-                elif not actor.get('is_admin') and row['owner'] != actor['id']:
+                elif row['source_key'] or not actor.get('is_admin') and row['owner'] != actor['id']:
                     forbidden.append(identity)
             if forbidden:
                 raise AssistantError('存在无权操作的文件，未做任何修改。', 403)
@@ -1130,6 +1305,7 @@ class KnowledgeBase:
         row = db.execute('SELECT * FROM documents WHERE id=?', (identity,)).fetchone()
         if not row:
             raise AssistantError('知识库文件不存在。', 404)
+        self._require_visible(db, actor, row)
         owner = row['owner'] == actor['id'] or actor.get('is_admin')
         if row['deleted']:
             raise AssistantError('该知识库文件已删除，不再作为回答依据。', 410)
@@ -1147,6 +1323,14 @@ class KnowledgeBase:
         original = db.execute('SELECT * FROM versions WHERE document_id=? AND version=?', (identity, number)).fetchone()
         if not original:
             raise AssistantError('文件版本不存在。', 404)
+        if row['source_key']:
+            provenance = db.execute('SELECT payload FROM source_versions WHERE document_id=? AND version=?', (identity, number)).fetchone()
+            try:
+                permitted = bool(provenance and self.source_acl and self.source_acl(actor, {**json.loads(provenance[0]), 'historical_version': True}))
+            except Exception:
+                permitted = False
+            if not permitted:
+                raise AssistantError('文件版本不存在或当前无权访问。', 404)
         return row, original
 
     def document(self, actor, identity, query):
@@ -1165,7 +1349,8 @@ class KnowledgeBase:
                 (identity, original['version'], (page - 1) * 20)).fetchall()
             return {'document': {**self._public(row, actor), 'name': original['name'], 'view_version': original['version'],
                     'historical': original['version'] != row['active_version']},
-                    'sections': [dict(chunk) for chunk in chunks], 'total': total, 'page': page, 'page_size': 20}
+                    'sections': [dict(chunk) for chunk in chunks], 'total': total, 'page': page, 'page_size': 20,
+                    'acl_revision': db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]}
 
     def file(self, actor, identity, version=None):
         check_actor(actor)
@@ -1200,7 +1385,10 @@ class KnowledgeBase:
                 snapshot = self._ensure_snapshot(vector_rev)
                 if snapshot is not None and getattr(snapshot, 'revision', None) == vector_rev and getattr(snapshot, 'count', 0) > 0:
                     vector = self.embedder.embed([query], config, query=True)[0]
-                    hits = snapshot.search(vector, k=40)
+                    with self.connect() as db:
+                        self._acl_sql(db, actor)
+                        readable = {row[0] for row in db.execute('SELECT c.id FROM chunks c JOIN documents d ON d.id=c.document_id WHERE d.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1')}
+                    hits = [hit for hit in snapshot.search(vector, k=snapshot.count) if hit[0] in readable][:40]
                     mode = MODE
                     indexready = True
                 else:
@@ -1233,13 +1421,14 @@ class KnowledgeBase:
         try:
             with self.connect() as db:
                 db.execute('BEGIN')
+                self._acl_sql(db, actor)
                 deadline = time.monotonic() + 3
                 db.set_progress_handler(lambda: time.monotonic() > deadline, 1000)
                 if config.get('generation') != self._get_config(db).get('generation'):
                     raise AssistantError('知识库模型刚发生变化，请重新查询。', 409)
-                fields = 'c.id,c.document_id,c.version,c.ordinal,c.text,c.location,v.name'
+                fields = 'c.id,c.document_id,c.version,c.ordinal,c.text,c.location,v.name,d.source_key'
                 joins = ' JOIN documents d ON d.id=c.document_id JOIN versions v ON v.document_id=c.document_id AND v.version=c.version '
-                active = 'd.deleted=0 AND d.active_version=c.version'
+                active = 'd.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1'
                 if snapshot is not None and snapshot.revision != self._vector_revision(db):
                     hits = []
                     mode, indexready = 'keyword', False
@@ -1270,21 +1459,24 @@ class KnowledgeBase:
                         for rank, row in enumerate(rows):
                             add(row, 'keyword', rank)
                 revision = self._revision(db)
+                acl_revision = db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]
         except sqlite3.Error:
             raise AssistantError('知识库检索暂忙，未取得完整结果，请缩小问题范围后重试。', 503) from None
         items = sorted(selected.values(), key=lambda item: (-item['score'], item['document_id'], item['ordinal']))[:8]
         for item in items:
             item.pop('id', None)
+            item['source_kind'] = 'document_library' if item.pop('source_key', '') else 'shared'
             item['score'] = round(item['score'], 6)
             item['url'] = f"/knowledge-base?document={item['document_id']}&version={item['version']}&chunk={item['ordinal']}"
-        return {'items': items, 'mode': mode, 'warning': warning, 'revision': revision, 'indexready': indexready}
+        return {'items': items, 'mode': mode, 'warning': warning, 'revision': revision, 'indexready': indexready, 'acl_revision': acl_revision}
 
-    def evidence_current(self, items, profile):
+    def evidence_current(self, items, profile, *, actor=None):
         if not self.model_allowed(profile):
             return False
         with self.connect() as db:
+            self._acl_sql(db, actor)
             for item in items:
-                row = db.execute('SELECT deleted,active_version FROM documents WHERE id=?', (item['document_id'],)).fetchone()
+                row = db.execute('SELECT deleted,active_version FROM documents WHERE id=? AND knowledge_visible(id)=1', (item['document_id'],)).fetchone()
                 if not row or row['deleted'] or row['active_version'] != item['version']:
                     return False
         return True

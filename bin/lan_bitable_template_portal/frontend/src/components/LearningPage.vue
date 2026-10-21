@@ -29,9 +29,11 @@
 
     <template v-else>
       <LearningSharing v-if="tab === 'sharing'" :is-admin="isAdmin" :user-id="userId" @dirty="sharingDirty = $event" @busy="busy = $event" />
+      <LearningCompletion v-else-if="tab === 'completion'" :scope="viewMode === 'overview' ? scope : ''" :person-id="learner?.id" :can-view-buildings="canViewBuildings" :refresh-key="completionRefresh" @open-paper="openCompletionPaper" />
       <template v-else-if="tab === 'today' || (reading && ['review', 'history'].includes(tab))">
         <div class="toolbar">
           <div class="actions">
+            <button v-if="completionReturn && reading" :disabled="busy" @click="returnToCompletion"><ChevronLeft :size="16" />返回每日完成</button>
             <button v-if="reading && tab !== 'today'" :disabled="busy" @click="saveDraft(); reading = false; loadView()"><ChevronLeft :size="16" />返回{{ tab === 'review' ? '复习列表' : '学习历史' }}</button>
             <span v-if="tab === 'today'" class="muted">{{ studyMode === 'practice' ? '自主练习' : '每日题单' }} · {{ date }}</span>
             <span v-else>{{ paper?.date }} · {{ paper?.scope }}楼</span>
@@ -406,9 +408,12 @@ import VnetSelect from "./VnetSelect.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import LearningDashboard from "./LearningDashboard.vue";
 import LearningSharing from "./LearningSharing.vue";
+import LearningCompletion from "./LearningCompletion.vue";
 
 const props = defineProps<{ scope?: string; personId?: string; userId: string }>();
-type Tab = "today" | "review" | "history" | "issues" | "profile" | "questions" | "settings" | "sharing";
+type Tab = "today" | "review" | "history" | "issues" | "profile" | "questions" | "settings" | "sharing" | "completion";
+const completionRefresh = ref(0);
+const completionReturn = ref<{ person:Dict|null }|null>(null);
 const sharingDirty = ref(false);
 const bankLabels: Dict = { written: "笔试题库", duty: "值班面试", professional: "专业面试", supplemental: "专项题库" };
 const typeLabels: Dict = { single: "单选题", multiple: "多选 / 不定项", interview: "面试题" };
@@ -424,6 +429,7 @@ const tabs = computed(() => {
         { id: "profile", label: learner.value ? "个人画像" : allPortrait.value ? "全部画像" : "楼栋汇总", icon: ChartNoAxesCombined },
         { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
         { id: "sharing", label: "分享会练习", icon: Users },
+        { id: "completion", label: "每日完成", icon: CheckCircle2 },
         ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
       ];
     }
@@ -432,6 +438,7 @@ const tabs = computed(() => {
       ...(learner.value ? [{ id: "today", label: "今日学练", icon: BookOpen }, { id: "review", label: "错题与复习", icon: Star }] : []),
       { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
       { id: "sharing", label: "分享会练习", icon: Users },
+      { id: "completion", label: "每日完成", icon: CheckCircle2 },
       ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
     ];
   });
@@ -705,6 +712,17 @@ async function loadPaper(id: string, qid = ""): Promise<void> {
   } catch (e) { if (token === epoch) error.value = String((e as Error).message); }
   finally { if (token === epoch) loading.value = false; }
 }
+async function openCompletionPaper(value:{paperId:string;person:Dict;date:string}):Promise<void>{
+  if(busy.value)return;
+  completionReturn.value={person:learner.value};
+  saveDraft();tab.value='history';reading.value=false;notice.value='';
+  filters.from=value.date;filters.to=value.date;
+  await loadPaper(value.paperId);
+}
+function returnToCompletion():void{
+  saveDraft();learner.value=completionReturn.value?.person||null;completionReturn.value=null;
+  reading.value=false;tab.value='completion';
+}
 async function deletePaper(id: string): Promise<void> {
   if (!isAdmin.value || !await ask("删除已发布题单", "删除后该人员不再显示或统计这份题单，已有作答保留审计；当天不会自动重新出题。确认删除？", "danger")) return;
   await perform(async () => {
@@ -717,7 +735,7 @@ function query(extra: Dict = {}): string {
   return new URLSearchParams(Object.entries({ scope: scope.value, person_id: learner.value?.id, page: pageNumber.value, page_size: 20, ...extra }).filter(([, v]) => v !== "" && v !== undefined).map(([k, v]) => [k, String(v)])).toString();
 }
 async function loadView(): Promise<void> {
-  if (tab.value === 'sharing') { readRequest?.abort(); loading.value = false; return; }
+  if (tab.value === 'sharing' || tab.value === 'completion') { readRequest?.abort(); loading.value = false; return; }
   const token = ++epoch; readRequest?.abort(); readRequest = new AbortController(); const readOptions = { signal: readRequest.signal }; loading.value = true; error.value = ""; selected.value = [];
   try {
     if (tab.value === "today") {
@@ -852,6 +870,7 @@ function clearFilters(): void {
 }
 async function refreshView(): Promise<void> {
   if (!ready.value) { await bootstrap(); return; }
+  if (tab.value === 'completion') { completionRefresh.value++; return; }
   if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("刷新设置", "尚有未保存的设置，确认放弃并重新读取？")) return;
   if (tab.value === 'today' && viewMode.value === 'practice' && !paper.value) await loadTodayPaper();
   else if (reading.value && paper.value && current.value) await loadPaper(paper.value.id, questionId(current.value));
@@ -893,8 +912,8 @@ async function bootstrap(): Promise<void> {
       date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
       Object.assign(settingsForm, boot.value.settings || {}); settingsSnapshot = JSON.stringify(settingsForm);
       ready.value = true;
-      if (new URLSearchParams(window.location.search).get('tab') === 'sharing') {
-        tab.value = 'sharing'; loading.value = false;
+      if (['sharing', 'completion'].includes(new URLSearchParams(window.location.search).get('tab') || '')) {
+        tab.value = new URLSearchParams(window.location.search).get('tab') as Tab; loading.value = false;
       } else if (viewMode.value === "practice" && boot.value.can_answer === true && learner.value?.id && boot.value.self_scope) {
         const entry = new URLSearchParams(window.location.search);
         if (entry.get('tab') === 'review') { tab.value = 'review'; await loadView(); }

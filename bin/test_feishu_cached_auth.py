@@ -74,6 +74,48 @@ class AuthFixture(unittest.TestCase):
 
 
 class ServiceCachedAuthTests(AuthFixture):
+    def test_notice_paths_fail_closed_when_qt_config_cannot_be_read(self):
+        self.cfg.refresh_credentials.side_effect = OSError("synthetic settings unavailable")
+        payload = service.NoticePayload(text="synthetic")
+        operations = [
+            lambda: service.upload_media_to_feishu(b"image"),
+            lambda: service.create_bitable_record_by_payload("维保通告", payload),
+            lambda: service.create_bitable_record_fields("维保通告", {"名称": "test"}),
+            lambda: service.query_record_by_id("recTest", "维保通告"),
+            lambda: service.delete_bitable_record("recTest", "维保通告"),
+            lambda: service.update_bitable_record_by_payload("recTest", "维保通告", payload),
+            lambda: service.update_bitable_record_fields("recTest", "维保通告", {"名称": "test"}),
+            lambda: service.batch_create_bitable_records_by_payload("维保通告", [payload])[0],
+            lambda: service.batch_update_bitable_records_by_payload("维保通告", [("recTest", payload)])[0],
+        ]
+        with patch.object(service, "_feishu_request", side_effect=AssertionError("no request with stale token")) as send:
+            for operation in operations:
+                ok, message = operation()
+                self.assertFalse(ok)
+                self.assertIn("配置暂不可读", message)
+                self.assertNotIn("未配置飞书用户令牌", message)
+            send.assert_not_called()
+
+    def test_empty_token_is_automatically_acquired_before_record_lookup(self):
+        self.cfg.user_token = ""
+        self.cfg.app_token = "testBase"
+        response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(records=[
+            SimpleNamespace(record_id="recTest", fields={"名称": "test"})]))
+        with patch.object(service, "_resolve_handler", return_value=(None, "testTable", "")), \
+                patch.object(service, "_feishu_request", return_value=response) as send:
+            ok, _ = service.query_record_by_id("recTest", "维保通告")
+        self.assertTrue(ok)
+        self.assertEqual(send.call_args.args[2], self.issued[0])
+        self.assertEqual(len(self.issued), 1)
+
+    def test_notice_auth_error_does_not_echo_transport_credentials(self):
+        error = auth.FeishuTokenError("Connection failed https://example.invalid?app_secret=DO_NOT_ECHO")
+        with patch.object(service, "ensure_feishu_token", side_effect=error):
+            with patch.object(service, "log_info"):
+                self.assertIsNone(service.check_token_status())
+        self.assertIn("连接飞书", service.feishu_auth_error())
+        self.assertNotIn("DO_NOT_ECHO", service.feishu_auth_error())
+
     def test_warm_ensure_and_status_revalidate_qt_and_preserve_margin(self):
         self.assertEqual(service.ensure_feishu_token(margin_seconds=17), 'cached-fixture')
         self.get_token.assert_called_once_with(margin_seconds=17)
@@ -132,6 +174,47 @@ class ServiceCachedAuthTests(AuthFixture):
             service._with_token_retry(send, read_only=False)
         send.assert_called_once()
         self.assertEqual(self.issued, [])
+
+
+class PortalCachedAuthTests(AuthFixture):
+    def test_portal_reads_and_uploads_never_fall_back_to_stale_token(self):
+        from lan_bitable_template_portal import portal_service as portal
+        self.cfg.refresh_credentials.side_effect = OSError('synthetic settings unavailable')
+        remote = object.__new__(portal.MaintenancePortalService)
+        remote._http_client = self.client
+        with tempfile.TemporaryDirectory() as folder:
+            file = Path(folder) / 'fixture.docx'
+            file.write_bytes(b'fixture')
+            operations = [remote._auth_headers,
+                lambda: remote._upload_drive_media_file(file_path=file, file_name=file.name,
+                    parent_type='bitable_file', parent_node='fixture-base', size=7, context='fixture'),
+                lambda: remote._upload_large_bitable_file(file_path=file, file_name=file.name, app_token='fixture-base')]
+            with patch.object(portal, 'config', self.cfg), \
+                    patch.object(portal, 'ensure_feishu_token', service.ensure_feishu_token), \
+                    patch.object(portal, 'feishu_auth_error', service.feishu_auth_error), \
+                    patch.object(portal, '_feishu_write_auth', return_value=(lambda: None, remote._auth_headers)):
+                for operation in operations:
+                    with self.assertRaises(portal.PortalError) as caught:
+                        operation()
+                    self.assertIn('配置暂不可读', str(caught.exception))
+                    self.assertNotIn('user_token', str(caught.exception))
+        self.client.request_json.assert_not_called()
+        self.client.request_file_json.assert_not_called()
+        self.assertEqual(self.cfg.user_token, 'cached-fixture')
+
+    def test_portal_empty_cache_automatically_acquires_current_application_token(self):
+        from lan_bitable_template_portal import portal_service as portal
+        self.cfg.user_token = ''
+        remote = object.__new__(portal.MaintenancePortalService)
+        with patch.object(portal, 'ensure_feishu_token', service.ensure_feishu_token):
+            self.assertEqual(remote._auth_headers(), {'Authorization': 'Bearer issued-1-cli_fixture'})
+        self.assertEqual(len(self.issued), 1)
+
+    def test_migration_failure_is_explained_without_provider_details(self):
+        self.cfg.feishu_app_migration_error = 'profile_authentication'
+        message = service._safe_auth_error(auth.FeishuTokenError('fixture-sensitive-secret'))
+        self.assertIn('迁移尚未通过校验', message)
+        self.assertNotIn('fixture-sensitive-secret', message)
 
 
 class CabinetCachedAuthTests(AuthFixture):

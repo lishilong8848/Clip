@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import logging
 import random
 import re
 import secrets
@@ -40,13 +41,22 @@ def question_mix(count, types):
 
 
 def sample_questions(questions, rng):
+    manual = [q['id'] for q in questions if q.get('origin', 'ai') == 'manual']
+    needed = max(0, 5 - len(manual))
+    questions = [q for q in questions if q.get('origin', 'ai') == 'ai']
+    if len(questions) < needed:
+        raise LearningError('人工题不足5道时，需要足够的AI题补齐；请补充题目后发布。')
+    if not needed:
+        return manual
     kinds = [kind for kind in QUESTION_TYPES if any(q['type'] == kind for q in questions)]
-    mix = question_mix(5, kinds)
-    chosen = []
+    if needed < len(kinds):
+        return manual + [q['id'] for q in rng.sample(questions, needed)]
+    mix = question_mix(needed, kinds)
+    chosen = list(manual)
     for kind in kinds:
         pool = [q['id'] for q in questions if q['type'] == kind]
         chosen.extend(rng.sample(pool, min(len(pool), mix.count(kind))))
-    chosen.extend(rng.sample([q['id'] for q in questions if q['id'] not in chosen], 5 - len(chosen)))
+    chosen.extend(rng.sample([q['id'] for q in questions if q['id'] not in chosen], max(0, 5 - len(chosen))))
     return chosen
 
 
@@ -62,21 +72,33 @@ def normalized(value):
     return re.sub(r'\W+', '', value).lower()
 
 
-def validate_questions(questions, source, types=None):
-    if not isinstance(questions, list) or not 5 <= len(questions) <= 40:
-        raise LearningError('每批须有5至40道有纪要依据的题目；内容不足时请补充纪要，不凑题。')
+def validate_questions(questions, source, types=None, *, draft=False):
+    if not isinstance(questions, list) or not (0 if draft else 5) <= len(questions) <= 100:
+        raise LearningError('每批发布至少5题、合计最多100题；AI题最多40题。')
+    if sum(isinstance(q, dict) and q.get('origin', 'ai') == 'ai' for q in questions) > 40:
+        raise LearningError('AI题最多40题。')
     allowed = selected_types(types) if types is not None else list(QUESTION_TYPES)
     result, seen = [], set()
     for index, q in enumerate(questions):
         if not isinstance(q, dict):
             raise LearningError('题目格式无效。')
+        origin = q.get('origin', 'ai')
+        if not isinstance(origin, str) or origin not in {'ai', 'manual'}:
+            raise LearningError('题目来源无效。')
+        permitted_types = allowed if origin == 'ai' else list(QUESTION_TYPES)
         values = {}
-        for name, limit in (('stem', 500), ('explanation', 600), ('evidence', 800)):
+        for name, limit in (('stem', 500), ('explanation', 600)):
             value = q.get(name)
             if not isinstance(value, str) or not value.strip() or len(value) > limit:
                 raise LearningError(f'第{index + 1}题的题干、解析或纪要依据缺失/过长。')
             values[name] = value.strip()
-        if len(values['evidence']) < 8 or unicodedata.normalize('NFKC', values['evidence']) not in unicodedata.normalize('NFKC', source):
+        evidence = q.get('evidence', '')
+        if not isinstance(evidence, str) or len(evidence) > 800:
+            raise LearningError('原文依据格式无效或超过800字。')
+        values['evidence'] = evidence.strip()
+        if 'origin' in q:
+            values['origin'] = origin
+        if origin == 'ai' and (len(values['evidence']) < 8 or unicodedata.normalize('NFKC', values['evidence']) not in unicodedata.normalize('NFKC', source)):
             raise LearningError(f'第{index + 1}题的依据无法在纪要原文中核对，请修订后再发布。')
         identity = normalized(values['stem'])
         if not identity or identity in seen:
@@ -88,7 +110,7 @@ def validate_questions(questions, source, types=None):
             reference = q.get('reference_answer')
             if not isinstance(reference, str) or not reference.strip() or len(reference) > 1000 or options not in (None, []) or correct not in (None, []):
                 raise LearningError(f'第{index + 1}道问答题需填写参考答案（最多1000字），不能有选择题选项。')
-            if 'interview' not in allowed:
+            if 'interview' not in permitted_types:
                 raise LearningError('生成题型不符合本批选择，请重新生成或核对题目。')
             result.append({**values, 'id': f'q{index + 1}', 'type': 'interview', 'options': [], 'correct': [], 'reference_answer': reference.strip()})
             continue
@@ -100,10 +122,11 @@ def validate_questions(questions, source, types=None):
                 or any(type(v) is not int or not 0 <= v < len(options) for v in correct)):
             raise LearningError(f'第{index + 1}题的正确选项无效。')
         kind = 'single' if len(correct) == 1 else 'multiple'
-        if kind not in allowed or q.get('type', kind) != kind:
+        if kind not in permitted_types or q.get('type', kind) != kind:
             raise LearningError(f'第{index + 1}题的题型与正确选项数量或所选题型不一致。')
         result.append({**values, 'id': f'q{index + 1}', 'options': [o.strip() for o in options], 'correct': sorted(correct), 'type': kind})
-    if types is not None and {q['type'] for q in result} != set(allowed):
+    ai_types = {q['type'] for q in result if q.get('origin', 'ai') == 'ai'}
+    if not draft and types is not None and ai_types and ai_types != set(allowed):
         raise LearningError('题目未包含所有已选题型，请补充题目后再发布。')
     return result
 
@@ -111,6 +134,9 @@ def validate_questions(questions, source, types=None):
 def read_source(portal, url):
     from openclaw_service.assistant.lighthouse_ai import AssistantError
     from openclaw_service.assistant.lighthouse_documents import document_reader, document_url
+    if isinstance(url, str) and '/wiki/' in url:
+        from .sharing_sources import resolve_document
+        url, _original = resolve_document(portal, url)
     target = document_url(url)
     if not target:
         raise LearningError('请输入 vnet.feishu.cn/docx/ 开头的纪要链接。')
@@ -202,6 +228,37 @@ class SharingExercises:
             raise LearningError('分享会批次不存在。', 404)
         return value
 
+    def changed(self, *dates):
+        callback = getattr(self.learning, 'completion_changed', None)
+        if callable(callback):
+            try:
+                callback(*dict.fromkeys(date for date in dates if date))
+            except Exception:
+                logging.warning('Sharing completion projection deferred after committed transaction')
+
+    def changed_batch(self, batch, *dates):
+        published = ''
+        try:
+            value = dt.datetime.fromisoformat(str(batch.get('published_at') or '').replace('Z', '+00:00'))
+            published = (value if value.tzinfo else value.replace(tzinfo=TZ)).astimezone(TZ).date().isoformat()
+        except (TypeError, ValueError):
+            pass
+        self.changed(batch.get('business_date'), published, batch.get('date'), *dates)
+
+    def people(self):
+        rows, seen = [], set()
+        for person in self.learning._all('person'):
+            ids = person.get('login_ids') or []
+            if not person.get('active') or len(ids) != 1 or not re.fullmatch(r'ou_[A-Za-z0-9]+', str(ids[0])):
+                continue
+            rows.append({'id': person['id'], 'person_id': person['id'], 'name': person.get('name', ''),
+                         'open_id': ids[0], 'union_id': '',
+                         'scope': person.get('scopes', [''])[0] if len(person.get('scopes', [])) == 1 else ''})
+            if ids[0] in seen:
+                raise LearningError('人员目录存在重复登录身份，请先核对目录。', 409)
+            seen.add(ids[0])
+        return rows
+
     def delete(self, identity, version, actor):
         self.learning._admin(actor)
         with self.learning.transaction() as conn:
@@ -220,20 +277,37 @@ class SharingExercises:
                 if job['status'] in {'pending', 'failed'}:
                     job.update(status='skipped', error='批次已删除，停止后续任务；已上传题目保留。')
                     self.learning._put('sharing_delivery', row[0], job, conn)
+        self.changed_batch(batch, now().date().isoformat())
         return {'id': identity, 'deleted': True}
 
-    def create(self, url, operation_id, actor, question_types=None):
+    def create(self, url, operation_id, actor, question_types=None, *, material_urls=None, material_ids=None,
+               participant_ids=None, auto_generate=True, title=''):
         self.learning._admin(actor)
         types = selected_types(question_types if question_types is not None else ['single'])
-        from openclaw_service.assistant.lighthouse_documents import document_url
-        target = document_url(url)
-        if not target or not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', operation_id):
-            raise LearningError('请输入有效纪要链接，并重新提交。')
+        from .sharing_sources import source_url
+        target = source_url(url) if url is not None and url != '' else ''
+        links, files, selected = [value if value is not None else [] for value in (material_urls, material_ids, participant_ids)]
+        if (type(auto_generate) is not bool or not isinstance(title, str) or len(title) > 200
+                or any(not isinstance(values, list) or len(values) != len(set(str(v) for v in values)) for values in (links, files, selected))
+                or len(links) + len(files) > 10 or len(selected) > 500
+                or any(not isinstance(value, str) for values in (links, files, selected) for value in values)):
+            raise LearningError('材料或名单参数无效。')
+        links = [source_url(link) for link in links]
+        if (auto_generate and not (target or links or files)) or not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', operation_id):
+            raise LearningError('请选择出题资料，并重新提交。')
+        if not target and not selected:
+            raise LearningError('仅材料或人工录题时必须显式选择答题名单。')
+        directory = {row['id']: row for row in self.people()} if selected else {}
+        if any(pid not in directory for pid in selected):
+            raise LearningError('所选人员不在当前有效名单中。', 403)
+        fingerprint = hashlib.sha256(json.dumps([target, types, links, files, selected, auto_generate, title], ensure_ascii=False).encode()).hexdigest()
         identity = key(actor['id'], operation_id)
         with self.learning.transaction() as conn:
             prior = self.learning._get('sharing_batch', identity, conn)
             if prior:
-                if prior['url'] != target or prior.get('question_types', ['single']) != types:
+                if (prior['url'] != target or prior.get('question_types', ['single']) != types
+                        or prior.get('request_fingerprint', fingerprint) != fingerprint
+                        or not prior.get('request_fingerprint') and (links or files or selected or not auto_generate or title)):
                     raise LearningError('重复提交的链接已变化，请刷新。', 409)
                 return {'id': identity}
             active = conn.execute("SELECT count(*) FROM documents WHERE kind='sharing_batch' AND json_extract(payload,'$.status') IN ('queued','generating')").fetchone()[0]
@@ -241,6 +315,8 @@ class SharingExercises:
                 raise LearningError('已有纪要正在生成，请等待完成后再提交。', 429)
             batch = {'id': identity, 'url': target, 'title': '正在读取纪要', 'status': 'queued', 'version': 1,
                      'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': [], 'participants': [], 'question_types': types}
+            batch.update(material_urls=links, material_ids=files, requested_participants=[directory[pid] for pid in selected],
+                         auto_generate=auto_generate, requested_title=title.strip(), request_fingerprint=fingerprint)
             self.learning._put('sharing_batch', identity, batch, conn)
             self.learning._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
         return {'id': identity}
@@ -274,20 +350,29 @@ class SharingExercises:
             'choice_count': sum(question_by_id.get(qid, {}).get('type') in {'single', 'multiple'} for qid in values.get(p['open_id'], {}).get('question_ids', [])),
             'delivery_error': values.get(p['open_id'], {}).get('delivery_error', ''),
             'delivery_status': values.get(p['open_id'], {}).get('delivery_status', 'pending'),
+            'question_count': len(values.get(p['open_id'], {}).get('question_ids', [])),
+            'saved_count': len(values.get(p['open_id'], {}).get('draft_answers', {})),
         } for p in participants]
         result = {k: batch.get(k, '') for k in ('id', 'title', 'url', 'status', 'version', 'created_at', 'published_at', 'error', 'progress')}
         result.update(participants=participants, question_count=len(batch['questions']),
                       completed=sum(bool(p['submitted_at']) for p in participants if not p['exempted']),
                       total=sum(not p['exempted'] for p in participants), attendee_total=len(participants))
         result['question_types'] = batch.get('question_types') or [kind for kind in QUESTION_TYPES if any(q['type'] == kind for q in batch['questions'])]
+        result.update(manual_count=sum(q.get('origin', 'ai') == 'manual' for q in batch['questions']),
+                      ai_count=sum(q.get('origin', 'ai') == 'ai' for q in batch['questions']))
         if (batch['status'] in {'published', 'closed'} and len(all_attempts) != len(assigned_participants(batch))
                 or batch['status'] == 'draft' and all_attempts):
             result['error'] = '历史分配恢复不完整，已暂停此批提醒与汇总；请同步恢复，不能重新抽题代替。'
         if actor.get('is_admin'):
             result['questions'] = batch['questions']
             result['source_text'] = (batch.get('source') or {}).get('text', '')
+            result['sources'] = [{k: v for k, v in source.items() if k != 'text'} for source in (batch.get('source') or {}).get('sources', [])]
         else:
             mine = next((p for p in attempts if p['open_id'] == actor['id']), None)
+            if mine and not actor.get('shared_account'):
+                result['paper'] = {'id': mine['id'], 'open_id': mine['open_id'], 'question_ids': mine['question_ids'], 'question_count': len(mine['question_ids']),
+                                   'draft_answers': mine.get('draft_answers', {}), 'progress_version': mine.get('progress_version', 0),
+                                   'submitted_at': mine['submitted_at'], 'page_size': 5}
             result['questions'] = [copy.deepcopy(q) for q in batch['questions'] if mine and q['id'] in mine['question_ids']]
             for q in result['questions']:
                 if not mine.get('submitted_at'):
@@ -322,7 +407,7 @@ class SharingExercises:
         items = []
         for row in rows:
             detail = self.detail(row[0], actor)
-            items.append({k: v for k, v in detail.items() if k not in {'questions', 'source_text', 'participants', 'results', 'weekly_reports'}})
+            items.append({k: v for k, v in detail.items() if k not in {'questions', 'source_text', 'sources', 'paper', 'participants', 'results', 'weekly_reports'}})
         return {'items': items, 'total': total, 'page': page}
 
     def edit(self, identity, payload, actor):
@@ -338,11 +423,12 @@ class SharingExercises:
             if (not isinstance(excluded, list) or any(not isinstance(oid, str) or oid not in known for oid in excluded)
                     or len(set(excluded)) != len(excluded)):
                 raise LearningError('免做人员必须从本批参会名单选择，且不能重复。')
-            batch['questions'] = validate_questions(payload.get('questions'), batch['source']['text'], batch.get('question_types'))
+            batch['questions'] = validate_questions(payload.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'), draft=True)
             batch['excluded_open_ids'] = excluded
             batch['version'] += 1
             batch.update(edited_by=actor['id'], edited_at=stamp())
             self.learning._put('sharing_batch', identity, batch, conn)
+        self.changed_batch(batch, now().date().isoformat())
         return self.detail(identity, actor)
 
     def enqueue(self, conn, kind, identity, **values):
@@ -366,18 +452,22 @@ class SharingExercises:
             questions = validate_questions(batch['questions'], batch['source']['text'], batch.get('question_types'))
             participants = assigned_participants(batch)
             if not participants: raise LearningError('请至少保留一位参会人参加答题。')
+            batch['date'] = now().date().isoformat()
+            batch['business_date'] = batch['date']
             rng = random.SystemRandom()
             for person in participants:
                 aid = key(identity, person['open_id'])
                 attempt = {**person, 'id': aid, 'batch_id': identity, 'date': batch['date'], 'app_id': app_id,
                            'question_ids': sample_questions(questions, rng), 'ticket': secrets.token_urlsafe(32),
                            'answers': {}, 'correct': None, 'submitted_at': '', 'delivery_status': 'pending'}
+                attempt.update(draft_answers={}, progress_version=0)
                 source_questions = {q['id']: q for q in questions}
                 completed = {**attempt, 'correct': sum(source_questions[qid]['type'] != 'interview' for qid in attempt['question_ids']),
                              'answers': {qid: ('答' * 1000 if source_questions[qid]['type'] == 'interview' else source_questions[qid]['correct']) for qid in attempt['question_ids']}}
-                for card in (exercise_card({**batch, 'questions': questions}, attempt), exercise_card({**batch, 'questions': questions}, completed, result=True)):
-                    if len(json.dumps(card, ensure_ascii=False).encode()) > 28000:
-                        raise LearningError('题目或解析过长，超过飞书5题卡片大小限制；请缩短后重新发布，尚未发送。')
+                for page in range((len(attempt['question_ids']) + 4) // 5):
+                    for card in (exercise_card({**batch, 'questions': questions}, attempt, page=page), exercise_card({**batch, 'questions': questions}, completed, result=True, page=page)):
+                        if len(json.dumps(card, ensure_ascii=False).encode()) > 28000:
+                            raise LearningError('题目或解析过长，超过飞书每页5题卡片大小限制；请缩短后重新发布，尚未发送。')
                 self.learning._put('sharing_attempt', aid, attempt, conn)
                 self.enqueue(conn, 'paper', 'paper:' + aid, batch_id=identity, attempt_id=aid)
             for question in questions:
@@ -385,6 +475,7 @@ class SharingExercises:
             batch.update(status='published', questions=questions, version=batch['version'] + 1,
                          published_at=stamp(), published_by=actor['id'], app_id=app_id)
             self.learning._put('sharing_batch', identity, batch, conn)
+        self.changed_batch(batch, now().date().isoformat())
         return {'id': identity, 'published': True}
 
     def submit(self, value, fields, operator, app_id, allowed):
@@ -393,39 +484,97 @@ class SharingExercises:
             raise LearningError('答题卡标识无效。', 400)
         with self.learning.transaction() as conn:
             attempt = self.learning._get('sharing_attempt', aid, conn)
-            if (not attempt or app_id != attempt['app_id'] or operator.get('union_id') != attempt['union_id']
+            same_person = attempt and (operator.get('union_id') == attempt.get('union_id') if attempt.get('union_id') else operator.get('open_id') == attempt['open_id'])
+            if (not attempt or app_id != attempt['app_id'] or not same_person
                     or not isinstance(value.get('ticket'), str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', value['ticket'])
                     or not hmac.compare_digest(attempt['ticket'], value['ticket']) or not allowed(attempt['open_id'])):
                 raise LearningError('仅当前仍有学练权限的参会人本人可提交，转发卡片不能代答。', 403)
             if attempt['submitted_at']:
-                return {'ok': True, 'toast': '已提交，保留首次成绩；答案已安排发送。'}
+                batch = self.batch(attempt['batch_id'], conn)
+                return {'ok': True, 'toast': '已提交，保留首次成绩；答案已安排发送。',
+                        'card': exercise_card(batch, attempt, result=True, page=value.get('target_page', value.get('page', 0)))}
             batch = self.batch(attempt['batch_id'], conn)
             if batch['status'] != 'published': raise LearningError('此批次已关闭，不能继续提交。', 409)
-            if not isinstance(fields, dict) or set(fields) != set(attempt['question_ids']):
-                raise LearningError('请完成全部5道题后再提交。')
-            questions = {q['id']: q for q in batch['questions']}
-            answers, correct = {}, 0
-            choice_count = 0
-            for qid in attempt['question_ids']:
-                q, raw = questions[qid], fields[qid]
-                if q['type'] == 'interview':
-                    if not isinstance(raw, str) or not raw.strip() or len(raw) > 1000:
-                        raise LearningError('请填写问答题答案，每题1至1000字。')
-                    answers[qid] = raw.strip()
-                    continue
-                choice_count += 1
-                if isinstance(raw, str): raw = [raw]
-                if not isinstance(raw, list) or not raw or any(not isinstance(v, str) or v not in [str(i) for i in range(len(q['options']))] for v in raw):
-                    raise LearningError('答案选项无效，请重新选择。')
-                selected = sorted({int(v) for v in raw})
-                if q['type'] == 'single' and len(selected) != 1: raise LearningError('单选题只能选择一项。')
-                answers[qid] = selected
-                correct += int(selected == q['correct'])
-            attempt.update(answers=answers, correct=correct, submitted_at=stamp(), submitted_by=operator['union_id'])
-            self.learning._put('sharing_attempt', aid, attempt, conn)
-            self.enqueue(conn, 'result', 'result:' + aid, batch_id=batch['id'], attempt_id=aid)
-        score = f'选择题答对{correct}/{choice_count}题；' if choice_count else ''
-        return {'ok': True, 'toast': f'已完成，{score}参考答案将发送给你。'}
+            payload = {'page': value.get('page', 0), 'answers': fields,
+                       'version': value.get('version', attempt.get('progress_version', 0)),
+                       'operation_id': value.get('operation_id', 'legacy-' + key(aid, json.dumps(fields, sort_keys=True))),
+                       'submit': value.get('submit', True), 'target_page': value.get('target_page', value.get('page', 0))}
+            result = self._save_answers(conn, batch, attempt, payload, operator.get('union_id') or operator.get('open_id'))
+            target = payload['target_page']
+            result['card'] = exercise_card(batch, attempt, result=bool(attempt['submitted_at']), page=target)
+        self.changed_batch(batch, attempt['date'], now().date().isoformat())
+        return result
+
+    def answer(self, identity, payload, actor, allowed):
+        if actor.get('shared_account') or not allowed(actor['id']):
+            raise LearningError('仅当前有权限的本人可保存答题。', 403)
+        with self.learning.transaction() as conn:
+            batch = self.batch(identity, conn)
+            attempt = self.learning._get('sharing_attempt', key(identity, actor['id']), conn)
+            if not attempt or attempt['open_id'] != actor['id']:
+                raise LearningError('答卷不属于当前账号。', 403)
+            if attempt['submitted_at']:
+                return {'id': identity, 'submitted': True}
+            if batch['status'] != 'published':
+                raise LearningError('此批次已关闭，不能保存或提交。', 409)
+            result = self._save_answers(conn, batch, attempt, payload, actor['id'])
+        self.changed_batch(batch, attempt['date'], now().date().isoformat())
+        return {**result, 'id': identity, 'submitted': bool(attempt['submitted_at'])}
+
+    @staticmethod
+    def _checked_answer(question, raw):
+        if question['type'] == 'interview':
+            if not isinstance(raw, str) or not raw.strip() or len(raw) > 1000:
+                raise LearningError('请填写问答题答案，每题1至1000字。')
+            return raw.strip()
+        raw = [raw] if isinstance(raw, str) else raw
+        if not isinstance(raw, list) or not raw or any(not isinstance(v, str) or v not in [str(i) for i in range(len(question['options']))] for v in raw):
+            raise LearningError('答案选项无效，请重新选择。')
+        selected = sorted({int(v) for v in raw})
+        if question['type'] == 'single' and len(selected) != 1:
+            raise LearningError('单选题只能选择一项。')
+        return selected
+
+    def _save_answers(self, conn, batch, attempt, payload, submitted_by):
+        page, fields = payload.get('page', 0), payload.get('answers')
+        pages = (len(attempt['question_ids']) + 4) // 5
+        op = payload.get('operation_id')
+        target = payload.get('target_page', page)
+        if (type(page) is not int or not 0 <= page < pages or type(target) is not int or not 0 <= target < pages
+                or not isinstance(op, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', op)
+                or type(payload.get('submit', False)) is not bool):
+            raise LearningError('分页或操作编号无效。')
+        expected = attempt['question_ids'][page * 5:page * 5 + 5]
+        if not isinstance(fields, dict) or set(fields) - set(expected):
+            raise LearningError('提交题目不属于本页答卷。')
+        fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        operations = attempt.setdefault('saved_operations', {})
+        if op in operations:
+            if operations[op] != fingerprint:
+                raise LearningError('同一操作编号不能保存不同答案。', 409)
+            return {'ok': True, 'toast': '本页进度已保存。', 'progress_version': attempt.get('progress_version', 0)}
+        if type(payload.get('version')) is not int or payload['version'] != attempt.get('progress_version', 0):
+            raise LearningError('答题进度已变化，请刷新后重试；未覆盖新答案。', 409)
+        questions = {q['id']: q for q in batch['questions']}
+        draft = dict(attempt.get('draft_answers', {}))
+        for qid, raw in fields.items():
+            if raw in ('', [], None) and not payload.get('submit'):
+                draft.pop(qid, None)
+            else:
+                draft[qid] = self._checked_answer(questions[qid], raw)
+        if payload.get('submit') and set(draft) != set(attempt['question_ids']):
+            raise LearningError(f"请完成全部{len(attempt['question_ids'])}道题后再提交；此前保存的进度仍保留。")
+        attempt.update(draft_answers=draft, progress_version=attempt.get('progress_version', 0) + 1)
+        operations[op] = fingerprint
+        while len(operations) > 128:
+            del operations[next(iter(operations))]
+        if payload.get('submit'):
+            correct = sum(q['type'] != 'interview' and draft[qid] == q['correct'] for qid, q in questions.items() if qid in attempt['question_ids'])
+            attempt.update(answers=copy.deepcopy(draft), correct=correct, submitted_at=stamp(), submitted_by=submitted_by)
+            self.enqueue(conn, 'result', 'result:' + attempt['id'], batch_id=batch['id'], attempt_id=attempt['id'])
+        self.learning._put('sharing_attempt', attempt['id'], attempt, conn)
+        return {'ok': True, 'toast': '已完成，参考答案将发送给你。' if attempt['submitted_at'] else '本页进度已保存，尚未完成整卷。',
+                'progress_version': attempt['progress_version']}
 
     def schedule(self, current):
         day = current.date().isoformat()
@@ -451,7 +600,7 @@ class SharingExercises:
                     by_id = {q['id']: q for q in batch['questions']}
                     for p in attempts:
                         answered = bool(p['submitted_at'] and p['submitted_at'][:10] <= end)
-                        snapshot.append({'name': p['name'], 'person_id': p['person_id'], 'answered': 5 if answered else 0,
+                        snapshot.append({'name': p['name'], 'person_id': p['person_id'], 'answered': len(p['question_ids']) if answered else 0,
                             'choices': sum(by_id[qid]['type'] != 'interview' for qid in p['question_ids']) if answered else 0,
                             'correct': p['correct'] if answered else 0,
                             'practice': 0, 'papers': 1 if answered else 0, 'scopes': [p['scope']] if p['scope'] else []})
@@ -461,18 +610,25 @@ class SharingExercises:
                                      items=snapshot[index:index + 50], part=part, parts=parts)
 
 
-def exercise_card(batch, attempt, *, reminder=False, result=False):
-    title = ('分享会练习 · 答题结果' if result else '分享会练习 · 未完成提醒' if reminder else '分享会练习 · 5道题')
-    elements = [{'tag': 'div', 'text': plain(batch['title'])}, {'tag': 'div', 'text': plain(attempt['name'] + (' · 已完成' if result else ' · 请完成以下5道题'))}]
+def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
+    count = len(attempt['question_ids'])
+    pages = max(1, (count + 4) // 5)
+    if page is None:
+        missing = next((i for i, qid in enumerate(attempt['question_ids']) if qid not in attempt.get('draft_answers', {})), 0)
+        page = missing // 5
+    if type(page) is not int or not 0 <= page < pages:
+        raise LearningError('答卷页码无效。')
+    title = ('分享会练习 · 答题结果' if result else '分享会练习 · 未完成提醒' if reminder else f'分享会练习 · {count}道题')
+    elements = [{'tag': 'div', 'text': plain(batch['title'])}, {'tag': 'div', 'text': plain(attempt['name'] + (' · 已完成' if result else f' · 共{count}题，已保存{len(attempt.get("draft_answers", {}))}题') + f' · 第{page + 1}/{pages}页')}]
     form = []
     questions = {q['id']: q for q in batch['questions']}
     choices = sum(questions[qid]['type'] != 'interview' for qid in attempt['question_ids'])
     if result:
         score = f"选择题正确 {attempt['correct']}/{choices} 题 · 正确率 {attempt['correct'] * 100 / choices:g}%" if choices else '本次为问答题，不计算正确率。'
-        if choices < 5:
-            score += f'\n问答题 {5 - choices} 题已记录，请对照参考答案复习，不计入选择题正确率。'
+        if choices < count:
+            score += f'\n问答题 {count - choices} 题已记录，请对照参考答案复习，不计入选择题正确率。'
         elements.append({'tag': 'div', 'text': plain(score)})
-    for index, qid in enumerate(attempt['question_ids']):
+    for index, qid in enumerate(attempt['question_ids'][page * 5:page * 5 + 5], page * 5):
         q = questions[qid]
         heading = f"{index + 1}. {QUESTION_TYPES[q['type']]} · {q['stem']}"
         target = elements if result else form
@@ -481,22 +637,37 @@ def exercise_card(batch, attempt, *, reminder=False, result=False):
             if result:
                 raw = attempt['answers'][qid]
                 answer = raw[:200] + ('…（完整作答已保存）' if len(raw) > 200 else '')
-                target.append({'tag': 'div', 'text': plain('你的作答：' + answer + '\n参考答案：' + q['reference_answer'] + '\n' + q['explanation'] + '\n纪要依据：' + q['evidence'])})
+                target.append({'tag': 'div', 'text': plain('你的作答：' + answer + '\n参考答案：' + q['reference_answer'] + '\n' + q['explanation'] + '\n' + ('专业经验人工题' if q.get('origin') == 'manual' else '原文依据：' + q['evidence']))})
             else:
                 target.append({'tag': 'input', 'name': qid, 'input_type': 'multiline_text', 'rows': 3,
-                               'max_length': 1000, 'required': True, 'placeholder': plain('请输入文字答案，最多1000字')})
+                               'max_length': 1000, 'required': False, 'default_value': attempt.get('draft_answers', {}).get(qid, ''), 'placeholder': plain('请输入文字答案，最多1000字')})
             continue
         target.append({'tag': 'div', 'text': plain('\n'.join(f'{chr(65 + i)}. {text}' for i, text in enumerate(q['options'])))})
         if result:
             target.append({'tag': 'div', 'text': plain('你的选择：' + '、'.join(chr(65 + i) for i in attempt['answers'][qid])
-                + '\n正确答案：' + '、'.join(chr(65 + i) for i in q['correct']) + '\n' + q['explanation'] + '\n纪要依据：' + q['evidence'])})
+                + '\n正确答案：' + '、'.join(chr(65 + i) for i in q['correct']) + '\n' + q['explanation'] + '\n' + ('专业经验人工题' if q.get('origin') == 'manual' else '原文依据：' + q['evidence']))})
         else:
             target.append({'tag': 'select_static' if q['type'] == 'single' else 'multi_select_static', 'name': qid,
-                'required': True, 'placeholder': plain('请选择答案'),
+                'required': False, 'placeholder': plain('请选择答案'),
+                **({'initial_option': str(attempt['draft_answers'][qid][0])} if q['type'] == 'single' and attempt.get('draft_answers', {}).get(qid) else {}),
+                **({'initial_options': [str(i) for i in attempt['draft_answers'][qid]]} if q['type'] == 'multiple' and attempt.get('draft_answers', {}).get(qid) else {}),
                 'options': [{'text': plain(chr(65 + i)), 'value': str(i)} for i in range(len(q['options']))]})
+    def button(label, target, complete=False):
+        value = {'kind': 'sharing_exercise', 'attempt_id': attempt['id'], 'ticket': attempt['ticket'],
+                 'page': page, 'target_page': target, 'submit': complete, 'version': attempt.get('progress_version', 0),
+                 'operation_id': key(attempt['id'], str(page), str(target), str(complete), str(attempt.get('progress_version', 0)))}
+        return {'tag': 'button', 'name': 'page_' + str(target) + ('_submit' if complete else ''),
+                **({} if result else {'form_action_type': 'submit'}), 'type': 'primary' if complete else 'default',
+                'text': plain(label), 'behaviors': [{'type': 'callback', 'value': value}]}
+    controls = elements if result else form
+    if page:
+        controls.append(button('上一页' if result else '保存并上一页', page - 1))
+    if page + 1 < pages:
+        controls.append(button('下一页' if result else '保存并下一页', page + 1))
+    elif not result:
+        controls.append(button(f'提交全部{count}题', page, True))
     if not result:
-        form.append({'tag': 'button', 'name': 'submit', 'form_action_type': 'submit', 'type': 'primary', 'text': plain('提交5道题'),
-                     'behaviors': [{'type': 'callback', 'value': {'kind': 'sharing_exercise', 'attempt_id': attempt['id'], 'ticket': attempt['ticket']}}]})
+        form.append(button('保存本页进度', page))
         elements.append({'tag': 'form', 'name': 'sharing_answers', 'elements': form})
     return {'schema': '2.0', 'header': {'title': plain(title), 'template': 'green' if result else 'blue'}, 'body': {'elements': elements}}
 

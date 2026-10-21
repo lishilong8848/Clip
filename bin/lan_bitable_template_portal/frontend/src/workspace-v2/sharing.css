@@ -2,35 +2,65 @@
 .workspace-v2 .sharing-exercises .sharing-toolbar{gap:8px;margin:8px 0}
 .workspace-v2 .sharing-title h2{font-size:16px;max-width:65ch}
 .workspace-v2 .sharing-create{padding:12px 0;margin-bottom:12px}
+.workspace-v2 .sharing-sources{gap:10px;margin-bottom:10px}
 .workspace-v2 .sharing-types{gap:4px 18px;margin-bottom:8px}
 .workspace-v2 .sharing-exercises .sharing-metrics{gap:12px;padding:10px 0;margin:10px 0;font-size:13px}
 .workspace-v2 .sharing-exercises .sharing-metrics strong{font-size:20px}
 .workspace-v2 .sharing-exercises .sharing-metrics progress{width:80px}
 .workspace-v2 .sharing-buttons{gap:8px;font-size:13px}
 .workspace-v2 .sharing-buttons .n-button__content{gap:6px}
+.workspace-v2 .sharing-answer-pane,.workspace-v2 .sharing-roster{animation:v2-sharing-in .2s ease-out}
+.workspace-v2 .sharing-answer-pane>header,.workspace-v2 .sharing-roster>header{margin:12px 0}
+.workspace-v2 .sharing-roster{gap:10px}
 .workspace-v2 .sharing-section{animation:v2-sharing-in .2s ease-out}
 .workspace-v2 .sharing-section>header{margin:12px 0}
 .workspace-v2 .sharing-section>.n-pagination{margin:12px 0;max-width:100%}
+.workspace-v2 .sharing-editor-bar{gap:6px 8px;padding:8px 0 2px}
+.workspace-v2 .sharing-editor-bar .n-button{min-height:34px;height:auto;font-size:12px}
+.workspace-v2 .sharing-editor-bar .n-button__content{gap:4px;white-space:normal}
+.workspace-v2 .sharing-editor-bar>span{font-size:12px}
+.workspace-v2 .sharing-question-tools .n-button{min-height:32px;height:auto;font-size:12px}
+.workspace-v2 .sharing-question-tools .n-button__content{gap:4px;white-space:normal}
+.workspace-v2 .sharing-question-tools select{min-height:34px;padding:5px 8px;max-width:100%}
+.workspace-v2 .sharing-origin{font-size:11px}
+.workspace-v2 .sharing-chips .n-button,.workspace-v2 .sharing-chip-x{min-height:26px}
 .workspace-v2 .v2-sharing-questions>.sharing-question{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 20px;padding:12px 0}
-.workspace-v2 .sharing-question>header,.workspace-v2 .sharing-question>label:first-of-type,.workspace-v2 .sharing-question>p,.workspace-v2 .sharing-question>.sharing-answer{grid-column:1/-1}
+.workspace-v2 .v2-sharing-questions>.sharing-question>.sharing-question-tools,.workspace-v2 .v2-sharing-questions>.sharing-question>header,.workspace-v2 .v2-sharing-questions>.sharing-question>label:first-of-type,.workspace-v2 .v2-sharing-questions>.sharing-question>p,.workspace-v2 .v2-sharing-questions>.sharing-question>.sharing-answer,.workspace-v2 .v2-sharing-questions>.sharing-question>.sharing-question-error{grid-column:1/-1}
+.workspace-v2 .v2-sharing-questions .sharing-option{grid-column:1/-1;margin:0}
 .workspace-v2 .sharing-question>header{margin:0}
 .workspace-v2 .sharing-exercises .sharing-question label,.workspace-v2 .sharing-exercises .sharing-option{margin:0;min-width:0}
 .workspace-v2 .sharing-question textarea{padding:7px 10px;min-height:42px;line-height:1.5}
-.workspace-v2 .sharing-option{grid-template-columns:20px 16px minmax(0,1fr);gap:6px}
-.workspace-v2 .sharing-question[data-type=interview]>label{grid-column:auto}
-.workspace-v2 .sharing-question[data-type=interview]>label:nth-of-type(-n+2){grid-column:1/-1}
+.workspace-v2 .sharing-option{grid-template-columns:20px 16px minmax(0,1fr) 26px;gap:6px}
+.workspace-v2 .sharing-question[data-kind=interview]>label{grid-column:auto}
+.workspace-v2 .sharing-question[data-kind=interview]>label:nth-of-type(-n+2){grid-column:1/-1}
+.workspace-v2 .sharing-choices{grid-column:1/-1;margin:4px 0}
+.workspace-v2 .sharing-choices label{min-height:44px}
 .workspace-v2 .sharing-pagination{margin:10px 0;gap:8px}
+.workspace-v2 .sharing-pagination .n-button{min-height:36px;height:auto}
+.workspace-v2 .sharing-pagination>.n-pagination{width:100%}
+.workspace-v2 .sharing-answerbar .n-button{min-height:40px;height:auto}
+.workspace-v2 .sharing-answerbar .n-button__content{gap:5px;white-space:normal}
 .workspace-v2 .sharing-table{max-height:480px;overflow:auto}
 .workspace-v2 .sharing-table th{position:sticky;top:0;z-index:1}
 .workspace-v2 .sharing-table th,.workspace-v2 .sharing-table td{padding:9px 12px}
+.workspace-v2 .sharing-table .n-button{min-height:32px;height:auto;font-size:12px;padding:0 8px}
+.workspace-v2 .sharing-table .n-button__content{gap:4px;white-space:normal}
+.workspace-v2 .sharing-roster-list .sharing-participation{min-height:36px}
+.workspace-v2 .sharing-roster .sharing-people-tools{flex-wrap:wrap;gap:8px}
+.workspace-v2 .sharing-roster .sharing-people-tools input{flex:1 1 200px;min-width:0}
+.workspace-v2 .sharing-roster .sharing-people-tools .n-button,.workspace-v2 .sharing-bulk .n-button{min-height:36px;height:auto}
+.workspace-v2 .sharing-bulk{gap:8px;flex-wrap:wrap}
+.workspace-v2 .sharing-people-list button{min-height:44px;height:auto;padding:6px 10px}
 .workspace-v2 .v2-sharing-paper{max-height:calc(100dvh - 40px);overflow:auto}
 .workspace-v2 .v2-sharing-paper .sharing-question{padding:14px 0}
 .workspace-v2 .v2-sharing-paper .sharing-question p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.6}
+.workspace-v2 .v2-sharing-paper .sharing-pagination{flex-wrap:wrap}
 .workspace-v2 .v2-sharing-delivery{animation:v2-sharing-in .2s ease-out}
 @keyframes v2-sharing-in{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:none}}
 @media(max-width:760px){
   .workspace-v2 .sharing-title{flex-basis:100%}.workspace-v2 .sharing-title h2{font-size:15px}
   .workspace-v2 .sharing-meta{font-size:12px;gap:6px 12px}
+  .workspace-v2 .sharing-counts{flex-basis:100%}
   .workspace-v2 .sharing-metrics{gap:10px}.workspace-v2 .sharing-metrics strong{font-size:18px}
   .workspace-v2 .v2-sharing-questions>.sharing-question{grid-template-columns:minmax(0,1fr);gap:10px}
   .workspace-v2 .sharing-question>label{grid-column:1/-1}
@@ -39,5 +69,21 @@
   .workspace-v2 .sharing-buttons .n-button{height:auto;min-height:40px;white-space:normal}
   .workspace-v2 .sharing-buttons .n-button__content{white-space:normal;text-align:center}
   .workspace-v2 .v2-sharing-tabs .n-tabs-tab{padding:10px 0;font-size:13px}
+  .workspace-v2 .sharing-section .sharing-editor-bar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+  .workspace-v2 .sharing-editor-bar .n-button{width:100%;min-height:44px}
+  .workspace-v2 .sharing-editor-bar>span{grid-column:1/-1}
+  .workspace-v2 .sharing-section .sharing-question-tools{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .workspace-v2 .sharing-question-tools>label{grid-column:auto;min-width:0}
+  .workspace-v2 .sharing-question-tools .n-button{width:100%}
+  .workspace-v2 .sharing-pagination{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+  .workspace-v2 .sharing-pagination>div{justify-content:center}
+  .workspace-v2 .sharing-answerbar{gap:8px}
+  .workspace-v2 .sharing-answerbar .n-button{width:100%}
+  .workspace-v2 .sharing-roster .sharing-people-tools{display:grid;grid-template-columns:minmax(0,1fr)}
+  .workspace-v2 .sharing-roster .sharing-people-tools .n-button{width:100%}
+  .workspace-v2 .sharing-bulk{display:grid;grid-template-columns:minmax(0,1fr)}
+  .workspace-v2 .sharing-bulk .n-button{width:100%;height:auto;white-space:normal}
+  .workspace-v2 .sharing-people-list{grid-template-columns:minmax(0,1fr);max-height:none}
+  .workspace-v2 .sharing-chips li{max-width:100%}
 }
-@media(prefers-reduced-motion:reduce){.workspace-v2 .sharing-section,.workspace-v2 .v2-sharing-delivery{animation:none}}
+@media(prefers-reduced-motion:reduce){.workspace-v2 .sharing-section,.workspace-v2 .sharing-answer-pane,.workspace-v2 .sharing-roster,.workspace-v2 .v2-sharing-delivery{animation:none}}

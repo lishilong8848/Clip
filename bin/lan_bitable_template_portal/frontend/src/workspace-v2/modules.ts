@@ -37,6 +37,7 @@ export function navigationModules(permitted: string[]): ModuleEntry[] {
   });
 }
 export function moduleForRoute(url: URL): string {
+  if (url.pathname === '/document-library') return 'knowledge';
   if (url.pathname === '/workbench-lite') return url.searchParams.get('work_type') || 'maintenance';
   if (url.pathname === '/') {
     if (url.searchParams.get('mode') === 'events') return 'event';

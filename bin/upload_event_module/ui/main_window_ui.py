@@ -72,6 +72,12 @@ class MainWindowUiMixin:
             "color: #F59E0B; font-size: 11px;"
         )
         status_layout.addWidget(self.remote_update_status_label)
+        self.remote_update_details_btn = QPushButton("查看原因")
+        self.remote_update_details_btn.setFlat(True)
+        self.remote_update_details_btn.setAccessibleName("查看远程更新检查失败原因")
+        self.remote_update_details_btn.clicked.connect(self.show_remote_update_error)
+        self.remote_update_details_btn.hide()
+        status_layout.addWidget(self.remote_update_details_btn)
         self.version_label = QLabel(f"版本: {self._build_display_version()}")
         self.version_label.setStyleSheet("color: #94A3B8; font-size: 11px;")
         status_layout.addWidget(self.version_label)
@@ -867,12 +873,6 @@ class MainWindowUiMixin:
                 self.restore_button_state(record_id=record_id)
             return
         self._init_deferred_dialogs()
-        if not config.user_token:
-            self.show_message("未配置飞书用户令牌。")
-            record_id = data.get("record_id") if data else None
-            if not self._restore_queued_upload_ui(record_id, requested=False):
-                self.restore_button_state(record_id=record_id)
-            return
         if isinstance(data, dict):
             self._hydrate_data_from_cache(data)
         # 同一条记录同一动作已打开，避免重复弹窗

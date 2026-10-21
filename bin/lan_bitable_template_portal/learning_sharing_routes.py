@@ -8,9 +8,12 @@ from contextlib import closing
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.requests import ClientDisconnect
 
 from .learning import LearningError, now, stamp
 from .learning_sharing import SharingExercises, exercise_card, key, question_mix, read_source, validate_questions, weekly_card
+from .sharing_sources import SharingMaterials, MAX_FILE, combine_sources, read_material_link, source_url
 
 
 class SharingRuntime:
@@ -78,7 +81,20 @@ class SharingRuntime:
         try:
             if not await asyncio.to_thread(self.update_batch, batch['id'], status='generating', error='', progress='正在读取完整纪要和参会人'):
                 return
-            source = await asyncio.to_thread(read_source, self.runtime.service, batch['url'])
+            sources = []
+            minutes = await asyncio.to_thread(read_source, self.runtime.service, batch['url']) if batch.get('url') else {}
+            if minutes:
+                sources.append(minutes)
+            for url in batch.get('material_urls', []):
+                sources.append(await asyncio.to_thread(read_material_link, self.runtime.service, url))
+            materials = SharingMaterials(core.learning)
+            for identity in batch.get('material_ids', []):
+                sources.append(await asyncio.to_thread(materials.read, identity, batch['owner']))
+            source = combine_sources(sources)
+            source.update(title=batch.get('requested_title') or minutes.get('title') or (sources[0].get('title') if sources else '分享会练习'),
+                          participants=batch.get('requested_participants') or minutes.get('participants', []))
+            if not minutes and not source['participants']:
+                raise LearningError('没有可核验的答题名单，未生成或发送。')
             people = await asyncio.to_thread(core.learning._all, 'person')
             for person in source['participants']:
                 matches = [p for p in people if person['open_id'] in p.get('login_ids', []) and p.get('active')]
@@ -96,16 +112,16 @@ class SharingRuntime:
             mix = first + mix
             questions = []
             generate = getattr(self.runtime, 'generate_sharing_questions', None)
-            if not callable(generate): raise LearningError('模型出题服务尚未就绪。', 503)
-            for offset in range(0, total, 5):
+            if batch.get('auto_generate', True) and not callable(generate): raise LearningError('模型出题服务尚未就绪。', 503)
+            for offset in (range(0, total, 5) if batch.get('auto_generate', True) else []):
                 if self.closing: return
                 if not await asyncio.to_thread(self.update_batch, batch['id'], progress=f'已生成{len(questions)}题，继续核对未覆盖知识点（最多{total}题）'):
                     return
                 additional = await generate(batch['owner'], source['text'], [q['stem'] for q in questions], min(5, total - offset), question_types=mix[offset:offset + 5])
-                questions.extend(additional)
+                questions.extend({**question, 'origin': 'ai'} for question in additional)
                 if len(additional) < 5:
                     break
-            questions = validate_questions(questions, source['text'], types)
+            questions = validate_questions(questions, source['text'], types, draft=not batch.get('auto_generate', True))
             await asyncio.to_thread(self.update_batch, batch['id'], status='draft', progress='', title=source['title'],
                                     source=source, participants=source['participants'], questions=questions, error='')
         except asyncio.CancelledError:
@@ -186,8 +202,8 @@ class SharingRuntime:
                     card = exercise_card(batch, attempt, reminder=job['kind'] == 'reminder', result=job['kind'] == 'result')
                     client = await bot.messenger.client()
                     response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
-                        params={'receive_id_type': 'union_id'}, headers=await bot.messenger.headers(),
-                        json={'receive_id': attempt['union_id'], 'msg_type': 'interactive',
+                        params={'receive_id_type': 'union_id' if attempt.get('union_id') else 'open_id'}, headers=await bot.messenger.headers(),
+                        json={'receive_id': attempt.get('union_id') or attempt['open_id'], 'msg_type': 'interactive',
                               'content': json.dumps(card, ensure_ascii=False), 'uuid': key('sharing', job['id'])})
                     result = response.json()
                     mid = (result.get('data') or {}).get('message_id')
@@ -209,6 +225,7 @@ class SharingRuntime:
                     field = 'result_delivery_status' if job['kind'] == 'result' else 'delivery_status'
                     current.update({field: job['status'], 'delivery_error': job.get('error', '')})
                     core.learning._put('sharing_attempt', current['id'], current, conn)
+        core.changed_batch(batch, now().date().isoformat())
 
     async def run(self):
         while not self.closing:
@@ -280,13 +297,22 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
             core = await asyncio.to_thread(feature.service)
             bid = request.path_params.get('batch_id')
             if request.method == 'GET':
-                data = await asyncio.to_thread(core.detail, bid, actor) if bid else await asyncio.to_thread(core.listing, actor, request.query_params.get('page', 1))
+                if request.url.path.endswith('/sharing/people'):
+                    core.learning._admin(actor)
+                    data = {'items': await asyncio.to_thread(core.people)}
+                else:
+                    data = await asyncio.to_thread(core.detail, bid, actor) if bid else await asyncio.to_thread(core.listing, actor, request.query_params.get('page', 1))
             else:
                 check_origin(request)
                 payload = await read_json(request)
-                core.learning._admin(actor)
-                if not bid:
-                    data = await asyncio.to_thread(core.create, payload.get('url'), payload.get('operation_id'), actor, payload.get('question_types'))
+                if bid and request.path_params.get('action') == 'answers':
+                    data = await asyncio.to_thread(core.answer, bid, payload, actor, feature.allowed)
+                elif not bid:
+                    if payload.get('url'):
+                        source_url(payload['url'], minutes=True)
+                    data = await asyncio.to_thread(core.create, payload.get('url'), payload.get('operation_id'), actor, payload.get('question_types'),
+                        material_urls=payload.get('material_urls'), material_ids=payload.get('material_ids'),
+                        participant_ids=payload.get('participant_ids'), auto_generate=payload.get('auto_generate', True), title=payload.get('title', ''))
                 elif request.method == 'POST' and request.path_params.get('action') == 'delete':
                     if feature.active_delivery_batch == bid or bid in feature.deleting_batches:
                         raise LearningError('后台正在处理发送或入库任务，请稍后再删除；已上传题目不会删除。', 409)
@@ -300,6 +326,7 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                 elif request.method == 'PUT':
                     data = await asyncio.to_thread(core.edit, bid, payload, actor)
                 else:
+                    core.learning._admin(actor)
                     action = request.path_params['action']
                     if action == 'publish':
                         bot = feature.bot()
@@ -320,13 +347,60 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                                 else:
                                     raise LearningError('此批次当前不支持该操作。', 409)
                                 core.learning._put('sharing_batch', bid, batch, conn)
-                            return {'id': bid}
-                        data = await asyncio.to_thread(update)
+                            return {'id': bid}, batch
+                        data, updated_batch = await asyncio.to_thread(update)
+                        core.changed_batch(updated_batch, now().date().isoformat())
                 feature.wake.set()
             return await asyncio.to_thread(controller._json_ok, request, session, data)
         except Exception as exc:
             return error_response(exc)
 
+    async def material_upload(request: Request):
+        form, parser = None, None
+        try:
+            session, actor = await asyncio.to_thread(identity, request)
+            if not session:
+                return controller._auth_required_response()
+            check_origin(request)
+            core = await asyncio.to_thread(feature.service)
+            core.learning._admin(actor)
+            size = 0
+            async def bounded():
+                nonlocal size
+                try:
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > 100 * 1024 * 1024 + 65536:
+                            raise MultiPartException('材料总计不能超过100MiB。')
+                        yield chunk
+                except ClientDisconnect:
+                    raise MultiPartException('上传已中断。') from None
+            parser = MultiPartParser(request.headers, bounded(), max_files=10, max_fields=0)
+            form = await parser.parse()
+            files = form.getlist('files')
+            if set(form) != {'files'} or not 1 <= len(files) <= 10 or any(not hasattr(file, 'read') for file in files):
+                raise LearningError('请选择1至10份分享材料。')
+            items, total = [], 0
+            for file in files:
+                content = await file.read(MAX_FILE + 1)
+                total += len(content)
+                if total > 100 * 1024 * 1024:
+                    raise LearningError('本次材料总计不能超过100MiB。', 413)
+                items.append(await asyncio.to_thread(SharingMaterials(core.learning).upload, actor, file.filename, content))
+            return await asyncio.to_thread(controller._json_ok, request, session, {'items': items})
+        except MultiPartException:
+            return error_response(LearningError('材料上传格式无效或超过大小限制。', 413))
+        except Exception as exc:
+            return error_response(exc)
+        finally:
+            if form is not None:
+                await form.close()
+            elif parser is not None:
+                for handle in parser._files_to_close_on_error:
+                    handle.close()
+
+    app.add_api_route('/api/learning/sharing/materials', material_upload, methods=['POST'])
+    app.add_api_route('/api/learning/sharing/people', endpoint, methods=['GET'])
     app.add_api_route('/api/learning/sharing', endpoint, methods=['GET', 'POST'])
     app.add_api_route('/api/learning/sharing/{batch_id}', endpoint, methods=['GET', 'PUT'])
     app.add_api_route('/api/learning/sharing/{batch_id}/{action}', endpoint, methods=['POST'])

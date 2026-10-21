@@ -109,6 +109,7 @@
       />
 
       <FeishuAssistantSettings v-else-if="tab === 'feishu'" />
+      <ReleaseJournalPage v-else-if="tab === 'development'" />
 
       <AdminPressurePane
         v-else
@@ -126,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, reactive, ref, watch } from "vue";
 import { ArrowLeft } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
 import {
@@ -147,6 +148,7 @@ import AdminStatusPane from "./AdminStatusPane.vue";
 import AdminWorkspaceChrome from "./AdminWorkspaceChrome.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
+const ReleaseJournalPage = defineAsyncComponent(() => import('./ReleaseJournalPage.vue'));
 
 type Dict = Record<string, any>;
 type MopSettingsKey = "mop_app_token" | "mop_table_id" | "mop_view_id" | "mop_title_field" | "mop_attachment_field";
@@ -284,6 +286,7 @@ const adminTabs = computed(() => {
       badge: mopSettingsLoaded.value && !mopConfigured.value ? "待配置" : "",
     },
     { key: "feishu" as AdminTabKey, label: "飞书智能体", description: "", badge: "" },
+    { key: "development" as AdminTabKey, label: "开发问题与更新记录", description: "", badge: "" },
   ];
   if (advancedDiagnosticsVisible.value) {
     tabs.push({

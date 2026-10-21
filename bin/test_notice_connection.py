@@ -163,6 +163,7 @@ class NoticeConnectionTests(unittest.TestCase):
             with self.subTest(notice=notice):
                 with (
                     patch.object(service, "lark", None),
+                    patch.object(service, "check_token_status", return_value="test-token"),
                     patch.object(service, "config", SimpleNamespace(user_token="test-token", app_token="test-base")),
                     patch.object(service, "_resolve_handler", return_value=(None, "test-table", "")),
                     patch.object(service, "_ensure_lark_sdk_loaded", side_effect=AssertionError("must not load SDK")),
@@ -193,6 +194,7 @@ class NoticeConnectionTests(unittest.TestCase):
                     success=lambda: True, data=response_data,
                 )
                 with (
+                    patch.object(service, "check_token_status", return_value="test"),
                     patch.object(service.config, "user_token", "test"),
                     patch.object(service, "_resolve_handler", return_value=(None, "table-test", "")),
                     patch.object(service, "_feishu_request", return_value=response) as batch,

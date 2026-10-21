@@ -148,6 +148,34 @@ class SmokeImportContractTests(unittest.TestCase):
 
 
 class ResidentArtifactTests(unittest.TestCase):
+    def test_bin_root_test_files_are_excluded_for_every_extension_without_removing_runtime(self):
+        excluded = {
+            'bin/test_fixture.py', 'bin/test_learning_completion_browser.mjs',
+            'bin/test_fixture.js', 'bin/test_fixture.json', 'bin/test_fixture',
+            'bin/TEST_FIXTURE.MJS', 'bin/mock_lan_notice_pressure.py',
+        }
+        kept = {
+            'bin/refactored_main.py', 'bin/learning_completion_browser.mjs',
+            'bin/openclaw_service/test_runtime.mjs', 'bin/openclaw_service/test_runtime.py',
+        }
+        with tempfile.TemporaryDirectory(prefix='resident-filter-') as directory:
+            root = Path(directory) / 'source'
+            output = Path(directory) / 'portable'
+            for relative in excluded | kept:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('fixture: ' + relative, encoding='utf-8')
+                self.assertEqual(package_portable._is_development_only_path(path, root), relative in excluded, relative)
+            selected = {path.relative_to(root).as_posix()
+                        for path in package_portable._iter_project_files(root, exclude_venv=True)}
+            self.assertEqual(selected, kept)
+            with patch.object(package_portable, 'PROJECT_ROOT', root):
+                package_portable.copy_project(output)
+            copied = {path.relative_to(output).as_posix() for path in output.rglob('*') if path.is_file()}
+            self.assertEqual(copied, kept)
+            for relative in kept:
+                self.assertEqual((output / relative).read_bytes(), (root / relative).read_bytes())
+
     def test_real_source_selection_includes_service_and_excludes_owned_runtime_and_development(self):
         files = {path.relative_to(ROOT).as_posix() for path in package_portable._iter_project_files(ROOT, exclude_venv=True)}
         required = {'启动程序.bat', 'bin/refactored_main.py', 'bin/lan_bitable_template_portal/lighthouse_routes.py',

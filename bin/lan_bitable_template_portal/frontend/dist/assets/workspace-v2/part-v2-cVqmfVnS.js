@@ -1,0 +1,1 @@
+import{ce as c,a$ as s,a_ as i,bt as t}from"./app-v2-pwH5Vm7e.js";function a(){const o=c(s,null);return i(()=>{if(o===null)return t;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||t;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{a as u};

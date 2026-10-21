@@ -161,7 +161,9 @@ class TransportSafetyTests(unittest.TestCase):
                 updater = RemotePatchUpdater(Path(tmp), Path(tmp) / "data", old_url)
                 with patch.object(patch_mirror, "fetch_manifest", return_value={"target_patch_version": 481}) as fetch, patch("requests.get") as get:
                     self.assertEqual(updater.fetch_manifest(), {"target_patch_version": 481})
-                    fetch.assert_called_once_with()
+                    fetch.assert_called_once()
+                    timeout = fetch.call_args.kwargs['timeout']
+                    self.assertEqual((timeout.connect, timeout.read), (5.0, 20.0))
                     get.assert_not_called()
 
     def test_streamed_body_limit_and_json_validation(self):

@@ -119,6 +119,17 @@ def create_archive(runtime, output):
     return spec
 
 
+class MirrorRequestError(AssistantError):
+    def __init__(self, code, request_id=''):
+        category = ('auth' if code in {99991663, 99991664, 99991665, 99991668, 99991677}
+                    else 'permission' if code in {99991671, 99991672, 1254002, 1254302}
+                    else 'rate_limit' if code in {99991400, 1254290, 1254291, 1254607, 1254608}
+                    else 'remote')
+        super().__init__('飞书镜像请求未完成（code=' + str(code) + '）。', 503, category=category)
+        self.code = code
+        self.request_id = request_id if isinstance(request_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request_id) else ''
+
+
 class FeishuRuntimeMirror:
     """Only the designated dependency and patch tables are allowed; no record deletion."""
     def __init__(self, *, client=None, headers=None, table=TABLE, timeout=None):
@@ -144,9 +155,9 @@ class FeishuRuntimeMirror:
             token = token_manager.get_tenant_token(**({'force_refresh': True} if force_refresh else {}))
         except Exception:
             startup_log('runtime_auth_failed')
-            raise AssistantError('助手依赖镜像认证失败，未使用缓存令牌。', 503) from None
+            raise AssistantError('助手依赖镜像认证失败，未使用缓存令牌。', 503, category='auth') from None
         if not token:
-            raise AssistantError('飞书依赖镜像认证不可用。', 503)
+            raise AssistantError('飞书依赖镜像认证不可用。', 503, category='auth')
         self.headers = {'Authorization': 'Bearer ' + token}
         return self.headers
 
@@ -158,14 +169,20 @@ class FeishuRuntimeMirror:
         return False
 
     def request(self, method, suffix='', **kwargs):
-        read_only = method.upper() in {'GET', 'HEAD'}
-        if not read_only:
-            kwargs['retries'] = 0
+        method = method.upper()
+        read_only = method in {'GET', 'HEAD'} or (method == 'POST' and suffix == '/records/search')
+        kwargs['retries'] = min(2, max(0, int(kwargs.get('retries', 2)))) if read_only else 0
+        if self.timeout is not None:
+            kwargs.setdefault('timeout', self.timeout)
         value = self.client.request_json(method, self.api + suffix, headers=self._auth_headers(), **kwargs)
         if self._refresh_rejected_token(value) and read_only:
             value = self.client.request_json(method, self.api + suffix, headers=self._auth_headers(), **kwargs)
         if not isinstance(value, dict) or type(value.get('code')) is not int or value['code'] != 0:
-            raise AssistantError('依赖镜像请求未完成。', 503)
+            code = value.get('code') if isinstance(value, dict) and type(value.get('code')) is int else None
+            error = value.get('error') if isinstance(value, dict) else None
+            request_id = ((error.get('log_id') if isinstance(error, dict) else '')
+                          or (value.get('request_id') if isinstance(value, dict) else ''))
+            raise MirrorRequestError(code, request_id)
         return value.get('data') or {}
 
     def ensure_fields(self):

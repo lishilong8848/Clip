@@ -27,6 +27,7 @@ import threading
 from pathlib import Path
 from functools import lru_cache
 from bin.frontend_assets import FRONTEND_INDEX, is_frontend_asset, referenced_assets
+from bin.upload_event_module.services import release_journal
 
 
 
@@ -904,6 +905,13 @@ def write_patch_meta(
         if path.is_file() and path.name != "patch_meta.json"
     }
 
+    journal_path = patch_dir / release_journal.BUNDLE_PATH
+    if journal_path.is_file():
+        meta["release_journal_bundle"] = {
+            "kind": release_journal.read_json(journal_path)["kind"],
+            "sha256": _hash_file(journal_path),
+        }
+
     if venv_hash:
 
         meta["venv_hash"] = venv_hash
@@ -1410,8 +1418,7 @@ def _is_development_only_path(path: Path, root: Path, *, relative_path: Path | N
     if parts[:2] == ("bin", "tests"):
         return True
     if len(parts) == 2 and parts[0] == "bin":
-        is_test_or_mock = parts[1].startswith("test_") or parts[1] == "mock_lan_notice_pressure.py"
-        if is_test_or_mock and path.suffix.lower() == ".py":
+        if parts[1].startswith("test_") or parts[1] == "mock_lan_notice_pressure.py":
             return True
     if parts[:2] == ("bin", "tools") and len(parts) > 2:
         return rel not in RUNTIME_TOOL_FILES
@@ -1857,8 +1864,10 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_live_concurrency", "bin.test_lighthouse_runtime_lanes", "bin.test_feishu_live_reply",
          "bin.test_feishu_app_migration",
          "bin.test_feishu_unified_settings",
+         "bin.test_qt_settings_save_pipeline",
          "bin.test_feishu_cloud_auth",
          "bin.test_feishu_cached_auth",
+         "bin.test_notice_connection",
          "bin.test_feishu_write_auth_isolation", "bin.test_feishu_cloud_token_guard",
          "bin.test_feishu_attachment_auth",
          "bin.test_feishu_directory_identity",
@@ -1873,7 +1882,10 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery",
          "bin.test_learning_update_flow",
+         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal",
+         "bin.test_learning_completion", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked",
          "bin.test_workspace_layouts",
+         "bin.test_workspace_extension_access",
          "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_location_distribution", "bin.test_pre_shift_roster", "bin.test_pre_shift_recipients", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_risk_inspection_delete", "bin.test_risk_inspection_system_fields", "bin.test_risk_inspection_final_push", "bin.test_risk_inspection_assignments", "bin.test_risk_inspection_task_access", "bin.test_risk_inspection_imports", "bin.test_risk_inspection_update_compatibility", "bin.test_account_bulk_modules", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
@@ -1951,7 +1963,7 @@ def _run_packaging_preflight_tests() -> None:
     log("重保管理专项测试通过。")
 
     _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest"],
+        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest", "bin.test_logger_reentry", "bin.test_update_check_recovery", "bin.test_release_journal", "bin.test_release_journal_routes"],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -2487,6 +2499,9 @@ def _write_latest_patch_manifest(
 
     }
 
+    if patch_meta.get("release_journal_bundle"):
+        manifest["release_journal_bundle"] = patch_meta["release_journal_bundle"]
+
     manifest_path = BUILD_DIR / "latest_patch.json"
 
     manifest_path.write_text(
@@ -2527,11 +2542,15 @@ def _publish_patch(patch_zip: Path, manifest_path: Path, manifest: dict) -> None
     if str(BIN_DIR) not in sys.path:
         sys.path.insert(0, str(BIN_DIR))
     from upload_event_module.services.patch_mirror import publish_patch, publish_manifest
+    journal_content = release_journal.read_archive_bundle(patch_zip, manifest)
+    journal = release_journal.BuildReleaseJournal(PROJECT_ROOT, BUILD_DIR) if journal_content is not None else None
     log("正在上传飞书补丁镜像并回读校验。")
     try:
         spec = publish_patch(patch_zip, manifest, BUILD_DIR / 'feishu_patch_upload_journal.json')
         updated = dict(manifest, feishu_patch=spec, update_source="feishu")
         updated.pop("zip_url", None)
+        if journal is not None:
+            updated["release_journal"] = journal.prepare_receipt(journal_content, updated)
         publish_manifest(updated)
     except Exception:
         log("飞书补丁上传、下载核验或发布清单确认未完成，暂不要通知用户更新。"
@@ -2546,6 +2565,8 @@ def _publish_patch(patch_zip: Path, manifest_path: Path, manifest: dict) -> None
         temporary.unlink(missing_ok=True)
     manifest.clear()
     manifest.update(updated)
+    if journal is not None:
+        journal.mark_published(journal_content, updated)
     log("飞书补丁上传、下载及发布清单回读核验通过；后续仅从飞书多维表检查和下载更新。")
 
 
@@ -2764,6 +2785,8 @@ def build_patch(
 
     python_version: str = "",
 
+    release_journal_bundle: dict | None = None,
+
 ) -> tuple[int, int, int]:
 
     patch_dir = BUILD_DIR / (dist_name + "_patch_only")
@@ -2840,7 +2863,7 @@ def build_patch(
         for rel in baseline_files.keys():
 
             # Installed clients retain the previous entry's hashed resources.
-            if rel not in current_set and not is_frontend_asset(rel):
+            if rel not in current_set and rel != release_journal.BUNDLE_PATH and not is_frontend_asset(rel):
 
                 if rel.parts[:2] == ("bin", "public_access") and rel.suffix in {".py", ".json"}:
                     public_restart = True
@@ -2916,6 +2939,9 @@ def build_patch(
             if not base_venv_hash:
 
                 base_venv_hash = base_meta.get("venv_hash", "") or ""
+
+    if release_journal_bundle is not None:
+        release_journal.write_json(patch_dir / release_journal.BUNDLE_PATH, release_journal_bundle)
 
     write_patch_meta(
 
@@ -3028,6 +3054,28 @@ def _packaging_lock():
         finally:
             handle.seek(0)
             release()
+
+
+def _prepare_release_notes(args):
+    journal = release_journal.BuildReleaseJournal(PROJECT_ROOT, BUILD_DIR)
+    draft = journal.prepare_draft()
+    if not AUTO_UPLOAD_FEISHU or args.skip_upload:
+        return journal, draft
+    if args.release_notes_file:
+        value = release_journal.read_json(Path(args.release_notes_file))
+        if not isinstance(value, dict):
+            raise release_journal.ReleaseJournalError("更新事项文件格式无效。")
+        draft = journal.save_draft(dict(draft, items=value.get("items")), confirmed=True)
+    else:
+        if "unittest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+            raise release_journal.ReleaseJournalError("非交互打包须提供 --release-notes-file，未弹窗或发布。")
+        if str(BIN_DIR) not in sys.path:
+            sys.path.insert(0, str(BIN_DIR))
+        from upload_event_module.ui.release_notes_dialog import review_release_notes
+        draft = review_release_notes(journal, draft)
+        if draft is None:
+            raise release_journal.ReleaseJournalError("已保存更新草稿，本次打包已取消。")
+    return journal, draft
 
 
 def main() -> None:
@@ -3173,6 +3221,7 @@ def main() -> None:
         "--retry-upload", action="store_true",
         help="Upload and verify the existing build_output/latest_patch.json and ZIP without rebuilding.",
     )
+    parser.add_argument("--release-notes-file", default="", help="Reviewed JSON items for noninteractive packaging.")
 
     args = parser.parse_args()
 
@@ -3206,6 +3255,8 @@ def main() -> None:
     if not args.skip_preflight:
 
         _run_packaging_preflight_tests()
+
+    journal, release_draft = _prepare_release_notes(args)
 
 
 
@@ -3578,6 +3629,9 @@ def main() -> None:
         module_to_package=RUNTIME_MODULE_TO_PACKAGE,
 
         python_version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+
+        release_journal_bundle=journal.bundle(release_draft, dist_name, target_patch_version,
+                                              publish=bool(AUTO_UPLOAD_FEISHU and not args.skip_upload)),
 
     )
 

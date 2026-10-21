@@ -37,7 +37,7 @@ export function adaptLearningPage(source) {
   code = replaceNode(code, has('learner-strip'), '');
   code = replaceNode(code, has('tabs'), `<nav v-if="ready && tab !== 'sharing'" class="tabs v2-learning-tabs" aria-label="学练页面" data-v2-navigation><NButton v-for="item in v2PrimaryTabs" :key="item.id" :type="tab===item.id?'primary':'default'" :quaternary="tab!==item.id" :aria-current="tab===item.id?'page':undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="16" />{{item.label}}</NButton></nav>`);
   code = replaceNode(code, node => node.tag === 'div' && has('toolbar')(node) && node.loc.source.includes('studyMode'), `<div class="toolbar v2-learning-studybar" data-v2-navigation>
-    <div v-if="reading && tab!=='today'" class="actions"><NButton secondary :disabled="busy" @click="saveDraft(); reading=false; loadView()"><ChevronLeft :size="16" />返回{{tab==='review'?'复习列表':'学习历史'}}</NButton><span>{{paper?.date}} · {{paper?.scope}}楼</span></div>
+    <div v-if="reading && tab!=='today'" class="actions"><NButton v-if="completionReturn" secondary :disabled="busy" @click="returnToCompletion"><ChevronLeft :size="16" />返回每日完成</NButton><NButton v-else secondary :disabled="busy" @click="saveDraft(); reading=false; loadView()"><ChevronLeft :size="16" />返回{{tab==='review'?'复习列表':'学习历史'}}</NButton><span>{{paper?.date}} · {{paper?.scope}}楼</span></div>
     <template v-else>
       <NRadioGroup v-if="viewMode==='practice' && boot.can_answer" :value="studyMode" size="small" aria-label="学练方式" :disabled="busy || loading" @update:value="value => switchStudyMode(value as 'daily'|'practice')"><NRadioButton value="daily">每日题单</NRadioButton><NRadioButton value="practice">自主练习</NRadioButton></NRadioGroup>
       <span class="v2-learning-progress-label">{{date}}<template v-if="paper"> · 已答 {{answered}} / {{validCount}} 题</template></span>
@@ -47,7 +47,7 @@ export function adaptLearningPage(source) {
       </div>
     </template>
   </div>
-  <section v-if="v2Completed && !v2CompletionHidden && !loading" class="v2-learning-completion" aria-label="题单完成结果">
+  <section v-if="tab==='today' && v2Completed && !v2CompletionHidden && !loading" class="v2-learning-completion" aria-label="题单完成结果">
     <CheckCircle2 :size="27" /><div><strong>{{studyMode==='practice'?'本次练习已完成':'今日题单已完成'}}</strong><p>已答 {{answered}} 题 · 首次选择题正确 {{v2PaperStats.correct}} / {{v2PaperStats.choices}}<template v-if="v2PaperStats.interviews"> · 问答 {{v2PaperStats.interviews}} 题</template></p></div>
     <div class="actions" data-v2-navigation><NButton size="small" secondary @click="switchTab('review')">查看错题</NButton><NButton size="small" secondary @click="switchTab('profile')">我的画像</NButton><NButton size="small" type="primary" :disabled="busy" @click="v2NewPractice">新练习15题</NButton><NButton quaternary circle aria-label="收起完成结果" @click="v2CompletionHidden=true"><X :size="17" /></NButton></div>
   </section>`);

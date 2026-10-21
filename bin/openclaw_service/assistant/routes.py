@@ -25,6 +25,7 @@ def install_assistant_routes(app, host):
     tagging_pool = None
     sharing_slot = asyncio.Semaphore(1)
     knowledge = None
+    knowledge_preparation = None
     knowledge_lock = threading.Lock()
     extensions = None
     extensions_lock = threading.Lock()
@@ -40,9 +41,14 @@ def install_assistant_routes(app, host):
     def get_knowledge():
         nonlocal knowledge
         with knowledge_lock:
+            if closing:
+                raise AssistantError('知识库正在关闭，请稍后重试。', 503)
             if knowledge is None:
                 from .lighthouse_knowledge import KnowledgeBase
+                from lan_bitable_template_portal.document_library import DocumentLibraryService
+                library = DocumentLibraryService(host.state.parent)
                 knowledge = KnowledgeBase(host.state / 'knowledge_base')
+                library.bind_knowledge(knowledge)
             return knowledge
 
     async def recommend_notice_tags(payload):
@@ -141,8 +147,15 @@ def install_assistant_routes(app, host):
             logging.getLogger(__name__).warning('Assistant startup preparation failed: type=%s', type(exc).__name__)
 
     async def startup():
-        nonlocal preparation
+        nonlocal preparation, knowledge_preparation
         # Do not delay the portal listener or execute work on Qt's main thread.
+        async def prepare_knowledge():
+            try:
+                await asyncio.to_thread(get_knowledge)
+            except Exception as exc:
+                logging.getLogger(__name__).warning('Knowledge source preparation failed: type=%s', type(exc).__name__)
+        # This starts only the existing knowledge worker, including direct library use.
+        knowledge_preparation = asyncio.create_task(prepare_knowledge())
         if os.environ.get("LIGHTHOUSE_AGENT_ENGINE", "openclaw").strip().lower() != "legacy":
             startup_log('preparing')
             preparation = asyncio.create_task(prepare_runtime())
@@ -181,8 +194,14 @@ def install_assistant_routes(app, host):
                 await asyncio.gather(*tuple(agent.tasks), return_exceptions=True)
         if service is not None:
             await asyncio.to_thread(service.model.close)
-        if knowledge is not None:
-            await asyncio.to_thread(knowledge.close)
+        if knowledge_preparation is not None:
+            await asyncio.gather(knowledge_preparation, return_exceptions=True)
+        def close_knowledge():
+            # Cancelled requests can leave their to_thread constructor running.
+            with knowledge_lock:
+                if knowledge is not None:
+                    knowledge.close()
+        await asyncio.to_thread(close_knowledge)
         if extensions is not None:
             await extensions.pool.close()
     # Host starts preparation only after migration and portal registration.
@@ -425,17 +444,29 @@ def install_assistant_routes(app, host):
                 if action.endswith("/cancel"):
                     data = await current_streams.stop(actor, run_id)
                     return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
-                await asyncio.to_thread(current_streams.get_run, actor, run_id)
+                run = await asyncio.to_thread(current_streams.get_run, actor, run_id)
+                terminal = next((event.get('data', {}) for event in reversed(run.get('events', []))
+                    if event.get('type') == 'data-turn' and event.get('data', {}).get('sources')), {})
+                if terminal.get('sources') and not await asyncio.to_thread(lambda: get_knowledge().cached_turn_current(actor, terminal)):
+                    raise AssistantError('来源文件或授权已变化，旧回答不可重放。', 403)
                 return StreamingResponse(current_streams.stream(actor, run_id, lambda: actor_for(request)),
                     media_type="text/event-stream", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "x-vercel-ai-ui-message-stream": "v1"})
             if action.startswith("files/"):
                 current_agent = await ready_agent()
                 identity = action.split("/")[1]
+                if not await asyncio.to_thread(lambda: get_knowledge().artifact_current(actor, identity)):
+                    raise AssistantError('来源文件或授权已变化，派生文件不可访问。', 403)
                 if request.query_params.get('preview') == '1':
                     from .lighthouse_artifacts import preview_file, document_task
                     data = await document_task(preview_file, current_agent.files, actor, identity)
+                    fresh = await actor_for(request)
+                    if fresh['id'] != actor['id'] or not await asyncio.to_thread(lambda: get_knowledge().artifact_current(fresh, identity)):
+                        raise AssistantError('来源文件或授权已变化，预览未返回。', 403)
                     return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
                 item = await asyncio.to_thread(current_agent.files.get, actor, identity)
+                fresh = await actor_for(request)
+                if fresh['id'] != actor['id'] or not await asyncio.to_thread(lambda: get_knowledge().artifact_current(fresh, identity)):
+                    raise AssistantError('来源文件或授权已变化，文件未返回。', 403)
                 if request.query_params.get('metadata') == '1':
                     return JSONResponse({'ok': True, 'data': current_agent.files.public(item)}, headers={'Cache-Control': 'private, no-store'})
                 inline = item['mime'].startswith('image/') or item['mime'] == 'application/pdf' and request.query_params.get('inline') == '1'

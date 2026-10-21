@@ -72,6 +72,7 @@ class PatchUpdateMixin:
         self._remote_non_ui_manifest = None
         self._remote_update_checking = False
         self._remote_update_busy = False
+        self._remote_update_diagnostic = None
         self._patch_apply_in_progress = False
         self._last_patch_source = "local"
         self._clipboard_paused_for_patch_update = False
@@ -127,6 +128,11 @@ class PatchUpdateMixin:
     def check_remote_update_now(self, _checked: bool = False):
         self._ensure_remote_patch_updater()
         self._schedule_remote_update_check(manual=True)
+
+    def show_remote_update_error(self, _checked: bool = False):
+        detail = getattr(self, '_remote_update_diagnostic', None)
+        if detail:
+            QMessageBox.information(self, detail['title'], detail['detail'])
 
     def _set_remote_update_status(self, text: str):
         label = getattr(self, "remote_update_status_label", None)
@@ -204,6 +210,7 @@ class PatchUpdateMixin:
 
         lower_current_thread_priority()
         status_text = "远程更新: 已是最新"
+        self._remote_update_diagnostic = None
         ui_manifest = None
         non_ui_manifest = None
         try:
@@ -233,8 +240,12 @@ class PatchUpdateMixin:
                 else:
                     status_text = "远程更新: 发现可更新(非UI)"
         except Exception as exc:
-            status_text = "远程更新: 检查失败"
-            log_warning(f"远程更新检查失败(不影响程序启动): {exc}")
+            from ..services.remote_patch_updater import update_check_diagnostic
+            self._remote_update_diagnostic = update_check_diagnostic(exc)
+            status_text = "远程更新: " + self._remote_update_diagnostic['title']
+            log_warning("远程更新检查失败(不影响程序启动): " +
+                        self._remote_update_diagnostic['title'] + "；" +
+                        self._remote_update_diagnostic['detail'].replace('\n', '；'))
 
         if getattr(self, "_closing", False):
             return
@@ -247,6 +258,9 @@ class PatchUpdateMixin:
         self._remote_update_checking = False
         if getattr(self, "_closing", False):
             return
+        detail_button = getattr(self, 'remote_update_details_btn', None)
+        if detail_button is not None:
+            detail_button.setVisible(bool(getattr(self, '_remote_update_diagnostic', None)))
         if ui_manifest:
             self._remote_ui_manifest = ui_manifest
             self._remote_non_ui_manifest = None

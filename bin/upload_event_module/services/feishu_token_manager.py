@@ -48,9 +48,10 @@ class FeishuTokenManager:
     def _credentials(self):
         refresher = getattr(config, 'refresh_credentials', None)
         loader = getattr(config, 'load', None)
+        refreshed_identity = None
         if callable(refresher):
             try:
-                refresher()
+                refreshed_identity = refresher()
             except Exception:
                 raise FeishuTokenError("Qt 飞书鉴权暂时无法读取，未使用旧配置。") from None
         elif callable(loader):
@@ -65,7 +66,9 @@ class FeishuTokenManager:
         app_id, secret = str(config.app_id or '').strip(), str(config.app_secret or '').strip()
         identity = app_id, secret
         if self._credential_identity is not None and identity != self._credential_identity:
-            config.user_token, config.token_expire_time = '', 0
+            # Canonical refresh already loads the token bound to this credential pair.
+            if refreshed_identity != identity:
+                config.user_token, config.token_expire_time = '', 0
             self._app_token_cache.clear()
         self._credential_identity = identity
         return app_id, secret

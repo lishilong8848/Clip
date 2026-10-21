@@ -157,6 +157,7 @@ class LearningCloud:
         self._sharing_schema_ready = False
         self._source_fields = {}
         self._entity_table_id = None
+        self.completion_schema_ready = False
         self._table_create_uncertain = False
         # Keep acknowledged uploads until the entity write is confirmed.
         self._pending_documents = {}
@@ -327,6 +328,8 @@ class LearningCloud:
                     raise LearningCloudError(f"源表年份字段缺失或类型不支持：{year}")
                 self._check_fields(fields, EXTRA_FIELDS)
             self._check_fields(entity_fields, ENTITY_FIELDS)
+            from .learning_completion import DISPLAY_FIELDS
+            self.completion_schema_ready = all(entity_fields.get(name, {}).get('type') == kind for name, kind in DISPLAY_FIELDS.items())
             if not table:
                 if self._table_create_uncertain:
                     raise LearningCloudWriteUncertain("上次建表结果未知且尚未查到表，请管理员核验后再初始化")
@@ -455,12 +458,18 @@ class LearningCloud:
             raise LearningCloudError('题库任务与已发布题目快照不一致，未写入')
         identity = f"sharing:{bid}:{q['id']}"
         metadata = {'source': 'meeting-sharing', 'sync_id': identity, 'batch_id': bid, 'question_id': q['id'], 'type': q['type']}
+        sources = batch.get('source', {}).get('sources', [])
+        if q.get('origin') == 'manual' or sources:
+            metadata['origin'] = q.get('origin', 'ai')
+            metadata['sources'] = [{name: source[name] for name in ('id', 'title', 'url', 'sha256', 'revision') if name in source}
+                                   for source in sources]
+        basis = '专业经验' if q.get('origin') == 'manual' else '纪要依据'
         fields = {
             '会议名称': _checked_text(_nonempty(batch.get('title'), 'title'), '会议名称'),
             '题目': q['stem'],
             '答案': q['reference_answer'] if q['type'] == 'interview' else '、'.join(chr(65 + i) for i in q['correct']),
-            '备注': f"题型：{QUESTION_TYPES[q['type']]}\n解析：{q['explanation']}\n纪要依据：{q['evidence']}",
-            '会议纪要链接': _checked_text(_nonempty(batch.get('url'), 'url'), '会议纪要链接'),
+            '备注': f"题型：{QUESTION_TYPES[q['type']]}\n解析：{q['explanation']}\n{basis}：{q['evidence']}",
+            '会议纪要链接': _checked_text(batch.get('url') or '', '会议纪要链接'),
             META_FIELD: _json_text(metadata, META_FIELD),
         }
         if q['options']:
@@ -489,6 +498,29 @@ class LearningCloud:
                 raise LearningCloudWriteUncertain('题库写入响应缺少记录ID，将核验原题后重试')
             return rid
 
+    def ensure_completion_schema(self, *, create=False, expected_table_id=None):
+        """Explicit deployment operation; ordinary reads/writes never create report columns."""
+        from .learning_completion import DISPLAY_FIELDS
+        if create:
+            self._require_write()
+        table = self._find_entity_table()
+        if not table:
+            raise LearningCloudError('画像学练数据表尚未就绪。')
+        if expected_table_id is not None and table != expected_table_id:
+            raise LearningCloudError('画像学练数据表与指定目标不一致，未新增字段。')
+        fields = self._fields(table)
+        self._check_fields(fields, DISPLAY_FIELDS)
+        missing = {name: kind for name, kind in DISPLAY_FIELDS.items() if name not in fields}
+        if create:
+            for name, kind in missing.items():
+                self._request('POST', f'tables/{table}/fields', {'field_name': name, 'type': kind},
+                              {'client_token': _client_token('field', table, name)})
+            fields = self._fields(table)
+            self._check_fields(fields, DISPLAY_FIELDS)
+            missing = {name: kind for name, kind in DISPLAY_FIELDS.items() if name not in fields}
+        self.completion_schema_ready = not missing
+        return {'table_id': table, 'ready': self.completion_schema_ready, 'missing': sorted(missing)}
+
     def upsert_entity(self, kind, key, payload, operation_id):
         self._require_write()
         _nonempty(operation_id, "operation_id")
@@ -513,6 +545,13 @@ class LearningCloud:
         with self._lock:
             self.ensure_schema()
             table = self._entity_table_id
+            if kind == 'daily_progress':
+                from .learning_completion import display_fields
+                if not self.completion_schema_ready:
+                    raise LearningCloudError('每日完成情况云列尚未由管理员初始化，日报保留本地等待重试。')
+                if payload.get('id') != key:
+                    raise LearningCloudError('每日完成情况业务键不一致。')
+                fields.update(display_fields(payload))
             rows = self._list_all(f"tables/{table}/records/search", {"filter": {
                 "conjunction": "and", "conditions": [
                     {"field_name": name, "operator": "is", "value": [value]}

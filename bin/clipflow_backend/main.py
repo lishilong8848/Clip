@@ -772,6 +772,10 @@ class FastAPIPortalController:
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
         install_link_directory_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.release_journal_routes import install_release_journal_routes
+        install_release_journal_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.document_library_portal import install_document_library_portal
+        install_document_library_portal(app, self, PortalRuntime)
         from lan_bitable_template_portal.workspace_layout_routes import install_workspace_layout_routes
         install_workspace_layout_routes(app, self, PortalRuntime)
         from public_access.certificate import install_certificate_routes
@@ -913,6 +917,7 @@ class FastAPIPortalController:
         @app.get("/life-guide")
         @app.get("/link-directory")
         @app.get("/knowledge-base")
+        @app.get("/document-library")
         @app.get("/work-handover")
         async def life_guide_page(request: Request):
             if self._current_session(request) is None:

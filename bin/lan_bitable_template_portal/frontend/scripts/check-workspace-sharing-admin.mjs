@@ -15,7 +15,7 @@ for(const name of ['LearningSharing','DrillManagementPage','CriticalGuardPage'])
   const adapted=name==='LearningSharing'?adaptLearningSharing(source):adaptModuleAdminEntry(source,name+'.vue');
   const parsed=parse(adapted);assert.deepEqual(parsed.errors,[]);compileScript(parsed.descriptor,{id:name,inlineTemplate:true});
 }
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,logLevel:'error',build:{outDir:process.env.CLIPFLOW_SHARING_PREVIEW_DIR || 'dist'},preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[],reads=[];
 let role='admin',version=1,failSave=true,publishes=0,deletes=0,saved;
 const scopes=['ALL','A','B','C','D','E','H','110'].map(value=>({value,label:value==='ALL'?'全部楼栋':value+'楼'}));
@@ -60,13 +60,11 @@ try{
  const tab=async text=>section().locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:text}).click();
  const screenshot=async name=>{await page.waitForTimeout(250);await page.screenshot({path:path.join(output,name+'.png'),animations:'disabled'});};
  await go('/learning&tab=sharing');await page.locator('.sharing-batch').click();
- await section().getByLabel('题干',{exact:true}).fill('核对题干修改应跨分区保留');
- assert.equal(await page.locator('.v2-sharing-questions>.sharing-question').count(),1,'only one question at a time');
+ await section().getByLabel('题干',{exact:true}).first().fill('核对题干修改应跨分区保留');
+ assert.equal(await page.locator('.v2-sharing-questions>.sharing-question').count(),5,'five questions per page');
  assert.equal(await page.getByRole('heading',{name:'参会人答题情况',exact:true}).count(),0);
- await section().getByRole('button',{name:'题目下一页',exact:true}).click();
  await page.locator('.sharing-question[data-type=multiple]').waitFor();
  await section().getByRole('checkbox',{name:'第2题选项B为正确答案',exact:true}).check();
- await section().getByRole('button',{name:'题目下一页',exact:true}).click();
  await section().getByLabel('参考答案（问答题不自动判分）').fill('核对参考答案修改');
  await screenshot('questions-pc');
  await tab('参会人');assert.equal(await section().locator('tbody tr').count(),12,'bounded attendee rows');
@@ -79,10 +77,10 @@ try{
  await page.keyboard.press('Escape');await page.locator('.v2-sharing-paper').waitFor({state:'hidden'});
  await tab('通知与同步');await section().getByText('题库同步 6 / 8 题',{exact:true}).waitFor();
  assert.equal(await section().locator('.sharing-question').count(),0);
- await tab('题目核对');await section().getByRole('button',{name:'题目上一页',exact:true}).click();await section().getByRole('button',{name:'题目上一页',exact:true}).click();
- assert.equal(await section().getByLabel('题干',{exact:true}).inputValue(),'核对题干修改应跨分区保留');
+ await tab('题目核对');
+ assert.equal(await section().getByLabel('题干',{exact:true}).first().inputValue(),'核对题干修改应跨分区保留');
  await section().getByRole('button',{name:'保存题目与名单',exact:true}).click();await page.getByText('隔离保存失败',{exact:true}).waitFor();
- assert.equal(await section().getByLabel('题干',{exact:true}).inputValue(),'核对题干修改应跨分区保留');
+ assert.equal(await section().getByLabel('题干',{exact:true}).first().inputValue(),'核对题干修改应跨分区保留');
  await section().getByRole('button',{name:'保存题目与名单',exact:true}).click();await page.getByText('题目与答题名单已保存。',{exact:true}).waitFor();
  assert.deepEqual(saved.excluded_open_ids,['person-1']);assert.deepEqual(saved.questions[1].correct,[0,1,2,3]);assert.equal(saved.questions[2].reference_answer,'核对参考答案修改');
  for(const width of [1366,390]){
@@ -95,6 +93,7 @@ try{
  await page.reload();await page.locator('.sharing-batch').click();await page.getByRole('heading',{name:'参会人答题情况',exact:true}).waitFor();
  assert.equal(await section().getByRole('checkbox').count(),0,'published roster is immutable');
  await page.setViewportSize({width:1440,height:900});
+ if(!process.argv.includes('--sharing-only')) {
  for(const url of ['/drill-management','/critical-guard']){
   for(const scope of ['A','H']){
    await go(url+'&scope='+scope);const admin=page.getByRole('button',{name:'管理员入口',exact:true});await admin.waitFor();await admin.click();
@@ -111,6 +110,8 @@ try{
  await screenshot('settings');assert.equal(await page.locator('.v2-settings-picker').count(),1);
  role='member';await go('/drill-management&scope=A&mode=admin');await page.locator('.drill-page').waitFor();assert.equal(await page.getByRole('button',{name:'管理员入口',exact:true}).count(),0);assert.equal(await page.locator('.drill-page .admin-view').count(),0);
  await go('/critical-guard&scope=A');await page.locator('.guard-page').waitFor();assert.equal(await page.getByRole('button',{name:'管理员入口',exact:true}).count(),0);
+ }
+ role='member';
  await go('/learning&tab=sharing');await page.locator('.sharing-batch').click();await tab('我的题目');
  assert.equal(await section().locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'通知与同步'}).count(),0);assert.equal(await section().locator('textarea').count(),0);
  assert.equal(await section().getByRole('button',{name:'删除批次',exact:true}).count(),0);
@@ -120,5 +121,5 @@ try{
  await confirmation.getByRole('button',{name:'取消',exact:true}).click();assert.equal(deletes,0);
  await section().getByRole('button',{name:'删除批次',exact:true}).click();await confirmation.getByRole('button',{name:'删除批次',exact:true}).click();
  await section().getByText('批次已删除，已上传题目保留。',{exact:true}).waitFor();assert.equal(deletes,1);assert.equal(await page.locator('.sharing-batch').count(),0);
- assert.deepEqual(errors,[]);console.log('PASS: sharing sections, one-question editing, draft preservation/retry, participant pagination, result modal, original confirmation, PC/mobile, admin entry and single settings navigation. All writes mocked.');
+ assert.deepEqual(errors,[]);console.log('PASS: sharing sections, five-question editing, draft preservation/retry, participant pagination, result modal, original confirmation, PC/mobile and delete confirmation. All writes mocked.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

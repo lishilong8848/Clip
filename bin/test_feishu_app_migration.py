@@ -112,6 +112,356 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(self.effective(secret="not-needed"), (migration.TARGET_APP_ID, NEW_SECRET))
         self.assertEqual(self.agent_path.read_bytes(), before)
 
+    def test_pending_target_valid_profile_clears_old_token_atomically_and_only_once(self):
+        module = self.config_module()
+        self.legacy_profile()
+        migration.upgrade_deployment_profile(profile_path=self.profile)
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET}
+        store = self.store_settings(initial)
+        history = {"turns": ["fixture-history"], "permissions": {"admin": False}}
+        store.put_document("lighthouse_ai", "fixture-person", history)
+        manager = module.ConfigManager()
+        expected = {**initial, "feishu_user_token": "", "token_expire_time": 0, migration.MIGRATION_MARKER: 2}
+        self.assertEqual(store.get_settings(), expected)
+        self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), (migration.TARGET_APP_ID, NEW_SECRET, ""))
+        self.assertEqual(store.get_document("lighthouse_ai", "fixture-person"), history)
+        self.assertTrue(manager.save_tenant_token("fixture-current-token", 9999999999,
+                        expected_credentials=(migration.TARGET_APP_ID, NEW_SECRET)))
+        with patch.object(migration, "_profile", side_effect=AssertionError("completed migration must not need profile")):
+            restarted = module.ConfigManager()
+        self.assertEqual(restarted.user_token, "fixture-current-token")
+
+    def test_pending_target_without_profile_bootstrap_discards_supplied_token(self):
+        module = self.config_module()
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET}
+        atomic_json(self.root / "config.json", initial)
+        store = self.store_settings({})
+        manager = module.ConfigManager()
+        self.assertEqual((manager.app_id, manager.app_secret), (migration.TARGET_APP_ID, NEW_SECRET))
+        self.assertEqual(store.get_settings(), {**initial, "feishu_user_token": "", "token_expire_time": 0,
+                                               migration.MIGRATION_MARKER: 2})
+        self.assertEqual((manager.user_token, manager.token_expire_time), ("", 0))
+
+    def test_pending_target_new_qt_install_validates_profile_and_clears_input_token(self):
+        module = self.config_module()
+        self.build()
+        store = self.store_settings({})
+        manager = module.ConfigManager()
+        self.assertFalse(manager.save(app_id=migration.TARGET_APP_ID, app_secret=SOURCE_SECRET))
+        self.assertIsNone(store.get_settings())
+        self.assertTrue(manager.save(app_id=migration.TARGET_APP_ID, app_secret=NEW_SECRET,
+                                     user_token="fixture-untrusted-token", token_expire_time=9999999999))
+        self.assertEqual(store.get_settings(), {"feishu_app_id": migration.TARGET_APP_ID,
+                         "feishu_app_secret": NEW_SECRET, "feishu_user_token": "", "token_expire_time": 0,
+                         migration.MIGRATION_MARKER: 2})
+
+    def test_empty_qt_save_cannot_mark_new_install_complete_and_bypass_target_validation(self):
+        module = self.config_module()
+        self.build()
+        store = self.store_settings({})
+        manager = module.ConfigManager()
+        self.assertTrue(manager.save(app_id="", app_secret=""))
+        before = store.get_settings()
+        self.assertNotIn(migration.MIGRATION_MARKER, before)
+        self.assertFalse(manager.save(app_id=migration.TARGET_APP_ID, app_secret=SOURCE_SECRET))
+        self.assertEqual(store.get_settings(), before)
+
+    def test_pending_target_missing_secret_cannot_complete_even_without_profile(self):
+        module = self.config_module()
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": ""}
+        store = self.store_settings(initial)
+        for has_profile in (False, True):
+            with self.subTest(has_profile=has_profile):
+                if has_profile:
+                    self.build()
+                manager = module.ConfigManager()
+                self.assertEqual(manager.feishu_app_migration_error, "qt_secret_invalid")
+                self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), ("", "", ""))
+                self.assertEqual(store.get_settings(), initial)
+                self.assertFalse(self.agent_path.exists())
+
+    def test_pending_target_mismatch_blocks_load_refresh_oauth_and_token_requests(self):
+        module = self.config_module()
+        self.build()
+        from upload_event_module.services import feishu_token_manager as auth
+        from lan_bitable_template_portal import portal_auth
+        from unittest.mock import Mock
+        for mode in ("v2", "installed-app-v1"):
+            with self.subTest(mode=mode):
+                if mode == "installed-app-v1":
+                    self.legacy_profile()
+                    migration.upgrade_deployment_profile(profile_path=self.profile)
+                initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, migration.MIGRATION_MARKER: 0}
+                store = self.store_settings(initial)
+                with patch.object(migration, "_decrypt", side_effect=AssertionError("must not guess old identity")), \
+                        patch.object(module, "log_error") as logged:
+                    manager = module.ConfigManager()
+                self.assertEqual(manager.feishu_app_migration_error, "profile_target_mismatch")
+                self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), ("", "", ""))
+                self.assertEqual(store.get_settings(), initial)
+                self.assertFalse(self.agent_path.exists())
+                with self.assertRaisesRegex(migration.FeishuAppMigrationError, "migration_pending"):
+                    manager.refresh_credentials()
+                http = Mock()
+                tokens = auth.FeishuTokenManager(http_client=http)
+                with patch.object(auth, "config", manager), patch.object(portal_auth, "config", manager), \
+                        patch.object(portal_auth, "token_manager", tokens), \
+                        patch.object(tokens, "_request_tenant_token_sdk") as sdk:
+                    with self.assertRaises(auth.FeishuTokenError):
+                        tokens.get_tenant_token()
+                    self.assertFalse(portal_auth.PortalAuthManager.configured())
+                http.request_json.assert_not_called()
+                sdk.assert_not_called()
+                for secret in (SOURCE_SECRET, NEW_SECRET, initial["feishu_user_token"]):
+                    self.assertNotIn(secret, str(logged.call_args_list))
+
+    def test_pending_target_corrupt_profile_fails_without_completion_or_mirror(self):
+        module = self.config_module()
+        self.build()
+        self.profile.write_bytes(b'{"unfinished":')
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET}
+        store = self.store_settings(initial)
+        manager = module.ConfigManager()
+        self.assertEqual(manager.feishu_app_migration_error, "profile_format")
+        self.assertEqual(store.get_settings(), initial)
+        self.assertFalse(self.agent_path.exists())
+
+    def test_pending_target_qt_repair_validates_candidate_then_commits_without_old_token(self):
+        module = self.config_module()
+        self.build()
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID}
+        store = self.store_settings(initial)
+        manager = module.ConfigManager()
+        self.assertTrue(manager.save(app_id=migration.TARGET_APP_ID, app_secret=NEW_SECRET,
+                                     user_token="fixture-stale-input", token_expire_time=9999999999,
+                                     table_id_weibao="fixture-repaired-table"))
+        self.assertEqual(store.get_settings(), {**initial, "feishu_app_secret": NEW_SECRET,
+                         "feishu_user_token": "", "token_expire_time": 0,
+                         "table_id_weibao": "fixture-repaired-table", migration.MIGRATION_MARKER: 2})
+        self.assertEqual((manager.app_secret, manager.user_token), (NEW_SECRET, ""))
+        self.assertEqual(manager.last_save_error, {})
+
+    def test_pending_target_qt_wrong_candidate_rolls_back_credentials_marker_and_settings(self):
+        module = self.config_module()
+        self.build()
+        manager = module.ConfigManager()
+        for stored_secret in (SOURCE_SECRET, NEW_SECRET):
+            with self.subTest(valid_stored_secret=stored_secret == NEW_SECRET):
+                initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID,
+                           "feishu_app_secret": stored_secret, migration.MIGRATION_MARKER: 0}
+                store = self.store_settings(initial)
+                self.assertFalse(manager.save(app_id=migration.TARGET_APP_ID, app_secret="fixture-wrong-candidate",
+                                               table_id_weibao="must-not-commit"))
+                self.assertEqual(store.get_settings(), initial)
+                self.assertEqual(manager.last_save_error["code"], "settings_credentials_blocked")
+        self.assertFalse(self.agent_path.exists())
+
+    def test_pending_target_cannot_save_token_before_migration_finishes(self):
+        module = self.config_module()
+        manager = module.ConfigManager()
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET}
+        store = self.store_settings(initial)
+        self.assertFalse(manager.save_tenant_token("fixture-late-token", 9999999999,
+                                                  expected_credentials=(migration.TARGET_APP_ID, NEW_SECRET)))
+        self.assertEqual(store.get_settings(), initial)
+
+    def test_pending_target_marker_and_token_clear_roll_back_together_on_write_failure(self):
+        module = self.config_module()
+        self.build()
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET}
+        store = self.store_settings(initial)
+        write = migration.write_settings
+        def failed_completion(connection, values):
+            write(connection, values)
+            if migration.MIGRATION_MARKER in values:
+                raise sqlite3.OperationalError("fixture-injected-failure")
+        with patch.object(migration, "write_settings", side_effect=failed_completion):
+            manager = module.ConfigManager()
+        self.assertEqual(store.get_settings(), initial)
+        self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), ("", "", ""))
+        self.assertFalse(self.agent_path.exists())
+
+    def test_verified_agent_recovers_different_installed_source_and_preserves_ownership(self):
+        module = self.config_module()
+        self.legacy_profile()
+        migration.upgrade_deployment_profile(profile_path=self.profile)
+        self.agent(enabled=False)
+        mirror = self.agent_path.read_bytes()
+        initial = {**self.source, "feishu_app_secret": "fixture-other-install-secret"}
+        store = self.store_settings(initial)
+        history = {"turns": ["fixture-original-history"]}
+        permissions = {"version": 2, "users": {"fixture-user": {"scopes": ["A"], "admin": False}}}
+        session = {"user": {"open_id": "fixture-user"}, "expires_at": 9999999999}
+        store.put_document("lighthouse_ai", "fixture-person", history)
+        store.put_auth_permissions(permissions)
+        store.put_auth_session("fixture-session", session)
+        saved_permissions, saved_session = store.get_auth_permissions(), store.get_auth_session("fixture-session")
+        with patch.object(migration, "_decrypt", wraps=migration._decrypt) as decrypt, \
+                patch.object(module, "log_info") as logged:
+            manager = module.ConfigManager()
+        decrypt.assert_called_once()
+        self.assertEqual(sum("迁移已提交" in str(call) for call in logged.call_args_list), 1)
+        self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), (migration.TARGET_APP_ID, NEW_SECRET, ""))
+        self.assertEqual(store.get_settings(), {**initial, "feishu_app_id": migration.TARGET_APP_ID,
+                         "feishu_app_secret": NEW_SECRET, "feishu_user_token": "", "token_expire_time": 0,
+                         migration.MIGRATION_MARKER: 2})
+        self.assertEqual(store.get_document("lighthouse_ai", "fixture-person"), history)
+        self.assertEqual(store.get_auth_permissions(), saved_permissions)
+        self.assertEqual(store.get_auth_session("fixture-session"), saved_session)
+        self.assertEqual(self.agent_path.read_bytes(), mirror)
+        with patch.object(migration, "_agent_secret", side_effect=AssertionError("recovery must run only once")):
+            self.assertEqual(module.ConfigManager().refresh_credentials(), (migration.TARGET_APP_ID, NEW_SECRET))
+
+    def test_verified_agent_recovers_pending_target_mismatch_and_missing_source_secret(self):
+        module = self.config_module()
+        self.legacy_profile()
+        migration.upgrade_deployment_profile(profile_path=self.profile)
+        self.agent()
+        for app, secret in ((migration.TARGET_APP_ID, SOURCE_SECRET), (migration.TARGET_APP_ID, ""), (SOURCE_APP_ID, "")):
+            with self.subTest(target=app == migration.TARGET_APP_ID, missing=not secret):
+                initial = {**self.source, "feishu_app_id": app, "feishu_app_secret": secret, migration.MIGRATION_MARKER: 0}
+                store = self.store_settings(initial)
+                manager = module.ConfigManager()
+                self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), (migration.TARGET_APP_ID, NEW_SECRET, ""))
+                self.assertEqual(store.get_settings(), {**initial, "feishu_app_id": migration.TARGET_APP_ID,
+                                 "feishu_app_secret": NEW_SECRET, "feishu_user_token": "", "token_expire_time": 0,
+                                 migration.MIGRATION_MARKER: 2})
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows DPAPI integration")
+    def test_verified_agent_recovery_uses_real_dpapi_with_synthetic_secret(self):
+        from openclaw_service.assistant.lighthouse_ai import protect_key, unprotect_key
+        module = self.config_module()
+        self.build()
+        self.agent(secret_cipher=protect_key(NEW_SECRET), bridge_cipher=protect_key("fixture-bridge"))
+        self.store_settings({**self.source, "feishu_app_secret": "fixture-other-install-secret"})
+        with patch.object(migration, "protect_key", protect_key), patch.object(migration, "unprotect_key", unprotect_key):
+            manager = module.ConfigManager()
+        self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), (migration.TARGET_APP_ID, NEW_SECRET, ""))
+
+    def test_unverified_agent_never_recovers_or_reads_other_credential_copies(self):
+        module = self.config_module()
+        self.build()
+        initial = {**self.source, "feishu_app_secret": "fixture-other-install-secret"}
+        store = self.store_settings(initial)
+        other = {"feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET}
+        atomic_json(self.root / "config.json", other)
+        atomic_json(migration.PACKAGED_CONFIG_PATH, other)
+        cases = ("other-app", "wrong-secret", "bad-dpapi", "missing", "plaintext-only", "invalid-json")
+        for case in cases:
+            with self.subTest(case=case):
+                self.agent()
+                if case == "other-app":
+                    self.agent(app_id=SOURCE_APP_ID)
+                elif case == "wrong-secret":
+                    self.agent(secret_cipher=protect("fixture-wrong-target-secret"))
+                elif case == "bad-dpapi":
+                    self.agent(secret_cipher="fixture-not-decryptable")
+                elif case == "missing":
+                    self.agent_path.unlink()
+                elif case == "plaintext-only":
+                    atomic_json(self.agent_path, {"app_id": migration.TARGET_APP_ID, "app_secret": NEW_SECRET})
+                else:
+                    self.agent_path.write_bytes(b'{"unfinished":')
+                before = self.agent_path.read_bytes() if self.agent_path.exists() else None
+                with patch.object(migration, "_read_object", wraps=migration._read_object) as read, \
+                        patch.object(module, "log_error") as logged:
+                    manager = module.ConfigManager()
+                self.assertEqual(manager.feishu_app_migration_error, "profile_authentication")
+                self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), ("", "", ""))
+                self.assertEqual(store.get_settings(), initial)
+                self.assertEqual(self.agent_path.read_bytes() if self.agent_path.exists() else None, before)
+                self.assertTrue(all(Path(call.args[0]) in {self.profile, self.agent_path} for call in read.call_args_list))
+                for value in (NEW_SECRET, SOURCE_SECRET, initial["feishu_app_secret"]):
+                    self.assertNotIn(value, str(logged.call_args_list))
+
+    def test_invalid_profile_never_uses_even_a_valid_local_agent(self):
+        module = self.config_module()
+        self.build()
+        self.agent()
+        before = self.agent_path.read_bytes()
+        initial = {**self.source, "feishu_app_secret": "fixture-other-install-secret"}
+        store = self.store_settings(initial)
+        self.profile.write_bytes(b'{"unfinished":')
+        with patch.object(migration, "_agent_secret", side_effect=AssertionError("invalid profile cannot authorize recovery")):
+            manager = module.ConfigManager()
+        self.assertEqual(manager.feishu_app_migration_error, "profile_format")
+        self.assertEqual(store.get_settings(), initial)
+        self.assertEqual(self.agent_path.read_bytes(), before)
+
+    def test_completed_migration_never_recovers_missing_or_rotated_qt_secret_from_agent(self):
+        module = self.config_module()
+        self.build()
+        self.agent()
+        for secret in ("fixture-user-rotated-secret", ""):
+            with self.subTest(missing=not secret):
+                initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID,
+                           "feishu_app_secret": secret, migration.MIGRATION_MARKER: 2}
+                store = self.store_settings(initial)
+                with patch.object(migration, "_agent_secret", side_effect=AssertionError("completed Qt authority cannot be replaced")):
+                    manager = module.ConfigManager()
+                self.assertEqual(store.get_settings(), initial)
+                self.assertEqual(manager.app_secret, secret)
+
+    def test_verified_agent_recovery_rolls_back_if_canonical_write_fails(self):
+        module = self.config_module()
+        self.build()
+        self.agent()
+        before = self.agent_path.read_bytes()
+        initial = {**self.source, "feishu_app_secret": "fixture-other-install-secret"}
+        store = self.store_settings(initial)
+        write = migration.write_settings
+        def fail(connection, values):
+            write(connection, values)
+            raise sqlite3.OperationalError("fixture-write-failure")
+        with patch.object(migration, "write_settings", side_effect=fail) as writes, \
+                patch.object(module, "log_info") as logged:
+            manager = module.ConfigManager()
+        writes.assert_called_once()
+        self.assertFalse(any("迁移已提交" in str(call) for call in logged.call_args_list))
+        self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), ("", "", ""))
+        self.assertEqual(store.get_settings(), initial)
+        self.assertEqual(self.agent_path.read_bytes(), before)
+
+    def test_correct_qt_candidate_precedes_local_agent_recovery(self):
+        module = self.config_module()
+        self.build()
+        self.agent(secret_cipher=protect("fixture-other-target-secret"))
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID}
+        store = self.store_settings(initial)
+        manager = module.ConfigManager()
+        with patch.object(migration, "_agent_secret", side_effect=AssertionError("valid Qt candidate must win")):
+            self.assertTrue(manager.save(app_id=migration.TARGET_APP_ID, app_secret=NEW_SECRET))
+        self.assertEqual((manager.app_secret, manager.user_token), (NEW_SECRET, ""))
+        self.assertEqual(store.get_settings()["feishu_app_secret"], NEW_SECRET)
+        self.assertEqual(store.get_settings()[migration.MIGRATION_MARKER], 2)
+
+    def test_wrong_explicit_qt_candidate_cannot_be_replaced_by_valid_agent(self):
+        module = self.config_module()
+        self.build()
+        manager = module.ConfigManager()
+        self.agent()
+        mirror = self.agent_path.read_bytes()
+        initial = {**self.source, "feishu_app_id": migration.TARGET_APP_ID}
+        store = self.store_settings(initial)
+        with patch.object(migration, "_agent_secret", side_effect=AssertionError("explicit candidate cannot use recovery")):
+            self.assertFalse(manager.save(app_id=migration.TARGET_APP_ID, app_secret="fixture-wrong-input",
+                                          table_id_weibao="must-not-save"))
+        self.assertEqual(store.get_settings(), initial)
+        self.assertEqual(self.agent_path.read_bytes(), mirror)
+        self.assertEqual(manager.last_save_error["code"], "settings_credentials_blocked")
+        manager.load()
+        self.assertEqual((manager.app_secret, manager.user_token), (NEW_SECRET, ""))
+        self.assertEqual(store.get_settings()["table_id_weibao"], initial["table_id_weibao"])
+
+    def test_normal_profile_decrypt_precedes_local_agent_recovery(self):
+        module = self.config_module()
+        self.build()
+        self.agent(secret_cipher=protect("fixture-other-target-secret"))
+        self.store_settings(self.source)
+        with patch.object(migration, "_agent_secret", side_effect=AssertionError("valid source must use profile")):
+            manager = module.ConfigManager()
+        self.assertEqual((manager.app_id, manager.app_secret, manager.user_token), (migration.TARGET_APP_ID, NEW_SECRET, ""))
+
     def test_profile_has_no_plaintext_secrets_tokens_or_decryption_key(self):
         self.assertEqual(self.build(), self.profile)
         raw = self.profile.read_text()
@@ -728,7 +1078,8 @@ print('done', flush=True)
         module = self.config_module()
         self.build()
         self.agent()
-        self.store_settings({**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET})
+        self.store_settings({**self.source, "feishu_app_id": migration.TARGET_APP_ID,
+                             "feishu_app_secret": NEW_SECRET, migration.MIGRATION_MARKER: 2})
         path = self.root / "config.json"
         for raw in (b'{"unfinished":', b" " * (migration.CONFIG_MAX_BYTES + 1)):
             with self.subTest(size=len(raw)):
@@ -770,7 +1121,8 @@ print('done', flush=True)
         self.build()
         self.profile.write_bytes(b'{"unfinished":')
         self.agent()
-        self.store_settings({**self.source, "feishu_app_id": migration.TARGET_APP_ID, "feishu_app_secret": NEW_SECRET})
+        self.store_settings({**self.source, "feishu_app_id": migration.TARGET_APP_ID,
+                             "feishu_app_secret": NEW_SECRET, migration.MIGRATION_MARKER: 2})
         atomic_json(self.root / "config.json", self.source)
         before = (self.root / "config.json").read_bytes()
         with self.assertLogs(migration._LOG, level="WARNING"):

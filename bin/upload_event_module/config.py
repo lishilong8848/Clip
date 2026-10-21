@@ -13,7 +13,7 @@ from .utils import (
 from .logger import log_info, log_error
 from .services.feishu_app_migration import (
     CREDENTIAL_FIELDS, TARGET_APP_ID, MIGRATION_MARKER, FeishuAppMigrationError, cleanup_legacy_configs,
-    migrate_config, migration_complete, qt_settings_transaction, read_credentials, sync_agent_config, write_settings,
+    effective_credentials, migrate_config, migration_complete, qt_settings_transaction, read_credentials, sync_agent_config, write_settings,
 )
 
 # 飞书 SDK 默认配置
@@ -73,9 +73,51 @@ DEFAULT_POLLING_WORK_ORDER_PUBLIC_RELAY_URL = ""
 
 CONFIG_FILE = get_data_file_path("config.json")
 
+
+_SAVE_ERRORS = {
+    "settings_save_failed": "配置未保存，请查看本地日志中的保存错误代码。",
+    "settings_database_busy": "配置未保存：本地数据库正忙，请稍后再保存。",
+    "settings_database_failed": "配置未保存：本地数据库不可写，请检查数据目录。",
+    "settings_permission_denied": "配置未保存：数据目录没有写入权限。",
+    "settings_io_failed": "配置未保存：本地文件写入失败，请检查磁盘空间和数据目录权限。",
+    "settings_runtime_incomplete": "配置未保存：保存组件尚未完整加载，请重启程序后再保存。",
+    "settings_invalid": "配置未保存：设置内容格式无效，请检查输入。",
+    "settings_credentials_changed": "配置未保存：飞书凭据已变化，请重新打开设置后再保存。",
+    "settings_credentials_blocked": "配置未保存：飞书凭据校验未通过，请检查当前应用 ID 和密钥。",
+    "settings_worker_unavailable": "配置未保存：后台保存任务不可用，请重新打开设置。",
+    "settings_saved_reload_failed": "配置已保存，但运行时加载失败，请重启程序；无需重复保存。",
+    "settings_saved_mirror_failed": "配置已保存，Qt 鉴权已加载，但飞书智能体配置同步失败，请检查数据目录权限后重新加载。",
+    "relay_url_change_blocked": "配置未保存：存在未结束的公网工单，或其状态无法核验，不能修改工单地址。",
+}
+
+
+def settings_save_failure(exc=None, *, code=None):
+    """Return only fixed, non-sensitive messages suitable for the Qt dialog."""
+    if code not in _SAVE_ERRORS:
+        if isinstance(exc, FeishuAppMigrationError):
+            code = "settings_credentials_blocked"
+        elif isinstance(exc, NameError):
+            code = "settings_runtime_incomplete"
+        elif isinstance(exc, PermissionError):
+            code = "settings_permission_denied"
+        elif isinstance(exc, sqlite3.Error):
+            sqlite_code = getattr(exc, "sqlite_errorcode", 0)
+            code = ("settings_database_busy" if sqlite_code & 0xff in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                    else "settings_database_failed")
+        elif isinstance(exc, OSError):
+            code = "settings_io_failed"
+        elif isinstance(exc, (ValueError, TypeError)):
+            code = "settings_invalid"
+        else:
+            code = "settings_save_failed"
+    return {"code": code, "error": _SAVE_ERRORS[code]}
+
+
 class ConfigManager:
     def __init__(self):
         self._credential_lock = threading.RLock()
+        self._save_status = threading.local()
+        self._credential_read_error = {}
         self.app_token = DEFAULT_FEISHU_APP_TOKEN
         self.user_token = DEFAULT_FEISHU_USER_TOKEN
         self.app_id = DEFAULT_FEISHU_APP_ID
@@ -158,16 +200,37 @@ class ConfigManager:
         return table_map.get(notice_type, "")
 
     def _load_config_from_sqlite(self):
-        try:
-            from lan_bitable_template_portal.state_store import LanPortalStateStore
-
-            return LanPortalStateStore().get_settings()
-        except Exception as exc:
-            log_error(f"系统: SQLite配置读取失败: {exc}")
+        database = Path(CONFIG_FILE).with_name("lan_portal_state.sqlite3").resolve()
+        if not database.exists():
             return None
+        # A settings read must not initialize the business schema or acquire a writer lock.
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone():
+                return None
+            rows = connection.execute("SELECT key, value_json FROM settings").fetchall()
+        return {key: json.loads(value) for key, value in rows} if rows else None
+
+    @property
+    def last_save_error(self):
+        return dict(getattr(getattr(self, "_save_status", None), "error", {}))
+
+    def _record_save_failure(self, exc=None, *, code=None):
+        if not hasattr(self, "_save_status"):
+            self._save_status = threading.local()
+        self._save_status.error = settings_save_failure(exc, code=code)
+        location = ""
+        trace = getattr(exc, "__traceback__", None)
+        if trace is not None:
+            while trace.tb_next is not None:
+                trace = trace.tb_next
+            location = f" at {Path(trace.tb_frame.f_code.co_filename).name}:{trace.tb_lineno}"
+        kind = type(exc).__name__ if exc is not None else "blocked"
+        status = "配置已保存，后续处理失败" if self._save_status.error["code"].startswith("settings_saved_") else "配置保存失败"
+        log_error(f"系统: {status} [{self._save_status.error['code']}] ({kind}){location}")
 
     def _save_config_to_sqlite(self, config_data: dict, *, expected_credentials=None, bootstrap=False) -> bool:
         if not isinstance(config_data, dict):
+            self._record_save_failure(code="settings_invalid")
             return False
         try:
             with self._credential_lock, qt_settings_transaction(os.path.dirname(CONFIG_FILE)) as connection:
@@ -175,46 +238,73 @@ class ConfigManager:
                     return True
                 current = read_credentials(connection)
                 identity = current["feishu_app_id"], current["feishu_app_secret"]
+                was_complete = migration_complete(connection)
+                allow_agent_recovery = bootstrap or not config_data
                 changes = dict(config_data)
                 changing_auth = bool({"feishu_app_id", "feishu_app_secret"} & changes.keys())
                 writing_token = bool({"feishu_user_token", "token_expire_time"} & changes.keys())
                 if writing_token and not changing_auth and expected_credentials != identity:
+                    self._record_save_failure(code="settings_credentials_changed")
                     return False
-                if writing_token and not changing_auth and identity[0].startswith("cli_") and identity[0] != TARGET_APP_ID and not migration_complete(connection):
+                if writing_token and not changing_auth and identity[0].startswith("cli_") and not was_complete:
+                    self._record_save_failure(code="settings_credentials_blocked")
                     return False
                 candidate = {**current, **{key: value for key, value in changes.items() if key in CREDENTIAL_FIELDS}}
-                if changing_auth and not bootstrap and (not identity[0] or identity[0] == TARGET_APP_ID):
+                if candidate["feishu_app_id"] == TARGET_APP_ID and not was_complete:
+                    # Validate the candidate through canonical reads; failure rolls back this entire transaction.
+                    write_settings(connection, candidate)
+                elif changing_auth and not bootstrap and not identity[0] and candidate["feishu_app_id"]:
                     write_settings(connection, {MIGRATION_MARKER: 2})
-                migrated = migrate_config(candidate, data_dir=os.path.dirname(CONFIG_FILE), _connection=connection)
-                if migrated is not candidate or (not bootstrap and
+                migrated = migrate_config(candidate, data_dir=os.path.dirname(CONFIG_FILE), _connection=connection,
+                                          _allow_agent_recovery=allow_agent_recovery)
+                completed_migration = not was_complete and migration_complete(connection)
+                if migrated is not candidate or completed_migration or (not bootstrap and
                         (migrated["feishu_app_id"], migrated["feishu_app_secret"]) != identity):
                     changes.update({key: migrated[key] for key in CREDENTIAL_FIELDS})
                     changes.update(feishu_user_token="", token_expire_time=0)
                 write_settings(connection, changes)
+                # Validate the resulting canonical rows before the transaction commits.
+                saved = read_credentials(connection)
+                if saved["feishu_app_id"].startswith("cli_"):
+                    effective_credentials(saved["feishu_app_id"], saved["feishu_app_secret"],
+                                          data_root=os.path.dirname(CONFIG_FILE), _connection=connection,
+                                          _allow_agent_recovery=allow_agent_recovery)
+            if completed_migration:
+                try:
+                    log_info("系统: 飞书凭据迁移已提交到Qt SQLite；镜像同步尚待完成。")
+                except Exception:
+                    pass
             return True
         except FeishuAppMigrationError:
             raise
         except Exception as exc:
-            log_error(f"系统: SQLite配置保存失败 ({type(exc).__name__})")
+            self._record_save_failure(exc)
             return False
 
     def refresh_credentials(self) -> tuple[str, str]:
         """Read only authoritative auth rows; never fall back to an old snapshot."""
         with self._credential_lock:
+            database = None
             try:
-                database = Path(CONFIG_FILE).with_name("lan_portal_state.sqlite3")
-                with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+                database = Path(CONFIG_FILE).with_name("lan_portal_state.sqlite3").resolve()
+                with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
                     current = read_credentials(connection, include_migration=True)
-                if current["feishu_app_id"].startswith("cli_") and current["feishu_app_id"] != TARGET_APP_ID and current[MIGRATION_MARKER] != 2:
+                if current["feishu_app_id"].startswith("cli_") and current[MIGRATION_MARKER] != 2:
                     raise FeishuAppMigrationError("migration_pending")
                 self.app_id, self.app_secret, self.user_token, self.token_expire_time = (
                     current[key] for key in CREDENTIAL_FIELDS)
                 self.feishu_app_migration_error = ""
+                self._credential_read_error = {}
                 return self.app_id, self.app_secret
             except Exception as exc:
                 self.app_id = self.app_secret = self.user_token = ""
                 self.token_expire_time = 0
                 self.feishu_app_migration_error = exc.code if isinstance(exc, FeishuAppMigrationError) else "settings_read_failed"
+                context = {"code": self.feishu_app_migration_error, "kind": type(exc).__name__,
+                           "database": str(database) if database is not None else "unavailable"}
+                if context != getattr(self, "_credential_read_error", {}):
+                    log_error(f"系统: Qt鉴权读取失败 [{context['code']}] ({context['kind']}) SQLite={context['database']}")
+                self._credential_read_error = context
                 raise FeishuAppMigrationError(self.feishu_app_migration_error) from None
 
     def save_tenant_token(self, token, expire, expected_credentials) -> bool:
@@ -267,6 +357,7 @@ class ConfigManager:
 
     def _load(self):
         """加载配置文件"""
+        self.feishu_agent_sync_error = ""
         try:
             config_data = self._load_config_from_sqlite()
             if config_data is None and os.path.exists(CONFIG_FILE):
@@ -276,18 +367,25 @@ class ConfigManager:
                     if not self._save_config_to_sqlite(config_data, bootstrap=True):
                         raise FeishuAppMigrationError("settings_persist_failed")
                     config_data = self._load_config_from_sqlite()
+            if config_data is None:
+                config_data = {}
             if isinstance(config_data, dict):
                     try:
                         migrated = config_data
-                        if str(config_data.get("feishu_app_id", "")).startswith("cli_"):
+                        if str(config_data.get("feishu_app_id", "")).startswith("cli_") and config_data.get(MIGRATION_MARKER) != 2:
                             if not self._save_config_to_sqlite({}):
                                 raise FeishuAppMigrationError("settings_persist_failed")
                         if str(config_data.get("feishu_app_id", "")).startswith("cli_"):
                             self.refresh_credentials()
                             migrated = {**config_data, **dict(zip(CREDENTIAL_FIELDS, (
                                 self.app_id, self.app_secret, self.user_token, self.token_expire_time)))}
-                        sync_agent_config(migrated.get("feishu_app_id", ""), migrated.get("feishu_app_secret", ""),
-                                          data_root=os.path.dirname(CONFIG_FILE))
+                        try:
+                            sync_agent_config(migrated.get("feishu_app_id", ""), migrated.get("feishu_app_secret", ""),
+                                              data_root=os.path.dirname(CONFIG_FILE))
+                        except Exception as exc:
+                            # The mirror cannot invalidate credentials already read from canonical SQLite.
+                            self.feishu_agent_sync_error = getattr(exc, "code", "agent_config_sync_failed")
+                            log_error(f"系统: 飞书智能体配置同步失败 ({type(exc).__name__})")
                         cleanup_legacy_configs(migrated.get("feishu_app_id", ""), data_root=os.path.dirname(CONFIG_FILE))
                         config_data = migrated
                         self.feishu_app_migration_error = ""
@@ -303,10 +401,10 @@ class ConfigManager:
                         "feishu_user_token", DEFAULT_FEISHU_USER_TOKEN
                     )
                     self.app_id = config_data.get(
-                        "feishu_app_id", self.app_id
+                        "feishu_app_id", DEFAULT_FEISHU_APP_ID
                     )
                     self.app_secret = config_data.get(
-                        "feishu_app_secret", self.app_secret
+                        "feishu_app_secret", DEFAULT_FEISHU_APP_SECRET
                     )
                     self.token_expire_time = config_data.get("token_expire_time", 0)
                     # 加载3个表格ID
@@ -542,9 +640,13 @@ class ConfigManager:
         dependency_bootstrap_allow_get_pip=None,
     ):
         """保存配置文件"""
+        if not hasattr(self, "_save_status"):
+            self._save_status = threading.local()
+        self._save_status.error = {}
         provided = {name for name, value in locals().items() if name != "self" and value is not None}
         with self._credential_lock:
             expected_credentials = self.app_id, self.app_secret
+        committed = False
         try:
             # 使用现有值作为默认值
             new_app_token = app_token if app_token is not None else self.app_token
@@ -656,7 +758,7 @@ class ConfigManager:
                 new_polling_work_order_public_relay_url
             )
             if relay_url_block_reason:
-                log_error(f"系统: {relay_url_block_reason}")
+                self._record_save_failure(code="relay_url_change_blocked")
                 return False
             new_disable_hot_reload = (
                 disable_hot_reload
@@ -828,19 +930,25 @@ class ConfigManager:
             cfg = {key: value for key, value in cfg.items() if parameter_names.get(key, key) in provided}
             with self._credential_lock:
                 if cfg and not self._save_config_to_sqlite(cfg, expected_credentials=expected_credentials):
+                    if not self.last_save_error:
+                        self._record_save_failure()
                     return False
+                committed = bool(cfg)
                 self.load()
                 if getattr(self, "feishu_app_migration_error", ""):
-                    return False
+                    self._record_save_failure(code="settings_saved_reload_failed" if committed else "settings_credentials_blocked")
+                    return committed
+                if getattr(self, "feishu_agent_sync_error", ""):
+                    self._record_save_failure(code="settings_saved_mirror_failed")
+                    return True
             log_info("系统: SQLite配置保存成功")
             return True
         except FeishuAppMigrationError as exc:
-            self.feishu_app_migration_error = exc.code
-            log_error(str(exc))
-            return False
+            self._record_save_failure(exc, code="settings_saved_reload_failed" if committed else None)
+            return committed
         except Exception as e:
-            log_error(f"系统: 配置保存失败 ({type(e).__name__})")
-            return False
+            self._record_save_failure(e, code="settings_saved_reload_failed" if committed else None)
+            return committed
 
 # ========== UI Constants ==========
 CLIPBOARD_CHECK_INTERVAL_MS = 1000

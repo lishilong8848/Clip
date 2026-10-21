@@ -95,7 +95,7 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage && !assignedRiskPage)"
+      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage && !isDocumentLibraryPage && !assignedRiskPage)"
       :checking="authChecking || auth.directoryPending"
       :logged-in="auth.loggedIn"
       :user="auth.user"
@@ -152,6 +152,7 @@
 
     <LinkDirectoryPage v-else-if="isLinkDirectoryPage" />
     <KnowledgeBasePage v-else-if="isKnowledgeBasePage" />
+    <DocumentLibraryPage v-else-if="isDocumentLibraryPage" />
 
     <DailyTaskChecklistPage
       v-else-if="isDailyTaskPage"
@@ -299,6 +300,7 @@ const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergence
 const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
 const LinkDirectoryPage = asyncPage(() => import("./components/LinkDirectoryPage.vue"));
 const KnowledgeBasePage = asyncPage(() => import("./components/KnowledgeBasePage.vue"));
+const DocumentLibraryPage = asyncPage(() => import("./components/DocumentLibraryPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
 const RepairManagementPage = asyncPage(() => import("./components/RepairManagementPage.vue"));
 const RepairStatusPage = asyncPage(() => import("./components/RepairStatusPage.vue"));
@@ -354,8 +356,8 @@ const impersonationBlocked=computed(()=>impersonationExpired.value||impersonatio
 const loading = ref(false);
 const adminInitialTab = computed(() => {
   const value = routeParams.value.get('tab');
-  return ['status', 'permissions', 'handover', 'mop', 'feishu', 'pressure'].includes(value || '')
-    ? value as 'status' | 'permissions' | 'handover' | 'mop' | 'feishu' | 'pressure' : 'permissions';
+  return ['status', 'permissions', 'handover', 'mop', 'feishu', 'pressure', 'development'].includes(value || '')
+    ? value as 'status' | 'permissions' | 'handover' | 'mop' | 'feishu' | 'pressure' | 'development' : 'permissions';
 });
 const showPermissionRequestPanel = ref(false);
 const refreshMenuOpen = ref(false);
@@ -440,6 +442,7 @@ const isPlanConvergencePage = computed(() => routePath.value === "/plan-converge
 const isLifeGuidePage = computed(() => routePath.value === "/life-guide");
 const isLinkDirectoryPage = computed(() => routePath.value === "/link-directory");
 const isKnowledgeBasePage = computed(() => routePath.value === "/knowledge-base");
+const isDocumentLibraryPage = computed(() => routePath.value === "/document-library");
 const isPasswordSettingsPage = computed(() => routePath.value === "/" && routeParams.value.get("account") === "password" && auth.user.login_method === 'password');
 const isMorningMeetingPrintPage = computed(() => routePath.value === "/daily-tasks/morning-meeting/print");
 const isWaterManagementPage = computed(() => routePath.value === "/water-management");
@@ -522,7 +525,7 @@ function moduleForCurrentRoute(): string {
   if (path === "/plan-convergence") return "plan_convergence";
   if (path === "/life-guide") return "life_guide";
   if (path === "/link-directory") return "links";
-  if (path === "/knowledge-base") return "knowledge";
+  if (path === "/knowledge-base" || path === "/document-library") return "knowledge";
   if (path === "/water-management") return "water";
   if (path === "/cabinet-power" || path === "/cabinet-power/batches") return "cabinet";
   if (path === "/critical-guard") return "critical_guard";
@@ -618,6 +621,7 @@ const headerSubtitle = computed(() => {
   if (isLifeGuidePage.value) return "参考人生指南";
   if (isLinkDirectoryPage.value) return "多维表导航";
   if (isKnowledgeBasePage.value) return "公司知识库";
+  if (isDocumentLibraryPage.value) return "南通文件";
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;
   if (isCabinetPowerPage.value || isCabinetPowerBatchPage.value) return "机柜上下电";
   if (isCriticalGuardPage.value) return routeParams.value.get("mode") === "admin" ? "重保管理 · 管理员" : criticalGuardScope.value ? `${scopeLabel(criticalGuardScope.value)} · 重保管理` : "风险管理 · 重保管理";

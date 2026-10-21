@@ -41,7 +41,7 @@ def _read_release(record):
 
 def _releases(mirror):
     page, seen, records = '', set(), []
-    while True:
+    for _ in range(100):
         data = mirror.request('POST', '/records/search',
             params={'page_size': 100, **({'page_token': page} if page else {})},
             json_payload={'field_names': ['组件名称', '版本', '启用', '整包SHA256', '更新说明'],
@@ -61,10 +61,11 @@ def _releases(mirror):
         if not isinstance(page, str) or not page or page in seen:
             raise ValueError('飞书补丁发布清单分页不完整，停止更新。')
         seen.add(page)
+    raise ValueError('飞书补丁发布清单超过分页上限，停止更新。')
 
 
-def fetch_manifest(*, mirror_factory=FeishuRuntimeMirror):
-    mirror = mirror_factory(table=PATCH_TABLE)
+def fetch_manifest(*, mirror_factory=FeishuRuntimeMirror, timeout=None):
+    mirror = mirror_factory(table=PATCH_TABLE, **({'timeout': timeout} if timeout is not None else {}))
     try:
         releases = _releases(mirror)
         if not releases:

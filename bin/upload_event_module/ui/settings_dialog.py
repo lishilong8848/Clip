@@ -26,6 +26,7 @@ from PyQt6.QtCore import Qt, QTimer
 from ..config import (
 
     config,
+    settings_save_failure,
 
     DEFAULT_FEISHU_APP_TOKEN,
 
@@ -153,7 +154,7 @@ class SettingsDialog(QDialog):
 
 
         # 飞书配置标题
-        feishu_title = QLabel("飞书 SDK 配置：")
+        feishu_title = QLabel("飞书应用鉴权（全局）：")
         feishu_title.setStyleSheet("font-weight: bold; color: #6366F1;")
 
         form_layout.addWidget(feishu_title)
@@ -166,6 +167,7 @@ class SettingsDialog(QDialog):
         self.app_id_input = QLineEdit()
 
         self.app_id_input.setPlaceholderText("输入飞书自建应用 App ID")
+        self.app_id_input.setToolTip("Qt、网页登录、通告和飞书智能体共用此应用配置。")
         form_layout.addWidget(app_id_label)
 
         form_layout.addWidget(self.app_id_input)
@@ -178,6 +180,7 @@ class SettingsDialog(QDialog):
         self.app_secret_input = QLineEdit()
 
         self.app_secret_input.setPlaceholderText("输入飞书自建应用 App Secret")
+        self.app_secret_input.setToolTip("访问令牌由程序自动获取及续期，无需手工填写用户令牌。")
         self.app_secret_input.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
 
         form_layout.addWidget(app_secret_label)
@@ -187,10 +190,10 @@ class SettingsDialog(QDialog):
 
 
         # 应用 Token
-        app_token_label = QLabel("多维表格 Token (app_token)：")
+        app_token_label = QLabel("多维表标识 (app_token)：")
         self.app_token_input = QLineEdit()
 
-        self.app_token_input.setPlaceholderText("输入多维表格应用 Token")
+        self.app_token_input.setPlaceholderText("输入多维表标识，不是访问令牌")
         form_layout.addWidget(app_token_label)
 
         form_layout.addWidget(self.app_token_input)
@@ -788,7 +791,7 @@ class SettingsDialog(QDialog):
         self.save_btn.setText("保存中...")
 
         def run() -> None:
-            result = {"ok": False, "error": "设置保存失败，请稍后重试。"}
+            result = {"ok": False, **settings_save_failure()}
             try:
                 resolved_token, replaced = resolve_bitable_app_token(
                     feishu_app_id, feishu_app_secret, feishu_app_token
@@ -800,8 +803,10 @@ class SettingsDialog(QDialog):
                         "ok": True,
                         "app_token": resolved_token if replaced else "",
                     }
+                if isinstance(getattr(config, "last_save_error", None), dict):
+                    result.update(config.last_save_error)
             except Exception as exc:
-                result["error"] = str(exc) or result["error"]
+                result.update(settings_save_failure(exc))
             try:
                 self.settings_save_finished.emit(result)
             except RuntimeError:
@@ -810,7 +815,7 @@ class SettingsDialog(QDialog):
         try:
             self._relay_health_executor.submit(run)
         except RuntimeError as exc:
-            self._on_settings_save_finished({"ok": False, "error": str(exc)})
+            self._on_settings_save_finished({"ok": False, **settings_save_failure(exc, code="settings_worker_unavailable")})
 
     def _on_settings_save_finished(self, result: dict) -> None:
         self.save_btn.setEnabled(True)
@@ -825,8 +830,13 @@ class SettingsDialog(QDialog):
         resolved_token = str((result or {}).get("app_token") or "")
         if resolved_token:
             self.app_token_input.setText(resolved_token)
-        show_toast_message(self, "✅ 设置已保存", duration_ms=1500)
-        self.hide()
+        if (result or {}).get("code") in {"settings_saved_reload_failed", "settings_saved_mirror_failed"}:
+            show_toast_message(self, result["error"], duration_ms=6000)
+            if result["code"] == "settings_saved_reload_failed":
+                return
+        else:
+            show_toast_message(self, "✅ 设置已保存", duration_ms=1500)
+            self.hide()
         QTimer.singleShot(0, self.settings_saved.emit)
 
     def reset_to_default(self):

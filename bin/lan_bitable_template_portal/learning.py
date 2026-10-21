@@ -311,6 +311,17 @@ class LearningService:
                 self._index_paper(paper, conn)
         if dirty:
             self._wake.set()
+            if getattr(self, '_completion_enabled', False) and kind in {'paper', 'record', 'notification'}:
+                from .learning_completion import date_of
+                dates = {value.get('date', '')}
+                for entry in value.get('entries', {}).values():
+                    dates.update(date_of(a.get('submitted_at')) for a in [entry.get('attempt') or {}, *entry.get('practice', [])])
+                for date in dates - {''}:
+                    self._put('local', 'completion_pending:' + date, {'date': date}, conn, False)
+
+    def completion_changed(self, *dates):
+        from .learning_completion import request_recompute
+        request_recompute(self, dates)
 
     def _documents(self, kind, *, scope='', person_id='', start='', end='', legacy=False, conn=None):
         clauses, args = ['kind=?'], [kind]
@@ -500,6 +511,10 @@ class LearningService:
                     refresh_people(self)
                 except Exception:
                     self._last_error = "人员目录暂未刷新，保留原名单；后台稍后重试。"
+            self._completion_enabled = getattr(self.cloud, 'completion_schema_ready', False) is True
+            if self._completion_enabled:
+                from .learning_completion import refresh
+                refresh(self, current)
             self.sync_pending(limit=40)
             day = current.date().isoformat()
             if not self.settings()["enabled"] and not manual_mode:
@@ -524,7 +539,11 @@ class LearningService:
         with self.transaction() as conn:
             for item in entities:
                 kind, key, value = item.get("kind"), item.get("key"), item.get("payload")
-                if kind not in {"person", "reserve", "paper", "record", "issue", "settings", "publication", "notification", "engagement", "audit", "attachment", "sharing_batch", "sharing_attempt", "sharing_delivery"} or not isinstance(value, dict):
+                if kind == 'daily_progress':
+                    from .learning_completion import valid
+                    if not valid(value) or value.get('id') != key:
+                        raise LearningError('云端每日完成记录格式无效，本次恢复已回滚。', 503)
+                if kind not in {"person", "reserve", "paper", "record", "issue", "settings", "publication", "notification", "engagement", "audit", "attachment", "sharing_batch", "sharing_attempt", "sharing_delivery", "daily_progress"} or not isinstance(value, dict):
                     continue
                 if self._get(kind, key, conn) is None:
                     self._put(kind, key, value, conn, False)
@@ -643,6 +662,20 @@ class LearningService:
             return
         payload = {k: v for k, v in value.items() if not k.startswith("_")}
         operation_id = f"learning:{kind}:{key}:{revision}"
+        if kind == 'daily_progress':
+            person = self._get('person', payload['person_id'])
+            if person and person['_dirty']:
+                return False
+            for paper_id in payload.get('source_papers', []):
+                paper, record = self._get('paper', paper_id), self._get('record', paper_id)
+                if not paper or paper['_dirty'] or record and record['_dirty']:
+                    return False
+            for task in payload.get('tasks', []):
+                if task.get('source') == 'sharing':
+                    attempt = self._get('sharing_attempt', task['task_id'])
+                    batch = self._get('sharing_batch', task.get('batch_id', ''))
+                    if not attempt or attempt['_dirty'] or not batch or batch['_dirty']:
+                        return False
         if kind == 'sharing_batch' and payload.get('status') in {'published', 'closed'}:
             from .learning_sharing import assigned_participants
             with closing(self._connect()) as conn:
@@ -1050,6 +1083,13 @@ class LearningService:
                 if entry.get("attempt") and not practice and not entry.get("needs_review"):
                     raise LearningError("本题已提交，可在复习中重做，首次记录不会覆盖", 409)
                 answer = {"operation_id": op, "fingerprint": fingerprint, "submitted_at": stamp(), "assisted": bool(entry.get("assisted")), "question_version": q["version"]}
+                answer['answer_view_snapshot'] = {
+                    'version': 1, 'answer_before_submit': bool(entry.get('answer_viewed_at')),
+                    'answer_viewed_at': entry.get('answer_viewed_at', ''), 'analysis_viewed_at': entry.get('analysis_viewed_at', ''),
+                    'hint_viewed_at': entry.get('hint_seen', ''),
+                    'legacy_unknown': bool(entry.get('legacy_view_unknown') or
+                        (entry.get('assisted') or entry.get('revealed')) and not entry.get('view_evidence_version')),
+                }
                 answer.update(operator_id=actor["id"], operator_name=actor.get("name", ""))
                 if q["type"] == "interview":
                     answer["answer_text"] = clean(payload.get("answer_text", ""))
@@ -1079,9 +1119,14 @@ class LearningService:
                 kind = payload.get("kind", "answer")
                 if kind not in {"answer", "analysis", "hint"}:
                     raise LearningError("无效提示类型")
+                if not entry.get('view_evidence_version') and (entry.get('assisted') or entry.get('revealed')):
+                    entry['legacy_view_unknown'] = True
                 if not entry.get("attempt"):
                     entry["assisted"] = True
                 entry["hint_seen" if kind == "hint" else "revealed"] = stamp()
+                entry['view_evidence_version'] = 1
+                if kind in {'answer', 'analysis'}:
+                    entry[kind + '_viewed_at'] = stamp()
             elif action == "notes":
                 if payload.get("version") != record["version"]:
                     raise LearningError("学习记录已变化，请读取最新内容后保存笔记。", 409)
@@ -1749,6 +1794,9 @@ class LearningService:
             raise LearningError("登录身份不完整。", 401)
         if not actor.get("is_admin") and not actor.get("person_id") and actor.get("scope") not in SCOPES:
             raise LearningError("楼栋值班账号、管理员及已关联人员名单的普通账号可使用画像学练。", 403)
+        if action == 'completion':
+            from .learning_completion import report
+            return report(self, actor, query)
         identity = payload.get("id")
         if action in {"papers.list", "history"}:
             return self.list_papers(actor, query)

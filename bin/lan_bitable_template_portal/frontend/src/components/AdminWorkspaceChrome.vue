@@ -19,7 +19,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { Activity, ChevronDown, ClipboardList, FileCog, MessageSquare, Settings2, UsersRound, Wrench } from 'lucide-vue-next';
+import { Activity, ChevronDown, ClipboardList, FileCog, MessageSquare, NotebookPen, Settings2, UsersRound, Wrench } from 'lucide-vue-next';
 import type { AdminTabKey } from '../adminToolsUtils';
 const props = defineProps<{
   tabs: Array<{ key: AdminTabKey; label: string; description: string; badge: string }>;
@@ -30,7 +30,7 @@ const emit = defineEmits<{ 'select-tab': [tab: AdminTabKey]; 'toggle-advanced': 
 const otherOpen = ref(props.activeTab !== 'permissions');
 const accountBadge = computed(() => props.tabs.find(item => item.key === 'permissions')?.badge);
 const otherTabs = computed(() => props.tabs.filter(item => item.key !== 'permissions'));
-const icons = { status: Activity, permissions: UsersRound, handover: ClipboardList, mop: FileCog, feishu: MessageSquare, pressure: Wrench };
+const icons = { status: Activity, permissions: UsersRound, handover: ClipboardList, mop: FileCog, feishu: MessageSquare, pressure: Wrench, development: NotebookPen };
 watch(() => props.activeTab, tab => { if (tab !== 'permissions') otherOpen.value = true; });
 </script>
 

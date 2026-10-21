@@ -2,12 +2,15 @@
 import base64
 import asyncio
 import copy
+import contextlib
 import gzip
 import hashlib
 import io
 import json
+import os
 import sys
 import tempfile
+import threading
 import traceback
 import unittest
 import wave
@@ -436,19 +439,20 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 raise AssistantError('测试账号未授权。', 403)
             return copy.deepcopy(ADMIN if identity == 'admin' else {**USER, **({'id': 'other'} if identity == 'other' else {})})
 
-        host = SimpleNamespace(store=self.store, state=Path(self.temp.name), catalog=object(), authorize=authorize,
+        host = SimpleNamespace(store=self.store, state=Path(self.temp.name) / 'lighthouse_openclaw', catalog=object(), authorize=authorize,
                                portal_bridge=SimpleNamespace(search=lambda *args: ([], [])))
-        routes.install_assistant_routes(app, host)
+        hooks = routes.install_assistant_routes(app, host)
         original_voice = Voice
 
         def voice_factory(store, files):
             return original_voice(store, files, client_factory=self.factory,
                 protect=self.voice._protect, unprotect=self.voice._unprotect)
 
-        with patch.object(routes, 'LighthouseAssistant', return_value=SimpleNamespace(store=self.store)), \
+        with patch.object(routes, 'LighthouseAssistant', return_value=SimpleNamespace(store=self.store, model=SimpleNamespace(close=Mock()))), \
              patch.object(module, 'Voice', side_effect=voice_factory):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://voice.test',
+            async with contextlib.AsyncExitStack() as cleanup, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://voice.test',
                                           headers={'x-test-account': 'user'}) as client:
+                cleanup.push_async_callback(hooks['shutdown'])
                 response = await client.get('/api/assistant/voice')
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertIs(response.json()['data']['stt'], False)
@@ -515,6 +519,78 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(forbidden.status_code, 404)
                 self.assertEqual(len(self.requests), 3)
 
+    async def test_shutdown_waits_for_inflight_knowledge_constructor_even_after_request_cancellation(self):
+        from fastapi import FastAPI
+        from openclaw_service.server import Host
+        from openclaw_service.assistant import routes
+        from openclaw_service.assistant.lighthouse_knowledge import KnowledgeBase
+        from bin.test_lighthouse_knowledge import FakeEmbedder, FakeMemoryIndex
+
+        for mode in ('eager', 'cancelled-request'):
+            with self.subTest(mode=mode):
+                app = FastAPI()
+                host = Host(state=Path(self.temp.name) / mode / 'lighthouse_openclaw',
+                    key='fixture-control-key', manager=SimpleNamespace(accounts={}, close=AsyncMock()))
+                host.authorize = AsyncMock(return_value={**USER, 'modules': ['knowledge']})
+                host.backend_hooks = routes.install_assistant_routes(app, host)
+                entered, finished, shutdown_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                release = threading.Event()
+                workers = []
+                loop = asyncio.get_running_loop()
+
+                def construct(root):
+                    loop.call_soon_threadsafe(entered.set)
+                    if not release.wait(5):
+                        raise AssertionError('Constructor barrier was not released')
+                    try:
+                        kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex)
+                        workers.append(kb)
+                        return kb
+                    finally:
+                        loop.call_soon_threadsafe(finished.set)
+
+                original_shutdown = host.backend_hooks['shutdown']
+                async def observed_shutdown():
+                    shutdown_entered.set()
+                    await original_shutdown()
+                host.backend_hooks['shutdown'] = observed_shutdown
+                request_task = close_task = None
+                with patch.dict(os.environ, {'LIGHTHOUSE_AGENT_ENGINE': 'legacy'}), \
+                        patch('openclaw_service.assistant.lighthouse_knowledge.KnowledgeBase', side_effect=construct), \
+                        patch('socket.socket.connect', side_effect=AssertionError('No external network')):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://voice.test') as client:
+                        try:
+                            if mode == 'eager':
+                                await host.backend_hooks['startup']()
+                            else:
+                                request_task = asyncio.create_task(client.get('/api/assistant/knowledge'))
+                            await asyncio.wait_for(entered.wait(), 3)
+                            if request_task is not None:
+                                request_task.cancel()
+                                await asyncio.gather(request_task, return_exceptions=True)
+                            close_task = asyncio.create_task(host.close())
+                            await asyncio.wait_for(shutdown_entered.wait(), 3)
+                            self.assertFalse(close_task.done(), 'Shutdown returned while the constructor was blocked')
+                            release.set()
+                            await asyncio.wait_for(finished.wait(), 3)
+                            await asyncio.wait_for(close_task, 5)
+                            self.assertFalse(workers[0]._worker.is_alive())
+                            for path in (workers[0].db, host.state.parent / 'document_library' / 'document_library.sqlite3'):
+                                path.unlink()
+                            response = await client.get('/api/assistant/knowledge')
+                            self.assertEqual(response.status_code, 503, response.text)
+                            self.assertEqual(len(workers), 1)
+                            self.assertFalse(workers[0].db.exists())
+                        finally:
+                            release.set()
+                            await asyncio.wait_for(finished.wait(), 5)
+                            if close_task is not None:
+                                await close_task
+                            else:
+                                await host.close()
+                            for kb in workers:
+                                await asyncio.to_thread(kb.close)
+
     async def test_original_assistant_acl_allows_staff_speech_and_blocks_guests(self):
         from fastapi import FastAPI
         from openclaw_service.assistant import routes
@@ -539,18 +615,19 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             return await actor_for(controller, runtime, request)
 
         app = FastAPI()
-        host = SimpleNamespace(store=self.store, state=Path(self.temp.name), catalog=object(), authorize=authorize,
+        host = SimpleNamespace(store=self.store, state=Path(self.temp.name) / 'lighthouse_openclaw', catalog=object(), authorize=authorize,
                                portal_bridge=SimpleNamespace(search=lambda *args: ([], [])))
-        routes.install_assistant_routes(app, host)
+        hooks = routes.install_assistant_routes(app, host)
         original_voice = Voice
 
         def voice_factory(store, files):
             return original_voice(store, files, client_factory=self.factory,
                                   protect=self.voice._protect, unprotect=self.voice._unprotect)
 
-        with patch.object(routes, 'LighthouseAssistant', return_value=SimpleNamespace(store=self.store)), \
+        with patch.object(routes, 'LighthouseAssistant', return_value=SimpleNamespace(store=self.store, model=SimpleNamespace(close=Mock()))), \
              patch.object(module, 'Voice', side_effect=voice_factory):
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://voice.test') as client:
+            async with contextlib.AsyncExitStack() as cleanup, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://voice.test') as client:
+                cleanup.push_async_callback(hooks['shutdown'])
                 for identity in ('user', 'temporary', 'external'):
                     with self.subTest(identity=identity):
                         headers = {'x-test-account': identity}

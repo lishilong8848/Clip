@@ -889,6 +889,8 @@ def claim(service, actor, payload):
         paper = {'id': identity, 'person_id': learner['id'], 'person': learner, 'date': date, 'scope': scope,
                  'created_at': stamp(), 'claimed_by': actor['id'], 'claimed_by_name': actor.get('name', ''),
                  'questions': questions, 'shortage': shortage, 'reserve_id': reserve['id'], 'notify': publication['notify']}
+        if shift:
+            paper['shift'] = shift
         service._put('paper', identity, paper, conn)
         service._put('reserve', reserve['id'], {**reserve, 'person_id': learner['id'], 'paper_id': identity}, conn)
     return service.public_paper(paper, actor)

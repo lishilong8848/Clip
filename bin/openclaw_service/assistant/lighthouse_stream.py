@@ -55,6 +55,17 @@ def public_turn(turn):
 
 
 class LighthouseStream:
+    def _knowledge_turn(self, actor, turn):
+        if not any(source.get('kind') == 'company_knowledge' for source in turn.get('sources', [])):
+            return turn
+        factory = getattr(self.portal, 'get_knowledge', None)
+        if factory is None:
+            return turn
+        return factory().filter_cached_turn(actor, turn)
+
+    def _knowledge_turns(self, actor, turns):
+        return [self._knowledge_turn(actor, turn) for turn in turns]
+
     def __init__(self, portal_agent, *, cached_reader=None, engine=None):
         self.portal = portal_agent
         self.assistant = portal_agent.assistant
@@ -146,7 +157,7 @@ class LighthouseStream:
                         or old.get('submitted_commands', []) != selections
                         or (old.get('preview_file') or {}).get('id', '') != preview_id):
                     raise AssistantError("消息编号不能用于不同内容。", 409)
-                return None, {"conversation_id": state["id"], "run_id": old.get("run_id", ""), "turn": public_turn(old)}
+                return None, {"conversation_id": state["id"], "run_id": old.get("run_id", ""), "turn": public_turn(self._knowledge_turn(actor, old))}
             if old and (old.get("plan") or {}).get("status") in PROTECTED_PLANS:
                 raise AssistantError("此消息的业务操作已执行或已提交，请查询原任务，不重新执行。", 409)
             from .lighthouse_commands import resolve
@@ -380,6 +391,10 @@ class LighthouseStream:
                 if set(context.get("scopes", [])) - set(run["scopes"]) or not self.assistant._allowed(context, actor):
                     context = {}
                 eligible = [t for t in run["_history"] if set(t.get("scopes", [])) <= set(run["scopes"])]
+                eligible = await asyncio.to_thread(self._knowledge_turns, public_actor, eligible)
+                if (any(t.get('knowledge_access_changed') for t in eligible)
+                        or (await asyncio.to_thread(self._knowledge_turn, public_actor, {'sources': context.get('knowledge_sources', [])})).get('knowledge_access_changed')):
+                    context = {}
                 # Keep the archive; only compress what is sent to a model.
                 cutoff = next((n + 1 for n, t in enumerate(eligible) if t["operation_id"] == context.get("through")), 0)
                 model_history = eligible if getattr(self.engine, 'manages_context', False) else eligible[cutoff:]
@@ -389,7 +404,8 @@ class LighthouseStream:
                     try:
                         summary = await asyncio.wait_for(self.engine.summarize(public_actor, older, context.get("summary", ""), run["_turn"]["_profile"]), 35)
                         context = {"summary": summary, "through": older[-1]["operation_id"], "scopes": run["scopes"], "access_scopes": actor["scopes"],
-                                   "compressed_turns": context.get("compressed_turns", 0) + len(older), "last_compressed_at": time.time()}
+                                   "compressed_turns": context.get("compressed_turns", 0) + len(older), "last_compressed_at": time.time(),
+                                   'knowledge_sources': [*context.get('knowledge_sources', []), *[source for turn in older for source in turn.get('sources', []) if source.get('kind') == 'company_knowledge']]}
                         await asyncio.to_thread(self._save_context, actor, run, context)
                         model_history = eligible[-6:]
                     except Exception:
@@ -409,6 +425,13 @@ class LighthouseStream:
                 result['file_ids'] = list(dict.fromkeys([*run['_turn'].get('file_ids', []), *result.get('file_ids', [])]))
                 if run.get('reply_mode') != 'live':
                     result = await asyncio.to_thread(package_long_reply, self.portal.files, public_actor, result)
+                if any(source.get('kind') == 'company_knowledge' for source in result.get('sources', [])):
+                    factory = getattr(self.portal, 'get_knowledge', None)
+                    if factory is not None:
+                        await asyncio.to_thread(lambda: factory().bind_source_artifacts(result))
+                checked = await asyncio.to_thread(self._knowledge_turn, current, result)
+                if checked.get('knowledge_access_changed'):
+                    raise AssistantError('来源资料或授权已变化，本次回答未发布。', 403)
                 published = run['answer']
                 run.update(status="completed", answer=result.get("answer") or run["answer"], label="回答完成")
                 if run['answer'] and run['answer'].startswith(published):
@@ -571,7 +594,7 @@ class LighthouseStream:
                 if turn.get("run_id") == active["id"] and turn.get("status") == "pending":
                     turn["answer"] = active.get("answer", "")
                     turn["process"] = copy.deepcopy(active.get("process", []))
-        result["turns"] = [public_turn(t) for t in result["turns"]]
+        result["turns"] = [public_turn(t) for t in await asyncio.to_thread(self._knowledge_turns, actor, result['turns'])]
         if operation is not None:
             turn = next((t for t in result['turns'] if t.get('operation_id') == operation), None)
             if turn is None:
@@ -583,7 +606,7 @@ class LighthouseStream:
             live = self.live.get((turn or {}).get('run_id'))
             if live and turn.get('status') == 'pending':
                 turn = {**turn, 'answer': live.get('answer', ''), 'reply_mode': live.get('reply_mode', 'validated')}
-            result['turns'] = [public_turn(turn)] if turn else []
+            result['turns'] = [public_turn(await asyncio.to_thread(self._knowledge_turn, actor, turn))] if turn else []
         return result
 
     def _clear_active(self, actor, identity):
@@ -606,7 +629,7 @@ class LighthouseStream:
         documents = list({doc['payload']['operation_id']: doc for doc in documents}.values())
         turns = [doc["payload"] for doc in documents if doc["payload"].get("at", 0) < before and self.assistant._allowed(doc["payload"], actor)]
         turns.sort(key=lambda item: item.get("at", 0))
-        return {"turns": [public_turn(t) for t in turns[-30:]], "has_more": len(turns) > 30}
+        return {"turns": [public_turn(t) for t in await asyncio.to_thread(self._knowledge_turns, actor, turns[-30:])], "has_more": len(turns) > 30}
 
     async def stream(self, actor, identity, authorize):
         from pydantic_ai.ui.vercel_ai.response_types import DoneChunk
@@ -626,6 +649,14 @@ class LighthouseStream:
                     break
                 last_auth = time.monotonic()
             events = run["events"][cursor:]
+            terminal = next((event.get('data', {}) for event in reversed(events)
+                if event.get('type') == 'data-turn' and event.get('data', {}).get('sources')), run.get('_knowledge_terminal', {}))
+            if any(source.get('kind') == 'company_knowledge' for source in terminal.get('sources', [])):
+                run['_knowledge_terminal'] = terminal
+                current = await authorize()
+                if (await asyncio.to_thread(self._knowledge_turn, current, terminal)).get('knowledge_access_changed'):
+                    yield 'data: ' + DoneChunk().encode(6) + '\n\n'
+                    break
             for event in events:
                 yield "data: " + json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n\n"
                 cursor += 1
