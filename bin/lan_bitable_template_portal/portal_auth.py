@@ -39,6 +39,7 @@ from .account_policy import (
     default_modules,
     categorize_position,
     account_allowed,
+    account_in_scope,
     level_rank,
     resolve_access_change,
 )
@@ -674,6 +675,7 @@ class PortalAuthManager:
             "level": level,
             "open_id": open_id,
             "is_fixed_superuser": fixed_superuser,
+            "enabled": enabled,
             "category": category,
             "home_scope": home,
             "role": role,
@@ -1200,7 +1202,7 @@ class PortalAuthManager:
         if not applicant_id or not reviewer_id or applicant_id == reviewer_id or self._open_id_explicitly_disabled(applicant_id):
             return False
         actor, target = self.account_profile(reviewer_id), self.account_profile(applicant_id)
-        if actor['level'] == 'L2' or (level_rank(actor['level']) >= level_rank(target['level'])
+        if (actor['level'] == 'L2' and not account_in_scope(actor, target)) or (level_rank(actor['level']) >= level_rank(target['level'])
                                     and not actor['level'] == target['level'] == 'L0'):
             return False
         return account_allowed(actor, {**target, 'open_id': applicant_id,

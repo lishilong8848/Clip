@@ -242,7 +242,7 @@ class SignatureManagementTests(unittest.TestCase):
         self.assertEqual(self.s.staff, before)
         self.assertEqual(self.s.uploads, 0)
 
-    def test_send_refresh_resets_old_target_profile_before_former_supervisor_authorization(self):
+    def test_send_refresh_updates_moved_signer_without_blocking_collection(self):
         access, profiles, hr = self.c_signer_access('ou-managerC')
         self.s.staff['recStaff']['楼栋'] = 'C楼'
         access.bind(self.m.directory())
@@ -250,11 +250,11 @@ class SignatureManagementTests(unittest.TestCase):
         self.s.staff['recStaff']['楼栋'] = 'D楼'
         profiles['ou-person'].update(home_scope='D', scope_rules=['D'])
         hr['ou-person']['scopes'] = ['D']
-        with self.assertRaises(SignatureManagementError) as error:
-            self.access_send(access, 'movedPerson')
-        self.assertEqual(error.exception.status, 403)
-        self.sender.assert_not_called()
-        self.assertEqual(self.store.list_documents(REQUEST_NS), [])
+        result = self.access_send(access, 'movedPerson')
+        self.assertEqual(result['status'], 'sent')
+        self.assertEqual(result['building'], 'D楼')
+        self.assertEqual(self.sender.call_args.args[1], ['ou-person'])
+        self.assertFalse(access.allowed(self.m.person('staff', 'recStaff'), 'view'))
 
     def test_send_refresh_rechecks_operator_modules_and_relay_scope(self):
         access, profiles, hr = self.c_signer_access('ou-managerC')
@@ -268,11 +268,14 @@ class SignatureManagementTests(unittest.TestCase):
             self.access_send(access, 'movedRelay', recipient='staff:recRelay')
         self.assertEqual(error.exception.status, 403)
         profiles['ou-managerC']['modules'] = []
+        self.assertEqual(self.access_send(access, 'collectionAllowed')['status'], 'sent')
+        self.sender.assert_called_once()
+        profiles['ou-managerC']['enabled'] = False
         with self.assertRaises(SignatureManagementError) as error:
             self.access_send(access, 'operatorRevoked')
         self.assertEqual(error.exception.status, 403)
-        self.sender.assert_not_called()
-        self.assertEqual(self.store.list_documents(REQUEST_NS), [])
+        self.sender.assert_called_once()
+        self.assertEqual(len(self.store.list_documents(REQUEST_NS)), 1)
 
     def test_new_send_rejects_failed_staff_refresh_even_with_a_cached_person(self):
         access, _, _ = self.c_signer_access()

@@ -142,7 +142,7 @@ class SignatureAccessTests(unittest.TestCase):
         self.assertEqual([p['record_id'] for p in result['people'] if not p['directory_only']], ['recoperatorE'])
         self.assertEqual({p['record_id'] for p in result['people']}, set(self.service.staff))
         self.assertEqual({p['record_id'] for p in result['people'] if p['invite_only']},
-                         {'recsuper', 'recmanager', 'recpeerManager', 'recsupervisorE'})
+                         set(self.service.staff) - {'recoperatorE'})
         self.assertEqual(result['counts']['signed'], 1)
         person = self.call('account')['person']
         self.assertEqual(person['record_id'], 'recoperatorE')
@@ -195,9 +195,9 @@ class SignatureAccessTests(unittest.TestCase):
         self.assertEqual(result['count'], 1)
         person = result['people'][0]
         self.assertTrue(person['directory_only'])
-        self.assertFalse(person['invite_only'])
+        self.assertTrue(person['invite_only'])
         self.assertFalse(person['can_preview'])
-        self.assertFalse(person['can_request'])
+        self.assertTrue(person['can_request'])
         for field in ('has_signature', 'request', 'identity_version', 'signature_count', 'raw_fields', 'open_id',
                       'email', 'phone', 'identity_number', 'signature_file_token', 'signature_preview_url',
                       'signature_version', 'effective_has_signature'):
@@ -217,18 +217,22 @@ class SignatureAccessTests(unittest.TestCase):
         self.assertEqual(len(self.call('people', {'page': 11})['people']), 30)
         self.sender.assert_not_called()
 
-    def test_crafted_preview_account_and_request_cannot_cross_buildings_or_levels(self):
+    def test_invites_cross_buildings_and_levels_but_preview_and_history_do_not(self):
         for actor, target in (('operatorE', 'operatorA'), ('supervisorE', 'operatorA'),
                               ('supervisorE', 'supervisorA'), ('manager', 'peerManager')):
             for operation, method, payload in (
                 ('preview', 'GET', {'source': 'staff', 'record_id': 'rec' + target}),
-                ('account', 'GET', {'open_id': target}),
-                ('requests', 'POST', {'source': 'staff', 'record_id': 'rec' + target, 'operation_id': 'attempt'})):
+                ('account', 'GET', {'open_id': target})):
                 with self.subTest(actor=actor, target=target, operation=operation):
                     with self.assertRaises(SignatureManagementError) as error:
                         self.call(operation, payload, actor=actor, method=method)
                     self.assertEqual(error.exception.status, 403)
-        self.sender.assert_not_called()
+            payload = {'source': 'staff', 'record_id': 'rec' + target, 'operation_id': actor + target}
+            result = self.call('requests', payload, actor=actor, method='POST')
+            self.assertEqual(result['status'], 'sent')
+            self.assertEqual(self.sender.call_args.args[1], [target])
+            self.assertEqual(self.call('requests', payload, actor=actor, method='POST'), result)
+        self.assertEqual(self.sender.call_count, 4)
         self.assertEqual(self.service.uploads, 0)
 
     def test_h_engineer_can_request_lower_engineers_but_not_view_their_ink(self):
@@ -326,6 +330,77 @@ class SignatureAccessTests(unittest.TestCase):
         self.assertTrue(row['directory_only'])
         self.assertFalse(row['can_preview'])
         self.assertFalse(row['can_request'])
+
+    def test_no_module_account_can_collect_from_any_enabled_person_without_viewing_ink(self):
+        self.profiles['operatorE'].update(modules=[], scope_rules=[])
+        before = copy.deepcopy(self.service.staff)
+        listing = self.call('people')
+        self.assertEqual(listing['count'], len(self.service.staff))
+        for row in listing['people']:
+            self.assertTrue(row['can_request'])
+            self.assertTrue(row['directory_only'])
+            self.assertFalse(row['can_preview'])
+            self.assertFalse(row['can_choose_recipient'])
+            self.assertNotIn('has_signature', row)
+            self.assertNotIn('request', row)
+        payload = {'source': 'staff', 'record_id': 'recpeerManager', 'operation_id': 'noModuleInvite'}
+        result = self.call('requests', payload, method='POST')
+        self.assertEqual(result['status'], 'sent')
+        self.assertEqual(self.call('requests', payload, method='POST'), result)
+        self.sender.assert_called_once()
+        self.assertEqual(self.sender.call_args.args[1], ['peerManager'])
+        for op, body in (('preview', payload), ('account', {'open_id': 'peerManager'}), ('duplicates', {})):
+            with self.subTest(operation=op), self.assertRaises(SignatureManagementError):
+                self.call(op, body)
+        self.assertEqual(self.service.staff, before)
+        self.assertEqual(self.service.uploads, 0)
+
+    def test_disabled_actor_or_target_and_anonymous_cannot_collect(self):
+        payload = {'source': 'staff', 'record_id': 'recoperatorA', 'operation_id': 'disabledInvite'}
+        self.profiles['operatorE']['enabled'] = False
+        with self.assertRaises(SignatureManagementError):
+            self.call('requests', payload, method='POST')
+        self.profiles['operatorE']['enabled'] = True
+        self.profiles['operatorA']['enabled'] = False
+        with self.assertRaises(SignatureManagementError):
+            self.call('requests', payload, method='POST')
+        with self.assertRaises(SignatureManagementError) as error:
+            self.call('requests', payload, method='POST', actor='')
+        self.assertEqual(error.exception.status, 401)
+        self.sender.assert_not_called()
+        self.assertEqual(self.store.list_documents('signature_management_request'), [])
+
+    def test_http_collection_without_module_keeps_login_and_image_guards(self):
+        from fastapi.testclient import TestClient
+        from clipflow_backend.main import FastAPIPortalController, PortalRuntime
+        self.profiles['operatorE'].update(modules=[], scope_rules=[])
+        controller = FastAPIPortalController(host='127.0.0.1', port=18766)
+        with (patch.object(PortalRuntime.service, '_signature_management', self.manager, create=True),
+              patch.object(controller, '_current_session') as session,
+              patch.object(PortalRuntime.auth_manager, 'account_profile', side_effect=self.auth.account_profile),
+              patch.object(PortalRuntime.auth_manager, 'directory_block_reason', return_value=''),
+              patch('clipflow_backend.main._send_text_to_open_ids_guarded', self.sender)):
+            client = TestClient(controller._build_app())
+            self.addCleanup(client.close)
+            endpoint = '/api/signatures/management/'
+            payload = {'source': 'staff', 'record_id': 'recoperatorA', 'operation_id': 'httpCollect'}
+            session.return_value = None
+            self.assertEqual(client.get(endpoint + 'people').status_code, 401)
+            self.assertEqual(client.post(endpoint + 'requests', json=payload).status_code, 401)
+            session.return_value = {'user': {'open_id': 'operatorE'}, 'role': 'building'}
+            rows = client.get(endpoint + 'people')
+            self.assertEqual(rows.status_code, 200, rows.text)
+            self.assertTrue(all(row['can_request'] and not row['can_preview'] for row in rows.json()['data']['people']))
+            response = client.post(endpoint + 'requests', json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['data']['status'], 'sent')
+            self.assertEqual(client.post(endpoint + 'requests', json=payload).status_code, 200)
+            self.sender.assert_called_once()
+            self.assertEqual(client.get(endpoint + 'preview', params=payload).status_code, 403)
+            self.assertEqual(client.get(endpoint + 'account').status_code, 403)
+            self.profiles['operatorE']['enabled'] = False
+            self.assertEqual(client.post(endpoint + 'requests', json=payload).status_code, 403)
+            self.sender.assert_called_once()
 
     def test_shared_duty_account_is_not_a_signer(self):
         duty = self.manager.d.BUILDING_OPEN_ID_MAP['H']
@@ -466,8 +541,8 @@ class MopSignatureInvitationTests(unittest.TestCase):
         self.assertTrue(repeated['person']['has_signature'])
         self.assertEqual(self.service.creates, 1)
         self.assertEqual(self.sender.call_count, 1)
-        with self.assertRaises(SignatureManagementError):
-            self.call('temporary', {'name': 'other', 'building': 'E楼', 'operation_id': 'forbidden'}, method='POST')
+        created = self.call('temporary', {'name': 'other', 'building': 'E楼', 'operation_id': 'collect'}, method='POST')
+        self.assertEqual(created['source'], 'external')
 
     def test_duplicate_clicks_and_concurrent_retries_do_not_create_or_send_twice(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -548,7 +623,8 @@ class MopSignatureInvitationTests(unittest.TestCase):
         from lan_bitable_template_portal.module_access import required_modules
         for operation in ('mop-people', 'mop-list', 'mop-invite'):
             self.assertEqual(required_modules('/api/signatures/management/' + operation), {'engineer_mop'})
-        self.assertEqual(required_modules('/api/signatures/management/temporary'), {'signatures'})
+        self.assertEqual(required_modules('/api/signatures/management/temporary'), frozenset())
+        self.assertEqual(required_modules('/api/signatures/management/preview'), {'signatures'})
 
     def test_failed_request_can_resume_after_restart_without_creating_another_person(self):
         self.sender.return_value = (False, '发送失败', [])

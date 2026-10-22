@@ -150,6 +150,52 @@ try {
     assert.equal(await page.locator('#lite-notice-form').count(), 0, 'old form HTML is metadata only, never mounted');
     assert.equal(await page.locator('.v2-notice-editor input[aria-label="名称"],.v2-notice-editor input[aria-label="标题"]').count() > 0, true);
     assert.equal(await page.locator('.v2-notice-upload input[aria-label="添加现场照片"]').count(),['maintenance','change','repair'].includes(kind)?1:0);
+    if(!process.argv.includes('--baseline')){
+      const editor=page.locator('.v2-notice-editor'),warnings=editor.locator('[data-cycle-warning]');
+      const controls=['content','reason','progress'].map(key=>({key,input:editor.locator(`[data-notice-field="${key}"] textarea,[data-notice-field="${key}"] input`).first()}));
+      const originals=[];
+      for(const control of controls)if(await control.input.count())originals.push({...control,value:await control.input.inputValue()});
+      const originalCycle=contracts.items.find(item=>item.kind===kind&&item.view==='detail').expected.maintenance_cycle;
+      const selectCycle=async value=>{await editor.locator('[data-notice-field="maintenance_cycle"] .n-base-selection').click();await page.locator('.n-base-select-option:visible').getByText(value,{exact:true}).click();};
+      try{
+        if(kind==='maintenance')await selectCycle('每月');
+        for(const control of originals.filter(item=>['content','reason'].includes(item.key)))await control.input.fill('季度维保检查');
+        if(kind==='maintenance'){
+          await editor.locator('[data-cycle-warning="reason"]').waitFor();assert.equal(await warnings.count(),2);
+          for(const key of ['content','reason'])assert(await editor.locator(`[data-notice-field="${key}"] .n-input`).evaluate(el=>el.classList.contains('n-input--error-status')),key+' has a red advisory border');
+          const viewport=page.viewportSize();
+          for(const [width,height] of [[402,874],[440,956],[1440,900]]){
+            await page.setViewportSize({width,height});await warnings.first().scrollIntoViewIfNeeded();
+            assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+            await page.screenshot({path:path.join(output,`cycle-warning-${width}.png`)});
+          }
+          await page.setViewportSize(viewport);
+          const content=originals.find(item=>item.key==='content').input;
+          await content.fill('每月维保检查');await page.waitForFunction(()=>!document.querySelector('[data-cycle-warning="content"]'));
+          assert.equal(await warnings.count(),1,'fixing content clears only its warning');await content.fill('季度维保检查');
+          await selectCycle('每季');await page.waitForFunction(()=>!document.querySelector('[data-cycle-warning]'));
+          await selectCycle('每月');await editor.locator('[data-cycle-warning="reason"]').waitFor();
+          await originals.find(item=>item.key==='progress').input.fill('现场已核对');
+          const preview=editor.getByRole('button',{name:'预览并确认更新',exact:true});assert(await preview.isEnabled());await preview.click();
+          await editor.getByLabel('发送前确认',{exact:true}).waitFor();await editor.locator('[data-cycle-warning-summary]').waitFor();
+          assert(await editor.getByRole('button',{name:'确认发送更新',exact:true}).isEnabled(),'cycle warnings never disable confirmation');
+          assert(!(await editor.getByLabel('待发送通告全文',{exact:true}).innerText()).includes('周期核对提醒'),'advisory never rewrites the notice');
+          assert(!writes.includes('/api/workbench-actions'),'advisory preview never submits a notice');
+          await editor.getByRole('button',{name:'返回修改',exact:true}).click();
+        }else{
+          assert.equal(await warnings.count(),0,kind+' ignores cycle words in content/reason');
+          assert.equal(await editor.locator('.has-cycle-warning,[data-cycle-warning-summary]').count(),0);
+        }
+      }finally{
+        if(await editor.getByRole('button',{name:'返回修改',exact:true}).isVisible())await editor.getByRole('button',{name:'返回修改',exact:true}).click();
+        for(const control of originals)await control.input.fill(control.value);
+        if(kind==='maintenance')await selectCycle(originalCycle);
+      }
+      assert.equal(await warnings.count(),0,'restore original fields before unchanged-layout baselines');
+      // Reopen also clears attempted-validation state, not just the edited field values.
+      await editor.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+      await editor.waitFor({state:'detached'});await entryCard.locator('.v2-notice-open').click();await editor.locator('.v2-notice-field-grid').waitFor();
+    }
     await page.waitForTimeout(350);
     const footerBox=await page.locator('.v2-notice-editor-footer').boundingBox();
     assert(footerBox.y+footerBox.height<=page.viewportSize().height+1,'editor actions must remain inside the viewport');
@@ -230,5 +276,5 @@ try {
   }
   assert.deepEqual(errors, []);
   assert.deepEqual(oldPages, [], 'no legacy document navigation');
-  console.log('PASS: isolated production notice pages, six categories, compact handling layout, existing forms and menus, logout failure.');
+  console.log('PASS: isolated production notice pages, six categories, maintenance-only cycle advisories and nonblocking preview, restored compact-layout baselines, existing forms and menus, logout failure.');
 } finally { await browser.close(); await server.close(); }

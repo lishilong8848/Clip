@@ -69,6 +69,11 @@ class SignatureReadPerformanceTests(unittest.TestCase):
         permissions = self.auth._load_permissions_locked()
         permissions['users']['ou_signature0']['modules'] = []
         self.auth._save_permissions_locked(permissions)
+        collected = self.read('ou_signature0')
+        self.assertTrue(all(row['directory_only'] and not row['can_preview'] for row in collected['people']))
+        self.assertTrue(all(row['can_request'] for row in collected['people']))
+        permissions['users']['ou_signature0']['enabled'] = False
+        self.auth._save_permissions_locked(permissions)
         with self.assertRaises(SignatureManagementError) as error:
             self.read('ou_signature0')
         self.assertEqual(error.exception.status, 403)

@@ -113,6 +113,8 @@ from .styles import get_stylesheet
 
 from .common import show_simple_message
 
+from ..services.notice_cycle_warnings import maintenance_warnings_from_notice
+
 from ..building_normalizer import (
 
     extract_building_codes,
@@ -3079,6 +3081,15 @@ class ScreenshotConfirmDialog(QDialog):
 
         maintenance_cycle_layout.addStretch()
 
+        self.maintenance_cycle_warning_label = QLabel()
+        self.maintenance_cycle_warning_label.setObjectName("MaintenanceCycleWarning")
+        self.maintenance_cycle_warning_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.maintenance_cycle_warning_label.setWordWrap(True)
+        self.maintenance_cycle_warning_label.setStyleSheet(
+            "color: #EF4444; font-size: 12px;"
+        )
+        self.maintenance_cycle_warning_label.hide()
+
         self.execution_party_container = QWidget()
         execution_party_layout = QHBoxLayout(self.execution_party_container)
         execution_party_layout.setContentsMargins(0, 0, 0, 0)
@@ -3218,6 +3229,8 @@ class ScreenshotConfirmDialog(QDialog):
         inner_layout.addWidget(self.change_level_container)
 
         inner_layout.addWidget(self.maintenance_cycle_container)
+
+        inner_layout.addWidget(self.maintenance_cycle_warning_label)
 
         inner_layout.addWidget(self.execution_party_container)
 
@@ -3920,9 +3933,21 @@ class ScreenshotConfirmDialog(QDialog):
 
 
 
+        self._refresh_maintenance_cycle_warnings()
         self._refresh_submit_state()
 
-
+    def _refresh_maintenance_cycle_warnings(self):
+        warnings = []
+        if self.notice_type == "维保通告":
+            warnings = maintenance_warnings_from_notice(
+                self.notice_type,
+                self.selected_maintenance_cycle,
+                (self.data_dict or {}).get("text", ""),
+            )
+        self.maintenance_cycle_warning_label.setText(
+            "\n".join(warning["message"] for warning in warnings)
+        )
+        self.maintenance_cycle_warning_label.setVisible(bool(warnings))
 
     @staticmethod
     def _building_options_for_notice(notice_type):
@@ -4545,6 +4570,9 @@ class ScreenshotConfirmDialog(QDialog):
         else:
 
             self.data_dict[key] = value
+
+        if key == "text":
+            self._refresh_maintenance_cycle_warnings()
 
 
 
@@ -8333,6 +8361,7 @@ class ScreenshotConfirmDialog(QDialog):
                 remove_when_empty=False,
             )
             self._patch_cache_fields({"maintenance_cycle": None})
+            self._refresh_maintenance_cycle_warnings()
             self._refresh_submit_state()
             self._notify_state_changed()
             return
@@ -8357,6 +8386,7 @@ class ScreenshotConfirmDialog(QDialog):
         self._patch_cache_fields(
             {"maintenance_cycle": self.selected_maintenance_cycle or None}
         )
+        self._refresh_maintenance_cycle_warnings()
         self._refresh_submit_state()
         self._notify_state_changed()
 
@@ -9221,6 +9251,8 @@ class DetailDialog(QDialog):
 
         self.current_data = {}
 
+        self.notice_type = ""
+
         self.ignore_focus_loss = False
 
         self.original_text = ""
@@ -9309,6 +9341,15 @@ class DetailDialog(QDialog):
 
         self.text_area = QTextEdit()
 
+        self.maintenance_cycle_warning_label = QLabel()
+        self.maintenance_cycle_warning_label.setObjectName("MaintenanceCycleWarning")
+        self.maintenance_cycle_warning_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.maintenance_cycle_warning_label.setWordWrap(True)
+        self.maintenance_cycle_warning_label.setStyleSheet(
+            "color: #EF4444; font-size: 12px;"
+        )
+        self.maintenance_cycle_warning_label.hide()
+
 
 
         btn_layout = QHBoxLayout()
@@ -9347,6 +9388,8 @@ class DetailDialog(QDialog):
 
         inner_layout.addWidget(self.text_area)
 
+        inner_layout.addWidget(self.maintenance_cycle_warning_label)
+
         inner_layout.addLayout(btn_layout)
 
         layout.addWidget(self.container)
@@ -9363,6 +9406,8 @@ class DetailDialog(QDialog):
 
         current_text = self.text_area.toPlainText()
 
+        self._refresh_maintenance_cycle_warnings()
+
         if current_text != self.original_text:
 
             self.save_btn.setEnabled(True)
@@ -9376,6 +9421,23 @@ class DetailDialog(QDialog):
             self.save_btn.setText("保存修改")
 
 
+
+    def _refresh_maintenance_cycle_warnings(self):
+        warnings = []
+        if self.notice_type == "维保通告":
+            warnings = maintenance_warnings_from_notice(
+                self.notice_type,
+                self.current_data.get("maintenance_cycle", ""),
+                self.text_area.toPlainText(),
+            )
+        self.maintenance_cycle_warning_label.setText(
+            "\n".join(warning["message"] for warning in warnings)
+        )
+        self.maintenance_cycle_warning_label.setVisible(bool(warnings))
+        self.text_area.setStyleSheet(
+            "QTextEdit, QTextEdit:focus { border: 1px solid #EF4444; }"
+            if warnings else ""
+        )
 
     def save_content(self):
 
@@ -9411,6 +9473,8 @@ class DetailDialog(QDialog):
 
         self.current_data = dict(data or {})
 
+        self.notice_type = self.current_data.get("notice_type", "")
+
         self.current_record_id = record_id
 
         self.current_active_item_id = str(
@@ -9420,6 +9484,8 @@ class DetailDialog(QDialog):
         self.original_text = data["text"]
 
         self.text_area.setPlainText(data["text"])
+
+        self._refresh_maintenance_cycle_warnings()
 
         self.text_area.moveCursor(self.text_area.textCursor().MoveOperation.Start)
 

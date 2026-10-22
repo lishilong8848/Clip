@@ -466,6 +466,11 @@ def fields_for(work, draft, action):
             "readonly": key == "title" or (action == "start" and key in {"device", "repair_device", "cabinet", "quantity"} and bool(draft.get(key))) or len(str(draft.get(key) or "")) > 1000,
             "kind": "select" if choices else "multiline" if key in {"content", "reason", "impact", "progress", "symptom", "solution"} else "text",
             "options": choices})
+        if (key == "maintenance_cycle" and work == "maintenance"
+                and draft.get("work_type") in (None, "", "maintenance")
+                and draft.get("notice_type") in (None, "", "维保通告")):
+            from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
+            result[-1]["cycle_rules"] = maintenance_cycle_rules()
         if key == "progress":
             result[-1]["default_on_end"] = END_PROGRESS_DEFAULT
     # Optional attachment receipts (现场照片 always; 阿里确认截图 change-only).

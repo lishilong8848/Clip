@@ -152,7 +152,7 @@ const homeViews = ['home', 'tasks', 'functions'];
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
-const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'signatures' && user.value.role !== 'guest' || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
 const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');
@@ -176,7 +176,7 @@ const permissionPage = computed(() => view.value === 'permission');
 const levelLabel = computed(() => ({ L0:'超级管理员',L1:'全楼管理员',L2:'工程师',L3:'楼栋主管',L4:'成员' }[String(user.value.level)] || '成员'));
 const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',engineer:'工程师',duty:'值班账号',operator:'值班员',shift_leader:'值班长' }[String(user.value.category)] || '工作空间'));
 const selectedMenu = computed(() => NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value || view.value);
-const permittedModules = computed(() => navigationModules(granted.value).filter(m=>m.id!=='accounts'));
+const permittedModules = computed(() => navigationModules(granted.value).filter(m=>m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest')));
 const menuOptions = computed(() => [
   { label: '个人工作台', key: 'home', icon: () => h(House, {size:19}) },
   ...[...new Set(permittedModules.value.map(m => m.group))].map(group => ({ key: group, label: group, type: 'group' as const, children: permittedModules.value.filter(m => m.group === group).map(m => ({ key: m.id, label:m.label, icon:() => h(moduleIcons[m.icon as keyof typeof moduleIcons],{size:18}) })) })),

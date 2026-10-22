@@ -86,6 +86,8 @@ class DocumentLibraryPortalTests(LibraryFixture):
             'property': {'multiple': multiple}}
         self.enterContext(patch.object(self.remote, 'fields', return_value=[*self.remote.fields(), self.person_schema]))
         self.remote.rows['recOne']['fields']['Owner'] = []
+        self.service.request_sync(self.admin, 'manuals')
+        self.service.process_sync('manuals')
 
     def person_schema_response(self):
         return next(field for field in self.data(self.prefix + '/schema')['fields'] if field['field_id'] == 'fldOwner')
@@ -264,7 +266,7 @@ class DocumentLibraryPortalTests(LibraryFixture):
                 token = 'tokenFixture' + name
                 self.remote.files[token] = content
                 self.remote.rows['recOne']['fields']['Files'] = [{'file_token': token, 'name': name, 'size': len(content)}]
-                record = self.data(self.prefix + '/records/recOne')
+                record = self.data(self.prefix + '/records/recOne?refresh=1')
                 url = record['attachments'][0]['download_url']
                 response = self.client.get(url)
                 self.assertEqual(response.status_code, 200, response.text)
@@ -385,7 +387,7 @@ class DocumentLibraryPortalTests(LibraryFixture):
     def test_unknown_source_scope_denies_record_search_and_download(self):
         current = self.data(self.prefix + '/records/recOne')
         self.remote.rows['recOne']['fields']['Building'] = 'A/unknown'
-        self.assertEqual(self.client.get(self.prefix + '/records/recOne').status_code, 404)
+        self.assertEqual(self.client.get(self.prefix + '/records/recOne?refresh=1').status_code, 404)
         self.assertEqual(self.client.get(current['attachments'][0]['download_url']).status_code, 404)
         self.assertEqual(self.kb.search(actor(), 'Alpha policy')['items'], [])
 
@@ -413,7 +415,7 @@ class DocumentLibraryPortalTests(LibraryFixture):
             self.profile['modules'] = []
             return result
         with patch.object(self.remote, 'get', side_effect=revoke):
-            response = self.client.get(self.prefix + '/records/recOne')
+            response = self.client.get(self.prefix + '/records/recOne?refresh=1')
         self.assertEqual(response.status_code, 403)
         self.assertNotIn('Alpha policy', response.text)
         self.assertFalse(self.kb.evidence_current(found, {'endpoint': 'https://company.example/v1'}, actor=actor()))

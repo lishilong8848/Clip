@@ -13,6 +13,7 @@ from urllib.parse import quote, urlencode
 
 from lan_bitable_template_portal.identity_utils import is_local_record_id
 from upload_event_module.building_normalizer import extract_building_codes
+from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
 
 
 WORK_TYPE_LABELS: dict[str, str] = {
@@ -2574,8 +2575,11 @@ def _detail_form(
         "title": _record_title(source), "building": _record_building(source),
         "cycle": _first(source.get("maintenance_cycle"), _field(source, "维护周期", "维保周期")),
     }).encode("utf-8")).hexdigest()
+    cycle_rules_attr = (f' data-maintenance-cycle-rules="{_e(_json_dumps(maintenance_cycle_rules()))}"'
+        if work == 'maintenance' and notice_type_value == '维保通告' else '')
+    cycle_warning_html = '<div id="lite-cycle-warning" class="notice-cycle-warning" role="status" hidden></div>' if cycle_rules_attr else ''
     return f"""
-      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}" data-draft-context="{draft_context}"{parsed_keys_attr}>
+      <form id="lite-notice-form" class="detail-form" data-action="{_e(action)}" data-detail-mode="{_e(detail_mode)}" data-work-type="{_e(work)}" data-draft-context="{draft_context}"{parsed_keys_attr}{cycle_rules_attr}>
         {datalists}
         <input type="hidden" name="scope" value="{_e(scope)}">
         <input type="hidden" name="source_month" value="{_e(source_month)}">
@@ -2600,6 +2604,7 @@ def _detail_form(
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
+        {cycle_warning_html}
         {_polling_work_order_selector(work)}
         {_polling_work_order_status(source, work)}
         {_site_photo_uploader(work, site_photo_count, site_photo_images)}
@@ -3181,6 +3186,9 @@ def render_workbench_lite(
     label.required > span::after {{ content:"必填"; display:inline-flex; margin-left:6px; border-radius:999px; padding:1px 6px; color:#b42318; background:#fff1f0; font-size:10px; font-weight:950; vertical-align:middle; }}
     input:required:invalid,textarea:required:invalid {{ border-color:#ffc7bf; background:#fffafa; }}
     #lite-notice-form [name="title"].format-invalid {{ border-color:#ef4444; background:#fff1f2; box-shadow:0 0 0 3px rgba(239,68,68,.12); }}
+    #lite-notice-form textarea.cycle-mismatch {{ border-color:#dc2626; box-shadow:0 0 0 2px rgba(220,38,38,.16); }}
+    .notice-cycle-warning {{ color:#b91c1c; border-left:3px solid #dc2626; padding:8px 12px; font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }}
+    .notice-cycle-warning[hidden] {{ display:none; }}
     .form-grid > label {{ min-width:0; }}
     .building-scope-field {{ min-width:0; margin:0; border:1px solid #d5e3f4; border-radius:10px; padding:6px 8px; background:#fbfdff; }}
     .building-scope-field legend {{ padding:0 3px; color:#51677f; font-size:11px; font-weight:900; }}
@@ -6264,10 +6272,40 @@ def render_workbench_lite(
       }}
       return `【${{label}}】${{value}}`;
     }}
+    function updateMaintenanceCycleWarnings(form) {{
+      const panel = form?.querySelector('#lite-cycle-warning');
+      if (!panel) return [];
+      let rules = [];
+      try {{ rules = JSON.parse(form.dataset.maintenanceCycleRules || '[]'); }} catch {{}}
+      if (!Array.isArray(rules)) rules = [];
+      const owner = new Map();
+      for (const rule of rules) for (const alias of rule.aliases || []) if (typeof alias === 'string' && alias) owner.set(alias, rule.value);
+      const aliases = [...owner.keys()].sort((a,b)=>b.length-a.length);
+      const enabled = previewValue(form, 'work_type') === 'maintenance' && previewValue(form, 'notice_type') === '维保通告';
+      const cycle = enabled ? owner.get(previewValue(form, 'maintenance_cycle').trim()) : '';
+      const warnings = [];
+      for (const [field,label] of [['content','内容'],['reason','原因']]) {{
+        const control = form.querySelector(`[name="${{field}}"]`), value = previewValue(form, field), terms = new Set();
+        if (cycle) for (let i=0;i<value.length;) {{
+          const term = aliases.find(alias=>value.startsWith(alias,i));
+          if (term) {{ if (owner.get(term)!==cycle) terms.add(term); i+=term.length; }} else i++;
+        }}
+        if (control) {{
+          control.classList.toggle('cycle-mismatch',terms.size>0);
+          const described = (control.getAttribute('aria-describedby')||'').split(' ').filter(id=>id&&id!=='lite-cycle-warning');
+          if (terms.size) described.push('lite-cycle-warning');
+          if (described.length) control.setAttribute('aria-describedby',described.join(' ')); else control.removeAttribute('aria-describedby');
+        }}
+        if (terms.size) warnings.push(`已选维保周期“${{cycle}}”，【${{label}}】含其它周期字样“${{[...terms].join('、')}}”，请核对（仅提醒，不阻止发送）。`);
+      }}
+      panel.textContent = warnings.join('\\n'); panel.hidden = !warnings.length;
+      return warnings;
+    }}
     function updateNoticePreview(form) {{
       const targetForm = form || document.getElementById('lite-notice-form');
       const preview = document.getElementById('lite-notice-preview');
       if (!targetForm || !preview) return;
+      updateMaintenanceCycleWarnings(targetForm);
       const workType = targetForm.querySelector('[name="work_type"]')?.value || targetForm.dataset.workType || 'maintenance';
       const template = previewTemplates[workType] || previewTemplates.maintenance;
       const noticeType = previewValue(targetForm, 'notice_type');

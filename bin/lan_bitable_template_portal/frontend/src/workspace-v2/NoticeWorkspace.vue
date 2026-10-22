@@ -41,6 +41,7 @@
         <div v-if="confirming||job||ambiguous" class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div>
         <NAlert v-if="!form.actions.length" type="warning" :bordered="false">此通告当前只可查看，不可重新发送。</NAlert>
         <NAlert v-if="verifyBeforeStart" type="warning" :bordered="false">计划显示进行中，但尚未定位到已发目标通告。请先在编辑区顶部“关联核验”中查找原通告；此时不能重复发送开始。</NAlert>
+        <NAlert v-if="(confirming||job||ambiguous)&&cycleWarnings.length" type="warning" :bordered="false" data-cycle-warning-summary><p v-for="warning in cycleWarnings" :key="warning">{{ warning }}</p></NAlert>
         <section v-if="job||ambiguous" class="v2-notice-task-result" role="status" :aria-label="taskTitle">
           <Clock3 v-if="eventWaiting" :size="36" /><NSpin v-else-if="job&&!terminal" size="large" /><CheckCircle2 v-else-if="succeeded" :size="38" class="is-success" /><CircleAlert v-else :size="36" />
           <h2>{{ taskTitle }}</h2><p>{{ eventWaiting?'已保存本次正文、时间和附件；事件结束或删除后自动发送，可返回列表继续办理其它通告。':job?.error || job?.upload_message || job?.message || (ambiguous?'提交响应未确认，已保留原操作标识，请勿重新创建。':succeeded?'已按原业务流程完成，列表正在同步。':'任务已受理，可返回列表继续办理其它通告。') }}</p>
@@ -61,7 +62,7 @@
           <section class="v2-notice-page-fields">
             <header><span>{{ missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
 
-            <NoticeFields :fields="editingFields" :values="form.values" :locked="locked" :attempted="attempted" compact :style="{'--notice-field-columns':fieldColumns}"><NFormItem v-if="action==='start'" label="所属楼栋" required data-notice-section="buildings" :show-feedback="false"><NCheckboxGroup v-model:value="form.values.building_codes" :disabled="locked"><NCheckbox v-for="s in buildingOptions" :key="s.value" :value="s.value">{{ s.label }}</NCheckbox></NCheckboxGroup></NFormItem></NoticeFields>
+            <NoticeFields :fields="editingFields" :values="form.values" :cycle-rules="form.cycleRules" :locked="locked" :attempted="attempted" compact :style="{'--notice-field-columns':fieldColumns}"><NFormItem v-if="action==='start'" label="所属楼栋" required data-notice-section="buildings" :show-feedback="false"><NCheckboxGroup v-model:value="form.values.building_codes" :disabled="locked"><NCheckbox v-for="s in buildingOptions" :key="s.value" :value="s.value">{{ s.label }}</NCheckbox></NCheckboxGroup></NFormItem></NoticeFields>
           </section>
 
           <section v-if="form.values.source_record_id&&!form.values.target_record_id&&action==='start'" class="v2-notice-field-section" data-notice-section="memory"><NoticeMemorySuggestions :key="formKey" :form="form" :month="applied.month" :action="action" :locked="locked" @applied="persist" /></section>
@@ -107,6 +108,7 @@ import { navigate,registerNavigationGuard } from './navigation';
 import { workspaceUrl } from './version';
 import { trackButtonRequest } from './actionMotion';
 import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,noticeDraftContext,restoreNoticeEdits,type NoticeForm } from './noticeForm';
+import { noticeCycleWarnings } from '../noticeCycleWarnings';
 import NoticePlanBinding from './NoticePlanBinding.vue';
 import NoticeFields from './NoticeFields.vue';
 import NoticeMemorySuggestions from './NoticeMemorySuggestions.vue';
@@ -199,6 +201,7 @@ const sopPersonName=(id:string)=>sopField.value.people?.find((p:Dict)=>p.record_
 watch(sopScope,(value,previous)=>{sopField.value={notice_scope:value,work_type:form.value?.values.work_type};if(previous&&previous!==value)sop.value={sop_version:0};});
 const attentionKeys=ref<string[]>([]),originalFields=ref<Dict>({});
 const missingFields=computed(()=>form.value?.fields.filter(f=>f.required&&!String(form.value!.values[f.key]??'').trim())||[]);
+const cycleWarnings=computed(()=>form.value?Object.values(noticeCycleWarnings(form.value.values,form.value.cycleRules)):[]);
 const primaryFields=computed(()=>{
   const fields=form.value?.fields||[],keys=new Set(['title','progress','actual_action_time',...(action.value==='start'?['start_time','end_time']:[]),...attentionKeys.value]);
   return fields.filter(f=>keys.has(f.key)).sort((a,b)=>Number(attentionKeys.value.includes(b.key))-Number(attentionKeys.value.includes(a.key)));

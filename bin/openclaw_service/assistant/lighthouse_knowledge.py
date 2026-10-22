@@ -290,9 +290,13 @@ class KnowledgeBase:
                 PRIMARY KEY(document_id,version));
             CREATE TABLE IF NOT EXISTS source_artifacts(id TEXT PRIMARY KEY,sources TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_retry(document_id TEXT PRIMARY KEY,attempts INTEGER NOT NULL,next_attempt REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS source_reindex_receipts(
+                source_key TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(source_key,request_id));
         ''')
         if 'source_key' not in {row[1] for row in db.execute('PRAGMA table_info(documents)')}:
             db.execute("ALTER TABLE documents ADD COLUMN source_key TEXT NOT NULL DEFAULT ''")
+        if 'index_token' not in {row[1] for row in db.execute('PRAGMA table_info(documents)')}:
+            db.execute("ALTER TABLE documents ADD COLUMN index_token TEXT NOT NULL DEFAULT ''")
         # Additive folder-tree migration: nested folders are groups whose parent_id
         # points at another group.  Existing flat groups keep parent_id NULL and remain
         # roots, so the API and all existing consumers stay compatible.  Referential
@@ -302,6 +306,11 @@ class KnowledgeBase:
             db.execute('ALTER TABLE knowledge_groups ADD COLUMN parent_id TEXT')
         db.execute('CREATE INDEX IF NOT EXISTS knowledge_groups_parent ON knowledge_groups(parent_id)')
         db.execute("UPDATE documents SET status='queued' WHERE status='indexing' AND deleted=0")
+        # Older source failures may predate retry receipts; preserve any existing backoff.
+        db.execute("""INSERT OR IGNORE INTO source_retry(document_id,attempts,next_attempt)
+            SELECT d.id,0,0 FROM documents d JOIN document_sources s ON s.document_id=d.id
+            WHERE d.deleted=0 AND d.source_key<>'' AND s.enabled=1
+                AND d.status='failed' AND d.pending_version IS NOT NULL""")
 
         prior = self._get_config(db)
         base = {k: prior.get(k) for k in ('generation',)}
@@ -766,6 +775,89 @@ class KnowledgeBase:
             if rows:
                 self._bump(db)
 
+    def reindex_source(self, source_key, source, request_id):
+        """Internally requeue an upserted source version once per durable request."""
+        if not isinstance(source_key, str) or not source_key or not isinstance(source, dict):
+            raise AssistantError('来源文件信息无效。')
+        try:
+            if not isinstance(request_id, str) or str(uuid.UUID(request_id)) != request_id.lower():
+                raise ValueError()
+        except (ValueError, AttributeError):
+            raise AssistantError('重新入库请求标识必须为 UUID。') from None
+        request_id = request_id.lower()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT d.*,s.payload,s.enabled FROM document_sources s JOIN documents d ON d.id=s.document_id '
+                'WHERE s.source_key=? AND d.source_key=s.source_key', (source_key,)).fetchone()
+            if not row or row['deleted'] or row['owner'] != '@document-library':
+                raise AssistantError('来源文件尚未入库或已移除。', 404)
+            if (not row['enabled'] or json.loads(row['payload']) != source
+                    or self.source_current is None or not self.source_current(source)):
+                raise AssistantError('来源版本已变化，未重新入库。', 409)
+            duplicate = db.execute('SELECT 1 FROM source_reindex_receipts WHERE source_key=? AND request_id=?',
+                (source_key, request_id)).fetchone() is not None
+            if not duplicate:
+                version = db.execute('SELECT MAX(version) FROM versions WHERE document_id=?', (row['id'],)).fetchone()[0]
+                if version is None:
+                    raise AssistantError('来源文件版本缺失，请先同步文件。', 409)
+                db.execute('INSERT INTO source_reindex_receipts VALUES(?,?)', (source_key, request_id))
+                db.execute("UPDATE documents SET pending_version=?,status='queued',revision=revision+1,error='',updated_at=? WHERE id=?",
+                    (version, time.time(), row['id']))
+                db.execute('DELETE FROM index_staging WHERE document_id=?', (row['id'],))
+                db.execute('DELETE FROM source_retry WHERE document_id=?', (row['id'],))
+                self._bump(db)
+            result = self._public(db.execute('SELECT * FROM documents WHERE id=?', (row['id'],)).fetchone(),
+                {'id': '@document-library'})
+        self._ensure_worker()
+        self._wake.set()
+        return {**result, 'duplicate': duplicate, 'request_id': request_id}
+
+    def remove_sources(self, prefix):
+        """Remove obsolete managed sources after canonical configuration removal."""
+        if not isinstance(prefix, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}/(?:[A-Za-z0-9_-]{1,200}/)?', prefix):
+            raise AssistantError('请指定完整来源表或记录前缀。')
+        if self.source_current is None:
+            raise AssistantError('无法核对来源状态，未清理文件。', 409)
+        removed, skipped, originals = 0, 0, []
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT d.id,s.payload FROM document_sources s JOIN documents d ON d.id=s.document_id '
+                "WHERE substr(s.source_key,1,?)=? AND d.source_key=s.source_key AND d.owner='@document-library'",
+                (len(prefix), prefix)).fetchall()
+            for row in rows:
+                if self.source_current(json.loads(row['payload'])) is not False:
+                    skipped += 1
+                    continue
+                identity = row['id']
+                originals.extend(dict(version) for version in db.execute('SELECT * FROM versions WHERE document_id=?', (identity,)))
+                db.execute('DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE document_id=?)', (identity,))
+                db.execute('DELETE FROM local_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id=?)', (identity,))
+                for table in ('chunks', 'index_staging', 'source_retry', 'doc_group_members', 'source_versions', 'versions', 'document_sources'):
+                    db.execute(f'DELETE FROM {table} WHERE document_id=?', (identity,))
+                db.execute('DELETE FROM documents WHERE id=?', (identity,))
+                removed += 1
+            if removed:
+                self._bump(db)
+                self._bump_vector(db)
+            vector_revision = self._vector_revision(db)
+        if removed:
+            # Recheck under a writer lock: a new upsert may already reuse the same path.
+            with suppress(OSError, ValueError), self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                referenced = {(self.root / row[0]).resolve() for row in db.execute('SELECT path FROM versions')}
+                for version in originals:
+                    expected = self.root / 'originals' / version['document_id'] / (str(version['version']) + Path(version['name']).suffix.lower())
+                    with suppress(OSError, ValueError):
+                        path = (self.root / version['path']).resolve()
+                        if (re.fullmatch(r'[a-f0-9]{32}', version['document_id']) and path == expected
+                                and path not in referenced and expected.parent.resolve() == expected.parent
+                                and not expected.is_symlink() and expected.is_file()):
+                            expected.unlink()
+        # Deletion may already have committed on a failed attempt; retries must publish too.
+        if self._index_available() and self._publish_snapshot(vector_revision) is None:
+            raise AssistantError('来源索引已清理，向量快照尚未更新，请稍后重试。', 503)
+        return {'removed': removed, 'skipped': skipped}
+
     def source_status(self, prefix):
         states = [item['status'] for item in self.source_states(prefix).values()]
         for state in ('blocked', 'failed', 'indexing', 'queued'):
@@ -971,10 +1063,12 @@ class KnowledgeBase:
                         db.execute('UPDATE source_retry SET next_attempt=? WHERE document_id=?', (time.time() + 300, row['id']))
                         return False
                 doc = dict(row)
+                # A fresh claim token fences old work even after removal/recreation of the same source ID.
+                doc['index_token'] = uuid.uuid4().hex
                 cfg = self._get_config(db)
                 vector_on = self._vector_mode(cfg)
                 version = dict(db.execute('SELECT * FROM versions WHERE document_id=? AND version=?', (doc['id'], doc['pending_version'])).fetchone())
-                db.execute("UPDATE documents SET status='indexing',error='' WHERE id=?", (doc['id'],))
+                db.execute("UPDATE documents SET status='indexing',error='',index_token=? WHERE id=?", (doc['index_token'], doc['id']))
                 db.execute('DELETE FROM index_staging WHERE document_id=?', (doc['id'],))
             try:
                 from .lighthouse_knowledge_extract import extract_sections, split_sections
@@ -993,8 +1087,8 @@ class KnowledgeBase:
                         if self._stop.is_set():
                             return False
                         with self.connect() as db:
-                            current = db.execute('SELECT revision,deleted FROM documents WHERE id=?', (doc['id'],)).fetchone()
-                            if current['deleted'] or current['revision'] != doc['revision']:
+                            current = db.execute('SELECT revision,deleted,index_token FROM documents WHERE id=?', (doc['id'],)).fetchone()
+                            if not current or current['deleted'] or current['revision'] != doc['revision'] or current['index_token'] != doc['index_token']:
                                 return True
                         texts = [chunk['text'] for chunk in chunks[start:start + _EMBED_BATCH]]
                         batch = self.embedder.embed(texts, cfg)
@@ -1003,8 +1097,8 @@ class KnowledgeBase:
                         packed = [(doc['id'], start + offset, _pack(vector)) for offset, vector in enumerate(batch)]
                         with self.connect() as db:
                             db.execute('BEGIN IMMEDIATE')
-                            current = db.execute('SELECT revision,deleted FROM documents WHERE id=?', (doc['id'],)).fetchone()
-                            if current['deleted'] or current['revision'] != doc['revision']:
+                            current = db.execute('SELECT revision,deleted,index_token FROM documents WHERE id=?', (doc['id'],)).fetchone()
+                            if not current or current['deleted'] or current['revision'] != doc['revision'] or current['index_token'] != doc['index_token']:
                                 return True
                             db.executemany('INSERT INTO index_staging VALUES(?,?,?)', packed)
                 if self._stop.is_set():
@@ -1012,7 +1106,8 @@ class KnowledgeBase:
                 with self.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     current = db.execute('SELECT * FROM documents WHERE id=?', (doc['id'],)).fetchone()
-                    if current['deleted'] or current['revision'] != doc['revision'] or current['pending_version'] != version['version']:
+                    if (not current or current['deleted'] or current['revision'] != doc['revision']
+                            or current['index_token'] != doc['index_token'] or current['pending_version'] != version['version']):
                         return True
                     if vector_on and db.execute('SELECT count(*) FROM index_staging WHERE document_id=?', (doc['id'],)).fetchone()[0] != len(chunks):
                         raise AssistantError('嵌入向量不完整，原文档版本已保留，请重试。', 502)
@@ -1052,6 +1147,11 @@ class KnowledgeBase:
                 message = str(exc) if isinstance(exc, AssistantError) else '文件解析或索引未完成，请检查格式后重试。'
                 status = 'blocked' if getattr(exc, 'category', '') == 'sensitive_document' else 'failed'
                 with self.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    current = db.execute('SELECT revision,deleted,index_token,status FROM documents WHERE id=?', (doc['id'],)).fetchone()
+                    if (not current or current['deleted'] or current['revision'] != doc['revision']
+                            or current['index_token'] != doc['index_token'] or current['status'] != 'indexing'):
+                        return True
                     db.execute('DELETE FROM index_staging WHERE document_id=?', (doc['id'],))
                     db.execute("UPDATE documents SET status=?,error=? WHERE id=? AND revision=? AND deleted=0 AND status='indexing'",
                         (status, safe_text(message, limit=600) or '文件包含不宜公开的信息，未入库。', doc['id'], doc['revision']))

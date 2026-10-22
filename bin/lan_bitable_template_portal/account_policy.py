@@ -16,7 +16,6 @@ CATEGORY_OPTIONS = [
     {"value": "other", "label": "其他/待分类"},
 ]
 MANAGED_CATEGORIES = frozenset({"engineer", "operator", "shift_leader", "duty"})
-
 LEVEL_RANK = {"L0": 0, "L1": 1, "L2": 2, "L3": 3, "L4": 4}
 LEVEL_OPTIONS = [
     {"value": "L0", "label": "L0 超级管理员"},
@@ -79,7 +78,7 @@ def _grantable_levels(actor_level):
     if rank == 1:
         return {"L0", "L2", "L3", "L4"}
     if rank == 2:
-        return {"L0"}
+        return {"L0", "L3", "L4"}
     if rank == 3:
         return {"L0", "L4"}
     return set()
@@ -93,19 +92,25 @@ def level_options_for(actor_level):
 
 def category_options_for(actor_level):
     rank = level_rank(actor_level)
-    if rank <= 1:
+    if rank <= 3:
         return copy.deepcopy(CATEGORY_OPTIONS)
-    if rank == 2:
-        return [option for option in CATEGORY_OPTIONS if option["value"] == "engineer"]
-    if rank == 3:
-        return [option for option in CATEGORY_OPTIONS if option["value"] in MANAGED_CATEGORIES]
     return []
+
+
+def account_in_scope(profile, target):
+    # Both the identity's home and its current grants must fit the manager's scope.
+    scopes = set(target.get('scope_rules', target.get('scopes', [])) or [])
+    if target.get('home_scope'):
+        scopes.add(target['home_scope'])
+    elif 'home_scope' not in target:
+        scopes.update(target.get('own_scopes') or [])
+    return bool(scopes) and scopes.issubset(set(profile.get('scope_rules') or []))
 
 
 def account_allowed(profile, target, action):
     if action not in {"view", "edit", "delete"} or not profile.get("can_manage_accounts"):
         return False
-    if target.get('is_self'):
+    if target.get('is_self') or profile.get('open_id') and profile.get('open_id') == target.get('open_id'):
         return action == 'view'
     peers_l0 = profile.get('level') == target.get('level') == 'L0'
     if level_rank(target.get('level')) <= level_rank(profile.get('level')) and not peers_l0:
@@ -116,16 +121,13 @@ def account_allowed(profile, target, action):
         return False
     if profile["level"] in {"L0", "L1"}:
         return True
-    if target.get("role") == "admin" or target.get("level") in {"L0", "L1", "L3"}:
+    if target.get("role") == "admin" or target.get("level") not in {"L3", "L4"}:
         return False
-    # L2 remains an edit-only engineer selector; explicit L0 grants are validated separately.
-    if profile["level"] == "L2":
-        return action == "edit" and target.get("category") == "engineer"
-    # L3 manages only own-building L4 accounts; peers (supervisors) stay out of reach.
-    return (profile["level"] == "L3" and target.get("category") in MANAGED_CATEGORIES
-            and target.get("level") == "L4"
-            and bool(target.get("own_scopes"))
-            and set(target["own_scopes"]).issubset(set(profile.get("scope_rules") or [profile.get("home_scope")])))
+    if profile["level"] in {"L2", "L3"} and account_in_scope(profile, target):
+        return True
+    # Preserve L2's existing cross-building, edit-only L4 engineer exception.
+    return (profile["level"] == "L2" and action == "edit"
+            and target.get("level") == "L4" and target.get("category") == "engineer")
 
 
 def account_details_allowed(profile, target):
@@ -153,10 +155,12 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
         raise PolicyViolation("不能修改同级或更高级账号，请由其上级审批。", 403)
 
     # Fixed super-user can never be re-granted through the management API.
-    if target.get('is_fixed_superuser') or target.get('locked') or (target.get("home_scope") == "H" and target.get("category") == "duty"):
-        raise PolicyViolation("固定管理员或固定值班账号权限不可修改。", 403)
+    if target.get('is_fixed_superuser') or target.get('locked'):
+        raise PolicyViolation("固定管理员权限不可修改。", 403)
     if actor_level == "L4":
         raise PolicyViolation("当前账号没有人员管理权限。", 403)
+    if not account_allowed(actor, target, 'edit'):
+        raise PolicyViolation("当前账号无权管理此人员或其现有楼栋范围。", 403)
 
     # Desired level (defaults to keeping the target's current level).
     resolved_level = str(level or target_level or "").strip()
@@ -164,6 +168,9 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
         raise PolicyViolation("无效的管理级别。", 400)
     if resolved_level not in _grantable_levels(actor_level):
         raise PolicyViolation("不能将账号设置到超出自身可授予的级别。", 403)
+    cross_building_engineer = actor_level == 'L2' and not account_in_scope(actor, target)
+    if cross_building_engineer and resolved_level != 'L0':
+        raise PolicyViolation("跨楼工程师仅保留原基础编辑和显式 L0 授权，不能修改其它访问权限。", 403)
     # Supervisors configure only lower-level accounts inside their managed scope.
     if actor_level == "L3" and target_level != "L4":
         raise PolicyViolation("L3 只能管理本楼栋的 L4 基础账号。", 403)
@@ -175,6 +182,8 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
         if not any(option["value"] == str(category).strip() for option in CATEGORY_OPTIONS):
             raise PolicyViolation("无效的业务岗位。", 400)
         resolved_category = str(category).strip()
+        if cross_building_engineer and resolved_category != 'engineer':
+            raise PolicyViolation("跨楼工程师不能更改为其它岗位。", 403)
         if actor_level not in {"L0", "L1"}:
             allowed_categories = category_options_for(actor_level)
             if not any(option["value"] == resolved_category for option in allowed_categories):

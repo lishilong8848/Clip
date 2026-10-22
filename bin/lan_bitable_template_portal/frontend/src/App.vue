@@ -537,7 +537,7 @@ function moduleForCurrentRoute(): string {
   if (path === "/critical-guard") return "critical_guard";
   if (path === "/risk-inspections") return "risk_inspection";
   if (path === "/drill-management" || path === "/drill-management/print") return "drills";
-  if (path === "/signature-management") return "signatures";
+  if (path === "/signature-management") return "";
   if (path === "/signature") return signatureLinkMode.value ? "" : "signatures";
   if (path === "/daily-tasks" || path === "/daily-tasks/morning-meeting/print") return "daily";
   if (path === "/workbench-lite") {

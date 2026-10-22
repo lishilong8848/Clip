@@ -109,10 +109,9 @@
               <fieldset v-if="canChooseAccess(draft)" class="account-access" :disabled="saving"><legend>访问权限</legend>
                 <p class="muted">此处设置的级别、岗位、楼栋与模块会覆盖HR默认授权。</p>
                 <label><span>权限级别</span>
-                  <select v-model="draft.level" aria-label="权限级别" :disabled="isFixedDuty" @change="changeLevel">
+                  <select v-model="draft.level" aria-label="权限级别" @change="changeLevel">
                     <option v-for="opt in accessLevelOptions" :key="opt.value" :value="opt.value" :disabled="opt.disabled">{{ opt.label }}</option>
                   </select>
-                  <small v-if="isFixedDuty" class="muted">固定值班账号级别不可修改。</small>
                 </label>
                 <label><span>岗位分类</span>
                   <select v-model="draft.category" aria-label="岗位分类" :disabled="!canSaveAccess(draft)">
@@ -217,9 +216,6 @@ function canEdit(item: Account) { return item.can_edit === true; }
 function canEditAccess(item: Account) { return item.can_edit_access === true; }
 function canChooseAccess(item: Account) { return canEditAccess(item) || item.can_grant_l0 === true; }
 function canSaveAccess(item: Account) { return canEditAccess(item) || (item.can_grant_l0 === true && item.level === 'L0'); }
-// H-building fixed duty accounts never have their level changed, regardless of
-// anything else the access panel offers.
-const isFixedDuty = computed(() => draft.value?.kind === 'duty' && (draft.value.home_scope === 'H' || draft.value.own_scopes?.includes('H')));
 const actorModules = computed(() => Array.isArray(policy.value?.modules) ? policy.value.modules as string[] : []);
 const selectedIds = ref(new Set<string>()), selectionNotice = ref('');
 const selectedAccounts = computed(() => items.value.filter(item => selectedIds.value.has(item.id)));
@@ -305,14 +301,16 @@ watch([bulkMode, selectedAccounts], () => {
 });
 const isSuperAdmin = computed(() => ['L0', 'L1'].includes(myLevel.value));
 const accessLevelOptions = computed(() => {
-  const options = levelOptions.value.map(option => ({ ...option, disabled: false }));
+  const options = levelOptions.value.filter(option => !draft.value || canEditAccess(draft.value) || option.value === 'L0')
+    .map(option => ({ ...option, disabled: false }));
   const current = draft.value?.level;
   if (current && !options.some(option => option.value === current)) {
     return [{ value: current, label: `${levelLabel(current)}（当前）`, disabled: true }, ...options];
   }
   return options;
 });
-const accessCategoryOptions = computed(() => categoryOptions.value);
+const accessCategoryOptions = computed(() => categoryOptions.value.filter(option =>
+  !draft.value || canEditAccess(draft.value) || option.value === 'engineer'));
 const accessModuleOptions = computed(() => moduleOptions.value.filter(option => actorModules.value.includes(option.value)));
 const moduleGroups = computed(() => ['业务管理', '通告办理', '协作与资料', '系统管理', '功能模块'].map(label => ({ label, options: accessModuleOptions.value.filter(option => (option.group || '功能模块') === label) })).filter(group => group.options.length));
 const bulkModuleGroups = computed(() => moduleGroups.value.map(group => {
@@ -327,8 +325,8 @@ const accessScopeOptions = computed(() => {
     const allowed = new Set(policy.value.scope_rules || []);
     return options.filter(option => allowed.has(option.value));
   }
-  const own = new Set(draft.value.own_scopes || []);
-  return options.filter(option => own.has(option.value) || option.value === draft.value?.home_scope);
+  const allowed = new Set(policy.value.scope_rules || []);
+  return options.filter(option => allowed.has(option.value));
 });
 
 function modulesForLevel(level?: string): string[] {

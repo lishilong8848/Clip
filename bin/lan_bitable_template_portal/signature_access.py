@@ -7,12 +7,15 @@ class SignatureAccess:
     def __init__(self, manager, auth, actor):
         self.manager, self.auth, self.actor = manager, auth, actor
         self.profile = auth.account_profile(actor)
-        if 'signatures' not in self.profile.get('modules', []) or auth.directory_block_reason(actor):
-            raise SignatureManagementError('当前账号没有签名管理权限。', 403)
+        if not actor or not self.profile or self.actor_blocked():
+            raise SignatureManagementError('当前账号不可发起签名，请重新登录或核对账号状态。', 403)
         self.data = None
         self.owners = {}
         self.profiles = {actor: self.profile}
         self._targets = None
+
+    def actor_blocked(self):
+        return self.profile.get('enabled') is False or bool(self.auth.directory_block_reason(self.actor))
 
     def profile_for(self, identity):
         if identity not in self.profiles:
@@ -36,7 +39,8 @@ class SignatureAccess:
 
     @property
     def global_manager(self):
-        return self.profile.get('level') in {'L0', 'L1'} and self.profile.get('can_manage_accounts', False)
+        return ('signatures' in self.profile.get('modules', [])
+                and self.profile.get('level') in {'L0', 'L1'} and self.profile.get('can_manage_accounts', False))
 
     @property
     def scopes(self):
@@ -44,7 +48,11 @@ class SignatureAccess:
 
     @property
     def can_create_temporary(self):
-        return bool(self.scopes)
+        return True
+
+    @property
+    def collection_scopes(self):
+        return list(self.manager.d.BUILDING_OPEN_ID_MAP)
 
     def shared_temporary(self, person):
         self.ensure_directory()
@@ -78,6 +86,8 @@ class SignatureAccess:
         if blocked:
             return None
         profile = self.profile_for(identity)
+        if not profile or profile.get('enabled') is False:
+            return None
         return {**profile, 'open_id': identity, 'is_self': identity == self.actor,
                 'own_scopes': [profile['home_scope']] if profile.get('home_scope') else [],
                 'blocked_reason': blocked}
@@ -85,6 +95,8 @@ class SignatureAccess:
     def allowed(self, person, action):
         if action == 'request':
             return self.request_allowed(person)
+        if 'signatures' not in self.profile.get('modules', []):
+            return False
         target = self.target(person)
         if target:
             if target['is_self']:
@@ -93,11 +105,11 @@ class SignatureAccess:
         return action in {'view', 'edit'} and self.shared_temporary(person)
 
     def request_allowed(self, person):
-        if self.allowed(person, 'edit'):
-            return True
-        superior = self.target(person)
-        subordinate = {**self.profile, 'own_scopes': [self.profile['home_scope']] if self.profile.get('home_scope') else []}
-        return bool(superior and account_allowed(superior, subordinate, 'edit'))
+        # Collecting a signature does not grant access to the person's ink or history.
+        return bool(self.target(person) or self.shared_temporary(person))
+
+    def relay_allowed(self, person):
+        return self.allowed(person, 'edit') or self.shared_temporary(person)
 
     def presentation(self, person):
         row = dict(person)
@@ -118,14 +130,17 @@ class SignatureAccess:
         row.update(is_self=bool(target and target['is_self']),
                    can_preview=bool(person.get('has_signature') and self.allowed(person, 'view')),
                    can_request=self.request_allowed(person),
-                   can_receive_message=bool(target and target.get('open_id')))
+                   can_receive_message=bool(target and target.get('open_id')),
+                   can_choose_recipient=self.relay_allowed(person),
+                   recipient_scopes=self.collection_scopes if self.shared_temporary(person) else self.scopes)
         row['directory_only'] = not self.allowed(person, 'view') and not self.allowed(person, 'edit')
         row['invite_only'] = row['can_request'] and row['directory_only']
         if row['directory_only']:
             # The shared directory exposes search metadata, never protected ink/history.
             row = {key: row.get(key) for key in ('source', 'record_id', 'person_key', 'name', 'employee_no',
                     'building', 'position', 'specialty', 'team', 'shift', 'account_nature',
-                    'is_self', 'can_preview', 'can_request', 'can_receive_message', 'invite_only', 'directory_only')}
+                    'is_self', 'can_preview', 'can_request', 'can_receive_message', 'can_choose_recipient',
+                    'recipient_scopes', 'invite_only', 'directory_only')}
             row['signature_status'] = 'restricted'
         return row
 
@@ -136,6 +151,8 @@ class SignatureAccess:
         return person
 
     def account(self, identity=''):
+        if 'signatures' not in self.profile.get('modules', []):
+            raise SignatureManagementError('当前账号没有查看签名的权限。', 403)
         identity = str(identity or self.actor).strip()
         if identity != self.actor:
             profile = self.profile_for(identity)
@@ -175,13 +192,11 @@ class SignatureAccess:
                     raise SignatureManagementError('所选人员无法接收签名链接，请重新选择。', 403)
             else:
                 self.require('staff', record_id, 'view')
-        elif value.split(':', 1)[-1].upper() not in self.scopes:
+        elif value.split(':', 1)[-1].upper() not in (self.collection_scopes if person and self.shared_temporary(person) else self.scopes):
             raise SignatureManagementError('不能把签名链接发送到管理范围之外的值班账号。', 403)
 
     def temporary(self, payload):
         scopes = set(self.manager.s._building_codes_from_value(payload.get('building')))
-        if not self.can_create_temporary:
-            raise SignatureManagementError('当前账号未配置可新增临时人员的楼栋。', 403)
-        if not scopes or not scopes.issubset(self.scopes):
-            raise SignatureManagementError('人员楼栋超出当前管理范围。', 403)
+        if not scopes or not scopes.issubset(self.collection_scopes):
+            raise SignatureManagementError('请选择有效的人员楼栋。', 400)
 

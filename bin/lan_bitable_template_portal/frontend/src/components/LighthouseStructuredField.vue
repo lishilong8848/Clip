@@ -1,5 +1,5 @@
 <template>
-  <div ref="controlRoot" class="lh-sf" :class="{ 'cabinet-row-editor': field.native_cabinet_row_editor, 'compact-fields': field.compact_columns, 'drill-config-editor': field.native_drill_configuration }">
+  <div ref="controlRoot" class="lh-sf" :class="{ 'cabinet-row-editor': field.native_cabinet_row_editor, 'compact-fields': field.compact_columns, 'drill-config-editor': field.native_drill_configuration, 'has-cycle-warning': !!noticeWarning }">
     <PlanConvergenceRules v-if="field.native_plan_rules" :is-admin="true" :model-value="modelValue" :disabled="disabled" @update:model-value="emitUpdate" />
     <CabinetBatchTextFill v-else-if="field.native_cabinet_text_fill" :batch-id="field.batch_id" embedded :model-value="modelValue" :disabled="disabled" :plan-id="planId" :plan-version="planVersion" :field-name="field.name" @update:model-value="emitUpdate" />
     <LighthouseCabinetTextCreate v-else-if="field.native_cabinet_text_create" :field="field" :model-value="modelValue" :disabled="disabled" :id="props.id" :plan-id="planId" :plan-version="planVersion" @update:model-value="emitUpdate" />
@@ -12,6 +12,7 @@
       <input v-if="field.searchable" class="lh-sf-input lh-sf-search" type="search" v-model="searchText" :aria-label="'查找' + field.label" maxlength="120" :placeholder="'查找' + field.label" @input="page = 1" />
       <div v-for="(child, i) in visibleChildren" :key="child.path" class="lh-sf-c" :class="{ 'lh-sf-wide': ['array', 'object'].includes(child.type) }">
         <LighthouseStructuredField :field="child" :model-value="childValue(child)" :disabled="disabled || child.read_only"
+          :notice-warning="cycleWarnings[child.path]"
           :id="props.id + '-' + i" :context="activeContext" :step-limit="stepLimit"
           :min-step-id="child.path === 'to_step_id' ? childValue({ path: 'from_step_id' }) : minStepId"
           @update:model-value="(v: any) => onChild(child, v)" />
@@ -76,13 +77,16 @@
           :disabled="disabled" :required="!!field.required" :aria-label="field.label" @input="jsonInput" />
         <textarea v-else-if="isTextarea" class="lh-sf-input lh-sf-area" :id="props.id" :value="scalarBind" rows="2"
           :maxlength="field.maxlength" :disabled="disabled" :required="!!field.required" :aria-label="field.label"
+          :aria-describedby="noticeWarning ? props.id + '-cycle-warning' : undefined"
           @input="onScalar($event, field)" />
         <input v-else class="lh-sf-input" :id="props.id" :type="nativeType" :value="scalarBind" :min="field.min" :max="field.max"
           :step="field.step" :maxlength="field.maxlength" :disabled="disabled" :required="!!field.required"
           :list="field.suggestions?.length ? props.id + '-suggestions' : undefined"
+          :aria-describedby="noticeWarning ? props.id + '-cycle-warning' : undefined"
           :aria-label="field.label" @input="onScalar($event, field)" />
         <datalist v-if="field.suggestions?.length" :id="props.id + '-suggestions'"><option v-for="value in field.suggestions" :key="value" :value="value" /></datalist>
         <span v-if="jsonMode && jsonError" class="lh-sf-error" role="alert">{{ jsonError }}</span>
+        <span v-if="noticeWarning" :id="props.id + '-cycle-warning'" class="lh-sf-cycle-warning" :data-cycle-warning="field.path" role="status">{{ noticeWarning }}</span>
       </template>
     </div>
   </div>
@@ -100,10 +104,11 @@ import CabinetBatchTextFill from "./CabinetBatchTextFill.vue";
 import LighthouseCabinetTextCreate from "./LighthouseCabinetTextCreate.vue";
 import LighthouseCabinetProof from "./LighthouseCabinetProof.vue";
 import LighthouseNoticeSop from "./LighthouseNoticeSop.vue";
+import { isMaintenanceNotice, noticeCycleWarnings } from '../noticeCycleWarnings';
 import { repairDraftInputValue, repairFieldValueToText, resolveRepairDeviceCatalog, repairModelsForBrand, repairDeviceDependentPatch,
   REPAIR_SUPPLIER_FIELDS, REPAIR_SPARE_PART_FIELDS, repairFollowupFieldDisabled, repairFollowupFieldPlaceholder } from "../repairManagementUtils";
 
-const props = defineProps<{ field: Record<string, any>; modelValue?: any; disabled?: boolean; id: string; context?: Record<string, any>[]; stepLimit?: number; minStepId?: string; planId?: string; planVersion?: number }>();
+const props = defineProps<{ field: Record<string, any>; modelValue?: any; disabled?: boolean; id: string; context?: Record<string, any>[]; stepLimit?: number; minStepId?: string; planId?: string; planVersion?: number; noticeWarning?: string }>();
 const emit = defineEmits<{ (e: "update:modelValue", value: any): void; (e: "load-options", value: { scope: string; q?: string }): void }>();
 const controlRoot = ref<HTMLElement | null>(null);
 function hasInvalidDraft(): boolean {
@@ -113,6 +118,11 @@ function hasInvalidDraft(): boolean {
 }
 
 const field = computed(() => props.field);
+const cycleWarnings = computed<Record<string, string | undefined>>(() => {
+  if (!field.value.native_notice || !isMaintenanceNotice(field.value)) return {};
+  const values = { work_type: field.value.work_type, ...props.modelValue };
+  return noticeCycleWarnings(values, field.value.children?.find((child: Record<string, any>) => child.path === 'maintenance_cycle')?.cycle_rules);
+});
 function waterPhotoUrl(value: unknown): string {
   return typeof value === 'string' && /^\/api\/capacity\/water\/images\/[A-Za-z0-9_-]+\?scope=[ABCDEH]&variant=thumb$/.test(value) ? value : '';
 }
@@ -446,4 +456,6 @@ function jsonInput(ev: Event): void {
 .lh-sf-pg:hover:not(:disabled) { background: var(--lh-surface-hover, #eef3fc); }
 .lh-sf-page-txt { font-size: 12px; color: var(--lh-muted, #5a6a7d); white-space: nowrap; }
 .lh-sf-error { font-size: 11px; color: var(--lh-danger, #d03030); }
+.has-cycle-warning .lh-sf-input { border-color: var(--lh-danger, #d03030); }
+.lh-sf-cycle-warning { display: block; margin-top: 4px; font-size: 12px; line-height: 1.5; color: var(--lh-danger, #d03030); overflow-wrap: anywhere; }
 </style>

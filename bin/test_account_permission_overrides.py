@@ -5,10 +5,10 @@ from unittest.mock import patch, Mock
 
 from .test_personnel_password_login import _TempDirTestCase, PersonnelLoginHarness, _page, _user
 from lan_bitable_template_portal.account_management import AccountManagement
-from lan_bitable_template_portal.account_policy import MODULE_IDS, default_modules, resolve_access_change
+from lan_bitable_template_portal.account_policy import CATEGORY_OPTIONS, MODULE_IDS, default_modules, resolve_access_change
 from lan_bitable_template_portal.account_policy import PolicyViolation
 from lan_bitable_template_portal.personnel_password_login import PasswordLoginError
-from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID
+from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID, PortalAuthManager
 from lan_bitable_template_portal.portal_service import PortalError
 
 
@@ -42,6 +42,257 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         item = self.item(rid)
         data = {key: item[key] for key in ("id", "revision", "enabled")}
         return {**data, **patch}
+
+    def duty_change(self, scope, **changes):
+        item = next(row for row in self.manager.accounts()['items']
+                    if row['open_id'] == BUILDING_OPEN_ID_MAP[scope])
+        return {**{key: item[key] for key in ('id', 'revision', 'enabled')}, **changes}
+
+    def test_h_duty_edit_flags_follow_actor_authority(self):
+        for actor, editable in (({'open_id': LI_SHILONG_OPEN_ID}, True), (self.actor('HM1'), False)):
+            row = next(row for row in self.manager.accounts(actor=actor)['items']
+                       if row['open_id'] == BUILDING_OPEN_ID_MAP['H'])
+            for flag in ('can_edit', 'can_edit_access', 'can_grant_l0'):
+                self.assertEqual(row[flag], editable, flag)
+            self.assertFalse(row['can_delete'])
+
+    def test_all_duty_module_batch_survives_reload_and_restart(self):
+        auth = self.h.auth
+        result = self.manager.update({'changes': [self.duty_change(scope, modules=[])
+            for scope in BUILDING_OPEN_ID_MAP]}, {'open_id': LI_SHILONG_OPEN_ID})
+        self.assertEqual(result, {'changed': len(BUILDING_OPEN_ID_MAP)})
+        saved = auth._state_store.get_auth_permissions()
+        auth._permissions_cache = None
+        restarted = PortalAuthManager()
+        self.addCleanup(restarted.shutdown)
+        self.addCleanup(restarted._state_store.shutdown_write_worker)
+        with patch.object(restarted, '_save_permissions_locked', wraps=restarted._save_permissions_locked) as save:
+            for scope, oid in BUILDING_OPEN_ID_MAP.items():
+                for manager in (auth, restarted):
+                    profile = manager.account_profile(oid)
+                    self.assertEqual(profile['modules'], [])
+                    self.assertTrue(profile['enabled'])
+                    self.assertEqual(profile['home_scope'], scope)
+                    self.assertEqual(profile['level'], 'L1' if scope == 'H' else 'L4')
+                    self.assertFalse(profile['can_manage_accounts'])
+                self.assertIn(oid, saved['users'])
+            save.assert_not_called()
+        self.assertEqual(restarted._state_store.get_auth_permissions(), saved)
+
+    def test_h_duty_override_disable_and_restore_preserves_saved_grant(self):
+        auth, oid = self.h.auth, BUILDING_OPEN_ID_MAP['H']
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.duty_change('H', level='L3', category='supervisor',
+            scopes=['H'], modules=['maintenance', 'accounts'])]}, root)
+        configured = auth._state_store.get_auth_permissions()['users'][oid]
+        for enabled in (False, True):
+            self.manager.update({'changes': [self.duty_change('H', enabled=enabled)]}, root)
+            auth.sync_directory_permissions([{'login_ids': [oid], 'selectable': True,
+                'account_nature': 'VNET', 'name': 'Synthetic duty', 'scopes': ['A'], 'position': 'manager'}])
+            auth._permissions_cache = None
+            restarted = PortalAuthManager()
+            try:
+                self.assertEqual(restarted._state_store.get_auth_permissions()['users'][oid],
+                                 {**configured, 'enabled': enabled})
+                profile = restarted.account_profile(oid)
+                self.assertEqual((profile['level'], profile['category'], profile['home_scope']),
+                                 ('L3', 'supervisor', 'H'))
+                self.assertEqual(profile['scope_rules'], ['H'])
+                self.assertEqual(profile['modules'], ['maintenance', 'accounts'] if enabled else [])
+                self.assertEqual(profile['enabled'], enabled)
+                self.assertEqual(restarted._open_id_explicitly_disabled(oid), not enabled)
+            finally:
+                restarted._state_store.shutdown_write_worker()
+                restarted.shutdown()
+        row = next(row for row in self.manager.accounts()['items'] if row['open_id'] == oid)
+        self.assertEqual((row['kind'], row['own_scopes']), ('duty', ['H']))
+        for operation in (lambda: self.manager.delete(row['id'], {'revision': row['revision']}, root),
+                          lambda: auth.remove_permission_user(oid, updated_by=LI_SHILONG_OPEN_ID)):
+            with self.assertRaises((PasswordLoginError, PortalError)):
+                operation()
+        self.assertEqual(auth._permission_user(oid), {**configured, 'enabled': True})
+
+    def test_h_duty_changes_keep_hierarchy_job_scope_and_atomicity(self):
+        auth = self.h.auth
+        # A permitted ordinary row before the forbidden H peer must not be saved.
+        before = auth._state_store.get_auth_permissions()
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes': [self.override_change('AO', modules=[]),
+                self.duty_change('H', modules=[])]}, self.actor('HM1'))
+        self.assertEqual(auth._state_store.get_auth_permissions(), before)
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.duty_change('H', level='L4')]}, root)
+        for actor in (self.actor('AS'), {'open_id': BUILDING_OPEN_ID_MAP['H']}):
+            before = auth._state_store.get_auth_permissions()
+            with self.assertRaises(PasswordLoginError):
+                self.manager.update({'changes': [self.duty_change('H', level='L0')]}, actor)
+            self.assertEqual(auth._state_store.get_auth_permissions(), before)
+        self.manager.update({'changes': [self.duty_change('H', modules=['maintenance'])]}, self.actor('HS'))
+        self.assertEqual(auth.account_profile(BUILDING_OPEN_ID_MAP['H'])['modules'], ['maintenance'])
+        fixed = next(row for row in self.manager.accounts()['items'] if row['open_id'] == LI_SHILONG_OPEN_ID)
+        before = auth._state_store.get_auth_permissions()
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes': [self.duty_change('H', modules=[]),
+                {**{key: fixed[key] for key in ('id', 'revision')}, 'enabled': False}]}, root)
+        self.assertEqual(auth._state_store.get_auth_permissions(), before)
+
+    def test_h_duty_l0_peer_management_keeps_self_and_fixed_superuser_protected(self):
+        root = {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.duty_change('H', level='L0'),
+            self.override_change('AE', level='L0')]}, root)
+        self.manager.update({'changes': [self.duty_change('H', category='duty')]}, self.actor('AE'))
+        h_actor = {'open_id': BUILDING_OPEN_ID_MAP['H']}
+        self.manager.update({'changes': [self.override_change('AE', category='manager')]}, h_actor)
+        before = self.h.auth._state_store.get_auth_permissions()
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes': [self.duty_change('H', level='L0')]}, h_actor)
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes': [self.duty_change('H', enabled=False)]}, self.actor('HM1'))
+        self.assertFalse(self.h.auth.can_manage_account(h_actor['open_id'], LI_SHILONG_OPEN_ID, 'edit'))
+        self.assertEqual(self.h.auth._state_store.get_auth_permissions(), before)
+
+    def test_h_duty_access_request_uses_same_policy_and_persists(self):
+        auth, oid = self.h.auth, BUILDING_OPEN_ID_MAP['H']
+        access = {'level': 'L4', 'category': 'duty', 'scopes': ['H'], 'modules': ['maintenance']}
+        result = auth.create_permission_request(open_id=oid, name='Synthetic duty', scopes=['H'],
+            reason='Isolated test', approver_open_id=LI_SHILONG_OPEN_ID, requested_access=access)
+        auth.approve_permission_request(result['request_id'], updated_by=LI_SHILONG_OPEN_ID)
+        auth._permissions_cache = None
+        self.assertEqual(auth.account_profile(oid)['level'], 'L4')
+        self.assertEqual(auth.account_profile(oid)['modules'], ['maintenance'])
+
+    def test_legacy_endpoints_cannot_reset_h_duty_override(self):
+        auth, oid = self.h.auth, BUILDING_OPEN_ID_MAP['H']
+        self.manager.update({'changes': [self.duty_change('H', level='L4', modules=[])]},
+                            {'open_id': LI_SHILONG_OPEN_ID})
+        before = auth._state_store.get_auth_permissions()
+        for operation in (
+            lambda: auth.upsert_permission_user(open_id=oid, role='admin', scopes=auth._admin_scopes(),
+                                                updated_by=LI_SHILONG_OPEN_ID),
+            lambda: auth.save_permissions_payload([{'open_id': oid, 'role': 'admin',
+                'scopes': auth._admin_scopes()}], updated_by=LI_SHILONG_OPEN_ID),
+            lambda: auth.bulk_merge_permission_users([{'open_id': oid, 'scopes': auth._admin_scopes()}],
+                                                     updated_by=LI_SHILONG_OPEN_ID),
+        ):
+            with self.assertRaises(PortalError):
+                operation()
+            self.assertEqual(auth._state_store.get_auth_permissions(), before)
+        auth.upsert_permission_user(open_id=oid, role='building', scopes=['H'],
+                                    enabled=False, updated_by=LI_SHILONG_OPEN_ID)
+        auth._permissions_cache = None
+        self.assertEqual(auth.account_profile(oid)['level'], 'L4')
+        self.assertEqual(auth._permission_user(oid), {**before['users'][oid], 'name': oid, 'enabled': False})
+
+    def test_enabled_is_independent_of_modules_and_fails_closed_for_blocked_identity(self):
+        auth, actor = self.h.auth, self.actor('AE')
+        self.manager.update({'changes': [self.override_change('AE', modules=[])]},
+                            {'open_id': LI_SHILONG_OPEN_ID})
+        for profile in (auth.account_profile(actor['open_id']), auth.public_user({'user': actor})):
+            self.assertTrue(profile['enabled'])
+            self.assertEqual(profile['modules'], [])
+        self.h.login.snapshot['people']['recAE'].update(selectable=False, disabled_reason='Fixture blocked')
+        self.assertTrue(auth._permission_user(actor['open_id'])['enabled'])
+        self.assertFalse(auth.account_profile(actor['open_id'])['enabled'])
+        self.assertFalse(auth.public_user({'user': actor})['enabled'])
+
+    def test_l2_manages_all_fixed_duties_inside_explicit_scopes_without_l0_promotion(self):
+        auth, root = self.h.auth, {'open_id': LI_SHILONG_OPEN_ID}
+        scopes = list(BUILDING_OPEN_ID_MAP)
+        self.manager.update({'changes': [self.override_change('HE1', level='L2', scopes=scopes),
+            *[self.duty_change(scope, level='L4') for scope in scopes]]}, root)
+        listing = self.manager.accounts(actor=self.actor('HE1'))
+        self.assertEqual({option['value'] for option in listing['level_options']}, {'L0', 'L3', 'L4'})
+        for row in listing['items']:
+            if row['kind'] == 'duty':
+                self.assertTrue(row['can_edit_access'])
+                self.assertFalse(row['can_delete'])
+        changes = [self.duty_change(scope, category='duty', modules=['maintenance']) for scope in scopes]
+        self.assertEqual(self.manager.update({'changes': changes}, self.actor('HE1')), {'changed': len(scopes)})
+        for scope, oid in BUILDING_OPEN_ID_MAP.items():
+            self.assertEqual(auth.account_profile(oid)['level'], 'L4')
+            self.assertEqual(auth.account_profile(oid)['modules'], ['maintenance'])
+            self.assertFalse(auth.can_manage_account(self.actor('HE1')['open_id'], oid, 'delete'))
+        self.manager.update({'changes': [self.duty_change('H', level='L3')]}, self.actor('HE1'))
+        self.manager.update({'changes': [self.duty_change('H', modules=['maintenance'])]}, self.actor('HE1'))
+        self.assertEqual(auth.account_profile(BUILDING_OPEN_ID_MAP['H'])['level'], 'L3')
+        for enabled in (False, True):
+            self.manager.update({'changes': [self.duty_change('H', enabled=enabled)]}, self.actor('HE1'))
+            auth._permissions_cache = None
+            self.assertEqual(auth.account_profile(BUILDING_OPEN_ID_MAP['H'])['enabled'], enabled)
+        restarted = PortalAuthManager()
+        try:
+            self.assertEqual(restarted.account_profile(BUILDING_OPEN_ID_MAP['H'])['level'], 'L3')
+            self.assertEqual(restarted.account_profile(BUILDING_OPEN_ID_MAP['H'])['modules'], ['maintenance'])
+        finally:
+            restarted._state_store.shutdown_write_worker()
+            restarted.shutdown()
+
+    def test_scoped_lower_accounts_do_not_depend_on_job_category(self):
+        auth, root = self.h.auth, {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.override_change('HE1', level='L2', scopes=['A'])]}, root)
+        for actor in (self.actor('HE1'), self.actor('AS')):
+            for option in CATEGORY_OPTIONS:
+                with self.subTest(actor=actor, category=option['value']):
+                    self.manager.update({'changes': [self.override_change('AO', category=option['value'])]}, root)
+                    row = next(row for row in self.manager.accounts(actor=actor)['items'] if row['id'] == 'recAO')
+                    self.assertTrue(row['can_edit_access'])
+                    self.manager.update({'changes': [self.override_change('AO', level='L4',
+                        category=option['value'], modules=['maintenance'])]}, actor)
+                    self.assertEqual(auth.account_profile('ou_fixtureAO')['level'], 'L4')
+                    self.assertEqual(auth.account_profile('ou_fixtureAO')['category'], option['value'])
+
+    def test_scoped_management_rejects_foreign_home_or_grants_even_with_forged_new_scopes(self):
+        auth, root = self.h.auth, {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.override_change('HE1', level='L2', scopes=['A']),
+            self.duty_change('H', level='L4')]}, root)
+        for actor in (self.actor('HE1'), self.actor('AS')):
+            for change in (self.duty_change('H', enabled=False), self.duty_change('B', modules=[])):
+                before = auth._state_store.get_auth_permissions()
+                with self.assertRaises(PasswordLoginError):
+                    self.manager.update({'changes': [self.override_change('AO', modules=[]), change]}, actor)
+                self.assertEqual(auth._state_store.get_auth_permissions(), before)
+            for target_scopes in (['A', 'B'], ['B']):
+                self.manager.update({'changes': [self.override_change('AO', level='L4', scopes=target_scopes)]}, root)
+                target = auth.account_profile('ou_fixtureAO')
+                before = auth._state_store.get_auth_permissions()
+                with self.assertRaises(PasswordLoginError):
+                    self.manager.update({'changes': [self.override_change('AO', scopes=['A'], modules=[])]}, actor)
+                with self.assertRaises(PolicyViolation):
+                    resolve_access_change(auth.account_profile(actor['open_id']), target, scopes=['A'], modules=[])
+                self.assertFalse(auth.can_manage_account(actor['open_id'], 'ou_fixtureAO', 'edit'))
+                self.assertEqual(auth._state_store.get_auth_permissions(), before)
+            self.manager.update({'changes': [self.override_change('AO', level='L4', scopes=['A'])]}, root)
+
+    def test_l2_scoped_grants_preserve_rank_self_fixed_and_owned_module_limits(self):
+        auth, root = self.h.auth, {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.duty_change('H', level='L4')]}, root)
+        for level in ('L1', 'L2'):
+            with self.assertRaises(PasswordLoginError):
+                self.manager.update({'changes': [self.duty_change('H', level=level)]}, self.actor('HE1'))
+        for rid in ('HE1', 'HE2', 'HM1'):
+            with self.assertRaises(PasswordLoginError):
+                self.manager.update({'changes': [self.override_change(rid, enabled=False)]}, self.actor('HE1'))
+        self.assertFalse(auth.can_manage_account('ou_fixtureHE1', LI_SHILONG_OPEN_ID, 'edit'))
+        self.manager.update({'changes': [self.override_change('HE1', modules=['accounts'])]}, root)
+        with self.assertRaises(PasswordLoginError):
+            self.manager.update({'changes': [self.duty_change('H', modules=['maintenance'])]}, self.actor('HE1'))
+        self.manager.update({'changes': [self.override_change('HE1', modules=[])]}, root)
+        with self.assertRaises(PolicyViolation):
+            resolve_access_change(auth.account_profile('ou_fixtureHE1'),
+                                  auth.account_profile(BUILDING_OPEN_ID_MAP['H']), modules=[])
+
+    def test_l2_scoped_approval_uses_same_target_policy(self):
+        auth, root = self.h.auth, {'open_id': LI_SHILONG_OPEN_ID}
+        self.manager.update({'changes': [self.duty_change('H', level='L4')]}, root)
+        oid, reviewer = BUILDING_OPEN_ID_MAP['H'], 'ou_fixtureHE1'
+        self.assertIn(reviewer, auth.permission_approver_ids(oid))
+        self.assertNotIn(reviewer, auth.permission_approver_ids(BUILDING_OPEN_ID_MAP['A']))
+        result = auth.create_permission_request(open_id=oid, name='Synthetic duty', scopes=['H'],
+            reason='Isolated scoped management', approver_open_id=reviewer,
+            requested_access={'level': 'L4', 'category': 'duty', 'scopes': ['H'], 'modules': ['maintenance']})
+        auth.approve_permission_request(result['request_id'], updated_by=reviewer)
+        self.assertEqual(auth.account_profile(oid)['level'], 'L4')
+        self.assertEqual(auth.account_profile(oid)['modules'], ['maintenance'])
 
     def test_l0_can_raise_l4_to_l1_gaining_admin_scopes_modules_and_manage(self):
         auth = self.h.auth
@@ -452,14 +703,14 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         for item in listing["items"]:
             self.assertIn("modules", item)
             self.assertIn("can_edit_access", item)
-        # L2 remains base-edit only; no assignable access levels.
+        # L2 can configure lower accounts in scope; foreign engineers retain base editing.
         l2_listing = self.manager.accounts(actor=self.actor("HE1"))
-        self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, {'L0'})
-        self.assertEqual({opt["value"] for opt in l2_listing["category_options"]}, {"engineer"})
-        # L2 can base-edit engineers but can_edit_access is False (no override UI).
+        self.assertEqual({opt["value"] for opt in l2_listing["level_options"]}, {'L0', 'L3', 'L4'})
+        self.assertEqual({opt["value"] for opt in l2_listing["category_options"]}, {opt['value'] for opt in CATEGORY_OPTIONS})
         self.assertTrue(all(item["can_edit"] for item in l2_listing["items"] if item['level'] == 'L4' and item['category'] == 'engineer'))
-        self.assertTrue(all(not item['can_edit'] for item in l2_listing['items'] if item['level'] in {'L2', 'L3'}))
-        self.assertTrue(all(item["can_edit_access"] is False for item in l2_listing["items"]))
+        self.assertTrue(all(not item['can_edit'] for item in l2_listing['items'] if item['level'] == 'L2'))
+        for item in l2_listing['items']:
+            self.assertEqual(item['can_edit_access'], item['id'] == 'recHS')
 
     def test_l4_cannot_receive_accounts_module(self):
         with self.assertRaises(PasswordLoginError):
@@ -581,6 +832,7 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
         auth = self.h.auth
         # Identity absent from the directory must not inherit default modules.
         unknown = auth.account_profile("ou_unknown")
+        self.assertFalse(unknown["enabled"])
         self.assertEqual(unknown["modules"], [])
         self.assertFalse(unknown["can_manage_accounts"])
         # A disabled known identity also fails closed for modules.
@@ -588,6 +840,7 @@ class AccountPermissionOverrideTests(_TempDirTestCase):
             {**{k: self.item("AE")[k] for k in ("id", "revision", "role", "scopes", "enabled")},
              "enabled": False}]}, self.actor("HM1"))
         disabled = auth.account_profile("ou_fixtureAE")
+        self.assertFalse(disabled["enabled"])
         self.assertEqual(disabled["modules"], [])
         self.assertFalse(disabled["can_manage_accounts"])
 

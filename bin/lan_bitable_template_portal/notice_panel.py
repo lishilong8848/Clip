@@ -343,6 +343,7 @@ class NoticePanel:
     # ---- public payloads ------------------------------------------------
     def public_items(self, doc):
         from .notice_panel_data import _normalize_item_notice_sop
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
         allowed = self._owner_modules(doc)
         result = []
         for item in doc.get("items") or []:
@@ -353,6 +354,13 @@ class NoticePanel:
             # exist from a time when the owner had broader module grants.
             if work_type and work_type not in allowed:
                 continue
+            notice_type = str(item_draft.get("notice_type") or "")
+            # Refresh display metadata for saved runs without rewriting their drafts or field choices.
+            fields = copy.deepcopy(item.get("fields") or [])
+            for field in fields:
+                field.pop("cycle_rules", None)
+                if field.get("key") == "maintenance_cycle" and work_type == "maintenance" and notice_type in ("", "维保通告"):
+                    field["cycle_rules"] = maintenance_cycle_rules()
             public_draft = {}
             for field in item.get("fields") or []:
                 key = field["key"]
@@ -365,11 +373,12 @@ class NoticePanel:
                 "status": item.get("status", ""),
                 "action": item.get("action", ""),
                 "work_type": str(item_draft.get("work_type") or ""),
+                "notice_type": notice_type,
                 "blocked": item.get("blocked", ""),
                 "selected": bool(item.get("selected")),
                 "edit_all": bool(item.get("edit_all")),
                 "brief_fields": list(item.get("brief_fields") or []),
-                "fields": item.get("fields") or [],
+                "fields": fields,
                 "draft": public_draft,
                 "preview": item.get("preview", ""),
                 "error": item.get("error", ""),

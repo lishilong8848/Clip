@@ -103,7 +103,7 @@ def install_document_library_routes(app, authorize, get_service):
             elif action == 'tables':
                 data = await asyncio.to_thread(service.tables, actor) if method == 'GET' else await asyncio.to_thread(service.save_table, actor, payload)
             elif action.endswith('/schema'):
-                data = await asyncio.to_thread(service.schema, actor, key)
+                data = await asyncio.to_thread(service.schema, actor, key, refresh=request.query_params.get('refresh') == '1')
             elif action.endswith('/file'):
                 attachment = request.path_params['attachment_id']
                 version = request.query_params.get('version')
@@ -158,8 +158,13 @@ def install_document_library_routes(app, authorize, get_service):
                 data = await asyncio.to_thread(service.sync_status, actor, key, request.path_params['job_id'])
             elif action.endswith('/sync'):
                 data = await asyncio.to_thread(service.request_sync, actor, key)
+            elif action.endswith('/reindex'):
+                data = await asyncio.to_thread(service.reindex, actor, key, payload)
+            elif method == 'DELETE':
+                data = await asyncio.to_thread(service.remove_table, actor, key, payload)
             elif identity:
-                data = await asyncio.to_thread(service.record, actor, key, identity) if method == 'GET' else await asyncio.to_thread(service.save_record, actor, key, payload, identity=identity)
+                data = await asyncio.to_thread(service.cached_record, actor, key, identity,
+                    refresh=request.query_params.get('refresh') == '1') if method == 'GET' else await asyncio.to_thread(service.save_record, actor, key, payload, identity=identity)
             elif action.endswith('/records'):
                 data = await initial_records(request, service, actor, key) if method == 'GET' else await asyncio.to_thread(service.save_record, actor, key, payload)
             else:
@@ -167,10 +172,14 @@ def install_document_library_routes(app, authorize, get_service):
             fresh = await authorize(request)
             _same_actor(actor, fresh)
             await asyncio.to_thread(service.check_response, fresh, key, data,
-                configuration=method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'}, preview=action == 'preview')
+                configuration=method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'},
+                preview=action == 'preview', removal=method == 'DELETE')
             if method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'} and data.get('enabled'):
                 start_scan(service, data['id'])
-            elif action.endswith('/sync') or action.endswith('/records') and method == 'GET':
+            elif action.endswith('/sync') or action.endswith('/reindex'):
+                start_scan(service, key)
+            elif key and method == 'GET':
+                await asyncio.to_thread(service.refresh_cache_if_due, fresh, key)
                 start_scan(service, key)
             return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
         except AssistantError as exc:
@@ -182,7 +191,8 @@ def install_document_library_routes(app, authorize, get_service):
 
     routes = (
         ('/preview', ['POST']),
-        ('/tables', ['GET', 'POST']), ('/tables/{table_key}', ['PUT']),
+        ('/tables', ['GET', 'POST']), ('/tables/{table_key}', ['PUT', 'DELETE']),
+        ('/tables/{table_key}/reindex', ['POST']),
         ('/tables/{table_key}/schema', ['GET']), ('/tables/{table_key}/records', ['GET', 'POST']),
         ('/tables/{table_key}/records/{record_id}', ['GET', 'PATCH']),
         ('/tables/{table_key}/records/{record_id}/attachments', ['POST']),

@@ -161,10 +161,12 @@ class FirstSyncTests(SyncFixture):
         rows = list(self.remote.rows.values())
         with patch.object(self.remote, 'records', return_value={'items': [rows[0]], 'has_more': True, 'page_token': 'next'}):
             self.service.process_sync('manuals')
-        self.assert_pending()
+        partial = self.service.list_records(actor(), 'manuals', {})
+        self.assertFalse(partial['cache']['complete'])
+        self.assertEqual([r['record_id'] for r in partial['items']], ['recOne'])
         with patch.object(self.remote, 'records', side_effect=AssistantError('denied code=1254302', 403, category='unauthorized')):
             self.service.process_sync('manuals')
-        self.assertIn('1254302', self.assert_pending('document_library_sync_failed'))
+        self.assertIn('1254302', self.service.list_records(actor(), 'manuals', {})['cache']['error'])
         identity = self.job()['id']
         self.service = self.reopen()
         self.service.request_sync(actor(), 'manuals')
@@ -238,11 +240,15 @@ class FirstSyncRoutesTests(SyncFixture):
                     for future in (first, second):
                         response = future.result(5)
                         self.assertEqual(response.status_code, 200, response.text)
-                        self.assertEqual(len(response.json()['data']['items']), 2)
+                        data = response.json()['data']
+                        self.assertIn(len(data['items']), (1, 2))
+                        if data['cache']['complete']:
+                            self.assertEqual(len(data['items']), 2)
             finally:
                 release.set()
         self.assertEqual(scan.call_count, 1)
         self.assertEqual(self.job()['status'], 'completed')
+        self.assertEqual(len(self.client.get(self.prefix + '/records').json()['data']['items']), 2)
 
     def test_failure_retry_response_and_no_duplicate_jobs(self):
         self.save()
@@ -300,38 +306,13 @@ class FirstSyncFrontendTests(unittest.TestCase):
         node = shutil.which('node')
         if not node:
             self.skipTest('Node is not installed')
-        script = r'''
-const fs=require('fs'),ts=require('typescript'),assert=require('node:assert/strict');
-const source=fs.readFileSync('src/components/DocumentLibraryPage.vue','utf8');
-const code=source.slice(source.indexOf('async function readRecords('),source.indexOf('function reload()'));
-assert(!/setInterval/.test(code));
-const delays=[];
-const window={setTimeout(fn,delay){delays.push(delay);return setTimeout(fn,0);},clearTimeout};
-class ApiError extends Error { constructor(code){super(code);this.payload={code};} }
-const make=(records,requestJson=async()=>({}))=>{
- const ctx={api:{records},requestJson,ApiError,AbortController,DOMException,window,errorText:e=>e.message,loadTable:async()=>{throw Error('unexpected schema load');}};
- for(const [key,value] of Object.entries({schema:{fields:[]},activeKey:'manuals',listLoading:false,listPending:false,syncFailed:false,listError:'',records:[],hasMore:false,nextCursor:'',currentCursor:'',cursorTrail:[],listReady:false,scope:'A',appliedQuery:'',busy:false}))ctx[key]={value};
- const body=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
- const methods=new Function(...Object.keys(ctx),'let listRead,disposed=false;'+body+';return {readRecords,retryRecords,waitForSyncRetry,cancel(){disposed=true;listRead?.abort();}};')(...Object.values(ctx));
- return {...ctx,...methods};
-};
-const page={items:[{record_id:'recOne'}],has_more:false,cursor:''};
-(async()=>{
- let calls=0;const pending=make(async()=>{if(++calls===1)throw new ApiError('document_library_sync_pending');return page;});
- await pending.readRecords();assert.equal(calls,2);assert.deepEqual(pending.records.value,page.items);assert.equal(pending.listError.value,'');assert(!pending.listPending.value);assert(delays[0]>=900);
- calls=0;const endless=make(async()=>{calls++;throw new ApiError('document_library_sync_pending');});
- await endless.readRecords();assert.equal(calls,15);assert(!endless.listReady.value);assert(endless.listError.value.includes('仍在后台同步'));assert(delays.at(-1)<=5000&&delays.at(-1)>=4500);
- let failing=true,posts=0;const retry=make(async()=>{if(failing)throw new ApiError('document_library_sync_failed');return page;},async(path,options)=>{posts++;assert.equal(path,'/api/document-library/tables/manuals/sync');assert.equal(options.method,'POST');failing=false;});
- await retry.readRecords();assert(retry.syncFailed.value);await retry.retryRecords();assert.equal(posts,1);assert(retry.listReady.value);
- let finish;const stale=make(()=>new Promise(resolve=>finish=resolve));const running=stale.readRecords();stale.activeKey.value='different';finish(page);await running;assert.deepEqual(stale.records.value,[]);
- let fail;const cancelled=make(()=>new Promise((_,reject)=>fail=reject));const inFlight=cancelled.readRecords();cancelled.cancel();fail(new ApiError('document_library_sync_pending'));await inFlight;assert.equal(cancelled.listError.value,'');assert(!cancelled.listReady.value);
- const controller=new AbortController();const backoff=cancelled.waitForSyncRetry(controller.signal,5000);controller.abort();await assert.rejects(backoff,{name:'AbortError'});
- let oldResolve;const switching=make(async(key)=>key==='manuals'?await new Promise(resolve=>oldResolve=resolve):{...page,items:[{record_id:'recNew'}]});const oldRead=switching.readRecords();switching.activeKey.value='new';await switching.readRecords();oldResolve(page);await oldRead;assert.deepEqual(switching.records.value,[{record_id:'recNew'}]);assert(switching.listReady.value);
- console.log('Document library first-sync frontend guards: 7 scenarios OK');
-})().catch(e=>{console.error(e);process.exitCode=1;});
-'''
-        result = subprocess.run([node, '-e', script], cwd=frontend, text=True, encoding='utf-8', capture_output=True, timeout=30)
+        # Compile the complete real SFC; its imports are isolated by the source fixture.
+        result = subprocess.run(
+            [node, 'scripts/check-document-library-maintenance.mjs', '--source-check'],
+            cwd=frontend, text=True, encoding='utf-8', capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('first-sync partial/pending keeps rows', result.stdout)
+        self.assertIn('cancelled reads, stale table responses', result.stdout)
 
 
 if __name__ == '__main__':

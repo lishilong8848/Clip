@@ -48,7 +48,7 @@ class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.client.aclose)
 
     async def test_module_revocation_denies_existing_session_and_direct_url(self):
-        for path in ("/learning", "/api/learning/today", "/api/signatures/management/people", "/api/assistant/knowledge/status"):
+        for path in ("/learning", "/api/learning/today", "/api/signatures/management/preview", "/api/assistant/knowledge/status"):
             self.assertEqual((await self.client.get(path)).status_code, 403, path)
         self.assertEqual(self.called, [])
         self.modules.add("learning")
@@ -77,7 +77,8 @@ class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
 
     def test_all_public_module_pages_are_mapped(self):
         self.assertEqual({item["value"] for item in MODULE_OPTIONS if item["group"] == "通告办理"}, NOTICE_MODULES)
-        paths = {"/signature-management": "signatures", "/knowledge-base": "knowledge",
+        self.assertEqual(required_modules('/signature-management'), frozenset())
+        paths = {"/api/signatures/management/preview": "signatures", "/knowledge-base": "knowledge",
                  "/admin/settings": "accounts", "/repair-status": "repair_management",
                  "/drill-management/print": "drills", "/cabinet-power/batches": "cabinet",
                  "/life-guide": "life_guide", "/link-directory": "links", "/plan-convergence": "plan_convergence",

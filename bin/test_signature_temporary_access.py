@@ -15,11 +15,11 @@ class TemporarySignatureAccessTests(unittest.TestCase):
         self.service.add('recVisitor', source='external', name='共享临时人员', building='A楼')
         return {'source': 'external', 'record_id': 'recVisitor'}
 
-    def test_all_signature_users_can_create_in_their_authorized_buildings(self):
+    def test_all_users_can_collect_temporary_signatures_in_any_building(self):
         listing = self.call('people')
         self.assertTrue(listing['can_create_temporary'])
         self.assertFalse(listing['can_manage_directory'])
-        self.assertEqual(listing['create_scope_options'], [{'value': 'E', 'label': 'E楼'}])
+        self.assertEqual({row['value'] for row in listing['create_scope_options']}, set(self.manager.d.BUILDING_OPEN_ID_MAP))
         payload = {'name': '新建临时人员', 'building': 'E楼', 'operation_id': 'newVisitor'}
         result = self.call('temporary', payload, method='POST')
         self.assertEqual(result['source'], 'external')
@@ -34,18 +34,25 @@ class TemporarySignatureAccessTests(unittest.TestCase):
                 self.assertFalse(person['can_preview'])
         self.sender.assert_not_called()
 
-    def test_unauthorized_building_and_revoked_permissions_cannot_create(self):
+    def test_collection_without_modules_does_not_grant_preview_and_disabled_cannot_create(self):
         payload = {'name': '临时人员', 'building': 'A楼', 'operation_id': 'outside'}
-        with self.assertRaises(SignatureManagementError):
-            self.call('temporary', payload, method='POST')
         self.profiles['operatorE']['scope_rules'] = []
-        self.assertFalse(self.call('people')['can_create_temporary'])
-        with self.assertRaises(SignatureManagementError):
-            self.call('temporary', {**payload, 'building': 'E楼'}, method='POST')
         self.profiles['operatorE']['modules'] = []
+        person = self.call('temporary', payload, method='POST')
+        self.assertTrue(person['can_request'])
+        self.assertTrue(person['can_choose_recipient'])
+        self.assertFalse(person['can_preview'])
+        self.assertNotIn('has_signature', person)
+        sent = self.call('requests', {'source': person['source'], 'record_id': person['record_id'],
+            'operation_id': 'collectCrossBuilding', 'recipient': 'duty:A'}, method='POST')
+        self.assertEqual(sent['status'], 'sent')
+        self.assertEqual(self.sender.call_args.args[1], [self.manager.d.BUILDING_OPEN_ID_MAP['A']])
+        with self.assertRaises(SignatureManagementError):
+            self.call('preview', {'source': person['source'], 'record_id': person['record_id']})
+        self.profiles['operatorE']['enabled'] = False
         with self.assertRaises(SignatureManagementError):
             self.call('temporary', payload, method='POST')
-        self.assertEqual(self.service.creates, 0)
+        self.assertEqual(self.service.creates, 1)
 
     def test_existing_other_building_temporary_signature_is_shared_without_account_privileges(self):
         payload = self.add_visitor()
@@ -97,7 +104,7 @@ class TemporarySignatureAccessTests(unittest.TestCase):
     def test_invalid_or_blocked_recipients_do_not_send(self):
         payload = {**self.add_visitor(), 'operation_id': 'rejected'}
         self.blocked.add('operatorA')
-        for recipient in ('staff:recoperatorA', 'staff:not-found', 'duty:A', 'forged'):
+        for recipient in ('staff:recoperatorA', 'staff:not-found', 'duty:missing', 'forged'):
             with self.subTest(recipient=recipient), self.assertRaises(SignatureManagementError):
                 self.call('requests', {**payload, 'recipient': recipient}, method='POST')
         self.sender.assert_not_called()

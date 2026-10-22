@@ -8,7 +8,7 @@ export type LibraryField = {
   read_only: boolean; required?: boolean; multiple?: boolean; read_only_reason?: string;
 };
 export type LibraryCapabilities = {
-  create?: boolean; edit?: boolean; upload?: boolean; configure_tables?: boolean;
+  create?: boolean; edit?: boolean; upload?: boolean; configure_tables?: boolean; reindex?: boolean;
   max_upload_bytes?: number;
 };
 export type LibraryTable = {
@@ -25,11 +25,14 @@ export type LibraryRecord = {
   record_id: string; fields: LibraryFields; revision: string;
   attachments: LibraryAttachment[]; capabilities: LibraryCapabilities;
   knowledge_status?: string | { state: string; error?: string };
+  knowledge_summary?: { total: number; ready: number; cached: number; vectorized: boolean };
   knowledge_items?: Array<{ kind: string; name: string; status: string; error?: string; field_id?: string; attachment_id?: string;
-    cached?: boolean; stage?: 'prepare' | 'index'; error_code?: string }>;
+    cached?: boolean; vectorized?: boolean; stage?: 'prepare' | 'index'; error_code?: string }>;
 };
+export type LibraryCache = { complete: boolean; updated_at: number; refreshing: boolean; error: string };
 export type LibrarySchema = {
   fields: LibraryField[]; display_fields: string[]; attachment_fields: string[];
+  cache?: LibraryCache;
 };
 export type LibraryPreview = {
   url: string; source: LibraryTable | null;
@@ -38,9 +41,12 @@ export type LibraryPreview = {
 export type LibraryTables = {
   items: LibraryTable[]; capabilities?: LibraryCapabilities; can_configure?: boolean;
   actor?: { can_configure?: boolean }; scopes?: Array<{ value: string; label: string }>;
+  cleanup_pending?: number; cleanup_error?: string;
 };
-export type LibraryList = { items: LibraryRecord[]; has_more: boolean; cursor: string };
+export type LibraryList = { items: LibraryRecord[]; has_more: boolean; cursor: string; total?: number; cache?: LibraryCache };
 export type LibraryMutation = { fields: LibraryFields; operation_id: string; reason: string; expected_revision?: string };
+export type LibraryLocalOperation = { operation_id: string; expected_revision: string };
+export type LibraryReindex = LibraryLocalOperation & ({ record_ids: string[] } | { all: true; q: string; scope: string });
 
 const root = '/api/document-library';
 function endpoint(path: string, tableKey?: string, params: Record<string, string | number | undefined> = {}) {
@@ -105,19 +111,32 @@ export const documentLibraryApi = {
     const data = await requestJson(endpoint('/tables'), { signal, fresh: true });
     return { ...data, items: arrayResult<Record<string, any>>(data, 'items').map(tableResult) };
   },
-  async schema(key: string, signal?: AbortSignal): Promise<LibrarySchema> {
-    const data = await requestJson(endpoint('/schema', key), { signal, fresh: true });
-    return { fields: fieldResults(data),
+  async schema(key: string, signal?: AbortSignal, refresh = false): Promise<LibrarySchema> {
+    const data = await requestJson(endpoint('/schema', key, { refresh: refresh ? 1 : undefined }), { signal, fresh: true });
+    return { fields: fieldResults(data), cache: data.cache,
       display_fields: arrayResult<string>(data, 'display_fields'), attachment_fields: arrayResult<string>(data, 'attachment_fields') };
   },
   async records(key: string, params: { scope?: string; q?: string; cursor?: string; page_size?: number }, signal?: AbortSignal): Promise<LibraryList> {
     const data = await requestJson(endpoint('/records', key, params), { signal, fresh: true });
     if (typeof data.has_more !== 'boolean') throw new ApiError('记录分页状态不完整，请重新读取。', { status: 502 });
     if (data.has_more && !data.cursor) throw new ApiError('下一页游标不完整，请重新读取。', { status: 502 });
-    return { items: arrayResult<Record<string, any>>(data, 'items').map(recordResult), has_more: data.has_more, cursor: String(data.cursor || '') };
+    return { items: arrayResult<Record<string, any>>(data, 'items').map(recordResult), has_more: data.has_more, cursor: String(data.cursor || ''),
+      total: typeof data.total === 'number' ? data.total : undefined, cache: data.cache };
   },
-  async record(key: string, id: string, signal?: AbortSignal): Promise<LibraryRecord> {
-    return recordResult(await requestJson(endpoint('/records/' + encodeURIComponent(id), key), { signal, fresh: true }));
+  async record(key: string, id: string, signal?: AbortSignal, refresh = false): Promise<LibraryRecord> {
+    return recordResult(await requestJson(endpoint('/records/' + encodeURIComponent(id), key, { refresh: refresh ? 1 : undefined }), { signal, fresh: true }));
+  },
+  async reindex(key: string, payload: LibraryReindex, signal?: AbortSignal): Promise<{ operation_id: string; status: 'queued'; records: number; items: number }> {
+    const data = await requestJson(endpoint('/reindex', key), { method: 'POST', body: JSON.stringify(payload), signal });
+    if (data.operation_id !== payload.operation_id || data.status !== 'queued' || !Number.isInteger(data.records) || data.records < 0 || !Number.isInteger(data.items) || data.items < 0)
+      throw new ApiError('重新向量化回执不完整，请按原操作重试。', { status: 502 });
+    return data as { operation_id: string; status: 'queued'; records: number; items: number };
+  },
+  async remove(key: string, payload: LibraryLocalOperation, signal?: AbortSignal): Promise<{ operation_id: string; removed: true; cleanup_status: 'pending' | 'completed' }> {
+    const data = await requestJson(endpoint('', key), { method: 'DELETE', body: JSON.stringify(payload), signal });
+    if (data.operation_id !== payload.operation_id || data.removed !== true || !['pending', 'completed'].includes(data.cleanup_status))
+      throw new ApiError('移除接入回执不完整，请按原操作重试。', { status: 502 });
+    return data as { operation_id: string; removed: true; cleanup_status: 'pending' | 'completed' };
   },
   async save(key: string, id: string | undefined, payload: LibraryMutation): Promise<LibraryRecord> {
     const data = await requestJson(endpoint('/records' + (id ? '/' + encodeURIComponent(id) : ''), key), {
@@ -182,7 +201,12 @@ export function valueText(value: LibraryValue): string {
   return String(raw);
 }
 export function newLibraryOperationId(): string {
-  return window.crypto.randomUUID();
+  if (typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+  const bytes = window.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 export function cloneLibraryValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));

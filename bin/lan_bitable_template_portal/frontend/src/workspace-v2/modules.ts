@@ -31,7 +31,7 @@ export function modulePermission(id: string): string { return modules.find(item 
 export function navigationModules(permitted: string[]): ModuleEntry[] {
   const notices=NOTICE_IDS.filter(id=>permitted.includes(id));
   return modules.flatMap(item=>{
-    if(!permitted.includes(item.permission||item.id)||item.id==='assistant')return [];
+    if(item.id!=='signatures'&&!permitted.includes(item.permission||item.id)||item.id==='assistant')return [];
     if(!NOTICE_IDS.includes(item.id))return [item];
     if(item.id!==notices[0])return [];
     return [{id:'notices',label:'通告办理',group:'运行管理',path:'/workbench-lite?work_type='+(notices.length===1?notices[0]:'all'),icon:'notice'},

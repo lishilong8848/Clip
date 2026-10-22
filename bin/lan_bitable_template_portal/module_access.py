@@ -47,6 +47,12 @@ PREFIXES = (
 
 
 def required_modules(path, work_type=""):
+    # Collection is open to signed-in accounts; signature images/history keep their grants.
+    if path.rstrip('/') == '/signature-management' or path in {
+            '/api/signatures/management/people', '/api/signatures/management/refresh',
+            '/api/signatures/management/requests', '/api/signatures/management/temporary',
+            '/api/signatures/management/recipients'}:
+        return frozenset()
     if path in {"/api/signatures/management/mop-people", "/api/signatures/management/mop-invite", "/api/signatures/management/mop-list"}:
         return frozenset({"engineer_mop"})
     if path.startswith("/api/qt/") or path in {"/api/assistant/feishu-event", "/api/health"}:

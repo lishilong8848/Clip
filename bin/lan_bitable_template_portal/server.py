@@ -9091,6 +9091,7 @@ class PortalRuntime:
                             raise NoticeJobPermissionDenied('个人补投前当前楼栋权限核验未通过。')
                     complete, reason = cls.service.send_action_personal_message({
                         'job_id': job_id, 'text': document['text'], 'recipients': document['recipients'],
+                        '_notice_delivery_text': document.get('delivery_text') or document['text'],
                         'message_signature': document['signature']}, recipient_limit=recipient_limit)
                 cls.service.mark_job(job_id, _notice_personal_retry_after=0 if complete else time.time() + 60)
                 if task['id']:

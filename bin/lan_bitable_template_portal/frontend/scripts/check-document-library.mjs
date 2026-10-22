@@ -294,7 +294,9 @@ try {
   await drawer().locator('.document-index-issues summary').click();
   await drawer().getByText('原始图纸.dwg', { exact: true }).waitFor();
   await drawer().getByText('原件已缓存，此格式暂不支持正文索引。', { exact: true }).waitFor();
-  await drawer().getByText('已缓存 · 格式不支持，未索引', { exact: true }).waitFor();
+  const unsupportedItem = drawer().locator('.document-index-issues li').filter({ hasText: '原始图纸.dwg' });
+  await unsupportedItem.getByText('格式不支持，未向量化', { exact: true }).waitFor();
+  await unsupportedItem.getByText('已缓存', { exact: true }).waitFor();
   assert.equal(await drawer().getByText('资料记录已保存。待索引重试，请查看下方各项原因。', { exact: true }).count(), 0);
   checks.push('unsupported attachment parsing is explicit and does not masquerade as success or a retryable failure');
   await context.close();
@@ -308,8 +310,12 @@ try {
   context = await open(); await firstDetail();
   await drawer().getByText('资料记录已保存。原件缓存待重试，请查看下方各项原因。', { exact: true }).waitFor();
   await drawer().locator('.document-index-issues summary').click();
-  await drawer().getByText('已缓存 · 已索引', { exact: true }).waitFor();
-  await drawer().getByText('未缓存 · 下载或保存待重试', { exact: true }).waitFor();
+  const cachedItem = drawer().locator('.document-index-issues li').filter({ hasText: '记录全文' });
+  await cachedItem.getByText('向量状态待核对', { exact: true }).waitFor();
+  await cachedItem.getByText('已缓存', { exact: true }).waitFor();
+  const retryItem = drawer().locator('.document-index-issues li').filter({ hasText: '待下载.xlsx' });
+  await retryItem.getByText('下载或保存待重试', { exact: true }).waitFor();
+  await retryItem.getByText('未缓存', { exact: true }).waitFor();
   await drawer().getByText('附件读取权限不足，请检查飞书应用及多维表高级权限。', { exact: true }).waitFor();
   checks.push('cached record and attachment download failure retain independent stages and safe errors');
   await context.close();

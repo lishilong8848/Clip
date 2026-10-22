@@ -28,6 +28,11 @@ class MaintenanceNoticeHandler(BaseNoticeHandler):
     notice_types = ("维保通告",)
     table_id_attr = "table_id_weibao"
 
+    def build_robot_message(self, payload: NoticePayload):
+        from ..notice_cycle_warnings import maintenance_reminder_text
+        title, content, notice_type, level = super().build_robot_message(payload)
+        return title, maintenance_reminder_text(notice_type, payload.maintenance_cycle, content), notice_type, level
+
     def build_create_fields(self, payload: NoticePayload) -> dict:
         info = extract_event_info(payload.text) or {}
         status = info.get("status", "")

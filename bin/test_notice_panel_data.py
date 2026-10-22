@@ -102,6 +102,19 @@ class PanelDataTests(unittest.TestCase):
         self.assertIn('现场已核对', preview)
         self.assertEqual(self.service._get_record_memory(self.fixture.records[0]), before)
 
+    def test_cycle_conflict_does_not_block_preview_or_rewrite_fields(self):
+        self.fixture.remember()
+        item = self.items()[0]
+        item['draft'].update(maintenance_cycle='每月', content='季度检验', reason='按半年度计划',
+                             progress='现场已核对', specialty='暖通', work_order_choice='本次无需工单')
+        original = copy.deepcopy(item['draft'])
+        body, preview = data.submission(self.service, item)
+        self.assertEqual(body['content'], original['content'])
+        self.assertEqual(body['reason'], original['reason'])
+        self.assertNotIn('cycle_rules', body)
+        self.assertNotIn('周期核对提醒', preview)
+        self.assertIn('季度检验', preview)
+
     def test_events_and_old_card_ui_absent(self):
         with self.assertRaisesRegex(PortalError, 'Qt'):
             data.build_items(self.service, 'A', 'event', [])
@@ -109,6 +122,33 @@ class PanelDataTests(unittest.TestCase):
         html = render_workbench_lite(payload={}, session={'user': {'name': 'Fixture'}}, scope='A', work_type='maintenance', manual=True)
         self.assertNotIn('/api/notice-cards', html)
         self.assertNotIn('立即发送测试卡片', html)
+
+
+class CycleFieldMetadataTests(unittest.TestCase):
+    def test_only_maintenance_cycle_has_rules_and_options_are_unchanged(self):
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
+        for action in ('start', 'update', 'end'):
+            with self.subTest(action=action):
+                draft = {'work_type': 'maintenance', 'notice_type': '维保通告', 'maintenance_cycle': '自定义周期'}
+                original = copy.deepcopy(draft)
+                fields = data.fields_for('maintenance', draft, action)
+                cycle = next(field for field in fields if field['key'] == 'maintenance_cycle')
+                self.assertEqual(cycle['cycle_rules'], maintenance_cycle_rules())
+                self.assertEqual(cycle['options'], ['自定义周期', *data.MAINTENANCE_CYCLE_OPTIONS])
+                self.assertEqual([field['key'] for field in fields if 'cycle_rules' in field], ['maintenance_cycle'])
+                self.assertEqual(draft, original)
+                cycle['cycle_rules'][0]['aliases'].append('不得持久保存')
+                fresh = next(field for field in data.fields_for('maintenance', draft, action) if field['key'] == 'maintenance_cycle')
+                self.assertEqual(fresh['cycle_rules'], maintenance_cycle_rules())
+
+    def test_other_types_and_conflicting_identity_never_receive_rules(self):
+        for work in ('change', 'repair', 'power', 'polling', 'adjust'):
+            for action in ('start', 'update', 'end'):
+                with self.subTest(work=work, action=action):
+                    self.assertFalse(any('cycle_rules' in field for field in data.fields_for(work, {'notice_type': '维保通告'}, action)))
+        for draft in ({'notice_type': '变更通告'}, {'work_type': 'change', 'notice_type': '维保通告'}):
+            self.assertFalse(any('cycle_rules' in field for field in data.fields_for('maintenance', draft, 'start')))
+        self.assertTrue(any('cycle_rules' in field for field in data.fields_for('maintenance', {}, 'start')))
 
 
 if __name__ == '__main__':

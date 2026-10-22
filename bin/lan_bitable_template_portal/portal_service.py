@@ -46508,6 +46508,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         job_id = str((prepared or {}).get("job_id") or "")
         message_signature = str((prepared or {}).get("message_signature") or "")
         job = self.get_job(job_id) or {}
+        from upload_event_module.services.notice_cycle_warnings import maintenance_reminder_text
+        delivery_text = prepared.get('_notice_delivery_text')
+        if not isinstance(delivery_text, str) or not delivery_text:
+            delivery_text = maintenance_reminder_text(prepared.get('notice_type'), prepared.get('maintenance_cycle'), text)
+        prepared = {**prepared, '_notice_delivery_text': delivery_text}
         guard = external_real_write_guard()
         if guard['mock_external']:
             self.mark_job(job_id, recipient_results=[{'open_id': recipient, 'ok': True, 'message': 'mock external send skipped'} for recipient in recipients])
@@ -46533,6 +46538,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not saved:
                 self.mark_job(job_id, _notice_personal_staging_pending={
                     'job_id': job_id, 'text': text, 'recipients': recipients, 'signature': message_signature,
+                    'delivery_text': delivery_text,
                     'next_check_at': time.time() + 60,
                     'request': {**self._compact_job_request(job.get('request') or {}),
                         **{key: job['request'][key] for key in ('_topic_delegation_id',) if key in (job.get('request') or {})}}})
@@ -46571,6 +46577,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     'ok': confirmed, 'failure_kind': '' if confirmed else 'uncertain' if uncertain else 'not_sent',
                     'message': receipt.get('message') or '尚未发送'}
             document = {'job_id': job_id, 'fingerprint': fingerprint, 'text': text, 'recipients': recipients,
+                'delivery_text': prepared.get('_notice_delivery_text') or text,
                 'signature': signature, 'created_at': time.time(), 'next_check_at': 0, 'state': 'pending',
                 'request': {**self._compact_job_request(job.get('request') or {}),
                             **{key: job['request'][key] for key in ('_topic_delegation_id',) if key in (job.get('request') or {})}},
@@ -46604,7 +46611,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             self._state_store.put_document('notice_personal_delivery', job_id, document)
             sent_count += 1
             try:
-                sent, message, receipts = send_text_to_open_ids(text, [recipient], message_uuid=identity)
+                sent, message, receipts = send_text_to_open_ids(document.get('delivery_text') or document['text'], [recipient], message_uuid=identity)
             except Exception:
                 sent, message, receipts = False, '个人发送中断，结果待核验。', []
             matches = [item for item in receipts if isinstance(item, dict) and item.get('open_id') == recipient]

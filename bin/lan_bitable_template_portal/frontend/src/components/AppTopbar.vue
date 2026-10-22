@@ -16,7 +16,7 @@
         <UserRound v-if="homeMode" :size="16" aria-hidden="true" />
         {{ auth.user?.name || "已登录" }}
       </span>
-      <button v-if="auth.loggedIn && homeMode && hasModule('signatures')" type="button" class="btn ghost settings-entry"
+      <button v-if="auth.loggedIn && auth.user?.role !== 'guest' && homeMode" type="button" class="btn ghost settings-entry"
         aria-label="签名管理" title="签名管理" @click="emit('open-signatures')">
         <Fingerprint :size="20" aria-hidden="true" />
       </button>

@@ -35,15 +35,16 @@
           <div v-if="editable && item.selected" class="row-mode"><span>通告内容</span><button :disabled="busy" @click="toggleFields(item)"><Pencil :size="13" />{{ item.edit_all ? '仅补充空白字段' : '编辑全部字段' }}</button></div>
           <UiTransition name="notice-collapse">
             <div v-if="editable && item.selected && expanded[item.key]" class="notice-fields-wrap"><div class="notice-fields">
-              <div v-for="field in shownFields(item)" :key="field.key" class="notice-field">
+              <div v-for="field in shownFields(item)" :key="field.key" class="notice-field" :class="{'has-cycle-warning':!!cycleWarnings[item.key]?.[field.key]}" @focusin="focusedCycleField=item.key+':'+field.key" @focusout="focusedCycleField=''">
                 <LighthouseNoticeSop v-if="field.kind === 'notice_sop'" :id="'npf-' + item.key + '-sop'" :field="sopField(item)" :model-value="item.draft.notice_sop" :disabled="busy || !!sopDirectories[item.key]?.loading" @update:model-value="updateSop(item, $event)" @load-options="loadSops(item, $event.q)" />
                 <RepairFieldControl v-else-if="!field.readonly && ['start_time', 'end_time'].includes(field.key)" :field="dateField" :input-id="'npf-' + item.key + '-' + field.key" :label="fieldLabel(field)" :model-value="repairDraftInputValue(dateField, item.draft[field.key])" :required="!!field.required" :disabled="busy" compact @update:model-value="item.draft[field.key] = $event.replace('T', ' '); changed()" />
                 <template v-else><span v-if="field.readonly">{{ fieldLabel(field) }}</span><label v-else :for="'npf-' + item.key + '-' + field.key">{{ fieldLabel(field) }}<em v-if="field.required" aria-hidden="true"> *</em></label>
                 <span v-if="field.readonly || String(item.draft?.[field.key] ?? '').length > 1000" class="readonly">{{ item.draft?.[field.key] || '—' }}</span>
                 <select v-else-if="field.kind === 'select'" :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" :disabled="busy" @change="onFieldChange(item, field)"><option value="">请选择</option><option v-for="value in field.options || []" :key="value" :value="value">{{ value }}</option></select>
-                <textarea v-else-if="field.kind === 'multiline'" :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" rows="1" maxlength="1000" :disabled="busy" @input="changed" />
-                <input v-else :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" type="text" maxlength="1000" :disabled="busy" @input="changed" />
+                <textarea v-else-if="field.kind === 'multiline'" :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" :aria-describedby="cycleWarnings[item.key]?.[field.key]?'npf-'+item.key+'-'+field.key+'-cycle-warning':undefined" rows="1" maxlength="1000" :disabled="busy" @input="changed" />
+                <input v-else :id="'npf-' + item.key + '-' + field.key" v-model="item.draft[field.key]" :aria-required="field.required" :aria-describedby="cycleWarnings[item.key]?.[field.key]?'npf-'+item.key+'-'+field.key+'-cycle-warning':undefined" type="text" maxlength="1000" :disabled="busy" @input="changed" />
                 </template>
+                <span v-if="cycleWarnings[item.key]?.[field.key]" :id="'npf-'+item.key+'-'+field.key+'-cycle-warning'" class="notice-cycle-warning" :data-cycle-warning="field.key" role="status">{{ cycleWarnings[item.key]?.[field.key] }}</span>
               </div>
               <small v-if="!shownFields(item).length" class="notice-meta">暂无待补充字段</small>
             </div>
@@ -67,6 +68,7 @@
           </UiTransition>
           <p v-if="item.error" class="notice-error">{{ item.error }}</p>
           <pre v-if="run.state === 'confirm'" class="notice-preview">{{ item.preview }}</pre>
+          <p v-for="(warning,key) in !editable?cycleWarnings[item.key]:{}" :key="key" class="notice-cycle-warning" data-cycle-warning-summary role="status">{{ warning }}</p>
           <p v-if="running || run.state === 'done'" class="notice-result" :class="{ failed: item.phase === 'failed', success: item.phase === 'success' }"><Loader2 v-if="!['success', 'failed', 'unavailable'].includes(item.phase)" class="spin" :size="13" />{{ item.result || '等待处理' }}</p>
         </article>
       </template>
@@ -91,6 +93,7 @@ import RepairFieldControl from './RepairFieldControl.vue';
 import LighthouseNoticeSop from './LighthouseNoticeSop.vue';
 import { repairDraftInputValue } from '../repairManagementUtils';
 import { focusNoticePhotoArea, noticePhotoFiles } from '../noticePhotoInput';
+import { isMaintenanceNotice, noticeCycleWarnings } from '../noticeCycleWarnings';
 
 const props = defineProps<{ userId: string; active: boolean }>();
 const emit = defineEmits<{ availability: [available: boolean]; edition: [id: string] }>();
@@ -103,6 +106,7 @@ const expanded = reactive<Record<string, boolean>>({});
 const sopDirectories = reactive<Record<string, Dict>>({});
 const uploading = ref(false);
 const photoErrors = reactive<Record<string, string>>({});
+const focusedCycleField = ref('');
 const dateField = { ui_type: 'datetime' };
 let original: Dict | null = null, disposed = false, serial = 0, timer = 0, saveTimer = 0, polling = false, editionPending = false;
 let controller: AbortController | undefined;
@@ -124,10 +128,13 @@ const filtered = computed<Dict[]>(() => {
 const pages = computed(() => Math.max(1, Math.ceil(filtered.value.length / 10)));
 const visibleRows = computed(() => filtered.value.slice((Math.min(page.value, pages.value) - 1) * 10, Math.min(page.value, pages.value) * 10));
 const dirty = computed(() => changes().length > 0);
+const cycleWarnings = computed<Record<string, Record<string,string|undefined>>>(() => Object.fromEntries((run.value?.items || []).map((item: Dict) => [item.key,
+  isMaintenanceNotice(item) ? noticeCycleWarnings({work_type:item.work_type,...item.draft}, (item.fields || []).find((field: Dict) => field.key === 'maintenance_cycle')?.cycle_rules) : {},
+])));
 function typeLabel(item: Dict): string { return ({ maintenance: '维保', change: '变更', repair: '检修', polling: '轮巡', adjust: '设备调整', power: '上下电' } as Dict)[item.work_type] || ''; }
 function fieldLabel(field: Dict): string { return String(field.label || '').replace('（YYYY-MM-DD HH:mm）', ''); }
 function briefKeys(item: Dict): string[] { return (item.fields || []).filter((field: Dict) => field.kind !== 'photos' && (['notice_action', 'notice_sop'].includes(field.key) || !field.readonly && (String(item.draft?.[field.key] ?? '').trim() === '' || field.key === 'progress' && !!(item.draft?.notice_action === '结束' && field.default_on_end || String(item.draft?.[field.key] ?? '') === String(field.default_on_end || ''))))).map((field: Dict) => field.key); }
-function shownFields(item: Dict): Dict[] { const keys = new Set([...(item.brief_fields || []), ...briefKeys(item)]); return (item.fields || []).filter((field: Dict) => field.kind !== 'photos' && (item.edit_all || keys.has(field.key))); }
+function shownFields(item: Dict): Dict[] { const keys = new Set([...(item.brief_fields || []), ...briefKeys(item), ...Object.keys(cycleWarnings.value[item.key] || {})]); return (item.fields || []).filter((field: Dict) => field.kind !== 'photos' && (item.edit_all || keys.has(field.key) || focusedCycleField.value===item.key+':'+field.key)); }
 function changed(): void { error.value = ''; window.clearTimeout(saveTimer); saveTimer = window.setTimeout(saveLocal, 350); }
 function onFieldChange(item: Dict, field: Dict): void {
   if (field.key === 'notice_action') {
@@ -445,6 +452,8 @@ input:disabled { cursor: not-allowed; }
 .notice-field em { color: var(--lh-danger); font-style: normal; }
 .notice-field textarea { resize: vertical; min-height: 38px; max-height: 110px; line-height: 1.6; }
 .notice-field input, .notice-field textarea, .notice-field select { background: var(--lh-surface); }
+.notice-field.has-cycle-warning input, .notice-field.has-cycle-warning textarea { border-color: var(--lh-danger, #b32d35); }
+.notice-cycle-warning { margin: 4px 0; color: var(--lh-danger, #b32d35); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .notice-field :deep(.repair-date-control input) { min-height: 34px; padding-right: 38px; background: var(--lh-surface); }
 .notice-field :deep(.repair-field-label) { font-size: 12px; }
 .notice-field :deep(.lhs-people-cols) { grid-template-columns: minmax(0, 1fr); }

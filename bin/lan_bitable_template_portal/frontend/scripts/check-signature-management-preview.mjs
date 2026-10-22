@@ -82,10 +82,16 @@ await page.route('**/*', async route => {
   if (pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-signature' } });
   if (pathname === '/api/signatures/management/people') {
     assert.equal(url.searchParams.has('message_capable'),false,'relay selection must not reuse the scoped/paginated directory');
-    const rows=people.map(p=>({...p,can_preview:role==='admin'||p.source==='external',can_request:role==='admin'||p.source==='external'}));
+    const rows=people.map(p=>{
+      const allowed=role==='admin'||role==='user'&&p.source==='external';
+      const row={...p,can_preview:allowed,can_request:true,can_choose_recipient:role==='admin'||p.source==='external',
+        recipient_scopes:p.source==='external'?['110',...'ABCDEH']:['A'],invite_only:!allowed,directory_only:!allowed};
+      if(!allowed){delete row.has_signature;delete row.effective_has_signature;row.signature_status='restricted';}
+      return row;
+    });
     if(role==='user')rows.push(
       {person_key:'staff:recBoss',record_id:'recBoss',name:'验收上级',source:'staff',building:'H楼',position:'经理',signature_status:'restricted',invite_only:true,can_request:true,can_preview:false,can_receive_message:true},
-      {person_key:'staff:recCross',record_id:'recCross',name:'跨楼目录人员',employee_no:'C900',source:'staff',building:'C楼',position:'运维主管',signature_status:'restricted',directory_only:true,invite_only:false,can_request:false,can_preview:false,can_receive_message:true},
+      {person_key:'staff:recCross',record_id:'recCross',name:'跨楼目录人员',employee_no:'C900',source:'staff',building:'C楼',position:'运维主管',signature_status:'restricted',directory_only:true,invite_only:true,can_request:true,can_preview:false,can_receive_message:true},
       {person_key:'external:shared-other',record_id:'shared-other',name:'其他人员创建的临时签名',source:'external',building:'C楼',has_signature:false,signature_status:'unsigned',can_request:true,can_preview:false},
       {person_key:'external:linked-protected',record_id:'linked-protected',name:'受保护的已关联签名',source:'external',building:'H楼',origin_staff_record_id:'recBoss',has_signature:true,signature_status:'restricted',can_request:false,can_preview:false},
     );
@@ -236,7 +242,7 @@ try {
   const crossDirectory = page.locator('.person-card').filter({hasText:'跨楼目录人员'});
   await crossDirectory.waitFor();
   assert.equal(await crossDirectory.getByText('签名受限', {exact:true}).count(), 1);
-  assert.equal(await crossDirectory.getByRole('button').count(), 0, 'directory visibility grants no signature actions');
+  assert.equal(await crossDirectory.getByRole('button',{name:'发送签名邀请',exact:true}).count(), 1, 'cross-building collection is allowed without ink access');
   assert.equal(await page.locator('.person-card').filter({hasText:'张三'}).getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'normal user gets no unauthorized formal preview');
   assert.equal(await page.locator('.person-card').filter({hasText:'受保护的已关联签名'}).getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'linked temporary signatures keep formal authority');
   assert.equal(await page.getByRole('button', { name: '查看签名', exact: true }).count(), 1, 'shared unlinked temporary signature remains usable');
@@ -349,8 +355,26 @@ try {
   assert.equal(await page.getByRole('button',{name:'新增临时人员',exact:true}).count(),0,'server permission controls create entry');
   allowCreate=true;createScopes=[];await page.goto(origin+entry);await sharedCard().waitFor();
   assert.equal(await page.getByRole('button',{name:'新增临时人员',exact:true}).count(),0,'no allowed creation building means no entry');
-  role='denied';const beforeDenied=apiPosts.length;await page.goto(origin+entry);await page.getByText('没有该功能权限',{exact:true}).waitFor();
-  assert.equal(await page.locator('.signature-management').count(),0,'without the signature module no signature-management surface mounts');assert.equal(apiPosts.length,beforeDenied);
+  role='denied';createScopes=['110',...'ABCDEH'].map(value=>({value,label:value==='110'?'110站':value+'楼'}));
+  const beforeCollectionPreview=previewRequests.length;
+  for(const viewport of [{width:1440,height:900},{width:402,height:874},{width:440,height:956}]){
+    await page.setViewportSize(viewport);await page.goto(origin+entry);await sharedCard().waitFor();
+    assert.equal(await page.getByRole('button',{name:'查看签名',exact:true}).count(),0,'collection-only accounts never see ink controls');
+    assert.equal(await page.getByRole('button',{name:'重复人员核对',exact:true}).count(),0);
+    await page.locator('.person-card').filter({hasText:'张三'}).getByRole('button',{name:'发送签名邀请',exact:true}).click();
+    const send=sendDialog();await send.waitFor();
+    assert.equal(await send.locator('.staff-results,.recipient-pinned').count(),0);
+    await send.getByRole('button',{name:'发送链接',exact:true}).click();await send.waitFor({state:'hidden'});
+    assert.equal(apiPosts.at(-1)[2].record_id,'rec_staff_1');assert.equal(apiPosts.at(-1)[2].recipient,'');
+    await sharedCard().getByRole('button',{name:'发送签名邀请',exact:true}).click();await waitRecipients(send);
+    assert.equal(await send.getByRole('group',{name:'值班账号代收'}).getByRole('button').count(),7);
+    await send.getByRole('button',{name:'C楼',exact:true}).click();
+    assert.equal(await send.getByRole('button',{name:'发送链接',exact:true}).isDisabled(),false);
+    await page.screenshot({path:path.join(output,'collection-only-'+viewport.width+'.png')});
+    await send.getByRole('button',{name:'取消',exact:true}).click();
+    assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+  }
+  assert.equal(previewRequests.length,beforeCollectionPreview,'collection-only navigation and sending never downloads signatures');
   assert.deepEqual(errors,[]);
 
   console.log(JSON.stringify({ ok: true, screenshots: output, checks: 'admin preview/retry and merge selection preserved; scoped non-admin creation; shared unlinked temporary signatures; 602 cross-building recipient candidates; no unauthorized formal/linked preview; upward direct-only invitation; failed/malformed/late recipient isolation; stable create/send IDs through lost and uncertain receipts; 1440x900,402x874,440x956' }));

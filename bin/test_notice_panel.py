@@ -797,6 +797,48 @@ class WorkTypeSortingTests(PanelTestBase):
 
 
 class PublicPayloadTests(PanelTestBase):
+    def test_saved_runs_receive_current_cycle_metadata_without_draft_mutation(self):
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
+        run = self.open(scope='E')
+        doc = self.store.get_document(panel.NS, run['id'])
+        for index, item in enumerate(doc['items']):
+            item['draft'].update(notice_type='维保通告', maintenance_cycle='每月', content='季度维保', reason='半年度计划')
+            item['fields'].append({'key': 'maintenance_cycle', 'label': '维保周期', 'kind': 'select',
+                                   'options': ['每月', '自定义周期'], 'required': True, 'readonly': False})
+            if index:
+                item['fields'][-1]['cycle_rules'] = [{'value': '旧规则', 'aliases': ['旧规则']}]
+            item['selected'] = True
+        self.store.put_document(panel.NS, run['id'], doc)
+        before = copy.deepcopy(doc)
+        for _ in range(2):
+            public = self.manager.public_run(run['id'])
+            for item in public['items']:
+                cycle = next(field for field in item['fields'] if field['key'] == 'maintenance_cycle')
+                self.assertEqual(cycle['cycle_rules'], maintenance_cycle_rules())
+                self.assertEqual(cycle['options'], ['每月', '自定义周期'])
+                self.assertEqual(item['notice_type'], '维保通告')
+                self.assertEqual(item['draft']['content'], '季度维保')
+                self.assertTrue(item['selected'])
+            self.assertEqual(self.store.get_document(panel.NS, run['id']), before)
+        local = copy.deepcopy(before)
+        result = self.manager.public_items(local)
+        result[0]['fields'][-1]['cycle_rules'][0]['aliases'].append('客户端改动')
+        self.assertEqual(local, before, 'response metadata must not alias the stored run')
+
+    def test_cycle_metadata_is_removed_on_other_types_or_identity_conflicts(self):
+        for work, notice_type in [('change', '变更通告'), ('repair', '设备检修通告'),
+                                  ('polling', '设备轮巡通告'), ('power', '上电通告'), ('adjust', '设备调整通告'),
+                                  ('maintenance', '变更通告'), ('', '维保通告')]:
+            with self.subTest(work=work, notice_type=notice_type):
+                item = self._item('legacy', 'E', action='update', work_type=work, draft={'notice_type': notice_type})
+                item['fields'].append({'key': 'maintenance_cycle', 'cycle_rules': [{'value': '每月', 'aliases': ['每月']}]})
+                result = self.manager.public_items({'owner': 'ou-li', 'items': [item]})[0]
+                self.assertFalse(any('cycle_rules' in field for field in result['fields']))
+                self.assertEqual(result['notice_type'], notice_type)
+                self.assertIn('cycle_rules', item['fields'][-1], 'only returned metadata is sanitized')
+        with patch.object(self.manager, '_owner_modules', return_value=set()):
+            self.assertEqual(self.manager.public_items({'items': [self._item('denied', 'E')]}), [])
+
     def test_no_raw_ids_or_private_payload_leak(self):
         run, _ = self.preview_confirm_flow(content="x", progress="y")
         public = self.manager.public_run(run["id"])

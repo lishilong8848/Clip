@@ -336,7 +336,7 @@ class SignatureManagement:
                 "can_manage_directory": bool(access and access.global_manager),
                 "can_create_temporary": bool(access and access.can_create_temporary),
                 "create_scope_options": [{"value": scope, "label": '110站' if scope == '110' else scope + '楼'}
-                                         for scope in (access.scopes if access else [])],
+                                         for scope in (access.collection_scopes if access else [])],
                 "scope_options": [{"value": scope, "label": '110站' if scope == '110' else scope + '楼'} for scope in scopes],
                 "recipients": [
                     {"value": b, "label": "110站值班账号" if b == "110" else f"{b}楼值班账号"}
@@ -471,10 +471,9 @@ class SignatureManagement:
                 if any(not info['ok'] for info in directory['sources'].values()):
                     raise SignatureManagementError('人员表读取失败，不能核验签名归属，请稍后重试。', 503)
                 access.bind(directory)
-                if ('signatures' not in access.profile.get('modules', [])
-                        or access.auth.directory_block_reason(actor)
+                if (not access.profile or access.actor_blocked()
                         or not access.allowed(person, 'request')
-                        or recipient and not access.allowed(person, 'edit')):
+                        or recipient and not access.relay_allowed(person)):
                     raise SignatureManagementError('人员归属或管理权限已变化，请刷新后重试。', 403)
                 access.recipient(recipient, person=person)
                 owner = access.target(person) or {}
@@ -873,7 +872,9 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         with reader(provider()) if callable(reader) and callable(provider) else nullcontext():
             access = SignatureAccess(manager, auth, actor)
             if operation == 'recipients':
-                person = access.require(payload.get('source'), payload.get('record_id'), 'edit')
+                person = access.require(payload.get('source'), payload.get('record_id'), 'request')
+                if not access.relay_allowed(person):
+                    raise SignatureManagementError('此签名邀请只能发送给本人。', 403)
                 return {'people': [{key: row.get(key, '') for key in
                                    ('record_id', 'name', 'employee_no', 'building', 'position', 'team', 'specialty')}
                                   for row in access.recipient_people(person)]}
@@ -898,10 +899,10 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
         raise SignatureManagementError('只有全楼管理员可以核对、关联或清理人员。', 403)
     if operation == "temporary":
         access.temporary(payload)
-        return manager._new_temporary(payload, _id(payload.get("operation_id")), actor)
+        return access.decorate(manager._new_temporary(payload, _id(payload.get("operation_id")), actor))
     if operation == "requests":
         person = access.require(payload.get('source'), payload.get('record_id'), 'request')
-        if payload.get('recipient') and not access.allowed(person, 'edit'):
+        if payload.get('recipient') and not access.relay_allowed(person):
             raise SignatureManagementError('向上级发起的签名邀请只能发送给该人员本人，不能选择代收人。', 403)
         access.recipient(payload.get('recipient'), person=person)
         return manager.send(payload, actor=actor, base_url=base_url, send_text=send_text,

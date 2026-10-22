@@ -31,7 +31,8 @@ const registry=await build({entryPoints:[fileURLToPath(new URL('../src/workspace
 const {modules,navigationModules,moduleForRoute,modulePermission,moduleUrl}=await import('data:text/javascript;base64,'+Buffer.from(registry.outputFiles[0].text).toString('base64'));
 assert.equal(moduleForRoute(logical('/document-library')),'documents');
 assert.equal(modulePermission('documents'),'knowledge');
-assert.deepEqual(navigationModules(['knowledge']).map(item=>item.id),['knowledge','documents']);
+assert.deepEqual(navigationModules(['knowledge']).map(item=>item.id),['knowledge','documents','signatures']);
+assert.deepEqual(navigationModules([]).map(item=>item.id),['signatures'],'signed-in collection entry does not grant any other module');
 assert.equal(navigationModules(['learning']).some(item=>['knowledge','documents'].includes(item.id)),false);
 assert.equal(moduleUrl(modules.find(item=>item.id==='documents'),'H'),'/document-library');
 const specialIds=['risk_inspection','plan_convergence','work_handover'];
@@ -39,11 +40,12 @@ assert.deepEqual(modules.filter(item=>item.group==='专项功能').map(item=>ite
 assert.equal(modules.find(item=>item.id==='learning').group,'学习与资料');
 for(const [id,route,scoped] of [['risk_inspection','/risk-inspections',true],['plan_convergence','/plan-convergence',true],['work_handover','/work-handover',false],['learning','/learning',false]]){
   const entries=navigationModules([id]);
-  assert.deepEqual(entries.map(item=>item.id),[id],id+': a single grant never exposes other modules');
-  assert.equal(entries[0].group,id==='learning'?'学习与资料':'专项功能');
+  assert.deepEqual(new Set(entries.map(item=>item.id)),new Set([id,'signatures']),id+': only universal signature collection accompanies a module grant');
+  const entry=entries.find(item=>item.id===id);
+  assert.equal(entry.group,id==='learning'?'学习与资料':'专项功能');
   assert.equal(modulePermission(id),id,id+': moving navigation never changes the required permission');
   assert.equal(moduleForRoute(logical(route)),id);
-  assert.equal(moduleUrl(entries[0],'B'),route+(scoped?'?scope=B':''));
+  assert.equal(moduleUrl(entry,'B'),route+(scoped?'?scope=B':''));
   assert.equal(moduleBackTarget('/?entry=special',logical(route)),null,id+': legacy parent must not escape the V2 module');
 }
 for(const allowed of [[],['learning'],['critical_guard'],['daily'],['knowledge']]){

@@ -41,12 +41,15 @@ def read_index_states(path, prefix, current):
                 if not current(json.loads(row['payload'])):
                     continue
                 missing = False
+                chunks = vectors = 0
                 if row['status'] == 'ready':
                     chunks, vectors = db.execute('''SELECT count(*),count(v.chunk_id) FROM chunks c
                         LEFT JOIN local_vectors v ON v.chunk_id=c.id WHERE c.document_id=? AND c.version=?''',
                         (row['id'], row['active_version'])).fetchone()
                     missing = not chunks or vector and chunks != vectors
-                result[row['source_key']] = {'status': 'queued' if missing else row['status'],
+                vectorized = row['status'] == 'ready' and bool(chunks and chunks == vectors)
+                status = 'queued' if missing else 'text_only' if row['status'] == 'ready' and not vectorized else row['status']
+                result[row['source_key']] = {'status': status, 'vectorized': vectorized,
                     'error': '知识库索引缺失，等待补入。' if missing else index_error(row['error']), 'missing': missing}
             return result
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):

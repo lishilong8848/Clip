@@ -1431,6 +1431,11 @@ function planChoices(plan: Dict, field: Dict): (string | number)[] { const value
 function togglePlanChoice(plan: Dict, field: Dict, value: string | number, checked: boolean): void { const old = planChoices(plan, field); planValues[plan.id + ':' + field.name] = checked ? Array.from(new Set([...old, value])) : old.filter(item => item !== value); planSelectionChanged(plan, field); }
 function clearPlanChoice(plan: Dict, field: Dict): void { planValues[plan.id + ':' + field.name] = []; planSelectionChanged(plan, field); }
 function planControl(plan: Dict, field: Dict): Dict {
+  if (field.native_notice) {
+    const body = plan.operations?.[field.operation_index || 0]?.body || {};
+    const conflict = [field, body, body.patch || {}].some(value => value.work_type && value.work_type !== 'maintenance' || value.notice_type && value.notice_type !== '维保通告');
+    return { ...field, work_type: conflict ? '' : body.work_type || field.work_type, notice_type: body.notice_type || body.patch?.notice_type || field.notice_type };
+  }
   if (field.native_notice_sop) {
     const notice = plan.fields.find((item: Dict) => item.operation_index === field.operation_index && item.native_notice);
     const buildings = notice ? planValues[plan.id + ':' + notice.name]?.building_codes : [];

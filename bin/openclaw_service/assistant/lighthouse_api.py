@@ -1404,11 +1404,14 @@ def _notice_frontend_fields(work_type: str, scopes: list[str]) -> dict:
     children.append(_child("end_time", "发现故障时间" if work_type == "repair" else "结束时间", ctype="datetime-local", step=1))
     children.append(_child("specialty", "专业", ctype="select", options=SPECIALTY_OPTIONS))
     if work_type == "maintenance":
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
+
         # Custom text is surfaced with non-restrictive suggestions; the descriptor
         # stays a plain text control so valid native custom cycles are never
         # restricted.
-        children.append(_child("maintenance_cycle", "维保周期",
-                               suggestions=MAINTENANCE_CYCLE_OPTIONS))
+        cycle = _child("maintenance_cycle", "维保周期", suggestions=MAINTENANCE_CYCLE_OPTIONS)
+        cycle["cycle_rules"] = maintenance_cycle_rules()
+        children.append(cycle)
     if work_type in {"maintenance", "change"}:
         children.append(_child("execution_party", "执行方", ctype="select", options=EXECUTION_PARTY_OPTIONS, req=True))
     if work_type == "change":
@@ -1448,6 +1451,7 @@ def _notice_frontend_fields(work_type: str, scopes: list[str]) -> dict:
         "type": "object",
         "children": children,
         "native_notice": True,
+        "work_type": work_type,
     }
 
 

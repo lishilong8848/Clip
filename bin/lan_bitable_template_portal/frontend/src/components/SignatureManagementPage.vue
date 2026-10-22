@@ -191,14 +191,14 @@
           <button v-if="selectedPerson?.can_receive_message" type="button" class="recipient-direct" :class="{ selected: recipient === 'direct' }" @click="recipient = 'direct'">
             <span><strong>发送给本人</strong><small>使用已关联的飞书账号接收</small></span><CheckCircle2 v-if="recipient === 'direct'" :size="18" />
           </button>
-          <div v-if="!selectedPerson?.invite_only" class="recipient-section">
+          <div v-if="canChooseRecipient" class="recipient-section">
             <strong>值班账号代收（置顶）</strong>
             <div class="recipient-pinned" role="group" aria-label="值班账号代收">
-              <button v-for="b in relayBuildings" :key="b" type="button" :class="{ selected: recipient === `duty:${b}` }" @click="recipient = `duty:${b}`">{{ buildingLabel(b) }}</button>
+              <button v-for="b in selectedRelayBuildings" :key="b" type="button" :class="{ selected: recipient === `duty:${b}` }" @click="recipient = `duty:${b}`">{{ buildingLabel(b) }}</button>
             </div>
           </div>
-          <label v-if="!selectedPerson?.invite_only"><span>其他 VNET 人员代收</span><div class="search-input"><Search :size="17" /><input v-model="relayQuery" type="search" autocomplete="off" placeholder="搜索姓名、工号、岗位或楼栋" /><button v-if="relayQuery" type="button" aria-label="清空代收人员搜索" @click="relayQuery = ''"><X :size="16" /></button></div></label>
-          <div v-if="!selectedPerson?.invite_only" class="staff-results" aria-live="polite">
+          <label v-if="canChooseRecipient"><span>其他 VNET 人员代收</span><div class="search-input"><Search :size="17" /><input v-model="relayQuery" type="search" autocomplete="off" placeholder="搜索姓名、工号、岗位或楼栋" /><button v-if="relayQuery" type="button" aria-label="清空代收人员搜索" @click="relayQuery = ''"><X :size="16" /></button></div></label>
+          <div v-if="canChooseRecipient" class="staff-results" aria-live="polite">
             <div v-if="relayLoading" class="staff-state"><RefreshCw :size="17" class="spin" />正在读取 VNET 人员…</div>
             <div v-else-if="relayError" class="staff-state error" role="alert">{{ relayError }}<button type="button" class="btn" :disabled="sending" @click="searchRelayPeople">重新读取接收人</button></div>
             <div v-else-if="!relayPeople.length" class="staff-state">没有匹配的可接收人员。</div>
@@ -263,11 +263,13 @@ const totalPages = computed(() => Math.max(1, Math.ceil(count.value / 50)));
 const resultRange = computed(() => !count.value ? "0 人" : `${(page.value - 1) * 50 + 1}–${Math.min(page.value * 50, count.value)} / ${count.value} 人`);
 const modalTitle = computed(() => modal.value === "create" ? "新增临时人员" : modal.value === "associate" ? "关联正式人员" : modal.value === "preview" ? "签名预览" : "发送签名链接");
 const modalSubmitLabel = computed(() => modal.value === "create" ? "新增并继续" : modal.value === "associate" ? "确认关联" : "发送链接");
+const canChooseRecipient = computed(() => selectedPerson.value?.can_choose_recipient ?? !selectedPerson.value?.invite_only);
+const selectedRelayBuildings = computed<string[]>(() => selectedPerson.value?.recipient_scopes || relayBuildings.value);
 const validRecipient = computed(() => {
   if (!selectedPerson.value || !props.loggedIn) return false;
   if (recipient.value === 'direct') return selectedPerson.value.can_receive_message === true;
-  if (selectedPerson.value.invite_only) return false;
-  if (recipient.value.startsWith('duty:')) return relayBuildings.value.includes(recipient.value.slice(5));
+  if (!canChooseRecipient.value) return false;
+  if (recipient.value.startsWith('duty:')) return selectedRelayBuildings.value.includes(recipient.value.slice(5));
   return relayReady.value && !relayLoading.value && relayDirectory.value.some(person => recipient.value === `staff:${person.record_id}`);
 });
 const modalSubmitDisabled = computed(() => sending.value || !props.loggedIn
@@ -385,7 +387,7 @@ function openSend(person: Dict) {
   recipient.value = person.can_receive_message ? "direct" : "";
   relayQuery.value = ""; relayDirectory.value = [];
   void showModal("send");
-  if (!person.invite_only) void searchRelayPeople();
+  if (canChooseRecipient.value) void searchRelayPeople();
 }
 function openAssociate(person: Dict) { selectedPerson.value = person; staffId.value = ""; samePerson.value = false; staffQuery.value = person.name; staffDirectory.value = []; void showModal("associate"); void searchStaff(); }
 
@@ -402,7 +404,7 @@ async function searchStaff() {
 
 async function searchRelayPeople() {
   const person = selectedPerson.value;
-  if (!props.loggedIn || modal.value !== 'send' || !person?.record_id || person.invite_only) return;
+  if (!props.loggedIn || modal.value !== 'send' || !person?.record_id || !canChooseRecipient.value) return;
   relayRead?.abort();
   const controller = new AbortController(); relayRead = controller;
   const n = ++relaySeq;

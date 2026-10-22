@@ -74,11 +74,11 @@ class AccountLevelTests(_TempDirTestCase):
         listing = self.manager.accounts(actor=actor)
         self.assertEqual({item["category"] for item in listing["items"]}, {"engineer", "supervisor"})
         for item in listing["items"]:
-            self.assertEqual(item["can_edit"], item['level'] == 'L4' and item['category'] == 'engineer')
-            self.assertFalse(item["can_delete"])
+            self.assertEqual(item["can_edit"], item['id'] == 'recHS' or item['level'] == 'L4' and item['category'] == 'engineer')
+            self.assertEqual(item["can_delete"], item['id'] == 'recHS')
             self.assertNotIn("last_login", item)
             self.assertNotIn("employee_no", item)
-            self.assertEqual(account_allowed(listing["policy"], item, "view"), item['is_self'])
+            self.assertEqual(account_allowed(listing["policy"], item, "view"), item['is_self'] or item['id'] == 'recHS')
         self.manager.update({"changes": [self.change("AE", enabled=False)]}, actor)
         self.assertTrue(self.h.auth._open_id_explicitly_disabled("ou_fixtureAE"))
         for rid in ("AO", "AS", "HM1"):

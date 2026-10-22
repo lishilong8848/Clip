@@ -416,6 +416,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.sharing_images",
     "lan_bitable_template_portal.sharing_generation",
     "lan_bitable_template_portal.document_library_index",
+    "upload_event_module.services.notice_cycle_warnings",
     "lan_bitable_template_portal.plan_convergence",
     "lan_bitable_template_portal.plan_convergence_recipients",
     "lan_bitable_template_portal.notice_recipients",
@@ -1699,7 +1700,8 @@ def _run_frontend_notice_navigation_checks() -> None:
     if not node:
         raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
     for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
-                 "check-notice-photo-paste.mjs"):
+                 "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
+                 "check-account-fixed-duty.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
@@ -1797,6 +1799,8 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "plan_convergence_points.py",
         PROJECT_ROOT / "bin" / "test_submission_reliability.py",
         PROJECT_ROOT / "bin" / "test_notice_delivery_source_recovery.py",
+        PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "notice_cycle_warnings.py",
+        PROJECT_ROOT / "bin" / "test_notice_cycle_warnings.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "critical_guard.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "risk_inspection_templates.py",
@@ -1923,7 +1927,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery", "bin.test_plan_convergence_recipients", "bin.test_planned_notice_deadlines",
          "bin.test_learning_update_flow",
-         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache",
+         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_knowledge_source_maintenance",
          "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model",
          "bin.test_signature_management_performance",
          "bin.test_workspace_layouts",
@@ -1958,7 +1962,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_dynamic_endpoints",
          "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
          "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
-         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_notice_delivery_source_recovery", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
+         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_notice_delivery_source_recovery", "bin.test_notice_cycle_warnings", "bin.test_qt_notice_cycle_warnings", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
                 "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
                 "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",

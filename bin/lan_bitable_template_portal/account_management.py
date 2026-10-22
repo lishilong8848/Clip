@@ -19,6 +19,7 @@ from .account_policy import (
     LEVEL_OPTIONS,
     PolicyViolation,
     account_allowed,
+    account_in_scope,
     account_details_allowed,
     categorize_position,
     category_options_for,
@@ -120,8 +121,7 @@ class AccountManagement:
             item["can_edit"] = not profile or account_allowed(profile, item, "edit")
             item["can_access_signature"] = not profile or any(account_allowed(profile, item, action) for action in ('view', 'edit'))
             item["can_edit_access"] = bool(item["can_edit"]) and self._access_editable(profile, item)
-            item["can_grant_l0"] = bool(profile and item["can_edit"] and profile['level'] in {'L0', 'L1', 'L2', 'L3'}
-                                        and not (item.get('category') == 'duty' and item.get('home_scope') == 'H'))
+            item["can_grant_l0"] = bool(profile and item["can_edit"] and profile['level'] in {'L0', 'L1', 'L2', 'L3'})
             item["can_delete"] = bool(profile and account_allowed(profile, item, "delete") and item["open_id"] != actor.get("open_id"))
             item["can_set_password"] = item["can_set_password"] and item["can_edit"]
             from .account_impersonation import can_impersonate
@@ -139,7 +139,7 @@ class AccountManagement:
                     for key in ("last_login", "password_set", "account_nature", "employee_no"):
                         item.pop(key, None)
         options = permissions["scope_options"]
-        if profile and profile["level"] == "L3":
+        if profile and profile["level"] in {"L2", "L3"}:
             options = [option for option in options if option["value"] in profile['scope_rules']]
         level_options = level_options_for(profile["level"]) if profile else copy.deepcopy(LEVEL_OPTIONS)
         category_options = category_options_for(profile["level"]) if profile else copy.deepcopy(CATEGORY_OPTIONS)
@@ -151,34 +151,15 @@ class AccountManagement:
 
     @staticmethod
     def _access_editable(profile, item):
-        """Whether the acting profile may edit the item's access override.
-
-        Fixed H duty and protected accounts are never editable; other L0 peers are.
-        The enabled toggle is governed separately by ``can_edit``. L2 ordinary
-        access editing remains disabled (its L0 promotion uses ``can_grant_l0``); L3
-        may configure L4 accounts inside its current managed building scope.
-        """
-        if profile is None:
-            return False
-        target_level = str(item.get("level") or "")
-        if item.get('locked') or item.get('is_self'):
-            return False
-        if item.get("category") == "duty" and list(item.get("own_scopes") or []) == ["H"]:
-            return False  # fixed H duty
-        act_level = str(profile.get("level") or "")
-        if act_level in {"L0", "L1"}:
-            return True
-        if act_level == "L2":
-            # L2 只能做基础编辑/启用，不能编辑/传播访问等级或模块等更高能力。
-            return False
-        if act_level == "L3":
-            return target_level == "L4"
-        return False
+        """Cross-building L2 engineer edits retain their separate L0-only grant."""
+        return bool(profile and account_allowed(profile, item, 'edit')
+                    and (profile['level'] in {'L0', 'L1'} or account_in_scope(profile, item)))
 
     def check(self, actor, item, action):
         profile = self.auth.account_profile(actor.get("open_id"))
         target = self.auth.account_profile(item.get("open_id"))
         current = {**item, "category": target["category"], "level": target["level"],
+                   "home_scope": target["home_scope"], "scope_rules": target["scope_rules"],
                    "is_self": item.get('open_id') == actor.get('open_id'),
                    "own_scopes": [target["home_scope"]] if target["home_scope"] else [],
                    "role": "admin" if target["level"] in {"L0", "L1"} else "building"}
