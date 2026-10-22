@@ -59,9 +59,9 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
-        line=81, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/schema")],
-        window=1, needles=["requestJson(endpoint('/schema', key), { signal, fresh: true })"],
-        note="字段查询使用默认 GET；endpoint 将 key 编码为 /tables/{table_key}，后端注册 /schema。",
+        line=115, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/schema")],
+        window=1, needles=["requestJson(endpoint('/schema', key, { refresh: refresh ? 1 : undefined }), { signal, fresh: true })"],
+        note="字段查询使用默认 GET；refresh 仅为查询参数，后端注册 /schema 并按需刷新缓存。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
@@ -71,9 +71,21 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
-        line=98, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/records/{param}")],
-        window=1, needles=["requestJson(endpoint('/records/' + encodeURIComponent(id), key), { signal, fresh: true })"],
-        note="单条记录默认 GET；表标识和记录标识分别编码，匹配后端 records/{record_id}。",
+        line=127, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/records/{param}")],
+        window=1, needles=["requestJson(endpoint('/records/' + encodeURIComponent(id), key, { refresh: refresh ? 1 : undefined }), { signal, fresh: true })"],
+        note="单条记录默认 GET；表和记录标识分别编码，refresh 仅为查询参数，匹配后端 records/{record_id}。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=130, kind="covered", method_paths=[("POST", "/api/document-library/tables/{param}/reindex")],
+        window=1, needles=["requestJson(endpoint('/reindex', key), { method: 'POST', body: JSON.stringify(payload), signal })"],
+        note="重新向量化使用 POST，匹配后端 /reindex；操作标识和资料权限继续由后端核验。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=136, kind="covered", method_paths=[("DELETE", "/api/document-library/tables/{param}")],
+        window=1, needles=["requestJson(endpoint('', key), { method: 'DELETE', body: JSON.stringify(payload), signal })"],
+        note="移除本地接入使用 DELETE，匹配后端资料表配置路由，不删除飞书源记录。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
@@ -1141,7 +1153,7 @@ class DynamicEndpointAuditTests(unittest.TestCase):
     def test_document_library_bindings_have_unique_helpers_and_mounted_backend_evidence(self):
         source = "lan_bitable_template_portal/frontend/src/api/documentLibrary.ts"
         bindings = [binding for binding in self.bindings if binding['source'] == source]
-        self.assertEqual(len(bindings), 9)
+        self.assertEqual(len(bindings), 11)
         text = _file_text(source)
         self.assertIn("const root = '/api/document-library';", text)
         self.assertIn("return root + (tableKey ? '/tables/' + encodeURIComponent(tableKey) : '') + path + "
