@@ -1,4 +1,4 @@
-"""Bounded pure helpers for in-service headcount requests (no IO; aggregate only)."""
+"""Bounded pure helpers for personnel counts and roster evidence (no IO)."""
 from __future__ import annotations
 
 import re
@@ -64,6 +64,7 @@ def summarize_roster(rows, actor, *, day, shift='', observed_at, source_url):
         basis += '\n\n未读到排班：' + '、'.join(missing) + '；未计作零人，以上不是全部楼栋的完整总数。'
     basis += '\n\n口径：按排班日期和人员（文本）统计，不含长白；同一人跨班次或楼栋分别计项，重名或身份缺失时不推断总人数，不代表实时签到。'
     return {'name': '值班排班人数统计', 'date': day, 'shift': shift, 'assignment_count': len(people),
+            'items': [{'scope': scope, 'shift': duty, 'name': name} for scope, duty, name in sorted(people)],
             'unique_people': unique, 'per_building': counts, 'complete': not missing, 'missing': missing,
             'observed_at': observed_at, 'source_url': source_url, 'basis': basis}
 

@@ -6,7 +6,7 @@ import json
 import unittest
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from bin import test_lighthouse_stream as fixtures
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
@@ -201,14 +201,15 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_general_question_uses_model_without_unrelated_business_reads(self):
         async def stream(messages, info):
-            self.assertEqual(info.function_tools, [])
             yield 'Hello 的中文是你好。'
         @asynccontextmanager
         async def factory(*_):
             yield FunctionModel(stream_function=stream)
         engine = LighthouseModel(self.portal, model_factory=factory)
-        result = await engine.answer(self.actor, {'question': '把 Hello 翻译成中文', '_profile': self.model.profile()},
-            [], self.request, AsyncMock(), self.authorize, {})
+        with patch.object(self.portal, '_invoke', new_callable=AsyncMock) as invoke:
+            result = await engine.answer(self.actor, {'question': '把 Hello 翻译成中文', '_profile': self.model.profile()},
+                [], self.request, AsyncMock(), self.authorize, {})
+        invoke.assert_not_awaited()
         self.assertEqual(result['answer'], 'Hello 的中文是你好。')
         self.assertEqual(self.reads, [])
         self.assertEqual(result['sources'], [])

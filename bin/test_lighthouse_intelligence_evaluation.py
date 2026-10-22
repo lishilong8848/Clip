@@ -128,6 +128,27 @@ class IndependentReviewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('测试乙', result['answer'])
                 self.assertNotIn(self.result['answer'], texts)
 
+    async def test_deferred_review_returns_internal_feedback_without_a_text_rewrite(self):
+        self.model.complete.return_value = self.rejected
+        result = await self.reviewer.run(self.actor, self.turn, [], self.result, self.authorize, defer_repair=True)
+        self.assertEqual(result['answer_review']['status'], 'needs_repair')
+        self.assertEqual(result['answer_review']['issues'], ['缺少已查到的两个人名'])
+        self.model.complete.assert_called_once()
+
+    async def test_small_evidence_is_not_silently_reduced_to_eight_rows(self):
+        self.result['sources'][0]['data']['participants'] = [{'name': f'测试{i}'} for i in range(45)]
+        self.model.complete.return_value = self.passed
+        await self.reviewer.run(self.actor, self.turn, [], self.result, self.authorize)
+        source = json.loads(self.model.complete.call_args.args[0][1]['content'])['evidence'][0]
+        self.assertFalse(source['excerpt_only'])
+        self.assertEqual(len(source['data']['participants']), 45)
+
+    async def test_reviewer_provider_failure_uses_another_configured_profile(self):
+        self.model.complete.side_effect = [TimeoutError(), self.passed]
+        result = await self.reviewer.run(self.actor, self.turn, [], self.result, self.authorize)
+        self.assertEqual(result['answer_review']['status'], 'passed')
+        self.assertEqual([call.kwargs['profile']['id'] for call in self.model.complete.call_args_list], ['checker', 'writer'])
+
 
 class SnapshotStatisticsTests(unittest.TestCase):
     def test_statistics_keep_duplicates_missing_values_and_partial_scope_explicit(self):
@@ -230,7 +251,8 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
         self.assertNotIn('output_files', result)
 
-    async def evaluate(self, channel, question, script, responder, *, scopes=('D',), turn=None, model_factory=None):
+    async def evaluate(self, channel, question, script, responder, *, scopes=('D',), turn=None, model_factory=None,
+                       reviewer=None, history=None):
         app, calls = FastAPI(), []
         @app.get('/api/assistant/work-orders')
         @app.get('/api/learning/papers')
@@ -260,10 +282,173 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
         events = []
         async def emit(kind, data):
             events.append((kind, data))
-        engine = LighthouseModel(portal, model_factory=model_factory or factory)
+        engine = LighthouseModel(portal, model_factory=model_factory or factory, answer_reviewer=reviewer)
         result = await engine.answer(actor, {'question': question, '_profile': {'name': 'fixture', 'model': 'fixture'},
-                                           **(turn or {})}, [], None, emit, auth, {})
+                                           **(turn or {})}, history or [], None, emit, auth, {})
         return result, calls, events
+
+    async def test_review_feedback_continues_same_query_loop_for_different_domains(self):
+        for channel in ('', 'feishu:oc_evaluation'):
+            for api, question in (('GET /api/assistant/work-orders', '查询D楼工单明细'),
+                                  ('GET /api/learning/papers', '查询D楼学练题单明细')):
+                with self.subTest(channel=channel, api=api):
+                    step, reference = 0, ''
+                    async def script(messages, info):
+                        nonlocal step, reference
+                        step += 1
+                        if step in (1, 4):
+                            yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                                'api_id': api, 'params': {'scope': 'D', 'page': 1 if step == 1 else 2}}}))}
+                        elif step == 2:
+                            reference = messages[-1].parts[0].content['query_ref']
+                            yield '仅看到测试甲，其他资料没有提供。'
+                        elif step == 3:
+                            self.assertIn('后续页', str(messages[-1]))
+                            self.assertNotIn('prepare_business', {tool.name for tool in info.function_tools})
+                            self.assertNotIn('create_text_file', {tool.name for tool in info.function_tools})
+                            yield {0: DeltaToolCall(name='read_query', json_args=json.dumps({
+                                'query_ref': reference, 'path': ['items'], 'limit': 20}))}
+                        else:
+                            self.assertIn('测试乙', str(messages[-1]))
+                            yield 'D楼共有2项：测试甲、测试乙。'
+                    reviewer = SimpleNamespace(run=AsyncMock())
+                    async def review(actor, turn, history, result, authorize, **kwargs):
+                        await authorize()
+                        if '测试乙' not in result['answer']:
+                            return {**result, 'answer_review': {'status': 'needs_repair', 'issues': ['已有资料有后续页，请补查。']}}
+                        self.assertTrue(any('测试乙' in str(source['data']) for source in result['sources']))
+                        return {**result, 'answer_review': {'status': 'passed', 'repairs': 0}}
+                    reviewer.run.side_effect = review
+                    def responder(scope, page, page_size):
+                        return {'ok': True, 'data': {'items': [{'id': str(page), 'name': '测试甲' if page == 1 else '测试乙'}],
+                                'total': 2, 'has_more': page < 2, 'page': page}}
+                    result, calls, events = await self.evaluate(channel, question, script, responder, reviewer=reviewer)
+                    self.assertEqual([call['page'] for call in calls], [1, 2])
+                    self.assertEqual(reviewer.run.await_count, 2)
+                    self.assertEqual(''.join(data['delta'] for kind, data in events if kind == 'text'), result['answer'])
+                    self.assertNotIn('没有提供', result['answer'])
+
+    async def test_followup_has_delivered_answer_and_conditions_but_not_another_topic(self):
+        from openclaw_service.assistant.lighthouse_model import evidence_summary
+        source = {'number': 1, 'title': '测试来源', 'data': {'items': []},
+                  'query_conditions': {'date': '2026-10-22', 'shift': '夜'}, 'queried_at': '2026-10-22T19:30:00+08:00'}
+        self.assertEqual(evidence_summary([source])[0]['conditions'], source['query_conditions'])
+        async def script(messages, info):
+            prompt = str(messages[-1])
+            self.assertIn('最近实际交付', prompt)
+            self.assertIn('2026-10-22', prompt)
+            self.assertIn('夜', prompt)
+            self.assertNotIn('其他话题私密资料', str(messages))
+            yield '缺少本轮可核验明细，不能按旧人数推断姓名。'
+        await self.evaluate('', '都是哪些人？', script, lambda *_: {}, history=[
+            {'question': '有多少人？', 'answer': '该次夜班共14人。', 'sources': [source], 'scopes': ['D']},
+            {'question': '其他话题私密资料', 'answer': '私密', 'feishu_topic': 'other', 'scopes': ['D']}])
+
+    async def test_unresolved_evidence_finishes_with_supported_partial_after_two_repairs(self):
+        step = 0
+        async def script(messages, info):
+            nonlocal step
+            step += 1
+            if step == 1:
+                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                    'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D'}}}))}
+            else:
+                yield '仅取得部分资料，其他记录无法确认。'
+        reviewer = SimpleNamespace(run=AsyncMock())
+        async def review(actor, turn, history, result, authorize, **kwargs):
+            await authorize()
+            if kwargs.get('defer_repair'):
+                return {**result, 'answer_review': {'status': 'needs_repair', 'issues': ['补充已取得的明细。']}}
+            return {**result, 'answer': '已取得D楼测试甲这一项，后续资料读取失败，总数暂无法确认。',
+                    'answer_review': {'status': 'corrected', 'repairs': 1}}
+        reviewer.run.side_effect = review
+        result, calls, events = await self.evaluate('feishu:oc_evaluation', '查询D楼工单明细', script,
+            lambda *_: {'ok': True, 'data': {'items': [{'name': '测试甲'}], 'complete': False}}, reviewer=reviewer)
+        self.assertEqual(reviewer.run.await_count, 3)
+        self.assertEqual([call.kwargs['defer_repair'] for call in reviewer.run.await_args_list], [True, True, False])
+        self.assertEqual(len(calls), 1)
+        self.assertIn('总数暂无法确认', result['answer'])
+        self.assertEqual(''.join(data['delta'] for kind, data in events if kind == 'text'), result['answer'])
+
+    async def test_repair_discards_stale_self_review_text_but_keeps_receipts(self):
+        step = 0
+        async def script(messages, info):
+            nonlocal step
+            step += 1
+            if step == 1:
+                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                    'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D'}}}))}
+            elif step == 2:
+                receipt = messages[-1].parts[0].content
+                yield {0: DeltaToolCall(name='review_answer', json_args=json.dumps({
+                    'answer': '共有1项。', 'goals': [{'description': '给出工单明细', 'kind': 'data',
+                        'status': 'complete', 'query_refs': [receipt['query_ref']]}]}))}
+            elif step == 3:
+                yield '已完成。'
+            else:
+                yield 'D楼有1项，名称为测试甲。'
+        reviewer = SimpleNamespace(run=AsyncMock())
+        async def review(actor, turn, history, result, authorize, **kwargs):
+            if '测试甲' not in result['answer']:
+                return {**result, 'answer_review': {'status': 'needs_repair', 'issues': ['请补充已知的名称。']}}
+            return {**result, 'answer_review': {'status': 'passed', 'repairs': 0}}
+        reviewer.run.side_effect = review
+        result, calls, _ = await self.evaluate('', '查询D楼工单明细', script,
+            lambda *_: {'ok': True, 'data': {'items': [{'name': '测试甲'}], 'total': 1, 'complete': True}}, reviewer=reviewer)
+        self.assertIn('测试甲', result['answer'])
+        self.assertEqual(reviewer.run.await_count, 2)
+        self.assertEqual(len(calls), 1)
+
+    async def test_source_validation_does_not_consume_the_semantic_repair_budget(self):
+        step = 0
+        async def script(messages, info):
+            nonlocal step
+            step += 1
+            if step == 1:
+                yield 'D楼有一条工单。'
+            elif step == 2:
+                self.assertIn('未查询真实', str(messages[-1]))
+                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                    'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D'}}}))}
+            else:
+                yield 'D楼有测试甲这一条工单。'
+        reviewer = SimpleNamespace(run=AsyncMock())
+        checks = 0
+        async def review(actor, turn, history, result, authorize, **kwargs):
+            nonlocal checks
+            checks += 1
+            return {**result, 'answer_review': {'status': 'needs_repair', 'issues': ['核对口径']} if checks < 3
+                    else {'status': 'passed', 'repairs': 0}}
+        reviewer.run.side_effect = review
+        result, calls, _ = await self.evaluate('', '查询D楼工单数量', script,
+            lambda *_: {'ok': True, 'data': {'items': [{'name': '测试甲'}], 'total': 1}}, reviewer=reviewer)
+        self.assertEqual(checks, 3)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result['answer_review']['status'], 'corrected')
+
+    async def test_reviewer_outage_does_not_release_a_previously_rejected_answer(self):
+        step = 0
+        async def script(messages, info):
+            nonlocal step
+            step += 1
+            if step == 1:
+                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                    'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D'}}}))}
+            else:
+                yield 'D楼有999项。'
+        reviewer = SimpleNamespace(run=AsyncMock())
+        checks = 0
+        async def review(actor, turn, history, result, authorize, **kwargs):
+            nonlocal checks
+            checks += 1
+            return {**result, 'answer_review': {'status': 'needs_repair', 'issues': ['数量错误']} if checks == 1
+                    else {'status': 'unavailable', 'repairs': 0}}
+        reviewer.run.side_effect = review
+        result, _, events = await self.evaluate('', '查询D楼工单数量', script,
+            lambda *_: {'ok': True, 'data': {'items': [{'name': '测试甲'}], 'total': 1}}, reviewer=reviewer)
+        self.assertEqual(result['answer_review']['status'], 'needs_review')
+        self.assertNotIn('999', result['answer'])
+        self.assertNotIn('999', ''.join(data['delta'] for kind, data in events if kind == 'text'))
 
     async def test_full_list_is_collected_once_and_remainder_is_read_from_snapshot(self):
         for channel in ('', 'feishu:oc_evaluation'):

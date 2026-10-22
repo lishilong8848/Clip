@@ -651,6 +651,72 @@ class OpenClawRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('请查询实际记录后回答', calls[1]['message'])
         self.assertEqual(events[-1].event_kind, 'agent_run_result')
 
+    async def test_readonly_review_can_repair_twice_with_unique_native_run_ids(self):
+        agent = _recovery_agent()
+        client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+        agent.client = client
+        agent._auto_tools = True
+        agent.calls = 1
+        agent.called_tools = {'lighthouse_query'}
+        agent.results = {'read': ('hash', {'ok': True, 'query_ref': 'original-snapshot'})}
+        count = 0
+        async def validate(answer):
+            nonlocal count
+            count += 1
+            if count < 3:
+                raise ModelRetry('补查原筛选条件的缺失资料')
+            return answer
+        agent.validators.append(validate)
+        events = [event async for event in agent._events(client, ['原问题及夜班筛选条件'], [])]
+        calls = [params for method, params in client.calls if method == 'agent']
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len({call['idempotencyKey'] for call in calls}), 3)
+        self.assertTrue(all('原问题及夜班筛选条件' in call['message'] for call in calls))
+        self.assertIn('original-snapshot', calls[-1]['message'])
+        self.assertTrue(agent._read_recovery)
+        self.assertEqual(events[-1].event_kind, 'agent_run_result')
+
+    async def test_readonly_repair_bridge_rejects_new_write_or_file_calls(self):
+        agent = _recovery_agent()
+        agent.running = True
+        agent._auto_tools = True
+        agent.called_tools = {'lighthouse_query'}
+        agent._complete_from_evidence('原问题', '补查')
+        bridge = BusinessBridge()
+        bridge.active[agent.token] = agent
+        called = AsyncMock()
+        async def tool():
+            await called()
+            return {'ok': True}
+        for name in ('prepare_business', 'create_text_file', 'personal_workspace'):
+            agent.tools['lighthouse_' + name] = Tool(tool)
+            with self.assertRaises(AssistantError):
+                await bridge.call(agent.token, {'session_key': agent.session_key, 'tool': 'lighthouse_' + name,
+                    'call_id': name, 'params': {}})
+        called.assert_not_awaited()
+
+    async def test_semantic_repair_budget_survives_initial_source_validation(self):
+        agent = _recovery_agent()
+        agent._auto_tools = True
+        client = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+        agent.client = client
+        count = 0
+        async def validate(answer):
+            nonlocal count
+            count += 1
+            if count == 1:
+                raise ModelRetry('请读取真实来源')
+            if count < 4:
+                agent._answer_repair = True
+                raise ModelRetry('请按已取得的资料修正')
+            return answer
+        agent.validators.append(validate)
+        events = [event async for event in agent._events(client, ['原问题'], [])]
+        calls = [params for method, params in client.calls if method == 'agent']
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len({call['idempotencyKey'] for call in calls}), 4)
+        self.assertEqual(events[-1].event_kind, 'agent_run_result')
+
     async def test_image_and_thinking_options_reach_native_run_without_probe(self):
         from pydantic_ai import BinaryContent
         for image_input in (True, False):

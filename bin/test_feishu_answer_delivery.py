@@ -46,6 +46,16 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(body['uuid'] for _, body in self.calls)), len(self.calls))
         self.messenger.upload_file.assert_not_awaited()
 
+    async def test_html_disclosure_keeps_names_and_basis_readable_in_original_topic(self):
+        reply = {'text': '夜班名单\n<details><summary>口径说明</summary>测试甲、测试乙；排班口径。</details>'}
+        await self.messenger.send(self.message, reply)
+        content = ''.join(json.loads(body['content'])['body']['elements'][0]['content'] for _, body in self.calls)
+        self.assertNotIn('<details>', content)
+        self.assertNotIn('<summary>', content)
+        self.assertIn('口径说明', content)
+        self.assertIn('测试甲、测试乙', content)
+        self.assertTrue(all(url.endswith('/om_Root/reply') for url, _ in self.calls))
+
     async def test_question_form_does_not_hide_answer_tail_or_sources(self):
         reply = {'text': '完整统计和来源，不只是表单开头', 'card': {'schema': '2.0', 'body': {
             'elements': [{'tag': 'markdown', 'content': '表单开头'}]}}}

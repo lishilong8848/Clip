@@ -846,9 +846,10 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         from bin.test_feishu_topic_delegation import Auth
+        from clipflow_backend.main import FastAPIPortalController
         from contextlib import asynccontextmanager
         from lan_bitable_template_portal import portal_auth
-        from lan_bitable_template_portal.lighthouse_bridge import actor_for
+        from lan_bitable_template_portal.lighthouse_bridge import actor_for, PortalAuthority
         from openclaw_service.assistant.lighthouse_model import LighthouseModel
         from upload_event_module.services.feishu_app_migration import TARGET_APP_ID
 
@@ -863,7 +864,14 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         clock = patch('lan_bitable_template_portal.learning.now', return_value=MONDAY)
         clock.start()
         self.addCleanup(clock.stop)
-        self.auth = Auth()
+        class LearningAuth(Auth):
+            _account_profile = Auth.account_profile
+            account_profile = portal_auth.PortalAuthManager.account_profile
+
+            def _account_read_state(self):
+                return None
+
+        self.auth = LearningAuth()
         for identity in ('ou_Admin', 'ou_User', 'ou_Duty'):
             self.auth.add(identity, ['A', 'B'] if identity == 'ou_Admin' else ['A'], ['assistant', 'learning'])
         self.auth.profiles['ou_Admin']['role'] = 'admin'
@@ -881,11 +889,20 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         building.start()
         self.addCleanup(building.stop)
         self.identity = 'ou_Admin'
+        self.guest = False
         self.backend = SimpleNamespace(auth_manager=self.auth, learning_service=self.service,
                                        state_store=self.store, service=SimpleNamespace())
-        self.controller = SimpleNamespace(_current_session=lambda request: {'user': {'open_id': self.identity}},
-            _auth_required_response=lambda: JSONResponse({'ok': False}, status_code=401),
-            _json_ok=lambda request, session, data: JSONResponse({'ok': True, 'data': data}))
+        self.enterContext(patch('clipflow_backend.main.PortalRuntime', self.backend))
+        self.controller = object.__new__(FastAPIPortalController)
+        self.controller._json_ok = lambda request, session, data: JSONResponse({'ok': True, 'data': data})
+
+        def session(_token):
+            if self.identity not in self.auth.profiles or self.auth._open_id_explicitly_disabled(self.identity):
+                return None
+            return {'user': {'open_id': self.identity}, 'is_guest': self.guest,
+                    'role': self.auth.account_profile(self.identity)['role']}
+
+        self.auth.get_session = session
         factory = patch.object(learning, 'LearningService', return_value=self.service)
         factory.start()
         self.addCleanup(factory.stop)
@@ -918,6 +935,13 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.engine = self.engine
         self.actor_for = actor_for
         self.actor = await actor_for(self.controller, self.backend, self.request)
+        self.authority = PortalAuthority(self.app, self.controller, self.backend,
+                                        SimpleNamespace(root=self.root, lease='fixture', instance='fixture'))
+
+        async def invoke(actor, operation, request, **kwargs):
+            return await self.authority.invoke({'request': request}, actor, {'operation': operation})
+
+        self.portal._invoke = AsyncMock(side_effect=invoke)
         self.person('self', '本人')
         with self.service.transaction() as conn:
             person = self.service._get('person', 'self', conn)
@@ -983,7 +1007,8 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         for channel in ('', 'feishu:oc_Group'):
             self.request.state.lighthouse_channel = channel
             self.actor = await self.authorize()
-            self.assertEqual(self.actor['learning_scopes'], ['A', 'B'])
+            self.assertEqual(self.actor['learning_scopes'], list('ABCDEH'))
+            self.assertEqual(self.actor['_business_write_access']['learning_scopes'], ['A', 'B'])
             ack = await self.submit('上周哪些人员参与答题 每周学练')
             await self.finish()
             run = self.runtime.get_run(self.actor, ack['run_id'])
@@ -999,29 +1024,26 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cloud.calls, [])
         self.assertEqual(self.sender.calls, [])
 
-    async def test_stream_personal_account_and_building_duty_stay_native_scoped(self):
+    async def test_stream_personal_and_duty_share_reads_but_retain_native_grants(self):
         self.person('other', '他人', scopes=('B',))
         self.paper('own-answer', 'self')
         self.paper('other-answer', 'other', scope='B')
-        self.identity = 'ou_User'
-        self.actor = await self.authorize()
-        self.assertEqual(self.actor['learning_person_id'], 'self')
-        self.assertEqual(self.actor['learning_scopes'], ['A'])
-        ack = await self.submit('上周哪些人员参与答题 每周学练')
-        await self.finish()
-        run = self.runtime.get_run(self.actor, ack['run_id'])
-        self.assertEqual(run['status'], 'completed', run.get('error'))
-        answer = (await self.runtime.conversation(self.actor))['turns'][-1]['answer']
-        self.assertIn('本人', answer)
-        self.assertNotIn('他人', answer)
-        self.identity = 'ou_Duty'
-        self.actor = await self.authorize()
-        ack = await self.submit('上周哪些人员参与答题 每周学练')
-        await self.finish()
-        run = self.runtime.get_run(self.actor, ack['run_id'])
-        self.assertEqual(run['status'], 'completed', run.get('error'))
-        answer = (await self.runtime.conversation(self.actor))['turns'][-1]['answer']
-        self.assertNotIn('他人', answer)
+        for identity in ('ou_User', 'ou_Duty'):
+            self.identity = identity
+            before = copy.deepcopy(self.auth.profiles)
+            self.actor = await self.authorize()
+            self.assertEqual(self.actor['learning_scopes'], list('ABCDEH'))
+            self.assertEqual(self.actor['_business_write_access']['learning_scopes'], ['A'])
+            if identity == 'ou_User':
+                self.assertEqual(self.actor['learning_person_id'], 'self')
+            ack = await self.submit('上周哪些人员参与答题 每周学练')
+            await self.finish()
+            run = self.runtime.get_run(self.actor, ack['run_id'])
+            self.assertEqual(run['status'], 'completed', run.get('error'))
+            self.assertIn('本人', run['answer'])
+            self.assertIn('他人', run['answer'])
+            self.assertIn('实际参与 **2 人**', run['answer'])
+            self.assertEqual(self.auth.profiles, before)
 
     async def test_real_stream_fills_missing_index_without_business_restore_or_writes(self):
         self.person('p1', '云端答题人员')
@@ -1072,17 +1094,29 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fetch.call_count, 1)
         self.assertEqual(before, ParticipationReadCacheTests.native_dump(self))
 
-    async def test_stream_missing_learning_module_and_missing_identity_never_return_success(self):
-        for identity, modules in (('ou_Admin', ['assistant']), ('ou_Low', ['assistant', 'learning'])):
+    async def test_linked_accounts_without_learning_grant_or_own_paper_can_read_shared_results(self):
+        self.paper('own', 'self')
+        for identity, modules in (('ou_Admin', ['assistant']), ('ou_Low', [])):
             self.identity = identity
             self.auth.profiles[identity]['modules'] = modules
             self.actor = await self.authorize()
             ack = await self.submit('上周哪些人员参与答题 每周学练')
             await self.finish()
             run = self.runtime.get_run(self.actor, ack['run_id'])
-            self.assertEqual(run['status'], 'failed')
-            self.assertNotIn('实际参与', run.get('answer', ''))
+            self.assertEqual(run['status'], 'completed', run.get('error'))
+            self.assertIn('实际参与 **1 人**', run['answer'])
+            self.assertEqual(self.auth.account_profile(identity)['modules'], modules)
             self.assertEqual((await self.runtime.conversation(self.actor))['turns'][-1]['question'], '上周哪些人员参与答题 每周学练')
+
+    async def test_missing_guest_and_disabled_login_cannot_start_shared_learning_query(self):
+        for identity, guest, disabled in (('', False, False), ('ou_Unknown', False, False),
+                                          ('ou_User', True, False), ('ou_User', False, True)):
+            self.identity, self.guest = identity, guest
+            if disabled:
+                self.auth.disabled.add(identity)
+            with self.subTest(identity=identity, guest=guest, disabled=disabled), self.assertRaises(AssistantError):
+                await self.authorize()
+        self.portal._invoke.assert_not_awaited()
 
     async def topic(self):
         from bin.test_feishu_topic_delegation import TopicDelegationTests
@@ -1116,26 +1150,26 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
 
         self.portal._invoke = AsyncMock(side_effect=invoke)
 
-    async def test_topic_real_execution_reads_only_sponsored_building_and_has_complete_kind(self):
+    async def test_topic_real_execution_uses_shared_reads_without_borrowing_write_permissions(self):
         self.person('a', 'A楼人员')
         self.person('b', 'B楼人员', scopes=('B',))
         self.paper('a-paper', 'a')
         self.paper('b-paper', 'b', scope='B')
         await self.topic()
-        self.assertEqual(self.actor['learning_scopes'], [])
+        self.assertEqual(self.actor['learning_scopes'], list('ABCDEH'))
+        self.assertEqual(self.actor['_business_write_access']['learning_scopes'], [])
         ack = await self.submit('上周哪些人员参与答题 每周学练')
         await self.finish()
         run = self.runtime.get_run(self.actor, ack['run_id'])
         self.assertEqual(run['status'], 'completed', run.get('error'))
         answer = (await self.runtime.conversation(self.actor))['turns'][-1]['answer']
         self.assertIn('A楼人员', answer)
-        self.assertNotIn('B楼人员', answer)
+        self.assertIn('B楼人员', answer)
+        self.assertIn('实际参与 **2 人**', answer)
         source = self.assistant._state(self.actor)['turns'][-1]['sources'][0]['data']
         self.assertEqual(source['kind'], 'learning_participation')
-        self.assertTrue(source['aggregate_only'])
-        audits = self.store.list_documents('lighthouse_topic_audit')
-        self.assertTrue(audits)
-        self.assertEqual({row['payload']['authorized_by'] for row in audits}, {'ou_Duty'})
+        self.assertEqual(self.authority.contexts[self.context]['topic_access'], [{'shared_business_read': True}])
+        self.assertFalse(self.store.list_documents('lighthouse_topic_audit'))
 
     async def test_topic_person_parameters_and_revoked_sponsor_cannot_be_used(self):
         from lan_bitable_template_portal.portal_auth import topic_capability
@@ -1159,7 +1193,9 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PortalError):
             self.authority.learning_summary(execution, operation)
 
-    async def test_topic_cannot_join_other_participants_module_scope_or_role(self):
+    async def test_topic_shared_query_does_not_require_combining_participant_grants(self):
+        self.person('b', 'B楼答题人员', scopes=('B',))
+        self.paper('b-paper', 'b', scope='B')
         self.auth.add('ou_EngineerB', ['B'], ['assistant', 'learning'])
         self.auth.add('ou_OtherDutyB', ['B'], ['assistant', 'event'])
         self.auth.profiles['ou_OtherDutyB']['category'] = 'duty'
@@ -1173,11 +1209,12 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         ack = await self.submit('上周B楼哪些人员参与答题 每周学练')
         await self.finish()
         run = self.runtime.get_run(self.actor, ack['run_id'])
-        self.assertEqual(run['status'], 'failed')
-        self.assertNotIn('实际参与', run.get('answer', ''))
-        self.portal._invoke.assert_not_awaited()
+        self.assertEqual(run['status'], 'completed', run.get('error'))
+        self.assertIn('B楼答题人员', run['answer'])
+        self.assertEqual(self.auth.account_profile('ou_Low')['modules'], ['assistant', 'event'])
+        self.assertEqual(self.auth.account_profile('ou_Low')['scope_rules'], ['D'])
 
-    async def test_topic_learning_grant_is_not_reused_in_another_topic(self):
+    async def test_shared_learning_read_in_another_topic_keeps_topic_context_separate(self):
         from bin.test_feishu_topic_delegation import TopicDelegationTests
         from starlette.requests import Request
 
@@ -1194,14 +1231,24 @@ class ParticipationStreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError):
             await self.authority.dispatch({'instance': 'fixture', 'lease': 'fixture',
                 'context_id': context, 'action': 'invoke', 'payload': {'operation': operation}})
+        self.assertTrue(self.registry.register(other.state.feishu_topic['id'],
+            {'id': self.identity, 'channel': 'feishu:oc_Group'}, {
+                'app_id': self.settings.app_id, 'chat_id': 'oc_Group', 'root_id': 'om_Other', 'chat_type': 'group',
+                'message_id': 'om_OtherLow', 'sender_id': 'ou_AgentLow'}))
+        result = await self.authority.dispatch({'instance': 'fixture', 'lease': 'fixture',
+            'context_id': context, 'action': 'invoke', 'payload': {'operation': operation}})
+        self.assertTrue(result['ok'], result)
+        other_actor = (await self.authority.authorize(context))[1]
+        self.assertNotEqual(other_actor['_feishu_topic']['id'], self.actor['_feishu_topic']['id'])
+        self.assertNotEqual(self.assistant._state(other_actor)['id'], self.assistant._state(self.actor)['id'])
 
-    async def test_stream_rechecks_module_before_emitting_completed_statistics(self):
+    async def test_stream_rechecks_login_before_emitting_completed_statistics(self):
         self.paper('own', 'self')
         original = self.portal.learning_participation_answer
 
         async def query(*args, **kwargs):
             result = await original(*args, **kwargs)
-            self.auth.profiles['ou_Admin']['modules'] = ['assistant']
+            self.auth.disabled.add('ou_Admin')
             return result
 
         self.portal.learning_participation_answer = AsyncMock(side_effect=query)

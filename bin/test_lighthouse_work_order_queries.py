@@ -5,7 +5,7 @@ Covers:
   * two-round (run_index) summaries and current round
   * delay remainder sourced from native ``PollingWorkOrderService.end_delay_status``
   * read-only role projection (names only, no tokens/hash/relay/photos/paths)
-  * scope isolation (A-only cannot read B orders)
+  * native scope isolation and all-building shared assistant reads
   * pending vs completed state filters
   * pagination
   * the authenticated ``GET /api/assistant/work-orders`` route
@@ -373,7 +373,11 @@ class WorkOrderQueryTests(unittest.TestCase):
             ids = [item["group_id"] for item in response_all.json()["data"]["items"]]
             self.assertIn("wo-route-active-a", ids)
             self.assertIn("wo-route-done-a", ids)
-            self.assertNotIn("wo-route-b", ids)
+            self.assertIn("wo-route-b", ids)
+            self.assertEqual(session["allowed_scopes"], ["A"])
+            response_b = client.get("/api/assistant/work-orders?scope=B&state=pending")
+            self.assertEqual(response_b.status_code, 200, response_b.text)
+            self.assertEqual([item["group_id"] for item in response_b.json()["data"]["items"]], ["wo-route-b"])
         # unauthenticated
         controller, runtime = self._route_runtime(None)
         app2 = FastAPI()

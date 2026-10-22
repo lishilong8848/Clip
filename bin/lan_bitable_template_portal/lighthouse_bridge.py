@@ -256,7 +256,8 @@ class PortalAuthority:
                 'state': {**context['request'].scope.get('state', {}), 'assistant_shared_business_read': grant}})
             if context.get('feishu_topic'):
                 self.record_access(context, {'shared_business_read': True})
-            result = await catalog.invoke(normalized, gateway_request)
+            # The gateway validates again and still needs the original path parameters.
+            result = await catalog.invoke(operation, gateway_request)
             if result.get('_binary'):
                 # Original files can contain private data that text redaction cannot remove.
                 raise AssistantError('共享查询不直接转发未脱敏原文件，请读取文档解析内容或在原业务页面按原权限下载。', 403)
@@ -374,7 +375,7 @@ class PortalAuthority:
             if not isinstance(query, dict):
                 raise AssistantError('查询参数无效。')
             if action == 'roster_count':
-                label = '值班排班人数统计（仅返回汇总）；日期：' + str(payload.get('date', '')) + '；班次：' + str(payload.get('shift') or '白夜班')
+                label = '值班排班人数及姓名（不提供个人身份标识）；日期：' + str(payload.get('date', '')) + '；班次：' + str(payload.get('shift') or '白夜班')
             else:
                 label = '在岗人员数量统计（仅返回汇总，不提供个人明细）' if action == 'staff_count' else (
                     await asyncio.to_thread(self.tables.table, query.get('table_id')))['name'] + '的多维表记录'

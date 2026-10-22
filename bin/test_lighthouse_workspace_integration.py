@@ -182,14 +182,18 @@ class WorkspaceIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ordinary_answer_cannot_start_speech_without_user_request(self):
         from openclaw_service.assistant.lighthouse_voice import Voice
-        async def script(messages, info):
-            self.assertEqual(info.function_tools, [])
-            yield '你好,有什么需要处理的事?'
-        with patch.object(Voice, 'synthesize', AsyncMock()) as synthesize:
-            result = await self.evaluate('', '你好', script)
-        synthesize.assert_not_awaited()
-        self.assertNotIn('output_files', result)
-        self.assertEqual(result['answer'], '你好,有什么需要处理的事?')
+        for channel in ('', 'feishu:oc_materials'):
+            async def script(messages, info):
+                names = [tool.name for tool in info.function_tools]
+                # Shared business reads are open to every linked account, so the shared model may expose
+                # lookup tools; it still has no standing reason to synthesize speech.
+                self.assertTrue({'table_catalog', 'query', 'search_history'} <= set(names))
+                yield '你好,有什么需要处理的事?'
+            with patch.object(Voice, 'synthesize', AsyncMock()) as synthesize:
+                result = await self.evaluate(channel, '你好', script)
+            synthesize.assert_not_awaited()
+            self.assertNotIn('output_files', result)
+            self.assertEqual(result['answer'], '你好,有什么需要处理的事?')
 
     async def test_tool_enabled_answer_still_rejects_unrequested_speech(self):
         from openclaw_service.assistant.lighthouse_voice import Voice

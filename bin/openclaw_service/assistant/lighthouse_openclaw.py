@@ -18,6 +18,7 @@ from .lighthouse_ai import AssistantError, safe_data, safe_text
 from .lighthouse_context import execution_key
 from .lighthouse_gateway import GatewayClient, GatewayError
 from .lighthouse_model import LighthouseModel, incomplete_reply
+from .lighthouse_review import READ_REPAIR_TOOLS
 from .lighthouse_runtime import OpenClawRuntime, account_key, agent_id
 from .lighthouse_startup_log import emit as startup_log
 from ..protocol import MAX_CONCURRENT_ACCOUNTS
@@ -100,13 +101,7 @@ class _ModelHealth:
             self._prune(now)
 
 
-READ_RECOVERY_TOOLS = frozenset('lighthouse_' + name for name in (
-    'discover', 'read_skill', 'table_catalog', 'table_records', 'staff_headcount', 'duty_roster',
-    'learning_participants', 'query', 'read_query', 'query_statistics', 'calculate', 'date_time',
-    'feishu_document', 'notice_sends', 'notice_records', 'repair_overview', 'event_notices',
-    'repair_followup_status', 'guard_task_status', 'ongoing_notices', 'pending_work', 'search_local',
-    'read_file', 'read_attachment_document', 'search_history', 'public_search', 'public_page', 'weather',
-    'review_answer', 'ask_business_question'))
+READ_RECOVERY_TOOLS = frozenset('lighthouse_' + name for name in READ_REPAIR_TOOLS)
 
 
 class BusinessBridge:
@@ -394,7 +389,7 @@ class OpenClawToolAgent:
 
     def _complete_from_evidence(self, original_message, reason):
         self._evidence_only = True
-        self._read_recovery = bool(getattr(self, '_auto_tools', False) and self.called_tools
+        self._read_recovery = bool(getattr(self, '_auto_tools', False)
                                    and self.called_tools <= READ_RECOVERY_TOOLS)
         policy = ('\n本轮继续只读查证：优先用read_query续读已有快照，缺少真实源的后续页、字段或相关资料时可继续使用本轮已提供的只读查询工具。'
                   '保留原筛选与日期，按分页标记补齐；不得绕过权限或查询确认，不重查已经完整取得的数据。禁止准备、提交或重做任何写操作。'
@@ -576,7 +571,7 @@ class OpenClawToolAgent:
             images = []
             message += '\n当前模型设置未启用图片输入，只能使用附件中提取的文字；没有可靠文字时提示开启图片输入或切换模型，不推断图像内容。'
         original_message = message
-        for attempt in range(2):
+        for attempt in range(4):
             if attempt and (published or self.calls != len(self.results)):
                 raise AssistantError('原回答已显示或工具结果尚未确认，原消息与操作任务已保留；未重新提交业务。',
                                      502, category='model_protocol')
@@ -588,7 +583,7 @@ class OpenClawToolAgent:
                       'deliver': False, 'thinking': capabilities['reasoning_effort'] if capabilities['reasoning'] else 'off',
                       'extraSystemPrompt': self.instructions, 'timeout': 180}
             if attempt:
-                params['idempotencyKey'] += ':validation'
+                params['idempotencyKey'] += ':validation' + (':' + str(attempt) if attempt > 1 else '')
             if images:
                 params['attachments'] = images
             self.run_id = params['idempotencyKey']
@@ -773,8 +768,13 @@ class OpenClawToolAgent:
                 if published:
                     raise AssistantError('原回答已显示，核验未通过；原消息已保留，未重新提交。',
                                          502, category='model_protocol') from None
+                if (getattr(self, '_answer_repair', False) and attempt < 3
+                        and self.calls == len(self.results)):
+                    message = self._complete_from_evidence(original_message, str(exc))
+                    continue
                 if self.calls:
-                    if attempt or not self.results or published or len(self.results) != self.calls:
+                    if (attempt >= (2 if self._read_recovery else 1) or not self.results
+                            or published or len(self.results) != self.calls):
                         if attempt and self.results and incomplete_reply(answer, question):
                             raise self._model_failure('')
                         raise AssistantError('模型未能核验工具结果，原操作状态未据此判定成败；请核对原任务，不要重复提交。',

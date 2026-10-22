@@ -45,6 +45,8 @@ def _uncertain_reply(identity):
 
 def _reply_text(value):
     text = safe_text(value, limit=120000).strip()
+    # Feishu cards do not render HTML disclosure widgets; retain their readable content.
+    text = re.sub(r'</?(?:details|summary)\b[^>]*>', '\n', text, flags=re.I).strip()
     if text:
         return text
     return safe_text("本轮回复包含受保护内容，已停止展示。请调整问题后重试。" if str(value or '').strip()

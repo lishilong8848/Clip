@@ -141,6 +141,12 @@ class SharedReadTests(unittest.IsolatedAsyncioTestCase):
             self.writes += 1
             return {'ok': True}
 
+        @self.app.get('/api/repair-management/records/{record_id}')
+        async def detail(request: Request, record_id: str):
+            if not permitted(request):
+                return JSONResponse({'error': 'denied'}, status_code=403)
+            return {'record_id': record_id, 'scope': 'B', 'phone': '13900000000'}
+
         @self.app.get('/api/repair-management/download')
         async def export(request: Request):
             return Response(b'original private attachment', media_type='application/pdf')
@@ -179,6 +185,21 @@ class SharedReadTests(unittest.IsolatedAsyncioTestCase):
         message = Request({**self.request.scope, 'method': 'POST', 'path': '/api/message-delivery/send'})
         denial = await module_denial(message, self.controller, self.runtime)
         self.assertEqual(denial.status_code, 403)
+
+    async def test_shared_detail_preserves_path_parameters_through_validation_and_gateway(self):
+        for record_id in ('rec_first', 'rec_second'):
+            operation = {'api_id': 'GET /api/repair-management/records/{record_id}',
+                         'path_params': {'record_id': record_id}}
+            result = await self.authority.invoke(self.context, self.actor, {'operation': operation})
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(result['_raw']['record_id'], record_id)
+            self.assertNotIn('13900000000', str(result))
+            self.assertIsNone(SHARED_READ.get())
+        with self.assertRaises(AssistantError):
+            await self.authority.invoke(self.context, self.actor, {'operation': {
+                'api_id': 'GET /api/repair-management/records/{record_id}',
+                'path_params': {'record_id': '../private'}}})
+        self.assertEqual(self.writes, 0)
 
     async def test_expired_guest_or_changed_user_cannot_use_shared_context(self):
         for session in (None, {'role': 'guest', 'user': {'open_id': 'ou_self'}},

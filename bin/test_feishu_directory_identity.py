@@ -233,7 +233,7 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
                 self.assertEqual(self.auth._state_store.get_auth_permissions(), saved)
                 self.assertTrue(all(not person["selectable"] for person in snapshot["people"].values()))
 
-    def test_fixed_sender_requires_current_app_saved_scope_module_and_enabled_account(self):
+    def test_fixed_sender_requires_current_app_and_enabled_account_without_read_grants(self):
         from openclaw_service.assistant.lighthouse_ai import AssistantError
         oid = TARGET_DUTY_OPEN_IDS["A"]
         rows = [self.row("recShared" + str(i), oid) for i in range(9)]
@@ -242,11 +242,19 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
         with self.assertRaises(AssistantError):
             channel._sender_user({"sender_id": oid})
         self.assertEqual(self.auth._permission_user(oid), {})
-        for changes in ({"scopes": []}, {"modules": []}, {"enabled": False}):
+        # Shared business reads need no module or building grant: an enabled, valid fixed sender is
+        # resolved even with empty scopes/modules, and the saved grant is never rewritten by the read.
+        for changes in ({"scopes": []}, {"modules": []}):
             with self.subTest(changes=changes):
                 self.grant(oid, **changes)
-                with self.assertRaises(AssistantError):
-                    channel._sender_user({"sender_id": oid})
+                saved = copy.deepcopy(self.auth._state_store.get_auth_permissions())
+                self.assertEqual(channel._sender_user({"sender_id": oid})["open_id"], oid)
+                self.assertEqual(self.auth._state_store.get_auth_permissions(), saved)
+                self.assertEqual(self.auth._permission_user(oid)["scopes"], changes.get("scopes", ["A"]))
+                self.assertEqual(self.auth._permission_user(oid)["modules"], changes.get("modules", ["assistant"]))
+        self.grant(oid, enabled=False)
+        with self.assertRaises(AssistantError):
+            channel._sender_user({"sender_id": oid})
         self.grant(oid)
         channel.config["app_id"] = "cli_syntheticFuture"
         with self.assertRaises(AssistantError) as mismatch:

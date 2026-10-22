@@ -783,7 +783,10 @@ class AppLifespanStartupTests(unittest.IsolatedAsyncioTestCase):
                 await self._wait_for_prepare()
                 actors = [call.args[0] for call in self.engine.queue_warmup.call_args_list]
                 self.assertEqual({actor['id'] for actor in actors}, {'queued-0', 'queued-1'})
-                self.assertEqual(next(actor['scopes'] for actor in actors if actor['id'] == 'queued-0'), ['A'])
+                actor = next(actor for actor in actors if actor['id'] == 'queued-0')
+                self.assertEqual(set(actor['scopes']), {'110', 'A', 'B', 'C', 'D', 'E', 'H'})
+                self.assertEqual(actor['_business_write_access']['scopes'], ['A'])
+                self.assertEqual(self.session['allowed_scopes'], ['A'])
 
     async def test_lifespan_enters_immediately_and_routes_respond_while_prepare_blocked(self):
         # engine.prepare stays blocked forever on a never-set gate; the lifespan
