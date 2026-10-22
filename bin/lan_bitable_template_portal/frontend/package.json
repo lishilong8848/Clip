@@ -16,7 +16,7 @@
     "check:assistant-stream": "node scripts/check-assistant-concurrent-stream.mjs",
     "check:read-cache": "node scripts/check-page-read-cache.mjs",
     "check:impersonation": "node scripts/check-impersonation.mjs",
-    "check:repair-submission": "node scripts/check-repair-submission.mjs",
+    "check:repair-submission": "node scripts/check-repair-submission.mjs && node scripts/check-repair-overview.mjs",
     "check:workspace-repairs": "node scripts/check-workspace-repairs.mjs",
     "check:workspace-history": "node scripts/check-workspace-history.mjs",
     "check:cabinet-reliability": "node scripts/check-cabinet-reliability.mjs",

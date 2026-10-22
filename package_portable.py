@@ -1702,7 +1702,7 @@ def _run_frontend_notice_navigation_checks() -> None:
         raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
     for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
                  "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
-                 "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs"):
+                 "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")

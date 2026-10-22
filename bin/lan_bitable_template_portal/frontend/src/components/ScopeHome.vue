@@ -107,6 +107,11 @@
         </div>
       </header>
 
+      <div v-if="activeMode === 'repair_management' && repairOverviewError" class="scope-loading-state error" role="alert">
+        <span>{{ repairOverviewError }}</span>
+        <button type="button" :disabled="repairOverviewLoading" @click="loadRepairOverview">重新读取</button>
+      </div>
+
       <div v-if="isEntryMenu" class="tool-grid" :class="{ 'capacity-grid': activeMode === 'capacity'||activeMode === 'risk' }">
         <button type="button"
           v-for="tool in activeMenuEntries"
@@ -173,8 +178,8 @@
               <span>通告 · 事件 · 检修</span>
             </template>
             <template v-else>
-              <span>{{ scopePrimaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).pending }}</span>
-              <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ scopeCounts(scope.value).ongoing }}</span>
+              <span>{{ scopePrimaryMetricLabel(scope.value) }} {{ activeMode === 'repair_management' ? repairMetricValue(scopeCounts(scope.value).pending) : scopeCounts(scope.value).pending }}</span>
+              <span>{{ scopeSecondaryMetricLabel(scope.value) }} {{ activeMode === 'repair_management' ? repairMetricValue(scopeCounts(scope.value).ongoing) : scopeCounts(scope.value).ongoing }}</span>
             </template>
           </div>
           <div class="scope-actions">
@@ -353,6 +358,8 @@ const openingWorkbenchKey = ref("");
 const repairOverviewLoading = ref(false);
 const repairOverviewLoaded = ref(false);
 const repairOverview = ref<Dict>({});
+const repairOverviewError = ref("");
+let repairOverviewController: AbortController | undefined;
 const waterBuildingsLoading = ref(false);
 const waterBuildings = ref<Array<{ value: string; label: string } & Dict>>([]);
 const waterSnapshot = ref<Dict>({});
@@ -641,7 +648,6 @@ const homeModuleMetrics = computed<Record<string, ScopeHomeModuleMetric>>(() => 
   const value = (count: number) => Object.keys(props.overview).length ? count : '…';
   const maintenance = aggregateWorkTypeCounts("maintenance");
   const change = aggregateWorkTypeCounts("change");
-  const repair = aggregateWorkTypeCounts("repair");
   const stats = homeBroadcastStats.value;
   return {
     ...(checkSummary.value && !checkError.value ? { pre_shift: {
@@ -666,12 +672,12 @@ const homeModuleMetrics = computed<Record<string, ScopeHomeModuleMetric>>(() => 
       secondaryLabel: "进行中",
       secondaryValue: value(change.ongoing),
     },
-    repair_management: {
-      primaryLabel: "待发起",
-      primaryValue: value(repair.pending),
+    ...(hasModule("repair_management") ? { repair_management: {
+      primaryLabel: "待检修",
+      primaryValue: repairMetricValue(repairAggregate.value.pending),
       secondaryLabel: "进行中",
-      secondaryValue: value(repair.ongoing),
-    },
+      secondaryValue: repairMetricValue(repairAggregate.value.inProgress),
+    } } : {}),
   };
 });
 
@@ -770,20 +776,37 @@ function selectEntry(key: EntryKey): void {
 }
 
 async function loadRepairOverview(): Promise<void> {
-  if (repairOverviewLoading.value || repairOverviewLoaded.value) return;
+  if (disposed || document.hidden || !hasModule("repair_management") || repairOverviewLoading.value) return;
+  const read = new AbortController(); repairOverviewController = read;
   repairOverviewLoading.value = true;
   try {
-    repairOverview.value = await requestJson("/api/repair-management/overview");
+    const data = await requestJson("/api/repair-management/overview", { signal: read.signal, cache: "no-store" });
+    if (read.signal.aborted || disposed) return;
+    if (!data.aggregate || !data.scopes) throw new Error("incomplete repair overview");
+    repairOverview.value = data;
     repairOverviewLoaded.value = true;
+    repairOverviewError.value = "";
   } catch {
-    repairOverview.value = {};
+    if (!read.signal.aborted && !disposed) repairOverviewError.value = repairOverviewLoaded.value
+      ? "检修统计刷新失败，当前显示上次成功数据。" : "检修统计暂未读取，请重试或进入检修单管理核对。";
   } finally {
-    repairOverviewLoading.value = false;
+    if (repairOverviewController === read) repairOverviewLoading.value = false;
   }
 }
 
 function repairMetricValue(value: number): number | string {
-  return repairOverviewLoading.value && !repairOverviewLoaded.value ? "…" : value;
+  return repairOverviewLoaded.value ? value : repairOverviewLoading.value ? "…" : "待读取";
+}
+
+watch([() => props.currentUser?.open_id, () => props.scopeOptions.map(item => item.value).join(','), () => hasModule("repair_management")], () => {
+  repairOverviewController?.abort(); repairOverviewLoading.value = false;
+  repairOverviewLoaded.value = false; repairOverview.value = {}; repairOverviewError.value = "";
+  void loadRepairOverview();
+}, { immediate: true });
+
+function refreshHomeReads(): void {
+  void refreshChecks();
+  if (!activeMode.value || activeMode.value === "repair_management") void loadRepairOverview();
 }
 
 function waterMetricValue(value: number, suffix = ""): string {
@@ -967,17 +990,16 @@ function scopeSecondaryMetricLabel(_scope: string): string {
 }
 
 onMounted(() => {
-  checkTimer = window.setInterval(() => void refreshChecks(), 30000);
-  window.addEventListener('clipflow-business-changed', refreshChecks);
-  document.addEventListener('visibilitychange', refreshChecks);
+  checkTimer = window.setInterval(refreshHomeReads, 30000);
+  window.addEventListener('clipflow-business-changed', refreshHomeReads);
+  document.addEventListener('visibilitychange', refreshHomeReads);
   emit("dashboard-visible", !activeMode.value);
-  if (activeMode.value === "repair_management") void loadRepairOverview();
   if (activeMode.value === "water") void loadWaterBuildings();
 });
 onBeforeUnmount(() => {
-  disposed = true; checkController?.abort(); window.clearInterval(checkTimer);
-  window.removeEventListener('clipflow-business-changed', refreshChecks);
-  document.removeEventListener('visibilitychange', refreshChecks);
+  disposed = true; checkController?.abort(); repairOverviewController?.abort(); window.clearInterval(checkTimer);
+  window.removeEventListener('clipflow-business-changed', refreshHomeReads);
+  document.removeEventListener('visibilitychange', refreshHomeReads);
   clearWaterBuildingsPoll();
 });
 
@@ -1686,6 +1708,18 @@ a.secondary {
   .scope-summary-strip article:first-child {
     border-top: 0;
   }
+
+  .scope-summary-strip.repair-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .repair-metrics article {
+    padding: 10px;
+    column-gap: 7px;
+  }
+
+  .repair-metrics article:nth-child(-n + 2) { border-top: 0; }
+  .repair-metrics article:nth-child(even) { border-left: 1px solid #e6eef8; }
 
 }
 </style>

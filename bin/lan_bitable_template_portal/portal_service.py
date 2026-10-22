@@ -27776,32 +27776,14 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not project_id:
                 continue
             linked = followups_by_project.get(project_id, [])
-            latest_followup = (
-                max(linked, key=self._repair_followup_order_key)
-                if linked
-                else {}
-            )
-            latest_display = (
-                latest_followup.get("display_fields")
-                if isinstance(latest_followup.get("display_fields"), dict)
-                else {}
-            )
-            latest_raw = (
-                latest_followup.get("raw_fields")
-                if isinstance(latest_followup.get("raw_fields"), dict)
-                else {}
-            )
-            progress_value = latest_raw.get("维修进度")
-            if progress_value in (None, "", [], {}):
-                progress_value = latest_display.get("维修进度")
-            progress_percent = self._repair_followup_progress_percent(progress_value)
-            completed = self._repair_management_is_completed(
+            has_followup, progress_percent = self._repair_management_latest_followup_progress(linked)
+            workflow = self._repair_management_effective_workflow(
                 project,
-                has_followup=bool(linked),
+                has_followup=has_followup,
                 latest_progress_percent=progress_percent,
             )
-            pending = not completed and not linked
-            in_progress = not completed and bool(linked)
+            pending = workflow == REPAIR_MANAGEMENT_NOT_STARTED_WORKFLOW
+            in_progress = workflow == REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
             in_year, in_month = project_period(project)
 
             matched_any_scope = False

@@ -19,7 +19,7 @@ class PackagingTests(unittest.TestCase):
         expected = ['check-workspace-navigation.mjs', 'check-legacy-module-entry.mjs',
                     'check-notice-photo-paste.mjs', 'check-legacy-notice-cycle.mjs',
                     'check-notice-cycle-warnings.mjs', 'check-account-fixed-duty.mjs',
-                    'check-assistant-shared-query.mjs']
+                    'check-assistant-shared-query.mjs', 'check-repair-overview.mjs']
         frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
         with patch.object(package.shutil, 'which', return_value='fixture-node'), \
                 patch.object(package, '_run_preflight_check') as run:

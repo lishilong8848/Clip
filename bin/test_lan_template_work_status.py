@@ -31036,6 +31036,51 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             },
         )
 
+    def test_repair_overview_matches_status_for_historical_and_started_projects(self):
+        service = object.__new__(_TestMaintenancePortalService)
+        projects = []
+
+        def project(record_id, building, **fields):
+            values = {"维修名称": record_id, "所属数据中心/楼栋-使用": building, **fields}
+            projects.append({"record_id": "rec_" + record_id, "raw_fields": values, "display_fields": dict(values)})
+
+        for scope in ("A", "B", "C", "H"):
+            project("historic_" + scope, "南通" + scope + "楼", **{"流程-L": "维修完成"})
+        project("d_pending", "南通D楼", **{"流程-L": "未开始"})
+        project("e_pending", "南通E楼", **{"流程-L": "未开始"})
+        project("e_started", "南通E楼", **{"维修开始时间": "2026-10-01 09:00"})
+        project("e_stored_progress", "南通E楼", **{"流程-L": "维修中"})
+        project("e_ended_incomplete", "南通E楼", **{"维修结束时间（2026）": "2026-10-01 18:00"})
+        project("de_shared", "南通D楼、南通E楼", **{"流程-L": "未开始"})
+        project("e_followup", "南通E楼")
+        project("e_finished", "南通E楼", **{"维修结束时间（2026）": "2026-10-01 18:00"})
+        followups = [
+            {"record_id": "rec_f_old", "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_e_followup", "维修进度": 1,
+                                                     "创建时间": "2026-10-01 10:00"}},
+            {"record_id": "rec_f_latest", "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_e_followup", "维修进度": .3,
+                                                        "创建时间": "2026-10-01 11:00"}},
+            {"record_id": "rec_f_done", "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: "rec_e_finished", "维修进度": 1}},
+        ]
+        service._load_repair_management_status_sources = lambda **kwargs: (projects, followups)
+        scopes = ["A", "B", "C", "D", "E", "H"]
+        payload = service.get_repair_management_scope_overview(scopes=scopes)
+        for scope in scopes:
+            with self.subTest(scope=scope):
+                status = service.get_repair_management_status(scope=scope)
+                self.assertEqual(payload["scopes"][scope]["pending"], status["stats"]["without_followup"])
+                self.assertEqual(payload["scopes"][scope]["in_progress"], status["stats"]["in_progress"])
+        self.assertEqual(payload["aggregate"]["pending"], 3, "shared D/E project counts only once")
+        self.assertEqual(payload["aggregate"]["in_progress"], 4)
+        restricted = service.get_repair_management_scope_overview(scopes=["A"])
+        self.assertEqual(restricted["aggregate"]["pending"], 0)
+        self.assertEqual(restricted["aggregate"]["in_progress"], 0)
+
+    def test_repair_overview_does_not_turn_read_failure_into_empty_counts(self):
+        service = object.__new__(_TestMaintenancePortalService)
+        with patch.object(service, "_load_repair_management_status_sources", side_effect=PortalError("snapshot unavailable")):
+            with self.assertRaises(PortalError):
+                service.get_repair_management_scope_overview(scopes=["E"])
+
     def test_repair_management_status_uses_event_alarm_and_occurrence_time(self):
         service = _TestMaintenancePortalService()
         service._load_repair_management_status_sources = (  # type: ignore[method-assign]
