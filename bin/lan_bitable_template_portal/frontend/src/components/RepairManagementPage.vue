@@ -816,6 +816,7 @@ const messageText = ref("");
 const messageTone = ref<"success" | "warning" | "failed">("success");
 const fields = ref<LooseDict[]>([]);
 const records = ref<LooseDict[]>([]);
+const deletedProjectIds = new Set<string>();
 const recordListRef = ref<HTMLElement | null>(null);
 const recordVirtualizerOptions = computed(() => ({
   count: records.value.length,
@@ -2599,6 +2600,7 @@ function sortRepairProjectPage(items: LooseDict[]): LooseDict[] {
 function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
   const recordId = String(patch.record_id || "").trim();
   if (!recordId) return true;
+  if (deletedProjectIds.has(recordId)) return false;
   const protectedUntil = recentlySavedProjects.get(recordId) || 0;
   if (protectedUntil > Date.now()) return false;
   if (protectedUntil) recentlySavedProjects.delete(recordId);
@@ -2643,6 +2645,8 @@ function applyRepairProjectPatch(patch: LooseDict, created = false): boolean {
 function applyRepairProjectDelete(recordIdValue: unknown): void {
   const recordId = String(recordIdValue || "").trim();
   if (!recordId) return;
+  deletedProjectIds.add(recordId);
+  clearRecordResponseCache();
   const existed = records.value.some(
     (item) => String(item.record_id || "").trim() === recordId,
   );
@@ -3151,8 +3155,9 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
     fields.value = Array.isArray(payload.fields)
       ? payload.fields.map((field: LooseDict) => withStandardRepairOptions(field))
       : [];
-    records.value = Array.isArray(payload.records) ? payload.records : [];
-    total.value = Number(payload.total || records.value.length || 0);
+    const incomingRecords: LooseDict[] = Array.isArray(payload.records) ? payload.records : [];
+    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));
+    total.value = Math.max(0, Number(payload.total ?? incomingRecords.length) - (incomingRecords.length - records.value.length));
     if (recordQueryChanged) {
       void nextTick(() => {
         if (recordListRef.value) recordListRef.value.scrollTop = 0;
@@ -3261,6 +3266,7 @@ function applySavedProjectRecord(
   const normalizedRecordId = String(recordId || "").trim();
   if (!normalizedRecordId) return;
   const now = Date.now();
+  if (deletedProjectIds.has(normalizedRecordId)) return;
   recentlySavedProjects.forEach((until, id) => {
     if (until <= now) recentlySavedProjects.delete(id);
   });
@@ -3423,6 +3429,9 @@ async function saveRecord(): Promise<boolean> {
     void loadProjectSyncStatus(editingRecordId.value);
     return true;
   } catch (error: unknown) {
+    if (wasEditing && error instanceof ApiError && error.status === 404) {
+      applyRepairProjectDelete(editingRecordId.value);
+    }
     if (submission.pending.value) {
       if (submission.status.value !== "failed") showMessage("", "warning");
     } else if (!captureProjectConflict(error)) {
@@ -3467,6 +3476,7 @@ async function deleteRecordNow(): Promise<void> {
     const result = await requestJson(`/api/repair-management/records/${encodeURIComponent(deletedRecordId)}?${params.toString()}`, {
       method: "DELETE",
     });
+    deletedProjectIds.add(deletedRecordId);
     clearRecordDetailCache(deletedRecordId);
     projectConflict.value = null;
     records.value = records.value.filter(

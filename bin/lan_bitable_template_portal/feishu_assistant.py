@@ -93,7 +93,7 @@ def _live_result(previous, result, *, incomplete=False):
         for key in ('thread_route', 'thread_messages', 'thread_fallback', 'sent_parts'):
             if key in previous:
                 result.setdefault(key, copy.deepcopy(previous[key]))
-        live['notice'] = '本轮未完成，以上仅为已生成的部分内容。' if incomplete else ''
+        live['notice'] = '本轮未完成，以上仅为已生成的部分内容。' if incomplete and live.get('partial', '').strip() else ''
         if incomplete and live.get('partial') and live['partial'] not in result['text']:
             result['text'] = live['partial'] + '\n\n' + result['text']
     return result
@@ -1102,11 +1102,9 @@ class FeishuAssistant:
         if (self.config.get('app_id') == TARGET_APP_ID
                 and (sender in REQUIRED_ADMIN_USERS or sender in BUILDING_OPEN_ID_MAP.values())):
             configured = getattr(auth, '_permission_user', lambda _: {})(sender)
-            if (configured and configured.get('enabled') is not False
-                    and auth.scopes_for_open_id(sender)
-                    and 'assistant' in getattr(auth, 'account_profile', lambda _: {})(sender).get('modules', [])):
+            if configured and configured.get('enabled') is not False:
                 return {'open_id': sender, 'name': str(configured.get('name') or sender), 'employee_no': ''}
-            raise AssistantError('当前灯塔账号尚未获得智能体或楼栋权限。', 403)
+            raise AssistantError('当前灯塔账号尚未启用。', 403)
         lookup = getattr(auth, 'directory_person', lambda _: {})
         person = lookup(sender)
         if not person:
@@ -1216,10 +1214,14 @@ class FeishuAssistant:
                 registry = getattr(auth, '_topic_delegations', None)
                 if registry is None:
                     registry = auth._topic_delegations = TopicDelegations(auth, self.runtime.state_store)
-                await asyncio.to_thread(registry.register, topic_id, actor, message)
+                from .assistant_shared_read import original_actor, shared_query_actor
+                personal = original_actor(actor)
+                await asyncio.to_thread(registry.register, topic_id, personal, message)
                 from .portal_service import PortalError
                 try:
-                    actor.update(await asyncio.to_thread(registry.enrich, actor, topic_id))
+                    enriched = await asyncio.to_thread(registry.enrich, personal, topic_id)
+                    actor.clear()
+                    actor.update(shared_query_actor(enriched))
                 except PortalError:
                     if message.get('kind') not in {'card_action', 'question_action'}:
                         raise

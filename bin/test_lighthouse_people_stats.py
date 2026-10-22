@@ -14,6 +14,7 @@ from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_people_stats import (
     personnel_count_request,
     summarize_staff,
+    summarize_roster,
 )
 from openclaw_service.assistant.lighthouse_sources import SCOPES
 
@@ -107,6 +108,26 @@ class PersonnelCountRequestTests(unittest.TestCase):
         for text in ("A楼有多少台机柜？", "今天有几条通告", "设备数量是多少"):
             with self.subTest(text=text):
                 self.assertFalse(personnel_count_request(text), text)
+
+
+class DutyCountTests(unittest.TestCase):
+    def test_scope_dedup_missing_identity_and_missing_shift(self):
+        rows = [{'scope': 'A', 'shift': '白', 'name': '示例甲', 'open_id': 'ou_one'},
+                {'scope': 'A', 'shift': '夜', 'name': '示例甲', 'open_id': 'ou_one'},
+                {'scope': 'B', 'shift': '白', 'name': '示例乙', 'open_id': 'ou_two'}]
+        def summarize(values, **kwargs):
+            return summarize_roster(values, A_ONLY, day='2026-10-22', observed_at=1, source_url=SOURCE_URL, **kwargs)
+        value = summarize(rows + rows)
+        self.assertEqual((value['assignment_count'], value['unique_people'], value['complete']), (2, 1, True))
+        self.assertNotIn('示例', str(value))
+        self.assertNotIn('ou_one', str(value))
+        self.assertEqual(summarize(rows, shift='白')['assignment_count'], 1)
+        value = summarize([{**rows[0], 'open_id': ''}])
+        self.assertIsNone(value['unique_people'])
+        self.assertFalse(value['complete'])
+        self.assertIn('未计作零人', value['basis'])
+        with self.assertRaises(AssistantError): summarize([])
+        with self.assertRaises(AssistantError): summarize([{**rows[0], 'name': ''}])
 
 
 class SummarizeStaffTests(unittest.TestCase):

@@ -8,7 +8,7 @@ import { chromium } from "playwright";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(root, "../../../output/playwright/repair-submission");
 await mkdir(output, { recursive: true });
-let writes = 0, operationRecoveries = 0, status = "processing", unavailable = false, browser;
+let writes = 0, deletes = 0, operationRecoveries = 0, status = "processing", unavailable = false, missingProject = false, browser;
 const writeOperations = [];
 const projectFields = {"故障发生时间":"2026-09-18 09:27", "故障维修原因":"过滤器堵塞", "故障发生现象描述":"压差过大",
   "所属专业":"暖通", "所属数据中心/楼栋-使用":"南通A楼", "关联事件单":"recEvent", "设备检修关联":"recTarget", "检修通告名称":"测试检修"};
@@ -55,7 +55,11 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
       }
       res.setHeader("Content-Type", "application/json");
       if (req.url === "/api/test-submit") { writes++; res.writeHead(200); res.write('{"data":'); setTimeout(() => res.destroy(), 30); return; }
+      if (req.url.startsWith('/api/repair-management/records/recSaved') && req.method === 'DELETE') {
+        deletes++; res.end(JSON.stringify({data:{record_id:'recSaved',deleted:true}})); return;
+      }
       if (req.url === "/api/repair-management/records/recSaved" && req.method === "PUT") {
+        if(missingProject){res.statusCode=404;res.end(JSON.stringify({ok:false,error:'云端维修项目已不存在，本次修改未保存。'}));return;}
         writes++;
         let body = "";
         req.on("data", chunk => { body += chunk; });
@@ -77,6 +81,9 @@ const vite = await createServer({ configFile: path.join(root, "vite.config.ts"),
       }
       if (req.url.startsWith('/api/repair-management/followups') && req.method === 'GET') {
         res.end(JSON.stringify({data:{records:[],fields:followupMeta,total:0,shared_fields:{}}})); return;
+      }
+      if (req.url.startsWith('/api/repair-management/ledger-candidates')) {
+        res.end(JSON.stringify({data:{records:[{record_id:'recDevice',设备编号:'A-TRB-001',设备名称:'测试设备',机楼:'南通A楼'}],total:1,page:1,options:{},cache:{ready:true,refreshing:false}}})); return;
       }
       if (req.url.startsWith('/api/repair-management/records') && req.method === 'GET') {
         res.end(JSON.stringify({data:{record:project,records:[project2,project],fields:projectMeta,total:2}})); return;
@@ -153,8 +160,29 @@ try {
   assert.equal(await page.locator('[data-field-name="故障发生现象描述"] textarea, [data-field-name="故障发生现象描述"] input').inputValue(),'直接覆盖保存');
   assert.equal(writeOperations.length,2);
   assert.equal(writeOperations[1],'');
+  // The list deliberately keeps returning its pre-delete snapshot.
+  await page.getByRole('button',{name:'删除',exact:true}).last().click();
+  await page.getByRole('button',{name:'确认删除',exact:true}).click();
+  await page.locator('.project-drawer').waitFor({state:'hidden'});
+  await page.waitForTimeout(500);
+  assert.equal(deletes,1);
+  assert.equal(await page.locator('.record-title').filter({hasText:'测试维修单'}).count(),0,'a stale list must not resurrect the deleted project');
+  assert.deepEqual(await page.locator('.record-title').allTextContents(),['固定位置维修单']);
+  missingProject=true;
+  await page.goto(base + '/__repair_check?mode=project-update');
+  const missingDraft=page.locator('[data-field-name="故障发生现象描述"] textarea, [data-field-name="故障发生现象描述"] input');
+  await missingDraft.fill('云端不存在时保留的填写');
+  await page.getByRole('button',{name:'保存修改',exact:true}).click();
+  await page.getByText('云端维修项目已不存在，本次修改未保存。',{exact:true}).waitFor();
+  assert.equal(await missingDraft.inputValue(),'云端不存在时保留的填写');
+  assert.equal(await page.locator('.record-title').filter({hasText:'测试维修单'}).count(),0);
+  missingProject=false;
   await page.goto(base + '/__repair_check?mode=followup');
   await page.getByLabel('维修进展描述',{exact:true}).fill('直接保存的跟进填写');
+  await page.getByRole('button',{name:'选择台账设备',exact:true}).click();
+  const ledgerDialog=page.getByRole('dialog',{name:'选择台账设备'});
+  await ledgerDialog.getByRole('checkbox',{name:'选择A-TRB-001',exact:true}).check();
+  await ledgerDialog.getByRole('button',{name:'确认',exact:true}).click();
   assert.equal(await page.getByText('待核实',{exact:true}).count(),0);
   assert.equal(await page.getByText('处理详情',{exact:true}).count(),0);
   const followupSave = page.getByRole('button',{name:'新增跟进记录',exact:true}).last();
@@ -164,6 +192,10 @@ try {
   assert.equal(writeOperations.length,3);
   assert.deepEqual(errors, []);
   console.log(`Repair create recovery and direct project/followup saves passed; writes=${writes}.`);
+} catch(error) {
+  console.error({writes,deletes,writeOperations});
+  console.error(await browser?.contexts()[0]?.pages()[0]?.locator('body').innerText());
+  throw error;
 } finally {
   await browser?.close();
   await vite.close();

@@ -32,6 +32,41 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
 
+    async def test_auto_tool_read_recovery_can_fetch_missing_page_but_cannot_prepare_writes(self):
+        agent, reads, blocked = self.fixture.agent, [], []
+        agent._auto_tools = True
+        agent._live_text_only = True
+        async def query(page: int):
+            reads.append(page)
+            return {'ok': True, 'data': {'page': page, 'has_more': page == 1}}
+        async def prepare():
+            self.fail('read recovery must not prepare a write')
+        agent.tools.update(lighthouse_query=Tool(query), lighthouse_prepare_business=Tool(prepare))
+        async def validate(answer):
+            if answer == '仅第一页':
+                raise ModelRetry('缺少第二页，请继续读取并汇总。')
+            return answer
+        agent.validators.append(validate)
+        async def hook(client):
+            submissions = [params for method, params in client.calls if method == 'agent']
+            page = len(submissions)
+            if page not in reads:
+                await self.fixture.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                    'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'page-' + str(page), 'params': {'page': page}})
+            if page == 2:
+                with self.assertRaises(AssistantError):
+                    await self.fixture.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                        'run_id': agent.run_id, 'tool': 'lighthouse_prepare_business', 'call_id': 'unsafe-write', 'params': {}})
+                blocked.append(True)
+                client.wait = {'status': 'ok', 'terminalReply': {'disposition': 'visible', 'text': '两页已核验汇总'}}
+        self.fixture.scripts['current'] = {'hook': hook, 'wait': {'status': 'ok',
+            'terminalReply': {'disposition': 'visible', 'text': '仅第一页'}}, 'events': []}
+        events = await self.fixture.run_agent()
+        self.assertEqual(events[-1].result.output, '两页已核验汇总')
+        self.assertEqual(reads, [1, 2])
+        self.assertTrue(blocked)
+        self.assertFalse(agent._read_recovery)
+
     async def test_missing_deliverable_is_completed_from_receipts_without_repeating_tools(self):
         agent, effects, attempts = self.fixture.agent, [], []
         agent._buffered_reply = True
@@ -616,12 +651,15 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(receipt['query_ref'], message)
             self.assertNotIn('测试姓名55', message)
             self.assertIn('read_query', message)
-            for tool, params in (('lighthouse_query', {'operation': {'api_id': 'GET /api/learning/profile',
-                                    'params': {'scope': 'D', 'view': 'participation'}}}),
-                                 ('lighthouse_prepare_business', {}),
+            cached = await flow.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'reuse-original-query',
+                'params': {'operation': {'api_id': 'GET /api/learning/profile', 'params': {'scope': 'D', 'view': 'participation'}}}})
+            self.assertTrue(cached['ok'])
+            self.assertEqual(reads, [('D', 'participation')], 'complete prior reads are reused, not fetched again')
+            for tool, params in (('lighthouse_prepare_business', {}),
                                  ('lighthouse_call_extension', {'server_id': 'fixture-unconfigured', 'tool': 'fixture', 'arguments': {}})):
                 self.assertIn(tool, agent.tools)
-                with self.assertRaisesRegex(AssistantError, '仅允许read_query'):
+                with self.assertRaisesRegex(AssistantError, '只读工具补查'):
                     await flow.engine.bridge.call(agent.token, {'session_key': agent.session_key,
                         'run_id': agent.run_id, 'tool': tool, 'call_id': 'forbidden-' + tool, 'params': params})
             if revoke:
@@ -662,7 +700,7 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flow.selected, ['current', 'backup'])
         self.assertEqual(reads, [('D', 'participation')])
         self.assertEqual(len(tails), 1)
-        self.assertEqual(flow.agent.calls, 2)
+        self.assertEqual(flow.agent.calls, 3)
         self.assertEqual(self.fixture.writes, [])
         text = ''.join(value['delta'] for kind, value in self.fixture.emit_log if kind == 'text')
         if revoke:

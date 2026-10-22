@@ -144,6 +144,17 @@ class NativeRuntimeLaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(host.runs)
         self.popen.assert_called_once()
 
+    async def test_streaming_chat_keeps_model_selected_tools_when_auto_tools_enabled(self):
+        resident, host = self.resident()
+        profile = {**runtime_fixtures._profile(), 'id': 'fixture'}
+        text = agent(self.engine, actor('auto-tool-chat'), profile)
+        text._live_text_only = True
+        text._auto_tools = True
+        item = await text._acquire_runtime()
+        self.assertFalse(self.runtime.accounts[item['key']]['text_only'])
+        self.assertEqual([value['name'] for value in json.loads((self.runtime.accounts[item['key']]['root'] / 'plugin' / 'tools.json').read_text(encoding='utf-8'))], ['lighthouse_probe'])
+        await resident.release(item)
+
     async def test_resident_text_only_uses_full_catalog_and_blocks_both_dispatch_layers(self):
         resident, host = self.resident()
         profile = {**runtime_fixtures._profile(), 'id': 'fixture'}

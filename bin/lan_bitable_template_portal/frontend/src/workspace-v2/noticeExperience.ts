@@ -1,5 +1,6 @@
 import type { Dict } from './client';
 import type { NoticeForm } from './noticeForm';
+import { noticeCycleWarnings } from '../noticeCycleWarnings';
 
 const buildingCodes = ['110', ...'ABCDEH'];
 export function noticeBuildings(row: Dict): string[] {
@@ -36,6 +37,8 @@ export function recommendationFields(form: NoticeForm, candidate: Dict, touched:
 }
 export type NoticeIssue = { message: string; target: string; label: string };
 export function noticeIssueTarget(form: NoticeForm, action: string, sop: Dict, photos: Dict[]): Omit<NoticeIssue, 'message'> {
+  const cycleField=Object.keys(noticeCycleWarnings(form.values,form.cycleRules))[0];
+  if(cycleField)return {target:'field:'+cycleField,label:'修改周期冲突'};
   const missing = form.fields.find(f => f.required && !String(form.values[f.key] ?? '').trim());
   if (missing) return { target: 'field:' + missing.key, label: '填写' + missing.label };
   if (!form.values.building_codes?.length) return { target: 'buildings', label: '选择楼栋' };

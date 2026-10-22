@@ -5345,6 +5345,12 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 conn.execute("BEGIN IMMEDIATE")
+                deleted_ids = {row[0] for row in conn.execute(
+                    "SELECT key FROM json_documents WHERE namespace=?",
+                    ("repair_snapshot_deleted:" + source_key,),
+                )}
+                insert_rows = [row for row in insert_rows if row[1] not in deleted_ids]
+                normalized_records = [row for row in normalized_records if row["record_id"] not in deleted_ids]
                 conn.execute(
                     "DELETE FROM repair_snapshot_records WHERE source_key=?",
                     (source_key,),
@@ -7306,6 +7312,9 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("SELECT 1 FROM json_documents WHERE namespace=? AND key=?",
+                        ("repair_snapshot_deleted:" + source_key, record_id)).fetchone():
+                    return
                 conn.execute(
                     """
                     INSERT INTO repair_snapshot_records(
@@ -7358,7 +7367,16 @@ class LanPortalStateStore:
                 )
                 conn.commit()
 
-    def delete_repair_snapshot_record(self, source_key: str, record_id: str) -> bool:
+    def repair_deleted_record_ids(self, source_key: str) -> set[str]:
+        source_key = self._normalize_repair_snapshot_source_key(source_key)
+        if not self.db_path.exists():
+            return set()
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            return {row[0] for row in conn.execute("SELECT key FROM json_documents WHERE namespace=?",
+                ("repair_snapshot_deleted:" + source_key,))}
+
+    def delete_repair_snapshot_record(self, source_key: str, record_id: str, *, confirmed_deleted: bool = False) -> bool:
         source_key = self._normalize_repair_snapshot_source_key(source_key)
         record_id = self._text(record_id)
         if not record_id:
@@ -7368,6 +7386,10 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 conn.execute("BEGIN IMMEDIATE")
+                if confirmed_deleted:
+                    # Commit the remote deletion receipt with cache removal, before any stale refresh can return.
+                    conn.execute("INSERT OR REPLACE INTO json_documents(namespace,key,payload_json,updated_at) VALUES (?,?,?,?)",
+                        ("repair_snapshot_deleted:" + source_key, record_id, self._json({"deleted": True}), now))
                 cursor = conn.execute(
                     "DELETE FROM repair_snapshot_records WHERE source_key=? AND record_id=?",
                     (source_key, record_id),

@@ -98,12 +98,18 @@ try {
   await rows.nth(1).locator('.n-radio-button').filter({ hasText: '异常' }).last().click();
   await check.getByRole('button', { name: '提交检查', exact: true }).click(); assert.equal(writes, 0);
   await rows.nth(1).getByRole('textbox').fill('待跟进测试问题');
+  await page.waitForFunction(()=>getComputedStyle(document.querySelector('.v2-check-normal.n-radio-button--checked')).backgroundColor==='rgb(21, 128, 61)'&&getComputedStyle(document.querySelector('.v2-check-abnormal.n-radio-button--checked')).backgroundColor==='rgb(180, 35, 24)');
   await page.getByRole('button', { name: '返回', exact: true }).click();
   await page.getByText('检查尚未提交', { exact: true }).waitFor();
   await page.getByRole('button', { name: '继续填写', exact: true }).click();
   assert.match(page.url(), /entry=pre_shift/);
+  assert.equal(await rows.nth(0).getByRole('group',{name:'检查附件上传区',exact:true}).count(),0,'empty attachment controls start collapsed');
+  await rows.nth(0).getByRole('button',{name:items[0].text+'附件',exact:true}).click();
   await rows.nth(0).getByLabel('上传检查附件', { exact: true }).setInputFiles({ name: '检查附件.txt', mimeType: 'text/plain', buffer: Buffer.from('isolated') });
   await check.getByRole('link', { name: '检查附件.txt', exact: true }).waitFor(); assert.equal(uploads, 1);
+  await rows.nth(0).getByRole('button',{name:items[0].text+'附件',exact:true}).click();
+  assert.equal(await rows.nth(0).getByRole('button',{name:items[0].text+'附件',exact:true}).innerText(),'1','collapsed attachments keep a visible count');
+  assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'待跟进测试问题','collapsing attachments keeps notes');
   for (const width of [1440, 390, 360]) {
     await page.setViewportSize({ width, height: width < 700 ? 844 : 960 });
     assert(!await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1));
@@ -160,6 +166,20 @@ try {
   const editor = page.locator('.v2-check-editor');
   await editor.getByRole('textbox', { name: '检查项1', exact: true }).waitFor();
   await editor.getByRole('button', { name: '取消', exact: true }).click();
+  scheduledTasks=[{...task,items:Array.from({length:25},(_,i)=>({id:'long-'+i,text:'核对本楼设备运行状态、交接记录与现场安全措施，逐项确认检查内容 '+(i+1)}))}];
+  await check.getByRole('button',{name:'刷新班前检查',exact:true}).click();await rows.nth(24).waitFor();
+  const itemList=check.getByRole('group',{name:'本次检查项目',exact:true});
+  for(const viewport of [{width:1440,height:900},{width:402,height:874},{width:440,height:956},{width:360,height:640}]){
+    await page.setViewportSize(viewport);
+    assert(await itemList.evaluate(el=>el.scrollHeight>el.clientHeight&&el.clientHeight<=481),'legacy long list is height-limited');
+    assert(await rows.first().locator('legend').evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),'legacy description font is at least 16px');
+    assert(!(await check.locator('.v2-check-choice').first().innerText()).includes('核对本楼设备运行状态'),'shift cards do not duplicate all check descriptions');
+    await rows.first().locator('.v2-check-normal').click();await rows.last().locator('.v2-check-abnormal').click();await rows.last().getByRole('textbox').fill('末项异常备注');
+    assert(await itemList.evaluate(el=>el.scrollTop>0));assert(await rows.first().getByRole('radio',{name:'无异常',exact:true}).isChecked());
+    assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+    await check.getByRole('button',{name:'提交检查',exact:true}).scrollIntoViewIfNeeded();await itemList.evaluate(el=>el.scrollTop=0);
+    await page.screenshot({path:path.join(output,'long-check-'+viewport.width+'.png'),fullPage:true});
+  }
   for (mode of ['engineer']) {
     const before = checks; await page.goto(origin + '/');
     await page.locator('.module-card').first().waitFor();

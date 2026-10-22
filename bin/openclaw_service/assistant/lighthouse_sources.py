@@ -494,12 +494,13 @@ def question_material_text(store, source):
                 raise AssistantError("题目资料文字提取未完成，请在原学练页面核对文件。", 422) from None
             if not text.strip():
                 raise AssistantError("未提取到可读文字，请在原学练页面核对资料。", 422)
-            cached = {"text": text}
+            cached = {"text": safe_text(text, limit=None)}
             store.put_document("lighthouse_question_text", digest, cached)
-        text = cached["text"]
+        # Old cache entries may predate privacy filtering; offsets always use clean text.
+        text = safe_text(cached["text"], limit=None)
     except (OSError, sqlite3.Error):
         raise AssistantError("题目资料读取未完成或本地缓存暂忙，请稍后重试。", 503) from None
-    return {"material_id": source['material_id'], "name": source['name'], "kind": source['kind'], "text": text[offset:offset + length],
+    return {"material_id": source['material_id'], "name": safe_text(source['name']), "kind": source['kind'], "text": text[offset:offset + length],
             "offset": offset, "next_offset": offset + length if offset + length < len(text) else None,
             "source": "题库原资料", "reading_method": "图片文字识别；图形含义须核对原图。" if source['mime'].startswith("image/") else "文档文字提取"}
 

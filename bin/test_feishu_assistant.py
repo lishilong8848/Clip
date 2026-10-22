@@ -483,7 +483,9 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
             _, actual = await authority.authorize(key)
         self.assertEqual(actual['id'], 'ou_Actual')
         self.assertFalse(actual['is_admin'])
-        self.assertEqual(actual['scopes'], ['E'])
+        from lan_bitable_template_portal.assistant_shared_read import original_actor
+        self.assertEqual(original_actor(actual)['scopes'], ['E'])
+        self.assertEqual(set(actual['scopes']), set('ABCDEH') | {'110'})
         self.assertEqual(actual['_shared_plan']['owner'], 'ou_OriginAdmin')
         revoked = {**actor, 'modules': ['assistant']}
         with patch('lan_bitable_template_portal.lighthouse_bridge.actor_for', AsyncMock(return_value=revoked)):
@@ -801,7 +803,9 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         request = Request({"type": "http", "headers": [(b"x-lighthouse-channel", b"feishu:oc_Evil")], "state": {}})
         actor = await actor_for(ctrl, SimpleNamespace(auth_manager=auth), request)
         self.assertNotIn("channel", actor)
-        self.assertEqual(actor["scopes"], ["D"])
+        from lan_bitable_template_portal.assistant_shared_read import original_actor
+        self.assertEqual(original_actor(actor)["scopes"], ["D"])
+        self.assertEqual(set(actor['scopes']), set('ABCDEH') | {'110'})
         request.state.lighthouse_channel = "feishu:oc_Chat"
         self.assertEqual((await actor_for(ctrl, SimpleNamespace(auth_manager=auth), request))["channel"], "feishu:oc_Chat")
 

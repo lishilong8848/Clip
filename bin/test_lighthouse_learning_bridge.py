@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).parent))
 from starlette.requests import Request
 from lan_bitable_template_portal.lighthouse_bridge import actor_for, PortalAuthority
+from lan_bitable_template_portal.assistant_shared_read import original_actor
+from openclaw_service.assistant.lighthouse_sources import SCOPES
 from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_model import read_scope_operations
@@ -27,7 +29,9 @@ class LearningBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.request = Request({'type': 'http', 'headers': [], 'state': {}})
 
     async def test_personal_hints_use_local_identity_without_widening_business_scope(self):
-        actor = await actor_for(self.controller, self.runtime, self.request)
+        shared = await actor_for(self.controller, self.runtime, self.request)
+        self.assertEqual(set(shared['scopes']), SCOPES)
+        actor = original_actor(shared)
         self.assertEqual(actor['scopes'], ['A', 'H'])
         self.assertEqual(actor['learning_scopes'], ['A'])
         self.assertEqual(actor['learning_person_id'], 'person_1')
@@ -42,7 +46,7 @@ class LearningBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shared_account_does_not_gain_personal_scope(self):
         self.session['user']['open_id'] = BUILDING_OPEN_ID_MAP['H']
-        actor = await actor_for(self.controller, self.runtime, self.request)
+        actor = original_actor(await actor_for(self.controller, self.runtime, self.request))
         self.assertEqual(actor['learning_scopes'], ['H'])
         self.assertNotIn('learning_person_id', actor)
         self.resolve.assert_not_called()
@@ -52,7 +56,7 @@ class LearningBridgeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(error=error):
                 self.resolve.return_value = {'person_id': ''}
                 self.resolve.side_effect = error
-                actor = await actor_for(self.controller, self.runtime, self.request)
+                actor = original_actor(await actor_for(self.controller, self.runtime, self.request))
                 self.assertEqual(actor['scopes'], ['A', 'H'])
                 self.assertEqual(actor['learning_scopes'], [])
                 self.assertNotIn('learning_person_id', actor)
@@ -72,8 +76,9 @@ class LearningBridgeTests(unittest.IsolatedAsyncioTestCase):
         context = authority.context(self.request, prior)
         self.resolve.side_effect = sqlite3.OperationalError('busy')
         _, current = await authority.authorize(context)
-        self.assertEqual(current['scopes'], ['A', 'H'])
-        self.assertEqual(current['learning_scopes'], [])
+        self.assertEqual(set(current['scopes']), SCOPES)
+        self.assertEqual(original_actor(current)['scopes'], ['A', 'H'])
+        self.assertEqual(original_actor(current)['learning_scopes'], [])
 
     async def test_real_person_lookup_reaches_only_own_historical_questions(self):
         from lan_bitable_template_portal.learning import LearningService
@@ -95,7 +100,7 @@ class LearningBridgeTests(unittest.IsolatedAsyncioTestCase):
                         question['id']: {'revealed': 'yes'}}}, conn, False)
                 service._put('local', 'refresh', {'at': '2026-10-09T08:00:00+08:00'}, conn, False)
             self.runtime.learning_service = service
-            actor = await actor_for(self.controller, self.runtime, self.request)
+            actor = original_actor(await actor_for(self.controller, self.runtime, self.request))
             operation = read_scope_operations({'api_id': 'GET /api/assistant/question-bank'},
                 {'schema': {'query': ['scope']}, 'scope_mode': ''}, actor)[0]
             result = question_bank(service, actor, operation['params'])

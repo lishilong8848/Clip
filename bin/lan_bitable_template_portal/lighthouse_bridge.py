@@ -14,6 +14,7 @@ import threading
 import time
 
 from openclaw_service.assistant.lighthouse_ai import AssistantError
+from .assistant_shared_read import original_actor, reader_actor, shared_query_actor, shared_operation, SharedRead
 
 
 async def actor_for(controller, runtime, request):
@@ -35,8 +36,6 @@ async def actor_for(controller, runtime, request):
         'scopes': sorted(allowed & SCOPES), 'can_manage_settings': True}
     from .module_access import allowed_modules
     actor['modules'] = sorted(allowed_modules(runtime.auth_manager, session))
-    if 'assistant' not in actor['modules']:
-        raise AssistantError('当前账号尚未获授灯塔助手权限。', 403)
     actor['name'] = str(user.get('name') or user.get('en_name') or session.get('name') or '').strip()
     actor['employee_no'] = str(user.get('employee_no') or user.get('employee_number') or '').strip()
     actor['role_label'] = '管理员' if actor['is_admin'] else '楼栋值班账号' if identity in BUILDING_OPEN_ID_MAP.values() else '普通账号'
@@ -63,7 +62,7 @@ async def actor_for(controller, runtime, request):
         raise AssistantError('助手客户端标识无效。')
     if client and not actor.get('channel'):
         actor['_execution_lane'] = 'web:' + client
-    return actor
+    return shared_query_actor(actor)
 
 
 class PortalAuthority:
@@ -96,8 +95,7 @@ class PortalAuthority:
         if len(self.contexts) >= 1024:
             raise AssistantError('助手请求较多，请稍后继续。', 429)
         identity = secrets.token_urlsafe(32)
-        personal = {**actor, 'scopes': list(actor.get('_personal_scopes', actor['scopes'])),
-                    'modules': list(actor.get('_personal_modules', actor.get('modules', [])))}
+        personal = self.personal_actor(actor)
         self.contexts[identity] = {'request': request, 'actor': copy.deepcopy(personal),
             'expires': now + 1800, 'plan_id': plan_id, 'lease': self.client.lease,
             'shared_plan': copy.deepcopy(shared_plan),
@@ -109,7 +107,7 @@ class PortalAuthority:
         context = self.contexts.get(identity)
         if not context or context['expires'] <= time.monotonic() or context['lease'] != self.client.lease:
             raise AssistantError('原登录授权已失效，未重新提交业务。', 403)
-        current = await actor_for(self.controller, self.runtime, context['request'])
+        current = original_actor(await actor_for(self.controller, self.runtime, context['request']))
         prior = context['actor']
         if set(prior.get('modules', [])) - set(current.get('modules', [])):
             raise AssistantError('功能权限已变化，请重新操作。', 403)
@@ -143,7 +141,7 @@ class PortalAuthority:
             from .portal_auth import topic_access_allowed
             if not topic_access_allowed({'capabilities': current['_topic_access']}, current):
                 raise AssistantError('话题资料权限已变化，未继续读取或回复旧资料。', 403)
-        return context, current
+        return context, shared_query_actor(current)
 
     @staticmethod
     def record_access(context, capability):
@@ -155,8 +153,9 @@ class PortalAuthority:
 
     @staticmethod
     def personal_actor(actor):
-        return {**actor, 'scopes': list(actor.get('_personal_scopes', actor['scopes'])),
-                'modules': list(actor.get('_personal_modules', actor.get('modules', [])))}
+        actual = original_actor(actor)
+        return {**actual, 'scopes': list(actual.get('_personal_scopes', actual['scopes'])),
+                'modules': list(actual.get('_personal_modules', actual.get('modules', [])))}
 
     def learning_summary(self, execution, operation):
         import datetime as dt
@@ -243,6 +242,27 @@ class PortalAuthority:
         if not isinstance(operation, dict):
             raise AssistantError('业务操作参数无效。')
         descriptor = catalog.get(operation.get('api_id', ''))
+        normalized, missing = await asyncio.to_thread(catalog.validate_operation, operation)
+        if actor.get('_shared_business_queries') and not missing and shared_operation(normalized):
+            from starlette.requests import Request
+            def validate_login():
+                session = self.controller._current_session(context['request'])
+                identity = str((session or {}).get('open_id') or ((session or {}).get('user') or {}).get('open_id') or '')
+                if (identity != actor['id'] or (session or {}).get('is_guest')
+                        or str((session or {}).get('role') or ((session or {}).get('user') or {}).get('role') or '').lower() == 'guest'):
+                    raise AssistantError('登录已失效，未继续共享业务查询。', 401)
+            grant = SharedRead(self.runtime.auth_manager, actor['id'], normalized, validate_login)
+            gateway_request = Request({**context['request'].scope,
+                'state': {**context['request'].scope.get('state', {}), 'assistant_shared_business_read': grant}})
+            if context.get('feishu_topic'):
+                self.record_access(context, {'shared_business_read': True})
+            result = await catalog.invoke(normalized, gateway_request)
+            if result.get('_binary'):
+                # Original files can contain private data that text redaction cannot remove.
+                raise AssistantError('共享查询不直接转发未脱敏原文件，请读取文档解析内容或在原业务页面按原权限下载。', 403)
+            from openclaw_service.assistant.lighthouse_ai import shared_data
+            return shared_data(result)
+        actor = original_actor(actor)
         execution = None
         gateway_request = context['request']
         topic = actor.get('_feishu_topic') or {}
@@ -321,12 +341,13 @@ class PortalAuthority:
         context, actor = await self.authorize(message.get('context_id'))
         if action == 'authorize':
             return actor
-        if action in {'feishu_document', 'table_catalog', 'table_records', 'staff_count', 'question_bank', 'question_material', 'search'}:
-            actor = self.personal_actor(actor)
+        if action in {'feishu_document', 'table_catalog', 'table_records', 'staff_count', 'roster_count', 'question_bank', 'question_material', 'search', 'cached', 'work_orders'}:
+            shared = actor.get('_shared_business_queries')
+            actor = reader_actor(actor) if shared else self.personal_actor(actor)
             actor.pop('_topic_capabilities', None)
             if context.get('feishu_topic'):
-                self.record_access(context, {'legacy': {k: actor.get(k) for k in ('scopes', 'modules', 'is_admin')},
-                                             'source_owner': actor['id']})
+                self.record_access(context, {'shared_business_read': True} if shared else
+                    {'legacy': {k: actor.get(k) for k in ('scopes', 'modules', 'is_admin')}, 'source_owner': actor['id']})
         if action == 'feishu_document':
             from openclaw_service.assistant.lighthouse_documents import read_document
             if set(payload) - {'url', 'offset', 'scopes'}:
@@ -340,7 +361,7 @@ class PortalAuthority:
                 hashlib.sha256(actor['id'].encode()).hexdigest()[:12], 'feishu' if actor.get('channel') else 'web',
                 ','.join(scoped['scopes']), result['total_characters'])
             return result
-        if action in {'table_catalog', 'table_records', 'staff_count'}:
+        if action in {'table_catalog', 'table_records', 'staff_count', 'roster_count'}:
             if 'links' not in actor.get('modules', []):
                 raise AssistantError('当前账号尚未获授多维表导航与查询权限。', 403)
             if self.tables is None:
@@ -352,18 +373,24 @@ class PortalAuthority:
             query = payload.get('query') or {}
             if not isinstance(query, dict):
                 raise AssistantError('查询参数无效。')
-            label = '在岗人员数量统计（仅返回汇总，不提供个人明细）' if action == 'staff_count' else (
-                await asyncio.to_thread(self.tables.table, query.get('table_id')))['name'] + '的多维表记录'
+            if action == 'roster_count':
+                label = '值班排班人数统计（仅返回汇总）；日期：' + str(payload.get('date', '')) + '；班次：' + str(payload.get('shift') or '白夜班')
+            else:
+                label = '在岗人员数量统计（仅返回汇总，不提供个人明细）' if action == 'staff_count' else (
+                    await asyncio.to_thread(self.tables.table, query.get('table_id')))['name'] + '的多维表记录'
             label += '；楼栋范围：' + '、'.join(scoped['scopes'])
             if query.get('filters'):
                 from openclaw_service.assistant.lighthouse_ai import safe_data
                 label += '；筛选：' + json.dumps(safe_data(query['filters']), ensure_ascii=False)
-            if action == 'staff_count' or not query.get('metadata_only'):
+            if not actor.get('_shared_business_queries') and (action in {'staff_count', 'roster_count'} or not query.get('metadata_only')):
                 consent = await asyncio.to_thread(self.read_consent.require, scoped, action, payload, label,
                     getattr(context['request'].state, 'feishu_question', ''))
                 if consent:
                     return consent
-            result = await asyncio.to_thread(self.tables.staff_count, scoped) if action == 'staff_count' else await asyncio.to_thread(self.tables.read, scoped, query)
+            if action == 'roster_count':
+                result = await asyncio.to_thread(self.tables.roster_count, scoped, payload.get('date'), payload.get('shift', ''))
+            else:
+                result = await asyncio.to_thread(self.tables.staff_count, scoped) if action == 'staff_count' else await asyncio.to_thread(self.tables.read, scoped, query)
             # Trace source and scope without logging values, questions or personal data.
             import logging
             logging.info('Assistant read action=%s actor=%s channel=%s table=%s scopes=%s', action,
@@ -385,7 +412,7 @@ class PortalAuthority:
         if action == 'search':
             from openclaw_service.assistant.lighthouse_sources import LocalAssistantSources
             scoped = self.narrowed(actor, payload.get('scopes'))
-            consent = await asyncio.to_thread(self.read_consent.require, scoped, action, payload,
+            consent = None if actor.get('_shared_business_queries') else await asyncio.to_thread(self.read_consent.require, scoped, action, payload,
                 '检索本地业务资料（可能包含人员信息）；范围：' + '、'.join(scoped['scopes']),
                 getattr(context['request'].state, 'feishu_question', ''))
             if consent:
@@ -420,7 +447,7 @@ class PortalAuthority:
                 module = values.get('work_type', ['maintenance'])[0] if payload.get('kind') == 'orders' else next(iter(modules))
                 scopes = set(row.get('scopes') or [])
                 permit = bool(scopes) and module in modules and any(module in profile.get('modules', []) and scopes <= set(profile.get('scopes', [])) for profile in profiles)
-                if permit and context.get('feishu_topic'):
+                if permit and context.get('feishu_topic') and not actor.get('_shared_business_queries'):
                     self.record_access(context, {'module': module, 'scopes': sorted(scopes), 'action': 'read', 'method': 'READ',
                         'path': 'cached:' + payload.get('kind', ''), 'resource': hashlib.sha256(str(row.get('url', '')).encode()).hexdigest(), 'admin': False})
                 return permit
@@ -436,7 +463,7 @@ class PortalAuthority:
         if action == 'question_material':
             if 'learning' not in actor.get('modules', []):
                 raise AssistantError('当前账号尚未获授画像学练权限。', 403)
-            consent = await asyncio.to_thread(self.read_consent.require, actor, action, payload,
+            consent = None if actor.get('_shared_business_queries') else await asyncio.to_thread(self.read_consent.require, actor, action, payload,
                 '读取原权限内的题库附件资料', getattr(context['request'].state, 'feishu_question', ''))
             if consent:
                 raise AssistantError(consent['message'], 409)
@@ -445,7 +472,7 @@ class PortalAuthority:
             if not set(actor.get('modules', [])) & {'maintenance', 'polling', 'adjust'}:
                 raise AssistantError('当前账号尚未获授工单所属功能权限。', 403)
             result = await asyncio.to_thread(work_order_records, self.runtime.state_store, actor, query)
-            if context.get('feishu_topic'):
+            if context.get('feishu_topic') and not actor.get('_shared_business_queries'):
                 from openclaw_service.assistant.lighthouse_sources import codes
                 for row in result.get('items', []):
                     self.record_access(context, {'module': row.get('work_type') or 'polling', 'scopes': sorted(codes(row.get('scope'))),

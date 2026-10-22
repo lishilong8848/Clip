@@ -59,6 +59,13 @@ for(const work_type of ['change','repair','polling','adjust','power','event','']
 for(const notice_type of ['变更通告','设备检修通告','事件通告','维保']) assert.deepEqual(warn({notice_type}),{});
 assert(Object.keys(warn({notice_type:undefined})).length,'known maintenance work with absent notice_type');
 for(const maintenance_cycle of ['未知周期','每月/每季','月',null,{},'']) assert.deepEqual(warn({maintenance_cycle}),{});
+for(const [cycle,content] of [['每季','三个月、每三个月、3个月和一个季度检查'],['半年','六个月和0.5年保养'],['每年','十二个月检查'],['每18个月','十八个月保养'],['每周','七天检查']]) assert.deepEqual(warn({maintenance_cycle:cycle,content,reason:''}),{});
+for(const [cycle,content] of [['每季','每两个月维护'],['每年','18个月保养'],['每周','两周巡检']]) assert(warn({maintenance_cycle:cycle,content,reason:''}).content);
+assert.deepEqual(warn({content:'2026年10月21日检查3台设备',reason:'12个过滤器'}),{});
+assert.deepEqual(warn({maintenance_cycle:'每季',content:'计划在3月检修，一月维护完成',reason:''}),{});
+const savedRules=rules.map(({interval,...rule})=>rule);
+assert.deepEqual(warn({},savedRules),warn());
+assert.deepEqual(warn({maintenance_cycle:'每季',content:'三个月维护',reason:'按季度计划'},savedRules),{});
 for(const raw of [null,undefined,{},'invalid',[],[{value:'每月',aliases:null}]]) assert.deepEqual(noticeCycleWarnings(values,raw),{});
 assert.deepEqual(maintenanceCycleRules(JSON.stringify(rules)),rules);
 assert.deepEqual(warn({maintenance_cycle:'冲突'},[{value:'每月',aliases:['冲突']},{value:'每季',aliases:['冲突']}]),{});
@@ -77,7 +84,8 @@ for(const name of ['workspace-v2/NoticeFields.vue','workspace-v2/NoticeWorkspace
  const source=await readFile(path.join(root,'src',name),'utf8');const {descriptor,errors}=parse(source,{filename:name});assert.deepEqual(errors,[]);compileScript(descriptor,{id:name});
 }
 const formSource=await readFile(path.join(root,'src/workspace-v2/noticeForm.ts'),'utf8');
-for(const name of ['validateNotice','noticeCommand']) assert(!formSource.split('export function '+name)[1].split('export function ')[0].includes('cycleRules'),name+' must not use warnings');
+assert(formSource.split('export function validateNotice')[1].includes('noticeCycleWarnings'),'all actions must validate cycle conflicts');
+assert(!formSource.split('export function noticeCommand')[1].split('export function ')[0].includes('cycleRules'),'cycle metadata stays out of submitted data');
 const assistantSource=parse(await readFile(path.join(root,'src/components/LighthouseAssistant.vue'),'utf8')).descriptor.scriptSetup.content;
 const ast=ts.createSourceFile('assistant.ts',assistantSource,ts.ScriptTarget.Latest,true);
 const controlNode=ast.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==='planControl');
@@ -144,16 +152,21 @@ try{
    const label={start:'开始',update:'更新',end:'结束'}[action];
    assert(await editor.getByRole('button',{name:'预览并确认'+label,exact:true}).isEnabled());
    await editor.getByRole('button',{name:'预览并确认'+label,exact:true}).click();
-   await editor.locator('[data-cycle-warning-summary]').waitFor();
+   assert.equal(submissions.length,0,'conflicts must not submit any action');
+   assert.equal(await editor.getByRole('button',{name:'确认发送'+label,exact:true}).count(),0);
+   assert((await editor.innerText()).includes('修改一致后再发送'));
+   assert.equal(await content.inputValue(),values.content,'invalid draft is retained');
+   await content.fill('每月例行检查');await reason.fill('按月度计划维护');
+   await editor.getByRole('button',{name:'预览并确认'+label,exact:true}).click();
    assert(!(await editor.getByLabel('待发送通告全文').innerText()).includes('周期核对提醒'),'preview text unchanged');
    await editor.getByRole('button',{name:'确认发送'+label,exact:true}).click();
    await editor.getByRole('heading',{name:'通告办理完成',exact:true}).waitFor().catch(async error=>{console.error({action,viewport,submissions,errors,text:await editor.innerText()});throw error;});
-   assert.equal(submissions.length,1);assert.equal(submissions[0].action,action);assert.equal(submissions[0].patch.content,values.content);assert.equal(submissions[0].patch.reason,values.reason);
+   assert.equal(submissions.length,1);assert.equal(submissions[0].action,action);assert.equal(submissions[0].patch.content,'每月例行检查');assert.equal(submissions[0].patch.reason,'按月度计划维护');
    assert(!JSON.stringify(submissions[0]).includes('cycleRules'));assert(!JSON.stringify(submissions[0]).includes('cycle_rules'));assert(!JSON.stringify(submissions[0]).includes('不阻止发送'));
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
    await page.addScriptTag({content:helper.outputFiles[0].text});
    const parsed=await page.evaluate(html=>{const h=window.noticeHelpers,f=h.parseNoticeForm(html);return {rules:f.cycleRules,error:h.validateNotice(f,'start',{},[]),command:h.noticeCommand(f,'start','test-operation',0,{},[],[])};},detail('maintenance','start'));
-   assert.deepEqual(parsed.rules,rules);assert.equal(parsed.error,'');assert.equal(parsed.command.patch.content,values.content);
+   assert.deepEqual(parsed.rules,rules);assert.match(parsed.error,/修改一致后再发送/);assert.equal(parsed.command.patch.content,values.content);
    for(const kind of ['change','repair','polling','power','adjust'])assert.deepEqual(await page.evaluate(html=>window.noticeHelpers.parseNoticeForm(html).cycleRules,detail(kind,'start')),[]);
    assert.deepEqual(errors,[]);await context.close();groups++;
   }
@@ -189,6 +202,7 @@ try{
     const payload=request.postDataJSON();panelWrites.push(payload);
     for(const change of payload.changes||[])Object.assign(panelRun.items[0],{...change,draft:{...panelRun.items[0].draft,...change.draft}});
     if(payload.action==='preview')panelRun.state='confirm';
+    else if(payload.action==='edit')panelRun.state='edit';
     else if(payload.action==='confirm'){panelRun.state='done';panelRun.items[0].phase='success';panelRun.items[0].result='隔离发送成功';}
     return ok({run:panelRun});
    }
@@ -203,11 +217,18 @@ try{
   await panel.getByRole('button',{name:'编辑全部字段',exact:true}).click();await panelContent.fill(values.content);
   assert.equal(await panel.locator('[data-cycle-warning]').count(),2);
   await panel.getByRole('button',{name:'预览所选 1 条',exact:true}).click();await panel.locator('[data-cycle-warning-summary]').first().waitFor();
+  await panel.getByRole('button',{name:'确认发送 1 条',exact:true}).click();
+  assert.equal(panelWrites.filter(value=>value.action==='confirm').length,0,'panel conflicts must not reach submission');
+  assert((await panel.innerText()).includes('修改一致后再发送'));
+  await panel.getByRole('button',{name:'返回修改',exact:true}).click();
+  const expandFields=panel.getByRole('button',{name:'编辑全部字段',exact:true});if(await expandFields.count())await expandFields.click();
+  await panel.locator('textarea[id$="-content"]').fill('每月检查');await panel.locator('textarea[id$="-reason"]').fill('按月度计划维护');
+  await panel.getByRole('button',{name:'预览所选 1 条',exact:true}).click();
   await panel.getByRole('button',{name:'确认发送 1 条',exact:true}).click();await panel.getByText('隔离发送成功',{exact:true}).waitFor();
   assert.equal(panelWrites.filter(value=>value.action==='confirm').length,1);
-  assert.equal(panelRun.items[0].draft.content,values.content);assert.equal(panelRun.items[0].draft.reason,values.reason);
+  assert.equal(panelRun.items[0].draft.content,'每月检查');assert.equal(panelRun.items[0].draft.reason,'按月度计划维护');
   assert.equal(await panelPage.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
   await panelContext.close();groups++;
  }
- console.log(`PASS: ${groups} source-browser viewport/action/theme groups; nonblocking start/update/end, unchanged payload, live withdrawal, assistant submission and type isolation. Screenshots: ${output}`);
+ console.log(`PASS: ${groups} source-browser viewport/action/theme groups; blocked start/update/end, corrected submissions, equivalent durations, draft retention and type isolation. Screenshots: ${output}`);
 }finally{await browser.close();await server.close();}

@@ -997,6 +997,8 @@ class PortalAgent:
         return urlunsplit(("", "", page.path, urlencode(params), ""))
 
     def get_plan(self, actor, identity):
+        from lan_bitable_template_portal.assistant_shared_read import original_actor
+        actor = original_actor(actor)
         plan = self.store.get_document(PLAN_NAMESPACE, identity)
         grant = actor.get('_shared_plan') or {}
         shared = bool(plan and grant.get('id') == identity and grant.get('owner') == plan.get('owner')
@@ -1246,6 +1248,8 @@ class PortalAgent:
         raise AssistantError("请先读取原重保任务，确定填报记录与版本后再填写。")
 
     def prepare(self, actor, decision, turn_id, file_ids, references=None, queries=None, *, question=""):
+        from lan_bitable_template_portal.assistant_shared_read import original_actor
+        actor = original_actor(actor)
         references = dict(references or {})
         operations = decision.get("operations")
         if not isinstance(operations, list) or not 1 <= len(operations) <= 10:

@@ -212,6 +212,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/lan_bitable_template_portal/pre_shift_location.py"),
     Path("bin/lan_bitable_template_portal/pre_shift_location_distribution.py"),
     Path("bin/lan_bitable_template_portal/lighthouse_bridge.py"),
+    Path("bin/lan_bitable_template_portal/assistant_shared_read.py"),
     Path("bin/openclaw_service/assistant/openclaw/runtime.json"),
     Path("bin/openclaw_service/assistant/openclaw/native-paths.mjs"),
     Path("bin/openclaw_service/assistant/openclaw/gateway-start.mjs"),
@@ -1701,7 +1702,7 @@ def _run_frontend_notice_navigation_checks() -> None:
         raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
     for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
                  "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
-                 "check-account-fixed-duty.mjs"):
+                 "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
@@ -1969,6 +1970,7 @@ def _run_packaging_preflight_tests() -> None:
                 "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_lighthouse_knowledge_stream_storage", "bin.test_notice_end_progress",
                 "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
                 "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
+                "bin.test_assistant_shared_read", "bin.test_lighthouse_shared_privacy",
          "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
         cwd=PROJECT_ROOT,
         check=True,
@@ -1995,7 +1997,7 @@ def _run_packaging_preflight_tests() -> None:
     _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_submission_reliability",
          "bin.test_event_remote_atomicity", "bin.test_event_notice_priority", "bin.test_event_notice_priority_recovery", "bin.test_event_notice_completion_recovery", "bin.test_notice_upload_reliability", "bin.test_notice_undo", "bin.test_notice_undo_fields", "bin.test_notice_undo_pairs",
-         "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
+         "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_repair_deleted_projection", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
         cwd=PROJECT_ROOT,
         check=True,
     )

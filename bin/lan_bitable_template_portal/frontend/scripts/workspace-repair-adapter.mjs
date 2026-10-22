@@ -136,7 +136,7 @@ export function adaptRepairController(source, kind, exposedNames) {
     script = script.slice(0,start) + `watch(projectDrawerOpen, open => {\n  if(open){projectDrawerReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;focusProjectDrawer();}\n  else clearSyncStatusTimer();\n});` + script.slice(end+'\n});'.length);
     script = editFunction(script, 'loadRecords', body => {
       let value=changeOnce(body,'  loading.value = true;',"  loading.value = true;v2RecordError.value='';");
-      value=changeOnce(value,'    records.value = Array.isArray(payload.records) ? payload.records : [];',"    records.value = Array.isArray(payload.records) ? payload.records : [];\n    v2RecordsReady.value=true;v2AppliedState.value=v2StateLabel.value;");
+      value=changeOnce(value,'    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));','    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));\n    v2RecordsReady.value=true;v2AppliedState.value=v2StateLabel.value;');
       return changeOnce(value,'    if (!silent) {',"    v2RecordError.value=error instanceof Error?error.message:'维修项目读取失败';\n    if (!silent) {");
     });
     script = editFunction(script,'handleFollowupChanged',body=>prepend(body,'  void v2LoadStats();'));

@@ -13,7 +13,7 @@
       <CheckHistory v-if="historyOpen" :key="String(user.open_id)" :scope="scope" />
       <CheckOverview v-else-if="overviewOpen&&state.can_manage" :rows="state.overview?.rows||[]" :disabled="busy||uploading||saving" @select="openBuilding" />
       <div v-else class="v2-check-workspace">
-      <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy||uploading||saving" @click="selectedId=row.id"><span>{{ row.shift }}班<CheckCircle2 v-if="row.submitted" :size="14" /></span><small class="v2-check-window">{{compact?shortDate(row.due*1000):dateLabel(row.due*1000)}} 至 {{compact?shortDate(row.deadline*1000):dateLabel(row.deadline*1000)}}</small><small v-if="!compact">{{row.items.map((item:Dict)=>item.text).join('、')}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}}</small><small v-else>{{row.due>serverNow?(compact?'可提前检查':'未到时间，可提前检查'):row.deadline<=serverNow?(compact?'逾期待补做':'已逾期，可补做'):'待检查'}} · {{row.items.length}} 项</small></button></div>
+      <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy||uploading||saving" @click="selectedId=row.id"><span>{{ row.shift }}班<CheckCircle2 v-if="row.submitted" :size="14" /></span><small class="v2-check-window">{{compact?shortDate(row.due*1000):dateLabel(row.due*1000)}} 至 {{compact?shortDate(row.deadline*1000):dateLabel(row.deadline*1000)}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}} · {{row.items.length}} 项</small><small v-else>{{row.due>serverNow?(compact?'可提前检查':'未到时间，可提前检查'):row.deadline<=serverNow?(compact?'逾期待补做':'已逾期，可补做'):'待检查'}} · {{row.items.length}} 项</small></button></div>
       <div class="v2-check-task">
       <template v-if="task">
         <div class="v2-check-status" :class="{'is-complete':task.submitted}">
@@ -24,20 +24,20 @@
         <div v-if="task.submitted" class="v2-check-sync" role="status">{{ task.sync_status==='synced'?'已同步飞书':'本地已保存，飞书同步中' }}<span v-if="task.sync_error"> · {{ task.sync_error }}</span></div>
         <NAlert v-else-if="!task.can_submit" type="info" :bordered="false">仅本楼值班人员、值班账号或有该楼管理权限的上级可提交。</NAlert>
         <form class="v2-check-form" @submit.prevent="submit">
-          <div class="v2-check-items">
+          <div class="v2-check-items" role="group" aria-label="本次检查项目" tabindex="0">
             <fieldset v-for="(item,index) in task.items" :key="item.id" class="v2-check-item">
               <legend><span>{{ index+1 }}</span>{{ item.text }}</legend>
               <div class="v2-check-result">
               <NRadioGroup :value="answer(item.id).status" :name="task.id+'-'+item.id" :disabled="busy || !task.can_submit" :aria-label="item.text" @update:value="value=>setAnswer(item.id,String(value))">
-                <NRadioButton value="normal">无异常</NRadioButton><NRadioButton value="abnormal">异常</NRadioButton>
+                <NRadioButton class="v2-check-normal" value="normal">无异常</NRadioButton><NRadioButton class="v2-check-abnormal" value="abnormal">异常</NRadioButton>
               </NRadioGroup>
-              <NButton v-if="compact" quaternary circle :aria-label="item.text+'附件'" :aria-expanded="!!attachmentOpen[task.id+':'+item.id]" :title="'附件 '+(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length+' 个'" :disabled="busy||uploading||!task.can_submit&&!(task.files||[]).some((f:Dict)=>f.item_id===item.id)" @click="attachmentOpen[task.id+':'+item.id]=!attachmentOpen[task.id+':'+item.id]"><Paperclip :size="16" /></NButton>
+              <NButton class="v2-check-attachment-toggle" quaternary :aria-label="item.text+'附件'" :aria-expanded="!!attachmentOpen[task.id+':'+item.id]" :title="'附件 '+(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length+' 个'" :disabled="busy||uploading||!task.can_submit&&!(task.files||[]).some((f:Dict)=>f.item_id===item.id)" @click="attachmentOpen[task.id+':'+item.id]=!attachmentOpen[task.id+':'+item.id]"><Paperclip :size="16" /><span v-if="(task.files||[]).some((f:Dict)=>f.item_id===item.id)">{{(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length}}</span></NButton>
               </div>
               <Transition name="v2-check-note"><div v-if="answer(item.id).status==='abnormal'" class="v2-check-note">
                 <label :for="'check-note-'+task.id+'-'+item.id">异常备注 <span v-if="!task.submitted">*</span></label>
                 <NInput :value="answer(item.id).note" type="textarea" :autosize="{minRows:compact?1:2,maxRows:4}" :maxlength="500" :disabled="busy || !task.can_submit" :input-props="{id:'check-note-'+task.id+'-'+item.id,'aria-label':item.text+'异常备注'}" placeholder="填写异常情况" @update:value="value=>setNote(item.id,value)" />
               </div></Transition>
-              <CheckAttachments v-if="!compact||attachmentOpen[task.id+':'+item.id]" :task-id="task.id" :item-id="item.id" kind="item" :files="(task.files||[]).filter((f:Dict)=>f.item_id===item.id)" :locked="busy||uploading||!task.can_submit" @busy="uploading=$event" @changed="load(true)" />
+              <CheckAttachments v-if="attachmentOpen[task.id+':'+item.id]" :task-id="task.id" :item-id="item.id" kind="item" :files="(task.files||[]).filter((f:Dict)=>f.item_id===item.id)" :locked="busy||uploading||!task.can_submit" @busy="uploading=$event" @changed="load(true)" />
             </fieldset>
           </div>
           <footer v-if="task.can_submit"><span>{{ answered===task.items.length?'检查项已填完，请核对后提交':'逐项选择检查结果' }}</span><NButton type="primary" attr-type="submit" :loading="busy" :disabled="busy||uploading">提交检查</NButton></footer>
@@ -165,6 +165,16 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 </style>
 <style>
 .workspace-v2 .v2-check-choice{min-height:88px;padding:12px}
-.workspace-v2 .v2-check-result .n-radio-button{min-height:44px;min-width:88px;display:inline-flex;align-items:center;justify-content:center}
+.v2-check-items{max-height:min(480px,58dvh);overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding-inline:4px 8px}
+.v2-check-items:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
+.v2-check-item{flex-shrink:0}
+.v2-check-item legend{font-size:16px;font-weight:600;line-height:1.6}
+.v2-check-item>.v2-check-attachments{grid-column:1/-1}
+.v2-check-result .n-radio-button{min-height:44px;min-width:88px;display:inline-flex;align-items:center;justify-content:center}
+.v2-check-result .v2-check-normal{--n-button-color-active:#15803d;--n-button-text-color-active:#fff;--n-button-border-color-active:#15803d}
+.v2-check-result .v2-check-abnormal{--n-button-color-active:#b42318;--n-button-text-color-active:#fff;--n-button-border-color-active:#b42318}
+.v2-check-result .n-radio-button--checked{--n-opacity-disabled:1}
+.v2-check-result .v2-check-attachment-toggle{min-height:44px;min-width:44px;padding-inline:8px}
+.v2-check-attachment-toggle .n-button__content{gap:4px}
 @media(max-width:760px){.workspace-v2 .v2-check-result{justify-self:stretch;justify-content:stretch}.workspace-v2 .v2-check-result .n-radio-group{display:flex;flex:1}.workspace-v2 .v2-check-result .n-radio-button{flex:1}}
 </style>

@@ -18,7 +18,8 @@ class PackagingTests(unittest.TestCase):
     def test_notice_navigation_browser_checks_are_mandatory_and_failure_stops(self):
         expected = ['check-workspace-navigation.mjs', 'check-legacy-module-entry.mjs',
                     'check-notice-photo-paste.mjs', 'check-legacy-notice-cycle.mjs',
-                    'check-notice-cycle-warnings.mjs', 'check-account-fixed-duty.mjs']
+                    'check-notice-cycle-warnings.mjs', 'check-account-fixed-duty.mjs',
+                    'check-assistant-shared-query.mjs']
         frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
         with patch.object(package.shutil, 'which', return_value='fixture-node'), \
                 patch.object(package, '_run_preflight_check') as run:
@@ -58,6 +59,9 @@ class PackagingTests(unittest.TestCase):
             self.assertFalse(dependencies._has_module('onnxruntime'))
 
     def test_sdk_and_all_local_server_modules_are_in_update_contract(self):
+        policy = Path('bin/lan_bitable_template_portal/assistant_shared_read.py')
+        self.assertIn(policy, package.FORCE_PATCH_INCLUDE_FILES)
+        self.assertFalse(package._is_development_only_path(ROOT / policy, ROOT))
         self.assertEqual(package.RUNTIME_MODULE_TO_PACKAGE['mcp'], 'mcp==1.30.0')
         self.assertIn('mcp', package.RUNTIME_PACKAGE_INSTALL_ORDER)
         for name in ('lighthouse_extensions.py', 'lighthouse_mcp_builtin.py', 'lighthouse_mcp_office.py', 'lighthouse_mcp_public.py'):

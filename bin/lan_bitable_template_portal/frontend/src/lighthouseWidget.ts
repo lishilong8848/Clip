@@ -14,9 +14,10 @@ if (host?.dataset.userId && !host.hasChildNodes() && !(window.parent !== window 
     loading = true;
     try {
       const status = await requestJson('/api/auth/status');
-      const modules = status.logged_in && status.user?.open_id === host!.dataset.userId ? status.user.modules || [] : [];
+      const available = status.logged_in && status.user?.open_id === host!.dataset.userId && status.user.role !== 'guest' && !status.user.impersonation;
+      const modules = available ? status.user.modules || [] : [];
       setModulePermissions(modules);
-      if (modules.includes('assistant')) {
+      if (available) {
         if (!app) {
           app = createApp(Assistant, { userId: host!.dataset.userId, userName: host!.dataset.userName || '' });
           app.component('LoadingIndicator', LoadingIndicator).component('UiTransition', UiTransition).mount(host!);

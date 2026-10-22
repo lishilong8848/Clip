@@ -1,13 +1,13 @@
-"""Maintenance-only advisory checks and existing message delivery recovery."""
+"""Maintenance cycle equivalence, send guards and existing delivery recovery."""
 import copy
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from upload_event_module.services.notice_cycle_warnings import (
-    maintenance_cycle_rules, maintenance_cycle_warnings, maintenance_reminder_text,
+    maintenance_cycle_rules, maintenance_cycle_warnings, maintenance_reminder_text, maintenance_cycle_error,
 )
 from upload_event_module.services.handlers.base import NoticePayload
 from upload_event_module.services.handlers.maintenance_notice import MaintenanceNoticeHandler
@@ -22,8 +22,8 @@ class CycleWarningTests(unittest.TestCase):
         values = {'content': '季度设备维护', 'reason': '按半年度、年度维保计划执行'}
         before = copy.deepcopy(values)
         result = maintenance_cycle_warnings('维保通告', '月度', **values)
-        self.assertEqual([(r['field'], r['terms']) for r in result], [('content', ['季度']), ('reason', ['半年度', '年度'])])
-        self.assertTrue(all(r['cycle'] == '每月' and '不阻止发送' in r['message'] for r in result))
+        self.assertEqual([(r['field'], r['terms']) for r in result], [('content', ['季度']), ('reason', ['按半年度', '年度'])])
+        self.assertTrue(all(r['cycle'] == '每月' and '修改一致后再发送' in r['message'] for r in result))
         self.assertEqual(values, before)
 
     def test_longest_alias_prevents_half_year_and_multi_year_false_positives(self):
@@ -43,10 +43,35 @@ class CycleWarningTests(unittest.TestCase):
         self.assertEqual(maintenance_reminder_text('维保通告', '每月', body), body)
 
     def test_missing_custom_cycle_or_corrected_content_has_no_warning(self):
-        for cycle in ('', '/', None, '每18个月', '按设备说明书'):
+        for cycle in ('', '/', None, '按设备说明书'):
             self.assertEqual(maintenance_cycle_warnings('维保通告', cycle, '季度', '年度'), [])
         self.assertEqual(maintenance_cycle_warnings('维保通告', '每月', '月度维护', '按每月计划'), [])
         self.assertEqual(maintenance_cycle_warnings('维保通告', '每季', '季度维护', '按每季计划'), [])
+
+    def test_equivalent_intervals_are_not_limited_to_fixed_aliases(self):
+        for cycle, content in [
+            ('每季', '每三个月、三个月、3个月、一个季度和季度保养'),
+            ('半年', '六个月、每6个月、0.5年、半年度'),
+            ('每年', '每十二个月、12个月、一年保养'),
+            ('每两年', '24个月、二十四个月和双年度保养'),
+            ('每周', '七天、7日和一周维护'),
+            ('每18个月', '十八个月维护'),
+            ('每45天', '四十五天维护'),
+        ]:
+            with self.subTest(cycle=cycle, content=content):
+                self.assertEqual(maintenance_cycle_warnings('维保通告', cycle, content), [])
+        for count in (2, 4, 9, 18, 36, 72):
+            self.assertEqual(maintenance_cycle_warnings('维保通告', f'每{count}个月', f'{count}个月检查'), [])
+            self.assertTrue(maintenance_cycle_warnings('维保通告', f'每{count}个月', f'{count+1}个月检查'))
+
+    def test_conflicts_dates_quantities_and_units_are_distinguished(self):
+        self.assertEqual(maintenance_cycle_warnings('维保通告', '每月', '2026年10月21日核对3台、12个设备'), [])
+        self.assertEqual(maintenance_cycle_warnings('维保通告', '每季', '计划在3月检修，一月维护完成'), [])
+        for cycle, content in [('每季','每两个月维护'), ('半年','3个月保养'), ('每年','每十八个月保养'),
+                               ('每周','每两周保养'), ('每月','30天检查')]:
+            self.assertTrue(maintenance_cycle_warnings('维保通告', cycle, content), (cycle,content))
+        self.assertEqual(maintenance_cycle_error('维保通告','每季',notice(content='3个月检查',reason='按季度计划')), '')
+        self.assertIn('【原因】',maintenance_cycle_error('维保通告','每季',notice(content='3个月检查',reason='每月检查')))
 
     def test_shared_rules_cover_every_alias_and_do_not_expose_mutable_constants(self):
         for rule in maintenance_cycle_rules():
@@ -148,3 +173,62 @@ class PersonalWarningTests(unittest.TestCase):
         with patch.object(portal, 'send_text_to_open_ids', side_effect=self.fx.send_ok) as send:
             self.fx.service.send_action_personal_message(prepared)
         self.assertTrue(all(call.args[0] == prepared['text'] for call in send.call_args_list))
+
+
+class CycleSendGuardTests(unittest.TestCase):
+    def test_direct_single_and_batch_uploads_reject_before_auth_network_or_messages(self):
+        from upload_event_module.services import feishu_service as feishu
+        with patch.object(feishu,'check_token_status') as auth, patch.object(feishu,'_send_robot_message') as send:
+            for action in ('开始','更新','结束'):
+                payload=NoticePayload(text=notice(action),maintenance_cycle='每月')
+                original=copy.deepcopy(payload)
+                results=[feishu.create_bitable_record_by_payload('维保通告',payload),
+                         feishu.update_bitable_record_by_payload('target','维保通告',payload)]
+                results+=feishu.batch_create_bitable_records_by_payload('维保通告',[payload])
+                results+=feishu.batch_update_bitable_records_by_payload('维保通告',[('target',payload)])
+                self.assertTrue(all(not ok and '修改一致后再发送' in message for ok,message in results))
+                self.assertEqual(payload,original)
+            auth.assert_not_called()
+            send.assert_not_called()
+
+    def test_corrected_and_other_notice_types_reach_original_upload_flow(self):
+        from upload_event_module.services import feishu_service as feishu
+        with patch.object(feishu,'check_token_status',return_value=False) as auth, patch.object(feishu,'feishu_auth_error',return_value='fixture-auth'):
+            for kind, text in [('维保通告',notice(content='每三个月检查',reason='按季度计划')), ('变更通告',notice(kind='变更通告'))]:
+                payload=NoticePayload(text=text,maintenance_cycle='每季')
+                self.assertEqual(feishu.create_bitable_record_by_payload(kind,payload),(False,'fixture-auth'))
+                self.assertEqual(feishu.update_bitable_record_by_payload('target',kind,payload),(False,'fixture-auth'))
+            self.assertEqual(auth.call_count,4)
+
+    def test_backend_web_and_qt_guards_precede_any_remote_side_effect(self):
+        from lan_bitable_template_portal import server
+        from lan_bitable_template_portal.portal_service import PortalError
+        with patch.object(server,'external_real_write_guard',side_effect=AssertionError('must not reach write flow')):
+            for action in ('start','update','end'):
+                text=notice({'start':'开始','update':'更新','end':'结束'}[action])
+                prepared={'notice_type':'维保通告','action':action,'maintenance_cycle':'每月','text':text}
+                self.assertEqual(server.PortalRuntime._execute_backend_prepared_upload(prepared)[0],False)
+                with self.assertRaisesRegex(PortalError,'修改一致后再发送'):
+                    server.PortalRuntime._execute_local_notice_upload({'action_type':'upload' if action=='start' else action,'data_dict':prepared})
+
+    def test_web_prepare_uses_authoritative_cycle_and_preserves_draft(self):
+        from lan_bitable_template_portal.portal_service import MaintenancePortalService, PortalError
+        service=object.__new__(MaintenancePortalService)
+        service.ensure_snapshot_loaded=Mock()
+        service._require_end_site_photo_cumulative=Mock()
+        service._resolve_notice_submit_building=Mock(return_value=('A楼',['A']))
+        service._remember_draft_fields=Mock()
+        service._recipients_for_building_codes=Mock(return_value=('A',['duty'],''))
+        for action in ('start','update','end'):
+            payload={'action':action,'manual':True,'record_id':'manual:fixture','target_record_id':'target' if action!='start' else '',
+                     'scope':'A','title':'A楼过滤器检查','building':'A楼','specialty':'暖通','maintenance_cycle':'每季',
+                     'content':'每月保养','reason':'季度检查','start_time':'2026-10-22 09:00','end_time':'2026-10-22 18:00'}
+            original=copy.deepcopy(payload)
+            with self.assertRaisesRegex(PortalError,'【内容】'):
+                service.prepare_maintenance_action(payload,job_id='cycle-'+action)
+            self.assertEqual(payload,original)
+            service._remember_draft_fields.assert_not_called()
+            payload['content']='每三个月保养'
+            result=service.prepare_maintenance_action(payload,job_id='cycle-'+action)
+            self.assertEqual(result['content'],payload['content'])
+            service._remember_draft_fields.reset_mock()

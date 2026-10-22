@@ -132,7 +132,7 @@ def read_document(service, actor, url, offset=0):
     if not isinstance(document, dict) or not isinstance(document.get('title'), str):
         raise AssistantError('飞书文档信息不完整，未继续读取。', 502)
     title = document['title']
-    if re.search(r'身份证|住址|密码|密钥|凭证|secret|password', title, re.I):
+    if re.search(r'身份证|住址|密码|密碼|密钥|密鑰|秘钥|凭证|凭据|憑證|憑據|令牌|secret|password|token', title, re.I):
         raise AssistantError('该文档涉及身份或凭证信息，不向助手开放。', 403)
     title_scopes = codes(title)
     if title_scopes - set(actor['scopes']):

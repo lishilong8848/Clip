@@ -4573,6 +4573,7 @@ class ScreenshotConfirmDialog(QDialog):
 
         if key == "text":
             self._refresh_maintenance_cycle_warnings()
+            self._refresh_submit_state()
 
 
 
@@ -6199,6 +6200,9 @@ class ScreenshotConfirmDialog(QDialog):
         cycle_valid = (not self.enable_maintenance_cycle_select) or bool(
             self.selected_maintenance_cycle
         )
+        cycle_consistent = self.notice_type != "维保通告" or not maintenance_warnings_from_notice(
+            self.notice_type, self.selected_maintenance_cycle, (self.data_dict or {}).get("text", "")
+        )
         execution_party_valid = (not self.enable_execution_party_select) or bool(
             self.selected_execution_party
         )
@@ -6221,6 +6225,8 @@ class ScreenshotConfirmDialog(QDialog):
             missing_fields.append("事件来源")
         if not cycle_valid:
             missing_fields.append("维保周期")
+        if not cycle_consistent:
+            missing_fields.append("内容、原因与维保周期一致")
         if not execution_party_valid:
             missing_fields.append("执行方")
         if not specialty_valid:
@@ -6234,6 +6240,7 @@ class ScreenshotConfirmDialog(QDialog):
             and level_valid
             and source_valid
             and cycle_valid
+            and cycle_consistent
             and execution_party_valid
             and specialty_valid
             and images_ready
@@ -8464,6 +8471,11 @@ class ScreenshotConfirmDialog(QDialog):
 
         self._suppress_ocr_cancel_on_hide = False
 
+        if self.notice_type == "维保通告" and maintenance_warnings_from_notice(self.notice_type, self.selected_maintenance_cycle, (self.data_dict or {}).get("text", "")):
+            self._refresh_maintenance_cycle_warnings()
+            show_simple_message(self, self.maintenance_cycle_warning_label.text(), self.theme)
+            return
+
         if self._qt_notice_requires_screenshot():
 
             message = "更新通告必须上传通告截图。"
@@ -8593,6 +8605,11 @@ class ScreenshotConfirmDialog(QDialog):
     def confirm_upload(self):
 
         self._suppress_ocr_cancel_on_hide = False
+
+        if self.notice_type == "维保通告" and maintenance_warnings_from_notice(self.notice_type, self.selected_maintenance_cycle, (self.data_dict or {}).get("text", "")):
+            self._refresh_maintenance_cycle_warnings()
+            show_simple_message(self, self.maintenance_cycle_warning_label.text(), self.theme)
+            return
 
         if not self._validate_end_site_photo():
 

@@ -211,7 +211,7 @@ class LiveConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_model_stream_is_visible_while_generator_is_blocked(self):
         released = asyncio.Event()
         async def model_stream(messages, info):
-            self.assertFalse(info.function_tools, 'live general answer must not have business tools')
+            self.assertTrue(info.function_tools, 'ordinary streaming keeps model-selected tools available without forcing a query')
             yield '冒泡排序会逐对比较'
             await released.wait()
             yield '将较大的数移到右侧。'

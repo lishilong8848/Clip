@@ -124,9 +124,30 @@ class AssistantTables:
             raise AssistantError('多维表分页不完整，不能判断为零条。', 503)
 
     def read(self, actor, query):
-        allowed_keys = {'table_id', 'fields', 'filters', 'cursor', 'limit', 'metadata_only'}
+        allowed_keys = {'table_id', 'fields', 'filters', 'cursor', 'limit', 'metadata_only', 'complete'}
         if not isinstance(query, dict) or set(query) - allowed_keys:
             raise AssistantError('只读表格查询参数无效。')
+        if type(query.get('complete', False)) is not bool:
+            raise AssistantError('完整查询参数无效。')
+        if query.get('complete') and not query.get('metadata_only'):
+            current = {key: value for key, value in query.items() if key != 'complete'}
+            rows, cursors, deadline = {}, set(), time.monotonic() + 25
+            for _ in range(20):
+                page = self.read(actor, current)
+                for row in page['items']:
+                    rid = row['record_id']
+                    if rid in rows and rows[rid] != row:
+                        raise AssistantError('分页期间记录已变化，请重新核对；未返回不一致的汇总。', 409)
+                    rows[rid] = row
+                cursor = page['cursor']
+                if not page['has_more'] or time.monotonic() >= deadline:
+                    break
+                if not cursor or cursor in cursors:
+                    raise AssistantError('多维表分页游标未前进，未将部分数据当作完整结果。', 503)
+                cursors.add(cursor)
+                current['cursor'] = cursor
+            return {**page, 'items': list(rows.values()), 'visible_page_count': len(rows),
+                    'complete': not page['has_more'], 'note': '仅统计已授权、实际读取的记录；complete=false时仍有后续页，不能作为完整总数。'}
         item = self.table(query.get('table_id'))
         if re.search(r'密钥|凭证|密码|令牌|模型配置|应用配置|账号配置|token|secret', item['name'] + item['category'], re.I):
             raise AssistantError('凭证及安全配置表不向助手开放直接读取，请使用原安全设置页面。', 403)
@@ -230,3 +251,24 @@ class AssistantTables:
             raise AssistantError('人员表未完整读取，未返回不可靠的人数。', 503)
         saved = self.cached('staff-count', 300, load)
         return summarize_staff(saved['value'], actor, observed_at=saved['observed_at'], source_url=item['url'])
+
+    def roster_count(self, actor, day, shift=''):
+        import datetime as dt
+        from .learning_reminders import read_roster, APP_TOKEN, TABLE_ID, VIEW_ID
+        from openclaw_service.assistant.lighthouse_people_stats import summarize_roster
+        try:
+            if not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day or shift not in {'', '白', '夜'}:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise AssistantError('排班统计日期或班次无效。') from None
+        scopes = sorted(actor.get('scopes') or [])
+        if not scopes or not set(scopes) <= set(SCOPES):
+            raise AssistantError('当前账号未配置可查询的楼栋范围。', 403)
+        def load():
+            try:
+                return read_roster(self.service, day, scopes=scopes)
+            except ValueError:
+                raise AssistantError('排班视图未完整读取，不能确认人数；请稍后重试。', 503) from None
+        saved = self.cached('roster-count:' + day + ':' + ','.join(scopes), 60, load)
+        return summarize_roster(saved['value'], actor, day=day, shift=shift, observed_at=saved['observed_at'],
+            source_url=f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}&view={VIEW_ID}')

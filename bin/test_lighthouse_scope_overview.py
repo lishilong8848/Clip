@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi import Request
 from lan_bitable_template_portal.lighthouse_model import scoped_operation
 from lan_bitable_template_portal.portal_service import PortalError
+from lan_bitable_template_portal.module_access import MODULE_IDS
 from test_lighthouse_frontend_contracts import build_native_catalog
 
 OPTIONS = [{'value': code, 'label': code + '楼'} for code in ('A', 'B', 'C', 'D', 'E', 'H', '110', 'CAMPUS', 'ALL')]
@@ -24,6 +25,7 @@ class ScopeOverviewTests(unittest.IsolatedAsyncioTestCase):
         service.get_scope_overview.side_effect = lambda **kw: {'source_snapshot_ready': True,
             'scope_options': OPTIONS, 'scopes': {scope: {'scope': scope, 'ongoing': 1} for scope in kw['scopes']}}
         auth = SimpleNamespace(filter_scope_options=lambda options, _session: options if 'ALL' in allowed else [o for o in options if o['value'] in allowed],
+                               account_profile=lambda _: {'modules': list(MODULE_IDS)},
                                filter_scope_overview=lambda data, _session: data)
         def authorized(_session, scope):
             if scope not in {o['value'] for o in OPTIONS} or ('ALL' not in allowed and scope not in allowed):

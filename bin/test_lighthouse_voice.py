@@ -628,7 +628,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
              patch.object(module, 'Voice', side_effect=voice_factory):
             async with contextlib.AsyncExitStack() as cleanup, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://voice.test') as client:
                 cleanup.push_async_callback(hooks['shutdown'])
-                for identity in ('user', 'temporary', 'external'):
+                for identity in ('user', 'temporary', 'external', 'no-assistant'):
                     with self.subTest(identity=identity):
                         headers = {'x-test-account': identity}
                         response = await client.get('/api/assistant/voice', headers=headers)
@@ -659,9 +659,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(response.content, WAV)
                         denied = await client.put('/api/assistant/voice', headers=headers, json={'stt': {'enabled': False}})
                         self.assertEqual(denied.status_code, 403, denied.text)
-                self.assertEqual(len(self.requests), 6)
+                self.assertEqual(len(self.requests), 8)
                 before = self.factory.call_count
-                for identity, status in (('guest', 403), ('flagged-guest', 403), ('no-assistant', 403), ('signed-out', 401)):
+                for identity, status in (('guest', 403), ('flagged-guest', 403), ('signed-out', 401)):
                     for method, path, payload in (('GET', '/api/assistant/voice', None),
                             ('POST', '/api/assistant/voice', {'action': 'transcribe', 'file_id': file_id}),
                             ('POST', '/api/assistant/voice', {'action': 'synthesize', 'text': 'Hello'}),
@@ -670,7 +670,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                             response = await client.request(method, path, headers={'x-test-account': identity}, json=payload)
                             self.assertEqual(response.status_code, status, response.text)
                 self.assertEqual(self.factory.call_count, before)
-                self.assertEqual(len(self.requests), 6)
+                self.assertEqual(len(self.requests), 8)
 
     async def test_runtime_blocks_audio_egress_but_owned_dedicated_transcription_works(self):
         from fastapi import FastAPI

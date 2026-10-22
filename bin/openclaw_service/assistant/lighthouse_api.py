@@ -3140,7 +3140,23 @@ class PortalAPICatalog:
         scope = getattr(request, 'scope', None)
         state = scope.get('state') if isinstance(scope, dict) else None
         delegated = state.get('lighthouse_topic_execution') if isinstance(state, dict) else None
-        if delegated is not None:
+        shared = state.get('assistant_shared_business_read') if isinstance(state, dict) else None
+        if shared is not None:
+            from lan_bitable_template_portal.assistant_shared_read import SharedRead, SHARED_READ
+            if not isinstance(shared, SharedRead) or not shared.matches_operation(normalized):
+                raise AssistantError('共享只读授权与请求不一致。', 403)
+            original_app = target_app
+            async def target_app(scope, receive, send):
+                if scope.get('type') != 'http' or not shared.matches(scope.get('method'), scope.get('path')):
+                    raise AssistantError('共享只读授权不能用于其它请求。', 403)
+                await asyncio.to_thread(shared.validate)
+                token = SHARED_READ.set(shared)
+                try:
+                    await original_app(scope, receive, send)
+                finally:
+                    shared.active = False
+                    SHARED_READ.reset(token)
+        elif delegated is not None:
             from lan_bitable_template_portal.portal_auth import TOPIC_EXECUTION, TopicExecution
             if not isinstance(delegated, TopicExecution) or not delegated.matches_operation(normalized):
                 raise AssistantError('话题授权与原业务请求不一致。', 403)

@@ -13,7 +13,7 @@ from urllib.parse import quote, urlencode
 
 from lan_bitable_template_portal.identity_utils import is_local_record_id
 from upload_event_module.building_normalizer import extract_building_codes
-from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
+from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules, MAINTENANCE_CYCLE_DURATION_PATTERN, MAINTENANCE_CYCLE_DATE_PATTERN
 
 
 WORK_TYPE_LABELS: dict[str, str] = {
@@ -6279,24 +6279,43 @@ def render_workbench_lite(
       try {{ rules = JSON.parse(form.dataset.maintenanceCycleRules || '[]'); }} catch {{}}
       if (!Array.isArray(rules)) rules = [];
       const owner = new Map();
-      for (const rule of rules) for (const alias of rule.aliases || []) if (typeof alias === 'string' && alias) owner.set(alias, rule.value);
+      for (const rule of rules) for (const alias of rule.aliases || []) if (typeof alias === 'string' && alias) owner.set(alias, rule);
       const aliases = [...owner.keys()].sort((a,b)=>b.length-a.length);
+      const durationPattern = {_json_dumps(MAINTENANCE_CYCLE_DURATION_PATTERN)};
+      function interval(term) {{
+        if (owner.has(term)) return owner.get(term).interval.join(':');
+        const match = new RegExp('^(?:'+durationPattern+')$').exec(term);
+        if (!match) return '';
+        const [,quantity,unit] = match;
+        if(unit==='月'&&!term.includes('个')&&!/^(每|按|隔)/.test(term)&&!/(一次|1次|\\/次)$/.test(term))return '';
+        let count = quantity === '半' ? 0.5 : Number(quantity);
+        if (Number.isNaN(count)) {{
+          count=0;let digit=0;
+          const digits={{零:0,〇:0,一:1,二:2,两:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9}};
+          for (const char of quantity) if (char in digits) digit=digits[char]; else {{ count+=(digit||1)*({{十:10,百:100,千:1000}}[char]);digit=0; }}
+          count+=digit;
+        }}
+        if(count<=0||['年','年度'].includes(unit)&&count>=1000)return '';
+        return (['星期','周','天','日'].includes(unit)?'day':'month')+':'+count*({{季度:3,季:3,年:12,年度:12,星期:7,周:7}}[unit]||1);
+      }}
+      const pattern=aliases.map(term=>term.replace(/[.*+?^${{}}()|[\\]\\\\]/g,'\\\\$&')).join('|')+'|'+durationPattern;
       const enabled = previewValue(form, 'work_type') === 'maintenance' && previewValue(form, 'notice_type') === '维保通告';
-      const cycle = enabled ? owner.get(previewValue(form, 'maintenance_cycle').trim()) : '';
+      const selected=previewValue(form,'maintenance_cycle').trim(),cycle=enabled?interval(selected):'';
       const warnings = [];
       for (const [field,label] of [['content','内容'],['reason','原因']]) {{
         const control = form.querySelector(`[name="${{field}}"]`), value = previewValue(form, field), terms = new Set();
-        if (cycle) for (let i=0;i<value.length;) {{
-          const term = aliases.find(alias=>value.startsWith(alias,i));
-          if (term) {{ if (owner.get(term)!==cycle) terms.add(term); i+=term.length; }} else i++;
+        if (cycle) for (const match of value.replace(new RegExp({_json_dumps(MAINTENANCE_CYCLE_DATE_PATTERN)},'g'),' ').matchAll(new RegExp(pattern,'g'))) {{
+          const term=match[0].trim(),found=interval(term);
+          if(found&&found!==cycle)terms.add(term);
         }}
         if (control) {{
           control.classList.toggle('cycle-mismatch',terms.size>0);
+          control.setCustomValidity(terms.size?'内容或原因与所选维保周期不一致，请修改后再发送。':'');
           const described = (control.getAttribute('aria-describedby')||'').split(' ').filter(id=>id&&id!=='lite-cycle-warning');
           if (terms.size) described.push('lite-cycle-warning');
           if (described.length) control.setAttribute('aria-describedby',described.join(' ')); else control.removeAttribute('aria-describedby');
         }}
-        if (terms.size) warnings.push(`已选维保周期“${{cycle}}”，【${{label}}】含其它周期字样“${{[...terms].join('、')}}”，请核对（仅提醒，不阻止发送）。`);
+        if (terms.size) warnings.push(`已选维保周期“${{owner.get(selected)?.value||selected}}”，【${{label}}】含不一致的周期“${{[...terms].join('、')}}”，请修改一致后再发送开始、更新或结束。`);
       }}
       panel.textContent = warnings.join('\\n'); panel.hidden = !warnings.length;
       return warnings;
@@ -6361,6 +6380,12 @@ def render_workbench_lite(
       if (workType === 'polling') updatePollingSelectionSummary(targetForm);
       const sitePhotoCount = Number(previewValue(targetForm, 'site_photo_count') || 0);
       const buttons = targetForm.querySelectorAll('button[name="submit_action"]');
+      const cycleIssues=updateMaintenanceCycleWarnings(targetForm);
+      if(cycleIssues.length) {{
+        buttons.forEach(button=>button.disabled=true);
+        setActionReason(cycleIssues.join('\\n'),'blocked');
+        return;
+      }}
       const titleIssue = syncRepairTitleValidity(targetForm);
       const bindingIssue = manualBindingIssue(targetForm);
       if (bindingIssue) {{
@@ -9700,6 +9725,8 @@ def render_workbench_lite(
       if (!form) return;
       event.preventDefault();
       if (form.classList.contains('is-submitting') || form.dataset.pendingActionJobId) return;
+      const cycleIssues=updateMaintenanceCycleWarnings(form);
+      if(cycleIssues.length) {{ showLiteError(cycleIssues.join('\\n')); updateActionAvailability(form); return; }}
       const submitter = event.submitter;
       const submitAction = form.dataset.pendingSubmitAction || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
       delete form.dataset.pendingSubmitAction;

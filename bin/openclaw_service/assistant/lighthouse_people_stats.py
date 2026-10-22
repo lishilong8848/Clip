@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Sequence
 from .lighthouse_ai import AssistantError
 from .lighthouse_sources import SCOPES, codes
 
-__all__ = ["personnel_count_request", "summarize_staff"]
+__all__ = ["personnel_count_request", "summarize_staff", "summarize_roster"]
 
 _HOW = re.compile(r"怎么|如何|怎样|何以|方法|步骤|教程|示例|例子|例题|统计出来|数出来|算一算|怎么数|怎么算|如何计算|怎么统计", re.I)
 _WEATHER = re.compile(r"天气|下雨|降雨|雨雪|气温|温度|湿度|风力|风速|风向|预报|weather|temperature|humidity|rain|forecast", re.I)
@@ -32,6 +32,40 @@ def personnel_count_request(question: Any) -> bool:
     if _ATTENDANCE.search(text) or _GENDER.search(text) or _QUALIFIER.search(text) or _SEND.search(text) or _PAST.search(text):
         return False
     return bool((_IN_SERVICE.search(text) or _STAFF.search(text)) and _COUNT.search(text))
+
+
+def summarize_roster(rows, actor, *, day, shift='', observed_at, source_url):
+    allowed = set(actor.get('scopes') or [])
+    if not allowed or not allowed <= set(SCOPES):
+        raise AssistantError('当前账号未配置可查询的楼栋范围。', 403)
+    shifts = [shift] if shift in {'白', '夜'} else ['白', '夜']
+    people = {}
+    for row in rows:
+        scope, duty_shift, name = row.get('scope'), row.get('shift'), str(row.get('name') or '').strip()
+        if scope not in allowed or duty_shift not in shifts:
+            continue
+        if not name:
+            raise AssistantError('排班名单姓名缺失，不能确认人数。', 503)
+        key = (scope, duty_shift, name)
+        oid = row.get('open_id') or ''
+        people[key] = oid if key not in people or people[key] == oid else ''
+    if not people:
+        raise AssistantError('未读取到所选日期和楼栋的排班名单，人数未知，不能按零人处理。', 503)
+    missing = [scope + '楼' + duty + '班' for scope in sorted(allowed) for duty in shifts
+               if not any(key[:2] == (scope, duty) for key in people)]
+    counts = [{'scope': scope, 'shift': duty, 'count': sum(key[:2] == (scope, duty) for key in people)}
+              for scope in sorted(allowed) for duty in shifts if any(key[:2] == (scope, duty) for key in people)]
+    unique = len(set(people.values())) if all(people.values()) else None
+    prefix = '已读取排班' if missing else '排班'
+    basis = f'{day}，' + (f'{shift}班' if shift else '白夜班') + f'{prefix}合计 **{len(people)} 个排班姓名项**'
+    basis += f'，按飞书身份去重 **{unique} 人**。' if unique is not None else '；部分人员身份未唯一确认，暂不提供跨楼栋、班次的去重总人数。'
+    basis += '\n\n' + '；'.join(f"{r['scope']}楼{r['shift']}班 {r['count']} 人" for r in counts) + '。'
+    if missing:
+        basis += '\n\n未读到排班：' + '、'.join(missing) + '；未计作零人，以上不是全部楼栋的完整总数。'
+    basis += '\n\n口径：按排班日期和人员（文本）统计，不含长白；同一人跨班次或楼栋分别计项，重名或身份缺失时不推断总人数，不代表实时签到。'
+    return {'name': '值班排班人数统计', 'date': day, 'shift': shift, 'assignment_count': len(people),
+            'unique_people': unique, 'per_building': counts, 'complete': not missing, 'missing': missing,
+            'observed_at': observed_at, 'source_url': source_url, 'basis': basis}
 
 
 def building_codes(value: Any):

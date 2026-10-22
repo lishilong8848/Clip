@@ -126,7 +126,7 @@ def topic_access_allowed(access, actor):
         capabilities = [{'legacy': {k: access.get(k) for k in ('scopes', 'modules', 'is_admin')},
                          **({'source_owner': access['source_owner']} if access.get('source_owner') else {})}]
     return (not access.get('source_owner') or access['source_owner'] == actor['id']) and all(
-        (not cap.get('source_owner') or cap['source_owner'] == actor['id']) and any(topic_capable(profile, cap) for profile in profiles)
+        (not cap.get('source_owner') or cap['source_owner'] == actor['id']) and (cap.get('shared_business_read') is True or any(topic_capable(profile, cap) for profile in profiles))
         for cap in capabilities)
 
 
@@ -162,7 +162,7 @@ class TopicDelegations:
                 or not re.fullmatch(r'ou_[A-Za-z0-9]+', str(message.get('sender_id') or ''))
                 or topic != expected or actor.get('channel') != 'feishu:' + chat):
             return False
-        if not self.profile(actor['id']):
+        if not self.profile(actor['id'], shared_query=True):
             raise PortalError('当前话题参与人的账号已停用或权限已撤销。')
         with self.lock:
             record = self.store.get_document(TOPIC_NAMESPACE, self.key(topic)) or {'id': topic, 'people': {}}
@@ -174,14 +174,14 @@ class TopicDelegations:
             self.store.put_document(TOPIC_NAMESPACE, self.key(topic), record)
         return True
 
-    def profile(self, identity):
+    def profile(self, identity, *, shared_query=False):
         if self.auth._open_id_explicitly_disabled(identity):
             return None
         person = self.auth.directory_person(identity)
         if person and (person.get('inactive') or not person.get('selectable')):
             return None
         profile = self.auth.account_profile(identity)
-        if 'assistant' not in profile.get('modules', []):
+        if not shared_query and 'assistant' not in profile.get('modules', []):
             return None
         scopes = set(profile.get('scope_rules', []))
         if 'ALL' in scopes:
@@ -193,7 +193,7 @@ class TopicDelegations:
     def evidence(self, topic, operator):
         record = self.store.get_document(TOPIC_NAMESPACE, self.key(topic)) or {}
         evidence = record.get('people', {}) if record.get('id') == topic else {}
-        if operator not in evidence or not self.profile(operator):
+        if operator not in evidence or not self.profile(operator, shared_query=True):
             raise PortalError('当前操作人不是有效的话题参与人。')
         return evidence
 
@@ -212,6 +212,8 @@ class TopicDelegations:
                 'modules': sorted(set(modules).union(*(set(p['modules']) for p in profiles)))}
 
     def issue(self, topic, operator, capability):
+        if not self.profile(operator):
+            raise PortalError('当前账号仅可共享查询，未获授话题业务操作权限。')
         profiles = self.participants(topic, operator)
         eligible = [p['id'] for p in profiles if topic_capable(p, capability)]
         if not eligible:
@@ -239,6 +241,8 @@ class TopicExecution:
         self.operator = grant['operator']
 
     def validate(self):
+        if not self.registry.profile(self.operator):
+            raise PortalError('当前操作人的话题业务权限已撤销。')
         evidence = self.registry.evidence(self.grant['topic'], self.operator)
         sponsor = next((p for identity in self.grant['eligible'] if identity in evidence
                         and (p := self.registry.profile(identity)) and topic_capable(p, self.grant['capability'])), None)
@@ -587,6 +591,10 @@ class PortalAuthManager:
 
     def account_profile(self, open_id: str) -> dict[str, Any]:
         identity = str(open_id or '').strip()
+        from .assistant_shared_read import SHARED_READ
+        shared = SHARED_READ.get()
+        if shared is not None and shared.active and shared.auth is self and shared.operator == identity:
+            return shared.profile(self._account_profile(identity))
         read = self._account_read_state()
         if read is None:
             return self._account_profile(identity)

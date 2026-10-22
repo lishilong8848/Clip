@@ -321,6 +321,10 @@ async function readLatest(): Promise<void> {
 }
 async function act(action: string): Promise<void> {
   if (!run.value || busy.value || uploading.value) return;
+  if(['confirm','retry','confirm_unmatched'].includes(action)){
+    const warnings=selected.value.flatMap(item=>Object.values(cycleWarnings.value[item.key]||{}));
+    if(warnings.length){error.value=warnings.join('\n');return;}
+  }
   if(action === 'confirm_unmatched' && !window.confirm('以下通告尚未匹配计划收敛，是否仍要发送？\n\n'+selected.value.filter(item=>item.convergence_confirmation_required).map(item=>item.title).join('\n')))return;
   saveLocal(); const id = run.value.id; busy.value = true; error.value = ''; window.clearTimeout(timer);
   try {

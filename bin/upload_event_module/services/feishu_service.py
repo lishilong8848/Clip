@@ -802,6 +802,10 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload, *
     """
     通过 NoticePayload 创建多维表记录
     """
+    from .notice_cycle_warnings import maintenance_cycle_error
+    cycle_error = maintenance_cycle_error(notice_type, payload.maintenance_cycle, payload.text)
+    if cycle_error:
+        return False, cycle_error
     if not check_token_status():
         return False, feishu_auth_error()
 
@@ -906,6 +910,10 @@ def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[Not
     payloads = [payload for payload in (payloads or []) if isinstance(payload, NoticePayload)]
     if not payloads:
         return []
+    from .notice_cycle_warnings import maintenance_cycle_error
+    errors = [maintenance_cycle_error(notice_type, payload.maintenance_cycle, payload.text) for payload in payloads]
+    if any(errors):
+        return [(False, error or "本批次存在维保周期冲突，未发送，请修正后重试。") for error in errors]
     if not check_token_status():
         return [(False, feishu_auth_error()) for _ in payloads]
 
@@ -1114,6 +1122,10 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     """
     通过 NoticePayload 更新多维表记录
     """
+    from .notice_cycle_warnings import maintenance_cycle_error
+    cycle_error = maintenance_cycle_error(notice_type, payload.maintenance_cycle, payload.text)
+    if cycle_error:
+        return False, cycle_error
     if not check_token_status():
         return False, feishu_auth_error()
 
@@ -1160,6 +1172,10 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
     ]
     if not normalized:
         return []
+    from .notice_cycle_warnings import maintenance_cycle_error
+    errors = [maintenance_cycle_error(notice_type, payload.maintenance_cycle, payload.text) for _, payload in normalized]
+    if any(errors):
+        return [(False, error or "本批次存在维保周期冲突，未发送，请修正后重试。") for error in errors]
     if not check_token_status():
         return [(False, feishu_auth_error()) for _ in normalized]
 

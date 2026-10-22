@@ -2666,6 +2666,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         deleted = self._state_store.delete_repair_snapshot_record(
             source_key,
             normalized_record_id,
+            confirmed_deleted=True,
         )
         if not deleted:
             return
@@ -16400,11 +16401,19 @@ class MaintenancePortalService(RepairOperationsMixin):
             scope,
             meta_by_name=meta_by_name,
         )
-        cloud_records = self._load_table_records_by_ids(
-            app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
-            meta_by_name=meta_by_name, work_type=WORK_TYPE_REPAIR,
-            notice_type=NOTICE_TYPE_REPAIR, record_ids=[record_id],
-        )
+        try:
+            cloud_records = self._load_table_records_by_ids(
+                app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                meta_by_name=meta_by_name, work_type=WORK_TYPE_REPAIR,
+                notice_type=NOTICE_TYPE_REPAIR, record_ids=[record_id],
+            )
+        except PortalError as exc:
+            if not self._repair_management_record_not_found_error(exc):
+                raise
+            self._delete_repair_snapshot_item(REPAIR_SNAPSHOT_SOURCE_PROJECTS, record_id)
+            self._remove_repair_source_projection(record_id)
+            self._invalidate_repair_management_status_cache()
+            raise PortalNotFoundError("云端维修项目已不存在，本次修改未保存；请刷新列表核对，未提交内容可先保留。") from exc
         if not cloud_records:
             raise PortalError("云端维修项目已不存在，请刷新后核对。")
         existing = cloud_records[0]
@@ -16412,16 +16421,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError("当前账号无权修改该楼栋维修项目。")
         self._remember_repair_project_fields(existing)
         existing_raw = existing.get("raw_fields") if isinstance((existing or {}).get("raw_fields"), dict) else {}
-        existing_display = (
-            existing.get("display_fields")
-            if isinstance((existing or {}).get("display_fields"), dict)
-            else {}
-        )
         summary_id = str(record_id or "").strip()
-        existing_event_ids = self._repair_management_record_ids(
-            existing_raw.get("关联事件单")
-            or existing_display.get("关联事件单")
-        )
+        existing_event_ids = self._repair_management_event_ids_from_record(existing)
         effective_event_id = str(source_event_id or "").strip()
         if not replace_source_relations and not effective_event_id:
             effective_event_id = existing_event_ids[0] if existing_event_ids else ""
@@ -16793,6 +16794,15 @@ class MaintenancePortalService(RepairOperationsMixin):
         *,
         scope: str = "ALL",
     ) -> dict[str, Any]:
+        summary_id = str(record_id or "").strip()
+        operation_id = self._repair_sync_operation_id("project_delete", summary_id)
+        existing_operation = self._state_store.get_repair_management_operation(operation_id) or {}
+        existing_result = dict(existing_operation.get("result") or {})
+        if existing_operation.get("status") == "completed" and existing_result.get("deleted"):
+            deleted_scopes = existing_result.get("record_scope_codes") or self._building_codes_from_value(existing_operation.get("scope"))
+            if self._normalize_scope(scope) != "ALL" and (not deleted_scopes or not self._scope_matches_buildings(scope, deleted_scopes)):
+                raise PortalError("当前账号无权操作该楼栋维修项目。")
+            return existing_result
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
@@ -16813,24 +16823,6 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if str(item.get("record_id") or "").strip()
             )
         )
-        operation_id = self._repair_sync_operation_id(
-            "project_delete",
-            summary_id,
-        )
-        existing_operation = (
-            self._state_store.get_repair_management_operation(operation_id)
-            or {}
-        )
-        existing_result = (
-            dict(existing_operation.get("result") or {})
-            if isinstance(existing_operation.get("result"), dict)
-            else {}
-        )
-        if (
-            str(existing_operation.get("status") or "") == "completed"
-            and bool(existing_result.get("deleted"))
-        ):
-            return existing_result
         existing_task_payload = (
             dict(existing_result.get("task_payload") or {})
             if isinstance(existing_result.get("task_payload"), dict)
@@ -16883,6 +16875,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             **existing_result,
             "task_payload": task_payload,
             "record_name": record_name,
+            "record_scope_codes": self._repair_record_building_codes(project_record),
             "started_at": time.time(),
             "available_at": 0,
         }
@@ -22654,7 +22647,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             self._clean_source_text(
                 fields.get("维修结束时间") or fields.get("维修结束时间（2026）")
             )
-        )
+        ) or self._repair_management_workflow_text(record, getattr(self, "_repair_field_meta_by_name", {})) == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
 
     def _repair_source_status(self, record: dict[str, Any]) -> str:
         if self._repair_has_ended(record):
@@ -35794,18 +35787,31 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> list[dict[str, Any]]:
         snapshot_records = self._source_snapshot_records(scope, source_snapshot)
         if snapshot_records is not None:
-            return self._sort_workbench_records(self._apply_source_work_type_rules([
+            records = snapshot_records
+        else:
+            records = self._workbench_records_from_memory(month=month, specialty=specialty, scope=scope)
+        if getattr(self, "_repair_snapshots_enabled", False):
+            repair_snapshot = self._state_store.get_repair_snapshot(REPAIR_SNAPSHOT_SOURCE_PROJECTS)
+            if (repair_snapshot.get("status") == "active"
+                    and repair_snapshot.get("app_token") == REPAIR_SOURCE_APP_TOKEN
+                    and repair_snapshot.get("table_id") == REPAIR_MANAGEMENT_TABLE_ID):
+                # The notice plan and project manager must not use different generations of the same table.
+                _, _, projects = self._repair_snapshot_from_local(repair_snapshot)
+                records = [row for row in records if self._record_work_type(row) != WORK_TYPE_REPAIR] + [
+                    row for row in projects if self._scope_matches_buildings(scope, self._repair_record_building_codes(row))]
+            deleted_ids = self._state_store.repair_deleted_record_ids(REPAIR_SNAPSHOT_SOURCE_PROJECTS)
+            records = [row for row in records if self._record_work_type(row) != WORK_TYPE_REPAIR
+                or str(row.get("record_id") or "") not in deleted_ids]
+        repair_records, _ = self._canonical_repair_management_projects([
+            row for row in records if self._record_work_type(row) == WORK_TYPE_REPAIR])
+        records = [row for row in records if self._record_work_type(row) != WORK_TYPE_REPAIR] + repair_records
+        return self._sort_workbench_records(self._apply_source_work_type_rules([
                 record
-                for record in snapshot_records
+                for record in records
                 if self._source_record_matches_filters(
                     record, month=month, specialty=specialty
                 )
             ]))
-        return self._sort_workbench_records(self._apply_source_work_type_rules(
-            self._workbench_records_from_memory(
-                month=month, specialty=specialty, scope=scope
-            )
-        ))
 
     def _maintenance_options_for_records(self, records: list[dict[str, Any]]) -> list[dict[str, str]]:
         options = []
@@ -45000,6 +45006,10 @@ class MaintenancePortalService(RepairOperationsMixin):
             building=building,
             building_codes=building_codes,
         )
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_warnings
+        cycle_issues = maintenance_cycle_warnings(NOTICE_TYPE_MAINTENANCE, maintenance_cycle, content, reason)
+        if cycle_issues:
+            raise PortalError("\n".join(issue['message'] for issue in cycle_issues))
         if action == "start":
             memory_total = (
                 str(maintenance_total or fields.get("维护总项") or "").strip()

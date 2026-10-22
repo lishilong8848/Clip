@@ -10,7 +10,7 @@ import time
 import unicodedata
 import uuid
 import ipaddress
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
 
@@ -20,11 +20,19 @@ NAMESPACE = "lighthouse_ai"
 SHARED_MODEL_PREFIX = "shared_"
 PRIVATE_REPLY = "不能提供人员身份证号、家庭住址或其他私密身份信息。可以查询人员姓名、工号及有权限的业务信息。"
 SENSITIVE = re.compile(r"身份证|身份證|证件号|證件號|护照(?:号|号码)|家庭住址|家庭地址|居住地址|居住地|住宅地址|户籍|戶籍|住址|home.?address|residential.?address|passport.?number|national.?id|identity.?(?:card|number)|id.?card", re.I)
-SECRET = re.compile(r"token|secret|password|authorization|api.?key|cookie|密码|密钥|口令|签名|signature|base64|cipher|private|file_path|local_file|raw_(?:json|data)|url|image|attachment|截图|附件|照片|证明|open_?id|user_?id|phone|mobile|email|电话|手机|邮箱|联系方式", re.I)
-ID_NUMBER = re.compile(r"(?<!\d)\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)|(?<!\d)\d{6}\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}(?!\d)")
+_CREDENTIAL_NAME = r"token|secret|password|authorization|api.?key|cookie|密码|密碼|密钥|密鑰|秘钥|口令|令牌|凭证|凭据|憑證|憑據"
+SECRET = re.compile(_CREDENTIAL_NAME + r"|签名|signature|base64|cipher|private|file_path|local_file|raw_(?:json|data)|url|image|attachment|截图|附件|照片|证明|open_?id|user_?id|phone|mobile|email|电话|手机|邮箱|联系方式", re.I)
+_NUMBER_GAP = r"[\s._-]*"
+_ID_DATE = rf"(?:0{_NUMBER_GAP}[1-9]|1{_NUMBER_GAP}[0-2]){_NUMBER_GAP}(?:0{_NUMBER_GAP}[1-9]|[12]{_NUMBER_GAP}\d|3{_NUMBER_GAP}[01])"
+ID_NUMBER = re.compile(rf"(?<!\d)(?:\d{_NUMBER_GAP}){{6}}(?:(?:1{_NUMBER_GAP}9|2{_NUMBER_GAP}0){_NUMBER_GAP}(?:\d{_NUMBER_GAP}){{2}}{_ID_DATE}{_NUMBER_GAP}(?:\d{_NUMBER_GAP}){{3}}[\dXx]|(?:\d{_NUMBER_GAP}){{2}}{_ID_DATE}{_NUMBER_GAP}(?:\d{_NUMBER_GAP}){{2}}\d)(?!\d)")
 ADDRESS = re.compile(r"(?:\b\d{1,6}\s+[\w .-]+\s+(?:street|road|avenue|lane|drive)\b)|(?:[\u4e00-\u9fff]{2,20}(?:小区|公寓|花园|家园|路|街|胡同|巷)[^\n，。；]{0,30}(?:室|单元|号))", re.I)
 API_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
-CONTACT = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)|(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+CONTACT = re.compile(r"(?<!\d)(?:\+?86[\s-]*)?1[\s-]*[3-9](?:[\s-]*\d){9}(?!\d)|(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+_CREDENTIAL_LABEL = re.compile(rf"(?:{_CREDENTIAL_NAME})[\"'`*]*[ \t]*[:=][ \t]*(.*)$", re.I)
+_SIGNATURE_LABEL = re.compile(r"签名|签字|手写|signature|autograph", re.I)
+_SIGNATURE_KIND = re.compile(r"(?:真实|原始|手写)?(?:签名|签字|signature|autograph)(?:原图|图片|图像|image)?(?:\.(?:png|jpe?g|webp|gif|bmp|svg))?", re.I)
+_SIGNATURE_IMAGE_URL = re.compile(r"/api/signatures/(?:image|(?:temporary|external)/image)(?:[/?#\s\"'<>)]|$)|/(?:signatures?|签名|签字)(?:[/_-][^\s\"'<>)]*)?\.(?:png|jpe?g|webp|gif|bmp|svg)(?:[?#\s\"'<>)]|$)", re.I)
+_IMAGE_CONTENT = re.compile(r"data:image/|!\[|<img\b|\.(?:png|jpe?g|webp|gif|bmp|svg)(?:[?#\s\"'<>)]|$)|\[(?:签名|签字|signature)(?:原图|图片|图像)?\]\(", re.I)
 BUSINESS_QUERY = re.compile(r"灯塔|通告|事件|维修|检修|跟进|机柜|机架|包间|上电|下电|水耗|维保|维护单|工单|SOP|MOP|CMDB|智航|设备|柴发|柴油|冷水|冷机|制冷|水泵|HVDC|UPS|BMS|演练|学练|题库|重保|晨会|日常|收敛|工号|人员|值班|楼栋|园区|工作|任务|待办|待处理|未完成|未结束|未闭环|[ABCDEH](?:楼|栋)|(?<![A-Z0-9])[ABCDEH]-\d|110(?:站|KV)|\b[A-Z]\d{2}\b|\brec[A-Za-z0-9]{8,}\b", re.I)
 PENDING_QUERY = re.compile(r"未完成|未结束|未闭环|待完成|待办|待处理|待跟进|剩余(?:工作|任务)|unfinished|pending\s+(?:work|task|job)", re.I)
 FOLLOW_UP = re.compile(r"这个|那个|该|它|他们|她们|这些|那条|刚才|上面|之前|上述|继续|上个|还有呢")
@@ -56,14 +64,38 @@ def is_business_query(question):
     return bool(BUSINESS_QUERY.search(question.replace('工作表', '')) or re.search(r'多维表|在职|在岗|员工|人事|人员表|采购|库存|质量评估|月度告警', question)) and not explicit_general_question(question)
 
 
-def private_identifier(value):
+def _privacy_text(value):
+    if isinstance(value, float) and value.is_integer():
+        value = format(value, ".0f")
     text = unicodedata.normalize("NFKC", str(value or ""))
-    if SENSITIVE.search(text) or ADDRESS.search(text) or ID_NUMBER.search(text):
-        return True
-    for fragment in re.findall(r"[\dXx][\dXx\s._-]{13,}[\dXx]", text):
-        if ID_NUMBER.search(re.sub(r"[\s._-]", "", fragment)):
-            return True
-    return False
+    return "".join(c for c in text if unicodedata.category(c) != "Cf").translate(
+        str.maketrans("‐‑‒–—―−", "-------"))
+
+
+def private_identifier(value):
+    text = _privacy_text(value)
+    return bool(SENSITIVE.search(text) or ADDRESS.search(text) or ID_NUMBER.search(text))
+
+
+def _signature_media(text, *, labeled=False):
+    if not isinstance(text, str):
+        return labeled and isinstance(text, (bytes, bytearray, memoryview)) and bool(text)
+    if labeled or _SIGNATURE_LABEL.search(text):
+        for prefix in re.finditer(r"[A-Za-z0-9+/_-]{4,}", re.sub(r"\s+", "", text)):
+            encoded = prefix.group()[:128]
+            try:
+                head = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+            except ValueError:
+                head = b""
+            if (head.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM", b"II*\0", b"MM\0*"))
+                    or head.startswith(b"RIFF") and head[8:12] == b"WEBP"
+                    or b"<svg" in head.lstrip()[:100]):
+                return True
+    decoded = unquote(unquote(text))
+    labels = re.sub(r"[?&#]signature=[^&\s]*", "", decoded, flags=re.I)
+    return bool(_SIGNATURE_IMAGE_URL.search(decoded) or
+                labeled and re.search(r"https?://|/api/", decoded, re.I) or
+                (labeled or _SIGNATURE_LABEL.search(labels)) and _IMAGE_CONTENT.search(decoded))
 
 
 class AssistantError(ValueError):
@@ -74,13 +106,36 @@ class AssistantError(ValueError):
 
 
 def safe_text(value, *, limit=6000):
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = _privacy_text(value)
     text = ID_NUMBER.sub("[敏感信息已隐藏]", text)
     text = API_KEY.sub("[凭证已隐藏]", text)
-    text = re.sub(r"([?&](?:token|access_token|ticket|signature|api_key|key)=)[^&\s]+", r"\1[凭证已隐藏]", text, flags=re.I)
+    text = re.sub(r"([?&](?:token|access_token|refresh_token|app_secret|client_secret|ticket|signature|api_key|key)=)[^&\s]+", r"\1[凭证已隐藏]", text, flags=re.I)
+    text = CONTACT.sub(lambda match: "" if len(match.group().splitlines()) > 1 else match.group(), text)
     # Labels in free-form notes must be filtered too, not only JSON field names.
-    return "\n".join(line for line in text.splitlines() if not private_identifier(line) and not CONTACT.search(line)
-                     and not re.search(r"(?:password|authorization|api.?key|access.?token|密码|密钥|口令)\s*[:：=]", line, re.I))[:limit]
+    lines, credential_pending, signature_pending, signature_bytes = [], False, False, False
+    for line in text.splitlines():
+        if credential_pending:
+            credential_pending = not line.strip(" \t`~\"'")
+            continue
+        if signature_bytes:
+            if re.fullmatch(r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?", line.strip()):
+                if line.strip().endswith("="):
+                    signature_bytes = False
+                continue
+            signature_bytes = False
+        credential = _CREDENTIAL_LABEL.search(line)
+        if credential:
+            credential_pending = not credential.group(1).strip(" \t`\"'")
+            continue
+        if _signature_media(line, labeled=signature_pending):
+            signature_bytes = bool(re.search(r"data:image/[^,]+;base64,[A-Za-z0-9+/]*$", line, re.I))
+            signature_pending = False
+            continue
+        if line.strip():
+            signature_pending = bool(re.fullmatch(r"\s*(?:真实|原始|手写)?(?:签名|签字|signature)(?:原图|图片|图像)?\s*[:=]?\s*", line, re.I))
+        if not private_identifier(line) and not CONTACT.search(line):
+            lines.append(line)
+    return "\n".join(lines)[:limit]
 
 
 def safe_signing_time(value):
@@ -114,13 +169,20 @@ def safe_data(value, depth=0, *, list_limit=40, _field=""):
     if depth > 12:
         return None
     if isinstance(value, dict):
-        return {k: safe_data(v, depth + 1, list_limit=list_limit, _field=str(k)) for k, v in value.items()
-                if (not SECRET.search(str(k)) or k == "signature_time" and safe_signing_time(v) is not None)
-                and str(k).lower() != "relative_path"
-                and not (str(k).lower() == "path" and isinstance(v, str) and (re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", v) or v.startswith("/") and not v.startswith("/api/")))
-                and not SENSITIVE.search(str(k))
-                and (("地址" not in str(k) and "address" not in str(k).lower()) or business_network_address(k, v))
-                and not str(k).startswith("_")}
+        clean = {}
+        signature = any(_SIGNATURE_KIND.fullmatch(_privacy_text(v)) for k, v in value.items()
+                        if _privacy_text(k).lower() in {"name", "kind", "type", "title", "label", "alt"} and isinstance(v, str))
+        for k, v in value.items():
+            name = _privacy_text(k)
+            if ((SECRET.search(name) and not (name == "signature_time" and safe_signing_time(v) is not None))
+                    or name.lower() == "relative_path" or name.startswith("_")
+                    or private_identifier(name) or CONTACT.search(name)
+                    or (("地址" in name or "address" in name.lower()) and not business_network_address(name, v))
+                    or (name.lower() == "path" and isinstance(v, str) and (re.match(r"^(?:[A-Za-z]:[\\/]|\\\\)", v) or v.startswith("/") and not v.startswith("/api/")))
+                    or (signature and _signature_media(_privacy_text(v), labeled=True))):
+                continue
+            clean[k] = safe_data(v, depth + 1, list_limit=list_limit, _field=name)
+        return clean
     if isinstance(value, (list, tuple)):
         return [safe_data(v, depth + 1, list_limit=list_limit, _field=_field) for v in value[:list_limit]]
     if isinstance(value, str):
@@ -136,7 +198,90 @@ def safe_data(value, depth=0, *, list_limit=40, _field=""):
         if len(value) > 20000:
             return "[内容过长,未发送]"
         return safe_text(value)
-    if isinstance(value, (int, float)) and private_identifier(value):
+    if isinstance(value, (int, float)) and (private_identifier(value) or CONTACT.search(_privacy_text(value))):
+        return "[敏感信息已隐藏]"
+    return value if isinstance(value, (bool, int, float)) or value is None else None
+
+
+_CONTACT_FIELD = re.compile(r"phone|mobile|email|电话|手机|邮箱|联系方式", re.I)
+_SHARED_LINK = re.compile(r"https?://[^\s<>\"')]+|/api/[^\s<>\"')]+", re.I)
+
+
+def _shared_private_field(name, value):
+    # File/pagination tokens are business references, not authentication tokens.
+    return bool((re.search(_CREDENTIAL_NAME, name, re.I) and name.lower() not in {"file_token", "page_token", "next_page_token"})
+                or _CONTACT_FIELD.search(name) or private_identifier(name) or CONTACT.search(name))
+
+
+def _shared_url(value):
+    if _signature_media(value):
+        return ""
+    try:
+        parts = urlsplit(value)
+        def query(text):
+            pairs = parse_qsl(text, keep_blank_values=True)
+            clean = []
+            for key, item in pairs:
+                name = _privacy_text(key)
+                if private_identifier(name) or CONTACT.search(name):
+                    continue
+                hidden = _shared_private_field(name, item) or name.lower() in {"signature", "ticket", "key"}
+                clean.append((key, "[凭证已隐藏]" if hidden else shared_data(item, _field=name)))
+            return text if clean == pairs else urlencode(clean)
+
+        path = []
+        for segment in parts.path.split("/"):
+            decoded = unquote(segment)
+            clean = shared_data(decoded, _field="id")
+            path.append(segment if clean == decoded else quote(clean, safe=""))
+        fragment = parts.fragment
+        if "?" in fragment:
+            head, _, tail = fragment.partition("?")
+            fragment = safe_text(head, limit=None) + "?" + query(tail)
+        elif "=" in fragment:
+            fragment = query(fragment)
+        else:
+            fragment = safe_text(fragment, limit=None)
+        return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], "/".join(path), query(parts.query), fragment))
+    except ValueError:
+        return "[凭证已隐藏]"
+
+
+def shared_data(value, *, _field="", _signature=False):
+    """Remove private content without trimming or reshaping native business projections."""
+    if isinstance(value, dict):
+        clean = {}
+        signature = _signature or any(_SIGNATURE_KIND.fullmatch(_privacy_text(v)) for k, v in value.items()
+                                     if _privacy_text(k).lower() in {"name", "kind", "type", "title", "label", "alt"} and isinstance(v, str))
+        for key, item in value.items():
+            name = _privacy_text(key)
+            signature_field = bool(_SIGNATURE_LABEL.search(name))
+            if _shared_private_field(name, item) or signature_field and _signature_media(item, labeled=True):
+                continue
+            clean[key] = shared_data(item, _field=name, _signature=signature or signature_field)
+        return clean
+    if isinstance(value, (list, tuple)):
+        return [shared_data(item, _field=_field, _signature=_signature) for item in value]
+    if isinstance(value, str):
+        if _signature and _signature_media(_privacy_text(value), labeled=True):
+            return ""
+        identifier = _field in _IDENTIFIER_FIELDS or _field.endswith(("_id", "_ids", "_ref", "_refs")) or _field.lower() in {"openid", "file_token", "page_token"}
+        if identifier and (_OPAQUE_IDENTIFIER.fullmatch(value) or re.fullmatch(r"(?:ou_|on_|rec)[A-Za-z0-9_-]{8,}", value)):
+            return value
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                parsed = json.loads(value)
+                clean = shared_data(parsed, _signature=_signature)
+                return value if clean == parsed else json.dumps(clean, ensure_ascii=False)
+            except (ValueError, RecursionError):
+                pass
+        links = []
+        def link(match):
+            links.append(_shared_url(match.group()))
+            return "\x00shared-link-" + str(len(links) - 1) + "\x00"
+        text = safe_text(_SHARED_LINK.sub(link, value), limit=None)
+        return re.sub(r"\x00shared-link-(\d+)\x00", lambda match: links[int(match.group(1))] if int(match.group(1)) < len(links) else "", text)
+    if isinstance(value, (int, float)) and (private_identifier(value) or CONTACT.search(_privacy_text(value))):
         return "[敏感信息已隐藏]"
     return value if isinstance(value, (bool, int, float)) or value is None else None
 

@@ -206,7 +206,15 @@ def install_assistant_routes(app, host):
             await extensions.pool.close()
     # Host starts preparation only after migration and portal registration.
     from .lighthouse_knowledge_routes import install_knowledge_routes
-    install_knowledge_routes(app, actor_for, get_knowledge)
+    async def knowledge_actor(request):
+        from lan_bitable_template_portal.assistant_shared_read import original_actor
+        actor = await actor_for(request)
+        if request.method not in {'GET', 'HEAD'}:
+            actor = original_actor(actor)
+            if 'modules' in actor and 'knowledge' not in actor['modules']:
+                raise AssistantError('当前账号尚未获授共享知识库维护权限。', 403)
+        return actor
+    install_knowledge_routes(app, knowledge_actor, get_knowledge)
 
     async def openclaw_tools(request: Request):
         try:
@@ -508,6 +516,8 @@ def install_assistant_routes(app, host):
                 data = await current_streams.conversation(actor)
                 return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
             if action.startswith("plans/"):
+                from lan_bitable_template_portal.assistant_shared_read import original_actor
+                actor = original_actor(actor)
                 identity = action.split("/")[1]
                 current_agent = await ready_agent()
                 if request.method == "PATCH":

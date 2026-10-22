@@ -1,5 +1,5 @@
 import type { Dict } from './client';
-import { isMaintenanceNotice, maintenanceCycleRules, type MaintenanceCycleRule } from '../noticeCycleWarnings';
+import { isMaintenanceNotice, maintenanceCycleRules, noticeCycleWarnings, type MaintenanceCycleRule } from '../noticeCycleWarnings';
 
 export type NoticeField = { key:string; label:string; group:string; type:string; required:boolean; readonly:boolean; options:{label:string;value:string}[]; hint:string; min?:number; max?:number; step?:number };
 export type NoticeForm = { values:Dict; cycleRules?:MaintenanceCycleRule[]; contextVersion?:string; fields:NoticeField[]; actions:string[]; initialAction:string; detailMode:string; canDelete:boolean; photoRequired:boolean; photos:Dict[]; aliPhotos:Dict[]; sop:boolean; groupId:string; sopLinks:{label:string;url:string}[]; sourceOptions:{label:string;value:string}[]; repairRelation?:{eventId:string;eventTitle:string;projectId:string;projectTitle:string} };
@@ -102,6 +102,8 @@ export function noticeCommand(form:NoticeForm,action:string,operationId:string,d
 }
 export function validateNotice(form:NoticeForm,action:string,sop:Dict,photos:Dict[]):string {
   if(!form.actions.includes(action))return '该通告当前不支持此操作，请刷新后核对。';
+  const cycleIssues=Object.values(noticeCycleWarnings(form.values,form.cycleRules));
+  if(cycleIssues.length)return cycleIssues.join('\n');
   const missing=form.fields.filter(f=>f.required&&!String(form.values[f.key]??'').trim());
   if(missing.length)return '请填写：'+missing.map(f=>f.label).join('、');
   if(!form.values.building_codes?.length)return '请选择通告所属楼栋。';

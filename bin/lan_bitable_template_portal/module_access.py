@@ -150,6 +150,9 @@ async def module_denial(request, controller, runtime):
     session = await asyncio.to_thread(controller._current_session, request)
     if not session:
         return None  # Original login or signed-link validation still applies.
+    if (needed == frozenset({'assistant'}) and path.startswith(('/api/assistant/', '/assistant'))
+            and not session.get('is_guest') and str(session.get('role') or (session.get('user') or {}).get('role') or '').lower() != 'guest'):
+        return None  # Shared chat access is not a grant to native business write APIs.
     values = dict(request.query_params)
     if needed == NOTICE_MODULES and request.method in {"POST", "PUT", "PATCH", "DELETE"} and "application/json" in request.headers.get("content-type", ""):
         try:

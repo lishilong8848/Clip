@@ -9835,6 +9835,14 @@ class FastAPIPortalController:
         )
 
     def _current_session(self, request: Request) -> dict | None:
+        from lan_bitable_template_portal.assistant_shared_read import SHARED_READ
+        shared = SHARED_READ.get()
+        if shared is not None and shared.active and shared.auth is PortalRuntime.auth_manager:
+            token = SHARED_READ.set(None)
+            try:
+                return shared.session(self._current_session(request))
+            finally:
+                SHARED_READ.reset(token)
         if hasattr(request.state, 'admin_impersonation_session'):
             return copy.deepcopy(request.state.admin_impersonation_session)
         from lan_bitable_template_portal.account_impersonation import COOKIE, current

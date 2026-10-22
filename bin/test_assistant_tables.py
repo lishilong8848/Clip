@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from bin.test_feishu_assistant import Memory
@@ -225,7 +225,148 @@ class ConsentTests(unittest.TestCase):
         self.assertTrue(self.consent.require(self.actor, 'read', self.payload, '人员统计', '查询姓名')['confirmation_required'])
 
 
+class RosterCountTests(unittest.TestCase):
+    def test_reuses_reader_without_changing_learning_snapshot_or_reminders(self):
+        from bin.test_learning_roster_resolution import DAY, roster_row, users, build_reader
+        from lan_bitable_template_portal.learning_reminders import read_roster
+        rows = [roster_row('示例甲', users(('示例甲', 'ou_one'))),
+                roster_row('示例乙', users(('示例乙', 'ou_two')), shift='夜'),
+                roster_row('站值班员', users(('站值班员', 'ou_station')), group='110站', scope='110站'),
+                roster_row('长白不计', group='长白')]
+        self.assertEqual(len(read_roster(build_reader(rows), DAY)), 2, 'existing reminder defaults still exclude station and long-day rows')
+        store, service = Memory(), build_reader(rows)
+        del service.state_cache_version
+        store.put_document('local', 'shift_roster', {'original': True})
+        service._last_error = 'original'
+        tables = AssistantTables(service, store)
+        value = tables.roster_count({**ADMIN, 'scopes': ['A', '110']}, DAY)
+        self.assertEqual(value['assignment_count'], 3)
+        self.assertTrue(any(row['scope'] == '110' for row in value['per_building']))
+        self.assertNotIn('ou_', str(value))
+        self.assertEqual(store.get_document('local', 'shift_roster'), {'original': True})
+        self.assertEqual(service._last_error, 'original')
+        calls = service._request_json.call_count
+        tables.roster_count({**ADMIN, 'scopes': ['A', '110']}, DAY)
+        self.assertEqual(service._request_json.call_count, calls, 'read-only cache avoids fetching again')
+
+    def test_incomplete_pages_fail_closed_and_do_not_poison_cache(self):
+        service = SimpleNamespace(_request_json=Mock(return_value={'code': 0, 'data': {'items': [], 'has_more': True}}))
+        tables = AssistantTables(service, Memory())
+        with self.assertRaisesRegex(AssistantError, '未完整读取'):
+            tables.roster_count({**ADMIN, 'scopes': ['A']}, '2026-10-22')
+        for day, shift in [('bad', ''), ('2026-10-22', '早')]:
+            with self.assertRaises(AssistantError): tables.roster_count(ADMIN, day, shift)
+
+
+class CompleteTableReadTests(TableTests):
+    def test_complete_read_preserves_projection_filters_and_gathers_pages(self):
+        original = self.service._request_payload
+        queries = []
+        def request(method, url, **kwargs):
+            if not url.endswith('/records/search'):
+                return original(method, url, **kwargs)
+            queries.append(kwargs)
+            last = kwargs['params'].get('page_token') == 'next'
+            return {'code': 0, 'data': {'items': [{'record_id': 'r2' if last else 'r1',
+                'fields': {'员工姓名': '第二人' if last else '第一人', '楼栋': 'A楼'}}],
+                'has_more': not last, **({'page_token': 'next'} if not last else {})}}
+        self.service._request_payload = request
+        filters = [{'field_name': '楼栋', 'operator': 'is', 'value': ['A楼']}]
+        query = {'table_id': PERSONNEL_TABLE, 'fields': ['员工姓名', '楼栋'], 'filters': filters, 'complete': True}
+        result = self.tables.read(ADMIN, query)
+        self.assertTrue(result['complete'])
+        self.assertEqual([r['record_id'] for r in result['items']], ['r1', 'r2'])
+        self.assertEqual(queries[0]['json_payload'], queries[1]['json_payload'])
+        self.assertEqual(queries[0]['json_payload']['filter']['conditions'], filters)
+        self.assertNotIn('cursor', query)
+
+    def test_incomplete_repeating_cursor_is_not_reported_complete(self):
+        self.more = True
+        with self.assertRaisesRegex(AssistantError, '游标未前进'):
+            self.tables.read(ADMIN, {'table_id': PERSONNEL_TABLE, 'complete': True})
+
+    def test_time_budget_keeps_partial_rows_explicit(self):
+        self.more = True
+        with patch('lan_bitable_template_portal.assistant_tables.time.monotonic', side_effect=[0, 26]):
+            result = self.tables.read(ADMIN, {'table_id': PERSONNEL_TABLE, 'complete': True})
+        self.assertFalse(result['complete'])
+        self.assertTrue(result['has_more'])
+        self.assertEqual(result['cursor'], 'next')
+
+
 class ModelCountTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_revocation_stops_publish_after_reading_a_source(self):
+        from contextlib import asynccontextmanager
+        from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+        from bin import test_lighthouse_stream as fixtures
+        from openclaw_service.assistant.lighthouse_model import LighthouseModel
+        holder = fixtures.StreamTests()
+        await holder.asyncSetUp()
+        self.addAsyncCleanup(holder.runtime.close)
+        self.addCleanup(holder.tmp.cleanup)
+        current = dict(ADMIN)
+        async def stream_model(messages, info):
+            receipts = [part for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            if not receipts:
+                yield {0: DeltaToolCall(name='staff_headcount', json_args='{}')}
+            else:
+                current['is_admin'] = False
+                yield '不得发布撤权前的旧结果'
+        @asynccontextmanager
+        async def factory(*_):
+            yield FunctionModel(stream_function=stream_model)
+        holder.portal.catalog.bridge = SimpleNamespace(acall=AsyncMock(return_value={'unique_people': 3}))
+        engine = LighthouseModel(holder.portal, model_factory=factory)
+        async def authorize():
+            return dict(current)
+        with self.assertRaisesRegex(AssistantError, '权限已变化'):
+            await engine.answer(ADMIN, {'question': '查询在职人数', '_profile': holder.model.profile()},
+                [], holder.request, AsyncMock(), authorize, {})
+
+    async def test_semantic_tool_selection_without_a_question_match_preserves_consent_and_errors(self):
+        from contextlib import asynccontextmanager
+        from pydantic_ai.models.function import DeltaToolCall, FunctionModel
+        from bin import test_lighthouse_stream as fixtures
+        from openclaw_service.assistant.lighthouse_model import LighthouseModel
+        holder = fixtures.StreamTests()
+        await holder.asyncSetUp()
+        self.addAsyncCleanup(holder.runtime.close)
+        self.addCleanup(holder.tmp.cleanup)
+        bridge = SimpleNamespace(acall=AsyncMock(return_value={'basis': '当天排班合计6人次，去重3人。', 'source_url': PERSONNEL_URL}))
+        holder.portal.catalog.bridge = bridge
+        async def stream_model(messages, info):
+            receipts = [part.content for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']
+            self.assertIn('duty_roster', {tool.name for tool in info.function_tools})
+            if not receipts:
+                yield {0: DeltaToolCall(name='table_catalog', json_args='{"keyword":"当日安排"}')}
+            elif len(receipts) == 1:
+                yield {0: DeltaToolCall(name='duty_roster', json_args='{"date":"2026-10-22"}')}
+            else:
+                receipt = receipts[-1]
+                yield receipt.get('message') or receipt.get('basis') or receipt['error']
+        @asynccontextmanager
+        async def factory(*_):
+            yield FunctionModel(stream_function=stream_model)
+        async def read(action, *args):
+            return {'items': []} if action == 'table_catalog' else bridge.result
+        bridge.acall.side_effect = read
+        bridge.result = bridge.acall.return_value
+        engine = LighthouseModel(holder.portal, model_factory=factory)
+        async def ask():
+            return await engine.answer(ADMIN, {'question': '帮我归并刚才说的两班安排', '_profile': holder.model.profile()},
+                [], holder.request, AsyncMock(), AsyncMock(return_value=ADMIN), {})
+        result = await ask()
+        self.assertIn('6人次', result['answer'])
+        self.assertEqual(bridge.acall.call_args.args[0], 'roster_count')
+        bridge.result = {'confirmation_required': True, 'message': '确认查询 roster123'}
+        result = await ask()
+        self.assertEqual(result['answer'], '确认查询 roster123')
+        self.assertEqual(result['sources'], [])
+        bridge.acall.side_effect = AssistantError('排班视图未完整读取，人数未知。', 503)
+        result = await ask()
+        self.assertIn('人数未知', result['answer'])
+        self.assertEqual(result['sources'], [])
+
     async def test_headcount_native_tool_retains_source_and_consent(self):
         from contextlib import asynccontextmanager
         from pydantic_ai.models.function import DeltaToolCall, FunctionModel
@@ -266,6 +407,27 @@ class ModelCountTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BridgeReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_roster_read_needs_module_scope_and_feishu_consent(self):
+        from lan_bitable_template_portal.lighthouse_bridge import PortalAuthority
+        from starlette.requests import Request
+        store = Memory()
+        authority = PortalAuthority(None, None, SimpleNamespace(state_store=store), SimpleNamespace(instance='i', lease='l'))
+        actor = {**ADMIN, 'scopes': ['A'], 'channel': 'feishu:oc_private', 'modules': ['assistant', 'links']}
+        request = Request({'type': 'http', 'state': {'feishu_question': '今天有多少人上班？'}})
+        authority.authorize = AsyncMock(return_value=({'request': request}, actor))
+        authority.tables = SimpleNamespace(roster_count=Mock(return_value={'assignment_count': 3}))
+        message = {'instance': 'i', 'lease': 'l', 'context_id': 'trusted', 'action': 'roster_count',
+                   'payload': {'scopes': ['A'], 'date': '2026-10-22', 'shift': ''}}
+        result = await authority.dispatch(message)
+        self.assertTrue(result['confirmation_required'])
+        authority.tables.roster_count.assert_not_called()
+        authority.read_consent.approve(actor, result['confirmation_code'])
+        self.assertEqual((await authority.dispatch(message))['assignment_count'], 3)
+        authority.tables.roster_count.assert_called_once_with(actor, '2026-10-22', '')
+        with self.assertRaises(AssistantError): await authority.dispatch({**message, 'payload': {**message['payload'], 'scopes': ['B']}})
+        authority.authorize.return_value = ({'request': request}, {**actor, 'modules': ['assistant']})
+        with self.assertRaises(AssistantError): await authority.dispatch(message)
+
     async def test_channel_consent_blocks_read_before_data_is_loaded(self):
         from lan_bitable_template_portal.lighthouse_bridge import PortalAuthority
         from starlette.requests import Request

@@ -59,7 +59,7 @@
           </template>
         </main>
         <MobileNavigation v-if="!impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="route.pathname === '/' && !route.searchParams.get('mode') ? view : 'functions'" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
-        <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && granted.includes('assistant') && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
+        <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
         <NModal v-if="!impersonationBlocked" v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
       </div>
     </NDialogProvider></NMessageProvider>
@@ -152,7 +152,7 @@ const homeViews = ['home', 'tasks', 'functions'];
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
-const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(activeModule.value === 'signatures' && user.value.role !== 'guest' || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
 const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');

@@ -24,9 +24,14 @@ try {
   await page.route('**/*', route => route.abort());
   for (const [kind, html] of Object.entries(pages)) {
     const logic = html.match(/function updateMaintenanceCycleWarnings\(form\) \{[\s\S]*?(?=\s*function updateNoticePreview)/)?.[0];
+    const availability=html.match(/function updateActionAvailability\(form\) \{[\s\S]*?(?=\s*window.setInterval)/)?.[0];
     assert(logic);
+    assert(availability);
     await page.setContent(html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ''));
-    await page.addScriptTag({ content: `function previewValue(form,key){return String(form.querySelector('[name="'+key+'"]')?.value||'');}\n${logic}` });
+    await page.addScriptTag({ content: `function previewValue(form,key){return String(form.querySelector('[name="'+key+'"]')?.value||'');}
+    function setActionReason(text){window.cycleReason=text;}function syncRepairTitleValidity(){return '';}function manualBindingIssue(){return '';}
+    function missingRequiredFields(){return [];}function noticeDurationIssue(){return '';}function updatePollingSelectionSummary(){}
+    ${logic}\n${availability}` });
     const result = await page.evaluate(kind => {
       const form = document.querySelector('#lite-notice-form');
       if (!form) throw new Error('Fixture notice form missing');
@@ -36,23 +41,33 @@ try {
       const text = controls.map(control => control?.value);
       const disabled = [...form.querySelectorAll('[name="submit_action"]')].map(button => button.disabled);
       if (kind !== 'maintenance') return { warnings, initial, rules: form.hasAttribute('data-maintenance-cycle-rules') };
-      const actionResults = ['start', 'update', 'end'].map(action => { form.dataset.action = action; return window.updateMaintenanceCycleWarnings(form).length; });
+      const validity=controls.map(control=>control.validationMessage);
+      const actionResults = ['start', 'update', 'end'].map(action => {
+        form.dataset.action = action;window.updateActionAvailability(form);
+        return {warnings:window.updateMaintenanceCycleWarnings(form).length,blocked:[...form.querySelectorAll('[name="submit_action"]')].every(button=>button.disabled)};
+      });
       controls.forEach(control => { control.value = '按月度计划维护'; });
       const fixed = window.updateMaintenanceCycleWarnings(form);
       const fixedRed = controls.some(control => control.classList.contains('cycle-mismatch'));
+      window.updateActionAvailability(form);const unblocked=[...form.querySelectorAll('[name="submit_action"]')].every(button=>!button.disabled);
       controls[0].value = '半年度维护'; form.querySelector('[name="maintenance_cycle"]').value = '半年';
       controls[1].value = '每半年维护'; const half = window.updateMaintenanceCycleWarnings(form);
-      return { warnings, initial, text, actionResults, fixed, fixedRed, half,
+      controls[0].value='每三个月、3个月和三个月维护';controls[1].value='每季度维护';form.querySelector('[name="maintenance_cycle"]').value='每季';
+      const quarter=window.updateMaintenanceCycleWarnings(form);
+      controls[0].value='2026年10月21日检查3台设备';controls[1].value='例行检查';
+      const dates=window.updateMaintenanceCycleWarnings(form);
+      return { warnings, initial, text, actionResults, fixed, fixedRed, half,quarter,dates,validity,unblocked,
         disabledUnchanged: JSON.stringify(disabled) === JSON.stringify([...form.querySelectorAll('[name="submit_action"]')].map(button => button.disabled)),
         validityMessages: controls.map(control => control.validationMessage),
         hidden: form.querySelector('#lite-cycle-warning').hidden };
     }, kind);
     if (kind === 'maintenance') {
       assert.equal(result.warnings.length, 2); assert.deepEqual(result.initial, [true, true]);
-      assert.deepEqual(result.text, ['季度保养', '按半年度计划维护']); assert.deepEqual(result.actionResults, [2, 2, 2]);
+      assert.deepEqual(result.text, ['季度保养', '按半年度计划维护']); assert(result.actionResults.every(value=>value.warnings===2&&value.blocked));
       assert.deepEqual(result.fixed, []); assert.equal(result.fixedRed, false); assert.deepEqual(result.half, []);
-      assert.equal(result.hidden, true); assert(result.disabledUnchanged); assert.deepEqual(result.validityMessages, ['', '']);
+      assert.deepEqual(result.quarter,[]);assert.deepEqual(result.dates,[]);assert(result.unblocked);
+      assert(result.validity.every(Boolean));assert.equal(result.hidden, true);assert.deepEqual(result.validityMessages, ['', '']);
     } else { assert.deepEqual(result.warnings, []); assert(result.initial.every(value => !value)); assert.equal(result.rules, false); }
   }
-  console.log('Legacy maintenance cycle warnings: rendered forms, all actions, reversible red borders, untouched text/buttons, other types excluded passed');
+  console.log('Legacy maintenance cycle validation: all actions blocked, corrections re-enable buttons, equivalent intervals, dates and other types excluded passed');
 } finally { await browser.close(); }

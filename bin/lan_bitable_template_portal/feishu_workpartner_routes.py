@@ -23,7 +23,8 @@ def install_feishu_workpartner_routes(app, controller, runtime, channel):
         return service
 
     async def actor(request, *, write=False, admin=False):
-        current = await actor_for(controller, runtime, request)
+        from .assistant_shared_read import original_actor
+        current = original_actor(await actor_for(controller, runtime, request))
         if admin and not current.get('is_admin'):
             raise AssistantError('仅管理员可配置协作资源授权。', 403)
         if write:

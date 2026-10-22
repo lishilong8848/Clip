@@ -310,6 +310,13 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         result = _live_result(prior, {'text': 'ALREADY-SHOWN-PARTIAL\n\n本轮未完成。'}, incomplete=True)
         self.assertEqual(result['text'].count('ALREADY-SHOWN-PARTIAL'), 1)
 
+    def test_failed_result_without_partial_does_not_claim_generated_content(self):
+        from lan_bitable_template_portal.feishu_assistant import _live_card
+        result = _live_result({'live_reply': {'partial': ''}}, {'text': '排班视图未完整读取，人数未知。'}, incomplete=True)
+        content = _live_card(result)['body']['elements']
+        self.assertEqual(len(content), 1)
+        self.assertEqual(content[0]['content'], '排班视图未完整读取,人数未知。')
+
     async def test_oversized_final_creates_complete_file_and_attaches_it_in_original_chat(self):
         message = self.message()
         waiting, _, turn = self.backend(message)

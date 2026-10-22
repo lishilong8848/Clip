@@ -237,7 +237,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError):
             work_order_records(self.store, actor, {'scope': 'B', 'group_id': 'forbidden-b'})
 
-    async def test_cached_orders_filter_each_row_by_one_complete_capability(self):
+    async def test_authenticated_topic_can_read_all_shared_orders(self):
         self.auth.profiles['ou_Repair']['modules'] = ['assistant', 'polling']
         for key, scope, module in [('allowed-a', 'A', 'maintenance'), ('allowed-b', 'B', 'polling'),
                                    ('forbidden-b', 'B', 'maintenance'), ('forbidden-a', 'A', 'polling')]:
@@ -246,7 +246,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         context = self.authority.context(self.request(), self.actor())
         result = await self.authority.dispatch({'instance': 'instance', 'lease': 'lease', 'context_id': context,
             'action': 'cached', 'payload': {'kind': 'orders', 'scopes': ['A', 'B']}})
-        self.assertEqual({row['title'] for row in result[0]}, {'allowed-a', 'allowed-b'})
+        self.assertEqual({row['title'] for row in result[0]}, {'allowed-a', 'allowed-b', 'forbidden-a', 'forbidden-b'})
 
     async def test_owner_files_are_bidirectionally_separate_from_topics(self):
         files = LighthouseFiles(self.store, self.root / 'files')
@@ -401,7 +401,8 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
         bot.config = {'app_id': TARGET_APP_ID}
         bot.inbox = Inbox(self.root / 'inbox.sqlite3')
-        request, actor = self.request(), self.actor()
+        from lan_bitable_template_portal.assistant_shared_read import shared_query_actor
+        request, actor = self.request(), shared_query_actor(self.actor())
         message = {'message_id': 'om_LowAgain', 'root_id': 'om_Root', 'chat_id': 'oc_Group', 'chat_type': 'group',
                    'app_id': TARGET_APP_ID, 'sender_id': 'ou_Low'}
         await bot._prepare_topic(message, request, actor)
@@ -409,6 +410,8 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actor['_personal_scopes'], ['D'])
         self.assertEqual(set(actor['_personal_modules']), {'assistant', 'event'})
         self.assertIn('A', actor['scopes'])
+        token = self.authority.context(request, actor)
+        self.assertEqual(self.authority.contexts[token]['actor']['scopes'], ['D'])
         assistant = LighthouseAssistant(self.store, Mock(), model=Mock())
         state = assistant._state(actor)
         turn = {'operation_id': 'feishu_' + 'b' * 40, 'at': 1, 'question': 'q', 'answer': 'borrowed source',
@@ -421,6 +424,17 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         mirrors = assistant._state(web)['turns']
         self.assertNotIn('borrowed source', mirrors[0]['answer'])
         self.assertTrue(mirrors[0]['display_only'])
+
+    async def test_query_only_participant_does_not_borrow_business_write_permissions(self):
+        self.auth.profiles['ou_Low']['modules'] = ['event']
+        message = {'message_id': 'om_QueryOnly', 'root_id': 'om_Root', 'chat_id': 'oc_Group',
+                   'chat_type': 'group', 'app_id': TARGET_APP_ID, 'sender_id': 'ou_Low'}
+        self.assertTrue(self.registry.register(self.topic, self.actor(), message))
+        self.assertIsNone(self.registry.profile('ou_Low'))
+        self.assertTrue(self.registry.profile('ou_Low', shared_query=True))
+        self.assertIn('A', self.registry.enrich(self.actor(), self.topic)['scopes'])
+        with self.assertRaises(PortalError):
+            self.registry.issue(self.topic, 'ou_Low', topic_capability(self.operation()))
 
     async def test_mixed_complete_capabilities_remain_context_without_cartesian_leak(self):
         inbox = Inbox(self.root / 'inbox.sqlite3')

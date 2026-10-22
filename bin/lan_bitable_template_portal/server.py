@@ -11601,6 +11601,10 @@ class PortalRuntime:
         action = str(prepared.get("action") or "").strip().lower()
         if not notice_type or action not in {"start", "update", "end"}:
             return False, "后端上传缺少必要字段。", ""
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_error
+        cycle_error = maintenance_cycle_error(notice_type, prepared.get('maintenance_cycle'), prepared.get('text'))
+        if cycle_error:
+            return False, cycle_error, ""
         needs_remote_site_photo = (
             action == "end"
             and cls._end_site_photo_required(notice_type)
@@ -12937,6 +12941,10 @@ class PortalRuntime:
         notice_type = str(data.get("notice_type") or "").strip()
         if not notice_type:
             raise PortalError("Qt 上传请求缺少 notice_type。")
+        from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_error
+        cycle_error = maintenance_cycle_error(notice_type, data.get('maintenance_cycle'), data.get('text'))
+        if cycle_error:
+            raise PortalError(cycle_error)
         record_id = str(data.get("record_id") or "").strip()
         if not record_id:
             raise PortalError("Qt 上传请求缺少 record_id。")

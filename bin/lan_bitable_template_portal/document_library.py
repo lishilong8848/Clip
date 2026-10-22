@@ -221,7 +221,10 @@ class DocumentLibraryService:
         if 'ALL' in granted:
             granted = set(SCOPES)
         permitted = set(source['write_scopes'] if write else source['read_scopes'])
-        result = bool(source['enabled'] and scopes and set(scopes) <= granted & permitted)
+        from .assistant_shared_read import SHARED_READ
+        shared = SHARED_READ.get()
+        shared_read = not write and shared is not None and shared.active and shared.operator == actor['id']
+        result = bool(source['enabled'] and scopes and (shared_read or set(scopes) <= granted & permitted))
         if result and self.authorize_source is not None:
             result = self.authorize_source(actor, source, list(scopes), 'write' if write else 'read') is True
         return result
@@ -681,6 +684,8 @@ class DocumentLibraryService:
             record = json.loads(cached['payload'])
             if not provenance.get('historical_version') and cached['revision'] != provenance['record_revision']:
                 return False
+            if actor.get('_shared_business_queries'):
+                return bool(source['enabled'] and record['scopes'] and provenance['scopes'])
             return self._allowed(actor, source, record['scopes']) and self._allowed(actor, source, provenance['scopes'])
         except Exception:
             return False

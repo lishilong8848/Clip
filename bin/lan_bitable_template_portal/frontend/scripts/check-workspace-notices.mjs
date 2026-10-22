@@ -177,8 +177,10 @@ try {
           await selectCycle('每月');await editor.locator('[data-cycle-warning="reason"]').waitFor();
           await originals.find(item=>item.key==='progress').input.fill('现场已核对');
           const preview=editor.getByRole('button',{name:'预览并确认更新',exact:true});assert(await preview.isEnabled());await preview.click();
-          await editor.getByLabel('发送前确认',{exact:true}).waitFor();await editor.locator('[data-cycle-warning-summary]').waitFor();
-          assert(await editor.getByRole('button',{name:'确认发送更新',exact:true}).isEnabled(),'cycle warnings never disable confirmation');
+          assert.equal(await editor.getByRole('button',{name:'确认发送更新',exact:true}).count(),0,'cycle conflicts must block confirmation');
+          assert((await editor.innerText()).includes('修改一致后再发送'));
+          await content.fill('每月维保检查');await originals.find(item=>item.key==='reason').input.fill('按月度计划维保');
+          await preview.click();await editor.getByLabel('发送前确认',{exact:true}).waitFor();
           assert(!(await editor.getByLabel('待发送通告全文',{exact:true}).innerText()).includes('周期核对提醒'),'advisory never rewrites the notice');
           assert(!writes.includes('/api/workbench-actions'),'advisory preview never submits a notice');
           await editor.getByRole('button',{name:'返回修改',exact:true}).click();
@@ -276,5 +278,5 @@ try {
   }
   assert.deepEqual(errors, []);
   assert.deepEqual(oldPages, [], 'no legacy document navigation');
-  console.log('PASS: isolated production notice pages, six categories, maintenance-only cycle advisories and nonblocking preview, restored compact-layout baselines, existing forms and menus, logout failure.');
+  console.log('PASS: isolated production notice pages, six categories, maintenance-only cycle send guards and corrected preview, restored compact-layout baselines, existing forms and menus, logout failure.');
 } finally { await browser.close(); await server.close(); }

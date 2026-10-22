@@ -1,4 +1,4 @@
-"""Qt-only advisory checks, with temporary data and no network or uploads."""
+"""Qt cycle send guards, with temporary data and no network or uploads."""
 import copy
 import os
 from pathlib import Path
@@ -84,10 +84,10 @@ class QtNoticeCycleWarningTests(unittest.TestCase):
         warning = dialog.maintenance_cycle_warning_label.text()
         self.assertIn("【内容】", warning)
         self.assertIn("【原因】", warning)
-        self.assertIn("不阻止发送", warning)
+        self.assertIn("修改一致后再发送", warning)
         self.assertEqual(dialog.data_dict["text"], original["text"])
         self.assertEqual(data, original)
-        self.assertTrue(dialog.btn_confirm.isEnabled())
+        self.assertFalse(dialog.btn_confirm.isEnabled())
 
     def test_cycle_selection_and_clearing_refresh_the_advisory(self):
         dialog = self.make_upload(notice(reason="按季度计划维保"))
@@ -98,7 +98,7 @@ class QtNoticeCycleWarningTests(unittest.TestCase):
                 dialog.maintenance_cycle_combo.activated.emit(index)
                 self.assertEqual(dialog.maintenance_cycle_warning_label.isHidden(), hidden)
                 self.assertEqual(dialog.data_dict["maintenance_cycle"], cycle)
-                self.assertTrue(dialog.btn_confirm.isEnabled())
+                self.assertEqual(dialog.btn_confirm.isEnabled(),hidden)
         dialog.maintenance_cycle_combo.setCurrentIndex(0)
         dialog.maintenance_cycle_combo.activated.emit(0)
         self.assertTrue(dialog.maintenance_cycle_warning_label.isHidden())
@@ -130,7 +130,7 @@ class QtNoticeCycleWarningTests(unittest.TestCase):
                     self.assertEqual(detail.text_area.styleSheet(), "")
             check.assert_not_called()
 
-    def test_start_update_end_emit_original_upload_parameters_despite_warnings(self):
+    def test_start_update_end_block_conflicts_but_preserve_original_parameters_after_correction(self):
         with patch.object(self.dialogs, "show_simple_message") as message:
             for action in ("upload", "update", "end"):
                 with self.subTest(action=action):
@@ -141,22 +141,35 @@ class QtNoticeCycleWarningTests(unittest.TestCase):
                     before = copy.deepcopy(dialog.data_dict)
                     received = []
                     dialog.upload_confirmed.connect(lambda *args: received.append(args))
+                    self.assertFalse(dialog.btn_confirm.isEnabled())
+                    dialog.confirm_upload()
+                    self.assertEqual(received, [])
+                    self.assertEqual(dialog.data_dict, before)
+                    dialog._update_data_dict_field('text',notice(content='每月检查过滤器',reason='按月度计划维保')['text'])
                     self.assertTrue(dialog.btn_confirm.isEnabled())
                     dialog.confirm_upload()
                     self.assertEqual(len(received), 1)
                     args = received[0]
-                    self.assertEqual(args[0]["text"], before["text"])
+                    self.assertEqual(args[0]["text"], notice(content='每月检查过滤器',reason='按月度计划维保')['text'])
                     self.assertEqual(args[0]["maintenance_cycle"], "每月")
                     self.assertEqual(args[0]["execution_party"], "自维")
                     self.assertEqual(args[1:4], (b"fixture-screenshot", action, "2026-10-22 09:30"))
                     self.assertEqual(args[4], ["A楼"])
                     self.assertEqual(args[5], [(b"fixture-site-photo", "site.png")])
                     self.assertEqual(args[6:], ("暖通", "", "", "", False, "auto"))
-                    self.assertEqual(data["text"], before["text"])
-            message.assert_not_called()
+            self.assertEqual(message.call_count,3)
+
+    def test_skip_screenshot_cannot_bypass_cycle_guard(self):
+        dialog=self.make_upload()
+        received=[]
+        dialog.upload_confirmed.connect(lambda *args:received.append(args))
+        with patch.object(self.dialogs,'show_simple_message') as message:
+            dialog.skip_screenshot()
+        self.assertEqual(received,[])
+        message.assert_called_once()
 
     def test_existing_required_fields_and_screenshot_rules_are_unchanged(self):
-        data = notice()
+        data = notice(content='月度检查',reason='按月度计划维保')
         data.pop("execution_party")
         dialog = self.make_upload(data, action="update")
         self.assertFalse(dialog.btn_confirm.isEnabled())
@@ -261,7 +274,7 @@ class QtNoticeCycleWarningTests(unittest.TestCase):
             label = dialog.maintenance_cycle_warning_label
             self.assertTrue(label.isVisible())
             self.assertLess(label.geometry().bottom(), button.geometry().top())
-        self.assertTrue(upload.btn_confirm.isEnabled())
+        self.assertFalse(upload.btn_confirm.isEnabled())
 
 
 if __name__ == "__main__":

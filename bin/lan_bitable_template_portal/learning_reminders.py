@@ -44,7 +44,7 @@ def duty_recipients(service):
     return targets
 
 
-def read_roster(service, day):
+def read_roster(service, day, *, scopes=tuple('ABCDEH')):
     from .learning import text
 
     people, cursor, seen = {}, '', set()
@@ -57,7 +57,8 @@ def read_roster(service, day):
             raise ValueError('学练排班视图读取不完整，未使用部分名单发送。')
         for row in data['items']:
             fields = row.get('fields') or {}
-            if text(fields.get('班组')).strip() in {'长白', '110站'} or fields.get('班次') not in SHIFT_TIMES:
+            if (text(fields.get('班组')).strip() == '长白' or fields.get('班次') not in SHIFT_TIMES
+                    or text(fields.get('班组')).strip() == '110站' and '110' not in scopes):
                 continue
             value = fields.get('排班日期')
             try:
@@ -67,10 +68,12 @@ def read_roster(service, day):
             if roster_day != day:
                 continue
             scope = str(fields.get('机楼') or '').strip().removesuffix('楼').removesuffix('站')
-            if scope == '110':
+            if scope == '110' and scope not in scopes:
                 continue
-            if scope not in tuple('ABCDEH'):
+            if scope not in (*tuple('ABCDEH'), '110'):
                 raise ValueError('学练排班楼栋不明确，未使用不完整名单发送。')
+            if scope not in scopes:
+                continue
             users = fields.get('人员') or {}
             users = users.get('users', []) if isinstance(users, dict) else users
             if not isinstance(users, list):
