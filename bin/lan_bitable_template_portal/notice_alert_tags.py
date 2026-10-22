@@ -24,9 +24,10 @@ def identity(*values):
 
 
 class NoticeAlertTags:
-    def __init__(self, service, recommend, send, *, clock=time.time, store=None):
+    def __init__(self, service, recommend, send, *, clock=time.time, store=None, get_supervisors=None):
         self.service, self.store = service, store if store is not None else service._state_store
         self.recommend, self.send, self.clock = recommend, send, clock
+        self.get_supervisors = get_supervisors
         self.lock = threading.RLock()
         self.capacity = asyncio.Semaphore(2)
 
@@ -156,17 +157,18 @@ class NoticeAlertTags:
 
     def notify(self, batch, jobs):
         warnings = [job['recipient_warning'] for job in jobs if job.get('recipient_warning')]
+        batch['supervisors_pending'] = False
         recipients = defaultdict(list)
         for job in jobs:
             for recipient in dict.fromkeys(job['recipients']):
                 recipients[recipient].append(job)
-        for recipient, selected in recipients.items():
-            receipt = batch['notifications'].setdefault(recipient, {})
+        def deliver(key, recipient, selected):
+            receipt = batch['notifications'].setdefault(key, {})
             if receipt.get('sent'):
-                continue
+                return
             if receipt.get('attempted_at') and self.clock() - receipt['attempted_at'] > 3500:
                 warnings.append('个人消息上次结果未确认且已超出去重时限，未重复发送。')
-                continue
+                return
             chunks = ['通告推荐标签（仅供现场核对，不代表已给告警打标）']
             for job in selected:
                 chunks.append(job['title'] + ' · ' + ('开始' if job['action'] == 'start' else '更新') + '\n' + (
@@ -175,13 +177,44 @@ class NoticeAlertTags:
             self.store.put_document(NS, 'batch:' + batch['id'], batch)
             try:
                 ok, _, _ = self.send('\n\n'.join(chunks), [recipient],
-                    message_uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, batch['id'] + recipient)))
+                    message_uuid=str(uuid.uuid5(uuid.NAMESPACE_URL, batch['id'] + key)))
             except Exception:
                 ok = False
             receipt['sent'] = bool(ok)
             if not ok:
-                warnings.append('推荐标签个人消息发送未确认，后台将有限重试；通告业务不受影响。')
+                warnings.append(('主管推荐标签消息' if key.startswith('supervisor:') else '推荐标签个人消息')
+                    + '发送未确认，后台将有限重试；通告业务不受影响。')
             self.store.put_document(NS, 'batch:' + batch['id'], batch)
+
+        for recipient, selected in recipients.items():
+            deliver(recipient, recipient, selected)
+        if self.get_supervisors:
+            for job in jobs:
+                try:
+                    supervisors, warning = self.get_supervisors(job)
+                    if warning:
+                        warnings.append(warning)
+                    for recipient in dict.fromkeys(supervisors):
+                        if recipient in job['recipients']:
+                            continue
+                        key = 'supervisor:' + job['id'] + ':' + recipient
+                        if batch['notifications'].get(key, {}).get('sent'):
+                            continue
+                        # Per-notice receipts keep retry content/UUID stable when a supervisor moves.
+                        current, _ = self.get_supervisors(job)
+                        if recipient not in current:
+                            batch['supervisors_pending'] = True
+                            continue
+                        deliver(key, recipient, [job])
+                    current, _ = self.get_supervisors(job)
+                    if set(current) - set(supervisors) - set(job['recipients']):
+                        batch['supervisors_pending'] = True
+                except Exception as exc:
+                    batch['supervisors_pending'] = True
+                    LOG.warning('通告标签主管接收人等待核对: %s', type(exc).__name__)
+            if batch['supervisors_pending']:
+                warnings.append('主管接收人暂不可核验，后台等待重试；原接收人推送不受影响。')
+        self.store.put_document(NS, 'batch:' + batch['id'], batch)
         for job in jobs:
             job['message_warning'] = '；'.join(dict.fromkeys(warnings))
         self.store.put_documents(NS, {'job:' + job['id']: job for job in jobs})
@@ -213,8 +246,9 @@ class NoticeAlertTags:
                 ok = False
             for row in rows:
                 if row['payload']['job_id'] in batch['job_ids']:
-                    saved = await asyncio.to_thread(self.store.mark_outbox_event, row['id'], 'done' if ok else 'pending',
-                        error='' if ok else '标签后台任务未完成；不影响通告', max_attempts=3)
+                    waiting = not ok and batch.get('supervisors_pending', False)
+                    saved = await asyncio.to_thread(self.store.mark_outbox_event, row['id'], 'done' if ok else 'leased' if waiting else 'pending',
+                        error='' if ok else '标签后台任务未完成；不影响通告', max_attempts=3, count_attempt=not waiting)
                     if saved and saved['status'] == 'failed':
                         key = 'job:' + row['payload']['job_id']
                         job = await asyncio.to_thread(self.store.get_document, NS, key)
@@ -227,7 +261,9 @@ class NoticeAlertTags:
 
 def install_notice_alert_tag_routes(app, controller, runtime, recommend):
     from .server import _send_text_to_open_ids_guarded
-    tagging = NoticeAlertTags(runtime.service, recommend, _send_text_to_open_ids_guarded, store=runtime.state_store)
+    from .notice_recipients import current_supervisors
+    tagging = NoticeAlertTags(runtime.service, recommend, _send_text_to_open_ids_guarded, store=runtime.state_store,
+        get_supervisors=lambda job: current_supervisors(runtime.auth_manager, job))
     runtime.notice_alert_tags = tagging
     worker = None
 

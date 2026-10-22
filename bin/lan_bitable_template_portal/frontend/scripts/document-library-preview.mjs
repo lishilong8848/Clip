@@ -37,7 +37,9 @@ function makeRecord(id, title, scope = 'A') {
     fldLink: { link: 'https://example.invalid/reference', text: '资料关联' }, fldValid: true,
     fldFiles: [{ name: '南通标识.png' }], fldFormula: '自动汇总 · 16页', fldUnknown: { name: '系统原始值' } },
     attachments: [{ attachment_id: 'file1', field_id: 'fldFiles', name: '南通标识.png', size: 2048, type: 'image/png' }],
-    capabilities: { edit: true, upload: true }, knowledge_status: { state: 'indexed' } };
+    capabilities: { edit: true, upload: true }, knowledge_status: { state: 'indexed' },
+    knowledge_items: [{ kind: 'record', name: id + '.txt', status: 'ready', cached: true, stage: 'index' },
+      { kind: 'attachment', name: '南通标识.png', attachment_id: 'file1', field_id: 'fldFiles', status: 'ready', cached: true, stage: 'index' }] };
 }
 export function documentFixture() {
   return { tables: [table('electrical', '电气技术资料'), table('mechanical', '暖通技术资料', false)],
@@ -77,6 +79,7 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
       const call = { path: relative, method: request.method, table: key, query: Object.fromEntries(url.searchParams) };
       fixture.calls.push(call);
       const selected = fixture.tables.find(item => item.id === key);
+      const tableRecords = fixture.recordsByTable?.[key] || fixture.records;
       const capabilities = record => ({ edit: selected.write_scopes.includes(record.fields.fldScope), upload: selected.write_scopes.includes(record.fields.fldScope), max_upload_bytes: 104857600 });
       const fail = message => json(message, 503);
       if (request.method === 'GET') {
@@ -88,7 +91,7 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
         if (resource === '/records') {
           if (fixture.listDelay) await new Promise(resolve => setTimeout(resolve, fixture.listDelay));
           if (fixture.flags.listFailure) return fail('资料列表暂时读取失败');
-          const visible = fixture.records.filter(record => (!url.searchParams.get('q') || record.fields.fldTitle.includes(url.searchParams.get('q'))) && (!url.searchParams.get('scope') || record.fields.fldScope === url.searchParams.get('scope')));
+          const visible = tableRecords.filter(record => (!url.searchParams.get('q') || record.fields.fldTitle.includes(url.searchParams.get('q'))) && (!url.searchParams.get('scope') || record.fields.fldScope === url.searchParams.get('scope')));
           const start = url.searchParams.get('cursor') === 'page2' ? 2 : 0;
           return json({ items: visible.slice(start, start + 2).map(record => ({ ...record, capabilities: capabilities(record) })), has_more: visible.length > start + 2, cursor: visible.length > start + 2 ? 'page2' : '' });
         }
@@ -99,7 +102,7 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
         if (resource.endsWith('/file')) {
           const image = await readFile(path.join(root, 'public/assets/vnet-logo.png')); response.setHeader('Content-Type', 'image/png'); response.end(image); return;
         }
-        const record = fixture.records.find(item => item.record_id === resource.split('/')[2]);
+        const record = tableRecords.find(item => item.record_id === resource.split('/')[2]);
         return record ? fixture.flags.detailFailure ? fail('资料详情暂时读取失败') : json({ ...record, capabilities: capabilities(record) }) : json('资料不存在', 404);
       }
       const chunks = []; for await (const chunk of request) chunks.push(chunk); const body = Buffer.concat(chunks);
@@ -145,10 +148,10 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
       fixture.writes.push({ path: relative, body: copy(payload) });
       assert(payload.operation_id, 'Writes carry one stable operation id'); assert(payload.reason?.trim(), 'Writes carry a real reason');
       if (fixture.receipts.has(payload.operation_id)) return json(fixture.receipts.get(payload.operation_id));
-      const id = resource.split('/')[2]; let record = fixture.records.find(item => item.record_id === id);
+      const id = resource.split('/')[2]; let record = tableRecords.find(item => item.record_id === id);
       if (record && fixture.flags.conflict) { fixture.flags.conflict = false; record.revision = 'r' + (++fixture.version); record.fields.fldCount = 18; return json('资料版本已更新，请读取最新版本', 409); }
       if (record && record.revision !== payload.expected_revision) return json('资料版本冲突', 409);
-      if (!record) { record = makeRecord('recCreated' + fixture.applied, '', 'A'); record.fields = {}; record.attachments = []; fixture.records.unshift(record); }
+      if (!record) { record = makeRecord('recCreated' + fixture.applied, '', 'A'); record.fields = {}; record.attachments = []; tableRecords.unshift(record); }
       if (file) record.attachments.push({ attachment_id: 'fileUpload' + fixture.applied, field_id: payload.field_id, name: file.name, size: file.size, type: file.type });
       else { assert(!('fldFormula' in payload.fields)); assert(!('fldUnknown' in payload.fields)); Object.assign(record.fields, payload.fields); }
       record.revision = 'r' + (++fixture.version); record.knowledge_status = { state: fixture.flags.indexFailure ? 'failed' : 'indexed' };

@@ -78,6 +78,7 @@ class FullSourceKnowledgeTests(LibraryFixture):
         schema = [*self.remote.fields(), {'field_id': 'fldPictures', 'field_name': 'Pictures', 'type': 17}]
         self.enterContext(patch.object(self.remote, 'fields', return_value=schema))
         self.remote.files['tokenImageFixture'] = b'fixture image bytes'
+        self.remote.files['tokenZipFixture'] = b'fixture archived original'
         self.remote.rows['recOne']['fields']['Pictures'] = [
             {'file_token': 'tokenImageFixture', 'name': 'drawing.png', 'size': 19},
             {'file_token': 'tokenZipFixture', 'name': 'archive.zip', 'size': 99}]

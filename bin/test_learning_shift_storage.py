@@ -40,7 +40,7 @@ class ShiftStorageTests(unittest.TestCase):
         self.temp = self.enterContext(TemporaryDirectory())
         self.clock = self.enterContext(patch.object(core, 'now', return_value=CURRENT))
         self.cloud = Cloud()
-        self.directory = {'one': {'login_ids': ['ou_one']}, 'two': {'login_ids': ['ou_two']}}
+        self.directory = {rid: {'name': rid, 'login_ids': ['ou_' + rid], 'selectable': True} for rid in ('one', 'two')}
         self.service = core.LearningService(self.temp, cloud=self.cloud,
             get_login_people=self.login_directory)
         for rid in self.directory:
@@ -241,9 +241,9 @@ class ShiftStorageTests(unittest.TestCase):
                 raise Conflict('synthetic changed record')
             done.append(rid)
         self.cloud.enrich_entity_record = enrich
-        with self.assertRaises(Conflict):
-            storage.backfill(self.service)
+        storage.backfill(self.service)
         self.assertEqual(done, ['recA'])
+        self.assertEqual(storage.history_issues(self.service)[0]['record_id'], 'recB')
         records[1]['payload_sha256'] = 'second'
         with patch.object(storage.time, 'time', return_value=10**12):
             storage.backfill(self.service)
@@ -260,14 +260,172 @@ class ShiftStorageTests(unittest.TestCase):
                 raise OSError('deleted externally')
             done.append(rid)
         self.cloud.enrich_entity_record = enrich
-        with self.assertRaises(OSError):
-            storage.backfill(self.service)
+        storage.backfill(self.service)
+        self.assertEqual(done, ['recZ'])
         records.pop(0)
         with patch.object(storage.time, 'time', return_value=10**12):
             storage.backfill(self.service)
         self.assertEqual(done, ['recZ'])
         self.assertEqual(self.service._get('local', 'shift_history_fields')['missing_ids'], ['recA'])
         self.assertTrue(self.service._get('local', 'shift_history_fields')['complete'])
+
+    def historical(self, name='one', rid='recOld', pid='legacy-id'):
+        return {'record_id': rid, 'kind': 'paper', 'key': rid, 'display_name': name,
+                'payload': {'id': rid, 'person_id': pid, 'person': {'id': pid, 'name': name},
+                            'date': DATE, 'shift': '白', 'scope': 'A', 'questions': []}, 'payload_sha256': rid}
+
+    def history_run(self, records):
+        self.cloud.list_entity_records = lambda: copy.deepcopy(records)
+        writes = []
+        self.cloud.enrich_entity_record = lambda *args, **kwargs: writes.append((args, kwargs))
+        storage.backfill(self.service)
+        return writes
+
+    def test_history_exact_name_uses_new_app_identity_without_changing_business_id(self):
+        record = self.historical('one')
+        self.directory['one']['login_ids'] = ['ou_currentApp']
+        writes = self.history_run([record])
+        self.assertEqual(writes[0][0][3]['人员'], [{'id': 'ou_currentApp'}])
+        self.assertEqual(writes[0][1]['expected_app_id'], 'cli_test')
+        self.assertEqual(writes[0][1]['expected_display_name'], 'one')
+        self.assertEqual(record['payload']['person_id'], 'legacy-id')
+        self.assertFalse(storage.history_issues(self.service))
+        self.assertEqual(self.cloud.calls, [])
+
+    def test_history_duplicate_does_not_guess_by_building_or_block_unique_person(self):
+        self.directory['duplicate'] = {'name': 'one', 'login_ids': ['ou_duplicate'], 'scopes': ['B']}
+        writes = self.history_run([self.historical(), self.historical('two', 'recOther')])
+        self.assertNotIn('人员', writes[0][0][3])
+        self.assertEqual(writes[1][0][3]['人员'], [{'id': 'ou_two'}])
+        issue = storage.history_issues(self.service)[0]
+        self.assertIn('重名', issue['reason'])
+        self.assertEqual(len(issue['candidates']), 2)
+        self.assertNotIn('ou_', str(issue))
+        self.assertEqual(self.service._get('local', 'shift_history_fields')['remaining'], 1)
+        storage.backfill(self.service)
+        self.assertEqual(len(writes), 2, 'No repeated remote writes for unresolved names')
+        self.paper('new-normal')
+        self.assertEqual(self.service.sync_pending()['pending_errors'], 0)
+        self.assertEqual(len(self.bundles()), 1)
+
+    def test_history_no_fuzzy_or_inactive_or_conflicting_or_shared_identity(self):
+        for label, name, person, rows, expected in [
+            ('missing', 'unknown', {}, self.directory, '未找到完全同名'),
+            ('partial', 'on', {}, self.directory, '未找到完全同名'),
+            ('case', 'One', {}, self.directory, '未找到完全同名'),
+            ('no-name', '', {}, self.directory, '没有可核验'),
+            ('changed', 'two', {'id': 'directory:one'}, self.directory, '不一致'),
+            ('inactive', 'one', {}, {'one': {**self.directory['one'], 'inactive': True}}, '停用'),
+            ('unselectable', 'one', {}, {'one': {**self.directory['one'], 'selectable': False}}, '待核对'),
+            ('no-oid', 'one', {}, {'one': {'name': 'one', 'login_ids': []}}, 'openid'),
+            ('shared-oid', 'one', {}, {**self.directory, 'extra': {'name': 'else', 'login_ids': ['ou_one']}}, 'openid'),
+        ]:
+            with self.subTest(label=label):
+                oid, reason, _ = storage.resolve_history_identity({'required': True, 'person': person, 'names': [name] if name else []}, rows)
+                self.assertEqual(oid, '')
+                self.assertIn(expected, reason)
+
+    def test_history_original_conflicting_names_and_operator_title_are_not_recipients(self):
+        record = self.historical()
+        record['payload']['person']['name'] = 'two'
+        writes = self.history_run([record])
+        self.assertNotIn('人员', writes[0][0][3])
+        self.assertIn('姓名不一致', storage.history_issues(self.service)[0]['reason'])
+        state = storage.Snapshot({})
+        for kind in ('settings', 'question', 'publication', 'sharing_batch'):
+            self.assertFalse(storage.history_identity(state, {'kind': kind, 'key': 'x',
+                'payload': {'name': 'one', 'operator_name': 'one'}})['required'])
+
+    def test_history_linked_paper_and_original_visible_name_can_resolve(self):
+        record = self.historical()
+        state = storage.Snapshot({('paper', record['key']): {'payload': record['payload']}})
+        identity = storage.history_identity(state, {'kind': 'record', 'key': record['key'], 'payload': {'entries': {}}})
+        self.assertEqual(storage.resolve_history_identity(identity, self.directory)[0], 'ou_one')
+        record['payload']['person'] = {}
+        self.assertEqual(self.history_run([record])[0][0][3]['人员'], [{'id': 'ou_one'}])
+
+    def test_history_retry_after_restart_and_directory_repair_only_updates_pending_row(self):
+        records = [self.historical('missing'), self.historical('two', 'recOther')]
+        writes = self.history_run(records)
+        restored = core.LearningService(self.temp, cloud=self.cloud, get_login_people=self.login_directory)
+        self.directory['added'] = {'name': 'missing', 'login_ids': ['ou_added'], 'selectable': True}
+        with patch.object(storage.time, 'time', return_value=10**12):
+            storage.backfill(restored)
+        self.assertEqual(len(writes), 3)
+        self.assertEqual(writes[-1][0][0], 'recOld')
+        self.assertEqual(writes[-1][0][3]['人员'], [{'id': 'ou_added'}])
+        self.assertTrue(restored._get('local', 'shift_history_fields')['complete'])
+        self.assertFalse(storage.history_issues(restored))
+
+    def test_history_v1_completed_is_rechecked_after_upgrade(self):
+        self.put('local', {'id': 'shift_history_fields', 'version': 1, 'complete': True}, False)
+        writes = self.history_run([self.historical()])
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(self.service._get('local', 'shift_history_fields')['version'], storage.HISTORY_VERSION)
+
+    def test_unresolved_rows_never_starve_later_rows_even_across_retry_windows(self):
+        records = [self.historical('missing', 'recA'), self.historical('two', 'recZ')]
+        self.cloud.list_entity_records = lambda: copy.deepcopy(records)
+        writes = []
+        self.cloud.enrich_entity_record = lambda *args, **kwargs: writes.append(args)
+        with patch.object(storage.time, 'time', return_value=1000):
+            storage.backfill(self.service, limit=1)
+        with patch.object(storage.time, 'time', return_value=1400):
+            storage.backfill(self.service, limit=1)
+        self.assertEqual([row[0] for row in writes], ['recA', 'recZ'])
+        self.assertEqual(writes[-1][3]['人员'], [{'id': 'ou_two'}])
+
+    def test_history_report_admin_only_and_export_escapes_formula(self):
+        self.history_run([self.historical('=missing')])
+        admin = {'id': 'admin', 'is_admin': True}
+        ordinary = {'id': 'ordinary', 'person_id': 'directory:one', 'scope': 'A', 'can_answer': True}
+        self.assertIn('history_issues', self.service.bootstrap('', admin)['sync'])
+        self.assertNotIn('history_issues', self.service.bootstrap('A', ordinary)['sync'])
+        self.assertNotIn('history_issues', self.service.sync_status())
+        with self.assertRaises(core.LearningError) as caught:
+            self.service.export('history_identity', {}, ordinary)
+        self.assertEqual(caught.exception.status, 403)
+        data, filename, mime = self.service.export('history_identity', {}, admin)
+        self.assertIn("'=missing", data.decode('utf-8-sig'))
+        self.assertIn('待核对', filename)
+        self.assertIn('text/csv', mime)
+
+    def test_legacy_dirty_sync_preserves_name_backfill_and_never_clears_unresolved_personnel(self):
+        value = self.historical()['payload']
+        self.put('paper', value)
+        self.put('local', {'id': 'shift_legacy:paper:' + value['id'], 'legacy': True}, False)
+        self.service.sync_pending()
+        self.assertEqual(self.cloud.calls[-1][3]['display_fields']['人员'], [{'id': 'ou_one'}])
+        self.directory['duplicate'] = {'name': 'one', 'login_ids': ['ou_duplicate']}
+        self.put('paper', {**value, 'status': 'completed'})
+        self.service.sync_pending()
+        self.assertNotIn('人员', self.cloud.calls[-1][3]['display_fields'])
+        self.assertEqual(self.cloud.calls[-1][2]['status'], 'completed')
+        self.assertFalse(self.service._get('paper', value['id'])['_dirty'])
+
+    def test_history_rejects_cross_person_link_even_with_identical_names(self):
+        self.directory['two']['name'] = 'one'
+        paper = self.historical('one', 'recPaper', 'directory:two')
+        record = {'record_id': 'recAnswer', 'kind': 'record', 'key': 'recPaper', 'payload_sha256': 'hash',
+                  'payload': {'id': 'recPaper', 'person_id': 'directory:one', 'entries': {}}}
+        writes = self.history_run([paper, record])
+        answer = next(args for args, _ in writes if args[0] == 'recAnswer')
+        self.assertNotIn('人员', answer[3])
+        self.assertIn('人员标识不一致', storage.history_issues(self.service)[0]['reason'])
+
+    def test_history_rejects_conflicting_embedded_person_id(self):
+        record = self.historical(pid='directory:one')
+        record['payload']['person']['id'] = 'directory:two'
+        writes = self.history_run([record])
+        self.assertNotIn('人员', writes[0][0][3])
+        self.assertIn('人员标识不一致', storage.history_issues(self.service)[0]['reason'])
+
+    def test_history_numeric_date_does_not_stop_later_valid_record(self):
+        bad = self.historical(rid='recBad')
+        bad['payload']['date'] = 1792512000000
+        writes = self.history_run([bad, self.historical('two', 'recGood')])
+        self.assertEqual({args[0] for args, _ in writes}, {'recBad', 'recGood'})
+        self.assertEqual(next(args for args, _ in writes if args[0] == 'recGood')[3]['人员'], [{'id': 'ou_two'}])
 
     def test_restore_rejects_different_local_owner_atomically(self):
         paper = self.paper()

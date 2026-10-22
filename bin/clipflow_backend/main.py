@@ -13087,6 +13087,18 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"每日工作汇总发送失败: {exc}")
 
+    def _run_scheduled_plan_deadlines(self) -> None:
+        if _mock_external_enabled() or self._stopping_event.is_set():
+            return
+        from lan_bitable_template_portal.planned_notice_deadlines import PlannedNoticeDeadlines
+        from lan_bitable_template_portal.server import _send_text_to_open_ids_guarded
+        reminders = getattr(self, '_plan_deadlines', None)
+        if reminders is None:
+            reminders = self._plan_deadlines = PlannedNoticeDeadlines(
+                PortalRuntime.service, PortalRuntime.state_store, PortalRuntime.auth_manager,
+                _send_text_to_open_ids_guarded)
+        reminders.tick()
+
     def _run_scheduled_daily_report_recipient_refresh(self) -> None:
         if _mock_external_enabled():
             return
@@ -13355,6 +13367,9 @@ class FastAPIPortalController:
         )
         scheduler.add_job(self._run_notice_panel, "interval", seconds=10,
                           id="notice_panel", max_instances=1, coalesce=True)
+        scheduler.add_job(self._run_scheduled_plan_deadlines, "cron", hour="9-23", minute="*", second=0,
+                          id="planned_notice_deadlines", max_instances=1, coalesce=True,
+                          misfire_grace_time=60, next_run_time=dt.datetime.now(dt.timezone(dt.timedelta(hours=8))))
         scheduler.add_job(
             self._write_runtime_heartbeat,
             "interval",
@@ -13552,6 +13567,9 @@ class FastAPIPortalController:
         self._write_runtime_heartbeat()
 
     def _stop_scheduler(self) -> None:
+        reminders = getattr(self, '_plan_deadlines', None)
+        if reminders is not None:
+            reminders.closed = True
         scheduler = self._scheduler
         self._scheduler = None
         if scheduler:

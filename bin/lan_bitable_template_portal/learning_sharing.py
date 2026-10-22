@@ -72,13 +72,22 @@ def normalized(value):
     return re.sub(r'\W+', '', value).lower()
 
 
-def validate_questions(questions, source, types=None, *, draft=False):
+def evidence_text(value):
+    value = re.sub(r'\s+', ' ', unicodedata.normalize('NFKC', value)).strip()
+    # Chinese line wraps are layout; keep separators between independent numbers/words.
+    return re.sub(r'(?<=[\u3400-\u9fff]) +| +(?=[\u3400-\u9fff])', '', value)
+
+
+def validate_questions(questions, source, types=None, *, draft=False, images=()):
     if not isinstance(questions, list) or not (0 if draft else 5) <= len(questions) <= 100:
         raise LearningError('每批发布至少5题、合计最多100题；AI题最多40题。')
     if sum(isinstance(q, dict) and q.get('origin', 'ai') == 'ai' for q in questions) > 40:
         raise LearningError('AI题最多40题。')
     allowed = selected_types(types) if types is not None else list(QUESTION_TYPES)
     result, seen = [], set()
+    image_by_id = {image['id']: image for image in images}
+    source_basis = evidence_text(source)
+    image_basis = {image['id']: evidence_text(image.get('text', '')) if image.get('mode') in {'ocr', 'vision'} else '' for image in images}
     for index, q in enumerate(questions):
         if not isinstance(q, dict):
             raise LearningError('题目格式无效。')
@@ -98,8 +107,20 @@ def validate_questions(questions, source, types=None, *, draft=False):
         values['evidence'] = evidence.strip()
         if 'origin' in q:
             values['origin'] = origin
-        if origin == 'ai' and (len(values['evidence']) < 8 or unicodedata.normalize('NFKC', values['evidence']) not in unicodedata.normalize('NFKC', source)):
+        ids = q.get('image_ids', [])
+        if (not isinstance(ids, list) or len(ids) > 3 or any(not isinstance(i, str) or i not in image_by_id for i in ids)
+                or len(set(ids)) != len(ids)):
+            raise LearningError(f'第{index + 1}题的图片必须从本批材料选择，最多3张且不能重复。')
+        basis = evidence_text(values['evidence'])
+        if origin == 'ai' and (len(basis) < 8 or not any(basis in text for text in [source_basis, *(image_basis[i] for i in ids)])):
             raise LearningError(f'第{index + 1}题的依据无法在纪要原文中核对，请修订后再发布。')
+        if ids:
+            confirmed = q.get('image_confirmed', False)
+            if type(confirmed) is not bool:
+                raise LearningError('题图核对状态无效。')
+            if not draft and any(image_by_id[i].get('mode') == 'vision' for i in ids) and not confirmed:
+                raise LearningError(f'第{index + 1}题包含图片识别内容，请对照原图核对题目与答案后再发布。')
+            values.update(image_ids=ids, image_confirmed=confirmed)
         identity = normalized(values['stem'])
         if not identity or identity in seen:
             raise LearningError('存在重复题干，请修订；不通过改编号凑足题量。')
@@ -162,6 +183,8 @@ def read_source(portal, url):
         raise LearningError('纪要中未找到“参会人”名单，未猜测接收人。')
     names = [name.strip() for name in attendance[1].split('@') if name.strip()]
 
+    source_blocks = []
+
     def mentions(id_type):
         found, cursor, seen, active = [], '', set(), False
         for _ in range(40):
@@ -169,6 +192,8 @@ def read_source(portal, url):
                                   **({'page_token': cursor} if cursor else {})})
             if not isinstance(data.get('items'), list) or type(data.get('has_more')) is not bool:
                 raise LearningError('纪要块分页不完整，未使用部分参会人名单。', 502)
+            if id_type == 'open_id':
+                source_blocks.extend(data['items'])
             for block in data['items']:
                 for value in block.values():
                     if not isinstance(value, dict) or not isinstance(value.get('elements'), list):
@@ -204,8 +229,10 @@ def read_source(portal, url):
         people[oid] = {'open_id': oid, 'union_id': uid, 'name': name}
     if len({p['union_id'] for p in people.values()}) != len(people) or len(people) > 500:
         raise LearningError('参会名单身份有冲突或超过500人，未发送。')
+    from .sharing_images import document_images
+    images = document_images(source_blocks, target, revision, document.get('title') or '分享会纪要')
     return {'url': target, 'title': document.get('title') or '分享会纪要', 'revision': revision,
-            'text': raw, 'participants': list(people.values()), 'read_at': stamp()}
+            'text': raw, 'participants': list(people.values()), 'read_at': stamp(), **({'images': images} if images else {})}
 
 
 def assigned_participants(batch):
@@ -353,7 +380,7 @@ class SharingExercises:
             'question_count': len(values.get(p['open_id'], {}).get('question_ids', [])),
             'saved_count': len(values.get(p['open_id'], {}).get('draft_answers', {})),
         } for p in participants]
-        result = {k: batch.get(k, '') for k in ('id', 'title', 'url', 'status', 'version', 'created_at', 'published_at', 'error', 'progress')}
+        result = {k: batch.get(k, '') for k in ('id', 'title', 'url', 'status', 'version', 'created_at', 'published_at', 'error', 'progress', 'generation_note')}
         result.update(participants=participants, question_count=len(batch['questions']),
                       completed=sum(bool(p['submitted_at']) for p in participants if not p['exempted']),
                       total=sum(not p['exempted'] for p in participants), attendee_total=len(participants))
@@ -364,9 +391,11 @@ class SharingExercises:
                 or batch['status'] == 'draft' and all_attempts):
             result['error'] = '历史分配恢复不完整，已暂停此批提醒与汇总；请同步恢复，不能重新抽题代替。'
         if actor.get('is_admin'):
-            result['questions'] = batch['questions']
+            result['questions'] = copy.deepcopy(batch['questions'])
             result['source_text'] = (batch.get('source') or {}).get('text', '')
-            result['sources'] = [{k: v for k, v in source.items() if k != 'text'} for source in (batch.get('source') or {}).get('sources', [])]
+            result['sources'] = [{k: v for k, v in source.items() if k not in {'text', 'images'}} for source in (batch.get('source') or {}).get('sources', [])]
+            from .sharing_images import public_images
+            result['source_images'] = public_images(batch, editor=True)
         else:
             mine = next((p for p in attempts if p['open_id'] == actor['id']), None)
             if mine and not actor.get('shared_account'):
@@ -379,6 +408,10 @@ class SharingExercises:
                     for name in ('correct', 'reference_answer', 'explanation', 'evidence'): q.pop(name, None)
                 else:
                     q['selected'] = mine['answers'][q['id']]
+        from .sharing_images import public_images
+        for question in result.get('questions', []):
+            if question.get('image_ids'):
+                question['images'] = public_images(batch, question['image_ids'])
         if actor.get('is_admin'):
             result['results'] = [{k: p.get(k) for k in ('name', 'open_id', 'question_ids', 'answers', 'correct', 'submitted_at')} for p in attempts]
             with closing(self.learning._connect()) as conn:
@@ -407,8 +440,16 @@ class SharingExercises:
         items = []
         for row in rows:
             detail = self.detail(row[0], actor)
-            items.append({k: v for k, v in detail.items() if k not in {'questions', 'source_text', 'sources', 'paper', 'participants', 'results', 'weekly_reports'}})
+            items.append({k: v for k, v in detail.items() if k not in {'questions', 'source_text', 'sources', 'source_images', 'paper', 'participants', 'results', 'weekly_reports'}})
         return {'items': items, 'total': total, 'page': page}
+
+    def image(self, identity, image_id, actor):
+        detail = self.detail(identity, actor)
+        visible = detail.get('source_images', []) if actor.get('is_admin') else [
+            image for question in detail.get('questions', []) for image in question.get('images', [])]
+        if not any(image['id'] == image_id for image in visible):
+            raise LearningError('无权查看此题图，或题图不属于当前题单。', 403)
+        return next(image for image in self.batch(identity)['source']['images'] if image['id'] == image_id)
 
     def edit(self, identity, payload, actor):
         self.learning._admin(actor)
@@ -423,7 +464,7 @@ class SharingExercises:
             if (not isinstance(excluded, list) or any(not isinstance(oid, str) or oid not in known for oid in excluded)
                     or len(set(excluded)) != len(excluded)):
                 raise LearningError('免做人员必须从本批参会名单选择，且不能重复。')
-            batch['questions'] = validate_questions(payload.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'), draft=True)
+            batch['questions'] = validate_questions(payload.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'), draft=True, images=batch.get('source', {}).get('images', []))
             batch['excluded_open_ids'] = excluded
             batch['version'] += 1
             batch.update(edited_by=actor['id'], edited_at=stamp())
@@ -449,7 +490,12 @@ class SharingExercises:
                 raise LearningError('仅可发布当前版本的已核对草稿。', 409)
             if self.attempts(identity, conn):
                 raise LearningError('此批已有分配记录但发布状态尚未恢复完整，禁止重新抽题；请先恢复同步。', 409)
-            questions = validate_questions(batch['questions'], batch['source']['text'], batch.get('question_types'))
+            questions = validate_questions(batch['questions'], batch['source']['text'], batch.get('question_types'), images=batch['source'].get('images', []))
+            if any(q.get('image_ids') for q in questions):
+                url = self.learning.portal_url()
+                if not url:
+                    raise LearningError('题图需要可用的学练入口，请核对门户地址后发布。', 503)
+                batch['image_page_url'] = url.rstrip('/') + '/learning?tab=sharing&batch_id=' + identity
             participants = assigned_participants(batch)
             if not participants: raise LearningError('请至少保留一位参会人参加答题。')
             batch['date'] = now().date().isoformat()
@@ -633,6 +679,9 @@ def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
         heading = f"{index + 1}. {QUESTION_TYPES[q['type']]} · {q['stem']}"
         target = elements if result else form
         target.append({'tag': 'div', 'text': plain(heading)})
+        if q.get('image_ids') and batch.get('image_page_url'):
+            target.append({'tag': 'div', 'text': {'tag': 'lark_md',
+                'content': f"[查看第{index + 1}题图片（{len(q['image_ids'])}张）]({batch['image_page_url']})"}})
         if q['type'] == 'interview':
             if result:
                 raw = attempt['answers'][qid]

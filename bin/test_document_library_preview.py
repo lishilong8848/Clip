@@ -219,7 +219,7 @@ class PreviewRemoteTests(RemoteTestCase):
 
     def test_denied_and_unreadable_tables_are_reported_without_leaking_ids(self):
         cases = (
-            ("denied", [{"code": 1254302, "msg": "secret provider text"}], "provider_error", 502),
+            ("denied", [{"code": 1254302, "msg": "secret provider text"}], "unauthorized", 403),
             # No readable table: reported as a permission problem, not a 502.
             ("unreadable", [{"code": 0, "data": {"items": [], "has_more": False}}], "", 403),
             ("unknown table", [tables_page([table("tblOther", "Other")])], "", 403))

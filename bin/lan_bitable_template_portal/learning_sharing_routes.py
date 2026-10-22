@@ -7,12 +7,12 @@ import uuid
 from contextlib import closing
 
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
 
 from .learning import LearningError, now, stamp
-from .learning_sharing import SharingExercises, exercise_card, key, question_mix, read_source, validate_questions, weekly_card
+from .learning_sharing import SharingExercises, exercise_card, key, read_source, weekly_card
 from .sharing_sources import SharingMaterials, MAX_FILE, combine_sources, read_material_link, source_url
 
 
@@ -66,20 +66,53 @@ class SharingRuntime:
         except LearningError as exc:
             return {'ok': False, 'toast': str(exc)}
 
-    def update_batch(self, identity, **fields):
+    def update_batch(self, identity, *, expected_version=None, **fields):
         core = self.service()
         with core.learning.transaction() as conn:
             batch = core.learning._get('sharing_batch', identity, conn)
-            if not batch or batch.get('status') == 'deleted':
+            if (not batch or batch.get('status') in {'published', 'closed', 'deleted'}
+                    or expected_version is not None and batch.get('version') != expected_version):
                 return False
             batch.update(fields)
             core.learning._put('sharing_batch', identity, batch, conn)
             return True
 
+    async def finish_generation(self, batch, source, state):
+        from .sharing_generation import generate_checked_questions
+
+        async def checkpoint(questions, progress_state, progress):
+            if self.closing or not await asyncio.to_thread(self.update_batch, batch['id'],
+                    expected_version=batch['version'], source=source, title=source['title'],
+                    participants=source['participants'], questions=questions,
+                    generation_state=progress_state, progress=progress):
+                raise asyncio.CancelledError()
+
+        if batch.get('auto_generate', True):
+            generate = getattr(self.runtime, 'generate_sharing_questions', None)
+            if not callable(generate):
+                raise LearningError('模型出题服务尚未就绪，已保留核对进度。', 503)
+            questions = await generate_checked_questions(batch, source, state, generate, checkpoint)
+        else:
+            questions = []
+        notes = list(state['notes'])
+        repaired = sum(bool(slot.get('repaired')) for slot in state['slots'])
+        discarded = sum(slot['status'] == 'discarded' for slot in state['slots'])
+        if repaired:
+            notes.append(f'已自动修订或重新生成{repaired}道问题题目，其余合格题保持不变。')
+        if discarded:
+            notes.append(f'{discarded}道题经自动修订仍未通过校验，未纳入发布题目，已保留其余合格题。')
+        await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'],
+            status='draft', progress='', title=source['title'], source=source,
+            participants=source['participants'], questions=questions, error='', generation_state={}, generation_note=' '.join(notes))
+
     async def generate(self, batch):
         core = self.service()
         try:
-            if not await asyncio.to_thread(self.update_batch, batch['id'], status='generating', error='', progress='正在读取完整纪要和参会人'):
+            if not await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], status='generating', error='', progress='正在读取完整纪要和参会人'):
+                return
+            saved = batch.get('generation_state')
+            if isinstance(saved, dict) and saved.get('schema') == 1:
+                await self.finish_generation(batch, batch['source'], saved)
                 return
             sources = []
             minutes = await asyncio.to_thread(read_source, self.runtime.service, batch['url']) if batch.get('url') else {}
@@ -103,36 +136,58 @@ class SharingRuntime:
                 match = matches[0] if matches else {}
                 scopes = match.get('scopes') or []
                 person.update(person_id=match.get('id') or 'feishu:' + person['open_id'], scope=scopes[0] if len(scopes) == 1 else '')
-            total = 40
-            types = batch.get('question_types') or ['single', 'multiple']
-            mix = question_mix(total, types)
-            first = question_mix(5, types)
-            for kind in first:
-                mix.remove(kind)
-            mix = first + mix
-            questions = []
             generate = getattr(self.runtime, 'generate_sharing_questions', None)
             if batch.get('auto_generate', True) and not callable(generate): raise LearningError('模型出题服务尚未就绪。', 503)
-            for offset in (range(0, total, 5) if batch.get('auto_generate', True) else []):
-                if self.closing: return
-                if not await asyncio.to_thread(self.update_batch, batch['id'], progress=f'已生成{len(questions)}题，继续核对未覆盖知识点（最多{total}题）'):
-                    return
-                additional = await generate(batch['owner'], source['text'], [q['stem'] for q in questions], min(5, total - offset), question_types=mix[offset:offset + 5])
-                questions.extend({**question, 'origin': 'ai'} for question in additional)
-                if len(additional) < 5:
-                    break
-            questions = validate_questions(questions, source['text'], types, draft=not batch.get('auto_generate', True))
-            await asyncio.to_thread(self.update_batch, batch['id'], status='draft', progress='', title=source['title'],
-                                    source=source, participants=source['participants'], questions=questions, error='')
+            from .sharing_images import SharingImages
+            image_store = SharingImages(core.learning, self.runtime.service)
+            image_refs = [image for item in sources for image in item.get('images', [])]
+            source_images = []
+            notes = []
+            if image_refs:
+                await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], progress=f'正在读取{len(image_refs)}张题图并识别图片文字')
+                source_images = await asyncio.to_thread(image_store.prepare, image_refs)
+                if callable(generate) and batch.get('auto_generate', True):
+                    for offset in range(0, len(source_images), 3):
+                        if self.closing:
+                            return
+                        group = source_images[offset:offset + 3]
+                        inputs = [await asyncio.to_thread(image_store.model_input, image) for image in group]
+                        analyzed = await generate(batch['owner'], '', [], 1, mode='image_sources', images=inputs)
+                        results = analyzed.get('images') if isinstance(analyzed, dict) else None
+                        if (not isinstance(results, list) or len(results) != len(group)
+                                or any(not isinstance(value, dict) or value.get('id') != original['id']
+                                    or value.get('mode') not in {'ocr', 'vision', 'unreadable'}
+                                    or not isinstance(value.get('text'), str) or len(value['text']) > 2000
+                                    for value, original in zip(results, group))):
+                            raise LearningError('图片识别结果无法与原图一一对应，请重新生成。', 502)
+                        for image, value in zip(group, results):
+                            image.update(text=value['text'], mode=value['mode'])
+                source['images'] = source_images
+                if len(source['text']) + sum(len(image['text']) for image in source_images) > 24000:
+                    raise LearningError('正文与图片识别内容超过24000字，请拆分材料，未截断出题。', 413)
+                modes = {image['mode'] for image in source_images}
+                if 'vision' in modes:
+                    notes.append('图片识别内容须对照原图核对题目与答案后发布。')
+                if 'ocr' in modes:
+                    notes.append('MiniMax未就绪或未可靠识别的图片仅按OCR文字出题，未推断图形、颜色或设备状态。')
+                unreadable = sum(image['mode'] == 'unreadable' for image in source_images)
+                if unreadable:
+                    notes.append(f'{unreadable}张图片未识别到可用依据，未据此自动出题；仍可查看原图并手动录题。')
+            await self.finish_generation(batch, source, {'schema': 1, 'slots': [], 'offset': 0, 'exhausted': False, 'notes': notes})
         except asyncio.CancelledError:
-            await asyncio.to_thread(self.update_batch, batch['id'], status='failed', error='生成被中断，请重新生成；未发布或发送。', progress='')
+            current = await asyncio.to_thread(core.learning._get, 'sharing_batch', batch['id']) or {}
+            resumable = bool(current.get('generation_state'))
+            await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'],
+                status='queued' if resumable else 'failed', error='生成暂停，已核对题目和修订进度保留，重启后继续。' if resumable else '生成被中断，请重新生成；未发布或发送。', progress='')
             raise
         except Exception as exc:
             from openclaw_service.assistant.lighthouse_ai import AssistantError
             error = str(exc) if isinstance(exc, (LearningError, AssistantError)) else '读取纪要或生成题目失败，请核对文档权限和本人模型配置后重试。'
-            await asyncio.to_thread(self.update_batch, batch['id'], status='failed', error=error[:500], progress='')
+            await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], status='failed', error=error[:500], progress='')
             logging.warning('Sharing exercise generation failed: %s', type(exc).__name__)
         finally:
+            if self.active_batch == batch['id']:
+                self.active_batch = ''
             self.wake.set()
 
     def pending(self, kind, limit):
@@ -199,6 +254,10 @@ class SharingRuntime:
                         raise LearningError('飞书应用已更换，旧批次不能跨应用发送；请核对原应用设置。', 409)
                     if not await asyncio.to_thread(self.allowed, attempt['open_id']):
                         raise LearningError('参会账号已停用或无学练权限，未发送。', 403)
+                    if batch.get('image_page_url'):
+                        url = core.learning.portal_url()
+                        if url:
+                            batch = {**batch, 'image_page_url': url.rstrip('/') + '/learning?tab=sharing&batch_id=' + batch['id']}
                     card = exercise_card(batch, attempt, reminder=job['kind'] == 'reminder', result=job['kind'] == 'result')
                     client = await bot.messenger.client()
                     response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
@@ -264,10 +323,12 @@ class SharingRuntime:
 
     def recover_interrupted(self):
         core = self.service()
+        active = self.active_batch if self.generation is not None and not self.generation.done() else ''
         with core.learning.transaction() as conn:
             for batch in core.learning._all('sharing_batch', conn):
-                if batch['status'] == 'generating' and batch['id'] != self.active_batch:
-                    batch.update(status='failed', progress='', error='上次生成被中断，尚未发布；可重新生成。')
+                if batch['status'] == 'generating' and batch['id'] != active:
+                    resumable = bool(batch.get('generation_state'))
+                    batch.update(status='queued' if resumable else 'failed', progress='', error='已恢复上次核对进度，将继续未完成的单题修订。' if resumable else '上次生成被中断，尚未发布；可重新生成。')
                     core.learning._put('sharing_batch', batch['id'], batch, conn)
 
     async def startup(self):
@@ -337,6 +398,10 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                                 batch = core.batch(bid, conn)
                                 if payload.get('version') != batch['version']: raise LearningError('批次已变化，请刷新。', 409)
                                 if action == 'retry' and batch['status'] == 'failed':
+                                    # An explicit user retry grants a new bounded round only to unresolved slots.
+                                    for slot in batch.get('generation_state', {}).get('slots', []):
+                                        if slot['status'] in {'discarded', 'pending'}:
+                                            slot.update(status='pending', attempts=0)
                                     batch.update(status='queued', error='', progress='', version=batch['version'] + 1)
                                 elif action == 'close' and batch['status'] == 'published':
                                     batch.update(status='closed', closed_at=stamp(), version=batch['version'] + 1)
@@ -399,6 +464,27 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                 for handle in parser._files_to_close_on_error:
                     handle.close()
 
+    async def source_image(request: Request):
+        try:
+            session, actor = await asyncio.to_thread(identity, request)
+            if not session:
+                return controller._auth_required_response()
+            core = await asyncio.to_thread(feature.service)
+            bid, image_id = request.path_params['batch_id'], request.path_params['image_id']
+            item = await asyncio.to_thread(core.image, bid, image_id, actor)
+            from .sharing_images import SharingImages
+            content = await asyncio.to_thread(SharingImages(core.learning, runtime.service).content, item)
+            # Recheck a revocation or batch removal that happened while recovering a missing cache.
+            current_session, current_actor = await asyncio.to_thread(identity, request)
+            if not current_session or current_actor['id'] != actor['id']:
+                return controller._auth_required_response()
+            await asyncio.to_thread(core.image, bid, image_id, current_actor)
+            return Response(content, media_type='image/jpeg', headers={
+                'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+        except Exception as exc:
+            return error_response(exc)
+
+    app.add_api_route('/api/learning/sharing/{batch_id}/images/{image_id}', source_image, methods=['GET'])
     app.add_api_route('/api/learning/sharing/materials', material_upload, methods=['POST'])
     app.add_api_route('/api/learning/sharing/people', endpoint, methods=['GET'])
     app.add_api_route('/api/learning/sharing', endpoint, methods=['GET', 'POST'])

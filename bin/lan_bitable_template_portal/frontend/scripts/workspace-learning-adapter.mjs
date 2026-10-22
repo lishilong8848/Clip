@@ -26,6 +26,7 @@ export function adaptLearningPage(source) {
       <NButton v-if="ready && viewMode==='overview' && canViewBuildings" size="small" text :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
     </div>
     <div class="actions" data-v2-navigation>
+      <span v-if="ready && isAdmin" class="sync-label" :class="{danger: !!boot.sync?.error, pending: !!boot.sync?.pending}"><Loader2 v-if="syncActive" :size="15" class="spin" />{{syncLabel}}<template v-if="boot.sync?.pending"> · {{boot.sync.pending}} 项待同步</template></span>
       <NDropdown v-if="ready && v2AuxOptions.length" :options="v2AuxOptions" @select="v2OpenSection"><NButton secondary size="small" :disabled="busy">{{ v2AuxTitle }}<ChevronDown :size="14" /></NButton></NDropdown>
       <span :data-v2-layout-tools="tab==='profile'?'learning-profile':'learning-practice'" class="v2-toolbar-end"></span>
     </div>

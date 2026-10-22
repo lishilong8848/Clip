@@ -8,7 +8,7 @@
           <button v-if="boot.can_answer" :class="{ active: viewMode === 'practice' }" :aria-pressed="viewMode === 'practice'" :disabled="busy" @click="goPractice"><BookOpen :size="14" />我的答题</button>
           <button v-if="canViewBuildings" :class="{ active: viewMode === 'overview' }" :aria-pressed="viewMode === 'overview'" :disabled="busy" @click="goOverview"><ChartNoAxesCombined :size="14" />楼栋画像</button>
         </span>
-        <span v-if="ready && isAdmin" class="sync-label" :class="{ danger: boot.sync?.status === 'error' }"><Loader2 v-if="syncActive" :size="15" class="spin" />{{ syncLabel }}<template v-if="boot.sync?.pending"> · {{ boot.sync.pending }} 项待同步</template></span>
+        <span v-if="ready && isAdmin" class="sync-label" :class="{ danger: !!boot.sync?.error, pending: !!boot.sync?.pending }"><Loader2 v-if="syncActive" :size="15" class="spin" />{{ syncLabel }}<template v-if="boot.sync?.pending"> · {{ boot.sync.pending }} 项待同步</template></span>
         <button class="icon-button" title="刷新当前页面" aria-label="刷新当前页面" :disabled="busy || loading" @click="refreshView"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       </div>
     </header>
@@ -117,11 +117,35 @@
       </template>
 
       <form v-else-if="tab === 'settings'" class="settings-form" @submit.prevent="saveSettings">
+        <details v-if="isAdmin && boot.sync?.history_issue_count" class="history-identity-issues">
+          <summary>历史人员待核对 · {{ boot.sync.history_issue_count }} 条</summary>
+          <div class="actions"><button type="button" :disabled="busy" @click="exportData('history_identity')"><Download :size="16" />导出完整清单</button><span v-if="boot.sync.history_issue_count > 50">当前显示前 50 条</span></div>
+          <ul>
+            <li v-for="item in boot.sync.history_issues" :key="item.record_id">
+              <strong>{{ item.name || '姓名缺失' }}</strong><span>{{ item.date }} {{ item.scope }}</span>
+              <span class="history-identity-reason">{{ item.reason }}</span><small>原记录：{{ item.record_id }}</small>
+              <small v-for="candidate in item.candidates" :key="candidate.record_id">候选：{{ candidate.name }} · 工号 {{ candidate.employee_no || '未填写' }} · {{ candidate.scopes.join('、') }} · {{ candidate.record_id }}</small>
+            </li>
+          </ul>
+        </details>
         <h2>题库与题单</h2><div class="actions"><button type="button" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库与人员</button><button type="button" class="primary" :title="boot.silent_manual_publish ? '生成今日题单，不发送飞书消息' : '请重启主程序后使用静默发布'" :disabled="busy || jobRunning || !boot.silent_manual_publish" @click="runJob('publish')"><Send :size="16" />手动发布题单</button></div>
         <h2>每日发布</h2><label class="checkbox-label"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy" />每日自动发布</label>
-        <label v-if="settingsForm.enabled" class="time-field">白班题单发布时间<input v-model="settingsForm.publish_time" type="time" required :disabled="busy" /></label>
-        <div v-if="settingsForm.enabled" class="shift-push-times">
-          <label class="time-field">夜班题单发布时间<input v-model="settingsForm.night_publish_time" type="time" required :disabled="busy" /></label>
+        <div v-for="shift in publishShifts" :key="shift.key" class="shift-publish-row">
+          <label class="time-field">{{ shift.label }}<input v-model="settingsForm[shift.field]" type="time" required :disabled="busy || !settingsForm.enabled" /></label>
+          <div class="shift-delivery" data-v2-inline-feedback>
+            <div class="shift-delivery-status" :class="shiftStatus(shift.key).state" role="status" aria-atomic="true">
+              <CheckCircle2 v-if="shiftStatus(shift.key).state === 'success'" :size="18" />
+              <AlertCircle v-else-if="['partial','unverified'].includes(shiftStatus(shift.key).state)" :size="18" />
+              <span class="shift-result-label">{{ shiftStatus(shift.key).label || '发送结果尚未就绪' }}</span>
+              <time>{{ boot.delivery_status?.date || boot.today }}</time>
+              <span v-if="shiftStatus(shift.key).expected">已发送 {{ shiftStatus(shift.key).sent }} / {{ shiftStatus(shift.key).expected }} 人</span>
+            </div>
+            <p v-if="shiftStatus(shift.key).failed" class="shift-failed-names">发送失败：{{ (shiftStatus(shift.key).issues || []).filter((person: Dict) => person.status === 'failed').map((person: Dict) => person.name).join('、') }}</p>
+            <details v-if="shiftStatus(shift.key).issues?.length" class="shift-delivery-issues">
+              <summary>发送异常 {{ shiftStatus(shift.key).failed || 0 }} 人 · 待发送或核对 {{ shiftStatus(shift.key).pending || 0 }} 人</summary>
+              <ul><li v-for="(person, index) in shiftStatus(shift.key).issues" :key="index"><strong>{{ person.name }}<span v-if="person.scope"> · {{ person.scope }}楼</span></strong><span>{{ person.reason }}</span></li></ul>
+            </details>
+          </div>
         </div>
         <h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label>
         <label v-if="settingsForm.reminder_enabled" class="time-field">提醒时间<input v-model="settingsForm.reminder_time" type="time" required :disabled="busy" /></label>
@@ -353,6 +377,24 @@ td { line-height: 1.65; }td small { display: block; margin-top: 4px; }.stem-cell
 .inventory { margin-top: 24px; }.inventory dl { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }.inventory dd { margin: 0 30px 0 0; font-size: 18px; font-weight: 600; }
 .inventory dd { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; font-weight: 400; }.inventory dd strong { font-size: 18px; font-weight: 600; }
 .settings-form { background: #fff; padding: 24px 28px; display: grid; gap: 18px; border-top: 1px solid #d8e5f7; }.settings-form h2:not(:first-child) { border-top: 1px solid #e5ecf5; padding-top: 22px; }.time-field { width: 170px; }.page-jump { display: inline-flex; align-items: center; gap: 5px; }.page-jump input { width: 64px; }
+.settings-form { min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.settings-form .checkbox-label { min-width: 0; white-space: normal; align-items: flex-start; }
+.settings-form .checkbox-label input { flex-shrink: 0; }
+.shift-publish-row { display: flex; flex-wrap: wrap; align-items: start; gap: 12px 20px; min-width: 0; }
+.shift-publish-row .time-field { flex: 0 0 170px; }
+.shift-delivery { flex: 1 1 240px; min-width: 0; padding-top: 24px; }
+.shift-delivery-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 13px; color: var(--text-color-3, #64758a); }
+.shift-result-label, .shift-delivery-status time { white-space: nowrap; }.shift-delivery-status svg { flex-shrink: 0; }
+.shift-delivery-status.success { color: #18794e; }.shift-delivery-status.partial, .shift-delivery-status.unverified { color: #a05216; }
+.shift-failed-names { margin: 6px 0 0; color: #a05216; font-size: 13px; overflow-wrap: anywhere; }
+.shift-delivery-issues { margin-top: 8px; font-size: 13px; }.shift-delivery-issues summary { cursor: pointer; padding: 6px 0; }
+.shift-delivery-issues ul { list-style: none; padding: 0; margin: 4px 0; }.shift-delivery-issues li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 0; border-top: 1px solid #e5ecf5; overflow-wrap: anywhere; }
+@media(max-width:600px) { .shift-delivery { flex-basis: 150px; padding-top: 0; }.shift-publish-row .time-field { flex: 1 1 150px; width: auto; } }
+.history-identity-issues { min-width: 0; border-block: 1px solid #d8e5f7; padding: 10px 0; }
+.history-identity-issues summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.history-identity-issues ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.history-identity-issues li { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 12px 0; border-top: 1px solid #e5ecf5; overflow-wrap: anywhere; }
+.history-identity-issues .history-identity-reason, .history-identity-issues small { flex-basis: 100%; }
 .learning-overlay { position: fixed; inset: 0; z-index: 800; display: grid; place-items: center; background: rgba(15, 35, 65, .4); padding: 24px; }
 .learning-modal { display: flex; flex-direction: column; width: min(1040px, 100%); max-height: calc(100dvh - 48px); background: #fff; border: 1px solid #d8e5f7; border-radius: 8px; box-shadow: 0 22px 80px #12356235; font: 14px 'Microsoft YaHei', system-ui, sans-serif; color: #20344e; outline: none; }
 .learning-modal > header { padding: 18px 22px; border-bottom: 1px solid #d8e5f7; flex: 0 0 auto; }.learning-modal > header h2 { min-width: 0; overflow-wrap: anywhere; }
@@ -490,9 +532,14 @@ const pageCount = computed(() => Math.max(1, Math.ceil(total.value / 20)));
 const jumpPage = ref<number>(1);
 const settingsForm = reactive<Dict>({ enabled: false, publish_time: "13:00", night_publish_time: "20:00", reminder_enabled: false, reminder_time: "17:00", portal_url: "", timeout_reminder_enabled: true, weekly_report_enabled: true });
 let settingsSnapshot = "";
-const syncActive = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status) || Number(boot.value.sync?.pending || 0) > 0);
+const syncActive = computed(() => boot.value.sync?.active ?? ["syncing", "publishing"].includes(boot.value.sync?.status));
 const jobRunning = computed(() => ["syncing", "publishing"].includes(boot.value.sync?.status));
-const syncLabel = computed(() => ({ idle: "未初始化", syncing: "同步中", publishing: "发布中", ready: "已同步", error: "同步失败" }[String(boot.value.sync?.status)] || "等待同步"));
+const syncLabel = computed(() => {
+  if (!syncActive.value && Number(boot.value.sync?.pending || 0) > 0) return boot.value.sync?.error || boot.value.sync?.waiting ? '等待重试' : '等待同步';
+  return ({ idle: "未初始化", syncing: "同步中", publishing: "发布中", ready: "已同步", error: "同步失败", pending: '等待同步', retry_waiting: '等待重试' }[String(boot.value.sync?.status)] || "等待同步");
+});
+const publishShifts = [{ key: '白', field: 'publish_time', label: '白班题单发布时间' }, { key: '夜', field: 'night_publish_time', label: '夜班题单发布时间' }];
+function shiftStatus(shift: string): Dict { return boot.value.delivery_status?.shifts?.find((row: Dict) => row.shift === shift) || {}; }
 let epoch = 0, disposed = false, pollTimer: number | undefined, todayTimer: number | undefined, pollFailures = 0;
 let onPopstate: (() => void) | undefined;
 const lifetime = new AbortController();
@@ -774,6 +821,7 @@ async function switchTab(value: Tab): Promise<void> {
   if (value === "today" && !scope.value) scope.value = boot.value.scopes?.find((s: Dict) => s.value)?.value || "";
   if (value === 'today' && viewMode.value === 'practice') await loadTodayPaper();
   else await loadView();
+  schedulePoll();
 }
 async function changeScope(label: string): Promise<void> {
   const next = overviewScopes.value.find(s => s.label === label)?.value;
@@ -940,16 +988,16 @@ async function bootstrap(): Promise<void> {
   }
 function schedulePoll(): void {
   window.clearTimeout(pollTimer);
-  if (disposed || !syncActive.value || pollFailures >= 3) return;
+  if (disposed || (!syncActive.value && !Number(boot.value.sync?.pending || 0) && tab.value !== 'settings') || pollFailures >= 3) return;
   pollTimer = window.setTimeout(async () => {
     if (document.hidden) { schedulePoll(); return; }
     try {
-      const data = await requestLearning(learningOptions,`/bootstrap?scope=${encodeURIComponent(scope.value)}`);
-      boot.value.sync = data.sync; boot.value.summary = data.summary; boot.value.question_problem_count = data.question_problem_count; pollFailures = 0;
+      const data = await requestLearning(learningOptions,`/bootstrap?scope=${encodeURIComponent(scope.value)}&refresh=1`);
+      boot.value.sync = data.sync; boot.value.delivery_status = data.delivery_status; boot.value.summary = data.summary; boot.value.question_problem_count = data.question_problem_count; pollFailures = 0;
       if (!syncActive.value && !paper.value && tab.value === "today") await loadView();
     } catch (e) { pollFailures++; if (pollFailures >= 3) error.value = `同步状态读取失败，请手动刷新。${(e as Error).message}`; }
     schedulePoll();
-  }, 4000 + pollFailures * 3000);
+  }, (syncActive.value ? 4000 : 30000) + pollFailures * 3000);
 }
 async function checkToday(): Promise<void> {
   if (disposed || document.hidden || tab.value !== "today" || !learner.value || busy.value || loading.value) return;

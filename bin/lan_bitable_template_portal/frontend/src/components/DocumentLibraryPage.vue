@@ -1,7 +1,7 @@
 <template>
   <NConfigProvider :locale="zhCN" :date-locale="dateZhCN">
     <section class="document-library" :style="styles" aria-label="南通文件" data-v2-inline-feedback>
-      <VnetBackButton to="/?entry=tools" :disabled="busy" />
+      <VnetBackButton v-if="!activeTable" to="/?entry=tools" :disabled="busy" />
       <header class="document-toolbar" data-v2-navigation>
         <div class="document-heading"><FolderOpen :size="21" aria-hidden="true" /><h1>南通文件</h1></div>
         <div class="document-actions">
@@ -13,13 +13,32 @@
       </header>
       <NAlert v-if="tablesError" type="error" :bordered="false" role="alert">{{ tablesError }} <NButton text :disabled="busy" @click="loadTables()">重新读取数据表</NButton></NAlert>
       <NAlert v-if="notice" type="success" :bordered="false" role="status">{{ notice }}</NAlert>
-      <form v-if="tables.items.length" class="document-filters" @submit.prevent="searchRecords">
-        <NSelect :value="activeKey" :options="tables.items.map(table => ({ value: table.key, label: table.name }))" :disabled="busy || tablesLoading" aria-label="文件数据表" @update:value="selectTable" />
+      <nav v-if="activeTable" class="document-table-context" aria-label="资料表位置">
+        <NButton :disabled="busy" @click="selectTable('')"><ChevronLeft :size="16" />全部数据表</NButton>
+        <strong>{{ activeTable.name }}</strong>
+        <a v-if="sourceLink(activeTable)" :href="sourceLink(activeTable)" target="_blank" rel="noopener noreferrer" title="打开飞书原表"><ExternalLink :size="16" />飞书原表</a>
+      </nav>
+      <section v-else-if="tables.items.length" class="document-sources" aria-label="已接入数据表">
+        <div class="document-source-heading"><h2>已接入数据表</h2><span>{{ tables.items.length }} 张</span></div>
+        <div class="document-source-list">
+          <article v-for="table in tables.items" :key="table.key" class="document-source">
+            <button type="button" class="document-source-entry" :disabled="busy || tablesLoading" :aria-label="'打开数据表：' + table.name" @click="selectTable(table.key)">
+              <FolderOpen :size="22" aria-hidden="true" />
+              <span><strong>{{ table.name }}</strong><small>{{ tableScopes(table) }}</small></span>
+              <NTag size="small" :bordered="false">{{ table.capabilities?.create ? '可新增' : '可查看' }}</NTag>
+              <ChevronRight :size="18" aria-hidden="true" />
+            </button>
+            <a v-if="sourceLink(table)" class="document-source-link" :href="sourceLink(table)" target="_blank" rel="noopener noreferrer" :aria-label="'打开飞书原表：' + table.name"><ExternalLink :size="14" /><span>{{ sourceLink(table) }}</span></a>
+          </article>
+        </div>
+      </section>
+      <form v-if="activeTable" class="document-filters" @submit.prevent="searchRecords">
         <NInput v-model:value="query" clearable :disabled="busy" placeholder="搜索资料" :input-props="{ 'aria-label': '搜索资料', type: 'search' }"><template #prefix><Search :size="16" /></template></NInput>
         <NSelect v-if="scopeOptions.length" :value="scope" :options="[{ value: '', label: '全部授权楼栋' }, ...scopeOptions]" :disabled="busy" aria-label="资料楼栋" @update:value="changeScope" />
         <NButton attr-type="submit" :disabled="busy || listLoading"><Search :size="16" />查询</NButton>
       </form>
-      <NAlert v-if="listError" type="error" :bordered="false" role="alert">{{ listError }} <NButton text :disabled="busy || listLoading" @click="readRecords(currentCursor, cursorTrail)">重试读取列表</NButton></NAlert>
+      <NAlert v-if="listPending" type="info" :bordered="false" role="status">来源资料正在后台同步，完成后自动显示列表。</NAlert>
+      <NAlert v-if="listError" type="error" :bordered="false" role="alert">{{ listError }} <NButton text :disabled="busy || listLoading" @click="retryRecords">{{ syncFailed ? '重试同步并读取' : '重试读取列表' }}</NButton></NAlert>
       <div v-if="tablesLoading && !tables.items.length || listLoading && !records.length" class="document-loading" aria-label="正在读取资料" role="status"><NSkeleton v-for="index in 5" :key="index" height="48px" /></div>
       <NEmpty v-else-if="!tablesLoading && !tablesError && !tables.items.length" description="尚无可访问的数据表" />
       <template v-else-if="schema">
@@ -32,12 +51,12 @@
                   <button v-if="index === 0" class="document-record-title" type="button" :disabled="busy" :aria-label="'查看资料：' + title(record)" @click="openRecord(record.record_id)"><FileText :size="17" /><DocumentLibraryField :field="field" :model-value="record.fields[field.id]" :interactive="false" /></button>
                   <DocumentLibraryField v-else :field="field" :model-value="record.fields[field.id]" />
                 </td>
-                <td><div class="document-record-meta"><span><Paperclip :size="14" />{{ record.attachments?.length || 0 }}</span><NTag :type="indexFailed(record) ? 'warning' : 'default'" :bordered="false" size="small">{{ indexLabel(record) }}</NTag></div></td>
+                <td><div class="document-record-meta"><span><Paperclip :size="14" />{{ record.attachments?.length || 0 }}</span><span>{{ cacheLabel(record) }}</span><NTag :type="indexFailed(record) ? 'warning' : 'default'" :bordered="false" size="small">{{ indexLabel(record) }}</NTag></div></td>
                 <td><NButton quaternary :disabled="busy" :aria-label="'打开资料：' + title(record)" title="查看详情" @click="openRecord(record.record_id)"><ChevronRight :size="17" /></NButton></td>
               </tr></tbody>
             </table>
           </div>
-          <div class="document-mobile-list"><article v-for="record in records" :key="record.record_id"><button class="document-mobile-title" type="button" :disabled="busy" @click="openRecord(record.record_id)"><FileText :size="20" /><strong>{{ title(record) }}</strong><ChevronRight :size="17" /></button><dl><template v-for="field in displayFields.slice(1, 4)" :key="field.id"><dt>{{ field.name }}</dt><dd><DocumentLibraryField :field="field" :model-value="record.fields[field.id]" /></dd></template></dl><div class="document-record-meta"><span><Paperclip :size="14" />{{ record.attachments?.length || 0 }} 个附件</span><NTag :type="indexFailed(record) ? 'warning' : 'default'" size="small" :bordered="false">{{ indexLabel(record) }}</NTag></div></article></div>
+          <div class="document-mobile-list"><article v-for="record in records" :key="record.record_id"><button class="document-mobile-title" type="button" :disabled="busy" @click="openRecord(record.record_id)"><FileText :size="20" /><strong>{{ title(record) }}</strong><ChevronRight :size="17" /></button><dl><template v-for="field in displayFields.slice(1, 4)" :key="field.id"><dt>{{ field.name }}</dt><dd><DocumentLibraryField :field="field" :model-value="record.fields[field.id]" /></dd></template></dl><div class="document-record-meta"><span><Paperclip :size="14" />{{ record.attachments?.length || 0 }} 个附件</span><span>{{ cacheLabel(record) }}</span><NTag :type="indexFailed(record) ? 'warning' : 'default'" size="small" :bordered="false">{{ indexLabel(record) }}</NTag></div></article></div>
         </div>
         <NEmpty v-else-if="listReady && !listLoading && !listError" description="没有符合条件的资料" />
         <footer v-if="records.length" class="document-pagination"><span>{{ records.length }} 条{{ listLoading ? ' · 正在读取' : '' }}</span><div><NButton :disabled="busy || listLoading || !cursorTrail.length" aria-label="上一页资料" title="上一页" @click="previousPage"><ChevronLeft :size="16" /></NButton><NButton :disabled="busy || listLoading || !hasMore" aria-label="下一页资料" title="下一页" @click="nextPage"><ChevronRight :size="16" /></NButton></div></footer>
@@ -49,17 +68,19 @@
             <NAlert v-if="detailError" type="error" :bordered="false" role="alert">{{ detailError }} <NButton v-if="!detail && targetId" text :disabled="busy" @click="openRecord(targetId)">重试读取详情</NButton></NAlert>
             <NAlert v-if="pendingWrite || pendingUpload" type="warning" :bordered="false" role="alert">操作回执尚未确认，输入及原操作编号已保留。请核验后按原操作重试。</NAlert>
             <NAlert v-if="conflict" type="warning" :bordered="false" role="alert">资料已被更新，尚未保存的输入已保留。<NButton text :disabled="busy" @click="readLatest">读取最新版本，保留输入</NButton></NAlert>
-            <NAlert v-if="detail && indexFailed(detail)" type="warning" :bordered="false" role="status">资料已保存，知识索引待重试。</NAlert>
+            <NAlert v-if="detail && indexFailed(detail)" type="warning" :bordered="false" role="status">资料记录已保存。{{ indexLabel(detail) }}，请查看下方各项原因。</NAlert>
             <NAlert v-else-if="detail && indexState(detail) === 'unsupported'" type="warning" :bordered="false" role="status">资料已保存，部分附件格式暂不支持正文解析。</NAlert>
             <NAlert v-else-if="notice" type="success" :bordered="false" role="status">{{ notice }}</NAlert>
-            <details v-if="indexIssues.length" class="document-index-issues"><summary>索引详情 · {{ indexIssues.length }} 项需关注</summary><ul><li v-for="item in indexIssues" :key="item.kind + ':' + (item.attachment_id || item.name)"><strong>{{ item.kind === 'record' ? '记录字段' : item.name }}</strong><span>{{ item.error || '索引暂未完成，系统将自动重试。' }}</span></li></ul></details>
+            <details v-if="indexItems.length" class="document-index-issues"><summary>本地缓存与索引 · {{ indexItems.length }} 项</summary><ul><li v-for="item in indexItems" :key="item.kind + ':' + (item.attachment_id || item.name)"><strong>{{ item.kind === 'record' ? '记录字段' : item.name }}</strong><span>{{ item.cached === true ? '已缓存' : item.cached === false ? '未缓存' : '缓存状态待核对' }} · {{ indexItemLabel(item) }}</span><span v-if="item.error">{{ item.error }}</span></li></ul></details>
             <div v-if="detailLoading" class="document-loading" role="status" aria-label="正在读取详情"><NSkeleton v-for="index in 4" :key="index" height="44px" /></div>
             <template v-else-if="detail || creating">
-              <div class="document-detail-bar"><NTag v-if="detail" :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail?.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="detail && !editing" :disabled="busy || !!pendingUpload" title="重新读取资料" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
-              <NTabs :value="detailTab" type="line" @update:value="selectDetailTab"><NTab name="fields">资料详情</NTab><NTab v-if="detail" name="versions" :disabled="editing || busy">附件版本</NTab></NTabs>
-              <form v-if="detailTab === 'fields'" id="document-record-form" class="document-field-grid" @submit.prevent="saveRecord">
-                <label v-for="field in schema?.fields" :key="field.id" class="document-detail-field" :class="{ 'document-wide': ['text', 'files', 'readonly'].includes(fieldKind(field)) }"><span>{{ field.name }}<span v-if="editing && field.required && canEditField(field)" class="document-required"> *</span><LockKeyhole v-if="editing && !canEditField(field)" :size="12" aria-label="只读字段" /></span><DocumentLibraryField :field="field" :model-value="editing ? draft[field.id] : detail?.fields[field.id]" :editing="editing && canEditField(field)" :disabled="busy || !!pendingWrite || conflict" @update:model-value="value => draft[field.id] = value" /><small v-if="field.read_only_reason" class="document-muted">{{ field.read_only_reason }}</small><small v-if="fieldErrors[field.id]" class="document-error">{{ fieldErrors[field.id] }}</small></label>
+              <div class="document-record-source"><FolderOpen :size="16" /><span>所属数据表</span><strong>{{ activeTable?.name }}</strong></div>
+              <div v-if="detail" class="document-detail-bar"><NTag :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="!editing" :disabled="busy || !!pendingUpload" title="重新读取资料" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
+              <NTabs v-if="!creating" :value="detailTab" type="line" @update:value="selectDetailTab"><NTab name="fields">资料详情</NTab><NTab v-if="detail" name="versions" :disabled="editing || busy">附件版本</NTab></NTabs>
+              <form v-if="detailTab === 'fields'" id="document-record-form" ref="recordForm" class="document-field-grid" @submit.prevent="saveRecord">
+                <label v-for="field in formFields" :key="field.id" class="document-detail-field" :class="{ 'document-wide': ['url', 'files', 'readonly'].includes(fieldKind(field)) }" :data-field-id="field.id"><span>{{ field.name }}<span v-if="editing && requiredField(field) && canEditField(field)" class="document-required"> *</span><LockKeyhole v-if="editing && !canEditField(field)" :size="12" aria-label="只读字段" /></span><DocumentLibraryField :field="field" :model-value="editing ? draft[field.id] : detail?.fields[field.id]" :editing="editing && canEditField(field)" :disabled="busy || !!pendingWrite || conflict" @update:model-value="value => updateField(field.id, value)" /><small v-if="field.read_only_reason" class="document-muted">{{ field.read_only_reason }}</small><small v-if="fieldErrors[field.id]" class="document-error" role="alert">{{ fieldErrors[field.id] }}</small></label>
                 <label v-if="editing" class="document-detail-field document-wide"><span>变更原因 *</span><NInput v-model:value="reason" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" :disabled="busy || !!pendingWrite" :maxlength="500" :input-props="{ 'aria-label': '变更原因' }" /></label>
+                <details v-if="creating && deferredFields.length" class="document-system-fields document-wide"><summary>系统与附件字段 · {{ deferredFields.length }}</summary><div class="document-field-grid"><div v-for="field in deferredFields" :key="field.id" class="document-detail-field"><span><LockKeyhole :size="12" />{{ field.name }}</span><small class="document-muted">{{ field.read_only_reason || (fieldKind(field) === 'files' ? '保存资料后添加附件' : '只读') }}</small></div></div></details>
               </form>
               <section v-if="detailTab === 'fields' && detail" class="document-attachments" aria-label="当前附件"><h2>当前附件 <span>{{ detail.attachments.length }}</span></h2><div v-for="file in detail.attachments" :key="file.id" class="document-attachment"><img v-if="file.mime_type?.startsWith('image/')" :src="fileUrl(file)" :alt="file.name" width="40" height="40" loading="lazy" /><FileText v-else :size="23" aria-hidden="true" /><div><strong>{{ file.name }}</strong><small>{{ schema?.fields.find(field => field.id === file.field_id)?.name }} · {{ sizeText(file.size) }}{{ file.version ? ' · V' + file.version : '' }}</small></div><a :href="fileUrl(file)" target="_blank" rel="noopener noreferrer" :aria-label="'打开附件：' + file.name" title="打开附件"><ExternalLink :size="16" /></a></div><p v-if="!detail.attachments.length" class="document-muted">暂无附件</p>
                 <div v-if="detail.capabilities.upload && !editing" class="document-upload"><div class="document-upload-controls"><NSelect v-model:value="uploadField" :options="attachmentFields.map(field => ({ value: field.id, label: field.name }))" :disabled="busy || !!pendingUpload" aria-label="上传附件字段" /><NSelect v-model:value="replaceId" :options="[{ value: '', label: '新增附件版本' }, ...detail.attachments.filter(file => file.field_id === uploadField).map(file => ({ value: file.id, label: '替换：' + file.name }))]" :disabled="busy || !!pendingUpload" aria-label="附件替换目标" /></div><label class="document-file-picker"><Upload :size="18" /><span>{{ pickedFile?.name || '选择附件' }}</span><input type="file" :disabled="busy || !!pendingUpload" aria-label="选择资料附件" @change="pickFile" /></label><label class="document-detail-field"><span>附件变更原因 *</span><NInput v-model:value="uploadReason" :disabled="busy || !!pendingUpload" :input-props="{ 'aria-label': '附件变更原因' }" /></label><NProgress v-if="uploading" type="line" :percentage="Math.min(progress, 99)" :show-indicator="true" /><NButton type="primary" :loading="uploading" :disabled="busy || !pickedFile || !uploadField || !uploadReason.trim() || conflict" @click="uploadAttachment"><Upload :size="16" />{{ pendingUpload ? '按原操作重试上传' : '上传附件' }}</NButton></div>
@@ -86,11 +107,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NConfigProvider, NDrawer, NDrawerContent, NEmpty, NInput, NModal, NProgress, NSelect, NSkeleton, NSpin, NTab, NTabs, NTag, dateZhCN, zhCN, useThemeVars } from 'naive-ui';
 import { ChevronLeft, ChevronRight, ExternalLink, FileText, FolderOpen, History, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Upload } from 'lucide-vue-next';
 import { registerNavigationGuard } from '../navigation';
-import { ApiError } from '../api/client';
+import { ApiError, requestJson } from '../api/client';
 import { cloneLibraryValue as clone, documentLibraryApi as api, fieldKind, fieldValue, newLibraryOperationId, valueText, writableField,
   type LibraryAttachment, type LibraryField, type LibraryFields, type LibraryMutation, type LibraryRecord, type LibrarySchema, type LibraryTable, type LibraryTables } from '../api/documentLibrary';
 import DocumentLibraryField from './DocumentLibraryField.vue';
@@ -105,6 +126,7 @@ const styles = computed(() => ({ '--doc-ink': theme.value.textColor1, '--doc-mut
 const tables = ref<LibraryTables>({ items: [] }), activeKey = ref(''), schema = ref<LibrarySchema | null>(null);
 const records = ref<LibraryRecord[]>([]), tablesLoading = ref(false), listLoading = ref(false), listReady = ref(false);
 const tablesError = ref(''), listError = ref(''), notice = ref(''), query = ref(''), appliedQuery = ref(''), scope = ref(props.scope || '');
+const listPending = ref(false), syncFailed = ref(false);
 const currentCursor = ref(''), cursorTrail = ref<string[]>([]), nextCursor = ref(''), hasMore = ref(false), actorScopes = ref<Array<{ value: string; label: string }>>([]);
 const activeTable = computed(() => tables.value.items.find(table => table.key === activeKey.value));
 const canConfigure = computed(() => typeof tables.value.can_configure === 'boolean' ? tables.value.can_configure
@@ -115,6 +137,9 @@ const displayFields = computed(() => (schema.value?.display_fields || []).map(id
 const attachmentFields = computed(() => (schema.value?.attachment_fields || []).map(id => schema.value!.fields.find(field => field.id === id)).filter((field): field is LibraryField => !!field));
 const detailOpen = ref(false), detail = ref<LibraryRecord | null>(null), targetId = ref(''), detailLoading = ref(false), detailError = ref('');
 const editing = ref(false), creating = ref(false), detailTab = ref('fields'), draft = ref<LibraryFields>({}), baseline = ref<LibraryFields>({}), reason = ref('');
+const recordForm = ref<HTMLFormElement | null>(null);
+const formFields = computed(() => (schema.value?.fields || []).filter(field => !creating.value || canEditField(field)));
+const deferredFields = computed(() => (schema.value?.fields || []).filter(field => !canEditField(field)));
 const fieldErrors = ref<Record<string, string>>({}), conflict = ref(false), saving = ref(false), uploading = ref(false), progress = ref(0);
 const pendingWrite = ref<LibraryMutation | null>(null);
 type UploadIntent = { file: File; field_id: string; expected_revision: string; operation_id: string; reason: string; replace_attachment_id: string };
@@ -126,14 +151,37 @@ const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(base
 let tablesRead: AbortController | undefined, listRead: AbortController | undefined, detailRead: AbortController | undefined, versionRead: AbortController | undefined;
 let leaveAction: (() => void) | undefined, unregisterNavigation: (() => void) | undefined, disposed = false, contextReady = false;
 function errorText(error: unknown) { return error instanceof Error ? error.message : '请求未完成，请重试。'; }
+function sourceLink(table: LibraryTable) {
+  try { const url = new URL(table.url || ''); return ['https:', 'http:'].includes(url.protocol) ? url.href : ''; } catch { return ''; }
+}
+function tableScopes(table: LibraryTable) {
+  return configurationScopes.value.filter(option => (table.read_scopes || table.scopes || []).includes(option.value)).map(option => option.label).join('、') || '已授权资料';
+}
 function title(record: LibraryRecord) { return displayFields.value.length ? valueText(record.fields[displayFields.value[0].id]) : record.record_id; }
 function indexState(record: LibraryRecord) { return typeof record.knowledge_status === 'string' ? record.knowledge_status : record.knowledge_status?.state || ''; }
-function indexFailed(record: LibraryRecord) { return ['failed', 'error', 'pending_retry', 'retrying', 'partial', 'blocked'].includes(indexState(record)); }
-function indexLabel(record: LibraryRecord) { const state = indexState(record); return indexFailed(record) ? '待索引重试' : state === 'unsupported' ? '部分格式不支持' : ['indexed', 'ready', 'succeeded', 'synced'].includes(state) ? '已索引' : state === 'none' ? '等待索引同步' : state ? '待索引' : '未提供索引状态'; }
-const indexIssues = computed(() => (detail.value?.knowledge_items || []).filter(item => ['failed', 'blocked', 'retrying', 'unsupported'].includes(item.status)));
+type IndexItem = NonNullable<LibraryRecord['knowledge_items']>[number];
+function indexFailed(record: LibraryRecord) { return ['failed', 'error', 'pending_retry', 'retrying', 'partial', 'blocked', 'unavailable'].includes(indexState(record)); }
+function indexLabel(record: LibraryRecord) {
+  const state = indexState(record);
+  if (state === 'blocked') return '内容已拦截';
+  if (state === 'unavailable') return '索引状态待核对';
+  if (indexFailed(record)) return record.knowledge_items?.some(item => item.status === 'retrying' && item.stage === 'prepare') ? '原件缓存待重试' : '待索引重试';
+  return state === 'caching' ? '正在缓存原件' : state === 'unsupported' ? '部分格式未索引' : ['indexed', 'ready', 'succeeded'].includes(state) ? '已索引' : state === 'none' ? '等待索引同步' : state ? '待索引' : '未提供索引状态';
+}
+function cacheLabel(record: LibraryRecord) {
+  const items = record.knowledge_items || [];
+  const files = items.filter(item => item.kind !== 'record');
+  if (!items.length || items.some(item => item.cached === undefined)) return '缓存状态待核对';
+  return files.length ? '原件已缓存 ' + files.filter(item => item.cached).length + '/' + files.length : '字段已缓存';
+}
+function indexItemLabel(item: IndexItem) {
+  if (item.status === 'retrying') return item.stage === 'prepare' ? '下载或保存待重试' : '提交索引待重试';
+  return ({ ready: '已索引', blocked: '已阻止索引', failed: '解析或索引失败', unsupported: '格式不支持，未索引', unavailable: '索引状态待核对', caching: '本地准备中', indexing: '正在索引' } as Record<string, string>)[item.status] || '等待索引';
+}
+const indexItems = computed(() => detail.value?.knowledge_items || []);
 function sizeText(size?: number) { return size === undefined ? '大小未提供' : size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(1) + ' KB' : (size / 1048576).toFixed(1) + ' MB'; }
 function fileUrl(file: LibraryAttachment) { return api.fileUrl(activeKey.value, detail.value!.record_id, file); }
-function hasUnsaved() { return settingsOpen.value || detailOpen.value && (editing.value && dirty.value || !!pickedFile.value || !!pendingWrite.value || !!pendingUpload.value); }
+function hasUnsaved() { return settingsOpen.value || detailOpen.value && (editing.value && (dirty.value || !!reason.value.trim()) || !!pickedFile.value || !!pendingWrite.value || !!pendingUpload.value); }
 function attemptLeave(action: () => void): boolean {
   if (busy.value) return false;
   if (hasUnsaved()) { leaveAction = action; discardOpen.value = true; return false; }
@@ -152,14 +200,14 @@ async function loadTables(preferred?: string) {
     }
     if (read.signal.aborted || disposed) return;
     tables.value = result;
-    activeKey.value = result.items.some(table => table.key === (preferred || activeKey.value)) ? preferred || activeKey.value : result.items[0]?.key || '';
+    activeKey.value = result.items.some(table => table.key === (preferred || activeKey.value)) ? preferred || activeKey.value : '';
     await loadTable();
   } catch (error) { if (!read.signal.aborted && !disposed) tablesError.value = errorText(error); }
   finally { if (tablesRead === read) tablesLoading.value = false; }
 }
 async function loadTable() {
   listRead?.abort(); detailRead?.abort(); versionRead?.abort(); detailOpen.value = false; detail.value = null;
-  records.value = []; schema.value = null; listReady.value = false; listError.value = ''; currentCursor.value = ''; cursorTrail.value = [];
+  records.value = []; schema.value = null; listReady.value = false; listLoading.value = false; listError.value = ''; listPending.value = false; syncFailed.value = false; currentCursor.value = ''; cursorTrail.value = []; nextCursor.value = ''; hasMore.value = false;
   if (!activeKey.value) return;
   const read = listRead = new AbortController(); const key = activeKey.value; listLoading.value = true;
   try {
@@ -171,17 +219,61 @@ async function loadTable() {
 }
 async function readRecords(cursor = '', trail: string[] = []) {
   if (!schema.value) { await loadTable(); return; }
-  listRead?.abort(); const read = listRead = new AbortController(); listLoading.value = true; listError.value = '';
+  listRead?.abort(); const read = listRead = new AbortController(); listLoading.value = true; listError.value = ''; listPending.value = false; syncFailed.value = false;
+  const key = activeKey.value;
   try {
-    const result = await api.records(activeKey.value, { scope: scope.value, q: appliedQuery.value, cursor, page_size: 30 }, read.signal);
-    if (read.signal.aborted || disposed) return;
-    records.value = result.items; hasMore.value = result.has_more; nextCursor.value = result.cursor;
-    currentCursor.value = cursor; cursorTrail.value = trail.slice(); listReady.value = true;
+    // Bound both newer long-poll responses and older servers that return pending immediately.
+    for (let attempt = 0; attempt < 15; attempt++) {
+      const started = Date.now();
+      try {
+        const result = await api.records(key, { scope: scope.value, q: appliedQuery.value, cursor, page_size: 30 }, read.signal);
+        if (read.signal.aborted || disposed || key !== activeKey.value) return;
+        records.value = result.items; hasMore.value = result.has_more; nextCursor.value = result.cursor;
+        currentCursor.value = cursor; cursorTrail.value = trail.slice(); listReady.value = true;
+        return;
+      } catch (error) {
+        if (read.signal.aborted || disposed || key !== activeKey.value) return;
+        if (!(error instanceof ApiError) || error.payload.code !== 'document_library_sync_pending') throw error;
+        listPending.value = true;
+        if (attempt < 14) {
+          const delay = Math.min(5000, 1000 * 2 ** Math.min(attempt, 3)) - (Date.now() - started);
+          if (delay > 0) await waitForSyncRetry(read.signal, delay);
+        }
+      }
+    }
+    listError.value = '来源资料仍在后台同步，已停止本页等待；可重新读取列表，原同步任务不会重复创建。';
+  } catch (error) {
+    if (!read.signal.aborted && !disposed) { listError.value = errorText(error); syncFailed.value = error instanceof ApiError && error.payload.code === 'document_library_sync_failed'; }
+  } finally { if (listRead === read) { listLoading.value = false; listPending.value = false; } }
+}
+function waitForSyncRetry(signal: AbortSignal, delay: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException('读取已取消', 'AbortError')); return; }
+    const cancel = () => { window.clearTimeout(timer); reject(new DOMException('读取已取消', 'AbortError')); };
+    const timer = window.setTimeout(() => { signal.removeEventListener('abort', cancel); resolve(); }, delay);
+    signal.addEventListener('abort', cancel, { once: true });
+  });
+}
+async function retryRecords() {
+  if (busy.value || listLoading.value) return;
+  if (!syncFailed.value) { await readRecords(currentCursor.value, cursorTrail.value); return; }
+  listRead?.abort(); const read = listRead = new AbortController(); const key = activeKey.value; listLoading.value = true;
+  try {
+    await requestJson('/api/document-library/tables/' + encodeURIComponent(key) + '/sync', { method: 'POST', body: '{}', signal: read.signal });
+    if (!read.signal.aborted && !disposed && key === activeKey.value) await readRecords(currentCursor.value, cursorTrail.value);
   } catch (error) { if (!read.signal.aborted && !disposed) listError.value = errorText(error); }
   finally { if (listRead === read) listLoading.value = false; }
 }
 function reload() { attemptLeave(() => { detailOpen.value = false; void loadTables(); }); }
-function selectTable(key: string) { if (key !== activeKey.value) attemptLeave(() => { activeKey.value = key; appliedQuery.value = ''; query.value = ''; void loadTable(); }); }
+function selectTable(key: string) {
+  if (key === activeKey.value || key && !tables.value.items.some(table => table.key === key)) return;
+  attemptLeave(() => {
+    tablesRead?.abort(); tablesLoading.value = false;
+    activeKey.value = key; appliedQuery.value = ''; query.value = ''; notice.value = '';
+    if (!scopeOptions.value.some(option => option.value === scope.value)) scope.value = '';
+    void loadTable();
+  });
+}
 function searchRecords() { if (!busy.value) { appliedQuery.value = query.value.trim(); void readRecords('', []); } }
 function changeScope(value: string) { if (!busy.value) { scope.value = value; void readRecords('', []); } }
 function nextPage() { if (hasMore.value && nextCursor.value) void readRecords(nextCursor.value, [...cursorTrail.value, currentCursor.value]); }
@@ -204,15 +296,20 @@ function openRecord(id: string) {
       .finally(() => { if (detailRead === read) detailLoading.value = false; });
   });
 }
-function createRecord() { attemptLeave(() => {
+function createRecord() {
+  if (!schema.value || !activeTable.value?.capabilities?.create || tablesError.value) return;
+  attemptLeave(() => {
   detailRead?.abort(); versionRead?.abort(); resetDetail(); detail.value = null; targetId.value = ''; draft.value = {}; baseline.value = {};
   const allowed = (activeTable.value?.write_scopes || []).filter(scope => configurationScopes.value.some(option => option.value === scope));
   const field = schema.value?.fields.find(field => field.id === activeTable.value?.scope_field);
   if (field && writableField(field) && allowed.length === 1) draft.value[field.id] = fieldKind(field) === 'multi' ? allowed : allowed[0];
   detailLoading.value = false; creating.value = true; editing.value = true; detailOpen.value = true;
+  void nextTick(() => recordForm.value?.querySelector<HTMLElement>('input, textarea, [tabindex="0"]')?.focus());
 }); }
 function closeDetail() { attemptLeave(() => { detailRead?.abort(); versionRead?.abort(); detailOpen.value = false; }); }
 function canEditField(field: LibraryField) { return writableField(field); }
+function requiredField(field: LibraryField) { return field.required || creating.value && field.id === activeTable.value?.scope_field; }
+function updateField(id: string, value: unknown) { draft.value[id] = value; delete fieldErrors.value[id]; }
 function changes(): LibraryFields {
   return Object.fromEntries((schema.value?.fields || []).filter(field => canEditField(field) && JSON.stringify(draft.value[field.id]) !== JSON.stringify(baseline.value[field.id])).map(field => [field.id, draft.value[field.id]]));
 }
@@ -221,11 +318,16 @@ function validate() {
   for (const field of schema.value?.fields || []) {
     if (!canEditField(field)) continue;
     const value = fieldValue(draft.value[field.id]);
-    if ((field.required || creating.value && field.id === activeTable.value?.scope_field) && (value === undefined || value === null || value === '' || Array.isArray(value) && !value.length)) errors[field.id] = '请填写' + field.name;
+    if (requiredField(field) && (value === undefined || value === null || value === '' || Array.isArray(value) && !value.length)) errors[field.id] = '请填写' + field.name;
     if (fieldKind(field) === 'number' && value != null && value !== '' && !Number.isFinite(Number(value))) errors[field.id] = '请输入有效数字';
     if (fieldKind(field) === 'url' && value) { try { if (!['http:', 'https:'].includes(new URL(typeof value === 'string' ? value : value.link).protocol)) errors[field.id] = '请输入有效的 HTTP 或 HTTPS 链接'; } catch { errors[field.id] = '请输入有效链接'; } }
   }
-  fieldErrors.value = errors; return !Object.keys(errors).length;
+  fieldErrors.value = errors;
+  if (Object.keys(errors).length) void nextTick(() => {
+    const field = Array.from(recordForm.value?.querySelectorAll<HTMLElement>('[data-field-id]') || []).find(element => errors[element.dataset.fieldId || '']);
+    field?.scrollIntoView({ block: 'center' }); field?.querySelector<HTMLElement>('input, textarea, [tabindex="0"]')?.focus({ preventScroll: true });
+  });
+  return !Object.keys(errors).length;
 }
 function uncertain(error: unknown) { return !(error instanceof ApiError) || !error.status || error.status >= 500; }
 function saved(record: LibraryRecord) {
@@ -294,6 +396,22 @@ onBeforeUnmount(() => { disposed = true; tablesRead?.abort(); listRead?.abort();
 </style>
 
 <style scoped>
+.document-source-heading,.document-table-context,.document-record-source{display:flex;align-items:center;gap:8px;min-width:0}
+.document-source-heading{margin-bottom:10px}.document-source-heading h2{margin:0;font-size:14px}.document-source-heading>span{color:var(--doc-muted);font-size:12px}
+.document-source-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr));gap:12px}
+.document-source{min-width:0;border:1px solid var(--doc-line);border-radius:6px;background:var(--doc-surface);overflow:hidden}
+.document-source-entry{display:flex;align-items:center;gap:12px;width:100%;min-height:84px;padding:14px;text-align:left;border:0;background:transparent;color:var(--doc-ink);font:inherit;cursor:pointer}
+.document-source-entry:hover{background:var(--doc-soft)}.document-source-entry:disabled{cursor:wait;opacity:.6}
+.document-source-entry>svg{flex:none;color:var(--doc-accent)}.document-source-entry>span{min-width:0;flex:1}
+.document-source-entry strong,.document-source-entry small{display:block;overflow-wrap:anywhere}.document-source-entry strong{font-size:15px}.document-source-entry small{margin-top:6px;color:var(--doc-muted);font-size:12px}
+.document-source-link{display:flex;align-items:center;gap:6px;min-height:44px;padding:6px 14px;box-sizing:border-box;border-top:1px solid var(--doc-line);color:var(--doc-accent);font-size:12px;text-decoration:none}
+.document-source-link>span{overflow-wrap:anywhere;min-width:0}.document-source-link>svg{flex:none}.document-source-link:hover{text-decoration:underline}
+.document-table-context{flex-wrap:wrap}.document-table-context>strong{flex:1;min-width:120px;overflow-wrap:anywhere;font-size:15px}
+.document-table-context>a{display:flex;align-items:center;gap:5px;min-height:44px;color:var(--doc-accent);font-size:13px;text-decoration:none}
+.document-filters{grid-template-columns:minmax(150px,1fr) minmax(140px,190px) auto}
+.document-record-source{flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--doc-line)}.document-record-source>span{color:var(--doc-muted);font-size:12px}.document-record-source>strong{overflow-wrap:anywhere}
+.document-system-fields{border-top:1px solid var(--doc-line);padding-top:8px;font-size:13px}.document-system-fields>summary{cursor:pointer;min-height:44px;align-content:center;color:var(--doc-muted)}.document-system-fields>.document-field-grid{padding:8px 0}
+@media(max-width:760px){.document-filters{grid-template-columns:minmax(0,1fr) auto}.document-filters>.n-input{grid-column:1;grid-row:1}.document-filters>.n-button{grid-column:2;grid-row:1}.document-filters>.n-select{grid-column:1/-1;grid-row:2}.document-source-entry{padding:12px;gap:8px}.document-source-link{padding-inline:12px}.document-field-grid{gap:12px}}
 .document-detail-field :deep(.document-field-value),
 .document-detail-field > time {
   color: var(--doc-ink);

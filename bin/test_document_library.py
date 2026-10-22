@@ -81,9 +81,14 @@ class Remote:
         self.metadata[token] = {'name': name, 'size': len(self.files[token])}
         return {'file_token': token, **self.metadata[token]}
 
-    def download(self, token):
+    def download(self, token, *, record_id=None, field_id=None):
         self.downloads += 1
         return self.files[token]
+
+    def download_to_file(self, token, target, *, record_id=None, field_id=None):
+        content = self.download(token, record_id=record_id, field_id=field_id)
+        Path(target).write_bytes(content)
+        return len(content)
 
     def close(self):
         pass
@@ -107,6 +112,7 @@ class LibraryFixture(unittest.TestCase):
             self.addCleanup(close_logging)
         self.remote = Remote()
         self.now = 1000.0
+        self.enterContext(patch.object(DocumentLibraryService, '_sleep_download', side_effect=lambda delay: setattr(self, 'now', self.now + delay)))
         self.kb = KnowledgeBase(Path(self.temp) / 'knowledge', embedder=FakeEmbedder(),
             memory_index_factory=FakeMemoryIndex, start_worker=False)
         self.addCleanup(self.kb.close)

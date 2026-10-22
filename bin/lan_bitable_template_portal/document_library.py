@@ -96,6 +96,8 @@ def validate_source(payload, *, identity=None):
 
 
 class DocumentLibraryService:
+    _sleep_download = staticmethod(time.sleep)
+
     def __init__(self, data_root, *, remote_factory=None, knowledge=None, authorize_source=None,
                  refresh_actor=None, people_provider=None, clock=time.time):
         self.root = Path(data_root).resolve() / 'document_library'
@@ -132,11 +134,26 @@ class DocumentLibraryService:
                 CREATE INDEX IF NOT EXISTS ingestion_due ON ingestion(status,next_attempt);
                 CREATE INDEX IF NOT EXISTS jobs_due ON sync_jobs(status,next_attempt);
             ''')
+            db.execute('BEGIN IMMEDIATE')
+            if 'download_after' not in {row[1] for row in db.execute('PRAGMA table_info(tables)')}:
+                db.execute('ALTER TABLE tables ADD COLUMN download_after REAL NOT NULL DEFAULT 0')
             for table, column in (('records', 'observed_at'), ('sync_jobs', 'created_at')):
                 if column not in {row[1] for row in db.execute('PRAGMA table_info(' + table + ')')}:
                     db.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' REAL NOT NULL DEFAULT 0')
             if 'actor_name' not in {row[1] for row in db.execute('PRAGMA table_info(versions)')}:
                 db.execute("ALTER TABLE versions ADD COLUMN actor_name TEXT NOT NULL DEFAULT ''")
+            for column in ('error', 'error_code'):
+                if column not in {row[1] for row in db.execute('PRAGMA table_info(sync_jobs)')}:
+                    db.execute('ALTER TABLE sync_jobs ADD COLUMN ' + column + " TEXT NOT NULL DEFAULT ''")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(ingestion)')}
+            for column, definition in (('stage', "TEXT NOT NULL DEFAULT 'prepare'"),
+                    ('cached', 'INTEGER NOT NULL DEFAULT 0'), ('cache_size', 'INTEGER NOT NULL DEFAULT 0'),
+                    ('error', "TEXT NOT NULL DEFAULT ''"), ('error_code', "TEXT NOT NULL DEFAULT ''")):
+                if column not in columns:
+                    db.execute('ALTER TABLE ingestion ADD COLUMN ' + column + ' ' + definition)
+            if 'stage' not in columns:
+                db.execute("UPDATE ingestion SET stage='index' WHERE status='synced'")
+                db.execute("UPDATE ingestion SET status='queued',next_attempt=0 WHERE status IN ('retrying','unsupported')")
         if knowledge is not None:
             self.bind_knowledge(knowledge)
 
@@ -374,10 +391,12 @@ class DocumentLibraryService:
 
     @staticmethod
     def _validate_schema(source, fields):
+        if not isinstance(fields, list) or not fields or any(not isinstance(field, dict) or not field.get('field_id') or not field.get('field_name') for field in fields):
+            raise AssistantError('来源资料字段信息不完整。', 503, category='bad_response')
         by_id = {field['field_id']: field for field in fields}
         required = [*source['display_fields'], *source['attachment_fields'], *([source['scope_field']] if source['scope_field'] else [])]
         if any(fid not in by_id for fid in required) or any(by_id[fid].get('type') != 17 for fid in source['attachment_fields']):
-            raise AssistantError('配置字段与来源数据表不匹配，请检查表配置。', 409)
+            raise AssistantError('配置字段与来源数据表不匹配，请检查表配置。', 409, category='document_library_schema')
         return by_id
 
     def _normalize(self, source, raw, fields, previous=None, replacement=None):
@@ -466,7 +485,7 @@ class DocumentLibraryService:
                 missing = indexed is not None and (source_key not in indexed or indexed[source_key].get('missing'))
                 if not old or json.loads(old[0]) != payload or old['status'] == 'removed' or old['status'] == 'synced' and missing:
                     db.execute("INSERT INTO ingestion(source_key,table_key,record_id,record_revision,payload,status) VALUES(?,?,?,?,?,'queued') "
-                        "ON CONFLICT(source_key) DO UPDATE SET record_revision=excluded.record_revision,payload=excluded.payload,status='queued',attempts=0,next_attempt=0,lease='',lease_until=0",
+                        "ON CONFLICT(source_key) DO UPDATE SET record_revision=excluded.record_revision,payload=excluded.payload,status='queued',stage='prepare',cached=0,cache_size=0,error='',error_code='',attempts=0,next_attempt=0,lease='',lease_until=0",
                         (source_key, key, identity, record['revision'], _json(payload)))
             for row in db.execute('SELECT source_key FROM ingestion WHERE table_key=? AND record_id=?', (key, identity)).fetchall():
                 if row[0] not in current_keys:
@@ -485,21 +504,33 @@ class DocumentLibraryService:
         for fid in set(source['attachment_fields']) | {a['field_id'] for a in result['attachments']}:
             result['fields'][fid] = [a for a in result['attachments'] if a['field_id'] == fid]
         with self.connect(readonly=True) as db:
-            tasks = db.execute('SELECT source_key,payload,status FROM ingestion WHERE table_key=? AND record_id=? AND status<>?',
+            tasks = db.execute('SELECT * FROM ingestion WHERE table_key=? AND record_id=? AND status<>?',
                 (source['id'], record['record_id'], 'removed')).fetchall()
-        indexed = self.knowledge.source_states(source['id'] + '/' + record['record_id'] + '/') if self.knowledge else {}
+        from .document_library_index import read_index_states
+        knowledge_db = self.knowledge.db if self.knowledge is not None else self.root.parent / 'lighthouse_openclaw/knowledge_base/knowledge.sqlite3'
+        indexed = read_index_states(knowledge_db, source['id'] + '/' + record['record_id'] + '/', self.source_current)
         items = []
         for task in tasks:
             payload = json.loads(task['payload'])
-            state = indexed.get(task['source_key'], {}) if task['status'] == 'synced' else {}
+            if payload.get('record_revision') != record['revision'] or payload.get('config_revision') != source['revision']:
+                continue
+            state = (indexed or {}).get(task['source_key'], {}) if task['status'] == 'synced' else {}
             status = state.get('status') or ('queued' if task['status'] in {'running', 'synced'} else task['status'])
+            cached = payload.get('kind') == 'record' or self._cache_size(payload.get('file_token', '')) > 0
+            stage = task['stage']
+            if task['status'] == 'synced' and indexed is None:
+                status = 'unavailable'
+            elif stage == 'prepare' and status in {'queued', 'running'}:
+                status = 'caching'
             items.append({**{k: payload[k] for k in ('name', 'field_id', 'attachment_id') if k in payload},
-                'kind': payload.get('kind', 'attachment'), 'status': status,
-                'error': state.get('error', '') or ('不支持此附件类型的正文解析，可按来源权限下载原文件。' if status == 'unsupported'
+                'kind': payload.get('kind', 'attachment'), 'status': status, 'stage': stage, 'cached': cached,
+                'error_code': task['error_code'],
+                'error': state.get('error', '') or task['error'] or ('原件已缓存，此格式暂不支持正文索引。' if status == 'unsupported'
+                    else '暂时无法读取实际索引状态，请稍后刷新。' if status == 'unavailable'
                     else '知识库索引缺失，等待补入。' if task['status'] == 'synced' and not state else '')})
         result['knowledge_items'] = items
         states = {item['status'] for item in items}
-        result['knowledge_status'] = next((state for state in ('blocked', 'failed', 'retrying', 'queued', 'indexing', 'unsupported', 'synced', 'ready')
+        result['knowledge_status'] = next((state for state in ('blocked', 'failed', 'retrying', 'unavailable', 'caching', 'queued', 'indexing', 'unsupported', 'ready')
             if state in states), 'none')
         result['config_revision'] = source['revision']
         editable = self._allowed(actor, source, record['scopes'], write=True)
@@ -509,6 +540,8 @@ class DocumentLibraryService:
     def list_records(self, actor, key, query):
         source = self._table(key)
         actor = self._actor(actor)
+        if not any(self._allowed(actor, source, [scope]) for scope in source['read_scopes']):
+            raise AssistantError('资料表不存在或当前无权访问。', 404)
         try:
             size = int(query.get('page_size', 50))
             offset = int(query.get('cursor') or 0)
@@ -520,12 +553,16 @@ class DocumentLibraryService:
         if scope and scope not in SCOPES:
             raise AssistantError('楼栋范围无效。')
         with self.connect(readonly=True) as db:
+            db.execute('BEGIN')
             rows = db.execute('SELECT payload FROM records WHERE table_key=? AND deleted=0 AND pending_operation=\'\' ORDER BY id', (key,)).fetchall()
             completed = db.execute("SELECT 1 FROM sync_jobs WHERE table_key=? AND config_revision=? AND status='completed' LIMIT 1", (key, source['revision'])).fetchone()
-            job = db.execute('SELECT status FROM sync_jobs WHERE table_key=? AND config_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (key, source['revision'])).fetchone()
+            job = db.execute('SELECT status,error FROM sync_jobs WHERE table_key=? AND config_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (key, source['revision'])).fetchone()
         rows = [row for row in rows if json.loads(row[0]).get('config_revision') == source['revision']]
-        if not rows and not completed:
-            raise AssistantError('来源资料首次同步尚未完成，请稍后重试。', 503,
+        if not completed:
+            if job and job['status'] == 'retrying':
+                raise AssistantError(job['error'] or '来源资料同步未完成，请重试同步；持续失败时请检查飞书鉴权和数据表权限。', 503,
+                    category='document_library_sync_failed')
+            raise AssistantError('正在后台同步来源资料，完成后将自动显示列表。', 503,
                 category='document_library_sync_pending')
         records = []
         for row in rows:
@@ -540,7 +577,7 @@ class DocumentLibraryService:
             items.append(public)
         return {'items': items, 'total': len(records), 'has_more': len(records) > offset + size,
             'cursor': str(offset + size) if len(records) > offset + size else '', 'page_size': size,
-            'config_revision': source['revision'], 'sync_status': job[0] if job else 'pending'}
+            'config_revision': source['revision'], 'sync_status': job['status'] if job else 'pending'}
 
     def record(self, actor, key, identity, *, refresh=True):
         source = self._table(key)
@@ -641,7 +678,7 @@ class DocumentLibraryService:
         attachment = next((a for a in record['attachments'] if a['attachment_id'] == attachment_id), None)
         if not attachment:
             raise AssistantError('附件不存在或当前无权访问。', 404)
-        path = self._content_path(source, attachment['file_token'])
+        path = self._content_path(source, attachment['file_token'], record_id=identity, field_id=attachment['field_id'])
         fresh_source = self._table(key)
         self._require(actor, fresh_source, record['scopes'])
         if fresh_source['revision'] != source['revision']:
@@ -651,22 +688,45 @@ class DocumentLibraryService:
             raise AssistantError('下载过程中来源资料已变化，请重新读取。', 409)
         return path, attachment['name']
 
-    def _content_path(self, source, token):
+    def _cache_size(self, token):
+        if not token:
+            return 0
+        path = self.root / 'files' / hashlib.sha256(token.encode()).hexdigest()
+        try:
+            size = path.stat().st_size
+            return size if path.is_file() and not path.is_symlink() and 0 < size <= MAX_FILE else 0
+        except OSError:
+            return 0
+
+    def _content_path(self, source, token, *, record_id=None, field_id=None):
         directory = self.root / 'files'
         directory.mkdir(exist_ok=True)
         path = directory / hashlib.sha256(token.encode()).hexdigest()
-        if not path.exists():
-            with self.remote(source) as remote:
-                content = remote.download(token)
-            if not isinstance(content, bytes) or not content or len(content) > MAX_FILE:
-                raise AssistantError('附件无效或超过大小限制。', 413)
+        if not self._cache_size(token):
             temporary = path.with_name(uuid.uuid4().hex + '.part')
             try:
-                temporary.write_bytes(content)
+                self._reserve_download(source['id'])
+                with self.remote(source) as remote:
+                    remote.download_to_file(token, temporary, record_id=record_id, field_id=field_id)
+                if not temporary.is_file() or not 0 < temporary.stat().st_size <= MAX_FILE:
+                    raise AssistantError('附件无效或超过大小限制。', 413, category='too_large')
                 temporary.replace(path)
             finally:
                 temporary.unlink(missing_ok=True)
         return path
+
+    def _reserve_download(self, key):
+        # Shared by portal and AI processes; cached files never consume a download slot.
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = self.clock()
+            after = db.execute('SELECT COALESCE(MAX(download_after),0) FROM tables').fetchone()[0]
+            delay = max(0, after - now)
+            if delay > 1:
+                raise AssistantError('附件下载正在排队，稍后重试。', 429, category='rate_limit')
+            db.execute('UPDATE tables SET download_after=? WHERE id=?', (max(now, after) + .25, key))
+        if delay:
+            self._sleep_download(delay)
 
     def check_response(self, actor, key, result, *, configuration=False, preview=False):
         actor = self._actor(actor)
@@ -926,31 +986,66 @@ class DocumentLibraryService:
         source = self._table(key)
         if not any(self._allowed(actor, source, [scope]) for scope in source['read_scopes']):
             raise AssistantError('资料表不存在或当前无权访问。', 404)
-        return self._enqueue_sync(source)
+        return self._enqueue_sync(source, retry=True)
 
-    def _enqueue_sync(self, source):
+    def ensure_initial_sync(self, actor, key):
+        source = self._table(key)
+        if not any(self._allowed(actor, source, [scope]) for scope in source['read_scopes']):
+            raise AssistantError('资料表不存在或当前无权访问。', 404)
+        return self._enqueue_sync(source, only_initial=True)
+
+    def _enqueue_sync(self, source, *, retry=False, only_initial=False):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT id FROM sync_jobs WHERE table_key=? AND config_revision=? AND status IN ('queued','running','retrying') LIMIT 1", (source['id'], source['revision'])).fetchone()
+            if only_initial and db.execute("SELECT 1 FROM sync_jobs WHERE table_key=? AND config_revision=? AND status='completed' LIMIT 1",
+                    (source['id'], source['revision'])).fetchone():
+                return None
+            row = db.execute("SELECT id,status FROM sync_jobs WHERE table_key=? AND config_revision=? AND status IN ('queued','running','retrying') LIMIT 1", (source['id'], source['revision'])).fetchone()
             if row:
-                return {'job_id': row[0], 'status': 'queued'}
-            identity = uuid.uuid4().hex
-            db.execute("INSERT INTO sync_jobs(id,table_key,config_revision,status,created_at) VALUES(?,?,?,'queued',?)", (identity, source['id'], source['revision'], self.clock()))
+                identity, status = row['id'], row['status']
+                if retry and status == 'retrying':
+                    db.execute("UPDATE sync_jobs SET status='queued',next_attempt=0 WHERE id=?", (identity,))
+                    status = 'queued'
+            else:
+                identity, status = uuid.uuid4().hex, 'queued'
+                db.execute("INSERT INTO sync_jobs(id,table_key,config_revision,status,created_at) VALUES(?,?,?,'queued',?)", (identity, source['id'], source['revision'], self.clock()))
             db.execute('UPDATE tables SET next_sync=? WHERE id=?', (self.clock() + 300, source['id']))
         if self.knowledge is not None:
             self.knowledge._wake.set()
-        return {'job_id': identity, 'status': 'queued'}
+        return {'job_id': identity, 'status': status}
 
     def sync_status(self, actor, key, identity):
         source = self._table(key)
         if not any(self._allowed(actor, source, [scope]) for scope in source['read_scopes']):
             raise AssistantError('资料表不存在或当前无权访问。', 404)
         with self.connect(readonly=True) as db:
-            row = db.execute('SELECT id,status FROM sync_jobs WHERE id=? AND table_key=?', (identity, key)).fetchone()
+            row = db.execute('SELECT id,status,error,error_code FROM sync_jobs WHERE id=? AND table_key=? AND config_revision=?', (identity, key, source['revision'])).fetchone()
         if not row:
             raise AssistantError('同步任务不存在。', 404)
         # A table-wide source scan never exposes counts from another building.
-        return {'job_id': row['id'], 'status': row['status']}
+        return {'job_id': row['id'], 'status': row['status'], 'error': row['error'], 'error_code': row['error_code']}
+
+    def process_sync(self, key):
+        # Portal requests can advance the same leased queue without starting the AI/index worker.
+        task = self._claim('sync_jobs', table_key=key)
+        if task:
+            self._scan_page(task)
+        return bool(task)
+
+    def prepare_pending(self, *, table_key=None, limit=16):
+        worked = False
+        for _ in range(limit):
+            task = self._claim('sync_jobs', table_key=table_key)
+            if task:
+                self._scan_page(task)
+            else:
+                task = self._claim('ingestion', table_key=table_key, stage='prepare')
+                if task:
+                    self._prepare(task)
+            if not task:
+                break
+            worked = True
+        return worked
 
     def process_one(self):
         with self.connect(readonly=True) as db:
@@ -962,33 +1057,68 @@ class DocumentLibraryService:
             else:
                 with self.connect() as db:
                     db.execute('UPDATE tables SET next_sync=? WHERE id=?', (self.clock() + 300, due[0]))
-        order = ('ingestion', 'sync_jobs') if self._ingest_next else ('sync_jobs', 'ingestion')
-        for table in order:
-            if table == 'ingestion' and self.knowledge is None:
-                continue
-            task = self._claim(table)
+        if self.prepare_pending(limit=1):
+            return True
+        if self.knowledge is not None:
+            task = self._claim('ingestion', stage='index')
             if task:
-                self._ingest_next = table == 'sync_jobs'
-                (self._scan_page if table == 'sync_jobs' else self._ingest)(task)
+                self._ingest(task)
                 return True
         return False
 
-    def _claim(self, table):
+    def _claim(self, table, *, table_key=None, stage=None):
         identity_column = 'id' if table == 'sync_jobs' else 'source_key'
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute(f"SELECT * FROM {table} WHERE status IN ('queued','running','retrying') AND next_attempt<=? AND lease_until<=? ORDER BY next_attempt LIMIT 1", (self.clock(), self.clock())).fetchone()
+            condition = ' AND table_key=?' if table_key is not None else ''
+            params = (self.clock(), self.clock()) + ((table_key,) if table_key is not None else ())
+            if stage is not None:
+                condition += ' AND stage=?'
+                params += (stage,)
+            row = db.execute(f"SELECT * FROM {table} WHERE status IN ('queued','running','retrying') AND next_attempt<=? AND lease_until<=?{condition} ORDER BY next_attempt LIMIT 1", params).fetchone()
             if not row:
                 return None
             lease = uuid.uuid4().hex
             db.execute(f"UPDATE {table} SET status='running',lease=?,lease_until=? WHERE {identity_column}=?", (lease, self.clock() + 180, row[identity_column]))
             return {**dict(row), 'lease': lease}
 
-    def _retry(self, table, task):
+    def _retry(self, table, task, error=None):
         key = 'id' if table == 'sync_jobs' else 'source_key'
         with self.connect() as db:
+            if table == 'sync_jobs':
+                code, message = self._sync_error(error)
+                db.execute('UPDATE sync_jobs SET error=?,error_code=? WHERE id=? AND lease=?',
+                    (message, code, task['id'], task['lease']))
+            else:
+                code, message = self._ingestion_error(error, task['stage'])
+                db.execute('UPDATE ingestion SET error=?,error_code=? WHERE source_key=? AND lease=?',
+                    (message, code, task['source_key'], task['lease']))
             db.execute(f"UPDATE {table} SET status='retrying',attempts=attempts+1,next_attempt=?,lease='',lease_until=0 WHERE {key}=? AND lease=?",
                 (self.clock() + min(300, 5 * 2 ** min(task['attempts'], 6)), task[key], task['lease']))
+
+    @staticmethod
+    def _sync_error(error):
+        # Never persist raw transport exceptions, request URLs, tokens or provider record values.
+        code = error.category if isinstance(error, AssistantError) else ''
+        messages = {
+            'credential_unavailable': '飞书鉴权尚未就绪，请检查 Qt 飞书鉴权配置后重试同步。',
+            'credential_changed': '同步期间飞书鉴权发生变化，请重试同步。',
+            'token_unavailable': '未能取得飞书访问令牌，请检查 Qt 飞书鉴权和网络后重试同步。',
+            'unauthorized': '飞书拒绝读取来源资料，请检查应用鉴权和此数据表的读取权限后重试。',
+            'transport': '读取来源资料时网络连接失败或超时，请检查网络后重试同步。',
+            'bad_response': '来源资料返回不完整，未将空列表作为同步成功，请重试同步。',
+            'pagination': '来源资料分页信息无效，请重试同步；持续失败时请联系管理员。',
+            'document_library_schema': '资料表字段已变化，请重新读取字段并核对资料表配置后同步。',
+        }
+        if isinstance(error, AssistantError) and error.status in (401, 403):
+            code = code if code in messages else 'unauthorized'
+        elif isinstance(error, (OSError, TimeoutError)):
+            code = 'transport'
+        message = messages.get(code, '来源资料同步失败，请重试同步；持续失败时请联系管理员检查数据表配置和后台日志。')
+        provider_code = re.search(r'code[=:]\s*(\d{1,12})', str(error)) if isinstance(error, AssistantError) else None
+        if provider_code:
+            message += '（飞书错误码：' + provider_code[1] + '）'
+        return (code if code in messages or code == 'provider_error' else 'sync_error'), message
 
     def _scan_page(self, task):
         try:
@@ -1000,12 +1130,16 @@ class DocumentLibraryService:
             with self.remote(source) as remote:
                 fields, page = remote.fields(), remote.records(cursor=task['cursor'], page_size=100)
             self._validate_schema(source, fields)
+            if (not isinstance(page, dict) or not isinstance(page.get('items'), list) or type(page.get('has_more')) is not bool
+                    or any(not isinstance(row, dict) or not isinstance(row.get('record_id'), str) or not row['record_id']
+                        or not isinstance(row.get('fields'), dict) for row in page['items'])):
+                raise AssistantError('来源资料记录信息不完整。', 503, category='bad_response')
             seen = json.loads(task['seen_cursors'])
             if len(seen) >= 10000:
                 raise AssistantError('来源分页超过安全上限。', 413)
             token = page.get('page_token') or ''
             if page.get('has_more') and (not token or token == task['cursor'] or token in seen):
-                raise AssistantError('来源分页信息无效。', 503)
+                raise AssistantError('来源分页信息无效。', 503, category='pagination')
             for raw in page.get('items', []):
                 old = self._cached(source['id'], raw['record_id'])
                 record = self._normalize(source, raw, fields, json.loads(old['payload']) if old else None)
@@ -1016,10 +1150,10 @@ class DocumentLibraryService:
                 for identity in missing:
                     self._retire(source['id'], identity, config_revision=source['revision'], job=(task['id'], task['lease']))
             with self.connect() as db:
-                db.execute("UPDATE sync_jobs SET status=?,cursor=?,seen_cursors=?,count=count+?,attempts=0,next_attempt=0,lease='',lease_until=0 WHERE id=? AND lease=?",
+                db.execute("UPDATE sync_jobs SET status=?,cursor=?,seen_cursors=?,count=count+?,attempts=0,next_attempt=0,lease='',lease_until=0,error='',error_code='' WHERE id=? AND lease=?",
                     ('queued' if page.get('has_more') else 'completed', token, _json([*seen, task['cursor']]), len(page.get('items', [])), task['id'], task['lease']))
-        except Exception:
-            self._retry('sync_jobs', task)
+        except Exception as exc:
+            self._retry('sync_jobs', task, exc)
 
     def _ingest(self, task):
         try:
@@ -1030,20 +1164,69 @@ class DocumentLibraryService:
                 with self.connect() as db:
                     db.execute("UPDATE ingestion SET status='removed',lease_until=0 WHERE source_key=? AND lease=?", (task['source_key'], task['lease']))
                 return
-            from openclaw_service.assistant.lighthouse_knowledge import EXTENSIONS
-            if Path(provenance['name']).suffix.lower() not in EXTENSIONS:
-                status = 'unsupported'
+            public_source = {key: provenance[key] for key in ('table_key', 'record_id', 'record_revision', 'config_revision', 'origin', 'scopes', 'attachment_id', 'field_id', 'kind') if key in provenance}
+            if provenance.get('kind') == 'record':
+                content = self._record_text(source, json.loads(cached['payload'])).encode('utf-8')
+                self.knowledge.upsert_source(task['source_key'], public_source, provenance['name'], content)
             else:
-                public_source = {key: provenance[key] for key in ('table_key', 'record_id', 'record_revision', 'config_revision', 'origin', 'scopes', 'attachment_id', 'field_id', 'kind') if key in provenance}
-                if provenance.get('kind') == 'record':
-                    content = self._record_text(source, json.loads(cached['payload'])).encode('utf-8')
+                if not self._cache_size(provenance['file_token']):
+                    with self.connect() as db:
+                        db.execute("UPDATE ingestion SET stage='prepare',status='queued',cached=0,lease='',lease_until=0 WHERE source_key=? AND lease=?",
+                            (task['source_key'], task['lease']))
+                    return
+                path = self.root / 'files' / hashlib.sha256(provenance['file_token'].encode()).hexdigest()
+                with path.open('rb') as content:
                     self.knowledge.upsert_source(task['source_key'], public_source, provenance['name'], content)
-                else:
-                    path = self._content_path(source, provenance['file_token'])
-                    with path.open('rb') as content:
-                        self.knowledge.upsert_source(task['source_key'], public_source, provenance['name'], content)
-                status = 'synced'
             with self.connect() as db:
-                db.execute("UPDATE ingestion SET status=?,lease='',lease_until=0 WHERE source_key=? AND lease=?", (status, task['source_key'], task['lease']))
-        except Exception:
-            self._retry('ingestion', task)
+                db.execute("UPDATE ingestion SET status='synced',error='',error_code='',lease='',lease_until=0 WHERE source_key=? AND lease=?", (task['source_key'], task['lease']))
+        except Exception as exc:
+            self._retry('ingestion', task, exc)
+
+    @staticmethod
+    def _ingestion_error(error, stage):
+        code = getattr(error, 'category', '')
+        messages = {
+            'unauthorized': '附件读取权限不足，请检查飞书应用及多维表高级权限。',
+            'token_rejected': '飞书拒绝附件下载鉴权，请检查 Qt 飞书鉴权。',
+            'rate_limit': '飞书附件下载限流，系统将退避后重试。',
+            'unsafe_redirect': '附件下载跳转未通过安全校验，未保存为成功缓存。',
+            'too_large': '附件为空或超过100 MiB上限，未缓存或索引。',
+            'bad_response': '附件响应不完整或不是原文件，未保存为成功缓存。',
+            'local_storage': '本地原件保存失败，请检查磁盘空间和目录权限。',
+            'transport': '附件下载连接失败或超时，系统将重试。',
+        }
+        if code not in messages:
+            if isinstance(error, OSError):
+                code = 'local_storage'
+            elif stage == 'index':
+                from .document_library_index import index_error
+                return 'index_submit', index_error(str(error) if isinstance(error, AssistantError) else '') or '本地原件已保留，提交知识库未完成，请稍后重试。'
+            else:
+                code, message = DocumentLibraryService._sync_error(error)
+                return code, message
+        return code, messages[code]
+
+    def _prepare(self, task):
+        try:
+            provenance = json.loads(task['payload'])
+            if not self.source_current(provenance):
+                with self.connect() as db:
+                    db.execute("UPDATE ingestion SET status='removed',lease='',lease_until=0 WHERE source_key=? AND lease=?", (task['source_key'], task['lease']))
+                return
+            if provenance.get('kind') == 'record':
+                size = len(self._cached(task['table_key'], task['record_id'])['payload'].encode('utf-8'))
+            else:
+                source = self._table(task['table_key'])
+                path = self._content_path(source, provenance['file_token'], record_id=task['record_id'], field_id=provenance['field_id'])
+                size = path.stat().st_size
+            if not self.source_current(provenance):
+                raise AssistantError('缓存期间来源版本已变化。', 409, category='source_changed')
+            from openclaw_service.assistant.lighthouse_knowledge import EXTENSIONS
+            supported = Path(provenance['name']).suffix.lower() in EXTENSIONS
+            with self.connect() as db:
+                db.execute("UPDATE ingestion SET stage='index',status=?,cached=1,cache_size=?,error='',error_code='',attempts=0,next_attempt=0,lease='',lease_until=0 WHERE source_key=? AND lease=?",
+                    ('queued' if supported else 'unsupported', size, task['source_key'], task['lease']))
+            if self.knowledge is not None:
+                self.knowledge._wake.set()
+        except Exception as exc:
+            self._retry('ingestion', task, exc)

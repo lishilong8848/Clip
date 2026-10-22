@@ -5,6 +5,8 @@ import { requestLearning } from '../api/learning';
 import type { Dict } from '../api/client';
 import { randomHexId } from '../browserStorage';
 import ConfirmDialog from './ConfirmDialog.vue';
+import LearningQuestionImages from './LearningQuestionImages.vue';
+import { logicalUrl } from '../workspace-v2/version';
 
 const props = defineProps<{ isAdmin: boolean; userId: string }>();
 const emit = defineEmits<{ dirty: [value: boolean]; busy: [value: boolean] }>();
@@ -56,6 +58,8 @@ const publishIssue = computed(() => {
   if (c.ai > AI_MAX) return `AI生成题超过 ${AI_MAX} 道，请删除或改为手动录入。`;
   if (c.total > TOTAL_MAX) return `手动与AI合计超过 ${TOTAL_MAX} 道。`;
   if (!assignedCount.value) return '请至少选择1位参加答题的参会人。';
+  const unconfirmed = (detail.value?.questions || []).findIndex((q: Dict) => needsImageConfirmation(q) && q.image_confirmed !== true);
+  if (unconfirmed >= 0) return `第${unconfirmed + 1}题需勾选“已对照原图核对题目与答案”后再发布。`;
   return '';
 });
 const paperSizeHint = computed(() => counts.value.manualSized
@@ -95,6 +99,22 @@ const resultQuestions = computed(() => {
 
 /* ---------- helpers ---------- */
 function changed() { dirty.value = true; emit('dirty', true); }
+function questionChanged(q: Dict) { q.image_confirmed = false; changed(); }
+function imageIds(q: Dict): string[] { return Array.isArray(q.image_ids) ? q.image_ids : (q.images || []).map((image: Dict) => image.id); }
+function questionImages(q: Dict): Dict[] {
+  if (!props.isAdmin || !isDraft.value) return q.images || [];
+  const images = new Map<string, Dict>([...(q.images || []), ...(detail.value?.source_images || [])].map((image: Dict) => [image.id, image]));
+  return imageIds(q).map(id => images.get(id)).filter((image): image is Dict => !!image);
+}
+function needsImageConfirmation(q: Dict) {
+  return questionImages(q).some(image => image.mode === 'vision');
+}
+function selectQuestionImages(q: Dict, ids: string[]) {
+  if (!canEditQuestions.value || ids.length > 3 || new Set(ids).size !== ids.length
+    || ids.some(id => !(detail.value?.source_images || []).some((image: Dict) => image.id === id))) return;
+  q.image_ids = ids;
+  questionChanged(q);
+}
 function clean() { dirty.value = false; emit('dirty', false); }
 function showAnswer(value: unknown, q?: Dict) {
   if (q?.type === 'interview') return typeof value === 'string' ? value.trim() : '';
@@ -112,7 +132,7 @@ function questionProblem(q: Dict, index: number, pageAi: number) {
   if (!String(q.stem || '').trim()) return `${base}缺少题干。`;
   if (String(q.stem).trim().length > 500) return `${base}题干超过500字。`;
   if (!['single', 'multiple', 'interview'].includes(q.type)) return `${base}题型无效。`;
-  if ((q.origin || 'ai') === 'ai' && pageAi > 0 && !String(q.evidence || '').trim()) return `${base}为AI生成题，需保留纪要原文依据。`;
+  if ((q.origin || 'ai') === 'ai' && pageAi > 0 && !String(q.evidence || '').trim()) return `${base}为AI生成题，需保留纪要/图片依据。`;
   if (['single', 'multiple'].includes(q.type)) {
     const options = (q.options || []).map((o: string) => String(o || '').trim());
     if (options.length < CHOICE_MIN || options.length > CHOICE_MAX) return `${base}需设置${CHOICE_MIN}-${CHOICE_MAX}个选项。`;
@@ -123,7 +143,7 @@ function questionProblem(q: Dict, index: number, pageAi: number) {
     if (q.type === 'single' && correct.length !== 1) return `${base}为单选题，只能设置1个正确答案。`;
   } else if (!String(q.reference_answer || '').trim()) return `${base}为问答题，需填写参考答案。`;
   if (String(q.explanation || '').trim().length > 600) return `${base}答案解析超过600字。`;
-  if (String(q.evidence || '').trim().length > 800) return `${base}纪要依据超过800字。`;
+  if (String(q.evidence || '').trim().length > 800) return `${base}纪要/图片依据超过800字。`;
   if (!String(q.explanation || '').trim()) return `${base}需填写答案解析。`;
   if (q.type === 'multiple' && (q.correct || []).length < 2) return `${base}为多选题，需至少2个正确选项。`;
   return '';
@@ -216,7 +236,7 @@ function setParticipation(person: Dict, checked: boolean) {
 
 /* ---------- manual question editor ---------- */
 function newQuestion(type: string): Dict {
-  return { id: `new-${randomHexId()}`, type, origin: 'manual', stem: '', options: type === 'interview' ? [] : ['', '', '', ''], correct: [], reference_answer: '', explanation: '', evidence: '' };
+  return { id: `new-${randomHexId()}`, type, origin: 'manual', stem: '', options: type === 'interview' ? [] : ['', '', '', ''], correct: [], reference_answer: '', explanation: '', evidence: '', image_ids: [], image_confirmed: false };
 }
 function countOf(origin: string) { return (detail.value?.questions || []).filter((q: Dict) => (q.origin || 'ai') === origin).length; }
 function addQuestion(type: string) {
@@ -241,23 +261,23 @@ function switchType(q: Dict, next: string) {
     q.options = options; q.correct = next === 'single' ? (q.correct || []).slice(0, 1) : (q.correct || []);
   }
   q.type = next;
-  changed();
+  questionChanged(q);
 }
 function addOption(q: Dict) {
   if (!canEditQuestions.value || !Array.isArray(q.options) || q.options.length >= CHOICE_MAX) return;
-  q.options.push(''); changed();
+  q.options.push(''); questionChanged(q);
 }
 function removeOption(q: Dict, index: number) {
   if (!canEditQuestions.value || !Array.isArray(q.options) || q.options.length <= CHOICE_MIN) return;
   q.options.splice(index, 1);
   q.correct = (q.correct || []).map((i: number) => (i === index ? -1 : i > index ? i - 1 : i)).filter((i: number) => i >= 0);
-  changed();
+  questionChanged(q);
 }
 function choose(q: Dict, index: number, checked: boolean) {
   if (!canEditQuestions.value) return;
   const current: number[] = q.correct || [];
   q.correct = q.type === 'single' ? (checked ? [index] : []) : checked ? [...new Set([...current, index])].sort((a, b) => a - b) : current.filter((i: number) => i !== index);
-  changed();
+  questionChanged(q);
 }
 /* ---------- requests ---------- */
 async function load(id = detail.value?.id, silent = false) {
@@ -298,6 +318,7 @@ async function openBatch(row: Dict) {
 }
 async function mutate(action: string) {
   if (busy.value) return;
+  if (action === 'publish' && (dirty.value || publishIssue.value)) { error.value = dirty.value ? '请先保存当前修改。' : publishIssue.value; return; }
   if (action === 'create' && !canCreate.value) { error.value = '请填写纪要链接、添加资料，或关闭AI生成并手动录入题目。'; return; }
   busy.value = true; error.value = ''; message.value = '';
   const generating = autoGenerate.value;
@@ -318,7 +339,10 @@ async function mutate(action: string) {
       const id = detail.value!.id;
       const body: Dict = { version: detail.value!.version };
       if (action === 'save') {
-        body.questions = detail.value!.questions;
+        body.questions = detail.value!.questions.map((q: Dict) => {
+          const { images, ...question } = q;
+          return { ...question, image_ids: imageIds(q), image_confirmed: q.image_confirmed === true };
+        });
         body.excluded_open_ids = detail.value!.participants.filter((p: Dict) => p.exempted).map((p: Dict) => p.open_id);
       }
       result = await requestLearning({}, `/sharing/${id}${action === 'save' ? '' : '/' + action}`, action === 'save' ? 'PUT' : 'POST', body);
@@ -397,7 +421,12 @@ function schedule() {
 }
 watch(() => detail.value?.id, () => { answerPage.value = 1; editingAnswers.value = false; });
 watch(personSearch, () => { selectedPerson.value = ''; });
-onMounted(() => { void load(); schedule(); });
+onMounted(() => {
+  const batchId = logicalUrl().searchParams.get('batch_id');
+  if (batchId && !/^[a-f0-9]{32}$/.test(batchId)) error.value = '分享会批次编号无效。';
+  else void load(batchId || undefined);
+  schedule();
+});
 onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout(timer); });
 </script>
 
@@ -452,12 +481,14 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
       <button v-if="dirty || editingAnswers" type="button" :disabled="busy" @click="ask('discard')"><RefreshCw :size="16" />放弃修改，读取最新</button>
       <div v-if="['queued', 'generating'].includes(detail.status)" class="sharing-empty" role="status"><Loader2 :size="28" class="spin" /><span>{{ detail.progress || '等待后台生成，不影响其它功能使用' }}</span></div>
       <div v-if="detail.error" class="sharing-alert error">{{ detail.error }}</div>
+      <p v-if="isAdmin && detail.generation_note" class="sharing-alert sharing-generation-note" role="status">{{ detail.generation_note }}</p>
       <ul v-if="isAdmin && detail.sources?.length" class="sharing-chips" aria-label="出题资料快照">
         <li v-for="(source, i) in detail.sources" :key="source.id || source.url || i"><a v-if="source.url" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }}</span><small v-if="source.low_confidence_count">OCR低置信文字 {{ source.low_confidence_count }} 处</small></li>
       </ul>
       <div class="sharing-toolbar" v-if="isAdmin">
         <div class="sharing-buttons"><button v-if="detail.status === 'failed'" type="button" :disabled="busy" @click="mutate('retry')"><RefreshCw :size="16" />重新生成</button><button v-if="isDraft" type="button" :disabled="busy || !dirty" @click="mutate('save')"><Save :size="16" />保存题目与名单</button><button v-if="isDraft" type="button" class="primary" :disabled="busy || dirty || !!publishIssue" :title="publishIssue" @click="ask('publish')"><Send :size="16" />核对后发布给参会人</button><button v-if="['published', 'closed'].includes(detail.status)" type="button" :disabled="busy" @click="ask('retry-delivery')"><RefreshCw :size="16" />重试未完成任务</button><button v-if="detail.status === 'published'" type="button" :disabled="busy" @click="ask('close')"><Square :size="15" />关闭本批</button><span v-if="dirty">题目或答题名单有未保存修改</span><span v-if="busy" role="status"><Loader2 :size="16" class="spin" />正在保存…</span></div>
       </div>
+      <p v-if="isAdmin && isDraft && publishIssue" class="sharing-hint" role="status">{{ publishIssue }}</p>
       <div v-if="isAdmin && detail.bank_sync?.total" class="sharing-bank" role="status"><strong>题库同步 {{ detail.bank_sync.synced }} / {{ detail.bank_sync.total }} 题</strong><span v-if="detail.bank_sync.total > detail.bank_sync.synced + detail.bank_sync.failed"><Loader2 :size="15" class="spin" />后台同步中</span><span v-if="detail.bank_sync.failed" class="error-text">{{ detail.bank_sync.failed }} 题待重试</span><a href="https://vnet.feishu.cn/wiki/P8R2w5FXRiNpBjkJ3WVcegJ0nzh?table=tblQevBJ9knFaBNh&view=vewhuXAYog" target="_blank" rel="noopener noreferrer">查看纪要题库</a><p v-if="detail.bank_sync.error" class="error-text">{{ detail.bank_sync.error }}</p></div>
       <div v-if="detail.participants.length" class="sharing-metrics"><div><Users :size="18" /><strong>{{ assignedCount }}</strong><span>需答题人数</span></div><div><CheckCircle2 :size="18" /><strong>{{ detail.completed }}</strong><span>已完成</span></div><div><strong>{{ assignedCount - detail.completed }}</strong><span>未完成</span></div><div><strong>{{ percent }}%</strong><span>完成率</span><progress :value="percent" max="100" aria-label="分享会练习完成率" /></div></div>
 
@@ -467,15 +498,16 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
         <article v-for="(q, i) in answerPageQuestions" :key="q.id" class="sharing-question" :data-type="q.type">
           <header><strong>第 {{ (answerPage - 1) * PAGE_SIZE + i + 1 }} 题</strong><span>{{ typeLabels[q.type] }}</span></header>
           <p class="sharing-stem">{{ q.stem }}</p>
+          <LearningQuestionImages :batch-id="detail.id" :images="q.images || []" />
           <template v-if="q.type === 'interview'">
             <label :for="`sharing-answer-${q.id}`">我的作答<textarea :id="`sharing-answer-${q.id}`" :value="answers[q.id] || ''" rows="4" maxlength="1000" :disabled="busy || !canAnswer" @input="writeAnswer(q, ($event.target as HTMLTextAreaElement).value)" /></label>
-            <div v-if="submitted" class="sharing-answer"><strong>我的作答：{{ showAnswer(q.selected ?? answers[q.id], q) || '未答' }}</strong><p v-if="q.reference_answer">参考答案（不自动判分）：{{ q.reference_answer }}</p><p>{{ q.explanation }}</p><blockquote v-if="q.evidence">{{ q.evidence }}</blockquote></div>
+            <div v-if="submitted" class="sharing-answer"><strong>我的作答：{{ showAnswer(q.selected ?? answers[q.id], q) || '未答' }}</strong><p v-if="q.reference_answer">参考答案（不自动判分）：{{ q.reference_answer }}</p><p>{{ q.explanation }}</p><blockquote v-if="q.evidence && (isAdmin || !q.images?.length)">{{ q.evidence }}</blockquote></div>
           </template>
           <template v-else>
             <fieldset class="sharing-choices" :disabled="busy || !canAnswer"><legend class="sharing-visually-hidden">第{{ i + 1 }}题选项</legend>
               <label v-for="(option, n) in q.options" :key="n" :class="{ checked: (answers[q.id] || []).includes(n) }"><input :type="q.type === 'single' ? 'radio' : 'checkbox'" :name="`sharing-answer-${q.id}`" :checked="(answers[q.id] || []).includes(n)" :aria-label="`第${i + 1}题选项${letters(n)}`" @change="pick(q, n, ($event.target as HTMLInputElement).checked)" /><span>{{ letters(n) }}. {{ option }}</span></label>
             </fieldset>
-            <div v-if="submitted" class="sharing-answer"><strong>我的作答：{{ showAnswer(q.selected ?? answers[q.id]) || '未答' }}</strong><p v-if="q.correct">正确答案：{{ correctAnswer(q) }}</p><p v-if="q.explanation">{{ q.explanation }}</p><blockquote v-if="q.evidence">{{ q.evidence }}</blockquote></div>
+            <div v-if="submitted" class="sharing-answer"><strong>我的作答：{{ showAnswer(q.selected ?? answers[q.id]) || '未答' }}</strong><p v-if="q.correct">正确答案：{{ correctAnswer(q) }}</p><p v-if="q.explanation">{{ q.explanation }}</p><blockquote v-if="q.evidence && (isAdmin || !q.images?.length)">{{ q.evidence }}</blockquote></div>
           </template>
         </article>
         <footer class="sharing-pagination v2-sharing-answerbar">
@@ -498,7 +530,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
           </tr>
         </tbody></table></div>
       </section>
-      <section v-if="resultPaper" class="sharing-section"><header><h3>{{ resultPaper.name }} · 本次答卷</h3><span>共 {{ (resultPaper.question_ids || []).length }} 题 · 每页5题 · {{ resultPaper.submitted_at?.slice(0, 16).replace('T', ' ') || '尚未提交' }}</span></header><article v-for="(q, i) in resultQuestions" :key="q.id" class="sharing-question"><strong>{{ (resultPage - 1) * PAGE_SIZE + i + 1 }}. {{ q.stem }}</strong><p v-for="(option, n) in q.options" :key="n">{{ letters(n) }}. {{ option }}</p><p>作答：{{ showAnswer(resultPaper.answers?.[q.id], q) || '未答' }}</p><p>{{ q.type === 'interview' ? '参考答案（不自动判分）' : '正确答案' }}：{{ q.type === 'interview' ? (q.reference_answer || '—') : (correctAnswer(q) || '—') }}</p><p v-if="q.explanation">解析：{{ q.explanation }}</p></article><footer class="sharing-pagination"><span>共 {{ resultPages }} 页</span><div><button type="button" aria-label="答卷上一页" :disabled="resultPage <= 1" @click="resultPage--"><ChevronLeft :size="16" /></button><span>{{ resultPage }} / {{ resultPages }}</span><button type="button" aria-label="答卷下一页" :disabled="resultPage >= resultPages" @click="resultPage++"><ChevronRight :size="16" /></button></div></footer></section>
+      <section v-if="resultPaper" class="sharing-section"><header><h3>{{ resultPaper.name }} · 本次答卷</h3><span>共 {{ (resultPaper.question_ids || []).length }} 题 · 每页5题 · {{ resultPaper.submitted_at?.slice(0, 16).replace('T', ' ') || '尚未提交' }}</span></header><article v-for="(q, i) in resultQuestions" :key="q.id" class="sharing-question"><strong>{{ (resultPage - 1) * PAGE_SIZE + i + 1 }}. {{ q.stem }}</strong><LearningQuestionImages :batch-id="detail.id" :images="q.images || []" /><p v-for="(option, n) in q.options" :key="n">{{ letters(n) }}. {{ option }}</p><p>作答：{{ showAnswer(resultPaper.answers?.[q.id], q) || '未答' }}</p><p>{{ q.type === 'interview' ? '参考答案（不自动判分）' : '正确答案' }}：{{ q.type === 'interview' ? (q.reference_answer || '—') : (correctAnswer(q) || '—') }}</p><p v-if="q.explanation">解析：{{ q.explanation }}</p></article><footer class="sharing-pagination"><span>共 {{ resultPages }} 页</span><div><button type="button" aria-label="答卷上一页" :disabled="resultPage <= 1" @click="resultPage--"><ChevronLeft :size="16" /></button><span>{{ resultPage }} / {{ resultPages }}</span><button type="button" aria-label="答卷下一页" :disabled="resultPage >= resultPages" @click="resultPage++"><ChevronRight :size="16" /></button></div></footer></section>
       <section v-if="isAdmin && detail.weekly_reports?.length" class="sharing-section"><header><h3>最近群汇总</h3></header><div class="sharing-table"><table><thead><tr><th>统计截止</th><th>分组</th><th>发送状态</th><th>说明</th></tr></thead><tbody><tr v-for="r in detail.weekly_reports" :key="`${r.date}-${r.part}`"><td>{{ r.end }}</td><td>{{ r.part }} / {{ r.parts }}</td><td>{{ ({ sent: '已发送', pending: '待发送', failed: '发送失败', skipped: '已停止' } as Record<string, string>)[r.status] || r.status }}</td><td>{{ r.error || r.sent_at?.slice(0, 16).replace('T', ' ') || '等待后台发送' }}</td></tr></tbody></table></div></section>
       <section v-if="isAdmin || (!paper && detail.questions?.length)" class="sharing-section">
         <header><h3>{{ isAdmin ? '生成题目与答案' : `我的${detail.questions.length}道题` }}</h3><span>{{ detail.questions.length }}题 · 手动{{ counts.manual }} / AI{{ counts.ai }}</span></header>
@@ -516,20 +548,22 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
               <label :for="`sharing-type-${q.id}`">题型<select :id="`sharing-type-${q.id}`" :value="q.type" :disabled="!canEditQuestions" @change="switchType(q, ($event.target as HTMLSelectElement).value)"><option v-for="(label, kind) in typeLabels" :key="kind" :value="kind">{{ label }}</option></select></label>
               <button type="button" :disabled="!canEditQuestions" :aria-label="`删除第${(questionPage - 1) * PAGE_SIZE + i + 1}题`" @click="removeQuestion(q)"><Trash2 :size="15" />删除此题</button>
             </div>
-            <label :for="`sharing-${q.id}`">题干<textarea :id="`sharing-${q.id}`" v-model="q.stem" rows="2" maxlength="500" :disabled="busy" @input="changed" /></label>
+            <label :for="`sharing-${q.id}`">题干<textarea :id="`sharing-${q.id}`" v-model="q.stem" rows="2" maxlength="500" :disabled="busy" @input="questionChanged(q)" /></label>
             <template v-if="q.type === 'interview'">
-              <label>参考答案（问答题不自动判分）<textarea v-model="q.reference_answer" rows="3" maxlength="1000" :disabled="busy" @input="changed" /></label>
+              <label>参考答案（问答题不自动判分）<textarea v-model="q.reference_answer" rows="3" maxlength="1000" :disabled="busy" @input="questionChanged(q)" /></label>
             </template>
             <template v-else>
               <p class="sharing-option-hint">正确选项（{{ q.type === 'single' ? '单选' : '多选' }}），选项需 {{ CHOICE_MIN }}-{{ CHOICE_MAX }} 个。</p>
-              <div v-for="(option, n) in q.options" :key="n" class="sharing-option"><input :type="q.type === 'single' ? 'radio' : 'checkbox'" :name="`sharing-answer-${q.id}`" :checked="q.correct.includes(n)" :aria-label="`第${(questionPage - 1) * PAGE_SIZE + i + 1}题选项${letters(n)}为正确答案`" :disabled="busy" @change="choose(q, Number(n), ($event.target as HTMLInputElement).checked)" /><label :for="`sharing-option-${q.id}-${n}`">{{ letters(Number(n)) }}</label><textarea :id="`sharing-option-${q.id}-${n}`" v-model="q.options[n]" rows="1" maxlength="300" :disabled="busy" @input="changed" /><button type="button" class="sharing-chip-x" :aria-label="`删除第${(questionPage - 1) * PAGE_SIZE + i + 1}题选项${letters(Number(n))}`" :disabled="busy || !canEditQuestions || q.options.length <= CHOICE_MIN" @click="removeOption(q, Number(n))"><X :size="14" /></button></div>
+              <div v-for="(option, n) in q.options" :key="n" class="sharing-option"><input :type="q.type === 'single' ? 'radio' : 'checkbox'" :name="`sharing-answer-${q.id}`" :checked="q.correct.includes(n)" :aria-label="`第${(questionPage - 1) * PAGE_SIZE + i + 1}题选项${letters(n)}为正确答案`" :disabled="busy" @change="choose(q, Number(n), ($event.target as HTMLInputElement).checked)" /><label :for="`sharing-option-${q.id}-${n}`">{{ letters(Number(n)) }}</label><textarea :id="`sharing-option-${q.id}-${n}`" v-model="q.options[n]" rows="1" maxlength="300" :disabled="busy" @input="questionChanged(q)" /><button type="button" class="sharing-chip-x" :aria-label="`删除第${(questionPage - 1) * PAGE_SIZE + i + 1}题选项${letters(Number(n))}`" :disabled="busy || !canEditQuestions || q.options.length <= CHOICE_MIN" @click="removeOption(q, Number(n))"><X :size="14" /></button></div>
               <button type="button" :disabled="!canEditQuestions || q.options.length >= CHOICE_MAX" @click="addOption(q)"><Plus :size="15" />增加选项</button>
             </template>
-            <label>答案解析<textarea v-model="q.explanation" rows="2" maxlength="600" :disabled="busy" @input="changed" /></label>
-            <label>纪要原文依据{{ (q.origin || 'ai') === 'manual' ? '（手动题可选）' : '（AI题必填，需出现在纪要/资料原文中）' }}<textarea v-model="q.evidence" rows="2" maxlength="800" :disabled="busy" @input="changed" /></label>
+            <label>答案解析<textarea v-model="q.explanation" rows="2" maxlength="600" :disabled="busy" @input="questionChanged(q)" /></label>
+            <label>纪要/图片依据{{ (q.origin || 'ai') === 'manual' ? '（手动题可选）' : '（AI题必填，需能在纪要/资料或所选图片中核对）' }}<textarea v-model="q.evidence" rows="2" maxlength="800" :disabled="busy" @input="questionChanged(q)" /></label>
+            <LearningQuestionImages :batch-id="detail.id" :images="questionImages(q)" :source-images="detail.source_images || []" :image-ids="imageIds(q)" editable :disabled="!canEditQuestions" @update:image-ids="selectQuestionImages(q, $event)" />
+            <label v-if="needsImageConfirmation(q)" class="sharing-image-confirm"><input v-model="q.image_confirmed" type="checkbox" :disabled="!canEditQuestions" @change="changed" /><span>已对照原图核对题目与答案</span></label>
             <p v-if="questionIssues[i]" role="alert" class="sharing-question-error">{{ questionIssues[i] }}</p>
           </template>
-          <template v-else><p>{{ q.stem }}</p><p v-for="(option, n) in q.options" :key="n">{{ letters(Number(n)) }}. {{ option }}</p><div v-if="(q.correct && q.correct.length) || q.reference_answer || q.explanation || q.evidence" class="sharing-answer"><strong>{{ q.type === 'interview' ? '参考答案（不自动判分）：' + (q.reference_answer || '—') : '正确答案：' + (correctAnswer(q) || '—') }}</strong><p v-if="q.explanation">{{ q.explanation }}</p><blockquote v-if="q.evidence">{{ q.evidence }}</blockquote></div></template>
+          <template v-else><p>{{ q.stem }}</p><LearningQuestionImages :batch-id="detail.id" :images="q.images || []" /><p v-for="(option, n) in q.options" :key="n">{{ letters(Number(n)) }}. {{ option }}</p><div v-if="(isAdmin || submitted || !q.images?.length) && ((q.correct && q.correct.length) || q.reference_answer || q.explanation || q.evidence)" class="sharing-answer"><strong>{{ q.type === 'interview' ? '参考答案（不自动判分）：' + (q.reference_answer || '—') : '正确答案：' + (correctAnswer(q) || '—') }}</strong><p v-if="q.explanation">{{ q.explanation }}</p><blockquote v-if="q.evidence && (isAdmin || !q.images?.length)">{{ q.evidence }}</blockquote></div></template>
         </article>
         <footer class="sharing-pagination"><span>每页5题<span v-if="isAdmin && isDraft"> · 第{{ questionPage }}页手动{{ (detail.questions || []).slice((questionPage - 1) * PAGE_SIZE, questionPage * PAGE_SIZE).filter((q: Dict) => (q.origin || 'ai') === 'manual').length }}题</span></span><div><button type="button" aria-label="题目上一页" :disabled="questionPage <= 1" @click="questionPage--"><ChevronLeft :size="16" /></button><span>{{ questionPage }} / {{ Math.max(1, Math.ceil(detail.questions.length / PAGE_SIZE)) }}</span><button type="button" aria-label="题目下一页" :disabled="questionPage * PAGE_SIZE >= detail.questions.length" @click="questionPage++"><ChevronRight :size="16" /></button></div></footer>
       </section>
@@ -548,6 +582,8 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 small,.sharing-meta,.sharing-pagination,.sharing-hint,.sharing-counts {color:#52667d;font-size:13px;}
 .sharing-create{border-block:1px solid #dce5ee;padding:20px 0;margin-bottom:20px;min-width:0;}.sharing-create>label{display:flex;gap:7px;align-items:center;margin-bottom:9px;font-weight:600;}.sharing-create>div{display:flex;gap:10px;min-width:0;}.sharing-create input{flex:1;min-width:0;}
 .sharing-alert{padding:12px 15px;margin:12px 0;border-radius:6px;line-height:1.6;overflow-wrap:anywhere;}.error{background:#fff1f2;color:#a82342;}.success{background:#ecf9f2;color:#146844;}.error-text{color:#a82342;}
+.sharing-generation-note{background:color-mix(in srgb,var(--cf-warning,#735515) 8%,var(--cf-surface,#fff8e7));color:var(--cf-warning,#735515);white-space:pre-wrap;}
+.sharing-question .sharing-image-confirm{display:flex;align-items:flex-start;gap:8px;min-height:44px;padding:10px 0;line-height:1.6;overflow-wrap:anywhere;}.sharing-image-confirm input{flex:none;width:18px;height:18px;margin:3px 0 0;accent-color:#2463df;}
 .sharing-sources{border:0;margin:0 0 14px;padding:0;display:grid;gap:14px;min-width:0;}.sharing-sources legend,.sharing-types legend{font-size:14px;font-weight:600;margin-bottom:6px;}.sharing-source{display:grid;gap:8px;min-width:0;}.sharing-source>input[type=url]{width:100%;box-sizing:border-box;}
 .sharing-check{display:inline-flex;gap:8px;align-items:center;font-weight:600;min-height:32px;min-width:0;overflow-wrap:anywhere;}.sharing-check input{flex:none;width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-check small{font-weight:400;flex-basis:100%;}
 .sharing-generate{display:grid;grid-template-columns:20px minmax(0,1fr);gap:4px 8px;align-items:center;margin:0 0 14px;font-weight:600;}.sharing-generate input{width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-generate small{font-weight:400;grid-column:2;}

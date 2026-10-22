@@ -185,6 +185,9 @@ class LearningService:
         self._shift_roster_reader = get_shift_roster
         self._notification_lock = threading.Lock()
         self._sync_lock = threading.RLock()
+        self._sync_active = False
+        self._completion_error = ''
+        self._completion_retry_at = 0.0
         self._portal_url = get_portal_url
         self._people_reader = get_people
         self._login_people_reader = get_login_people
@@ -437,7 +440,9 @@ class LearningService:
                 self.tick()
             except Exception as exc:
                 self._last_error = str(exc)[:600]
-                logging.getLogger(__name__).warning("学练后台任务失败: %s", exc)
+                if self._refresh_state == 'syncing':
+                    self._refresh_state = 'error'
+                logging.getLogger(__name__).warning("学练后台任务失败: %s", exc, exc_info=True)
 
     def request_refresh(self):
         if self._refresh_state != "syncing":
@@ -448,11 +453,24 @@ class LearningService:
             self._wake.set()
         return self.sync_status()
 
-    def sync_status(self):
+    def sync_status(self, *, include_history_issues=False):
         with closing(self._connect()) as conn:
             pending = conn.execute("SELECT count(*) FROM documents WHERE dirty=1").fetchone()[0]
-        return {"status": "publishing" if self._manual_publish_pending() else self._refresh_state, "error": self._last_error, "pending": pending,
+            waiting, next_retry = conn.execute("SELECT COUNT(*),MIN(retry_at) FROM documents WHERE dirty=1 AND retry_at>?", (time.time(),)).fetchone()
+            issue_count = conn.execute("SELECT count(*) FROM documents WHERE kind='local' AND key LIKE 'shift_history_issue:%'").fetchone()[0] if include_history_issues else 0
+        status = 'syncing' if self._sync_active else 'publishing' if self._manual_publish_pending() else self._refresh_state
+        if status not in {'syncing', 'publishing'} and pending:
+            status = 'retry_waiting' if waiting or self._last_error else 'pending'
+        error = '；'.join(dict.fromkeys(filter(None, (self._last_error, self._completion_error))))
+        if error == '请选择有效统计日期。':
+            error = '后台学练汇总中的日期需要核对，页面所选日期不受影响。后台将继续处理其它任务。'
+        result = {"status": status, "error": error, "pending": pending, 'waiting': waiting, 'next_retry_at': next_retry,
+                'active': bool(self._sync_active or self._refresh_state == 'syncing'),
                 "updated_at": (self._get("local", "refresh") or {}).get("at", "")}
+        if include_history_issues:
+            from .learning_shift_storage import history_issues
+            result.update(history_issue_count=issue_count, history_issues=history_issues(self, limit=50))
+        return result
 
     def _manual_publish_pending(self, date=None):
         date = date or now().date().isoformat()
@@ -513,9 +531,18 @@ class LearningService:
                 except Exception:
                     self._last_error = "人员目录暂未刷新，保留原名单；后台稍后重试。"
             self._completion_enabled = getattr(self.cloud, 'completion_schema_ready', False) is True
-            if self._completion_enabled:
+            if self._completion_enabled and time.time() >= self._completion_retry_at:
                 from .learning_completion import refresh
-                refresh(self, current)
+                try:
+                    refresh(self, current)
+                    self._completion_error = ''
+                    self._completion_retry_at = 0.0
+                    if self._last_error == '请选择有效统计日期。':
+                        self._last_error = ''
+                except Exception:
+                    self._completion_retry_at = time.time() + 300
+                    self._completion_error = '每日完成后台汇总暂未更新，原数据已保留，5分钟后重试；题单同步和消息发送继续。'
+                    logging.getLogger(__name__).warning('每日完成后台汇总失败，未中断同步与发布', exc_info=True)
             self.sync_pending(limit=40)
             day = current.date().isoformat()
             if not self.settings()["enabled"] and not manual_mode:
@@ -679,7 +706,11 @@ class LearningService:
 
     def sync_pending(self, limit=40, *, force=False):
         with self._sync_lock:
-            return self._sync_pending(limit, force=force)
+            self._sync_active = True
+            try:
+                return self._sync_pending(limit, force=force)
+            finally:
+                self._sync_active = False
 
     def _sync_pending(self, limit=40, *, force=False):
         with closing(self._connect()) as conn:
@@ -1008,12 +1039,16 @@ class LearningService:
             summary = {}  # Unmatched ordinary account: surface identity_issue, no stats yet.
         else:
             summary = self.profile(actor, {"scope": scope})["summary"]
+        delivery = {}
+        if admin:
+            from .learning_delivery_status import report
+            delivery['delivery_status'] = report(self)
         return {"is_admin": admin, "can_answer": can_answer, "can_view_buildings": can_view_buildings,
                 "self_person": self_public, "self_scope": self_scope, "identity_issue": actor.get("identity_issue", ""),
-                "scopes": scopes, "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(),
+                "scopes": scopes, "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(include_history_issues=admin),
                 "today": now().date().isoformat(), "silent_manual_publish": True,
                 "question_problem_count": sum(bool(q.get("problems")) and q.get("status") != "deleted" for q in self._all("question")) if admin else 0,
-                "summary": summary}
+                "summary": summary, **delivery}
 
     def _paper(self, paper_id, actor, conn=None, write=False):
         paper = self._get("paper", paper_id, conn)
@@ -1819,6 +1854,16 @@ class LearningService:
 
     def export(self, kind, query, actor):
         self._admin(actor)
+        safe = lambda value: "'" + str(value) if str(value).startswith(("=", "+", "-", "@", "\t", "\r")) else value
+        if kind == "history_identity":
+            from .learning_shift_storage import history_issues
+            output = io.StringIO(newline="")
+            writer = csv.writer(output)
+            writer.writerow(["原记录ID", "姓名", "日期", "楼栋", "待核对原因", "候选人员（姓名 / 工号 / 楼栋 / 人员记录ID）"])
+            for row in history_issues(self):
+                candidates = "；".join(" / ".join([p['name'], p['employee_no'], "、".join(p['scopes']), p['record_id']]) for p in row.get('candidates', []))
+                writer.writerow([safe(row.get(k) or '') for k in ('record_id', 'name', 'date', 'scope', 'reason')] + [safe(candidates)])
+            return output.getvalue().encode("utf-8-sig"), "学练历史人员待核对.csv", "text/csv; charset=utf-8"
         if kind == "questions":
             values = [{k: v for k, v in q.items() if not k.startswith("_") and k not in {"record_id", "attachments", "id", "create_fingerprint"}} for q in self._filtered_questions(query)]
             return json.dumps({"format": "clipflow-learning-v1", "questions": values}, ensure_ascii=False, indent=2).encode(), "学练题库.json", "application/json"
@@ -1827,7 +1872,6 @@ class LearningService:
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(["日期", "楼栋", "姓名", "工号", "人员标识", "题库", "题目", "首次正确", "使用提示", "自评", "提交时间", "无效题", "更正说明", "操作账号", "题单类型"])
-        safe = lambda value: "'" + str(value) if str(value).startswith(("=", "+", "-", "@", "\t", "\r")) else value
         for p in self._documents("paper", person_id=str(query.get("person_id") or ""), scope=scope,
                                  start=query.get("from", ""), end=query.get("to", ""), legacy=query.get("legacy") == "1"):
             if p.get("deleted_at") or scope and p["scope"] != scope or query.get("from") and p["date"] < query["from"] or query.get("to") and p["date"] > query["to"]:

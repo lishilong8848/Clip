@@ -616,12 +616,15 @@ class LearningCloud:
         if not isinstance(batch, dict) or batch.get('status') not in {'published', 'closed'} or not isinstance(question, dict):
             raise LearningCloudError('只能将已发布的纪要题目同步到题库')
         bid = _identifier(batch.get('id'), 'batch.id', r'[0-9a-f]{32}')
-        checked = validate_questions(batch.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'))
+        checked = validate_questions(batch.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'), images=batch.get('source', {}).get('images', []))
         q = next((item for item in checked if item['id'] == question.get('id')), None)
         if q is None or q != question:
             raise LearningCloudError('题库任务与已发布题目快照不一致，未写入')
         identity = f"sharing:{bid}:{q['id']}"
         metadata = {'source': 'meeting-sharing', 'sync_id': identity, 'batch_id': bid, 'question_id': q['id'], 'type': q['type']}
+        if q.get('image_ids'):
+            metadata['image_ids'] = q['image_ids']
+            metadata['image_page_url'] = batch.get('image_page_url', '')
         sources = batch.get('source', {}).get('sources', [])
         if q.get('origin') == 'manual' or sources:
             metadata['origin'] = q.get('origin', 'ai')
@@ -638,6 +641,8 @@ class LearningCloud:
         }
         if q['options']:
             fields['选项'] = '\n'.join(f'{chr(65 + i)}. {option}' for i, option in enumerate(q['options']))
+        if q.get('image_ids'):
+            fields['备注'] += '\n题图（登录后查看）：' + batch.get('image_page_url', '')
         with self._lock:
             if not self._sharing_schema_ready:
                 self._check_fields(self._fields(SHARING_TABLE_ID), SHARING_FIELDS, required=True)
@@ -802,7 +807,7 @@ class LearningCloud:
             self._pending_documents.pop((kind, key), None)
             return result
 
-    def enrich_entity_record(self, record_id, kind, key, display_fields, *, expected_payload_sha256=None, expected_app_id=None):
+    def enrich_entity_record(self, record_id, kind, key, display_fields, *, expected_payload_sha256=None, expected_app_id=None, expected_display_name=None):
         self._require_write()
         _identifier(record_id, "record_id", r"rec[A-Za-z0-9]+")
         kind, key = _entity_kind(kind), _nonempty(key, "key")
@@ -824,6 +829,8 @@ class LearningCloud:
                     raise LearningCloudError("历史记录内容无效，未补列") from None
                 if _payload_digest(payload) != expected_payload_sha256:
                     raise LearningCloudConflict("历史记录内容已变化，发生冲突；请重新计算汇总，未补列")
+            if expected_display_name is not None and _text(actual.get('姓名') or '') != expected_display_name:
+                raise LearningCloudConflict("历史记录姓名已变化，未补列；等待重新核对")
             fields = {**display, "类别": ENTITY_KIND_LABELS.get(kind, kind)}
             if _same_fields(fields, actual):
                 return record

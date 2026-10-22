@@ -322,11 +322,14 @@ def history_identity(state, item):
         names.append((value.get('summary') or {}).get('name'))
     linked_person = linked.get('person') or {}
     names.extend([linked_person.get('name'), linked.get('name') if kind == 'sharing_delivery' else None])
+    ids = [value.get('person_id'), identity if kind == 'person' else '', original.get('id'),
+           linked.get('person_id'), linked_person.get('id')]
+    conflicting_ids = len({pid for pid in ids if isinstance(pid, str) and pid}) > 1
     names = sorted({name.strip() for name in names if isinstance(name, str) and name.strip()})
     if not names and isinstance(person.get('name'), str) and person['name'].strip():
         names = [person['name'].strip()]
     return {'person': {key: person[key] for key in ('id', 'aliases', 'login_ids', 'employee_no') if key in person},
-            'names': names, 'required': True}
+            'names': names, 'required': True, 'conflict': conflicting_ids}
 
 
 def resolve_history_identity(identity, directory):
@@ -335,7 +338,9 @@ def resolve_history_identity(identity, directory):
     names = identity.get('names') or []
     rows = identity_rows(identity.get('person') or {}, directory)
     reason = ''
-    if len(names) > 1:
+    if identity.get('conflict'):
+        reason = '原记录与内嵌或关联题单的人员标识不一致'
+    elif len(names) > 1:
         reason = '原记录中的姓名不一致，需人工核对'
     elif len(rows) > 1:
         reason = '原人员标识对应多条人员记录，需人工核对'
@@ -365,10 +370,11 @@ def resolve_history_identity(identity, directory):
     return '', reason, candidates
 
 
-def history_issues(service):
+def history_issues(service, limit=None):
     with closing(service._connect()) as conn:
         return [json.loads(row[0]) for row in conn.execute(
-            "SELECT payload FROM documents WHERE kind='local' AND key LIKE 'shift_history_issue:%' ORDER BY key")]
+            "SELECT payload FROM documents WHERE kind='local' AND key LIKE 'shift_history_issue:%' ORDER BY key LIMIT ?",
+            (limit if limit is not None else -1,))]
 
 
 def current_directory(service):
@@ -510,8 +516,17 @@ def sync(service, rows, limit):
     for pair in due:
         if state.legacy(*pair):
             fields = history_fields(state, *pair, directory)
-            if not valid:
-                fields.pop('人员', None)
+            fields.pop('人员', None)
+            if valid:
+                try:
+                    identity = history_identity(state, {'kind': pair[0], 'key': pair[1], 'payload': state.get(*pair)})
+                    oid, reason, _ = resolve_history_identity(identity, directory)
+                except (AttributeError, KeyError, TypeError, ValueError):
+                    oid, reason = '', '历史人员资料待核对'
+                if oid:
+                    fields['人员'] = [{'id': oid}]
+                if reason:
+                    fields.pop('姓名', None)
             legacy_fields[pair] = (fields, app_id)
     return handled, failures, legacy_fields
 
@@ -541,9 +556,10 @@ def backfill(service, limit=8):
             value = item['payload']
             if item['kind'] == 'shift_person' or not isinstance(value, dict):
                 continue
+            date = value.get('date')
             documents[item['kind'], item['key']] = {'payload': value, 'revision': 1, 'dirty': False,
                 'updated': value.get('updated_at') or value.get('created_at') or
-                ((value.get('date') or '1970-01-01') + 'T00:00:00+08:00')}
+                ((date if isinstance(date, str) and date else '1970-01-01') + 'T00:00:00+08:00')}
         state = Snapshot(documents)
         with service.transaction() as conn:
             if not progress.get('prepared'):
@@ -564,15 +580,20 @@ def backfill(service, limit=8):
                     identity = {'person': {}, 'names': [], 'required': True}
                 if item.get('display_name'):
                     fields['姓名'] = item['display_name']
+                elif len(identity.get('names') or []) > 1:
+                    fields.pop('姓名', None)
                 _, reason, candidates = resolve_history_identity(identity, directory)
                 job_key = 'shift_history_row:' + item['record_id']
                 previous = service._get('local', job_key, conn) or {}
                 unchanged = (previous.get('payload_sha256') == item['payload_sha256']
+                             and previous.get('display_name', '') == item.get('display_name', '')
                              and previous.get('identity') == identity)
                 job = {
                     'record_id': item['record_id'], 'kind': item['kind'], 'key': item['key'],
                     'payload_sha256': item['payload_sha256'], 'fields': fields, 'identity': identity,
-                    'metadata_done': bool(unchanged and previous.get('metadata_done')), 'retry_at': 0}
+                    'display_name': item.get('display_name', ''),
+                    'metadata_done': bool(unchanged and previous.get('metadata_done')),
+                    'retry_at': previous.get('retry_at', 0) if unchanged else 0}
                 service._put('local', job_key, job, conn, False)
                 if reason:
                     _history_issue(service, conn, job, reason, candidates)
@@ -581,7 +602,8 @@ def backfill(service, limit=8):
             service._put('local', 'shift_history_fields', progress, conn, False)
     with closing(service._connect()) as conn:
         jobs = conn.execute("SELECT key,payload FROM documents WHERE kind='local' AND key LIKE 'shift_history_row:%' "
-                            "AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? ORDER BY key LIMIT ?", (time.time(), limit)).fetchall()
+                            "AND COALESCE(json_extract(payload,'$.retry_at'),0)<=? "
+                            "ORDER BY COALESCE(json_extract(payload,'$.retry_at'),0),key LIMIT ?", (time.time(), limit)).fetchall()
     for row in jobs:
         job = json.loads(row['payload'])
         oid, reason, candidates = resolve_history_identity(job['identity'], directory)
@@ -592,14 +614,16 @@ def backfill(service, limit=8):
         try:
             if not reason or not job.get('metadata_done'):
                 service.cloud.enrich_entity_record(job['record_id'], job['kind'], job['key'], fields,
-                                                   expected_payload_sha256=job['payload_sha256'], expected_app_id=app_id)
+                                                   expected_payload_sha256=job['payload_sha256'], expected_app_id=app_id,
+                                                   expected_display_name=job['display_name'])
             job['metadata_done'] = True
         except Exception:
             with service.transaction() as conn:
                 _history_issue(service, conn, job, reason or '补写结果尚未确认，稍后重新核对并重试', candidates)
                 job['retry_at'] = time.time() + 300
                 service._put('local', row['key'], job, conn, False)
-            progress['replan_at'] = min(progress.get('replan_at') or float('inf'), time.time() + 300)
+                progress['replan_at'] = min(progress.get('replan_at') or float('inf'), time.time() + 300)
+                service._put('local', 'shift_history_fields', progress, conn, False)
             continue
         with service.transaction() as conn:
             if reason:
@@ -619,7 +643,10 @@ def backfill(service, limit=8):
 
 def _history_issue(service, conn, job, reason, candidates):
     fields = job['fields']
+    date = fields.get('日期')
+    if isinstance(date, (int, float)):
+        date = dt.datetime.fromtimestamp(date / 1000, core.TZ).date().isoformat()
     service._put('local', 'shift_history_issue:' + job['record_id'], {
         'record_id': job['record_id'], 'kind': job['kind'], 'name': '、'.join(job['identity'].get('names') or []),
-        'date': fields.get('日期'), 'scope': fields.get('楼栋') or '',
+        'date': date or '', 'scope': fields.get('楼栋') or '',
         'reason': reason, 'candidates': candidates}, conn, False)

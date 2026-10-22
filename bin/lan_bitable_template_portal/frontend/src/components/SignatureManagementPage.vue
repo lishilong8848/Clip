@@ -60,7 +60,7 @@
           </label>
           <label><span>楼栋</span><select v-model="scope"><option value="">全部楼栋</option><option v-for="b in buildings" :key="b" :value="b">{{ buildingLabel(b) }}</option></select></label>
           <label><span>人员来源</span><select v-model="source"><option value="">全部人员</option><option value="staff">正式人员</option><option value="external">临时人员</option></select></label>
-          <label><span>签名状态</span><select v-model="status"><option value="">全部状态</option><option value="unsigned">未签名</option><option value="signed">已有签名</option><option value="resign">需重新签名</option><option value="restricted">可邀请的上级</option></select></label>
+          <label><span>签名状态</span><select v-model="status"><option value="">全部状态</option><option value="unsigned">未签名</option><option value="signed">已有签名</option><option value="resign">需重新签名</option><option value="restricted">签名受限</option></select></label>
           <button v-if="hasFilters" type="button" class="btn clear-filter" @click="clearFilters"><X :size="15" />清除筛选</button>
         </div>
 
@@ -295,7 +295,7 @@ const relayPeople = computed(() => filterDirectory(relayDirectory.value, relayQu
 
 function buildingLabel(value: string) { return value === "110" ? "110站" : `${value}楼`; }
 function dateText(value: number) { return value ? new Date(value * 1000).toLocaleString("zh-CN") : "尚未加载"; }
-function stateLabel(value: string) { return ({ signed: "已有可用签名", unsigned: "未签名", resign: "需重新签名", restricted: "上级人员 · 可发送签名邀请" } as Dict)[value] || value; }
+function stateLabel(value: string) { return ({ signed: "已有可用签名", unsigned: "未签名", resign: "需重新签名", restricted: "签名受限" } as Dict)[value] || value; }
 function requestLabel(value: string) { return ({ ready: "待本人在线签名", sent: "待本人签名", sending: "消息发送中", saving: "保存待核验", completed: "签名已保存", send_failed: "发送失败", send_unknown: "发送结果待核验", revoked: "链接已撤销", expired: "链接已过期" } as Dict)[value] || value; }
 function personInitial(person: Dict) { return String(person.name || person.employee_no || "?").trim().slice(0, 1).toUpperCase() || "?"; }
 function clearFilters() { query.value = ""; source.value = ""; status.value = ""; scope.value = ""; }

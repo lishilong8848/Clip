@@ -1,6 +1,7 @@
 """Document-library routes; the host supplies the existing session/CSRF authority."""
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 from fastapi import Request
@@ -13,10 +14,71 @@ from .document_library import MAX_FILE, _member
 
 PREFIX = '/api/document-library'
 _UPLOADS = asyncio.Semaphore(2)
+_INITIAL_WAIT_SECONDS = 20
 
 
 def install_document_library_routes(app, authorize, get_service):
     """authorize(request) must validate the session, knowledge grant and write CSRF."""
+    scans = {}
+    scan_slot = asyncio.Semaphore(1)
+    closing = False
+
+    def start_scan(service, key):
+        if closing:
+            raise AssistantError('资料同步正在关闭，请稍后重新读取。', 503)
+        task = scans.get(key)
+        if task is None or task.done():
+            async def advance():
+                async with scan_slot:
+                    while not closing and await asyncio.to_thread(service.prepare_pending, table_key=key, limit=1):
+                        pass
+            task = scans[key] = asyncio.create_task(advance())
+            def finished(done):
+                if scans.get(key) is done:
+                    scans.pop(key, None)
+                if not done.cancelled() and done.exception() is not None:
+                    logging.getLogger(__name__).warning('Document library scan unavailable: type=%s', type(done.exception()).__name__)
+            task.add_done_callback(finished)
+        return task
+
+    async def close_scans():
+        nonlocal closing
+        closing = True
+        # Do not cancel a running thread while it holds a durable scan lease.
+        await asyncio.gather(*scans.values(), return_exceptions=True)
+
+    app.add_event_handler('shutdown', close_scans)
+
+    async def initial_records(request, service, actor, key):
+        query = dict(request.query_params)
+        deadline = asyncio.get_running_loop().time() + _INITIAL_WAIT_SECONDS
+        task = None
+        while True:
+            try:
+                return await asyncio.to_thread(service.list_records, actor, key, query)
+            except AssistantError as exc:
+                if exc.category != 'document_library_sync_pending':
+                    raise
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise
+            if await request.is_disconnected():
+                raise AssistantError('资料读取已取消，后台同步仍会继续。', 503, category='document_library_read_cancelled')
+            if task is None or task.done():
+                if task is not None and not task.cancelled() and task.exception() is not None:
+                    raise AssistantError('资料同步队列暂时不可用，请重试；持续失败时请联系管理员检查运行目录。', 503,
+                        category='document_library_sync_failed')
+                await asyncio.to_thread(service.ensure_initial_sync, actor, key)
+                task = start_scan(service, key)
+            await asyncio.wait({task}, timeout=min(1, max(0, deadline - asyncio.get_running_loop().time())))
+            if task.done() and not task.cancelled() and task.exception() is None:
+                # Another process may hold the lease. This bounded read waits, not a new scheduler.
+                try:
+                    return await asyncio.to_thread(service.list_records, actor, key, query)
+                except AssistantError as exc:
+                    if exc.category != 'document_library_sync_pending':
+                        raise
+                await asyncio.sleep(min(1, max(0, deadline - asyncio.get_running_loop().time())))
+
     async def endpoint(request: Request):
         try:
             actor = await authorize(request)
@@ -99,13 +161,17 @@ def install_document_library_routes(app, authorize, get_service):
             elif identity:
                 data = await asyncio.to_thread(service.record, actor, key, identity) if method == 'GET' else await asyncio.to_thread(service.save_record, actor, key, payload, identity=identity)
             elif action.endswith('/records'):
-                data = await asyncio.to_thread(service.list_records, actor, key, dict(request.query_params)) if method == 'GET' else await asyncio.to_thread(service.save_record, actor, key, payload)
+                data = await initial_records(request, service, actor, key) if method == 'GET' else await asyncio.to_thread(service.save_record, actor, key, payload)
             else:
                 data = await asyncio.to_thread(service.save_table, actor, payload, key=key)
             fresh = await authorize(request)
             _same_actor(actor, fresh)
             await asyncio.to_thread(service.check_response, fresh, key, data,
                 configuration=method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'}, preview=action == 'preview')
+            if method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'} and data.get('enabled'):
+                start_scan(service, data['id'])
+            elif action.endswith('/sync') or action.endswith('/records') and method == 'GET':
+                start_scan(service, key)
             return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
         except AssistantError as exc:
             return JSONResponse({'ok': False, 'error': str(exc), 'code': exc.category or 'document_library_error'}, status_code=exc.status, headers={'Cache-Control': 'no-store'})

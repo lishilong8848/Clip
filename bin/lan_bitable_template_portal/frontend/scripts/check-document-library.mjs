@@ -15,14 +15,15 @@ const viewports = [
   { name: 'small-phone', width: 360, height: 844 },
 ];
 let page;
-function reset() { Object.assign(fixture, documentFixture()); }
-async function open(version = 'v2', dark = false) {
+function reset() { delete fixture.recordsByTable; Object.assign(fixture, documentFixture()); }
+async function open(version = 'v2', dark = false, selectFirst = true) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
   await context.addInitScript(dark => localStorage.setItem('clipflow:workspace-night-mode:ou_fixtureDoc', dark ? 'dark' : 'light'), dark);
   await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
   page = await context.newPage(); page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin + '/?version=' + version + (dark ? '&dark=1' : ''));
   await page.getByRole('heading', { name: '南通文件', exact: true }).waitFor();
+  if (selectFirst && !fixture.flags.tablesFailure) await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).click();
   return context;
 }
 const drawer = () => page.locator('.n-drawer-content').filter({ has: page.locator('.document-detail') });
@@ -42,6 +43,54 @@ async function editTitle(title, reason = '核对原始资料后更新') {
   await drawer().getByLabel('变更原因', { exact: true }).fill(reason);
 }
 try {
+  for (const version of ['legacy', 'v2']) {
+    reset();
+    fixture.tables[0].url = 'https://vnet.feishu.cn/wiki/sourceFixture?table=tblSyntheticelectrical';
+    fixture.tables[1].url = 'javascript:alert(1)';
+    fixture.tables[1].capabilities.create = true; fixture.tables[1].write_scopes = ['A'];
+    const mechanical = structuredClone(fixture.records[0]); mechanical.record_id = 'recMechanical'; mechanical.fields.fldTitle = '独立暖通资料';
+    fixture.recordsByTable = { mechanical: [mechanical] };
+    const context = await open(version, false, false);
+    await page.getByRole('button', { name: '打开数据表：暖通技术资料', exact: true }).waitFor();
+    assert(fixture.calls.every(call => call.path === '/tables'), 'Overview must not fetch any table schema or records');
+    assert.equal(await page.getByRole('button', { name: '新建资料', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('link', { name: '打开飞书原表：暖通技术资料', exact: true }).count(), 0, 'Unsafe source links are not rendered');
+    assert.match(await page.getByRole('link', { name: '打开飞书原表：电气技术资料', exact: true }).getAttribute('href'), /sourceFixture/);
+    fixture.listDelay = 500;
+    const pending = page.waitForRequest(request => request.url().includes('/tables/electrical/records'));
+    await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).click(); await pending;
+    await page.getByRole('button', { name: '全部数据表', exact: true }).click();
+    fixture.listDelay = 0;
+    await page.getByRole('button', { name: '打开数据表：暖通技术资料', exact: true }).click();
+    await page.getByRole('button', { name: '查看资料：独立暖通资料', exact: true }).waitFor();
+    await page.waitForTimeout(550);
+    assert.equal(await page.getByRole('button', { name: '查看资料：A楼高压配电操作规程', exact: true }).count(), 0, 'Late records from a prior source must not leak into the current table');
+    await page.getByRole('button', { name: '新建资料', exact: true }).click();
+    await drawer().locator('.document-record-source').getByText('暖通技术资料', { exact: true }).waitFor();
+    assert.equal(await drawer().locator('.document-system-fields').getAttribute('open'), null);
+    await drawer().getByLabel('变更原因', { exact: true }).fill('暖通资料入库');
+    await drawer().getByRole('button', { name: '保存资料', exact: true }).click();
+    await drawer().getByText('请填写资料名称', { exact: true }).waitFor();
+    assert.equal(fixture.applied, 0);
+    assert.equal(await drawer().getByLabel('资料名称', { exact: true }).evaluate(input => input === document.activeElement), true);
+    await drawer().getByLabel('资料名称', { exact: true }).fill('新建暖通资料');
+    assert.equal(await drawer().getByText('请填写资料名称', { exact: true }).count(), 0);
+    await drawer().getByRole('button', { name: '保存资料', exact: true }).click();
+    await drawer().getByText('资料保存成功。', { exact: true }).waitFor();
+    assert.equal(fixture.writes.at(-1).path, '/tables/mechanical/records');
+    assert(!fixture.records.some(record => record.fields.fldTitle === '新建暖通资料'));
+    await editTitle('修改暖通资料');
+    await drawer().getByRole('button', { name: '保存资料', exact: true }).click();
+    await drawer().getByText('资料保存成功。', { exact: true }).waitFor();
+    assert.equal(fixture.writes.at(-1).path, '/tables/mechanical/records/recCreated0');
+    await drawer().getByRole('button', { name: '关闭', exact: true }).click();
+    fixture.tables = fixture.tables.filter(table => table.id !== 'mechanical');
+    await page.getByRole('button', { name: '刷新文件列表', exact: true }).click();
+    await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: '新建资料', exact: true }).count(), 0, 'Revoked source returns to overview, not another writable source');
+    await context.close();
+  }
+  checks.push('legacy/v2 source-only overview; safe links; delayed source isolation; source-bound create/edit; required-field focus; revoked source returns to overview');
   reset(); fixture.flags.listFailure = true;
   let context = await open();
   await page.getByText('资料列表暂时读取失败', { exact: false }).waitFor();
@@ -93,7 +142,7 @@ try {
   await drawer().getByLabel('选择资料附件', { exact: true }).setInputFiles({ name: '规程补充.txt', mimeType: 'text/plain', buffer: Buffer.from('synthetic document attachment') });
   await drawer().getByLabel('附件变更原因', { exact: true }).fill('补充验收附件');
   await drawer().getByRole('button', { name: '上传附件', exact: true }).click();
-  await drawer().getByText('资料已保存，知识索引待重试。', { exact: true }).waitFor();
+  await drawer().getByText('资料记录已保存。待索引重试，请查看下方各项原因。', { exact: true }).waitFor();
   assert.equal(fixture.writes.at(-1).body.field_id, 'fldFiles');
   assert.equal(fixture.writes.at(-1).body.file.name, '规程补充.txt');
   assert.equal(fixture.records[0].attachments.length, 2);
@@ -134,8 +183,8 @@ try {
   checks.push('search empty state and cursor navigation use actual server results');
 
   const authReadsBeforeTableSwitch = fixture.authReads;
-  await page.getByLabel('文件数据表', { exact: true }).click();
-  await page.locator('.n-base-select-option').filter({ hasText: '暖通技术资料' }).click();
+  await page.getByRole('button', { name: '全部数据表', exact: true }).click();
+  await page.getByRole('button', { name: '打开数据表：暖通技术资料', exact: true }).click();
   await page.getByRole('button', { name: '查看资料：A楼回执丢失核验资料', exact: true }).click();
   await drawer().getByText('资料附件', { exact: true }).waitFor();
   assert.equal(await drawer().getByRole('button', { name: '编辑资料', exact: true }).count(), 0);
@@ -185,6 +234,7 @@ try {
   assert.equal(await page.getByText('尚无可访问的数据表', { exact: true }).count(), 0);
   fixture.flags.tablesFailure = false; fixture.flags.schemaFailure = true;
   await page.getByRole('button', { name: '重新读取数据表', exact: true }).click();
+  await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).click();
   await page.getByText('字段读取暂时失败', { exact: false }).waitFor();
   await page.getByRole('button', { name: '数据表配置', exact: true }).click();
   await page.locator('.document-settings').waitFor();
@@ -238,18 +288,43 @@ try {
 
   reset();
   fixture.records[0].knowledge_status = 'unsupported';
-  fixture.records[0].knowledge_items = [{ kind: 'attachment', name: '原始图纸.dwg', attachment_id: 'unsupported1', status: 'unsupported', error: '不支持此附件类型的正文解析，可下载原文件。' }];
+  fixture.records[0].knowledge_items = [{ kind: 'attachment', name: '原始图纸.dwg', attachment_id: 'unsupported1', status: 'unsupported', cached: true, stage: 'index', error: '原件已缓存，此格式暂不支持正文索引。' }];
   context = await open(); await firstDetail();
   await drawer().getByText('资料已保存，部分附件格式暂不支持正文解析。', { exact: true }).waitFor();
   await drawer().locator('.document-index-issues summary').click();
   await drawer().getByText('原始图纸.dwg', { exact: true }).waitFor();
-  await drawer().getByText('不支持此附件类型的正文解析，可下载原文件。', { exact: true }).waitFor();
-  assert.equal(await drawer().getByText('资料已保存，知识索引待重试。', { exact: true }).count(), 0);
+  await drawer().getByText('原件已缓存，此格式暂不支持正文索引。', { exact: true }).waitFor();
+  await drawer().getByText('已缓存 · 格式不支持，未索引', { exact: true }).waitFor();
+  assert.equal(await drawer().getByText('资料记录已保存。待索引重试，请查看下方各项原因。', { exact: true }).count(), 0);
   checks.push('unsupported attachment parsing is explicit and does not masquerade as success or a retryable failure');
   await context.close();
 
+  reset();
+  fixture.records[0].knowledge_status = 'retrying';
+  fixture.records[0].knowledge_items = [
+    { kind: 'record', name: 'fixture.txt', status: 'ready', cached: true, stage: 'index' },
+    { kind: 'attachment', name: '待下载.xlsx', attachment_id: 'retry1', status: 'retrying', cached: false, stage: 'prepare', error_code: 'unauthorized', error: '附件读取权限不足，请检查飞书应用及多维表高级权限。' },
+  ];
+  context = await open(); await firstDetail();
+  await drawer().getByText('资料记录已保存。原件缓存待重试，请查看下方各项原因。', { exact: true }).waitFor();
+  await drawer().locator('.document-index-issues summary').click();
+  await drawer().getByText('已缓存 · 已索引', { exact: true }).waitFor();
+  await drawer().getByText('未缓存 · 下载或保存待重试', { exact: true }).waitFor();
+  await drawer().getByText('附件读取权限不足，请检查飞书应用及多维表高级权限。', { exact: true }).waitFor();
+  checks.push('cached record and attachment download failure retain independent stages and safe errors');
+  await context.close();
+
   for (const [version, dark] of [['legacy', false], ['v2', false], ['v2', true]]) {
-    reset(); context = await open(version, dark);
+    reset(); fixture.tables[0].url = 'https://vnet.feishu.cn/wiki/sourceFixture?table=tblSyntheticelectrical';
+    context = await open(version, dark, false);
+    await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).waitFor();
+    for (const { name, width, height } of viewports) {
+      await page.setViewportSize({ width, height }); await stableLayout();
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${version}/${dark}/${name} overview overflow`);
+      await page.screenshot({ path: path.join(output, `${version}${dark ? '-dark' : ''}-overview-${width}x${height}.png`), fullPage: true });
+    }
+    await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).click();
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.getByRole('button', { name: '查看资料：A楼高压配电操作规程', exact: true }).waitFor();
     for (const { name, width, height } of viewports) {
       await page.setViewportSize({ width, height });
@@ -268,6 +343,18 @@ try {
       await page.screenshot({ path: path.join(output, `${version}${dark ? '-dark' : ''}-detail-${width}x${height}.png`), fullPage: true });
     }
     await drawer().getByRole('button', { name: '关闭', exact: true }).click();
+    await page.getByRole('button', { name: '新建资料', exact: true }).click();
+    for (const { name, width, height } of viewports) {
+      await page.setViewportSize({ width, height }); await stableLayout();
+      const save = drawer().getByRole('button', { name: '保存资料', exact: true });
+      const box = await save.boundingBox();
+      assert(box && box.y >= 0 && box.y + box.height <= height, `${version}/${dark}/${name} save is visible without scrolling`);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${version}/${dark}/${name} create overflow`);
+      await page.screenshot({ path: path.join(output, `${version}${dark ? '-dark' : ''}-create-${width}x${height}.png`), fullPage: true });
+    }
+    await drawer().getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: '离开', exact: true }).click();
+    await page.getByRole('button', { name: '全部数据表', exact: true }).click();
     if (version === 'legacy') {
       await page.getByRole('button', { name: '返回', exact: true }).click();
       const returned = new URL(page.url());

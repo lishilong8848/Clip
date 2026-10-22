@@ -7,6 +7,9 @@ network call can leave the process. All temp files live in a temporary dir.
 from __future__ import annotations
 
 import os
+import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -79,6 +82,7 @@ class FakeHttpClient:
         self.bytes_payload = b"fixture-bytes"
         self.bytes_error = None
         self.bytes_response = None
+        self.download_responses = []
         self.before_call = None
         self.file_callback = None
         self.closed = 0
@@ -128,6 +132,22 @@ class FakeHttpClient:
         if self.bytes_response is not None:
             return self.bytes_response
         return self.bytes_payload, "application/octet-stream"
+
+    def _client_for_request(self):
+        return self
+
+    @contextmanager
+    def stream(self, method, url, **kwargs):
+        self.calls.append({'kind': 'stream', 'method': method, 'url': url, **kwargs})
+        self._hook()
+        if self.bytes_error is not None:
+            raise self.bytes_error
+        if self.download_responses:
+            yield self._next(self.download_responses)
+        else:
+            data = self.bytes_payload
+            yield SimpleNamespace(status_code=200, headers={'content-type': 'application/octet-stream'},
+                iter_bytes=lambda size: (data[index:index+size] for index in range(0, len(data), size)))
 
 
 class RemoteTestCase(unittest.TestCase):
@@ -286,8 +306,12 @@ class ReadTests(RemoteTestCase):
                 with self.assertRaises(AssistantError) as raised:
                     self.remote.get(RECORD_ID)
                 expected = ("bad_response" if not isinstance(payload["code"], int)
+                            else "unauthorized" if payload["code"] == 1254302
                             else "provider_error")
                 self.assertEqual(raised.exception.category, expected)
+                if expected == "unauthorized":
+                    self.assertEqual(raised.exception.status, 403)
+                    self.assertIn("1254302", str(raised.exception))
 
     def test_get_rejects_a_mismatched_or_missing_record(self):
         for record in (None, {"record_id": OTHER_RECORD_ID, "fields": {}},
@@ -456,7 +480,7 @@ class WriteTests(RemoteTestCase):
             self.remote.update(RECORD_ID, {"name": "doc2"})
         self.assertEqual(raised.exception.category, "provider_error")
         self.assertEqual(raised.exception.status, 502)
-        self.assertEqual(str(raised.exception), "资料库来源请求失败。")
+        self.assertEqual(str(raised.exception), "资料库来源请求失败（code=1254060）。")
         self.assertNotIn("TextFieldConvFail", str(raised.exception))
 
     def test_write_with_malformed_code_is_not_treated_as_success(self):
@@ -695,8 +719,8 @@ class AttachmentTests(RemoteTestCase):
         self.assertEqual(
             call["url"],
             "https://open.feishu.cn/open-apis/drive/v1/medias/{0}/download".format(FILE_TOKEN))
-        self.assertEqual(call["retries"], 0)
-        self.assertEqual(call["max_bytes"], remote_module.MAX_DOWNLOAD_BYTES + 1)
+        self.assertFalse(call['follow_redirects'])
+        self.assertEqual(call['headers']['Accept-Encoding'], 'identity')
         self.assertEqual(self.guard_calls, 0)
 
     def test_download_is_bounded_to_one_hundred_mib(self):

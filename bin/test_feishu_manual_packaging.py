@@ -36,6 +36,11 @@ class ManualFeishuPackagingTests(unittest.TestCase):
         data.mkdir()
         for name in ("config.json", "feishu_assistant.json", "lan_portal_state.sqlite3"):
             (data / name).write_text("fixture-private-runtime-data", encoding="utf-8")
+        for relative in ("document_library/files/cached-attachment", "document_library/files/unfinished.part",
+                         "lighthouse_openclaw/knowledge_base/originals/cached.txt"):
+            cached = data / relative
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_text("fixture-private-runtime-data", encoding="utf-8")
         copied = self.root / "copied"
         packaging.copy_project(copied)
         self.assertTrue((copied / "app.py").exists())

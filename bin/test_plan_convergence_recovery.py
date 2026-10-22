@@ -46,11 +46,12 @@ class RecoveryTests(unittest.TestCase):
     def advance(self, seconds=notifications.RETRY_SECONDS + 1):
         self.clock.return_value += seconds
 
-    def enqueue(self, ident='one', *, kind='repair', code='B', target='recB', action='start'):
+    def enqueue(self, ident='one', *, kind='repair', code='B', target='recB', action='start', specialty=''):
         notice = {'notice_type': '变更通告' if kind == 'change' else '设备检修',
             'work_type': kind, 'action': action, 'title': code + '楼设备作业',
             'building': code + '楼', 'building_codes': [code], 'location': code + '-124',
-            'repair_device': code + '-124-BAS-101', 'repair_fault': '指示灯故障', 'content': '控制器变更'}
+            'repair_device': code + '-124-BAS-101', 'repair_fault': '指示灯故障', 'content': '控制器变更',
+            'specialty': specialty}
         self.worker.enqueue(notice, operation_id=ident, target_record_id=target)
         return self.store.get_document(notifications.CHANNEL,
             ('latest:change:' if kind == 'change' else 'latest:') + target)['job_id']
@@ -71,10 +72,11 @@ class RecoveryTests(unittest.TestCase):
         return [call for call in self.send.call_args_list if call.args[1] == [BUILDING_OPEN_ID_MAP['H']]]
 
     def restart(self):
+        get_engineers = self.worker.get_engineers
         self.store.shutdown_write_worker()
         self.store = LanPortalStateStore(self.path)
         self.addCleanup(self.store.shutdown_write_worker)
-        self.worker = notifications.NoticePlanChecks(self.service, self.store, self.check, self.send)
+        self.worker = notifications.NoticePlanChecks(self.service, self.store, self.check, self.send, get_engineers=get_engineers)
         self.worker.recover()
 
     def test_timeout_waits_persistently_without_unmatched_result_then_recovers(self):
@@ -533,6 +535,126 @@ class RecoveryTests(unittest.TestCase):
         self.restart()
         self.drain()
         self.assertEqual(self.check.call_count, 1)
+
+    def test_engineers_are_resolved_after_check_not_at_enqueue(self):
+        self.worker.get_engineers = Mock(return_value=(['ou_engineer', 'B-duty'], ''))
+        ident = self.enqueue(specialty='暖通')
+        self.worker.get_engineers.assert_not_called()
+        self.drain()
+        self.assertEqual([call.args[1] for call in self.send.call_args_list], [['B-duty'], ['ou_engineer']])
+        record, scopes = self.worker.get_engineers.call_args.args
+        self.assertEqual(record['major'], '暖通')
+        self.assertEqual(scopes, ['B'])
+        self.assertTrue(self.job(ident)['receipts']['ou_engineer']['sent'])
+        self.restart()
+        self.drain()
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_engineer_directory_failure_keeps_duty_delivery_and_retries_after_restart(self):
+        resolver = self.worker.get_engineers = Mock(side_effect=TimeoutError('secret'))
+        ident = self.enqueue(specialty='电气')
+        self.drain()
+        self.assertEqual(self.send.call_count, 1)
+        self.assertTrue(self.job(ident)['receipts']['B-duty']['sent'])
+        self.assertTrue(self.rows('leased'))
+        self.assertNotIn('secret', self.job(ident)['engineer_warning'])
+        self.restart()
+        resolver.side_effect = None
+        resolver.return_value = (['ou_new'], '')
+        self.advance()
+        self.drain()
+        self.assertEqual([call.args[1] for call in self.send.call_args_list], [['B-duty'], ['ou_new']])
+        self.assertFalse(self.rows('leased'))
+
+    def test_transferred_engineer_is_removed_on_retry_without_resending_duty(self):
+        resolver = self.worker.get_engineers = Mock(return_value=(['ou_old'], ''))
+        def reject_engineer(text, people, **kwargs):
+            return self.accept(text, people, **kwargs) if people == ['B-duty'] else (
+                False, 'blocked', [{'open_id': people[0], 'code': 230013}])
+        self.send.side_effect = reject_engineer
+        ident = self.enqueue()
+        self.drain()
+        resolver.return_value = (['ou_new'], '')
+        self.send.side_effect = self.accept
+        self.advance()
+        self.drain()
+        self.assertEqual([call.args[1] for call in self.send.call_args_list], [['B-duty'], ['ou_old'], ['ou_new']])
+        self.assertEqual(self.job(ident)['engineer_recipients'], ['ou_new'])
+        self.assertIn('ou_old', self.job(ident)['receipts'])
+
+    def test_transfer_between_recipients_prevents_send_to_former_engineer(self):
+        resolver = self.worker.get_engineers = Mock(return_value=(['ou_old'], ''))
+        def transfer(text, people, **kwargs):
+            if people == ['B-duty']:
+                resolver.return_value = (['ou_new'], '')
+            return self.accept(text, people, **kwargs)
+        self.send.side_effect = transfer
+        self.enqueue()
+        self.drain()
+        self.assertEqual(self.send.call_count, 1)
+        self.advance()
+        self.drain()
+        self.assertEqual([call.args[1] for call in self.send.call_args_list], [['B-duty'], ['ou_new']])
+
+    def test_new_engineer_during_delivery_is_not_lost(self):
+        resolver = self.worker.get_engineers = Mock(return_value=([], ''))
+        def new_assignment(text, people, **kwargs):
+            resolver.return_value = (['ou_new'], '')
+            return self.accept(text, people, **kwargs)
+        self.send.side_effect = new_assignment
+        self.enqueue()
+        self.drain()
+        self.assertTrue(self.rows('leased'))
+        self.advance()
+        self.drain()
+        self.assertEqual([call.args[1] for call in self.send.call_args_list], [['B-duty'], ['ou_new']])
+
+    def test_engineer_unconfirmed_receipt_keeps_uuid_and_does_not_resend_after_window(self):
+        self.worker.get_engineers = Mock(return_value=(['ou_engineer'], ''))
+        def timeout(text, people, **kwargs):
+            if people == ['ou_engineer']:
+                raise TimeoutError()
+            return self.accept(text, people, **kwargs)
+        self.send.side_effect = timeout
+        ident = self.enqueue()
+        self.drain()
+        original = self.job(ident)['receipts']['ou_engineer']['message_uuid']
+        self.advance()
+        self.drain()
+        self.assertEqual(self.send.call_args.kwargs['message_uuid'], original)
+        self.advance(notifications.DELIVERY_WINDOW)
+        self.restart()
+        self.drain()
+        self.assertEqual(self.send.call_count, 3)
+        self.assertTrue(self.job(ident)['receipts']['ou_engineer']['delivery_uncertain'])
+
+    def test_engineer_lookup_does_not_affect_outage_alert_or_notice_filters(self):
+        resolver = self.worker.get_engineers = Mock(return_value=(['ou_engineer'], ''))
+        for code, action in (('D', 'start'), ('E', 'update'), ('B', 'end')):
+            self.worker.enqueue({'work_type': 'change', 'action': action, 'title': code + '楼操作',
+                'building': code + '楼', 'building_codes': [code], 'specialty': '暖通'},
+                operation_id=code, target_record_id='rec' + code)
+        resolver.assert_not_called()
+        self.assertFalse(self.rows())
+        self.check.side_effect = TimeoutError()
+        self.enqueue()
+        self.drain()
+        resolver.assert_not_called()
+        self.assertEqual(len(self.h_messages()), 1)
+        self.assertEqual(self.send.call_count, 1)
+
+    def test_missing_duty_recipient_is_not_hidden_by_successful_engineer_delivery(self):
+        self.service._recipients_for_building_codes.return_value = ('', [], 'missing')
+        self.service._recipients_for_building_codes.side_effect = None
+        self.worker.get_engineers = Mock(return_value=(['ou_engineer'], ''))
+        self.enqueue()
+        self.drain()
+        self.assertTrue(self.rows('leased'))
+        self.service._recipients_for_building_codes.return_value = ('', ['B-duty'], '')
+        self.advance()
+        self.drain()
+        self.assertEqual([call.args[1] for call in self.send.call_args_list], [['ou_engineer'], ['B-duty']])
+        self.assertFalse(self.rows('leased'))
 
 
 if __name__ == '__main__':

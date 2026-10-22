@@ -293,8 +293,7 @@ class SignatureManagement:
         ]
         if access:
             access.bind(data, cache_targets=True)
-            rows = [access.decorate(row) for row in rows
-                    if access.allowed(row, 'view') or access.allowed(row, 'request')]
+            rows = [access.decorate(row) for row in rows]
         counts = {state: sum(p["signature_status"] == state for p in rows) for state in ("signed", "unsigned", "resign")}
         scopes = sorted({scope for row in rows for scope in self.s._building_codes_from_value(row.get('building'))})
         rows = [p for p in rows if
@@ -322,7 +321,7 @@ class SignatureManagement:
         latest = {r["key"]: r["payload"] for r in self.store.list_documents(PERSON_NS)}
         request_by_id = {r["key"]: r["payload"] for r in self.store.list_documents(REQUEST_NS)}
         for row in selected:
-            if row.get('invite_only'):
+            if row.get('directory_only') or row.get('invite_only'):
                 continue
             effective = data["resolved"].get(row["person_key"], row)
             row["effective_person_key"] = effective["person_key"]

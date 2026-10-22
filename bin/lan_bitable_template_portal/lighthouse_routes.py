@@ -92,17 +92,25 @@ def install_lighthouse_routes(app, controller, runtime):
             raise AssistantError('后台推荐标签未完成。', 503)
         return result['data']
 
-    async def generate_sharing_questions(owner, source, previous, count, question_types=None):
+    async def generate_sharing_questions(owner, source, previous, count, question_types=None,
+                                         images=None, source_images=None, mode=None, repair=None):
+        payload = {'owner': owner, 'source': source, 'previous': previous, 'count': count,
+                   'question_types': question_types}
+        payload.update({key: value for key, value in (('images', images), ('source_images', source_images),
+                                                     ('mode', mode), ('repair', repair))
+                        if value is not None})
+        # Reserve space for the instance and lease added to the 8MiB IPC body.
+        if mode == 'image_sources' and len(json.dumps(payload, ensure_ascii=False).encode('utf-8')) > 8 * 1024 * 1024 - 4096:
+            raise AssistantError('图片识别请求须小于助手通道8MiB上限，请缩小JPEG或减少本批图片。', 413)
         current, _ = await ready()
         http = await current.http_client()
         response = await http.post(f"http://127.0.0.1:{current.descriptor['port']}/generate-sharing-questions",
             headers={'Authorization': 'Bearer ' + current.key}, timeout=100,
-            json={'instance': current.instance, 'lease': current.lease, 'owner': owner,
-                  'source': source, 'previous': previous, 'count': count, 'question_types': question_types})
+            json={'instance': current.instance, 'lease': current.lease, **payload})
         result = response.json()
         if not result.get('ok'):
             raise AssistantError(str(result.get('error') or '分享会出题未完成，请核对本人模型配置及纪要内容后重试。')[:500], 503)
-        return result['data']['questions']
+        return result['data'] if mode == 'image_sources' else result['data']['questions']
 
     runtime.generate_sharing_questions = generate_sharing_questions
 

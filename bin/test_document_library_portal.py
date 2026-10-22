@@ -447,8 +447,8 @@ class DocumentLibraryPortalTests(LibraryFixture):
         url = current['attachments'][0]['download_url']
         self.assertEqual(self.client.get(url).content, b'Alpha policy service steps')
         original = self.bridge_service._content_path
-        def revoke(*args):
-            path = original(*args)
+        def revoke(*args, **kwargs):
+            path = original(*args, **kwargs)
             self.profile['scopes'] = ['B']
             return path
         with patch.object(self.bridge_service, '_content_path', side_effect=revoke):
@@ -459,8 +459,8 @@ class DocumentLibraryPortalTests(LibraryFixture):
     def test_download_rejects_configuration_change_during_byte_read(self):
         record = self.data(self.prefix + '/records/recOne')
         original = self.bridge_service._content_path
-        def remove_attachment_field(*args):
-            path = original(*args)
+        def remove_attachment_field(*args, **kwargs):
+            path = original(*args, **kwargs)
             source = self.service._table('manuals')
             self.service.save_table(self.admin, configuration(attachment_fields=[],
                 expected_revision=source['revision']), key='manuals')

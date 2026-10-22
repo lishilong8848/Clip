@@ -20,9 +20,10 @@ class IncompleteCheckResult(ValueError):
 
 
 class NoticePlanChecks:
-    def __init__(self, service, store, check, send, *, get_convergence=None):
+    def __init__(self, service, store, check, send, *, get_convergence=None, get_engineers=None):
         self.service, self.store, self.check, self.send = service, store, check, send
         self.get_convergence = get_convergence
+        self.get_engineers = get_engineers
         self.stopped = False
 
     def enqueue(self, notice, *, operation_id, target_record_id, request=None):
@@ -49,6 +50,7 @@ class NoticePlanChecks:
             recipients, warning = [], type(exc).__name__
         job = {'id': identity, 'target_record_id': target_record_id, 'record': snapshot,
                'action': action, 'status': 'pending', 'recipients': list(dict.fromkeys(recipients)),
+               'duty_recipients': list(dict.fromkeys(recipients)),
                'work_type': kind, 'scopes': scopes, 'version': 2, 'warning': warning, 'created_at': time.time(), 'receipts': {}}
         with self.store._lock:
             if self.store.get_document(CHANNEL, identity):
@@ -155,13 +157,16 @@ class NoticePlanChecks:
                 'checked_at': job['checked_at'], 'hits': job['result']['records'][0]['hits'],
                 'fingerprint': business_fingerprint(job['record'])})
 
-    def _deliver(self, document, message):
+    def _deliver(self, document, message, *, can_send=None):
         complete = bool(document.get('recipients'))
         for recipient in document.get('recipients', []):
             if self.stopped:
                 return False
             receipt = document.setdefault('receipts', {}).setdefault(recipient, {})
             if receipt.get('sent'):
+                continue
+            if can_send and not can_send(recipient):
+                complete = False
                 continue
             if receipt.get('attempted_at') and time.time() - receipt['attempted_at'] > DELIVERY_WINDOW:
                 receipt['delivery_uncertain'] = True
@@ -196,6 +201,38 @@ class NoticePlanChecks:
             complete = complete and receipt['sent']
             self.store.put_document(CHANNEL, document['id'], document)
         return complete
+
+    def _refresh_recipients(self, job):
+        # Old unfinished jobs only contained the original duty/admin recipients.
+        duty = job.setdefault('duty_recipients', list(job.get('recipients', [])))
+        scopes = job.get('scopes') or self.service._building_codes_from_value(job['record'].get('building'))
+        if not duty:
+            try:
+                _, duty, warning = self.service._recipients_for_building_codes(scopes, fallback_building=job['record'].get('building', ''))
+                job.update(duty_recipients=list(dict.fromkeys(duty)), warning=warning)
+            except Exception as exc:
+                job['warning'] = type(exc).__name__
+        engineers, ready = [], True
+        if self.get_engineers:
+            try:
+                engineers, job['engineer_warning'] = self.get_engineers(job['record'], scopes)
+            except Exception as exc:
+                ready = False
+                job['engineer_warning'] = '工程师接收人待重新核对: ' + type(exc).__name__
+        job.update(engineer_recipients=engineers, recipients=list(dict.fromkeys([*duty, *engineers])))
+        self.store.put_document(CHANNEL, job['id'], job)
+        return ready and bool(duty)
+
+    def _can_send_result(self, job, recipient):
+        if recipient in job.get('duty_recipients', []):
+            return True
+        # Recheck each unsent engineer; transfers during delivery/retries must take effect.
+        try:
+            scopes = job.get('scopes') or self.service._building_codes_from_value(job['record'].get('building'))
+            engineers, _ = self.get_engineers(job['record'], scopes)
+            return recipient in engineers
+        except Exception:
+            return False
 
     def _process_alert(self, row):
         alert = self.store.get_document(CHANNEL, row['payload']['outage_id'])
@@ -243,15 +280,11 @@ class NoticePlanChecks:
             self.store.mark_outbox_event(row['id'], 'done')
             return
         self._publish_change_result(job)
-        if not job.get('recipients'):
-            try:
-                scopes = job.get('scopes') or self.service._building_codes_from_value(job['record'].get('building'))
-                _, recipients, warning = self.service._recipients_for_building_codes(scopes, fallback_building=job['record'].get('building', ''))
-                job.update(recipients=list(dict.fromkeys(recipients)), warning=warning)
-                self.store.put_document(CHANNEL, job['id'], job)
-            except Exception as exc:
-                LOG.warning('自动核对接收人稍后重试: %s', type(exc).__name__)
-        if self._deliver(job, self.message(job)):
+        ready = self._refresh_recipients(job)
+        delivered = self._deliver(job, self.message(job), can_send=lambda person: self._can_send_result(job, person))
+        # Newly assigned engineers may appear while earlier recipients are being sent.
+        if ready and delivered and self._refresh_recipients(job) and all(
+                job.get('receipts', {}).get(person, {}).get('sent') for person in job['recipients']):
             self.store.mark_outbox_event(row['id'], 'done')
         else:
             self._defer(row, '核对已完成，通知待确认投递')
@@ -259,13 +292,15 @@ class NoticePlanChecks:
 
 def install_notice_plan_checks(app, runtime, get_service):
     from .server import _send_text_to_open_ids_guarded
+    from .plan_convergence_recipients import current_engineers
     from upload_event_module.services.process_lifetime import lower_current_thread_priority
     def check(record):
         service = get_service()
         method = service.change_check if record.get('work_type') == 'change' else service.maintenance_check
         return method(records=[record])
     checks = NoticePlanChecks(runtime.service, runtime.state_store, check,
-        _send_text_to_open_ids_guarded, get_convergence=get_service)
+        _send_text_to_open_ids_guarded, get_convergence=get_service,
+        get_engineers=lambda record, scopes: current_engineers(runtime.auth_manager, record, scopes))
     runtime.notice_plan_checks = checks
     from .plan_convergence_send import NoticeConvergenceGuard
     from .plan_convergence_expiry import ConvergenceExpiryReminders

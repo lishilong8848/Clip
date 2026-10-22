@@ -46,6 +46,7 @@ async function run(version, viewport) {
   }
   try {
     await page.goto(origin + '/?version=' + version);
+    await page.getByRole('button', {name: '打开数据表：电气技术资料', exact: true}).click();
     await page.getByRole('button', {name: '数据表配置', exact: true}).click();
     assert(!await submit().isDisabled(), 'existing configuration remains editable without preview');
     await settings.getByLabel('数据表显示名称', {exact: true}).fill('保留原配置的资料表');

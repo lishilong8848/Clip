@@ -361,7 +361,7 @@ def refresh(service, current=None):
     with closing(service._connect()) as conn:
         pending = {row[0]: row[1] for row in conn.execute("SELECT day,revision FROM documents WHERE kind='local' AND key LIKE 'completion_pending:%'")}
         dates.update(pending)
-    dates = {value for value in dates if isinstance(value, str) and date_of(value + 'T00:00:00') == value}
+    dates = {value for value in dates if isinstance(value, str) and value and date_of(value + 'T00:00:00') == value}
     if getattr(service, '_shift_roster_reader', None):
         from .learning_reminders import roster_snapshot
         for date in sorted(dates):

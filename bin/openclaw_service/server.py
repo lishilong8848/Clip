@@ -364,7 +364,7 @@ def build_app(host, *, request_stop=lambda _: None):
             body = bytearray()
             async for chunk in request.stream():
                 body.extend(chunk)
-                if len(body) > (256 * 1024 if action == 'bridge' else 1024 * 1024):
+                if len(body) > (256 * 1024 if action == 'bridge' else 8 * 1024 * 1024 if action == 'generate-sharing-questions' else 1024 * 1024):
                     raise ServiceError('助手请求过大。', 413, 'request_too_large')
             payload = json.loads(body or b'{}')
             if not isinstance(payload, dict):

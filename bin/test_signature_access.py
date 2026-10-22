@@ -139,7 +139,8 @@ class SignatureAccessTests(unittest.TestCase):
 
     def test_personal_directory_and_account_use_identity_not_name(self):
         result = self.call('people')
-        self.assertEqual([p['record_id'] for p in result['people'] if not p['invite_only']], ['recoperatorE'])
+        self.assertEqual([p['record_id'] for p in result['people'] if not p['directory_only']], ['recoperatorE'])
+        self.assertEqual({p['record_id'] for p in result['people']}, set(self.service.staff))
         self.assertEqual({p['record_id'] for p in result['people'] if p['invite_only']},
                          {'recsuper', 'recmanager', 'recpeerManager', 'recsupervisorE'})
         self.assertEqual(result['counts']['signed'], 1)
@@ -151,17 +152,70 @@ class SignatureAccessTests(unittest.TestCase):
         for key in ('raw_fields', 'signature_file_token', 'signature_version', 'signature_preview_url'):
             self.assertNotIn(key, person)
 
-    def test_supervisor_only_sees_own_lower_level_people(self):
+    def test_supervisor_sees_all_people_but_manages_only_own_lower_level_people(self):
         listing = self.call('people', actor='supervisorE')
-        self.assertEqual({p['record_id'] for p in listing['people'] if not p['invite_only']},
+        self.assertEqual({p['record_id'] for p in listing['people'] if not p['directory_only']},
                          {'recsupervisorE', 'recoperatorE', 'recengineerE'})
         self.assertEqual([row['value'] for row in listing['recipients']], ['E'])
         self.assertEqual(listing['counts']['signed'], 3)
-        self.assertEqual(self.call('people', {'scope': 'A'}, actor='supervisorE')['count'], 0)
+        self.assertEqual(self.call('people', {'scope': 'A'}, actor='supervisorE')['count'], 3)
         refreshed = self.call('refresh', actor='supervisorE', method='POST')
         self.assertNotIn('resolved', refreshed)
         self.assertNotIn('staff', refreshed)
-        self.assertEqual(sum(not p['invite_only'] for p in refreshed['people']), 3)
+        self.assertEqual(sum(not p['directory_only'] for p in refreshed['people']), 3)
+
+    def test_directory_search_includes_all_levels_buildings_and_unlinked_people(self):
+        self.service.add('recUnlinked', name='未关联人员', open_id='', employee_no='SEARCH900', building='C楼')
+        self.service.add('recVisitor', name='跨楼临时人员', source='external', building='B楼')
+        expected = set(self.service.staff) | {'recVisitor'}
+        for actor in ('operatorE', 'supervisorE', 'manager', 'super'):
+            with self.subTest(actor=actor):
+                result = self.call('people', actor=actor)
+                self.assertEqual({row['record_id'] for row in result['people']}, expected)
+                self.assertTrue({'A', 'B', 'C', 'E', 'H'} <= {row['value'] for row in result['scope_options']})
+                for query, record_id in (('recoperatorA', 'recoperatorA'), ('recpeerManager', 'recpeerManager'),
+                                         ('SEARCH900', 'recUnlinked'), ('跨楼临时人员', 'recVisitor')):
+                    rows = self.call('people', {'q': query}, actor=actor)['people']
+                    self.assertEqual([row['record_id'] for row in rows], [record_id])
+        self.sender.assert_not_called()
+        self.assertEqual((self.service.creates, self.service.uploads), (0, 0))
+
+    def test_directory_only_metadata_does_not_expose_private_fields_or_signing_history(self):
+        from lan_bitable_template_portal.signature_management import PERSON_NS, REQUEST_NS
+        payload = self.manager.directory()
+        raw = next(row for row in payload['staff'] if row['record_id'] == 'recoperatorA')
+        raw.update(email='private@example.invalid', phone='private-phone', identity_number='private-id',
+                   signature_file_token='private-token', signature_preview_url='https://private.invalid/signature',
+                   team='夜班测试组', shift='夜班', specialty='暖通')
+        self.store.put_document(PERSON_NS, 'staff:recoperatorA', {'request_id': 'private-request'})
+        self.store.put_document(REQUEST_NS, 'private-request', {'request_id': 'private-request',
+            'status': 'sent', 'recipient_label': 'private-recipient', 'expires_at': 1800000000})
+        with patch.object(self.manager, 'directory', return_value=payload):
+            result = self.call('people', {'q': '夜班测试组 暖通'})
+        self.assertEqual(result['count'], 1)
+        person = result['people'][0]
+        self.assertTrue(person['directory_only'])
+        self.assertFalse(person['invite_only'])
+        self.assertFalse(person['can_preview'])
+        self.assertFalse(person['can_request'])
+        for field in ('has_signature', 'request', 'identity_version', 'signature_count', 'raw_fields', 'open_id',
+                      'email', 'phone', 'identity_number', 'signature_file_token', 'signature_preview_url',
+                      'signature_version', 'effective_has_signature'):
+            self.assertNotIn(field, person)
+        self.assertNotIn('private-', json.dumps(result))
+
+    def test_search_applies_to_entire_directory_before_pagination(self):
+        for index in range(520):
+            self.service.add('recSearch' + str(index), name='跨楼人员' + str(index),
+                open_id='', employee_no='EMP' + str(index), building='C楼')
+        listing = self.call('people', {'source': 'staff'})
+        self.assertEqual(listing['count'], 530)
+        self.assertEqual(len(listing['people']), 50)
+        result = self.call('people', {'q': 'EMP519', 'scope': 'C', 'source': 'staff'})
+        self.assertEqual(result['count'], 1)
+        self.assertEqual(result['people'][0]['record_id'], 'recSearch519')
+        self.assertEqual(len(self.call('people', {'page': 11})['people']), 30)
+        self.sender.assert_not_called()
 
     def test_crafted_preview_account_and_request_cannot_cross_buildings_or_levels(self):
         for actor, target in (('operatorE', 'operatorA'), ('supervisorE', 'operatorA'),
@@ -179,10 +233,11 @@ class SignatureAccessTests(unittest.TestCase):
 
     def test_h_engineer_can_request_lower_engineers_but_not_view_their_ink(self):
         listing = self.call('people', actor='crossEngineer')
-        self.assertEqual({p['record_id'] for p in listing['people'] if not p['invite_only']},
+        self.assertEqual({p['record_id'] for p in listing['people'] if not p['directory_only']},
                          {'reccrossEngineer', 'recengineerA', 'recengineerE'})
         for row in listing['people']:
-            self.assertTrue(row['can_request'])
+            if not row['directory_only']:
+                self.assertTrue(row['can_request'])
             self.assertEqual(row['can_preview'], row['is_self'])
         result = self.call('requests', {'source': 'staff', 'record_id': 'recengineerA', 'operation_id': 'engineer-request'},
                            actor='crossEngineer', method='POST')
@@ -267,7 +322,10 @@ class SignatureAccessTests(unittest.TestCase):
         with self.assertRaises(SignatureManagementError):
             self.call('self-start', method='POST')
         self.blocked.add('operatorA')
-        self.assertNotIn('recoperatorA', {p['record_id'] for p in self.call('people', actor='super')['people']})
+        row = next(p for p in self.call('people', actor='super')['people'] if p['record_id'] == 'recoperatorA')
+        self.assertTrue(row['directory_only'])
+        self.assertFalse(row['can_preview'])
+        self.assertFalse(row['can_request'])
 
     def test_shared_duty_account_is_not_a_signer(self):
         duty = self.manager.d.BUILDING_OPEN_ID_MAP['H']

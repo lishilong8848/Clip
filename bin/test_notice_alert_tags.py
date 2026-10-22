@@ -34,6 +34,7 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = LanPortalStateStore(Path(temp.name) / 'test.sqlite3')
+        self.addCleanup(self.store.shutdown_write_worker)
         self.calls = []
         async def model(owner, notices):
             self.calls.append((owner, copy.deepcopy(notices)))
@@ -176,6 +177,123 @@ class AlertTagsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual([call.args[1][0] for call in self.sender.call_args_list], ['ou_E', 'ou_li', 'ou_li'])
         self.assertEqual(self.sender.call_args_list[1].kwargs['message_uuid'], self.sender.call_args_list[2].kwargs['message_uuid'])
+
+    async def test_supervisors_receive_only_their_notices_and_original_recipients_stay_batched(self):
+        self.tags.get_supervisors = Mock(side_effect=lambda job: (['ou_manager_' + scope for scope in job['scopes']], ''))
+        self.enqueue('E楼维护')
+        self.enqueue('AB楼维护', target='recAB', scopes=['A', 'B'])
+        self.tags.get_supervisors.assert_not_called()
+        await self.tags.tick()
+        sent = {call.args[1][0]: call.args[0] for call in self.sender.call_args_list}
+        self.assertEqual(set(sent), {'ou_E', 'ou_A', 'ou_B', 'ou_li', 'ou_manager_E', 'ou_manager_A', 'ou_manager_B'})
+        self.assertNotIn('AB楼维护', sent['ou_manager_E'])
+        self.assertNotIn('E楼维护', sent['ou_manager_A'])
+        self.assertIn('E楼维护', sent['ou_li'])
+        self.assertIn('AB楼维护', sent['ou_li'])
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_supervisor_also_original_recipient_does_not_receive_duplicate(self):
+        self.tags.get_supervisors = Mock(return_value=(['ou_E', 'ou_li', 'ou_li'], ''))
+        self.enqueue()
+        await self.tags.tick()
+        self.assertEqual([call.args[1] for call in self.sender.call_args_list], [['ou_E'], ['ou_li']])
+
+    async def test_supervisor_retry_has_stable_per_notice_uuid_and_no_regeneration(self):
+        resolver = Mock(return_value=(['ou_manager'], ''))
+        self.tags.get_supervisors = resolver
+        self.enqueue('first')
+        self.enqueue('second', target='recSecond')
+        def send(text, people, **kwargs):
+            if people == ['ou_manager'] and 'second ·' in text:
+                raise TimeoutError()
+            return True, 'ok', []
+        self.sender.side_effect = send
+        await self.tags.tick()
+        prior = self.sender.call_args_list[-1]
+        self.sender.side_effect = None
+        restarted = NoticeAlertTags(self.service, self.tags.recommend, self.sender, get_supervisors=resolver)
+        await restarted.tick()
+        self.assertEqual(self.sender.call_count, 5)
+        self.assertEqual(self.sender.call_args.kwargs['message_uuid'], prior.kwargs['message_uuid'])
+        self.assertIn('second ·', self.sender.call_args.args[0])
+        self.assertNotIn('first ·', self.sender.call_args.args[0])
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_transfer_on_retry_keeps_content_separate_and_does_not_send_former_supervisor(self):
+        assigned = {'E': ['ou_manager'], 'A': []}
+        self.tags.get_supervisors = lambda job: (assigned[job['scopes'][0]], '')
+        self.enqueue('E job')
+        self.enqueue('A job', target='recA', scopes=['A'])
+        self.sender.side_effect = lambda text, people, **_: (people != ['ou_manager'], 'result', [])
+        await self.tags.tick()
+        old_uuid = self.sender.call_args.kwargs['message_uuid']
+        assigned.update(E=['ou_replacement'], A=['ou_manager'])
+        self.sender.reset_mock()
+        self.sender.side_effect = None
+        await self.tags.tick()
+        sent = {call.args[1][0]: call for call in self.sender.call_args_list}
+        self.assertEqual(set(sent), {'ou_replacement', 'ou_manager'})
+        self.assertIn('E job', sent['ou_replacement'].args[0])
+        self.assertNotIn('E job', sent['ou_manager'].args[0])
+        self.assertIn('A job', sent['ou_manager'].args[0])
+        self.assertNotEqual(sent['ou_manager'].kwargs['message_uuid'], old_uuid)
+
+    async def test_directory_outage_retains_pending_task_without_blocking_duty_or_burning_retries(self):
+        resolver = self.tags.get_supervisors = Mock(side_effect=TimeoutError('private data'))
+        self.enqueue()
+        await self.tags.tick()
+        for _ in range(4):
+            self.store.release_outbox_leases(CHANNEL)
+            await self.tags.tick()
+        rows = self.store.list_outbox_events(CHANNEL, status='leased')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['attempts'], 0)
+        self.assertEqual(self.sender.call_count, 2)
+        self.assertNotIn('private data', self.tags.latest('recE', 'maintenance', ['E'])['message_warning'])
+        resolver.side_effect = None
+        resolver.return_value = (['ou_manager'], '')
+        self.store.release_outbox_leases(CHANNEL)
+        await self.tags.tick()
+        self.assertEqual(self.sender.call_count, 3)
+        self.assertFalse(self.store.list_outbox_events(CHANNEL))
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_transfer_before_supervisor_send_defers_without_sending_stale_identity(self):
+        resolver = self.tags.get_supervisors = Mock(side_effect=[(['ou_old'], ''), (['ou_new'], ''), (['ou_new'], '')])
+        self.enqueue()
+        await self.tags.tick()
+        self.assertEqual(self.sender.call_count, 2)
+        resolver.side_effect = None
+        resolver.return_value = (['ou_new'], '')
+        self.store.release_outbox_leases(CHANNEL)
+        await self.tags.tick()
+        self.assertEqual(self.sender.call_args.args[1], ['ou_new'])
+        self.assertNotIn(['ou_old'], [call.args[1] for call in self.sender.call_args_list])
+
+    async def test_supervisor_outside_uuid_window_does_not_replay_uncertain_delivery(self):
+        now = [1800000000]
+        self.tags.clock = lambda: now[0]
+        self.tags.get_supervisors = Mock(return_value=(['ou_manager'], ''))
+        self.sender.side_effect = lambda text, people, **_: (people != ['ou_manager'], 'result', [])
+        self.enqueue()
+        await self.tags.tick()
+        now[0] += 3600
+        await self.tags.tick()
+        self.assertEqual(self.sender.call_count, 3)
+        self.assertIn('超出去重时限', self.tags.latest('recE', 'maintenance', ['E'])['message_warning'])
+
+    async def test_display_only_retry_does_not_send_supervisor_notifications(self):
+        self.tags.get_supervisors = Mock(return_value=(['ou_manager'], ''))
+        self.enqueue()
+        await self.tags.tick()
+        original = self.store.list_documents(NS, key_prefix='job:')[0]
+        self.store.put_document(NS, original['key'], {**original['payload'], 'status': 'failed', 'finished_at': 1})
+        self.tags.get_supervisors.reset_mock()
+        self.sender.reset_mock()
+        self.tags.latest('recE', 'maintenance', ['E'])
+        await self.tags.tick()
+        self.tags.get_supervisors.assert_not_called()
+        self.sender.assert_not_called()
 
     async def test_old_failure_regenerates_for_display_only_without_resending(self):
         self.enqueue()

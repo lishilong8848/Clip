@@ -20,6 +20,8 @@ reads no configuration and opens no connection.
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import os
 import re
 import tempfile
@@ -27,7 +29,7 @@ import threading
 import time
 import uuid
 import zlib
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 READ_RETRIES = 1
 PAGE_SIZE = 100
@@ -288,7 +290,9 @@ class DocumentLibraryRemote:
             raise _error("资料库飞书授权被拒绝，请联系管理员。",
                          401, category="token_rejected")
         if code:
-            raise _error("资料库来源请求失败。", 502, category="provider_error")
+            if code in {1254302, 1254304, 99991672}:
+                raise _error(f"资料库来源读取权限不足（code={code}）。", 403, category="unauthorized")
+            raise _error(f"资料库来源请求失败（code={code}）。", 502, category="provider_error")
         return payload
 
     def _call(self, method, url, *, params=None, body=None, retries, operation):
@@ -335,30 +339,6 @@ class DocumentLibraryRemote:
             return response
         raise _error("资料库{0}未完成。".format(operation),
                      503, category="transport")
-
-    def _bytes(self, url, *, params=None):
-        """Read raw bytes (download); identity is re-checked around the call."""
-        manager, identity = self._begin(write=False)
-        token = self._token(manager, identity)
-        headers = {"Authorization": "Bearer " + token}
-        for attempt in range(READ_RETRIES + 1):
-            self._check(manager, identity)
-            try:
-                content, _content_type = self._http_client().request_bytes(
-                    "GET", url, headers=headers,
-                    params=dict(params) if params else None,
-                    retries=0, max_bytes=MAX_DOWNLOAD_BYTES + 1,
-                )
-            except Exception:
-                self._check(manager, identity)
-                if not attempt:
-                    time.sleep(_READ_RETRY_DELAY_SECONDS)
-                    continue
-                raise _error("资料库附件下载未完成。",
-                             503, category="transport") from None
-            self._check(manager, identity)
-            return content
-        raise _error("资料库附件下载未完成。", 503, category="transport")
 
     # -- Bitable records ------------------------------------------------
 
@@ -682,22 +662,140 @@ class DocumentLibraryRemote:
             retries=0,
         ), "分片上传完成")
 
-    def download(self, file_token):
-        """Download one attachment into memory, bounded to 100 MiB."""
+    def _download_params(self, file_token, record_id, field_id):
         if not _is_file_token(file_token):
             raise _error("资料库附件标识无效。",
                          category="invalid_file_token")
-        from urllib.parse import quote
+        if record_id is None and field_id is None:
+            return None
+        if (not _is_record_id(record_id) or not isinstance(field_id, str)
+                or not re.fullmatch(r'fld[A-Za-z0-9]+', field_id)
+                or not re.fullmatch(r'tbl[A-Za-z0-9]+', self.table_id)):
+            raise _error('附件所属记录或字段无效。', category='invalid_attachment_context')
+        return {'extra': json.dumps({'bitablePerm': {'tableId': self.table_id,
+            'attachments': {field_id: {record_id: [file_token]}}}}, separators=(',', ':'))}
 
-        url = MEDIA_DOWNLOAD_URL.format(file_token=quote(file_token, safe=""))
-        content = self._bytes(url)
-        if not isinstance(content, (bytes, bytearray)):
-            raise _error("资料库附件下载响应无效。", 502,
-                         category="bad_response")
-        if len(content) > MAX_DOWNLOAD_BYTES:
-            raise _error("资料库附件下载超过100 MiB。", 413,
-                         category="too_large")
-        return bytes(content)
+    def _download_stream(self, url, *, headers, params):
+        return self._http_client()._client_for_request().stream('GET', url,
+            headers=headers, params=params, follow_redirects=False)
+
+    @staticmethod
+    def _download_redirect(url, location, api_path):
+        try:
+            if not isinstance(location, str) or not location or len(location) > 8192 or re.search(r'[\x00-\x20\\]', location):
+                raise ValueError()
+            target = urljoin(url, location)
+            parsed = urlsplit(target)
+            host = parsed.hostname or ''
+            if (parsed.scheme != 'https' or parsed.username or parsed.password or parsed.fragment
+                    or parsed.port not in (None, 443)
+                    or not any(host == domain or host.endswith('.' + domain)
+                        for domain in ('feishu.cn', 'feishucdn.com', 'feishu-attachment.com'))
+                    or host == 'open.feishu.cn' and parsed.path != api_path):
+                raise ValueError()
+            return target
+        except ValueError:
+            raise _error('附件下载跳转目标不安全，已停止。', 502, category='unsafe_redirect') from None
+
+    def _download(self, file_token, output, *, record_id=None, field_id=None):
+        params = self._download_params(file_token, record_id, field_id)
+        from urllib.parse import quote
+        api_url = MEDIA_DOWNLOAD_URL.format(file_token=quote(file_token, safe=''))
+        manager, identity = self._begin(write=False)
+        token = self._token(manager, identity)
+        auth_retry = network_retry = False
+        while True:
+            url, seen = api_url, set()
+            output.seek(0)
+            output.truncate()
+            try:
+                for _ in range(5):
+                    self._check(manager, identity)
+                    if url in seen:
+                        raise _error('附件下载发生循环跳转，已停止。', 502, category='unsafe_redirect')
+                    seen.add(url)
+                    is_api = urlsplit(url).hostname == 'open.feishu.cn'
+                    # Only the exact API endpoint receives bearer/context; never the attachment CDN.
+                    with self._download_stream(api_url if is_api else url,
+                            headers={'Accept-Encoding': 'identity', **({'Authorization': 'Bearer ' + token} if is_api else {})},
+                            params=params if is_api else None) as response:
+                        self._check(manager, identity)
+                        status = response.status_code
+                        if status in {301, 302, 303, 307, 308}:
+                            url = self._download_redirect(url, response.headers.get('location'), urlsplit(api_url).path)
+                            continue
+                        code = None
+                        if status != 200 or (is_api and 'json' in response.headers.get('content-type', '').lower()
+                                and 'attachment' not in response.headers.get('content-disposition', '').lower()):
+                            body = bytearray()
+                            for chunk in response.iter_bytes(8192):
+                                if len(body) + len(chunk) > 65536:
+                                    raise _error('附件接口返回的错误信息无效。', 502, category='bad_response')
+                                body.extend(chunk)
+                            try:
+                                payload = json.loads(body)
+                                raw_code = payload.get('code') if isinstance(payload, dict) else None
+                                code = raw_code if type(raw_code) is int else None
+                            except (ValueError, UnicodeError):
+                                pass
+                            if status == 401 or type(code) is int and code in _TOKEN_ERROR_CODES:
+                                raise _error('附件下载鉴权失效。', 401, category='token_rejected')
+                            if status == 403 or code in {1254302, 1254304, 99991672, 99991679}:
+                                raise _error('附件读取权限不足，请检查多维表高级权限与附件访问权限。', 403, category='unauthorized')
+                            if status == 429 or code == 99991400:
+                                raise _error('飞书附件下载限流，稍后自动重试。', 429, category='rate_limit')
+                            if type(code) is int and code:
+                                raise _error(f'附件下载被飞书拒绝（code={code}）。', 502, category='provider_error')
+                            raise _error(f'附件接口未返回原文件（HTTP {status}）。', 502, category='bad_response')
+                        declared = response.headers.get('content-length')
+                        if declared is not None and (not declared.isdecimal() or int(declared) > MAX_DOWNLOAD_BYTES):
+                            raise _error('附件大小无效或超过100 MiB。', 413, category='too_large')
+                        size = 0
+                        for chunk in response.iter_bytes(1024 * 1024):
+                            self._check(manager, identity)
+                            size += len(chunk)
+                            if size > MAX_DOWNLOAD_BYTES:
+                                raise _error('附件下载超过100 MiB。', 413, category='too_large')
+                            output.write(chunk)
+                        self._check(manager, identity)
+                        encoded = response.headers.get('content-encoding', 'identity').lower() not in ('', 'identity')
+                        if not size or not encoded and declared is not None and size != int(declared):
+                            raise _error('附件未完整下载，未保存为成功缓存。', 502, category='bad_response')
+                        return size
+                raise _error('附件下载跳转次数过多，已停止。', 502, category='unsafe_redirect')
+            except Exception as exc:
+                self._check(manager, identity)
+                category = getattr(exc, 'category', '')
+                if category == 'token_rejected' and not auth_retry:
+                    auth_retry = True
+                    token = self._token(manager, identity, force_refresh=True)
+                    continue
+                if category:
+                    raise
+                import httpx
+                if isinstance(exc, httpx.TransportError) and not network_retry:
+                    network_retry = True
+                    time.sleep(_READ_RETRY_DELAY_SECONDS)
+                    continue
+                if isinstance(exc, OSError) and not isinstance(exc, httpx.TransportError):
+                    raise _error('附件本地文件写入失败，请检查磁盘空间与目录权限。', 503, category='local_storage') from None
+                raise _error('附件下载连接失败或超时。', 503, category='transport') from None
+
+    def download(self, file_token, *, record_id=None, field_id=None):
+        """Compatibility reader; production caching uses the streamed file path."""
+        with io.BytesIO() as output:
+            self._download(file_token, output, record_id=record_id, field_id=field_id)
+            return output.getvalue()
+
+    def download_to_file(self, file_token, target, *, record_id=None, field_id=None):
+        from pathlib import Path
+        target = Path(target)
+        try:
+            with target.open('wb') as output:
+                return self._download(file_token, output, record_id=record_id, field_id=field_id)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
 
     # -- lifecycle ------------------------------------------------------
 

@@ -146,12 +146,13 @@ def read_material_link(portal, url):
     text = get(path + '/raw_content', {'lang': 1}).get('content')
     if not revision or not isinstance(text, str) or len(text) > 100000:
         raise LearningError('分享材料正文为空、过大或版本不完整，请拆分后重新读取。')
-    files, cursor, seen = {}, '', set()
+    files, cursor, seen, blocks = {}, '', set(), []
     for _ in range(40):
         data = get(path + '/blocks', {'page_size': 500, 'document_revision_id': revision,
                    **({'page_token': cursor} if cursor else {})})
         if not isinstance(data.get('items'), list) or type(data.get('has_more')) is not bool:
             raise LearningError('材料附件分页不完整，未使用部分材料。', 502)
+        blocks.extend(data['items'])
         for block in data['items']:
             file = block.get('file') if isinstance(block, dict) else None
             if file is None:
@@ -184,9 +185,11 @@ def read_material_link(portal, url):
         raise LearningError('分享材料正文为空或超过100000字，请拆分后重新读取。')
     if get(path).get('document', {}).get('revision_id') != revision:
         raise LearningError('读取期间分享材料已变化，请重新提交。', 409)
+    from .sharing_images import document_images
+    images = document_images(blocks, 'https://vnet.feishu.cn/docx/' + token, revision, document.get('title') or '分享材料')
     return {'url': target, 'title': document.get('title') or '分享材料', 'revision': revision,
             'text': text, 'sha256': hashlib.sha256(text.encode()).hexdigest(),
-            'extraction_complete': True, 'read_at': stamp(), **extra}
+            'extraction_complete': True, 'read_at': stamp(), **extra, **({'images': images} if images else {})}
 
 
 class SharingMaterials:

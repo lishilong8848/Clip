@@ -49,7 +49,8 @@ const emit=defineEmits<{ 'open-paper': [value:{paperId:string;person:Dict;date:s
 const states = ['未安排', '未到时', '待答', '答题中', '已完成', '逾期', '待核对'];
 const stateOptions = ['全部状态', ...states];
 const shiftOptions = ['全部班次', '白班', '夜班'];
-let today = beijingDate(), followToday = true;
+let today = beijingDate();
+const followToday = ref(true);
 const filters = reactive({ from: today, to: today, status: '全部状态', shift: '全部班次', q: '' });
 const dateError = computed(() => completionDateError(filters.from, filters.to));
 const result = ref<Dict>({ items: [], summary: {}, total: 0 });
@@ -65,7 +66,7 @@ function paperTitle(row:Dict,id:string):string{const task=row.tasks.find((task:D
 function timeLabel(value: string): string { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
 async function load(): Promise<void> {
   const currentDay = beijingDate();
-  if (followToday && currentDay !== today) {
+  if (followToday.value && currentDay !== today) {
     today = currentDay;
     filters.from = today; filters.to = today; page.value = 1;
   }
@@ -88,7 +89,7 @@ async function load(): Promise<void> {
 function reload(): void { page.value = 1; void load(); }
 function turn(delta: number): void { page.value += delta; void load(); }
 function checkToday(): void {
-  if (!document.hidden && followToday && beijingDate() !== today) void load();
+  if (!document.hidden && followToday.value && beijingDate() !== today) void load();
 }
 watch(() => [filters.from, filters.to], () => { error.value = ''; });
 watch(() => [props.scope, props.personId, props.refreshKey], (value, previous) => {

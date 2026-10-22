@@ -153,16 +153,30 @@ class ShiftCloudTests(unittest.TestCase):
                 self.assertFalse(self.fake.mutations())
 
     def test_list_records_decompresses_without_flattening_or_writing(self):
-        original = self.row(cloud.ENTITY_KIND_LABELS["record"], "original-key", {"data": "原样"}, compressed=True)
+        original = self.row(cloud.ENTITY_KIND_LABELS["record"], "original-key", {"data": "原样"}, fields={'姓名': [{'text': '原姓名'}]}, compressed=True)
         bundle = self.row("shift_person", "班次人员:2026-10-21:白:stable-person", self.bundle(), compressed=True)
         rows = self.new_remote(enabled=False).list_entity_records()
         self.assertEqual(rows[0], {"record_id": original["record_id"], "kind": "record", "key": "original-key",
-                                  "payload": {"data": "原样"},
+                                  "payload": {"data": "原样"}, "display_name": "原姓名",
                                   "payload_sha256": hashlib.sha256('{"data":"原样"}'.encode("utf-8")).hexdigest()})
         self.assertEqual(rows[1]["record_id"], bundle["record_id"])
         self.assertEqual(rows[1]["payload"], self.bundle())
         self.assertEqual(rows[1]["kind"], "shift_person")
         self.assertFalse(self.fake.mutations())
+
+    def test_enrich_rechecks_original_name_before_person_field_write(self):
+        original = self.row('paper', 'key', {}, fields={'姓名': '原姓名', '人员': [{'id': 'ou_existing'}]})
+        before = copy.deepcopy(original)
+        with self.assertRaisesRegex(cloud.LearningCloudConflict, '姓名已变化'):
+            self.remote.enrich_entity_record(original['record_id'], 'paper', 'key',
+                {'人员': [{'id': 'ou_wrong'}]}, expected_display_name='过期姓名')
+        self.assertFalse(self.fake.mutations())
+        self.assertEqual(original, before)
+        self.remote.enrich_entity_record(original['record_id'], 'paper', 'key',
+            {'姓名': '原姓名'}, expected_display_name='原姓名')
+        self.assertEqual(original['fields']['人员'], [{'id': 'ou_existing'}], 'Omitting unresolved personnel must not clear it')
+        self.assertEqual(original['fields']['内容'], before['fields']['内容'])
+
 
     def test_invalid_bundle_shapes_fail_read_and_write_without_partial_data(self):
         variants = [None, [], {}, self.bundle(schema_version=True), self.bundle(schema_version=2),

@@ -63,7 +63,9 @@ class SignatureReadPerformanceTests(unittest.TestCase):
     def test_each_read_rechecks_actor_and_revocation_and_does_not_reuse_admin_result(self):
         self.read()
         own = self.read('ou_signature0')
-        self.assertEqual([row['record_id'] for row in own['people']], ['recSignature0'])
+        self.assertEqual(own['count'], 1200)
+        self.assertEqual(len(own['people']), 50)
+        self.assertEqual([row['record_id'] for row in own['people'] if not row['directory_only']], ['recSignature0'])
         permissions = self.auth._load_permissions_locked()
         permissions['users']['ou_signature0']['modules'] = []
         self.auth._save_permissions_locked(permissions)
@@ -71,7 +73,7 @@ class SignatureReadPerformanceTests(unittest.TestCase):
             self.read('ou_signature0')
         self.assertEqual(error.exception.status, 403)
         self.assertIsNone(self.auth._account_read_state())
-        self.assertEqual(self.read('ou_signature1')['people'][0]['record_id'], 'recSignature1')
+        self.assertEqual(self.read('ou_signature1', {'q': 'Fixture 0001'})['people'][0]['record_id'], 'recSignature1')
 
     def test_failed_refresh_keeps_safe_previous_metadata_but_live_permission_filter(self):
         before = self.read('ou_signature0')

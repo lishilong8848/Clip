@@ -920,14 +920,29 @@ class KnowledgeBase:
     def _run(self):
         from upload_event_module.services.process_lifetime import lower_current_thread_priority
         lower_current_thread_priority()
+        prepared_since_index = 0
         while not self._stop.is_set():
             try:
                 worked = False
+                preparing = False
                 for task in tuple(self._worker_tasks):
+                    if self._stop.is_set():
+                        return
                     try:
+                        prepare = getattr(getattr(task, '__self__', None), 'prepare_pending', None)
+                        if callable(prepare) and not self._stop.is_set() and prepare(limit=1):
+                            worked = preparing = True
+                            continue
                         worked = bool(task()) or worked
                     except Exception:
                         logging.warning('Knowledge source synchronization failed; retry deferred')
+                if self._stop.is_set():
+                    return
+                if preparing:
+                    prepared_since_index += 1
+                    if prepared_since_index < 4:
+                        continue
+                prepared_since_index = 0
                 if self.process_one() or worked:
                     continue
             except (OSError, sqlite3.Error):

@@ -413,13 +413,16 @@ class SharingTests(unittest.TestCase):
                 sync = self.core.detail(bid, ADMIN)['bank_sync']
                 self.assertEqual(sync, {'total': 20, 'synced': 0, 'failed': 0, 'error': ''})
 
-    def test_model_obeys_each_requested_type_and_rejects_mismatch(self):
+    def test_model_obeys_requested_types_and_defers_mismatch_to_shared_validation(self):
         qs = typed_questions(list(sharing.QUESTION_TYPES), 5)
         payload = {'source': SOURCE, 'previous': [], 'count': 5, 'question_types': [q['type'] for q in qs]}
         model = Mock(); model.complete.return_value = json.dumps({'questions': qs})
         self.assertEqual(generate(model, payload)['questions'], qs)
         model.complete.return_value = json.dumps({'questions': questions(5)})
-        with self.assertRaises(ValueError): generate(model, payload)
+        values = generate(model, payload)['questions']
+        self.assertEqual(values, questions(5))
+        with self.assertRaises(LearningError):
+            sharing.validate_questions(values, SOURCE, list(sharing.QUESTION_TYPES))
 
 
 class SourceTests(unittest.TestCase):

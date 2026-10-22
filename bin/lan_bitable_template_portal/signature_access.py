@@ -119,12 +119,13 @@ class SignatureAccess:
                    can_preview=bool(person.get('has_signature') and self.allowed(person, 'view')),
                    can_request=self.request_allowed(person),
                    can_receive_message=bool(target and target.get('open_id')))
-        row['invite_only'] = row['can_request'] and not self.allowed(person, 'view') and not self.allowed(person, 'edit')
-        if row['invite_only']:
-            # An invitation exposes the recipient, never their handwriting or signing history.
+        row['directory_only'] = not self.allowed(person, 'view') and not self.allowed(person, 'edit')
+        row['invite_only'] = row['can_request'] and row['directory_only']
+        if row['directory_only']:
+            # The shared directory exposes search metadata, never protected ink/history.
             row = {key: row.get(key) for key in ('source', 'record_id', 'person_key', 'name', 'employee_no',
-                    'building', 'position', 'specialty', 'is_self', 'can_preview', 'can_request',
-                    'can_receive_message', 'invite_only')}
+                    'building', 'position', 'specialty', 'team', 'shift', 'account_nature',
+                    'is_self', 'can_preview', 'can_request', 'can_receive_message', 'invite_only', 'directory_only')}
             row['signature_status'] = 'restricted'
         return row
 

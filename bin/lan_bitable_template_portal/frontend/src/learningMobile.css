@@ -6,7 +6,7 @@
   .heading { min-width: 0; }
   .page-head > .actions { gap: 8px; }
   .page-head .sync-label { flex-basis: 100%; order: 3; }
-  .page-head .sync-label:not(:has(.spin)):not(.danger) { display: none; }
+  .page-head .sync-label:not(:has(.spin)):not(.danger):not(.pending) { display: none; }
   .learning-page.learning-page :is(.page-head, .tabs, .answer-tools, .question-footer, .learner-strip) button:not(.primary) { min-height: 38px !important; }
   .learning-page.learning-page :is(.page-head, .question-meta) .icon-button { min-width: 38px !important; width: 38px; }
   .view-switch { flex: 1; display: flex; }

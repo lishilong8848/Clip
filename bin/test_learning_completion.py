@@ -67,6 +67,71 @@ class CompletionTests(unittest.TestCase):
     def actor(self, pid='p1'):
         return {'id': 'oid-' + pid, 'person_id': pid, 'is_admin': False, 'shared_account': False, 'can_answer': True}
 
+    def test_first_backfill_ignores_unanswered_attempt_empty_dates(self):
+        paper = self.paper()
+        self.put('record', {'id': paper['id'], 'person_id': 'p1', 'date': DATE, 'scope': 'A',
+                           'entries': {paper['questions'][0]['id']: {'practice': []}}})
+        self.service._restored = self.service._completion_enabled = True
+        completion.refresh(self.service, AFTERNOON)
+        self.assertIsNotNone(self.service._get('local', 'completion_initialized'))
+        value = self.service._get(completion.KIND, completion.key(DATE, 'p1'))
+        self.assertEqual(value['answered'], 0)
+        self.assertEqual(value['assigned'], 2)
+        self.assertFalse(any(row.get('date') == '' for row in self.service._all(completion.KIND)))
+
+    def test_completion_failure_does_not_block_sync_or_sends_and_is_retried(self):
+        self.enable = support.LearningTests.enable.__get__(self)
+        self.enable()
+        self.service._restored = self.service._schema_ready = True
+        self.cloud.completion_schema_ready = True
+        with self.service.transaction() as conn:
+            self.service._put('local', 'people_sync', {'checked_at': 10**12}, conn, False)
+            self.service._put('publication', self.service._publication_key(DATE), {'date': DATE}, conn, False)
+            for n in range(9):
+                self.service._put('audit', str(n), {'id': str(n)}, conn)
+        with patch.object(completion, 'refresh', side_effect=learning.LearningError('请选择有效统计日期。')) as broken, \
+             patch.object(self.service, 'send_notifications') as send, \
+             self.assertLogs('lan_bitable_template_portal.learning', level='WARNING'):
+            self.service._tick(AFTERNOON)
+            self.assertEqual(self.service.sync_status()['pending'], 0)
+            self.assertFalse(self.service.sync_status()['active'])
+            self.assertIn('后台汇总', self.service.sync_status()['error'])
+            self.assertNotIn('请选择有效统计日期', self.service.sync_status()['error'])
+            self.service._tick(AFTERNOON)
+            self.assertEqual(broken.call_count, 1)
+            self.assertEqual(send.call_count, 2)
+        with patch.object(learning.time, 'time', return_value=self.service._completion_retry_at + 1), \
+             patch.object(completion, 'refresh') as fixed, patch.object(self.service, 'send_notifications'):
+            self.service._tick(AFTERNOON)
+            self.assertEqual(fixed.call_count, 1)
+            self.assertEqual(self.service.sync_status()['error'], '')
+
+    def test_pending_and_retry_are_not_reported_as_running_or_fully_synced(self):
+        self.service._refresh_state = 'ready'
+        self.put('audit', {'id': 'pending'}, dirty=True)
+        status = self.service.sync_status()
+        self.assertEqual(status['status'], 'pending')
+        self.assertFalse(status['active'])
+        with self.service.transaction() as conn:
+            conn.execute("UPDATE documents SET retry_at=? WHERE kind='audit'", (10**12,))
+        status = self.service.sync_status()
+        self.assertEqual(status['status'], 'retry_waiting')
+        self.assertEqual(status['waiting'], 1)
+        with patch.object(self.service, '_sync_pending', side_effect=RuntimeError('synthetic')):
+            with self.assertRaises(RuntimeError):
+                self.service.sync_pending()
+        self.assertFalse(self.service.sync_status()['active'])
+
+    def test_delivery_report_only_in_admin_bootstrap(self):
+        self.person(support.ACTOR['person_id'])
+        with patch('lan_bitable_template_portal.learning_delivery_status.report', return_value={'date': DATE, 'shifts': []}) as report:
+            admin = self.service.bootstrap('', ADMIN)
+            self.assertEqual(admin['delivery_status']['date'], DATE)
+            report.assert_called_once_with(self.service)
+            ordinary = self.service.bootstrap('A', support.ACTOR)
+            self.assertNotIn('delivery_status', ordinary)
+            self.assertEqual(report.call_count, 1)
+
     def test_all_people_empty_verified_roster_not_reserve_assignment(self):
         self.person(); self.person('p2', ('B',)); self.person('inactive', active=False)
         self.put('publication', {'id': DATE, 'date': DATE, 'reserve_ids': ['reserve-all'], 'paper_ids': []})

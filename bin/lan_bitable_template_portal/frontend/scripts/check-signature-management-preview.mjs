@@ -85,6 +85,7 @@ await page.route('**/*', async route => {
     const rows=people.map(p=>({...p,can_preview:role==='admin'||p.source==='external',can_request:role==='admin'||p.source==='external'}));
     if(role==='user')rows.push(
       {person_key:'staff:recBoss',record_id:'recBoss',name:'验收上级',source:'staff',building:'H楼',position:'经理',signature_status:'restricted',invite_only:true,can_request:true,can_preview:false,can_receive_message:true},
+      {person_key:'staff:recCross',record_id:'recCross',name:'跨楼目录人员',employee_no:'C900',source:'staff',building:'C楼',position:'运维主管',signature_status:'restricted',directory_only:true,invite_only:false,can_request:false,can_preview:false,can_receive_message:true},
       {person_key:'external:shared-other',record_id:'shared-other',name:'其他人员创建的临时签名',source:'external',building:'C楼',has_signature:false,signature_status:'unsigned',can_request:true,can_preview:false},
       {person_key:'external:linked-protected',record_id:'linked-protected',name:'受保护的已关联签名',source:'external',building:'H楼',origin_staff_record_id:'recBoss',has_signature:true,signature_status:'restricted',can_request:false,can_preview:false},
     );
@@ -232,6 +233,10 @@ try {
   role = 'user';
   await page.goto(origin + entry);
   await page.getByText('张三', { exact: true }).first().waitFor();
+  const crossDirectory = page.locator('.person-card').filter({hasText:'跨楼目录人员'});
+  await crossDirectory.waitFor();
+  assert.equal(await crossDirectory.getByText('签名受限', {exact:true}).count(), 1);
+  assert.equal(await crossDirectory.getByRole('button').count(), 0, 'directory visibility grants no signature actions');
   assert.equal(await page.locator('.person-card').filter({hasText:'张三'}).getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'normal user gets no unauthorized formal preview');
   assert.equal(await page.locator('.person-card').filter({hasText:'受保护的已关联签名'}).getByRole('button', { name: '查看签名', exact: true }).count(), 0, 'linked temporary signatures keep formal authority');
   assert.equal(await page.getByRole('button', { name: '查看签名', exact: true }).count(), 1, 'shared unlinked temporary signature remains usable');

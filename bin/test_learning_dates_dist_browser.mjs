@@ -44,6 +44,8 @@ try {
   for (const v2 of [false, true]) for (const timezoneId of ['UTC', 'Asia/Shanghai']) {
     const label = `${v2 ? 'v2' : 'legacy'}-${timezoneId.replace('/', '-')}`;
     const requests = [];
+    let admin = true;
+    let recoveredDelivery = false;
     let instant = '2024-02-28T15:59:59.999Z';
     const context = await browser.newContext({ timezoneId, locale: timezoneId === 'UTC' ? 'en-US' : 'zh-CN',
       serviceWorkers: 'block', viewport: { width: 1440, height: 1000 } });
@@ -65,9 +67,23 @@ try {
       if (endpoint === '/api/handover-links') return ok({ links: {} });
       if (endpoint === '/api/auth/permission-requests/current') return ok({});
       if (endpoint.startsWith('/api/workspace-layouts/')) return ok({ revision: 0, value: null });
-      if (endpoint === '/api/learning/bootstrap') return ok({ is_admin: true, can_answer: false, can_view_buildings: true,
-        scopes: [{ value: 'A', label: 'A楼' }], scope: 'A', today: dayOf(instant), settings: {},
-        sync: { status: 'ready', pending: 0 }, summary: {} });
+      if (endpoint === '/api/learning/bootstrap') return ok({ is_admin: admin, can_answer: false, can_view_buildings: true,
+        scopes: [{ value: 'A', label: 'A楼' }], scope: 'A', today: dayOf(instant), settings: {enabled:true},
+        delivery_status: { date: dayOf(instant), shifts: [
+          {shift:'白',state:'success',label:'发布及发送成功',expected:2,sent:2,failed:0,pending:0,issues:[]},
+          recoveredDelivery ? {shift:'夜',state:'success',label:'发布及发送成功',expected:3,sent:3,failed:0,pending:0,issues:[]} :
+          {shift:'夜',state:'partial',label:'部分未完成',expected:3,sent:1,failed:1,pending:1,issues:[
+            {name:'夜班测试甲',scope:'A',status:'failed',reason:'机器人对该人员不可用'},
+            {name:'夜班测试乙',scope:'B',status:'pending',reason:'通知待发送'}]},
+        ] },
+        sync: { status: 'retry_waiting', pending: 9, active: false, waiting: 9, history_issue_count: 51, history_issues: [
+          { record_id: 'recSyntheticIdentity', name: '测试同名人员', date: '2026-10-21', scope: 'A楼', reason: '人员表中存在重名，未自动选择',
+            candidates: [{ record_id: 'recDirectoryOne', name: '测试同名人员', employee_no: 'TEST01', scopes: ['A', 'B'] }] },
+          { record_id: 'recSyntheticMissing', name: '', date: '', scope: '', reason: '原记录没有可核验的人员姓名', candidates: [] },
+        ] }, summary: {} });
+      if (endpoint === '/api/learning/settings') return ok({ enabled: true, publish_time: '13:00', night_publish_time: '20:00', reminder_time: '17:00' });
+      if (endpoint === '/api/learning/export' && query.kind === 'history_identity') return route.fulfill({
+        headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': "attachment; filename*=UTF-8''history-identity.csv" }, body: 'name,reason\ntest,ambiguous\n' });
       if (endpoint === '/api/learning/profile') return ok({ summary: { answered: 0 }, people: [], trend: [],
         from: query.from || new Date(Date.parse(dayOf(instant)) - (Number(query.period || 7) - 1) * 86400000).toISOString().slice(0, 10),
         to: query.to || dayOf(instant) });
@@ -162,6 +178,65 @@ try {
     assert.equal(completionReads().at(-1).query.to, '2024-02-29');
     assert.equal(await page.locator('.completion-error').count(), 0);
     await page.screenshot({ path: path.join(output, label + '.png'), fullPage: true });
+    for (const viewport of [{ width: 402, height: 874 }, { width: 440, height: 956 }, { width: 1440, height: 900 }]) {
+      await page.setViewportSize(viewport);
+      recoveredDelivery = false;
+      await page.goto(entry); await ready();
+      if (v2) {
+        await page.getByRole('button', { name: '学练管理', exact: true }).click();
+        await page.getByText('发布设置', { exact: true }).click();
+      } else await page.getByRole('button', { name: '发布设置', exact: true }).click();
+      await ready();
+      assert(await page.locator('.sync-label').isVisible(), 'Pending status stays visible on phones');
+      assert.match(await page.locator('.sync-label').innerText(), /等待重试.*9/);
+      assert.equal(await page.locator('.sync-label .spin').count(), 0, 'Pending rows never imply active sync');
+      const shiftRows = page.locator('.shift-publish-row');
+      assert.equal(await shiftRows.count(), 2);
+      assert.match(await shiftRows.nth(0).innerText(), /发布及发送成功.*已发送 2 \/ 2 人/s);
+      assert.match(await shiftRows.nth(1).innerText(), /部分未完成.*已发送 1 \/ 3 人/s);
+      await shiftRows.nth(1).locator('summary').click();
+      await shiftRows.nth(1).getByText('机器人对该人员不可用', { exact: true }).waitFor();
+      assert.match(await shiftRows.nth(1).innerText(), /夜班测试甲.*机器人对该人员不可用/s);
+      assert.match(await shiftRows.nth(1).innerText(), /夜班测试乙.*通知待发送/s);
+      const issues = page.locator('.history-identity-issues');
+      await issues.locator('summary').click();
+      await issues.getByText('人员表中存在重名，未自动选择', { exact: true }).waitFor();
+      assert.match(await issues.innerText(), /TEST01/);
+      assert.match(await issues.innerText(), /前 50 条/);
+      const download = page.waitForEvent('download');
+      await issues.getByRole('button', { name: '导出完整清单', exact: true }).click();
+      assert.equal((await download).suggestedFilename(), 'history-identity.csv');
+      await ready();
+      assert.equal(await shiftRows.locator('[popover],[data-v2-feedback]').count(), 0, 'Publication status stays inline instead of becoming a toast');
+      for (const status of await shiftRows.locator('.shift-delivery-status').all()) {
+        assert(!['fixed', 'absolute'].includes(await status.evaluate(el => getComputedStyle(el).position)), 'Status remains beside its publication time');
+      }
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+      const box = await issues.boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= viewport.width + 1, 'Report fits viewport');
+      await page.screenshot({ path: path.join(output, `${label}-identity-${viewport.width}.png`), fullPage: true });
+      for (let shift = 0; shift < 2; shift++) {
+        const input = shiftRows.nth(shift).locator('input');
+        await input.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
+        assert(await input.evaluate(el => {
+          const r = el.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          return hit === el || el.contains(hit);
+        }), `${label}/${viewport.width}/${shift}: time field can be scrolled clear of fixed navigation`);
+      }
+      await page.screenshot({ path: path.join(output, `${label}-publication-${viewport.width}.png`) });
+      if (!v2 && timezoneId === 'UTC' && viewport.width === 1440) {
+        await page.getByRole('textbox', { name: '白班题单发布时间', exact: true }).fill('13:15');
+        recoveredDelivery = true;
+        await shiftRows.nth(1).getByText('发布及发送成功', { exact: false }).waitFor({ timeout: 35000 });
+        assert.equal(await shiftRows.nth(1).locator('details').count(), 0, 'Success removes previous failure names');
+        assert.equal(await page.getByRole('textbox', { name: '白班题单发布时间', exact: true }).inputValue(), '13:15', 'Background status refresh preserves unsaved schedule');
+        await page.getByRole('textbox', { name: '白班题单发布时间', exact: true }).fill('13:00');
+      }
+    }
+    admin = false;
+    await page.goto(entry + '&tab=settings'); await ready();
+    assert.equal(await page.locator('.history-identity-issues').count(), 0, 'Non-admin cannot render report');
     cases.push({ label, profileReads: profileReads().length, completionReads: completionReads().length, requests });
     console.log(`PASS ${label}: actual dist entry, blank filters, periods, Shanghai midnight, strict dates and fetch counts`);
     await context.close(); activePage = undefined;
