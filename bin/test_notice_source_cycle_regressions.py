@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from bin.test_notice_memory_history import _HistoryMemoryService, _source_record
 from lan_bitable_template_portal.portal_service import (
-    STATE_NS_DAILY_SUMMARY, STATE_NS_MEMORY, STATE_NS_WORK_STATUS, MaintenancePortalService, NoticeSourcePending,
+    STATE_NS_DAILY_SUMMARY, STATE_NS_MEMORY, STATE_NS_WORK_STATUS, FieldMeta, MaintenancePortalService, NoticeSourcePending,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
@@ -27,6 +27,8 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
         service._memory_dir = Path(self.tmp.name) / 'memory'
         service._summary_dir = Path(self.tmp.name) / 'summaries'
         service._work_status_dir = Path(self.tmp.name) / 'work-status'
+        service._field_meta_by_name['维护实施状态'] = FieldMeta(
+            'status-formula', '维护实施状态', 'Formula', 20, False, {}, [], True)
         return service
 
     def tearDown(self):

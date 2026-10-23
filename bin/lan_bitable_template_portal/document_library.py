@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 import uuid
 
 from openclaw_service.assistant.lighthouse_ai import AssistantError
+from .document_library_filters import matches_filters, parse_filters
 
 SCOPES = frozenset(('A', 'B', 'C', 'D', 'E', 'H', '110'))
 MAX_FILE = 100 * 1024 * 1024
@@ -595,11 +596,14 @@ class DocumentLibraryService:
                 raise ValueError()
         except (ValueError, TypeError):
             raise AssistantError('分页参数无效。') from None
-        scope, q = query.get('scope', ''), str(query.get('q') or '').strip()[:200].casefold()
-        if scope and scope not in SCOPES:
+        scope, q = query.get('scope') or '', str(query.get('q') or '').strip()[:200].casefold()
+        if scope == 'ALL':
+            scope = ''
+        if not isinstance(scope, str) or scope and scope not in SCOPES:
             raise AssistantError('楼栋范围无效。')
         with self.connect(readonly=True) as db:
             db.execute('BEGIN')
+            filters = self._filters(source, query.get('filters'), db)
             rows = db.execute('SELECT payload,observed_at FROM records WHERE table_key=? AND deleted=0 AND pending_operation=\'\' ORDER BY id', (key,)).fetchall()
             completed = db.execute("SELECT 1 FROM sync_jobs WHERE table_key=? AND config_revision=? AND status='completed' LIMIT 1", (key, source['revision'])).fetchone()
             job = db.execute('SELECT status,error FROM sync_jobs WHERE table_key=? AND config_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (key, source['revision'])).fetchone()
@@ -614,7 +618,7 @@ class DocumentLibraryService:
         for row in rows:
             record = json.loads(row[0])
             if (self._allowed(actor, source, record['scopes']) and (not scope or scope in record['scopes'])
-                    and (not q or q in _json(record['fields']).casefold())):
+                    and (not q or q in _json(record['fields']).casefold()) and matches_filters(record['fields'], filters)):
                 records.append(record)
         items = []
         for record in records[offset:offset + size]:
@@ -625,6 +629,15 @@ class DocumentLibraryService:
             'config_revision': source['revision'], 'sync_status': job['status'] if job else 'pending',
             'cache': {'complete': bool(completed), 'updated_at': max((row['observed_at'] for row in rows), default=0),
                 'refreshing': bool(job and job['status'] in ('queued', 'running')), 'error': job['error'] if job else ''}}
+
+    @staticmethod
+    def _filters(source, value, db):
+        if value is None:
+            return []
+        row = db.execute('SELECT payload FROM schema_cache WHERE table_key=? AND config_revision=?',
+            (source['id'], source['revision'])).fetchone()
+        fields = {field['field_id']: field for field in json.loads(row[0])} if row else {}
+        return parse_filters(value, fields)
 
     def cached_record(self, actor, key, identity, *, refresh=False):
         source, cached = self._table(key), self._cached(key, identity)
@@ -1059,14 +1072,16 @@ class DocumentLibraryService:
         actor = self._actor(actor)
         if actor.get('read_only'):
             raise AssistantError('只读会话不能重新向量化。', 403)
-        if set(payload) - {'operation_id', 'expected_revision', 'record_ids', 'all', 'q', 'scope'}:
+        if set(payload) - {'operation_id', 'expected_revision', 'record_ids', 'all', 'q', 'scope', 'filters'}:
             raise AssistantError('重新向量化参数无效。')
         ids, all_records = payload.get('record_ids'), payload.get('all', False)
         if type(all_records) is not bool or (all_records and ids is not None) or (not all_records and
                 (not isinstance(ids, list) or not ids or len(ids) > 1000 or any(not isinstance(v, str) or not v for v in ids))):
             raise AssistantError('请选择记录或全部匹配记录。')
-        scope, q = payload.get('scope', ''), str(payload.get('q') or '').strip()[:200].casefold()
-        if scope and scope not in SCOPES:
+        scope, q = payload.get('scope') or '', str(payload.get('q') or '').strip()[:200].casefold()
+        if scope == 'ALL':
+            scope = ''
+        if not isinstance(scope, str) or scope and scope not in SCOPES:
             raise AssistantError('楼栋范围无效。')
         operation, fingerprint = self._maintenance_request(actor, key, payload, 'reindex')
         with self.connect() as db:
@@ -1079,6 +1094,7 @@ class DocumentLibraryService:
                 raise AssistantError('当前无权访问此资料表。', 403)
             if source['revision'] != payload.get('expected_revision'):
                 raise AssistantError('资料表配置已变化，请刷新后重试。', 409)
+            filters = self._filters(source, payload.get('filters'), db)
             previous = db.execute('SELECT * FROM maintenance WHERE id=?', (operation,)).fetchone()
             if previous:
                 if previous['fingerprint'] != fingerprint:
@@ -1091,7 +1107,8 @@ class DocumentLibraryService:
                 record = json.loads(row[0])
                 if record['config_revision'] != source['revision'] or not self._allowed(actor, source, record['scopes']):
                     continue
-                if ((all_records and (not scope or scope in record['scopes']) and (not q or q in _json(record['fields']).casefold()))
+                if ((all_records and (not scope or scope in record['scopes']) and (not q or q in _json(record['fields']).casefold())
+                        and matches_filters(record['fields'], filters))
                         or not all_records and record['record_id'] in ids):
                     selected.append(record)
             if not all_records and {r['record_id'] for r in selected} != set(ids):
@@ -1244,6 +1261,12 @@ class DocumentLibraryService:
             if not task:
                 break
             worked = True
+        # Feed ready originals to the shared worker without waiting for every attachment download.
+        if self.knowledge is not None:
+            task = self._claim('ingestion', table_key=table_key, stage='index')
+            if task:
+                self._ingest(task)
+                worked = True
         return worked
 
     def process_one(self):

@@ -31,8 +31,9 @@ def snapshot(service):
 
 
 class Snapshot:
-    def __init__(self, documents):
+    def __init__(self, documents, *, include_legacy=False):
         self.documents = documents
+        self.include_legacy = include_legacy
         self.people = {k: v['payload'] for (kind, k), v in documents.items() if kind == 'person'}
         self.owners = defaultdict(set)
         for pid, person in self.people.items():
@@ -47,7 +48,7 @@ class Snapshot:
                 self.records_by_person[self.get('paper', identity).get('person_id')].append((identity, row))
 
     def legacy(self, kind, identity):
-        return self.get('local', 'shift_legacy:' + kind + ':' + identity).get('legacy') is True
+        return not self.include_legacy and self.get('local', 'shift_legacy:' + kind + ':' + identity).get('legacy') is True
 
     def get(self, kind, identity):
         return self.documents.get((kind, identity), {}).get('payload', {})
@@ -268,8 +269,12 @@ class Snapshot:
             status = '待核对'
         totals = {field: sum(t.get(field) or 0 for t in tasks) for field in
                   ('assigned', 'answered', 'correct', 'objective_answered', 'answer_viewed', 'answer_view_unknown')}
+        deliveries = {task['delivery_status'] for task in tasks if task.get('delivery_status')}
+        if not deliveries:
+            deliveries = {completion._delivery(row['payload']) for pair, row in members if pair[0] == 'notification'}
         return {'date': date, 'shift': shift, 'person_id': pid, 'name': person.get('name', ''),
                 'scopes': sorted(scopes - {''}), 'status': status, 'tasks': tasks, **totals,
+                'delivery_status': '、'.join(sorted(deliveries)) if deliveries else '无需发送',
                 'practice_questions': len(practices), 'review_count': reviews, 'updated_at': latest}
 
 
@@ -402,7 +407,8 @@ def display(summary, oid=''):
             '正确题数': summary['correct'], '首次客观正确率': round(summary['correct'] * 100 / answered, 1) if answered else None,
             '看答案后数': summary['answer_viewed'] if not summary['answer_view_unknown'] else None,
             '主动练习量': summary['practice_questions'], '复习次数': summary['review_count'],
-            '更新时间': int(dt.datetime.fromisoformat(summary['updated_at']).timestamp() * 1000)}
+            '更新时间': int(dt.datetime.fromisoformat(summary['updated_at']).timestamp() * 1000),
+            **({'题单发送状态': summary['delivery_status']} if 'delivery_status' in summary else {})}
 
 
 def history_fields(state, kind, identity, directory):
@@ -428,7 +434,8 @@ def history_fields(state, kind, identity, directory):
 
 
 def sync(service, rows, limit):
-    state = Snapshot(snapshot(service))
+    personnel_only = getattr(service.cloud, 'personnel_only_storage', False) is True
+    state = Snapshot(snapshot(service), include_legacy=personnel_only)
     groups, errors = state.groups()
     directory, valid, app_id = current_directory(service)
     if not valid:
@@ -455,6 +462,9 @@ def sync(service, rows, limit):
         payload = {'schema_version': 1, 'date': owner[0], 'shift': owner[1], 'person_id': owner[2],
                    'entities': [{'kind': p[0], 'key': p[1], 'payload': r['payload']} for p, r in sorted(members)],
                    'summary': summary}
+        if personnel_only:
+            payload['entities'] = []
+            payload['summary'] = {name: value for name, value in summary.items() if name != 'tasks'}
         fields = display(summary, person_open_id(state.people.get(owner[2], {'id': owner[2]}), directory))
         if not valid:
             fields.pop('人员', None)
@@ -472,7 +482,7 @@ def sync(service, rows, limit):
         if not selected and members and any(row['dirty'] for _, row in members):
             continue
         member_pairs = {pair for pair, _ in members}
-        if any(state.documents[pair]['dirty'] and pair not in member_pairs and pair not in acknowledged
+        if not personnel_only and any(state.documents[pair]['dirty'] and pair not in member_pairs and pair not in acknowledged
                for pair in state.dependencies[owner]):
             continue
         if count >= limit or service._stop.is_set():
@@ -480,16 +490,23 @@ def sync(service, rows, limit):
             continue
         count += 1
         try:
+            expected = {}
+            if personnel_only:
+                from .learning_personnel_storage import verify_bundle_archive
+                previous = verify_bundle_archive(service, identity, app_id)
+                if previous:
+                    expected['expected_previous_sha256'] = previous
             with service.transaction() as conn:
                 for pair, _ in members:
                     service._put('local', 'shift_owner:' + pair[0] + ':' + pair[1], {'owner': list(owner)}, conn, False)
             service.cloud.upsert_entity('shift_person', identity, payload, 'shift:' + fingerprint,
-                                        display_fields=fields, expected_app_id=app_id)
+                                        display_fields=fields, expected_app_id=app_id, **expected)
             with service.transaction() as conn:
                 for pair, row in members:
                     conn.execute('UPDATE documents SET dirty=0,retry_at=0 WHERE kind=? AND key=? AND revision=?',
                                  (*pair, row['revision']))
-                service._put('local', 'shift_cloud:' + identity, {'fingerprint': fingerprint}, conn, False)
+                service._put('local', 'shift_cloud:' + identity,
+                             {'fingerprint': fingerprint, 'personnel_only': personnel_only}, conn, False)
                 conn.execute("DELETE FROM documents WHERE kind='local' AND key=?", ('shift_summary_pending:' + identity,))
             acknowledged.update(member_pairs)
         except Exception as exc:
@@ -513,6 +530,18 @@ def sync(service, rows, limit):
                              (*pair, state.documents[pair]['revision']))
             handled.add(pair)
     legacy_fields = {}
+    if personnel_only:
+        # System state stays durable in SQLite but must not become another cloud category.
+        with service.transaction() as conn:
+            for kind, identity, revision in rows:
+                pair = (kind, identity)
+                if pair in handled or pair in errors or kind in {'question', 'attachment'}:
+                    continue
+                if kind not in KINDS or state.owner(kind, identity) is None:
+                    conn.execute('UPDATE documents SET dirty=0,retry_at=0 WHERE kind=? AND key=? AND revision=?',
+                                 (kind, identity, revision))
+                    handled.add(pair)
+        return handled, failures, legacy_fields
     for pair in due:
         if state.legacy(*pair):
             fields = history_fields(state, *pair, directory)

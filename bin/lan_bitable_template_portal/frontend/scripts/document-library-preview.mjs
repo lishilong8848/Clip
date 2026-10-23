@@ -50,7 +50,7 @@ export function documentFixture() {
     previewDelay: 0, canConfigure: true, personMultiple: false, listDelay: 0, version: 1, authReads: 0 };
 }
 export async function startDocumentLibraryPreview({ port = 0 } = {}) {
-  const outDir = path.join(root, 'dist'); await mkdir(output, { recursive: true });
+  const outDir = path.resolve(process.env.CLIPFLOW_DOCUMENT_PREVIEW_DIR || path.join(root, 'dist')); await mkdir(output, { recursive: true });
   await readFile(path.join(outDir, 'index.html'));
   const fixture = documentFixture();
   const server = createServer(async (request, response) => {

@@ -31,10 +31,11 @@ import uuid
 from .lighthouse_ai import (AssistantError, ADDRESS, API_KEY, CONTACT, ID_NUMBER,
                             protect_key, safe_text)
 from .lighthouse_message_delivery import MESSAGE_INTENT
+from .lighthouse_knowledge_extract import SUPPORTED_EXTENSIONS
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 MAX_BATCH_BYTES = 300 * 1024 * 1024
-EXTENSIONS = {'.pdf', '.docx', '.xlsx', '.xlsm', '.pptx', '.txt', '.md', '.csv', '.png', '.jpg', '.jpeg', '.webp'}
+EXTENSIONS = SUPPORTED_EXTENSIONS
 
 # Local FAISS configuration is fixed for every deployment.  No per-install
 # embedding endpoint, model name or credential is required anymore.
@@ -141,12 +142,14 @@ def _pack(vector, dim=DIMENSIONS):
 
 class KnowledgeBase:
     def __init__(self, root, *, embedder=None, protect=protect_key, extractor=None,
-                 start_worker=True, memory_index_factory=None, source_acl=None, source_current=None):
+                 start_worker=True, memory_index_factory=None, source_acl=None, source_current=None,
+                 source_summarizer=None):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = self.root / 'knowledge.sqlite3'
         self.protect = protect
         self.extractor = extractor
+        self.source_summarizer = source_summarizer
         self.source_acl = source_acl
         self.source_current = source_current
         self._worker_tasks = []
@@ -265,6 +268,10 @@ class KnowledgeBase:
                 hash TEXT NOT NULL,path TEXT NOT NULL,size INTEGER NOT NULL,created_at REAL NOT NULL,
                 PRIMARY KEY(document_id,version));
             CREATE INDEX IF NOT EXISTS versions_hash ON versions(hash);
+            CREATE TABLE IF NOT EXISTS document_analysis(
+                document_id TEXT NOT NULL,version INTEGER NOT NULL,part INTEGER NOT NULL,
+                text TEXT NOT NULL,location TEXT NOT NULL,summary TEXT NOT NULL,
+                PRIMARY KEY(document_id,version,part));
             CREATE TABLE IF NOT EXISTS chunks(
                 id INTEGER PRIMARY KEY,document_id TEXT NOT NULL,version INTEGER NOT NULL,
                 ordinal INTEGER NOT NULL,text TEXT NOT NULL,location TEXT NOT NULL);
@@ -832,7 +839,7 @@ class KnowledgeBase:
                 originals.extend(dict(version) for version in db.execute('SELECT * FROM versions WHERE document_id=?', (identity,)))
                 db.execute('DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE document_id=?)', (identity,))
                 db.execute('DELETE FROM local_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id=?)', (identity,))
-                for table in ('chunks', 'index_staging', 'source_retry', 'doc_group_members', 'source_versions', 'versions', 'document_sources'):
+                for table in ('chunks', 'index_staging', 'source_retry', 'doc_group_members', 'source_versions', 'document_analysis', 'versions', 'document_sources'):
                     db.execute(f'DELETE FROM {table} WHERE document_id=?', (identity,))
                 db.execute('DELETE FROM documents WHERE id=?', (identity,))
                 removed += 1
@@ -1048,6 +1055,42 @@ class KnowledgeBase:
             raise AssistantError('知识库原文件缺失，请重新上传文件。', 404)
         return path
 
+    def _source_sections(self, doc, version, sections):
+        if self.source_summarizer is None or not doc['source_key']:
+            return sections
+        with self.connect(readonly=True) as db:
+            row = db.execute('SELECT payload FROM source_versions WHERE document_id=? AND version=?',
+                (doc['id'], version['version'])).fetchone()
+        if row is None or json.loads(row[0]).get('kind') != 'attachment':
+            return sections
+        from .lighthouse_knowledge_summary import summary_parts
+        result = []
+        for part, section in enumerate(summary_parts(sections)):
+            if self._stop.is_set():
+                return None
+            with self.connect(readonly=True) as db:
+                current = db.execute('SELECT revision,deleted,index_token FROM documents WHERE id=?', (doc['id'],)).fetchone()
+                if not current or current['deleted'] or current['revision'] != doc['revision'] or current['index_token'] != doc['index_token']:
+                    return None
+                saved = db.execute('SELECT text,location,summary FROM document_analysis WHERE document_id=? AND version=? AND part=?',
+                    (doc['id'], version['version'], part)).fetchone()
+            summary = saved['summary'] if saved and saved['text'] == section['text'] and saved['location'] == section['location'] else ''
+            if not summary:
+                summary = self.source_summarizer(section['text'], version['name'], section['location'])
+                if not isinstance(summary, str) or not summary.strip() or len(summary) > 12000:
+                    raise AssistantError('文档摘要返回内容无效；原件已保留，将自动重试。', 503)
+                if sensitive_document(summary):
+                    raise AssistantError('文档摘要含疑似敏感信息，未公开入库。', 422, category='sensitive_document')
+                with self.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    current = db.execute('SELECT revision,deleted,index_token FROM documents WHERE id=?', (doc['id'],)).fetchone()
+                    if not current or current['deleted'] or current['revision'] != doc['revision'] or current['index_token'] != doc['index_token']:
+                        return None
+                    db.execute('INSERT OR REPLACE INTO document_analysis VALUES(?,?,?,?,?,?)',
+                        (doc['id'], version['version'], part, section['text'], section['location'], summary))
+            result.append({'text': summary, 'location': section['location'] + ' · 模型摘要'})
+        return result
+
     def process_one(self):
         # Indexing (including embedding and vector persistence) is serialized by this
         # lock.  Search never takes ``_index_lock`` so reads remain parallel.
@@ -1075,6 +1118,9 @@ class KnowledgeBase:
                 sections = (self.extractor or extract_sections)(self._path(version['path']).read_bytes(), version['name'])
                 if any(sensitive_document(section['text']) for section in sections):
                     raise AssistantError('文件含疑似身份证、住址、联系方式或凭证，未公开入库。请脱敏后替换文件。', 422, category='sensitive_document')
+                sections = self._source_sections(doc, version, sections)
+                if sections is None:
+                    return False if self._stop.is_set() else True
                 chunks = split_sections(sections)
                 if not chunks:
                     raise AssistantError('文件没有可检索的正文，未公开入库。', 422)

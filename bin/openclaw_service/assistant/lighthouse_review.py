@@ -96,6 +96,9 @@ class AnswerReviewer:
                   'files': [{key: item[key] for key in ('id', 'name') if key in item} for item in result.get('output_files', [])],
                   'downloads': _excerpt(safe_data(result.get('downloads', []))),
                   'answer': result['answer']}
+        if topic:
+            # The portal revalidates this public transcript; private operator history stays excluded.
+            packet['topic_context'] = safe_text((actor.get('_feishu_topic') or {}).get('context', ''), limit=12000)
         effective = task_question(turn, actor)
         if effective != turn['question']:
             packet['effective_question'] = effective

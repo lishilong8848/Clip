@@ -146,7 +146,10 @@ class _StreamFixture:
         self.runtime = LighthouseStream(self.portal, engine=_DummyStreamEngine())
 
     def seed_turn(self, turn, *, active_run_id=""):
-        state = {"id": "conversation-fixture", "turns": [copy.deepcopy(turn)], "active_run_id": active_run_id}
+        turn = {**copy.deepcopy(turn),
+                'source_channel': 'feishu' if self.actor.get('channel', '').startswith('feishu:') else 'web',
+                'feishu_topic': (self.actor.get('_feishu_topic') or {}).get('id', '')}
+        state = {**self.assistant._state(self.actor), "turns": [turn], "active_run_id": active_run_id}
         self.store.put_document(NAMESPACE, self.assistant._key(self.actor), state)
 
     def accept(self, question, operation_id):
@@ -480,7 +483,8 @@ class QueryIntentAsyncTests(unittest.IsolatedAsyncioTestCase):
                     "answer": "今天已发送的变更通告为0条。", "status": "completed", "scopes": ["E"]})
                 state = fixture.assistant._state(actor)
                 state["turns"].append({"operation_id": "fixture_message_0002", "question": "今天进行中的变更有几个？",
-                    "answer": "当前未结束变更4条。", "status": "completed", "scopes": ["E"]})
+                    "answer": "当前未结束变更4条。", "status": "completed", "scopes": ["E"],
+                    "source_channel": 'feishu' if channel else 'web', "feishu_topic": ""})
                 state["query_scopes"] = ["E"]
                 fixture.store.put_document(NAMESPACE, fixture.assistant._key(actor), state)
                 run, _ = fixture.accept("分别是哪些？", "fixture_message_0003")

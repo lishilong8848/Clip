@@ -500,7 +500,7 @@ class ShiftCloudIntegrationTests(unittest.TestCase):
         self.service = core.LearningService(self.temp, cloud=self.remote,
             get_login_people=self.login_directory)
 
-    def test_actual_adapter_sync_and_empty_database_restore(self):
+    def test_actual_adapter_keeps_private_details_local_across_restart(self):
         pid = 'directory:one'
         person = self.put('person', {'id': pid, 'name': '合成人员', 'scopes': ['A'], 'active': True,
                                     'login_ids': ['ou_one']})
@@ -514,13 +514,19 @@ class ShiftCloudIntegrationTests(unittest.TestCase):
         self.assertEqual(self.service.sync_pending()['pending_errors'], 0, self.service._last_error)
         rows = self.fake.records[self.table]
         self.assertEqual(sum(r['fields']['类别'] == '班次人员汇总' for r in rows), 2)
+        restarted = core.LearningService(self.temp, cloud=self.remote,
+            get_login_people=self.login_directory)
+        with patch.object(self.remote, 'load_entities', side_effect=AssertionError('private details must stay local')):
+            restarted.restore()
+        self.assertEqual(restarted._get('record', 'paper')['entries'], self.service._get('record', 'paper')['entries'])
+        self.assertEqual(restarted._get('notification', 'night')['status'], 'sent')
+        self.assertEqual(restarted._get('local', 'shift_owner:paper:paper')['owner'], [DATE, '白', pid])
         with TemporaryDirectory() as directory:
             restored = core.LearningService(directory, cloud=self.remote,
                 get_login_people=self.login_directory)
             restored.restore()
-            self.assertEqual(restored._get('record', 'paper')['entries'], self.service._get('record', 'paper')['entries'])
-            self.assertEqual(restored._get('notification', 'night')['status'], 'sent')
-            self.assertEqual(restored._get('local', 'shift_owner:paper:paper')['owner'], [DATE, '白', pid])
+            self.assertIsNone(restored._get('record', 'paper'))
+            self.assertIsNone(restored._get('notification', 'night'))
             restored.sync_pending()
             self.assertEqual(len(self.fake.records[self.table]), len(rows))
 

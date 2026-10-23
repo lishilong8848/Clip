@@ -77,14 +77,8 @@ def _card_text(card):
 
 
 def _live_card(reply):
-    text = _reply_text(reply.get('text'))
-    if reply.get('awaiting_turn') and len(text) > 3500:
-        text = text[:3500] + '\n\n[内容较长，本卡片仅展示开头。]'
+    text = '正在整理完整回答，请稍候。' if reply.get('awaiting_turn') else _reply_text(reply.get('text'))
     elements = [{'tag': 'markdown', 'content': chunk} for chunk in _reply_chunks(text)]
-    notice = ('正在生成，以上为未完成的回答。' if reply.get('awaiting_turn')
-              else reply['live_reply'].get('notice', ''))
-    if notice:
-        elements.append({'tag': 'markdown', 'content': notice})
     return {'schema': '2.0', 'config': {'update_multi': True}, 'body': {'elements': elements}}
 
 
@@ -95,9 +89,8 @@ def _live_result(previous, result, *, incomplete=False):
         for key in ('thread_route', 'thread_messages', 'thread_fallback', 'sent_parts'):
             if key in previous:
                 result.setdefault(key, copy.deepcopy(previous[key]))
-        live['notice'] = '本轮未完成，以上仅为已生成的部分内容。' if incomplete and live.get('partial', '').strip() else ''
-        if incomplete and live.get('partial') and live['partial'] not in result['text']:
-            result['text'] = live['partial'] + '\n\n' + result['text']
+        live.pop('partial', None)
+        live['notice'] = ''
     return result
 
 
@@ -678,7 +671,8 @@ class FeishuMessenger:
                 placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {}}
                 parts.append(('live:0', 'interactive', _live_card(placeholder)))
         # A form is supplementary: it must not replace the answer or its sources.
-        if live is None and (not card or text not in _card_text(card)):
+        card_text = _card_text(card)
+        if live is None and (not card_text.strip() or text not in _reply_text(card_text)):
             parts.extend((prefix if not card and index == 0 and prefix in {'attachment-stopped', 'answer:fallback'}
                           else prefix + (':text:' if card else ':') + str(index), 'interactive',
                           {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': chunk}]}})
@@ -752,7 +746,7 @@ class FeishuMessenger:
                             and delivered['thread_id'] != message['thread_id'])):
                     raise AssistantError('飞书占位回复回执话题不匹配，已停止自动重试。',
                                          403, category='feishu_delivery_permanent')
-                live.update(message_id=delivered['message_id'], updated_at=time.time())
+                live.update(message_id=delivered['message_id'], updated_at=time.time(), content=json.dumps(content, ensure_ascii=False))
             if delivered.get('thread_id'):
                 reply['thread_route'] = {'chat_id': message['chat_id'],
                     'chat_type': message['chat_type'],
@@ -1472,6 +1466,8 @@ class FeishuAssistant:
         if turn.get('status') in {'failed', 'stopped', 'cancelled', 'superseded'}:
             from openclaw_service.assistant.lighthouse_context import reply_failure
             text = reply_failure(turn.get('error'), turn.get('error_code', ''), question)
+            if turn.get('status') == 'failed' and re.fullmatch('[a-f0-9]{32}', str(turn.get('run_id') or '')):
+                text += '\n诊断编号：' + turn['run_id'][:8]
         elif turn.get('status') == 'pending':
             text = '本条消息仍在处理中，原会话和操作任务已保留，请查看原任务，不要重复提交。'
         else:
@@ -1519,11 +1515,13 @@ class FeishuAssistant:
                 return reply
             return _live_result(reply, _uncertain_reply(message['message_id']), incomplete=True)
         if turn.get('status') in {'pending', 'queued', 'running'}:
-            if (turn.get('reply_mode') == 'live' and not reply.get('has_input_files')
+            if (isinstance(reply.get('live_reply'), dict) or turn.get('reply_mode') == 'live'
+                    and not reply.get('has_input_files')
                     and not any(turn.get(key) for key in ('plan', 'sources', 'output_files', 'clarification'))):
                 live = reply.setdefault('live_reply', {})
-                live['partial'] = safe_text(turn.get('answer'), limit=120000).strip()
-                reply['text'] = live['partial'] or '正在生成回答，请稍候。'
+                live.pop('partial', None)
+                live['notice'] = ''
+            reply['text'] = '正在整理完整回答，请稍候。'
             return reply
         final = await self._turn_reply(message, request, actor, conversation, turn,
                                       reply.get('query_question') or message['question'],
@@ -2342,7 +2340,7 @@ class FeishuAssistant:
                 return saved
             from openclaw_service.assistant.lighthouse_context import reply_failure
             return _live_result(saved or {}, {'text': reply_failure(safe_text(str(exc)) if isinstance(exc, AssistantError) else '',
-                getattr(exc, 'category', ''), message.get('question', ''))})
+                getattr(exc, 'category', ''), message.get('question', '')) + '\n诊断编号：' + diagnostic})
 
     async def schedule_plan_status(self, message, plan, conversation=None, actor_id=None):
         """Register one deduplicated pending-result poll per person+plan.

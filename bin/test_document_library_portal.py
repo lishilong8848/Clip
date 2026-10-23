@@ -596,8 +596,8 @@ class DocumentLibraryWorkerTests(LibraryFixture):
     def test_worker_startup_indexes_portal_database_without_assistant_requests(self):
         from openclaw_service.assistant.routes import install_assistant_routes
         workers, libraries = [], []
-        def build_knowledge(root):
-            kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex)
+        def build_knowledge(root, **kwargs):
+            kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex, **kwargs)
             workers.append(kb)
             return kb
         def build_library(root):
@@ -607,11 +607,15 @@ class DocumentLibraryWorkerTests(LibraryFixture):
         source = self.service._table('manuals')
         self.service.save_table(self.admin, configuration(name='Worker fixture',
             expected_revision=source['revision']), key='manuals')
-        host = SimpleNamespace(state=Path(self.temp) / 'lighthouse_openclaw')
+        model = SimpleNamespace(close=Mock())
+        host = SimpleNamespace(state=Path(self.temp) / 'lighthouse_openclaw',
+            store=object(), portal_bridge=SimpleNamespace(search=Mock()))
         with patch.dict(os.environ, {'LIGHTHOUSE_AGENT_ENGINE': 'legacy'}), \
                 patch('lan_bitable_template_portal.document_library.DocumentLibraryService', side_effect=build_library), \
                 patch('openclaw_service.assistant.lighthouse_knowledge.KnowledgeBase', side_effect=build_knowledge), \
-                patch('openclaw_service.assistant.routes.LighthouseAssistant', side_effect=AssertionError('No real model')):
+                patch('openclaw_service.assistant.routes.LighthouseAssistant', return_value=SimpleNamespace(model=model)), \
+                patch('openclaw_service.assistant.lighthouse_knowledge_summary.summarize',
+                    side_effect=lambda model, text, name, location, **kwargs: text) as summarize:
             hooks = install_assistant_routes(FastAPI(), host)
             async def exercise():
                 try:
@@ -626,6 +630,9 @@ class DocumentLibraryWorkerTests(LibraryFixture):
                         self.fail('Startup worker did not index the portal source')
                     self.assertEqual(libraries[0].db_path, self.service.db_path)
                     self.assertTrue(workers[0]._worker.is_alive())
+                    self.assertTrue(callable(workers[0].source_summarizer))
+                    self.assertEqual(workers[0].source_summarizer('Fixture summary', 'fixture.txt', 'paragraph 1'), 'Fixture summary')
+                    self.assertIs(summarize.call_args.args[0], model)
                     self.assertTrue(workers[0].source_acl)
                     self.assertTrue(workers[0].source_current)
                 finally:

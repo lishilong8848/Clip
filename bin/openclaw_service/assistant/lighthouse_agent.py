@@ -1006,6 +1006,8 @@ class PortalAgent:
                       and actor.get('channel') == 'feishu:' + str(grant.get('chat_id')))
         if not plan or plan.get("owner") != actor["id"] and not shared:
             raise AssistantError("操作计划不存在或无权访问。", 404)
+        if plan.get('source_channel') and plan['source_channel'] != ('feishu' if actor.get('channel', '').startswith('feishu:') else 'web'):
+            raise AssistantError('操作计划不属于当前会话。', 404)
         topic_id = (actor.get('_feishu_topic') or {}).get('id')
         if plan.get('topic_id') != topic_id and not (shared and topic_id and grant.get('topic_id') == topic_id):
             raise AssistantError('操作计划不属于当前话题或个人会话。', 404)
@@ -2004,6 +2006,7 @@ class PortalAgent:
             raise AssistantError("必要填写较多，请分步完成此操作。")
         used_queries = set(re.findall(r'"ref"\s*:\s*"(query_[a-f0-9]{32})"', json.dumps(normalized)))
         plan = {"id": identity, "owner": actor["id"], "scopes": actor["scopes"], "turn_id": turn_id, "conversation_id": self.assistant._state(actor)["id"], "title": safe_text(decision.get("title") or "业务操作")[:120],
+                "source_channel": 'feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
                 "explanation": safe_text(decision.get("explanation", ""))[:1000], "operations": normalized, "fields": fields, "file_ids": file_ids,
                 "risk": risk, "version": 1, "status": "needs_input" if fields else "awaiting_confirmation", "created_at": time.time(), "results": [], "error": "", "_references": references or {}, "_queries": {**{key: queries[key] for key in used_queries if key in (queries or {})}, **form_queries}}
         if (actor.get('_feishu_topic') or {}).get('id'):
@@ -2119,6 +2122,8 @@ class PortalAgent:
             if payload.get("conversation_id") != state["id"]:
                 raise AssistantError("会话已变化，请重新读取。", 409)
             prior = next((t for t in state["turns"] if t["operation_id"] == operation), None)
+            if prior and not assistant._allowed(prior, actor):
+                raise AssistantError('原消息不属于当前会话或权限已变化。', 403)
             if prior and prior.get("status") == "completed":
                 return assistant.conversation(actor)
             if prior and prior.get("question") != safe_text(question.strip()):
@@ -2128,7 +2133,9 @@ class PortalAgent:
             profile = model.profile(selected["id"] if selected else "")
             state["model_id"] = profile["id"]
             turn = prior or {"operation_id": operation, "question": safe_text(question.strip()) or "请处理附件", "scopes": actor["scopes"], "at": time.time()}
-            turn.update(status="pending", error="", model_name=profile["name"], attachments=[self.files.public(self.files.get(actor, fid)) for fid in file_ids])
+            turn.update(status="pending", error="", model_name=profile["name"], attachments=[self.files.public(self.files.get(actor, fid)) for fid in file_ids],
+                        source_channel='feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
+                        feishu_topic=(actor.get('_feishu_topic') or {}).get('id', ''))
             if not prior:
                 state["turns"].append(turn)
             assistant._reserve(actor)

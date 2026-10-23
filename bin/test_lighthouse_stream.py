@@ -68,7 +68,9 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         @self.app.get("/api/repair-management/records")
         async def records(scope: str = "ALL"):
             self.reads.append(scope)
-            return {"ok": True, "data": {"scope": scope, "total": 2, "records": [{"record_id": "repair1", "scope": scope, "title": "测试维修"}]}}
+            return {"ok": True, "data": {"scope": scope, "total": 2, "records": [
+                {"record_id": "repair1", "scope": scope, "title": "测试维修"},
+                {"record_id": "repair2", "scope": scope, "title": "测试维修二"}]}}
         self.portal = PortalAgent(self.assistant, PortalAPICatalog(self.app), LighthouseFiles(self.store))
         self.engine = Engine()
         self.runtime = LighthouseStream(self.portal, engine=self.engine)
@@ -98,7 +100,8 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         turn = (await self.runtime.conversation(self.actor))['turns'][-1]
         self.assertEqual(run['status'], 'failed')
         self.assertEqual(turn['status'], 'failed')
-        self.assertIn('完整的答题名单', turn['error'])
+        self.assertIn('未能完成回答', turn['error'])
+        self.assertNotIn('答题名单', turn['error'])
         self.assertNotIn('诊断编号', turn['error'])
         self.assertNotIn('未取得可靠业务依据', turn['error'])
         self.assertEqual(turn['question'], '今天答题的都有哪些?')
@@ -233,6 +236,7 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         operation = 'feishu_' + 'a' * 40
         state = self.assistant._state(self.actor)
         turn = {'operation_id': operation, 'answer': 'Original final answer', 'status': 'completed',
+                'source_channel': 'web',
                 'scopes': self.actor['scopes'], 'access_scopes': self.actor['scopes']}
         self.store.put_document('lighthouse_messages', state['id'] + ':' + operation, turn)
         result = await self.runtime.conversation(self.actor, operation=operation)

@@ -823,8 +823,8 @@ class TestAssistantBackendProxy(unittest.IsolatedAsyncioTestCase):
         from bin.test_lighthouse_knowledge import FakeEmbedder, FakeMemoryIndex
         ready = threading.Event()
         workers = []
-        def build_knowledge(root):
-            kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex)
+        def build_knowledge(root, **kwargs):
+            kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex, **kwargs)
             workers.append(kb)
             ready.set()
             return kb
@@ -835,6 +835,7 @@ class TestAssistantBackendProxy(unittest.IsolatedAsyncioTestCase):
                 async with world.activate():
                     await world.warm(world.portal_client())
                     self.assertTrue(await asyncio.to_thread(ready.wait, 5))
+                    self.assertTrue(callable(workers[0].source_summarizer))
                     self.assertTrue(workers[0]._worker.is_alive())
             self.assertTrue(world.host.closing)
             self.assertFalse(workers[0]._worker.is_alive())

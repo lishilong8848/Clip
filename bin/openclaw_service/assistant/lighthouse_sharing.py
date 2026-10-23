@@ -107,16 +107,19 @@ def _image_sources(model, values):
         prefix = ('OCR文字：' + ocr + '\n') if ocr else ''
         budget = max(0, min(700, MAX_IMAGE_TEXT - len(prefix) - len(VISION_NOTE)))
         if profile is not None and budget:
-            try:
-                raw = model.complete([{'role': 'system', 'content': instruction + f'本图视觉观察最多{budget}字，不要重复OCR。'}, {'role': 'user', 'content': [
-                    {'type': 'text', 'text': json.dumps({'id': item['id'], 'ocr_text': ocr}, ensure_ascii=False)},
-                    {'type': 'image_url', 'image_url': {'url': item['data_url']}}]}],
-                    profile=profile, max_tokens=1500, structured=True, timeout=25)
-                value = _json(raw)
-                if isinstance(value, dict) and isinstance(value.get('text'), str):
-                    visual = _source_text(value['text'])
-            except Exception:
-                pass
+            for _ in range(2):
+                try:
+                    raw = model.complete([{'role': 'system', 'content': instruction + f'本图视觉观察最多{budget}字，不要重复OCR。'}, {'role': 'user', 'content': [
+                        {'type': 'text', 'text': json.dumps({'id': item['id'], 'ocr_text': ocr}, ensure_ascii=False)},
+                        {'type': 'image_url', 'image_url': {'url': item['data_url']}}]}],
+                        profile=profile, max_tokens=1500, structured=True, timeout=25)
+                    value = _json(raw)
+                    if isinstance(value, dict) and isinstance(value.get('text'), str):
+                        visual = _source_text(value['text'])
+                    if visual and len(visual) <= budget:
+                        break
+                except Exception:
+                    pass
         if visual and len(visual) <= budget:
             text, mode = prefix + VISION_NOTE + visual, 'vision'
         elif ocr:
@@ -184,7 +187,9 @@ def generate(model, payload):
     source, previous = payload.get('source'), payload.get('previous', [])
     count = payload.get('count')
     types = payload.get('question_types')
-    if (not isinstance(source, str) or not 200 <= len(source) <= 24000 or type(count) is not int or not 1 <= count <= 5
+    if (not isinstance(source, str) or len(source) > 24000
+            or len(source.strip()) < 200 and not any(image['mode'] in {'vision', 'ocr'} and image['text'] for image in source_images)
+            or type(count) is not int or not 1 <= count <= 5
             or not isinstance(previous, list) or len(previous) > 40 or any(not isinstance(s, str) or len(s) > 500 for s in previous)):
         raise AssistantError('分享会出题参数无效。')
     if types is not None and (not isinstance(types, list) or len(types) != count
@@ -232,14 +237,27 @@ def generate(model, payload):
             '无法修正原题时可依据材料重新生成一道同题型题。strategy=replace时必须换成材料中另一可靠知识点，不能只改写原题。'
             '两种策略均须重新核对正文和图片文字依据、图片id和答案；没有可靠且不重复的题时返回{"questions":[]}，绝不捏造或自动确认原图。'
         )
-    raw = model.complete([{'role': 'system', 'content': instruction}, {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}],
-        max_tokens=4000, structured=True)
+    messages = [{'role': 'system', 'content': instruction}, {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}]
+    profiles = [None]
     try:
-        values = _json(raw).get('questions')
-    except (ValueError, AttributeError, TypeError, RecursionError):
-        raise AssistantError('模型未返回完整题目结构，请重试或补充纪要。', 502) from None
-    if not isinstance(values, list) or len(values) > count:
-        raise AssistantError('模型返回题目数量或格式无效，请重试。', 422)
+        settings = model.settings()
+        if settings.get('enabled'):
+            profiles.extend(model.profile(item['id']) for item in settings['models']
+                if item.get('configured') and item.get('id') != settings.get('active_model_id'))
+    except Exception:
+        pass
+    # This is read-only generation; failover never changes the user's selected model.
+    for index, profile in enumerate(profiles[:4]):
+        try:
+            raw = model.complete(messages, **({'profile': profile} if profile is not None else {}),
+                max_tokens=4000, structured=True, timeout=30 if index == 0 else 20)
+            values = _json(raw).get('questions')
+            if not isinstance(values, list) or len(values) > count:
+                raise ValueError('Invalid question structure')
+            break
+        except Exception:
+            if index == len(profiles[:4]) - 1:
+                raise AssistantError('可用模型未返回完整题目，已保留资料、名单及合格题；可重试生成或直接手动录题。', 502) from None
     # The shared validator checks each question; preserve count for exhaustion detection.
     for question in values:
         if isinstance(question, dict):

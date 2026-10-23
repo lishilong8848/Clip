@@ -18,7 +18,8 @@ def _question_key(actor, message):
 
 def prepare_question_card(bot, message, actor, conversation, turn):
     clarification = turn.get('clarification')
-    if not isinstance(clarification, dict) or turn.get('plan'):
+    if (not isinstance(clarification, dict) or turn.get('plan')
+            or turn.get('status') in {'failed', 'stopped', 'cancelled', 'superseded', 'pending'}):
         return None
     options = clarification.get('options', [])
     ticket = secrets.token_urlsafe(24)

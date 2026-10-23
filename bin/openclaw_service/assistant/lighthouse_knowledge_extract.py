@@ -17,10 +17,11 @@ interesting structures are built in memory:
   * DOCX paragraph text is reconstructed only from ``w:t`` / ``w:tab`` /
     ``w:br`` nodes (never ``itertext``, which also picks up metatext), and
     table-cell paragraphs retain their table+row association where practical.
-The scanned-PDF error is explicit that this module does not bundle OCR.
+Scanned PDF pages are rendered locally and passed to the existing bounded OCR.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import csv
 import io
 import re
@@ -40,7 +41,10 @@ MAX_CHUNKS = 8_000
 BATCH_ROWS = 200
 SUPPORTED_EXTENSIONS = frozenset({
     ".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".xlsm", ".pptx",
-    ".png", ".jpg", ".jpeg", ".webp",
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+    ".log", ".json", ".xml", ".yaml", ".yml", ".tsv", ".html", ".htm", ".epub",
+    ".docm", ".dotx", ".dotm", ".xltx", ".xltm", ".pptm", ".ppsx", ".potx",
+    ".odt", ".ods", ".odp",
 })
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -55,12 +59,13 @@ def _clean(value):
 
 
 def _decode_text(content):
-    for encoding in ("utf-8-sig", "gb18030"):
+    encodings = ("utf-16",) if content.startswith((b'\xff\xfe', b'\xfe\xff')) else ("utf-8-sig", "gb18030")
+    for encoding in encodings:
         try:
             return content.decode(encoding)
         except UnicodeDecodeError:
             continue
-    raise AssistantError("无法识别文本编码，请另存为UTF-8或GB18030后重新上传。")
+    raise AssistantError("无法识别文本编码，请另存为UTF-8、UTF-16或GB18030后重新上传。")
 
 
 def _paragraphs(text):
@@ -281,16 +286,7 @@ def _docx_sections(content, filename):
     return sections
 
 
-def _pdf_page_need_ocr(page_no):
-    # pypdf can return '' for scanned pages.  This module intentionally does
-    # NOT bundle/render OCR (fitz is not part of the runtime), so we fail
-    # explicitly instead of indexing a blank page or fabricating content.
-    raise AssistantError(
-        f"PDF第{page_no}页未提取到文字，疑似扫描件；本系统不支持PDF内置OCR，"
-        "请转换为带文字层的PDF，或先用其他OCR识别后再上传。")
-
-
-def _pdf_sections(content, filename):
+def _pdf_sections(content, filename, ocr=None):
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(content))
     if reader.is_encrypted:
@@ -299,14 +295,88 @@ def _pdf_sections(content, filename):
         raise AssistantError(f"PDF超过{MAX_PAGES}页，请拆分文件后上传。")
     sections = []
     total_chars = 0
-    for index, page in enumerate(reader.pages, 1):
-        block = (page.extract_text() or "").strip()
-        if not block:
-            _pdf_page_need_ocr(index)
-        total_chars += len(block)
-        if total_chars > MAX_CHARS:
-            raise AssistantError("文档提取文字超过200万字符上限，请拆分文件后上传。")
-        sections.append({"text": block, "location": f"{filename}:第{index}页"})
+    rendered = None
+    try:
+        for index, page in enumerate(reader.pages, 1):
+            block = (page.extract_text() or "").strip()
+            location = f"{filename}:第{index}页"
+            if not block:
+                if page.get_contents() is None and not page.get('/Annots'):
+                    continue
+                try:
+                    import pypdfium2
+                    if rendered is None:
+                        rendered = pypdfium2.PdfDocument(content)
+                    with closing(rendered[index - 1]) as pdf_page:
+                        width, height = pdf_page.get_size()
+                        if not 0 < max(width, height) < 1_000_000:
+                            raise ValueError('invalid page size')
+                        bitmap = pdf_page.render(scale=min(2, 2400 / max(width, height)))
+                        try:
+                            with bitmap.to_pil() as image:
+                                output = io.BytesIO()
+                                image.save(output, format='PNG')
+                            block = _clean((ocr or recognize_text)(output.getvalue()))
+                        finally:
+                            bitmap.close()
+                except Exception as exc:
+                    raise AssistantError(f"PDF第{index}页OCR未完成，请检查本地识别组件后重试。", 503) from exc
+                if not block:
+                    raise AssistantError(f"PDF第{index}页OCR未识别到文字，请检查扫描清晰度或补充正文。", 422)
+                location += '（OCR）'
+            total_chars += len(block)
+            if total_chars > MAX_CHARS:
+                raise AssistantError("文档提取文字超过200万字符上限，请拆分文件后上传。")
+            sections.append({"text": block, "location": location})
+    finally:
+        if rendered is not None:
+            rendered.close()
+    if not sections:
+        raise AssistantError('PDF未提取到文字；空白页无需OCR，请上传含正文的文件。', 422)
+    return sections
+
+
+def _converted_sections(content, filename):
+    suffix = Path(filename).suffix.lower()
+    if suffix in ('.odt', '.ods', '.odp'):
+        _check_archive(content)
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            root = ElementTree.fromstring(archive.read('content.xml'))
+        paragraphs = root.iter()
+        text = '\n'.join(''.join(node.itertext()) for node in paragraphs
+            if node.tag in ('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p',
+                            '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}h'))
+    elif suffix in ('.html', '.htm'):
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(_decode_text(content), 'html.parser')
+        for node in soup(['script', 'style', 'noscript']):
+            node.decompose()
+        text = soup.get_text('\n', strip=True)
+    else:
+        _check_archive(content)
+        from markitdown import StreamInfo
+        from markitdown.converters import EpubConverter
+        text = EpubConverter().convert(io.BytesIO(content), StreamInfo(extension=suffix)).markdown
+    return _text_sections(text.encode('utf-8'), filename)
+
+
+def _tiff_sections(content, filename, ocr):
+    from PIL import Image
+    sections = []
+    with Image.open(io.BytesIO(content)) as image:
+        if image.n_frames > MAX_PAGES:
+            raise AssistantError(f'TIFF超过{MAX_PAGES}页，请拆分文件。', 413)
+        for index in range(image.n_frames):
+            image.seek(index)
+            if image.width * image.height > 40_000_000:
+                raise AssistantError('图片像素过大，请缩小后上传。', 413)
+            output = io.BytesIO()
+            with image.convert('RGB') as frame:
+                frame.thumbnail((2400, 2400))
+                frame.save(output, format='PNG')
+            section = _image_sections(output.getvalue(), filename, ocr)[0]
+            section['location'] = f'{filename}:第{index + 1}页（OCR）'
+            sections.append(section)
     return sections
 
 
@@ -419,6 +489,19 @@ def _image_sections(content, filename, ocr):
 
 def _pptx_sections(content, filename):
     _check_archive(content)
+    if Path(filename).suffix.lower() != '.pptx':
+        # Variants share the package structure; normalize its type in memory, never execute VBA.
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(content)) as source, zipfile.ZipFile(output, 'w') as target:
+            for item in source.infolist():
+                body = source.read(item)
+                if item.filename == '[Content_Types].xml':
+                    for variant in (b'application/vnd.ms-powerpoint.presentation.macroEnabled.main+xml',
+                            b'application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml',
+                            b'application/vnd.openxmlformats-officedocument.presentationml.template.main+xml'):
+                        body = body.replace(variant, b'application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml')
+                target.writestr(item, body)
+        content = output.getvalue()
     from pptx import Presentation
     slides = Presentation(io.BytesIO(content)).slides
     if len(slides) > 100:
@@ -457,20 +540,24 @@ def extract_sections(content, filename, *, ocr=None):
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise AssistantError(
-            "不支持的文件类型，仅支持 txt/md/csv/pdf/docx/xlsx/xlsm/pptx 以及图片。")
+            "不支持的文件类型，尚无可用的正文解析器，请另存为PDF、DOCX、XLSX、PPTX或文本后重试；原件保留。")
 
-    if suffix in (".png", ".jpg", ".jpeg", ".webp"):
+    if suffix in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
         sections = _image_sections(content, filename, ocr)
+    elif suffix in ('.tif', '.tiff'):
+        sections = _tiff_sections(content, filename, ocr)
     elif suffix == ".pdf":
-        sections = _pdf_sections(content, filename)
-    elif suffix == ".docx":
+        sections = _pdf_sections(content, filename, ocr)
+    elif suffix in (".docx", ".docm", ".dotx", ".dotm"):
         sections = _docx_sections(content, filename)
-    elif suffix == '.pptx':
+    elif suffix in ('.pptx', '.pptm', '.ppsx', '.potx'):
         sections = _pptx_sections(content, filename)
-    elif suffix in (".xlsx", ".xlsm"):
+    elif suffix in (".xlsx", ".xlsm", ".xltx", ".xltm"):
         sections = _xlsx_sections(content, filename)
     elif suffix == ".csv":
         sections = _csv_sections(content, filename)
+    elif suffix in ('.html', '.htm', '.epub', '.odt', '.ods', '.odp'):
+        sections = _converted_sections(content, filename)
     else:
         sections = _text_sections(content, filename)
 

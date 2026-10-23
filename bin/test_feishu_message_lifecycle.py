@@ -282,7 +282,8 @@ class TopicInferenceIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(personal['turns']), 1)
         self.assertEqual(personal['turns'][0]['question'], 'private web secret fixture')
         private_actor = {**self.person, 'channel': 'feishu:oc_Private'}
-        self.assertEqual(self.assistant._key(private_actor), self.assistant._key(self.person))
+        self.assertNotEqual(self.assistant._key(private_actor), self.assistant._key(self.person))
+        self.assertEqual(self.assistant._state(private_actor)['turns'], [])
         self.assertNotEqual(self.assistant._key(first), self.assistant._key(self.person))
 
     async def test_topic_model_sessions_change_with_public_view_and_never_reuse_personal_native_history(self):
@@ -294,6 +295,31 @@ class TopicInferenceIsolationTests(unittest.IsolatedAsyncioTestCase):
         changed = OpenClawToolAgent(engine, actor, {**turn, 'run_id': 'run-two'}, AsyncMock(), {}, instructions='policy')
         self.assertNotEqual(private.session_key, first.session_key)
         self.assertNotEqual(first.session_key, changed.session_key)
+
+    async def test_channel_upgrade_rotates_native_history_once_without_deleting_old_session(self):
+        engine = _fake_engine()
+        engine.assistant._state = Mock(return_value={'id': 'existing-conversation'})
+        turn = {'operation_id': 'original-operation'}
+        before = OpenClawToolAgent(engine, self.person, turn, AsyncMock(), {}, instructions='policy')
+        engine.assistant._state.return_value = {'id': 'existing-conversation', 'channel_isolated': True}
+        after = OpenClawToolAgent(engine, self.person, turn, AsyncMock(), {}, instructions='policy')
+        restarted = OpenClawToolAgent(engine, self.person, turn, AsyncMock(), {}, instructions='policy')
+        self.assertNotEqual(before.session_key, after.session_key)
+        self.assertEqual(after.session_key, restarted.session_key)
+
+    async def test_topic_followup_uses_latest_public_discussion_not_owners_older_private_execution(self):
+        actor = self.topic_actor()
+        await self.ask(actor, '查询今天D楼的事件')
+        state = self.assistant._state(actor)
+        state['turns'][-1]['learning_query'] = {'date': '2000-01-01'}
+        self.store.put_document('lighthouse_ai', self.assistant._key(actor), state)
+        actor['_feishu_topic']['context'] = '另一位参与人问：夜班有多少人上班？公开回答：夜班14人。'
+        await self.ask(actor, '分别是哪些？')
+        turn = self.engine.calls[-1]['turn']
+        self.assertIn('夜班14人', turn['prompt'])
+        self.assertNotIn('查询今天D楼的事件', turn['prompt'])
+        self.assertIsNone(turn['_learning_followup_query'])
+        self.assertEqual(self.engine.calls[-1]['history'], [])
 
     async def test_topic_scope_or_module_revocation_prevents_old_prompt_reuse(self):
         actor = self.topic_actor(context='private-to-D document')

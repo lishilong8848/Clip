@@ -33,6 +33,7 @@ try {
       if(p==='/api/health')return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,service:'clipflow_backend',instance_id:'sharing-fixture'})});
       if(p==='/api/auth/status')return ok({logged_in:true,user:{open_id:actor==='admin'?'ou_admin':'ou_one',name:'测试用户',role:actor==='admin'?'admin':'user',modules:['learning']},scope_options:[{value:'A',label:'A楼'}]});
       if(p==='/api/assistant/appearance')return ok({enabled:false});
+      if(p==='/api/assistant/icon-weather')return ok({enabled:false});
       if(p==='/api/handover-links')return ok({links:{}});
       if(p==='/api/auth/permission-requests/current')return ok({});
       if(p==='/api/scope-overview')return ok({scopes:{}});

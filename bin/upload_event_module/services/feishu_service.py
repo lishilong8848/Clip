@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import quote
 from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
 
-from ..config import SPECIALTY_FIRE, config
+from ..config import CHANGE_NOTICE_FIELDS, SPECIALTY_FIRE, STATUS_END, config
 from ..logger import log_error, log_info, log_warning
 from .feishu_token_manager import (
     TOKEN_ERROR_CODES,
@@ -816,6 +816,9 @@ def create_bitable_record_by_payload(notice_type: str, payload: NoticePayload, *
     fields = _filter_missing_optional_fields(
         notice_type, handler.build_create_fields(payload)
     )
+    confirmation_error = _change_end_confirmation_error(target_record_id, notice_type, fields)
+    if confirmation_error:
+        return False, confirmation_error
     setattr(payload, "_clipflow_written_fields", dict(fields or {}))
     if target_record_id:
         ok, result = update_bitable_record_fields(target_record_id, notice_type, fields)
@@ -927,6 +930,9 @@ def batch_create_bitable_records_by_payload(notice_type: str, payloads: list[Not
         )
         for payload in payloads
     ]
+    errors = [_change_end_confirmation_error("", notice_type, fields) for fields in fields_list]
+    if any(errors):
+        return [(False, error or "本批次存在未满足结束条件的变更通告，未发送。") for error in errors]
     if _info_logging_enabled():
         log_info(f"Batch creating records({notice_type}) count={len(fields_list)}")
 
@@ -1118,6 +1124,30 @@ def update_bitable_record(
                 f"NoticeTiming update: type={notice_type}, record_id={record_id}, elapsed_s={elapsed:.2f}"
             )
 
+
+def _change_end_confirmation_error(record_id: str, notice_type: str, fields: dict) -> str:
+    if notice_type != "变更通告" or fields.get(CHANGE_NOTICE_FIELDS["status"]) != STATUS_END:
+        return ""
+    field_name = CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]
+    images = fields.get(field_name)
+    if images is None and record_id:
+        # Only the exact target's current attachments count, not cached UI counts.
+        ok, record = query_record_by_id(record_id, notice_type)
+        if (
+            not ok or not isinstance(record, dict)
+            or not isinstance(record.get("fields"), dict) or not record["fields"]
+            or (record.get("record_id") and record["record_id"] != record_id)
+        ):
+            return "暂时无法核验目标变更通告的阿里确认截图，未发送结束，请稍后重试。"
+        images = record["fields"].get(field_name)
+    if isinstance(images, list) and any(
+        isinstance(image, dict) and str(image.get("file_token") or "").strip()
+        for image in images
+    ):
+        return ""
+    return "结束变更通告前必须上传至少一张阿里确认截图，现场照片不能代替。"
+
+
 def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: NoticePayload):
     """
     通过 NoticePayload 更新多维表记录
@@ -1136,6 +1166,9 @@ def update_bitable_record_by_payload(record_id: str, notice_type: str, payload: 
     fields = _filter_missing_optional_fields(
         notice_type, handler.build_update_fields(payload)
     )
+    confirmation_error = _change_end_confirmation_error(record_id, notice_type, fields)
+    if confirmation_error:
+        return False, confirmation_error
     setattr(payload, "_clipflow_written_fields", dict(fields or {}))
     if _info_logging_enabled():
         log_info(f"Updating record({notice_type}) {record_id} with fields: {fields}")
@@ -1189,6 +1222,12 @@ def batch_update_bitable_records_by_payload(notice_type: str, updates: list[tupl
         )
         for _record_id, payload in normalized
     ]
+    errors = [
+        _change_end_confirmation_error(record_id, notice_type, fields)
+        for (record_id, _payload), fields in zip(normalized, fields_list)
+    ]
+    if any(errors):
+        return [(False, error or "本批次存在未满足结束条件的变更通告，未发送。") for error in errors]
     client = _build_client()
     records = [
         AppTableRecord.builder().record_id(record_id).fields(fields).build()

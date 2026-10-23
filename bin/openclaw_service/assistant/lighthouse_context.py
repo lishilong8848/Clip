@@ -334,10 +334,10 @@ def reply_failure(detail, category='', question=''):
     category = str(category or '')
     if re.search(r'(?:原任务|操作|业务)(?:的)?(?:执行)?(?:结果|状态)尚未确认', detail):
         return '原任务结果尚未确认，已保留当前记录。请先查看原任务状态，不要重复提交。'
+    if category == 'model_validation':
+        return '本次回答未通过资料核验，暂时不能作为可靠结论。原问题已保留。'
     generic = re.search(r'未取得可靠业务依据|模型(?:运行|未|处理)|原回答|完整终答|可见回答|查询处理遇到程序异常', detail)
     if category.startswith('model_') or category in {'timeout', 'query_adapter'} or generic:
-        if re.search(r'答题|学练|做题|考试', question):
-            return '这次还没能取得完整的答题名单，不能把不完整记录当作全部人数。可先在“画像学练”的历史记录中查看已提交记录；原问题已保留。'
         if category == 'model_context':
             return '这段对话的资料较多，精简上下文后仍未能完成回答。聊天记录和已提交任务没有删除；可把长资料作为附件提供，并指出本次最需要处理的部分。'
         return '这次未能完成回答，原消息已保留。可以稍后重试原消息或切换可用模型；如涉及业务提交，请先查看原任务状态，避免重复操作。'

@@ -52,6 +52,15 @@ ENTITY_KIND_LABELS = {
 ENTITY_KIND_ALIASES = {label: kind for kind, label in ENTITY_KIND_LABELS.items()}
 SHIFT_ENTITY_KINDS = {"paper", "record", "reserve", "notification", "engagement",
                       "sharing_attempt", "sharing_delivery", "daily_progress"}
+PERSONNEL_SUMMARY_LABELS = {
+    "date": "日期", "shift": "班次", "person_id": "人员标识", "name": "姓名", "scopes": "楼栋",
+    "status": "完成状态", "assigned": "应答题数", "answered": "已答题数", "correct": "正确题数",
+    "objective_answered": "已答客观题数", "answer_viewed": "看答案后作答数",
+    "answer_view_unknown": "辅助作答无法细分数", "practice_questions": "主动练习量",
+    "review_count": "复习次数", "updated_at": "更新时间",
+    "delivery_status": "题单发送状态",
+}
+PERSONNEL_FIELDS = {"题单发送状态": 1}
 MAX_TEXT_LENGTH = 100_000
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 DOCUMENT_SCHEMA = "learning.entity.gzip"
@@ -207,7 +216,7 @@ def _checked_display_fields(fields):
         return {}
     if not isinstance(fields, dict):
         raise ValueError("汇总展示字段必须是对象")
-    allowed, result = _display_field_types(), {}
+    allowed, result = {**_display_field_types(), **PERSONNEL_FIELDS}, {}
     for name, value in fields.items():
         kind = allowed.get(name)
         if kind is None:
@@ -259,6 +268,7 @@ def _same_fields(expected, actual):
 
 class LearningCloud:
     shift_storage_enabled = True
+    personnel_only_storage = True
 
     def __init__(self, *, enabled=False, http_client=None):
         self.enabled = enabled
@@ -697,15 +707,31 @@ class LearningCloud:
         if not table:
             raise LearningCloudError("画像学练数据原表尚未就绪，保留 pending 等待管理员核验")
         fields = self._fields(table)
-        expected = _display_field_types()
-        required = expected if shift else {name: expected[name] for name in display_fields}
+        expected = {**_display_field_types(), **PERSONNEL_FIELDS}
+        required = ({name: kind for name, kind in expected.items() if name not in PERSONNEL_FIELDS or name in display_fields}
+                    if shift else {name: expected[name] for name in display_fields})
         try:
             self._check_fields(fields, {**ENTITY_FIELDS, **required}, required=True)
         except LearningCloudError as exc:
             raise LearningCloudError(f"{exc}；汇总保留 pending 等待管理员核验") from None
         return table
 
-    def upsert_entity(self, kind, key, payload, operation_id, *, display_fields=None, expected_app_id=None):
+    def ensure_personnel_schema(self):
+        self._require_write()
+        with self._entity_operation():
+            table = self._find_entity_table()
+            if not table:
+                raise LearningCloudError('画像学练原表尚未就绪，未接入其它表。')
+            fields = self._fields(table)
+            self._check_fields(fields, PERSONNEL_FIELDS)
+            for name, kind in PERSONNEL_FIELDS.items():
+                if name not in fields:
+                    self._request('POST', f'tables/{table}/fields', {'field_name': name, 'type': kind},
+                                  {'client_token': _client_token('field', table, name)})
+            self._check_fields(self._fields(table), PERSONNEL_FIELDS, required=True)
+
+    def upsert_entity(self, kind, key, payload, operation_id, *, display_fields=None, expected_app_id=None,
+                      expected_previous_sha256=None):
         self._require_write()
         _nonempty(operation_id, "operation_id")
         kind = _entity_kind(kind)
@@ -718,6 +744,13 @@ class LearningCloud:
                                          or "完整明细" in payload and "记录说明" in payload):
             raise ValueError("实体 payload 不得使用保留的压缩文档 schema_marker")
         content = _json_text(payload, "内容", check_length=False)
+        personnel_summary = kind == "shift_person" and not payload["entities"]
+        if personnel_summary:
+            if set(payload["summary"]) - PERSONNEL_SUMMARY_LABELS.keys():
+                raise LearningCloudError("人员汇总包含非汇总内容，未将内部资料写入原表")
+            content = _json_text({"人员班次答题情况": {
+                PERSONNEL_SUMMARY_LABELS[name]: value for name, value in payload["summary"].items()
+            }}, "内容")
         try:
             raw = content.encode("utf-8")
         except UnicodeEncodeError:
@@ -771,13 +804,23 @@ class LearningCloud:
             previous = None
             if existing.get("内容"):
                 try:
-                    previous = _document_pointer(json.loads(_text(existing["内容"])))
+                    original = json.loads(_text(existing["内容"]))
+                    if expected_previous_sha256 is not None:
+                        previous_payload = self._load_entity_document(original)
+                        checksum = _payload_digest(previous_payload)
+                        summary_only = (kind == 'shift_person' and isinstance(previous_payload, dict)
+                                        and previous_payload.get('entities') == []
+                                        and all(previous_payload.get(name) == payload.get(name)
+                                                for name in ('date', 'shift', 'person_id')))
+                        if not summary_only and checksum not in {expected_previous_sha256, _payload_digest(payload)}:
+                            raise LearningCloudConflict("云端班次明细已变化，未覆盖；请先重新备份核验")
+                    previous = _document_pointer(original)
                 except (ValueError, TypeError):
                     raise LearningCloudError("云端实体内容不是有效 JSON，无法确认已有文档指针") from None
             refs = [a for a in _attachment_refs(existing.get("附件") or [])
                     if not previous or a.get("file_token") != previous["file_token"]]
             refs.extend(fields.get("附件", []))
-            if kind == "shift_person" or len(content) > MAX_TEXT_LENGTH:
+            if kind == "shift_person" and not personnel_summary or len(content) > MAX_TEXT_LENGTH:
                 sha = hashlib.sha256(raw).hexdigest()
                 pointer = next((p for p in (previous, self._pending_documents.get((kind, key)))
                                 if p and p["sha256"] == sha and p["raw_bytes"] == len(raw)), None)
@@ -801,6 +844,10 @@ class LearningCloud:
                 content = _json_text(visible_pointer, "内容")
                 refs.append({"file_token": pointer["file_token"]})
             fields["内容"] = content
+            if personnel_summary:
+                # The original document has been archived locally before replacing its pointer.
+                refs = []
+                fields["附件"] = []
             if refs or "附件" in fields or previous:
                 fields["附件"] = _attachment_refs(refs)
             result = self._write_record(table, fields, operation_id, [kind, key], rows[0]["record_id"] if rows else None)
@@ -837,6 +884,16 @@ class LearningCloud:
             return self._write_record(table, fields, "enrich", [kind, key], record_id)
 
     def _load_entity_document(self, value):
+        if isinstance(value, dict) and set(value) == {"人员班次答题情况"}:
+            summary = value["人员班次答题情况"]
+            names = {label: name for name, label in PERSONNEL_SUMMARY_LABELS.items()}
+            if not isinstance(summary, dict) or set(summary) - names.keys():
+                raise LearningCloudError("人员班次汇总字段无效，未返回部分数据")
+            summary = {names[name]: item for name, item in summary.items()}
+            value = {"schema_version": 1, "entities": [], "summary": summary,
+                     **{name: summary.get(name) for name in ("date", "shift", "person_id")}}
+            _shift_entities(value)
+            return value
         pointer = _document_pointer(value)
         if pointer is None:
             return value
@@ -855,7 +912,7 @@ class LearningCloud:
         except (ValueError, RecursionError):
             raise LearningCloudError("解压实体文档不是有效 UTF-8 JSON，未返回部分数据") from None
 
-    def list_entity_records(self):
+    def list_entity_records(self, *, include_fields=False):
         table = self._find_entity_table()
         if not table:
             return []
@@ -881,11 +938,13 @@ class LearningCloud:
                 display_name = ''
             result.append({"record_id": row["record_id"], "kind": kind, "key": key, "display_name": display_name,
                            "payload": payload, "payload_sha256": _payload_digest(payload)})
+            if include_fields:
+                result[-1]["fields"] = copy.deepcopy(fields)
         return result
 
-    def load_entities(self):
+    def load_entities(self, records=None):
         result, bundled, groups = {}, {}, set()
-        for row in self.list_entity_records():
+        for row in self.list_entity_records() if records is None else records:
             kind, key, payload = row["kind"], row["key"], row["payload"]
             if kind != "shift_person":
                 result[(kind, key)] = {"kind": kind, "key": key, "payload": payload}
@@ -901,6 +960,31 @@ class LearningCloud:
                 bundled[identity] = {**entity, "storage_owner": list(group)}
         result.update(bundled)
         return list(result.values())
+
+    def delete_archived_entity(self, row, *, expected_app_id):
+        self._require_write()
+        record_id = _identifier(row.get("record_id"), "record_id", r"rec[A-Za-z0-9]+")
+        if row.get("kind") in {"shift_person", "paper", "record", "sharing_attempt", "daily_progress"}:
+            raise LearningCloudError("人员答题历史及班次汇总不得作为系统记录清理")
+        with self._entity_operation(expected_app_id):
+            table = self._find_entity_table()
+            if not table:
+                raise LearningCloudError("原表尚未就绪，未清理历史记录")
+            data = self._request("GET", f"tables/{table}/records/{record_id}", params={"user_id_type": "open_id"})
+            actual = data.get("record")
+            fields = actual.get("fields") if isinstance(actual, dict) else None
+            if (not isinstance(fields, dict) or actual.get("record_id") != record_id
+                    or _entity_kind(_text(fields.get("类别"))) != row.get("kind")
+                    or _text(fields.get("业务键")) != row.get("key")
+                    or _payload_digest(fields) != _payload_digest(row.get("fields"))):
+                raise LearningCloudConflict("历史记录已变化，未清理；等待重新备份核验")
+            payload = self._load_entity_document(json.loads(_text(fields.get("内容"))))
+            if _payload_digest(payload) != row["payload_sha256"]:
+                raise LearningCloudConflict("历史记录内容已变化，未清理")
+            data = self._request("DELETE", f"tables/{table}/records/{record_id}")
+            if data.get("deleted") is not True or data.get("record_id") != record_id:
+                raise LearningCloudWriteUncertain("历史清理结果尚未确认，保留本地备份并稍后核对")
+            return data
 
     def upload_attachment(self, path, name):
         self._require_write()
@@ -945,18 +1029,21 @@ class LearningCloud:
         for attempt in range(2):
             self._check_entity_credentials()
             try:
-                content, _ = self._http.request_bytes(
+                content, content_type = self._http.request_bytes(
                     "GET", f"{API_ROOT}/drive/v1/medias/{token}/download",
                     headers=headers, retries=0, max_bytes=max_bytes,
                 )
                 self._check_entity_credentials()
-                if len(content) > max_bytes:
-                    raise LearningCloudError("附件超过 max_bytes")
+                if not content or len(content) > max_bytes:
+                    raise LearningCloudError("附件为空或超过 max_bytes")
                 try:
                     payload = json.loads(content) if len(content) <= 65536 else {}
                 except (ValueError, UnicodeError):
                     payload = {}
                 if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] not in TOKEN_ERRORS:
+                    if ("application/json" in content_type.lower() and isinstance(payload, dict)
+                            and type(payload.get("code")) is int and payload["code"] != 0):
+                        raise LearningCloudError(f"附件下载被飞书拒绝：code={payload['code']}，未将错误响应保存为文件")
                     return content
                 if attempt:
                     raise LearningCloudError("附件下载授权已失效")

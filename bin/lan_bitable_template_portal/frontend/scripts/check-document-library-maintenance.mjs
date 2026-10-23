@@ -130,6 +130,38 @@ async function checkDist() {
     await textIncludes(summary(), '已选择 0 条');
     checks.push('all uses current applied q/scope across pages; changed filter clears selection');
 
+    for (const version of ['legacy', 'v2']) {
+      await reset(); await open(version);
+      await button('字段筛选').click();
+      await page.locator('.document-filter-row .n-select').nth(0).click();
+      await page.locator('.n-base-select-option').filter({ hasText: '文件页数' }).click();
+      await page.locator('.document-filter-row .n-select').nth(1).click();
+      await page.locator('.n-base-select-option').filter({ hasText: '不小于' }).click();
+      await page.locator('.document-filter-row .n-input-number input').fill('31');
+      await button('查询').click(); await ready();
+      await textIncludes(page.locator('.document-pagination'), '匹配 73 条');
+      await button('第 2 页资料').click(); await ready(); assert.equal(listCalls().at(-1).query.cursor, '30');
+      await button('选择全部匹配记录（跨页）').click(); await button('重新向量化选中').click();
+      await textIncludes(dialog(), '文件页数 不小于 31');
+      await dialog().getByRole('button', { name: '确认重新向量化', exact: true }).click();
+      await textIncludes(page.locator('.document-library'), '73 条记录');
+      assert.deepEqual(fixture.mutations.at(-1).body.filters, [{ field: 'fldCount', op: 'gte', value: 31 }]);
+      assert.deepEqual(JSON.parse(listCalls().at(-1).query.filters), fixture.mutations.at(-1).body.filters);
+      for (const viewport of viewports) { await page.setViewportSize(viewport); await capture(`${version}-field-filter-${viewport.width}x${viewport.height}`); }
+      await page.setViewportSize(viewports[0]);
+      await page.clock.install(); fixture.listDelay = 700;
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+      const started = page.waitForRequest(request => new URL(request.url()).pathname.endsWith('/records'));
+      await page.clock.fastForward(120_001); await started;
+      assert.equal(await button('选择本页').isEnabled(), true);
+      assert.equal(await button('第 1 页资料').isEnabled(), true);
+      assert.equal(await button('字段筛选').isEnabled(), true);
+      await button('选择本页').click(); await textIncludes(summary(), '已选择 30 条');
+      assert.equal(await page.locator('.document-loading').count(), 0);
+      await page.waitForTimeout(800);
+      checks.push(`${version}: native numeric field filter, numbered pagination, filtered cross-page selection and interactive silent refresh`);
+    }
+
     await reset(); await open();
     fixture.mutationDelay = 500; fixture.loseReceipt = true;
     await page.evaluate(() => Object.defineProperty(window.crypto, 'randomUUID', { value: undefined, configurable: true }));

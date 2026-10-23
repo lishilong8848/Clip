@@ -43,7 +43,7 @@ DOMAINS = (
     ("learning", r"学练|题单|答题|错题", "画像学练", "只查询原权限内题单、进度、未答数量、历史和复习资料；未发布与已发布未答分开。答题、答案提示、编辑、发布和质疑提交走原页面，不在助手办理。"),
     ("daily", r"日常|每日任务|晨会|日报|工作报告", "日常工作", "日常任务、工作报告和晨会不是事件通告，按相应日期及状态。"),
     ("convergence", r"收敛|智航|核对台|规则配置", "计划收敛审查", "规则、核对结果、告警及检修核对分开，不把命中规则数当事件数。"),
-    ("people", r"人员|工号|值班账号|签名", "人员", "只提供授权姓名和工号；不提供签名图片、身份证、住址和凭证。"),
+    ("people", r"人员|工号|值班账号|排班|白班|夜班|当班|上班|出勤|签名", "人员", "排班人数与名单必须读取对应日期和班次的真实资料，不等同实时签到。只提供授权姓名和工号；不提供签名图片、身份证、住址和凭证。"),
     ("history", r"通告历史|历史通告", "通告历史", "查询历史记录，不用当前未完成数据代替。"),
 )
 
@@ -117,6 +117,12 @@ def query_refinement(text):
     if len(text) > 150 or MODEL_QUESTION.fullmatch(text) or re.search(r"你是谁|你(?:还有|能|会|是).*能力|什么(?:模型|能力)|你好|翻译|写一|解释一下", text):
         return False
     if re.fullmatch(r'(?:请|需要|可以|那就|帮我)?(?:联网|上网)(?:查(?:询|一下)?|搜(?:索|一下)?|核对(?:一下)?|核实(?:一下)?)?[。！!？?\s]*', text):
+        return True
+    # A bare read retry names no subject or date; it only repeats the already authorized question.
+    if re.fullmatch(r'(?:(?:请|麻烦|帮我|帮忙|再|你|您|先|继续|重新)[，,]?\s*)*'
+                    r'(?:查看|查阅|查找|查查|查|检索|核实|核对|确认|复查|复核|看看)(?:一下|一遍|下)?'
+                    r'(?:再|又)?(?:查看|查阅|查找|查查|查|检索|核实|核对|确认|复查|复核|看看)?(?:一下|一遍|下)?'
+                    r'(?:吧|呢|嘛)?[。！!？?\s]*', text):
         return True
     if re.search(r"^(?:那|那么|现在)?(?:只看|仅看|只要|仅限|也看|也包括|加上|再加上|还是|改为|改成)", text):
         return True
@@ -215,6 +221,7 @@ QUERY_PAGE_SCHEMAS = {
     "GET /api/assistant/work-orders": (("items", "", "page", "page_size", "work_orders"),),
     "GET /api/assistant/question-bank": (("items", "", "page", "page_size", "question_versions"),),
     "GET /api/learning/history": (("items", "", "page", "page_size", "papers"),),
+    "GET /api/learning/completion": (("items", "", "page", "page_size", "person_days"),),
     "GET /api/learning/papers": (("items", "", "page", "page_size", "papers"),),
 }
 

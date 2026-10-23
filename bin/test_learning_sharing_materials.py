@@ -186,7 +186,8 @@ class SharingMaterialsTests(unittest.TestCase):
     def test_pdf_ocr_fills_all_missing_pages_not_just_first_excerpt(self):
         service = SharingMaterials(self.learning)
         item = service.upload(ADMIN, 'scan.pdf', b'fixture-pdf')
-        def parse(kind, payload):
+        def parse(kind, payload, **options):
+            self.assertIsNone(options['max_bytes'])
             if kind == 'markdown':
                 return {'text': '', 'references': [], 'extraction_complete': False, 'total_pages': 3, 'empty': True}
             return {'text': f'OCR page {payload["page"]}', 'low_confidence_count': 1}
@@ -223,8 +224,9 @@ class SharingMaterialsTests(unittest.TestCase):
         for text in ('first page', 'END_PDF'):
             canvas.drawString(50, 700, text); canvas.showPage()
         canvas.save(); documents.append(('file.pdf', buffer.getvalue(), 'END_PDF'))
-        def existing_worker(kind, payload):
+        def existing_worker(kind, payload, **options):
             self.assertEqual(kind, 'markdown')
+            self.assertIsNone(options['max_bytes'])
             path = Path(payload['path'])
             return document_markdown(path.read_bytes(), path.suffix)
         with patch('openclaw_service.assistant.lighthouse_document_tools.run_local', side_effect=existing_worker):

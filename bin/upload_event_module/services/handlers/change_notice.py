@@ -218,6 +218,16 @@ class ChangeNoticeHandler(BaseNoticeHandler):
         if progress:
             fields[CHANGE_NOTICE_FIELDS["progress"]] = progress
 
+        if payload.ali_confirmation_file_tokens:
+            ali_tokens = self.merge_tokens(
+                payload.existing_ali_confirmation_file_tokens,
+                payload.ali_confirmation_file_tokens,
+            )
+            fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]] = [
+                {"file_token": token} for token in dict.fromkeys(ali_tokens)
+            ]
+            fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
+
         if is_end:
             fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
                 change_today_in_progress_value("end", progress)
@@ -240,17 +250,6 @@ class ChangeNoticeHandler(BaseNoticeHandler):
                     {"file_token": token} for token in extra_tokens
                 ]
             return fields
-
-        if payload.ali_confirmation_file_tokens:
-            ali_tokens = self.merge_tokens(
-                payload.existing_ali_confirmation_file_tokens,
-                payload.ali_confirmation_file_tokens,
-            )
-            fields[CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]] = [
-                {"file_token": token}
-                for token in ali_tokens
-            ]
-            fields[CHANGE_NOTICE_FIELDS["h_confirmation"]] = False
 
         fields[CHANGE_NOTICE_FIELDS["today_in_progress"]] = (
             change_today_in_progress_value("update", progress)

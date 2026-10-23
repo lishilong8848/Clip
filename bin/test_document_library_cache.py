@@ -157,6 +157,25 @@ class LocalPreparationTests(SyncFixture):
         self.assertEqual(self.remote.downloads, 3)
         self.assertFalse(self.kb.list(self.admin, {})['items'])
 
+    def test_cached_text_indexes_before_other_attachments_finish_downloading(self):
+        self.save()
+        # A busy download queue must not keep already cached record text queued forever.
+        original = self.remote.download_to_file
+        def unavailable(token, target, **context):
+            if token == 'tokenFixtureTwo':
+                raise AssistantError('fixture offline', 503, category='transport')
+            return original(token, target, **context)
+        with patch.object(self.remote, 'download_to_file', side_effect=unavailable):
+            for _ in range(12):
+                self.worker.prepare_pending(limit=1)
+                self.kb.process_one()
+        first = self.service.list_records(actor(), 'manuals', {})['items'][0]
+        self.assertTrue(first['knowledge_summary']['vectorized'])
+        self.assertEqual(first['knowledge_status'], 'ready')
+        second = self.service.list_records(actor(('B',)), 'manuals', {})['items'][0]
+        self.assertFalse(second['knowledge_summary']['vectorized'])
+        self.assertEqual(next(item for item in second['knowledge_items'] if item['kind'] == 'attachment')['status'], 'retrying')
+
     def test_attachment_permission_failure_isolated_then_retry_preserves_cached_files(self):
         self.save()
         original = self.remote.download_to_file
@@ -216,13 +235,19 @@ class LocalPreparationTests(SyncFixture):
                 self.assertTrue(all(item['cached'] for item in row['knowledge_items']))
                 self.assertTrue(all(item['status'] == 'unavailable' for item in row['knowledge_items']))
 
-    def test_existing_worker_prepares_originals_before_expensive_index_and_stops_between_items(self):
+    def test_existing_worker_prepares_each_original_before_index_and_stops_between_items(self):
         self.save()
         def index():
             with self.kb.connect(readonly=True) as db:
                 if not db.execute('SELECT 1 FROM documents WHERE pending_version IS NOT NULL').fetchone():
                     return False
-            self.assertEqual(self.remote.downloads, 2)
+            with self.worker.connect(readonly=True) as db:
+                tasks = db.execute("SELECT payload FROM ingestion WHERE status='synced'").fetchall()
+            self.assertTrue(tasks)
+            for task in tasks:
+                payload = json.loads(task[0])
+                if payload.get('kind') != 'record':
+                    self.assertTrue(self.worker._cache_size(payload['file_token']))
             self.kb._stop.set()
             return True
         with patch.object(self.kb, 'process_one', side_effect=index) as run, patch(

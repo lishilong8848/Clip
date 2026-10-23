@@ -13,7 +13,7 @@ from starlette.requests import ClientDisconnect
 
 from .learning import LearningError, now, stamp
 from .learning_sharing import SharingExercises, exercise_card, key, read_source, weekly_card
-from .sharing_sources import SharingMaterials, MAX_FILE, combine_sources, read_material_link, source_url
+from .sharing_sources import SharingMaterials, combine_sources, read_material_link, source_url
 
 
 class SharingRuntime:
@@ -137,6 +137,9 @@ class SharingRuntime:
                 scopes = match.get('scopes') or []
                 person.update(person_id=match.get('id') or 'feishu:' + person['open_id'], scope=scopes[0] if len(scopes) == 1 else '')
             generate = getattr(self.runtime, 'generate_sharing_questions', None)
+            if not await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'],
+                    source=source, title=source['title'], participants=source['participants']):
+                return
             if batch.get('auto_generate', True) and not callable(generate): raise LearningError('模型出题服务尚未就绪。', 503)
             from .sharing_images import SharingImages
             image_store = SharingImages(core.learning, self.runtime.service)
@@ -144,13 +147,19 @@ class SharingRuntime:
             source_images = []
             notes = []
             if image_refs:
-                await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], progress=f'正在读取{len(image_refs)}张题图并识别图片文字')
-                source_images = await asyncio.to_thread(image_store.prepare, image_refs)
+                await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], progress=f'正在读取{len(image_refs)}张题图，准备识别现场内容')
+                source_images = await asyncio.to_thread(image_store.prepare, image_refs, ocr=not batch.get('auto_generate', True))
+                source['images'] = source_images
+                if not await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], source=source):
+                    return
                 if callable(generate) and batch.get('auto_generate', True):
-                    for offset in range(0, len(source_images), 3):
+                    for offset in range(len(source_images)):
                         if self.closing:
                             return
-                        group = source_images[offset:offset + 3]
+                        group = source_images[offset:offset + 1]
+                        if not await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'],
+                                progress=f'MiniMax正在理解第{offset + 1}/{len(source_images)}张题图（现场内容及文字）'):
+                            return
                         inputs = [await asyncio.to_thread(image_store.model_input, image) for image in group]
                         analyzed = await generate(batch['owner'], '', [], 1, mode='image_sources', images=inputs)
                         results = analyzed.get('images') if isinstance(analyzed, dict) else None
@@ -162,6 +171,17 @@ class SharingRuntime:
                             raise LearningError('图片识别结果无法与原图一一对应，请重新生成。', 502)
                         for image, value in zip(group, results):
                             image.update(text=value['text'], mode=value['mode'])
+                            if image['mode'] == 'unreadable':
+                                from openclaw_service.assistant.lighthouse_files import recognize_text
+                                from openclaw_service.assistant.lighthouse_ai import AssistantError
+                                try:
+                                    text = await asyncio.to_thread(recognize_text, await asyncio.to_thread(image_store.content, image))
+                                except AssistantError:
+                                    text = ''
+                                if text.strip() and len(text) <= 2000:
+                                    image.update(text=text.strip(), mode='ocr')
+                        if not await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], source=source):
+                            return
                 source['images'] = source_images
                 if len(source['text']) + sum(len(image['text']) for image in source_images) > 24000:
                     raise LearningError('正文与图片识别内容超过24000字，请拆分材料，未截断出题。', 413)
@@ -429,32 +449,23 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
             check_origin(request)
             core = await asyncio.to_thread(feature.service)
             core.learning._admin(actor)
-            size = 0
-            async def bounded():
-                nonlocal size
+            async def stream():
                 try:
                     async for chunk in request.stream():
-                        size += len(chunk)
-                        if size > 100 * 1024 * 1024 + 65536:
-                            raise MultiPartException('材料总计不能超过100MiB。')
                         yield chunk
                 except ClientDisconnect:
                     raise MultiPartException('上传已中断。') from None
-            parser = MultiPartParser(request.headers, bounded(), max_files=10, max_fields=0)
+            parser = MultiPartParser(request.headers, stream(), max_files=10, max_fields=0)
             form = await parser.parse()
             files = form.getlist('files')
             if set(form) != {'files'} or not 1 <= len(files) <= 10 or any(not hasattr(file, 'read') for file in files):
                 raise LearningError('请选择1至10份分享材料。')
-            items, total = [], 0
+            items = []
             for file in files:
-                content = await file.read(MAX_FILE + 1)
-                total += len(content)
-                if total > 100 * 1024 * 1024:
-                    raise LearningError('本次材料总计不能超过100MiB。', 413)
-                items.append(await asyncio.to_thread(SharingMaterials(core.learning).upload, actor, file.filename, content))
+                items.append(await asyncio.to_thread(SharingMaterials(core.learning).upload, actor, file.filename, file.file))
             return await asyncio.to_thread(controller._json_ok, request, session, {'items': items})
         except MultiPartException:
-            return error_response(LearningError('材料上传格式无效或超过大小限制。', 413))
+            return error_response(LearningError('材料上传格式无效、文件数量超限或上传已中断。', 400))
         except Exception as exc:
             return error_response(exc)
         finally:

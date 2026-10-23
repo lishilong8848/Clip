@@ -59,10 +59,11 @@ try {
                 batch = { ...batchFor(0), status: 'draft', version: 1, questions: [], question_count: 0 }; delete batch.paper;
                 return ok({ id: batch.id });
               }
-              return ok({ items: [batch], page: 1, total: 1 });
+              const items = role === 'admin' ? [batch, ...Array.from({length:4},(_,i)=>({...batch,id:`history-${i}`,title:`第${i+1}批 · A楼2号冷机轮巡过程中触发冷却水流量过低告警排查处理过程分享会${' · 长标题'.repeat(i+1)}`,status:'failed'}))] : [batch];
+              return ok({ items, page: 1, total: items.length });
             }
             if (url.pathname === '/api/learning/sharing/fixture') {
-              if (req.method === 'PUT') { saved = body; batch.questions = body.questions; batch.question_count = body.questions.length; batch.version++; }
+              if (req.method === 'PUT') { saved = body; batch.questions = body.questions; batch.question_count = body.questions.length; batch.status = 'draft'; batch.version++; }
               const view = structuredClone(batch);
               if (role !== 'admin' && !view.paper.submitted_at) for (const q of view.questions) for (const k of ['correct', 'explanation', 'evidence', 'reference_answer']) delete q[k];
               if (view.paper?.submitted_at) for (const q of view.questions) q.selected = view.paper.draft_answers[q.id];
@@ -94,12 +95,25 @@ try {
     const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(e.message));
     try {
       await page.goto(origin + '/__sharing-materials');
+      for (const [width,height] of [[1440,900],[402,874],[440,956]]) {
+        await page.setViewportSize({width,height});
+        await page.locator('.sharing-batch').last().waitFor();
+        const layout=await page.evaluate(()=>{
+          const rows=[...document.querySelectorAll('.sharing-batch')];
+          return {overflow:document.documentElement.scrollWidth>innerWidth+1, overlap:rows.some((row,i)=>i && row.getBoundingClientRect().top < rows[i-1].getBoundingClientRect().bottom-1), clipped:rows.some(row=>{
+            const rect=row.getBoundingClientRect();return [...row.querySelectorAll('.sharing-batch-title,.sharing-batch-meta,strong,small')].some(child=>{const r=child.getBoundingClientRect();return r.top<rect.top-1||r.bottom>rect.bottom+1||r.right>rect.right+1;});
+          }), fields:[...document.querySelectorAll('.sharing-source')].map(el=>({top:el.getBoundingClientRect().top,left:el.getBoundingClientRect().left}))};
+        });
+        assert.equal(layout.overflow,false);assert.equal(layout.overlap,false);assert.equal(layout.clipped,false,`${v2}-${width}: history content must fit its own row`);
+        if(width===1440) assert(Math.abs(layout.fields[0].top-layout.fields[1].top)<2 && layout.fields[0].left<layout.fields[1].left,'desktop sources share a row');
+        await page.screenshot({path:path.join(output,`history-${v2}-${width}.png`),fullPage:true});
+      }
+      await page.setViewportSize({width:1440,height:900});
       await page.getByLabel('使用飞书纪要').uncheck();
       await page.getByLabel('AI生成题目').uncheck();
       await page.getByLabel('资料链接', { exact: true }).fill('https://vnet.feishu.cn/wiki/Fixture');
       await page.getByRole('button', { name: '添加链接', exact: true }).click();
       await page.getByLabel('资料链接', { exact: true }).fill('https://vnet.feishu.cn/file/FileFixture/?from=share#fragment');
-      await page.getByRole('button', { name: '添加链接', exact: true }).click();
       await page.getByLabel('选择资料文件').setInputFiles({ name: 'slides.pptx', mimeType: 'application/octet-stream', buffer: Buffer.from('fixture') });
       await page.getByRole('button', { name: '上传 1 份' }).click();
       assert(await page.getByRole('button', { name: '创建空白草稿', exact: true }).isDisabled(), 'material-only roster is explicit');
@@ -117,6 +131,16 @@ try {
       await page.getByText('题目与答题名单已保存。', { exact: true }).waitFor();
       assert.equal(saved.questions[0].origin, 'manual'); assert.equal(saved.questions[0].evidence, '');
       await page.screenshot({ path: path.join(output, `manual-${v2}.png`), fullPage: true });
+      batch.status='failed';batch.error='模型未返回有效回答';
+      await page.reload();await page.locator('.sharing-batch').first().click();
+      await page.getByRole('button',{name:'新增问答题',exact:true}).click();
+      await page.getByLabel('题干',{exact:true}).last().fill('模型失败后补录的题目');
+      await page.getByLabel('参考答案（问答题不自动判分）',{exact:true}).last().fill('人工参考答案');
+      await page.getByLabel('答案解析',{exact:true}).last().fill('人工解析');
+      assert(await page.getByRole('button',{name:'重新生成',exact:true}).isDisabled(),'unsaved manual edits cannot be discarded by retry');
+      await page.getByRole('button',{name:'保存题目与名单',exact:true}).click();
+      await page.getByText('题目与答题名单已保存。',{exact:true}).waitFor();
+      assert.equal(saved.questions.length,2);assert.equal(batch.status,'draft');
       role = 'member'; batch = batchFor(11); batch.status = 'closed';
       batch.paper.draft_answers = { q1: [0], q3: '此前保存的答案' };
       await page.goto(origin + '/__sharing-materials?role=member'); await page.locator('.sharing-batch').click();

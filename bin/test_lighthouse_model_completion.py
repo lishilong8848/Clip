@@ -646,6 +646,8 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
             receipts.append(receipt)
 
         async def backup(client):
+            if tails:
+                return
             agent, receipt = flow.agent, receipts[0]
             message = next(params['message'] for method, params in client.calls if method == 'agent')
             self.assertIn(receipt['query_ref'], message)
@@ -655,7 +657,8 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
                 'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'reuse-original-query',
                 'params': {'operation': {'api_id': 'GET /api/learning/profile', 'params': {'scope': 'D', 'view': 'participation'}}}})
             self.assertTrue(cached['ok'])
-            self.assertEqual(reads, [('D', 'participation')], 'complete prior reads are reused, not fetched again')
+            self.assertEqual(reads, [('D', 'participation')] * (2 if partial else 1),
+                             'complete reads are reused; an incomplete source can be reread')
             for tool, params in (('lighthouse_prepare_business', {}),
                                  ('lighthouse_call_extension', {'server_id': 'fixture-unconfigured', 'tool': 'fixture', 'arguments': {}})):
                 self.assertIn(tool, agent.tools)
@@ -698,7 +701,7 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
         else:
             await self.fixture._run_answer(factory, '查询D楼人员明细', [])
         self.assertEqual(flow.selected, ['current', 'backup'])
-        self.assertEqual(reads, [('D', 'participation')])
+        self.assertEqual(reads, [('D', 'participation')] * (2 if partial else 1))
         self.assertEqual(len(tails), 1)
         self.assertEqual(flow.agent.calls, 3)
         self.assertEqual(self.fixture.writes, [])

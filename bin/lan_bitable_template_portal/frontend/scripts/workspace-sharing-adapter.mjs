@@ -71,7 +71,7 @@ function v2DeleteBatch() {
 }
 const v2Participants = computed(() => participantsView.value.slice((v2PersonPage.value - 1) * 12, v2PersonPage.value * 12));
 watch(() => detail.value?.id, () => {
-  v2Section.value = detail.value?.status === 'draft' || !detail.value?.participants.length || (!props.isAdmin && detail.value?.questions?.length) ? 'questions' : 'people';
+  v2Section.value = ['draft', 'failed'].includes(detail.value?.status || '') || !detail.value?.participants.length || (!props.isAdmin && detail.value?.questions?.length) ? 'questions' : 'people';
   questionPage.value = 1; v2PersonPage.value = 1;
 });
 watch(personSearch, () => { v2PersonPage.value = 1; });

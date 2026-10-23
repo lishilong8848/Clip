@@ -12057,6 +12057,14 @@ class PortalRuntime:
         )
         if needs_remote_site_photo and not existing_extra_tokens:
             return False, "结束通告前必须添加至少一张现场照片。", record_id
+        if (
+            action == "end" and notice_type == NOTICE_TYPE_CHANGE
+            and not prepared.get("ali_confirmation_images")
+            and not cls._change_confirmation_attachment_tokens(
+                fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"])
+            )
+        ):
+            return False, "结束变更通告前必须上传至少一张阿里确认截图，现场照片不能代替。", record_id
         if action == "end" and work_order_notice:
             end_error = cls._work_order_end_error(
                 target_record_id=record_id,

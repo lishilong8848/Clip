@@ -135,6 +135,21 @@ class IndependentReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['answer_review']['issues'], ['缺少已查到的两个人名'])
         self.model.complete.assert_called_once()
 
+    async def test_topic_review_receives_the_same_authorized_public_context_as_the_writer(self):
+        actor = {**self.actor, 'channel': 'feishu:oc_fixture', '_feishu_topic': {
+            'id': 'oc_fixture:om_topic', 'context': '话题已确认：只看今天夜班的D楼人员，不是全天。'}}
+        self.turn['question'] = '都是哪些人？'
+        self.turn['_feishu_topic'] = {'context': 'User-controlled unrelated context must not be used'}
+        self.model.complete.return_value = self.passed
+        authorize = AsyncMock(return_value=actor)
+        history = [{'question': 'Unrelated private conversation', 'answer': 'Private details', 'scopes': ['D']}]
+        await self.reviewer.run(actor, self.turn, history, self.result, authorize)
+        packet = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertEqual(packet['history'], [])
+        self.assertIn('夜班', packet['topic_context'])
+        self.assertNotIn('Private details', str(packet))
+        self.assertNotIn('User-controlled', str(packet))
+
     async def test_small_evidence_is_not_silently_reduced_to_eight_rows(self):
         self.result['sources'][0]['data']['participants'] = [{'name': f'测试{i}'} for i in range(45)]
         self.model.complete.return_value = self.passed
@@ -407,7 +422,7 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
             if step == 1:
                 yield 'D楼有一条工单。'
             elif step == 2:
-                self.assertIn('未查询真实', str(messages[-1]))
+                self.assertIn('继续只读查证', str(messages[-1]))
                 yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
                     'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D'}}}))}
             else:
@@ -495,7 +510,8 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
                         'operation': {'api_id': 'GET /api/assistant/work-orders',
                                       'params': {'scope': 'D', 'page_size': 20}}}))}
                 else:
-                    response = messages[-1].parts[0].content
+                    response = next(part.content for message in reversed(messages) for part in reversed(message.parts)
+                                    if getattr(part, 'part_kind', '') == 'tool-return' and getattr(part, 'tool_name', '') == 'query')
                     self.assertEqual(response['query_state'], 'partial')
                     self.assertFalse(response['data']['complete'])
                     yield '已取得20项，后续分页暂不可用，完整数量未知。'
@@ -516,7 +532,7 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
             peak = max(peak, active)
             try:
                 await asyncio.sleep(.01)
-                return {'ok': True, 'data': {'items': [], 'total': 0, 'scope': scope}}
+                return {'ok': True, 'data': {'items': [], 'total': 0, 'scope': scope, 'complete': True}}
             finally:
                 active -= 1
         async def script(messages, info):

@@ -8,7 +8,6 @@ import uuid
 from .learning import LearningError
 
 MAX_IMAGES = 24
-MAX_IMAGE = 20 * 1024 * 1024
 
 
 def document_images(blocks, url, revision, title):
@@ -29,18 +28,18 @@ def document_images(blocks, url, revision, title):
 
 def jpeg(content):
     from PIL import Image, ImageOps, UnidentifiedImageError
-    if not isinstance(content, bytes) or not 0 < len(content) <= MAX_IMAGE:
-        raise LearningError('题图为空或超过20MiB，请核对原图片。', 413)
+    if isinstance(content, bytes):
+        content = io.BytesIO(content)
+    if not callable(getattr(content, 'read', None)):
+        raise LearningError('题图未完整返回，请核对原图片。', 502)
     try:
-        with Image.open(io.BytesIO(content)) as image:
+        with Image.open(content) as image:
             if image.width * image.height > 40_000_000 or image.format not in {'JPEG', 'PNG', 'WEBP', 'GIF', 'BMP'}:
                 raise LearningError('题图格式不支持或像素过大，请缩小后重试。', 413)
             image = ImageOps.exif_transpose(image).convert('RGB')
             output = io.BytesIO()
             image.save(output, format='JPEG', quality=92)
             data = output.getvalue()
-            if len(data) > MAX_IMAGE:
-                raise LearningError('题图转换后超过20MiB，请缩小后重试。', 413)
             return data
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         raise LearningError('题图内容无法识别，请核对原图片。', 422) from None
@@ -60,14 +59,14 @@ class SharingImages:
         return path
 
     def download(self, item):
-        from .sharing_sources import cloud_reader
+        from .sharing_sources import cloud_reader, downloaded_file
         token = item.get('token')
         if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9]+', token):
             raise LearningError('题图来源无效，请重新读取材料。', 422)
         _, _, kind, get = cloud_reader(self.portal, item.get('source_url'))
         if kind != 'docx':
             raise LearningError('题图来源必须为飞书文档。', 422)
-        return get('drive/v1/medias/' + token + '/download').get('content')
+        return downloaded_file(get('drive/v1/medias/' + token + '/download'))
 
     def save(self, identity, data):
         path = self.path(identity)
@@ -80,27 +79,24 @@ class SharingImages:
             temporary.unlink(missing_ok=True)
         return path
 
-    def prepare(self, items):
+    def prepare(self, items, *, ocr=True):
         from openclaw_service.assistant.lighthouse_ai import AssistantError
         from openclaw_service.assistant.lighthouse_files import recognize_text
         if not isinstance(items, list) or len(items) > MAX_IMAGES:
             raise LearningError('每批分享材料最多24张图片，请拆分后读取。', 413)
-        result, seen, total = [], set(), 0
+        result, seen = [], set()
         for item in items:
             content = self.download(item)
-            if not isinstance(content, bytes):
-                raise LearningError('题图下载未完整返回，请重新读取。', 502)
-            total += len(content)
-            if total > 100 * 1024 * 1024:
-                raise LearningError('本批题图超过100MiB，请拆分后读取。', 413)
-            identity = hashlib.sha256(content).hexdigest()
-            if identity in seen:
-                continue
-            data = jpeg(content)
+            with io.BytesIO(content) if isinstance(content, bytes) else content as stream:
+                identity = hashlib.file_digest(stream, 'sha256').hexdigest()
+                if identity in seen:
+                    continue
+                stream.seek(0)
+                data = jpeg(stream)
             rendered_hash = hashlib.sha256(data).hexdigest()
             self.save(rendered_hash, data)
             try:
-                text = recognize_text(data).strip()
+                text = recognize_text(data).strip() if ocr else ''
             except AssistantError:
                 text = ''
             if len(text) > 2000:
@@ -118,16 +114,17 @@ class SharingImages:
     def content(self, item):
         path = self.path(item.get('sha256'))
         try:
-            if path.stat().st_size <= MAX_IMAGE:
-                content = path.read_bytes()
-                if hashlib.sha256(content).hexdigest() == item.get('sha256'):
-                    return content
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() == item.get('sha256'):
+                return content
         except FileNotFoundError:
             pass
         original = self.download(item)
-        if not isinstance(original, bytes) or hashlib.sha256(original).hexdigest() != item['id']:
-            raise LearningError('原题图已变化，无法恢复发布时的图片；未替换成其他版本。', 409)
-        content = jpeg(original)
+        with io.BytesIO(original) if isinstance(original, bytes) else original as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != item['id']:
+                raise LearningError('原题图已变化，无法恢复发布时的图片；未替换成其他版本。', 409)
+            stream.seek(0)
+            content = jpeg(stream)
         if hashlib.sha256(content).hexdigest() != item.get('sha256'):
             raise LearningError('题图快照校验未通过，请联系管理员核对。', 409)
         self.save(item['sha256'], content)

@@ -40,7 +40,7 @@ const participantsView = computed(() => (detail.value?.participants || []).filte
 const assignedCount = computed(() => (detail.value?.participants || []).filter((p: Dict) => !p.exempted).length);
 const exemptedCount = computed(() => (detail.value?.participants || []).length - assignedCount.value);
 const percent = computed(() => detail.value?.total ? Math.round(detail.value.completed * 100 / detail.value.total) : 0);
-const isDraft = computed(() => detail.value?.status === 'draft');
+const isDraft = computed(() => ['draft', 'failed'].includes(detail.value?.status || ''));
 const editable = computed(() => props.isAdmin && isDraft.value && !busy.value);
 const canEditQuestions = editable;
 const counts = computed(() => {
@@ -173,8 +173,8 @@ function addMaterialUrl() {
 function pickFiles(event: Event) {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files || []);
-  const accepted = files.filter(file => file.size > 0 && file.size <= 20 * 1024 * 1024 && /\.(pdf|docx|xlsx|xlsm|pptx)$/i.test(file.name));
-  if (accepted.length !== files.length) error.value = '请选择非空PDF、DOCX、XLSX、XLSM或PPTX，单份最大20MiB。';
+  const accepted = files.filter(file => file.size > 0 && /\.(pdf|docx|xlsx|xlsm|pptx)$/i.test(file.name));
+  if (accepted.length !== files.length) error.value = '请选择非空PDF、DOCX、XLSX、XLSM或PPTX。';
   if (materialUrls.value.length + materialIds.value.length + materialFiles.value.length + accepted.length > 10) { error.value = '每批最多10份材料。'; return; }
   materialFiles.value = [...materialFiles.value, ...accepted.filter(file => !materialFiles.value.some(old => old.name === file.name && old.size === file.size))];
   input.value = '';
@@ -198,7 +198,7 @@ async function uploadMaterials() {
   finally { uploading.value = false; }
 }
 const canCreate = computed(() => !busy.value && !uploading.value
-  && (!autoGenerate.value || !!(includeMinutes.value && url.value.trim()) || materialUrls.value.length > 0 || materialIds.value.length > 0)
+  && (!autoGenerate.value || !!(includeMinutes.value && url.value.trim()) || !!materialUrl.value.trim() || materialUrls.value.length > 0 || materialIds.value.length > 0)
   && (!!(includeMinutes.value && url.value.trim()) || participants.value.length > 0)
   && (!autoGenerate.value || questionTypes.value.length > 0) && !materialFiles.value.length);
 function toggleType(kind: string, checked: boolean) {
@@ -320,6 +320,7 @@ async function mutate(action: string) {
   if (busy.value) return;
   if (action === 'publish' && (dirty.value || publishIssue.value)) { error.value = dirty.value ? '请先保存当前修改。' : publishIssue.value; return; }
   if (action === 'create' && !canCreate.value) { error.value = '请填写纪要链接、添加资料，或关闭AI生成并手动录入题目。'; return; }
+  if (action === 'create' && materialUrl.value.trim()) { addMaterialUrl(); if (materialUrl.value.trim()) return; }
   busy.value = true; error.value = ''; message.value = '';
   const generating = autoGenerate.value;
   try {
@@ -448,7 +449,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
             <input v-model="url" type="url" aria-label="飞书纪要链接" maxlength="2048" placeholder="https://vnet.feishu.cn/docx/…" :disabled="busy || !includeMinutes" /></div>
           <div class="sharing-source"><span class="sharing-check"><FileText :size="16" />资料文档 / 知识库链接</span>
             <div class="sharing-inline"><input v-model="materialUrl" type="url" aria-label="资料链接" maxlength="2048" placeholder="https://vnet.feishu.cn/wiki/…" :disabled="busy" /><button type="button" :disabled="busy || !materialUrl.trim()" @click="addMaterialUrl"><Plus :size="15" />添加链接</button></div>
-            <ul v-if="materialUrls.length" class="sharing-chips" aria-label="已添加的资料链接"><li v-for="item in materialUrls" :key="item"><span>{{ item }}</span><button type="button" class="sharing-chip-x" :aria-label="`移除资料链接 ${item}`" :disabled="busy" @click="toggleMaterialUrl(item, false)"><X :size="14" /></button></li></ul>
+            <ul v-if="materialUrls.length" class="sharing-chips sharing-source-links" aria-label="已添加的资料链接"><li v-for="item in materialUrls" :key="item"><span :title="item">{{ item }}</span><button type="button" class="sharing-chip-x" :aria-label="`移除资料链接 ${item}`" :disabled="busy" @click="toggleMaterialUrl(item, false)"><X :size="14" /></button></li></ul>
           </div>
           <div class="sharing-source"><span class="sharing-check"><Upload :size="16" />上传资料文件</span>
             <div class="sharing-inline"><input type="file" multiple accept=".pdf,.docx,.xlsx,.xlsm,.pptx" aria-label="选择资料文件" :disabled="busy || uploading" @change="pickFiles" /><button type="button" :disabled="busy || uploading || !materialFiles.length" @click="uploadMaterials"><Loader2 v-if="uploading" :size="15" class="spin" /><Upload v-else :size="15" />上传 {{ materialFiles.length || '' }} 份</button></div>
@@ -472,7 +473,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
       <div v-if="loading && !rows.length" class="sharing-empty" role="status"><Loader2 :size="24" class="spin" />正在读取批次…</div>
       <div v-else-if="!rows.length" class="sharing-empty"><FileText :size="30" /><span>{{ isAdmin ? '暂无分享会练习批次' : '暂无与你相关的分享会练习' }}</span></div>
       <div v-else class="sharing-batches">
-        <button v-for="row in rows" :key="row.id" type="button" class="sharing-batch" @click="openBatch(row)"><div><strong>{{ row.title }}</strong><small>{{ row.created_at?.slice(0, 16).replace('T', ' ') }}</small></div><span class="sharing-status" :class="row.status">{{ labels[row.status] }}</span><span>{{ row.question_count }}题</span><span>{{ row.completed }}/{{ row.total }}人完成</span><ChevronRight :size="18" /></button>
+        <button v-for="row in rows" :key="row.id" type="button" class="sharing-batch" @click="openBatch(row)"><span class="sharing-batch-title"><strong>{{ row.title }}</strong><small>{{ row.created_at?.slice(0, 16).replace('T', ' ') }}</small></span><span class="sharing-batch-meta"><span class="sharing-status" :class="row.status">{{ labels[row.status] }}</span><span>{{ row.question_count }}题</span><span>{{ row.completed }}/{{ row.total }}人完成</span><ChevronRight :size="18" /></span></button>
       </div>
       <footer class="sharing-pagination"><span>共 {{ total }} 批</span><div><button type="button" aria-label="上一页" :disabled="busy || loading || page <= 1" @click="page--; load()"><ChevronLeft :size="16" /></button><span>{{ page }} / {{ Math.max(1, Math.ceil(total / 15)) }}</span><button type="button" aria-label="下一页" :disabled="busy || loading || page * 15 >= total" @click="page++; load()"><ChevronRight :size="16" /></button></div></footer>
     </template>
@@ -486,7 +487,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
         <li v-for="(source, i) in detail.sources" :key="source.id || source.url || i"><a v-if="source.url" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }}</span><small v-if="source.low_confidence_count">OCR低置信文字 {{ source.low_confidence_count }} 处</small></li>
       </ul>
       <div class="sharing-toolbar" v-if="isAdmin">
-        <div class="sharing-buttons"><button v-if="detail.status === 'failed'" type="button" :disabled="busy" @click="mutate('retry')"><RefreshCw :size="16" />重新生成</button><button v-if="isDraft" type="button" :disabled="busy || !dirty" @click="mutate('save')"><Save :size="16" />保存题目与名单</button><button v-if="isDraft" type="button" class="primary" :disabled="busy || dirty || !!publishIssue" :title="publishIssue" @click="ask('publish')"><Send :size="16" />核对后发布给参会人</button><button v-if="['published', 'closed'].includes(detail.status)" type="button" :disabled="busy" @click="ask('retry-delivery')"><RefreshCw :size="16" />重试未完成任务</button><button v-if="detail.status === 'published'" type="button" :disabled="busy" @click="ask('close')"><Square :size="15" />关闭本批</button><span v-if="dirty">题目或答题名单有未保存修改</span><span v-if="busy" role="status"><Loader2 :size="16" class="spin" />正在保存…</span></div>
+        <div class="sharing-buttons"><button v-if="detail.status === 'failed'" type="button" :disabled="busy || dirty" @click="mutate('retry')"><RefreshCw :size="16" />重新生成</button><button v-if="isDraft" type="button" :disabled="busy || (!dirty && detail.status !== 'failed')" @click="mutate('save')"><Save :size="16" />保存题目与名单</button><button v-if="isDraft" type="button" class="primary" :disabled="busy || dirty || detail.status === 'failed' || !!publishIssue" :title="detail.status === 'failed' ? '请先保存题目与名单为草稿' : publishIssue" @click="ask('publish')"><Send :size="16" />核对后发布给参会人</button><button v-if="['published', 'closed'].includes(detail.status)" type="button" :disabled="busy" @click="ask('retry-delivery')"><RefreshCw :size="16" />重试未完成任务</button><button v-if="detail.status === 'published'" type="button" :disabled="busy" @click="ask('close')"><Square :size="15" />关闭本批</button><span v-if="dirty">题目或答题名单有未保存修改</span><span v-if="busy" role="status"><Loader2 :size="16" class="spin" />正在保存…</span></div>
       </div>
       <p v-if="isAdmin && isDraft && publishIssue" class="sharing-hint" role="status">{{ publishIssue }}</p>
       <div v-if="isAdmin && detail.bank_sync?.total" class="sharing-bank" role="status"><strong>题库同步 {{ detail.bank_sync.synced }} / {{ detail.bank_sync.total }} 题</strong><span v-if="detail.bank_sync.total > detail.bank_sync.synced + detail.bank_sync.failed"><Loader2 :size="15" class="spin" />后台同步中</span><span v-if="detail.bank_sync.failed" class="error-text">{{ detail.bank_sync.failed }} 题待重试</span><a href="https://vnet.feishu.cn/wiki/P8R2w5FXRiNpBjkJ3WVcegJ0nzh?table=tblQevBJ9knFaBNh&view=vewhuXAYog" target="_blank" rel="noopener noreferrer">查看纪要题库</a><p v-if="detail.bank_sync.error" class="error-text">{{ detail.bank_sync.error }}</p></div>
@@ -584,13 +585,13 @@ small,.sharing-meta,.sharing-pagination,.sharing-hint,.sharing-counts {color:#52
 .sharing-alert{padding:12px 15px;margin:12px 0;border-radius:6px;line-height:1.6;overflow-wrap:anywhere;}.error{background:#fff1f2;color:#a82342;}.success{background:#ecf9f2;color:#146844;}.error-text{color:#a82342;}
 .sharing-generation-note{background:color-mix(in srgb,var(--cf-warning,#735515) 8%,var(--cf-surface,#fff8e7));color:var(--cf-warning,#735515);white-space:pre-wrap;}
 .sharing-question .sharing-image-confirm{display:flex;align-items:flex-start;gap:8px;min-height:44px;padding:10px 0;line-height:1.6;overflow-wrap:anywhere;}.sharing-image-confirm input{flex:none;width:18px;height:18px;margin:3px 0 0;accent-color:#2463df;}
-.sharing-sources{border:0;margin:0 0 14px;padding:0;display:grid;gap:14px;min-width:0;}.sharing-sources legend,.sharing-types legend{font-size:14px;font-weight:600;margin-bottom:6px;}.sharing-source{display:grid;gap:8px;min-width:0;}.sharing-source>input[type=url]{width:100%;box-sizing:border-box;}
+.sharing-sources{border:0;margin:0 0 14px;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:14px;min-width:0;align-items:start;}.sharing-sources legend,.sharing-types legend{font-size:14px;font-weight:600;margin-bottom:6px;}.sharing-source{display:grid;gap:8px;min-width:0;}.sharing-source>input[type=url]{width:100%;box-sizing:border-box;}.sharing-source .sharing-inline{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:stretch;}.sharing-source .sharing-inline>input{width:100%;max-width:100%;box-sizing:border-box;}.sharing-source-links li{min-width:0;}.sharing-source-links li>span{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;}
 .sharing-check{display:inline-flex;gap:8px;align-items:center;font-weight:600;min-height:32px;min-width:0;overflow-wrap:anywhere;}.sharing-check input{flex:none;width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-check small{font-weight:400;flex-basis:100%;}
 .sharing-generate{display:grid;grid-template-columns:20px minmax(0,1fr);gap:4px 8px;align-items:center;margin:0 0 14px;font-weight:600;}.sharing-generate input{width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-generate small{font-weight:400;grid-column:2;}
 .sharing-inline{min-width:0;}.sharing-inline>input{flex:1 1 220px;min-width:0;}.sharing-inline button{flex:none;}
 .sharing-chips{list-style:none;display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;min-width:0;}.sharing-chips li{display:inline-flex;align-items:center;gap:4px;max-width:100%;background:#f2f6fb;border:1px solid #dbe5f0;border-radius:999px;padding:3px 4px 3px 10px;font-size:12px;color:#405e85;}.sharing-chips li>span{overflow-wrap:anywhere;min-width:0;}.sharing-chip-x{min-height:26px;height:26px;width:26px;padding:0;border-radius:50%;border-color:transparent;color:#58708a;flex:none;}
 .sharing-types{display:flex;align-items:center;flex-wrap:wrap;gap:8px 20px;border:0;margin:0 0 14px;padding:0;}.sharing-types label{display:flex;gap:8px;align-items:center;min-height:40px;cursor:pointer;}.sharing-types input{flex:none;width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-types small{flex-basis:100%;line-height:1.6;}
-.sharing-empty{display:flex;min-height:160px;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#58708a;text-align:center;}.sharing-batches{border-top:1px solid #dce5ee;}.sharing-batch{display:grid;width:100%;grid-template-columns:minmax(0,1fr) 90px 65px 125px 20px;gap:14px;text-align:left;border:0;border-bottom:1px solid #dce5ee;border-radius:0;padding:16px 12px;color:inherit;}.sharing-batch strong{display:block;overflow-wrap:anywhere;line-height:1.65;}.sharing-batch small{display:block;margin-top:5px;}
+.sharing-empty{display:flex;min-height:160px;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#58708a;text-align:center;}.sharing-batches{border-top:1px solid #dce5ee;display:grid;min-width:0;}.sharing-batch{display:grid;width:100%;box-sizing:border-box;grid-template-columns:minmax(0,1fr) auto;gap:12px;text-align:left;border:0;border-bottom:1px solid #dce5ee;border-radius:0;padding:12px;color:inherit;height:auto;white-space:normal;}.sharing-batch-title{display:block;min-width:0;text-align:left;}.sharing-batch strong{display:block;overflow-wrap:anywhere;line-height:1.6;}.sharing-batch small{display:block;margin-top:4px;}.sharing-batch-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;white-space:nowrap;font-size:13px;}
 .sharing-status{background:#eef3fa;color:#405e85;border-radius:4px;padding:4px 8px;font-size:12px;white-space:nowrap;}.sharing-status.published{background:#e4f6ef;color:#11704f;}.sharing-status.failed{background:#fff0f0;color:#ab2948;}.sharing-status.generating,.sharing-status.queued{background:#fff4dc;color:#805a17;}
 .sharing-counts{overflow-wrap:anywhere;}
 .sharing-selection-summary{font-size:14px;font-weight:600;margin:0 0 8px;line-height:1.6}.sharing-selection-hint,.sharing-hint{font-size:13px;color:#52667d;margin:0 0 12px;line-height:1.6}.sharing-participation{display:inline-flex;gap:8px;align-items:center;min-height:44px;cursor:pointer;white-space:nowrap;min-width:0}.sharing-participation input{width:18px;height:18px;margin:0;accent-color:#2463df;flex:none}.sharing-exempted{background:#f7f8fa;color:#627083}
@@ -608,6 +609,6 @@ small,.sharing-meta,.sharing-pagination,.sharing-hint,.sharing-counts {color:#52
 .sharing-people{display:grid;gap:10px;min-width:0;}.sharing-people-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;min-width:0;max-height:320px;overflow:auto;}.sharing-people-list button{justify-content:flex-start;text-align:left;font-size:13px;min-width:0;}.sharing-people-list button span{display:grid;min-width:0;overflow-wrap:anywhere;}.sharing-people-list button small{color:#52667d;}
 .sharing-visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
 .spin{animation:sharing-spin 1s linear infinite;}@keyframes sharing-spin{to{transform:rotate(360deg)}}
-@media(max-width:700px){.sharing-create>div,.sharing-inline{flex-direction:column;align-items:stretch;}.sharing-inline button{width:100%;}.sharing-metrics{grid-template-columns:repeat(2,minmax(0,1fr));}.sharing-batch{grid-template-columns:1fr auto;}.sharing-batch>div{grid-column:1/-1;}.sharing-batch>svg{display:none;}.sharing-toolbar{align-items:flex-start;}.sharing-section>header input{width:100%;box-sizing:border-box;}.sharing-title h2{font-size:16px;}.sharing-question{padding:16px 0;}button{min-height:42px;}.sharing-people-list{grid-template-columns:minmax(0,1fr);max-height:none;}.sharing-question-tools button{flex:1 1 auto;}.sharing-pagination>*{justify-content:center;}.sharing-option{grid-template-columns:20px 20px minmax(0,1fr) 28px;}}
+@media(max-width:700px){.sharing-metrics{grid-template-columns:repeat(2,minmax(0,1fr));}.sharing-batch{grid-template-columns:minmax(0,1fr);gap:6px;}.sharing-batch-meta>svg{margin-left:auto;}.sharing-toolbar{align-items:flex-start;}.sharing-section>header input{width:100%;box-sizing:border-box;}.sharing-title h2{font-size:16px;}.sharing-question{padding:16px 0;}button{min-height:42px;}.sharing-people-list{grid-template-columns:minmax(0,1fr);max-height:none;}.sharing-question-tools button{flex:1 1 auto;}.sharing-pagination>*{justify-content:center;}.sharing-option{grid-template-columns:20px 20px minmax(0,1fr) 28px;}}
 @media(prefers-reduced-motion:reduce){.spin{animation-duration:2s;}button{transition:none;}}
 </style>

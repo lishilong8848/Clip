@@ -538,12 +538,12 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 workers = []
                 loop = asyncio.get_running_loop()
 
-                def construct(root):
+                def construct(root, **kwargs):
                     loop.call_soon_threadsafe(entered.set)
-                    if not release.wait(5):
-                        raise AssertionError('Constructor barrier was not released')
                     try:
-                        kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex)
+                        if not release.wait(5):
+                            raise AssertionError('Constructor barrier was not released')
+                        kb = KnowledgeBase(root, embedder=FakeEmbedder(), memory_index_factory=FakeMemoryIndex, **kwargs)
                         workers.append(kb)
                         return kb
                     finally:
@@ -574,6 +574,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                             release.set()
                             await asyncio.wait_for(finished.wait(), 3)
                             await asyncio.wait_for(close_task, 5)
+                            self.assertTrue(callable(workers[0].source_summarizer))
                             self.assertFalse(workers[0]._worker.is_alive())
                             for path in (workers[0].db, host.state.parent / 'document_library' / 'document_library.sqlite3'):
                                 path.unlink()
@@ -583,7 +584,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                             self.assertFalse(workers[0].db.exists())
                         finally:
                             release.set()
-                            await asyncio.wait_for(finished.wait(), 5)
+                            # Keep an initialization failure visible instead of masking it in cleanup.
+                            if entered.is_set():
+                                await asyncio.wait_for(finished.wait(), 5)
                             if close_task is not None:
                                 await close_task
                             else:

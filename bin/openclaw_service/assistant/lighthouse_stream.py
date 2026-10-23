@@ -136,6 +136,7 @@ class LighthouseStream:
         clean_question = safe_text(question.strip(), limit=12000) or ("隐私相关问题" if private_request else "请处理附件")
         topic = actor.get('_feishu_topic') if actor.get('channel', '').startswith('feishu:') else None
         topic_id = topic.get('id', '') if isinstance(topic, dict) else ''
+        public_context = topic.get('context', '') if topic_id else ''
         if not isinstance(files, list) or len(files) > 10 or any(not isinstance(file, str) for file in files):
             raise AssistantError("附件列表格式无效。")
         attachments = [self.portal.files.public(self.portal.files.get(actor, file)) for file in files]
@@ -178,7 +179,7 @@ class LighthouseStream:
                      or clean_question in previous['clarification'].get('options', [])
                      or named_clarification_reply(clean_question, previous)))
             refining = clarification_reply or task_followup(clean_question) and not awaiting_clarification
-            prior_scopes = previous.get('scopes') if previous else lane.get('query_scopes')
+            prior_scopes = None if public_context else previous.get('scopes') if previous else lane.get('query_scopes')
             scopes = resolve_scopes(actor, question, prior_scopes if refining else None)
             from .lighthouse_ai import is_business_query
             from .lighthouse_knowledge import company_question
@@ -209,7 +210,7 @@ class LighthouseStream:
                     raise AssistantError("本轮补充后附件超过10个，请分步处理。")
                 prior.update(status="superseded", error="已结合后续补充继续处理。", superseded_by=operation)
                 self.store.put_document(MESSAGES, state["id"] + ":" + prior["operation_id"], prior)
-            elif refining and not clarification_reply:
+            elif refining and not clarification_reply and not public_context:
                 previous = next((item for item in reversed(topic_turns) if item is not old and item.get("question")), None)
                 if previous:
                     prompt = "之前的问题：" + (previous.get("prompt") or previous["question"]) + "\n本次补充（采用最新条件）：" + prompt
@@ -242,7 +243,7 @@ class LighthouseStream:
             turn = old or {"operation_id": operation, "at": time.time()}
             if old:
                 turn.setdefault("attempts", []).append({key: copy.deepcopy(old.get(key)) for key in ("run_id", "answer", "status", "error", "at")})
-            structured = task_context(clean_question, previous if refining and not files and not clarification_reply else None,
+            structured = task_context(clean_question, previous if refining and not files and not clarification_reply and not public_context else None,
                                       actor, topic_id=topic_id, scopes=scopes)
             if not topic_id:
                 state['reply_preferences'] = reply_preferences(clean_question, state.get('reply_preferences'))
@@ -253,7 +254,7 @@ class LighthouseStream:
                         resume_available=False,
                         _task_context=structured,
                         _reply_preferences=copy.deepcopy(state.get('reply_preferences', {})) if not topic_id else {},
-                        _learning_followup_query=copy.deepcopy(previous.get('learning_query')) if previous and refining and self.assistant._allowed(previous, actor) else None,
+                        _learning_followup_query=copy.deepcopy(previous.get('learning_query')) if previous and refining and not public_context and self.assistant._allowed(previous, actor) else None,
                         feishu_topic=topic_id,
                         execution_lane=execution_lane(actor),
                         commands=selected_commands, submitted_commands=copy.deepcopy(selections), _command_context=command_context,
@@ -279,6 +280,7 @@ class LighthouseStream:
             self.assistant._active.add(actor["id"])
             run = {"id": run_id, "owner": actor["id"], "conversation_id": state["id"], "operation_id": operation,
                    "execution_lane": execution_lane(actor),
+                   "source_channel": turn['source_channel'], "feishu_topic": topic_id,
                    "scopes": scopes, "access_scopes": actor["scopes"], "access_modules": list(actor.get('modules', [])),
                    "status": "queued", "label": "等待处理", "events": [], "revision": 1,
                    "answer": "", "process": [], "created_at": time.time(), "_turn": {**copy.deepcopy(turn),
@@ -352,8 +354,8 @@ class LighthouseStream:
                 await asyncio.to_thread(self._save_run, run)
                 return
             if kind == 'reply-mode':
-                run['reply_mode'] = data['mode']
-                await asyncio.to_thread(self._patch_turn, actor, run, {'reply_mode': data['mode']})
+                run['reply_mode'] = 'validated' if actor.get('channel', '').startswith('feishu:') else data['mode']
+                await asyncio.to_thread(self._patch_turn, actor, run, {'reply_mode': run['reply_mode']})
                 return
             if kind == "text":
                 run['_candidate_answer'] = run.get('_candidate_answer', '') + data['delta']
@@ -456,7 +458,7 @@ class LighthouseStream:
             error = reply_failure(error, error_code, run['_turn'].get('prompt') or run['_turn']['question'])
             frames = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)[-6:]]
             logging.getLogger(__name__).warning("Assistant run failed: run=%s category=%s type=%s http_status=%s frames=%s",
-                run["id"], error_code, type(exc).__name__, getattr(exc, "status_code", None), ",".join(frames))
+                run["id"], error_code, type(exc).__name__, getattr(exc, "status_code", getattr(exc, 'status', None)), ",".join(frames))
             run.update(status="failed", label="处理未完成", error=error, error_code=error_code)
             changes = {"status": "failed", "error": error, "error_code": error_code, "answer": run["answer"], "process": run["process"],
                        "_draft_answer": run.get('_candidate_answer', ''),
@@ -495,6 +497,11 @@ class LighthouseStream:
         state = self._read(actor)
         if run["conversation_id"] not in [state['id'], *state.get('legacy_conversation_ids', [])]:
             raise AssistantError("原会话已清空。", 404)
+        turn = run if run.get('source_channel') else self.store.get_document(MESSAGES, run['conversation_id'] + ':' + run['operation_id'])
+        if turn and cancelling:
+            turn = {key: turn[key] for key in ('operation_id', 'source_channel', 'feishu_topic', 'source_topic') if key in turn}
+        if turn and not self.assistant._allowed(turn, actor):
+            raise AssistantError('回答任务不属于当前会话。', 404)
         return run
 
     async def stop(self, actor, identity):

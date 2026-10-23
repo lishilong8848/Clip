@@ -691,6 +691,7 @@ _SHARED_QUERY_FIELDS = {
 # target-record existence stay entirely with the native handler.
 _QUERY_FIELD_ENUMS = {
     "POST /api/notice-attachments": {"kind": ["site", "ali"]},
+    "GET /api/learning/completion": {"shift": ["", "白", "夜"]},
 }
 
 
@@ -768,7 +769,7 @@ _BINARY_CTYPE_PREFIXES = (
 
 def _route_excluded(path: str, method: str = "") -> bool:
     if path.startswith("/api/learning/"):
-        permitted = {"papers", "papers/{id}", "history", "review", "profile", "issues", "questions", "questions/{id}"}
+        permitted = {"papers", "papers/{id}", "history", "completion", "review", "profile", "issues", "questions", "questions/{id}"}
         return path.removeprefix("/api/learning/") not in permitted or bool(method and method != "GET")
     if method and method.upper() != "GET" and any(path == prefix or path.startswith(prefix + "/") for prefix in _DIRECT_TABLE_PREFIXES):
         return True
@@ -2585,6 +2586,8 @@ class PortalAPICatalog:
             global_bank = path in {"/api/learning/questions", "/api/learning/questions/{id}"}
             scope_rule = None if global_bank else (tuple("ABCDEH"), "params", True)
             query_fields = list(dict.fromkeys([*query_fields, "scope", "date", "today", "from", "to", "page", "page_size", "search", "bank", "kind", "period"]))
+            if path == '/api/learning/completion':
+                query_fields = list(dict.fromkeys([*query_fields, 'shift', 'status', 'q', 'person_id']))
         if scope_rule:
             if scope_rule[1] == "params" and "scope" not in query_fields:
                 query_fields.append("scope")
@@ -2596,7 +2599,7 @@ class PortalAPICatalog:
             if name in query_fields
         }
         group = _module_label(path)
-        learning_name = {"papers": "学练题单", "history": "学练历史", "review": "错题与笔记", "profile": "学习画像", "issues": "题目质疑", "questions": "题库资料"}.get(path.removeprefix('/api/learning/').split('/')[0]) if path.startswith('/api/learning/') else None
+        learning_name = {"papers": "学练题单", "history": "学练历史", "completion": "学练每日完成情况（排班日、班次、人员与作答明细）", "review": "错题与笔记", "profile": "学习画像", "issues": "题目质疑", "questions": "题库资料"}.get(path.removeprefix('/api/learning/').split('/')[0]) if path.startswith('/api/learning/') else None
         keywords = [_GROUP_KEYWORDS.get(group, "")]
         keywords.extend(_ACTION_LABELS[part] for part in path.split("/") if part in _ACTION_LABELS)
         keywords.extend(words for prefix, words in _PATH_KEYWORDS.items()

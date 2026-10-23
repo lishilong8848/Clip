@@ -148,7 +148,7 @@ class SharingImageModelTests(unittest.TestCase):
 
     def test_vision_can_read_without_ocr_and_partial_failures_keep_image_order(self):
         images = [image_source(color, '') for color in ('red', 'blue', 'green')]
-        self.transport.request_json.side_effect = [response({'text': VISUAL}), TimeoutError(), response({'text': VISUAL})]
+        self.transport.request_json.side_effect = [response({'text': VISUAL}), TimeoutError(), TimeoutError(), response({'text': VISUAL})]
         result = self.recognize(images)
         self.assertEqual([item['id'] for item in result], [item['id'] for item in images])
         self.assertEqual([item['mode'] for item in result], ['vision', 'unreadable', 'vision'])

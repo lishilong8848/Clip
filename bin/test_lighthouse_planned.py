@@ -282,9 +282,12 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
         for channel in ('', 'feishu:oc_fixture'):
             actor = {**self.actor, 'is_admin': True, 'channel': channel}
             if channel:
-                shared = (await runtime.conversation(actor))['turns'][-1]
-                self.assertEqual(shared['plan']['planned_notice']['stage'], 'preview')
+                web_actor = {**actor, 'channel': ''}
+                web_before = (await runtime.conversation(web_actor))['turns']
+                self.assertEqual(web_before[-1]['plan']['planned_notice']['stage'], 'preview')
+                self.assertEqual((await runtime.conversation(actor))['turns'], [])
                 self.assistant.clear(actor)
+                self.assertEqual((await runtime.conversation(web_actor))['turns'], web_before)
 
             async def authorize():
                 return copy.deepcopy(actor)
@@ -313,6 +316,10 @@ class PlannedAssistantTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved['operations'][0]['body']['source_record_id'], 'source-2')
                 self.assertEqual(saved['status'], 'needs_input')
                 self.assertEqual(self.writes, [])
+                if channel:
+                    self.assertEqual((await runtime.conversation(web_actor))['turns'], web_before)
+                    with self.assertRaises(AssistantError):
+                        self.agent.get_plan(web_actor, saved['id'])
 
     async def test_scope_reply_without_pending_plan_does_not_crash(self):
         state = self.assistant._state(self.actor)

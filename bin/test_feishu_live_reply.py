@@ -105,7 +105,7 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         await self.bot._drain(message['union_id'])
         return self.bot.inbox.reply_for(message['message_id'])
 
-    async def test_private_placeholder_then_snapshots_and_final_edit_one_receipt(self):
+    async def test_private_placeholder_hides_snapshots_then_final_edits_one_receipt(self):
         message = self.message()
         waiting, conversation, turn = self.backend(message)
         waiting = await self.deliver(message, waiting)
@@ -116,13 +116,12 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         turn['answer'] = '第一部分，第二部分'
         waiting['live_reply']['updated_at'] = 0
         waiting = await self.deliver(message, waiting)
-        self.assertEqual(len(self.edits), 1)
-        self.assertIn('第一部分,第二部分', self.edits[-1][1]['content'])
-        self.assertIn('未完成', self.edits[-1][1]['content'])
+        self.assertEqual(self.edits, [])
+        self.assertNotIn('第一部分', str(self.posts))
         turn.update(status='completed', answer='这是经过最终校验的完整回答。')
         self.assertIsNone(await self.deliver(message, waiting))
         self.assertEqual(len(self.posts), 1)
-        self.assertEqual(len(self.edits), 2)
+        self.assertEqual(len(self.edits), 1)
         self.assertIn('完整回答', self.edits[-1][1]['content'])
         self.assertNotIn('未完成', self.edits[-1][1]['content'])
         self.assertTrue(all(url.endswith('/om_Live') for url, _ in self.edits))
@@ -237,7 +236,7 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts[0], attempts[1])
         self.assertEqual(len(self.posts), 1)
 
-    async def test_failed_or_stopped_answer_keeps_partial_and_explicit_nonfinal_notice(self):
+    async def test_failed_or_stopped_answer_discards_partial_and_never_claims_success(self):
         for index, status in enumerate(('failed', 'stopped', 'cancelled', 'superseded')):
             message = self.message('Failure' + str(index))
             waiting, _, turn = self.backend(message, answer='PARTIAL-EXPLANATION')
@@ -245,8 +244,8 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
             turn.update(status=status, answer='操作已完成。', error='本轮已停止。')
             await self.deliver(message, waiting)
             content = self.edits[-1][1]['content']
-            self.assertIn('PARTIAL-EXPLANATION', content)
-            self.assertIn('未完成', content)
+            self.assertNotIn('PARTIAL-EXPLANATION', content)
+            self.assertIn('已停止', content)
             self.assertNotIn('操作已完成', content)
         self.assertEqual(len(self.posts), 4)
 
@@ -278,17 +277,17 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('PARTIAL-TOPIC', self.bot.inbox.topic_context(message, self.actor))
         self.assertEqual(len(self.posts), 1)
 
-    async def test_stopped_long_partial_is_complete_and_still_explicitly_nonfinal(self):
+    async def test_stopped_long_partial_is_not_delivered(self):
         message = self.message()
         waiting, _, turn = self.backend(message, answer='部分内容' * 2000)
         waiting = await self.deliver(message, waiting)
         turn.update(status='stopped', error='本轮已停止。')
         await self.deliver(message, waiting)
         content = json.loads(self.edits[-1][1]['content'])
-        displayed = ''.join(element['content'] for element in content['body']['elements'][:-1])
-        self.assertIn('部分内容' * 2000, displayed)
+        displayed = ''.join(element['content'] for element in content['body']['elements'])
+        self.assertNotIn('部分内容', displayed)
         self.assertNotIn('仅展示开头', displayed)
-        self.assertIn('未完成', content['body']['elements'][-1]['content'])
+        self.assertIn('已停止', displayed)
         self.assertLess(len(json.dumps(content, ensure_ascii=False).encode()), 30000)
 
     async def test_3501_and_5000_character_final_replies_are_complete_in_same_card(self):
@@ -413,14 +412,13 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         with patch('lan_bitable_template_portal.feishu_assistant._LIVE_REPLY_INTERVAL', .01):
             reply = await asyncio.wait_for(self.bot.answer(message), 3)
         self.assertEqual(len(self.posts), 1)
-        self.assertTrue(any('LIVE-BEFORE-RETURN' in body['content'] for _, body in self.edits))
+        self.assertFalse(any('LIVE-BEFORE-RETURN' in body['content'] for _, body in self.posts + self.edits))
         self.assertIn('FINAL-AFTER-POLL', reply['text'])
         self.assertEqual(sum(call.args[2] == 'chat' for call in self.bot._call.await_args_list), 1)
 
     async def test_cancelling_poll_keeps_receipt_and_recovery_never_replays_chat(self):
         message = self.message()
         waiting = self.waiting(message)
-        edited = asyncio.Event()
         never = asyncio.Event()
         status = 'running'
 
@@ -431,19 +429,13 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
                       'answer': 'SAVED-PARTIAL', 'error': '本轮已停止。'}] if kwargs.get('params') else []
             return {'conversation_id': 'original', 'turns': turns}
 
-        original = self.client.patch.side_effect
-
-        async def edit(url, **kwargs):
-            result = await original(url, **kwargs)
-            edited.set()
-            return result
-
-        self.client.patch.side_effect = edit
         self.bot._call = AsyncMock(side_effect=call)
         with patch('lan_bitable_template_portal.feishu_assistant._LIVE_REPLY_INTERVAL', .01):
             task = asyncio.create_task(self.bot._answer_message(message))
             try:
-                await asyncio.wait_for(edited.wait(), 3)
+                async with asyncio.timeout(3):
+                    while not (self.bot.inbox.reply_for(message['message_id']) or {}).get('live_reply', {}).get('message_id'):
+                        await asyncio.sleep(.01)
             finally:
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
@@ -455,7 +447,7 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         await self.deliver(message, saved)
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(sum(call.args[2] == 'chat' for call in self.bot._call.await_args_list), 1)
-        self.assertIn('未完成', self.edits[-1][1]['content'])
+        self.assertIn('已停止', self.edits[-1][1]['content'])
 
     async def test_same_person_other_topics_and_private_chats_run_concurrently(self):
         first = self.message('TopicOne', group=True)

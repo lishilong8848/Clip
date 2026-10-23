@@ -3982,6 +3982,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
             self.assertFalse(qt_compatible["web_today_screenshot_required"])
 
+            prepared_end = service.prepare_change_action(
+                {**update, "action": "end", "progress": "工作完成",
+                 "site_photos": [{"upload_id": "site-photo"}],
+                 "ali_confirmation_images": [{"upload_id": attachment["upload_id"]}]},
+                job_id="job-web-change-end-with-image",
+            )
+            self.assertEqual(prepared_end["today_in_progress_value"], "否")
+            self.assertEqual(prepared_end["ali_confirmation_images"], [{"upload_id": attachment["upload_id"]}])
+            self.assertIn("action === 'end' || changeActionWritesTodayYes(action, patch.progress)",
+                          Path(workbench_lite_module.__file__).read_text(encoding="utf-8"))
+
             previous_store = PortalRuntime.state_store
             previous_service = PortalRuntime.service
             PortalRuntime.state_store = service._state_store

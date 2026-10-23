@@ -390,6 +390,7 @@ SMOKE_IMPORT_MODULES = [
     "openclaw_service.update",
     "openclaw_service.gateway_log",
     "openclaw_service.assistant.routes",
+    "openclaw_service.assistant.lighthouse_knowledge_summary",
     "openclaw_service.assistant.lighthouse_commands",
     "openclaw_service.assistant.lighthouse_shared_skills",
     "openclaw_service.assistant.lighthouse_extensions",
@@ -413,6 +414,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.server",
     "lan_bitable_template_portal.risk_inspection_imports",
     "lan_bitable_template_portal.learning_shift_storage",
+    "lan_bitable_template_portal.learning_personnel_storage",
     "lan_bitable_template_portal.learning_delivery_status",
     "lan_bitable_template_portal.sharing_images",
     "lan_bitable_template_portal.sharing_generation",
@@ -1702,7 +1704,8 @@ def _run_frontend_notice_navigation_checks() -> None:
         raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
     for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
                  "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
-                 "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs"):
+                 "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
+                 "check-document-library-all-scopes.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
@@ -1755,6 +1758,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "upload_event_module" / "services" / "robot_webhook.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_cloud.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_shift_storage.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_personnel_storage.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_delivery_status.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "document_library_index.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_routes.py",
@@ -1929,7 +1933,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery", "bin.test_plan_convergence_recipients", "bin.test_planned_notice_deadlines",
          "bin.test_learning_update_flow",
          "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_knowledge_source_maintenance",
-         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model",
+         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model",
          "bin.test_signature_management_performance",
          "bin.test_workspace_layouts",
          "bin.test_workspace_extension_access",
@@ -1939,7 +1943,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
-         "bin.test_lighthouse_question_intent", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
+         "bin.test_lighthouse_question_intent", "bin.test_lighthouse_read_followups", "bin.test_lighthouse_source_recovery", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
          "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",
          "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_news", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
          "bin.test_lighthouse_document_tools",
@@ -1967,6 +1971,7 @@ def _run_packaging_preflight_tests() -> None:
                 "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
                 "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
                 "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
+                "bin.test_knowledge_document_formats", "bin.test_knowledge_document_summary", "bin.test_document_library_all_scopes",
                 "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_lighthouse_knowledge_stream_storage", "bin.test_notice_end_progress",
                 "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
                 "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",

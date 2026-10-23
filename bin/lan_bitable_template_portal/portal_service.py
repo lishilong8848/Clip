@@ -22358,9 +22358,13 @@ class MaintenancePortalService(RepairOperationsMixin):
         meta_by_name = getattr(self, '_field_meta_by_name' if source_work_type == WORK_TYPE_MAINTENANCE else '_change_field_meta_by_name', {})
         default_app = self.app_token if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_SOURCE_APP_TOKEN
         default_table = self.table_id if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_SOURCE_TABLE_ID
-        if (app_token, table_id) != (default_app, default_table):
+        if (app_token, table_id) != (default_app, default_table) or (
+            not guard.get('mock_external') and status_field not in meta_by_name
+        ):
             _, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
         status_meta = meta_by_name.get(status_field)
+        if not status_meta and not guard.get('mock_external'):
+            raise NoticeSourcePending('源表状态字段元信息缺失，后台将重新读取字段定义后重试，未猜测写入。')
         writable_status = bool(status_meta and not self._field_meta_is_readonly(status_meta))
         expected_status = '已结束' if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_PROGRESS_ENDED
         def status_ended(fields):
@@ -45841,7 +45845,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "progress": progress,
             "today_in_progress_value": today_in_progress,
             "ali_confirmation_images": (
-                ali_confirmation_images if today_in_progress == "是" else []
+                ali_confirmation_images if today_in_progress == "是" or action == "end" else []
             ),
             "ali_confirmation_source": ali_confirmation_source,
             "ali_confirmation_screenshot_fingerprint": (

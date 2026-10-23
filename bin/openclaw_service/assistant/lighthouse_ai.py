@@ -61,7 +61,7 @@ def explicit_general_question(question):
 
 def is_business_query(question):
     # A worksheet is a document term, not an outstanding-work query.
-    return bool(BUSINESS_QUERY.search(question.replace('工作表', '')) or re.search(r'多维表|在职|在岗|员工|人事|人员表|采购|库存|质量评估|月度告警', question)) and not explicit_general_question(question)
+    return bool(BUSINESS_QUERY.search(question.replace('工作表', '')) or re.search(r'多维表|在职|在岗|员工|人事|人员表|排班|白班|夜班|当班|上班|出勤|采购|库存|质量评估|月度告警', question)) and not explicit_general_question(question)
 
 
 def _privacy_text(value):
@@ -651,11 +651,21 @@ class LighthouseAssistant:
             # The shared public transcript is separate from each operator's private execution state.
             return 'topic-conversation:' + hashlib.sha256(topic['id'].encode()).hexdigest()[:24] + ':' + actor['id']
         channel = actor.get("channel")
-        suffix = ":" + hashlib.sha256(channel.encode()).hexdigest()[:24] if channel and not channel.startswith('feishu:') else ""
+        if channel and channel.startswith('feishu:'):
+            return 'feishu-conversation:' + actor['id']
+        suffix = ":" + hashlib.sha256(channel.encode()).hexdigest()[:24] if channel else ""
         return "conversation:" + actor["id"] + suffix
 
     @staticmethod
     def _allowed(turn, actor):
+        message = 'operation_id' in turn
+        origin = turn.get('source_channel') or ('feishu' if str(turn.get('operation_id', '')).startswith(('feishu_', 'topic_mirror_')) else 'web' if message else '')
+        if origin and origin != ('feishu' if actor.get('channel', '').startswith('feishu:') else 'web'):
+            return False
+        if message and turn.get('feishu_topic', '') != (actor.get('_feishu_topic') or {}).get('id', ''):
+            return False
+        if turn.get('source_topic'):
+            return False
         if turn.get('topic_access'):
             from lan_bitable_template_portal.portal_auth import topic_access_allowed
             return topic_access_allowed({'capabilities': turn['topic_access']}, actor)
@@ -680,38 +690,52 @@ class LighthouseAssistant:
 
     def _state(self, actor):
         with self._lock:
-            data = self.store.get_document(NAMESPACE, self._key(actor))
-            if (not actor.get('_feishu_topic') and (not actor.get('channel') or actor['channel'].startswith('feishu:'))
-                    and not (data or {}).get('unified_person')):
-                previous = self.store.list_documents(NAMESPACE, key_prefix='conversation:' + actor['id'] + ':')
-                previous.sort(key=lambda item: item.get('updated_at', 0))
-                states = [item['payload'] for item in previous if isinstance(item.get('payload'), dict) and item['payload'].get('id')]
-                if data is None and states:
-                    data = copy.deepcopy(states[-1])
-                data = data or {'id': uuid.uuid4().hex, 'turns': []}
-                turns = {}
-                for old in [*states, data]:
-                    for turn in old.get('turns', []):
-                        if turn.get('operation_id'):
-                            turns[turn['operation_id']] = copy.deepcopy(turn)
-                data['turns'] = sorted(turns.values(), key=lambda item: item.get('at', 0))
-                data['legacy_conversation_ids'] = list(dict.fromkeys(old['id'] for old in states if old['id'] != data['id']))
-                data['unified_person'] = True
-                # Keep original channel documents and message archives for recovery.
-                if states and data['turns']:
-                    archive = {data['id'] + ':' + turn['operation_id']: turn for turn in data['turns']}
-                    writer = getattr(self.store, 'put_documents', None)
-                    if callable(writer):
-                        writer('lighthouse_messages', archive)
-                    else:
-                        for archive_key, turn in archive.items():
-                            self.store.put_document('lighthouse_messages', archive_key, turn)
-                    data['message_archive_ready'] = True
-                self._trim_turns(data)
-                self.store.put_document(NAMESPACE, self._key(actor), data)
+            key = self._key(actor)
+            data = self.store.get_document(NAMESPACE, key)
             if data is None:
                 data = {"id": uuid.uuid4().hex, "turns": []}
-                self.store.put_document(NAMESPACE, self._key(actor), data)
+                if key.startswith('feishu-conversation:'):
+                    old = self.store.get_document(NAMESPACE, 'conversation:' + actor['id']) or {}
+                    if old.get('id'):
+                        data['legacy_conversation_ids'] = [old['id'], *old.get('legacy_conversation_ids', [])]
+                    # Copy only identifiable private Feishu turns; the original archive remains intact.
+                    archived = [self.store.get_document('lighthouse_messages', old['id'] + ':' + turn['operation_id']) or turn
+                                for turn in old.get('turns', [])]
+                    data['turns'] = [copy.deepcopy(turn) for turn in archived
+                                     if turn.get('source_channel') == 'feishu'
+                                     and not turn.get('display_only') and not turn.get('feishu_topic')
+                                     and not turn.get('source_topic')]
+                    if data['turns']:
+                        # Preserve existing private cards and delivery receipts across the split.
+                        data['id'] = old['id']
+                        data['legacy_conversation_ids'] = old.get('legacy_conversation_ids', [])
+                        run_ids = {turn.get('run_id') for turn in data['turns'] if turn.get('run_id')}
+                        data['streaming'] = old.get('streaming', False)
+                        data['execution_lanes'] = {name: copy.deepcopy(lane) for name, lane in old.get('execution_lanes', {}).items()
+                                                   if lane.get('active_run_id') in run_ids}
+                        active = old.get('_legacy_active_run') or old
+                        if active.get('active_run_id') in run_ids:
+                            data.update({name: copy.deepcopy(active[name]) for name in ('active_run_id', 'phase', 'query_scopes') if name in active})
+                    if old.get('model_id'):
+                        data['model_id'] = old['model_id']
+                self.store.put_document(NAMESPACE, key, data)
+            if not data.get('channel_isolated'):
+                # Old summaries may mix channels; retain them without reusing them as context.
+                for saved in [data, *data.get('execution_lanes', {}).values()]:
+                    if saved.get('context'):
+                        saved['_legacy_context'] = copy.deepcopy(saved['context'])
+                        saved['context'] = {}
+                active = next((turn for turn in data['turns'] if turn.get('run_id') and turn['run_id'] == data.get('active_run_id')), None)
+                if active and not self._allowed(active, actor):
+                    data['_legacy_active_run'] = {name: data[name] for name in ('active_run_id', 'phase', 'query_scopes') if name in data}
+                    data['active_run_id'], data['phase'] = '', ''
+                    data.pop('query_scopes', None)
+                data['channel_isolated'] = True
+                for turn in data.get('turns', []):
+                    archive_key = data['id'] + ':' + turn['operation_id']
+                    if self.store.get_document('lighthouse_messages', archive_key) is None:
+                        self.store.put_document('lighthouse_messages', archive_key, turn)
+                self.store.put_document(NAMESPACE, key, data)
             return data
 
     def conversation_stamp(self, actor):
@@ -736,7 +760,6 @@ class LighthouseAssistant:
             existing = next((t for t in state['turns'] if t['operation_id'] == operation), None)
             existing = existing or self.store.get_document('lighthouse_messages', state['id'] + ':' + operation)
             if existing:
-                self._mirror_topic_reply(actor, payload, existing)
                 return {'recorded': True}
             turn = {'operation_id': operation, 'at': time.time(), 'question': safe_text(payload['question'], limit=12000),
                     'answer': safe_text(payload['answer'], limit=120000), 'status': 'completed', 'source_channel': 'feishu',
@@ -747,33 +770,7 @@ class LighthouseAssistant:
             self.store.put_document('lighthouse_messages', state['id'] + ':' + operation, turn)
             self._trim_turns(state)
             self.store.put_document(NAMESPACE, self._key(actor), state)
-            self._mirror_topic_reply(actor, payload, turn)
         return {'recorded': True}
-
-    def _mirror_topic_reply(self, actor, payload, turn):
-        topic = actor.get('_feishu_topic') or {}
-        if not topic.get('id') or not actor.get('channel', '').startswith('feishu:'):
-            return
-        personal = {**actor, 'scopes': list(actor.get('_personal_scopes', actor['scopes'])),
-                    'modules': list(actor.get('_personal_modules', actor.get('modules', [])))}
-        personal.pop('_feishu_topic', None)
-        personal.pop('_topic_capabilities', None)
-        personal['role'] = 'admin' if personal.get('is_admin') else 'building'
-        state = self._state(personal)
-        identity = 'topic_mirror_' + hashlib.sha256((topic['id'] + ':' + payload['operation_id']).encode()).hexdigest()[:40]
-        if any(t.get('operation_id') == identity for t in state.get('turns', [])):
-            return
-        accessible = self._allowed(turn, personal)
-        mirror = {'operation_id': identity, 'at': turn.get('at', time.time()), 'question': safe_text(payload['question'], limit=12000),
-                  'answer': safe_text(payload['answer'], limit=120000) if accessible else '本话题回复涉及临时委派权限，请返回原话题查看。',
-                  'status': 'completed', 'source_channel': 'feishu', 'display_only': True,
-                  'source_topic': topic['id'], 'scopes': personal['scopes'], 'access_scopes': personal['scopes'],
-                  'access_modules': list(personal.get('modules', [])),
-                  'sources': [], 'process': []}
-        state['turns'].append(mirror)
-        self.store.put_document('lighthouse_messages', state['id'] + ':' + identity, mirror)
-        self._trim_turns(state)
-        self.store.put_document(NAMESPACE, self._key(personal), state)
 
     @staticmethod
     def _selected(data, settings):
@@ -870,6 +867,7 @@ class LighthouseAssistant:
             if any((turn.get("plan") or {}).get("status") in {"running", "submitted"} for turn in previous.get("turns", [])):
                 raise AssistantError("业务操作仍在处理，请完成后再清空会话。", 409)
             self.store.put_document(NAMESPACE, self._key(actor), {"id": uuid.uuid4().hex, "turns": [], "model_id": previous.get("model_id", ""), "unified_person": True,
+                "channel_isolated": True,
                 "reply_preferences": previous.get('reply_preferences', {})})
             return self.conversation(actor)
 
@@ -999,7 +997,7 @@ class LighthouseAssistant:
         if not isinstance(operation, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", operation):
             raise AssistantError("提问编号无效，请刷新页面。")
         with self._lock:
-            state = self.store.get_document(NAMESPACE, self._key(actor)) or {"id": uuid.uuid4().hex, "turns": []}
+            state = self._state(actor)
             if payload.get("conversation_id") != state["id"]:
                 raise AssistantError("会话已变化，请重新读取后提问。", 409)
             prior = next((t for t in state["turns"] if t["operation_id"] == operation), None)
@@ -1018,7 +1016,9 @@ class LighthouseAssistant:
             state["model_id"] = profile["id"]
             self._reserve(actor)
             turn = prior or {"operation_id": operation, "question": clean_question, "scopes": actor["scopes"], "at": time.time()}
-            turn.update(status="pending", error="", model_name=profile["name"])
+            turn.update(status="pending", error="", model_name=profile["name"],
+                        source_channel='feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
+                        feishu_topic=(actor.get('_feishu_topic') or {}).get('id', ''))
             if not prior:
                 state["turns"].append(turn)
         try:

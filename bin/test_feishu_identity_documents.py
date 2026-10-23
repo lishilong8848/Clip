@@ -102,6 +102,7 @@ class IdentityDocumentTests(unittest.TestCase):
 
     def test_model_and_topic_account_keys_only(self):
         for key, expected in [('model:' + PREVIOUS, 'model:' + CURRENT),
+                              ('feishu-conversation:' + PREVIOUS, 'feishu-conversation:' + CURRENT),
                               ('conversation:' + PREVIOUS + ':channelHash', 'conversation:' + CURRENT + ':channelHash'),
                               ('topic-conversation:topicHash:' + PREVIOUS, 'topic-conversation:topicHash:' + CURRENT)]:
             with self.subTest(key=key):

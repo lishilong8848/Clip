@@ -1,5 +1,6 @@
 """Sharing source adapters over the existing Qt reader and offline document tools."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -9,7 +10,6 @@ from urllib.parse import urlsplit
 
 from .learning import LearningError, stamp
 
-MAX_FILE = 20 * 1024 * 1024
 SUFFIXES = {'.pdf', '.docx', '.xlsx', '.xlsm', '.pptx'}
 
 
@@ -27,9 +27,10 @@ def source_url(value, *, minutes=False):
 
 
 class _MaterialReader:
-    """Adapt read-only metadata and bounded bytes to the Qt document auth retry."""
+    """Adapt read-only metadata and disk-spooled downloads to Qt auth retry."""
     def __init__(self, portal):
         self.portal = portal
+        self.download_file = None
 
     def _auth_headers(self):
         return self.portal._auth_headers()
@@ -44,24 +45,29 @@ class _MaterialReader:
                 if 300 <= response.status_code < 400:
                     raise LearningError('材料下载要求跳转，未跟随跳转；请下载原文件后显式上传。', 502)
                 size = response.headers.get('content-length')
-                if size and (not size.isdecimal() or int(size) > MAX_FILE):
-                    raise LearningError('材料下载大小无效或超过20MiB。', 413)
-                content = bytearray()
-                for chunk in response.iter_bytes(65536):
-                    if len(content) + len(chunk) > MAX_FILE:
-                        raise LearningError('材料下载超过20MiB，已停止。', 413)
-                    content.extend(chunk)
-                if 'json' in response.headers.get('content-type', '').lower():
-                    try:
-                        value = json.loads(content)
-                    except (ValueError, UnicodeError):
-                        value = None
-                    if isinstance(value, dict) and type(value.get('code')) is int and value['code']:
-                        return value
-                    raise LearningError('附件接口未返回可识别文件，请下载原文件后显式上传。', 502)
-                if response.status_code != 200 or not content:
-                    raise LearningError('材料下载未完成，请核对文件授权或显式上传原文件。', 502)
-                return {'code': 0, 'data': {'content': bytes(content)}}
+                if size and not size.isdecimal():
+                    raise LearningError('材料下载大小无效。', 502)
+                content = tempfile.SpooledTemporaryFile(max_size=2 * 1024 * 1024)
+                try:
+                    for chunk in response.iter_bytes(65536):
+                        content.write(chunk)
+                    length = content.tell()
+                    content.seek(0)
+                    if 'json' in response.headers.get('content-type', '').lower():
+                        try:
+                            value = json.load(content)
+                        except (ValueError, UnicodeError):
+                            value = None
+                        if isinstance(value, dict) and type(value.get('code')) is int and value['code']:
+                            return value
+                        raise LearningError('附件接口未返回可识别文件，请下载原文件后显式上传。', 502)
+                    if response.status_code != 200 or not length:
+                        raise LearningError('材料下载未完成，请核对文件授权或显式上传原文件。', 502)
+                    self.download_file = content
+                    return {'code': 0, 'data': {'file': content}}
+                finally:
+                    if self.download_file is not content:
+                        content.close()
         return self.portal._request_payload(method, url, context=context, headers=headers, params=params, retries=0)
 
 
@@ -70,14 +76,19 @@ def cloud_reader(portal, url, *, minutes=False):
     from openclaw_service.assistant.lighthouse_documents import document_reader
     from openclaw_service.assistant.lighthouse_ai import AssistantError
     target = source_url(url, minutes=minutes)
-    request = document_reader(_MaterialReader(portal), '分享材料只读解析')
+    reader = _MaterialReader(portal)
+    request = document_reader(reader, '分享材料只读解析')
 
     def get(path, params=None):
         try:
             result = request('https://open.feishu.cn/open-apis/' + path, params)
         except LearningError:
+            if reader.download_file is not None:
+                reader.download_file.close()
             raise
         except AssistantError as exc:
+            if reader.download_file is not None:
+                reader.download_file.close()
             raise LearningError(str(exc), exc.status) from None
         except TransportError:
             raise LearningError('分享材料读取时网络超时或连接中断，请稍后重试。', 503) from None
@@ -105,16 +116,22 @@ def resolve_document(portal, url):
     return 'https://vnet.feishu.cn/docx/' + token, target
 
 
+def downloaded_file(data):
+    content = data.get('file')
+    if content is None and isinstance(data.get('content'), bytes):
+        content = io.BytesIO(data['content'])
+    if content is None or not callable(getattr(content, 'read', None)):
+        raise LearningError('材料附件未完整返回，请重新读取。', 502)
+    return content
+
+
 def _read_linked_file(get, token, name, *, embedded=False):
     if not isinstance(name, str) or len(name) > 240 or Path(name).suffix.lower() not in SUFFIXES:
         raise LearningError('材料文件名或格式无法识别，仅支持PDF、DOCX、XLSX、XLSM和PPTX；请核对原文件后显式上传。')
-    content = get('drive/v1/' + ('medias/' if embedded else 'files/') + token + '/download').get('content')
-    if not isinstance(content, bytes) or not 0 < len(content) <= MAX_FILE:
-        raise LearningError('材料附件为空、响应无效或超过20MiB。', 413)
-    digest = hashlib.sha256(content).hexdigest()
-    with tempfile.TemporaryDirectory(prefix='sharing-material-') as folder:
+    with downloaded_file(get('drive/v1/' + ('medias/' if embedded else 'files/') + token + '/download')) as content, tempfile.TemporaryDirectory(prefix='sharing-material-') as folder:
         path = Path(folder) / ('material' + Path(name).suffix.lower())
-        path.write_bytes(content)
+        with path.open('xb') as output:
+            digest = _copy_material(content, output)[1]
         parsed = SharingMaterials.parse(path, digest)
     return {'title': name, 'sha256': digest, **parsed}
 
@@ -181,15 +198,28 @@ def read_material_link(portal, url):
         extra = {'attachment': {'name': name, 'sha256': attached['sha256']},
                  'references': [{**ref, 'start': ref['start'] + offset, 'end': ref['end'] + offset} for ref in attached['references']],
                  'low_confidence_count': attached['low_confidence_count']}
-    if not text.strip() or len(text) > 100000:
-        raise LearningError('分享材料正文为空或超过100000字，请拆分后重新读取。')
+    if len(text) > 100000:
+        raise LearningError('分享材料正文超过100000字，请拆分后重新读取。')
     if get(path).get('document', {}).get('revision_id') != revision:
         raise LearningError('读取期间分享材料已变化，请重新提交。', 409)
     from .sharing_images import document_images
     images = document_images(blocks, 'https://vnet.feishu.cn/docx/' + token, revision, document.get('title') or '分享材料')
+    if not text.strip() and not images:
+        raise LearningError('分享材料没有可读取的正文或图片，请核对原文档。')
     return {'url': target, 'title': document.get('title') or '分享材料', 'revision': revision,
             'text': text, 'sha256': hashlib.sha256(text.encode()).hexdigest(),
             'extraction_complete': True, 'read_at': stamp(), **extra, **({'images': images} if images else {})}
+
+
+def _copy_material(content, output):
+    digest, size = hashlib.sha256(), 0
+    while chunk := content.read(65536):
+        output.write(chunk)
+        digest.update(chunk)
+        size += len(chunk)
+    if not size:
+        raise LearningError('材料为空，请选择有效文件。')
+    return size, digest.hexdigest()
 
 
 class SharingMaterials:
@@ -201,16 +231,18 @@ class SharingMaterials:
         self.learning._admin(actor)
         if not isinstance(name, str) or len(name) > 240 or Path(name).suffix.lower() not in SUFFIXES:
             raise LearningError('支持PDF、DOCX、XLSX、XLSM和PPTX材料。')
-        if not isinstance(content, bytes) or not 0 < len(content) <= MAX_FILE:
-            raise LearningError('单份材料须为非空文件，最大20MiB。', 413)
+        if isinstance(content, bytes):
+            content = io.BytesIO(content)
+        if not callable(getattr(content, 'read', None)):
+            raise LearningError('请选择有效材料文件。')
         identity = uuid.uuid4().hex
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / (identity + Path(name).suffix.lower())
-        with path.open('xb') as output:
-            output.write(content)
-        item = {'id': identity, 'owner': actor['id'], 'name': Path(name).name, 'size': len(content),
-                'path': str(path), 'sha256': hashlib.sha256(content).hexdigest()}
         try:
+            with path.open('xb') as output:
+                size, digest = _copy_material(content, output)
+            item = {'id': identity, 'owner': actor['id'], 'name': Path(name).name, 'size': size,
+                    'path': str(path), 'sha256': digest}
             # Staging is local-only; the immutable parsed snapshot travels with its batch.
             with self.learning.transaction() as conn:
                 self.learning._put('sharing_material', identity, item, conn, False)
@@ -234,7 +266,7 @@ class SharingMaterials:
     def parse(path, sha256):
         from openclaw_service.assistant.lighthouse_document_tools import run_local
         payload = {'path': str(path), 'sha256': sha256, 'page': 1}
-        result = run_local('markdown', payload)
+        result = run_local('markdown', payload, max_bytes=None)
         if path.suffix.lower() == '.pdf' and not result.get('extraction_complete'):
             total = result.get('total_pages', 0)
             pages = {ref['page']: result['text'][ref['start']:ref['end']] for ref in result.get('references', []) if ref.get('kind') == 'page'}
@@ -244,7 +276,7 @@ class SharingMaterials:
             for page in range(1, total + 1):
                 if page in pages:
                     continue
-                recognized = run_local('ocr', {**payload, 'page': page})
+                recognized = run_local('ocr', {**payload, 'page': page}, max_bytes=None)
                 if not recognized.get('text', '').strip():
                     raise LearningError(f'PDF第{page}页OCR未提取到有效正文，未使用不完整材料。')
                 pages[page] = f'[page {page}]\n' + recognized['text']

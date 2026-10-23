@@ -64,6 +64,20 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(safe_text(reply['text']), self.calls[0][1]['content'])
         self.assertIn('表单开头', self.calls[1][1]['content'])
 
+    async def test_normalized_question_form_does_not_repeat_same_question_as_separate_reply(self):
+        reply = {'text': '请补充范围\n<details><summary>选择回答</summary>甲或乙</details>',
+                 'card': {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown',
+                    'content': '请补充范围\n<details><summary>选择回答</summary>甲或乙</details>'}]}}}
+        await self.messenger.send(self.message, reply)
+        await self.messenger.send(self.message, reply)
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_form_without_markdown_does_not_hide_empty_answer_failure_notice(self):
+        reply = {'text': '', 'card': {'schema': '2.0', 'body': {'elements': []}}}
+        await self.messenger.send(self.message, reply)
+        self.assertEqual(len(self.calls), 2)
+        self.assertIn('本轮暂未生成回答', self.calls[0][1]['content'])
+
     async def test_mid_answer_disconnect_retries_only_missing_part_with_same_uuid(self):
         reply = {'text': '答' * 8000}
         original = self.client.post.side_effect
@@ -188,6 +202,42 @@ class AnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         reply = await self.bot._recover_answer(self.message, waiting)
         self.assertNotIn('正在查询第一栋', reply['text'])
         self.assertIn('未完成', reply['text'])
+
+    async def test_legacy_live_turn_never_mirrors_prefix_and_failure_discards_old_card_draft(self):
+        from lan_bitable_template_portal.feishu_assistant import _live_card
+        waiting = await self.bot._answer_message(self.message)
+        original = self.bot._call.side_effect
+        async def legacy(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if isinstance(result, dict) and result.get('turns'):
+                result['turns'][0]['reply_mode'] = 'live'
+            return result
+        self.bot._call.side_effect = legacy
+        waiting['live_reply'] = {'partial': '今天', 'notice': 'old incomplete notice', 'message_id': 'om_Existing'}
+        card = _live_card(waiting)
+        self.assertNotIn('今天', json.dumps(card, ensure_ascii=False))
+        pending = await self.bot._recover_answer(self.message, waiting)
+        self.assertNotIn('正在查询第一栋', pending['text'])
+        self.assertNotIn('partial', pending['live_reply'])
+        self.status = 'failed'
+        failed = await self.bot._recover_answer(self.message, pending)
+        self.assertNotIn('今天', failed['text'])
+        self.assertNotIn('正在查询第一栋', failed['text'])
+        self.assertEqual(failed['live_reply']['message_id'], 'om_Existing')
+        self.assertFalse(failed['live_reply']['notice'])
+        self.assertEqual(self.posts, 1)
+
+    async def test_failed_turn_has_a_safe_run_reference_but_no_rejected_candidate(self):
+        reply = await self.bot._turn_reply(self.message, self.request, self.actor, self.conversation,
+            {'status': 'failed', 'error': 'Internal details must not be shown', 'error_code': 'model_validation',
+             'run_id': 'abc12345' * 4, 'answer': 'Unverified candidate must not be shown'}, self.message['question'])
+        self.assertIn('未通过资料核验', reply['text'])
+        self.assertIn('诊断编号:abc12345', reply['text'])
+        self.assertNotIn('Internal details', reply['text'])
+        self.assertNotIn('Unverified candidate', reply['text'])
+        reply = await self.bot._turn_reply(self.message, self.request, self.actor, self.conversation,
+            {'status': 'failed', 'run_id': 'untrusted reference', 'error_code': 'model_validation'}, self.message['question'])
+        self.assertNotIn('诊断编号', reply['text'])
 
     async def test_temporarily_unreachable_backend_keeps_pending_outcome_for_later(self):
         waiting = await self.bot._answer_message(self.message)

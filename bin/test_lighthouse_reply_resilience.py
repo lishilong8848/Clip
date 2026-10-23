@@ -74,11 +74,16 @@ class ReplyResilienceTests(unittest.TestCase):
 
     def test_friendly_failure_without_diagnostics_or_fake_result(self):
         text = reply_failure('未取得可靠业务依据,未执行业务,请重试或明确查询内容。（诊断编号：16cec44a）', question='今天答题的都有哪些')
-        self.assertIn('完整的答题名单', text)
+        self.assertIn('未能完成回答', text)
+        self.assertNotIn('答题名单', text)
         self.assertNotIn('诊断编号', text)
         self.assertNotIn('未取得可靠业务依据', text)
         for code in ('model_context', 'model_protocol', 'model_auth', 'timeout', 'query_adapter'):
-            self.assertTrue(reply_failure('', code))
+            text = reply_failure('', code, '查看本周都有哪些人参与了答题')
+            self.assertTrue(text)
+            self.assertNotIn('答题名单', text)
+            if code == 'model_context':
+                self.assertIn('上下文', text)
         for message in ('没有权限查看该楼栋', '结束通告前必须上传一张现场照片', '回答已停止，可继续或重新提问。'):
             self.assertEqual(reply_failure(message), message)
 

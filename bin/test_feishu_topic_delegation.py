@@ -262,7 +262,7 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(AssistantError):
                 files.get(actor, identity)
 
-    async def test_mirror_is_display_only_not_personal_memory_and_no_other_owner(self):
+    async def test_topic_reply_is_saved_once_without_personal_or_web_mirroring(self):
         model = Mock(); model.settings.return_value = {'models': [], 'enabled': True}
         assistant = LighthouseAssistant(self.store, Mock(), model=model)
         actor = self.actor()
@@ -270,13 +270,14 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         payload = {'operation_id': 'feishu_' + 'a' * 40, 'conversation_id': state['id'],
                    'question': 'my public question', 'answer': 'my public answer'}
         assistant.record_channel_reply(actor, payload)
-        web = {**actor}; web.pop('_feishu_topic')
-        personal = assistant._state(web)
-        self.assertEqual(len(personal['turns']), 1)
-        self.assertTrue(personal['turns'][0]['display_only'])
-        self.assertEqual(personal['turns'][0]['answer'], payload['answer'])
+        private = {**actor}; private.pop('_feishu_topic')
+        web = {**private}; web.pop('channel')
+        personal = assistant._state(private)
+        self.assertEqual(personal['turns'], [])
+        self.assertEqual(assistant._state(web)['turns'], [])
+        self.assertEqual(assistant._state(actor)['turns'][0]['answer'], payload['answer'])
         assistant.record_channel_reply(actor, payload)
-        self.assertEqual(len(assistant._state(web)['turns']), 1)
+        self.assertEqual(len(assistant._state(actor)['turns']), 1)
         other = {**web, 'id': 'ou_Maint'}
         self.assertEqual(assistant._state(other)['turns'], [])
         messages = assistant._messages(personal['turns'], {}, [], 'private followup')
@@ -397,6 +398,32 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('HIDDEN', context)
         self.assertLessEqual(len(context), 12000)
 
+    async def test_same_topic_shares_delivered_public_replies_across_people_and_restart(self):
+        bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
+        bot.config = {'app_id': TARGET_APP_ID}
+        bot.inbox = Inbox(self.root / 'inbox.sqlite3')
+        message = {'message_id': 'om_Public', 'root_id': 'om_Root', 'chat_id': 'oc_Group',
+                   'chat_type': 'group', 'app_id': TARGET_APP_ID, 'sender_id': 'ou_Low',
+                   'question': '本话题已核实多少项？'}
+        bot.inbox.remember_public_reply(message, {'text': '已核实三项公开结果',
+            'delivery_access': {'capabilities': [], 'scopes': [], 'modules': []},
+            'thread_route': {'chat_id': 'oc_Group', 'root_id': 'om_Root'}})
+        bot.inbox = Inbox(self.root / 'inbox.sqlite3')
+        contexts = []
+        for identity in ('ou_Low', 'ou_Maint', 'ou_Repair'):
+            actor = self.actor(identity)
+            await bot._prepare_topic({**message, 'sender_id': identity}, self.request(identity), actor)
+            contexts.append(actor['_feishu_topic']['context'])
+            self.assertIn('本话题已核实多少项', contexts[-1])
+            self.assertIn('已核实三项公开结果', contexts[-1])
+        self.assertEqual(len(set(contexts)), 1)
+        for changed in ({'root_id': 'om_Other'}, {'chat_id': 'oc_Other'}, {'app_id': 'cli_other'}):
+            self.assertEqual(bot.inbox.topic_context({**message, **changed}, self.actor()), '')
+        actor = self.actor()
+        actor.pop('_feishu_topic')
+        await bot._prepare_topic({**message, 'chat_type': 'p2p'}, self.request(), actor)
+        self.assertNotIn('_feishu_topic', actor)
+
     async def test_enrich_and_double_prepare_never_promote_personal_permissions(self):
         bot = FeishuAssistant(SimpleNamespace(), self.runtime, AsyncMock())
         bot.config = {'app_id': TARGET_APP_ID}
@@ -421,9 +448,9 @@ class TopicDelegationTests(unittest.IsolatedAsyncioTestCase):
         assistant.record_channel_reply(actor, {'conversation_id': state['id'], 'operation_id': turn['operation_id'],
             'question': 'q', 'answer': 'borrowed source'})
         web = {**self.actor()}; web.pop('_feishu_topic')
-        mirrors = assistant._state(web)['turns']
-        self.assertNotIn('borrowed source', mirrors[0]['answer'])
-        self.assertTrue(mirrors[0]['display_only'])
+        self.assertEqual(assistant._state(web)['turns'], [])
+        self.assertEqual(assistant._state({**web, 'channel': ''})['turns'], [])
+        self.assertEqual(assistant._state(actor)['turns'][0]['answer'], 'borrowed source')
 
     async def test_query_only_participant_does_not_borrow_business_write_permissions(self):
         self.auth.profiles['ou_Low']['modules'] = ['event']

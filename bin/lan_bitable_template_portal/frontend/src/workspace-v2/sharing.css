@@ -3,6 +3,9 @@
 .workspace-v2 .sharing-title h2{font-size:16px;max-width:65ch}
 .workspace-v2 .sharing-create{padding:12px 0;margin-bottom:12px}
 .workspace-v2 .sharing-sources{gap:10px;margin-bottom:10px}
+.workspace-v2 .sharing-batch.n-button{height:auto;min-width:0;white-space:normal;display:flex}
+.workspace-v2 .sharing-batch>.n-button__content{display:grid;grid-template-columns:minmax(0,1fr) auto;width:100%;min-width:0;gap:12px;white-space:normal;line-height:1.6}
+@media(max-width:700px){.workspace-v2 .sharing-batch>.n-button__content{grid-template-columns:minmax(0,1fr);gap:6px}}
 .workspace-v2 .sharing-types{gap:4px 18px;margin-bottom:8px}
 .workspace-v2 .sharing-exercises .sharing-metrics{gap:12px;padding:10px 0;margin:10px 0;font-size:13px}
 .workspace-v2 .sharing-exercises .sharing-metrics strong{font-size:20px}

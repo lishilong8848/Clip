@@ -97,6 +97,77 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.engine.bridge.active)
         self.assertFalse(self.items[0]['busy'])
 
+    async def test_topic_read_validation_exhaustion_uses_backup_and_original_receipts(self):
+        self.actor.update(channel='feishu:oc_fixture',
+                          _feishu_topic={'id': 'oc_fixture:om_topic', 'context': 'Only public topic context'})
+        self.agent = native.OpenClawToolAgent(self.engine, self.actor,
+            {'operation_id': 'original-operation', 'run_id': 'original-run'}, self.emit, self.profiles[0],
+            instructions='Original authorization and business policy')
+        self.agent._acquire_runtime = AsyncMock(side_effect=self.acquire)
+        self.agent._auto_tools = True
+        self.agent._buffered_reply = True
+        reads = []
+        async def query(page: int):
+            reads.append(page)
+            return {'ok': True, 'query_ref': 'snapshot-' + str(page),
+                    'data': {'page': page, 'scope': 'A', 'has_more': page == 1}}
+        self.agent.tools['lighthouse_query'] = Tool(query)
+        async def validate(answer):
+            if self.agent.profile['id'] == 'current':
+                raise ModelRetry('Read the missing second page before claiming completeness')
+            return answer
+        self.agent.validators.append(validate)
+        async def hook(client):
+            page = 1 if self.agent.profile['id'] == 'current' else 2
+            if page not in reads:
+                await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
+                    'run_id': self.agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'page-' + str(page),
+                    'params': {'page': page}})
+        for identity, answer in (('current', 'Unverified complete list'), ('backup', 'Verified complete answer')):
+            self.scripts[identity] = {'hook': hook, 'events': [], 'wait': {'status': 'ok',
+                'terminalReply': {'disposition': 'visible', 'text': answer}}}
+        events = await self.run_agent(['Original topic question, A building'])
+        self.assertEqual(events[-1].result.output, 'Verified complete answer')
+        self.assertEqual(self.selected, ['current', 'backup'])
+        self.assertEqual(reads, [1, 2])
+        backup = next(params for method, params in self.clients[-1].calls if method == 'agent')
+        self.assertIn('Original topic question', backup['message'])
+        self.assertIn('snapshot-1', backup['message'])
+        self.assertIn(':evidence:', backup['sessionKey'])
+        self.assertTrue(backup['idempotencyKey'].endswith(':fallback:1'))
+        self.assertEqual(self.agent.health.snapshot(self.agent._health_key(self.profiles[0]))['category'], 'model_validation')
+
+    async def test_confirmed_mutation_validation_failure_does_not_start_another_model(self):
+        effects = []
+        async def submit():
+            effects.append('submitted')
+            return {'ok': True, 'job_id': 'original-job'}
+        self.agent.tools['lighthouse_submit'] = Tool(submit)
+        async def hook(client):
+            if not effects:
+                await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
+                    'run_id': self.agent.run_id, 'tool': 'lighthouse_submit', 'call_id': 'original', 'params': {}})
+        async def reject(answer):
+            raise ModelRetry('Business outcome does not match the candidate')
+        self.agent.validators.append(reject)
+        self.scripts['current'] = {'hook': hook}
+        with self.assertRaises(AssistantError):
+            await self.run_agent()
+        self.assertEqual(effects, ['submitted'])
+        self.assertEqual(self.selected, ['current'])
+        self.assertEqual(self.agent.health.snapshot(self.agent._health_key(self.profiles[0])), {})
+
+    async def test_repeated_invalid_answers_have_a_bounded_model_chain(self):
+        self.configure(self.actor['id'], [self.profiles[0], *[profile('backup' + str(i)) for i in range(5)]])
+        async def reject(answer):
+            raise ModelRetry('Missing evidence')
+        self.agent.validators.append(reject)
+        with self.assertRaises(AssistantError) as raised:
+            await self.run_agent()
+        self.assertEqual(raised.exception.category, 'model_validation')
+        self.assertEqual(self.selected, ['current', 'backup0', 'backup1', 'backup2'])
+        self.assertFalse(self.engine.bridge.active)
+
     async def test_terminal_failures_switch_once_and_keep_turn_session_history_and_images(self):
         for message in ('Model provider unavailable', 'Model provider timed out', 'Model provider authentication failed',
                         'Model provider rate limit exceeded', 'Model provider model not found', 'private provider failure'):
@@ -199,6 +270,62 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                     events.append(event)
         self.assertEqual(events[0].delta.content_delta, 'partial original answer')
         self.assertEqual(self.selected, ['current'])
+
+    async def test_confirmed_readonly_run_without_terminal_body_uses_backup_not_prefix(self):
+        self.agent._auto_tools = True
+        self.agent._buffered_reply = True
+        reads = []
+        async def query():
+            reads.append('original')
+            return {'ok': True, 'query_ref': 'original-snapshot', 'data': {'total': 2}}
+        self.agent.tools['lighthouse_query'] = Tool(query)
+        async def hook(client):
+            if not reads:
+                await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
+                    'run_id': self.agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'original-read', 'params': {}})
+        self.scripts['current'] = {'hook': hook, 'wait': {'status': 'ok'}, 'events': [
+            {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'assistant', 'data': {'text': '今天'}}},
+            {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'lifecycle', 'data': {'phase': 'end'}}}]}
+        with patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_GRACE', .02), \
+                patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_POLL', .005), \
+                patch.object(native.OpenClawToolAgent, 'RUN_STATUS_POLL', .005):
+            events = await self.run_agent(['Original business question'])
+        self.assertEqual(self.selected, ['current', 'backup'])
+        self.assertEqual(reads, ['original'])
+        self.assertEqual(events[-1].result.output, 'fixture reply')
+        self.assertNotIn('今天', str(events))
+        request = next(params for method, params in self.clients[-1].calls if method == 'agent')
+        self.assertIn('original-snapshot', request['message'])
+        self.assertIn('Original business question', request['message'])
+
+    async def test_unknown_pending_or_mutating_terminal_cannot_be_replayed(self):
+        for outcome, mutation in (({'status': 'in_progress'}, False),
+                ({'status': 'ok', 'pendingError': True}, False),
+                ({'status': 'ok', 'pendingToolCalls': ['pending']}, False),
+                ({'status': 'ok', 'stopReason': 'toolUse'}, False),
+                ({'status': 'ok', 'aborted': True}, False), ({'status': 'ok'}, True)):
+            with self.subTest(outcome=outcome, mutation=mutation):
+                self.setUp()
+                self.agent._auto_tools = True
+                self.agent._buffered_reply = True
+                effects = []
+                async def submit():
+                    effects.append('original')
+                    return {'ok': True, 'job_id': 'original-task'}
+                self.agent.tools['lighthouse_submit'] = Tool(submit)
+                async def hook(client):
+                    if mutation and not effects:
+                        await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
+                            'run_id': self.agent.run_id, 'tool': 'lighthouse_submit', 'call_id': 'original-write', 'params': {}})
+                self.scripts['current'] = {'hook': hook, 'wait': outcome, 'events': [
+                    {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'lifecycle', 'data': {'phase': 'end'}}}]}
+                with patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_GRACE', .02), \
+                        patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_POLL', .005), \
+                        patch.object(native.OpenClawToolAgent, 'RUN_STATUS_POLL', .005):
+                    with self.assertRaises(AssistantError):
+                        await self.run_agent()
+                self.assertEqual(self.selected, ['current'])
+                self.assertEqual(effects, ['original'] if mutation else [])
 
     async def test_uncertain_connection_result_only_observes_original_run(self):
         self.scripts['current'] = {'fail': {'agent': GatewayError('DISCONNECTED')}}

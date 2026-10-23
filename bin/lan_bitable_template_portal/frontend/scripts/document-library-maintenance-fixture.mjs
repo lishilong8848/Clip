@@ -15,6 +15,7 @@ export function maintenanceFixture() {
     record.record_id = `recMaintenance${index + 1}`;
     record.fields.fldTitle = `维护资料${index + 1}`;
     record.fields.fldScope = index < 65 ? 'A' : 'E';
+    record.fields.fldCount = index + 1;
     record.capabilities.reindex = true;
     record.knowledge_status = 'ready';
     record.knowledge_items.forEach(item => { item.status = 'ready'; item.vectorized = true; });
@@ -36,6 +37,18 @@ export function maintenanceFixture() {
     listDelay: 0, mutationDelay: 0, listFailure: false, listStatus: 0, detailStatus: 0, loseReceipt: false, malformedReceipt: false,
     conflict: false, duplicateCursor: false, empty: false,
   };
+}
+
+function matchesFields(record, filters = []) {
+  return filters.every(filter => {
+    const value = record.fields[filter.field], empty = value === undefined || value === null || value === '';
+    if (filter.op === 'empty') return empty;
+    if (filter.op === 'not_empty') return !empty;
+    if (empty) return false;
+    if (filter.op === 'gte') return Number(value) >= Number(filter.value);
+    if (filter.op === 'lte') return Number(value) <= Number(filter.value);
+    return filter.op === 'eq' ? String(value) === String(filter.value) : String(value).includes(filter.value);
+  });
 }
 
 export async function startMaintenancePreview({ port = 0 } = {}) {
@@ -95,7 +108,7 @@ export async function startMaintenancePreview({ port = 0 } = {}) {
             let selected;
             if (body.all) {
               assert(!('record_ids' in body)); assert.equal(typeof body.q, 'string'); assert.equal(typeof body.scope, 'string');
-              selected = fixture.records.filter(record => (!body.q || record.fields.fldTitle.includes(body.q)) && (!body.scope || record.fields.fldScope === body.scope));
+              selected = fixture.records.filter(record => (!body.q || record.fields.fldTitle.includes(body.q)) && (!body.scope || record.fields.fldScope === body.scope) && matchesFields(record, body.filters));
             } else {
               assert(body.record_ids.length > 0); assert.equal(new Set(body.record_ids).size, body.record_ids.length);
               selected = fixture.records.filter(record => body.record_ids.includes(record.record_id));
@@ -112,7 +125,8 @@ export async function startMaintenancePreview({ port = 0 } = {}) {
           await wait(fixture.listDelay);
           if (fixture.listStatus) return json('列表读取权限已失效', fixture.listStatus);
           if (fixture.listFailure) return json('缓存列表暂时不可用', 503);
-          const visible = fixture.empty ? [] : fixture.records.filter(record => (!url.searchParams.get('q') || record.fields.fldTitle.includes(url.searchParams.get('q'))) && (!url.searchParams.get('scope') || record.fields.fldScope === url.searchParams.get('scope')));
+          const filters = JSON.parse(url.searchParams.get('filters') || '[]');
+          const visible = fixture.empty ? [] : fixture.records.filter(record => (!url.searchParams.get('q') || record.fields.fldTitle.includes(url.searchParams.get('q'))) && (!url.searchParams.get('scope') || record.fields.fldScope === url.searchParams.get('scope')) && matchesFields(record, filters));
           const start = Number(url.searchParams.get('cursor') || 0), size = Number(url.searchParams.get('page_size') || 30), more = start + size < visible.length;
           return json({ items: visible.slice(start, start + size).map(present), has_more: more,
             cursor: more ? String(start + size) : '',
@@ -187,7 +201,7 @@ export async function checkMaintenanceSource() {
     const rows = fixture.records.map(record => ({ ...record, attachments: record.attachments.map(file => ({ ...file, id: file.attachment_id })) }));
     const api = {
       tables: async () => ({ items: fixture.tables.map(table => ({ ...table, key: table.id })), can_configure: true, scopes: [{ value: 'A', label: 'A楼' }] }),
-      schema: async (key, signal, refresh) => { calls.push({ schema: key, refresh }); return { fields: [{ id: 'fldTitle', name: '资料名称', type: 1 }], display_fields: ['fldTitle'], attachment_fields: [] }; },
+      schema: async (key, signal, refresh) => { calls.push({ schema: key, refresh }); return { fields: [{ id: 'fldTitle', name: '资料名称', type: 1 }, { id: 'fldCount', name: '文件页数', type: 2 }], display_fields: ['fldTitle'], attachment_fields: [] }; },
       records: async (key, params) => {
         calls.push({ key, params }); const start = Number(params.cursor || 0);
         return { items: rows.slice(start, start + params.page_size), has_more: start + params.page_size < rows.length, cursor: start + params.page_size < rows.length ? String(start + params.page_size) : '', total: rows.length, cache: fixture.cache };
@@ -253,11 +267,40 @@ export async function checkMaintenanceSource() {
     await p.readRecords(); assert.equal(p.syncFailed.value, true); assert.equal(p.records.value.length, 30);
     ctx.fixture.cache.error = ''; await p.retryRecords(); assert.equal(ctx.calls.filter(call => call.sync).length, 1);
     assert.equal(p.syncFailed.value, false);
-    p.schedulePoll(); assert.equal([...ctx.timers.values()][0].delay, 15_000);
+    p.schedulePoll(); assert.equal([...ctx.timers.values()][0].delay, 30_000);
+    p.listPending.value = false; p.schedulePoll(); assert.equal([...ctx.timers.values()][0].delay, 120_000);
     ctx.document.hidden = true; p.visibilityChanged(); assert.equal(ctx.timers.size, 0);
     const reads = ctx.calls.length; await p.poll(); assert.equal(ctx.calls.length, reads);
     ctx.document.hidden = false; p.schedulePoll(); ctx.dispose(); assert.equal(ctx.timers.size, 0);
-    checks.push('first-sync partial/pending keeps rows; cache.error retries /sync; 15s visibility polling and teardown');
+    checks.push('first-sync partial/pending keeps rows; cache.error retries /sync; 30s pending / 120s settled visibility polling and teardown');
+
+    const background = await open(), b = background.page;
+    const schemaReads = background.calls.filter(call => call.schema).length;
+    let backgroundResolve;
+    const backgroundRead = background.api.records;
+    background.api.records = () => new Promise(resolve => { backgroundResolve = resolve; });
+    const runningPoll = b.poll(); await flush();
+    assert.equal(b.listLoading.value, false); assert.equal(b.tablesLoading.value, false);
+    assert.equal(b.listRefreshing.value, true); assert.equal(b.busy.value, false);
+    assert.equal(b.records.value.length, 30); b.selectPage(); assert.equal(b.selectedIds.value.length, 30);
+    await b.poll(); assert.equal(background.calls.filter(call => call.schema).length, schemaReads, 'Silent refresh does not reload unchanged schema');
+    backgroundResolve({ items: background.rows.slice(0, 30), has_more: true, cursor: '30', total: 103, cache: background.fixture.cache });
+    const sameRows = b.records.value; await runningPoll;
+    assert.equal(b.records.value, sameRows, 'Unchanged rows retain identity');
+    assert.equal(b.selectedIds.value.length, 30); assert.equal(b.listRefreshing.value, false);
+    background.api.records = backgroundRead;
+    b.goPage(3); await flush(); assert.equal(b.currentCursor.value, '60');
+    assert.deepEqual(Array.from(b.pageNumbers.value), [1, 2, 3, 4]);
+    b.total.value = 600; b.currentCursor.value = '270';
+    assert.deepEqual(Array.from(b.pageNumbers.value), [1, null, 9, 10, 11, null, 20]);
+    b.filters.value = [{ field: 'fldCount', op: 'gte', value: null }];
+    b.searchRecords(); assert(b.filterError.value); assert.equal(b.currentCursor.value, '270');
+    b.filters.value[0].value = 10; b.searchRecords(); await flush();
+    assert.equal(b.currentCursor.value, ''); assert.equal(b.hasSelection.value, false);
+    assert.deepEqual(clone(background.calls.filter(call => call.params).at(-1).params.filters), [{ field: 'fldCount', op: 'gte', value: 10 }]);
+    b.selectAll(); b.filters.value[0].value = 99; b.confirmReindex();
+    assert.deepEqual(clone(b.maintenanceIntent.value.payload.filters), [{ field: 'fldCount', op: 'gte', value: 10 }], 'All matching uses applied filters, not unsubmitted edits');
+    checks.push('silent refresh keeps controls enabled and selection; unchanged row identity; numbered pages; typed applied field filters shared by cross-page selection');
 
     const stale = await open();
     let oldResolve;

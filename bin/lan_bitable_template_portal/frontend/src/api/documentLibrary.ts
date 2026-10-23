@@ -46,7 +46,8 @@ export type LibraryTables = {
 export type LibraryList = { items: LibraryRecord[]; has_more: boolean; cursor: string; total?: number; cache?: LibraryCache };
 export type LibraryMutation = { fields: LibraryFields; operation_id: string; reason: string; expected_revision?: string };
 export type LibraryLocalOperation = { operation_id: string; expected_revision: string };
-export type LibraryReindex = LibraryLocalOperation & ({ record_ids: string[] } | { all: true; q: string; scope: string });
+export type LibraryFilter = { field: string; op: string; value?: string | number | boolean | null };
+export type LibraryReindex = LibraryLocalOperation & ({ record_ids: string[] } | { all: true; q: string; scope: string; filters?: LibraryFilter[] });
 
 const root = '/api/document-library';
 function endpoint(path: string, tableKey?: string, params: Record<string, string | number | undefined> = {}) {
@@ -116,8 +117,9 @@ export const documentLibraryApi = {
     return { fields: fieldResults(data), cache: data.cache,
       display_fields: arrayResult<string>(data, 'display_fields'), attachment_fields: arrayResult<string>(data, 'attachment_fields') };
   },
-  async records(key: string, params: { scope?: string; q?: string; cursor?: string; page_size?: number }, signal?: AbortSignal): Promise<LibraryList> {
-    const data = await requestJson(endpoint('/records', key, params), { signal, fresh: true });
+  async records(key: string, params: { scope?: string; q?: string; cursor?: string; page_size?: number; filters?: LibraryFilter[] }, signal?: AbortSignal): Promise<LibraryList> {
+    const { filters, ...query } = params;
+    const data = await requestJson(endpoint('/records', key, { ...query, filters: filters?.length ? JSON.stringify(filters) : undefined }), { signal, fresh: true });
     if (typeof data.has_more !== 'boolean') throw new ApiError('记录分页状态不完整，请重新读取。', { status: 502 });
     if (data.has_more && !data.cursor) throw new ApiError('下一页游标不完整，请重新读取。', { status: 502 });
     return { items: arrayResult<Record<string, any>>(data, 'items').map(recordResult), has_more: data.has_more, cursor: String(data.cursor || ''),

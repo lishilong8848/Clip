@@ -354,7 +354,7 @@ def transform_document(namespace, key, payload, mapping):
     if namespace == 'lighthouse_ai':
         if key.startswith(('research:', 'workspace:v1:')) and isinstance(value, dict):
             return _hashed_checkpoint(key, value, mapping)
-        if key.startswith(('conversation:', 'model:')):
+        if key.startswith(('conversation:', 'feishu-conversation:', 'model:')):
             prefix, suffix = key.split(':', 1)
             return prefix + ':' + _account_key(suffix, mapping), _walk(value, mapping)
         if key.startswith('topic-conversation:'):

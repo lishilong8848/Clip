@@ -64,8 +64,9 @@ class LinkedMaterialTests(unittest.TestCase):
             raise AssertionError('Unexpected fixture API path: ' + path)
         return httpx.Response(200, json={'code': 0, 'data': data})
 
-    def parse(self, kind, payload):
+    def parse(self, kind, payload, **options):
         self.assertEqual(kind, 'markdown')
+        self.assertIsNone(options['max_bytes'])
         path = Path(payload['path']); self.paths.append(path)
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), payload['sha256'])
         return {'text': 'parsed complete text', 'extraction_complete': True,
@@ -136,23 +137,21 @@ class LinkedMaterialTests(unittest.TestCase):
         self.parser.assert_not_called()
         self.assertTrue(all(r.url.host == 'open.feishu.cn' for r in self.calls))
 
-    def test_stream_size_limit_checks_declared_and_actual_bytes_and_closes(self):
+    def test_large_stream_spools_without_twenty_megabyte_limit_and_closes(self):
         class Chunks(httpx.SyncByteStream):
             count, closed = 0, False
             def __iter__(self):
-                for _ in range(4):
+                for _ in range(340):
                     self.count += 1
                     yield b'x' * 65536
             def close(self): self.closed = True
-        with patch('lan_bitable_template_portal.sharing_sources.MAX_FILE', 65537):
-            for headers in ({'content-length': '1000000'}, {}):
-                stream = Chunks()
-                self.download = lambda request: httpx.Response(200, headers=headers, stream=stream)
-                with self.assertRaises(LearningError) as error: read_material_link(self.portal, 'https://vnet.feishu.cn/file/FileToken')
-                self.assertEqual(error.exception.status, 413)
-                self.assertTrue(stream.closed)
-                self.assertEqual(stream.count, 0 if headers else 2)
-        self.parser.assert_not_called()
+        for headers in ({'content-length': str(340 * 65536)}, {}):
+            stream = Chunks()
+            self.download = lambda request: httpx.Response(200, headers=headers, stream=stream)
+            source = read_material_link(self.portal, 'https://vnet.feishu.cn/file/FileToken')
+            self.assertEqual(source['text'], 'parsed complete text')
+            self.assertTrue(stream.closed)
+            self.assertEqual(stream.count, 340)
 
     def test_download_transport_errors_are_retryable_and_redacted(self):
         class BrokenStream(httpx.SyncByteStream):
@@ -221,7 +220,7 @@ class LinkedMaterialTests(unittest.TestCase):
         self.parser.assert_not_called()
 
     def test_parser_failure_cleans_temporary_linked_file(self):
-        def fail(kind, payload):
+        def fail(kind, payload, **options):
             self.paths.append(Path(payload['path']))
             raise LearningError('Unsupported file contents')
         self.parser.side_effect = fail
@@ -239,7 +238,7 @@ class LinkedMaterialTests(unittest.TestCase):
         self.assertFalse(any(r.url.path.endswith('/download') for r in self.calls))
 
     def test_linked_pdf_ocr_reuses_missing_page_handling(self):
-        def ocr(kind, payload):
+        def ocr(kind, payload, **options):
             if kind == 'markdown':
                 return {'text': 'first', 'references': [{'kind': 'page', 'page': 1, 'start': 0, 'end': 5}],
                         'total_pages': 2, 'extraction_complete': False}
@@ -263,7 +262,7 @@ class LinkedMaterialTests(unittest.TestCase):
         buffer = io.BytesIO(); slides.save(buffer)
         self.name = 'linked.pptx'
         self.download = lambda request: httpx.Response(200, content=buffer.getvalue())
-        self.parser.side_effect = lambda kind, payload: document_markdown(Path(payload['path']).read_bytes(), '.pptx')
+        self.parser.side_effect = lambda kind, payload, **options: document_markdown(Path(payload['path']).read_bytes(), '.pptx')
         source = read_material_link(self.portal, 'https://vnet.feishu.cn/file/FileToken')
         self.assertIn('last slide', source['text'])
         self.assertEqual({ref['page'] for ref in source['references']}, {1, 2})

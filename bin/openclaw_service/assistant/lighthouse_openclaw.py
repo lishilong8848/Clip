@@ -57,7 +57,7 @@ class _ModelHealth:
     """Process-local observations contain only account/config hashes and numeric health."""
     MAX_ENTRIES = 512
     TTL = 3600
-    TRANSIENT = frozenset({'model_busy', 'model_connection', 'timeout'})
+    TRANSIENT = frozenset({'model_busy', 'model_connection', 'model_validation', 'timeout'})
     CONFIGURATION = frozenset({'model_auth', 'model_request'})
 
     def __init__(self):
@@ -208,6 +208,9 @@ class OpenClawToolAgent:
         scope_key = hashlib.sha256(json.dumps(sorted(actor['scopes'])).encode()).hexdigest()[:16]
         state = engine.assistant._state(actor)
         self.session_key = 'agent:' + agent_id(execution_key(actor)) + ':lighthouse:' + state['id'] + ':' + scope_key
+        if state.get('channel_isolated'):
+            # Keep old native history on disk, but rehydrate only channel-filtered turns.
+            self.session_key += ':channels-v1'
         topic = actor.get('_feishu_topic')
         if isinstance(topic, dict) and topic.get('id'):
             # Rehydrate only the currently authorized public transcript, never hidden native history.
@@ -387,6 +390,14 @@ class OpenClawToolAgent:
         self.run_id = ''
         return native_model_error(error, timeout=timeout)
 
+    def _validation_failure(self, message):
+        # Called only after a terminal reply; unknown or mutating tools cannot be replayed.
+        readonly = self.calls == len(self.results) and (
+            not self.calls or bool(self.called_tools) and self.called_tools <= READ_RECOVERY_TOOLS)
+        if readonly:
+            self._terminal_model_failure = True
+        return AssistantError(message, 502, category='model_validation' if readonly else 'model_protocol')
+
     def _complete_from_evidence(self, original_message, reason):
         self._evidence_only = True
         self._read_recovery = bool(getattr(self, '_auto_tools', False)
@@ -474,7 +485,7 @@ class OpenClawToolAgent:
                 if (not self._terminal_model_failure or visible or len(attempted) >= 4
                         or self.calls and len(self.results) != self.calls
                         or exc.category not in {'model_auth', 'model_busy', 'model_request',
-                            'model_connection', 'model_protocol', 'model_context', 'timeout', 'vision_unsupported'}):
+                            'model_connection', 'model_protocol', 'model_validation', 'model_context', 'timeout', 'vision_unsupported'}):
                     raise
                 self._routing_failure = exc.category
                 try:
@@ -494,7 +505,8 @@ class OpenClawToolAgent:
                     history = []
                 logging.getLogger(__name__).warning('Assistant model fallback: run=%s category=%s attempt=%s',
                     str(self.turn.get('run_id') or '')[:8], exc.category, self._fallback_attempt)
-                await self.emit('status', {'label': '当前模型暂不可用，正在切换可用模型'})
+                await self.emit('status', {'label': '当前模型未完成资料核验，正在换用其他模型继续' if exc.category == 'model_validation'
+                                          else '当前模型暂不可用，正在切换可用模型'})
                 events = await stack.enter_async_context(self._run_stream_attempt(prompt, history))
 
     @asynccontextmanager
@@ -627,7 +639,7 @@ class OpenClawToolAgent:
             if terminal_ack:
                 self.run_id = ''
             deadline, sequences, compaction_notified = time.monotonic() + 190, {}, False
-            terminal_deadline, chat_message = None, None
+            terminal_deadline, chat_message, finished = None, None, {}
             next_terminal_check = time.monotonic() + self.RUN_STATUS_POLL
             while self.run_id and time.monotonic() < deadline:
                 if not compaction_notified and self.item.get('compaction_run_id') == self.run_id:
@@ -636,6 +648,7 @@ class OpenClawToolAgent:
                 while not self.events.empty():
                     yield self.events.get_nowait()
                 if time.monotonic() >= next_terminal_check:
+                    finished = {}
                     try:
                         finished = await self.client.request('agent.wait', {'runId': self.run_id,
                             'timeoutMs': 5000 if terminal_deadline else 0}, timeout=7 if terminal_deadline else 5)
@@ -656,6 +669,14 @@ class OpenClawToolAgent:
                         self.run_id = ''
                         break
                 if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
+                    outcomes = [value for value in (finished, finished.get('terminalReply'), chat_message) if isinstance(value, dict)]
+                    pending = any(value.get(key) for value in outcomes for key in
+                                  ('pendingError', 'yielded', 'pendingToolCalls', 'aborted')) or any(
+                        value.get('stopReason') in {'toolUse', 'tool_use', 'tool_calls', 'aborted'} for value in outcomes)
+                    logging.getLogger(__name__).warning('Assistant terminal reply missing: run=%s completed=%s pending=%s calls=%s results=%s',
+                        str(self.turn.get('run_id') or '')[:8], finished.get('status') == 'ok', pending, self.calls, len(self.results))
+                    if finished.get('status') == 'ok' and not pending:
+                        raise self._validation_failure('模型运行已结束但未返回完整终答，未将片段作为结论；原消息和任务已保留。')
                     raise AssistantError('原回答尚未取得完整终答，原消息与操作任务已保留；未重新提交业务。',
                                          502, category='model_protocol')
                 try:
@@ -744,6 +765,10 @@ class OpenClawToolAgent:
             while not self.events.empty():
                 yield self.events.get_nowait()
             if not answer.strip():
+                if (getattr(self, '_auto_tools', False) and self.calls and attempt < 3
+                        and self.calls == len(self.results) and self.called_tools <= READ_RECOVERY_TOOLS):
+                    message = self._complete_from_evidence(original_message, '上轮没有最终正文，请继续补查缺口并根据回执提供可见答复。')
+                    continue
                 if self.calls and (attempt or not self.results):
                     raise AssistantError('模型未返回可见回答，原工具结果与操作任务已保留；请核对原任务，不要重复提交。',
                                          502, category='model_protocol')
@@ -777,14 +802,13 @@ class OpenClawToolAgent:
                             or published or len(self.results) != self.calls):
                         if attempt and self.results and incomplete_reply(answer, question):
                             raise self._model_failure('')
-                        raise AssistantError('模型未能核验工具结果，原操作状态未据此判定成败；请核对原任务，不要重复提交。',
-                                             502, category='model_protocol') from None
+                        raise self._validation_failure('模型未能核验工具结果，原操作状态未据此判定成败；请核对原任务，不要重复提交。') from None
                     message = self._complete_from_evidence(original_message, str(exc))
                     continue
                 if attempt:
                     if incomplete_reply(answer, question):
                         raise self._model_failure('')
-                    raise AssistantError('未取得可靠业务依据，未执行业务，请重试或明确查询内容。', 502) from None
+                    raise self._validation_failure('未取得可靠业务依据，未执行业务，请重试或明确查询内容。') from None
                 message = original_message + '\n本轮回答核验要求：' + safe_text(str(exc))
                 continue
             self.item['native_history_session'] = self.session_key

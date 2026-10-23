@@ -8990,7 +8990,7 @@ def render_workbench_lite(
       }}
       if (
         patch.work_type === 'change'
-        && changeActionWritesTodayYes(action, patch.progress)
+        && (action === 'end' || changeActionWritesTodayYes(action, patch.progress))
         && aliConfirmationImages.length
       ) {{
         patch.ali_confirmation_images = aliConfirmationImages;

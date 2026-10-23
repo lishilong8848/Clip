@@ -65,9 +65,9 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
-        line=92, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/records")],
-        window=1, needles=["requestJson(endpoint('/records', key, params), { signal, fresh: true })"],
-        note="记录分页使用默认 GET；scope/q/cursor/page_size 仅进入查询串，后端注册 /records。",
+        line=122, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/records")],
+        window=1, needles=["requestJson(endpoint('/records', key, { ...query, filters: filters?.length ? JSON.stringify(filters) : undefined }), { signal, fresh: true })"],
+        note="记录分页使用默认 GET；scope/q/cursor/page_size 和 JSON 序列化的 filters 仅进入查询串，后端注册 /records。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",

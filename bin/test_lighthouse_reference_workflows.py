@@ -423,9 +423,11 @@ class ReferenceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("remember-this-target", sent[0])
         self.assertNotIn("never-send-descriptor", sent[0])
 
-    async def test_failed_native_read_returns_reason_without_retrying_or_inventing_count(self):
+    async def test_failed_native_read_returns_reason_after_bounded_recovery_without_inventing_count(self):
+        reads = []
         @self.app.get("/api/repair-management/records")
         async def records(scope: str):
+            reads.append(scope)
             return JSONResponse({"ok": False, "error": "来源资料读取暂忙。"}, status_code=503)
         attempts = []
         async def stream(messages, info):
@@ -436,7 +438,8 @@ class ReferenceWorkflowTests(unittest.IsolatedAsyncioTestCase):
             else:
                 yield "A楼相关维修记录有5条。"
         result = await self.answer(stream, "查询A楼柴发相关维修记录共有几条")
-        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(reads, ['A'])
         self.assertIn("来源资料读取暂忙", result["answer"])
         self.assertIn("暂无法确认", result["answer"])
         self.assertNotIn("5条", result["answer"])

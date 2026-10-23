@@ -505,9 +505,11 @@ class LearningService:
         if not settings["enabled"] and not manual_mode:
             local = self._get("settings", "main")
             # Turning scheduling off is itself durable; do not strand the disable write.
-            if local and local["_dirty"] and (self._schema_ready or (self._get("local", "disable_sync") or {}).get("required")):
-                self.cloud.enabled = True
-                self.cloud.ensure_schema()
+            personnel_only = getattr(self.cloud, 'personnel_only_storage', False) is True
+            if local and local["_dirty"] and (personnel_only or self._schema_ready or (self._get("local", "disable_sync") or {}).get("required")):
+                if not personnel_only:
+                    self.cloud.enabled = True
+                    self.cloud.ensure_schema()
                 self._sync_document(("settings", "main", local["_revision"]))
                 self.cloud.enabled = False
                 with self.transaction() as conn:
@@ -559,17 +561,24 @@ class LearningService:
             if settings["enabled"] and self.settings()["enabled"]:
                 self.send_notifications(current)
             if getattr(self.cloud, 'shift_storage_enabled', False) is True:
-                from .learning_shift_storage import backfill
                 try:
-                    backfill(self)
+                    if getattr(self.cloud, 'personnel_only_storage', False) is True:
+                        from .learning_personnel_storage import cleanup
+                        cleanup(self)
+                    else:
+                        from .learning_shift_storage import backfill
+                        backfill(self)
                 except Exception:
-                    self._last_error = '学练历史展示字段尚未补齐，原记录保留，后台稍后继续。'
+                    self._last_error = '学练历史整理尚未完成，原记录及本地备份保留，后台稍后继续。'
         finally:
             if not settings["enabled"]:
                 self.cloud.enabled = False
 
-    def restore(self):
-        entities = self.cloud.load_entities()
+    def restore(self, *, entities=None):
+        if entities is None:
+            local_only = (getattr(self.cloud, 'personnel_only_storage', False) is True
+                          and (self._get('local', 'personnel_table_v1') or {}).get('prepared'))
+            entities = [] if local_only else self.cloud.load_entities()
         with self.transaction() as conn:
             for item in entities:
                 kind, key, value = item.get("kind"), item.get("key"), item.get("payload")
@@ -713,6 +722,14 @@ class LearningService:
                 self._sync_active = False
 
     def _sync_pending(self, limit=40, *, force=False):
+        if getattr(self.cloud, 'personnel_only_storage', False) is True:
+            from .learning_personnel_storage import prepare
+            try:
+                prepare(self)
+            except Exception:
+                self._last_error = '学练本地备份尚未核验，暂未改写原表；后台将重试，题单和提醒继续处理。'
+                logging.getLogger(__name__).warning('学练人员表整理准备失败，保留原表', exc_info=True)
+                return {'pending_errors': 1}
         with closing(self._connect()) as conn:
             rows = conn.execute("SELECT kind,key,revision FROM documents WHERE dirty=1 AND (? OR retry_at<=?) ORDER BY CASE kind WHEN 'attachment' THEN 0 WHEN 'question' THEN 1 WHEN 'paper' THEN 2 WHEN 'publication' THEN 9 ELSE 3 END,updated LIMIT ?", (int(force), time.time(), limit)).fetchall()
         errors, handled, legacy_fields = [], set(), {}
@@ -741,6 +758,11 @@ class LearningService:
         kind, key, revision = row
         value = self._get(kind, key)
         if not value or value["_revision"] != revision:
+            return
+        personnel_only = getattr(self.cloud, 'personnel_only_storage', False) is True
+        if personnel_only and kind not in {'question', 'attachment'}:
+            with self.transaction() as conn:
+                conn.execute('UPDATE documents SET dirty=0,retry_at=0 WHERE kind=? AND key=? AND revision=?', row)
             return
         payload = {k: v for k, v in value.items() if not k.startswith("_")}
         operation_id = f"learning:{kind}:{key}:{revision}"
@@ -797,7 +819,8 @@ class LearningService:
                 with self.transaction() as conn:
                     self._put(kind, key, payload, conn)
                     revision = self._get(kind, key, conn)["_revision"]
-            self.cloud.upsert_entity(kind, key, {k: v for k, v in payload.items() if k != "local_file"}, operation_id)
+            if not personnel_only:
+                self.cloud.upsert_entity(kind, key, {k: v for k, v in payload.items() if k != "local_file"}, operation_id)
         elif kind == "question":
             for attachment in payload.get("attachments", []):
                 stored = self._get("attachment", attachment["id"])
@@ -1727,7 +1750,10 @@ class LearningService:
         if path is None or not path.is_file():
             if not value.get("file_token"):
                 raise LearningError("附件尚未同步或本地文件缺失，请稍后重试", 409)
-            content = self.cloud.download_attachment(value["file_token"], MAX_FILE)
+            from .learning_personnel_storage import archived_attachment
+            content = archived_attachment(self, value["file_token"], MAX_FILE)
+            if content is None:
+                content = self.cloud.download_attachment(value["file_token"], MAX_FILE)
             local_name = hashlib.sha256(content).hexdigest() + Path(value["name"]).suffix.lower()
             path = self._save_file(local_name, content)
             with self.transaction() as conn:

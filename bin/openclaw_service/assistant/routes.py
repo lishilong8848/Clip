@@ -45,9 +45,12 @@ def install_assistant_routes(app, host):
                 raise AssistantError('知识库正在关闭，请稍后重试。', 503)
             if knowledge is None:
                 from .lighthouse_knowledge import KnowledgeBase
+                from .lighthouse_knowledge_summary import summarize
                 from lan_bitable_template_portal.document_library import DocumentLibraryService
                 library = DocumentLibraryService(host.state.parent)
-                knowledge = KnowledgeBase(host.state / 'knowledge_base')
+                knowledge = KnowledgeBase(host.state / 'knowledge_base', source_summarizer=lambda text, name, location:
+                    summarize(get_service().model, text, name, location,
+                        allowed=lambda profile: knowledge is not None and knowledge.model_allowed(profile)))
                 library.bind_knowledge(knowledge)
             return knowledge
 

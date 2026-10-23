@@ -313,11 +313,11 @@ class ExtractPdfTests(unittest.TestCase):
         self.assertEqual(sections[0]["text"], "Hello Lighthouse")
         self.assertEqual(sections[0]["location"], "手册.pdf:第1页")
 
-    def test_pdf_scanned_blank_raises_need_ocr(self):
+    def test_pdf_blank_is_not_falsely_indexed(self):
         with self.assertRaises(AssistantError) as ctx:
             extract_sections(make_blank_pdf(), "扫描.pdf")
         self.assertIn("OCR", str(ctx.exception))
-        self.assertIn("不支持PDF内置OCR", str(ctx.exception))
+        self.assertIn("空白页", str(ctx.exception))
 
     def test_pdf_encrypted_raises(self):
         with self.assertRaises(AssistantError) as ctx:

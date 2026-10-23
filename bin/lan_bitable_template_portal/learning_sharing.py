@@ -253,6 +253,8 @@ class SharingExercises:
         value = self.learning._get('sharing_batch', identity, conn)
         if not value or value.get('status') == 'deleted':
             raise LearningError('分享会批次不存在。', 404)
+        if value.get('status') == 'failed' and not value.get('participants'):
+            value['participants'] = copy.deepcopy(value.get('requested_participants') or [])
         return value
 
     def changed(self, *dates):
@@ -338,12 +340,15 @@ class SharingExercises:
                     raise LearningError('重复提交的链接已变化，请刷新。', 409)
                 return {'id': identity}
             active = conn.execute("SELECT count(*) FROM documents WHERE kind='sharing_batch' AND json_extract(payload,'$.status') IN ('queued','generating')").fetchone()[0]
-            if active >= 3:
+            if active >= 3 and (auto_generate or not selected):
                 raise LearningError('已有纪要正在生成，请等待完成后再提交。', 429)
             batch = {'id': identity, 'url': target, 'title': '正在读取纪要', 'status': 'queued', 'version': 1,
                      'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': [], 'participants': [], 'question_types': types}
             batch.update(material_urls=links, material_ids=files, requested_participants=[directory[pid] for pid in selected],
                          auto_generate=auto_generate, requested_title=title.strip(), request_fingerprint=fingerprint)
+            batch['participants'] = copy.deepcopy(batch['requested_participants'])
+            if not auto_generate and selected and not (target or links or files):
+                batch.update(status='draft', title=title.strip() or '手动录题', source={'text': '', 'sources': []})
             self.learning._put('sharing_batch', identity, batch, conn)
             self.learning._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
         return {'id': identity}
@@ -457,7 +462,7 @@ class SharingExercises:
             batch = self.batch(identity, conn)
             if payload.get('version') != batch['version']:
                 raise LearningError('批次已变化，请刷新后核对。', 409)
-            if batch['status'] != 'draft':
+            if batch['status'] not in {'draft', 'failed'}:
                 raise LearningError('只有待核对草稿可修改，已发布题目保持原快照。', 409)
             excluded = payload.get('excluded_open_ids', batch.get('excluded_open_ids', []))
             known = {person['open_id'] for person in batch['participants']}
@@ -466,6 +471,8 @@ class SharingExercises:
                 raise LearningError('免做人员必须从本批参会名单选择，且不能重复。')
             batch['questions'] = validate_questions(payload.get('questions'), batch.get('source', {}).get('text', ''), batch.get('question_types'), draft=True, images=batch.get('source', {}).get('images', []))
             batch['excluded_open_ids'] = excluded
+            if batch['status'] == 'failed':
+                batch.update(status='draft', auto_generate=False, error='', progress='', generation_state={})
             batch['version'] += 1
             batch.update(edited_by=actor['id'], edited_at=stamp())
             self.learning._put('sharing_batch', identity, batch, conn)

@@ -64,6 +64,7 @@ export function createFixture() {
     if (pathname === '/api/health') return { status: 200, json: { ok: true, service: 'clipflow_backend', instance_id: 'images-fixture' } };
     if (pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'ou_fixture', name: '测试参会人', role: fixture.role === 'admin' ? 'admin' : 'user', modules: ['learning'] }, scope_options: [{ value: 'A', label: 'A楼' }] });
     if (pathname === '/api/assistant/appearance') return ok({ enabled: false });
+    if (pathname === '/api/assistant/icon-weather') return ok({ enabled: false });
     if (pathname === '/api/handover-links') return ok({ links: {} });
     if (pathname === '/api/auth/permission-requests/current') return ok({});
     if (pathname === '/api/scope-overview') return ok({ scopes: {} });

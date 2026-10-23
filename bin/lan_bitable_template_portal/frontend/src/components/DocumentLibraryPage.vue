@@ -40,7 +40,22 @@
         <NInput v-model:value="query" clearable :disabled="busy" placeholder="搜索资料" :input-props="{ 'aria-label': '搜索资料', type: 'search' }"><template #prefix><Search :size="16" /></template></NInput>
         <NSelect v-if="scopeOptions.length" :value="scope" :options="[{ value: '', label: '全部授权楼栋' }, ...scopeOptions]" :disabled="busy" aria-label="资料楼栋" @update:value="changeScope" />
         <NButton attr-type="submit" :disabled="busy || listLoading"><Search :size="16" />查询</NButton>
+        <NButton :disabled="busy || filters.length >= 20" @click="addFilter"><Plus :size="16" />字段筛选</NButton>
       </form>
+      <div v-if="activeTable && filters.length" class="document-field-filters">
+        <div v-for="(filter, index) in filters" :key="index" class="document-filter-row">
+          <NSelect :value="filter.field" :options="filterFields" :disabled="busy" filterable :aria-label="'筛选字段 ' + (index + 1)" @update:value="value => changeFilterField(index, value)" />
+          <NSelect v-model:value="filter.op" :options="filterOperators(filter)" :disabled="busy" :aria-label="'筛选条件 ' + (index + 1)" />
+          <template v-if="!['empty', 'not_empty'].includes(filter.op)">
+            <NSelect v-if="filterChoices(filter).length" v-model:value="filter.value" :options="filterChoices(filter)" :disabled="busy" filterable clearable :aria-label="'筛选值 ' + (index + 1)" />
+            <NInputNumber v-else-if="filterKind(filter) === 'number'" v-model:value="filter.value" :disabled="busy" :aria-label="'筛选值 ' + (index + 1)" />
+            <NDatePicker v-else-if="filterKind(filter) === 'date'" v-model:formatted-value="filter.value" type="date" value-format="yyyy-MM-dd" clearable :disabled="busy" :aria-label="'筛选值 ' + (index + 1)" />
+            <NInput v-else v-model:value="filter.value" :disabled="busy" clearable :aria-label="'筛选值 ' + (index + 1)" placeholder="筛选值" @keydown.enter="searchRecords" />
+          </template>
+          <NButton quaternary :disabled="busy" :aria-label="'移除筛选条件 ' + (index + 1)" @click="filters.splice(index, 1)"><X :size="16" /></NButton>
+        </div>
+        <span v-if="filterError" class="document-error" role="alert">{{ filterError }}</span>
+      </div>
       <div v-if="canReindex" class="document-selection" aria-label="资料选择">
         <NButton :disabled="busy || listLoading || !selectableRecords.length" @click="selectPage"><ListChecks :size="16" />选择本页</NButton>
         <NButton :disabled="busy || listLoading || total === undefined || total === 0" @click="selectAll"><ListChecks :size="16" />选择全部匹配记录（跨页）</NButton>
@@ -75,7 +90,7 @@
           </article></div>
         </div>
         <NEmpty v-else-if="listReady && !listLoading && !listError && !listPending" description="没有符合条件的资料" />
-        <footer v-if="records.length" class="document-pagination"><span>本页 {{ records.length }} 条{{ total === undefined ? '' : ' · 匹配 ' + total + ' 条' }}{{ listLoading ? ' · 正在读取' : '' }}</span><div><NButton :disabled="busy || listLoading || !hasPrevious" aria-label="首页资料" title="首页" @click="firstPage"><ChevronsLeft :size="16" /></NButton><NButton :disabled="busy || listLoading || !hasPrevious" aria-label="上一页资料" title="上一页" @click="previousPage"><ChevronLeft :size="16" /></NButton><NButton :disabled="busy || listLoading || !hasMore" aria-label="下一页资料" title="下一页" @click="nextPage"><ChevronRight :size="16" /></NButton><NButton :disabled="busy || listLoading || !hasMore || total === undefined" aria-label="末页资料" title="末页" @click="lastPage"><ChevronsRight :size="16" /></NButton></div></footer>
+        <footer v-if="records.length || total" class="document-pagination"><span>本页 {{ records.length }} 条{{ total === undefined ? '' : ' · 匹配 ' + total + ' 条' }}{{ listLoading ? ' · 正在读取' : '' }}{{ listRefreshing ? ' · 后台更新中' : '' }}</span><nav aria-label="资料分页"><NButton :disabled="busy || listLoading || !hasPrevious" aria-label="首页资料" title="首页" @click="firstPage"><ChevronsLeft :size="16" /></NButton><NButton :disabled="busy || listLoading || !hasPrevious" aria-label="上一页资料" title="上一页" @click="previousPage"><ChevronLeft :size="16" /></NButton><template v-for="(page, index) in pageNumbers" :key="index"><span v-if="page === null" class="document-page-ellipsis">…</span><NButton v-else :type="page === currentPage ? 'primary' : 'default'" :aria-current="page === currentPage ? 'page' : undefined" :aria-label="'第 ' + page + ' 页资料'" :disabled="busy || listLoading" @click="goPage(page)">{{ page }}</NButton></template><NButton :disabled="busy || listLoading || !hasMore" aria-label="下一页资料" title="下一页" @click="nextPage"><ChevronRight :size="16" /></NButton><NButton :disabled="busy || listLoading || !hasMore || total === undefined" aria-label="末页资料" title="末页" @click="lastPage"><ChevronsRight :size="16" /></NButton></nav></footer>
       </template>
 
       <NDrawer :show="detailOpen" width="min(800px, 100vw)" :mask-closable="!busy" :close-on-esc="!busy" @update:show="value => { if (!value) closeDetail() }">
@@ -132,13 +147,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { NAlert, NButton, NCheckbox, NConfigProvider, NDrawer, NDrawerContent, NEmpty, NInput, NModal, NProgress, NSelect, NSkeleton, NSpin, NTab, NTabs, NTag, dateZhCN, zhCN, useThemeVars } from 'naive-ui';
+import { NAlert, NButton, NCheckbox, NConfigProvider, NDatePicker, NDrawer, NDrawerContent, NEmpty, NInput, NInputNumber, NModal, NProgress, NSelect, NSkeleton, NSpin, NTab, NTabs, NTag, dateZhCN, zhCN, useThemeVars } from 'naive-ui';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ExternalLink, FileText, FolderOpen, History, ListChecks, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from 'lucide-vue-next';
 import { registerNavigationGuard } from '../navigation';
 import { AUTH_EXPIRED_EVENT, ApiError, requestJson } from '../api/client';
 import { readCacheKey } from '../api/readCache';
 import { cloneLibraryValue as clone, documentLibraryApi as api, fieldKind, fieldValue, newLibraryOperationId, valueText, writableField,
-  type LibraryAttachment, type LibraryCache, type LibraryField, type LibraryFields, type LibraryLocalOperation, type LibraryMutation, type LibraryRecord, type LibraryReindex, type LibrarySchema, type LibraryTable, type LibraryTables } from '../api/documentLibrary';
+  type LibraryAttachment, type LibraryCache, type LibraryField, type LibraryFields, type LibraryFilter, type LibraryLocalOperation, type LibraryMutation, type LibraryRecord, type LibraryReindex, type LibrarySchema, type LibraryTable, type LibraryTables } from '../api/documentLibrary';
 import DocumentLibraryField from './DocumentLibraryField.vue';
 import DocumentLibraryTableSettings from './DocumentLibraryTableSettings.vue';
 import VnetBackButton from './VnetBackButton.vue';
@@ -150,12 +165,24 @@ const styles = computed(() => ({ '--doc-ink': theme.value.textColor1, '--doc-mut
   '--doc-accent': theme.value.primaryColor, '--doc-error': theme.value.errorColor }));
 const tables = ref<LibraryTables>({ items: [] }), activeKey = ref(''), schema = ref<LibrarySchema | null>(null);
 const records = ref<LibraryRecord[]>([]), tablesLoading = ref(false), listLoading = ref(false), listReady = ref(false);
-const tablesError = ref(''), listError = ref(''), notice = ref(''), query = ref(''), appliedQuery = ref(''), scope = ref(props.scope || '');
+const normalizeScope = (value?: string) => value === 'ALL' ? '' : value || '';
+const tablesError = ref(''), listError = ref(''), notice = ref(''), query = ref(''), appliedQuery = ref(''), scope = ref(normalizeScope(props.scope));
 const listPending = ref(false), syncFailed = ref(false);
+const listRefreshing = ref(false), filterError = ref('');
+// Values stay typed in the request; the editor narrows them by the selected field.
+const filters = ref<Array<{ field: string; op: string; value: any }>>([]), appliedFilters = ref<LibraryFilter[]>([]);
 const total = ref<number>(), listCache = ref<LibraryCache>(), cleanupPending = ref(0);
 const pageSize = 30;
 const currentCursor = ref(''), cursorTrail = ref<string[]>([]), nextCursor = ref(''), hasMore = ref(false), actorScopes = ref<Array<{ value: string; label: string }>>([]);
 const hasPrevious = computed(() => /^\d+$/.test(currentCursor.value) ? Number(currentCursor.value) > 0 : cursorTrail.value.length > 0);
+const currentPage = computed(() => Math.floor(Number(currentCursor.value || 0) / pageSize) + 1);
+const pageCount = computed(() => total.value === undefined ? 0 : Math.max(1, Math.ceil(total.value / pageSize)));
+const pageNumbers = computed(() => {
+  if (!pageCount.value || !Number.isFinite(currentPage.value)) return [];
+  const start = Math.max(1, Math.min(currentPage.value - 1, pageCount.value - 2));
+  const pages = [...new Set([1, start, start + 1, start + 2, pageCount.value])].filter(page => page <= pageCount.value).sort((a, b) => a - b);
+  return pages.flatMap((page, index) => index && page - pages[index - 1] > 1 ? [null, page] : [page]);
+});
 const activeTable = computed(() => tables.value.items.find(table => table.key === activeKey.value));
 const canConfigure = computed(() => typeof tables.value.can_configure === 'boolean' ? tables.value.can_configure
   : tables.value.capabilities?.configure_tables === true || tables.value.actor?.can_configure === true);
@@ -163,7 +190,8 @@ const canReindex = computed(() => activeTable.value?.capabilities?.reindex === t
 const selectedIds = ref<string[]>([]), allSelected = ref(false);
 const selectableRecords = computed(() => records.value.filter(record => record.capabilities.reindex === true));
 const hasSelection = computed(() => allSelected.value || selectedIds.value.length > 0);
-const filterLabel = computed(() => `搜索：${appliedQuery.value || '不限'}；楼栋：${scopeOptions.value.find(option => option.value === scope.value)?.label || '全部授权楼栋'}`);
+const filterLabel = computed(() => `搜索：${appliedQuery.value || '不限'}；楼栋：${scopeOptions.value.find(option => option.value === scope.value)?.label || '全部授权楼栋'}`
+  + appliedFilters.value.map(filter => `；${schema.value?.fields.find(field => field.id === filter.field)?.name || filter.field} ${filterOperators(filter).find(op => op.value === filter.op)?.label || ''} ${filter.value ?? ''}`).join(''));
 const selectionLabel = computed(() => allSelected.value
   ? `已选择全部匹配记录（跨页，${listCache.value?.complete === false ? '当前缓存 ' : ''}${total.value ?? '未知'} 条）；${filterLabel.value}`
   : `已选择 ${selectedIds.value.length} 条；${filterLabel.value}`);
@@ -192,6 +220,32 @@ let tablesRead: AbortController | undefined, listRead: AbortController | undefin
 let maintenanceRead: AbortController | undefined, pollTimer: number | undefined, contextEpoch = 0;
 let identityKey = currentIdentity();
 let leaveAction: (() => void) | undefined, unregisterNavigation: (() => void) | undefined, disposed = false, contextReady = false;
+const filterFields = computed(() => (schema.value?.fields || []).map(field => ({ value: field.id, label: field.name })));
+function filterKind(filter: LibraryFilter) {
+  const field = schema.value?.fields.find(field => field.id === filter.field);
+  return field ? [1001, 1002].includes(Number(field.type)) ? 'date' : fieldKind(field) : 'text';
+}
+function filterOperators(filter: LibraryFilter) {
+  const kind = filterKind(filter);
+  return [
+    ...(!['number', 'date', 'select', 'multi', 'bool', 'person'].includes(kind) ? [{ value: 'contains', label: '包含' }] : []),
+    { value: 'eq', label: '等于' },
+    ...(['number', 'date'].includes(kind) ? [{ value: 'gte', label: '不小于' }, { value: 'lte', label: '不大于' }] : []),
+    { value: 'empty', label: '未填写' }, { value: 'not_empty', label: '已填写' },
+  ];
+}
+function filterChoices(filter: LibraryFilter) {
+  if (filterKind(filter) === 'bool') return [{ value: 'true', label: '是' }, { value: 'false', label: '否' }];
+  const field = schema.value?.fields.find(field => field.id === filter.field);
+  return (field?.options || []).map(option => typeof option === 'string' ? { value: option, label: option }
+    : { value: option.name || option.label || option.id || option.value || '', label: option.name || option.label || option.id || option.value || '' }).filter(option => option.value);
+}
+function addFilter() {
+  if (filterFields.value.length && filters.value.length < 20) { filters.value.push({ field: filterFields.value[0].value, op: 'contains', value: '' }); changeFilterField(filters.value.length - 1, filterFields.value[0].value); }
+}
+function changeFilterField(index: number, field: string) {
+  const filter = filters.value[index]; filter.field = field; filter.value = null; filter.op = filterOperators(filter)[0].value; filterError.value = '';
+}
 function errorText(error: unknown) { return error instanceof Error ? error.message : '请求未完成，请重试。'; }
 function withdrawUnauthorized(error: unknown) {
   if (!(error instanceof ApiError) || ![401, 403, 404].includes(error.status)) return false;
@@ -292,7 +346,7 @@ function confirmReindex(record?: LibraryRecord) {
   if (maintenanceIntent.value) { maintenanceOpen.value = true; return; }
   const operation = { operation_id: newLibraryOperationId(), expected_revision: activeTable.value!.revision! };
   const payload: LibraryReindex = record ? { ...operation, record_ids: [record.record_id] }
-    : allSelected.value ? { ...operation, all: true, q: appliedQuery.value, scope: scope.value }
+    : allSelected.value ? { ...operation, all: true, q: appliedQuery.value, scope: scope.value, filters: clone(appliedFilters.value) }
     : { ...operation, record_ids: selectedIds.value.slice() };
   maintenanceIntent.value = { kind: 'reindex', key: activeKey.value, payload,
     label: `数据表：${activeTable.value!.name}；${record ? '单条资料：' + title(record) : selectionLabel.value}` };
@@ -335,11 +389,13 @@ function resetView(clearSchema = true) {
   draft.value = {}; baseline.value = {}; discardOpen.value = false; leaveAction = undefined;
   detailLoading.value = false; versionsLoading.value = false;
   records.value = []; if (clearSchema) schema.value = null;
+  if (clearSchema) { filters.value = []; appliedFilters.value = []; filterError.value = ''; }
+  listRefreshing.value = false;
   listReady.value = false; listLoading.value = false; listError.value = ''; listPending.value = false; syncFailed.value = false;
   total.value = undefined; listCache.value = undefined; currentCursor.value = ''; cursorTrail.value = []; nextCursor.value = ''; hasMore.value = false;
 }
-async function loadTables(preferred?: string, refreshSchema = false) {
-  tablesRead?.abort(); const read = tablesRead = new AbortController(); tablesLoading.value = true; tablesError.value = '';
+async function loadTables(preferred?: string, refreshSchema = false, silent = false) {
+  tablesRead?.abort(); const read = tablesRead = new AbortController(); if (!silent) tablesLoading.value = true;
   try {
     const result = await api.tables(read.signal);
     if (!contextReady && !result.scopes) {
@@ -349,17 +405,22 @@ async function loadTables(preferred?: string, refreshSchema = false) {
     }
     if (read.signal.aborted || disposed) return;
     const nextKey = result.items.some(table => table.key === (preferred || activeKey.value)) ? preferred || activeKey.value : '';
+    tablesError.value = '';
+    const schemaChanged = !!activeTable.value && result.items.find(table => table.key === nextKey)?.revision !== activeTable.value.revision;
     if (nextKey !== activeKey.value) resetView();
     tables.value = result; activeKey.value = nextKey;
     if (typeof result.cleanup_pending === 'number') cleanupPending.value = result.cleanup_pending;
     if (!canReindex.value) { clearSelection(); if (maintenanceIntent.value?.kind === 'reindex') resetMaintenance(); }
-    await loadTable(false, refreshSchema);
+    if (silent && (busy.value || hasUnsaved())) return;
+    if (schemaChanged) { clearSelection(); filters.value = []; appliedFilters.value = []; }
+    await loadTable(false, refreshSchema || schemaChanged, silent);
   } catch (error) { if (!read.signal.aborted && !disposed) { if (withdrawUnauthorized(error)) { tables.value = { items: [] }; activeKey.value = ''; } tablesError.value = errorText(error); } }
   finally { if (tablesRead === read) tablesLoading.value = false; }
 }
-async function loadTable(reset = false, refreshSchema = false) {
+async function loadTable(reset = false, refreshSchema = false, silent = false) {
   if (reset) resetView();
   if (!activeKey.value) return;
+  if (silent && schema.value && !refreshSchema) { await readRecords(currentCursor.value, cursorTrail.value, true); return; }
   listRead?.abort();
   const read = listRead = new AbortController(); const key = activeKey.value; listLoading.value = true;
   try {
@@ -367,18 +428,21 @@ async function loadTable(reset = false, refreshSchema = false) {
     if (read.signal.aborted || disposed) return;
     schema.value = result;
     if (result.cache) listPending.value = !result.cache.complete || result.cache.refreshing;
-    await readRecords(currentCursor.value, cursorTrail.value);
+    await readRecords(currentCursor.value, cursorTrail.value, silent);
   } catch (error) { if (!read.signal.aborted && !disposed && !withdrawUnauthorized(error)) listError.value = errorText(error); }
   finally { if (listRead === read) listLoading.value = false; }
 }
-async function readRecords(cursor = '', trail: string[] = []) {
+async function readRecords(cursor = '', trail: string[] = [], silent = false) {
   if (!schema.value) { await loadTable(); return; }
-  listRead?.abort(); const read = listRead = new AbortController(); listLoading.value = true; listError.value = ''; syncFailed.value = false;
+  listRead?.abort(); const read = listRead = new AbortController(); listLoading.value = !silent; listRefreshing.value = silent;
+  if (!silent) { listError.value = ''; syncFailed.value = false; }
   const key = activeKey.value;
   try {
-    const result = await api.records(key, { scope: scope.value, q: appliedQuery.value, cursor, page_size: pageSize }, read.signal);
+    const result = await api.records(key, { scope: scope.value, q: appliedQuery.value, filters: clone(appliedFilters.value), cursor, page_size: pageSize }, read.signal);
     if (read.signal.aborted || disposed || key !== activeKey.value) return;
-    records.value = result.items; hasMore.value = result.has_more; nextCursor.value = result.cursor;
+    if (silent && (busy.value || hasUnsaved())) return;
+    if (JSON.stringify(records.value) !== JSON.stringify(result.items)) records.value = result.items;
+    hasMore.value = result.has_more; nextCursor.value = result.cursor;
     total.value = result.total; listCache.value = result.cache;
     listPending.value = !!result.cache && (!result.cache.complete || result.cache.refreshing);
     listError.value = result.cache?.error || '';
@@ -392,7 +456,7 @@ async function readRecords(cursor = '', trail: string[] = []) {
       if (error instanceof ApiError && error.payload.code === 'document_library_sync_pending') listPending.value = true;
       else { listError.value = errorText(error); syncFailed.value = error instanceof ApiError && error.payload.code === 'document_library_sync_failed'; }
     }
-  } finally { if (listRead === read) listLoading.value = false; }
+  } finally { if (listRead === read) { listLoading.value = false; listRefreshing.value = false; } }
 }
 async function retryRecords() {
   if (busy.value || listLoading.value) return;
@@ -414,8 +478,14 @@ function selectTable(key: string) {
     void loadTable(true);
   });
 }
-function searchRecords() { if (!busy.value && !listLoading.value) attemptLeave(() => { appliedQuery.value = query.value.trim(); resetView(false); void readRecords('', []); }); }
-function changeScope(value: string) { if (!busy.value) attemptLeave(() => { scope.value = value; resetView(false); void readRecords('', []); }); }
+function searchRecords() {
+  if (busy.value || listLoading.value) return;
+  if (filters.value.some(filter => !['empty', 'not_empty'].includes(filter.op) && (filter.value === null || filter.value === ''))) {
+    filterError.value = '请补齐筛选值，或移除不用的条件。'; return;
+  }
+  attemptLeave(() => { appliedQuery.value = query.value.trim(); appliedFilters.value = clone(filters.value); filterError.value = ''; resetView(false); void readRecords('', []); });
+}
+function changeScope(value: string) { if (!busy.value) attemptLeave(() => { scope.value = normalizeScope(value); resetView(false); void readRecords('', []); }); }
 function nextPage() { if (!busy.value && !listLoading.value && hasMore.value && nextCursor.value) void readRecords(nextCursor.value, /^\d+$/.test(nextCursor.value) ? [] : [...cursorTrail.value, currentCursor.value]); }
 function previousPage() {
   if (busy.value || listLoading.value || !hasPrevious.value) return;
@@ -426,6 +496,10 @@ function firstPage() { if (!busy.value && !listLoading.value && hasPrevious.valu
 function lastPage() {
   if (!busy.value && !listLoading.value && hasMore.value && total.value !== undefined)
     void readRecords(String(Math.max(0, Math.floor((total.value - 1) / pageSize) * pageSize)), []);
+}
+function goPage(page: number) {
+  if (!busy.value && !listLoading.value && page >= 1 && page <= pageCount.value && page !== currentPage.value)
+    void readRecords(page === 1 ? '' : String((page - 1) * pageSize), []);
 }
 function resetDetail() {
   detailError.value = ''; notice.value = ''; reason.value = ''; editing.value = false; creating.value = false; fieldErrors.value = {}; conflict.value = false;
@@ -555,22 +629,28 @@ function clearIdentity() {
   query.value = ''; appliedQuery.value = ''; scope.value = ''; notice.value = ''; cleanupPending.value = 0;
   saving.value = false; uploading.value = false;
 }
+let polling = false;
 async function poll() {
-  if (disposed || document.hidden || busy.value || editing.value || settingsOpen.value || discardOpen.value || maintenanceIntent.value || hasUnsaved() || listLoading.value || tablesLoading.value || detailLoading.value) return;
-  await loadTables();
-  if (disposed || editing.value || hasUnsaved() || busy.value || detailLoading.value || maintenanceIntent.value || !detailOpen.value || !detail.value) return;
-  const read = detailRead = new AbortController();
+  if (polling || disposed || document.hidden || busy.value || editing.value || settingsOpen.value || discardOpen.value || maintenanceIntent.value || hasUnsaved() || listLoading.value || tablesLoading.value || detailLoading.value) return;
+  polling = true;
   try {
-    const record = await api.record(activeKey.value, detail.value.record_id, read.signal);
-    if (!disposed && !read.signal.aborted && !editing.value && !hasUnsaved()) applyDetail(record);
-  } catch (error) { if (!disposed && !read.signal.aborted) withdrawUnauthorized(error); }
+    await loadTables(undefined, false, true);
+    if (disposed || editing.value || hasUnsaved() || busy.value || detailLoading.value || maintenanceIntent.value || !detailOpen.value || !detail.value) return;
+    const read = detailRead = new AbortController();
+    try {
+      const record = await api.record(activeKey.value, detail.value.record_id, read.signal);
+      if (!disposed && !read.signal.aborted && !editing.value && !hasUnsaved() && !busy.value
+          && detailOpen.value && targetId.value === record.record_id) applyDetail(record);
+    } catch (error) { if (!disposed && !read.signal.aborted) withdrawUnauthorized(error); }
+  } finally { polling = false; }
 }
 function schedulePoll() {
   window.clearTimeout(pollTimer);
-  if (!disposed && !document.hidden) pollTimer = window.setTimeout(async () => { try { await poll(); } finally { schedulePoll(); } }, 15_000);
+  const pending = listPending.value || records.value.some(record => ['queued', 'indexing', 'caching'].includes(indexState(record)));
+  if (!disposed && !document.hidden) pollTimer = window.setTimeout(async () => { try { await poll(); } finally { schedulePoll(); } }, pending ? 30_000 : 120_000);
 }
 function visibilityChanged() { schedulePoll(); }
-watch(() => props.scope, value => { if (value !== undefined && value !== scope.value && !busy.value) changeScope(value); });
+watch(() => props.scope, value => { if (value !== undefined && normalizeScope(value) !== scope.value && !busy.value) changeScope(value); });
 watch(uploadField, () => replaceId.value = '');
 onMounted(() => { unregisterNavigation = registerNavigationGuard((_target, proceed) => { if (busy.value) return false; if (!hasUnsaved()) return true; leaveAction = proceed; discardOpen.value = true; return false; }); window.addEventListener('beforeunload', beforeUnload); window.addEventListener('clipflow-read-cache-reset', identityChanged); window.addEventListener(AUTH_EXPIRED_EVENT, clearIdentity); document.addEventListener('visibilitychange', visibilityChanged); void loadTables(); schedulePoll(); });
 onBeforeUnmount(() => { disposed = true; window.clearTimeout(pollTimer); maintenanceRead?.abort(); tablesRead?.abort(); listRead?.abort(); detailRead?.abort(); versionRead?.abort(); unregisterNavigation?.(); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('clipflow-read-cache-reset', identityChanged); window.removeEventListener(AUTH_EXPIRED_EVENT, clearIdentity); document.removeEventListener('visibilitychange', visibilityChanged); });
@@ -627,4 +707,8 @@ onBeforeUnmount(() => { disposed = true; window.clearTimeout(pollTimer); mainten
 .document-pagination{flex-wrap:wrap}.document-pagination>div{gap:4px}.document-pagination :deep(.n-button){width:40px;padding:0}
 .document-maintenance-dialog p{overflow-wrap:anywhere}.document-maintenance-dialog :deep(.n-dialog__action){flex-wrap:wrap}
 @media(max-width:760px){.document-selection{gap:6px}.document-selection :deep(.n-button){font-size:12px;padding-inline:9px}.document-pagination{gap:8px}.document-pagination>span{flex:1;min-width:120px}.document-pagination :deep(.n-button){width:36px;min-width:36px}.document-row-actions{gap:4px}}
+.document-filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.document-filters>.n-input{flex:1;min-width:150px}.document-filters>.n-select{flex:0 1 190px;min-width:140px}
+.document-field-filters{display:grid;gap:8px}.document-filter-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0}.document-filter-row>:nth-child(1){flex:1 1 160px;min-width:130px}.document-filter-row>:nth-child(2){flex:0 1 120px;min-width:100px}.document-filter-row>:nth-child(3):not(.n-button){flex:1 1 190px;min-width:130px}.document-filter-row>.n-button{flex:none}
+.document-pagination>nav{display:flex;align-items:center;flex-wrap:wrap;gap:4px;max-width:100%}.document-page-ellipsis{padding:0 2px}
+@media(max-width:760px){.document-filters>.n-select{flex:1 1 150px}.document-filter-row{gap:6px}.document-filter-row>:nth-child(1){flex-basis:calc(60% - 8px);min-width:0}.document-filter-row>:nth-child(2){flex-basis:calc(40% - 8px);min-width:0}.document-filter-row>:nth-child(3):not(.n-button){flex-basis:calc(100% - 56px);min-width:0}.document-pagination>nav{width:100%;gap:4px}.document-pagination :deep(.n-button){width:44px;min-width:44px}}
 </style>

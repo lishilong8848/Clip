@@ -83,15 +83,15 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(result['content']['file_key'], 'file_v3_abc-def')
         self.assertNotIn('text', result['content'])
 
-    def test_conversation_separates_people_but_reuses_rooms_and_web(self):
+    def test_conversation_separates_people_and_web_from_private_feishu(self):
         keys = [LighthouseAssistant._key(actor) for actor in [
             {"id": "a"}, {"id": "b"}, {"id": "a", "channel": "feishu:oc_1"},
             {"id": "a", "channel": "feishu:oc_2"}, {"id": "b", "channel": "feishu:oc_1"}]]
-        self.assertEqual(len(set(keys)), 2)
+        self.assertEqual(len(set(keys)), 4)
         self.assertEqual(keys[0], "conversation:a")
-        self.assertEqual(keys[0], keys[2])
+        self.assertNotEqual(keys[0], keys[2])
         self.assertEqual(keys[2], keys[3])
-        self.assertEqual(keys[1], keys[4])
+        self.assertNotEqual(keys[1], keys[4])
 
 
 class SenderDirectoryTests(unittest.IsolatedAsyncioTestCase):
@@ -582,11 +582,13 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await restarted._resolve_user(other_room), user)
         self.channel.messenger.sender_name.assert_not_awaited()
         self.channel.messenger.sender_record.assert_not_awaited()
-        self.assertEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Other'}),
+        self.assertNotEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Other'}),
                          LighthouseAssistant._key({'id': 'ou_Person'}))
         assistant = LighthouseAssistant(self.store, Mock(), model=Mock())
         restored = assistant._state({'id': user['open_id'], 'channel': 'feishu:oc_Other'})
-        self.assertEqual((restored['id'], restored['turns']), (history['id'], history['turns']))
+        self.assertNotEqual(restored['id'], history['id'])
+        self.assertEqual(restored['turns'], [])
+        self.assertEqual(assistant._state({'id': 'ou_Person'})['turns'], history['turns'])
         self.runtime.auth_manager._open_id_explicitly_disabled = lambda _: True
         with self.assertRaisesRegex(AssistantError, '停用'):
             await restarted._resolve_user(other_room)
@@ -606,7 +608,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError):
             self.channel._sender_user(message, name='王彦博')
 
-    async def test_migrated_hr_record_uses_current_sender_without_login_and_reuses_web_context(self):
+    async def test_migrated_hr_record_needs_no_login_and_keeps_web_history_separate(self):
         person = {'id': 'recZheng', 'name': '郑帅', 'login_ids': ['ou_WebZheng'], 'selectable': True}
         history = self.migrate_fixture(person, 'ou_Person')
         person = {**person, 'login_ids': ['ou_Person']}
@@ -623,7 +625,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         restarted = FeishuAssistant(self.controller, self.runtime, AsyncMock())
         restarted.config = dict(self.channel.config)
         self.assertEqual(await restarted._resolve_user({**message, 'chat_type': 'p2p', 'chat_id': 'oc_Other'}), user)
-        self.assertEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Chat'}),
+        self.assertNotEqual(LighthouseAssistant._key({'id': user['open_id'], 'channel': 'feishu:oc_Chat'}),
                          LighthouseAssistant._key({'id': 'ou_Person'}))
         self.controller._current_session = lambda _: {'user': user}
         request = Request({'type': 'http', 'headers': [], 'state': {'lighthouse_channel': 'feishu:oc_Chat'}})
@@ -631,8 +633,9 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         model = Mock()
         model.settings.return_value = {'models': [], 'enabled': True}
         conversation = LighthouseAssistant(self.store, Mock(), model=model).conversation(actor)
-        self.assertEqual(conversation['conversation_id'], history['id'])
-        self.assertEqual(conversation['turns'][0]['answer'], history['turns'][0]['answer'])
+        self.assertNotEqual(conversation['conversation_id'], history['id'])
+        self.assertEqual(conversation['turns'], [])
+        self.assertEqual(self.store.get_document('lighthouse_ai', 'conversation:ou_Person')['turns'], history['turns'])
         with self.assertRaises(AssistantError):
             await self.channel._resolve_user({**message, 'sender_id': 'ou_WebZheng'})
         self.channel.messenger.sender_name.assert_not_awaited()

@@ -41,6 +41,51 @@ class MaintenanceTests(LibraryFixture):
         self.drain()
         self.assertEqual((self.remote.creates, self.remote.updates, self.remote.uploads), (0, 0, 0))
 
+    def test_field_filters_match_listing_and_cross_page_selection_offline(self):
+        filters = [{'field': 'fldNumber', 'op': 'gte', 'value': 5},
+            {'field': 'fldTitle', 'op': 'contains', 'value': 'policy'}]
+        with patch.object(self.remote, 'records', side_effect=AssertionError('Use local cache')), \
+                patch.object(self.remote, 'fields', side_effect=AssertionError('Use cached fields')):
+            listed = self.service.list_records(self.admin, 'manuals', {'filters': json.dumps(filters), 'page_size': 1})
+            self.assertEqual((listed['total'], listed['has_more']), (1, False))
+            self.assertEqual(listed['items'][0]['record_id'], 'recTwo')
+            result = self.service.reindex(self.admin, 'manuals', self.request(all=True, filters=filters))
+        self.assertEqual(result['records'], listed['total'])
+        with self.service.connect(readonly=True) as db:
+            ids = {row[0] for row in db.execute("SELECT record_id FROM ingestion WHERE reindex_request<>''")}
+        self.assertEqual(ids, {'recTwo'})
+        self.assertEqual(self.service.list_records(actor(), 'manuals', {'filters': json.dumps(filters)})['total'], 0)
+
+    def test_filters_invalid_fields_or_values_cannot_broaden_selection(self):
+        invalid = [False, {}, '[', [{'field': 'missing', 'op': 'empty'}],
+            [{'field': 'fldNumber', 'op': 'gte', 'value': 'NaN'}],
+            [{'field': 'fldTitle', 'op': 'lte', 'value': 'x'}],
+            [{'field': ['fldTitle'], 'op': 'eq', 'value': 'x'}]]
+        for filters in invalid:
+            with self.subTest(filters=filters):
+                with self.assertRaises(AssistantError):
+                    self.service.list_records(self.admin, 'manuals', {'filters': filters})
+                with self.assertRaises(AssistantError):
+                    self.service.reindex(self.admin, 'manuals', self.request(all=True, filters=filters))
+        with self.service.connect(readonly=True) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM maintenance').fetchone()[0], 0)
+
+    def test_native_field_filter_dates_names_false_zero_and_attachments(self):
+        from lan_bitable_template_portal.document_library_filters import matches_filters, parse_filters
+        fields = {fid: {'type': kind} for fid, kind in [('date', 5), ('people', 11), ('valid', 7), ('count', 2), ('files', 17)]}
+        values = {'date': 1792425600000, 'people': [{'id': 'ou_fixture', 'name': '测试人员'}],
+            'valid': False, 'count': 0, 'files': [{'file_token': 'not-a-label', 'name': '运维规程.pdf'}]}
+        filters = [{'field': 'date', 'op': 'eq', 'value': '2026-10-20'},
+            {'field': 'people', 'op': 'eq', 'value': '测试人员'}, {'field': 'valid', 'op': 'eq', 'value': False},
+            {'field': 'count', 'op': 'eq', 'value': 0}, {'field': 'files', 'op': 'contains', 'value': '规程'}]
+        self.assertTrue(matches_filters(values, parse_filters(filters, fields)))
+        self.assertFalse(matches_filters(values, parse_filters([{'field': 'valid', 'op': 'empty'}], fields)))
+        self.assertFalse(matches_filters(values, parse_filters([{'field': 'date', 'op': 'lte', 'value': '2026-10-19'}], fields)))
+        self.assertTrue(matches_filters({}, parse_filters([{'field': 'files', 'op': 'empty'}], fields)))
+        for date in ('2026-02-31', 'yesterday'):
+            with self.assertRaises(AssistantError):
+                parse_filters([{'field': 'date', 'op': 'eq', 'value': date}], fields)
+
     def test_inflight_ingest_cannot_consume_newer_reindex_request(self):
         self.service.reindex(actor(), 'manuals', self.request(record_ids=['recOne']))
         self.service.prepare_pending(limit=8)
@@ -134,6 +179,31 @@ class MaintenanceTests(LibraryFixture):
 
 
 class CacheTests(SyncFixture):
+    def test_all_remote_pages_are_cached_and_paging_survives_restart_offline(self):
+        rows = []
+        for number in range(75):
+            row = copy.deepcopy(self.remote.rows['recOne'])
+            row['record_id'] = f'rec{number:03d}'
+            row['fields'].update(Title=f'Policy {number}', Number=number, Files=[])
+            rows.append(row)
+        self.save()
+        def page(cursor='', page_size=100):
+            offset = int(cursor or 0)
+            return {'items': rows[offset:offset + 25], 'has_more': offset + 25 < len(rows),
+                'page_token': str(offset + 25) if offset + 25 < len(rows) else ''}
+        with patch.object(self.remote, 'records', side_effect=page) as read:
+            for _ in range(3):
+                self.assertTrue(self.service.process_sync('manuals'))
+            self.assertEqual(read.call_count, 3)
+        self.service = self.reopen()
+        with patch.object(self.remote, 'records', side_effect=AssertionError('Offline cache must serve every page')), \
+                patch.object(self.remote, 'fields', side_effect=AssertionError('Use cached schema')):
+            first = self.service.list_records(actor(), 'manuals', {'page_size': 30})
+            last = self.service.list_records(actor(), 'manuals', {'page_size': 30, 'cursor': '60'})
+            self.assertEqual((first['total'], first['cache']['complete']), (75, True))
+            self.assertEqual((len(last['items']), last['has_more']), (15, False))
+            self.assertEqual(last['items'][-1]['record_id'], 'rec074')
+
     def test_restart_opens_schema_records_details_offline(self):
         self.save()
         self.service.process_sync('manuals')

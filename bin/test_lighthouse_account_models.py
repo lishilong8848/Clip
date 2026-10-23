@@ -436,20 +436,29 @@ class LighthouseAssistantModelForTests(unittest.TestCase):
             "model": "model-2", "api_key": "key-2"}})
         model.configure({"action": "select", "id": "m1"})
 
-        # Place one completed turn and a compressed summary in the account conversation store.
-        convo = {"id": "convo_1", "turns": [{
-            "operation_id": "turn_0000000000001", "question": "旧问题",
-            "answer": "旧答案", "scopes": ["A"], "status": "completed", "model_name": "一号模型"}],
-            "context": {"summary": "旧摘要", "compressed_turns": 3, "last_compressed_at": 1}}
-        self.store.put_document(NAMESPACE, "conversation:actor_a", copy.deepcopy(convo))
+        for channel in ('', 'feishu:oc_fixture'):
+            with self.subTest(channel=channel):
+                current = {**actor, 'channel': channel}
+                # Model switching is separate from the one-time legacy channel migration.
+                convo = {**assistant._state(current), "model_id": "m1", "turns": [{
+                    "operation_id": "turn_0000000000001", "question": "旧问题",
+                    "answer": "旧答案", "scopes": ["A"], "status": "completed", "model_name": "一号模型",
+                    "source_channel": "feishu" if channel else "web", "feishu_topic": ""}],
+                    "context": {"summary": "旧摘要", "compressed_turns": 3, "last_compressed_at": 1,
+                                "through": "previous-compressed-turn", "scopes": ["A"]}}
+                self.store.put_document(NAMESPACE, assistant._key(current), copy.deepcopy(convo))
 
-        # Switching to model 2 through the assistant keeps the same id, turns and context.
-        switched = assistant.select_model(actor, {"conversation_id": "convo_1", "model_id": "m2"})
-        self.assertEqual(switched["conversation_id"], "convo_1")
-        self.assertEqual(len(switched["turns"]), 1)
-        self.assertEqual(switched["turns"][0]["operation_id"], "turn_0000000000001")
-        self.assertEqual(switched["context"]["compressed_turns"], 3)
-        self.assertEqual(switched["model_id"], "m2")
+                # Switching to model 2 keeps the same channel's id, turns and context.
+                switched = assistant.select_model(current, {"conversation_id": convo['id'], "model_id": "m2"})
+                self.assertEqual(switched["conversation_id"], convo['id'])
+                self.assertEqual(len(switched["turns"]), 1)
+                self.assertEqual(switched["turns"][0]["operation_id"], "turn_0000000000001")
+                self.assertEqual(switched["context"]["compressed_turns"], 3)
+                self.assertEqual(switched["model_id"], "m2")
+                stored = assistant._state(current)
+                self.assertEqual(stored['turns'], convo['turns'])
+                self.assertEqual(stored['context'], convo['context'])
+                self.assertNotIn('_legacy_context', stored)
 
     def test_chat_and_compression_use_only_the_owner_configuration(self):
         calls = []

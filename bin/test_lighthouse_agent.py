@@ -170,11 +170,13 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("无权查询", result["turns"][-1]["answer"])
 
     async def test_group_shared_plan_uses_actual_actor_and_preserves_personal_histories(self):
+        owner = {**ACTOR, 'channel': 'feishu:oc_Group'}
+        payload = {**self.payload, 'conversation_id': self.assistant._state(owner)['id']}
         self.decisions({'action': 'prepare', 'title': '共享通告', 'operations': [
             {'api_id': 'POST /api/fixture-submit', 'body': {'scope': 'A', 'title': '测试通告'}}]})
-        result = await self.agent.chat(ACTOR, self.payload, self.request)
+        result = await self.agent.chat(owner, payload, self.request)
         plan = result['turns'][-1]['plan']
-        raw = self.agent.get_plan(ACTOR, plan['id'])
+        raw = self.agent.get_plan(owner, plan['id'])
         delegate = {**ACTOR, 'id': 'fixture-b', 'name': '实际确认人', 'channel': 'feishu:oc_Group',
             '_shared_plan': {'id': plan['id'], 'owner': ACTOR['id'], 'conversation_id': raw['conversation_id'], 'chat_id': 'oc_Group'}}
         before = copy.deepcopy(self.assistant._state(delegate))
@@ -186,14 +188,15 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             await self.agent.confirm(delegate, plan['id'], {'version': first['version'], 'stage': 'execute'}, self.request)
         await self.agent.confirm(delegate, plan['id'], {'version': first['version'], 'stage': 'execute'}, self.request)
         await asyncio_gather(self.agent)
-        final = self.agent.get_plan(ACTOR, plan['id'])
+        final = self.agent.get_plan(owner, plan['id'])
         self.assertEqual(final['status'], 'completed')
         self.assertEqual(final['confirmed_by']['id'], delegate['id'])
         self.assertEqual(final['owner'], ACTOR['id'])
         self.assertEqual(len(self.writes), 1)
         self.assertEqual(self.assistant._state(delegate)['turns'], before['turns'])
-        self.assertEqual(self.assistant.conversation(ACTOR)['turns'][-1]['plan']['status'], 'completed')
-        self.assistant.clear(ACTOR)
+        self.assertEqual(self.assistant.conversation(owner)['turns'][-1]['plan']['status'], 'completed')
+        self.assertEqual(self.assistant.conversation(ACTOR)['turns'], [])
+        self.assistant.clear(owner)
         with self.assertRaises(AssistantError): self.agent.get_plan(delegate, plan['id'])
 
     def test_shared_files_are_limited_to_the_current_server_grant(self):

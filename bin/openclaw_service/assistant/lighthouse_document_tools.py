@@ -21,9 +21,9 @@ def _offline(*args, **kwargs):
     raise OSError('Local document tools cannot access the network')
 
 
-def checked_file(item):
+def checked_file(item, *, max_bytes=20 * 1024 * 1024):
     path = Path(item['path'])
-    if path.stat().st_size > 20 * 1024 * 1024:
+    if max_bytes is not None and path.stat().st_size > max_bytes:
         raise AssistantError('单文件最多20MiB。', 413)
     content = path.read_bytes()
     if hashlib.sha256(content).hexdigest() != item['sha256']:
@@ -31,7 +31,7 @@ def checked_file(item):
     return content
 
 
-def _worker(kind, payload, sender):
+def _worker(kind, payload, sender, max_bytes=20 * 1024 * 1024):
     try:
         for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
             os.environ[name] = '1'
@@ -60,7 +60,7 @@ def _worker(kind, payload, sender):
             result = render_flowchart(**payload)
         elif kind in {'markdown', 'ocr'}:
             path = Path(payload['path'])
-            content = checked_file(payload)
+            content = checked_file(payload, max_bytes=max_bytes)
             result = ocr_text(content, path.suffix.lower(), payload['page']) if kind == 'ocr' else document_markdown(content, path.suffix.lower())
         else:
             raise AssistantError('不支持此文档工具。')
@@ -72,13 +72,13 @@ def _worker(kind, payload, sender):
         sender.close()
 
 
-def run_local(kind, payload, timeout=45):
+def run_local(kind, payload, timeout=45, *, max_bytes=20 * 1024 * 1024):
     # One low-priority child bounds CPU use; completion/timeout releases all model memory.
     if not _SLOT.acquire(timeout=5):
         raise AssistantError('本地文档工具正忙，请稍后重试；普通聊天和业务办理不受影响。', 429)
     context = multiprocessing.get_context('spawn')
     receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(target=_worker, args=(kind, payload, sender), daemon=True)
+    process = context.Process(target=_worker, args=(kind, payload, sender, max_bytes), daemon=True)
     try:
         process.start()
         if os.name == 'nt':

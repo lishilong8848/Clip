@@ -97,7 +97,7 @@ INSTRUCTIONS = GENERAL_INSTRUCTIONS + """
 未发检修=计划列表中未开始的检修；未结束检修=进行中检修通告；未完成维修单是另一类事项。
 已发送通告数量使用notice_sends工具，按实际发送时间统计成功的开始、更新、结束；不同通告条数和发送次数分别回答。工作台待办、计划时间、历史stats.started都不能替代发送总量。
 维修项目的跟进条数和当前进度用repair_followup_status读取原记录；先查明record_id，不用标题猜ID。追问某条时沿用资料中的原ID重新读取。
-画像学练可共享查询题单、进度、未答数量和题库资料，不改变学练页面的原答题及答案开放状态。答题、质疑提交、发布、编辑及设置仍在[画像学练原页面](/learning)办理，不能在助手中准备这些操作。今日未发布题单与已发布但未完成必须分开说明。题库只读使用GET /api/assistant/question-bank，search按题目关键词，bank为written/duty/professional；以实际接口回执为准，缺失答案不代表题库无答案。
+画像学练可共享查询题单、进度、未答数量和题库资料，不改变学练页面的原答题及答案开放状态。答题、质疑提交、发布、编辑及设置仍在[画像学练原页面](/learning)办理，不能在助手中准备这些操作。今日未发布题单与已发布但未完成必须分开说明。按班次查询用GET /api/learning/completion，date或from/to为排班日，shift为白或夜；按原分页补齐人员，逐人核对tasks中对应班次的answered，待答或仅已发送不算参与；夜班跨零点仍属该次排班日，不拿整天合计代替。learning_participants按实际提交日期统计，不区分班次。题库只读使用GET /api/assistant/question-bank，search按题目关键词，bank为written/duty/professional；以实际接口回执为准，缺失答案不代表题库无答案。
 题库检索不要求用户与题干一字不差。理解用户语义后提取2至6个核心术语、同义表达或缩写（例如“不停电供电”可检索“UPS 不间断电源 备用电源”），以空格分隔放入search；未指定哪种题库时省略bank，不分三次查询。检索词是候选召回，不是已确认事实。结合返回题干、选项及获准答案核对含义，引用真正相关原题，不能把关键词碰巧相同的题当答案。没有可靠候选时可换一次同义词，不得编造题库结论或绕过未开放答案。其他业务名称查询也先提炼关键词，保留楼栋、设备编号和日期等必要约束，不要求用户照抄记录标题。
 设备原理、机房运行知识和故障分析问题优先检索有权查看的题库资料，用户不必加“题库”二字；先简明回答问题，再给出处，不能只列资料标题或出处。题库说明不能当作当前现场状态。未找到可靠原题时说明检索限制，补充的一般知识须与题库依据区分。普通聊天、编程知识等与灯塔业务无关的问题不需要检索题库。
 题目查询返回materials时，可用GET /api/assistant/question-material读取资料，material_id只取已有materials的id，offset从0开始、length最多6000，按next_offset继续。只读原有权限允许的题目资料，不读取质疑附件；图片通过文字识别读取，不能据此虚构图形关系。文件或识别读取失败时保留说明，不认为答案为空，也不猜图中答案。
@@ -802,12 +802,13 @@ class LighthouseModel:
             requires_source = requires_source or bool(COUNT.search(question) or DETAIL.search(question) or PENDING.search(question))
         profile = turn["_profile"]
         sources, references, queries = [], {}, {}
-        answer_review, repair_rounds = None, 0
+        answer_review, repair_rounds, source_repairs = None, 0, 0
+        read_blocked = False
         rejected_answers = set()
         from .lighthouse_review import READ_REPAIR_TOOLS, UNVERIFIED_REPLY
 
         async def repair_tools(_, definitions):
-            return [tool for tool in definitions if tool.name in READ_REPAIR_TOOLS] if repair_rounds else definitions
+            return [tool for tool in definitions if tool.name in READ_REPAIR_TOOLS] if repair_rounds or source_repairs else definitions
 
         query_sources = {}
         query_failures = []
@@ -873,6 +874,7 @@ class LighthouseModel:
                 raise ModelRetry('当前是通用知识或外部话题，不查询或准备无关的灯塔业务；直接回答原问题，可按需使用公开工具。')
 
         async def invoke(operation):
+            nonlocal read_blocked
             require_business_intent(operation.get("api_id", ""))
             from lan_bitable_template_portal.assistant_shared_read import reader_actor
             current = reader_actor(await current_actor())
@@ -920,7 +922,8 @@ class LighthouseModel:
                     if file["id"] not in turn["file_ids"]:
                         turn["file_ids"].append(file["id"])
                         turn.setdefault("output_files", []).append(self.portal.files.public(authorized_file))
-            if result.get('ok'):
+            read_blocked = read_blocked or result.get('status') in {401, 403} or bool(result.get('confirmation_required'))
+            if result.get('ok') and query_result_state(result)[0] not in {'partial', 'unavailable', 'empty_page'}:
                 read_results[read_key] = copy.deepcopy(result)
             return result
 
@@ -1009,6 +1012,7 @@ class LighthouseModel:
             return {"answer": answer, "sources": sources, "_references": references}
 
         async def table_read(action, query=None, **options):
+            nonlocal read_blocked
             require_business_intent()
             from lan_bitable_template_portal.assistant_shared_read import reader_actor
             current = reader_actor(await current_actor())
@@ -1021,7 +1025,12 @@ class LighthouseModel:
                 if not isinstance(result, dict):
                     raise AssistantError('只读查询未返回完整结果，数量未知。', 502)
                 if result.get('confirmation_required'):
+                    read_blocked = True
+                    query_failures.append(safe_text(result.get('message') or result.get('summary') or '此来源需要先确认查询，尚未读取。'))
                     return result
+                if result.get('ok') is False:
+                    raise AssistantError(safe_text(result.get('error') or '只读来源未取得。'),
+                                         result.get('status') if type(result.get('status')) is int else 503)
                 await current_actor()
                 if action == 'table_catalog':
                     return result
@@ -1030,8 +1039,9 @@ class LighthouseModel:
                 sources[-1]['query_conditions'] = safe_data(query if query is not None else options)
                 return {'ok': True, **result, 'query_ref': evidence['query_ref'], 'source_number': evidence['source_number']}
             except AssistantError as exc:
+                read_blocked = read_blocked or exc.status in {401, 403}
                 query_failures.append(safe_text(str(exc)))
-                return {'ok': False, 'error': safe_text(str(exc)), 'total': None}
+                return {'ok': False, 'error': safe_text(str(exc)), 'status': exc.status, 'total': None}
 
         document_results = {}
         async def read_feishu_document(url, offset=0):
@@ -1299,12 +1309,20 @@ class LighthouseModel:
             @agent.tool_plain(timeout=40)
             async def learning_participants(period: Literal['week', 'last_week', ''] = '',
                                             start_date: str = '', end_date: str = '') -> dict:
-                """Actual learning participants and answer statistics, not pending papers or staff headcount. Infer the intended dates from conversation semantics; choose week/last_week OR explicit YYYY-MM-DD start_date and end_date. Reuses the authoritative collector across the current authorized scope. A followup may also compare results or generate a report; this tool does not finish the answer or write data."""
+                """Actual learning participants by submission date, not pending papers or staff headcount. Infer dates; choose week/last_week OR explicit YYYY-MM-DD start_date and end_date. Does NOT filter shifts: for a shift use discover/query GET /api/learning/completion, preserve roster date and shift and inspect matching tasks. A followup may compare results or generate a report; no writes."""
+                nonlocal read_blocked
                 if bool(period) == bool(start_date or end_date) or not period and not (start_date and end_date):
                     return {'ok': False, 'error': '请选择周范围或完整的起止日期，不能猜测缺失的时间。'}
                 params = {'scope': 'ALL', **({'period': period} if period else {'from': start_date, 'to': end_date})}
                 current = await current_actor()
-                result = await self.portal.learning_participation_answer(current, params, request)
+                try:
+                    result = await self.portal.learning_participation_answer(current, params, request)
+                except AssistantError as exc:
+                    read_blocked = read_blocked or exc.status in {401, 403}
+                    query_failures.append(safe_text(str(exc)))
+                    return {'ok': False, 'error': safe_text(str(exc)), 'status': exc.status,
+                            'query_conditions': params, 'query_state': 'unavailable',
+                            'guidance': '权限拒绝时停止；其它读取失败可用discover查找原只读接口或table_catalog查找真实来源，保留原日期和范围补查，不把失败当零。'}
                 data = result['sources'][0]['data']
                 latest = await current_actor()
                 if set(current.get('learning_scopes') or []) - set(latest.get('learning_scopes') or []):
@@ -1576,7 +1594,7 @@ class LighthouseModel:
             @agent.tool_plain(timeout=310)
             async def query(operation: PortalOperation, complete: bool = False) -> dict:
                 """Read an existing API. complete=true gathers supported list pagination (20 reads/2000 rows/35 seconds per building), preserving filters and rechecking access on each read. For other APIs retain their real pagination arguments and read_query for snapshot slices. Never refreshes or writes."""
-                nonlocal buffer_business
+                nonlocal buffer_business, read_blocked
                 buffer_business = True
                 operation = operation.model_dump()
                 try:
@@ -1620,6 +1638,7 @@ class LighthouseModel:
 
                     results = await asyncio.gather(*(read_operation(item) for item in operations))
                 except AssistantError as exc:
+                    read_blocked = read_blocked or exc.status in {401, 403}
                     query_failures.append(safe_text(str(exc)))
                     return {"ok": False, "error": str(exc), "count": None, "query_state": "forbidden" if exc.status == 403 else "unavailable"}
                 if len(results) > 1:
@@ -2263,7 +2282,7 @@ class LighthouseModel:
 
             @agent.output_validator
             async def require_business_source(result: str) -> str:
-                nonlocal answer_review, repair_rounds, reviewed_answer, reviewed_goals
+                nonlocal answer_review, repair_rounds, source_repairs, reviewed_answer, reviewed_goals
                 await current_actor()
                 if reviewed_answer is not None:
                     result = reviewed_answer
@@ -2303,6 +2322,29 @@ class LighthouseModel:
                         raise ModelRetry("用户要求办理或填写，目标或意图不清楚时用ask_business_question询问；目标明确时调用prepare_business提供选择、日期、人员等原生控件。不能猜测目标或新值，也不能声称已完成。")
                 if form_requested and plan is not None:
                     return "请核对下方填写项，确认后执行。"
+                latest_sources = {}
+                for source in query_sources.values():
+                    latest_sources[source.get('query_key') or (source['url'], source['title'])] = source
+                available_sources = [source for source in latest_sources.values() if source.get('available')]
+                incomplete_sources = [source for source in latest_sources.values() if query_result_state({
+                    'ok': source.get('available'), 'data': queries.get(source['query_ref'])})[0]
+                    in {'partial', 'unavailable', 'empty_page'}]
+                if (requires_source and business_question and not form_requested and plan is None
+                        and not read_blocked and source_repairs < 2
+                        and (not available_sources or self.answer_reviewer is None and incomplete_sources)):
+                    source_repairs += 1
+                    reviewed_answer, reviewed_goals = None, []
+                    if self.agent_factory:
+                        agent._answer_repair = True
+                    await emit('status', {'label': '正在补查缺失资料'})
+                    gaps = [{'query_ref': source['query_ref'], 'source': source['title']} for source in incomplete_sources]
+                    raise ModelRetry('原问题的业务资料尚未完整取得，请在本轮继续只读查证后再回答，不让用户重新提问或自行去页面查看。'
+                        '先从discover核对现有接口及参数；原接口缺字段、分页或历史时用table_catalog寻找对应来源并以table_records读取。'
+                        '已有query_ref先read_query，完整结果不重复读取；只补缺失部分，必要时纠正参数或换相关只读来源。'
+                        '保留用户及当前话题的对象、日期、楼栋、班次和口径；不要改成无关日期或用样本代替完整数据。'
+                        '不绕过权限、待确认限制或重做任何写入。若确实不可取得，只给已核实结论及明确缺口。'
+                        + '\n缺失快照：' + json.dumps(gaps, ensure_ascii=False)
+                        + '\n读取问题：' + '；'.join(dict.fromkeys(query_failures))[:2000])
                 if requires_source and not sources and plan is None:
                     if query_failures:
                         return "本轮" + material_label + "未取得，暂无法确认：" + "；".join(dict.fromkeys(query_failures))
@@ -2447,7 +2489,8 @@ class LighthouseModel:
             # provider marks it final_result early. Business runs stream progress
             # first and release only the validated final answer, not tool-loop prose.
             buffer_business = bool(business_question or form_requested or public_realtime or knowledge_question or document_targets or file_analysis or file_requested or advanced_question)
-            live_general = not (buffer_business or requires_source or selected_context or turn.get('file_ids')
+            live_general = not (actor.get('channel', '').startswith('feishu:')
+                                or buffer_business or requires_source or selected_context or turn.get('file_ids')
                                 or turn.get('preview_file') or workspace_question)
             text, final_answer = PublicText(question, live=live_general), ""
             await emit('reply-mode', {'mode': 'live' if live_general else 'validated'})

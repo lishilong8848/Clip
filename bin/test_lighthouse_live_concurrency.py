@@ -91,14 +91,21 @@ class LiveConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                  {'channel': 'feishu:oc_Test', '_feishu_topic': {'id': 'topic-two'}}]
         self.runtime.slots = None
         runs = [await self.launch(lane) for lane in lanes]
-        await self.until(lambda: all(self.runtime.live[ack['run_id']]['answer'] for _, ack, _ in runs))
+        await self.until(lambda: all(self.runtime.live[ack['run_id']].get('_candidate_answer') for _, ack, _ in runs))
         self.assertEqual(len({execution_key(actor) for actor, _, _ in runs}), 5)
         for actor, ack, _ in runs:
             view = await self.runtime.conversation(actor)
             self.assertEqual(view['active_run_id'], ack['run_id'])
             self.assertTrue(view['busy'])
+            run = self.runtime.get_run(actor, ack['run_id'])
+            if actor.get('channel', '').startswith('feishu:'):
+                self.assertEqual(run['reply_mode'], 'validated')
+                self.assertEqual(run['answer'], '')
+                self.assertFalse(any(item['type'] == 'text-delta' for item in run['events']))
+            else:
+                self.assertEqual(run['answer'], '第一段，')
         self.assertEqual(runs[0][1]['conversation_id'], runs[1][1]['conversation_id'])
-        self.assertEqual(runs[0][1]['conversation_id'], runs[2][1]['conversation_id'])
+        self.assertEqual(len({ack['conversation_id'] for _, ack, _ in runs}), 4)
         release.set()
         await self.finish()
         self.assertTrue(all(self.runtime.get_run(actor, ack['run_id'])['status'] == 'completed' for actor, ack, _ in runs))
@@ -119,6 +126,18 @@ class LiveConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other['status'], 'failed')
         self.assertEqual(other['answer'], '第一段，')
         self.assertTrue(other['error'])
+
+    async def test_owner_can_stop_own_run_after_revocation_but_not_from_another_channel(self):
+        reached, release = self.live_engine()
+        actor, ack, _ = await self.launch({'channel': 'feishu:oc_Private'})
+        await reached.wait()
+        actor['scopes'], actor['modules'] = [], []
+        with self.assertRaises(fixtures.AssistantError):
+            await self.runtime.stop({**actor, 'channel': ''}, ack['run_id'])
+        result = await self.runtime.stop(actor, ack['run_id'])
+        self.assertEqual(result['status'], 'stopped')
+        release.set()
+        await self.finish()
 
     async def test_other_lane_does_not_cancel_a_business_form_or_refine_its_question(self):
         first, ack, _ = await self.launch({'_execution_lane': 'browser-one'}, '查询D楼的维修项目')
@@ -165,7 +184,7 @@ class LiveConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assistant.clear(current)
 
     async def test_completed_legacy_feishu_reply_can_still_be_read_by_operation(self):
-        actor, ack, _ = await self.launch({}, operation_id='feishu_' + 'a' * 40)
+        actor, ack, _ = await self.launch({'channel': 'feishu:oc_Test'}, operation_id='feishu_' + 'a' * 40)
         await self.finish()
         result = await self.runtime.conversation({**actor, 'channel': 'feishu:oc_Test'}, operation='feishu_' + 'a' * 40)
         self.assertEqual(result['turns'][0]['run_id'], ack['run_id'])
@@ -232,6 +251,42 @@ class LiveConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         await self.finish()
         self.assertEqual(run['status'], 'completed')
         reviewer.run.assert_not_awaited()
+
+    async def test_actual_feishu_model_waits_for_complete_answer_while_web_stays_live(self):
+        generated, release = asyncio.Event(), asyncio.Event()
+        async def model_stream(messages, info):
+            yield '冒泡排序会逐对比较'
+            generated.set()
+            await release.wait()
+            yield '将较大的数移到右侧。'
+        @asynccontextmanager
+        async def factory(*_):
+            yield FunctionModel(stream_function=model_stream)
+        self.runtime.engine = LighthouseModel(self.portal, model_factory=factory)
+        actor, ack, _ = await self.launch({'channel': 'feishu:oc_Test'})
+        try:
+            await asyncio.wait_for(generated.wait(), 3)
+            run = self.runtime.get_run(actor, ack['run_id'])
+            self.assertEqual(run['reply_mode'], 'validated')
+            self.assertEqual(run['answer'], '')
+            self.assertFalse(any(item['type'] == 'text-delta' for item in run['events']))
+        finally:
+            release.set()
+        await self.finish()
+        self.assertEqual(run['status'], 'completed')
+        self.assertIn('将较大的数移到右侧', run['answer'])
+        self.assertEqual(len([item for item in run['events'] if item['type'] == 'text-delta']), 1)
+
+    def test_roster_wording_is_business_but_general_advice_stays_general(self):
+        from openclaw_service.assistant.lighthouse_ai import is_business_query
+        from openclaw_service.assistant.lighthouse_queries import business_domains
+        for question in ('今天白班有多少人上班，分别是谁？', '明天夜班有哪些人？', '本周排班名单', '当班出勤有几人？'):
+            with self.subTest(question=question):
+                self.assertTrue(is_business_query(question))
+                self.assertIn('people', business_domains(question))
+        for question in ('写一首上班的诗歌', '上班效率有哪些提升建议？', '解释冒泡排序的原理'):
+            with self.subTest(question=question):
+                self.assertFalse(is_business_query(question))
 
     async def test_business_reviewer_must_finish_before_text_is_released(self):
         checking, release = asyncio.Event(), asyncio.Event()

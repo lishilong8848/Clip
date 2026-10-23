@@ -197,9 +197,57 @@ class NoticeDeliverySourceRecoveryTests(unittest.TestCase):
     def test_missing_metadata_is_visible_not_guessed_status_write(self):
         payload, _, _ = self.source()
         self.service._field_meta_by_name = {}
+        self.service._load_table_fields = Mock(return_value=([], {}))
         with self.assertRaisesRegex(portal.NoticeSourcePending, '元信息缺失'):
             self.service.sync_notice_source_ended_fields(payload)
-        self.assertNotIn('维护实施状态', self.service._patch_record_fields.call_args.kwargs['fields'])
+        self.service._patch_record_fields.assert_not_called()
+        self.service._load_table_fields.assert_called_once()
+
+    def test_change_end_recovers_missing_metadata_after_restart_without_resending_target(self):
+        payload, remote, row = self.source(work_type='change')
+        self.service._change_field_meta_by_name = {}
+        self.service._load_table_fields = Mock(side_effect=OSError('fields offline'))
+        self.runtime._queue_source_end_sync(payload, 'rec-target', '变更通告')
+        end_fields = {'变更状态': '结束', '变更结束时间': payload['ended_at']}
+        with patch.object(server, 'query_record_by_id', return_value=(True, {'fields': end_fields})), \
+                patch.object(server, 'update_bitable_record_by_payload') as target_write, \
+                patch.object(portal, 'send_text_to_open_ids') as sender:
+            self.runtime.process_source_end_sync()
+            self.service._patch_record_fields.assert_not_called()
+            self.assertEqual(row['display_fields']['变更进度'], '进行中')
+            pending = self.store.list_outbox_events('notice_source_finalize', status='deferred')
+            self.assertEqual(len(pending), 1)
+            self.assertIn('fields offline', pending[0]['last_error'])
+            restarted = self.new_service()
+            restarted._change_field_meta_by_name = {}
+            restarted._change_records = [row]
+            restarted._request_json = self.service._request_json
+            restarted._patch_record_fields = self.service._patch_record_fields
+            restarted._load_table_fields = Mock(return_value=([], {
+                '变更进度': field('变更进度', options=['进行中', '已结束'])}))
+            self.runtime.service = restarted
+            self.set_due('notice_source_finalize')
+            self.runtime.process_source_end_sync()
+            self.runtime.process_source_end_sync()
+        self.assertEqual(remote['变更进度'], '已结束')
+        self.assertEqual(row['display_fields']['变更进度'], '已结束')
+        restarted._patch_record_fields.assert_called_once()
+        self.assertEqual(len(self.store.list_outbox_events('notice_source_finalize', status='done')), 1)
+        target_write.assert_not_called()
+        sender.assert_not_called()
+
+    def test_reloaded_change_formula_is_not_written_or_falsely_marked_ended(self):
+        payload, remote, row = self.source(work_type='change')
+        self.service._change_field_meta_by_name = {}
+        self.service._load_table_fields = Mock(return_value=([], {'变更进度': field('变更进度', formula=True)}))
+        for _ in range(2):
+            with self.assertRaises(portal.NoticeSourcePending):
+                self.service.sync_notice_source_ended_fields(payload)
+        self.service._patch_record_fields.assert_called_once()
+        self.assertNotIn('变更进度', self.service._patch_record_fields.call_args.kwargs['fields'])
+        self.assertEqual(row['display_fields']['变更进度'], '进行中')
+        remote['变更进度'] = '已结束'
+        self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
 
     def test_formula_pending_survives_retries_restart_and_does_not_change_target_success(self):
         payload, remote, _ = self.source(formula=True)
@@ -788,6 +836,157 @@ class NoticeDeliverySourceRecoveryTests(unittest.TestCase):
         self.service._patch_record_fields.assert_not_called()
         event = self.store.list_outbox_events('notice_source_finalize', status='deferred')[0]
         self.assertIn('操作锁已过期', event['last_error'])
+
+
+class ChangeEndConfirmationTests(unittest.TestCase):
+    def setUp(self):
+        from upload_event_module.services import feishu_service
+        from upload_event_module.services.handlers.change_notice import ChangeNoticeHandler
+        from upload_event_module.services.handlers.base import NoticePayload
+        self.api = feishu_service
+        self.handler = ChangeNoticeHandler()
+        self.payload = NoticePayload(
+            text='【变更通告】状态：结束\n【名称】110站UPS切换测试\n'
+                 '【时间】2026-10-23 09:00~2026-10-23 18:00\n【进度】工作完成',
+            response_time='2026-10-23 18:00',
+        )
+        self.enterContext(patch('requests.sessions.Session.request', side_effect=AssertionError('network forbidden')))
+        self.enterContext(patch.object(self.api, 'check_token_status', return_value=True))
+        self.enterContext(patch.object(self.api, '_resolve_handler', return_value=(self.handler, 'test-table', '')))
+        self.enterContext(patch.object(self.api, '_filter_missing_optional_fields', side_effect=lambda n, f: f))
+        self.enterContext(patch.object(self.api, '_info_logging_enabled', return_value=False))
+        self.enterContext(patch.object(self.api, '_log_record_action'))
+        self.write = self.enterContext(patch.object(self.api, '_execute_bitable_write', return_value=SimpleNamespace(
+            success=lambda: True, data=SimpleNamespace(record=SimpleNamespace(record_id='rec-target')))))
+        self.sender = self.enterContext(patch.object(self.api, '_send_robot_message'))
+        self.query = self.enterContext(patch.object(self.api, 'query_record_by_id', return_value=(True, {
+            'record_id': 'rec-target', 'fields': {'变更状态': '开始'}})))
+
+    def test_missing_ali_screenshot_blocks_end_even_with_site_photos_and_cached_tokens(self):
+        self.payload.extra_file_tokens = ['site-photo']
+        self.payload.existing_ali_confirmation_file_tokens = ['stale-other-target']
+        for images in (None, [], [{'name': 'not-uploaded.png'}], [{'file_token': ''}]):
+            with self.subTest(images=images):
+                self.query.return_value = (True, {'record_id': 'rec-target', 'fields': {
+                    '变更状态': '开始', '阿里确认截图': images, '现场图片': [{'file_token': 'site-photo'}]}})
+                ok, error = self.api.update_bitable_record_by_payload('rec-target', '变更通告', self.payload)
+                self.assertFalse(ok)
+                self.assertIn('阿里确认截图', error)
+        self.write.assert_not_called()
+        self.sender.assert_not_called()
+
+    def test_existing_target_screenshot_allows_end_without_h_confirmation(self):
+        self.query.return_value = (True, {'record_id': 'rec-target', 'fields': {
+            '变更状态': '开始', '阿里确认截图': [{'file_token': 'ali-old'}], 'H楼确认': False}})
+        self.assertTrue(self.api.update_bitable_record_by_payload('rec-target', '变更通告', self.payload)[0])
+        self.query.assert_called_once_with('rec-target', '变更通告')
+        self.write.assert_called_once()
+        self.sender.assert_called_once()
+        self.assertEqual(self.payload._clipflow_written_fields['变更状态'], '结束')
+        self.assertNotIn('阿里确认截图', self.payload._clipflow_written_fields)
+
+    def test_new_ali_image_is_preserved_and_merged_once_on_end(self):
+        self.payload.ali_confirmation_file_tokens = ['ali-new', 'ali-new']
+        self.payload.existing_ali_confirmation_file_tokens = ['ali-old']
+        self.assertTrue(self.api.update_bitable_record_by_payload('rec-target', '变更通告', self.payload)[0])
+        fields = self.payload._clipflow_written_fields
+        self.assertEqual(fields['阿里确认截图'], [{'file_token': 'ali-old'}, {'file_token': 'ali-new'}])
+        self.assertFalse(fields['H楼确认'])
+        self.assertEqual(fields['变更状态'], '结束')
+        self.query.assert_not_called()
+
+    def test_unreadable_or_wrong_target_is_not_reported_as_success(self):
+        for response in ((False, 'offline'), (True, {}), (True, {'fields': {}}), (True, {
+                'record_id': 'rec-other', 'fields': {'阿里确认截图': [{'file_token': 'other'}]}})):
+            with self.subTest(response=response):
+                self.query.return_value = response
+                ok, error = self.api.update_bitable_record_by_payload('rec-target', '变更通告', self.payload)
+                self.assertFalse(ok)
+                self.assertIn('未发送结束', error)
+        self.write.assert_not_called()
+        self.sender.assert_not_called()
+
+    def test_network_exception_never_writes_end_or_sends_notification(self):
+        self.query.side_effect = OSError('offline')
+        with self.assertRaises(OSError):
+            self.api.update_bitable_record_by_payload('rec-target', '变更通告', self.payload)
+        self.write.assert_not_called()
+        self.sender.assert_not_called()
+
+    def test_batch_end_and_create_cannot_bypass_screenshot_requirement(self):
+        with patch.object(self.api, '_build_client') as client:
+            results = self.api.batch_update_bitable_records_by_payload('变更通告', [('rec-target', self.payload)])
+            self.assertFalse(results[0][0])
+            self.assertIn('阿里确认截图', results[0][1])
+            self.assertFalse(self.api.create_bitable_record_by_payload('变更通告', self.payload)[0])
+            self.assertFalse(self.api.batch_create_bitable_records_by_payload('变更通告', [self.payload])[0][0])
+        client.assert_not_called()
+        self.write.assert_not_called()
+        self.sender.assert_not_called()
+
+    def test_non_end_change_and_other_notice_types_are_unchanged(self):
+        for notice, status in (('变更通告', '开始'), ('变更通告', '更新'), ('检修通告', '结束'), ('维保通告', '结束')):
+            with self.subTest(notice=notice, status=status):
+                self.assertEqual(self.api._change_end_confirmation_error('rec-target', notice, {'变更状态': status}), '')
+        self.query.assert_not_called()
+
+    def test_backend_end_verifies_new_screenshot_before_writing_end(self):
+        fields = {'变更状态': '开始', '阿里确认截图': [{'file_token': 'ali-old'}], 'H楼确认': True}
+        prepared = {'action': 'end', 'work_type': 'change', 'notice_type': '变更通告',
+                    'target_record_id': 'rec-target', 'text': self.payload.text,
+                    'ali_confirmation_images': [{'file_token': 'ali-new'}]}
+        runtime = type('IsolatedChangeEndRuntime', (server.PortalRuntime,), {
+            '_has_cumulative_site_photo_for_notice': Mock(return_value=True),
+            '_create_backend_undo_checkpoint': Mock(return_value=''),
+            '_stage_notice_robot_delivery': Mock(), '_check_current_notice_actor': Mock(),
+            '_mark_local_notice_images_target_written': Mock(),
+        })
+        self.query.side_effect = lambda *a: (True, {'record_id': 'rec-target', 'fields': copy.deepcopy(fields)})
+        with patch.object(server, 'external_real_write_guard', return_value={'mock_external': False, 'real_write_allowed': True}), \
+                patch.object(server, 'query_record_by_id', side_effect=self.query.side_effect), \
+                patch.object(server, 'update_bitable_record_fields', side_effect=lambda rid, typ, patch: (fields.update(patch) or (True, rid))) as image_write, \
+                patch.object(server, 'update_bitable_record_by_payload', side_effect=self.api.update_bitable_record_by_payload):
+            ok, _, rid = runtime._execute_backend_prepared_upload(prepared)
+        self.assertTrue(ok)
+        self.assertEqual(rid, 'rec-target')
+        self.assertEqual(fields['阿里确认截图'], [{'file_token': 'ali-old'}, {'file_token': 'ali-new'}])
+        image_write.assert_called_once()
+        self.write.assert_called_once()
+
+    def test_backend_missing_or_failed_image_blocks_target_end(self):
+        runtime = type('IsolatedMissingChangeImageRuntime', (server.PortalRuntime,), {
+            '_has_cumulative_site_photo_for_notice': Mock(return_value=True),
+            '_create_backend_undo_checkpoint': Mock(return_value=''),
+        })
+        prepared = {'action': 'end', 'work_type': 'change', 'notice_type': '变更通告',
+                    'target_record_id': 'rec-target', 'text': self.payload.text}
+        with patch.object(server, 'external_real_write_guard', return_value={'mock_external': False, 'real_write_allowed': True}), \
+                patch.object(server, 'query_record_by_id', return_value=(True, {'fields': {'变更状态': '开始'}})), \
+                patch.object(runtime, '_upload_extra_images_for_notice', return_value=(True, '', [], [])), \
+                patch.object(runtime, '_upload_change_confirmation_images', return_value=(False, '截图上传失败', [], [])), \
+                patch.object(server, 'update_bitable_record_by_payload') as target_write:
+            self.assertIn('阿里确认截图', runtime._execute_backend_prepared_upload(prepared)[1])
+            prepared['ali_confirmation_images'] = [{'upload_id': 'failed-image'}]
+            self.assertFalse(runtime._execute_backend_prepared_upload(prepared)[0])
+        target_write.assert_not_called()
+
+    def test_backend_unconfirmed_screenshot_write_does_not_end_notice(self):
+        runtime = type('IsolatedUnconfirmedChangeImageRuntime', (server.PortalRuntime,), {
+            '_has_cumulative_site_photo_for_notice': Mock(return_value=True),
+            '_create_backend_undo_checkpoint': Mock(return_value=''),
+        })
+        prepared = {'action': 'end', 'work_type': 'change', 'notice_type': '变更通告',
+                    'target_record_id': 'rec-target', 'text': self.payload.text,
+                    'ali_confirmation_images': [{'file_token': 'new-image'}]}
+        with patch.object(server, 'external_real_write_guard', return_value={'mock_external': False, 'real_write_allowed': True}), \
+                patch.object(server, 'query_record_by_id', return_value=(True, {'fields': {'变更状态': '开始'}})), \
+                patch.object(runtime, '_upload_extra_images_for_notice', return_value=(True, '', [], [])), \
+                patch.object(runtime, '_repair_pending_change_confirmation_remote_fields', side_effect=RuntimeError('截图尚未确认')), \
+                patch.object(server, 'update_bitable_record_by_payload') as target_write:
+            ok, error, _ = runtime._execute_backend_prepared_upload(prepared)
+        self.assertFalse(ok)
+        self.assertIn('尚未确认', error)
+        target_write.assert_not_called()
 
 
 if __name__ == '__main__':
