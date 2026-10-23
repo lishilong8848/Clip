@@ -313,7 +313,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
 
     async def test_inapplicable_document_falls_back_without_sending_document_to_search(self):
         self.item['text'] = '只能用于公司内部的无关资料'
-        self.model.complete.side_effect = ['[NO_APPLICABLE_DOCUMENT]', '公开参考。[1]']
+        self.model.complete.side_effect = ['[NO_APPLICABLE_DOCUMENT]', '{"keywords":[]}', '公开参考。[1]']
         self.engine.public_sources = SimpleNamespace(search=AsyncMock(return_value={
             'ok': True, 'queried_at': '2026-10-11', 'results': [
                 {'title': '公开资料', 'url': 'https://example.com', 'snippet': '公开内容'}]}))
@@ -322,7 +322,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
             '变压器故障怎么应急', self.emit, AsyncMock(return_value=self.actor))
         self.engine.public_sources.search.assert_awaited_once_with('变压器故障怎么应急', '变压器故障怎么应急')
         self.assertNotIn(self.item['text'], str(self.model.complete.call_args_list[-1]))
-        self.assertIn('不适用于', result['answer'])
+        self.assertIn('尚未取得足以支持', result['answer'])
 
     async def test_internal_question_and_denied_access_do_not_fall_back_to_public(self):
         self.engine.public_sources = SimpleNamespace(search=AsyncMock())

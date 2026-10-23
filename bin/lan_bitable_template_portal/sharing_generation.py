@@ -44,6 +44,8 @@ async def generate_checked_questions(batch, source, state, generate, checkpoint)
     for kind in first:
         mix.remove(kind)
     mix = first + mix
+    missing = set(types) - {q['type'] for q in checked_questions(state, source, types)}
+    mix.sort(key=lambda kind: kind not in missing)
     summaries = [{'id': image['id'], 'text': image['text'], 'mode': image['mode']} for image in source.get('images', [])]
     extras = {'source_images': summaries} if summaries else {}
 
@@ -80,16 +82,21 @@ async def generate_checked_questions(batch, source, state, generate, checkpoint)
 
     await save('已保留合格题，继续核对待处理题目')
     await repair_pending()
-    while not state['exhausted'] and state['offset'] < 40:
+    if state.pop('replenish', False):
+        valid = checked_questions(state, source, types)
+        if len(valid) < 5 or set(types) - {q['type'] for q in valid}:
+            state.update(offset=0, exhausted=False)
+    while not state['exhausted'] and state['offset'] < 40 and len(checked_questions(state, source, types)) < 40:
         offset = state['offset']
+        count = min(5, 40 - len(checked_questions(state, source, types)))
         await save(f'已核对{len(checked_questions(state, source, types))}题，继续生成未覆盖知识点（最多40题）')
         additional = await generate(batch['owner'], source['text'],
-            [q['stem'] for q in checked_questions(state, source, types)], 5,
-            question_types=mix[offset:offset + 5], **extras)
-        if not isinstance(additional, list) or len(additional) > 5:
+            [q['stem'] for q in checked_questions(state, source, types)], count,
+            question_types=mix[offset:offset + count], **extras)
+        if not isinstance(additional, list) or len(additional) > count:
             raise LearningError('模型返回题目数量或格式无效，已保留之前的合格题。', 502)
         # Check the entire page before repairing so later valid questions are also protected.
-        for question, expected in zip(additional, mix[offset:offset + 5]):
+        for question, expected in zip(additional, mix[offset:offset + count]):
             slot = {'expected': expected, 'attempts': 0}
             try:
                 value = check_candidate(question, expected, state, source, types)
@@ -98,7 +105,7 @@ async def generate_checked_questions(batch, source, state, generate, checkpoint)
             else:
                 slot.update(status='valid', question=value)
             state['slots'].append(slot)
-        state.update(offset=offset + 5, exhausted=len(additional) < 5)
+        state.update(offset=offset + count, exhausted=len(additional) < count)
         await save('本轮合格题已保存，正在核对问题题目')
         await repair_pending()
     questions = checked_questions(state, source, types)

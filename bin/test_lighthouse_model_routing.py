@@ -195,7 +195,9 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.agent.profile = {**profiles[0], '_automatic_selection': True}
                 self.agent.turn['question'] = 'Analyze and compare repair trends'
                 await self.fixture.run_agent()
-                self.assertEqual(self.fixture.selected, ['current'])
+                self.assertEqual(self.fixture.selected, ['unsafe'] if 'image_input' in capabilities else ['current'])
+                for capability, enabled in capabilities.items():
+                    self.assertEqual(self.agent.profile.get(capability), enabled)
 
     async def test_automatic_attachment_route_uses_existing_context_settings(self):
         self.profiles(fixtures.profile('large', context_window=128000))

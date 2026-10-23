@@ -1381,6 +1381,8 @@ class MainWindowWorkflowMixin:
             "_queued_after_upload",
             "_queued_action",
             "_queued_upload_requested",
+            "_event_inflight_retry_snapshot",
+            "_upload_verification_pending",
         ):
             queued_data.pop(key, None)
         queued_data["_has_unuploaded_changes"] = True
@@ -1402,6 +1404,8 @@ class MainWindowWorkflowMixin:
             },
         )
         self._restore_queued_upload_ui(record_id, requested=True)
+        if str(data_dict.get("notice_type") or "") == "事件通告":
+            self._probe_event_upload(data_dict)
         if self.current_screenshot_record_id == record_id:
             self.current_screenshot_record_id = None
             self.current_screenshot_action_type = None
@@ -1448,7 +1452,7 @@ class MainWindowWorkflowMixin:
         self._schedule_pending_update_after_upload()
 
     def _schedule_pending_update_after_upload(self, delay: int = 300):
-        if self._pending_update_after_upload_scheduled:
+        if getattr(self, "_pending_update_after_upload_scheduled", False):
             return
         self._pending_update_after_upload_scheduled = True
         QTimer.singleShot(delay, self._try_process_pending_update_after_upload)
@@ -1459,12 +1463,25 @@ class MainWindowWorkflowMixin:
             return
         if self._closing:
             return
+        retry_delay = 500
+        try:
+            self._dispatch_ready_pending_updates()
+            self._pending_update_last_error = ""
+        except Exception as exc:
+            retry_delay = 5000
+            error = f"{type(exc).__name__}: {exc}"
+            if error != getattr(self, "_pending_update_last_error", ""):
+                log_error(f"Qt 排队通告续传暂未完成，已保留请求等待重试: {error}")
+            self._pending_update_last_error = error
+        finally:
+            if self.pending_update_after_upload and not self._closing:
+                self._schedule_pending_update_after_upload(retry_delay)
+
+    def _dispatch_ready_pending_updates(self):
         screenshot_dialog = getattr(self, "screenshot_dialog", None)
-        if getattr(self, "current_screenshot_record_id", None) or (
-            screenshot_dialog and screenshot_dialog.isVisible()
-        ):
-            self._schedule_pending_update_after_upload(500)
-            return
+        screenshot_record_id = str(getattr(self, "current_screenshot_record_id", None) or "")
+        if not screenshot_record_id and screenshot_dialog and screenshot_dialog.isVisible():
+            screenshot_record_id = str((getattr(screenshot_dialog, "data_dict", None) or {}).get("record_id") or "")
         for pending_key in list(self.pending_update_after_upload.keys()):
             target_record_id = pending_key
             list_widget, item = self._find_active_item_by_record_id(target_record_id)
@@ -1485,14 +1502,23 @@ class MainWindowWorkflowMixin:
             candidate_ids.update(
                 self._upload_completion_record_id_candidates(target_record_id)
             )
+            if screenshot_record_id in candidate_ids:
+                continue
             pending_ids = set(
                 getattr(self, "pending_action_record_ids", set()) or set()
             )
-            if data.get("_upload_in_progress") or candidate_ids.intersection(
-                pending_ids
+            if (
+                data.get("_upload_in_progress")
+                or candidate_ids.intersection(pending_ids)
+                or data.get("_upload_verification_pending")
+                or (data.get("_queued_after_upload") and self._upload_operation_for_record(data))
             ):
+                if str(data.get("notice_type") or "") == "事件通告":
+                    self._probe_event_upload(data)
                 continue
-            request = self.pending_update_after_upload.pop(pending_key, {}) or {}
+            request = self.pending_update_after_upload.get(pending_key)
+            if not request:
+                continue
             payload_data = request.get("data") or data
             if isinstance(payload_data, dict):
                 payload_data = dict(payload_data)
@@ -1501,6 +1527,8 @@ class MainWindowWorkflowMixin:
                     "_queued_after_upload",
                     "_queued_action",
                     "_queued_upload_requested",
+                    "_event_inflight_retry_snapshot",
+                    "_upload_verification_pending",
                 ):
                     payload_data.pop(key, None)
                 payload_data["_is_placeholder_record"] = False
@@ -1566,6 +1594,9 @@ class MainWindowWorkflowMixin:
             )
             pending_event_level = resolved_level if notice_type == "事件通告" else ""
             action_type = request.get("action_type", "update")
+            # Preserve the same operation if dispatch raises after submission.
+            operation_id = request.setdefault("dispatch_operation_id", f"qt_notice:{uuid.uuid4().hex}")
+            payload_data["_upload_operation_id"] = operation_id
             log_info(
                 "PendingUpdate: dispatch "
                 f"record_id={payload_data.get('record_id', target_record_id)} "
@@ -1590,25 +1621,31 @@ class MainWindowWorkflowMixin:
                     item,
                     current_data,
                 )
-            self.do_feishu_upload(
-                payload_data,
-                request.get("screenshot_bytes"),
-                action_type,
-                response_time=request.get("response_time", ""),
-                buildings=resolved.get("buildings"),
-                extra_images=request.get("extra_images"),
-                specialty=resolved.get("specialty"),
-                change_level=pending_change_level,
-                event_level=pending_event_level,
-                event_source=resolved.get("event_source"),
-                recover_selected=bool(request.get("recover_selected", False)),
-                robot_group_choice=str(
-                    request.get("robot_group_choice") or "auto"
-                ).strip()
-                or "auto",
-            )
-        if self.pending_update_after_upload:
-            self._schedule_pending_update_after_upload(500)
+            try:
+                self.do_feishu_upload(
+                    payload_data,
+                    request.get("screenshot_bytes"),
+                    action_type,
+                    response_time=request.get("response_time", ""),
+                    buildings=resolved.get("buildings"),
+                    extra_images=request.get("extra_images"),
+                    specialty=resolved.get("specialty"),
+                    change_level=pending_change_level,
+                    event_level=pending_event_level,
+                    event_source=resolved.get("event_source"),
+                    recover_selected=bool(request.get("recover_selected", False)),
+                    robot_group_choice=str(request.get("robot_group_choice") or "auto").strip() or "auto",
+                )
+            except Exception:
+                current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+                if not current.get("_upload_in_progress"):
+                    current.update(_queued_after_upload=True, _queued_action=action_type,
+                                   _queued_upload_requested=True, _has_unuploaded_changes=True)
+                    item.setData(Qt.ItemDataRole.UserRole, current)
+                    self._rebuild_active_item_widget(list_widget, item, current)
+                raise
+            if self.pending_update_after_upload.get(pending_key) is request:
+                self.pending_update_after_upload.pop(pending_key, None)
 
     def _manual_update_has_target(self, content: str) -> bool:
         info = extract_event_info(content)
@@ -2648,6 +2685,13 @@ class MainWindowWorkflowMixin:
             action_type,
         )
         record_id = data_dict["record_id"]
+        if any(
+            key in self.pending_update_after_upload
+            for key in self._upload_completion_record_id_candidates(record_id)
+        ):
+            self._schedule_pending_update_after_upload()
+            self.show_message("该操作已确认，将在上一条结果核对完成后自动继续。")
+            return
         upload_busy = (
             record_id in self.pending_action_record_ids
             or bool(data_dict.get("_upload_in_progress"))
@@ -3495,6 +3539,10 @@ class MainWindowWorkflowMixin:
                         f"operation_id={operation_id}"
                     )
                     return
+                if operation_id:
+                    for pending_key, request in list(self.pending_update_after_upload.items()):
+                        if request.get("dispatch_operation_id") == operation_id:
+                            self.pending_update_after_upload.pop(pending_key, None)
                 if name == "结束" and not success and record_id:
                     self._rollback_end(record_id)
                     self.restore_button_state(
@@ -3670,6 +3718,8 @@ class MainWindowWorkflowMixin:
                 clear_state = getattr(self, "clear_upload_runtime_state_for_ids", None)
                 if not stale_result and callable(clear_state):
                     clear_state(record_id, real_record_id)
+                if not stale_result and self.pending_update_after_upload:
+                    self._schedule_pending_update_after_upload()
 
         if self._enqueue_ui_mutation("request_finished", _apply_updates) is False and not self._closing:
             # This slot is invoked on the Qt thread; dropping a terminal result

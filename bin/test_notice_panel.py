@@ -1080,5 +1080,67 @@ class EditionMetadataSignatureTests(PanelTestBase):
         self.assertGreater(next_at, 0)
 
 
+class SourceIsolationTests(PanelTestBase):
+    def partial_source(self, service, scope, work, ongoing, current=None):
+        if work in {"all", "change"}:
+            raise PortalError("变更计划读取失败")
+        return [self._item("a", scope)] if work == "maintenance" else []
+
+    def test_one_failed_source_does_not_hide_other_notices(self):
+        self.build_impl = self.partial_source
+        run = self.open("A")
+        self.assertEqual(run["state"], "edit")
+        self.assertEqual([row["key"] for row in run["items"]], ["a"])
+        self.assertIn("变更", run["error"])
+        self.assertIn("其它可用通告", run["error"])
+        self.native.assert_not_called()
+
+    def test_preview_and_confirm_only_check_selected_type(self):
+        self.build_impl = self.partial_source
+        run = self.open("A")
+        self.select_fill_save(run["id"], "a", progress="现场准备完成")
+        previewed = self.preview(run["id"])
+        self.assertEqual(previewed["state"], "confirm")
+        doc = self.manager._get(run["id"])
+        self.manager._confirm(doc, make_session())
+        self.assertEqual(doc["state"], "running")
+        self.assertEqual(doc["items"][0]["draft"]["progress"], "现场准备完成")
+        self.native.assert_not_called()
+
+    def test_failed_selected_type_still_blocks_confirmation_and_keeps_draft(self):
+        run = self.open("A")
+        self.select_fill_save(run["id"], "a", progress="手填进度")
+        self.assertEqual(self.preview(run["id"])["state"], "confirm")
+        def fail(*args, **kwargs):
+            raise PortalError("维保计划读取失败")
+        self.build_impl = fail
+        doc = self.manager._get(run["id"])
+        self.manager._confirm(doc, make_session())
+        self.assertEqual(doc["state"], "edit")
+        self.assertIn("读取失败", doc["error"])
+        self.assertEqual(doc["items"][0]["draft"]["progress"], "手填进度")
+        self.native.assert_not_called()
+
+    def test_partial_read_with_no_rows_does_not_claim_empty(self):
+        def empty(service, scope, work, ongoing, current=None):
+            if work in {"all", "change"}:
+                raise PortalError("变更计划读取失败")
+            return []
+        self.build_impl = empty
+        run = self.open("A")
+        self.assertEqual(run["state"], "failed")
+        self.assertIn("尚不能确认没有待办", run["error"])
+
+    def test_refresh_clears_source_warning_after_recovery(self):
+        self.build_impl = self.partial_source
+        run = self.open("A")
+        self.assertIn("变更", run["error"])
+        self.build_impl = self._default_build_items
+        refreshed = self.action(run["id"], "refresh")
+        self.assertEqual(refreshed["state"], "edit")
+        self.assertEqual(refreshed["error"], "")
+        self.assertEqual(self.manager._get(run["id"])["source_errors"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

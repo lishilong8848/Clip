@@ -59,6 +59,14 @@ class SharingImages:
         return path
 
     def download(self, item):
+        if item.get('local_sha256'):
+            try:
+                content = self.path(item['local_sha256']).read_bytes()
+            except FileNotFoundError:
+                raise LearningError('本地题图快照缺失，请恢复原运行数据；未替换为其他图片。', 404) from None
+            if hashlib.sha256(content).hexdigest() != item['local_sha256']:
+                raise LearningError('本地题图校验失败，未使用损坏图片。', 409)
+            return content
         from .sharing_sources import cloud_reader, downloaded_file
         token = item.get('token')
         if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9]+', token):
@@ -105,7 +113,7 @@ class SharingImages:
                            'text': text, 'mode': 'ocr' if text else 'unreadable'})
             seen.add(identity)
         from .sharing_sources import cloud_reader
-        for url, revision in {(item['source_url'], item['revision']) for item in items}:
+        for url, revision in {(item['source_url'], item['revision']) for item in items if not item.get('local_sha256')}:
             _, token, _, get = cloud_reader(self.portal, url)
             if get('docx/v1/documents/' + token).get('document', {}).get('revision_id') != revision:
                 raise LearningError('读取题图期间材料已变化，请重新生成；未混用不同版本。', 409)

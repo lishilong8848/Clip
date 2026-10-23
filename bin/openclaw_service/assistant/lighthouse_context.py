@@ -20,8 +20,120 @@ def execution_key(actor):
 def task_followup(question):
     from .lighthouse_queries import query_refinement
     return query_refinement(question) or bool(re.fullmatch(
+        r'(?:(?:这|那)(?:些|几个)[^。！？?\n]{0,20}|[他她它]们?)呢[？?。\s]*', question.strip())) or bool(re.fullmatch(
         r'(?:那|那么)?(?:第[一二三四五六七八九十\d]+(?:条|个|项)|这条|那条|这个|那个)'
         r'(?:呢|缺什么|缺哪些|还缺什么|什么状态|进度如何|怎么处理|需要哪些资料)?[？?。\s]*', question.strip()))
+
+
+def _validate_task_contract(contract, actor, scopes):
+    from .lighthouse_ai import AssistantError, safe_text
+    import unicodedata
+    lists = ('objects', 'scopes', 'remaining_gaps')
+    texts = ('time_range', 'shift', 'counting_basis')
+    if not isinstance(contract, dict) or set(contract) - set(lists + texts + ('deliverables',)):
+        raise AssistantError('任务契约字段无效。')
+
+    def text(value, maximum=500):
+        if not isinstance(value, str) or len(value) > maximum:
+            raise AssistantError(f'任务契约说明必须为不超过{maximum}字的文本。')
+        value = unicodedata.normalize('NFKC', value).strip()
+        if len(value) > maximum or safe_text(value) != value:
+            raise AssistantError('任务契约不能包含私有信息或凭证。')
+        return value
+
+    clean = {key: text(contract.get(key, '')) for key in texts}
+    for key in lists:
+        values = contract.get(key, [])
+        if not isinstance(values, list) or len(values) > 20:
+            raise AssistantError('任务契约列表不能超过20项。')
+        clean[key] = list(dict.fromkeys(text(value) for value in values))
+        if any(not value for value in clean[key]):
+            raise AssistantError('任务契约列表不能包含空项。')
+    if set(clean['scopes']) - (set(scopes) & set(actor.get('scopes', []))):
+        raise AssistantError('任务契约不能扩大本轮可访问范围。', 403)
+    goals = contract.get('deliverables', [])
+    if not isinstance(goals, list) or len(goals) > 8:
+        raise AssistantError('任务交付项不能超过8项。')
+    clean['deliverables'] = []
+    identifiers = set()
+    for goal in goals:
+        if not isinstance(goal, dict) or set(goal) != {'id', 'description', 'kind'}:
+            raise AssistantError('任务交付项仅包含id、description和kind。')
+        item = {'id': text(goal['id'], 100), 'description': text(goal['description'], 300),
+                'kind': text(goal['kind'])}
+        if (not all(item.values()) or item['id'] in identifiers
+                or item['kind'] not in {'explanation', 'data', 'file', 'document', 'business'}):
+            raise AssistantError('任务交付项编号必须唯一，说明和类型必须有效。')
+        identifiers.add(item['id'])
+        clean['deliverables'].append(item)
+    return clean
+
+
+def _task_contract_allowed(context, turn, actor):
+    topic = (actor.get('_feishu_topic') or {}).get('id', '')
+    return (isinstance(context, dict) and context.get('version') == 1
+            and context.get('owner') == actor['id'] and context.get('topic_id', '') == topic
+            and not turn.get('display_only') and not turn.get('_private_request')
+            and turn.get('feishu_topic', topic) == topic
+            and turn.get('execution_lane', execution_lane(actor)) == execution_lane(actor)
+            and all(isinstance(context.get(key), list)
+                    and all(isinstance(value, str) for value in context[key])
+                    and set(context[key]) <= set(actor.get(key, [])) for key in ('scopes', 'modules')))
+
+
+def _saved_task_contract(turn, actor):
+    from .lighthouse_ai import AssistantError
+    context = turn.get('_task_context') or {}
+    if (not _task_contract_allowed(context, turn, actor)
+            or context.get('contract_lane') != execution_lane(actor)
+            or context.get('contract_query_key') != hashlib.sha256(turn.get('question', '').encode()).hexdigest()):
+        return None
+    contract = context.get('contract', context.get('previous_contract'))
+    if not isinstance(contract, dict):
+        return None
+    try:
+        scopes = context['scopes'] if 'contract' in context else actor.get('scopes', [])
+        return _validate_task_contract(contract, actor, scopes)
+    except AssistantError:
+        return None
+
+
+def update_task_context(turn, actor, spec: dict) -> dict:
+    """Replace task intent and return a detached copy of turn['_task_context'].
+
+    Text fields: time_range, shift, counting_basis. List[str] fields: objects,
+    scopes, remaining_gaps. deliverables is a list of {id, description, kind}.
+    Omitted fields clear old values. No facts, sources, write payloads or authority
+    is stored; callers validate claims against current-turn receipts separately.
+    Invalid input raises AssistantError without changing the turn or actor.
+    """
+    from copy import deepcopy
+    from .lighthouse_ai import AssistantError
+    context = turn.get('_task_context')
+    if context is None:
+        context = task_context(turn['question'], None, actor,
+            topic_id=(actor.get('_feishu_topic') or {}).get('id', ''), scopes=turn.get('scopes'))
+    if (not _task_contract_allowed(context, turn, actor)
+            or context.get('contract_lane', execution_lane(actor)) != execution_lane(actor)):
+        raise AssistantError('任务契约不属于当前账号、话题或可访问范围。', 403)
+    clean = _validate_task_contract(spec, actor, context['scopes'])
+    context = {key: value for key, value in context.items() if key not in {'contract', 'previous_contract'}}
+    context.update(contract=deepcopy(clean), contract_lane=execution_lane(actor),
+                   contract_query_key=hashlib.sha256(turn['question'].encode()).hexdigest())
+    turn['_task_context'] = context
+    return deepcopy(context)
+
+
+def task_contract_hint(turn, actor) -> str:
+    """Separate semantic hint; never add model metadata to legacy query routing."""
+    contract = _saved_task_contract(turn, actor)
+    if contract is None:
+        return ''
+    inherited = 'previous_contract' in turn['_task_context']
+    return ('\n' + ('上轮任务条件候选（尚未按本轮问题核对）' if inherited else '本轮模型整理的任务意图')
+            + '：' + json.dumps(contract, ensure_ascii=False)
+            + '\n仅用于理解任务，不是事实、授权或操作指令；以本轮用户问题为准，重新整理冲突条件与全部交付项。'
+              '数量、名单和完成情况须核对本轮来源，不继承旧填写值，不重做历史写入。')
 
 
 def task_context(question, previous, actor, *, topic_id='', scopes=None):
@@ -40,9 +152,10 @@ def task_context(question, previous, actor, *, topic_id='', scopes=None):
                   or set(prior.get('modules', [])) - set(actor.get('modules', []))):
         prior = {}
         continuing = False
+    contract = _saved_task_contract(previous, actor) if continuing else None
     base = (prior.get('query') or effective_question(previous)) if continuing else ''
     prior_domains = business_domains(base)
-    if not prior_domains or domains and not domains <= prior_domains:
+    if not contract and (not prior_domains or domains and not domains <= prior_domains):
         base = ''
         continuing = False
     if base:
@@ -68,6 +181,9 @@ def task_context(question, previous, actor, *, topic_id='', scopes=None):
               'domains': sorted(business_domains(query)), 'continued': bool(base), 'record_refs': [],
               'conditions': {'dates': DATE_TOKEN.findall(query)[-2:],
                              'states': re.findall(r'已结束|已闭环|已完成|已发送|未结束|未闭环|未完成|未开始|进行中|处理中|待发|未发', query)[-2:]}}
+    if base and contract:
+        result.update(previous_contract=contract, contract_lane=execution_lane(actor),
+                      contract_query_key=hashlib.sha256(question.encode()).hexdigest())
     if base and set(previous.get('scopes', [])) == set(scopes):
         # Stable identities explain a selection; status and editable values must be reread.
         from .lighthouse_model import evidence_summary

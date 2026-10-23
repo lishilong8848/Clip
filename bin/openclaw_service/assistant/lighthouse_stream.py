@@ -424,6 +424,9 @@ class LighthouseStream:
                     result['topic_access'] = copy.deepcopy(current.get('_topic_access', []))
                 from .lighthouse_artifacts import package_long_reply
                 result['answer'] = result.get('answer') or run.get('_candidate_answer', '')
+                # Preserve tool-updated intent even when the engine returns only answer/sources.
+                if '_task_context' in run['_turn']:
+                    result.setdefault('_task_context', copy.deepcopy(run['_turn']['_task_context']))
                 result['file_ids'] = list(dict.fromkeys([*run['_turn'].get('file_ids', []), *result.get('file_ids', [])]))
                 if run.get('reply_mode') != 'live':
                     result = await asyncio.to_thread(package_long_reply, self.portal.files, public_actor, result)

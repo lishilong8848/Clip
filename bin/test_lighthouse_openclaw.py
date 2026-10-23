@@ -1297,7 +1297,7 @@ class AgentFactoryHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("actor", fake_agent.kwargs)
         self.assertIs(fake_agent.kwargs["actor"], self.actor)
         self.assertEqual(fake_agent.kwargs["name"], "lighthouse")
-        self.assertEqual(fake_agent.kwargs["retries"], 2)
+        self.assertEqual(fake_agent.kwargs["retries"], {'tools': 2, 'output': 4})
         self.assertEqual(fake_agent.kwargs["tool_timeout"], 45)
 
         # Real catalog is attached (realoriginalcatalog), not a mock.

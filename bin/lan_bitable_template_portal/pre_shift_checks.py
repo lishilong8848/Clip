@@ -152,6 +152,10 @@ class CheckService:
                     expires REAL NOT NULL, lease REAL DEFAULT 0, request_hash TEXT DEFAULT '', result TEXT DEFAULT '');
                 CREATE INDEX IF NOT EXISTS photo_preview_expiry ON photo_previews(expires,lease);
                 CREATE TABLE IF NOT EXISTS photo_preferences(actor_id TEXT PRIMARY KEY, version INTEGER NOT NULL, style TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS task_changes(task_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                    actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, changed TEXT NOT NULL,
+                    operation TEXT NOT NULL, request_hash TEXT NOT NULL, before_json TEXT NOT NULL,
+                    result TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(task_id,revision));
             ''')
             task_cols = {r[1] for r in conn.execute('PRAGMA table_info(tasks)')}
             delivery_cols = {r[1] for r in conn.execute('PRAGMA table_info(deliveries)')}
@@ -165,9 +169,22 @@ class CheckService:
                 conn.execute('ALTER TABLE rosters ADD COLUMN loaded_at REAL NOT NULL DEFAULT 0')
             if 'evidence' not in task_cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN evidence TEXT DEFAULT ''")
+            for field, sql_type in {'revision': 'INTEGER NOT NULL DEFAULT 1', 'updated_by': "TEXT NOT NULL DEFAULT ''",
+                    'updated_by_name': "TEXT NOT NULL DEFAULT ''", 'updated_at': "TEXT NOT NULL DEFAULT ''"}.items():
+                if field not in task_cols:
+                    conn.execute(f'ALTER TABLE tasks ADD COLUMN {field} {sql_type}')
+            conn.execute("UPDATE tasks SET updated_by=actor_id,updated_by_name=actor_name,updated_at=submitted WHERE submitted!='' AND updated_at=''")
             file_cols = {r[1] for r in conn.execute('PRAGMA table_info(files)')}
             if 'content_hash' not in file_cols:
                 conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT DEFAULT ''")
+            if 'archived' not in file_cols:
+                conn.execute('ALTER TABLE files ADD COLUMN archived INTEGER NOT NULL DEFAULT 0')
+                conn.execute('DROP INDEX IF EXISTS one_handover')
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_handover ON files(day,scope,shift) WHERE kind='handover' AND archived=0")
+            outbox_cols = {r[1] for r in conn.execute('PRAGMA table_info(outbox)')}
+            for field, sql_type in {'lease': 'REAL NOT NULL DEFAULT 0', 'lease_token': "TEXT NOT NULL DEFAULT ''"}.items():
+                if field not in outbox_cols:
+                    conn.execute(f'ALTER TABLE outbox ADD COLUMN {field} {sql_type}')
             if 'detail_version' not in {r[1] for r in conn.execute('PRAGMA table_info(outbox)')}:
                 conn.execute('ALTER TABLE outbox ADD COLUMN detail_version INTEGER NOT NULL DEFAULT 0')
             # Reuse the existing row and retry queue to backfill old submissions once.
@@ -179,8 +196,7 @@ class CheckService:
         conn = sqlite3.connect(self.db, timeout=5)
         conn.row_factory = sqlite3.Row
         try:
-            if write:
-                conn.execute('BEGIN IMMEDIATE')
+            conn.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
             yield conn
             conn.commit()
         except Exception:
@@ -478,6 +494,8 @@ class CheckService:
                 'size': frow['size'], 'is_image': bool(frow['is_image']), 'kind': frow.get('kind', '')}
 
     def _can_delete_file(self, actor, frow, task, current):
+        if task['submitted']:
+            return not frow.get('archived') and self._can_complete(actor, task)
         if actor.get('id') != frow['uploader_id']:
             return False
         if frow['kind'] == 'handover':
@@ -532,18 +550,7 @@ class CheckService:
                                     (scope, current.timestamp())):
                 if not row['submitted'] and not definition['items'] and row['deadline'] > current.timestamp():
                     continue
-                task = dict(row)
-                for key in ('items', 'people'):
-                    task[key] = json.loads(task[key])
-                task['answers'] = json.loads(task['answers']) if task['answers'] else []
-                task['can_submit'] = self.can_submit(actor, task, current)
-                outbox = conn.execute('SELECT * FROM outbox WHERE id=?', (task['cloud_key'],)).fetchone()
-                task['sync_status'] = 'synced' if outbox and outbox['synced'] == outbox['revision'] else 'pending'
-                task['sync_error'] = outbox['error'] if outbox else ''
-                task['files'] = self._state_files(conn, actor, task, current)
-                task['handover_photo'] = self._state_handover(conn, actor, task, current)
-                task['can_upload_handover'] = self._can_upload_handover(conn, actor, task, current)
-                tasks.append(task)
+                tasks.append(self._public_task(conn, actor, row, current))
             roster = conn.execute('SELECT people,error FROM rosters WHERE day=?', (day,)).fetchone()
             roster_ready = bool(roster and roster['people'] and any(p.get('scope') == scope for p in json.loads(roster['people'])))
             roster_error = roster['error'] if roster else ''
@@ -582,7 +589,8 @@ class CheckService:
             for row in rows:
                 task = dict(row)
                 item = {key: task[key] for key in ('id', 'day', 'scope', 'shift', 'due', 'deadline',
-                                                  'definition_version', 'actor_name', 'submitted')}
+                    'definition_version', 'actor_name', 'submitted', 'revision', 'updated_by', 'updated_by_name', 'updated_at')}
+                item['can_edit'] = self._can_complete(actor, task)
                 item['answers'] = json.loads(task['answers'])
                 item['normal_count'] = sum(a['status'] == 'normal' for a in item['answers'])
                 item['abnormal_count'] = sum(a['status'] == 'abnormal' for a in item['answers'])
@@ -611,7 +619,7 @@ class CheckService:
                 status = ('未配置清单' if not configured else '本班暂无清单') if not tasks else (
                     '已完成' if not pending else '逾期待补做' if any(t['deadline'] <= current.timestamp() for t in pending)
                     else '待完成' if any(t['due'] <= current.timestamp() for t in pending) else '未到时间')
-                photo = conn.execute("SELECT id,name FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
+                photo = conn.execute("SELECT id,name FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=? LIMIT 1",
                                      (day, scope, shift)).fetchone()
                 rows.append({'id': day + ':' + scope + ':' + shift, 'day': day, 'scope': scope, 'shift': shift,
                     'status': status, 'total': total, 'completed': sum(len(json.loads(t['items'])) for t in completed),
@@ -625,9 +633,9 @@ class CheckService:
         if task['submitted'] and task['evidence']:
             ev = json.loads(task['evidence'])
             refs = ev.get('item_files', [])
-            return [{**self._public_ref(r, actor, task, current, can_delete=False), **self._photo_status(conn, r['id'], actor)}
+            return [{**self._public_ref(r, actor, task, current, can_delete=self._can_complete(actor, task)), **self._photo_status(conn, r['id'], actor)}
                     for r in refs if r.get('kind') != 'handover']
-        rows = conn.execute("SELECT * FROM files WHERE task_id=? AND kind='item' ORDER BY created", (task['id'],)).fetchall()
+        rows = conn.execute("SELECT * FROM files WHERE task_id=? AND kind='item' AND archived=0 ORDER BY created", (task['id'],)).fetchall()
         out = []
         for row in rows:
             f = dict(row)
@@ -646,7 +654,7 @@ class CheckService:
                 'can_delete': self._can_delete_file(actor, frow, task, current)}
 
     def _state_handover(self, conn, actor, task, current):
-        row = conn.execute("SELECT * FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? ORDER BY created LIMIT 1",
+        row = conn.execute("SELECT * FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=? ORDER BY created LIMIT 1",
                            (task['day'], task['scope'], task['shift'])).fetchone()
         if not row:
             return None
@@ -666,6 +674,8 @@ class CheckService:
                     'delivery_error': delivery['error']} if delivery['recipient'] == actor['id'] else {})}
 
     def _handover_can_delete(self, conn, actor, task, current, row):
+        if task['submitted']:
+            return self._can_complete(actor, task)
         if row['uploader_id'] != actor['id']:
             return False
         if row['submitted']:
@@ -677,9 +687,117 @@ class CheckService:
     def _can_upload_handover(self, conn, actor, task, current):
         if not self._can_complete(actor, task):
             return False
-        h = conn.execute("SELECT id FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
+        h = conn.execute("SELECT id FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=? LIMIT 1",
                          (task['day'], task['scope'], task['shift'])).fetchone()
         return h is None
+
+    def _public_task(self, conn, actor, row, current):
+        task = dict(row)
+        for key in ('items', 'people', 'answers'):
+            task[key] = json.loads(task[key]) if task[key] else []
+        task.update(can_submit=self.can_submit(actor, task, current),
+                    can_edit=bool(task['submitted']) and self._can_complete(actor, task))
+        outbox = conn.execute('SELECT * FROM outbox WHERE id=?', (task['cloud_key'],)).fetchone()
+        task['sync_status'] = 'synced' if outbox and outbox['synced'] == outbox['revision'] else 'pending'
+        task['sync_error'] = outbox['error'] if outbox else ''
+        task['files'] = self._state_files(conn, actor, task, current)
+        task['handover_photo'] = self._state_handover(conn, actor, task, current)
+        task['can_upload_handover'] = self._can_upload_handover(conn, actor, task, current)
+        return task
+
+    def task(self, actor, task_id, current=None):
+        with self.connection() as conn:
+            row = self._task(conn, actor, task_id)
+            return self._public_task(conn, actor, row, current or now())
+
+    def _task(self, conn, actor, task_id):
+        row = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+        if not row:
+            raise CheckError('班前检查不存在，请刷新。', 404)
+        authorized(actor, row['scope'])
+        return row
+
+    @staticmethod
+    def _request_hash(operation, *values):
+        return hashlib.sha256(dump([operation, *values]).encode()).hexdigest()
+
+    def _edit_revision(self, conn, actor, task, revision, operation='', request_hash='', *, uploading=False):
+        if not self._can_complete(actor, task):
+            raise CheckError('当前账号不能修改该次检查。', 403)
+        if type(revision) is not int or not 1 <= revision <= 999999999999:
+            raise CheckError('请携带当前检查版本后重试。', 409)
+        if revision == task['revision']:
+            return None
+        prior = conn.execute('SELECT * FROM task_changes WHERE task_id=? AND revision=?', (task['id'], revision)).fetchone()
+        if (task['revision'] == revision + 1 and prior and prior['actor_id'] == actor['id']
+                and prior['operation'] == operation and (uploading or request_hash and prior['request_hash'] == request_hash)):
+            return json.loads(prior['result'])
+        raise CheckError('检查已被更新，请刷新后再修改。', 409)
+
+    def _snapshot_evidence(self, conn, task):
+        item_ids = {item['id'] for item in json.loads(task['items'])}
+        evidence = {'item_files': [self._evidence_file(dict(row)) for row in conn.execute(
+            "SELECT * FROM files WHERE task_id=? AND kind='item' AND archived=0 ORDER BY created,id", (task['id'],))
+            if row['item_id'] in item_ids]}
+        handover = conn.execute("SELECT * FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=?",
+                               (task['day'], task['scope'], task['shift'])).fetchone()
+        if handover:
+            evidence['handover'] = self._evidence_file(dict(handover))
+        return evidence
+
+    def _before_change(self, conn, tasks):
+        return [(dict(task), {'answers': json.loads(task['answers']), 'evidence': self._snapshot_evidence(conn, task)})
+                for task in tasks if task['submitted']]
+
+    def _publish_change(self, conn, actor, before, operation, request_hash, result, current):
+        keys = set()
+        for task, snapshot in before:
+            evidence = self._snapshot_evidence(conn, task)
+            for ref in [*evidence['item_files'], *([evidence['handover']] if evidence.get('handover') else [])]:
+                conn.execute('UPDATE files SET submitted=1 WHERE id=?', (ref['id'],))
+            conn.execute('INSERT INTO task_changes VALUES(?,?,?,?,?,?,?,?,?)',
+                (task['id'], task['revision'], actor['id'], actor['name'], current.isoformat(), operation,
+                 request_hash, dump(snapshot), dump({**result, 'task_id': task['id'], 'revision': task['revision'] + 1})))
+            conn.execute('UPDATE tasks SET evidence=?,revision=revision+1,updated_by=?,updated_by_name=?,updated_at=? WHERE id=?',
+                (dump(evidence), actor['id'], actor['name'], current.isoformat(), task['id']))
+            keys.add(task['cloud_key'])
+        for key in keys:
+            conn.execute('INSERT INTO outbox(id,revision) VALUES(?,1) ON CONFLICT(id) DO UPDATE SET revision=revision+1,retry_at=0', (key,))
+
+    def _validate_answers(self, task, answers):
+        items = json.loads(task['items'])
+        if not items or not isinstance(answers, list) or len(answers) != len(items):
+            raise CheckError('请逐项完成检查后提交。')
+        mapped = {}
+        for answer in answers:
+            if not isinstance(answer, dict) or set(answer) != {'id', 'status', 'note'}:
+                raise CheckError('检查结果格式无效。')
+            key, status, note = answer['id'], answer['status'], answer['note']
+            if not isinstance(key, str) or key in mapped or status not in ('normal', 'abnormal'):
+                raise CheckError('每条检查项必须且只能选择无异常或异常。')
+            if not isinstance(note, str) or len(note.strip()) > 500 or status == 'abnormal' and not note.strip():
+                raise CheckError('异常项请填写备注（最多500字）。')
+            mapped[key] = {'status': status, 'note': note.strip() if status == 'abnormal' else ''}
+        if set(mapped) != {item['id'] for item in items}:
+            raise CheckError('检查项不一致，请重新读取清单。', 409)
+        return [{**item, **mapped[item['id']]} for item in items]
+
+    def edit(self, actor, task_id, revision, answers, current=None):
+        current = current or now()
+        with self.connection(True) as conn:
+            task = self._task(conn, actor, task_id)
+            if not task['submitted']:
+                raise CheckError('请通过原提交入口完成首次检查。', 409)
+            results = self._validate_answers(task, answers)
+            request_hash = self._request_hash('answers', results)
+            prior = self._edit_revision(conn, actor, task, revision, 'answers', request_hash)
+            if prior is None and dump(results) != task['answers']:
+                before = self._before_change(conn, [task])
+                conn.execute('UPDATE tasks SET answers=? WHERE id=?', (dump(results), task_id))
+                self._publish_change(conn, actor, before, 'answers', request_hash, {}, current)
+            result = self._public_task(conn, actor, self._task(conn, actor, task_id), current)
+        self.wake.set()
+        return result
 
     def submit(self, actor, task_id, version, answers, current=None):
         current = current or now()
@@ -699,32 +817,18 @@ class CheckService:
             if type(version) is not int or version != row['definition_version']:
                 raise CheckError('清单版本已变化，请重新读取。', 409)
             items = json.loads(row['items'])
-            if not items or not isinstance(answers, list) or len(answers) != len(items):
-                raise CheckError('请逐项完成检查后提交。')
-            mapped = {}
-            for answer in answers:
-                if not isinstance(answer, dict) or set(answer) != {'id', 'status', 'note'}:
-                    raise CheckError('检查结果格式无效。')
-                key, status, note = answer['id'], answer['status'], answer['note']
-                if not isinstance(key, str) or key in mapped or status not in ('normal', 'abnormal'):
-                    raise CheckError('每条检查项必须且只能选择无异常或异常。')
-                if not isinstance(note, str) or len(note.strip()) > 500 or status == 'abnormal' and not note.strip():
-                    raise CheckError('异常项请填写备注（最多500字）。')
-                mapped[key] = {'status': status, 'note': note.strip() if status == 'abnormal' else ''}
-            if set(mapped) != {item['id'] for item in items}:
-                raise CheckError('检查项不一致，请重新读取清单。', 409)
-            results = [{**item, **mapped[item['id']]} for item in items]
+            results = self._validate_answers(row, answers)
             # One person/day/building cloud row includes both shifts if a duty account covers both.
             cloud_key = ':'.join(('pre-shift', row['day'], row['scope'], actor['id']))
             # Snapshot file references for current items only (removed definition items never sync).
             current_items = {item['id'] for item in items}
             file_refs = [self._evidence_file(dict(r)) for r in conn.execute(
-                "SELECT * FROM files WHERE task_id=? AND kind='item' AND submitted=0 ORDER BY created", (task_id,))]
+                "SELECT * FROM files WHERE task_id=? AND kind='item' AND archived=0 AND submitted=0 ORDER BY created", (task_id,))]
             file_refs = [ref for ref in file_refs if ref['item_id'] in current_items]
             for ref in file_refs:
                 conn.execute('UPDATE files SET submitted=1 WHERE id=?', (ref['id'],))
             evidence = {'item_files': file_refs}
-            h = conn.execute("SELECT * FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? AND submitted=0 ORDER BY created LIMIT 1",
+            h = conn.execute("SELECT * FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=? ORDER BY created LIMIT 1",
                              (row['day'], row['scope'], row['shift'])).fetchone()
             if h:
                 conn.execute('UPDATE files SET submitted=1 WHERE id=?', (h['id'],))
@@ -732,15 +836,21 @@ class CheckService:
             conn.execute('UPDATE tasks SET actor_id=?,actor_name=?,submitted=?,answers=?,cloud_key=?,evidence=? WHERE id=?',
                          (actor['id'], actor['name'], current.isoformat(), dump(results), cloud_key,
                           dump(evidence), task_id))
+            conn.execute('UPDATE tasks SET updated_by=?,updated_by_name=?,updated_at=? WHERE id=?',
+                         (actor['id'], actor['name'], current.isoformat(), task_id))
             conn.execute('INSERT INTO outbox(id,revision) VALUES(?,1) ON CONFLICT(id) DO UPDATE SET revision=revision+1,retry_at=0', (cloud_key,))
         self.wake.set()
         return {'completed': True, 'already_completed': False, 'actor_name': actor['name']}
 
-    def stage_upload(self, actor, task_id, item_id, kind, name, current=None, *, captured=False):
+    def stage_upload(self, actor, task_id, item_id, kind, name, current=None, *, captured=False,
+                     revision=None, replace_file_id=None):
         """Validate upload intent before reading request body; returns a session dict."""
         current = current or now()
         if kind not in ('item', 'handover'):
             raise CheckError('附件类型无效。')
+        if replace_file_id is not None and (kind != 'handover' or not isinstance(replace_file_id, str)
+                or not re.fullmatch(r'[a-f0-9]{32}', replace_file_id)):
+            raise CheckError('替换照片标识无效。')
         name = _sanitize_name(name)
         ext = Path(name).suffix.lower()
         if ext not in ALLOWED_EXTS:
@@ -756,11 +866,13 @@ class CheckService:
             if task is None:
                 raise CheckError('班前检查任务不存在，请刷新。', 404)
             authorized(actor, task['scope'])
+            if task['submitted'] or revision is not None:
+                self._edit_revision(conn, actor, task, revision, kind + '_upload', uploading=True)
             if kind == 'item':
                 items = set(i['id'] for i in json.loads(task['items']))
                 if item_id not in items:
                     raise CheckError('检查项不存在，请刷新。', 404)
-                if not self.can_submit(actor, task, current):
+                if not self._can_complete(actor, task):
                     raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传检查附件。', 403)
             else:
                 if not self._can_complete(actor, task):
@@ -771,7 +883,38 @@ class CheckService:
                 'task_id': task_id, 'item_id': item_id or '', 'name': name,
                 'actor_id': actor.get('id'), 'scope': task['scope'],
                 'captured': captured,
+                'revision': revision if revision is not None else task['revision'],
+                'was_submitted': bool(task['submitted']), 'replace_file_id': replace_file_id,
                 'definition_version': task['definition_version']}
+
+    def _upload_context(self, conn, actor, session, current, *, content_hash=None):
+        task = self._task(conn, actor, session['task_id'])
+        if actor.get('id') != session.get('actor_id') or task['scope'] != session['scope']:
+            raise CheckError('上传身份或楼栋已变化，请重新选择。', 409)
+        if task['definition_version'] != session.get('definition_version'):
+            raise CheckError('清单版本已变化，请重新上传。', 409)
+        if not self._can_complete(actor, task):
+            raise CheckError('当前账号不能上传该次检查的附件。', 403)
+        if session['kind'] == 'item' and session['item_id'] not in {i['id'] for i in json.loads(task['items'])}:
+            raise CheckError('检查项不存在，请刷新。', 404)
+        if bool(task['submitted']) != session.get('was_submitted', False):
+            raise CheckError('检查状态已变化，请刷新后重新上传。', 409)
+        operation = session['kind'] + '_upload'
+        request_hash = self._request_hash(operation, session['task_id'], session['item_id'], session['name'],
+                                          content_hash, session.get('replace_file_id')) if content_hash else ''
+        prior = self._edit_revision(conn, actor, task, session.get('revision', task['revision']), operation, request_hash)
+        if prior is not None:
+            saved = conn.execute('SELECT 1 FROM files WHERE id=? AND archived=0', (prior.get('id'),)).fetchone()
+            if not saved:
+                raise CheckError('原附件已被修改，请刷新。', 409)
+            prior = {**prior, **self._photo_status(conn, prior['id'], actor)}
+        return task, request_hash, prior
+
+    def _file_receipt(self, conn, actor, task_id, file_id, current):
+        task = self._task(conn, actor, task_id)
+        row = conn.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
+        return {**self._public_file(dict(row), actor, task, current), **self._photo_status(conn, file_id, actor),
+                'task_id': task_id, 'revision': task['revision']}
 
     def abort_upload(self, session):
         try:
@@ -907,7 +1050,12 @@ class CheckService:
                 raise CheckError('该预览已提交过其他设置，请核验原照片，不要重复上传。', 409)
             if row['result']:
                 result = json.loads(row['result'])
-                if not conn.execute('SELECT 1 FROM files WHERE id=?', (result['id'],)).fetchone():
+                task = self._task(conn, actor, json.loads(row['session'])['task_id'])
+                if not self._can_complete(actor, task):
+                    raise CheckError('当前账号不能修改该次检查。', 403)
+                if result.get('revision', task['revision']) != task['revision']:
+                    raise CheckError('检查已被更新，请刷新。', 409)
+                if not conn.execute('SELECT 1 FROM files WHERE id=? AND archived=0', (result['id'],)).fetchone():
                     raise CheckError('原照片已被移除，请重新选择。', 409)
                 return {**result, **self._photo_status(conn, result['id'], actor)}
             if row['lease'] > current.timestamp():
@@ -995,17 +1143,10 @@ class CheckService:
                 if Path(name).suffix.lower() not in IMAGE_EXTS:
                     raise CheckError('照片预览仅支持图片。')
                 with self.connection() as conn:
-                    task = conn.execute('SELECT * FROM tasks WHERE id=?',(session['task_id'],)).fetchone()
-                    if not task or actor.get('id') != session.get('actor_id'):
-                        raise CheckError('上传身份或任务已变化，请重新选择。',409)
-                    authorized(actor,task['scope'])
-                    if session['kind']=='item' and (not self.can_submit(actor,task,current)
-                            or session['item_id'] not in {i['id'] for i in json.loads(task['items'])}):
-                        raise CheckError('当前检查项不能上传照片。',403)
-                    if session['kind']=='handover' and not self._can_complete(actor,task):
-                        raise CheckError('当前账号不能上传交接班照片。',403)
-                return inspect_photo(staging,session['scope'],current,session.get('photo_weather'),
-                                     handover=kind=='handover',capture=session.get('photo_capture'))
+                    task, _, _ = self._upload_context(conn, actor, session, current)
+                return {**inspect_photo(staging,session['scope'],current,session.get('photo_weather'),
+                                     handover=kind=='handover',capture=session.get('photo_capture')),
+                        'task_id': task['id'], 'revision': task['revision']}
             session['photo_options'] = options
             capture = {key: value for key, value in (session.get('photo_capture') or {}).items() if key != '_time_audit'}
             if options is not None and Path(name).suffix.lower() in IMAGE_EXTS:
@@ -1110,31 +1251,25 @@ class CheckService:
         final = self.files_dir / f'{file_id}{ext}'
         try:
             with self.connection(True) as conn:
-                task = conn.execute('SELECT * FROM tasks WHERE id=?', (session['task_id'],)).fetchone()
-                if task is None:
-                    raise CheckError('班前检查任务不存在，请刷新。', 404)
-                authorized(actor, task['scope'])
-                if task['definition_version'] != session.get('definition_version'):
-                    raise CheckError('清单版本已变化，请重新上传。', 409)
-                if not self.can_submit(actor, task, current):
-                    raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传检查附件。', 403)
-                items = {i['id'] for i in json.loads(task['items'])}
-                if session.get('item_id') not in items:
-                    raise CheckError('检查项不存在，请刷新。', 404)
+                task, request_hash, prior = self._upload_context(conn, actor, session, current, content_hash=content_hash)
+                if prior is not None:
+                    return prior
                 existing = conn.execute(
-                    "SELECT * FROM files WHERE task_id=? AND item_id=? AND kind='item' AND uploader_id=? AND content_hash=? LIMIT 1",
+                    "SELECT * FROM files WHERE task_id=? AND item_id=? AND kind='item' AND archived=0 AND uploader_id=? AND content_hash=? LIMIT 1",
                     (session['task_id'], session['item_id'], actor['id'], content_hash)).fetchone()
                 if existing:
-                    return {**self._public_dict(existing['id'], existing['item_id'], existing['name'],
-                                             existing['size'], bool(existing['is_image'])), **self._photo_status(conn, existing['id'], actor)}
-                count = conn.execute("SELECT COUNT(*) FROM files WHERE task_id=? AND item_id=? AND kind='item' AND submitted=0",
+                    return self._file_receipt(conn, actor, task['id'], existing['id'], current)
+                count = conn.execute("SELECT COUNT(*) FROM files WHERE task_id=? AND item_id=? AND kind='item' AND archived=0",
                                      (session['task_id'], session['item_id'])).fetchone()[0]
                 if count >= MAX_FILES_PER_ITEM:
                     raise CheckError('每个检查项最多上传10个附件。')
-                total = conn.execute("SELECT COALESCE(SUM(size),0) FROM files WHERE task_id=? AND kind='item' AND submitted=0",
+                total = conn.execute("SELECT COALESCE(SUM(size),0) FROM files WHERE task_id=? AND kind='item' AND archived=0",
                                      (session['task_id'],)).fetchone()[0]
                 if total + size > MAX_TASK_BYTES:
                     raise CheckError('单个检查任务附件合计不能超过100MiB。')
+                if size > MAX_FILE_BYTES:
+                    raise CheckError('单个附件不能超过20MiB。', 413)
+                before = self._before_change(conn, [task])
                 os.replace(rendered if watermark else staging, final)
                 created = current.isoformat()
                 conn.execute(
@@ -1150,6 +1285,9 @@ class CheckService:
                     watermark = {'applied':False,'existing':options['existing'], 'audit': session.get('photo_audit', {})}
                     conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
                                  (file_id, actor['id'], dump(watermark)))
+                self._publish_change(conn, actor, before, 'item_upload', request_hash,
+                    self._file_receipt(conn, actor, task['id'], file_id, current), current)
+                result = self._file_receipt(conn, actor, task['id'], file_id, current)
         except Exception:
             try:
                 if final.exists():
@@ -1160,10 +1298,9 @@ class CheckService:
         finally:
             rendered.unlink(missing_ok=True)
             self.abort_upload(session)
-        if watermark:
+        if watermark or task['submitted']:
             self.wake.set()
-        return {**self._public_dict(file_id, session.get('item_id'), name, size, ext in IMAGE_EXTS),
-                **({'watermarked': bool(watermark.get('applied',True) or watermark.get('existing')), 'watermark': watermark, 'delivery_status': 'pending'} if watermark else {})}
+        return result
 
     def _commit_handover(self, actor, session, staging, size, current):
         if actor.get('id') != session.get('actor_id'):
@@ -1187,21 +1324,28 @@ class CheckService:
             except (ValueError, OSError) as exc:
                 raise CheckError('交接班照片水印生成失败：' + str(exc)) from exc
             size = (rendered if stamp_enabled else staging).stat().st_size
+            if size > MAX_FILE_BYTES:
+                raise CheckError('单个附件不能超过20MiB。', 413)
             with self.connection(True) as conn:
-                task = conn.execute('SELECT * FROM tasks WHERE id=?', (session['task_id'],)).fetchone()
-                if task is None:
-                    raise CheckError('班前检查任务不存在，请刷新。', 404)
-                authorized(actor, task['scope'])
-                if not self._can_complete(actor, task):
-                    raise CheckError('仅本楼值班人员、值班账号或有该楼管理权限的上级可上传交接班照片。', 403)
-                exists = conn.execute("SELECT * FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? LIMIT 1",
+                task, request_hash, prior = self._upload_context(conn, actor, session, current, content_hash=content_hash)
+                if prior is not None:
+                    return prior
+                exists = conn.execute("SELECT * FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=? LIMIT 1",
                                       (task['day'], task['scope'], task['shift'])).fetchone()
                 if exists:
-                    if exists['uploader_id'] == actor['id'] and exists['content_hash'] == content_hash:
-                        return {**self._public_dict(exists['id'], '', exists['name'], exists['size'],
-                                                 bool(exists['is_image'])), **self._photo_status(conn, exists['id'], actor)}
-                    self.abort_upload(session)
-                    raise CheckError('该班次交接班照片已存在，不能重复上传。', 409)
+                    if not session.get('replace_file_id') and exists['uploader_id'] == actor['id'] and exists['content_hash'] == content_hash:
+                        return self._file_receipt(conn, actor, task['id'], exists['id'], current)
+                    if session.get('replace_file_id') != exists['id']:
+                        raise CheckError('该班次交接班照片已存在或已变化，请刷新后选择替换。', 409)
+                elif session.get('replace_file_id'):
+                    raise CheckError('被替换照片已变化，请刷新。', 409)
+                affected = conn.execute("SELECT * FROM tasks WHERE day=? AND scope=? AND shift=? AND submitted!=''",
+                    (task['day'], task['scope'], task['shift'])).fetchall()
+                if affected and not task['submitted'] and exists:
+                    raise CheckError('请从已提交检查携带当前版本修改共享照片。', 409)
+                before = self._before_change(conn, affected)
+                if exists:
+                    self._archive_file(conn, exists, current)
                 os.replace(rendered if stamp_enabled else staging, final)
                 created = current.isoformat()
                 conn.execute(
@@ -1212,7 +1356,9 @@ class CheckService:
                      actor['id'], actor['name'], created, content_hash))
                 conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
                              (file_id, actor['id'], dump(watermark)))
-                self._bump_shift_cloud(conn, task['day'], task['scope'], task['shift'])
+                self._publish_change(conn, actor, before, 'handover_upload', request_hash,
+                    self._file_receipt(conn, actor, task['id'], file_id, current), current)
+                result = self._file_receipt(conn, actor, task['id'], file_id, current)
         except Exception:
             try:
                 if final.exists():
@@ -1224,16 +1370,7 @@ class CheckService:
             rendered.unlink(missing_ok=True)
             self.abort_upload(session)
         self.wake.set()
-        return {**self._public_dict(file_id, '', name, size, True), 'watermarked': bool(watermark.get('applied',True) or watermark.get('existing')),
-                'watermark': watermark, 'delivery_status': 'pending'}
-
-    def _bump_shift_cloud(self, conn, day, scope, shift):
-        keys = {r['cloud_key'] for r in conn.execute(
-            "SELECT cloud_key FROM tasks WHERE day=? AND scope=? AND shift=? AND submitted!='' AND cloud_key!=''",
-            (day, scope, shift))}
-        for key in keys:
-            conn.execute('INSERT INTO outbox(id,revision) VALUES(?,1) ON CONFLICT(id) DO UPDATE SET revision=revision+1,retry_at=0',
-                         (key,))
+        return result
 
     def _public_dict(self, file_id, item_id, name, size, is_image):
         return {'id': file_id, 'item_id': item_id, 'name': name, 'size': size,
@@ -1253,45 +1390,58 @@ class CheckService:
                 'is_image': bool(row['is_image']), 'item_id': row['item_id'],
                 'kind': row['kind'], 'scope': row['scope']}
 
-    def delete_file(self, actor, file_id, current=None):
+    def _archive_file(self, conn, row, current):
+        delivery = conn.execute('SELECT lease FROM photo_deliveries WHERE file_id=?', (row['id'],)).fetchone()
+        if delivery and delivery['lease'] > current.timestamp():
+            raise CheckError('照片正在发送给本人，请稍后再修改。', 409)
+        conn.execute('UPDATE files SET archived=1 WHERE id=?', (row['id'],))
+
+    def delete_file(self, actor, file_id, current=None, *, revision=None, task_id=None):
         current = current or now()
+        disk = None
         with self.connection(True) as conn:
             row = conn.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
             if not row:
                 raise CheckError('附件不存在。', 404)
             authorized(actor, row['scope'])
-            task = conn.execute('SELECT * FROM tasks WHERE id=?', (row['task_id'],)).fetchone()
-            if row['kind'] == 'handover':
-                if row['submitted']:
-                    raise CheckError('已提交的交接班照片不能删除。', 403)
-                if self._any_submitted_in_shift(row['day'], row['scope'], row['shift'], conn):
-                    raise CheckError('该班次已有提交记录，交接班照片已归档不能删除。', 403)
-                if row['uploader_id'] != actor['id']:
-                    raise CheckError('仅上传人可删除交接班照片。', 403)
-                if not self._can_complete(actor, task):
-                    raise CheckError('仅有本楼检查权限的上传人可删除未提交的交接班照片。', 403)
-                delivery = conn.execute('SELECT lease FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
-                if delivery and delivery['lease'] > current.timestamp():
-                    raise CheckError('交接班照片正在发送给本人，请稍后再移除。', 409)
+            shared = row['kind'] == 'handover'
+            affected = conn.execute("SELECT * FROM tasks WHERE day=? AND scope=? AND shift=? AND submitted!=''",
+                (row['day'], row['scope'], row['shift'])).fetchall() if shared else []
+            if shared and affected and not task_id:
+                raise CheckError('请指定已提交检查及当前版本后修改共享照片。', 409)
+            task = self._task(conn, actor, task_id or row['task_id'])
+            if (not shared and task['id'] != row['task_id'] or shared and
+                    any(task[key] != row[key] for key in ('day', 'scope', 'shift'))):
+                raise CheckError('附件不属于该次检查。', 403)
+            request_hash = self._request_hash('delete', file_id)
+            if task['submitted']:
+                prior = self._edit_revision(conn, actor, task, revision, 'delete', request_hash)
+                if prior is not None:
+                    return prior
             else:
-                if row['submitted'] or (task and task['submitted']):
-                    raise CheckError('已提交的检查附件不能删除或修改。', 403)
-                if row['uploader_id'] != actor['id']:
-                    raise CheckError('仅上传人可删除检查附件。', 403)
-                if not self.can_submit(actor, task, current):
-                    raise CheckError('当前账号不能删除该检查附件。', 403)
-                delivery = conn.execute('SELECT lease FROM photo_deliveries WHERE file_id=?', (file_id,)).fetchone()
-                if delivery and delivery['lease'] > current.timestamp():
-                    raise CheckError('水印照片正在发送给本人，请稍后再移除。', 409)
-            disk = row['disk_name']
-            conn.execute('DELETE FROM files WHERE id=?', (file_id,))
-            conn.execute('DELETE FROM photo_deliveries WHERE file_id=?', (file_id,))
-        path = self.files_dir / disk
-        try:
-            Path(path).unlink(missing_ok=True)
-        except OSError:
-            pass
-        return {'ok': True}
+                if affected or row['submitted'] or row['uploader_id'] != actor['id'] or not self._can_complete(actor, task):
+                    raise CheckError('当前账号不能删除该附件；已归档共享照片请从原提交记录编辑。', 403)
+                if revision is not None:
+                    self._edit_revision(conn, actor, task, revision)
+            if row['archived']:
+                raise CheckError('附件已被修改，请刷新。', 409)
+            before = self._before_change(conn, affected if shared else [task])
+            self._archive_file(conn, row, current)
+            if before or row['submitted']:
+                self._publish_change(conn, actor, before, 'delete', request_hash, {'ok': True}, current)
+            else:
+                disk = row['disk_name']
+                conn.execute('DELETE FROM files WHERE id=?', (file_id,))
+                conn.execute('DELETE FROM photo_deliveries WHERE file_id=?', (file_id,))
+            result = {'ok': True, 'task_id': task['id'],
+                      'revision': conn.execute('SELECT revision FROM tasks WHERE id=?', (task['id'],)).fetchone()[0]}
+        if disk:
+            try:
+                (self.files_dir / disk).unlink(missing_ok=True)
+            except OSError:
+                pass
+        self.wake.set()
+        return result
 
     def notify(self, current):
         if not self.sender or not self.portal_url:
@@ -1373,7 +1523,7 @@ class CheckService:
                 return
             with self.connection(True) as conn:
                 row = conn.execute('''SELECT p.*,f.disk_name,f.name FROM photo_deliveries p
-                    JOIN files f ON f.id=p.file_id WHERE p.sent=0 AND p.retry_at<=? AND p.lease<=?
+                    JOIN files f ON f.id=p.file_id WHERE f.archived=0 AND p.sent=0 AND p.retry_at<=? AND p.lease<=?
                     ORDER BY f.created,p.file_id LIMIT 1''', (current.timestamp(), current.timestamp())).fetchone()
                 if row is None:
                     return
@@ -1408,7 +1558,7 @@ class CheckService:
                     conn.execute('UPDATE photo_deliveries SET retry_at=?,lease=0,error=? WHERE file_id=?',
                                  (current.timestamp() + 300, error, photo['file_id']))
         with self.connection() as conn:
-            if conn.execute('SELECT 1 FROM photo_deliveries WHERE sent=0 AND retry_at<=? AND lease<=? LIMIT 1',
+            if conn.execute('SELECT 1 FROM photo_deliveries p JOIN files f ON f.id=p.file_id WHERE f.archived=0 AND p.sent=0 AND p.retry_at<=? AND p.lease<=? LIMIT 1',
                             (current.timestamp(), current.timestamp())).fetchone():
                 self.wake.set()
 
@@ -1427,7 +1577,7 @@ class CheckService:
                     seen.add(h['id'])
                     refs.append({**h, 'kind': 'handover'})
         else:
-            rows = conn.execute("SELECT * FROM files WHERE task_id=? AND kind='item' ORDER BY created", (task['id'],)).fetchall()
+            rows = conn.execute("SELECT * FROM files WHERE task_id=? AND kind='item' AND archived=0 ORDER BY created", (task['id'],)).fetchall()
             for r in rows:
                 ref = self._evidence_file(dict(r))
                 if ref['id'] not in seen:
@@ -1435,7 +1585,7 @@ class CheckService:
                     refs.append(ref)
         # Live shared handover for the shift always syncs (it may be uploaded after submit).
         handover = conn.execute(
-            "SELECT * FROM files WHERE kind='handover' AND day=? AND scope=? AND shift=? ORDER BY created LIMIT 1",
+            "SELECT * FROM files WHERE kind='handover' AND archived=0 AND day=? AND scope=? AND shift=? ORDER BY created LIMIT 1",
             (task['day'], task['scope'], task['shift'])).fetchone()
         if handover:
             ref = self._evidence_file(dict(handover))
@@ -1445,7 +1595,7 @@ class CheckService:
         out = []
         for ref in refs:
             row = conn.execute('SELECT * FROM files WHERE id=?', (ref['id'],)).fetchone()
-            if not row:
+            if not row or row['archived']:
                 raise CheckError('证据附件信息缺失，暂缓同步。')
             path = self.files_dir / row['disk_name']
             if not path.is_file():
@@ -1461,19 +1611,27 @@ class CheckService:
         if not self.cloud:
             return
         with self.connection() as conn:
-            jobs = [dict(row) for row in conn.execute('SELECT * FROM outbox WHERE revision>synced AND retry_at<=? LIMIT 10', (current.timestamp(),))]
+            jobs = [dict(row) for row in conn.execute('SELECT * FROM outbox WHERE revision>synced AND retry_at<=? AND lease<=? LIMIT 10', (current.timestamp(), current.timestamp()))]
         for job in jobs:
             if self.stop_event.is_set():
                 return
+            lease_token = uuid.uuid4().hex
             try:
-                with self.connection() as conn:
+                with self.connection(True) as conn:
+                    fresh = conn.execute('SELECT * FROM outbox WHERE id=? AND revision>synced AND lease<=? AND retry_at<=?',
+                                         (job['id'], current.timestamp(), current.timestamp())).fetchone()
+                    if not fresh:
+                        continue
+                    job = dict(fresh)
                     rows = [dict(row) for row in conn.execute('SELECT * FROM tasks WHERE cloud_key=? AND submitted!=\'\' ORDER BY due', (job['id'],))]
                     for task in rows:
                         task['_files'] = self._internal_files(conn, task)
+                    conn.execute('UPDATE outbox SET lease=?,lease_token=? WHERE id=?',
+                                 (current.timestamp() + 300, lease_token, job['id']))
             except Exception:
                 with self.connection(True) as conn:
-                    conn.execute('UPDATE outbox SET retry_at=?,error=? WHERE id=?',
-                                 (current.timestamp() + 300, '本地附件缺失，同步需重试。', job['id']))
+                    conn.execute('UPDATE outbox SET retry_at=?,error=? WHERE id=? AND revision=? AND lease<=?',
+                        (current.timestamp() + 300, '本地附件缺失，同步需重试。', job['id'], job['revision'], current.timestamp()))
                 continue
             if not rows:
                 continue
@@ -1481,12 +1639,23 @@ class CheckService:
             try:
                 record_id = self.cloud.upsert(job['id'], rows, job['record_id'])
                 with self.connection(True) as conn:
-                    conn.execute("UPDATE outbox SET record_id=?,synced=?,detail_version=?,error='' WHERE id=?",
-                                 (record_id, job['revision'], CLOUD_DETAIL_VERSION, job['id']))
+                    changed = conn.execute("UPDATE outbox SET record_id=?,synced=?,detail_version=?,error='',lease=0,lease_token='' WHERE id=? AND lease_token=?",
+                                 (record_id, job['revision'], CLOUD_DETAIL_VERSION, job['id'], lease_token)).rowcount
+                    if not changed:
+                        # An expired worker may publish after its successor; republish the latest snapshot.
+                        conn.execute('UPDATE outbox SET revision=revision+1,retry_at=0 WHERE id=?', (job['id'],))
+                    pending = conn.execute('SELECT revision>synced FROM outbox WHERE id=?', (job['id'],)).fetchone()[0]
+                if pending:
+                    self.wake.set()
             except Exception:
                 with self.connection(True) as conn:
-                    conn.execute('UPDATE outbox SET retry_at=?,error=? WHERE id=?',
-                                 (current.timestamp() + 300, '本地已保存，飞书同步暂未完成，将自动重试。', job['id']))
+                    changed = conn.execute("UPDATE outbox SET retry_at=CASE WHEN revision>? THEN 0 ELSE ? END,error=?,lease=0,lease_token='' WHERE id=? AND lease_token=?",
+                        (job['revision'], current.timestamp() + 300, '本地已保存，飞书同步暂未完成，将自动重试。', job['id'], lease_token)).rowcount
+                    if not changed:
+                        # A lost response can still follow a committed stale write.
+                        conn.execute('UPDATE outbox SET revision=revision+1,retry_at=0 WHERE id=?', (job['id'],))
+                if not changed:
+                    self.wake.set()
 
     def _persist_file_token(self, file_id, token):
         with self.connection(True) as conn:

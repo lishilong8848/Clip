@@ -152,6 +152,7 @@ class KnowledgeBase:
         self.source_summarizer = source_summarizer
         self.source_acl = source_acl
         self.source_current = source_current
+        self._evidence_key = os.urandom(32)
         self._worker_tasks = []
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -1596,12 +1597,45 @@ class KnowledgeBase:
             _, original = self._document_version(db, actor, identity, version)
             return self._path(original['path']), original['name']
 
+    def answer_evidence(self, actor, items, *, profile, model):
+        """Read bounded current-version context; return items, warnings and coverage."""
+        from .lighthouse_knowledge_evidence import answer_evidence
+        return answer_evidence(self, actor, items, profile=profile, model=model)
+
     def model_allowed(self, profile):
         endpoint_origin = origin(profile.get('endpoint', ''))
         config = self.configuration()
         approved = config.get('approved_origins', [])
         # Profiles come from the authenticated account's existing model settings, not browser input.
         return endpoint_origin in approved or not approved
+
+    @staticmethod
+    def _search_context(db, item):
+        # Use the search transaction and ACL, never a second search or a historical version.
+        rows = db.execute('''SELECT c.ordinal,c.text,c.location FROM chunks c
+            JOIN documents d ON d.id=c.document_id
+            WHERE c.document_id=? AND c.version=? AND c.ordinal BETWEEN ? AND ?
+                AND d.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1
+            ORDER BY c.ordinal LIMIT 3''',
+            (item['document_id'], item['version'], item['ordinal'] - 1, item['ordinal'] + 1)).fetchall()
+        context = []
+        for row in rows:
+            header = re.search(r'（列：([^）]+)）', row['location'])
+            context.append({**dict(row), 'document_id': item['document_id'], 'version': item['version'],
+                'relation': 'hit' if row['ordinal'] == item['ordinal'] else
+                    'previous' if row['ordinal'] < item['ordinal'] else 'next',
+                'table_header': header.group(1) if header else None})
+        item['context'] = context
+        # Existing answer consumers pass text and location, so include the bounded evidence there.
+        if len(context) > 1 or any(part['table_header'] for part in context):
+            item['text'] = '\n\n'.join(f"[{part['location']}]\n{part['text']}" for part in context)
+        item['source_version'] = {'version': item['version'], 'sha256': item.pop('source_hash'),
+            'created_at': item.pop('source_created_at')}
+        item['coverage'] = {'scope': 'retrieved_context', 'complete': False,
+            'ordinals': [part['ordinal'] for part in context], 'context_chunks': len(context),
+            'indexed_document_chunks': item.pop('indexed_chunks'), 'history': 'unknown',
+            'pending_version': item.pop('pending_version'), 'original_document_complete': None}
+        item['content_trust'] = 'untrusted_data'
 
     def search(self, actor, query, *, profile=None):
         check_actor(actor)
@@ -1613,7 +1647,9 @@ class KnowledgeBase:
             raise AssistantError('当前聊天模型未获授权接收公司资料，请选择管理员批准的公司模型。', 403)
         with self.connect() as db:
             if not db.execute('SELECT 1 FROM documents WHERE deleted=0 AND active_version IS NOT NULL LIMIT 1').fetchone():
-                return {'items': [], 'mode': 'keyword', 'warning': '公司知识库暂无已完成入库的文件。', 'revision': self._revision(db), 'indexready': False}
+                return {'items': [], 'mode': 'keyword', 'warning': '公司知识库暂无已完成入库的文件。',
+                    'revision': self._revision(db), 'indexready': False, 'complete': False,
+                    'coverage': {'scope': 'ranked_search_hits', 'complete': False, 'history': 'unknown'}}
         mode, warning, snapshot, hits = 'keyword', '', None, []
         indexready = False
         if self._vector_mode(config):
@@ -1664,7 +1700,8 @@ class KnowledgeBase:
                 db.set_progress_handler(lambda: time.monotonic() > deadline, 1000)
                 if config.get('generation') != self._get_config(db).get('generation'):
                     raise AssistantError('知识库模型刚发生变化，请重新查询。', 409)
-                fields = 'c.id,c.document_id,c.version,c.ordinal,c.text,c.location,v.name,d.source_key'
+                fields = ('c.id,c.document_id,c.version,c.ordinal,c.text,c.location,v.name,d.source_key,'
+                    'v.hash AS source_hash,v.created_at AS source_created_at,d.chunks AS indexed_chunks,d.pending_version')
                 joins = ' JOIN documents d ON d.id=c.document_id JOIN versions v ON v.document_id=c.document_id AND v.version=c.version '
                 active = 'd.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1'
                 if snapshot is not None and snapshot.revision != self._vector_revision(db):
@@ -1698,15 +1735,21 @@ class KnowledgeBase:
                             add(row, 'keyword', rank)
                 revision = self._revision(db)
                 acl_revision = db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]
+                items = sorted(selected.values(), key=lambda item: (-item['score'], item['document_id'], item['ordinal']))[:8]
+                for item in items:
+                    self._search_context(db, item)
         except sqlite3.Error:
             raise AssistantError('知识库检索暂忙，未取得完整结果，请缩小问题范围后重试。', 503) from None
-        items = sorted(selected.values(), key=lambda item: (-item['score'], item['document_id'], item['ordinal']))[:8]
         for item in items:
             item.pop('id', None)
             item['source_kind'] = 'document_library' if item.pop('source_key', '') else 'shared'
             item['score'] = round(item['score'], 6)
             item['url'] = f"/knowledge-base?document={item['document_id']}&version={item['version']}&chunk={item['ordinal']}"
-        return {'items': items, 'mode': mode, 'warning': warning, 'revision': revision, 'indexready': indexready, 'acl_revision': acl_revision}
+        return {'items': items, 'mode': mode, 'warning': warning, 'revision': revision,
+            'indexready': indexready, 'acl_revision': acl_revision, 'complete': False,
+            'coverage': {'scope': 'ranked_search_hits', 'complete': False, 'hit_limit': 8,
+                'returned_hits': len(items), 'history': 'unknown', 'count_basis': 'retrieval_hits_not_business_records'},
+            'statistics': {'tool': 'query_statistics', 'basis': 'authorized_structured_records'}}
 
     def evidence_current(self, items, profile, *, actor=None):
         if not self.model_allowed(profile):

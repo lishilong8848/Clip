@@ -20,7 +20,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from .cabinet_guest import is_cabinet_guest
-from .portal_service import PortalError
+from .portal_service import NOTICE_TYPE_BY_WORK_TYPE, PortalError
 
 ZONE = dt.timezone(dt.timedelta(hours=8))
 NS = "assistant_notice_panels"
@@ -390,10 +390,15 @@ class NoticePanel:
 
     def public_run(self, identity):
         doc = self._get(identity)
+        unavailable = sorted(set(doc.get("source_errors") or {}) & self._owner_modules(doc))
+        source_warning = (
+            "以下类型计划暂未就绪：" + "、".join(NOTICE_TYPE_BY_WORK_TYPE.get(work, work) for work in unavailable)
+            + "。已显示其它可用通告，请稍后重新读取。"
+        ) if unavailable else ""
         return {"id": identity, "revision": doc["revision"], "scope": doc["scope"],
                 "date": doc["date"], "slot": doc["slot"], "state": doc["state"],
                 "generation": int(doc.get("generation") or 1),
-                "items": self.public_items(doc), "error": str(doc.get("error") or ""),
+                "items": self.public_items(doc), "error": str(doc.get("error") or source_warning),
                 "updated_at": float(doc.get("updated_at") or 0)}
 
     # ---- open/prepare ----------------------------------------------------
@@ -459,12 +464,27 @@ class NoticePanel:
     def _build_items(self, doc):
         from .notice_panel_data import build_items
         allowed = self._owner_modules(doc)
+        doc["source_errors"] = {}
         if not allowed:
             return []
         ongoing = self.controller._get_ongoing(doc["scope"])
-        rows = [row for work in (["all"] if allowed == NOTICE_MODULES else sorted(allowed))
-                for row in build_items(self.runtime.service, doc["scope"], work, ongoing)
-                if (row.get("draft") or {}).get("work_type") in allowed]
+        rows = None
+        if allowed == NOTICE_MODULES:
+            try:
+                rows = build_items(self.runtime.service, doc["scope"], "all", ongoing)
+            except PortalError:
+                pass
+        if rows is None:
+            rows = []
+            for work in sorted(allowed):
+                try:
+                    rows.extend(row for row in build_items(self.runtime.service, doc["scope"], work, ongoing)
+                                if (row.get("draft") or {}).get("work_type") == work)
+                except PortalError as exc:
+                    doc["source_errors"][work] = str(exc)
+            if not rows and doc["source_errors"]:
+                raise PortalError("部分计划未能读取，尚不能确认没有待办。" + next(iter(doc["source_errors"].values())))
+        rows = [row for row in rows if (row.get("draft") or {}).get("work_type") in allowed]
         preferred = "update" if doc.get("slot") == "evening" else "start"
         return sorted(rows, key=lambda item: (bool(item.get("blocked")),
                                               item.get("action") != preferred,
@@ -679,6 +699,16 @@ class NoticePanel:
             # untouched default (custom text is preserved).
             apply_end_default(item.setdefault("draft", {}), item, previous_action)
 
+    def _selected_current_rows(self, doc, selected):
+        from .notice_panel_data import build_items
+        ongoing = self.controller._get_ongoing(doc["scope"])
+        works = {str((item.get("draft") or {}).get("work_type") or "") for item in selected}
+        if not works or not works <= self._owner_modules(doc):
+            raise PortalError("无权办理所选类型的通告。")
+        return {row["key"]: row for work in sorted(works)
+                for row in build_items(self.runtime.service, doc["scope"], work, ongoing)
+                if (row.get("draft") or {}).get("work_type") == work}
+
     def _preview(self, doc):
         selected = [item for item in doc.get("items") or [] if item.get("selected")]
         if not selected:
@@ -687,9 +717,8 @@ class NoticePanel:
             return
         errors = False
         try:
-            from .notice_panel_data import build_items, submission
-            current_rows = {row["key"]: row for row in build_items(
-                self.runtime.service, doc["scope"], "all", self.controller._get_ongoing(doc["scope"]))}
+            from .notice_panel_data import submission
+            current_rows = self._selected_current_rows(doc, selected)
         except Exception as exc:
             doc["state"] = "edit"
             doc["error"] = str(exc)
@@ -722,9 +751,8 @@ class NoticePanel:
         if not selected:
             raise PortalError("请至少选择一条通告。")
         try:
-            from .notice_panel_data import build_items, submission
-            current_rows = {row["key"]: row for row in build_items(
-                self.runtime.service, doc["scope"], "all", self.controller._get_ongoing(doc["scope"]))}
+            from .notice_panel_data import submission
+            current_rows = self._selected_current_rows(doc, selected)
         except Exception as exc:
             doc["state"] = "edit"
             doc["error"] = str(exc)

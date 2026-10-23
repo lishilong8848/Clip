@@ -8,6 +8,7 @@
         <NCollapseItem v-for="row in data.items" :key="row.id" :name="row.id">
           <template #header><div class="check-history-heading"><strong>{{row.day}} · {{row.shift}}班</strong><span>{{row.actor_name}}</span><NTag size="small" :bordered="false" :type="row.abnormal_count?'warning':'success'">{{row.abnormal_count?'存在异常':'全部正常'}}</NTag><small>正常 {{row.normal_count}} · 异常 {{row.abnormal_count}}</small></div></template>
           <div class="check-history-meta"><span>提交时间 {{dateLabel(row.submitted)}}</span><span>计划时间 {{dateLabel(row.due*1000)}}</span><span>{{row.sync_status==='synced'?'已同步飞书':'本地已保存，待同步飞书'}}</span></div>
+          <div v-if="row.can_edit||row.revision>1" class="check-history-edit"><span v-if="row.revision>1&&row.updated_at">最近修改：{{row.updated_by_name||row.updated_by}} · {{dateLabel(row.updated_at)}}</span><NButton v-if="row.can_edit" size="small" secondary @click="emit('edit',row.id)"><template #icon><Pencil :size="15" /></template>修改记录</NButton></div>
           <NAlert v-if="row.sync_error" type="warning" :bordered="false">{{row.sync_error}}</NAlert>
           <ol class="check-history-answers">
             <li v-for="answer in row.answers" :key="answer.id" :class="{'is-abnormal':answer.status==='abnormal'}">
@@ -27,10 +28,11 @@
 <script setup lang="ts">
 import {onBeforeUnmount,ref,watch} from 'vue';
 import {NAlert,NButton,NCollapse,NCollapseItem,NEmpty,NPagination,NSkeleton,NTag} from 'naive-ui';
-import {RefreshCw} from 'lucide-vue-next';
+import {Pencil,RefreshCw} from 'lucide-vue-next';
 import {requestJson,type Dict} from '../client';
 import CheckAttachments from './CheckAttachments.vue';
 const props=defineProps<{scope:string}>();
+const emit=defineEmits<{edit:[id:string]}>();
 const data=ref<Dict>(),page=ref(1),loading=ref(false),error=ref('');
 let controller:AbortController|undefined,disposed=false;
 function dateLabel(value:string|number){return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
@@ -45,9 +47,12 @@ async function load(next=1){
   finally{if(controller===read)loading.value=false;}
 }
 watch(()=>props.scope,()=>{data.value=undefined;page.value=1;void load();},{immediate:true});
-onBeforeUnmount(()=>{disposed=true;controller?.abort();});
+function refresh(){if(!loading.value)void load(page.value);}
+window.addEventListener('pre-shift-record-changed',refresh);
+onBeforeUnmount(()=>{disposed=true;controller?.abort();window.removeEventListener('pre-shift-record-changed',refresh);});
 </script>
 <style scoped>
+.check-history-edit{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-bottom:10px;font-size:12px;color:var(--v2-muted,#647487)}
 .check-history{min-width:0;display:grid;gap:12px}.check-history>header{display:flex;align-items:center;justify-content:space-between;gap:8px}.check-history>header>span{font-weight:600}.check-history small{font-size:12px;color:var(--v2-muted,#647487);font-weight:400}.check-history>header small{margin-left:10px}
 .check-history-heading{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;min-width:0;line-height:1.6}.check-history-heading strong{font-size:13px}.check-history-heading>span{font-size:13px}.check-history-meta{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:12px;color:var(--v2-muted,#647487);line-height:1.6;margin-bottom:10px}
 .check-history-answers{margin:0;padding-left:24px}.check-history-answers>li{padding:9px 0;border-bottom:1px solid var(--v2-border,#d8e3f1);overflow-wrap:anywhere}.check-history-answers>li>div:first-child{display:flex;align-items:flex-start;gap:10px;justify-content:space-between}.check-history-answers strong{font-size:13px;font-weight:500;line-height:1.6}.check-history-answers p{white-space:pre-wrap;margin:6px 0;font-size:13px;line-height:1.6}.check-history-answers .is-abnormal p{color:var(--warning-color,#985719)}.check-history-photo{display:grid;gap:8px;margin-top:12px;font-size:13px}.check-history>.n-pagination{justify-self:end;max-width:100%}

@@ -4883,7 +4883,10 @@ class LanPortalStateStore:
                         warnings.append(text)
                 status_payload = source_meta.get("source_refresh_status")
                 if isinstance(status_payload, dict):
-                    refresh_status.update(status_payload)
+                    # A table's older global metadata cannot override another table's own snapshot.
+                    for key, value in status_payload.items():
+                        if key == source_key or key not in active_sources:
+                            refresh_status[key] = dict(value) if isinstance(value, dict) else value
                 source_status = source_meta.get("source_status")
                 if isinstance(source_status, dict):
                     refresh_status[source_key] = dict(source_status)

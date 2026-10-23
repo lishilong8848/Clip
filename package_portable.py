@@ -391,6 +391,9 @@ SMOKE_IMPORT_MODULES = [
     "openclaw_service.gateway_log",
     "openclaw_service.assistant.routes",
     "openclaw_service.assistant.lighthouse_knowledge_summary",
+    "openclaw_service.assistant.lighthouse_knowledge_evidence",
+    "openclaw_service.assistant.lighthouse_query_intent",
+    "openclaw_service.assistant.lighthouse_model_health",
     "openclaw_service.assistant.lighthouse_commands",
     "openclaw_service.assistant.lighthouse_shared_skills",
     "openclaw_service.assistant.lighthouse_extensions",
@@ -417,6 +420,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.learning_personnel_storage",
     "lan_bitable_template_portal.learning_delivery_status",
     "lan_bitable_template_portal.sharing_images",
+    "lan_bitable_template_portal.sharing_material_images",
     "lan_bitable_template_portal.sharing_generation",
     "lan_bitable_template_portal.document_library_index",
     "upload_event_module.services.notice_cycle_warnings",
@@ -1705,7 +1709,9 @@ def _run_frontend_notice_navigation_checks() -> None:
     for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
                  "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
                  "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
-                 "check-document-library-all-scopes.mjs"):
+                 "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
+                 "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs",
+                 "check-pre-shift-edits.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
@@ -1765,6 +1771,7 @@ def _run_packaging_preflight_tests() -> None:
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_sharing.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "learning_sharing_routes.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "sharing_images.py",
+        PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "sharing_material_images.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "sharing_generation.py",
         PROJECT_ROOT / "bin" / "lan_bitable_template_portal" / "sharing_sources.py",
         PROJECT_ROOT / "bin" / "openclaw_service" / "assistant" / "lighthouse_sharing.py",
@@ -1908,6 +1915,17 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
          "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_model_completion", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
          "bin.test_lighthouse_task_context", "bin.test_lighthouse_business_semantics", "bin.test_lighthouse_model_routing", "bin.test_lighthouse_file_provenance", "bin.test_lighthouse_intelligence_evaluation",
+         "bin.test_lighthouse_intelligence_replay", "bin.test_lighthouse_review_resilience", "bin.test_lighthouse_task_context_contract",
+         "bin.test_lighthouse_connection_isolation", "bin.test_lighthouse_source_coverage",
+         "bin.test_lighthouse_knowledge_automatic",
+         "bin.test_lighthouse_knowledge_repair", "bin.test_lighthouse_knowledge_evidence",
+         "bin.test_lighthouse_claim_review", "bin.test_lighthouse_answer_quality_replay",
+         "bin.test_lighthouse_reviewer_reread", "bin.test_lighthouse_mixed_query",
+         "bin.test_lighthouse_query_intent", "bin.test_lighthouse_task_model_quality",
+         "bin.test_lighthouse_mixed_native_guard", "bin.test_lighthouse_live_evaluation",
+         "bin.test_lighthouse_quality_integration",
+         "bin.test_pre_shift_edits",
+         "bin.test_lighthouse_quality_packaging",
          "bin.test_lighthouse_workspace", "bin.test_lighthouse_workspace_integration", "bin.test_lighthouse_research",
          "bin.test_lighthouse_sandbox", "bin.test_lighthouse_visual", "bin.test_lighthouse_media_bridge", "bin.test_lighthouse_voice",
          "bin.test_lighthouse_request_budget", "bin.test_lighthouse_model_policy", "bin.test_lighthouse_system_messages",
@@ -1932,8 +1950,8 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery", "bin.test_plan_convergence_recipients", "bin.test_planned_notice_deadlines",
          "bin.test_learning_update_flow",
-         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_knowledge_source_maintenance",
-         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model",
+         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_document_library_resilience", "bin.test_knowledge_source_maintenance",
+         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model", "bin.test_sharing_resilience", "bin.test_sharing_material_recovery",
          "bin.test_signature_management_performance",
          "bin.test_workspace_layouts",
          "bin.test_workspace_extension_access",
@@ -2001,6 +2019,7 @@ def _run_packaging_preflight_tests() -> None:
 
     _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_submission_reliability",
+         "bin.test_active_notice_model", "bin.test_qt_shell_backend_events",
          "bin.test_event_remote_atomicity", "bin.test_event_notice_priority", "bin.test_event_notice_priority_recovery", "bin.test_event_notice_completion_recovery", "bin.test_notice_upload_reliability", "bin.test_notice_undo", "bin.test_notice_undo_fields", "bin.test_notice_undo_pairs",
          "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_repair_deleted_projection", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
         cwd=PROJECT_ROOT,

@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import uuid
 from urllib.parse import urlsplit
@@ -125,14 +126,16 @@ def downloaded_file(data):
     return content
 
 
-def _read_linked_file(get, token, name, *, embedded=False):
+def _read_linked_file(get, token, name, *, embedded=False, image_store=None):
     if not isinstance(name, str) or len(name) > 240 or Path(name).suffix.lower() not in SUFFIXES:
         raise LearningError('材料文件名或格式无法识别，仅支持PDF、DOCX、XLSX、XLSM和PPTX；请核对原文件后显式上传。')
     with downloaded_file(get('drive/v1/' + ('medias/' if embedded else 'files/') + token + '/download')) as content, tempfile.TemporaryDirectory(prefix='sharing-material-') as folder:
         path = Path(folder) / ('material' + Path(name).suffix.lower())
         with path.open('xb') as output:
             digest = _copy_material(content, output)[1]
-        parsed = SharingMaterials.parse(path, digest)
+        from .sharing_material_images import extract_images
+        images = extract_images(path, digest, image_store, name) if image_store else []
+        parsed = SharingMaterials.parse(path, digest, images=images)
     return {'title': name, 'sha256': digest, **parsed}
 
 
@@ -146,11 +149,11 @@ def _file_metadata(get, token):
     return metas[0]
 
 
-def read_material_link(portal, url):
+def read_material_link(portal, url, *, image_store=None):
     target, token, kind, get = cloud_reader(portal, url)
     if kind == 'file':
         meta = _file_metadata(get, token)
-        source = _read_linked_file(get, token, meta.get('title'))
+        source = _read_linked_file(get, token, meta.get('title'), image_store=image_store)
         current = _file_metadata(get, token)
         if any(current.get(key) != meta.get(key) for key in ('title', 'latest_modify_time')):
             raise LearningError('读取期间材料文件已变化，请重新提交。', 409)
@@ -192,7 +195,7 @@ def read_material_link(portal, url):
     extra = {}
     if files:
         file_token, name = next(iter(files.items()))
-        attached = _read_linked_file(get, file_token, name, embedded=True)
+        attached = _read_linked_file(get, file_token, name, embedded=True, image_store=image_store)
         offset = len(text) + 2 if text else 0
         text = text + '\n\n' + attached['text'] if text else attached['text']
         extra = {'attachment': {'name': name, 'sha256': attached['sha256']},
@@ -204,6 +207,8 @@ def read_material_link(portal, url):
         raise LearningError('读取期间分享材料已变化，请重新提交。', 409)
     from .sharing_images import document_images
     images = document_images(blocks, 'https://vnet.feishu.cn/docx/' + token, revision, document.get('title') or '分享材料')
+    if files:
+        images += attached.get('images', [])
     if not text.strip() and not images:
         raise LearningError('分享材料没有可读取的正文或图片，请核对原文档。')
     return {'url': target, 'title': document.get('title') or '分享材料', 'revision': revision,
@@ -214,6 +219,8 @@ def read_material_link(portal, url):
 def _copy_material(content, output):
     digest, size = hashlib.sha256(), 0
     while chunk := content.read(65536):
+        if size % (16 * 1024 * 1024) == 0 and shutil.disk_usage(Path(output.name).parent).free < 64 * 1024 * 1024:
+            raise LearningError('本地磁盘空间不足，材料未完成上传，请释放空间后重试。', 507)
         output.write(chunk)
         digest.update(chunk)
         size += len(chunk)
@@ -238,17 +245,25 @@ class SharingMaterials:
         identity = uuid.uuid4().hex
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / (identity + Path(name).suffix.lower())
+        staged = path
         try:
             with path.open('xb') as output:
                 size, digest = _copy_material(content, output)
-            item = {'id': identity, 'owner': actor['id'], 'name': Path(name).name, 'size': size,
-                    'path': str(path), 'sha256': digest}
+            identity = hashlib.sha256((actor['id'] + ':' + digest + ':' + path.suffix).encode()).hexdigest()[:32]
+            target = self.root / (identity + path.suffix)
             # Staging is local-only; the immutable parsed snapshot travels with its batch.
             with self.learning.transaction() as conn:
+                prior = self.learning._get('sharing_material', identity, conn)
+                if prior and target.is_file():
+                    with target.open('rb') as original:
+                        if hashlib.file_digest(original, 'sha256').hexdigest() == digest:
+                            return {key: prior[key] for key in ('id', 'name', 'size')}
+                path.replace(target)
+                item = {'id': identity, 'owner': actor['id'], 'name': Path(name).name, 'size': size,
+                        'path': str(target), 'sha256': digest}
                 self.learning._put('sharing_material', identity, item, conn, False)
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
+        finally:
+            staged.unlink(missing_ok=True)
         return {key: item[key] for key in ('id', 'name', 'size')}
 
     def read(self, identity, owner):
@@ -260,10 +275,13 @@ class SharingMaterials:
         path = Path(item.get('path', '')).resolve()
         if not path.is_relative_to(self.root) or not path.is_file():
             raise LearningError('原材料已不可用，请重新上传。', 404)
-        return {'id': identity, 'title': item['name'], 'sha256': item['sha256'], **self.parse(path, item['sha256'])}
+        from .sharing_images import SharingImages
+        from .sharing_material_images import extract_images
+        images = extract_images(path, item['sha256'], SharingImages(self.learning, None), item['name'])
+        return {'id': identity, 'title': item['name'], 'sha256': item['sha256'], **self.parse(path, item['sha256'], images=images)}
 
     @staticmethod
-    def parse(path, sha256):
+    def parse(path, sha256, *, images=()):
         from openclaw_service.assistant.lighthouse_document_tools import run_local
         payload = {'path': str(path), 'sha256': sha256, 'page': 1}
         result = run_local('markdown', payload, max_bytes=None)
@@ -277,7 +295,7 @@ class SharingMaterials:
                 if page in pages:
                     continue
                 recognized = run_local('ocr', {**payload, 'page': page}, max_bytes=None)
-                if not recognized.get('text', '').strip():
+                if not recognized.get('text', '').strip() and page not in {image.get('page') for image in images}:
                     raise LearningError(f'PDF第{page}页OCR未提取到有效正文，未使用不完整材料。')
                 pages[page] = f'[page {page}]\n' + recognized['text']
                 low += recognized.get('low_confidence_count', 0)
@@ -289,13 +307,13 @@ class SharingMaterials:
                 offset += len(text) + 1
             result.update(text='\n'.join(texts), references=references,
                           extraction_complete=True, low_confidence_count=low)
-        if not result.get('extraction_complete') or result.get('empty') and not result.get('text', '').strip():
+        if not result.get('extraction_complete') or result.get('empty') and not result.get('text', '').strip() and not images:
             raise LearningError('材料未完整提取到可读正文，不能据此出题。')
-        if not result.get('text', '').strip() or len(result['text']) > 100000:
+        if (not result.get('text', '').strip() and not images) or len(result.get('text', '')) > 100000:
             raise LearningError('材料正文为空或过大，请拆分后上传。')
         return {'text': result['text'],
                 'extraction_complete': True, 'references': result.get('references', []),
-                'low_confidence_count': result.get('low_confidence_count', 0), 'read_at': stamp()}
+                'low_confidence_count': result.get('low_confidence_count', 0), 'read_at': stamp(), **({'images': list(images)} if images else {})}
 
 
 def combine_sources(sources):

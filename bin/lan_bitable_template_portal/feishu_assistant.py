@@ -385,7 +385,7 @@ class Inbox:
         with self.connect() as db:
             rows = db.execute('SELECT question,answer,access FROM topic_posts WHERE chat_id=? AND root_id=? AND app_id=? ORDER BY created_at DESC LIMIT 64',
                               (topic['chat_id'], topic['root_id'], message.get('app_id', ''))).fetchall()
-        parts, required = [], []
+        parts, required, questions = [], [], []
         for question, answer, raw in reversed(rows):
             access = json.loads(raw)
             from .portal_auth import topic_access_allowed
@@ -400,11 +400,12 @@ class Inbox:
                     continue
                 required = combined
                 parts.append('话题问题：' + question + '\n已公开回复（历史）：' + answer)
+                questions.append(safe_text(question, limit=2000))
         # Filter first, then retain bounded older excerpts and fuller recent replies.
         older, recent = parts[:-8], parts[-8:]
         excerpts = ['[较早话题摘要节选] ' + part[:max(48, 3800 // max(1, len(older)))] for part in older]
         context = ('\n\n'.join(excerpts)[:4500] + '\n\n' + '\n\n'.join(part[:900] for part in recent)).strip()[:12000]
-        return {'context': context, 'access': required} if details else context
+        return {'context': context, 'access': required, 'questions': questions[-8:]} if details else context
 
     def defer_delivery(self, identity, *, permanent=False, reason=''):
         with self.connect() as db:

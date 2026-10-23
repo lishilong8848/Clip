@@ -91,6 +91,7 @@ class MaterialRecoveryTests(unittest.TestCase):
             self.core.detail(self.bid, {'id': 'ou_other'})
 
     def test_large_upload_spools_and_sharing_parser_only_waives_byte_limit(self):
+        self.enterContext(patch('lan_bitable_template_portal.sharing_material_images.extract_images', return_value=[]))
         data = b'x' * (21 * 1024 * 1024)
         stream = io.BytesIO(data)
         item = SharingMaterials(self.learning).upload(fixture.ADMIN, 'large.pdf', stream)

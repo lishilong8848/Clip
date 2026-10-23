@@ -44,10 +44,26 @@ function roleFor(prop) {
   }
   return '';
 }
+function brandBlue(rgba) {
+  return rgba&&rgba[2]>rgba[0]+45&&rgba[2]>rgba[1]*1.08&&rgba[1]>rgba[0]+15;
+}
+function paletteColor(token,role,dark,variant) {
+  const rgba=parseColor(token);if(!rgba)return token;
+  const [r,g,b,a]=rgba,light=(Math.max(r,g,b)+Math.min(r,g,b))/510,neutral=Math.max(r,g,b)-Math.min(r,g,b)<32;
+  let name='';
+  if(brandBlue(rgba)&&['text','surface','border'].includes(role))name=role==='surface'?variant:'accent-text';
+  else if(neutral&&role==='surface'&&light>.65)name=light>.97?'surface':'soft';
+  else if(neutral&&role==='border'&&light>.48)name='border';
+  else if(neutral&&role==='text'&&light<.74)name=light<.35?'text':'muted';
+  if(!name)return dark?nightColor(token,role):token;
+  const variable='var(--v2-palette-'+name+','+(dark?nightColor(token,role):token)+')';
+  return a===1?variable:'color-mix(in srgb,'+variable+' '+Number((a*100).toFixed(2))+'%,transparent)';
+}
 const rootSelector='html.workspace-v2[data-v2-theme="dark"]';
-function scope(selector) {
-  if(/^(?::root|html|\.workspace-v2)(?![\w-])/.test(selector))return selector.replace(/^(?::root|html|\.workspace-v2)/,rootSelector);
-  return rootSelector+' '+selector;
+function scope(selector,dark=true) {
+  const prefix=dark?rootSelector:'html.workspace-v2[data-v2-theme="light"][data-v2-palette]';
+  if(/^(?::root|html|\.workspace-v2)(?![\w-])/.test(selector))return selector.replace(/^(?::root|html|\.workspace-v2)/,prefix);
+  return prefix+' '+selector;
 }
 export default function workspaceNightTheme() {
   return {postcssPlugin:'workspace-night-theme',OnceExit(root) {
@@ -58,21 +74,25 @@ export default function workspaceNightTheme() {
       let excluded=false;
       for(let parent=rule.parent;parent;parent=parent.parent)if(parent.type==='atrule'&&(/keyframes/.test(parent.name)||/print|forced-colors/.test(parent.params)))excluded=true;
       if(excluded)continue;
+      for(const dark of [false,true]) {
       const declarations=[];
       const accentFill=rule.nodes.some(decl=>decl.type==='decl'&&/^background(?:-color)?$/.test(decl.prop)&&/^var\(--(?:v2-blue|mb-accent|cf-brand-blue)(?:,|\))/.test(decl.value));
+      const literalAccent=rule.nodes.some(decl=>decl.type==='decl'&&/^background(?:-color)?$/.test(decl.prop)&&brandBlue(parseColor(decl.value)));
+      const variant=/:active/.test(rule.selector)?'pressed':/:hover|:focus/.test(rule.selector)?'hover':'accent';
       rule.each(decl=>{
         if(decl.type!=='decl')return;
         const role=decl.prop==='fill'&&/(?:\btext\b|label)/.test(rule.selector)?'text':roleFor(decl.prop);
         if(!role)return;
-        const value=accentFill&&decl.prop==='color'&&/^(?:white|#fff|#ffffff)$/i.test(decl.value)?'var(--v2-on-accent, #14202a)':/url\(|light-dark\(|var\(--(?:lh-|bot-)/.test(decl.value)?decl.value:decl.value.replace(colorToken,color=>nightColor(color,role));
+        const value=(accentFill||literalAccent)&&decl.prop==='color'&&/^(?:white|#fff|#ffffff)$/i.test(decl.value)?literalAccent?'var(--v2-palette-on-accent)':'var(--v2-on-accent, #14202a)':/url\(|light-dark\(|var\(--(?:lh-|bot-)/.test(decl.value)?decl.value:decl.value.replace(colorToken,color=>paletteColor(color,role,dark,variant));
         // Keep later transparent/none/var() overrides at the same specificity as converted colors.
         declarations.push(decl.clone({value}));
       });
       if(!declarations.length)continue;
-      const themed=rule.clone({selector:selectors.map(scope).join(',')});
+      const themed=rule.clone({selector:selectors.map(selector=>scope(selector,dark)).join(',')});
       themed.removeAll();themed.append(declarations);
       const screen=postcss.atRule({name:'media',params:'screen and (forced-colors: none)'});
       screen.append(themed);rule.after(screen);
+      }
     }
   }};
 }

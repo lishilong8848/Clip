@@ -7,6 +7,7 @@
         <div class="document-actions">
           <NButton v-if="canConfigure" :disabled="busy || tablesLoading || !!tablesError" title="接入数据表" aria-label="接入数据表" @click="openSettings(true)"><Plus :size="16" /><span>接入表</span></NButton>
           <NButton v-if="canConfigure && activeTable" :disabled="busy || tablesLoading || !!tablesError" title="数据表配置" aria-label="数据表配置" @click="openSettings(false)"><Settings2 :size="16" /></NButton>
+          <NButton v-if="canConfigure" :disabled="busy" title="本地附件缓存" aria-label="本地附件缓存" @click="openStorage"><HardDrive :size="16" /></NButton>
           <NButton :loading="tablesLoading || listLoading" :disabled="busy" title="刷新文件列表" aria-label="刷新文件列表" @click="reload"><RefreshCw :size="16" /></NButton>
           <NButton v-if="activeTable?.capabilities?.create" type="primary" :disabled="busy || !schema || !!tablesError" @click="createRecord"><Plus :size="16" />新建资料</NButton>
         </div>
@@ -16,6 +17,12 @@
       <NAlert v-if="cleanupPending" type="info" :bordered="false" role="status">接入已移除，来源索引后台清理中（{{ cleanupPending }} 项）。</NAlert>
       <NAlert v-if="tables.cleanup_error" type="warning" :bordered="false" role="alert">后台清理尚未完成：{{ tables.cleanup_error }}</NAlert>
       <NAlert v-if="maintenanceIntent && !maintenanceOpen" type="warning" :bordered="false" role="alert">本地操作回执尚未确认。<NButton text :disabled="busy" @click="maintenanceOpen = true">继续原操作</NButton></NAlert>
+      <details v-if="activeTable && (operations.length || operationError)" class="document-pending" open><summary>待核验操作<template v-if="operations.length"> · {{ operations.length }}</template></summary>
+        <div v-for="operation in operations" :key="operation.operation_id" class="document-operation"><div><strong>{{ operation.kind === 'create' ? '新增资料' : operation.kind === 'attachment' ? '附件上传' : '资料修改' }}</strong><small>{{ operation.actor_name }} · {{ timeText(operation.created_at) }} · {{ operation.reason }}</small></div>
+          <NInput v-if="!operation.record_id" v-model:value="operationTargets[operation.operation_id]" placeholder="核对飞书原表后填写记录 ID" :disabled="busy" :input-props="{ 'aria-label': '核验记录 ID' }" />
+          <NButton :disabled="busy" :loading="verifying === operation.operation_id" @click="verifyOperation(operation)"><RefreshCw :size="16" />核验原操作</NButton>
+        </div><p v-if="operationError" class="document-error" role="alert">{{ operationError }}</p>
+      </details>
       <nav v-if="activeTable" class="document-table-context" aria-label="资料表位置">
         <NButton :disabled="busy" @click="selectTable('')"><ChevronLeft :size="16" />全部数据表</NButton>
         <strong>{{ activeTable.name }}</strong>
@@ -28,11 +35,12 @@
           <article v-for="table in tables.items" :key="table.key" class="document-source">
             <div class="document-source-top"><button type="button" class="document-source-entry" :disabled="busy || tablesLoading" :aria-label="'打开数据表：' + table.name" @click="selectTable(table.key)">
               <FolderOpen :size="22" aria-hidden="true" />
-              <span><strong>{{ table.name }}</strong><small>{{ tableScopes(table) }}</small></span>
+              <span><strong>{{ table.name }}</strong><small>{{ tableScopes(table) }}</small><small v-if="table.summary">{{ table.summary.records }} 条缓存记录 · {{ timeText(table.summary.updated_at) }}<template v-if="table.summary.pending_items"> · {{ table.summary.pending_items }} 项待处理</template></small></span>
               <NTag size="small" :bordered="false">{{ table.capabilities?.create ? '可新增' : '可查看' }}</NTag>
               <ChevronRight :size="18" aria-hidden="true" />
             </button><NButton v-if="canRemove(table)" quaternary :disabled="busy || tablesLoading" title="移除本地接入" :aria-label="'移除本地接入：' + table.name" @click="confirmRemove(table)"><Trash2 :size="17" /></NButton></div>
             <a v-if="sourceLink(table)" class="document-source-link" :href="sourceLink(table)" target="_blank" rel="noopener noreferrer" :aria-label="'打开飞书原表：' + table.name"><ExternalLink :size="14" /><span>{{ sourceLink(table) }}</span></a>
+            <p v-if="table.summary?.error" class="document-error" role="status">{{ table.summary.error }}</p>
           </article>
         </div>
       </section>
@@ -61,9 +69,11 @@
         <NButton :disabled="busy || listLoading || total === undefined || total === 0" @click="selectAll"><ListChecks :size="16" />选择全部匹配记录（跨页）</NButton>
         <NButton :disabled="busy || !hasSelection" @click="clearSelection"><X :size="16" />清空选择</NButton>
         <NButton type="primary" :disabled="busy || listLoading || !hasSelection" @click="confirmReindex()"><RefreshCw :size="16" />重新向量化选中</NButton>
+        <NSelect v-model:value="reindexMode" :options="[{ value: 'all', label: '全部重建' }, { value: 'failed', label: '仅重试失败项' }, { value: 'missing', label: '仅补齐缺失项' }]" :disabled="busy" aria-label="向量化处理方式" class="document-reindex-mode" />
         <span class="document-selection-summary" role="status">{{ selectionLabel }}</span>
       </div>
       <NAlert v-if="listPending" type="info" :bordered="false" role="status">来源资料正在后台同步{{ records.length ? '，当前显示已缓存资料。' : '，完成后自动显示列表。' }}</NAlert>
+      <span v-if="activeTable && listCache?.updated_at" class="document-muted">本地记录更新于 {{ timeText(listCache.updated_at) }}</span>
       <NAlert v-if="listError" type="error" :bordered="false" role="alert">{{ listError }} <NButton text :disabled="busy || listLoading" @click="retryRecords">{{ syncFailed ? '重试同步并读取' : '重试读取列表' }}</NButton></NAlert>
       <div v-if="tablesLoading && !tables.items.length || listLoading && !records.length" class="document-loading" aria-label="正在读取资料" role="status"><NSkeleton v-for="index in 5" :key="index" height="48px" /></div>
       <NEmpty v-else-if="!tablesLoading && !tablesError && !tables.items.length" description="尚无可访问的数据表" />
@@ -98,7 +108,8 @@
           <div class="document-detail" data-v2-inline-feedback>
             <NAlert v-if="detailError" type="error" :bordered="false" role="alert">{{ detailError }} <NButton v-if="!detail && targetId" text :disabled="busy" @click="openRecord(targetId)">重试读取详情</NButton></NAlert>
             <NAlert v-if="pendingWrite || pendingUpload" type="warning" :bordered="false" role="alert">操作回执尚未确认，输入及原操作编号已保留。请核验后按原操作重试。</NAlert>
-            <NAlert v-if="conflict" type="warning" :bordered="false" role="alert">资料已被更新，尚未保存的输入已保留。<NButton text :disabled="busy" @click="readLatest">读取最新版本，保留输入</NButton></NAlert>
+            <NAlert v-if="conflict" type="warning" :bordered="false" role="alert">资料已被更新，尚未保存的输入已保留。<NButton v-if="!fieldConflicts.length" text :disabled="busy" @click="readLatest">读取最新版本，保留输入</NButton><span v-else>请先选择每个冲突字段需要保留的值。</span></NAlert>
+            <section v-if="fieldConflicts.length" class="document-conflicts" aria-label="字段冲突对比"><article v-for="item in fieldConflicts" :key="item.id"><strong>{{ schema?.fields.find(field => field.id === item.id)?.name || item.id }}</strong><div><span>我的修改：{{ valueText(item.mine) }}</span><span>最新值：{{ valueText(item.latest) }}</span></div><NButton :disabled="busy" @click="resolveConflict(item.id, true)">保留我的修改</NButton><NButton :disabled="busy" @click="resolveConflict(item.id, false)">使用最新值</NButton></article></section>
             <NAlert v-if="detail && indexFailed(detail)" type="warning" :bordered="false" role="status">资料记录已保存。{{ indexLabel(detail) }}，请查看下方各项原因。</NAlert>
             <NAlert v-else-if="detail && indexState(detail) === 'unsupported'" type="warning" :bordered="false" role="status">资料已保存，部分附件格式暂不支持正文解析。</NAlert>
             <NAlert v-else-if="notice" type="success" :bordered="false" role="status">{{ notice }}</NAlert>
@@ -107,14 +118,14 @@
             <div v-if="detailLoading" class="document-loading" role="status" aria-label="正在读取详情"><NSkeleton v-for="index in 4" :key="index" height="44px" /></div>
             <template v-else-if="detail || creating">
               <div class="document-record-source"><FolderOpen :size="16" /><span>所属数据表</span><strong>{{ activeTable?.name }}</strong></div>
-              <div v-if="detail" class="document-detail-bar"><NTag :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="!editing && canReindex && detail.capabilities.reindex" :disabled="busy || !!pendingUpload" title="重新向量化此资料" aria-label="重新向量化此资料" @click="confirmReindex(detail)"><RefreshCw :size="15" />重新向量化</NButton><NButton :disabled="busy || detailLoading || !!pendingWrite || !!pendingUpload" :title="editing ? '重新读取资料，保留输入' : '重新读取资料'" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
+              <div v-if="detail" class="document-detail-bar"><NTag :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="!editing && canReindex && detail.capabilities.reindex" :disabled="busy || !!pendingUpload" title="重新向量化此资料" aria-label="重新向量化此资料" @click="confirmReindex(detail)"><RefreshCw :size="15" />重新向量化</NButton><NButton :disabled="busy || detailLoading || !!pendingWrite || !!pendingUpload || !!fieldConflicts.length" :title="editing ? '重新读取资料，保留输入' : '重新读取资料'" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
               <NTabs v-if="!creating" :value="detailTab" type="line" @update:value="selectDetailTab"><NTab name="fields">资料详情</NTab><NTab v-if="detail" name="versions" :disabled="editing || busy">附件版本</NTab></NTabs>
-              <form v-if="detailTab === 'fields'" id="document-record-form" ref="recordForm" class="document-field-grid" @submit.prevent="saveRecord">
+              <form v-if="detailTab === 'fields'" id="document-record-form" ref="recordForm" class="document-field-grid" :class="{ 'document-read-fields': !editing }" @submit.prevent="saveRecord">
                 <label v-for="field in formFields" :key="field.id" class="document-detail-field" :class="{ 'document-wide': ['url', 'files', 'readonly'].includes(fieldKind(field)) }" :data-field-id="field.id"><span>{{ field.name }}<span v-if="editing && requiredField(field) && canEditField(field)" class="document-required"> *</span><LockKeyhole v-if="editing && !canEditField(field)" :size="12" aria-label="只读字段" /></span><DocumentLibraryField :field="field" :model-value="editing ? draft[field.id] : detail?.fields[field.id]" :editing="editing && canEditField(field)" :disabled="busy || !!pendingWrite || conflict" @update:model-value="value => updateField(field.id, value)" /><small v-if="field.read_only_reason" class="document-muted">{{ field.read_only_reason }}</small><small v-if="fieldErrors[field.id]" class="document-error" role="alert">{{ fieldErrors[field.id] }}</small></label>
                 <label v-if="editing" class="document-detail-field document-wide"><span>变更原因 *</span><NInput v-model:value="reason" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" :disabled="busy || !!pendingWrite" :maxlength="500" :input-props="{ 'aria-label': '变更原因' }" /></label>
-                <details v-if="creating && deferredFields.length" class="document-system-fields document-wide"><summary>系统与附件字段 · {{ deferredFields.length }}</summary><div class="document-field-grid"><div v-for="field in deferredFields" :key="field.id" class="document-detail-field"><span><LockKeyhole :size="12" />{{ field.name }}</span><small class="document-muted">{{ field.read_only_reason || (fieldKind(field) === 'files' ? '保存资料后添加附件' : '只读') }}</small></div></div></details>
+                <details v-if="deferredFields.length" class="document-system-fields document-wide"><summary>系统与只读字段 · {{ deferredFields.length }}</summary><div class="document-field-grid"><div v-for="field in deferredFields" :key="field.id" class="document-detail-field"><span><LockKeyhole :size="12" />{{ field.name }}</span><DocumentLibraryField v-if="!creating" :field="field" :model-value="detail?.fields[field.id]" /><small class="document-muted">{{ field.read_only_reason || (fieldKind(field) === 'files' ? '保存资料后添加附件' : '只读') }}</small></div></div></details>
               </form>
-              <section v-if="detailTab === 'fields' && detail" class="document-attachments" aria-label="当前附件"><h2>当前附件 <span>{{ detail.attachments.length }}</span></h2><div v-for="file in detail.attachments" :key="file.id" class="document-attachment"><img v-if="file.mime_type?.startsWith('image/')" :src="fileUrl(file)" :alt="file.name" width="40" height="40" loading="lazy" /><FileText v-else :size="23" aria-hidden="true" /><div><strong>{{ file.name }}</strong><small>{{ schema?.fields.find(field => field.id === file.field_id)?.name }} · {{ sizeText(file.size) }}{{ file.version ? ' · V' + file.version : '' }}</small></div><a :href="fileUrl(file)" target="_blank" rel="noopener noreferrer" :aria-label="'打开附件：' + file.name" title="打开附件"><ExternalLink :size="16" /></a></div><p v-if="!detail.attachments.length" class="document-muted">暂无附件</p>
+              <section v-if="detailTab === 'fields' && detail" class="document-attachments" aria-label="当前附件"><h2>当前附件 <span>{{ detail.attachments.length }}</span></h2><div v-for="file in detail.attachments" :key="file.id" class="document-attachment"><img v-if="file.mime_type?.startsWith('image/')" :src="previewUrl(file)" :alt="file.name" width="40" height="40" loading="lazy" /><FileText v-else :size="23" aria-hidden="true" /><div><strong>{{ file.name }}</strong><small>{{ schema?.fields.find(field => field.id === file.field_id)?.name }} · {{ sizeText(file.size) }}{{ file.version ? ' · V' + file.version : '' }}</small></div><NButton quaternary :aria-label="'预览附件：' + file.name" title="本页预览" @click="openPreview(file, detail.attachments)"><Eye :size="17" /></NButton><a :href="fileUrl(file)" target="_blank" rel="noopener noreferrer" :aria-label="'打开附件：' + file.name" title="下载附件"><Download :size="16" /></a></div><p v-if="!detail.attachments.length" class="document-muted">暂无附件</p>
                 <div v-if="detail.capabilities.upload && !editing" class="document-upload"><div class="document-upload-controls"><NSelect v-model:value="uploadField" :options="attachmentFields.map(field => ({ value: field.id, label: field.name }))" :disabled="busy || !!pendingUpload" aria-label="上传附件字段" /><NSelect v-model:value="replaceId" :options="[{ value: '', label: '新增附件版本' }, ...detail.attachments.filter(file => file.field_id === uploadField).map(file => ({ value: file.id, label: '替换：' + file.name }))]" :disabled="busy || !!pendingUpload" aria-label="附件替换目标" /></div><label class="document-file-picker"><Upload :size="18" /><span>{{ pickedFile?.name || '选择附件' }}</span><input type="file" :disabled="busy || !!pendingUpload" aria-label="选择资料附件" @change="pickFile" /></label><label class="document-detail-field"><span>附件变更原因 *</span><NInput v-model:value="uploadReason" :disabled="busy || !!pendingUpload" :input-props="{ 'aria-label': '附件变更原因' }" /></label><NProgress v-if="uploading" type="line" :percentage="Math.min(progress, 99)" :show-indicator="true" /><NButton type="primary" :loading="uploading" :disabled="busy || !pickedFile || !uploadField || !uploadReason.trim() || conflict" @click="uploadAttachment"><Upload :size="16" />{{ pendingUpload ? '按原操作重试上传' : '上传附件' }}</NButton></div>
               </section>
               <section v-if="detailTab === 'versions'" class="document-versions" aria-label="附件版本记录">
@@ -122,7 +133,7 @@
                 <NSpin :show="versionsLoading">
                   <ol v-if="versions.length"><li v-for="file in versions" :key="file.id + ':' + file.version">
                     <History :size="17" /><div><strong>{{ file.name }}</strong><small>V{{ file.version || '—' }} · {{ file.created_at || '时间未提供' }}{{ file.created_by ? ' · ' + file.created_by : '' }}</small></div>
-                    <NTag v-if="file.current" size="small" :bordered="false">当前</NTag><a :href="fileUrl(file)" target="_blank" rel="noopener noreferrer" :aria-label="'打开历史附件：' + file.name" title="打开历史附件"><ExternalLink :size="16" /></a>
+                    <NTag v-if="file.current" size="small" :bordered="false">当前</NTag><NButton quaternary :aria-label="'预览历史附件：' + file.name" title="本页预览" @click="openPreview(file, versions)"><Eye :size="17" /></NButton><a :href="fileUrl(file)" target="_blank" rel="noopener noreferrer" :aria-label="'打开历史附件：' + file.name" title="下载历史附件"><Download :size="16" /></a>
                   </li></ol>
                   <NEmpty v-else-if="!versionsLoading && !versionsError && versionsReady" description="暂无附件版本记录" />
                 </NSpin>
@@ -132,6 +143,11 @@
           <template #footer><div class="document-detail-footer"><NButton :disabled="busy" @click="closeDetail">{{ editing ? '取消' : '关闭' }}</NButton><NButton v-if="editing" type="primary" attr-type="submit" form="document-record-form" :loading="saving" :disabled="busy || conflict || !reason.trim() || !creating && !dirty">{{ pendingWrite ? '按原操作重试保存' : '保存资料' }}</NButton></div></template>
         </NDrawerContent>
       </NDrawer>
+      <NModal :show="!!previewFile" preset="card" :title="previewFile?.name" :style="{ ...styles, width: 'min(960px, calc(100vw - 24px))' }" @update:show="value => { if (!value) previewFile = null }"><div v-if="previewFile" class="document-preview">
+        <div class="document-preview-actions"><NButton :disabled="previewPosition <= 0" aria-label="上一个附件" @click="stepPreview(-1)"><ChevronLeft :size="18" /></NButton><span>{{ previewPosition + 1 }}/{{ previewFiles.length }} · {{ sizeText(previewFile.size) }}</span><NButton :disabled="previewPosition >= previewFiles.length - 1" aria-label="下一个附件" @click="stepPreview(1)"><ChevronRight :size="18" /></NButton><a :href="fileUrl(previewFile)" target="_blank" rel="noopener noreferrer"><Download :size="17" />下载</a></div>
+        <NAlert v-if="previewError" type="error" :bordered="false">{{ previewError }}</NAlert><img v-if="previewKind === 'image'" :src="previewUrl(previewFile)" :alt="previewFile.name" @error="previewError = '图片读取失败，请重新打开或下载核对。'" /><iframe v-else-if="previewKind === 'pdf'" :src="previewUrl(previewFile)" :title="previewFile.name" referrerpolicy="no-referrer" /><NEmpty v-else description="此格式暂不支持本页预览，请下载查看。" />
+      </div></NModal>
+      <NModal v-model:show="storageOpen" preset="dialog" title="本地附件缓存" :mask-closable="!storageBusy" :close-on-esc="!storageBusy" :closable="!storageBusy"><NAlert v-if="storageError" type="error" :bordered="false">{{ storageError }}</NAlert><dl v-if="storageInfo" class="document-storage"><dt>已缓存</dt><dd>{{ storageInfo.files }} 个 · {{ sizeText(storageInfo.bytes) }}</dd><dt>可安全清理</dt><dd>{{ storageInfo.orphan_files }} 个 · {{ sizeText(storageInfo.orphan_bytes) }}</dd><dt>磁盘可用</dt><dd>{{ sizeText(storageInfo.free_bytes) }}</dd></dl><p class="document-muted">仅清理超过一天、且没有记录、历史版本或待处理任务引用的原件缓存，不删除飞书文件。</p><template #action><NButton :disabled="storageBusy" @click="storageOpen = false">关闭</NButton><NButton type="warning" :loading="storageBusy" :disabled="!storageInfo?.orphan_files || storageBusy" @click="cleanStorage">清理无引用缓存</NButton></template></NModal>
       <DocumentLibraryTableSettings :show="settingsOpen" :initial="settingsNew ? undefined : activeTable" :schema="settingsNew ? undefined : schema || undefined" :scopes="configurationScopes" @close="closeSettings" @saved="configurationSaved" />
       <NModal :show="maintenanceOpen" preset="dialog" class="document-maintenance-dialog" :style="{ ...styles, width: 'min(520px, calc(100vw - 32px))' }" :title="maintenanceIntent?.kind === 'remove' ? '移除本地接入？' : '确认重新向量化？'" :mask-closable="!maintenanceBusy" :close-on-esc="!maintenanceBusy" :closable="!maintenanceBusy" @update:show="value => { if (!value) closeMaintenance() }">
         <p>{{ maintenanceIntent?.label }}</p>
@@ -148,12 +164,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCheckbox, NConfigProvider, NDatePicker, NDrawer, NDrawerContent, NEmpty, NInput, NInputNumber, NModal, NProgress, NSelect, NSkeleton, NSpin, NTab, NTabs, NTag, dateZhCN, zhCN, useThemeVars } from 'naive-ui';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ExternalLink, FileText, FolderOpen, History, ListChecks, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from 'lucide-vue-next';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Download, Eye, HardDrive, ExternalLink, FileText, FolderOpen, History, ListChecks, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from 'lucide-vue-next';
 import { registerNavigationGuard } from '../navigation';
 import { AUTH_EXPIRED_EVENT, ApiError, requestJson } from '../api/client';
 import { readCacheKey } from '../api/readCache';
 import { cloneLibraryValue as clone, documentLibraryApi as api, fieldKind, fieldValue, newLibraryOperationId, valueText, writableField,
-  type LibraryAttachment, type LibraryCache, type LibraryField, type LibraryFields, type LibraryFilter, type LibraryLocalOperation, type LibraryMutation, type LibraryRecord, type LibraryReindex, type LibrarySchema, type LibraryTable, type LibraryTables } from '../api/documentLibrary';
+  type LibraryAttachment, type LibraryCache, type LibraryField, type LibraryFields, type LibraryFilter, type LibraryLocalOperation, type LibraryMutation, type LibraryPendingOperation, type LibraryStorage, type LibraryRecord, type LibraryReindex, type LibrarySchema, type LibraryTable, type LibraryTables } from '../api/documentLibrary';
 import DocumentLibraryField from './DocumentLibraryField.vue';
 import DocumentLibraryTableSettings from './DocumentLibraryTableSettings.vue';
 import VnetBackButton from './VnetBackButton.vue';
@@ -199,6 +215,13 @@ type MaintenanceIntent = { kind: 'reindex'; key: string; label: string; payload:
   | { kind: 'remove'; key: string; label: string; payload: LibraryLocalOperation };
 const maintenanceIntent = ref<MaintenanceIntent | null>(null), maintenanceOpen = ref(false), maintenanceBusy = ref(false);
 const maintenanceError = ref(''), maintenanceUncertain = ref(false);
+const reindexMode = ref<'all' | 'failed' | 'missing'>('all');
+const operations = ref<LibraryPendingOperation[]>([]), operationTargets = ref<Record<string, string>>({}), operationError = ref(''), verifying = ref('');
+const storageOpen = ref(false), storageBusy = ref(false), storageInfo = ref<LibraryStorage | null>(null), storageError = ref('');
+const previewFile = ref<LibraryAttachment | null>(null), previewFiles = ref<LibraryAttachment[]>([]), previewError = ref('');
+const previewPosition = computed(() => previewFiles.value.findIndex(file => file.id === previewFile.value?.id && file.version === previewFile.value?.version));
+const previewKind = computed(() => /\.(png|jpe?g|gif|webp)$/i.test(previewFile.value?.name || '') ? 'image' : /\.pdf$/i.test(previewFile.value?.name || '') ? 'pdf' : 'unsupported');
+const fieldConflicts = ref<Array<{ id: string; mine: unknown; latest: unknown }>>([]);
 const configurationScopes = computed(() => tables.value.scopes || actorScopes.value);
 const scopeOptions = computed(() => configurationScopes.value.filter(scope => !activeTable.value?.read_scopes || activeTable.value.read_scopes.includes(scope.value)));
 const displayFields = computed(() => (schema.value?.display_fields || []).map(id => schema.value!.fields.find(field => field.id === id)).filter((field): field is LibraryField => !!field));
@@ -206,15 +229,16 @@ const attachmentFields = computed(() => (schema.value?.attachment_fields || []).
 const detailOpen = ref(false), detail = ref<LibraryRecord | null>(null), targetId = ref(''), detailLoading = ref(false), detailError = ref('');
 const editing = ref(false), creating = ref(false), detailTab = ref('fields'), draft = ref<LibraryFields>({}), baseline = ref<LibraryFields>({}), reason = ref('');
 const recordForm = ref<HTMLFormElement | null>(null);
-const formFields = computed(() => (schema.value?.fields || []).filter(field => !creating.value || canEditField(field)));
-const deferredFields = computed(() => (schema.value?.fields || []).filter(field => !canEditField(field)));
+const formFields = computed(() => (schema.value?.fields || []).filter(field => canEditField(field)).sort((a, b) =>
+  (displayFields.value.findIndex(field => field.id === a.id) + 1 || 1000) - (displayFields.value.findIndex(field => field.id === b.id) + 1 || 1000)));
+const deferredFields = computed(() => (schema.value?.fields || []).filter(field => !canEditField(field) && (creating.value || fieldKind(field) !== 'files')));
 const fieldErrors = ref<Record<string, string>>({}), conflict = ref(false), saving = ref(false), uploading = ref(false), progress = ref(0);
 const pendingWrite = ref<LibraryMutation | null>(null);
 type UploadIntent = { file: File; field_id: string; expected_revision: string; operation_id: string; reason: string; replace_attachment_id: string };
 const pendingUpload = ref<UploadIntent | null>(null), pickedFile = ref<File | null>(null), uploadField = ref(''), replaceId = ref(''), uploadReason = ref('');
 const versions = ref<LibraryAttachment[]>([]), versionsLoading = ref(false), versionsError = ref(''), versionsReady = ref(false);
 const settingsOpen = ref(false), settingsNew = ref(false), discardOpen = ref(false);
-const busy = computed(() => saving.value || uploading.value || maintenanceBusy.value);
+const busy = computed(() => saving.value || uploading.value || maintenanceBusy.value || !!verifying.value || storageBusy.value);
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(baseline.value));
 let tablesRead: AbortController | undefined, listRead: AbortController | undefined, detailRead: AbortController | undefined, versionRead: AbortController | undefined;
 let maintenanceRead: AbortController | undefined, pollTimer: number | undefined, contextEpoch = 0;
@@ -303,6 +327,52 @@ function indexItemLabel(item: IndexItem) {
 const indexItems = computed(() => detail.value?.knowledge_items || []);
 function sizeText(size?: number) { return size === undefined ? '大小未提供' : size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(1) + ' KB' : (size / 1048576).toFixed(1) + ' MB'; }
 function fileUrl(file: LibraryAttachment) { return api.fileUrl(activeKey.value, detail.value!.record_id, file); }
+function previewUrl(file: LibraryAttachment) { const url = new URL(fileUrl(file), window.location.origin); url.searchParams.set('preview', '1'); return url.pathname + url.search; }
+function timeText(value: number) { return value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(value * 1000) : '尚未同步'; }
+function openPreview(file: LibraryAttachment, files: LibraryAttachment[]) { previewFiles.value = files; previewFile.value = file; previewError.value = ''; }
+function stepPreview(direction: number) { const file = previewFiles.value[previewPosition.value + direction]; if (file) { previewFile.value = file; previewError.value = ''; } }
+async function openStorage() {
+  storageOpen.value = true; storageBusy.value = true; storageError.value = '';
+  const identity = identityKey;
+  try { const value = await api.storage(); if (!disposed && identity === identityKey) storageInfo.value = value; }
+  catch (error) { if (!disposed && identity === identityKey) storageError.value = errorText(error); }
+  finally { if (identity === identityKey) storageBusy.value = false; }
+}
+async function cleanStorage() {
+  if (!storageInfo.value || storageBusy.value) return;
+  storageBusy.value = true; storageError.value = '';
+  const identity = identityKey;
+  try { const value = await api.storage(storageInfo.value.revision); if (!disposed && identity === identityKey) storageInfo.value = value; }
+  catch (error) { if (!disposed && identity === identityKey) storageError.value = errorText(error); }
+  finally { if (identity === identityKey) storageBusy.value = false; }
+}
+async function loadOperations() {
+  const key = activeKey.value, epoch = contextEpoch;
+  if (!key) return;
+  try { const value = await api.operations(key); if (!disposed && key === activeKey.value && epoch === contextEpoch) { operations.value = value; operationError.value = ''; } }
+  catch (error) { if (!disposed && epoch === contextEpoch) { if (error instanceof ApiError && [401, 403].includes(error.status)) operations.value = []; operationError.value = errorText(error); } }
+}
+async function verifyOperation(operation: LibraryPendingOperation) {
+  if (busy.value) return;
+  verifying.value = operation.operation_id; operationError.value = '';
+  const epoch = contextEpoch, key = activeKey.value;
+  try {
+    const result = await api.verify(key, operation.operation_id, operationTargets.value[operation.operation_id]);
+    if (disposed || epoch !== contextEpoch) return;
+    if (result.status === 'completed') {
+      notice.value = '原操作已核验成功，没有重复提交。';
+      if (detail.value && result.record?.record_id === detail.value.record_id) saved(result.record);
+      await loadOperations(); await readRecords(currentCursor.value, cursorTrail.value);
+    } else operationError.value = result.message || '原操作仍待核验，本次未重复提交。';
+  } catch (error) { if (!disposed && epoch === contextEpoch) operationError.value = errorText(error); }
+  finally { if (epoch === contextEpoch) verifying.value = ''; }
+}
+function resolveConflict(id: string, mine: boolean) {
+  const item = fieldConflicts.value.find(field => field.id === id);
+  if (item) draft.value[id] = mine ? item.mine : item.latest;
+  fieldConflicts.value = fieldConflicts.value.filter(field => field.id !== id);
+  conflict.value = fieldConflicts.value.length > 0;
+}
 function hasUnsaved() { return settingsOpen.value || detailOpen.value && (editing.value && (dirty.value || !!reason.value.trim()) || !!pickedFile.value || !!pendingWrite.value || !!pendingUpload.value); }
 function attemptLeave(action: () => void): boolean {
   if (busy.value) return false;
@@ -348,8 +418,9 @@ function confirmReindex(record?: LibraryRecord) {
   const payload: LibraryReindex = record ? { ...operation, record_ids: [record.record_id] }
     : allSelected.value ? { ...operation, all: true, q: appliedQuery.value, scope: scope.value, filters: clone(appliedFilters.value) }
     : { ...operation, record_ids: selectedIds.value.slice() };
+  payload.mode = reindexMode.value;
   maintenanceIntent.value = { kind: 'reindex', key: activeKey.value, payload,
-    label: `数据表：${activeTable.value!.name}；${record ? '单条资料：' + title(record) : selectionLabel.value}` };
+    label: `数据表：${activeTable.value!.name}；${record ? '单条资料：' + title(record) : selectionLabel.value}；${{ all: '全部重建', failed: '仅重试失败项', missing: '仅补齐缺失项' }[reindexMode.value]}` };
   maintenanceOpen.value = true;
 }
 async function runMaintenance() {
@@ -384,6 +455,7 @@ async function runMaintenance() {
   } finally { if (maintenanceRead === read) maintenanceBusy.value = false; }
 }
 function resetView(clearSchema = true) {
+  operations.value = []; operationTargets.value = {}; operationError.value = ''; previewFile.value = null;
   contextEpoch++; listRead?.abort(); detailRead?.abort(); versionRead?.abort();
   clearSelection(); resetMaintenance(); resetDetail(); detailOpen.value = false; detail.value = null; targetId.value = '';
   draft.value = {}; baseline.value = {}; discardOpen.value = false; leaveAction = undefined;
@@ -420,6 +492,7 @@ async function loadTables(preferred?: string, refreshSchema = false, silent = fa
 async function loadTable(reset = false, refreshSchema = false, silent = false) {
   if (reset) resetView();
   if (!activeKey.value) return;
+  void loadOperations();
   if (silent && schema.value && !refreshSchema) { await readRecords(currentCursor.value, cursorTrail.value, true); return; }
   listRead?.abort();
   const read = listRead = new AbortController(); const key = activeKey.value; listLoading.value = true;
@@ -502,6 +575,7 @@ function goPage(page: number) {
     void readRecords(page === 1 ? '' : String((page - 1) * pageSize), []);
 }
 function resetDetail() {
+  previewFile.value = null; fieldConflicts.value = [];
   detailError.value = ''; notice.value = ''; reason.value = ''; editing.value = false; creating.value = false; fieldErrors.value = {}; conflict.value = false;
   pendingWrite.value = null; pendingUpload.value = null; pickedFile.value = null; replaceId.value = ''; uploadReason.value = '';
   detailTab.value = 'fields'; versions.value = []; versionsError.value = ''; versionsReady.value = false;
@@ -557,6 +631,7 @@ function saved(record: LibraryRecord) {
   applyDetail(record); targetId.value = record.record_id; creating.value = false; editing.value = false; pendingWrite.value = null; pendingUpload.value = null; conflict.value = false;
   const index = records.value.findIndex(item => item.record_id === record.record_id); if (index >= 0) records.value[index] = record;
   notice.value = indexFailed(record) ? '资料保存成功，知识索引待重试。' : '资料保存成功。';
+  void loadOperations();
   void readRecords(currentCursor.value, cursorTrail.value);
 }
 async function saveRecord() {
@@ -566,18 +641,25 @@ async function saveRecord() {
   saving.value = true; detailError.value = ''; notice.value = '';
   const epoch = contextEpoch;
   try { const record = await api.save(activeKey.value, creating.value ? undefined : detail.value!.record_id, clone(pendingWrite.value)); if (!disposed && epoch === contextEpoch) saved(record); }
-  catch (error) { if (!disposed && epoch === contextEpoch) { detailError.value = errorText(error); if (!uncertain(error)) pendingWrite.value = null; if (error instanceof ApiError && error.status === 409) conflict.value = true; } }
+  catch (error) { if (!disposed && epoch === contextEpoch) { detailError.value = errorText(error); if (!uncertain(error)) pendingWrite.value = null; else void loadOperations(); if (error instanceof ApiError && error.status === 409) conflict.value = true; } }
   finally { if (epoch === contextEpoch) saving.value = false; }
 }
 async function readLatest() {
-  if (!detail.value || busy.value || pendingWrite.value || pendingUpload.value) return;
+  if (!detail.value || busy.value || pendingWrite.value || pendingUpload.value || fieldConflicts.value.length) return;
   detailRead?.abort(); const read = detailRead = new AbortController(); detailLoading.value = true; detailError.value = '';
   const unsaved = clone(changes());
+  const old = clone(baseline.value);
   try {
     const record = await api.record(activeKey.value, detail.value.record_id, read.signal, true);
     if (read.signal.aborted || disposed) return;
-    applyDetail(record); if (editing.value) draft.value = { ...draft.value, ...unsaved };
-    conflict.value = false;
+    applyDetail(record);
+    fieldConflicts.value = [];
+    if (editing.value) for (const [id, mine] of Object.entries(unsaved)) {
+      if (JSON.stringify(old[id]) !== JSON.stringify(record.fields[id]) && JSON.stringify(mine) !== JSON.stringify(record.fields[id]))
+        fieldConflicts.value.push({ id, mine, latest: record.fields[id] === undefined ? undefined : clone(record.fields[id]) });
+      else draft.value[id] = mine;
+    }
+    conflict.value = fieldConflicts.value.length > 0;
   } catch (error) { if (!read.signal.aborted && !disposed && !withdrawUnauthorized(error)) detailError.value = errorText(error); }
   finally { if (detailRead === read) detailLoading.value = false; }
 }
@@ -596,7 +678,7 @@ async function uploadAttachment() {
   uploading.value = true; detailError.value = ''; progress.value = 0; notice.value = '';
   const epoch = contextEpoch;
   try { const record = await api.upload(activeKey.value, detail.value.record_id, form, percent => { if (epoch === contextEpoch) progress.value = percent; }); if (!disposed && epoch === contextEpoch) { saved(record); pickedFile.value = null; uploadReason.value = ''; versionsReady.value = false; } }
-  catch (error) { if (!disposed && epoch === contextEpoch) { detailError.value = errorText(error); if (!uncertain(error)) pendingUpload.value = null; if (error instanceof ApiError && error.status === 409) conflict.value = true; } }
+  catch (error) { if (!disposed && epoch === contextEpoch) { detailError.value = errorText(error); if (!uncertain(error)) pendingUpload.value = null; else void loadOperations(); if (error instanceof ApiError && error.status === 409) conflict.value = true; } }
   finally { if (epoch === contextEpoch) uploading.value = false; }
 }
 function selectDetailTab(value: string) { detailTab.value = value; if (value === 'versions' && !versionsReady.value) void loadVersions(); }
@@ -624,6 +706,8 @@ function identityChanged() {
   if (next) void loadTables();
 }
 function clearIdentity() {
+  storageOpen.value = false; storageInfo.value = null; previewFile.value = null;
+  verifying.value = ''; storageBusy.value = false;
   tablesRead?.abort(); resetView(); tables.value = { items: [] }; activeKey.value = ''; actorScopes.value = [];
   settingsOpen.value = false; contextReady = false; tablesLoading.value = false; tablesError.value = '';
   query.value = ''; appliedQuery.value = ''; scope.value = ''; notice.value = ''; cleanupPending.value = 0;
@@ -658,6 +742,8 @@ onBeforeUnmount(() => { disposed = true; window.clearTimeout(pollTimer); mainten
 
 <style scoped>
 .document-library{width:100%;max-width:1600px;min-width:0;box-sizing:border-box;margin:auto;padding:16px 20px;color:var(--doc-ink);font-size:14px;letter-spacing:0;display:grid;gap:14px}.document-toolbar,.document-heading,.document-actions,.document-pagination,.document-pagination>div,.document-detail-bar,.document-detail-footer{display:flex;align-items:center;gap:8px}.document-toolbar{flex-wrap:wrap;padding-bottom:14px;border-bottom:1px solid var(--doc-line)}.document-heading{min-width:0}.document-heading h1{margin:0;font-size:19px;font-weight:650;white-space:nowrap}.document-heading>svg{color:var(--doc-accent)}.document-actions{margin-left:auto;flex-wrap:wrap}.document-library :deep(.n-button__content),.document-detail :deep(.n-button__content){gap:5px}.document-filters{display:grid;grid-template-columns:minmax(180px,260px) minmax(150px,1fr) minmax(140px,190px) auto;gap:10px;margin:0}.document-filters>.n-input{grid-column:auto}.document-loading{display:grid;gap:10px;padding:8px 0}.document-results{min-width:0}.document-table-wrap{overflow:auto;max-width:100%}.document-table{width:100%;border-collapse:collapse;text-align:left;table-layout:fixed}.document-table th{font-size:12px;color:var(--doc-muted);background:var(--doc-soft);font-weight:500}.document-table th,.document-table td{padding:12px 10px;border-bottom:1px solid var(--doc-line);overflow-wrap:anywhere;vertical-align:middle}.document-table th:last-child{width:44px}.document-table th:nth-last-child(2){width:160px}.document-table td{font-size:13px;line-height:1.6}.document-table tbody tr:hover{background:color-mix(in srgb,var(--doc-accent) 4%,transparent)}.document-record-title{display:flex;align-items:flex-start;gap:8px;text-align:left;font:inherit;font-weight:550;border:0;background:transparent;color:var(--doc-ink);cursor:pointer;padding:3px 0;max-width:100%;min-width:0}.document-record-title>svg{flex:none;margin-top:3px;color:var(--doc-accent)}.document-record-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--doc-muted)}.document-record-meta>span{display:flex;align-items:center;gap:4px}.document-pagination{justify-content:space-between;font-size:12px;color:var(--doc-muted)}.document-mobile-list{display:none}.document-detail{display:grid;gap:14px;min-width:0;color:var(--doc-ink);font-size:14px}.document-detail-bar{justify-content:flex-end}.document-detail-bar>.n-tag{margin-right:auto}.document-field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px}.document-detail-field{display:grid;align-content:start;gap:6px;min-width:0}.document-detail-field>span{display:flex;align-items:center;gap:5px;color:var(--doc-muted);font-size:12px}.document-wide{grid-column:1/-1}.document-required,.document-error{color:var(--doc-error)}.document-error{font-size:12px}.document-attachments{border-top:1px solid var(--doc-line);padding-top:14px;min-width:0}.document-attachments h2{display:flex;align-items:center;gap:7px;font-size:14px;margin:0 0 10px}.document-attachments h2>span{color:var(--doc-muted);font-size:12px;font-weight:400}.document-attachment{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--doc-line);min-width:0}.document-attachment>svg{flex:none;color:var(--doc-muted)}.document-attachment>img{object-fit:cover;border:1px solid var(--doc-line);border-radius:4px;flex:none}.document-attachment>div{min-width:0;flex:1}.document-attachment strong,.document-versions strong{display:block;font-size:13px;font-weight:500;overflow-wrap:anywhere}.document-attachment small,.document-versions small{display:block;color:var(--doc-muted);font-size:12px;margin-top:4px}.document-attachment>a,.document-versions a{display:flex;align-items:center;justify-content:center;color:var(--doc-accent);min-width:36px;min-height:36px}.document-upload{display:grid;gap:12px;margin-top:16px}.document-upload>.n-button{justify-self:end}.document-upload-controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.document-file-picker{position:relative;display:flex;align-items:center;gap:10px;min-height:54px;padding:10px 12px;box-sizing:border-box;border:1px dashed var(--doc-line);border-radius:6px;overflow-wrap:anywhere;cursor:pointer}.document-file-picker>span{min-width:0}.document-file-picker input{position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}.document-versions ol{list-style:none;margin:0;padding:0}.document-versions li{display:flex;align-items:flex-start;gap:10px;padding:14px 0;border-bottom:1px solid var(--doc-line)}.document-versions li>div{flex:1;min-width:0}.document-versions li>svg{margin-top:3px;flex:none;color:var(--doc-muted)}.document-detail-footer{justify-content:flex-end;flex-wrap:wrap}.document-muted{color:var(--doc-muted);font-size:13px}.document-sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.document-library :focus-visible,.document-detail :focus-visible{outline:2px solid var(--doc-accent);outline-offset:3px}.document-record-title,.document-mobile-title{transition:color 160ms ease-out}.document-record-title:hover,.document-mobile-title:hover{color:var(--doc-accent)}@media(max-width:760px){.document-library{padding:12px;gap:12px}.document-toolbar{gap:10px}.document-toolbar>.n-button{order:0}.document-heading h1{font-size:17px}.document-actions{margin-left:auto;gap:6px}.document-filters{grid-template-columns:minmax(0,1fr) auto;gap:8px}.document-filters>.n-base-selection,.document-filters>.n-select{grid-column:1/-1}.document-filters>.n-input{grid-column:1}.document-filters>.n-button{grid-column:2;grid-row:2}.document-table-wrap{display:none}.document-mobile-list{display:grid}.document-mobile-list article{padding:12px 0;border-bottom:1px solid var(--doc-line)}.document-mobile-title{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;padding:0;text-align:left;border:0;background:transparent;font:inherit;color:var(--doc-ink);cursor:pointer}.document-mobile-title>svg{flex:none;color:var(--doc-accent)}.document-mobile-title>strong{min-width:0;flex:1;overflow-wrap:anywhere;font-weight:550}.document-mobile-list dl{display:grid;grid-template-columns:88px minmax(0,1fr);gap:6px 10px;margin:8px 0 12px;font-size:13px}.document-mobile-list dt{color:var(--doc-muted);overflow-wrap:anywhere}.document-mobile-list dd{margin:0;min-width:0}.document-detail .n-button,.document-library :deep(.n-button),.document-detail-footer :deep(.n-button){min-height:44px}.document-field-grid{grid-template-columns:minmax(0,1fr);gap:14px}.document-upload-controls{grid-template-columns:minmax(0,1fr)}.document-attachment>a,.document-versions a{min-width:44px;min-height:44px}.document-actions>.n-button{min-width:40px}.document-pagination{padding-top:4px}}@media(max-width:400px){.document-actions{width:100%;justify-content:flex-end}.document-toolbar{row-gap:8px}}@media(prefers-reduced-motion:reduce){.document-library *,.document-detail *{transition:none!important;animation:none!important}}
+.document-reindex-mode{width:170px;max-width:100%}.document-pending{border:1px solid var(--doc-line);border-radius:6px;padding:10px 12px}.document-pending summary{cursor:pointer;font-weight:600}.document-operation{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--doc-line)}.document-operation>div:first-child{flex:1 1 200px;min-width:0}.document-operation small{display:block;color:var(--doc-muted);overflow-wrap:anywhere}.document-operation>.n-input{flex:1 1 210px;max-width:300px}.document-conflicts article{padding:10px 0;border-bottom:1px solid var(--doc-line)}.document-conflicts article>div{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:8px 0;overflow-wrap:anywhere}.document-conflicts article>.n-button{margin:0 8px 4px 0}.document-preview{display:grid;gap:12px;min-width:0}.document-preview-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.document-preview-actions a{margin-left:auto;display:flex;align-items:center;gap:5px;min-height:44px}.document-preview img{display:block;width:100%;height:65dvh;object-fit:contain}.document-preview iframe{border:0;width:100%;height:65dvh;min-height:220px}.document-storage{display:grid;grid-template-columns:110px 1fr;gap:12px}.document-storage dd{margin:0;overflow-wrap:anywhere}.document-table th:last-child{width:90px}.document-table th{position:sticky;top:0;z-index:1}.document-table-wrap{max-height:65vh}.document-system-fields summary{cursor:pointer;padding:8px 0}.document-source small{overflow-wrap:anywhere}@media(max-width:760px){.document-operation>.n-input{max-width:none}.document-operation>.n-button{min-height:44px}.document-conflicts article>div{grid-template-columns:1fr}.document-preview-actions .n-button{min-height:44px;min-width:44px}.document-reindex-mode{flex:1 1 160px;min-width:0}.document-storage{grid-template-columns:90px 1fr}}
+@media(max-width:760px){.document-read-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.document-read-fields>.document-detail-field:first-child{grid-column:1/-1}}
 </style>
 
 <style scoped>

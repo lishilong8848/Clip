@@ -44,6 +44,6 @@ const api={name:'isolated-responsive-fixtures',configurePreviewServer(host){host
     return reply({status:503,json:{ok:false,error:'隔离预览尚未配置此接口：'+url.pathname}});
   }catch(error){console.error(url.pathname,error);return reply({status:500,json:{ok:false,error:'隔离预览数据错误：'+error.message}});}
 });}};
-server=await preview({root,configFile:false,plugins:[api],logLevel:'error',build:{outDir:'dist'},preview:{host:'127.0.0.1',port:Number(process.env.RESPONSIVE_PORT||14536),strictPort:true}});
+server=await preview({root,configFile:false,plugins:[api],logLevel:'error',build:{outDir:process.env.RESPONSIVE_BUILD_DIR||'dist'},preview:{host:'127.0.0.1',port:Number(process.env.RESPONSIVE_PORT||14536),strictPort:true}});
 console.log('ISOLATED_PREVIEW http://127.0.0.1:'+server.httpServer.address().port);
 process.on('SIGINT',()=>server.httpServer.close(()=>process.exit()));

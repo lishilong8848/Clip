@@ -52,15 +52,16 @@ try {
     const entry=v2?'/assets/workspace-v2/index.html?__page=%2Flearning&tab=sharing':'/learning?tab=sharing';
     await page.goto(base+entry);
     await page.getByRole('heading',{name:'分享会练习',exact:true}).waitFor();
+    await page.getByRole('button',{name:'新建分享会练习',exact:true}).click();
     await page.getByLabel('飞书纪要链接',{exact:true}).fill('https://vnet.feishu.cn/docx/Fixture');
     await page.getByRole('checkbox',{name:'多选题',exact:true}).check();
     await page.getByRole('button',{name:'读取资料并生成题目',exact:true}).click();
     await page.getByRole('heading',{name:batch.title,exact:true}).waitFor();
     assert.equal(created,1);assert.equal(published,0);
-    if(v2) await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'参会人'}).click();
+    await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'参会人'}).click();
     await page.getByRole('checkbox',{name:'参加答题：测试人员乙',exact:true}).uncheck();
     await page.getByText('参会 2 人 · 参加答题 1 人 · 本次不做 1 人',{exact:true}).waitFor();
-    if(v2) await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'题目核对'}).click();
+    await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'题目核对'}).click();
     await page.locator('#sharing-q1').fill('修改后的题干：出现流量告警后，首先应核对什么？');
     assert.equal(await page.getByRole('button',{name:'核对后发布给参会人',exact:true}).isDisabled(),true);
     await page.getByRole('button',{name:'保存题目与名单',exact:true}).click();
@@ -75,7 +76,7 @@ try {
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
     actor='personal';await page.reload();
     await page.locator('.sharing-batch').click();
-    if(v2) await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'我的题目'}).click();
+    await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'我的题目'}).click();
     await page.getByRole('heading',{name:'我的5道题',exact:true}).waitFor();
     assert.equal(await page.getByRole('button',{name:'核对后发布给参会人',exact:true}).count(),0);
     assert.equal(await page.locator('.sharing-answer').count(),0);

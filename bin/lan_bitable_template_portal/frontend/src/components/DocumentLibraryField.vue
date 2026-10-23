@@ -3,7 +3,7 @@
     <NInput v-if="kind === 'text'" :value="raw == null ? '' : Array.isArray(raw) ? raw.map(valueText).join('') : String(raw)" type="textarea" :autosize="{ minRows: 2, maxRows: 6 }" :disabled="disabled" :input-props="{ 'aria-label': field.name }" @update:value="update" />
     <NInputNumber v-else-if="kind === 'number'" :value="raw == null || raw === '' ? null : Number(raw)" :disabled="disabled" :input-props="{ 'aria-label': field.name }" clearable @update:value="update" />
     <NSelect v-else-if="kind === 'select' || kind === 'multi'" :value="raw ?? (kind === 'multi' ? [] : null)" :multiple="kind === 'multi'" :options="options" :disabled="disabled" :aria-label="field.name" filterable clearable @update:value="update" />
-    <NDatePicker v-else-if="kind === 'date'" :value="dateValue" type="date" clearable :disabled="disabled" :input-props="{ 'aria-label': field.name }" @update:value="updateDate" />
+    <NDatePicker v-else-if="kind === 'date'" :value="dateValue" :type="showTime ? 'datetime' : 'date'" :format="showTime ? 'yyyy-MM-dd HH:mm' : 'yyyy-MM-dd'" clearable :disabled="disabled" :input-props="{ 'aria-label': field.name }" @update:value="updateDate" />
     <NSwitch v-else-if="kind === 'bool'" :value="Boolean(raw)" :disabled="disabled" :aria-label="field.name" @update:value="update"><template #checked>是</template><template #unchecked>否</template></NSwitch>
     <NSelect v-else-if="kind === 'person'" :value="field.multiple === false ? personIds[0] || null : personIds" :options="peopleOptions" :multiple="field.multiple !== false" filterable :disabled="disabled" :aria-label="field.name" clearable @update:value="updatePeople" />
     <div v-else-if="kind === 'url'" class="document-url-fields">
@@ -12,7 +12,7 @@
     </div>
   </div>
   <a v-else-if="kind === 'url' && safeLink && interactive" :href="safeLink" target="_blank" rel="noopener noreferrer" class="document-field-link">{{ raw?.text || safeLink }}<ExternalLink :size="13" aria-hidden="true" /></a>
-  <time v-else-if="kind === 'date' && dateValue !== null" :datetime="new Date(dateValue).toISOString()">{{ new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai' }).format(dateValue) }}</time>
+  <time v-else-if="kind === 'date' && instant !== null" :datetime="new Date(instant).toISOString()">{{ new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', ...(showTime ? { hour: '2-digit', minute: '2-digit', hour12: false } : {}) }).format(instant) }}</time>
   <span v-else class="document-field-value" :class="{ 'is-empty': raw == null || raw === '' || Array.isArray(raw) && !raw.length }">{{ valueText(modelValue) }}</span>
 </template>
 
@@ -24,7 +24,7 @@ import { fieldKind, fieldValue, valueText, writableField, type LibraryField, typ
 
 const props = withDefaults(defineProps<{ field: LibraryField; modelValue?: LibraryValue; editing?: boolean; disabled?: boolean; interactive?: boolean }>(), { editing: false, disabled: false, interactive: true });
 const emit = defineEmits<{ 'update:modelValue': [value: LibraryValue] }>();
-const kind = computed(() => fieldKind(props.field));
+const kind = computed(() => [1001, 1002].includes(Number(props.field.type)) ? 'date' : fieldKind(props.field));
 const raw = computed(() => fieldValue(props.modelValue));
 const editable = computed(() => props.editing && writableField(props.field));
 const options = computed(() => (props.field.options || []).map(option => typeof option === 'string' ? { label: option, value: option } : {
@@ -39,10 +39,17 @@ const peopleOptions = computed(() => {
   }
   return result;
 });
-const dateValue = computed(() => {
+const showTime = computed(() => props.field.property?.show_time === true || /[Hh]/.test(props.field.property?.date_formatter || '') || [1001, 1002].includes(Number(props.field.type)));
+const instant = computed(() => {
   if (raw.value == null || raw.value === '') return null;
-  const value = typeof raw.value === 'number' ? raw.value : Date.parse(String(raw.value));
+  const value = typeof raw.value === 'number' || /^\d{13}$/.test(String(raw.value)) ? Number(raw.value) : Date.parse(String(raw.value));
   return Number.isFinite(value) ? value : null;
+});
+const dateValue = computed(() => {
+  if (instant.value === null) return null;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(instant.value).map(part => [part.type, part.value]));
+  return new Date(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second)).getTime();
 });
 const safeLink = computed(() => {
   const link = typeof raw.value === 'string' ? raw.value : raw.value?.link;
@@ -53,7 +60,11 @@ function update(value: unknown) {
   emit('update:modelValue', old && typeof old === 'object' && 'type' in old && 'value' in old ? { ...old, value } : value);
 }
 function updateDate(value: number | null) {
-  update(value === null ? null : typeof raw.value === 'string' ? new Date(value).toISOString() : value);
+  if (value === null) { update(null); return; }
+  const date = new Date(value);
+  const stamp = Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), showTime.value ? date.getHours() : 0,
+    showTime.value ? date.getMinutes() : 0, showTime.value ? date.getSeconds() : 0) - 8 * 3600_000;
+  update(typeof raw.value === 'string' ? new Date(stamp).toISOString() : stamp);
 }
 function updatePeople(value: string[]|string|null) {
   const ids=Array.isArray(value)?value:value?[value]:[];

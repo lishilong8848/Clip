@@ -20,7 +20,7 @@ def index_error(message):
     return '文件解析或索引未完成，系统将按原任务重试。' if text else ''
 
 
-def read_index_states(path, prefix, current):
+def read_index_states(path, prefix, current, *, record_ids=None):
     """None means unreadable; {} means no current source documents, never ready."""
     path = Path(path)
     if not path.is_file():
@@ -34,12 +34,17 @@ def read_index_states(path, prefix, current):
             if not isinstance(config, dict):
                 return None
             vector = config.get('mode') not in ('keyword', 'hybrid')
+            condition = " AND json_extract(s.payload,'$.record_id') IN (" + ','.join('?' for _ in record_ids) + ')' if record_ids is not None else ''
             rows = db.execute('''SELECT s.source_key,s.payload,d.id,d.active_version,d.status,d.error
                 FROM document_sources s JOIN documents d ON d.id=s.document_id
-                WHERE substr(s.source_key,1,?)=? AND s.enabled=1 AND d.deleted=0''', (len(prefix), prefix)).fetchall()
+                WHERE s.source_key>=? AND s.source_key<? AND s.enabled=1 AND d.deleted=0''' + condition,
+                (prefix, prefix + '\uffff', *(record_ids or ()))).fetchall()
             result = {}
             for row in rows:
-                if not current(json.loads(row['payload'])):
+                provenance = json.loads(row['payload'])
+                if record_ids is not None and provenance.get('record_id') not in record_ids:
+                    continue
+                if not current(provenance):
                     continue
                 missing = False
                 chunks = vectors = 0

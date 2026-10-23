@@ -10,6 +10,7 @@ import time
 import unicodedata
 import uuid
 import ipaddress
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
@@ -330,19 +331,31 @@ def model_reasoning_options(profile):
     return {"reasoning_effort": "none" if options["reasoning_effort"] == "off" else options["reasoning_effort"]}
 
 
+class _ModelHttpClient(FeishuHttpClient):
+    def _ensure_client_locked(self):
+        import httpx
+        from upload_event_module.services.http_client import verified_tls_context
+        if self._client is None:
+            self._client = httpx.Client(verify=verified_tls_context(trust_env=False),
+                timeout=httpx.Timeout(connect=5, read=75, write=20, pool=5),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+                cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
+                follow_redirects=False, trust_env=False)
+        return self._client
+
+
 class CustomModel:
     """Other modules can reuse complete(); no business writes or automatic calls."""
     def __init__(self, store, *, client=None, protect=protect_key, unprotect=unprotect_key):
-        import httpx
         self.store, self.protect, self.unprotect = store, protect, unprotect
         self._lock = threading.RLock()
         self._config_key = "model"
-        self.client = client or FeishuHttpClient(timeout=httpx.Timeout(connect=5, read=75, write=20, pool=5), retries=0)
+        self.client = client
 
     def for_actor(self, actor_id):
         if not isinstance(actor_id, str) or not actor_id.strip():
             raise AssistantError("缺少登录身份，无法读取模型设置。", 403)
-        # Bound views share the transport and lock, not the account's configuration.
+        # Bound views share the settings lock; production transports belong to each call.
         bound = copy.copy(self)
         bound._config_key = "model:" + actor_id
         return bound
@@ -539,8 +552,10 @@ class CustomModel:
             key = self.unprotect(selected["key_cipher"])
         except Exception:
             raise AssistantError("当前系统账号无法读取模型凭证，请在本人模型设置中重新配置。", 503) from None
+        injected = self.client
+        client = injected if injected is not None else _ModelHttpClient(retries=0)
         try:
-            payload = self.client.request_json("POST", endpoint, headers={"Authorization": "Bearer " + key},
+            payload = client.request_json("POST", endpoint, headers={"Authorization": "Bearer " + key},
                 json_payload=request, retries=0,
                 **({'timeout': timeout} if timeout is not None else {}))
         except FeishuHTTPError as exc:
@@ -562,6 +577,9 @@ class CustomModel:
             else:
                 message = "模型连接失败或响应超时，问题已保留，可重试。"
             raise AssistantError(message, 502) from None
+        finally:
+            if injected is None:
+                client.close()
         if not isinstance(payload, dict) or payload.get("error"):
             raise AssistantError("模型服务未完成回答，请稍后重试。", 502)
         try:
@@ -579,7 +597,7 @@ class CustomModel:
         return safe_text(answer)[:12000]
 
     def close(self):
-        self.client.close()
+        """Request clients close in complete(); injected clients belong to the caller."""
 
 
 SYSTEM = """你是南通运维灯塔的灯塔助手，使用中文简洁回答。

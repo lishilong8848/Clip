@@ -634,5 +634,53 @@ class PrefillRecommendationIntegrationTests(PlannedNativeTests):
         self.assertEqual(result["draft"]["progress"], "")
 
 
+class PlannedSnapshotReadinessTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = LanPortalStateStore(Path(self.tmp.name) / "state.sqlite3")
+        self.addCleanup(self.store.shutdown_write_worker)
+        self.service = Mock()
+        self.service._state_store = self.store
+        self.service._source_refresh_status = {}
+
+    def save(self, kind, own_status="success", remembered=None, rows=None):
+        self.store.replace_source_table_snapshot(kind, {"ALL": rows or [], "A": rows or []}, meta={
+            "source_status": {"status": own_status},
+            "source_refresh_status": remembered or {kind: {"status": own_status}},
+        })
+
+    def test_old_other_table_metadata_cannot_reject_refreshed_maintenance(self):
+        for kind in ("change", "repair"):
+            self.save(kind, remembered={"maintenance": {"status": "failed"}, kind: {"status": "success"}})
+        self.save("maintenance", rows=[{"record_id": "rec-plan", "work_type": "maintenance"}])
+        snapshot = planned._ready(self.service, "A", ("maintenance",))
+        self.assertEqual(snapshot["meta"]["source_refresh_status"]["maintenance"]["status"], "success")
+        self.assertEqual([row["record_id"] for row in snapshot["records"]], ["rec-plan"])
+
+    def test_old_success_cannot_hide_another_table_partial_state(self):
+        self.save("maintenance", own_status="partial")
+        self.save("repair", remembered={"maintenance": {"status": "success"}, "repair": {"status": "success"}})
+        with self.assertRaisesRegex(PortalError, "维保.*读取尚未完成"):
+            planned._ready(self.service, "A", ("maintenance",))
+
+    def test_change_recovery_is_not_overwritten_by_older_repair_metadata(self):
+        self.save("repair", remembered={"change": {"status": "retained"}, "repair": {"status": "success"}})
+        self.save("change")
+        self.assertEqual(planned._ready(self.service, "A", ("change",))["meta"]
+                         ["source_refresh_status"]["change"]["status"], "success")
+
+    def test_missing_type_is_not_reported_as_complete_empty(self):
+        self.save("maintenance")
+        with self.assertRaisesRegex(PortalError, "变更.*读取尚未完成"):
+            planned._ready(self.service, "A", ("change",))
+
+    def test_successful_empty_snapshot_is_valid(self):
+        self.save("maintenance")
+        snapshot = planned._ready(self.service, "A", ("maintenance", "polling", "adjust", "power"))
+        self.assertTrue(snapshot["exists"])
+        self.assertEqual(snapshot["records"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

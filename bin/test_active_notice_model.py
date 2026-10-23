@@ -1742,7 +1742,6 @@ class ActiveNoticeModelTests(unittest.TestCase):
                 "_queued_after_upload": True,
                 "_queued_action": "end",
                 "_queued_upload_requested": True,
-                "_upload_operation_id": "qt_notice:finished-old",
                 "text": text,
             },
         )
@@ -1792,7 +1791,8 @@ class ActiveNoticeModelTests(unittest.TestCase):
             captured["data"]["target_record_id"],
             "rec-event-auto-dispatch",
         )
-        self.assertNotIn("_upload_operation_id", captured["data"])
+        self.assertTrue(captured["data"]["_upload_operation_id"].startswith("qt_notice:"))
+        self.assertNotEqual(captured["data"]["_upload_operation_id"], "qt_notice:finished-old")
         self.assertFalse(harness.pending_update_after_upload)
         current = item.data(Qt.ItemDataRole.UserRole)
         self.assertNotIn("_queued_after_upload", current)
@@ -2891,6 +2891,245 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(item_data["_delete_operation_id"], operation_ids[0])
         self.assertTrue(harness.removed)
         self.assertEqual(harness.cache_save_requests, 1)
+
+
+class QtEventQueueRecoveryTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        error_log = patch("upload_event_module.ui.main_window_workflow.log_error")
+        self.error_log = error_log.start()
+        self.addCleanup(error_log.stop)
+        self.h = _ReplaceRecordIdHarness()
+        h = self.h
+        h._closing = False
+        h._pending_update_after_upload_scheduled = False
+        h.pending_action_record_ids = set()
+        h.pending_replace_by_record_id = {}
+        h.current_screenshot_record_id = None
+        h.current_screenshot_action_type = None
+        h.screenshot_dialog = type("Dialog", (), {"isVisible": lambda self: False})()
+        h.cache_store = None
+        h._upsert_active_cache_record = lambda *_: True
+        h._set_last_ui_op = lambda *args, **kwargs: None
+        h._enqueue_ui_mutation = lambda _tag, fn: fn()
+        h._notify_lan_portal_upload_result = lambda *args: None
+        h._try_process_deferred_events = lambda: None
+        h._do_move_to_history = lambda *args, **kwargs: None
+        h._post_request_finished = h.on_request_finished
+        h._event_upload_probe_last = {}
+        h._event_upload_probe_active = set()
+        h._resolve_upload_fields_from_cache = lambda *args: {
+            "buildings": ["A楼"], "level": "I3", "event_source": "日常巡检发现",
+        }
+        self.scheduled = []
+        h._schedule_pending_update_after_upload = lambda delay=300: self.scheduled.append(delay)
+        self.sent = []
+        h.do_feishu_upload = lambda *args, **kwargs: self.sent.append((args, kwargs))
+        self.item = QListWidgetItem("event")
+        h.list_active_event.addItem(self.item)
+        h.list_active_event.itemChanged.connect(lambda _: h._active_notice_store().invalidate())
+        self.data = {
+            "active_item_id": "aid-queue-recovery", "record_id": "rec-queue-recovery",
+            "target_record_id": "rec-queue-recovery", "notice_type": "事件通告",
+            "_is_placeholder_record": False, "_has_unuploaded_changes": True,
+            "_queued_after_upload": True, "_queued_upload_requested": True, "_queued_action": "end",
+            "text": "【事件通告】状态：结束\n【标题】A楼I3事件\n【概述】温控仪故障\n【进展】事件转检修",
+        }
+        self.item.setData(Qt.ItemDataRole.UserRole, self.data)
+        self.request = {
+            "data": dict(self.data), "action_type": "end", "screenshot_bytes": b"confirmed-image",
+            "extra_images": [{"file_name": "site.png", "upload_id": "site-id"}],
+            "response_time": "2026-10-23 14:20", "robot_group_choice": "skip",
+        }
+        h.pending_update_after_upload = {self.data["record_id"]: self.request}
+
+    def test_orphan_queue_marker_restores_end_without_uploading(self):
+        self.h.pending_update_after_upload.clear()
+        self.h._recover_stale_upload_states()
+        current = self.item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(ActiveNoticeModel.action_for_record(current), "end")
+        self.assertEqual(current["text"], self.data["text"])
+        self.assertFalse(current.get("_queued_upload_requested"))
+        self.assertEqual(self.sent, [])
+
+    def test_watchdog_wakes_real_queue_without_marking_it_failed(self):
+        self.h._recover_stale_upload_states()
+        self.assertTrue(self.scheduled)
+        self.assertIs(self.h.pending_update_after_upload[self.data["record_id"]], self.request)
+        self.assertNotIn("_last_upload_error", self.item.data(Qt.ItemDataRole.UserRole))
+
+    def test_cache_error_preserves_confirmed_end_and_retries(self):
+        from sqlite3 import OperationalError
+        resolve = self.h._resolve_upload_fields_from_cache
+        with patch.object(self.h, "_resolve_upload_fields_from_cache", side_effect=OperationalError("locked")):
+            self.h._try_process_pending_update_after_upload()
+            self.h._try_process_pending_update_after_upload()
+        self.error_log.assert_called_once()
+        self.assertIs(self.h.pending_update_after_upload[self.data["record_id"]], self.request)
+        self.assertTrue(self.scheduled)
+        self.assertFalse(self.sent)
+        self.h._resolve_upload_fields_from_cache = resolve
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual(len(self.sent), 1)
+        args, kwargs = self.sent[0]
+        self.assertEqual(args[0]["text"], self.data["text"])
+        self.assertEqual(args[1:], (b"confirmed-image", "end"))
+        self.assertEqual(kwargs["extra_images"], self.request["extra_images"])
+        self.assertEqual(kwargs["response_time"], self.request["response_time"])
+        self.assertFalse(self.h.pending_update_after_upload)
+
+    def test_ready_queue_retry_is_not_discarded_as_predecessor_timeout(self):
+        self.h._event_upload_probe_first_seen = {self.data["record_id"]: time.monotonic() - 601}
+        self.h._recover_stale_upload_states()
+        self.assertIs(self.h.pending_update_after_upload[self.data["record_id"]], self.request)
+        self.assertEqual(self.item.data(Qt.ItemDataRole.UserRole)["text"], self.data["text"])
+        self.assertNotIn("_last_upload_error", self.item.data(Qt.ItemDataRole.UserRole))
+        self.assertFalse(self.sent)
+
+    def test_unrelated_screenshot_does_not_block_confirmed_end(self):
+        self.h.current_screenshot_record_id = "rec-another-event"
+        self.h.screenshot_dialog.isVisible = lambda: True
+        self.h.pending_action_record_ids.add("rec-another-event")
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("rec-another-event", self.h.pending_action_record_ids)
+        self.assertEqual(self.h.current_screenshot_record_id, "rec-another-event")
+
+    def test_same_record_screenshot_still_waits(self):
+        self.h.current_screenshot_record_id = self.data["record_id"]
+        self.h._try_process_pending_update_after_upload()
+        self.assertFalse(self.sent)
+        self.assertTrue(self.h.pending_update_after_upload)
+        self.assertTrue(self.scheduled)
+
+    def test_repeated_click_before_dispatch_keeps_original_confirmed_end(self):
+        self.h._dialog_block_reason = lambda *_: ""
+        self.h._is_record_binding_conflicted = lambda *_: False
+        self.h._is_routing_conflicted = lambda *_: False
+        self.h.show_message = lambda *_: None
+        self.h._show_screenshot_dialog = lambda *_: self.fail("duplicate confirmation must not open")
+        self.h.handle_action(dict(self.data), "end")
+        self.assertIs(self.h.pending_update_after_upload[self.data["record_id"]], self.request)
+        self.assertFalse(self.sent)
+        self.assertNotIn("_upload_operation_id", self.item.data(Qt.ItemDataRole.UserRole))
+
+    def test_dispatch_exception_reuses_operation_not_previous_snapshot(self):
+        seen = []
+        self.request["data"].update(
+            _upload_operation_id="qt_notice:previous",
+            _event_inflight_retry_snapshot={"text": "previous version"},
+        )
+        def upload(data, *args, **kwargs):
+            seen.append(dict(data))
+            if len(seen) == 1:
+                raise RuntimeError("dispatch interrupted")
+        self.h.do_feishu_upload = upload
+        self.h._try_process_pending_update_after_upload()
+        self.assertTrue(self.h.pending_update_after_upload)
+        self.assertTrue(self.item.data(Qt.ItemDataRole.UserRole)["_queued_upload_requested"])
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0]["_upload_operation_id"], seen[1]["_upload_operation_id"])
+        self.assertNotEqual(seen[0]["_upload_operation_id"], "qt_notice:previous")
+        self.assertNotIn("_event_inflight_retry_snapshot", seen[0])
+        self.assertFalse(self.h.pending_update_after_upload)
+
+    def test_snapshot_refresh_keeps_original_operation_evidence(self):
+        original = {"text": "original start", "record_id": "local-original", "_upload_operation_id": "qt_notice:previous"}
+        queued = {**self.data, "_upload_operation_id": "qt_notice:previous", "_event_inflight_retry_snapshot": original}
+        refreshed = self.h._inherit_active_runtime_fields(dict(self.data), queued)
+        self.assertEqual(refreshed["_event_inflight_retry_snapshot"], original)
+        self.assertEqual(refreshed["_upload_operation_id"], "qt_notice:previous")
+
+    def test_missing_callback_completed_probe_releases_end_once(self):
+        operation_id = "qt_notice:previous"
+        current = {**self.data, "_upload_operation_id": operation_id}
+        self.item.setData(Qt.ItemDataRole.UserRole, current)
+        self.h.pending_action_record_ids = {self.data["record_id"]}
+        self.h.pending_action_types = {self.data["record_id"]: "update"}
+        self.h.lan_template_portal_controller = type("Controller", (), {
+            "get_qt_notice_operation": lambda _self, _id: {
+                "status": "completed", "operation_type": "update", "target_record_id": self.data["record_id"],
+            },
+        })()
+        class InlineThread:
+            def __init__(self, *, target, **kwargs): self.target = target
+            def start(self): self.target()
+        with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+            self.h._probe_event_upload(current)
+        self.assertFalse(self.h.pending_action_record_ids)
+        self.assertTrue(self.scheduled)
+        self.h._try_process_pending_update_after_upload()
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent[0][0][2], "end")
+
+    def test_late_previous_callback_does_not_clear_new_end_operation(self):
+        current = {**self.data, "_upload_operation_id": "qt_notice:new-end", "_upload_in_progress": True,
+                   "_event_inflight_retry_snapshot": {"_upload_operation_id": "qt_notice:previous"}}
+        current.pop("_queued_upload_requested")
+        current.pop("_queued_after_upload")
+        self.item.setData(Qt.ItemDataRole.UserRole, current)
+        self.h.pending_action_record_ids = {self.data["record_id"]}
+        self.h.pending_update_after_upload.clear()
+        self.h.on_request_finished("更新", True, self.data["record_id"], self.data["record_id"], "qt_notice:previous")
+        self.assertTrue(self.item.data(Qt.ItemDataRole.UserRole)["_upload_in_progress"])
+        self.assertIn(self.data["record_id"], self.h.pending_action_record_ids)
+        self.assertFalse(self.sent)
+
+    def test_refresh_cleared_top_level_operation_still_reconciles_original(self):
+        original = {**self.data, "_upload_operation_id": "qt_notice:previous"}
+        current = {**self.data, "_event_inflight_retry_snapshot": original}
+        self.item.setData(Qt.ItemDataRole.UserRole, current)
+        checked = []
+        def read_operation(operation_id):
+            checked.append(operation_id)
+            return {"status": "completed", "operation_type": "update",
+                    "target_record_id": self.data["record_id"]}
+        self.h.lan_template_portal_controller = type("Controller", (), {
+            "get_qt_notice_operation": staticmethod(read_operation),
+        })()
+        class InlineThread:
+            def __init__(self, *, target, **kwargs): self.target = target
+            def start(self): self.target()
+        with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+            self.h._probe_event_upload(current)
+        self.assertEqual(checked, ["qt_notice:previous"])
+        self.assertNotIn("_event_inflight_retry_snapshot", self.item.data(Qt.ItemDataRole.UserRole))
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual(len(self.sent), 1)
+
+    def test_unknown_predecessor_does_not_release_end(self):
+        current = {**self.data, "_upload_operation_id": "qt_notice:previous"}
+        self.item.setData(Qt.ItemDataRole.UserRole, current)
+        self.h.pending_action_record_ids = set()
+        self.h.lan_template_portal_controller = type("Controller", (), {
+            "get_qt_notice_operation": lambda *_: None,
+        })()
+        class InlineThread:
+            def __init__(self, *, target, **kwargs): self.target = target
+            def start(self): self.target()
+        with patch("upload_event_module.ui.main_window_records.threading.Thread", InlineThread):
+            self.h._probe_event_upload(current)
+        self.h._try_process_pending_update_after_upload()
+        self.assertFalse(self.sent)
+        self.assertIs(self.h.pending_update_after_upload[self.data["record_id"]], self.request)
+
+    def test_completion_after_dispatch_exception_removes_only_same_operation(self):
+        def upload(data, *args, **kwargs):
+            self.item.setData(Qt.ItemDataRole.UserRole, {**data, "_upload_in_progress": True})
+            self.h.pending_action_record_ids.add(data["record_id"])
+            raise RuntimeError("after command accepted")
+        self.h.do_feishu_upload = upload
+        self.h._try_process_pending_update_after_upload()
+        operation_id = self.request["dispatch_operation_id"]
+        self.h.pending_update_after_upload["rec-other"] = {"dispatch_operation_id": "qt_notice:other"}
+        self.h.on_request_finished("结束", True, self.data["record_id"], self.data["record_id"], operation_id)
+        self.assertNotIn(self.data["record_id"], self.h.pending_update_after_upload)
+        self.assertIn("rec-other", self.h.pending_update_after_upload)
 
 
 if __name__ == "__main__":

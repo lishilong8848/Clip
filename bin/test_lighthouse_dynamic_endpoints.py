@@ -46,6 +46,19 @@ from lan_bitable_template_portal.document_library_routes import install_document
 KNOWN_DYNAMIC_BINDINGS = [
     dict(
         source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=98, kind="covered", method_paths=[("GET", "/api/document-library/tables/{param}/operations")],
+        window=1, needles=["requestJson(endpoint('/operations', key), { signal, fresh: true })"],
+        note="待核验操作列表使用默认GET；后端仍按操作身份和资料表权限过滤，不返回待提交字段正文。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
+        line=101, kind="covered", method_paths=[("POST", "/api/document-library/tables/{param}/operations/{param}/verify")],
+        window=2, needles=["requestJson(endpoint('/operations/' + encodeURIComponent(id) + '/verify', key)",
+                           "method: 'POST', body: JSON.stringify(recordId ? { record_id: recordId } : {})"],
+        note="已有操作的结果核验使用POST，保留原操作权限和确认流程，不能视为只读或重新发送。",
+    ),
+    dict(
+        source="lan_bitable_template_portal/frontend/src/api/documentLibrary.ts",
         line=86, kind="covered", method_paths=[("POST", "/api/document-library/preview")],
         window=2, needles=["requestJson(endpoint('/preview'), {",
                            "method: 'POST', body: JSON.stringify({ url, ...(tableId ? { table_id: tableId } : {}) }), signal"],
@@ -126,10 +139,10 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningSharing.vue",
-        line=37, kind="excluded",
+        line=303, kind="excluded",
         method_paths=[("GET", "/api/learning/sharing"), ("GET", "/api/learning/sharing/{param}")],
-        window=4, needles=['id ? `/sharing/${id}` : `/sharing?page=${page.value}`'],
-        note="分享会批次列表/详情均经 requestLearning 访问;保持学练管理端点的原生排除边界。",
+        window=4, needles=["id ? `/sharing/${id}${silent ? '?progress=1' : '?compact=1'}` : `/sharing?page=${page.value}`"],
+        note="分享会批次列表/详情均经 requestLearning 访问，progress/compact仅为查询参数；保持学练管理端点的原生排除边界。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/components/LearningSharing.vue",
@@ -157,15 +170,16 @@ KNOWN_DYNAMIC_BINDINGS = [
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/dashboard/CheckAttachments.vue",
-        line=38, kind="covered",
+        line=107, kind="covered",
         method_paths=[("DELETE", "/api/pre-shift-checks/files/{param}")],
-        window=3, needles=["await requestJson(url(file),{method:'DELETE'})"],
+        window=3, needles=["await requestJson(url(file)+suffix,{method:'DELETE'})",
+                           "new URLSearchParams({task_id:taskId,revision:String(mutationRevision.value)})"],
         definition_ref=dict(
             source="lan_bitable_template_portal/frontend/src/workspace-v2/dashboard/CheckAttachments.vue",
             definition_marker="function url(file:Dict)",
             definition_needles=["'/api/pre-shift-checks/files/'", "encodeURIComponent(file.id)"],
         ),
-        note="班前检查附件删除复用已注册 DELETE 路由；后端校验上传人、楼栋及提交状态，保留用户确认。",
+        note="班前检查附件删除复用已注册 DELETE 路由；提交后的删除携带任务和版本，后端校验原检查权限、楼栋及版本，保留用户确认。",
     ),
     dict(
         source="lan_bitable_template_portal/frontend/src/workspace-v2/dashboard/CheckAttachments.vue",
@@ -1153,7 +1167,7 @@ class DynamicEndpointAuditTests(unittest.TestCase):
     def test_document_library_bindings_have_unique_helpers_and_mounted_backend_evidence(self):
         source = "lan_bitable_template_portal/frontend/src/api/documentLibrary.ts"
         bindings = [binding for binding in self.bindings if binding['source'] == source]
-        self.assertEqual(len(bindings), 11)
+        self.assertEqual(len(bindings), 13)
         text = _file_text(source)
         self.assertIn("const root = '/api/document-library';", text)
         self.assertIn("return root + (tableKey ? '/tables/' + encodeURIComponent(tableKey) : '') + path + "
@@ -1175,6 +1189,16 @@ class DynamicEndpointAuditTests(unittest.TestCase):
                 for method, path in binding['method_paths']:
                     self.assertTrue(_in_catalog(self.native_ids, method, path))
                     self.assertFalse(_route_excluded(path, method))
+
+    def test_document_operation_verification_remains_a_confirmed_write(self):
+        from fastapi import FastAPI
+        app = FastAPI()
+        def no_execution(*args, **kwargs):
+            raise AssertionError('Metadata inspection cannot execute a business operation')
+        install_document_library_routes(app, no_execution, no_execution)
+        catalog = PortalAPICatalog(app)
+        self.assertTrue(catalog.get('GET /api/document-library/tables/{table_key}/operations')['read_only'])
+        self.assertFalse(catalog.get('POST /api/document-library/tables/{table_key}/operations/{operation_id}/verify')['read_only'])
 
     def test_static_resource_manifest_is_not_a_business_endpoint(self):
         resources = [b for b in self.bindings if b['kind'] == 'static_asset']

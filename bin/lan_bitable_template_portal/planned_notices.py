@@ -41,11 +41,14 @@ def _ready(service, scope, types):
     snapshot = service._state_store.get_source_scope_snapshot(scope)
     if not snapshot.get("exists"):
         _error("计划列表尚未加载完整，请先在通告页面完成加载后重试。")
-    statuses = (snapshot.get("meta") or {}).get("source_refresh_status") or service._source_refresh_status
+    meta = snapshot.get("meta") or {}
+    statuses = meta.get("source_refresh_status") or service._source_refresh_status
+    versions = meta.get("source_versions") or snapshot.get("source_versions") or {}
     for kind in {kind if kind in {"change", "repair"} else "maintenance" for kind in types}:
         state = statuses.get(kind) or {}
-        if state.get("status") in {"failed", "retained", "loading", "partial"}:
-            _error("计划列表读取尚未完成或失败，请刷新该类型计划后重试；本次未匹配通告。")
+        if (meta.get("snapshot_mode") == "per_source" and not versions.get(kind)) or state.get("status") in {"failed", "retained", "loading", "partial"}:
+            label = {"maintenance": "维保、轮巡、设备调整及上下电", "change": "变更", "repair": "检修"}[kind]
+            _error(f"{label}计划列表读取尚未完成或失败，请刷新对应计划后重试；未将读取失败当作无通告。")
     return snapshot
 
 

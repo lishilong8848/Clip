@@ -115,14 +115,34 @@ class SharingRuntime:
                 await self.finish_generation(batch, batch['source'], saved)
                 return
             sources = []
-            minutes = await asyncio.to_thread(read_source, self.runtime.service, batch['url']) if batch.get('url') else {}
+            from .sharing_images import SharingImages
+            image_store = SharingImages(core.learning, self.runtime.service)
+            material_state = (batch.get('material_state') or {}) if batch['status'] in {'queued', 'failed', 'generating'} else {}
+            async def read_material(identity, label, reader):
+                saved = material_state.get(identity, {})
+                if saved.get('status') == 'ready':
+                    return saved['source']
+                material_state[identity] = {'title': label, 'status': 'reading', 'error': ''}
+                await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'],
+                    material_state=material_state, progress=f'正在读取材料：{label}')
+                try:
+                    value = await reader()
+                except Exception as exc:
+                    material_state[identity].update(status='failed', error=str(exc)[:300] if isinstance(exc, LearningError) else '材料读取未完成，已保留其他材料；可重试此项。')
+                    await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], material_state=material_state)
+                    raise
+                material_state[identity].update(status='ready', title=value.get('title') or label, source=value)
+                await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], material_state=material_state)
+                return value
+            minutes = await read_material('minutes', '会议纪要', lambda: asyncio.to_thread(read_source, self.runtime.service, batch['url'])) if batch.get('url') else {}
             if minutes:
                 sources.append(minutes)
             for url in batch.get('material_urls', []):
-                sources.append(await asyncio.to_thread(read_material_link, self.runtime.service, url))
+                sources.append(await read_material(url, url, lambda: asyncio.to_thread(read_material_link, self.runtime.service, url, image_store=image_store)))
             materials = SharingMaterials(core.learning)
             for identity in batch.get('material_ids', []):
-                sources.append(await asyncio.to_thread(materials.read, identity, batch['owner']))
+                metadata = await asyncio.to_thread(core.learning._get, 'sharing_material', identity) or {}
+                sources.append(await read_material(identity, metadata.get('name') or '上传材料 ' + identity[:8], lambda: asyncio.to_thread(materials.read, identity, batch['owner'])))
             source = combine_sources(sources)
             source.update(title=batch.get('requested_title') or minutes.get('title') or (sources[0].get('title') if sources else '分享会练习'),
                           participants=batch.get('requested_participants') or minutes.get('participants', []))
@@ -301,8 +321,9 @@ class SharingRuntime:
                 current = core.learning._get('sharing_attempt', attempt['id'], conn)
                 if current:
                     # Never overwrite a concurrent answer with the pre-network snapshot.
-                    field = 'result_delivery_status' if job['kind'] == 'result' else 'delivery_status'
-                    current.update({field: job['status'], 'delivery_error': job.get('error', '')})
+                    prefix = {'paper': 'delivery', 'reminder': 'reminder_delivery', 'result': 'result_delivery'}[job['kind']]
+                    current.update({prefix + '_status': job['status'], prefix + '_error': job.get('error', ''),
+                                    prefix + '_at': job.get('sent_at', '')})
                     core.learning._put('sharing_attempt', current['id'], current, conn)
         core.changed_batch(batch, now().date().isoformat())
 
@@ -381,8 +402,10 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                 if request.url.path.endswith('/sharing/people'):
                     core.learning._admin(actor)
                     data = {'items': await asyncio.to_thread(core.people)}
+                elif bid and request.query_params.get('person'):
+                    data = await asyncio.to_thread(core.answer_detail, bid, actor, request.query_params['person'])
                 else:
-                    data = await asyncio.to_thread(core.detail, bid, actor) if bid else await asyncio.to_thread(core.listing, actor, request.query_params.get('page', 1))
+                    data = await asyncio.to_thread(core.detail, bid, actor, progress_only=request.query_params.get('progress') == '1', compact=request.query_params.get('compact') == '1') if bid else await asyncio.to_thread(core.listing, actor, request.query_params.get('page', 1))
             else:
                 check_origin(request)
                 payload = await read_json(request)
@@ -422,6 +445,10 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                                     for slot in batch.get('generation_state', {}).get('slots', []):
                                         if slot['status'] in {'discarded', 'pending'}:
                                             slot.update(status='pending', attempts=0)
+                                    state = batch.get('generation_state', {})
+                                    valid = [slot['question'] for slot in state.get('slots', []) if slot['status'] == 'valid']
+                                    if state and (len(valid) < 5 or set(batch.get('question_types', [])) - {q['type'] for q in valid}):
+                                        state['replenish'] = True
                                     batch.update(status='queued', error='', progress='', version=batch['version'] + 1)
                                 elif action == 'close' and batch['status'] == 'published':
                                     batch.update(status='closed', closed_at=stamp(), version=batch['version'] + 1)
@@ -450,8 +477,16 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
             core = await asyncio.to_thread(feature.service)
             core.learning._admin(actor)
             async def stream():
+                import shutil
+                import tempfile
+                checked = 0
                 try:
                     async for chunk in request.stream():
+                        if checked <= 0:
+                            if shutil.disk_usage(tempfile.gettempdir()).free < 64 * 1024 * 1024:
+                                raise LearningError('临时磁盘空间不足，上传已停止；请释放空间后重试剩余文件。', 507)
+                            checked = 16 * 1024 * 1024
+                        checked -= len(chunk)
                         yield chunk
                 except ClientDisconnect:
                     raise MultiPartException('上传已中断。') from None

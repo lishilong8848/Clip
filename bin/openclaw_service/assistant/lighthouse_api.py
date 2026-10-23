@@ -2604,6 +2604,32 @@ class PortalAPICatalog:
         keywords.extend(_ACTION_LABELS[part] for part in path.split("/") if part in _ACTION_LABELS)
         keywords.extend(words for prefix, words in _PATH_KEYWORDS.items()
                         if path == prefix or path.startswith(prefix + "/"))
+        source_metadata = {}
+        if read_only:
+            from .lighthouse_queries import QUERY_PAGE_SCHEMAS
+            response_schema = None
+            if route.response_model is not None:
+                with suppress(Exception):
+                    response_schema = _schema_redact(TypeAdapter(route.response_model).json_schema())
+            query_types = {}
+            for param in getattr(route.dependant, "query_params", ()):
+                if param.name in query_fields:
+                    with suppress(Exception):
+                        query_types[param.name] = _schema_redact(TypeAdapter(param.field_info.annotation).json_schema())
+            source_metadata = {"source_metadata": {
+                "kind": "structured_api", "source": api_id, "source_version": None,
+                "fields": response_schema,
+                "query_fields": [{"name": name, "schema": query_types.get(name)} for name in query_fields],
+                "history": {"coverage": "unknown", "start": None, "end": None,
+                    "filter_fields": [name for name in query_fields if name in
+                        {"date", "from", "to", "start_date", "end_date", "year", "month", "period"}]},
+                "refresh": {"mode": "existing_read_route", "ttl_seconds": None},
+                "pagination": {"parameters": [name for name in query_fields if name in
+                    {"page", "page_size", "offset", "limit", "cursor", "records_page", "records_page_size",
+                     "ongoing_page", "ongoing_page_size"}], "bounded_collection": api_id in QUERY_PAGE_SCHEMAS},
+                "read_coverage": {"state": "not_read", "complete": False},
+                "statistics": {"tool": "query_statistics", "basis": "authorized_structured_records",
+                    "full_total_requires_complete": True}, "content_trust": "untrusted_data"}}
         return {
             "id": api_id,
             "method": method,
@@ -2614,6 +2640,7 @@ class PortalAPICatalog:
             "keywords": " ".join(keywords),
             "read_only": read_only,
             "risk": risk,
+            **source_metadata,
             **({"scope_mode": "single", "scope_values": list(scope_rule[0]),
                 "scope_section": scope_rule[1], "scope_required": scope_rule[2]} if scope_rule else {}),
             "schema": {
@@ -3317,14 +3344,22 @@ class PortalAPICatalog:
         return self._consume_json(status, raw, api_id)
 
     def _consume_json(self, status: int, raw: Any, api_id: str) -> dict:
+        from .lighthouse_queries import query_result_state
         ok = 200 <= status < 300
         if isinstance(raw, dict) and "ok" in raw:
             ok = ok and bool(raw.get("ok"))
             payload = raw.get("data", raw)
         else:
             payload = raw
+        if ok and payload is not raw and isinstance(payload, dict):
+            outer_state, _ = query_result_state({"ok": ok, "data": raw, "api_id": api_id})
+            if outer_state in {"partial", "unavailable"}:
+                # Keep native envelope restrictions on the snapshot used by exact statistics.
+                payload = {**payload, "complete": False,
+                    **({"available": False} if outer_state == "unavailable" else {})}
         data = safe_data(payload)
         truncated = _detect_truncation(raw) or _serialized_truncated(data)
+        state, guidance = query_result_state({"ok": ok, "_raw": payload, "api_id": api_id})
         return {
             "ok": ok,
             "status": status,
@@ -3332,6 +3367,9 @@ class PortalAPICatalog:
             "error": None if ok else self._error_from_response(raw, status),
             "api_id": api_id,
             "truncated": truncated,
+            "coverage": {"state": state, "complete": False if state in {"partial", "unavailable", "empty_page"}
+                else payload.get("complete") if isinstance(payload, dict) else None,
+                "display_truncated": truncated, "history": "unknown", "guidance": guidance},
             "_raw": payload,
         }
 

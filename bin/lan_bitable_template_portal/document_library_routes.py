@@ -20,7 +20,7 @@ _INITIAL_WAIT_SECONDS = 20
 def install_document_library_routes(app, authorize, get_service):
     """authorize(request) must validate the session, knowledge grant and write CSRF."""
     scans = {}
-    scan_slot = asyncio.Semaphore(1)
+    scan_slot = asyncio.Semaphore(2)
     closing = False
 
     def start_scan(service, key):
@@ -29,9 +29,12 @@ def install_document_library_routes(app, authorize, get_service):
         task = scans.get(key)
         if task is None or task.done():
             async def advance():
-                async with scan_slot:
-                    while not closing and await asyncio.to_thread(service.prepare_pending, table_key=key, limit=1):
-                        pass
+                while not closing:
+                    async with scan_slot:
+                        worked = await asyncio.to_thread(service.prepare_pending, table_key=key, limit=1)
+                    if not worked:
+                        break
+                    await asyncio.sleep(0)
             task = scans[key] = asyncio.create_task(advance())
             def finished(done):
                 if scans.get(key) is done:
@@ -59,7 +62,8 @@ def install_document_library_routes(app, authorize, get_service):
             except AssistantError as exc:
                 if exc.category != 'document_library_sync_pending':
                     raise
-                if asyncio.get_running_loop().time() >= deadline:
+                # Even an expired first read must wake the durable job before returning pending.
+                if task is not None and asyncio.get_running_loop().time() >= deadline:
                     raise
             if await request.is_disconnected():
                 raise AssistantError('资料读取已取消，后台同步仍会继续。', 503, category='document_library_read_cancelled')
@@ -100,6 +104,8 @@ def install_document_library_routes(app, authorize, get_service):
                     raise AssistantError('请求内容必须是对象。')
             if action == 'preview':
                 data = await asyncio.to_thread(service.preview_table, actor, payload)
+            elif action == 'storage':
+                data = await asyncio.to_thread(service.storage, actor, payload if method == 'POST' else None)
             elif action == 'tables':
                 data = await asyncio.to_thread(service.tables, actor) if method == 'GET' else await asyncio.to_thread(service.save_table, actor, payload)
             elif action.endswith('/schema'):
@@ -112,9 +118,15 @@ def install_document_library_routes(app, authorize, get_service):
                 _same_actor(actor, fresh)
                 path, name = await asyncio.to_thread(service.download, fresh, key, identity, attachment, version=version, refresh=False)
                 media_type = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-                    '.gif': 'image/gif', '.webp': 'image/webp'}.get(Path(name).suffix.lower(), 'application/octet-stream')
-                return FileResponse(path, filename=name, media_type=media_type, content_disposition_type='attachment', headers={
-                    'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+                    '.gif': 'image/gif', '.webp': 'image/webp', '.pdf': 'application/pdf'}.get(Path(name).suffix.lower(), 'application/octet-stream')
+                inline = request.query_params.get('preview') == '1' and media_type != 'application/octet-stream'
+                return FileResponse(path, filename=name, media_type=media_type, content_disposition_type='inline' if inline else 'attachment', headers={
+                    'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+                    'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'self'"})
+            elif action.endswith('/operations'):
+                data = await asyncio.to_thread(service.pending_operations, actor, key)
+            elif action.endswith('/verify'):
+                data = await asyncio.to_thread(service.verify_operation, actor, key, request.path_params['operation_id'], payload)
             elif action.endswith('/versions'):
                 data = await asyncio.to_thread(service.versions, actor, key, identity)
             elif action.endswith('/attachments'):
@@ -171,6 +183,8 @@ def install_document_library_routes(app, authorize, get_service):
                 data = await asyncio.to_thread(service.save_table, actor, payload, key=key)
             fresh = await authorize(request)
             _same_actor(actor, fresh)
+            if action == 'storage' and (not fresh.get('is_admin') or fresh.get('read_only')):
+                raise AssistantError('缓存管理权限已变化。', 403)
             await asyncio.to_thread(service.check_response, fresh, key, data,
                 configuration=method in {'POST', 'PUT'} and action in {'tables', 'tables/{table_key}'},
                 preview=action == 'preview', removal=method == 'DELETE')
@@ -191,7 +205,10 @@ def install_document_library_routes(app, authorize, get_service):
 
     routes = (
         ('/preview', ['POST']),
+        ('/storage', ['GET', 'POST']),
         ('/tables', ['GET', 'POST']), ('/tables/{table_key}', ['PUT', 'DELETE']),
+        ('/tables/{table_key}/operations', ['GET']),
+        ('/tables/{table_key}/operations/{operation_id}/verify', ['POST']),
         ('/tables/{table_key}/reindex', ['POST']),
         ('/tables/{table_key}/schema', ['GET']), ('/tables/{table_key}/records', ['GET', 'POST']),
         ('/tables/{table_key}/records/{record_id}', ['GET', 'PATCH']),

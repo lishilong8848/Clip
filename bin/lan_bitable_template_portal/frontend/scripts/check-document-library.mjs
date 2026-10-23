@@ -97,6 +97,7 @@ try {
   assert.equal(await page.getByText('没有符合条件的资料', { exact: true }).count(), 0, 'Read failure must not masquerade as an empty library');
   fixture.flags.listFailure = false; await page.getByRole('button', { name: '重试读取列表', exact: true }).click();
   await firstDetail();
+  await drawer().locator('.document-system-fields > summary').click();
   await drawer().getByText('系统原始值', { exact: true }).waitFor();
   await editTitle('A楼更新后的配电操作规程');
   const readOnly = drawer().locator('.document-detail-field').filter({ hasText: '系统汇总' });
@@ -186,7 +187,7 @@ try {
   await page.getByRole('button', { name: '全部数据表', exact: true }).click();
   await page.getByRole('button', { name: '打开数据表：暖通技术资料', exact: true }).click();
   await page.getByRole('button', { name: '查看资料：A楼回执丢失核验资料', exact: true }).click();
-  await drawer().getByText('资料附件', { exact: true }).waitFor();
+  await drawer().getByRole('region', { name: '当前附件', exact: true }).waitFor();
   assert.equal(await drawer().getByRole('button', { name: '编辑资料', exact: true }).count(), 0);
   assert.equal(await drawer().getByRole('button', { name: '上传附件', exact: true }).count(), 0);
   await drawer().getByRole('button', { name: '关闭', exact: true }).click();

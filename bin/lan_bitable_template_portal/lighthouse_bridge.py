@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 
-from openclaw_service.assistant.lighthouse_ai import AssistantError
+from openclaw_service.assistant.lighthouse_ai import AssistantError, safe_text
 from .assistant_shared_read import original_actor, reader_actor, shared_query_actor, shared_operation, SharedRead
 
 
@@ -141,6 +141,9 @@ class PortalAuthority:
             from .portal_auth import topic_access_allowed
             if not topic_access_allowed({'capabilities': current['_topic_access']}, current):
                 raise AssistantError('话题资料权限已变化，未继续读取或回复旧资料。', 403)
+            if isinstance(topic.get('questions'), list):
+                current['_feishu_topic']['questions'] = [safe_text(question, limit=2000)
+                    for question in topic['questions'][-8:] if isinstance(question, str)]
         return context, shared_query_actor(current)
 
     @staticmethod

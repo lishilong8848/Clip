@@ -67,7 +67,8 @@ try {
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     try {
-      await page.goto(origin + '/__account-fixture.html');
+      // The isolated Vite cache compiles cold; keep interaction assertions at 15s.
+      await page.goto(origin + '/__account-fixture.html', { timeout: 60000 });
       await page.getByRole('button', { name: `管理${duty.name}`, exact: true }).click();
       const editor = page.getByRole('dialog', { name: duty.name, exact: true });
       const level = editor.getByLabel('权限级别', { exact: true });

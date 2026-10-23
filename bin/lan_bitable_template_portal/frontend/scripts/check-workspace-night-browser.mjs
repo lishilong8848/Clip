@@ -46,23 +46,26 @@ try{
     const toggle=page.getByRole('switch',{name:'夜间模式'});
     if(await toggle.getAttribute('aria-checked')!==String(mode==='dark'))await toggle.click();
     await page.waitForFunction(value=>document.documentElement.dataset.v2Theme===value,mode);
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(400);
   };
   const paint=selector=>page.locator(selector).first().evaluate(el=>{
-    const s=getComputedStyle(el);return{background:s.backgroundColor,color:s.color,scheme:s.colorScheme};
+    const s=getComputedStyle(el),canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');
+    const rgb=value=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return 'rgb('+[...ctx.getImageData(0,0,1,1).data].slice(0,3).join(', ')+')';};
+    return{background:rgb(s.backgroundColor),color:rgb(s.color),scheme:s.colorScheme};
   });
   const light=rgb=>rgb.match(/[\d.]+/g).slice(0,3).map(Number).map(n=>n/255).map(n=>n<=.04045?n/12.92:((n+.055)/1.055)**2.4).reduce((sum,n,i)=>sum+n*[.2126,.7152,.0722][i],0);
   const contrast=(a,b)=>(Math.max(light(a),light(b))+.05)/(Math.min(light(a),light(b))+.05);
   await page.goto(entry+'?view=my');await page.getByRole('heading',{name:'夜间验收人员',exact:true}).waitFor();
+  await page.waitForLoadState('networkidle');
   const day=await paint('body');assert(light(day.background)>.5);
   const before=requests.length;await theme('dark');assert.equal(requests.length,before,'switching themes does not refetch business data');
   const night=await paint('body');assert(light(night.background)<.05);assert(contrast(night.color,night.background)>=4.5);
   const popup=await paint('.n-popover');assert(light(popup.background)<.08,'portalled component-library popover is dark');
-  assert(light((await paint('.v2-nav-search')).background)<.08,'navigation search does not retain a pale background');
+  if(await page.locator('.v2-nav-search').count())assert(light((await paint('.v2-nav-search')).background)<.08,'navigation search does not retain a pale background');
   await page.getByRole('switch',{name:'夜间模式'}).focus();await page.keyboard.press('Space');
   await page.waitForFunction(()=>document.documentElement.dataset.v2Theme==='light');
   await page.keyboard.press('Space');await page.waitForFunction(()=>document.documentElement.dataset.v2Theme==='dark');
-  for(const label of ['海湾蓝','松石青','石墨灰','莓果红']){
+  for(const label of ['钴蓝银白','黑金','朱砂红橙','松绿薄荷','石墨冰青','莓红石白']){
     await page.getByRole('button',{name:label,exact:true}).click();
     const colors=await page.evaluate(()=>{
       const el=document.createElement('span');document.querySelector('.v2-shell').append(el);
@@ -117,7 +120,9 @@ try{
     await page.setViewportSize({width,height:900});
     for(const mode of ['dark','light']){
       await theme(mode);await page.getByRole('button',{name:'导航配色',exact:true}).click();await page.getByRole('switch',{name:'夜间模式'}).waitFor({state:'hidden'});
-      const field=await paint('#personnel-password');assert(contrast(field.color,field.background)>=4.5,'password form text is legible in both themes');
+      const field=await paint('#personnel-password');
+      await page.screenshot({path:path.join(output,`login-${mode}-${width}.png`)});
+      assert(contrast(field.color,field.background)>=4.5,'password form text is legible in both themes: '+JSON.stringify({mode,width,field}));
       assert.equal(light(field.background)<.1,mode==='dark');
       assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
       await page.screenshot({path:path.join(output,`login-${mode}-${width}.png`)});

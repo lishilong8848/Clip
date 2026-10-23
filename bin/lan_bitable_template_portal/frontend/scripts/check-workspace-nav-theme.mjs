@@ -4,11 +4,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {preview} from 'vite';
 import {chromium} from 'playwright';
+import './check-workspace-palettes.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../output/playwright/nav-theme');
 const entry='/assets/workspace-v2/index.html';
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server=await preview({root,configFile:false,build:{outDir:process.env.RESPONSIVE_BUILD_DIR||'dist'},logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 let account='fixture-a',page;const errors=[];
@@ -52,12 +53,12 @@ try{
   const initial=await colors();
   await page.getByRole('button',{name:'导航配色',exact:true}).click();
   await page.screenshot({path:path.join(output,'theme-picker-open.png')});
-  for(const label of ['松石青','石墨灰','莓果红','海湾蓝']){
+  for(const label of ['黑金','朱砂红橙','松绿薄荷','石墨冰青','莓红石白','钴蓝银白']){
     await page.getByRole('button',{name:label,exact:true}).click();const next=await colors();
     assert(luminance(next.side)>luminance(next.top),'sidebar stays lighter than header');
     assert(contrast(next.text,next.side)>=4.5&&contrast(next.text,next.selected)>=4.5,'sidebar text remains readable');
     assert(contrast([244,248,255],next.top)>=4.5,'header text remains readable');
-    if(label!=='海湾蓝'){assert.notEqual(next.header,initial.header);assert.notEqual(next.sidebar,initial.sidebar);}
+    if(label!=='钴蓝银白'){assert.notEqual(next.header,initial.header);assert.notDeepEqual(next.selected,initial.selected);}
     assert.equal(await page.getByRole('button',{name:label,exact:true}).getAttribute('aria-pressed'),'true');
     await assertHeaderSeam();
   }
@@ -71,19 +72,34 @@ try{
     await assertHeaderSeam();
     assert.equal(await page.evaluate(()=>localStorage.getItem('clipflow:workspace-nav-color:fixture-a')),custom,'custom color is persisted');
   }
-  await page.getByText('导航配色',{exact:true}).last().click();
-  await page.getByRole('button',{name:'松石青',exact:true}).click();
+  await page.getByText('主题配色',{exact:true}).last().click();
+  await page.getByRole('button',{name:'松绿薄荷',exact:true}).click();
   await page.getByRole('heading',{name:'界面验收人员',exact:true}).click();
   await page.reload();await page.getByRole('heading',{name:'界面验收人员',exact:true}).waitFor();
-  assert.equal((await colors()).color,'#16836d','personal color survives reload');
+  assert.equal((await colors()).color,'#087a61','personal color survives reload');
   account='fixture-b';await page.reload();await page.getByRole('heading',{name:'界面验收人员',exact:true}).waitFor();
-  assert.equal((await colors()).color,'#2364d2','different account starts with its own preference');
+  assert.equal((await colors()).color,'#2457e6','different account starts with its own preference');
   account='fixture-a';await page.reload();await page.getByRole('heading',{name:'界面验收人员',exact:true}).waitFor();
-  assert.equal((await colors()).color,'#16836d');
+  assert.equal((await colors()).color,'#087a61');
+  await page.getByRole('button',{name:'导航配色',exact:true}).click();
+  for(const dark of [false,true]){
+    const toggle=page.getByRole('switch',{name:'夜间模式'});
+    if(await toggle.getAttribute('aria-checked')!==String(dark))await toggle.click();
+    for(const label of ['钴蓝银白','黑金','朱砂红橙','松绿薄荷','石墨冰青','莓红石白']){
+      await page.getByRole('button',{name:label,exact:true}).click();
+      await page.waitForTimeout(400);
+      const next=await colors();assert(contrast(next.text,next.side)>=4.5&&contrast(next.text,next.selected)>=4.5);
+      const panel=await page.locator('.n-popover').evaluate(el=>({background:getComputedStyle(el).backgroundColor,color:getComputedStyle(el).color}));
+      const toRgb=value=>value.match(/[\d.]+/g).slice(0,3).map(Number);
+      assert(contrast(toRgb(panel.background),toRgb(panel.color))>=4.5,'theme picker text is readable');
+      await page.screenshot({path:path.join(output,`palette-${label}-${dark?'night':'day'}.png`)});
+    }
+  }
+  await page.getByRole('heading',{name:'界面验收人员',exact:true}).click();
   const logo=page.locator('.v2-brand img');
   assert.equal(await logo.evaluate(img=>getComputedStyle(img).backgroundColor),'rgba(0, 0, 0, 0)');
   assert(await logo.evaluate(img=>img.complete&&img.naturalWidth===300),'original logo loads unchanged');
-  for(const width of [1440,1150,1100,1024,390,360]){
+  for(const width of [1512,1440,1150,1100,1024,440,402,390,360]){
     await page.setViewportSize({width,height:900});await page.waitForTimeout(250);
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),'header controls fit viewport');
     const box=await page.getByRole('button',{name:'导航配色',exact:true}).boundingBox();assert(box.x>=0&&box.x+box.width<=width);

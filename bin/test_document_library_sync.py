@@ -274,13 +274,14 @@ class FirstSyncRoutesTests(SyncFixture):
             self.assertTrue(release.wait(5))
             return original(**kwargs)
         with patch.object(self.remote, 'records', side_effect=slow) as scan, patch(
-                'lan_bitable_template_portal.document_library_routes._INITIAL_WAIT_SECONDS', .03):
+                'lan_bitable_template_portal.document_library_routes._INITIAL_WAIT_SECONDS', 0):
             try:
                 response = self.client.get(self.prefix + '/records')
-                self.assertTrue(entered.is_set())
                 self.assertEqual(response.status_code, 503)
                 self.assertEqual(response.json()['code'], 'document_library_sync_pending')
                 identity = self.job()['id']
+                # A pending response may precede worker dispatch under a busy executor.
+                self.assertTrue(entered.wait(3), 'queued first sync did not start')
             finally:
                 release.set()
         response = self.client.get(self.prefix + '/records')

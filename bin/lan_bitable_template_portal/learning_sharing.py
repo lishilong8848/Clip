@@ -78,6 +78,27 @@ def evidence_text(value):
     return re.sub(r'(?<=[\u3400-\u9fff]) +| +(?=[\u3400-\u9fff])', '', value)
 
 
+def evidence_locations(batch, question):
+    quote = question.get('evidence', '')
+    if not quote:
+        return []
+    basis, result = evidence_text(quote), []
+    source = batch.get('source') or {}
+    for item in source.get('sources') or [source]:
+        text = item.get('text', '')
+        if basis not in evidence_text(text):
+            continue
+        references = [ref for ref in item.get('references', [])
+                      if basis in evidence_text(text[ref.get('start', 0):ref.get('end', len(text))])]
+        position = text.find(quote)
+        result.append({'title': item.get('title') or batch['title'], 'url': item.get('url', ''),
+                       'references': references, 'excerpt': text[max(0, position - 100):position + len(quote) + 100] if position >= 0 else quote})
+    for image in source.get('images', []):
+        if image['id'] in question.get('image_ids', []) and basis in evidence_text(image.get('text', '')):
+            result.append({'title': image['label'], 'image_id': image['id'], 'excerpt': image['text'], 'references': []})
+    return result
+
+
 def validate_questions(questions, source, types=None, *, draft=False, images=()):
     if not isinstance(questions, list) or not (0 if draft else 5) <= len(questions) <= 100:
         raise LearningError('每批发布至少5题、合计最多100题；AI题最多40题。')
@@ -353,11 +374,13 @@ class SharingExercises:
             self.learning._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
         return {'id': identity}
 
-    def attempts(self, identity, conn=None):
+    def attempts(self, identity, conn=None, *, summary=False):
         own = conn is None
         conn = conn or self.learning._connect()
         try:
-            return [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_attempt' AND json_extract(payload,'$.batch_id')=? ORDER BY key", (identity,))]
+            projection = "json_remove(payload,'$.answers','$.draft_answers','$.saved_operations','$.ticket'),(SELECT count(*) FROM json_each(documents.payload,'$.draft_answers'))" if summary else 'payload'
+            rows = conn.execute("SELECT " + projection + " FROM documents WHERE kind='sharing_attempt' AND json_extract(payload,'$.batch_id')=? ORDER BY key", (identity,))
+            return [{**json.loads(row[0]), **({'saved_count': row[1]} if summary else {})} for row in rows]
         finally:
             if own: conn.close()
 
@@ -365,14 +388,27 @@ class SharingExercises:
         return bool(actor.get('is_admin') or person.get('open_id') == actor['id']
                     or actor.get('shared_account') and actor.get('scope') and actor['scope'] == person.get('scope'))
 
-    def detail(self, identity, actor):
+    def detail(self, identity, actor, *, progress_only=False, compact=False):
         batch = self.batch(identity)
         participants = [p for p in batch['participants'] if self.permitted(actor, p)]
         if not actor.get('is_admin') and (not participants or batch['status'] not in {'published', 'closed'}):
             raise LearningError('无权查看此分享会练习。', 403)
-        all_attempts = self.attempts(identity)
+        all_attempts = self.attempts(identity, summary=progress_only or compact)
         attempts = [p for p in all_attempts if self.permitted(actor, p)]
         values = {p['open_id']: p for p in attempts}
+        with closing(self.learning._connect()) as conn:
+            delivery = [json.loads(row[0]) for row in conn.execute("""SELECT payload FROM (
+                SELECT payload,ROW_NUMBER() OVER (PARTITION BY json_extract(payload,'$.attempt_id'),json_extract(payload,'$.kind')
+                    ORDER BY COALESCE(json_extract(payload,'$.date'),'') DESC,updated DESC,key DESC) AS latest
+                FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=?
+                    AND json_extract(payload,'$.kind') IN ('paper','reminder','result')) WHERE latest=1""", (identity,))]
+        # Original task receipts repair older mixed status fields without resending anything.
+        by_attempt = {p['id']: p for p in attempts}
+        for job in delivery:
+            attempt = by_attempt.get(job.get('attempt_id'))
+            if attempt:
+                prefix = {'paper': 'delivery', 'reminder': 'reminder_delivery', 'result': 'result_delivery'}[job['kind']]
+                attempt.update({prefix + '_status': job['status'], prefix + '_error': job.get('error', ''), prefix + '_at': job.get('sent_at', '')})
         question_by_id = {q['id']: q for q in batch['questions']}
         excluded = set(batch.get('excluded_open_ids') or [])
         participants = [{k: p.get(k, '') for k in ('name', 'person_id', 'scope', 'open_id')} | {
@@ -382,8 +418,11 @@ class SharingExercises:
             'choice_count': sum(question_by_id.get(qid, {}).get('type') in {'single', 'multiple'} for qid in values.get(p['open_id'], {}).get('question_ids', [])),
             'delivery_error': values.get(p['open_id'], {}).get('delivery_error', ''),
             'delivery_status': values.get(p['open_id'], {}).get('delivery_status', 'pending'),
+            **{prefix + suffix: values.get(p['open_id'], {}).get(prefix + suffix, '')
+               for prefix in ('delivery', 'reminder_delivery', 'result_delivery') for suffix in ('_error', '_at', '_status')
+               if prefix != 'delivery' or suffix != '_status'},
             'question_count': len(values.get(p['open_id'], {}).get('question_ids', [])),
-            'saved_count': len(values.get(p['open_id'], {}).get('draft_answers', {})),
+            'saved_count': values.get(p['open_id'], {}).get('saved_count', len(values.get(p['open_id'], {}).get('draft_answers', {}))),
         } for p in participants]
         result = {k: batch.get(k, '') for k in ('id', 'title', 'url', 'status', 'version', 'created_at', 'published_at', 'error', 'progress', 'generation_note')}
         result.update(participants=participants, question_count=len(batch['questions']),
@@ -395,30 +434,39 @@ class SharingExercises:
         if (batch['status'] in {'published', 'closed'} and len(all_attempts) != len(assigned_participants(batch))
                 or batch['status'] == 'draft' and all_attempts):
             result['error'] = '历史分配恢复不完整，已暂停此批提醒与汇总；请同步恢复，不能重新抽题代替。'
-        if actor.get('is_admin'):
+        mine = next((p for p in attempts if p['open_id'] == actor['id']), None)
+        if mine and (progress_only or compact) and not actor.get('shared_account'):
+            mine = self.learning._get('sharing_attempt', mine['id'])
+        if mine and not actor.get('shared_account'):
+            result['paper'] = {k: mine.get(k, '' if k == 'submitted_at' else {}) for k in ('id', 'open_id', 'question_ids', 'draft_answers', 'submitted_at')}
+            result['paper'].update(progress_version=mine.get('progress_version', 0), question_count=len(mine['question_ids']), page_size=5)
+        if actor.get('is_admin') and not progress_only:
             result['questions'] = copy.deepcopy(batch['questions'])
             result['source_text'] = (batch.get('source') or {}).get('text', '')
             result['sources'] = [{k: v for k, v in source.items() if k not in {'text', 'images'}} for source in (batch.get('source') or {}).get('sources', [])]
             from .sharing_images import public_images
             result['source_images'] = public_images(batch, editor=True)
-        else:
-            mine = next((p for p in attempts if p['open_id'] == actor['id']), None)
-            if mine and not actor.get('shared_account'):
-                result['paper'] = {'id': mine['id'], 'open_id': mine['open_id'], 'question_ids': mine['question_ids'], 'question_count': len(mine['question_ids']),
-                                   'draft_answers': mine.get('draft_answers', {}), 'progress_version': mine.get('progress_version', 0),
-                                   'submitted_at': mine['submitted_at'], 'page_size': 5}
-            result['questions'] = [copy.deepcopy(q) for q in batch['questions'] if mine and q['id'] in mine['question_ids']]
-            for q in result['questions']:
+        if actor.get('is_admin'):
+            result['material_status'] = [{'id': key, **{k: value.get(k, '') for k in ('title', 'status', 'error')}}
+                                         for key, value in (batch.get('material_state') or {}).items()]
+        if not progress_only:
+            own_questions = [copy.deepcopy(q) for q in batch['questions'] if mine and q['id'] in mine['question_ids']]
+            for q in own_questions:
                 if not mine.get('submitted_at'):
                     for name in ('correct', 'reference_answer', 'explanation', 'evidence'): q.pop(name, None)
                 else:
                     q['selected'] = mine['answers'][q['id']]
+            result['my_questions' if actor.get('is_admin') else 'questions'] = own_questions
         from .sharing_images import public_images
-        for question in result.get('questions', []):
+        for question in result.get('questions', []) + result.get('my_questions', []):
             if question.get('image_ids'):
                 question['images'] = public_images(batch, question['image_ids'])
+        if not progress_only:
+            result['evidence_locations'] = {q['id']: evidence_locations(batch, q) for q in result.get('questions', []) if q.get('evidence')}
         if actor.get('is_admin'):
-            result['results'] = [{k: p.get(k) for k in ('name', 'open_id', 'question_ids', 'answers', 'correct', 'submitted_at')} for p in attempts]
+            if not progress_only:
+                fields = ('name', 'open_id', 'correct', 'submitted_at') if compact else ('name', 'open_id', 'question_ids', 'answers', 'correct', 'submitted_at')
+                result['results'] = [{k: p.get(k) for k in fields} for p in attempts]
             with closing(self.learning._connect()) as conn:
                 notices = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=? AND json_extract(payload,'$.kind')='weekly' ORDER BY updated DESC LIMIT 10", (identity,))]
             result['weekly_reports'] = [{k: row.get(k) for k in ('date', 'end', 'part', 'parts', 'status', 'error', 'sent_at')} for row in notices]
@@ -428,6 +476,16 @@ class SharingExercises:
                                   'failed': sum(row['status'] == 'failed' for row in uploads),
                                   'error': next((row.get('error', '') for row in uploads if row.get('error') and row['status'] != 'sent'), '')}
         return result
+
+    def answer_detail(self, identity, actor, open_id):
+        self.learning._admin(actor)
+        self.batch(identity)
+        if not isinstance(open_id, str) or not re.fullmatch(r'ou_[A-Za-z0-9]+', open_id):
+            raise LearningError('答卷人员标识无效。')
+        attempt = self.learning._get('sharing_attempt', key(identity, open_id))
+        if not attempt or attempt['batch_id'] != identity or attempt['open_id'] != open_id:
+            raise LearningError('此批次没有该人员答卷。', 404)
+        return {k: attempt.get(k) for k in ('name', 'open_id', 'question_ids', 'answers', 'correct', 'submitted_at')}
 
     def listing(self, actor, page=1):
         try: page = max(1, min(10000, int(page)))
@@ -441,11 +499,14 @@ class SharingExercises:
                 where += "json_extract(p.value,'$.open_id')=?)"; args.append(actor['id'])
         with closing(self.learning._connect()) as conn:
             total = conn.execute('SELECT count(*) FROM documents WHERE ' + where, args).fetchone()[0]
-            rows = conn.execute('SELECT key FROM documents WHERE ' + where + ' ORDER BY updated DESC LIMIT 15 OFFSET ?', [*args, (page - 1) * 15]).fetchall()
-        items = []
-        for row in rows:
-            detail = self.detail(row[0], actor)
-            items.append({k: v for k, v in detail.items() if k not in {'questions', 'source_text', 'sources', 'source_images', 'paper', 'participants', 'results', 'weekly_reports'}})
+            rows = conn.execute("SELECT json_object('id',key,'title',json_extract(payload,'$.title'),'status',json_extract(payload,'$.status'),'version',json_extract(payload,'$.version'),'created_at',json_extract(payload,'$.created_at'),'question_count',json_array_length(payload,'$.questions'),'participants',json_extract(payload,'$.participants'),'excluded',json_extract(payload,'$.excluded_open_ids')) FROM documents WHERE " + where + ' ORDER BY updated DESC LIMIT 15 OFFSET ?', [*args, (page - 1) * 15]).fetchall()
+            items = [json.loads(row[0]) for row in rows]
+            ids = [item['id'] for item in items]
+            submitted = {(row[0], row[1]) for row in conn.execute("SELECT json_extract(payload,'$.batch_id'),json_extract(payload,'$.open_id') FROM documents WHERE kind='sharing_attempt' AND COALESCE(json_extract(payload,'$.submitted_at'),'')<>'' AND json_extract(payload,'$.batch_id') IN (" + ','.join('?' for _ in ids) + ')', ids)} if ids else set()
+        for item in items:
+            excluded = set(item.pop('excluded') or [])
+            people = [p for p in item.pop('participants') or [] if self.permitted(actor, p) and p['open_id'] not in excluded]
+            item.update(total=len(people), completed=sum((item['id'], p['open_id']) in submitted for p in people))
         return {'items': items, 'total': total, 'page': page}
 
     def image(self, identity, image_id, actor):
@@ -464,6 +525,15 @@ class SharingExercises:
                 raise LearningError('批次已变化，请刷新后核对。', 409)
             if batch['status'] not in {'draft', 'failed'}:
                 raise LearningError('只有待核对草稿可修改，已发布题目保持原快照。', 409)
+            if 'participant_ids' in payload:
+                ids = payload['participant_ids']
+                if not isinstance(ids, list) or len(ids) > 500 or any(not isinstance(pid, str) for pid in ids) or len(set(ids)) != len(ids):
+                    raise LearningError('补充人员名单无效。')
+                directory = {person['id']: person for person in self.people()}
+                if any(pid not in directory for pid in ids):
+                    raise LearningError('补充人员已不在有效目录，请重新选择。', 409)
+                known_ids = {person['open_id'] for person in batch['participants']}
+                batch['participants'] += [directory[pid] for pid in ids if directory[pid]['open_id'] not in known_ids]
             excluded = payload.get('excluded_open_ids', batch.get('excluded_open_ids', []))
             known = {person['open_id'] for person in batch['participants']}
             if (not isinstance(excluded, list) or any(not isinstance(oid, str) or oid not in known for oid in excluded)

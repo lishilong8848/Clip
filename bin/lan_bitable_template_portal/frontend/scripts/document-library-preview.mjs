@@ -44,7 +44,8 @@ function makeRecord(id, title, scope = 'A') {
 export function documentFixture() {
   return { tables: [table('electrical', '电气技术资料'), table('mechanical', '暖通技术资料', false)],
     records: [makeRecord('recDoc1', 'A楼高压配电操作规程'), makeRecord('recDoc2', 'A楼电气系统竣工图'), makeRecord('recDoc3', 'E楼运行资料', 'E')],
-    calls: [], writes: [], applied: 0, receipts: new Map(), flags: { tablesFailure: false, schemaFailure: false, listFailure: false,
+    calls: [], writes: [], applied: 0, receipts: new Map(), pendingOperations: [], dateTime: false,
+    storage: { bytes: 8192, files: 3, orphan_files: 1, orphan_bytes: 2048, free_bytes: 1073741824, revision: 'storage1' }, flags: { tablesFailure: false, schemaFailure: false, listFailure: false,
       detailFailure: false, versionsFailure: false, conflict: false, loseReceipt: false, indexFailure: false, denyWrite: false,
       previewDenied: false, previewMalformed: false, previewEmptyFields: false, previewUnknownTable: false, previewNoTables: false, configLoseReceipt: false },
     previewDelay: 0, canConfigure: true, personMultiple: false, listDelay: 0, version: 1, authReads: 0 };
@@ -80,13 +81,16 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
       fixture.calls.push(call);
       const selected = fixture.tables.find(item => item.id === key);
       const tableRecords = fixture.recordsByTable?.[key] || fixture.records;
-      const capabilities = record => ({ edit: selected.write_scopes.includes(record.fields.fldScope), upload: selected.write_scopes.includes(record.fields.fldScope), max_upload_bytes: 104857600 });
+      const capabilities = record => ({ edit: selected.write_scopes.includes(record.fields.fldScope), upload: selected.write_scopes.includes(record.fields.fldScope), max_upload_bytes: 104857600,
+        ...(selected.capabilities?.reindex !== undefined ? { reindex: selected.capabilities.reindex } : {}) });
       const fail = message => json(message, 503);
       if (request.method === 'GET') {
+        if (relative === '/storage') return fixture.canConfigure ? json(fixture.storage) : json('无权管理缓存', 403);
         if (relative === '/tables') return fixture.flags.tablesFailure ? fail('数据表列表暂时不可用') : json({ items: fixture.tables, can_configure: fixture.canConfigure });
         if (!selected) return json('没有此数据表的权限', 403);
+        if (resource === '/operations') return json({ items: fixture.pendingOperations.filter(item => item.table === key) });
         if (resource === '/schema') return fixture.flags.schemaFailure ? fail('字段读取暂时失败') : json({ table: selected,
-          fields: schema.fields.map(field => ({ field_id: field.id, field_name: field.name, type: field.type, property: { options: field.options || [], ...(field.type===11?{multiple:fixture.personMultiple}:{}) }, read_only: field.read_only, required: field.required })),
+          fields: schema.fields.map(field => ({ field_id: field.id, field_name: field.name, type: field.type, property: { options: field.options || [], ...(field.type===11?{multiple:fixture.personMultiple}:{}), ...(field.type === 5 && fixture.dateTime ? { date_formatter: 'yyyy/MM/dd HH:mm' } : {}) }, read_only: field.read_only, required: field.required })),
           display_fields: selected.display_fields, attachment_fields: selected.attachment_fields });
         if (resource === '/records') {
           if (fixture.listDelay) await new Promise(resolve => setTimeout(resolve, fixture.listDelay));
@@ -106,6 +110,19 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
         return record ? fixture.flags.detailFailure ? fail('资料详情暂时读取失败') : json({ ...record, capabilities: capabilities(record) }) : json('资料不存在', 404);
       }
       const chunks = []; for await (const chunk of request) chunks.push(chunk); const body = Buffer.concat(chunks);
+      if (relative === '/storage') {
+        if (!fixture.canConfigure) return json('无权管理缓存', 403);
+        const payload = JSON.parse(body.toString());
+        if (payload.expected_revision !== fixture.storage.revision) return json('缓存引用已变化', 409);
+        fixture.storage = { ...fixture.storage, bytes: 6144, files: 2, orphan_files: 0, orphan_bytes: 0, revision: 'storage2', removed: 1 };
+        return json(fixture.storage);
+      }
+      if (resource.endsWith('/verify')) {
+        const id = resource.split('/')[2], record = fixture.receipts.get(id);
+        if (!record) return json({ status: 'uncertain', message: '原操作仍待核验，不重复提交。' });
+        fixture.pendingOperations = fixture.pendingOperations.filter(item => item.operation_id !== id);
+        return json({ status: 'completed', record });
+      }
       if (relative === '/preview' && request.method === 'POST') {
         const payload = JSON.parse(body.toString()); call.body = payload;
         if (!fixture.canConfigure || fixture.flags.previewDenied) return json('没有读取此数据表的权限', 403);
@@ -156,7 +173,7 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
       else { assert(!('fldFormula' in payload.fields)); assert(!('fldUnknown' in payload.fields)); Object.assign(record.fields, payload.fields); }
       record.revision = 'r' + (++fixture.version); record.knowledge_status = { state: fixture.flags.indexFailure ? 'failed' : 'indexed' };
       record.capabilities = capabilities(record); fixture.applied++; fixture.receipts.set(payload.operation_id, copy(record));
-      if (fixture.flags.loseReceipt) { fixture.flags.loseReceipt = false; return json('原写入已提交，回执传输未完成', 503); }
+      if (fixture.flags.loseReceipt) { fixture.flags.loseReceipt = false; fixture.pendingOperations.push({ table: key, operation_id: payload.operation_id, record_id: record.record_id, kind: file ? 'attachment' : id ? 'update' : 'create', reason: payload.reason, actor_name: '资料管理员', status: 'uncertain', created_at: 1792376400 }); return json('原写入已提交，回执传输未完成', 503); }
       return json(record);
     } catch (error) { json(error instanceof Error ? error.message : '隔离验收失败', 500); }
   });

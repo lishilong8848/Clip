@@ -1,5 +1,5 @@
 <template>
-  <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing?'true':undefined">
+  <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing||recordId?'true':undefined">
     <Teleport v-if="headerTarget&&!historyOpen" :to="headerTarget"><NButton data-v2-navigation size="small" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></Teleport>
     <div class="v2-check-toolbar" data-v2-navigation>
       <NSelect v-if="state?.can_manage&&!fixedScope&&(!compact||!overviewOpen||historyOpen)" :value="scope" :options="scopeOptions" :disabled="busy || uploading || saving" aria-label="检查楼栋" @update:value="changeScope" />
@@ -7,10 +7,10 @@
       <span v-if="needsAttention" class="v2-check-alert" role="status"><i aria-hidden="true" />待检查</span>
       <div class="v2-check-actions"><NButton v-if="!compact||!overviewOpen||historyOpen" size="small" secondary :disabled="busy||uploading||saving||editing" :aria-pressed="historyOpen" @click="historyOpen=!historyOpen"><template #icon><History :size="15" /></template>{{compact?(historyOpen?'返回检查清单':'历史检查记录'):(historyOpen?'返回检查':'历史记录')}}</NButton><NButton v-if="!historyOpen&&(!compact||!overviewOpen)&&!fixedScope&&state?.can_manage&&state.overview?.rows" size="small" secondary :disabled="busy||uploading||saving" @click="overviewOpen=!overviewOpen">{{compact?'返回楼栋列表':overviewOpen?'本楼检查':'完成总览'}}</NButton><NButton v-if="state?.can_manage&&(!compact||!overviewOpen)" size="small" secondary :disabled="busy||uploading||saving" @click="edit"><template #icon><Settings2 :size="15" /></template>管理清单</NButton><NButton v-if="!historyOpen&&!headerTarget" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></div>
     </div>
-    <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
+    <NAlert v-if="error&&!task?.can_submit" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NSkeleton v-if="!state && loading" text :repeat="4" />
     <template v-else-if="state">
-      <CheckHistory v-if="historyOpen" :key="String(user.open_id)" :scope="scope" />
+      <CheckHistory v-if="historyOpen" :key="String(user.open_id)" :scope="scope" @edit="recordId=$event" />
       <CheckOverview v-else-if="overviewOpen&&state.can_manage" :rows="state.overview?.rows||[]" :disabled="busy||uploading||saving" @select="openBuilding" />
       <div v-else class="v2-check-workspace">
       <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy||uploading||saving" @click="selectedId=row.id"><span>{{ row.shift }}班<CheckCircle2 v-if="row.submitted" :size="14" /></span><small class="v2-check-window">{{compact?shortDate(row.due*1000):dateLabel(row.due*1000)}} 至 {{compact?shortDate(row.deadline*1000):dateLabel(row.deadline*1000)}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}} · {{row.items.length}} 项</small><small v-else>{{row.due>serverNow?(compact?'可提前检查':'未到时间，可提前检查'):row.deadline<=serverNow?(compact?'逾期待补做':'已逾期，可补做'):'待检查'}} · {{row.items.length}} 项</small></button></div>
@@ -20,6 +20,7 @@
           <CheckCircle2 v-if="task.submitted" :size="20" /><ClipboardCheck v-else :size="20" />
           <div><strong>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</strong><small>{{ task.submitted ? completionLabel(task) + ' · ' + task.actor_name + ' · ' + dateLabel(task.submitted) : (task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员') + ' · 任意一人提交即可' }}</small></div>
           <span v-if="!task.submitted">{{ answered }} / {{ task.items.length }}</span>
+          <NButton v-else-if="task.can_edit" secondary size="small" @click="recordId=task.id"><template #icon><Pencil :size="15" /></template>修改记录</NButton>
         </div>
         <div v-if="task.submitted" class="v2-check-sync" role="status">{{ task.sync_status==='synced'?'已同步飞书':'本地已保存，飞书同步中' }}<span v-if="task.sync_error"> · {{ task.sync_error }}</span></div>
         <NAlert v-else-if="!task.can_submit" type="info" :bordered="false">仅本楼值班人员、值班账号或有该楼管理权限的上级可提交。</NAlert>
@@ -31,7 +32,7 @@
               <NRadioGroup :value="answer(item.id).status" :name="task.id+'-'+item.id" :disabled="busy || !task.can_submit" :aria-label="item.text" @update:value="value=>setAnswer(item.id,String(value))">
                 <NRadioButton class="v2-check-normal" value="normal">无异常</NRadioButton><NRadioButton class="v2-check-abnormal" value="abnormal">异常</NRadioButton>
               </NRadioGroup>
-              <NButton class="v2-check-attachment-toggle" quaternary :aria-label="item.text+'附件'" :aria-expanded="!!attachmentOpen[task.id+':'+item.id]" :title="'附件 '+(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length+' 个'" :disabled="busy||uploading||!task.can_submit&&!(task.files||[]).some((f:Dict)=>f.item_id===item.id)" @click="attachmentOpen[task.id+':'+item.id]=!attachmentOpen[task.id+':'+item.id]"><Paperclip :size="16" /><span v-if="(task.files||[]).some((f:Dict)=>f.item_id===item.id)">{{(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length}}</span></NButton>
+              <NButton class="v2-check-attachment-toggle" attr-type="button" quaternary :aria-label="item.text+'附件'" :aria-expanded="!!attachmentOpen[task.id+':'+item.id]" :title="'附件 '+(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length+' 个'" :disabled="busy||uploading||!task.can_submit&&!(task.files||[]).some((f:Dict)=>f.item_id===item.id)" @click="toggleAttachments(item.id,$event)"><Paperclip :size="16" /><span v-if="(task.files||[]).some((f:Dict)=>f.item_id===item.id)">{{(task.files||[]).filter((f:Dict)=>f.item_id===item.id).length}}</span></NButton>
               </div>
               <Transition name="v2-check-note"><div v-if="answer(item.id).status==='abnormal'" class="v2-check-note">
                 <label :for="'check-note-'+task.id+'-'+item.id">异常备注 <span v-if="!task.submitted">*</span></label>
@@ -40,9 +41,10 @@
               <CheckAttachments v-if="attachmentOpen[task.id+':'+item.id]" :task-id="task.id" :item-id="item.id" kind="item" :files="(task.files||[]).filter((f:Dict)=>f.item_id===item.id)" :locked="busy||uploading||!task.can_submit" @busy="uploading=$event" @changed="load(true)" />
             </fieldset>
           </div>
+          <p v-if="error&&task.can_submit" class="v2-check-form-error" role="alert">{{error}}</p>
           <footer v-if="task.can_submit"><span>{{ answered===task.items.length?'检查项已填完，请核对后提交':'逐项选择检查结果' }}</span><NButton type="primary" attr-type="submit" :loading="busy" :disabled="busy||uploading">提交检查</NButton></footer>
         </form>
-        <section class="v2-check-handover"><h3>交接班照片 <small>{{task.handover_photo?'本班已上传':'本楼本班共用一张'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
+        <section class="v2-check-handover"><h3>交接班照片 <small>{{task.handover_photo?'本班已上传':'本楼本班共用一张'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :revision="task.submitted?task.revision:undefined" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
       </template>
       <NEmpty v-else :description="!state.definition.items.length?'尚未配置班前检查清单':!state.roster_ready?'正在准备当天排班':'当前没有已发布的本楼班前检查'" size="small" />
       <ol v-if="!task && state.definition.items.length" class="v2-check-preview"><li v-for="item in state.definition.items" :key="item.id">{{ item.text }}<small> · {{frequencyLabel(item.frequency)}}</small></li></ol>
@@ -63,12 +65,13 @@
       <PhotoLocationSettings v-if="editing&&state?.can_configure_location" @busy="locationSaving=$event" />
       <template #footer><div class="v2-check-editor-actions"><NButton :disabled="saving||locationSaving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving||locationSaving" data-v2-submit @click="saveDefinition">保存清单</NButton></div></template>
     </NModal>
+    <CheckRecordEditor v-if="recordId" :key="user.open_id+':'+recordId" :task-id="recordId" :register-guard="registerGuard" @close="recordId=''" @changed="load(true)" />
   </section>
 </template>
 <script setup lang="ts">
 import { computed,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,NRadioButton,NRadioGroup,NSelect,NSkeleton,useDialog,useMessage } from 'naive-ui';
-import { CheckCircle2,ClipboardCheck,History,Paperclip,Plus,RefreshCw,Settings2,Trash2 } from 'lucide-vue-next';
+import { CheckCircle2,ClipboardCheck,History,Paperclip,Pencil,Plus,RefreshCw,Settings2,Trash2 } from 'lucide-vue-next';
 import { requestJson,type Dict } from '../client';
 import { randomHexId } from '../../browserStorage';
 import { registerNavigationGuard } from '../navigation';
@@ -77,6 +80,7 @@ import CheckFrequency from './CheckFrequency.vue';
 import CheckAttachments from './CheckAttachments.vue';
 import CheckOverview from './CheckOverview.vue';
 import CheckHistory from './CheckHistory.vue';
+import CheckRecordEditor from './CheckRecordEditor.vue';
 import PhotoLocationSettings from './PhotoLocationSettings.vue';
 const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
 const headerTarget=ref<HTMLElement|null>(null);
@@ -86,6 +90,7 @@ const editing=ref(false),saving=ref(false),locationSaving=ref(false),uploading=r
 const recipientOptions=ref<{value:string;label:string}[]>([]),recipientsLoading=ref(false),recipientError=ref('');let recipientController:AbortController|undefined;
 const overviewOpen=ref(false);let firstState=true;
 const historyOpen=ref(false);
+const recordId=ref('');
 const compact=document.documentElement.classList.contains('workspace-v2');
 const attachmentOpen=ref<Record<string,boolean>>({});
 const drafts=ref<Record<string,Record<string,{status:string;note:string}>>>({});
@@ -103,6 +108,12 @@ function answer(id:string){return task.value?.submitted ? task.value.answers.fin
 const answered=computed(()=>task.value?.items.filter((i:Dict)=>answer(i.id).status==='normal'||answer(i.id).status==='abnormal'&&answer(i.id).note.trim()).length||0);
 function setAnswer(id:string,status:string){if(!task.value)return;error.value='';draftVersions[task.value.id]=task.value.definition_version;const draft=drafts.value[task.value.id]||={};draft[id]={...answer(id),status};}
 function setNote(id:string,note:string){if(!task.value)return;error.value='';draftVersions[task.value.id]=task.value.definition_version;const draft=drafts.value[task.value.id]||={};draft[id]={...answer(id),note};}
+async function toggleAttachments(id:string,event:MouseEvent){
+  if(!task.value)return;const key=task.value.id+':'+id,field=(event.currentTarget as HTMLElement).closest('fieldset');
+  attachmentOpen.value[key]=!attachmentOpen.value[key];if(!attachmentOpen.value[key])return;
+  await nextTick();const zone=field?.querySelector<HTMLElement>('.v2-check-attachments');
+  if(zone?.isConnected){zone.focus({preventScroll:true});(zone.querySelector<HTMLElement>('.v2-check-file-actions')||zone).scrollIntoView({block:'nearest'});}
+}
 function dateLabel(value:string|number){return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function shortDate(value:number){return new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function completionLabel(row:Dict){const time=Date.parse(row.submitted)/1000;return time<row.due?'提前完成':time>=row.deadline?'补做完成':'已完成';}
@@ -136,9 +147,9 @@ async function submit(){
 }
 const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
 function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||busy.value||saving.value||editing.value||uploading.value){event.preventDefault();event.returnValue='';}}
-function refresh(){if(!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value)void load();}
+function refresh(){if(!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value&&!recordId.value)void load();}
 onMounted(()=>{void load();timer=setInterval(refresh,30000);window.addEventListener('clipflow-business-changed',refresh);window.addEventListener('beforeunload',beforeUnload);document.addEventListener('visibilitychange',refresh);});
-watch(()=>props.user.open_id,()=>{drafts.value={};state.value=undefined;recipientController?.abort();recipientOptions.value=[];items.value=[];editing.value=false;});
+watch(()=>props.user.open_id,()=>{recordId.value='';drafts.value={};state.value=undefined;recipientController?.abort();recipientOptions.value=[];items.value=[];editing.value=false;});
 onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abort();if(timer)clearInterval(timer);removeGuard();window.removeEventListener('clipflow-business-changed',refresh);window.removeEventListener('beforeunload',beforeUnload);document.removeEventListener('visibilitychange',refresh);});
 </script>
 <style>
@@ -165,7 +176,8 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 </style>
 <style>
 .workspace-v2 .v2-check-choice{min-height:88px;padding:12px}
-.v2-check-items{max-height:min(480px,58dvh);overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding-inline:4px 8px}
+.v2-check-items{max-height:min(480px,58dvh);overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:4px 8px 12px 4px;scroll-padding-block:12px}
+.v2-check-form-error{color:#b42318;font-size:13px;line-height:1.5;margin:8px 0}
 .v2-check-items:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
 .v2-check-item{flex-shrink:0}
 .v2-check-item legend{font-size:16px;font-weight:600;line-height:1.6}

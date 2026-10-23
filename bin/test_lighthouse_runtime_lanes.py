@@ -465,7 +465,9 @@ class NativeAgentLaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({value.token for value in (legacy, a, b)}), 3)
         self.assertEqual(a.token, agent(self.engine, actor('a')).token)
         a.health.record(a._health_key(a.profile), category='model_auth')
-        self.assertEqual(b.health.snapshot(b._health_key(b.profile)), {})
+        self.assertEqual(b.health.snapshot(b._health_key(b.profile))['category'], 'model_auth')
+        other = agent(self.engine, actor('a', id='another-owner'))
+        self.assertEqual(other.health.snapshot(other._health_key(other.profile)), {})
         self.assertTrue(all(value.actor['id'] == 'same-owner' for value in (legacy, a, b)))
 
     async def test_gateway_rotation_and_native_history_cache_are_lane_local(self):

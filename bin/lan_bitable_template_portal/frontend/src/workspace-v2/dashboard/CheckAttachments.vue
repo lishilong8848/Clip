@@ -8,9 +8,9 @@
       <span v-if="file.delivery_status" class="v2-check-photo-delivery" :class="{'has-error':!!file.delivery_error}" role="status">{{file.delivery_status==='sent'?'照片已发送给当前登录账号':file.delivery_error||'照片已保存，正在发送给当前登录账号'}}</span>
     </div></div>
     <div v-if="!locked&&allowUpload!==false" class="v2-check-file-actions">
-      <NButton size="small" secondary :disabled="working" @click="photos?.click()"><ImagePlus :size="15" />上传照片</NButton>
-      <NButton v-if="kind!=='handover'" size="small" quaternary :disabled="working" @click="picker?.click()"><Paperclip :size="15" />添加文件</NButton>
-      <NButton size="small" secondary :disabled="working" @click="camera?.click()"><Camera :size="15" />拍照</NButton>
+      <NButton attr-type="button" size="small" secondary :disabled="working" @click="photos?.click()"><ImagePlus :size="15" />{{replacingHandover?'替换照片':'上传照片'}}</NButton>
+      <NButton v-if="kind!=='handover'" attr-type="button" size="small" quaternary :disabled="working" @click="picker?.click()"><Paperclip :size="15" />添加文件</NButton>
+      <NButton attr-type="button" size="small" secondary :disabled="working" @click="camera?.click()"><Camera :size="15" />拍照</NButton>
     </div>
     <div v-if="working" class="v2-check-file-actions" role="status"><NSpin :size="14" />{{editor?'正在编辑照片':'正在处理'}} {{uploadName}}</div>
     <input ref="photos" class="v2-check-file-input" type="file" accept="image/jpeg,image/png,image/webp" :multiple="kind!=='handover'" :aria-label="kind==='handover'?'上传交接班照片':'上传检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
@@ -40,14 +40,16 @@ import {Camera,Paperclip,ImagePlus,FileText,X,Download} from 'lucide-vue-next';
 import {requestBinaryJson,requestJson,type Dict} from '../client';
 import {requestFile} from '../../api/client';
 import PreShiftPhotoEditor from './PreShiftPhotoEditor.vue';
-const props=withDefaults(defineProps<{taskId:string;itemId?:string;kind:'item'|'handover';files:Dict[];locked:boolean;allowUpload?:boolean}>(),{allowUpload:true});
-const emit=defineEmits<{changed:[];busy:[value:boolean]}>();
+const props=withDefaults(defineProps<{taskId:string;itemId?:string;kind:'item'|'handover';files:Dict[];locked:boolean;allowUpload?:boolean;revision?:number}>(),{allowUpload:true});
+const emit=defineEmits<{changed:[result?:Dict];busy:[value:boolean]}>();
 const camera=ref<HTMLInputElement>(),photos=ref<HTMLInputElement>(),picker=ref<HTMLInputElement>(),working=ref(false),error=ref(''),uploadName=ref(''),dragging=ref(false);
 const dialog=useDialog();let disposed=false,dragDepth=0;
 const uploaded=ref<Dict[]>([]),previewPhoto=ref<{url:string;file:File;meta:Dict}>(),saveStatus=ref('');
+const removed=ref<string[]>([]),mutationRevision=ref(props.revision);
 const editor=ref<{file:File;info:Dict;taskId:string}>(),editorSaving=ref(false),editorError=ref('');
 let resolveEditor:((file:Dict|null)=>void)|undefined,uploadController:AbortController|undefined;
-const shownFiles=computed(()=>[...props.files,...uploaded.value.filter(file=>!props.files.some(item=>item.id===file.id))]);
+const shownFiles=computed(()=>(props.kind==='handover'&&uploaded.value.length?uploaded.value.slice(-1):[...props.files,...uploaded.value.filter(file=>!props.files.some(item=>item.id===file.id))]).filter(file=>!removed.value.includes(file.id)));
+const replacingHandover=computed(()=>props.kind==='handover'&&props.revision!==undefined&&shownFiles.value.length===1);
 const canSharePhoto=computed(()=>Boolean(previewPhoto.value&&navigator.canShare?.({files:[previewPhoto.value.file]})));
 const photoAudit=computed(()=>{const audit=previewPhoto.value?.meta.watermark?.audit;if(!audit?.display_time)return '';return '拍照时间：'+audit.display_time+' · '+(audit.modified?(audit.original_time?'手动修改；原始 '+audit.original_time:'手动填写'):audit.source);});
 function url(file:Dict){return '/api/pre-shift-checks/files/'+encodeURIComponent(file.id);}
@@ -62,7 +64,7 @@ function photoRequest(file:File,context:Dict,captured:boolean,preview=false){
   const metadata=JSON.stringify(context),header=encodeURIComponent(metadata);
   if(metadata.length>4096||header.length>7000)throw new Error('水印文字和Logo信息过长，请缩短文字后重试。');
   uploadController=new AbortController();
-  return requestBinaryJson((preview?'/api/pre-shift-checks/photo-preview?':'/api/pre-shift-checks/files?')+new URLSearchParams({task_id:props.taskId,item_id:props.itemId||'',kind:props.kind,name:file.name,capture:captured?'1':'0',retain:preview?'1':'0'}),file,
+  return requestBinaryJson((preview?'/api/pre-shift-checks/photo-preview?':'/api/pre-shift-checks/files?')+new URLSearchParams({task_id:props.taskId,item_id:props.itemId||'',kind:props.kind,name:file.name,capture:captured?'1':'0',retain:preview?'1':'0',...(mutationRevision.value!==undefined?{revision:String(mutationRevision.value)}:{}),...(replacingHandover.value?{replace_file_id:shownFiles.value[0].id}:{})}),file,
     {signal:uploadController.signal,headers:{'Content-Type':file.type||'application/octet-stream','X-Photo-Context':header}});
 }
 async function saveEditedPhoto(options:Dict,remember:boolean){
@@ -77,7 +79,7 @@ async function upload(files:File[],captured=false){
   working.value=true;emit('busy',true);error.value='';const capturedAt=Date.now(),taskId=props.taskId;
   let lastPhoto:Dict|undefined;
   try{
-    if(files.length+shownFiles.value.length>(props.kind==='handover'?1:10))throw new Error(props.kind==='handover'?'本班交接班照片只需上传一次。':'每项最多10个附件。');
+    if(files.length+(replacingHandover.value?0:shownFiles.value.length)>(props.kind==='handover'?1:10))throw new Error(props.kind==='handover'?'本班交接班照片只需上传一次。':'每项最多10个附件。');
     for(const file of files){if(!file.size||file.size>20*1024*1024)throw new Error('请选择20MB以内的非空文件。');if(!(props.kind==='handover'?/\.(jpe?g|png|webp)$/i:/\.(jpe?g|png|webp|pdf|docx?|xlsx?|md|txt|csv)$/i).test(file.name))throw new Error('不支持此文件类型。');}
     const context=files.some(file=>/\.(jpe?g|png|webp)$/i.test(file.name))?await currentPosition():{};
     if(captured)context.captured_at=capturedAt;
@@ -92,7 +94,7 @@ async function upload(files:File[],captured=false){
         saved=await new Promise(resolve=>{resolveEditor=resolve;editor.value={file,info,taskId};});
       }else saved=await photoRequest(file,context,captured);
       if(disposed||taskId!==props.taskId)break;
-      if(saved){uploaded.value.push(saved);emit('changed');if(saved.is_image)lastPhoto=saved;}
+      if(saved){uploaded.value.push(saved);if(Number.isInteger(saved.revision))mutationRevision.value=saved.revision;emit('changed',saved);if(saved.is_image)lastPhoto=saved;}
     }
     if(lastPhoto&&!disposed)await showPhoto(lastPhoto,captured);
   }catch(e){if(!disposed)error.value=(e as Error).message;emit('changed');}
@@ -102,11 +104,20 @@ async function showPhoto(meta:Dict,autoDownload=false){const taskId=props.taskId
 function downloadPhoto(){const photo=previewPhoto.value;if(!photo)return;const link=document.createElement('a');link.href=photo.url;link.download=photo.file.name;document.body.appendChild(link);link.click();link.remove();saveStatus.value='已请求下载，请查看本机下载记录；手机如未保存，可打开系统保存或长按照片。';}
 async function sharePhoto(){if(!previewPhoto.value)return;try{await navigator.share({files:[previewPhoto.value.file]});saveStatus.value='请在系统菜单中选择保存图片；相册是否保存成功以手机提示为准。';}catch(e){if((e as Error).name!=='AbortError')saveStatus.value='当前浏览器不能打开系统保存，请长按照片保存到相册。';}}
 function closePhoto(){if(previewPhoto.value){const old=previewPhoto.value.url;setTimeout(()=>URL.revokeObjectURL(old),60000);}previewPhoto.value=undefined;saveStatus.value='';}
-function remove(file:Dict){dialog.warning({title:'移除此附件？',content:file.name,positiveText:'移除',negativeText:'取消',onPositiveClick:async()=>{working.value=true;emit('busy',true);try{await requestJson(url(file),{method:'DELETE'});uploaded.value=uploaded.value.filter(item=>item.id!==file.id);emit('changed');}catch(e){error.value=(e as Error).message;return false;}finally{working.value=false;emit('busy',false);}}});}
-watch(()=>[props.taskId,props.itemId],()=>{uploadController?.abort();editorSaving.value=false;cancelEditor();uploaded.value=[];closePhoto();error.value='';});
+function remove(file:Dict){if(props.locked||working.value)return;const taskId=props.taskId;dialog.warning({title:'移除此附件？',content:file.name,positiveText:'移除',negativeText:'取消',onPositiveClick:async()=>{if(taskId!==props.taskId||props.locked||working.value)return false;working.value=true;emit('busy',true);try{const suffix=mutationRevision.value!==undefined?'?'+new URLSearchParams({task_id:taskId,revision:String(mutationRevision.value)}):'';const result=await requestJson(url(file)+suffix,{method:'DELETE'});uploaded.value=uploaded.value.filter(item=>item.id!==file.id);removed.value.push(file.id);if(Number.isInteger(result.revision))mutationRevision.value=result.revision;emit('changed',result);}catch(e){error.value=(e as Error).message;return false;}finally{working.value=false;emit('busy',false);}}});}
+watch(()=>[props.files,props.revision] as const,([files,revision])=>{
+  // Once a server snapshot acknowledges an upload, local receipts must not resurrect removed files.
+  uploaded.value=revision!==undefined&&revision>=(mutationRevision.value??0)?[]:uploaded.value.filter(file=>!files.some(item=>item.id===file.id));
+  removed.value=removed.value.filter(id=>files.some(file=>file.id===id));
+  if(revision!==undefined)mutationRevision.value=Math.max(revision,mutationRevision.value??0);
+});
+watch(()=>[props.taskId,props.itemId],()=>{uploadController?.abort();editorSaving.value=false;cancelEditor();uploaded.value=[];removed.value=[];mutationRevision.value=props.revision;closePhoto();error.value='';});
 onBeforeUnmount(()=>{disposed=true;uploadController?.abort();editorSaving.value=false;cancelEditor();closePhoto();});
 </script>
 <style>
+/* Keep hidden pickers inside their upload area, not the modal's outer scroll frame. */
+.v2-check-attachments{position:relative}.v2-check-file-input{top:0;left:0}
+.v2-check-file-actions{scroll-margin-block:12px}.v2-check-file-actions .n-button{min-height:44px}
 .v2-check-photo-preview.n-card{width:min(800px,calc(100vw - 24px));max-height:92dvh;overflow:auto}.v2-check-photo-preview img{display:block;width:100%;max-height:65dvh;object-fit:contain;touch-action:manipulation}.v2-check-photo-preview p{font-size:12px;line-height:1.5;color:var(--v2-muted)}
 .v2-check-photo-thumb{display:block;border:0;padding:0;background:transparent;cursor:pointer;border-radius:4px;overflow:hidden;min-width:44px;min-height:44px}.v2-check-photo-thumb img{display:block;width:56px;height:44px;object-fit:contain}.is-handover .v2-check-photo-thumb{grid-column:1/-1;width:100%}.is-handover .v2-check-photo-thumb img{width:auto;max-width:100%;height:auto;max-height:320px;margin:auto}@media(max-width:760px){.is-handover .v2-check-photo-thumb img{max-height:240px}}
 .v2-check-attachments{outline:2px solid transparent;outline-offset:3px;transition:outline-color .18s,background-color .18s;border-radius:6px}.v2-check-attachments:focus-visible,.v2-check-attachments.is-dragging{outline-color:var(--v2-blue)}.v2-check-attachments.is-dragging{background:color-mix(in srgb,var(--v2-blue) 10%,transparent)}

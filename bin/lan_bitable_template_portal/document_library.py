@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import shutil
 import time
 import unicodedata
 from urllib.parse import parse_qs, urlsplit
@@ -18,6 +19,7 @@ from .document_library_filters import matches_filters, parse_filters
 SCOPES = frozenset(('A', 'B', 'C', 'D', 'E', 'H', '110'))
 MAX_FILE = 100 * 1024 * 1024
 _WRITABLE_TYPES = {1, 2, 3, 4, 5, 7, 11, 15}
+_INDEX_UNSET = object()
 
 
 def _json(value):
@@ -142,6 +144,7 @@ class DocumentLibraryService:
                     lease TEXT NOT NULL DEFAULT '',lease_until REAL NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '');
             ''')
             db.execute('BEGIN IMMEDIATE')
+            db.execute("CREATE INDEX IF NOT EXISTS records_cached_view ON records(table_key,json_extract(payload,'$.config_revision'),json_extract(payload,'$.scopes'),id) WHERE deleted=0 AND pending_operation=''")
             if 'download_after' not in {row[1] for row in db.execute('PRAGMA table_info(tables)')}:
                 db.execute('ALTER TABLE tables ADD COLUMN download_after REAL NOT NULL DEFAULT 0')
             for table, column in (('records', 'observed_at'), ('sync_jobs', 'created_at')):
@@ -286,6 +289,15 @@ class DocumentLibraryService:
                 items.append({**source, 'capabilities': {'create': can_create,
                     'reindex': not actor.get('read_only', False),
                     'configure_tables': bool(actor.get('is_admin')), 'max_upload_bytes': MAX_FILE}})
+                with self.connect(readonly=True) as db:
+                    where, params = self._list_where(db, actor, source)
+                    count, updated = db.execute('SELECT count(*),MAX(observed_at) FROM records WHERE ' + where, params).fetchone()
+                    job = db.execute('SELECT status,error FROM sync_jobs WHERE table_key=? AND config_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1',
+                        (source['id'], source['revision'])).fetchone()
+                    pending = db.execute("SELECT count(*) FROM ingestion WHERE table_key=? AND status IN ('queued','running','retrying','blocked','failed') AND record_id IN (SELECT id FROM records WHERE " + where + ')',
+                        (source['id'], *params)).fetchone()[0]
+                items[-1]['summary'] = {'records': count, 'updated_at': updated or 0, 'pending_items': pending,
+                    'sync_status': job['status'] if job else 'pending', 'error': job['error'] if job else ''}
         return {'items': items, 'can_configure': bool(actor.get('is_admin') and not actor.get('read_only')),
             **({'cleanup_pending': cleanup[0], 'cleanup_error': cleanup[1] or ''} if actor.get('is_admin') else {})}
 
@@ -531,19 +543,21 @@ class DocumentLibraryService:
             self.knowledge._wake.set()
         return True
 
-    def _public(self, source, record, actor):
+    def _public(self, source, record, actor, *, tasks=None, indexed=_INDEX_UNSET):
         result = json.loads(_json(record))
         for attachment in result['attachments']:
             attachment.pop('file_token', None)
             attachment['download_url'] = f"/api/document-library/tables/{source['id']}/records/{record['record_id']}/attachments/{attachment['attachment_id']}/file"
         for fid in set(source['attachment_fields']) | {a['field_id'] for a in result['attachments']}:
             result['fields'][fid] = [a for a in result['attachments'] if a['field_id'] == fid]
-        with self.connect(readonly=True) as db:
-            tasks = db.execute('SELECT * FROM ingestion WHERE table_key=? AND record_id=? AND status<>?',
-                (source['id'], record['record_id'], 'removed')).fetchall()
+        if tasks is None:
+            with self.connect(readonly=True) as db:
+                tasks = db.execute('SELECT * FROM ingestion WHERE table_key=? AND record_id=? AND status<>?',
+                    (source['id'], record['record_id'], 'removed')).fetchall()
         from .document_library_index import read_index_states
         knowledge_db = self.knowledge.db if self.knowledge is not None else self.root.parent / 'lighthouse_openclaw/knowledge_base/knowledge.sqlite3'
-        indexed = read_index_states(knowledge_db, source['id'] + '/' + record['record_id'] + '/', self.source_current)
+        if indexed is _INDEX_UNSET:
+            indexed = read_index_states(knowledge_db, source['id'] + '/' + record['record_id'] + '/', self.source_current)
         items = []
         tasks = {task['source_key']: task for task in tasks}
         for source_key, expected in self._source_entries(source, record):
@@ -604,31 +618,57 @@ class DocumentLibraryService:
         with self.connect(readonly=True) as db:
             db.execute('BEGIN')
             filters = self._filters(source, query.get('filters'), db)
-            rows = db.execute('SELECT payload,observed_at FROM records WHERE table_key=? AND deleted=0 AND pending_operation=\'\' ORDER BY id', (key,)).fetchall()
+            where, params = self._list_where(db, actor, source, scope, q, filters)
+            total, observed = db.execute('SELECT count(*),MAX(observed_at) FROM records WHERE ' + where, params).fetchone()
+            rows = db.execute('SELECT payload,observed_at FROM records WHERE ' + where + ' ORDER BY id LIMIT ? OFFSET ?',
+                (*params, size, offset)).fetchall()
             completed = db.execute("SELECT 1 FROM sync_jobs WHERE table_key=? AND config_revision=? AND status='completed' LIMIT 1", (key, source['revision'])).fetchone()
             job = db.execute('SELECT status,error FROM sync_jobs WHERE table_key=? AND config_revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1', (key, source['revision'])).fetchone()
-        rows = [row for row in rows if json.loads(row[0]).get('config_revision') == source['revision']]
-        if not completed and not rows:
-            if job and job['status'] == 'retrying':
+            page = {json.loads(row['payload'])['record_id']: json.loads(row['payload']) for row in rows}
+            tasks = db.execute('SELECT * FROM ingestion WHERE table_key=? AND status<>? AND record_id IN ('
+                + ','.join('?' for _ in page) + ')', (key, 'removed', *page)).fetchall() if page else []
+        if not completed and not total:
+            if job and job['status'] in {'retrying', 'blocked'}:
                 raise AssistantError(job['error'] or '来源资料同步未完成，请重试同步；持续失败时请检查飞书鉴权和数据表权限。', 503,
                     category='document_library_sync_failed')
             raise AssistantError('正在后台同步来源资料，完成后将自动显示列表。', 503,
                 category='document_library_sync_pending')
-        records = []
-        for row in rows:
-            record = json.loads(row[0])
-            if (self._allowed(actor, source, record['scopes']) and (not scope or scope in record['scopes'])
-                    and (not q or q in _json(record['fields']).casefold()) and matches_filters(record['fields'], filters)):
-                records.append(record)
-        items = []
-        for record in records[offset:offset + size]:
-            public = self._public(source, record, actor)
-            items.append(public)
-        return {'items': items, 'total': len(records), 'has_more': len(records) > offset + size,
-            'cursor': str(offset + size) if len(records) > offset + size else '', 'page_size': size,
+        from .document_library_index import read_index_states
+        knowledge_db = self.knowledge.db if self.knowledge is not None else self.root.parent / 'lighthouse_openclaw/knowledge_base/knowledge.sqlite3'
+        def current_snapshot(provenance):
+            record = page.get(provenance.get('record_id'))
+            return bool(record and provenance.get('table_key') == key and source['enabled']
+                and provenance.get('record_revision') == record['revision']
+                and provenance.get('config_revision') == source['revision']
+                and provenance.get('origin') == _digest([source['base_token'], source['table_id']]))
+        indexed = read_index_states(knowledge_db, key + '/', current_snapshot, record_ids=set(page)) if page else {}
+        grouped = {}
+        for task in tasks:
+            grouped.setdefault(task['record_id'], []).append(task)
+        items = [self._public(source, record, actor, tasks=grouped.get(identity, []), indexed=indexed)
+                 for identity, record in page.items()]
+        return {'items': items, 'total': total, 'has_more': total > offset + size,
+            'cursor': str(offset + size) if total > offset + size else '', 'page_size': size,
             'config_revision': source['revision'], 'sync_status': job['status'] if job else 'pending',
-            'cache': {'complete': bool(completed), 'updated_at': max((row['observed_at'] for row in rows), default=0),
+            'cache': {'complete': bool(completed), 'updated_at': observed or 0,
                 'refreshing': bool(job and job['status'] in ('queued', 'running')), 'error': job['error'] if job else ''}}
+
+    def _list_where(self, db, actor, source, scope='', q='', filters=()):
+        groups = db.execute("SELECT DISTINCT json_extract(payload,'$.scopes') FROM records WHERE table_key=? AND deleted=0", (source['id'],))
+        allowed = [row[0] for row in groups if row[0] and self._allowed(actor, source, json.loads(row[0]))
+                   and (not scope or scope in json.loads(row[0]))]
+        where = "table_key=? AND deleted=0 AND pending_operation='' AND json_extract(payload,'$.config_revision')=?"
+        params = [source['id'], source['revision']]
+        where += " AND json_extract(payload,'$.scopes') IN (" + ','.join('?' for _ in allowed) + ')'
+        params.extend(allowed)
+        if q:
+            db.create_function('library_casefold', 1, lambda value: (value or '').casefold(), deterministic=True)
+            where += " AND instr(library_casefold(json_extract(payload,'$.fields')),?)>0"
+            params.append(q)
+        if filters:
+            db.create_function('library_matches', 1, lambda value: matches_filters(json.loads(value), filters))
+            where += " AND library_matches(json_extract(payload,'$.fields'))"
+        return where, params
 
     @staticmethod
     def _filters(source, value, db):
@@ -771,6 +811,8 @@ class DocumentLibraryService:
         directory.mkdir(exist_ok=True)
         path = directory / hashlib.sha256(token.encode()).hexdigest()
         if not self._cache_size(token):
+            if shutil.disk_usage(self.root).free < MAX_FILE + 64 * 1024 * 1024:
+                raise AssistantError('本地磁盘可用空间不足，请先清理无引用的缓存或释放磁盘空间。', 503, category='local_storage')
             temporary = path.with_name(uuid.uuid4().hex + '.part')
             try:
                 self._reserve_download(source['id'])
@@ -814,10 +856,20 @@ class DocumentLibraryService:
             raise AssistantError('请求过程中资料表配置已变化，请重新读取。', 409)
         if not any(self._allowed(actor, source, [scope]) for scope in source['read_scopes']):
             raise AssistantError('资料表访问权限已变化。', 403)
-        for record in result['items'] if isinstance(result.get('items'), list) else [result]:
+        records = result['items'] if isinstance(result.get('items'), list) else [result.get('record', result)]
+        identities = [record['record_id'] for record in records if 'scopes' in record]
+        with self.connect(readonly=True) as db:
+            cached_rows = {row['id']: row for row in db.execute('SELECT * FROM records WHERE table_key=? AND id IN ('
+                + ','.join('?' for _ in identities) + ')', (key, *identities))} if identities else {}
+        for record in records:
+            if record.get('operation_id') and 'scopes' not in record:
+                with self.connect(readonly=True) as db:
+                    operation = db.execute('SELECT * FROM operations WHERE id=? AND table_key=?', (record['operation_id'], key)).fetchone()
+                if operation is not None:
+                    self._operation_access(actor, source, operation)
             if 'scopes' in record:
                 self._require(actor, source, record['scopes'])
-                cached = self._cached(key, record['record_id'])
+                cached = cached_rows.get(record['record_id'])
                 if not cached or cached['deleted']:
                     raise AssistantError('资料记录已移除，请重新读取。', 404)
                 current = json.loads(cached['payload'])
@@ -858,7 +910,7 @@ class DocumentLibraryService:
                     raise AssistantError('资料记录已变化，请刷新后重试。', 409)
                 db.execute('UPDATE records SET pending_operation=? WHERE table_key=? AND id=?', (operation, source['id'], identity))
             data = {'fields': fields, 'reason': reason, 'config_revision': source['revision'], 'upload': upload,
-                'actor_name': str(actor.get('name') or '')[:120]}
+                'actor_name': str(actor.get('name') or '')[:120], 'origin': _digest([source['base_token'], source['table_id']])}
             db.execute("INSERT INTO operations VALUES(?,?,?,?,?,'pending',?,NULL,?)",
                 (operation, fingerprint, source['id'], identity or '', actor['id'], _json(data), self.clock()))
             return dict(db.execute('SELECT * FROM operations WHERE id=?', (operation,)).fetchone()), True
@@ -910,6 +962,71 @@ class DocumentLibraryService:
                 return self._complete_write(actor, source, operation, fields, raw, replacement=replacement)
         raise AssistantError('上次操作结果尚未确认，系统未重复提交，请核验来源记录。', 503,
             category='document_library_uncertain')
+
+    def _operation_access(self, actor, source, operation):
+        if operation['actor'] != actor['id'] and not actor.get('is_admin'):
+            raise AssistantError('核验操作不存在或无权访问。', 404)
+        data = json.loads(operation['payload'])
+        if data['config_revision'] != source['revision'] and data.get('origin') != _digest([source['base_token'], source['table_id']]):
+            raise AssistantError('操作对应的数据表配置已变化，请管理员核对原来源。', 409)
+        cached = self._cached(source['id'], operation['record_id']) if operation['record_id'] else None
+        fields = json.loads(cached['payload'])['fields'] if cached else {}
+        self._require(actor, source, self._record_scopes(source, {**fields, **(data.get('fields') or {})}))
+        return data
+
+    def pending_operations(self, actor, key):
+        actor, source = self._actor(actor), self._table(key)
+        with self.connect(readonly=True) as db:
+            rows = db.execute("SELECT * FROM operations WHERE table_key=? AND status IN ('pending','uncertain') ORDER BY created_at DESC", (key,)).fetchall()
+        items = []
+        for row in rows:
+            try:
+                data = self._operation_access(actor, source, row)
+            except AssistantError:
+                continue
+            items.append({'operation_id': row['id'], 'record_id': row['record_id'], 'status': row['status'],
+                'created_at': row['created_at'], 'reason': data['reason'], 'actor_name': data.get('actor_name', ''),
+                'kind': 'attachment' if data.get('upload') else 'update' if row['record_id'] else 'create'})
+        return {'items': items, 'config_revision': source['revision']}
+
+    def verify_operation(self, actor, key, identity, payload):
+        actor, source = self._actor(actor), self._table(key)
+        if actor.get('read_only') or set(payload) - {'record_id'}:
+            raise AssistantError('当前请求不能进行操作核验。', 403)
+        with self.connect(readonly=True) as db:
+            row = db.execute('SELECT * FROM operations WHERE id=? AND table_key=?', (identity, key)).fetchone()
+        if row is None:
+            raise AssistantError('核验操作不存在。', 404)
+        operation = dict(row)
+        data = self._operation_access(actor, source, operation)
+        if not operation['record_id']:
+            candidate = payload.get('record_id')
+            if not isinstance(candidate, str) or not re.fullmatch(r'rec[A-Za-z0-9]+', candidate):
+                return {'operation_id': identity, 'status': 'uncertain', 'message': '新增结果未返回记录编号，请在飞书原表核对后填写对应记录 ID；本次不会重新新增。'}
+            with self.remote(source) as remote:
+                fields, raw = remote.fields(), remote.get(candidate)
+            if raw is None or data.get('fields') is None:
+                raise AssistantError('未找到可核验的原写入结果。', 409)
+            normalized = self._normalize(source, raw, fields)
+            self._require(actor, source, normalized['scopes'])
+            if not self._verify_fields(normalized, data['fields'], fields):
+                raise AssistantError('所选记录与原提交内容不一致，未绑定或重新发送。', 409)
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute("UPDATE operations SET record_id=? WHERE id=? AND record_id='' AND status IN ('pending','uncertain')", (candidate, identity))
+                current = db.execute('SELECT * FROM operations WHERE id=?', (identity,)).fetchone()
+                if current is None or current['record_id'] != candidate:
+                    raise AssistantError('原操作已被其他核验更新，请重新读取；未重复发送。', 409)
+                operation = dict(current)
+        with self.remote(source) as remote:
+            fields = remote.fields()
+        try:
+            record = self._recover_write(actor, source, operation, fields)
+        except AssistantError as exc:
+            if exc.category != 'document_library_uncertain':
+                raise
+            return {'operation_id': identity, 'status': 'uncertain', 'message': str(exc)}
+        return {'operation_id': identity, 'status': 'completed', 'record': record}
 
     def _uncertain(self, operation):
         with self.connect() as db:
@@ -1072,8 +1189,11 @@ class DocumentLibraryService:
         actor = self._actor(actor)
         if actor.get('read_only'):
             raise AssistantError('只读会话不能重新向量化。', 403)
-        if set(payload) - {'operation_id', 'expected_revision', 'record_ids', 'all', 'q', 'scope', 'filters'}:
+        if set(payload) - {'operation_id', 'expected_revision', 'record_ids', 'all', 'q', 'scope', 'filters', 'mode'}:
             raise AssistantError('重新向量化参数无效。')
+        mode = payload.get('mode', 'all')
+        if mode not in {'all', 'failed', 'missing'}:
+            raise AssistantError('向量化范围无效。')
         ids, all_records = payload.get('record_ids'), payload.get('all', False)
         if type(all_records) is not bool or (all_records and ids is not None) or (not all_records and
                 (not isinstance(ids, list) or not ids or len(ids) > 1000 or any(not isinstance(v, str) or not v for v in ids))):
@@ -1114,13 +1234,25 @@ class DocumentLibraryService:
             if not all_records and {r['record_id'] for r in selected} != set(ids):
                 raise AssistantError('部分记录已变化、正在写入或无权访问，请重新选择。', 409)
             count = 0
+            changed_records = set()
+            from .document_library_index import read_index_states
+            indexed = (read_index_states(self.knowledge.db if self.knowledge else self.root.parent / 'lighthouse_openclaw/knowledge_base/knowledge.sqlite3',
+                key + '/', self.source_current, record_ids={r['record_id'] for r in selected}) or {}) if mode != 'all' else {}
             for record in selected:
                 for source_key, provenance in self._source_entries(source, record):
+                    if mode != 'all':
+                        old = db.execute('SELECT status,payload FROM ingestion WHERE source_key=?', (source_key,)).fetchone()
+                        state = indexed.get(source_key, {})
+                        failed = state.get('status') in {'failed', 'blocked'} or old and old['status'] in {'retrying', 'failed', 'blocked'}
+                        missing = not old or old['status'] == 'removed' or json.loads(old['payload']) != provenance or state.get('missing') or old['status'] == 'synced' and not state
+                        if not (failed if mode == 'failed' else missing):
+                            continue
                     db.execute("INSERT INTO ingestion(source_key,table_key,record_id,record_revision,payload,status,reindex_request) VALUES(?,?,?,?,?,'queued',?) "
                         "ON CONFLICT(source_key) DO UPDATE SET record_revision=excluded.record_revision,payload=excluded.payload,status='queued',stage='prepare',reindex_request=excluded.reindex_request,attempts=0,next_attempt=0,error='',error_code=''",
                         (source_key, key, record['record_id'], record['revision'], _json(provenance), operation))
                     count += 1
-            result = {'operation_id': operation, 'status': 'queued', 'records': len(selected), 'items': count}
+                    changed_records.add(record['record_id'])
+            result = {'operation_id': operation, 'status': 'queued', 'records': len(changed_records), 'items': count}
             db.execute("INSERT INTO maintenance(id,kind,table_key,fingerprint,result,status) VALUES(?,'reindex',?,?,?,'accepted')",
                 (operation, key, fingerprint, _json(result)))
         if self.knowledge is not None:
@@ -1184,6 +1316,66 @@ class DocumentLibraryService:
                     (self.clock() + min(300, 5 * 2 ** min(task['attempts'], 6)), '本地索引清理未完成，将自动重试；飞书原记录未改变。', task['id'], task['lease']))
         return True
 
+    def _storage_snapshot(self, db):
+        references = set()
+        def tokens(value):
+            if isinstance(value, dict):
+                if isinstance(value.get('file_token'), str):
+                    references.add(hashlib.sha256(value['file_token'].encode()).hexdigest())
+                for child in value.values():
+                    tokens(child)
+            elif isinstance(value, list):
+                for child in value:
+                    tokens(child)
+        for table in ('records', 'versions', 'ingestion'):
+            for row in db.execute('SELECT payload FROM ' + table):
+                tokens(json.loads(row[0]))
+        for row in db.execute("SELECT payload FROM operations WHERE status IN ('pending','uncertain')"):
+            tokens(json.loads(row[0]))
+        files, candidates = [], []
+        directory = self.root / 'files'
+        for path in directory.iterdir() if directory.is_dir() else ():
+            if not re.fullmatch(r'[a-f0-9]{64}', path.name) or path.is_symlink() or not path.is_file():
+                continue
+            stat = path.stat()
+            item = (path.name, stat.st_size, stat.st_mtime_ns)
+            files.append(item)
+            # A grace period also protects a download whose database commit is still in flight.
+            if path.name not in references and self.clock() - stat.st_mtime >= 86400:
+                candidates.append(item)
+        return {'bytes': sum(row[1] for row in files), 'files': len(files),
+            'orphan_bytes': sum(row[1] for row in candidates), 'orphan_files': len(candidates),
+            'free_bytes': shutil.disk_usage(self.root).free, 'revision': _digest(sorted(candidates))}, candidates
+
+    def storage(self, actor, payload=None):
+        actor = self._actor(actor)
+        if not actor.get('is_admin') or actor.get('read_only'):
+            raise AssistantError('仅管理员可管理本地附件缓存。', 403)
+        with self.connect() as db:
+            if payload is not None:
+                if set(payload) != {'expected_revision'}:
+                    raise AssistantError('缓存清理参数无效。')
+                db.execute('BEGIN IMMEDIATE')
+            status, candidates = self._storage_snapshot(db)
+            if payload is not None:
+                if status['revision'] != payload['expected_revision']:
+                    raise AssistantError('缓存引用已变化，请重新读取后确认清理。', 409)
+                actor = self._actor(actor)
+                if not actor.get('is_admin') or actor.get('read_only'):
+                    raise AssistantError('管理权限已变化，未清理。', 403)
+                removed = 0
+                for name, size, stamp in candidates:
+                    path = self.root / 'files' / name
+                    if path.is_symlink() or path.resolve().parent != (self.root / 'files').resolve():
+                        continue
+                    stat = path.stat()
+                    if (stat.st_size, stat.st_mtime_ns) == (size, stamp):
+                        path.unlink()
+                        removed += 1
+                status, _ = self._storage_snapshot(db)
+                status['removed'] = removed
+        return status
+
     def refresh_cache_if_due(self, actor, key):
         source = self._table(key)
         if not any(self._allowed(actor, source, [s]) for s in source['read_scopes']):
@@ -1213,10 +1405,10 @@ class DocumentLibraryService:
             if only_initial and db.execute("SELECT 1 FROM sync_jobs WHERE table_key=? AND config_revision=? AND status='completed' LIMIT 1",
                     (source['id'], source['revision'])).fetchone():
                 return None
-            row = db.execute("SELECT id,status FROM sync_jobs WHERE table_key=? AND config_revision=? AND status IN ('queued','running','retrying') LIMIT 1", (source['id'], source['revision'])).fetchone()
+            row = db.execute("SELECT id,status FROM sync_jobs WHERE table_key=? AND config_revision=? AND status IN ('queued','running','retrying','blocked') LIMIT 1", (source['id'], source['revision'])).fetchone()
             if row:
                 identity, status = row['id'], row['status']
-                if retry and status == 'retrying':
+                if retry and status in {'retrying', 'blocked'}:
                     db.execute("UPDATE sync_jobs SET status='queued',next_attempt=0 WHERE id=?", (identity,))
                     status = 'queued'
             else:
@@ -1315,8 +1507,9 @@ class DocumentLibraryService:
                 code, message = self._ingestion_error(error, task['stage'])
                 db.execute('UPDATE ingestion SET error=?,error_code=? WHERE source_key=? AND lease=?',
                     (message, code, task['source_key'], task['lease']))
-            db.execute(f"UPDATE {table} SET status='retrying',attempts=attempts+1,next_attempt=?,lease='',lease_until=0 WHERE {key}=? AND lease=?",
-                (self.clock() + min(300, 5 * 2 ** min(task['attempts'], 6)), task[key], task['lease']))
+            terminal = code in {'too_large', 'unsafe_redirect', 'document_library_schema', 'invalid_source', 'source_invalid'}
+            db.execute(f"UPDATE {table} SET status=?,attempts=attempts+1,next_attempt=?,lease='',lease_until=0 WHERE {key}=? AND lease=?",
+                ('blocked' if terminal else 'retrying', self.clock() + min(300, 5 * 2 ** min(task['attempts'], 6)), task[key], task['lease']))
 
     @staticmethod
     def _sync_error(error):
@@ -1373,8 +1566,8 @@ class DocumentLibraryService:
                 for identity in missing:
                     self._retire(source['id'], identity, config_revision=source['revision'], job=(task['id'], task['lease']))
             with self.connect() as db:
-                db.execute("UPDATE sync_jobs SET status=?,cursor=?,seen_cursors=?,count=count+?,attempts=0,next_attempt=0,lease='',lease_until=0,error='',error_code='' WHERE id=? AND lease=?",
-                    ('queued' if page.get('has_more') else 'completed', token, _json([*seen, task['cursor']]), len(page.get('items', [])), task['id'], task['lease']))
+                db.execute("UPDATE sync_jobs SET status=?,cursor=?,seen_cursors=?,count=count+?,attempts=0,next_attempt=?,lease='',lease_until=0,error='',error_code='' WHERE id=? AND lease=?",
+                    ('queued' if page.get('has_more') else 'completed', token, _json([*seen, task['cursor']]), len(page.get('items', [])), self.clock() if page.get('has_more') else 0, task['id'], task['lease']))
         except Exception as exc:
             self._retry('sync_jobs', task, exc)
 

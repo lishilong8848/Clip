@@ -172,6 +172,12 @@ class MainWindowRecordsMixin:
                 )
         return busy
 
+    @staticmethod
+    def _upload_operation_for_record(data: dict) -> str:
+        original = data.get("_event_inflight_retry_snapshot")
+        original = original if isinstance(original, dict) else {}
+        return str(data.get("_upload_operation_id") or original.get("_upload_operation_id") or "").strip()
+
     def _upload_state_is_busy(self, data: dict) -> bool:
         if not isinstance(data, dict):
             return False
@@ -229,7 +235,7 @@ class MainWindowRecordsMixin:
         return float(max(60, min(value, 3600)))
 
     def _probe_event_upload(self, data: dict) -> None:
-        operation_id = str(data.get("_upload_operation_id") or "").strip()
+        operation_id = self._upload_operation_for_record(data)
         controller = getattr(self, "lan_template_portal_controller", None)
         if not operation_id or not callable(getattr(controller, "get_qt_notice_operation", None)):
             return
@@ -250,7 +256,11 @@ class MainWindowRecordsMixin:
         last[operation_id] = now
         active.add(operation_id)
         original = data.get("_event_inflight_retry_snapshot")
-        original = dict(original) if isinstance(original, dict) else dict(data)
+        original_operation = str(original.get("_upload_operation_id") or "") if isinstance(original, dict) else ""
+        original = dict(original) if isinstance(original, dict) and (
+            original_operation == operation_id
+            or (not original_operation and data.get("_queued_after_upload"))
+        ) else dict(data)
         record_id = str(original.get("record_id") or data.get("record_id") or "")
 
         def finish(name: str, success: bool, message: str) -> None:
@@ -352,6 +362,26 @@ class MainWindowRecordsMixin:
             if data.get("_event_wait_job_id"):
                 continue
             is_event = str(data.get("notice_type") or "") == "事件通告"
+            if is_event and data.get("_queued_upload_requested"):
+                candidate_ids = self._upload_completion_record_id_candidates(data.get("record_id"))
+                queued = any(key in self.pending_update_after_upload for key in candidate_ids)
+                if queued:
+                    self._schedule_pending_update_after_upload()
+                    if (
+                        not self._upload_operation_for_record(data)
+                        and not data.get("_upload_in_progress")
+                        and not data.get("_upload_verification_pending")
+                        and not set(candidate_ids).intersection(self.pending_action_record_ids)
+                    ):
+                        # The predecessor settled; retrying preparation is not an upload timeout.
+                        continue
+                elif not self._upload_operation_for_record(data) and not self._upload_state_is_busy(data):
+                    # A display marker alone is not a confirmed queued request.
+                    data = dict(data)
+                    data.pop("_queued_upload_requested", None)
+                    data["_has_unuploaded_changes"] = True
+                    item.setData(Qt.ItemDataRole.UserRole, data)
+                    self._rebuild_active_item_widget(list_widget, item, data)
             waiting_event = is_event and bool(
                 data.get("_queued_upload_requested")
                 or data.get("_upload_verification_pending")
@@ -1710,6 +1740,7 @@ class MainWindowRecordsMixin:
                 "_queued_action",
                 "_queued_upload_requested",
                 "_upload_operation_id",
+                "_event_inflight_retry_snapshot",
             ):
                 if key in existing_data:
                     updated[key] = existing_data.get(key)
@@ -3544,7 +3575,7 @@ class MainWindowRecordsMixin:
         for list_widget, item, data in entries:
             if not self._is_valid_list_item(item) or not isinstance(data, dict):
                 continue
-            if str(data.get("_upload_operation_id") or "").strip() != operation_id:
+            if self._upload_operation_for_record(data) != operation_id:
                 continue
             if bool(data.get("_upload_in_progress")):
                 return list_widget, item
@@ -3563,7 +3594,7 @@ class MainWindowRecordsMixin:
         )
         if item and self._is_valid_list_item(item):
             data = item.data(Qt.ItemDataRole.UserRole) or {}
-            stored_operation = str(data.get("_upload_operation_id") or "").strip()
+            stored_operation = self._upload_operation_for_record(data)
             if stored_operation == operation_id:
                 return True
             observed_newer_operation = bool(stored_operation)
@@ -3574,7 +3605,7 @@ class MainWindowRecordsMixin:
         for _list_widget, candidate, data in entries:
             if not self._is_valid_list_item(candidate) or not isinstance(data, dict):
                 continue
-            stored_operation = str(data.get("_upload_operation_id") or "").strip()
+            stored_operation = self._upload_operation_for_record(data)
             if stored_operation == operation_id:
                 return True
             values = {

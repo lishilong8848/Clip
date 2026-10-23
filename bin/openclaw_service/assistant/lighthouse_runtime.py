@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -226,6 +227,7 @@ class OpenClawRuntime:
         self.bridge_token = secrets.token_urlsafe(40)
         self.model_url = None
         self.http = None
+        self.model_tls = None
         self.http_lock = asyncio.Lock()
         self.plugin_hash = None
         self.tool_names = None
@@ -577,37 +579,38 @@ class OpenClawRuntime:
         raise AssistantError('本账号上一轮停止结果尚未确认，请稍后继续；其他账号可正常使用。', 409)
 
     async def model_client(self):
+        """Prewarm TLS and return a request scope; injected transports are borrowed."""
         import httpx
         from .lighthouse_public import _verified_tls_context
         if self.closing:
             raise AssistantStartupError('助手服务正在关闭。', 503)
         if self.http is not None:
-            return self.http
+            return nullcontext(self.http)
         # Certificate loading has no sockets; shutdown must not await its lock.
-        context = await asyncio.to_thread(_verified_tls_context, trust_env=False)
+        context = self.model_tls
+        if context is None:
+            context = await asyncio.to_thread(_verified_tls_context, trust_env=False)
         async with self.http_lock:
             if self.closing:
                 raise AssistantStartupError('助手服务正在关闭。', 503)
-            if self.http is None:
-                creation = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, verify=context,
+            self.model_tls = context
+
+        @asynccontextmanager
+        async def connection():
+            if self.closing:
+                raise AssistantStartupError('助手服务正在关闭。', 503)
+            async with httpx.AsyncClient(verify=context,
                     timeout=httpx.Timeout(180, connect=10, pool=10),
-                    limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
+                    limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
                     cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
-                    follow_redirects=False, trust_env=False))
-                try:
-                    client = await asyncio.shield(creation)
-                except asyncio.CancelledError:
-                    client = await creation
-                    await client.aclose()
-                    raise
-                if self.closing:
-                    await client.aclose()
-                    raise AssistantStartupError('助手服务正在关闭。', 503)
-                self.http = client
-            return self.http
+                    follow_redirects=False, trust_env=False) as client:
+                yield client
+
+        return connection()
 
     async def forward_model(self, request):
         from fastapi.responses import JSONResponse, StreamingResponse
+        from anyio import CancelScope
         import httpx
         gateway = self.gateway
         authorization = request.headers.get('authorization', '')
@@ -671,53 +674,50 @@ class OpenClawRuntime:
         if bounded.get('messages') != payload.get('messages') and item.get('run_id'):
             item['compaction_run_id'] = item['run_id']
         payload = bounded
-        for attempt in range(2):
-            try:
-                client = await self.model_client()
+        connection = AsyncExitStack()
+        streaming = False
+        try:
+            client = await connection.enter_async_context(await self.model_client())
+            for attempt in range(2):
                 if self.closing or self.accounts.get(key) is not item or item.get('blocked') or not item.get('busy'):
                     return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
                 response = await client.send(client.build_request('POST', item['profile']['endpoint'], json=payload,
                     headers={'Authorization': 'Bearer ' + item['model_key'], 'Cookie': ''}), stream=True)
-            except AssistantStartupError:
-                return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
-            except httpx.TimeoutException:
-                return JSONResponse({'error': model_provider_error(504)}, status_code=504)
-            except (httpx.HTTPError, OSError):
-                return JSONResponse({'error': model_provider_error(502)}, status_code=502)
-            if response.status_code == 200:
-                break
-            error_body = bytearray()
-            try:
-                if response.status_code in {400, 413, 415, 422}:
-                    async with asyncio.timeout(2):
-                        async for chunk in response.aiter_bytes():
-                            if len(error_body) + len(chunk) > 16384:
-                                error_body.clear()
-                                break
-                            error_body.extend(chunk)
-            except (httpx.HTTPError, OSError, asyncio.TimeoutError):
-                error_body.clear()
-            finally:
-                await response.aclose()
-            error = model_provider_error(response.status_code, error_body)
-            # Only a rejected model request may be retried; never replay a tool or an accepted stream.
-            if attempt == 0 and error.get('code') == 'context_length_exceeded':
-                budget = max(2000, len(json.dumps(payload.get('messages', []), ensure_ascii=False)) // 2)
-                compacted = compact_model_messages(payload, budget)
-                if compacted is not payload:
-                    try:
-                        payload = bound_model_payload(compacted, item['profile'])
-                    except AssistantError:
-                        return JSONResponse({'error': {'code': 'context_length_exceeded',
-                            'message': 'Context length exceeded'}}, status_code=413)
-                    if item.get('run_id'):
-                        item['compaction_run_id'] = item['run_id']
-                    continue
-            return JSONResponse({'error': error}, status_code=response.status_code)
+                if response.status_code == 200:
+                    connection.push_async_callback(response.aclose)
+                    break
+                error_body = bytearray()
+                try:
+                    if response.status_code in {400, 413, 415, 422}:
+                        async with asyncio.timeout(2):
+                            async for chunk in response.aiter_bytes():
+                                if len(error_body) + len(chunk) > 16384:
+                                    error_body.clear()
+                                    break
+                                error_body.extend(chunk)
+                except (httpx.HTTPError, OSError, asyncio.TimeoutError):
+                    error_body.clear()
+                finally:
+                    with CancelScope(shield=True):
+                        await response.aclose()
+                error = model_provider_error(response.status_code, error_body)
+                # Only a rejected model request may be retried; never replay a tool or an accepted stream.
+                if attempt == 0 and error.get('code') == 'context_length_exceeded':
+                    budget = max(2000, len(json.dumps(payload.get('messages', []), ensure_ascii=False)) // 2)
+                    compacted = compact_model_messages(payload, budget)
+                    if compacted is not payload:
+                        try:
+                            payload = bound_model_payload(compacted, item['profile'])
+                        except AssistantError:
+                            return JSONResponse({'error': {'code': 'context_length_exceeded',
+                                'message': 'Context length exceeded'}}, status_code=413)
+                        if item.get('run_id'):
+                            item['compaction_run_id'] = item['run_id']
+                        continue
+                return JSONResponse({'error': error}, status_code=response.status_code)
 
-        async def chunks():
-            size = 0
-            try:
+            async def chunks():
+                size = 0
                 async for chunk in response.aiter_bytes():
                     if self.accounts.get(key) is not item or item.get('blocked') or not item.get('busy'):
                         return
@@ -725,10 +725,29 @@ class OpenClawRuntime:
                     if size > 32 * 1024 * 1024:
                         return
                     yield chunk
-            finally:
-                await response.aclose()
-        return StreamingResponse(chunks(), media_type=response.headers.get('content-type', 'application/json'),
+            class ModelStream(StreamingResponse):
+                async def __call__(self, scope, receive, send):
+                    try:
+                        await super().__call__(scope, receive, send)
+                    finally:
+                        # Disconnect may cancel the response before its iterator starts.
+                        with CancelScope(shield=True):
+                            await connection.aclose()
+
+            result = ModelStream(chunks(), media_type=response.headers.get('content-type', 'application/json'),
                                  headers={'Cache-Control': 'no-store'})
+            streaming = True
+            return result
+        except AssistantStartupError:
+            return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
+        except httpx.TimeoutException:
+            return JSONResponse({'error': model_provider_error(504)}, status_code=504)
+        except (httpx.HTTPError, OSError):
+            return JSONResponse({'error': model_provider_error(502)}, status_code=502)
+        finally:
+            if not streaming:
+                with CancelScope(shield=True):
+                    await connection.aclose()
 
     async def close(self):
         self.closing = True
@@ -751,6 +770,7 @@ class OpenClawRuntime:
             self.accounts.clear()
             self.locks.clear()
         async with self.http_lock:
+            self.model_tls = None
             if self.http is not None:
                 await self.http.aclose()
                 self.http = None

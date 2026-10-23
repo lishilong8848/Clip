@@ -1,0 +1,99 @@
+html.workspace-v2 {
+  --v2-surface-line: color-mix(in srgb, var(--v2-border) 78%, var(--v2-ink));
+  --v2-surface-shadow: 0 2px 7px #182d4212;
+  --v2-record-shadow: 0 1px 3px #182d4210;
+  --v2-record-hover-shadow: 0 2px 6px #182d4220;
+  --v2-selected-line: var(--v2-blue);
+  --v2-selected-bg: color-mix(in srgb, var(--v2-blue) 9%, var(--cf-surface, #fff));
+}
+
+html.workspace-v2[data-v2-theme=dark] {
+  --v2-surface-shadow: 0 2px 8px #00000040;
+  --v2-record-shadow: 0 1px 4px #00000030;
+  --v2-record-hover-shadow: 0 2px 7px #00000050;
+  --v2-selected-bg: color-mix(in srgb, var(--v2-blue) 15%, var(--cf-surface, #202429));
+}
+
+/* The layout owns the outer frame; embedded business sections stay unframed. */
+html.workspace-v2 .v2-main .grid-stack-item:not(.ui-draggable-dragging) > .v2-widget {
+  border-color: var(--v2-surface-line);
+  box-shadow: var(--v2-surface-shadow);
+}
+
+html.workspace-v2 .v2-main .v2-widget-head {
+  border-bottom-color: var(--v2-border);
+  background: color-mix(in srgb, var(--v2-bg) 40%, var(--cf-surface, #fff));
+}
+
+html.workspace-v2 .v2-main :is(
+  .v2-notice-entry, .v2-repair-workspace .record-row,
+  .v2-business-todos .v2-todo-list > li, .v2-task-operation,
+  .v2-check-building, .v2-check-choice, .v2-sop-item,
+  .mop-row, .notice-panel .notice-row, .drill-list__item, .pc-record,
+  .kb-row, .risk-mobile-task, .document-mobile-list > article
+) {
+  border-color: var(--v2-surface-line);
+  box-shadow: var(--v2-record-shadow);
+  transition: border-color 160ms ease-out, background-color 160ms ease-out, box-shadow 160ms ease-out;
+}
+
+/* Flat list rows need an inset edge, without changing their size or spacing. */
+html.workspace-v2 .v2-main :is(.v2-business-todos .v2-todo-list > li, .v2-repair-workspace .record-row) {
+  box-shadow: inset 0 0 0 1px var(--v2-border), var(--v2-record-shadow);
+}
+
+@media (hover: hover) {
+  html.workspace-v2 .v2-main :is(
+    .v2-notice-entry, .v2-repair-workspace .record-row,
+    .v2-business-todos .v2-todo-list > li, .v2-task-operation,
+    .v2-check-building.v2-clickable-card, .v2-check-choice, .v2-sop-item,
+    .mop-row, .notice-panel .notice-row, .drill-list__item, .pc-record,
+    .kb-row, .risk-mobile-task, .document-mobile-list > article
+  ):where(:hover:not(:disabled):not([aria-disabled=true]):not(.is-loading)) {
+    border-color: color-mix(in srgb, var(--v2-blue) 55%, var(--v2-border));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--v2-blue) 35%, var(--v2-border)), var(--v2-record-hover-shadow);
+  }
+}
+
+/* Only existing selection state gets the persistent highlight, never focus/hover. */
+html.workspace-v2 .v2-main :is(
+  .v2-notice-entry, .v2-repair-workspace .record-row,
+  .v2-check-choice, .v2-sop-item, .mop-row, .notice-panel .notice-row,
+  .drill-list__item, .pc-record, .kb-row
+):is(.active, .selected, .is-selected, [aria-selected=true], [aria-pressed=true]),
+html.workspace-v2 .v2-main .document-mobile-list > article:has(> .document-mobile-heading > .n-checkbox--checked) {
+  border-color: var(--v2-selected-line);
+  background: var(--v2-selected-bg);
+  box-shadow: inset 3px 0 0 var(--v2-selected-line), inset 0 0 0 1px var(--v2-selected-line), var(--v2-record-hover-shadow);
+}
+
+/* Keyboard focus stays distinguishable from a selected business record. */
+html.workspace-v2 .v2-main :is(
+  .v2-notice-entry, .v2-repair-workspace .record-row, .v2-todo-row,
+  .v2-task-operation, .v2-check-choice, .v2-sop-item, .mop-row,
+  .notice-panel .notice-row, .drill-list__item, .pc-record, .kb-row,
+  .risk-mobile-task, .document-mobile-list > article
+):is(:focus-visible, :has(:focus-visible)) {
+  outline: 2px solid var(--v2-selected-line);
+  outline-offset: -2px;
+}
+
+html.workspace-v2 .v2-main :is(.n-data-table-tr--checked, tr[aria-selected=true], .document-table tr:has(> .document-check > .n-checkbox--checked)) > td {
+  background: var(--v2-selected-bg);
+  box-shadow: inset 0 1px var(--v2-selected-line), inset 0 -1px var(--v2-selected-line);
+}
+html.workspace-v2 .v2-main :is(.n-data-table-tr--checked, tr[aria-selected=true], .document-table tr:has(> .document-check > .n-checkbox--checked)) > td:first-child {
+  box-shadow: inset 3px 0 var(--v2-selected-line), inset 0 1px var(--v2-selected-line), inset 0 -1px var(--v2-selected-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.workspace-v2 .v2-main :is(.v2-notice-entry, .record-row, .v2-todo-list > li, .v2-task-operation, .v2-check-building, .v2-check-choice, .v2-sop-item, .mop-row, .notice-row, .drill-list__item, .pc-record, .kb-row, .risk-mobile-task, .document-mobile-list > article) { transition: none !important; }
+}
+
+@media print {
+  html.workspace-v2 .v2-main { --v2-surface-shadow: none; --v2-record-shadow: none; --v2-record-hover-shadow: none; }
+  html.workspace-v2 .v2-main :is(.v2-widget, .v2-notice-entry, .record-row, .v2-todo-list > li, .v2-task-operation, .v2-check-building, .v2-check-choice, .v2-sop-item, .mop-row, .notice-row, .drill-list__item, .pc-record, .kb-row, .risk-mobile-task, .document-mobile-list > article, td) {
+    box-shadow: none !important;
+    outline: none !important;
+  }
+}

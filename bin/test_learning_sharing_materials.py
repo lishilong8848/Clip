@@ -168,7 +168,43 @@ class SharingMaterialsTests(unittest.TestCase):
         with self.assertRaises(LearningError):
             self.core.create('', 'fixture-material-create-03', ADMIN, **{**kwargs, 'participant_ids': ['forged']})
 
+    def test_link_free_manual_draft_saves_and_publishes_without_reading_or_generating(self):
+        with self.learning.transaction() as conn:
+            self.learning._put('person', 'p_manual', {'id': 'p_manual', 'name': 'Manual learner',
+                'active': True, 'login_ids': ['ou_manual'], 'scopes': ['A']}, conn, False)
+        with patch('lan_bitable_template_portal.learning_sharing_routes.read_source', side_effect=AssertionError('No source read')), \
+             patch('lan_bitable_template_portal.learning_sharing_routes.read_material_link', side_effect=AssertionError('No material read')):
+            created = self.core.create('', 'fixture-pure-manual-create', ADMIN, auto_generate=False,
+                participant_ids=['p_manual'], title='Manual only')
+            bid = created['id']
+            batch = self.core.batch(bid)
+            self.assertEqual(batch['status'], 'draft')
+            self.assertEqual(batch['source'], {'text': '', 'sources': []})
+            self.assertFalse(batch['auto_generate'])
+            self.assertEqual(self.core.create('', 'fixture-pure-manual-create', ADMIN, auto_generate=False,
+                participant_ids=['p_manual'], title='Manual only'), created)
+            self.core.edit(bid, {'version': 1, 'questions': manual(6)}, ADMIN)
+            self.core.publish(bid, 2, ADMIN, 'cli_fixtureCurrent')
+            self.core.publish(bid, 2, ADMIN, 'cli_fixtureCurrent')
+        papers = self.core.attempts(bid)
+        self.assertEqual(len(papers), 1)
+        self.assertEqual(len(papers[0]['question_ids']), 6)
+        self.assertEqual(papers[0]['open_id'], 'ou_manual')
+        self.assertEqual([q['evidence'] for q in self.core.batch(bid)['questions']], [''] * 6)
+        queued = [job for job in self.learning._all('sharing_delivery') if job['batch_id'] == bid]
+        self.assertEqual(sum(job['kind'] == 'paper' for job in queued), 1)
+        self.assertEqual(sum(job['kind'] == 'bank' for job in queued), 6)
+
+    def test_link_free_manual_keeps_existing_permissions_and_recipient_checks(self):
+        for actor, people in (({'id': 'ou_member'}, ['unknown']), (ADMIN, []), (ADMIN, ['unknown'])):
+            with self.subTest(actor=actor, people=people), self.assertRaises(LearningError):
+                self.core.create('', 'fixture-pure-manual-invalid', actor,
+                    auto_generate=False, participant_ids=people)
+        with self.assertRaises(LearningError):
+            self.core.create('', 'fixture-no-source-ai', ADMIN, auto_generate=True)
+
     def test_material_upload_is_local_private_and_full_text_uses_existing_worker(self):
+        self.enterContext(patch('lan_bitable_template_portal.sharing_material_images.extract_images', return_value=[]))
         service = SharingMaterials(self.learning)
         item = service.upload(ADMIN, 'slides.pptx', b'fixture-pptx')
         with patch('openclaw_service.assistant.lighthouse_document_tools.run_local', return_value={
@@ -184,6 +220,7 @@ class SharingMaterialsTests(unittest.TestCase):
             checked_file(self.learning._get('sharing_material', item['id']))
 
     def test_pdf_ocr_fills_all_missing_pages_not_just_first_excerpt(self):
+        self.enterContext(patch('lan_bitable_template_portal.sharing_material_images.extract_images', return_value=[]))
         service = SharingMaterials(self.learning)
         item = service.upload(ADMIN, 'scan.pdf', b'fixture-pdf')
         def parse(kind, payload, **options):

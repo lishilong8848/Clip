@@ -199,7 +199,7 @@ class AttachmentTests(Base):
         with self.assertRaises(checks.CheckError):
             self.service.stage_upload({**self.peer, 'home_scope': 'B'}, self._white_id(), 'x', 'item', '越权.txt', late)
 
-    def test_item_file_upload_ownership_and_frozen_evidence(self):
+    def test_item_file_upload_ownership_and_versioned_evidence(self):
         self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))
         self.prepare(at(DAY + 'T09:00:00'))
         white = self._white_id()
@@ -221,20 +221,26 @@ class AttachmentTests(Base):
             self.service.delete_file(self.peer, uploaded['id'], at(DAY + 'T09:00:00'))
         # Uploader can delete before submit (within shift window).
         self.service.delete_file(self.worker, uploaded['id'], at(DAY + 'T09:00:00'))
-        # Re-upload for the submit-freeze assertions below.
+        # Re-upload for the submitted evidence assertions below.
         session = self.service.stage_upload(self.worker, white, 'x', 'item', 'note.png')
         make_png(session['path'])
         size = pathlib.Path(session['path']).stat().st_size
         uploaded = self.service.commit_upload(self.worker, session, size)
-        # Submit freezes evidence.
+        # Submitted evidence requires an explicit revision to change.
         self.service.submit(self.worker, white, 1, [{'id': 'x', 'status': 'normal', 'note': ''}], at(DAY + 'T09:10:00'))
         state = self.service.state(self.worker, 'A', at(DAY + 'T09:10:00'))
         task = next(t for t in state['tasks'] if t['id'] == white)
         self.assertEqual([f['name'] for f in task['files']], ['note.png'])
-        self.assertFalse(task['files'][0]['can_delete'])
+        self.assertTrue(task['files'][0]['can_delete'])
         with self.assertRaises(checks.CheckError) as exc:
             self.service.delete_file(self.worker, uploaded['id'], at(DAY + 'T09:10:00'))
-        self.assertTrue(exc.exception.status in (403, 400))
+        self.assertEqual(exc.exception.status, 409)
+        original = pathlib.Path(self.service.get_file(self.worker, uploaded['id'])['path']).read_bytes()
+        deleted = self.service.delete_file(self.peer, uploaded['id'], at(DAY + 'T09:10:00'),
+                                           task_id=white, revision=task['revision'])
+        self.assertEqual(deleted['revision'], task['revision'] + 1)
+        self.assertEqual(self.service.task(self.worker, white)['files'], [])
+        self.assertEqual(pathlib.Path(self.service.get_file(self.worker, uploaded['id'])['path']).read_bytes(), original)
 
     def test_reject_bad_path_size_and_signature(self):
         self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))
@@ -287,10 +293,11 @@ class AttachmentTests(Base):
         self.assertEqual(sum(not r['already_completed'] for r in results), 1)
 
         # Two competing handover uploads: only one wins.
-        s1 = self.service.stage_upload(self.worker, white, '', 'handover', 'h1.png')
+        revision = self.service.task(self.worker, white)['revision']
+        s1 = self.service.stage_upload(self.worker, white, '', 'handover', 'h1.png', revision=revision)
         make_png(s1['path'])
         size1 = pathlib.Path(s1['path']).stat().st_size
-        s2 = self.service.stage_upload(self.peer, white, '', 'handover', 'h2.png')
+        s2 = self.service.stage_upload(self.peer, white, '', 'handover', 'h2.png', revision=revision)
         make_png(s2['path'])
         size2 = pathlib.Path(s2['path']).stat().st_size
         winner = self.service.commit_upload(self.worker, s1, size1)
@@ -310,7 +317,8 @@ class AttachmentTests(Base):
             outbox = conn.execute('SELECT revision, synced FROM outbox').fetchall()
         self.assertEqual(len(outbox), 1)
         before = outbox[0]['revision']
-        session = self.service.stage_upload(self.worker, white, '', 'handover', 'h.png')
+        revision = self.service.task(self.worker, white)['revision']
+        session = self.service.stage_upload(self.worker, white, '', 'handover', 'h.png', revision=revision)
         make_png(session['path'])
         size = pathlib.Path(session['path']).stat().st_size
         self.service.commit_upload(self.worker, session, size)
@@ -408,7 +416,9 @@ class RegressionTests(Base):
 
     def _upload_image(self, white, item_id, name, kind='item', actor=None):
         actor = actor or self.worker
-        session = self.service.stage_upload(actor, white, item_id, kind, name)
+        task = self.service.task(actor, white)
+        session = self.service.stage_upload(actor, white, item_id, kind, name,
+                                            revision=task['revision'] if task['submitted'] else None)
         make_png(session['path'])
         size = pathlib.Path(session['path']).stat().st_size
         return self.service.commit_upload(actor, session, size), session

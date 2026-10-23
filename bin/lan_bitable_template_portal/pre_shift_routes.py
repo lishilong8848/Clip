@@ -108,6 +108,14 @@ def install_pre_shift_routes(app, controller, runtime):
             raise CheckError('提交格式无效。')
         return body
 
+    def revision_for(request):
+        value = request.query_params.get('revision')
+        if value is None:
+            return None
+        if not value.isascii() or not value.isdecimal() or len(value) > 12 or int(value) < 1:
+            raise CheckError('检查版本无效。', 409)
+        return int(value)
+
     async def handle(request, operation):
         try:
             actor = await asyncio.to_thread(actor_for, request)
@@ -137,6 +145,14 @@ def install_pre_shift_routes(app, controller, runtime):
                 if set(body) != {'version', 'items'}:
                     raise CheckError('清单参数无效。')
                 data = await asyncio.to_thread(svc.save_definition, actor, scope, body['version'], body['items'])
+            elif operation == 'task':
+                task_id = request.path_params['task_id']
+                if request.method == 'GET':
+                    data = await asyncio.to_thread(svc.task, actor, task_id)
+                else:
+                    if set(body) != {'revision', 'answers'}:
+                        raise CheckError('编辑参数无效。')
+                    data = await asyncio.to_thread(svc.edit, actor, task_id, body['revision'], body['answers'])
             else:
                 if set(body) != {'task_id', 'version', 'answers'} or not isinstance(body['task_id'], str):
                     raise CheckError('提交参数无效。')
@@ -168,6 +184,10 @@ def install_pre_shift_routes(app, controller, runtime):
     @app.post('/api/pre-shift-checks/submit')
     async def submit(request: Request):
         return await handle(request, 'submit')
+
+    @app.api_route('/api/pre-shift-checks/tasks/{task_id}', methods=['GET', 'PUT'])
+    async def task(request: Request, task_id: str):
+        return await handle(request, 'task')
 
     @app.delete('/api/pre-shift-checks/photo-preview')
     async def discard_photo(request: Request):
@@ -222,7 +242,8 @@ def install_pre_shift_routes(app, controller, runtime):
                 photo_capture.pop('captured_at', None)
             photo_capture.pop('_time_audit', None)
             photo_capture.pop('_location_name', None)
-            session = await asyncio.to_thread(svc.stage_upload, actor, task_id, item_id, kind, name, captured=capture == '1')
+            session = await asyncio.to_thread(svc.stage_upload, actor, task_id, item_id, kind, name,
+                captured=capture == '1', revision=revision_for(request), replace_file_id=request.query_params.get('replace_file_id'))
             session['photo_capture'] = photo_capture
             stage = Path(session['path'])
             size = 0
@@ -291,7 +312,8 @@ def install_pre_shift_routes(app, controller, runtime):
             actor = await asyncio.to_thread(actor_for, request)
             assert_same_origin(request)
             svc = await asyncio.to_thread(get_service)
-            result = await asyncio.to_thread(svc.delete_file, actor, file_id)
+            result = await asyncio.to_thread(svc.delete_file, actor, file_id,
+                revision=revision_for(request), task_id=request.query_params.get('task_id'))
             return JSONResponse({'ok': True, 'data': result}, headers={'Cache-Control': 'no-store'})
         except CheckError as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status)

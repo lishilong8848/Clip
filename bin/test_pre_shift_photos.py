@@ -615,14 +615,24 @@ class DeliveryTests(Base):
         import sqlite3
         self.save('A', 0, [{'id': 'x', 'text': '检查'}])
         self.prepare(at(DAY+'T09:00:00'))
-        with patch.object(self.service,'_bump_shift_cloud',side_effect=sqlite3.OperationalError('disk write')):
-            with self.assertRaises(sqlite3.OperationalError):
-                self.upload_again()
+        # Inject a storage error only after both file and delivery inserts ran.
+        with self.service.connection(True) as conn:
+            conn.execute("""CREATE TRIGGER fail_photo_delivery AFTER INSERT ON photo_deliveries
+                            BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END""")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'injected storage failure'):
+            self.upload_again()
         with self.service.connection() as conn:
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0],0)
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0],0)
         self.assertEqual(list(self.service.files_dir.glob('*.jpg')),[])
         self.assertEqual(list(self.service.staging_dir.iterdir()),[])
+        with self.service.connection(True) as conn:
+            conn.execute('DROP TRIGGER fail_photo_delivery')
+        photo = self.upload_again()
+        with self.service.connection() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0], 1)
+        self.assertTrue(Path(self.service.get_file(self.worker, photo['id'])['path']).is_file())
 
     def test_concurrent_workers_only_claim_one_delivery(self):
         import threading

@@ -432,9 +432,12 @@ class SubmissionReliabilityTests(unittest.TestCase):
                 }
                 PortalRuntime._queue_source_end_sync(payload, 'recTarget', '变更通告' if work_type == 'change' else '维保通告')
                 self.assertEqual(row['display_fields'][field], '进行中')
+                fields = {field: FieldMeta('status', field, 'SingleSelect', 3, False, {}, ['进行中', '已结束'], False),
+                          '实际结束时间': FieldMeta('ended', '实际结束时间', 'DateTime', 5, False, {}, [], False)}
                 with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={
                     'mock_external': False, 'real_write_allowed': True,
-                }), patch.object(self.service, '_request_json', side_effect=[
+                }), patch.object(self.service, '_load_table_fields', return_value=(list(fields.values()), fields)), \
+                    patch.object(self.service, '_request_json', side_effect=[
                     {'data': {'record': {'record_id': row['record_id'], 'fields': dict(row['display_fields'])}}},
                     {'data': {'record': {'record_id': row['record_id'], 'fields': {
                         field: '已结束', '实际结束时间': '2026-10-16 17:00',
@@ -442,6 +445,7 @@ class SubmissionReliabilityTests(unittest.TestCase):
                 ]), patch.object(self.service, '_patch_record_fields') as source_write:
                     self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
                 source_write.assert_called_once()
+                self.assertEqual(source_write.call_args.kwargs['fields'][field], '已结束')
                 self.assertEqual(row['display_fields'][field], '已结束')
                 cached = self.store.get_source_scope_snapshot('A')['records']
                 self.assertTrue(any(item['record_id'] == 'recSource' and item['display_fields'][field] == '已结束'

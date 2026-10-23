@@ -6,6 +6,7 @@ export type LibraryOption = { id?: string; value?: string; name?: string; label?
 export type LibraryField = {
   id: string; name: string; type: string | number; options?: LibraryOption[];
   read_only: boolean; required?: boolean; multiple?: boolean; read_only_reason?: string;
+  property?: { date_formatter?: string; show_time?: boolean; [key: string]: unknown };
 };
 export type LibraryCapabilities = {
   create?: boolean; edit?: boolean; upload?: boolean; configure_tables?: boolean; reindex?: boolean;
@@ -16,6 +17,7 @@ export type LibraryTable = {
   display_fields?: string[]; attachment_fields?: string[];
   scope_field?: string; fixed_scopes?: string[]; read_scopes?: string[]; write_scopes?: string[];
   scopes?: string[]; enabled?: boolean; capabilities?: LibraryCapabilities;
+  summary?: { records: number; updated_at: number; pending_items: number; sync_status: string; error: string };
 };
 export type LibraryAttachment = {
   id: string; field_id: string; name: string; size?: number; mime_type?: string;
@@ -47,7 +49,9 @@ export type LibraryList = { items: LibraryRecord[]; has_more: boolean; cursor: s
 export type LibraryMutation = { fields: LibraryFields; operation_id: string; reason: string; expected_revision?: string };
 export type LibraryLocalOperation = { operation_id: string; expected_revision: string };
 export type LibraryFilter = { field: string; op: string; value?: string | number | boolean | null };
-export type LibraryReindex = LibraryLocalOperation & ({ record_ids: string[] } | { all: true; q: string; scope: string; filters?: LibraryFilter[] });
+export type LibraryReindex = LibraryLocalOperation & { mode?: 'all' | 'failed' | 'missing' } & ({ record_ids: string[] } | { all: true; q: string; scope: string; filters?: LibraryFilter[] });
+export type LibraryPendingOperation = { operation_id: string; record_id: string; status: string; kind: string; reason: string; actor_name: string; created_at: number };
+export type LibraryStorage = { bytes: number; files: number; orphan_bytes: number; orphan_files: number; free_bytes: number; revision: string; removed?: number };
 
 const root = '/api/document-library';
 function endpoint(path: string, tableKey?: string, params: Record<string, string | number | undefined> = {}) {
@@ -90,6 +94,18 @@ function recordResult(data: Record<string, any>): LibraryRecord {
 }
 
 export const documentLibraryApi = {
+  async operations(key: string, signal?: AbortSignal): Promise<LibraryPendingOperation[]> {
+    return arrayResult(await requestJson(endpoint('/operations', key), { signal, fresh: true }), 'items');
+  },
+  async verify(key: string, id: string, recordId = ''): Promise<{ status: string; message?: string; record?: LibraryRecord }> {
+    const data = await requestJson(endpoint('/operations/' + encodeURIComponent(id) + '/verify', key), {
+      method: 'POST', body: JSON.stringify(recordId ? { record_id: recordId } : {}), timeoutMs: 90_000 });
+    return { ...data, record: data.record ? recordResult(data.record) : undefined } as { status: string; message?: string; record?: LibraryRecord };
+  },
+  async storage(revision?: string): Promise<LibraryStorage> {
+    return await requestJson(root + '/storage', revision === undefined ? { fresh: true } : {
+      method: 'POST', body: JSON.stringify({ expected_revision: revision }) }) as LibraryStorage;
+  },
   async preview(url: string, tableId?: string, signal?: AbortSignal): Promise<LibraryPreview> {
     const data = await requestJson(endpoint('/preview'), {
       method: 'POST', body: JSON.stringify({ url, ...(tableId ? { table_id: tableId } : {}) }), signal,

@@ -35,6 +35,7 @@ try{
   if(p==='/api/learning/bootstrap')return ok({is_admin:role==='admin',can_answer:true,can_view_buildings:true,self_person:{id:'person-self',name:'隔离本人'},self_scope:'A',scopes,today:'2026-10-14',settings:{enabled:true},sync:{}});
   if(p==='/api/learning/sharing')return ok({items:deletes?[]:[batch],total:deletes?0:1});
   if(p==='/api/learning/sharing/sharing-fixture'){
+   if(url.searchParams.has('person')) return ok(batch.results.find(item=>item.open_id===url.searchParams.get('person')));
    if(req.method()==='PUT'){
     if(failSave){failSave=false;return route.fulfill({status:503,json:{ok:false,error:'隔离保存失败'}});}
     saved=req.postDataJSON();assert.equal(saved.version,batch.version);batch.questions=saved.questions;batch.participants.forEach(item=>item.exempted=saved.excluded_open_ids.includes(item.open_id));batch.version++;
@@ -63,7 +64,7 @@ try{
  await section().getByLabel('题干',{exact:true}).first().fill('核对题干修改应跨分区保留');
  assert.equal(await page.locator('.v2-sharing-questions>.sharing-question').count(),5,'five questions per page');
  assert.equal(await page.getByRole('heading',{name:'参会人答题情况',exact:true}).count(),0);
- await page.locator('.sharing-question[data-type=multiple]').waitFor();
+ await page.locator('.sharing-question[data-kind=multiple]').waitFor();
  await section().getByRole('checkbox',{name:'第2题选项B为正确答案',exact:true}).check();
  await section().getByLabel('参考答案（问答题不自动判分）').fill('核对参考答案修改');
  await screenshot('questions-pc');
@@ -116,10 +117,10 @@ try{
  assert.equal(await section().locator('.v2-sharing-tabs .n-tabs-tab').filter({hasText:'通知与同步'}).count(),0);assert.equal(await section().locator('textarea').count(),0);
  assert.equal(await section().getByRole('button',{name:'删除批次',exact:true}).count(),0);
  role='admin';await go('/learning&tab=sharing');await page.locator('.sharing-batch').click();
- await section().getByRole('button',{name:'删除批次',exact:true}).click();const confirmation=page.locator('.n-dialog');
+ await section().getByRole('button',{name:'删除批次',exact:true}).click();const confirmation=page.getByRole('dialog');
  assert.match(await confirmation.innerText(),/已上传到多维题库的题目不会删除/);assert.equal(deletes,0);
  await confirmation.getByRole('button',{name:'取消',exact:true}).click();assert.equal(deletes,0);
- await section().getByRole('button',{name:'删除批次',exact:true}).click();await confirmation.getByRole('button',{name:'删除批次',exact:true}).click();
+ await section().getByRole('button',{name:'删除批次',exact:true}).click();await confirmation.getByRole('button',{name:'确认',exact:true}).click();
  await section().getByText('批次已删除，已上传题目保留。',{exact:true}).waitFor();assert.equal(deletes,1);assert.equal(await page.locator('.sharing-batch').count(),0);
  assert.deepEqual(errors,[]);console.log('PASS: sharing sections, five-question editing, draft preservation/retry, participant pagination, result modal, original confirmation, PC/mobile and delete confirmation. All writes mocked.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

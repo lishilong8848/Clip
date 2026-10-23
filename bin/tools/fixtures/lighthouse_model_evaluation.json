@@ -1,0 +1,255 @@
+{
+  "version": "lighthouse-synthetic-v2",
+  "cases": [
+    {
+      "id": "roster_count_names",
+      "task_type": "statistics",
+      "question": "D楼这天白班到底哪些人在岗？人数和名单一起给我，同一个人别重复算。",
+      "context": {"date": "2026-10-21", "timezone": "Asia/Shanghai"},
+      "sources": [
+        {"id": "R1", "kind": "current_roster", "complete": true, "date": "2026-10-21", "rows": [
+          {"scope": "D", "shift": "day", "person_id": "P1", "name": "TEST_A"},
+          {"scope": "D", "shift": "day", "person_id": "P1", "name": "TEST_A"},
+          {"scope": "D", "shift": "day", "person_id": "P2", "name": "TEST_B"},
+          {"scope": "D", "shift": "day", "person_id": "P3", "name": "TEST_C"},
+          {"scope": "E", "shift": "day", "person_id": "P4", "name": "TEST_D"}
+        ]},
+        {"id": "R2", "kind": "historical_summary", "date": "2026-10-20", "count": 9}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-21", "shift": "day", "subject": "roster", "delivery": "chat"},
+        "source_ids": ["R1"],
+        "facts": {"count": 3, "names": ["TEST_A", "TEST_B", "TEST_C"]},
+        "citations": {"count": ["R1"], "names": ["R1"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "learning_night_dedup",
+      "task_type": "statistics",
+      "question": "21号D楼夜班学练参加了几个人，都是谁？重复提交算一个人，别按题目数算。",
+      "context": {"month": "2026-10", "timezone": "Asia/Shanghai"},
+      "sources": [
+        {"id": "L1", "kind": "shift_rule", "scope": "D", "business_date": "2026-10-21", "shift": "night", "start_inclusive": "2026-10-21T20:00:00+08:00", "end_exclusive": "2026-10-22T08:00:00+08:00"},
+        {"id": "L2", "kind": "learning_submissions", "complete": true, "rows": [
+          {"scope": "D", "at": "2026-10-21T21:00:00+08:00", "person_id": "P1", "name": "TEST_A", "questions": 10},
+          {"scope": "D", "at": "2026-10-22T01:00:00+08:00", "person_id": "P1", "name": "TEST_A", "questions": 12},
+          {"scope": "D", "at": "2026-10-22T07:59:00+08:00", "person_id": "P3", "name": "TEST_C", "questions": 8},
+          {"scope": "D", "at": "2026-10-22T08:00:00+08:00", "person_id": "P2", "name": "TEST_B", "questions": 9}
+        ]}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-21", "shift": "night", "subject": "learning", "delivery": "chat"},
+        "source_ids": ["L1", "L2"],
+        "facts": {"count": 2, "names": ["TEST_A", "TEST_C"], "business_date": "2026-10-21"},
+        "citations": {"count": ["L1", "L2"], "names": ["L1", "L2"], "business_date": ["L1"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "maintenance_notice_state",
+      "task_type": "statistics",
+      "question": "D楼当前还没结束的维保通告有哪些，一共几条？跟进里写了已完成就算结束了吗？",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "M1", "kind": "current_maintenance_notices", "complete": true, "state_rule": "通告是否结束以notice_state为准，followup_text不改变通告状态。", "rows": [
+          {"id": "M-01", "scope": "D", "notice_state": "ongoing", "followup_text": "本次跟进已完成"},
+          {"id": "M-02", "scope": "D", "notice_state": "closed", "followup_text": "补录资料中"},
+          {"id": "M-03", "scope": "E", "notice_state": "ongoing", "followup_text": "待核验"}
+        ]}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-23", "shift": "", "subject": "maintenance", "delivery": "chat"},
+        "source_ids": ["M1"],
+        "facts": {"count": 1, "notice_ids": ["M-01"], "followup_implies_closed": false},
+        "citations": {"count": ["M1"], "notice_ids": ["M1"], "followup_implies_closed": ["M1"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "sop_conflicting_evidence",
+      "task_type": "document",
+      "question": "按D楼资料库这两份同版本SOP，审批要几位复核人？只核对文件依据，不要给设备操作步骤。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "D1", "kind": "sop", "scope": "D", "version": "v3", "current": true, "section": "审批", "text": "双人复核后方可提交审批。"},
+        {"id": "D2", "kind": "sop", "scope": "D", "version": "v3", "current": true, "section": "审批", "text": "单人复核后方可提交审批。"},
+        {"id": "D3", "kind": "cafeteria_policy", "text": "供餐名单须经三人核对。"}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-23", "shift": "", "subject": "sop", "delivery": "chat"},
+        "source_ids": ["D1", "D2"],
+        "facts": {"reviewer_count": null, "conflicting_counts": [1, 2], "can_confirm_rule": false},
+        "citations": {"reviewer_count": ["D1", "D2"], "conflicting_counts": ["D1", "D2"], "can_confirm_rule": ["D1", "D2"]},
+        "completeness": "conflict", "limitations": ["conflicting_documents"], "followups": ["confirm_authoritative_version"]
+      }
+    },
+    {
+      "id": "sop_irrelevant_evidence",
+      "task_type": "document",
+      "question": "请根据这些资料核对D楼设备SOP的复核人数。依据不足就说明无法确认，并请我补充匹配的SOP，不要补写操作步骤。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "D4", "kind": "printer_manual", "scope": "D", "text": "打印机耗材领用登记需一人签收，不涉及设备SOP审批。"}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-23", "shift": "", "subject": "sop", "delivery": "chat"},
+        "source_ids": [],
+        "facts": {"reviewer_count": null, "can_confirm_rule": false},
+        "citations": {"reviewer_count": [], "can_confirm_rule": []},
+        "completeness": "unsupported", "limitations": ["no_matching_document"], "followups": ["provide_matching_sop"]
+      }
+    },
+    {
+      "id": "followup_night_and_delivery",
+      "task_type": "statistics",
+      "question": "那夜班呢？人数和名单一起，发给我。",
+      "context": {"date": "2026-10-21", "history": [
+        {"role": "user", "content": "查D楼21号白班的在岗人数和名单。"},
+        {"role": "assistant", "content": "白班名单已显示在当前对话。"}
+      ]},
+      "sources": [
+        {"id": "F1", "kind": "current_roster", "complete": true, "scope": "D", "date": "2026-10-21", "rows": [
+          {"shift": "day", "person_id": "P1", "name": "TEST_A"},
+          {"shift": "night", "person_id": "P2", "name": "TEST_B"},
+          {"shift": "night", "person_id": "P3", "name": "TEST_C"}
+        ]}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-21", "shift": "night", "subject": "roster", "delivery": "chat"},
+        "source_ids": ["F1"],
+        "facts": {"count": 2, "names": ["TEST_B", "TEST_C"]},
+        "citations": {"count": ["F1"], "names": ["F1"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "mixed_current_and_document",
+      "task_type": "mixed",
+      "question": "D楼今天还有多少维保通告没结束？同时核对文件中的关闭审批条件。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "C1", "kind": "current_maintenance_notices", "complete": true, "scope": "D", "date": "2026-10-23", "rows": [{"id": "M-11", "state": "ongoing"}, {"id": "M-12", "state": "ongoing"}, {"id": "M-13", "state": "closed"}]},
+        {"id": "C2", "kind": "sop", "scope": "D", "current": true, "text": "关闭审批需要复核记录和验收记录齐备。此条不表示当前任何通告已经满足条件。"},
+        {"id": "C3", "kind": "historical_summary", "date": "2026-10-20", "ongoing_count": 7}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-23", "shift": "", "subject": "maintenance_and_sop", "delivery": "chat"},
+        "source_ids": ["C1", "C2"],
+        "facts": {"count": 2, "notice_ids": ["M-11", "M-12"], "required_records": ["review", "acceptance"]},
+        "citations": {"count": ["C1"], "notice_ids": ["C1"], "required_records": ["C2"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "roster_partial_page",
+      "task_type": "statistics",
+      "question": "给我D楼今天白班所有在岗人员的总数和完整名单。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "P1", "kind": "current_roster", "scope": "D", "date": "2026-10-23", "shift": "day", "complete": false, "next_page_error": "unavailable", "rows": [{"person_id": "P1", "name": "TEST_A"}]}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-23", "shift": "day", "subject": "roster", "delivery": "chat"},
+        "source_ids": ["P1"],
+        "facts": {"count": null, "observed_count": 1, "names": ["TEST_A"]},
+        "citations": {"count": ["P1"], "observed_count": ["P1"], "names": ["P1"]},
+        "completeness": "partial", "limitations": ["missing_page"], "followups": []
+      }
+    },
+    {
+      "id": "mixed_missing_document",
+      "task_type": "mixed",
+      "question": "D楼今天未结束的维保通告数量和名单给我，再核对相关SOP的关闭审批条件。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "X1", "kind": "current_maintenance_notices", "complete": true, "scope": "D", "date": "2026-10-23", "rows": [{"id": "M-21", "state": "ongoing"}]},
+        {"id": "X2", "kind": "printer_manual", "text": "打印耗材保管说明，与维保通告关闭审批无关。"}
+      ],
+      "expected": {
+        "understanding": {"scope": "D", "date": "2026-10-23", "shift": "", "subject": "maintenance_and_sop", "delivery": "chat"},
+        "source_ids": ["X1"],
+        "facts": {"count": 1, "notice_ids": ["M-21"], "required_records": null},
+        "citations": {"count": ["X1"], "notice_ids": ["X1"], "required_records": []},
+        "completeness": "partial", "limitations": ["no_matching_document"], "followups": ["provide_matching_sop"]
+      }
+    },
+    {
+      "id": "followup_chat_only",
+      "task_type": "general",
+      "question": "把刚才那份摘要发给我就好。",
+      "context": {"date": "2026-10-23", "history": [{"role": "user", "content": "摘要留在当前对话，不要发飞书或私信。"}]},
+      "sources": [{"id": "G1", "kind": "synthetic_summary", "text": "演示资料核对完成，摘要编号SUMMARY-01。"}],
+      "expected": {
+        "understanding": {"scope": "", "date": "2026-10-23", "shift": "", "subject": "summary", "delivery": "chat"},
+        "source_ids": ["G1"],
+        "facts": {"summary_id": "SUMMARY-01", "external_send_authorized": false},
+        "citations": {"summary_id": ["G1"], "external_send_authorized": []},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "followup_ambiguous_target",
+      "task_type": "general",
+      "question": "那条已经完成了吗？",
+      "context": {"date": "2026-10-23", "history": [{"role": "assistant", "content": "有两项演示资料核对任务，尚未选定其中哪一项。"}]},
+      "sources": [{"id": "G2", "kind": "synthetic_tasks", "complete": true, "rows": [{"id": "TASK-A", "state": "complete"}, {"id": "TASK-B", "state": "pending"}]}],
+      "expected": {
+        "understanding": {"scope": "", "date": "2026-10-23", "shift": "", "subject": "task_status", "delivery": "chat"},
+        "source_ids": ["G2"],
+        "facts": {"target_id": null, "completed": null},
+        "citations": {"target_id": ["G2"], "completed": ["G2"]},
+        "completeness": "partial", "limitations": ["ambiguous_target"], "followups": ["identify_target"]
+      }
+    },
+    {
+      "id": "sop_current_version",
+      "task_type": "document",
+      "question": "E楼这份SOP的新旧版复核人数不同，按当前有效版本应由几人复核？只核对审批文字，不给操作步骤。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "V1", "kind": "sop", "scope": "E", "version": "v1", "current": false, "reviewer_count": 1, "text": "旧版，已失效：一人复核。"},
+        {"id": "V2", "kind": "sop", "scope": "E", "version": "v2", "current": true, "reviewer_count": 2, "text": "当前有效版：两人复核。"}
+      ],
+      "expected": {
+        "understanding": {"scope": "E", "date": "2026-10-23", "shift": "", "subject": "sop", "delivery": "chat"},
+        "source_ids": ["V2"],
+        "facts": {"reviewer_count": 2, "can_confirm_rule": true},
+        "citations": {"reviewer_count": ["V2"], "can_confirm_rule": ["V2"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "mixed_zero_current_and_document",
+      "task_type": "mixed",
+      "question": "E楼今天还有没结束的维保通告吗？数量、名单和现行SOP的关闭审批条件一起给我。",
+      "context": {"date": "2026-10-23"},
+      "sources": [
+        {"id": "Z1", "kind": "current_maintenance_notices", "scope": "E", "date": "2026-10-23", "complete": true, "rows": [{"id": "M-31", "state": "closed"}, {"id": "M-32", "state": "closed"}]},
+        {"id": "Z2", "kind": "sop", "scope": "E", "current": true, "text": "关闭审批需复核记录和验收记录齐备。"},
+        {"id": "Z3", "kind": "historical_summary", "scope": "E", "date": "2026-10-20", "ongoing_count": 3}
+      ],
+      "expected": {
+        "understanding": {"scope": "E", "date": "2026-10-23", "shift": "", "subject": "maintenance_and_sop", "delivery": "chat"},
+        "source_ids": ["Z1", "Z2"],
+        "facts": {"count": 0, "notice_ids": [], "required_records": ["review", "acceptance"]},
+        "citations": {"count": ["Z1"], "notice_ids": ["Z1"], "required_records": ["Z2"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    },
+    {
+      "id": "followup_resolved_target",
+      "task_type": "general",
+      "question": "我指的是TASK-B那项演示核对任务，现在完成了吗？只在这里答复。",
+      "context": {"date": "2026-10-23", "history": [{"role": "assistant", "content": "上一轮有TASK-A和TASK-B两项任务，尚未选定目标。"}]},
+      "sources": [{"id": "G3", "kind": "synthetic_tasks", "complete": true, "rows": [{"id": "TASK-A", "state": "complete"}, {"id": "TASK-B", "state": "pending"}]}],
+      "expected": {
+        "understanding": {"scope": "", "date": "2026-10-23", "shift": "", "subject": "task_status", "delivery": "chat"},
+        "source_ids": ["G3"],
+        "facts": {"target_id": "TASK-B", "completed": false},
+        "citations": {"target_id": ["G3"], "completed": ["G3"]},
+        "completeness": "complete", "limitations": [], "followups": []
+      }
+    }
+  ]
+}

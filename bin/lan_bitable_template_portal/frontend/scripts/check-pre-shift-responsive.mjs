@@ -53,7 +53,11 @@ try{
         tasks:['白','夜'].map(shift=>({id:scope+shift,scope,shift,day:'2026-10-17',due:shift==='白'?now/1000-600:now/1000+30000,deadline:now/1000+50000,definition_version:1,items,people:[{name:'人员一'},{name:'人员二'}],submitted:submitted&&shift==='白'?'2026-10-17T09:00:00+08:00':'',actor_name:'人员一',can_submit:(!manager||params.has('editable'))&&!submitted,can_upload_handover:!manager&&!photo,files:[],handover_photo:photo,answers:submitted?items.map(item=>({...item,status:'normal',note:''})):[],sync_status:'synced'}))});
     }
     if(url.pathname==='/api/pre-shift-checks/submit'){writes++;assert.equal(request.postDataJSON().answers.length,3);submitted=true;return ok({completed:true,actor_name:'人员一'});}
-    if(url.pathname==='/api/pre-shift-checks/files'){assert.equal(url.searchParams.get('kind'),'handover');assert.equal(photo,null);photo={id:'fixture-photo',name:'交接班.png',is_image:true,size:80};return ok(photo);}
+    if(url.pathname==='/api/pre-shift-checks/photo-preview'){
+      assert.equal(url.searchParams.get('kind'),'handover');
+      return ok({preview_id:'fixture-preview',image:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh98AAAAASUVORK5CYII=',width:1,height:1,time_source:'照片拍摄信息',original_time:'2026-10-17 09:00',options:{enabled:false,existing:false,scale:.4,title:'A楼班前检查',area:'A楼',time:'2026-10-17 09:00',weather:'',location:''}});
+    }
+    if(url.pathname==='/api/pre-shift-checks/files'){assert.equal(request.postDataJSON().preview_id,'fixture-preview');assert.equal(photo,null);photo={id:'fixture-photo',name:'交接班.png',is_image:true,size:80};return ok(photo);}
     if(url.pathname.startsWith('/api/pre-shift-checks/files/'))return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jh98AAAAASUVORK5CYII=','base64')});
     return ok({});
   });
@@ -71,7 +75,7 @@ try{
   await page.goto(origin+'/?role=operator');await page.locator('fieldset').nth(2).waitFor();
   assert.equal(await page.locator('.v2-check-attachments[aria-label="检查附件上传区"]').count(),0,'optional attachment controls are collapsed initially');
   await page.getByRole('button',{name:items[0].text+'附件',exact:true}).click();assert.equal(await page.locator('.v2-check-attachments[aria-label="检查附件上传区"]').count(),1);
-  await page.getByLabel('上传交接班照片',{exact:true}).setInputFiles({name:'交接班.png',mimeType:'image/png',buffer:Buffer.from('isolated-photo')});await page.getByText('本班已上传',{exact:true}).waitFor();assert.equal(await page.locator('.v2-check-handover').getByRole('button',{name:'上传照片',exact:true}).count(),0,'one photo removes the second-upload control');
+  await page.getByLabel('上传交接班照片',{exact:true}).setInputFiles({name:'交接班.png',mimeType:'image/png',buffer:Buffer.from('isolated-photo')});await page.locator('.v2-photo-editor').getByRole('button',{name:'保留原图并上传',exact:true}).click();await page.locator('.v2-check-photo-preview').getByRole('button',{name:'完成',exact:true}).click();await page.getByText('本班已上传',{exact:true}).waitFor();assert.equal(await page.locator('.v2-check-handover').getByRole('button',{name:'上传照片',exact:true}).count(),0,'one photo removes the second-upload control');
   for(const width of [360,375,390]){await page.setViewportSize({width,height:width===360?640:667});await page.locator('#stage').evaluate(el=>{el.style.width='100%';el.style.height='calc(100dvh - 20px)';});assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(screenshots,'operator-'+width+'.png'),fullPage:true});}
   for(const row of await page.locator('fieldset').all())await row.locator('.n-radio-button').filter({hasText:'无异常'}).click();
   await page.getByRole('button',{name:'提交检查',exact:true}).click();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,1);
@@ -88,7 +92,7 @@ try{
   await history.getByText('A楼历史检查人22',{exact:true}).waitFor();assert.equal(await history.locator('.n-collapse-item').count(),3,'all old records are accessible, not just the current shift');
   historyMalformed=true;await page.getByRole('button',{name:'刷新历史检查记录',exact:true}).click();await history.getByRole('alert').filter({hasText:'历史检查记录返回不完整，请重新读取。'}).waitFor();assert.equal(await history.locator('.n-collapse-item').count(),3,'a failed read retains the last confirmed history');
   historyMalformed=false;await history.getByRole('button',{name:'重试',exact:true}).click();await history.getByRole('alert').waitFor({state:'detached'});
-  await page.getByRole('button',{name:'返回检查',exact:true}).click();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,1,'history never resubmits completed work');
+  await page.getByRole('button',{name:/^返回检查(?:清单)?$/}).click();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,1,'history never resubmits completed work');
   submitted=false;photo=null;
   await page.setViewportSize({width:1440,height:900});
   await page.goto(origin+'/?legacy&limited&editable');await page.locator('.legacy-pre-shift-buildings fieldset').nth(5).waitFor();

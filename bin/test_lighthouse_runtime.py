@@ -10,7 +10,7 @@ import ssl
 import threading
 import time
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -336,7 +336,7 @@ class ModelTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.close()
         self.directory.cleanup()
 
-    async def test_reused_model_transport_never_persists_provider_account_cookies(self):
+    async def test_request_transports_never_persist_provider_account_cookies(self):
         real_client, cookies = httpx.AsyncClient, []
         def provider(request):
             cookies.append(request.headers.get('cookie', ''))
@@ -344,15 +344,18 @@ class ModelTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
                 'Set-Cookie': 'provider_session=synthetic-account-a; Path=/; Secure'})
         with patch.object(httpx, 'AsyncClient', side_effect=lambda **kwargs:
                 real_client(**kwargs, transport=httpx.MockTransport(provider))):
-            client = await self.runtime.model_client()
+            clients = []
             for account in ('a', 'b'):
-                await client.post('https://provider.invalid/v1/chat/completions',
-                    headers={'Authorization': 'Bearer synthetic-' + account}, json={'messages': []})
+                async with await self.runtime.model_client() as client:
+                    clients.append(client)
+                    await client.post('https://provider.invalid/v1/chat/completions',
+                        headers={'Authorization': 'Bearer synthetic-' + account}, json={'messages': []})
+                    self.assertEqual(list(client.cookies.items()), [])
             self.assertEqual(cookies, ['', ''])
-            self.assertEqual(list(client.cookies.items()), [])
-            self.assertIs(await self.runtime.model_client(), client)
+            self.assertIsNot(clients[0], clients[1])
+            self.assertTrue(all(client.is_closed for client in clients))
 
-    async def test_verified_transport_is_offloop_reused_and_makes_no_prewarm_requests(self):
+    async def test_prewarm_reuses_offloop_tls_without_creating_connections(self):
         from openclaw_service.assistant import lighthouse_public as public
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         real_client = httpx.AsyncClient
@@ -368,7 +371,6 @@ class ModelTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError('Certificate preparation blocked the event loop')
             return context
         def create_client(**kwargs):
-            threads.append(threading.get_ident())
             options.append(kwargs)
             client = real_client(**kwargs, transport=httpx.MockTransport(
                 lambda _: self.fail('Preparation must not contact a provider')))
@@ -382,23 +384,29 @@ class ModelTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {}, clear=True), patch.object(tls_policy, '_tls_contexts', {}), patch.object(ssl, 'create_default_context', create_context), \
                 patch.object(httpx, 'AsyncClient', create_client):
             try:
-                clients = await asyncio.wait_for(asyncio.gather(*(self.runtime.model_client() for _ in range(20)), tick()), 10)
+                connections = await asyncio.wait_for(asyncio.gather(*(self.runtime.model_client() for _ in range(20)), tick()), 10)
             finally:
                 release.set()
-            self.assertEqual(len(instances), 1)
-            self.assertTrue(all(client is instances[0] for client in clients[:-1]))
+            self.assertEqual(instances, [])
             self.assertEqual(ticks, [True])
             self.assertNotIn(loop_thread, threads)
+            async with connections[0] as first, connections[1] as second:
+                self.assertIsNot(first, second)
+                self.assertFalse(first.is_closed)
+                self.assertFalse(second.is_closed)
             self.assertIs(options[0]['verify'], context)
+            self.assertIs(options[1]['verify'], context)
             self.assertIs(options[0]['trust_env'], False)
             self.assertIs(options[0]['follow_redirects'], False)
-            self.assertEqual(options[0]['limits'].max_connections, 40)
-            self.assertEqual(options[0]['limits'].max_keepalive_connections, 20)
+            self.assertEqual(options[0]['limits'].max_connections, 1)
+            self.assertEqual(options[0]['limits'].max_keepalive_connections, 0)
+            self.assertEqual(options[0]['timeout'].as_dict(), {'connect': 10, 'read': 180, 'write': 180, 'pool': 10})
             self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
             self.assertTrue(context.check_hostname)
-            self.assertIs(await self.runtime.model_client(), instances[0])
+            await self.runtime.model_client()
+            self.assertEqual(len(instances), 2)
         await self.runtime.close()
-        self.assertTrue(instances[0].is_closed)
+        self.assertTrue(all(client.is_closed for client in instances))
 
     async def test_shutdown_during_certificate_preparation_cannot_create_a_late_client(self):
         from openclaw_service.assistant import lighthouse_public as public
@@ -420,24 +428,24 @@ class ModelTransportPreparationTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
 
-    async def test_cancelled_client_construction_closes_the_unpublished_client(self):
+    async def test_cancelled_prewarm_never_constructs_a_client(self):
         from openclaw_service.assistant import lighthouse_public as public
         entered, release = threading.Event(), threading.Event()
-        client = Mock(aclose=AsyncMock())
-        def create_client(**_):
+        def certificate(**_):
             entered.set()
             release.wait(2)
-            return client
-        with patch.object(public, '_verified_tls_context', return_value=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)), \
-                patch.object(httpx, 'AsyncClient', create_client):
+            return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        with patch.object(public, '_verified_tls_context', certificate), \
+                patch.object(httpx, 'AsyncClient') as create:
             task = asyncio.create_task(self.runtime.model_client())
             try:
                 self.assertTrue(await asyncio.to_thread(entered.wait, 1))
                 task.cancel()
                 release.set()
                 with self.assertRaises(asyncio.CancelledError): await task
-                client.aclose.assert_awaited_once()
+                create.assert_not_called()
                 self.assertIsNone(self.runtime.http)
+                self.assertIsNone(self.runtime.model_tls)
             finally:
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)
@@ -771,7 +779,7 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     if change == 'stop': item['blocked'] = True
                     elif change == 'replace': self.runtime.accounts[item['key']] = {**item}
                     else: self.runtime.closing = True
-                    return client
+                    return nullcontext(client)
                 with patch.object(self.runtime, 'model_client', side_effect=prepare):
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
                         response = await caller.post('/api/assistant/openclaw-models/chat/completions',

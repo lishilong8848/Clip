@@ -18,6 +18,7 @@
     "check:impersonation": "node scripts/check-impersonation.mjs",
     "check:repair-submission": "node scripts/check-repair-submission.mjs && node scripts/check-repair-overview.mjs",
     "check:workspace-repairs": "node scripts/check-workspace-repairs.mjs",
+    "check:workspace-surfaces": "node scripts/check-workspace-surfaces.mjs",
     "check:workspace-history": "node scripts/check-workspace-history.mjs",
     "check:cabinet-reliability": "node scripts/check-cabinet-reliability.mjs",
     "check:plan-convergence": "node --experimental-strip-types scripts/check-plan-convergence.ts",

@@ -7,15 +7,14 @@ import json
 import logging
 import re
 import secrets
-import threading
 import time
-from collections import OrderedDict
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 from .lighthouse_ai import AssistantError, safe_data, safe_text
 from .lighthouse_context import execution_key
+from .lighthouse_model_health import ModelHealth as _ModelHealth, model_health, model_health_key, profile_key, select_task_profile
 from .lighthouse_gateway import GatewayClient, GatewayError
 from .lighthouse_model import LighthouseModel, incomplete_reply
 from .lighthouse_review import READ_REPAIR_TOOLS
@@ -51,54 +50,6 @@ def native_model_error(error, *, timeout=False):
             return AssistantError(message, status, category=category)
     return AssistantError('模型运行未完成，原消息已保留，可重试。', 504 if timeout else 502,
                           category='timeout' if timeout else 'model_protocol')
-
-
-class _ModelHealth:
-    """Process-local observations contain only account/config hashes and numeric health."""
-    MAX_ENTRIES = 512
-    TTL = 3600
-    TRANSIENT = frozenset({'model_busy', 'model_connection', 'model_validation', 'timeout'})
-    CONFIGURATION = frozenset({'model_auth', 'model_request'})
-
-    def __init__(self):
-        self._entries = OrderedDict()
-        self._lock = threading.Lock()
-        self._clock = time.monotonic
-
-    def _prune(self, now):
-        for key, entry in list(self._entries.items()):
-            if now - entry['updated'] >= self.TTL:
-                del self._entries[key]
-        while len(self._entries) > self.MAX_ENTRIES:
-            self._entries.popitem(last=False)
-
-    def snapshot(self, key):
-        with self._lock:
-            self._prune(self._clock())
-            entry = self._entries.get(key)
-            if entry is not None:
-                self._entries.move_to_end(key)
-            return dict(entry or {})
-
-    def record(self, key, *, category='', latency=None):
-        if category and category not in self.TRANSIENT | self.CONFIGURATION:
-            return
-        with self._lock:
-            now = self._clock()
-            self._prune(now)
-            entry = self._entries.pop(key, {'failures': 0})
-            if category:
-                failures = min(entry['failures'] + 1, 5)
-                base, maximum = (15, 120) if category in self.TRANSIENT else (60, 300)
-                entry.update(failures=failures, cooldown_until=now + min(maximum, base * 2 ** (failures - 1)),
-                             category=category)
-            else:
-                previous = entry.get('latency', latency)
-                entry.update(failures=0, cooldown_until=0, category='',
-                             latency=previous * .75 + latency * .25)
-            entry['updated'] = now
-            self._entries[key] = entry
-            self._prune(now)
 
 
 READ_RECOVERY_TOOLS = frozenset('lighthouse_' + name for name in READ_REPAIR_TOOLS)
@@ -137,6 +88,8 @@ class BusinessBridge:
             raise AssistantError('工具参数无效。')
         signature = hashlib.sha256(json.dumps([name, args], sort_keys=True).encode()).hexdigest()
         async with active.call_lock:
+            if getattr(active, 'turn', {}).get('_read_only_phase') and name not in READ_RECOVERY_TOOLS:
+                raise AssistantError('当前阶段仅允许只读查询，不得创建文件、准备表单或执行业务。', 403)
             cached = active.results.get(identity)
             if cached:
                 if cached[0] != signature:
@@ -204,7 +157,7 @@ class OpenClawToolAgent:
         self._evidence_only = False
         self._read_recovery = False
         self.called_tools = set()
-        self.health = engine.__dict__.setdefault('_model_health', _ModelHealth())
+        self.health = model_health(engine.assistant)
         scope_key = hashlib.sha256(json.dumps(sorted(actor['scopes'])).encode()).hexdigest()[:16]
         state = engine.assistant._state(actor)
         self.session_key = 'agent:' + agent_id(execution_key(actor)) + ':lighthouse:' + state['id'] + ':' + scope_key
@@ -294,7 +247,8 @@ class OpenClawToolAgent:
 
     async def _acquire_runtime(self, *, warm_only=False):
         definitions = [{'name': name, 'label': tool.name, 'description': tool.description or '',
-                        'parameters': tool.function_schema.json_schema} for name, tool in self.tools.items()]
+                        'parameters': tool.function_schema.json_schema} for name, tool in self.tools.items()
+                       if not self.turn.get('_read_only_phase') or name in READ_RECOVERY_TOOLS]
         text_only = getattr(self, '_live_text_only', False) and not getattr(self, '_auto_tools', False) and not warm_only
         if text_only:
             self._buffered_reply = False
@@ -327,7 +281,7 @@ class OpenClawToolAgent:
         try:
             item = await self.engine.manager.acquire(self.actor, self.engine.assistant.model_for(self.actor), self.profile,
                 plugin=plugin, **({'plugin_catalog': catalog} if text_only else {}),
-                tool_names=[] if text_only else list(self.tools), bridge_token=self.token, bridge_url=self.engine.bridge_url(),
+                tool_names=[tool['name'] for tool in definitions], bridge_token=self.token, bridge_url=self.engine.bridge_url(),
                 progress=lambda label: loop.call_soon_threadsafe(progress.put_nowait, label))
         finally:
             announcer.cancel()
@@ -416,51 +370,15 @@ class OpenClawToolAgent:
                 + json.dumps(safe_data([value[1] for value in self.results.values()], list_limit=None), ensure_ascii=False))
 
     def _next_profile(self, attempted, *, initial=False):
-        from .lighthouse_ai import model_capabilities
-        from .lighthouse_context import model_context_limit
-        model = self.engine.assistant.model_for(self.actor)
-        settings = model.settings()
-        if not settings.get('enabled'):
-            return None
-        required = model_capabilities(self.profile)
-        # Only the server's automatic flag permits replacing the initial profile.
-        question = str(self.turn.get('prompt') or self.turn.get('question') or '')[:2000]
-        reasoning = bool(re.search(r'分析|比较|对比|排查|诊断|推理|计算|统计|汇总|方案|\b(?:analy[sz]e|compare|debug|diagnose|calculate|reason|plan)\b', question, re.I))
-        context = bool(self.turn.get('file_ids') or getattr(self, '_routing_failure', '') == 'model_context')
-        candidates = []
-        for index, item in enumerate(settings.get('models', [])):
-            if not item.get('configured'):
-                continue
-            try:
-                candidate = model.profile(item['id'])
-                capabilities = model_capabilities(candidate)
-                context_window = int(candidate.get('context_window') or 64000)
-                context_window = min(context_window, model_context_limit(candidate))
-            except (AssistantError, TypeError, ValueError):
-                continue
-            if self._profile_key(candidate) in attempted:
-                continue
-            if any(capabilities[key] != required[key] for key in ('tool_calls', 'image_input')):
-                continue
-            health = self.health.snapshot(self._health_key(candidate))
-            if health.get('cooldown_until', 0) > self.health._clock():
-                continue
-            score = (-context_window if context else 0, capabilities['reasoning'] != reasoning,
-                     health.get('latency', 30), initial and item['id'] != self.profile.get('id'), index)
-            candidates.append((score, candidate))
-        return min(candidates, key=lambda pair: pair[0])[1] if candidates else None
+        return select_task_profile(self.engine.assistant, self.actor, self.turn, self.profile,
+            attempted=attempted, initial=initial, context=getattr(self, '_routing_failure', '') == 'model_context')
 
     def _health_key(self, profile):
-        from .lighthouse_ai import model_capabilities
-        fingerprint = hashlib.sha256(json.dumps([
-            self._profile_key(profile), model_capabilities(profile), profile.get('context_window') or 64000
-        ], sort_keys=True).encode()).hexdigest()
-        return account_key(execution_key(self.actor)), fingerprint
+        return model_health_key(self.actor, profile)
 
     @staticmethod
     def _profile_key(profile):
-        return hashlib.sha256(json.dumps([profile.get(key) for key in
-            ('endpoint', 'model', 'key_cipher')], ensure_ascii=False).encode()).hexdigest()
+        return profile_key(profile)
 
     async def _events_with_fallback(self, prompt, history, stack, events):
         attempted, visible = set(), False

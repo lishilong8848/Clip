@@ -27,7 +27,7 @@ function batchFor(manual) {
 }
 try {
   for (const v2 of [false, true]) {
-    let batch = batchFor(0), role = 'admin', operations = new Map(), posts = 0, loss = false, saved, previewDone;
+    let batch = batchFor(0), role = 'admin', operations = new Map(), posts = 0, loss = false, saved, previewDone, manualCreates = 0;
     const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
       <style>body{margin:0;padding:16px;font:14px sans-serif;background:#f7f9fc}#app{max-width:1280px;margin:auto}*{box-sizing:border-box}</style>
       <div id="app" class="${v2 ? 'workspace-v2' : ''}"></div><script type="module">
@@ -54,8 +54,13 @@ try {
             if (url.pathname === '/api/learning/sharing') {
               if (req.method === 'POST') {
                 assert.equal(body.url, ''); assert.deepEqual(body.participant_ids, ['p1']);
-                assert.deepEqual(body.material_urls, ['https://vnet.feishu.cn/wiki/Fixture', 'https://vnet.feishu.cn/file/FileFixture']);
-                assert.deepEqual(body.material_ids, ['fixture-file']); assert.equal(body.auto_generate, false);
+                if (body.title === '纯手工无链接练习') {
+                  assert.deepEqual(body.material_urls, []); assert.deepEqual(body.material_ids, []); manualCreates++;
+                } else {
+                  assert.deepEqual(body.material_urls, ['https://vnet.feishu.cn/wiki/Fixture', 'https://vnet.feishu.cn/file/FileFixture']);
+                  assert.deepEqual(body.material_ids, ['fixture-file']);
+                }
+                assert.equal(body.auto_generate, false);
                 batch = { ...batchFor(0), status: 'draft', version: 1, questions: [], question_count: 0 }; delete batch.paper;
                 return ok({ id: batch.id });
               }
@@ -92,7 +97,7 @@ try {
     const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-    const page = await context.newPage(); page.setDefaultTimeout(15000); page.on('pageerror', e => errors.push(e.message));
+    const page = await context.newPage(); page.setDefaultTimeout(15000); page.setDefaultNavigationTimeout(60000); page.on('pageerror', e => errors.push(e.message));
     try {
       await page.goto(origin + '/__sharing-materials');
       for (const [width,height] of [[1440,900],[402,874],[440,956]]) {
@@ -105,10 +110,58 @@ try {
           }), fields:[...document.querySelectorAll('.sharing-source')].map(el=>({top:el.getBoundingClientRect().top,left:el.getBoundingClientRect().left}))};
         });
         assert.equal(layout.overflow,false);assert.equal(layout.overlap,false);assert.equal(layout.clipped,false,`${v2}-${width}: history content must fit its own row`);
-        if(width===1440) assert(Math.abs(layout.fields[0].top-layout.fields[1].top)<2 && layout.fields[0].left<layout.fields[1].left,'desktop sources share a row');
+        assert.equal(layout.fields.length,0,'Creation is separate from the batch list');
         await page.screenshot({path:path.join(output,`history-${v2}-${width}.png`),fullPage:true});
       }
       await page.setViewportSize({width:1440,height:900});
+      await page.getByRole('button',{name:'新建分享会练习',exact:true}).click();
+      await page.getByLabel('飞书纪要链接', {exact:true}).fill('invalid-unused-url');
+      await page.getByLabel('资料链接', {exact:true}).fill('unused material draft');
+      await page.getByLabel('选择资料文件').setInputFiles({name:'unused.pptx',mimeType:'application/octet-stream',buffer:Buffer.from('fixture')});
+      await page.getByText('纯手工出题',{exact:true}).click();
+      assert.equal(await page.locator('.sharing-source').count(), 0, 'pure manual mode has no required materials');
+      assert(await page.getByRole('button',{name:'创建空白草稿',exact:true}).isDisabled(), 'explicit recipients are still required');
+      await page.getByRole('button',{name:'读取人员目录',exact:true}).click();
+      await page.getByRole('button',{name:'添加参会人：测试人员',exact:true}).click();
+      await page.getByLabel('练习标题（可选）', {exact:true}).fill('纯手工无链接练习');
+      assert(await page.getByRole('button',{name:'创建空白草稿',exact:true}).isEnabled(), 'unused pending materials must not block manual creation');
+      await page.getByText('资料出题',{exact:true}).click();
+      assert.equal(await page.getByLabel('飞书纪要链接',{exact:true}).inputValue(), 'invalid-unused-url', 'switching modes preserves unfinished inputs');
+      await page.getByText('纯手工出题',{exact:true}).click();
+      await page.reload();
+      await page.getByRole('radio',{name:'纯手工出题',exact:true}).waitFor();
+      assert(await page.getByRole('radio',{name:'纯手工出题',exact:true}).isChecked(), 'manual mode survives restoring a creation draft');
+      for (const [width,height] of [[1440,900],[402,874],[440,956]]) {
+        await page.setViewportSize({width,height});
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+        assert(await page.evaluate(()=>{
+          const mode=document.querySelector('.sharing-mode').getBoundingClientRect();
+          const title=document.querySelector('label[for="sharing-title"]').getBoundingClientRect();
+          const search=document.querySelector('.sharing-people-tools input').getBoundingClientRect();
+          const read=document.querySelector('.sharing-people-tools button').getBoundingClientRect();
+          const titleInput=document.querySelector('#sharing-title').getBoundingClientRect();
+          const chosen=document.querySelector('.sharing-create-actions .sharing-chips').getBoundingClientRect();
+          const submit=document.querySelector('.sharing-create-actions>button').getBoundingClientRect();
+          return title.left>=mode.right && titleInput.top<mode.bottom && Math.abs(search.top-read.top)<4
+            && Math.abs((chosen.top+chosen.bottom)-(submit.top+submit.bottom))<8
+            && [...document.querySelectorAll('.sharing-mode .n-radio-button')].every(el=>{
+              const r=el.getBoundingClientRect(); return r.top>=mode.top && r.bottom<=mode.bottom+1 && r.right<=title.left;
+            });
+        }), 'mode/title and people search/actions must share rows without overlap');
+        await page.screenshot({path:path.join(output,`pure-manual-${v2}-${width}.png`),fullPage:true});
+      }
+      await page.getByRole('button',{name:'创建空白草稿',exact:true}).click();
+      await page.getByRole('button',{name:'新增问答题',exact:true}).click();
+      await page.getByLabel('题干',{exact:true}).fill('纯手工题目');
+      await page.getByLabel('参考答案（问答题不自动判分）',{exact:true}).fill('人工参考答案');
+      await page.getByLabel('答案解析',{exact:true}).fill('人工解析');
+      await page.getByRole('button',{name:'保存题目与名单',exact:true}).click();
+      await page.getByText('题目与答题名单已保存。',{exact:true}).waitFor();
+      assert.equal(manualCreates,1); assert.equal(saved.questions[0].origin,'manual'); assert.equal(saved.questions[0].evidence,'');
+      await page.getByRole('button',{name:'批次列表',exact:true}).click();
+      await page.setViewportSize({width:1440,height:900});
+      await page.getByRole('button',{name:'新建分享会练习',exact:true}).click();
+      assert(await page.locator('.sharing-source').count() >= 2);
       await page.getByLabel('使用飞书纪要').uncheck();
       await page.getByLabel('AI生成题目').uncheck();
       await page.getByLabel('资料链接', { exact: true }).fill('https://vnet.feishu.cn/wiki/Fixture');
@@ -156,7 +209,7 @@ try {
       if (v2) {
         await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({ hasText: '参会人' }).click();
         assert.equal(await page.locator('.sharing-answer-pane').count(), 0, 'people tab hides the paper');
-        await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({ hasText: '我的题目' }).click();
+        await page.locator('.v2-sharing-tabs .n-tabs-tab').filter({ hasText: '我的答题' }).click();
         await page.getByText('第 2 / 3 页', { exact: true }).waitFor();
       }
       for (const count of [0, 4, 5, 11]) {

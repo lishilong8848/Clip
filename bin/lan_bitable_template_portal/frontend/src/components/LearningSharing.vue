@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ArrowLeft, CheckCircle2, ChevronLeft, ChevronRight, FileText, Link, Loader2, Plus, RefreshCw, Save, Send, Square, Trash2, Upload, Users, X } from 'lucide-vue-next';
 import { requestLearning } from '../api/learning';
 import type { Dict } from '../api/client';
-import { randomHexId } from '../browserStorage';
+import { randomHexId, resilientStorage } from '../browserStorage';
+import { NModal, NPagination, NRadioButton, NRadioGroup, NTab, NTabs } from 'naive-ui';
 import ConfirmDialog from './ConfirmDialog.vue';
 import LearningQuestionImages from './LearningQuestionImages.vue';
 import { logicalUrl } from '../workspace-v2/version';
@@ -21,6 +22,8 @@ const rows = ref<Dict[]>([]), detail = ref<Dict | null>(null), url = ref(''), ma
 const title = ref('');
 const questionTypes = ref<string[]>(['single']);
 const autoGenerate = ref(true), includeMinutes = ref(true);
+const creationMode = ref<'materials' | 'manual'>('materials');
+const manualOnly = computed(() => creationMode.value === 'manual');
 const materialUrls = ref<string[]>([]), materialIds = ref<string[]>([]);
 const uploadedNames = ref<Record<string, string>>({});
 const materialFiles = ref<File[]>([]), uploading = ref(false);
@@ -28,7 +31,12 @@ const people = ref<Dict[]>([]), participants = ref<Dict[]>([]), peopleSearch = r
 const page = ref(1), total = ref(0), questionPage = ref(1), personSearch = ref('');
 const selectedPerson = ref('');
 const busy = ref(false), loading = ref(false), error = ref(''), message = ref(''), dirty = ref(false);
-watch(busy, value => emit('busy', value));
+watch(() => busy.value || uploading.value, value => emit('busy', value));
+const creating = ref(false), sectionTab = ref('questions'), personPage = ref(1), storageWarning = ref('');
+const additionIds = ref<string[]>([]), evidenceQuestion = ref<Dict | null>(null);
+const creationDirty = computed(() => !!(title.value || url.value || materialUrl.value || materialUrls.value.length || materialIds.value.length || materialFiles.value.length || participants.value.length));
+const storage = resilientStorage('localStorage', () => { storageWarning.value = '浏览器暂不能保存草稿，请保持页面打开并先保存。'; });
+const creationKey = () => 'clipflow:sharing:create:v1:' + props.userId;
 const labels: Record<string, string> = { queued: '等待生成', generating: '正在生成', draft: '待核对发布', published: '答题中', closed: '已关闭', failed: '生成失败' };
 const confirm = ref<{ open: boolean; action: string; title: string; message: string }>({ open: false, action: '', title: '', message: '' });
 let request: AbortController | undefined, epoch = 0, timer: ReturnType<typeof setTimeout> | undefined, disposed = false;
@@ -37,6 +45,7 @@ let createId = randomHexId();
 /* ---------- draft editor / detail views ---------- */
 const questions = computed(() => (detail.value?.questions || []).slice((questionPage.value - 1) * PAGE_SIZE, questionPage.value * PAGE_SIZE));
 const participantsView = computed(() => (detail.value?.participants || []).filter((p: Dict) => `${p.name} ${p.scope}`.includes(personSearch.value.trim())));
+const pagedParticipants = computed(() => participantsView.value.slice((personPage.value - 1) * 12, personPage.value * 12));
 const assignedCount = computed(() => (detail.value?.participants || []).filter((p: Dict) => !p.exempted).length);
 const exemptedCount = computed(() => (detail.value?.participants || []).length - assignedCount.value);
 const percent = computed(() => detail.value?.total ? Math.round(detail.value.completed * 100 / detail.value.total) : 0);
@@ -64,6 +73,7 @@ const publishIssue = computed(() => {
 });
 const paperSizeHint = computed(() => counts.value.manualSized
   ? `已手动录入 ${counts.value.manual} 道，每人完整作答这 ${counts.value.manual} 道（不额外补AI题）。`
+  : counts.value.ai === 0 ? `已手动录入 ${counts.value.manual} 道，还需补充 ${PAGE_SIZE - counts.value.manual} 道题后发布。`
   : `手动录入 ${counts.value.manual} 道（全部必答），不足5道时由AI生成题补足到5道。`);
 const visiblePeople = computed(() => {
   const keyword = peopleSearch.value.trim();
@@ -76,20 +86,22 @@ const paper = computed<Dict | null>(() => detail.value?.paper || null);
 const myQuestions = computed(() => {
   const paperValue = paper.value;
   if (!paperValue) return detail.value?.questions || [];
-  const byId = new Map<string, Dict>((detail.value?.questions || []).map((q: Dict) => [q.id, q]));
+  const byId = new Map<string, Dict>((detail.value?.my_questions || detail.value?.questions || []).map((q: Dict) => [q.id, q]));
   const ids: string[] = paperValue.question_ids || [];
   const ordered = ids.map(id => byId.get(id)).filter(Boolean);
   return ordered.length ? ordered : detail.value?.questions || [];
 });
 const submitted = computed(() => !!paper.value?.submitted_at);
-const canAnswer = computed(() => !!paper.value && !submitted.value && detail.value?.status === 'published' && paper.value.open_id === props.userId && !props.isAdmin);
+const canAnswer = computed(() => !!paper.value && !submitted.value && detail.value?.status === 'published' && paper.value.open_id === props.userId);
 const answerPages = computed(() => Math.max(1, Math.ceil(myQuestions.value.length / PAGE_SIZE)));
 const answerPage = ref(1), answers = ref<Dict>({}), answerVersion = ref(0), answerError = ref('');
+const answerBaseline = ref<Dict>({}), answerConflicts = ref<{ id: string; mine: unknown; latest: unknown }[]>([]);
 let answerOperation: { fingerprint: string; id: string } | undefined;
 const answerPageQuestions = computed(() => myQuestions.value.slice((answerPage.value - 1) * PAGE_SIZE, answerPage.value * PAGE_SIZE));
 const answeredCount = computed(() => myQuestions.value.filter((q: Dict) => hasAnswer(q)).length);
 const lastPageComplete = computed(() => answerPageQuestions.value.every((q: Dict) => hasAnswer(q)));
-const resultPaper = computed(() => (detail.value?.results || []).find((p: Dict) => p.open_id === selectedPerson.value));
+const resultDetail = ref<Dict | null>(null), resultLoading = ref(false), resultError = ref('');
+const resultPaper = computed(() => resultDetail.value?.open_id === selectedPerson.value ? resultDetail.value : (detail.value?.results || []).find((p: Dict) => p.open_id === selectedPerson.value));
 const resultPage = ref(1);
 const resultPages = computed(() => Math.max(1, Math.ceil((resultPaper.value?.question_ids || []).length / PAGE_SIZE)));
 const resultQuestions = computed(() => {
@@ -184,23 +196,26 @@ async function uploadMaterials() {
   if (busy.value || uploading.value || !props.isAdmin || !materialFiles.value.length) return;
   uploading.value = true; error.value = ''; message.value = '';
   try {
-    const body = new FormData();
-    for (const file of materialFiles.value) body.append('files', file);
-    const result = await requestLearning({}, '/sharing/materials', 'POST', body);
-    const items: Dict[] = Array.isArray(result?.items) ? result.items : [];
-    if (!items.length) throw new Error('资料上传响应为空，请核对后重试。');
-    const known = new Set(materialIds.value);
-    materialIds.value = [...materialIds.value, ...items.map(item => String(item.id)).filter(id => id && !known.has(id))];
-    for (const item of items) uploadedNames.value[item.id] = item.name;
-    materialFiles.value = [];
-    message.value = `已上传 ${items.length} 份资料。`;
+    const files = materialFiles.value.slice();
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index], body = new FormData(); body.append('files', file);
+      message.value = `正在上传 ${index + 1}/${files.length}：${file.name}`;
+      const result = await requestLearning({}, '/sharing/materials', 'POST', body);
+      if (disposed) return;
+      const items: Dict[] = Array.isArray(result?.items) ? result.items : [];
+      if (items.length !== 1 || !items[0].id) throw new Error('材料回执未确认，已成功上传的材料保留，请重试当前文件。');
+      for (const item of items) { if (!materialIds.value.includes(item.id)) materialIds.value.push(item.id); uploadedNames.value[item.id] = item.name; }
+      materialFiles.value = materialFiles.value.filter(value => value !== file);
+    }
+    message.value = `材料上传完成，共 ${materialIds.value.length} 份。`;
   } catch (e) { error.value = (e as Error).message; }
   finally { uploading.value = false; }
 }
 const canCreate = computed(() => !busy.value && !uploading.value
-  && (!autoGenerate.value || !!(includeMinutes.value && url.value.trim()) || !!materialUrl.value.trim() || materialUrls.value.length > 0 || materialIds.value.length > 0)
+  && (manualOnly.value ? participants.value.length > 0 : (
+  (!autoGenerate.value || !!(includeMinutes.value && url.value.trim()) || !!materialUrl.value.trim() || materialUrls.value.length > 0 || materialIds.value.length > 0)
   && (!!(includeMinutes.value && url.value.trim()) || participants.value.length > 0)
-  && (!autoGenerate.value || questionTypes.value.length > 0) && !materialFiles.value.length);
+  && (!autoGenerate.value || questionTypes.value.length > 0) && !materialFiles.value.length)));
 function toggleType(kind: string, checked: boolean) {
   questionTypes.value = checked ? TYPES.filter(item => item === kind || questionTypes.value.includes(item)) : questionTypes.value.filter(item => item !== kind);
 }
@@ -223,6 +238,10 @@ function addParticipant(person: Dict) {
   if (busy.value) return;
   if (participantOpenIds.value.has(person.open_id)) { message.value = `${person.name} 已在答题名单中。`; return; }
   participants.value = [...participants.value, knownParticipant(person)];
+}
+function addDraftParticipant(person: Dict) {
+  if (!editable.value || !person.person_id || detail.value!.participants.some((p: Dict) => p.open_id === person.open_id)) return;
+  detail.value!.participants.push({ ...person, exempted: false }); additionIds.value.push(person.person_id); changed();
 }
 function removeParticipant(person: Dict) {
   if (busy.value) return;
@@ -285,9 +304,13 @@ async function load(id = detail.value?.id, silent = false) {
   if (!silent) loading.value = true;
   error.value = '';
   try {
-    const result = await requestLearning({ signal: request.signal }, id ? `/sharing/${id}` : `/sharing?page=${page.value}`);
+    let result = await requestLearning({ signal: request.signal }, id ? `/sharing/${id}${silent ? '?progress=1' : '?compact=1'}` : `/sharing?page=${page.value}`);
     if (disposed || ticket !== epoch) return;
     if (id) {
+      if (silent && detail.value && (result.version !== detail.value.version || result.status !== detail.value.status || result.paper?.submitted_at !== detail.value.paper?.submitted_at)) {
+        result = await requestLearning({ signal: request.signal }, `/sharing/${id}?compact=1`);
+        if (disposed || ticket !== epoch) return;
+      } else if (silent) result = { ...detail.value, ...result };
       if (!dirty.value) detail.value = result;
       if (!editingAnswers.value) resetAnswers(true);
     } else { rows.value = result.items || []; total.value = result.total; }
@@ -302,6 +325,7 @@ function resetAnswers(force = false) {
     return [q.id, q.type === 'interview' ? (typeof saved === 'string' ? saved : '') : (Array.isArray(saved) ? saved.map(Number).filter((i: number) => Number.isInteger(i) && i >= 0 && i < (q.options || []).length) : [])];
   }));
   answerVersion.value = Number(paper.value?.progress_version ?? 0);
+  answerBaseline.value = JSON.parse(JSON.stringify(answers.value)); answerConflicts.value = [];
   answerPage.value = Math.min(answerPage.value, answerPages.value);
   editingAnswers.value = false;
   answerOperation = undefined;
@@ -310,7 +334,8 @@ function resetAnswers(force = false) {
 }
 const editingAnswers = ref(false);
 async function openBatch(row: Dict) {
-  if (busy.value) return;
+  if (busy.value || uploading.value) return;
+  if (creationDirty.value) { error.value = '新建草稿已保留，请先完成或放弃后打开其他批次。'; return; }
   clean(); questionPage.value = 1; personSearch.value = ''; selectedPerson.value = ''; resultPage.value = 1;
   answerPage.value = 1; editingAnswers.value = false;
   await load(row.id);
@@ -319,23 +344,24 @@ async function openBatch(row: Dict) {
 async function mutate(action: string) {
   if (busy.value) return;
   if (action === 'publish' && (dirty.value || publishIssue.value)) { error.value = dirty.value ? '请先保存当前修改。' : publishIssue.value; return; }
-  if (action === 'create' && !canCreate.value) { error.value = '请填写纪要链接、添加资料，或关闭AI生成并手动录入题目。'; return; }
-  if (action === 'create' && materialUrl.value.trim()) { addMaterialUrl(); if (materialUrl.value.trim()) return; }
+  if (action === 'create' && !canCreate.value) { error.value = manualOnly.value ? '请先选择答题人员。' : '请核对出题资料和答题名单，或选择纯手工出题。'; return; }
+  if (action === 'create' && !manualOnly.value && materialUrl.value.trim()) { addMaterialUrl(); if (materialUrl.value.trim()) return; }
   busy.value = true; error.value = ''; message.value = '';
-  const generating = autoGenerate.value;
+  const generating = !manualOnly.value && autoGenerate.value;
   try {
     let result: Dict;
     if (action === 'create') {
-      const minutes = includeMinutes.value && url.value.trim() ? url.value.trim() : '';
+      const minutes = !manualOnly.value && includeMinutes.value && url.value.trim() ? url.value.trim() : '';
       result = await requestLearning({}, '/sharing', 'POST', {
         url: minutes, title: title.value.trim(), question_types: questionTypes.value.length ? questionTypes.value : ['single'],
-        operation_id: createId, material_urls: materialUrls.value, material_ids: materialIds.value,
+        operation_id: createId, material_urls: manualOnly.value ? [] : materialUrls.value, material_ids: manualOnly.value ? [] : materialIds.value,
         participant_ids: participants.value.map(p => p.person_id).filter(Boolean),
-        auto_generate: autoGenerate.value,
+        auto_generate: generating,
       });
-      createId = randomHexId(); url.value = ''; title.value = ''; materialUrls.value = []; materialIds.value = []; uploadedNames.value = {};
+      createId = randomHexId(); url.value = ''; materialUrl.value = ''; title.value = ''; materialUrls.value = []; materialIds.value = []; uploadedNames.value = {};
       participants.value = []; materialFiles.value = [];
-      autoGenerate.value = true; includeMinutes.value = true;
+      autoGenerate.value = true; includeMinutes.value = true; creationMode.value = 'materials';
+      storage.removeItem(creationKey()); creating.value = false;
     } else {
       const id = detail.value!.id;
       const body: Dict = { version: detail.value!.version };
@@ -345,9 +371,10 @@ async function mutate(action: string) {
           return { ...question, image_ids: imageIds(q), image_confirmed: q.image_confirmed === true };
         });
         body.excluded_open_ids = detail.value!.participants.filter((p: Dict) => p.exempted).map((p: Dict) => p.open_id);
+        if (additionIds.value.length) body.participant_ids = additionIds.value;
       }
       result = await requestLearning({}, `/sharing/${id}${action === 'save' ? '' : '/' + action}`, action === 'save' ? 'PUT' : 'POST', body);
-      if (action === 'save') clean();
+      if (action === 'save') { clean(); additionIds.value = []; }
     }
     await load(result.id);
     const doneMessages: Record<string, string> = { save: '题目与答题名单已保存。', publish: '已发布答题，正在后台发送答题卡并同步题目到题库。', retry: '已重新排队生成。', close: '已关闭本批答题及未答提醒，历史成绩保留。', 'retry-delivery': '已继续失败的原任务，不重新抽题，也不重复发送已成功的卡片。' };
@@ -367,7 +394,15 @@ function ask(action: string) {
       : action === 'remove-participant' ? '移出后该参会人不再收到答题卡，草稿发布前可随时重新加入。'
       : '将继续失败的原任务，不重新分配题目。若上次网络中断但对方已经收到，超出飞书去重时限后可能再次收到相同卡片，请先核对。' };
 }
-function resolved(ok: boolean) { const action = confirm.value.action; confirm.value = { ...confirm.value, open: false }; if (!ok) return; if (action === 'discard') { clean(); editingAnswers.value = false; void load(); } else void mutate(action); }
+function resolved(ok: boolean) { const action = confirm.value.action; confirm.value = { ...confirm.value, open: false }; if (!ok) return; if (action === 'discard-create') { url.value = ''; title.value = ''; materialUrl.value = ''; materialUrls.value = []; materialIds.value = []; participants.value = []; materialFiles.value = []; storage.removeItem(creationKey()); creating.value = false; } else if (action === 'delete') void deleteBatch(); else if (action === 'discard') { clean(); additionIds.value = []; editingAnswers.value = false; void load(); } else void mutate(action); }
+function closeCreate() { if (uploading.value || busy.value) return; if (creationDirty.value) confirm.value = { open: true, action: 'discard-create', title: '放弃新建草稿？', message: '将清空本次未创建的标题、材料和人员选择，已经发布的批次不受影响。' }; else creating.value = false; }
+function askDelete() { confirm.value = { open: true, action: 'delete', title: '删除分享会批次？', message: '删除后停止本批答题、提醒和后续同步；已上传到多维题库的题目不会删除。' }; }
+async function deleteBatch() {
+  if (!props.isAdmin || !detail.value || busy.value) return;
+  busy.value = true; error.value = '';
+  try { await requestLearning({}, `/sharing/${detail.value.id}/delete`, 'POST', { version: detail.value.version }); clean(); editingAnswers.value = false; detail.value = null; selectedPerson.value = ''; message.value = '批次已删除，已上传题目保留。'; await load(); if (!rows.value.length && page.value > 1) { page.value--; await load(); } }
+  catch (e) { error.value = (e as Error).message; } finally { busy.value = false; }
+}
 async function back() { if (busy.value) return; if (dirty.value || editingAnswers.value) { error.value = '请先保存当前修改或答题进度，再返回列表。'; return; } detail.value = null; selectedPerson.value = ''; await load(); }
 
 /* ---------- answering ---------- */
@@ -383,7 +418,7 @@ function answerPayload() {
   return Object.fromEntries(answerPageQuestions.value.map((q: Dict) => [q.id, q.type === 'interview' ? (answers.value[q.id] || '') : (answers.value[q.id] || []).map(String)]));
 }
 async function sendAnswers(submit: boolean, target = answerPage.value) {
-  if (busy.value || !canAnswer.value || !detail.value || !paper.value) return;
+  if (busy.value || !canAnswer.value || !detail.value || !paper.value || answerConflicts.value.length) return;
   const round = answerPages.value;
   if (submit && answerPage.value !== round) { answerError.value = '只有最后一页可以提交，请先逐页保存进度。'; return; }
   if (submit && answeredCount.value !== myQuestions.value.length) { answerError.value = `还有 ${myQuestions.value.length - answeredCount.value} 题未作答，全部作答后才能提交。`; return; }
@@ -405,8 +440,41 @@ async function sendAnswers(submit: boolean, target = answerPage.value) {
       answerPage.value = target;
       message.value = '答题进度已保存，尚未提交整卷。';
     }
-  } catch (e) { answerError.value = (e as Error).message; }
+  } catch (e) {
+    answerError.value = (e as Error).message;
+    if ((e as { status?: number }).status === 409) await reconcileAnswers();
+  }
   finally { busy.value = false; }
+}
+async function reconcileAnswers() {
+  const mine = JSON.parse(JSON.stringify(answers.value)), baseline = answerBaseline.value;
+  try {
+    const latest = await requestLearning({}, `/sharing/${detail.value!.id}`);
+    if (disposed) return;
+    detail.value = latest; resetAnswers(true);
+    if (submitted.value) { answerError.value = '另一端已提交，保留首次成绩。当前显示已提交答卷，未覆盖。'; return; }
+    if (latest.status !== 'published') { answers.value = mine; editingAnswers.value = true; answerError.value = '此批次已关闭，本页未提交输入仍保留，不能继续保存或提交。'; return; }
+    for (const q of myQuestions.value) {
+      if (JSON.stringify(mine[q.id]) === JSON.stringify(baseline[q.id])) continue;
+      if (JSON.stringify(answers.value[q.id]) !== JSON.stringify(baseline[q.id]) && JSON.stringify(answers.value[q.id]) !== JSON.stringify(mine[q.id]))
+        answerConflicts.value.push({ id: q.id, mine: mine[q.id], latest: answers.value[q.id] });
+      answers.value[q.id] = mine[q.id];
+    }
+    editingAnswers.value = true;
+    answerError.value = answerConflicts.value.length ? '其他页面已修改同一题，请逐题选择要保留的答案；本页输入未丢失。' : '已合并另一端进度并保留本页输入，请确认后保存。';
+  } catch { answerError.value = '最新答题进度暂不可用，本页输入已保留。请稍后重新保存。'; }
+}
+function resolveAnswer(id: string, useMine: boolean) { const value = answerConflicts.value.find(item => item.id === id); if (value) answers.value[id] = useMine ? value.mine : value.latest; answerConflicts.value = answerConflicts.value.filter(item => item.id !== id); }
+const deliveryLabel = (value: string) => (({ sent: '已发送', pending: '等待发送', failed: '发送失败', skipped: '已停止' } as Record<string, string>)[value] || '暂无');
+function showEvidence(q: Dict) { evidenceQuestion.value = q; }
+const evidenceLocations = computed(() => detail.value?.evidence_locations?.[evidenceQuestion.value?.id] || []);
+async function selectResult(openId: string) {
+  selectedPerson.value = selectedPerson.value === openId ? '' : openId; resultDetail.value = null; resultPage.value = 1; resultError.value = '';
+  if (!selectedPerson.value || !detail.value) return;
+  resultLoading.value = true; const batch = detail.value.id;
+  try { const value = await requestLearning({}, `/sharing/${batch}?person=${encodeURIComponent(openId)}`); if (!disposed && detail.value?.id === batch && selectedPerson.value === openId) resultDetail.value = value; }
+  catch (e) { if (!disposed && selectedPerson.value === openId) resultError.value = (e as Error).message; }
+  finally { if (selectedPerson.value === openId) resultLoading.value = false; }
 }
 
 /* ---------- polling ---------- */
@@ -416,13 +484,34 @@ function schedule() {
     const before = fingerprint();
     if (!disposed && !document.hidden && !busy.value && !dirty.value && !editingAnswers.value && detail.value
       && (['queued', 'generating', 'published'].includes(detail.value.status) || (detail.value.bank_sync?.total > detail.value.bank_sync?.synced + detail.value.bank_sync?.failed))) await load(detail.value.id, true);
+    else if (!disposed && !document.hidden && !busy.value && !uploading.value && !detail.value && !creating.value) await load(undefined, true);
     if (!disposed && fingerprint() !== before && paper.value && !canAnswer.value) resetAnswers(true);
     if (!disposed) schedule();
   }, 8000);
 }
 watch(() => detail.value?.id, () => { answerPage.value = 1; editingAnswers.value = false; });
 watch(personSearch, () => { selectedPerson.value = ''; });
+watch(personSearch, () => { personPage.value = 1; });
+watch(() => detail.value?.id, () => { sectionTab.value = paper.value ? 'mine' : ['draft', 'failed', 'queued', 'generating'].includes(detail.value?.status) ? 'questions' : 'people'; personPage.value = 1; additionIds.value = []; });
+watch(() => [dirty.value, editingAnswers.value, creationDirty.value], () => emit('dirty', dirty.value || editingAnswers.value || creationDirty.value), { flush: 'sync' });
+watch(() => [title.value, url.value, materialUrl.value, materialUrls.value, materialIds.value, participants.value, autoGenerate.value, includeMinutes.value, questionTypes.value, creationMode.value], () => {
+  if (!props.isAdmin || !props.userId) return;
+  if (!creationDirty.value) { storage.removeItem(creationKey()); return; }
+  storage.setItem(creationKey(), JSON.stringify({ schema: 1, userId: props.userId, createId, title: title.value, url: url.value, materialUrl: materialUrl.value, materialUrls: materialUrls.value, materialIds: materialIds.value, uploadedNames: uploadedNames.value, participants: participants.value, autoGenerate: autoGenerate.value, includeMinutes: includeMinutes.value, questionTypes: questionTypes.value, creationMode: creationMode.value }));
+}, { deep: true });
 onMounted(() => {
+  try {
+    const saved = JSON.parse(storage.getItem(creationKey()) || 'null');
+    if (props.isAdmin && saved?.schema === 1 && saved.userId === props.userId) {
+      title.value = String(saved.title || ''); url.value = String(saved.url || ''); materialUrl.value = String(saved.materialUrl || '');
+      materialUrls.value = Array.isArray(saved.materialUrls) ? saved.materialUrls : []; materialIds.value = Array.isArray(saved.materialIds) ? saved.materialIds : [];
+      participants.value = Array.isArray(saved.participants) ? saved.participants : []; uploadedNames.value = saved.uploadedNames || {};
+      autoGenerate.value = saved.autoGenerate !== false; includeMinutes.value = saved.includeMinutes !== false; questionTypes.value = Array.isArray(saved.questionTypes) ? saved.questionTypes : ['single'];
+      creationMode.value = saved.creationMode === 'manual' ? 'manual' : 'materials';
+      if (/^[a-f0-9]{32}$/.test(saved.createId)) createId = saved.createId;
+      creating.value = creationDirty.value; message.value = '已恢复本账号的新建草稿；尚未上传的文件需重新选择。';
+    }
+  } catch { storageWarning.value = '上次新建草稿无法读取，请重新核对填写。'; }
   const batchId = logicalUrl().searchParams.get('batch_id');
   if (batchId && !/^[a-f0-9]{32}$/.test(batchId)) error.value = '分享会批次编号无效。';
   else void load(batchId || undefined);
@@ -435,15 +524,25 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
   <section class="sharing-exercises" :aria-busy="busy || loading">
     <div v-if="error" role="alert" class="sharing-alert error">{{ error }}</div>
     <div v-if="message" role="status" class="sharing-alert success">{{ message }}</div>
-    <header class="sharing-toolbar">
-      <div class="sharing-title"><button v-if="detail" type="button" :disabled="busy" @click="back"><ArrowLeft :size="16" />批次列表</button><h2>{{ detail ? detail.title : '分享会练习' }}</h2></div>
+    <div v-if="storageWarning" role="alert" class="sharing-alert error">{{ storageWarning }}</div>
+    <header class="sharing-toolbar" :class="{ 'sharing-creating-toolbar': creating && !detail }">
+      <div class="sharing-title"><button v-if="detail" type="button" :disabled="busy" @click="back"><ArrowLeft :size="16" />批次列表</button><button v-else-if="creating" type="button" :disabled="busy || uploading" @click="closeCreate"><ArrowLeft :size="16" />返回批次列表</button><h2>{{ detail ? detail.title : '分享会练习' }}</h2></div>
       <button type="button" :disabled="busy || loading || dirty || editingAnswers" title="刷新分享会练习" @click="load()"><RefreshCw :size="16" :class="{ spin: loading }" />刷新</button>
+      <button v-if="isAdmin && !detail && !creating" type="button" class="primary" @click="creating = true"><Plus :size="16" />新建分享会练习</button>
+      <button v-if="isAdmin && detail" type="button" class="sharing-danger" :disabled="busy || uploading" @click="askDelete"><Trash2 :size="16" />删除批次</button>
     </header>
     <template v-if="!detail">
-      <form v-if="isAdmin" class="sharing-create" aria-label="新建分享会练习" @submit.prevent="mutate('create')">
-        <label for="sharing-title">练习标题（可选）</label>
-        <div><input id="sharing-title" v-model="title" type="text" maxlength="120" placeholder="留空则使用纪要或资料名称" :disabled="busy" /></div>
-        <fieldset class="sharing-sources" :disabled="busy">
+      <form v-if="isAdmin && creating" class="sharing-create" aria-label="新建分享会练习" @submit.prevent="mutate('create')">
+        <div class="sharing-create-fields">
+          <fieldset class="sharing-mode" :disabled="busy || uploading">
+            <legend>出题方式</legend>
+            <NRadioGroup v-model:value="creationMode" name="sharing-creation-mode" aria-label="出题方式" size="large" :disabled="busy || uploading">
+              <NRadioButton value="materials">资料出题</NRadioButton><NRadioButton value="manual">纯手工出题</NRadioButton>
+            </NRadioGroup>
+          </fieldset>
+          <label for="sharing-title" class="sharing-create-title"><span>练习标题（可选）</span><input id="sharing-title" v-model="title" type="text" maxlength="120" :placeholder="manualOnly ? '请输入练习标题' : '留空则使用纪要或资料名称'" :disabled="busy" /></label>
+        </div>
+        <fieldset v-if="!manualOnly" class="sharing-sources" :disabled="busy">
           <legend>出题来源</legend>
           <div class="sharing-source"><label class="sharing-check sharing-minutes-toggle"><input v-model="includeMinutes" type="checkbox" :disabled="busy" /><Link :size="16" />使用飞书纪要</label>
             <input v-model="url" type="url" aria-label="飞书纪要链接" maxlength="2048" placeholder="https://vnet.feishu.cn/docx/…" :disabled="busy || !includeMinutes" /></div>
@@ -454,34 +553,41 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
           <div class="sharing-source"><span class="sharing-check"><Upload :size="16" />上传资料文件</span>
             <div class="sharing-inline"><input type="file" multiple accept=".pdf,.docx,.xlsx,.xlsm,.pptx" aria-label="选择资料文件" :disabled="busy || uploading" @change="pickFiles" /><button type="button" :disabled="busy || uploading || !materialFiles.length" @click="uploadMaterials"><Loader2 v-if="uploading" :size="15" class="spin" /><Upload v-else :size="15" />上传 {{ materialFiles.length || '' }} 份</button></div>
             <ul v-if="materialFiles.length" class="sharing-chips" aria-label="待上传资料"><li v-for="file in materialFiles" :key="file.name + file.size"><span>{{ file.name }}</span><button type="button" class="sharing-chip-x" :aria-label="`取消上传 ${file.name}`" :disabled="busy || uploading" @click="removeFile(file)"><X :size="14" /></button></li></ul>
-            <ul v-if="materialIds.length" class="sharing-chips" aria-label="已上传资料"><li v-for="id in materialIds" :key="id"><span>{{ uploadedNames[id] || '已上传材料' }}</span><button type="button" class="sharing-chip-x" :aria-label="`移除已上传资料 ${uploadedNames[id] || id}`" :disabled="busy" @click="materialIds = materialIds.filter(item => item !== id)"><X :size="14" /></button></li></ul>
+            <ul v-if="materialIds.length" class="sharing-chips" aria-label="已上传资料"><li v-for="id in materialIds" :key="id"><span>{{ uploadedNames[id] || '已上传材料' }}</span><button type="button" class="sharing-chip-x" :aria-label="`移除已上传资料 ${uploadedNames[id] || id}`" :disabled="busy" @click="materialIds = materialIds.filter((item: string) => item !== id)"><X :size="14" /></button></li></ul>
           </div>
         </fieldset>
-        <label class="sharing-check sharing-generate"><input v-model="autoGenerate" type="checkbox" :disabled="busy" />AI生成题目（最多40题）</label>
-        <fieldset class="sharing-types" :disabled="busy || !autoGenerate">
-          <legend>AI生成题型（可多选，手动录入不受限制）</legend>
-          <label v-for="(label, kind) in typeLabels" :key="kind"><input type="checkbox" :checked="questionTypes.includes(kind)" :disabled="busy || !autoGenerate" @change="toggleType(kind, ($event.target as HTMLInputElement).checked)" />{{ label }}</label>
-        </fieldset>
+        <div v-if="!manualOnly" class="sharing-generation-options">
+          <label class="sharing-check sharing-generate"><input v-model="autoGenerate" type="checkbox" :disabled="busy" />AI生成题目（最多40题）</label>
+          <fieldset class="sharing-types" :disabled="busy || !autoGenerate">
+            <legend>AI生成题型（可多选，手动录入不受限制）</legend>
+            <label v-for="(label, kind) in typeLabels" :key="kind"><input type="checkbox" :checked="questionTypes.includes(kind)" :disabled="busy || !autoGenerate" @change="toggleType(kind, ($event.target as HTMLInputElement).checked)" />{{ label }}</label>
+          </fieldset>
+        </div>
         <fieldset class="sharing-roster" :disabled="busy || uploading">
-          <legend>答题名单{{ includeMinutes && url.trim() ? '（未选则沿用纪要参会人）' : '（必选）' }} · {{ participants.length }}人</legend>
+          <legend>答题名单{{ !manualOnly && includeMinutes && url.trim() ? '（未选则沿用纪要参会人）' : '（必选）' }} · {{ participants.length }}人</legend>
           <div class="sharing-people-tools"><input v-model="peopleSearch" type="search" aria-label="搜索可添加人员" placeholder="搜索姓名 / 楼栋" @focus="loadPeople()" /><button type="button" :disabled="peopleLoading" @click="loadPeople(true)"><RefreshCw :size="15" />读取人员目录</button></div>
-          <ul class="sharing-chips" aria-label="已选答题名单"><li v-for="p in participants" :key="p.open_id"><span>{{ p.name }}</span><button type="button" :aria-label="`移除参会人：${p.name}`" @click="removeParticipant(p)"><X :size="14" /></button></li></ul>
           <div class="sharing-people-list"><button v-for="p in visiblePeople" :key="p.open_id" type="button" :disabled="participantOpenIds.has(p.open_id)" :aria-label="`添加参会人：${p.name}`" @click="addParticipant(p)"><Plus :size="14" /><span>{{ p.name }}<small>{{ p.scope || '未归楼' }}</small></span></button></div>
         </fieldset>
-        <div class="sharing-inline"><button type="submit" class="primary" :disabled="!canCreate"><Loader2 v-if="busy" :size="16" class="spin" /><FileText v-else :size="16" />{{ autoGenerate ? '读取资料并生成题目' : '创建空白草稿' }}</button></div>
+        <div class="sharing-create-actions">
+          <ul class="sharing-chips" aria-label="已选答题名单"><li v-for="p in participants" :key="p.open_id"><span>{{ p.name }}</span><button type="button" :disabled="busy || uploading" :aria-label="`移除参会人：${p.name}`" @click="removeParticipant(p)"><X :size="14" /></button></li></ul>
+          <button type="submit" class="primary" :disabled="!canCreate"><Loader2 v-if="busy" :size="16" class="spin" /><FileText v-else :size="16" />{{ !manualOnly && autoGenerate ? '读取资料并生成题目' : '创建空白草稿' }}</button>
+        </div>
       </form>
+      <template v-if="!creating">
       <div v-if="loading && !rows.length" class="sharing-empty" role="status"><Loader2 :size="24" class="spin" />正在读取批次…</div>
       <div v-else-if="!rows.length" class="sharing-empty"><FileText :size="30" /><span>{{ isAdmin ? '暂无分享会练习批次' : '暂无与你相关的分享会练习' }}</span></div>
       <div v-else class="sharing-batches">
         <button v-for="row in rows" :key="row.id" type="button" class="sharing-batch" @click="openBatch(row)"><span class="sharing-batch-title"><strong>{{ row.title }}</strong><small>{{ row.created_at?.slice(0, 16).replace('T', ' ') }}</small></span><span class="sharing-batch-meta"><span class="sharing-status" :class="row.status">{{ labels[row.status] }}</span><span>{{ row.question_count }}题</span><span>{{ row.completed }}/{{ row.total }}人完成</span><ChevronRight :size="18" /></span></button>
       </div>
       <footer class="sharing-pagination"><span>共 {{ total }} 批</span><div><button type="button" aria-label="上一页" :disabled="busy || loading || page <= 1" @click="page--; load()"><ChevronLeft :size="16" /></button><span>{{ page }} / {{ Math.max(1, Math.ceil(total / 15)) }}</span><button type="button" aria-label="下一页" :disabled="busy || loading || page * 15 >= total" @click="page++; load()"><ChevronRight :size="16" /></button></div></footer>
+      </template>
     </template>
     <template v-else>
       <div class="sharing-meta"><span class="sharing-status" :class="detail.status">{{ labels[detail.status] }}</span><a v-if="detail.url" :href="detail.url" target="_blank" rel="noopener noreferrer">查看原纪要</a><span v-if="detail.published_at">发布于 {{ detail.published_at.slice(0, 16).replace('T', ' ') }}</span><span class="sharing-counts" role="status">手动 {{ counts.manual }} 题 · AI {{ counts.ai }} 题 · 合计 {{ counts.total }} 题（AI上限 {{ AI_MAX }}，合计上限 {{ TOTAL_MAX }}）</span></div>
       <button v-if="dirty || editingAnswers" type="button" :disabled="busy" @click="ask('discard')"><RefreshCw :size="16" />放弃修改，读取最新</button>
       <div v-if="['queued', 'generating'].includes(detail.status)" class="sharing-empty" role="status"><Loader2 :size="28" class="spin" /><span>{{ detail.progress || '等待后台生成，不影响其它功能使用' }}</span></div>
       <div v-if="detail.error" class="sharing-alert error">{{ detail.error }}</div>
+      <ul v-if="isAdmin && detail.material_status?.length" class="sharing-material-status" aria-label="材料读取进度"><li v-for="item in detail.material_status" :key="item.id"><strong>{{ item.title }}</strong><span>{{ ({ ready: '已读取', reading: '读取中', failed: '读取失败' } as Record<string,string>)[item.status] }}</span><small v-if="item.error">{{ item.error }}</small></li></ul>
       <p v-if="isAdmin && detail.generation_note" class="sharing-alert sharing-generation-note" role="status">{{ detail.generation_note }}</p>
       <ul v-if="isAdmin && detail.sources?.length" class="sharing-chips" aria-label="出题资料快照">
         <li v-for="(source, i) in detail.sources" :key="source.id || source.url || i"><a v-if="source.url" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }}</span><small v-if="source.low_confidence_count">OCR低置信文字 {{ source.low_confidence_count }} 处</small></li>
@@ -490,12 +596,16 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
         <div class="sharing-buttons"><button v-if="detail.status === 'failed'" type="button" :disabled="busy || dirty" @click="mutate('retry')"><RefreshCw :size="16" />重新生成</button><button v-if="isDraft" type="button" :disabled="busy || (!dirty && detail.status !== 'failed')" @click="mutate('save')"><Save :size="16" />保存题目与名单</button><button v-if="isDraft" type="button" class="primary" :disabled="busy || dirty || detail.status === 'failed' || !!publishIssue" :title="detail.status === 'failed' ? '请先保存题目与名单为草稿' : publishIssue" @click="ask('publish')"><Send :size="16" />核对后发布给参会人</button><button v-if="['published', 'closed'].includes(detail.status)" type="button" :disabled="busy" @click="ask('retry-delivery')"><RefreshCw :size="16" />重试未完成任务</button><button v-if="detail.status === 'published'" type="button" :disabled="busy" @click="ask('close')"><Square :size="15" />关闭本批</button><span v-if="dirty">题目或答题名单有未保存修改</span><span v-if="busy" role="status"><Loader2 :size="16" class="spin" />正在保存…</span></div>
       </div>
       <p v-if="isAdmin && isDraft && publishIssue" class="sharing-hint" role="status">{{ publishIssue }}</p>
-      <div v-if="isAdmin && detail.bank_sync?.total" class="sharing-bank" role="status"><strong>题库同步 {{ detail.bank_sync.synced }} / {{ detail.bank_sync.total }} 题</strong><span v-if="detail.bank_sync.total > detail.bank_sync.synced + detail.bank_sync.failed"><Loader2 :size="15" class="spin" />后台同步中</span><span v-if="detail.bank_sync.failed" class="error-text">{{ detail.bank_sync.failed }} 题待重试</span><a href="https://vnet.feishu.cn/wiki/P8R2w5FXRiNpBjkJ3WVcegJ0nzh?table=tblQevBJ9knFaBNh&view=vewhuXAYog" target="_blank" rel="noopener noreferrer">查看纪要题库</a><p v-if="detail.bank_sync.error" class="error-text">{{ detail.bank_sync.error }}</p></div>
       <div v-if="detail.participants.length" class="sharing-metrics"><div><Users :size="18" /><strong>{{ assignedCount }}</strong><span>需答题人数</span></div><div><CheckCircle2 :size="18" /><strong>{{ detail.completed }}</strong><span>已完成</span></div><div><strong>{{ assignedCount - detail.completed }}</strong><span>未完成</span></div><div><strong>{{ percent }}%</strong><span>完成率</span><progress :value="percent" max="100" aria-label="分享会练习完成率" /></div></div>
 
-      <section v-if="paper" class="sharing-answer-pane" aria-label="我的答题">
+      <NTabs v-model:value="sectionTab" type="line" class="v2-sharing-tabs" aria-label="分享会内容">
+        <NTab v-if="paper" name="mine">我的答题</NTab><NTab v-if="isAdmin || (!paper && detail.questions?.length)" name="questions">{{ isAdmin ? '题目核对' : '我的题目' }}</NTab><NTab name="people">参会人 · {{ detail.participants.length }}</NTab><NTab v-if="isAdmin" name="delivery">通知与同步</NTab>
+      </NTabs>
+      <div v-if="isAdmin && sectionTab === 'delivery' && detail.bank_sync?.total" class="sharing-bank" role="status"><strong>题库同步 {{ detail.bank_sync.synced }} / {{ detail.bank_sync.total }} 题</strong><span v-if="detail.bank_sync.total > detail.bank_sync.synced + detail.bank_sync.failed"><Loader2 :size="15" class="spin" />后台同步中</span><span v-if="detail.bank_sync.failed" class="error-text">{{ detail.bank_sync.failed }} 题待重试</span><a href="https://vnet.feishu.cn/wiki/P8R2w5FXRiNpBjkJ3WVcegJ0nzh?table=tblQevBJ9knFaBNh&view=vewhuXAYog" target="_blank" rel="noopener noreferrer">查看纪要题库</a><p v-if="detail.bank_sync.error" class="error-text">{{ detail.bank_sync.error }}</p></div>
+      <section v-if="paper && sectionTab === 'mine'" class="sharing-answer-pane" aria-label="我的答题">
         <header><h3>{{ submitted ? '我的答卷' : canAnswer ? `我的答题 · 第${answerPage}页 / 共${answerPages}页` : '我的答题记录' }}</h3><span v-if="submitted">已于 {{ paper!.submitted_at.slice(0, 16).replace('T', ' ') }} 提交</span><span v-else>已答 {{ answeredCount }} / {{ myQuestions.length }} 题 · 每页5题</span></header>
         <div v-if="answerError" role="alert" class="sharing-alert error">{{ answerError }}</div>
+        <section v-if="answerConflicts.length" class="sharing-conflicts" aria-label="答题冲突核对"><article v-for="item in answerConflicts" :key="item.id"><strong>{{ myQuestions.find((q: Dict) => q.id === item.id)?.stem }}</strong><p>本页：{{ showAnswer(item.mine, myQuestions.find((q: Dict) => q.id === item.id)) || '未答' }}</p><p>其他页面：{{ showAnswer(item.latest, myQuestions.find((q: Dict) => q.id === item.id)) || '未答' }}</p><button type="button" @click="resolveAnswer(item.id, true)">保留本页答案</button><button type="button" @click="resolveAnswer(item.id, false)">使用其他页面答案</button></article></section>
         <article v-for="(q, i) in answerPageQuestions" :key="q.id" class="sharing-question" :data-type="q.type">
           <header><strong>第 {{ (answerPage - 1) * PAGE_SIZE + i + 1 }} 题</strong><span>{{ typeLabels[q.type] }}</span></header>
           <p class="sharing-stem">{{ q.stem }}</p>
@@ -511,30 +621,33 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
             <div v-if="submitted" class="sharing-answer"><strong>我的作答：{{ showAnswer(q.selected ?? answers[q.id]) || '未答' }}</strong><p v-if="q.correct">正确答案：{{ correctAnswer(q) }}</p><p v-if="q.explanation">{{ q.explanation }}</p><blockquote v-if="q.evidence && (isAdmin || !q.images?.length)">{{ q.evidence }}</blockquote></div>
           </template>
         </article>
-        <footer class="sharing-pagination v2-sharing-answerbar">
+        <fieldset class="sharing-answer-controls" :disabled="busy || !!answerConflicts.length"><footer class="sharing-pagination v2-sharing-answerbar">
           <button type="button" aria-label="答题上一页" :disabled="busy || answerPage <= 1" @click="canAnswer ? sendAnswers(false, answerPage - 1) : answerPage--"><ChevronLeft :size="16" />上一页</button>
           <span>第 {{ answerPage }} / {{ answerPages }} 页</span>
           <button v-if="canAnswer" type="button" :disabled="busy" @click="sendAnswers(false)"><Save :size="16" />保存本页进度</button>
           <button v-if="answerPage < answerPages" type="button" aria-label="答题下一页" :disabled="busy" @click="canAnswer ? sendAnswers(false, answerPage + 1) : answerPage++"><ChevronRight :size="16" />{{ canAnswer ? '保存并下一页' : '下一页' }}</button>
           <button v-if="canAnswer && answerPage >= answerPages" type="button" class="primary" aria-label="提交全部答题" :disabled="busy || !lastPageComplete || answeredCount < myQuestions.length" @click="sendAnswers(true)"><Loader2 v-if="busy" :size="16" class="spin" /><Send v-else :size="16" />提交全部答题</button>
-        </footer>
+        </footer></fieldset>
       </section>
 
-      <section v-if="detail.participants.length" class="sharing-section">
+      <section v-if="sectionTab === 'people'" class="sharing-section">
         <header><h3>参会人答题情况</h3><input v-model="personSearch" type="search" aria-label="搜索参会人" placeholder="搜索姓名 / 楼栋" /></header>
         <p class="sharing-selection-summary" role="status">参会 {{ detail.participants.length }} 人 · 参加答题 {{ assignedCount }} 人 · 本次不做 {{ exemptedCount }} 人</p>
         <p v-if="isAdmin && isDraft" class="sharing-selection-hint">取消勾选无需答题的参会人，保存后再发布。免做人员不发送题目或催答提醒。</p>
+        <details v-if="isAdmin && isDraft" class="sharing-add-people"><summary @click="loadPeople()">补充参会人</summary><input v-model="peopleSearch" type="search" aria-label="搜索补充参会人" placeholder="姓名或楼栋" /><div class="sharing-people-list"><button v-for="person in visiblePeople" :key="person.open_id" type="button" :disabled="busy || detail.participants.some((p: Dict) => p.open_id === person.open_id)" @click="addDraftParticipant(person)"><Plus :size="15" />{{ person.name }} {{ person.scope }}</button></div></details>
         <div class="sharing-table"><table><thead><tr><th v-if="isAdmin && isDraft">参加答题</th><th>姓名</th><th>楼栋</th><th>提交状态</th><th>选择题正确数</th><th>选择题正确率</th><th>通知</th><th v-if="detail.results?.length">答卷</th></tr></thead><tbody>
-          <tr v-for="p in participantsView" :key="p.open_id" :class="{ 'sharing-exempted': p.exempted }">
+          <tr v-for="p in pagedParticipants" :key="p.open_id" :class="{ 'sharing-exempted': p.exempted }">
             <td v-if="isAdmin && isDraft"><label class="sharing-participation"><input type="checkbox" :checked="!p.exempted" :disabled="busy" :aria-label="'参加答题：' + p.name" @change="setParticipation(p, ($event.target as HTMLInputElement).checked)" /><span>{{ p.exempted ? '本次不做' : '参加' }}</span></label></td>
-            <td>{{ p.name }}</td><td>{{ p.scope || '未归楼' }}</td><td>{{ p.exempted ? '无需作答' : p.submitted_at ? '已提交' : '未提交' }}</td><td>{{ !p.submitted_at || !p.choice_count ? '—' : p.correct + '/' + p.choice_count }}</td><td>{{ !p.submitted_at || !p.choice_count ? '—' : Math.round(p.correct * 100 / p.choice_count) + '%' }}</td><td><span v-if="p.exempted">免做，不推送</span><span v-else-if="p.delivery_error" class="error-text">{{ p.delivery_error }}</span><span v-else>{{ p.delivery_status === 'sent' ? '已发送' : isDraft ? '待发布' : '待发送' }}</span></td><td v-if="detail.results?.length"><button v-if="!p.exempted" type="button" @click="selectedPerson = selectedPerson === p.open_id ? '' : p.open_id; resultPage = 1"><FileText :size="15" />{{ selectedPerson === p.open_id ? '收起答卷' : '查看答卷' }}</button><span v-else>—</span></td>
+            <td>{{ p.name }}</td><td>{{ p.scope || '未归楼' }}</td><td>{{ p.exempted ? '无需作答' : p.submitted_at ? '已提交' : '未提交' }}</td><td>{{ !p.submitted_at || !p.choice_count ? '—' : p.correct + '/' + p.choice_count }}</td><td>{{ !p.submitted_at || !p.choice_count ? '—' : Math.round(p.correct * 100 / p.choice_count) + '%' }}</td><td><span v-if="p.exempted">免做，不推送</span><span v-else-if="p.delivery_error" class="error-text">{{ p.delivery_error }}</span><span v-else>{{ p.delivery_status === 'sent' ? '已发送' : isDraft ? '待发布' : '待发送' }}</span></td><td v-if="detail.results?.length"><button v-if="!p.exempted" type="button" @click="selectResult(p.open_id)"><FileText :size="15" />{{ selectedPerson === p.open_id ? '收起答卷' : '查看答卷' }}</button><span v-else>—</span></td>
           </tr>
         </tbody></table></div>
+        <NPagination v-model:page="personPage" :item-count="participantsView.length" :page-size="12" :page-slot="5" aria-label="参会人分页" />
       </section>
-      <section v-if="resultPaper" class="sharing-section"><header><h3>{{ resultPaper.name }} · 本次答卷</h3><span>共 {{ (resultPaper.question_ids || []).length }} 题 · 每页5题 · {{ resultPaper.submitted_at?.slice(0, 16).replace('T', ' ') || '尚未提交' }}</span></header><article v-for="(q, i) in resultQuestions" :key="q.id" class="sharing-question"><strong>{{ (resultPage - 1) * PAGE_SIZE + i + 1 }}. {{ q.stem }}</strong><LearningQuestionImages :batch-id="detail.id" :images="q.images || []" /><p v-for="(option, n) in q.options" :key="n">{{ letters(n) }}. {{ option }}</p><p>作答：{{ showAnswer(resultPaper.answers?.[q.id], q) || '未答' }}</p><p>{{ q.type === 'interview' ? '参考答案（不自动判分）' : '正确答案' }}：{{ q.type === 'interview' ? (q.reference_answer || '—') : (correctAnswer(q) || '—') }}</p><p v-if="q.explanation">解析：{{ q.explanation }}</p></article><footer class="sharing-pagination"><span>共 {{ resultPages }} 页</span><div><button type="button" aria-label="答卷上一页" :disabled="resultPage <= 1" @click="resultPage--"><ChevronLeft :size="16" /></button><span>{{ resultPage }} / {{ resultPages }}</span><button type="button" aria-label="答卷下一页" :disabled="resultPage >= resultPages" @click="resultPage++"><ChevronRight :size="16" /></button></div></footer></section>
-      <section v-if="isAdmin && detail.weekly_reports?.length" class="sharing-section"><header><h3>最近群汇总</h3></header><div class="sharing-table"><table><thead><tr><th>统计截止</th><th>分组</th><th>发送状态</th><th>说明</th></tr></thead><tbody><tr v-for="r in detail.weekly_reports" :key="`${r.date}-${r.part}`"><td>{{ r.end }}</td><td>{{ r.part }} / {{ r.parts }}</td><td>{{ ({ sent: '已发送', pending: '待发送', failed: '发送失败', skipped: '已停止' } as Record<string, string>)[r.status] || r.status }}</td><td>{{ r.error || r.sent_at?.slice(0, 16).replace('T', ' ') || '等待后台发送' }}</td></tr></tbody></table></div></section>
-      <section v-if="isAdmin || (!paper && detail.questions?.length)" class="sharing-section">
-        <header><h3>{{ isAdmin ? '生成题目与答案' : `我的${detail.questions.length}道题` }}</h3><span>{{ detail.questions.length }}题 · 手动{{ counts.manual }} / AI{{ counts.ai }}</span></header>
+      <NModal :show="!!resultPaper" preset="card" class="v2-sharing-paper" :title="resultPaper?.name + ' · 本次答卷'" :style="{width:'min(760px,calc(100vw - 24px))'}" @update:show="(value: boolean) => { if (!value) selectedPerson = ''; }"><p v-if="resultLoading" role="status">正在读取答卷…</p><p v-if="resultError" role="alert">{{ resultError }}<button type="button" @click="selectedPerson && selectResult(selectedPerson)">关闭</button></p><section v-if="resultPaper && !resultLoading && !resultError" class="sharing-section"><header><span>共 {{ (resultPaper.question_ids || []).length }} 题 · 每页5题 · {{ resultPaper.submitted_at?.slice(0, 16).replace('T', ' ') || '尚未提交' }}</span></header><article v-for="(q, i) in resultQuestions" :key="q.id" class="sharing-question"><strong>{{ (resultPage - 1) * PAGE_SIZE + i + 1 }}. {{ q.stem }}</strong><LearningQuestionImages :batch-id="detail.id" :images="q.images || []" /><p v-for="(option, n) in q.options" :key="n">{{ letters(n) }}. {{ option }}</p><p>作答：{{ showAnswer(resultPaper.answers?.[q.id], q) || '未答' }}</p><p>{{ q.type === 'interview' ? '参考答案（不自动判分）' : '正确答案' }}：{{ q.type === 'interview' ? (q.reference_answer || '—') : (correctAnswer(q) || '—') }}</p><p v-if="q.explanation">解析：{{ q.explanation }}</p></article><footer class="sharing-pagination"><span>共 {{ resultPages }} 页</span><div><button type="button" aria-label="答卷上一页" :disabled="resultPage <= 1" @click="resultPage--"><ChevronLeft :size="16" /></button><span>{{ resultPage }} / {{ resultPages }}</span><button type="button" aria-label="答卷下一页" :disabled="resultPage >= resultPages" @click="resultPage++"><ChevronRight :size="16" /></button></div></footer></section></NModal>
+      <section v-if="isAdmin && sectionTab === 'delivery'" class="sharing-section"><header><h3>通知与同步</h3><input v-model="personSearch" aria-label="搜索通知人员" placeholder="姓名或楼栋" /></header><div class="sharing-table"><table><thead><tr><th>人员</th><th>题单发送</th><th>最近催答</th><th>成绩通知</th></tr></thead><tbody><tr v-for="p in pagedParticipants" :key="p.open_id"><td>{{ p.name }} {{ p.scope }}</td><td v-for="prefix in ['delivery', 'reminder_delivery', 'result_delivery']" :key="prefix">{{ p.exempted ? '无需发送' : deliveryLabel(p[prefix + '_status']) }}<small v-if="p[prefix + '_error']" class="error-text">{{ p[prefix + '_error'] }}</small><small v-else>{{ p[prefix + '_at']?.slice(0, 16).replace('T', ' ') }}</small></td></tr></tbody></table></div><NPagination v-model:page="personPage" :item-count="participantsView.length" :page-size="12" :page-slot="5" aria-label="通知人员分页" /></section>
+      <section v-if="isAdmin && sectionTab === 'delivery' && detail.weekly_reports?.length" class="sharing-section"><header><h3>最近群汇总</h3></header><div class="sharing-table"><table><thead><tr><th>统计截止</th><th>分组</th><th>发送状态</th><th>说明</th></tr></thead><tbody><tr v-for="r in detail.weekly_reports" :key="`${r.date}-${r.part}`"><td>{{ r.end }}</td><td>{{ r.part }} / {{ r.parts }}</td><td>{{ deliveryLabel(r.status) }}</td><td>{{ r.error || r.sent_at?.slice(0, 16).replace('T', ' ') || '等待后台发送' }}</td></tr></tbody></table></div></section>
+      <section v-if="sectionTab === 'questions' && (isAdmin || (!paper && detail.questions?.length))" class="sharing-section v2-sharing-questions">
+        <header><h3>{{ isAdmin ? '题目与答案' : `我的${detail.questions.length}道题` }}</h3><span>{{ detail.questions.length }}题 · 手动{{ counts.manual }} / AI{{ counts.ai }}</span></header>
         <div v-if="isAdmin && isDraft" class="sharing-editor-bar">
           <button type="button" aria-label="新增单选题" title="新增单选题" :disabled="!canEditQuestions" @click="addQuestion('single')"><Plus :size="15" />单选题</button>
           <button type="button" aria-label="新增多选题" title="新增多选题" :disabled="!canEditQuestions" @click="addQuestion('multiple')"><Plus :size="15" />多选题</button>
@@ -563,6 +676,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
             <LearningQuestionImages :batch-id="detail.id" :images="questionImages(q)" :source-images="detail.source_images || []" :image-ids="imageIds(q)" editable :disabled="!canEditQuestions" @update:image-ids="selectQuestionImages(q, $event)" />
             <label v-if="needsImageConfirmation(q)" class="sharing-image-confirm"><input v-model="q.image_confirmed" type="checkbox" :disabled="!canEditQuestions" @change="changed" /><span>已对照原图核对题目与答案</span></label>
             <p v-if="questionIssues[i]" role="alert" class="sharing-question-error">{{ questionIssues[i] }}</p>
+            <button v-if="q.evidence" type="button" :disabled="dirty" @click="showEvidence(q)"><FileText :size="15" />定位题目依据</button>
           </template>
           <template v-else><p>{{ q.stem }}</p><LearningQuestionImages :batch-id="detail.id" :images="q.images || []" /><p v-for="(option, n) in q.options" :key="n">{{ letters(Number(n)) }}. {{ option }}</p><div v-if="(isAdmin || submitted || !q.images?.length) && ((q.correct && q.correct.length) || q.reference_answer || q.explanation || q.evidence)" class="sharing-answer"><strong>{{ q.type === 'interview' ? '参考答案（不自动判分）：' + (q.reference_answer || '—') : '正确答案：' + (correctAnswer(q) || '—') }}</strong><p v-if="q.explanation">{{ q.explanation }}</p><blockquote v-if="q.evidence && (isAdmin || !q.images?.length)">{{ q.evidence }}</blockquote></div></template>
         </article>
@@ -570,6 +684,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
       </section>
     </template>
     <ConfirmDialog :open="confirm.open" :title="confirm.title" :message="confirm.message" @resolve="resolved" />
+    <NModal :show="!!evidenceQuestion" preset="card" title="题目依据" class="sharing-evidence" :style="{width:'min(760px,calc(100vw - 24px))'}" @update:show="(value: boolean) => { if (!value) evidenceQuestion = null; }"><p>{{ evidenceQuestion?.stem }}</p><blockquote>{{ evidenceQuestion?.evidence }}</blockquote><article v-for="(location, index) in evidenceLocations" :key="index"><h3>{{ location.title }}</h3><p v-for="(ref, number) in location.references" :key="number">{{ ref.kind?.includes('slide') ? '幻灯片' : ref.page ? '页码' : '位置' }} {{ ref.page || ref.slide || ref.sheet || ref.paragraph || '' }}</p><pre>{{ location.excerpt }}</pre><a v-if="/^https:\/\/vnet\.feishu\.cn\//.test(location.url || '')" :href="location.url" target="_blank" rel="noopener noreferrer">打开原材料</a><LearningQuestionImages v-if="location.image_id && detail" :batch-id="detail.id" :images="(detail.source_images || []).filter((image: Dict) => image.id === location.image_id)" /></article><p v-if="!evidenceLocations.length">旧题未保存分材料位置，可依据以上引文核对原纪要。</p></NModal>
   </section>
 </template>
 
@@ -590,6 +705,11 @@ small,.sharing-meta,.sharing-pagination,.sharing-hint,.sharing-counts {color:#52
 .sharing-generate{display:grid;grid-template-columns:20px minmax(0,1fr);gap:4px 8px;align-items:center;margin:0 0 14px;font-weight:600;}.sharing-generate input{width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-generate small{font-weight:400;grid-column:2;}
 .sharing-inline{min-width:0;}.sharing-inline>input{flex:1 1 220px;min-width:0;}.sharing-inline button{flex:none;}
 .sharing-chips{list-style:none;display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;min-width:0;}.sharing-chips li{display:inline-flex;align-items:center;gap:4px;max-width:100%;background:#f2f6fb;border:1px solid #dbe5f0;border-radius:999px;padding:3px 4px 3px 10px;font-size:12px;color:#405e85;}.sharing-chips li>span{overflow-wrap:anywhere;min-width:0;}.sharing-chip-x{min-height:26px;height:26px;width:26px;padding:0;border-radius:50%;border-color:transparent;color:#58708a;flex:none;}
+.sharing-create>.sharing-create-fields{display:grid;grid-template-columns:max-content minmax(0,1fr);align-items:end;gap:12px;margin-bottom:14px;}.sharing-create-title{display:grid;gap:6px;min-width:0;font-weight:600;}.sharing-create-title input{width:100%;box-sizing:border-box;font-weight:400;}.sharing-mode{border:0;margin:0;padding:0;min-width:0;}.sharing-mode legend{font-size:14px;font-weight:600;margin-bottom:6px;padding:0;}
+.sharing-exercises .sharing-creating-toolbar .sharing-title{flex-basis:auto;}.sharing-exercises .sharing-create .sharing-people-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;}.sharing-create>.sharing-roster{border:0;margin:0 0 12px;padding:0;}
+.sharing-create>.sharing-generation-options{align-items:center;flex-wrap:wrap;gap:8px 20px;margin-bottom:14px;}.sharing-generation-options>.sharing-generate,.sharing-generation-options>.sharing-types{margin:0;}
+.sharing-create>.sharing-create-actions{align-items:center;justify-content:space-between;flex-wrap:wrap;}.sharing-create-actions>.sharing-chips{flex:1 1 140px;}.sharing-create-actions>button{flex:none;}
+@media(max-width:360px){.sharing-create>.sharing-create-fields{grid-template-columns:minmax(0,1fr);}}
 .sharing-types{display:flex;align-items:center;flex-wrap:wrap;gap:8px 20px;border:0;margin:0 0 14px;padding:0;}.sharing-types label{display:flex;gap:8px;align-items:center;min-height:40px;cursor:pointer;}.sharing-types input{flex:none;width:18px;height:18px;margin:0;accent-color:#2463df;}.sharing-types small{flex-basis:100%;line-height:1.6;}
 .sharing-empty{display:flex;min-height:160px;align-items:center;justify-content:center;flex-direction:column;gap:14px;color:#58708a;text-align:center;}.sharing-batches{border-top:1px solid #dce5ee;display:grid;min-width:0;}.sharing-batch{display:grid;width:100%;box-sizing:border-box;grid-template-columns:minmax(0,1fr) auto;gap:12px;text-align:left;border:0;border-bottom:1px solid #dce5ee;border-radius:0;padding:12px;color:inherit;height:auto;white-space:normal;}.sharing-batch-title{display:block;min-width:0;text-align:left;}.sharing-batch strong{display:block;overflow-wrap:anywhere;line-height:1.6;}.sharing-batch small{display:block;margin-top:4px;}.sharing-batch-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;white-space:nowrap;font-size:13px;}
 .sharing-status{background:#eef3fa;color:#405e85;border-radius:4px;padding:4px 8px;font-size:12px;white-space:nowrap;}.sharing-status.published{background:#e4f6ef;color:#11704f;}.sharing-status.failed{background:#fff0f0;color:#ab2948;}.sharing-status.generating,.sharing-status.queued{background:#fff4dc;color:#805a17;}
@@ -611,4 +731,7 @@ small,.sharing-meta,.sharing-pagination,.sharing-hint,.sharing-counts {color:#52
 .spin{animation:sharing-spin 1s linear infinite;}@keyframes sharing-spin{to{transform:rotate(360deg)}}
 @media(max-width:700px){.sharing-metrics{grid-template-columns:repeat(2,minmax(0,1fr));}.sharing-batch{grid-template-columns:minmax(0,1fr);gap:6px;}.sharing-batch-meta>svg{margin-left:auto;}.sharing-toolbar{align-items:flex-start;}.sharing-section>header input{width:100%;box-sizing:border-box;}.sharing-title h2{font-size:16px;}.sharing-question{padding:16px 0;}button{min-height:42px;}.sharing-people-list{grid-template-columns:minmax(0,1fr);max-height:none;}.sharing-question-tools button{flex:1 1 auto;}.sharing-pagination>*{justify-content:center;}.sharing-option{grid-template-columns:20px 20px minmax(0,1fr) 28px;}}
 @media(prefers-reduced-motion:reduce){.spin{animation-duration:2s;}button{transition:none;}}
+.sharing-question-tools>label{display:flex;align-items:center;gap:8px;white-space:nowrap;min-width:0}.sharing-question-tools>label>select{flex:1;min-width:0}.sharing-question>button{justify-self:start;max-width:100%}
+.sharing-danger{color:#b42332}.sharing-answer-controls{padding:0;border:0;min-width:0}.sharing-conflicts article{border-bottom:1px solid #dce5ee;padding:12px 0}.sharing-conflicts button{margin:4px 8px 4px 0}.sharing-table small{display:block;max-width:260px;overflow-wrap:anywhere}.sharing-material-status{padding:0;list-style:none;display:grid;gap:6px}.sharing-material-status li{display:flex;gap:8px;flex-wrap:wrap;font-size:13px}.sharing-material-status strong{font-weight:500;overflow-wrap:anywhere}.sharing-material-status small{flex-basis:100%;color:#a82342}.sharing-add-people summary{min-height:44px;align-content:center;cursor:pointer}.sharing-evidence,.v2-sharing-paper{max-height:calc(100dvh - 32px);overflow:auto}.sharing-evidence pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7}.sharing-section .n-pagination{margin-top:12px}.sharing-section .sharing-table{max-height:480px;overflow:auto}.sharing-section th{position:sticky;top:0;background:var(--cf-surface,#fff)}
+@media(max-width:760px){.sharing-exercises .sharing-people-list{max-height:280px;overflow:auto}.sharing-exercises .v2-sharing-answerbar{display:flex;flex-wrap:wrap;gap:8px}.v2-sharing-answerbar>button{flex:1 1 130px;min-height:44px}.v2-sharing-answerbar>span{flex-basis:100%;text-align:center}.sharing-exercises .sharing-buttons{display:flex;flex-wrap:wrap}.sharing-buttons button{flex:1 1 140px}.sharing-exercises .sharing-people-tools{display:flex;flex-wrap:wrap}.sharing-people-tools input{flex:1 1 150px;min-width:0}.sharing-people-tools button{flex:0 1 auto}}
 </style>

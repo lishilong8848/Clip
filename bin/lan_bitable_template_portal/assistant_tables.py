@@ -27,17 +27,33 @@ class AssistantTables:
         self.directory = LinkDirectory(store, LinkRemote(service))
         self.locks = [threading.Lock() for _ in range(16)]
 
-    def cached(self, key, ttl, load):
+    def cached(self, key, ttl, load, *, source_identity=None):
         # Fixed lock stripes bound memory and coalesce identical concurrent reads.
         with self.locks[int(hashlib.sha256(key.encode()).hexdigest()[:8], 16) % len(self.locks)]:
             version = getattr(self.service, 'state_cache_version', None)
             revision = version() if callable(version) and not key.startswith('base:') else None
             old = self.store.get_document(NS, key)
-            if old and old.get('source_revision') == revision and time.time() - old['observed_at'] < ttl:
-                return old
-            value = {'value': load(), 'observed_at': time.time(), 'source_revision': revision}
-            self.store.put_document(NS, key, value)
-            return value
+            hit = bool(old and old.get('source_revision') == revision
+                and old.get('source_identity') == source_identity and 0 <= time.time() - old['observed_at'] < ttl)
+            value = old if hit else {'value': load(), 'observed_at': time.time(),
+                'source_revision': revision, 'source_identity': source_identity}
+            if not hit:
+                self.store.put_document(NS, key, value)
+            return {**value, 'cache_hit': hit, 'expires_at': value['observed_at'] + ttl,
+                'age_seconds': max(0, time.time() - value['observed_at'])}
+
+    @staticmethod
+    def source_metadata(item, schema=None):
+        return {'kind': 'structured_table', 'source': item['url'], 'source_version': None,
+            'fields': None if schema is None else [dict(field) for field in schema
+                if field_allowed(field['name']) and field['type'] not in {17, 18}],
+            'field_lookup': {'table_id': item['table_id'], 'metadata_only': True},
+            'history': {'coverage': 'unknown', 'start': None, 'end': None},
+            'refresh': {'mode': 'on_demand', 'schema_ttl_seconds': 3600, 'records_ttl_seconds': 120},
+            'pagination': {'cursor': True, 'page_size_max': 40, 'max_pages': 20, 'timeout_seconds': 25},
+            'read_coverage': {'state': 'not_read', 'complete': False},
+            'statistics': {'tool': 'query_statistics', 'basis': 'authorized_structured_records',
+                'full_total_requires_complete': True}, 'content_trust': 'untrusted_data'}
 
     def request(self, method, path, *, params=None, body=None):
         # This service cannot write records, even when called by an administrator.
@@ -78,8 +94,10 @@ class AssistantTables:
                 text = ' '.join(row[k] for k in ('name', 'category', 'purpose')).casefold()
                 return (100 if keyword.casefold() in text else 0) + sum(term.casefold() in text for term in terms)
             rows = sorted((row for row in rows if score(row)), key=lambda row: (-score(row), row['sort']))
-        return {'items': [{k: row[k] for k in ('name', 'table_id', 'category', 'purpose', 'url')}
-                          for row in rows[(page - 1) * 20:page * 20]], 'total': len(rows), 'page': page}
+        return {'items': [{**{k: row[k] for k in ('name', 'table_id', 'category', 'purpose', 'url')},
+                          'source_metadata': self.source_metadata(row)}
+                          for row in rows[(page - 1) * 20:page * 20]], 'total': len(rows), 'page': page,
+                'page_size': 20, 'has_more': page * 20 < len(rows), 'count_basis': 'directory_entries'}
 
     def table(self, table_id):
         matches = [row for row in self.directory_rows() if row['table_id'] == table_id]
@@ -98,7 +116,7 @@ class AssistantTables:
             return node['obj_token']
         return self.cached('base:' + parts[2], 86400, load)['value']
 
-    def schema(self, item, *, ttl=3600):
+    def schema(self, item, *, ttl=3600, receipt=False):
         base = self.base(item)
         def load():
             fields, cursor, seen = [], '', set()
@@ -114,7 +132,8 @@ class AssistantTables:
                     break
                 seen.add(cursor)
             raise AssistantError('字段分页不完整，未继续读取记录。', 503)
-        return base, self.cached('schema:' + item['table_id'], ttl, load)['value']
+        saved = self.cached('schema:' + item['table_id'], ttl, load, source_identity=[base, item['url']])
+        return base, saved if receipt else saved['value']
 
     @staticmethod
     def valid_page(data):
@@ -132,8 +151,15 @@ class AssistantTables:
         if query.get('complete') and not query.get('metadata_only'):
             current = {key: value for key, value in query.items() if key != 'complete'}
             rows, cursors, deadline = {}, set(), time.monotonic() + 25
-            for _ in range(20):
+            observed, expiries, cache_hits, revisions, totals = [], [], [], set(), set()
+            for pages in range(1, 21):
                 page = self.read(actor, current)
+                observed.append(page['observed_at'])
+                expiries.append(page['freshness']['expires_at'])
+                cache_hits.append(page['freshness']['cache_hit'])
+                revisions.add(page['freshness']['local_cache_revision'])
+                if type(page['total']) is int:
+                    totals.add(page['total'])
                 for row in page['items']:
                     rid = row['record_id']
                     if rid in rows and rows[rid] != row:
@@ -146,12 +172,23 @@ class AssistantTables:
                     raise AssistantError('多维表分页游标未前进，未将部分数据当作完整结果。', 503)
                 cursors.add(cursor)
                 current['cursor'] = cursor
+            complete = (not query.get('cursor') and not page['has_more'] and len(revisions) == 1
+                and len(totals) <= 1 and (not totals or totals == {len(rows)})
+                and (pages > 1 or page['complete']))
             return {**page, 'items': list(rows.values()), 'visible_page_count': len(rows),
-                    'complete': not page['has_more'], 'note': '仅统计已授权、实际读取的记录；complete=false时仍有后续页，不能作为完整总数。'}
+                    'complete': complete, 'observed_at': min(observed),
+                    'freshness': {**page['freshness'], 'oldest_observed_at': min(observed),
+                        'newest_observed_at': max(observed), 'cache_hit': any(cache_hits),
+                        'all_cache_hits': all(cache_hits), 'expires_at': min(expiries),
+                        'age_seconds': max(0, time.time() - min(observed))},
+                    'coverage': {**page['coverage'], 'complete': complete, 'pages_read': pages,
+                        'records_read': len(rows), 'started_from_first_page': not bool(query.get('cursor'))},
+                    'note': '仅统计已授权、实际读取的记录；complete=false表示分页、起始范围或来源一致性未核验完整，不能作为完整总数。'}
         item = self.table(query.get('table_id'))
         if re.search(r'密钥|凭证|密码|令牌|模型配置|应用配置|账号配置|token|secret', item['name'] + item['category'], re.I):
             raise AssistantError('凭证及安全配置表不向助手开放直接读取，请使用原安全设置页面。', 403)
-        base, schema = self.schema(item)
+        base, schema_saved = self.schema(item, receipt=True)
+        schema = schema_saved['value']
         requested = query.get('fields') or []
         filters = query.get('filters') or []
         names = ([name for name in requested if isinstance(name, str)] if isinstance(requested, list) else [])
@@ -159,14 +196,18 @@ class AssistantTables:
             names += [row['field_name'] for row in filters if isinstance(row, dict) and isinstance(row.get('field_name'), str)]
         if any(field_allowed(name) and name not in {field['name'] for field in schema} for name in names):
             # Missing columns may have been added remotely; coalesce a bounded schema re-read.
-            base, schema = self.schema(item, ttl=10)
+            base, schema_saved = self.schema(item, ttl=10, receipt=True)
+            schema = schema_saved['value']
         safe_fields = [f['name'] for f in schema if field_allowed(f['name']) and f['type'] not in {17, 18}]
         # Questions/answers retain the learning module's original visibility rules.
         if not actor.get('is_admin') and re.search(r'题库|学练|权限|账户|账号|密钥|配置|程序日志', item['name'] + item['category']):
             raise AssistantError('该表请使用原业务模块查询，不能通过直连扩大原权限。', 403)
         if query.get('metadata_only'):
             return {'name': item['name'], 'table_id': item['table_id'], 'fields': safe_fields,
-                'source': item['url'], 'read_only': True}
+                'source': item['url'], 'read_only': True, 'complete': False,
+                'source_metadata': self.source_metadata(item, schema),
+                'schema_observed_at': schema_saved['observed_at'],
+                'schema_freshness': {key: schema_saved[key] for key in ('cache_hit', 'age_seconds', 'expires_at')}}
         fields = query.get('fields') or safe_fields[:40]
         if not isinstance(fields, list) or len(fields) > 60 or any(x not in safe_fields for x in fields):
             raise AssistantError('字段不存在或属于禁止提供的敏感字段。', 403)
@@ -203,16 +244,25 @@ class AssistantTables:
             return {**{k: data[k] for k in ('has_more', 'page_token', 'total') if k in data},
                 'items': [{'record_id': r['record_id'], 'fields': safe_data(
                     {k: v for k, v in (r.get('fields') or {}).items() if k in selected}, list_limit=100)} for r in data['items']]}
-        saved = self.cached('page:' + key, 120, load)
+        saved = self.cached('page:' + key, 120, load, source_identity=base)
         data = saved['value']
         rows = data['items']
         if scoped:
             from openclaw_service.assistant.lighthouse_people_stats import building_codes
             rows = [r for r in rows if (scopes := set().union(*(building_codes(plain(r['fields'].get(k))) for k in scope_fields)))
                     and scopes <= set(actor['scopes'])]
+        complete = (not cursor and not data['has_more'] and
+            (type(data.get('total')) is not int or data['total'] == len({r['record_id'] for r in data['items']})))
         return {'name': item['name'], 'source': item['url'], 'observed_at': saved['observed_at'],
             'items': rows, 'has_more': data['has_more'], 'cursor': data.get('page_token', ''),
             'total': None if scoped else data.get('total'), 'visible_page_count': len(rows),
+            'complete': complete,
+            'freshness': {key: saved[key] for key in ('cache_hit', 'age_seconds', 'expires_at')}
+                | {'local_cache_revision': saved['source_revision'], 'source_version': None},
+            'coverage': {'complete': complete, 'scope': 'authorized_filtered_records', 'pages_read': 1,
+                'records_read': len(rows), 'started_from_first_page': not bool(cursor),
+                'history': 'unknown', 'atomic_snapshot': False},
+            'content_trust': 'untrusted_data',
             'note': '记录按当前权限过滤。分页未读完或total为空时，不得把本页条数当作全表数量。', 'read_only': True}
 
     def staff_count(self, actor):
