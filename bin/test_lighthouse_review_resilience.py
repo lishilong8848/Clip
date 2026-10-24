@@ -53,6 +53,62 @@ class ReviewResilienceTests(unittest.IsolatedAsyncioTestCase):
     def packet(self):
         return json.loads(self.model.complete.call_args_list[0].args[0][1]['content'])
 
+    async def test_current_and_history_timestamps_keep_their_distinct_meanings(self):
+        from openclaw_service.assistant.lighthouse_queries import QUERY_TIME_GUIDANCE
+        from openclaw_service.assistant.lighthouse_review import REVIEW, REWRITE
+        self.turn['_reference_time'] = '2026-10-24T00:00:01+08:00'
+        first, second, missing = (self.source(i) for i in (1, 2, 3))
+        first.update(queried_at='2026-10-23T23:59:59+08:00')
+        first['data'].update(date='2026-10-22', updated_at='2026-10-20T08:00:00+08:00')
+        second.update(queried_at='2026-10-24T00:00:03+08:00')
+        second['data']['last_cloud_sync_at'] = '2026-10-21T09:00:00+08:00'
+        self.result['sources'] = [first, second, missing]
+        history = [{'question': 'old question', 'answer': 'old answer', 'scopes': ['D'],
+                    'sources': [first]}]
+        before = copy.deepcopy(self.result)
+        for channel in ('', 'feishu:oc_fixture'):
+            self.actor['channel'] = channel
+            self.model.complete.reset_mock()
+            await self.reviewer.run(self.actor, self.turn, history, self.result, self.authorize)
+            packet = self.packet()
+            self.assertEqual(packet['query_context']['reference_time'], self.turn['_reference_time'])
+            self.assertEqual([s['queried_at'] for s in packet['evidence']],
+                [first['queried_at'], second['queried_at'], None])
+            self.assertEqual(packet['evidence'][0]['data']['updated_at'], first['data']['updated_at'])
+            self.assertEqual(packet['evidence'][1]['data']['last_cloud_sync_at'], second['data']['last_cloud_sync_at'])
+            self.assertNotIn('updated_at', packet['evidence'][2]['data'])
+            self.assertEqual(packet['history'][0]['queries'][0]['source_freshness']['updated_at'], first['data']['updated_at'])
+        self.assertEqual(self.result, before)
+        self.assertIn(QUERY_TIME_GUIDANCE, REVIEW)
+        self.assertIn(QUERY_TIME_GUIDANCE, REWRITE)
+
+    async def test_business_only_review_does_not_recover_original_mixed_prompt(self):
+        self.turn.update(question='D楼未完成工单数量', prompt='D楼未完成工单，同时核对设备X归档要求',
+                          _read_only_phase=True, _query_intent={'kind': 'business', 'query': 'D楼未完成工单数量'})
+        await self.run_review(business_only=True)
+        packet = self.packet()
+        self.assertEqual(packet['question'], self.turn['question'])
+        self.assertNotIn('effective_question', packet)
+        self.assertNotIn('设备X', json.dumps(packet, ensure_ascii=False))
+
+    async def test_mixed_review_receives_each_branch_without_modifying_conditions(self):
+        self.turn.update(question='D楼工单，同时核对设备X归档要求', _query_intent={
+            'kind': 'mixed', 'business_query': 'D楼工单', 'document_query': '设备X归档要求'})
+        await self.run_review()
+        self.assertEqual(self.packet()['branch_queries'], {
+            'business_query': 'D楼工单', 'document_query': '设备X归档要求'})
+
+    async def test_compaction_preserves_source_read_time_without_inventing_native_time(self):
+        from openclaw_service.assistant.lighthouse_review import _review_packet
+        data = {'items': [{'name': 'row' + str(i), 'body': 'x' * 4000} for i in range(40)]}
+        source = {**self.source(data=data), 'state': 'available', 'excerpt_only': False,
+                  'queried_at': '2026-10-23T20:00:00+08:00'}
+        packet = _review_packet({'question': 'Count rows', 'answer': '40 rows',
+            'query_context': {'reference_time': '2026-10-24T00:00:00+08:00'}, 'evidence': [source]})
+        self.assertEqual(packet['evidence'][0]['queried_at'], source['queried_at'])
+        self.assertNotIn('updated_at', packet['evidence'][0]['data'])
+        self.assertTrue(packet['evidence'][0]['excerpt_only'])
+
     async def test_four_models_two_fail_third_healthy_and_health_contains_no_content(self):
         self.model.complete.side_effect = [TimeoutError('private provider text'), OSError('fixture-secret'), self.passed]
         result = await self.run_review()
@@ -77,6 +133,29 @@ class ReviewResilienceTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_review()
         self.assertEqual(result['answer_review']['status'], 'passed')
         self.assertEqual(self.model.complete.call_args.kwargs['profile']['id'], 'writer')
+
+    async def test_invalid_review_does_not_disable_models_for_the_next_question(self):
+        self.model.complete.return_value = 'not a review object'
+        self.turn['run_id'] = 'a' * 32
+        with patch('openclaw_service.assistant.lighthouse_review.capture') as captured:
+            result = await self.run_review()
+        self.assertEqual([call.kwargs['category'] for call in captured.call_args_list],
+                         ['review_validation'] * 4 + ['review_unavailable'])
+        self.assertTrue(all(call.kwargs['run_id'] == self.turn['run_id'] for call in captured.call_args_list))
+        self.assertEqual(result['answer_review']['status'], 'unavailable')
+        self.assertEqual(self.model.complete.call_count, 4)
+        health = model_health(self.assistant)
+        for profile in self.profiles.values():
+            self.assertLessEqual(health.snapshot(model_health_key(self.actor, profile)).get('cooldown_until', 0), health._clock())
+        from openclaw_service.assistant.lighthouse_model_health import select_task_profile
+        chosen = select_task_profile(self.assistant, self.actor, {**self.turn, 'task_type': 'mixed'},
+                                    {**self.profiles['writer'], '_automatic_selection': True})
+        self.assertIsNotNone(chosen)
+        self.model.complete.reset_mock()
+        self.model.complete.return_value = self.passed
+        result = await self.run_review()
+        self.assertEqual(result['answer_review']['status'], 'passed')
+        self.model.complete.assert_called_once()
 
     async def test_health_sorts_healthy_reviewers_by_latency_before_writer(self):
         health = model_health(self.assistant)

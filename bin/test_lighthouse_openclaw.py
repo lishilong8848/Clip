@@ -801,7 +801,8 @@ class OpenClawRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 agent = _recovery_agent()
                 fake = FakeGatewayClient('ws://127.0.0.1:19999', 'fixture-token', events=[
                     {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'lifecycle',
-                     'data': {'phase': 'error', 'error': marker + ': sk-test-secret-private private-provider-detail'}}}])
+                     'data': {'phase': 'error', 'error': marker + ': sk-test-secret-private private-provider-detail'}}}],
+                    wait={'status': 'error', 'error': marker + ': sk-test-secret-private private-provider-detail'})
                 agent.client = fake
                 with self.assertRaises(AssistantError) as raised:
                     _ = [event async for event in agent._events(fake, ['hello'], [])]
@@ -1248,6 +1249,38 @@ class AgentFactoryHookTests(unittest.IsolatedAsyncioTestCase):
 
     async def emit(self, kind, value):
         self.emit_log.append((kind, value))
+
+    async def test_cached_api_and_repeated_slices_keep_original_read_time(self):
+        import datetime as dt
+        from openclaw_service.assistant import lighthouse_model as shared
+        from openclaw_service.assistant.lighthouse_queries import QUERY_TIME_GUIDANCE
+        fake = FakeAgent(None)
+        def factory(model, **kwargs):
+            fake.__init__(model, **kwargs)
+            return fake
+        engine = self._engine(factory)
+        self.addAsyncCleanup(engine.close)
+        turn = {'question': '查询D楼维修记录并整理明细', 'operation_id': 'time-fixture',
+                'file_ids': [], '_profile': {'id': 'fixture', 'name': 'Fixture', 'model': 'fixture'}}
+        clock = Mock(wraps=dt.datetime)
+        first = dt.datetime(2026, 10, 23, 23, 59, 59, tzinfo=dt.timezone(dt.timedelta(hours=8)))
+        clock.now.return_value = first
+        with patch.object(shared, 'dt', SimpleNamespace(datetime=clock, timezone=dt.timezone, timedelta=dt.timedelta)):
+            await engine.answer(self.actor, turn, [], self.request, self.emit, self.authorize, {})
+            self.assertIn(QUERY_TIME_GUIDANCE, fake.kwargs['instructions'])
+            operation = PortalOperation(api_id='GET /api/repair-management/records', params={'scope': 'D'})
+            original = await fake.tools['query'](operation, complete=False)
+            clock.now.return_value = first + dt.timedelta(minutes=2)
+            cached = await fake.tools['query'](operation, complete=False)
+            for _ in range(2):
+                sliced = await fake.tools['read_query'](original['query_ref'], ['records'])
+                self.assertEqual(sliced['queried_at'], original['queried_at'])
+                self.assertEqual(sliced['data']['queried_at'], original['queried_at'])
+                self.assertTrue(sliced['data']['snapshot_only'])
+            self.assertEqual(cached['queried_at'], first.isoformat())
+            self.assertEqual(original['queried_at'], first.isoformat())
+        self.assertEqual(self.reads, ['D'])
+        self.assertEqual(self.writes, [])
 
     async def test_asking_blocks_preparation_and_does_not_waive_confirmation(self):
         fake_agent = FakeAgent(None)

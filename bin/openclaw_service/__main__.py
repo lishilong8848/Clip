@@ -91,6 +91,11 @@ async def serve(args):
         handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
         logger.addHandler(handler)
         logger.propagate = False
+        from .diagnostics import configure
+        try:
+            await asyncio.to_thread(configure, state, args.project_root)
+        except Exception:
+            logger.warning('Diagnostic local storage unavailable')
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(('127.0.0.1', 0))
         listener.listen(64)

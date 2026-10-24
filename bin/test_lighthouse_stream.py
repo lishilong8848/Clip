@@ -385,6 +385,39 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(turn.get('plan'))
         self.assertEqual(self.reads, [])
 
+    async def test_generated_media_marker_is_readable_and_file_is_not_generated_twice(self):
+        async def stream(messages, info):
+            results = [part.content for message in messages for part in message.parts
+                       if getattr(part, 'part_kind', '') == 'tool-return']
+            if not results:
+                yield {0: DeltaToolCall(name='create_text_file', json_args=json.dumps({
+                    'name': '说明.txt', 'content': 'fixture contents'}))}
+            else:
+                yield '已生成文件。\n\nMEDIA:\nMEDIA:' + results[-1]['file_id']
+
+        @asynccontextmanager
+        async def factory(*_):
+            yield FunctionModel(stream_function=stream)
+
+        self.runtime.engine = LighthouseModel(self.portal, model_factory=factory)
+        for channel in ('', 'feishu:oc_fixture'):
+            self.actor['channel'] = channel
+            with patch.object(self.portal.files, 'upload', wraps=self.portal.files.upload) as upload:
+                ack = await self.submit('生成说明.txt文件，内容为fixture contents')
+                await self.finish()
+                upload.assert_called_once()
+            turn = (await self.runtime.conversation(self.actor))['turns'][-1]
+            self.assertEqual(turn['status'], 'completed', turn.get('error'))
+            self.assertNotIn('MEDIA:', turn['answer'])
+            self.assertIn('说明.txt', turn['answer'])
+            self.assertEqual(len(turn['output_files']), 1)
+            file = turn['output_files'][0]
+            self.assertEqual(Path(self.portal.files.get(self.actor, file['id'])['path']).read_bytes(), b'fixture contents')
+            with self.assertRaises(AssistantError):
+                self.portal.files.get({**self.actor, 'id': 'another-user'}, file['id'])
+            replay = ''.join([chunk async for chunk in self.runtime.stream(self.actor, ack['run_id'], self.authorize)])
+            self.assertNotIn('MEDIA:', replay)
+
     async def test_spreadsheet_worksheet_is_not_a_live_business_work_query(self):
         async def stream(messages, info):
             results = [part for message in messages for part in message.parts if getattr(part, 'part_kind', '') == 'tool-return']

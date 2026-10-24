@@ -190,6 +190,9 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/openclaw_service/launcher.py"),
     Path("bin/openclaw_service/client.py"),
     Path("bin/openclaw_service/protocol.py"),
+    Path("bin/openclaw_service/diagnostics.py"),
+    Path("bin/openclaw_service/diagnostic_store.py"),
+    Path("bin/lan_bitable_template_portal/assistant_diagnostics_cloud.py"),
     Path("bin/upload_event_module/services/feishu_app_migration.py"),
     Path("bin/lan_bitable_template_portal/feishu_identity.py"),
     Path("bin/lan_bitable_template_portal/feishu_identity_migration.py"),
@@ -278,6 +281,7 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
     "mcp": "mcp==1.30.0",
     "markitdown": "markitdown[docx,xlsx,pptx,pdf]==0.1.8",
+    "markdown_it": "markdown-it-py",
     "magika": "magika==0.6.2",
     "rapidocr": "rapidocr==3.10.0",
     "onnxruntime": "onnxruntime==1.23.2",
@@ -350,7 +354,7 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "pydantic",
     "pydantic_ai",
     "mcp",
-    "markitdown", "magika", "rapidocr", "onnxruntime", "pypdfium2", "playwright",
+    "markitdown", "markdown_it", "magika", "rapidocr", "onnxruntime", "pypdfium2", "playwright",
     "openai",
 
     "starlette",
@@ -380,6 +384,7 @@ if sys.platform == "win32":
 
 
 SMOKE_IMPORT_MODULES = [
+    "markdown_it",
     "openclaw_service.__main__",
     "openclaw_service.server",
     "openclaw_service.client",
@@ -389,6 +394,9 @@ SMOKE_IMPORT_MODULES = [
     "openclaw_service.launcher",
     "openclaw_service.update",
     "openclaw_service.gateway_log",
+    "openclaw_service.diagnostics",
+    "openclaw_service.diagnostic_store",
+    "lan_bitable_template_portal.assistant_diagnostics_cloud",
     "openclaw_service.assistant.routes",
     "openclaw_service.assistant.lighthouse_knowledge_summary",
     "openclaw_service.assistant.lighthouse_knowledge_evidence",
@@ -463,6 +471,7 @@ SMOKE_IMPORT_MODULES = [
 ]
 
 PACKAGING_PREFLIGHT_MODULES = [
+    "markdown_it",
     "mcp",
     "docx", "pptx", "reportlab",
     "yaml",
@@ -1912,11 +1921,15 @@ def _run_packaging_preflight_tests() -> None:
     _run_preflight_check(
         [test_python, "-m", "unittest",
          "bin.test_robot_webhook",
+         "bin.test_assistant_diagnostics", "bin.test_assistant_diagnostic_store", "bin.test_assistant_diagnostics_cloud",
+         "bin.test_lighthouse_tool_readiness", "bin.test_lighthouse_engine_evaluation",
          "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
          "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_model_completion", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
          "bin.test_lighthouse_task_context", "bin.test_lighthouse_business_semantics", "bin.test_lighthouse_model_routing", "bin.test_lighthouse_file_provenance", "bin.test_lighthouse_intelligence_evaluation",
          "bin.test_lighthouse_intelligence_replay", "bin.test_lighthouse_review_resilience", "bin.test_lighthouse_task_context_contract",
          "bin.test_lighthouse_connection_isolation", "bin.test_lighthouse_source_coverage",
+         "bin.test_lighthouse_source_contracts",
+         "bin.test_lighthouse_partial_claims",
          "bin.test_lighthouse_knowledge_automatic",
          "bin.test_lighthouse_knowledge_repair", "bin.test_lighthouse_knowledge_evidence",
          "bin.test_lighthouse_claim_review", "bin.test_lighthouse_answer_quality_replay",

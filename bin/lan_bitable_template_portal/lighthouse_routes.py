@@ -22,6 +22,7 @@ def install_lighthouse_routes(app, controller, runtime):
     client, authority = None, None
     lock = asyncio.Lock()
     preparation = None
+    diagnostic_reporter = None
     closing = False
 
     async def ready():
@@ -40,7 +41,16 @@ def install_lighthouse_routes(app, controller, runtime):
         return client, authority
 
     async def startup():
-        nonlocal preparation
+        nonlocal preparation, diagnostic_reporter
+        from openclaw_service.diagnostics import configure, DiagnosticReporter
+        from openclaw_service.protocol import PROJECT
+        try:
+            diagnostic_store = await asyncio.to_thread(configure,
+                Path(runtime.state_store.db_path).parent / 'lighthouse_openclaw', PROJECT)
+            diagnostic_reporter = DiagnosticReporter(diagnostic_store)
+            diagnostic_reporter.start()
+        except Exception:
+            logging.getLogger(__name__).warning('Diagnostic local storage unavailable')
         async def connect():
             from openclaw_service.assistant.lighthouse_startup_log import emit
             emit('service_connecting')
@@ -61,6 +71,8 @@ def install_lighthouse_routes(app, controller, runtime):
         closing = True
         await public_sender.close()
         await feishu_channel.close()
+        if diagnostic_reporter is not None:
+            await diagnostic_reporter.close()
         if preparation:
             preparation.cancel()
             await asyncio.gather(preparation, return_exceptions=True)

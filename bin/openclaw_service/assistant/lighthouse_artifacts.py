@@ -168,6 +168,33 @@ def create_document(files, actor, name, data, *, source_scopes=None):
     return files.upload(actor, name, document_bytes(name, data), extract=False, source_scopes=source_scopes or actor['scopes'])
 
 
+def render_file_markers(text, outputs):
+    """Name this turn's real attachments; leave code and unknown references untouched."""
+    names = {item['id']: item['name'] for item in (outputs or []) if isinstance(item, dict)
+             and re.fullmatch(r'[a-f0-9]{32}', str(item.get('id', '')))
+             and isinstance(item.get('name'), str) and item['name']
+             and not any(char in item['name'] for char in '\r\n')}
+    if 'MEDIA:' not in text:
+        return text
+    lines, fence = [], ''
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip('\r\n')
+        edge = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', content)
+        if edge:
+            if not fence:
+                fence = edge[1]
+            elif edge[1][0] == fence[0] and len(edge[1]) >= len(fence) and not edge[2].strip():
+                fence = ''
+        if not fence and not edge and re.fullmatch(r' {0,3}MEDIA:[ \t]*', content):
+            continue
+        marker = None if fence or edge else re.fullmatch(r'( {0,3})MEDIA:\s*([a-f0-9]{32})[ \t]*', content)
+        if marker and marker[2] in names:
+            name = re.sub(r'([\\`*_{}\[\]()<>])', r'\\\1', names[marker[2]])
+            line = marker[1] + '附件：' + name + line[len(content):]
+        lines.append(line)
+    return ''.join(lines)
+
+
 def package_long_reply(files, actor, result):
     text = str(result.get('answer') or '')
     if len(text) <= LONG_REPLY:

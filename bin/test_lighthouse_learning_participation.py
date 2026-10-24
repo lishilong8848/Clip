@@ -32,6 +32,7 @@ from openclaw_service.assistant.lighthouse_sources import (
     collect_learning_participation, learning_participation_reply, learning_participation_request,
 )
 from bin import test_lighthouse_stream as streaming
+from bin.test_learning_completion import CompletionTests
 
 MONDAY = dt.datetime(2026, 10, 19, 10, tzinfo=learning.TZ)
 ADMIN = {'id': 'ou_admin', 'is_admin': True, 'scope': '', 'person_id': '', 'shared_account': False}
@@ -438,6 +439,83 @@ class ParticipationTests(unittest.TestCase):
         self.assertEqual(turn['question'], '上周哪些人员参与答题 每周学练')
         self.assertNotIn('answer', turn)
         portal._save_chat.assert_called_once_with({'id': 'p1'}, {}, finish=True)
+
+
+class ShiftQueryTests(unittest.IsolatedAsyncioTestCase):
+    setUp = ParticipationTests.setUp
+    prepare = ParticipationTests.prepare
+    put = CompletionTests.put
+    person = CompletionTests.person
+    roster = CompletionTests.roster
+    paper = CompletionTests.paper
+    record = CompletionTests.record
+    seed = CompletionTests.seed
+    question = CompletionTests.question
+
+    async def test_real_shift_projection_and_pagination_do_not_count_daytime_answers_as_night(self):
+        from lan_bitable_template_portal import learning_completion
+        from openclaw_service.assistant.lighthouse_queries import collect_query_pages, query_result_state
+
+        self.prepare()
+        day = '2026-10-18'
+        duties = []
+        for pid, scope, shift, answered in (('one', 'A', '夜', 2), ('two', 'A', '夜', 1), ('day-only', 'B', '白', 1)):
+            paper = self.paper(pid, scope, shift, day, identity=pid)
+            self.record(paper, answered=answered, submitted=(
+                '2026-10-19T02:00:00+08:00' if shift == '夜' else day + 'T14:00:00+08:00'))
+            duties.append({'person_id': pid, 'scope': scope, 'shift': shift})
+        self.roster([*duties, {'person_id': 'day-only', 'scope': 'B', 'shift': '夜'}], day)
+        with closing(self.service._connect()) as conn:
+            before = list(conn.iterdump())
+        calls, reports = [], []
+
+        async def invoke(operation):
+            calls.append(copy.deepcopy(operation))
+            raw = learning_completion.report(self.service, ADMIN, operation['params'])
+            return {'ok': True, 'api_id': operation['api_id'], '_raw': raw}
+
+        for scope in ('A', 'B'):
+            report = await collect_query_pages({'api_id': 'GET /api/learning/completion',
+                'params': {'scope': scope, 'date': day, 'shift': '夜', 'page_size': 1}}, invoke)
+            reports.append(report['_raw'])
+            state, guidance = query_result_state(report)
+            self.assertEqual(state, 'found')
+            self.assertIn('不裁剪tasks', guidance)
+            self.assertIn('按person_id去重', guidance)
+            self.assertEqual(report['_raw']['query_completeness']['lists']['items']['unit'], 'person_days')
+        self.assertEqual([call['params']['page'] for call in calls], [1, 2, 1])
+        self.assertTrue(all(call['params']['shift'] == '夜' and call['params']['date'] == day for call in calls))
+        self.assertEqual(sum(report['total'] for report in reports), 3)
+        selected = {row['person_id'] for report in reports for row in report['items']
+                    if any(task['shift'] == '夜' and task['answered'] > 0 for task in row['tasks'])}
+        self.assertEqual(selected, {'one', 'two'})
+        mixed = reports[1]['items'][0]
+        self.assertEqual(mixed['answered'], 1)
+        self.assertEqual(sum(t['answered'] for t in mixed['tasks'] if t['shift'] == '夜'), 0)
+        self.assertEqual(learning_completion.report(self.service, ADMIN,
+            {'date': '2026-10-19', 'shift': '夜'})['total'], 0)
+        with closing(self.service._connect()) as conn:
+            self.assertEqual(list(conn.iterdump()), before)
+        self.assertEqual(self.cloud.calls, [])
+        self.assertEqual(self.sender.calls, [])
+
+    async def test_actual_participation_includes_review_only_person_without_current_shift_tasks(self):
+        from lan_bitable_template_portal import learning_completion
+        from openclaw_service.assistant.lighthouse_queries import semantic_context
+
+        self.prepare()
+        paper = self.paper('review-only', 'A', '', '2026-10-01', mode='practice', identity='review')
+        self.record(paper, answered=1, submitted='2026-10-01T14:00:00+08:00',
+                    practice=[{'submitted_at': '2026-10-19T03:00:00+08:00', 'correct': True}])
+        row = learning_completion.report(self.service, ADMIN, {'date': '2026-10-19'})['items'][0]
+        self.assertEqual(row['tasks'], [])
+        self.assertEqual((row['answered'], row['practice_attempts']), (0, 1))
+        report = learning_personal.participation(self.service, ADMIN, {'period': 'week', 'scope': 'A'})
+        self.assertEqual([person['person_id'] for person in report['participants']], ['review-only'])
+        self.assertEqual((report['summary']['participants'], report['summary']['answered'], report['summary']['practice']), (1, 0, 1))
+        self.assertIn('不能只用completion的tasks/answered替代', semantic_context('本周哪些人参与答题'))
+        self.assertEqual(self.cloud.calls, [])
+        self.assertEqual(self.sender.calls, [])
 
 
 class ParticipationReadCacheTests(unittest.TestCase):

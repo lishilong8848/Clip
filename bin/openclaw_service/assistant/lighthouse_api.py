@@ -2606,7 +2606,7 @@ class PortalAPICatalog:
                         if path == prefix or path.startswith(prefix + "/"))
         source_metadata = {}
         if read_only:
-            from .lighthouse_queries import QUERY_PAGE_SCHEMAS
+            from .lighthouse_queries import QUERY_PAGE_SCHEMAS, source_field_contract
             response_schema = None
             if route.response_model is not None:
                 with suppress(Exception):
@@ -2630,6 +2630,9 @@ class PortalAPICatalog:
                 "read_coverage": {"state": "not_read", "complete": False},
                 "statistics": {"tool": "query_statistics", "basis": "authorized_structured_records",
                     "full_total_requires_complete": True}, "content_trust": "untrusted_data"}}
+            contract = source_field_contract(api_id)
+            if contract:
+                source_metadata['source_metadata']['field_contract'] = contract
         return {
             "id": api_id,
             "method": method,

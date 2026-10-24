@@ -4,11 +4,12 @@ Scope: question *intent* only. This module intentionally does not touch
 production code, credentials, real runtime/business data, cloud/network, the
 frontend, or raw tables. It uses the real intent/date helpers and builds
 synthetic FunctionModel fixtures for the paths that legitimately reach the
-model. Deterministic paths (events, pending, guard, learning-only, notice
+model. Independent deterministic paths (events, pending, guard, learning-only, notice
 sends) are tested with a *forbidden* model factory so a regression that leaks
 into the model is caught.
 """
 import copy
+import json
 import sys
 import unittest
 from contextlib import asynccontextmanager
@@ -20,7 +21,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fastapi import FastAPI, Request  # noqa: E402
-from pydantic_ai.models.function import FunctionModel  # noqa: E402
+from pydantic_ai.models.function import DeltaToolCall, FunctionModel  # noqa: E402
 
 from lan_bitable_template_portal.lighthouse_ai import AssistantError, MODEL_QUESTION  # noqa: E402
 from lan_bitable_template_portal.lighthouse_ai import LighthouseAssistant, NAMESPACE  # noqa: E402
@@ -492,13 +493,29 @@ class QueryIntentAsyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("进行中的变更", effective)
                 self.assertNotIn("今天有几个变更", effective)
                 self.assertEqual(run["scopes"], ["E"])
-                synthetic = {"scopes": ["E"], "queried_at": "2026-10-10T09:40:00+08:00",
+                synthetic = {"scopes": ["E"], "complete": True, "queried_at": "2026-10-10T09:40:00+08:00",
                     "groups": [{"key": "notices", "label": "未结束通告", "count": 4, "known_count": 4,
                         "available": True, "error": "", "warnings": [], "remaining": 0,
                         "url": "/workbench-lite?scope=E", "type_counts": {"变更": 4},
                         "items": [{"title": "变更测试" + str(i), "scopes": ["E"], "status": "开始", "type": "变更"}
                                   for i in range(1, 5)]}]}
-                harness = _EngineHarness({}, factory=_forbidden_factory(self))
+                step = 0
+                @asynccontextmanager
+                async def factory(*_):
+                    async def stream(messages, info):
+                        nonlocal step
+                        step += 1
+                        if step == 1:
+                            self.assertIn('进行中的变更', str(messages))
+                            yield {0: DeltaToolCall(name='ongoing_notices',
+                                                   json_args=json.dumps({'notice_type': 'change'}))}
+                        else:
+                            receipt = messages[-1].parts[0].content
+                            self.assertTrue(receipt['complete'])
+                            yield '当前未结束变更：' + '、'.join(
+                                row['title'] for group in receipt['data']['groups'] for row in group['items'])
+                    yield FunctionModel(stream_function=stream)
+                harness = _EngineHarness({}, factory=factory)
 
                 async def authorize():
                     return actor
@@ -511,6 +528,7 @@ class QueryIntentAsyncTests(unittest.IsolatedAsyncioTestCase):
                     result = await harness.engine.answer({**actor, "scopes": run["scopes"], "allowed_scopes": actor["scopes"]},
                         run["_turn"], run["_history"], None, emit, authorize, {})
                 reader.assert_awaited_once()
+                self.assertEqual(step, 2)
                 self.assertEqual(reader.call_args.kwargs["groups_only"], {"notices"})
                 self.assertEqual(reader.call_args.kwargs["notice_type"], "change")
                 self.assertEqual(reader.call_args.args[0]["scopes"], ["E"])

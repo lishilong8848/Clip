@@ -191,6 +191,25 @@ class TableCoverageTests(unittest.TestCase):
 
 
 class CatalogCoverageTests(unittest.TestCase):
+    def test_native_cabinet_metadata_does_not_change_routes_or_spread_to_other_status_fields(self):
+        app = FastAPI()
+        def endpoint():
+            raise AssertionError('Metadata must not invoke a business route')
+        for path in ('/api/cabinet-power/overview', '/api/cabinet-power/rooms', '/api/cabinet-power/racks',
+                     '/api/cabinet-power/rooms/{room_id}/layout', '/api/cabinet-power/batches', '/api/example/status'):
+            app.add_api_route(path, endpoint, methods=['GET'])
+        catalog = PortalAPICatalog(app)
+        for api in ('GET /api/cabinet-power/overview', 'GET /api/cabinet-power/rooms',
+                    'GET /api/cabinet-power/racks', 'GET /api/cabinet-power/rooms/{room_id}/layout'):
+            descriptor = catalog.get(api)
+            self.assertTrue(descriptor['read_only'])
+            contract = descriptor['source_metadata']['field_contract']
+            self.assertEqual(contract['state_labels']['off'], '未上电/已下电')
+            self.assertEqual(contract['count_unit'], '机柜')
+            self.assertFalse(descriptor['source_metadata']['read_coverage']['complete'])
+        for api in ('GET /api/cabinet-power/batches', 'GET /api/example/status'):
+            self.assertNotIn('field_contract', catalog.get(api)['source_metadata'])
+
     def test_route_metadata_uses_declared_types_without_inventing_history(self):
         class Row(BaseModel):
             value: int

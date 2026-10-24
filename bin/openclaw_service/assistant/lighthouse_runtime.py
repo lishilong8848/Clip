@@ -157,6 +157,8 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
             entries[item['agent_id']]['tools'] = {'deny': ['*']}
         elif not capabilities["tool_calls"]:
             entries[item['agent_id']]['tools'] = {'deny': list(tool_names)}
+        elif 'tool_names' in item and set(item['tool_names']) != set(tool_names):
+            entries[item['agent_id']]['tools'] = {'allow': item['tool_names']}
         if item.get('model_parameters'):
             entries[item['agent_id']]['models'] = {ref: {'params': item['model_parameters']}}
     config = {
@@ -340,6 +342,7 @@ class OpenClawRuntime:
                 item = {"key": key, "agent_id": agent_id(identity), "root": root, "fingerprint": fingerprint,
                         'config_fingerprint': config_fingerprint,
                         'text_only': text_only,
+                        'tool_names': list(tool_names),
                         "used_at": time.monotonic(), "busy": True, "profile": dict(profile),
                         "model_key": model_key, "model_parameters": model_parameters}
                 if existing and existing.get('configured') and not existing.get('stopped') and existing.get('config_fingerprint') == config_fingerprint:
@@ -458,6 +461,8 @@ class OpenClawRuntime:
             startup_log('gateway_ready', pid=process.pid, port=port, protocol=gateway['protocol'],
                         elapsed_ms=round((time.monotonic() - started) * 1000, 1))
         except BaseException as exc:
+            from openclaw_service.diagnostics import capture
+            capture('startup', 'startup_failed', category=getattr(exc, 'category', ''), error=exc)
             startup_log('startup_failed', error=type(exc).__name__)
             await asyncio.to_thread(self._terminate_startup_process, process)
             if log:
@@ -493,10 +498,9 @@ class OpenClawRuntime:
                         while time.monotonic() < deadline:
                             roster = await client.request('agents.list', {}, timeout=5)
                             observed = {entry.get('id'): entry.get('name') for entry in roster.get('agents', [])}
-                            for account in self.accounts.values():
-                                if observed.get(account['agent_id']) == account['config_fingerprint']:
-                                    account['configured'] = True
-                            if item.get('configured'):
+                            if observed.get(item['agent_id']) == item['config_fingerprint']:
+                                await self._verify_tools(client, item)
+                                item['configured'] = True
                                 return
                             await asyncio.sleep(.3)
             except (OSError, asyncio.TimeoutError, InvalidHandshake):
@@ -541,6 +545,7 @@ class OpenClawRuntime:
                         # hello-ok can precede agent readiness. This local, read-only
                         # RPC shares the Gateway's startup gate with the agent RPC.
                         await client.request("models.list", {'agentId': item['agent_id']}, timeout=5)
+                        await self._verify_tools(client, item)
                         item["protocol"] = client.protocol
                         return item
             except (OSError, InvalidHandshake):
@@ -556,6 +561,33 @@ class OpenClawRuntime:
                 else:
                     raise AssistantStartupError("助手网关握手未通过（" + exc.code + "），未启动会话。", 503) from None
         raise AssistantStartupError("助手启动超时，原消息已保留，可继续。", 503)
+
+    async def _verify_tools(self, client, item):
+        from .lighthouse_ai import model_capabilities
+        from .lighthouse_gateway import GatewayError
+        expected = set(item.get('tool_names', self.tool_names or ()))
+        if not expected or item.get('text_only') or not model_capabilities(item.get('profile', {}))['tool_calls']:
+            return
+        # Catalog loading activates lazy plugins; effective tools verify real factories and policy.
+        session = 'agent:' + item['agent_id'] + ':lighthouse-readiness'
+        try:
+            await client.request('tools.catalog', {'agentId': item['agent_id'], 'includePlugins': True}, timeout=5)
+            await client.request('sessions.patch', {'key': session}, timeout=5)
+            value = await client.request('tools.effective', {'agentId': item['agent_id'], 'sessionKey': session}, timeout=5)
+        except GatewayError as exc:
+            if exc.code in {'UNAVAILABLE', 'DISCONNECTED', 'HANDSHAKE_TIMEOUT', 'TIMEOUT'}:
+                raise
+            raise AssistantStartupError('助手查询工具加载核验失败，原消息和已有任务已保留。',
+                                        503, category='runtime_tools') from None
+        groups = value.get('groups', []) if isinstance(value, dict) else []
+        groups = groups if isinstance(groups, list) else []
+        available = {tool.get('id') for group in groups if isinstance(group, dict) and isinstance(group.get('tools'), list)
+                     for tool in group['tools'] if isinstance(tool, dict) and isinstance(tool.get('id'), str)
+                     and tool.get('pluginId') == 'lighthouse-tools' and not tool.get('deniedBySession')}
+        if not isinstance(value, dict) or value.get('agentId') != item['agent_id'] or not expected <= available:
+            LOGGER.warning('Assistant tools not ready: expected=%s available=%s', len(expected), len(available))
+            raise AssistantStartupError('助手查询工具尚未完整加载，未启动问答；原消息和已有任务已保留。',
+                                        503, category='runtime_tools')
 
     async def _stop(self, item):
         # Abort acknowledgement may be lost. Revoke this account's callbacks and

@@ -57,6 +57,20 @@ class CompleteQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["requested_scope"], "A")
         self.assertIn("queried_at", evidence)
 
+    async def test_supplied_snapshot_keeps_known_or_unknown_read_time(self):
+        for extra in ({}, {'_queried_at': None}, {'_queried_at': '2026-10-23T23:59:59+08:00'}):
+            with self.subTest(extra=extra):
+                first = result({'items': records(1), 'total': 1, 'page': 1, 'page_size': 20,
+                                'updated_at': '2026-10-20T08:00:00+08:00'}, **extra)
+                before = copy.deepcopy(first)
+                async def forbidden(_):
+                    self.fail('Complete cached snapshot must not be fetched again')
+                data = await collect_query_pages(self.op, forbidden, first_result=first)
+                freshness = data['_raw']['query_completeness']['source_freshness'][0]
+                self.assertEqual(freshness['queried_at'], extra.get('_queried_at'))
+                self.assertEqual(freshness['updated_at'], first['_raw']['updated_at'])
+                self.assertEqual(first, before)
+
     async def test_supplied_result_only_fetches_missing_pages_even_when_it_is_page_two(self):
         for supplied_page in (1, 2):
             with self.subTest(supplied_page=supplied_page):
@@ -314,6 +328,19 @@ class CompleteQueryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class NoticeSemanticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notice_aggregate_uses_receipt_time_not_wrapper_clock(self):
+        for stamp in ('2026-10-23T23:59:59+08:00', None):
+            with self.subTest(stamp=stamp):
+                async def invoke(_):
+                    return result({'days': [], 'last_loaded_at': '2026-10-20T08:00:00+08:00'},
+                                  _queried_at=stamp)
+                data = await collect_notices({'scopes': ['A'], 'modules': ['maintenance']},
+                    NoticeQuery(status='sent', start_date='2026-10-20', end_date='2026-10-20'), invoke)
+                self.assertEqual(data['queried_at'], stamp)
+                self.assertEqual(data['source_freshness'][0]['queried_at'], stamp)
+                self.assertTrue(all(group['queried_at'] == stamp for group in data['groups']))
+                self.assertEqual(data['count'], 0)
+
     def test_typed_status_date_boundary(self):
         for values in ({"status": "sent"}, {"status": "planned", "start_date": "2026-10-20"},
                        {"status": "open", "end_date": "2026-10-20"},

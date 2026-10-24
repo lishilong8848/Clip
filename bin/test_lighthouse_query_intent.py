@@ -147,11 +147,11 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['kind'], 'mixed')
         self.assertEqual(result['task_type'], 'mixed')
         self.assertEqual((result['business_query'], result['document_query']), (business, document))
-        self.assertEqual(self.model.complete.call_count, 1)
+        self.assertEqual(self.model.complete.call_count, 2)
 
-    async def test_mixed_rejects_missing_scope_date_device_and_write_branches(self):
+    async def test_mixed_rejects_changed_scope_date_device_and_write_branches(self):
         question = 'A楼昨天UPS事件及处置规程'
-        for branch in ('UPS处置规程', 'A楼今天UPS处置规程', 'B楼昨天UPS处置规程',
+        for branch in ('A楼今天UPS处置规程', 'B楼昨天UPS处置规程',
                        'A楼昨天HVDC处置规程', '删除A楼昨天UPS事件'):
             self.model.complete.return_value = decision(question, 'mixed',
                 business_query='A楼昨天UPS事件', document_query=branch)
@@ -200,11 +200,62 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
         self.model.complete.return_value = decision('B楼今天事件，按事件编号去重', continued=True)
         self.assert_unknown(await self.resolve('换成B楼', history=history), '换成B楼')
 
-    async def test_mixed_branches_cannot_drop_counting_basis(self):
+    async def test_mixed_document_query_does_not_inherit_business_counting_basis(self):
         question = 'A楼昨天UPS事件，按事件编号去重，并核对规程'
-        self.model.complete.return_value = decision(question, 'mixed',
-            business_query='A楼昨天UPS事件，按事件编号去重', document_query='A楼昨天UPS规程')
-        self.assert_unknown(await self.resolve(question), question)
+        for branch in ('A楼昨天UPS处置规程', 'A楼昨天UPS规程'):
+            self.model.complete.return_value = decision(question, 'mixed',
+                business_query='A楼昨天UPS事件，按事件编号去重', document_query=branch)
+            result = await self.resolve(question)
+            self.assertEqual(result['kind'], 'mixed')
+            self.assertEqual(result['document_query'], branch)
+            self.assertEqual(result['business_query'], 'A楼昨天UPS事件，按事件编号去重')
+
+    async def test_mixed_keeps_branch_specific_filters_and_shared_scope(self):
+        for question, business, document in (
+            ('查询A楼未完成工单数量，同时核对设备X的归档要求',
+             '查询A楼未完成工单数量', '核对设备X的归档要求'),
+            ('查询A楼昨天夜班未完成UPS工单，核对B楼今天HVDC规程',
+             '查询A楼昨天夜班未完成UPS工单', '核对B楼今天HVDC规程'),
+            ('A楼昨天UPS有哪些未完成工单，并核对该设备当时的归档规程',
+             'A楼昨天UPS有哪些未完成工单', 'A楼昨天UPS的归档规程')):
+            with self.subTest(question=question):
+                self.model.complete.return_value = decision(question, 'mixed',
+                    business_query=business, document_query=document)
+                result = await self.resolve(question)
+                self.assertEqual(result['kind'], 'mixed')
+                self.assertEqual((result['business_query'], result['document_query']), (business, document))
+
+    async def test_mixed_missing_conditions_does_not_return_an_unreviewed_retry(self):
+        question = '查询A楼昨天未完成UPS工单，并核对B楼规程'
+        self.model.complete.side_effect = [
+            decision(question, 'mixed', business_query='查询A楼UPS工单', document_query='B楼规程'),
+            decision(question, 'mixed', business_query='查询A楼昨天未完成UPS工单', document_query='B楼规程')]
+        result = await self.resolve(question)
+        self.assert_unknown(result, question, attempts=2)
+
+    async def test_mixed_semantic_audit_restores_shared_date_to_business_branch(self):
+        question = 'A楼今天UPS状态记录是否符合本站规程要求？'
+        first = decision(question, 'mixed', business_query='A楼UPS状态记录',
+                         document_query='A楼今天UPS适用的本站规程要求')
+        corrected = decision(question, 'mixed', business_query='A楼今天UPS状态记录',
+                             document_query='A楼今天UPS适用的本站规程要求')
+        self.model.complete.side_effect = [first, corrected]
+        result = await self.resolve(question)
+        self.assertEqual(result['business_query'], 'A楼今天UPS状态记录')
+        self.assertEqual(result['attempts'], 2)
+        self.assertEqual(self.packet()['candidate_split']['business_query'], 'A楼UPS状态记录')
+
+    async def test_mixed_audit_failure_does_not_return_unreviewed_split(self):
+        question = 'A楼今天UPS状态记录及本站规程要求'
+        self.model.complete.side_effect = [decision(question, 'mixed',
+            business_query='A楼今天UPS状态记录', document_query='A楼今天UPS规程要求'), TimeoutError()]
+        self.assert_unknown(await self.resolve(question), question, attempts=2)
+
+    async def test_mixed_first_provider_failure_cannot_bypass_semantic_audit(self):
+        question = 'A楼今天UPS状态记录及本站规程要求'
+        self.model.complete.side_effect = [TimeoutError(), decision(question, 'mixed',
+            business_query='A楼UPS状态记录', document_query='A楼今天UPS规程要求')]
+        self.assert_unknown(await self.resolve(question), question, attempts=2)
 
     async def test_history_requires_same_owner_topic_and_browser_and_stops_at_barrier(self):
         previous = self.previous('A楼今天事件')

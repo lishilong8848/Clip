@@ -17,7 +17,7 @@ from .lighthouse_context import execution_key
 from .lighthouse_model_health import ModelHealth as _ModelHealth, model_health, model_health_key, profile_key, select_task_profile
 from .lighthouse_gateway import GatewayClient, GatewayError
 from .lighthouse_model import LighthouseModel, incomplete_reply
-from .lighthouse_review import READ_REPAIR_TOOLS
+from .lighthouse_review import BUSINESS_READ_TOOLS, READ_REPAIR_TOOLS
 from .lighthouse_runtime import OpenClawRuntime, account_key, agent_id
 from .lighthouse_startup_log import emit as startup_log
 from ..protocol import MAX_CONCURRENT_ACCOUNTS
@@ -33,6 +33,8 @@ def native_model_error(error, *, timeout=False):
     text = error.get('message') if isinstance(error, dict) else error
     text = text.lower() if isinstance(text, str) else ''
     for marker, category, status, message in (
+        ('no callable tools remain', 'runtime_tools', 503,
+         '助手查询工具未正确加载，原消息和已有任务已保留；请重启程序后重试，切换模型不能解决此问题。'),
         ('temporarily disabled after a provider auth/billing failure', 'model_auth', 503,
          '当前模型在认证或额度失败后进入短暂冷却，请核对模型密钥及额度，稍后重试原消息；本次冷却不会锁住其他账号的会话。'),
         ('model provider authentication failed', 'model_auth', 502, '模型认证未通过，请核对本人模型设置。'),
@@ -53,6 +55,7 @@ def native_model_error(error, *, timeout=False):
 
 
 READ_RECOVERY_TOOLS = frozenset('lighthouse_' + name for name in READ_REPAIR_TOOLS)
+BUSINESS_RECOVERY_TOOLS = frozenset('lighthouse_' + name for name in BUSINESS_READ_TOOLS)
 
 
 class BusinessBridge:
@@ -88,8 +91,8 @@ class BusinessBridge:
             raise AssistantError('工具参数无效。')
         signature = hashlib.sha256(json.dumps([name, args], sort_keys=True).encode()).hexdigest()
         async with active.call_lock:
-            if getattr(active, 'turn', {}).get('_read_only_phase') and name not in READ_RECOVERY_TOOLS:
-                raise AssistantError('当前阶段仅允许只读查询，不得创建文件、准备表单或执行业务。', 403)
+            if getattr(active, 'turn', {}).get('_read_only_phase') and name not in BUSINESS_RECOVERY_TOOLS:
+                raise AssistantError('当前阶段仅允许业务只读查询，公司文档由后续阶段读取；不得创建文件、准备表单或执行业务。', 403)
             cached = active.results.get(identity)
             if cached:
                 if cached[0] != signature:
@@ -169,6 +172,10 @@ class OpenClawToolAgent:
             # Rehydrate only the currently authorized public transcript, never hidden native history.
             view = [topic['id'], topic.get('context', ''), actor.get('modules', []), turn.get('run_id') or turn.get('operation_id')]
             self.session_key += ':topic:' + hashlib.sha256(json.dumps(view, sort_keys=True).encode()).hexdigest()[:24]
+        if turn.get('_read_only_phase'):
+            # A standalone mixed branch must not inherit native history from another turn.
+            phase_id = turn.get('run_id') or turn.get('operation_id') or turn.setdefault('_read_phase_id', secrets.token_hex(16))
+            self.session_key += ':mixed-business:' + hashlib.sha256(str(phase_id).encode()).hexdigest()[:24]
         self.token = engine.tokens.setdefault(account_key(execution_key(actor)), secrets.token_urlsafe(40))
 
     def tool_plain(self, function=None, **kwargs):
@@ -229,15 +236,17 @@ class OpenClawToolAgent:
     def _terminal_answer(self, outcome, chat_message=None):
         if not isinstance(outcome, dict) or outcome.get('runId', self.run_id) != self.run_id:
             raise AssistantError('原回答运行编号不一致，未使用其他会话内容。', 502)
-        if outcome.get('pendingError') or outcome.get('yielded') or outcome.get('pendingToolCalls') or outcome.get('aborted'):
+        reply = outcome.get('terminalReply')
+        outcomes = [value for value in (outcome, reply) if isinstance(value, dict)]
+        if (any(value.get(key) for value in outcomes for key in ('pendingError', 'yielded', 'pendingToolCalls', 'aborted'))
+                or any(value.get('stopReason') in {'toolUse', 'tool_use', 'tool_calls', 'aborted'} for value in outcomes)):
             return None
         if outcome.get('status') == 'error':
             raise self._model_failure(outcome.get('error'))
         if outcome.get('status') != 'ok':
             return None
-        if outcome.get('stopReason') in {'toolUse', 'tool_use', 'tool_calls', 'length', 'max_tokens', 'aborted', 'error'}:
+        if outcome.get('stopReason') in {'length', 'max_tokens', 'error'}:
             return None
-        reply = outcome.get('terminalReply')
         if isinstance(reply, dict):
             if reply.get('disposition') == 'visible':
                 return self._reply_text({**reply, 'role': 'assistant'})
@@ -247,8 +256,9 @@ class OpenClawToolAgent:
 
     async def _acquire_runtime(self, *, warm_only=False):
         definitions = [{'name': name, 'label': tool.name, 'description': tool.description or '',
-                        'parameters': tool.function_schema.json_schema} for name, tool in self.tools.items()
-                       if not self.turn.get('_read_only_phase') or name in READ_RECOVERY_TOOLS]
+                        'parameters': tool.function_schema.json_schema} for name, tool in self.tools.items()]
+        enabled = [tool['name'] for tool in definitions
+                   if not self.turn.get('_read_only_phase') or tool['name'] in BUSINESS_RECOVERY_TOOLS]
         text_only = getattr(self, '_live_text_only', False) and not getattr(self, '_auto_tools', False) and not warm_only
         if text_only:
             self._buffered_reply = False
@@ -258,17 +268,14 @@ class OpenClawToolAgent:
                 await self.emit('status', {'label': '正在连接灯塔助手'})
             try:
                 return await self.engine.manager.acquire(self.actor, self.engine.assistant.model_for(self.actor), self.profile,
-                    definitions=definitions, warm_only=warm_only, text_only=text_only)
+                    definitions=definitions, tool_names=enabled, warm_only=warm_only, text_only=text_only)
             except ServiceError as exc:
                 raise AssistantError(str(exc), exc.status) from None
         plugin = self.engine.manager.root / account_key(execution_key(self.actor)) / 'plugin'
         from openclaw_service.protocol import prepare_tool_plugin
-        catalog = None
+        # The shared plugin stays stable; only this lane's tool allowlist changes.
         if text_only:
-            # Preserve the shared tool catalog even when its first lane has no tools.
-            catalog = plugin.with_name('plugin-catalog')
-            await asyncio.to_thread(prepare_tool_plugin, Path(__file__).parent / 'openclaw/plugin', catalog, definitions)
-            definitions = []
+            enabled = []
         await asyncio.to_thread(prepare_tool_plugin, Path(__file__).parent / 'openclaw/plugin', plugin, definitions)
         if not self.engine.gateway_ready(self.actor):
             await self.emit('status', {'label': '正在连接助手'})
@@ -280,8 +287,8 @@ class OpenClawToolAgent:
         announcer = asyncio.create_task(announce_install())
         try:
             item = await self.engine.manager.acquire(self.actor, self.engine.assistant.model_for(self.actor), self.profile,
-                plugin=plugin, **({'plugin_catalog': catalog} if text_only else {}),
-                tool_names=[tool['name'] for tool in definitions], bridge_token=self.token, bridge_url=self.engine.bridge_url(),
+                plugin=plugin, plugin_catalog=plugin,
+                tool_names=enabled, bridge_token=self.token, bridge_url=self.engine.bridge_url(),
                 progress=lambda label: loop.call_soon_threadsafe(progress.put_nowait, label))
         finally:
             announcer.cancel()
@@ -342,7 +349,11 @@ class OpenClawToolAgent:
         # Only a terminal outcome for this exact run permits a new model run.
         self._terminal_model_failure = True
         self.run_id = ''
-        return native_model_error(error, timeout=timeout)
+        failure = native_model_error(error, timeout=timeout)
+        from openclaw_service.diagnostics import capture
+        capture('assistant', 'model_attempt', run_id=self.turn.get('run_id', ''),
+                category=failure.category, error=failure, native=error)
+        return failure
 
     def _validation_failure(self, message):
         # Called only after a terminal reply; unknown or mutating tools cannot be replayed.
@@ -397,6 +408,10 @@ class OpenClawToolAgent:
                     yield event
                 return
             except AssistantError as exc:
+                logging.getLogger(__name__).warning(
+                    'Assistant attempt failed: run=%s category=%s terminal=%s visible=%s calls=%s results=%s',
+                    str(self.turn.get('run_id') or '')[:8], exc.category,
+                    self._terminal_model_failure, visible, self.calls, len(self.results))
                 if self._terminal_model_failure:
                     self.health.record(self._health_key(self.profile), category=exc.category)
                 await stack.aclose()
@@ -638,7 +653,11 @@ class OpenClawToolAgent:
                                 ('stopReason', 'yielded', 'aborted', 'pendingToolCalls') if key in data}}
                         terminal_deadline = terminal_deadline or time.monotonic() + self.FINAL_REPLY_GRACE
                         next_terminal_check = 0
-                    elif data.get('state') in {'error', 'aborted'}:
+                    elif data.get('state') == 'error':
+                        # Chat errors may precede the persisted outcome; observe this run before failover.
+                        terminal_deadline = terminal_deadline or time.monotonic() + self.FINAL_REPLY_GRACE
+                        next_terminal_check = 0
+                    elif data.get('state') == 'aborted':
                         raise AssistantError('原回答未正常完成，原消息与操作任务已保留；未重新提交业务。',
                                              502, category='model_protocol')
                     continue
@@ -673,8 +692,6 @@ class OpenClawToolAgent:
                         await self.emit('status', {'label': '正在自动整理上下文'})
                         compaction_notified = True
                     if stream == 'lifecycle' and update.get('phase') in {'end', 'error'}:
-                        if update['phase'] == 'error':
-                            raise self._model_failure(update.get('error'))
                         if terminal_deadline is None:
                             terminal_deadline = time.monotonic() + self.FINAL_REPLY_GRACE
                             next_terminal_check = 0
@@ -688,8 +705,7 @@ class OpenClawToolAgent:
                     message = self._complete_from_evidence(original_message, '上轮没有最终正文，请继续补查缺口并根据回执提供可见答复。')
                     continue
                 if self.calls and (attempt or not self.results):
-                    raise AssistantError('模型未返回可见回答，原工具结果与操作任务已保留；请核对原任务，不要重复提交。',
-                                         502, category='model_protocol')
+                    raise self._validation_failure('模型未返回可见回答，原工具结果与操作任务已保留；请核对原任务，不要重复提交。')
                 if attempt:
                     raise self._model_failure('')
                 if self.calls:

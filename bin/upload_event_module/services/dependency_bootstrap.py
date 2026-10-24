@@ -66,6 +66,7 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "pydantic_ai": "pydantic-ai-slim[openai]==2.52.0",
     "mcp": "mcp==1.30.0",
     "markitdown": "markitdown[docx,xlsx,pptx,pdf]==0.1.8",
+    "markdown_it": "markdown-it-py",
     "magika": "magika==0.6.2",
     "rapidocr": "rapidocr==3.10.0",
     "onnxruntime": "onnxruntime==1.23.2",

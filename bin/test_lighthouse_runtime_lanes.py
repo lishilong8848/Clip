@@ -155,6 +155,58 @@ class NativeRuntimeLaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([value['name'] for value in json.loads((self.runtime.accounts[item['key']]['root'] / 'plugin' / 'tools.json').read_text(encoding='utf-8'))], ['lighthouse_probe'])
         await resident.release(item)
 
+    async def check_full_and_readonly_catalog(self, resident_mode):
+        resident, host = self.resident() if resident_mode else (None, None)
+        owner = actor('mixed-readonly')
+        profile = {**runtime_fixtures._profile(), 'id': 'fixture'}
+        plugin_bytes = None
+        for readonly in (True, False, True, False):
+            value = agent(self.engine, owner, profile)
+            value.tools['lighthouse_query'] = agent_fixtures._tool(agent_fixtures._async_ok)
+            value.tools['lighthouse_prepare_business'] = agent_fixtures._tool(agent_fixtures._async_ok)
+            value.turn['_read_only_phase'] = readonly
+            item = await value._acquire_runtime()
+            native_item = self.runtime.accounts[item['key']]
+            content = (native_item['root'] / 'plugin' / 'tools.json').read_bytes()
+            if plugin_bytes is None:
+                plugin_bytes = content
+            self.assertEqual(content, plugin_bytes)
+            expected = ['lighthouse_query'] if readonly else list(value.tools)
+            self.assertEqual(native_item['tool_names'], expected)
+            self.assertCountEqual(self.runtime.tool_names, value.tools)
+            config = json.loads((self.runtime.gateway['root'] / 'openclaw.json').read_text(encoding='utf-8'))
+            entry = config['agents']['entries'][native_item['agent_id']]
+            if readonly:
+                self.assertEqual(entry['tools'], {'allow': ['lighthouse_query']})
+                value.running, value.run_id = True, 'readonly-test-run'
+                self.engine.bridge.active[value.token] = value
+                payload = {'agent_id': native_item['agent_id'], 'session_key': value.session_key,
+                    'run_id': value.run_id, 'tool': 'lighthouse_prepare_business', 'call_id': 'denied', 'params': {}}
+                with self.assertRaises(AssistantError) as denied:
+                    await self.engine.bridge.call(value.token, payload)
+                self.assertEqual(denied.exception.status, 403)
+                self.assertEqual(value.calls, 0)
+                if resident:
+                    await resident.begin_run(item, value.session_key, value.run_id, value.token)
+                    with patch.object(httpx, 'AsyncClient') as callback:
+                        with self.assertRaises(ServiceError) as denied:
+                            await host.bridge(payload, self.runtime.bridge_token)
+                        self.assertEqual(denied.exception.status, 403)
+                        callback.assert_not_called()
+            else:
+                self.assertNotIn('tools', entry)
+            if resident:
+                await resident.release(item)
+            else:
+                item['busy'] = False
+        self.popen.assert_called_once()
+
+    async def test_local_readonly_and_full_rounds_share_a_stable_plugin(self):
+        await self.check_full_and_readonly_catalog(False)
+
+    async def test_resident_readonly_and_full_rounds_share_a_stable_plugin(self):
+        await self.check_full_and_readonly_catalog(True)
+
     async def test_resident_text_only_uses_full_catalog_and_blocks_both_dispatch_layers(self):
         resident, host = self.resident()
         profile = {**runtime_fixtures._profile(), 'id': 'fixture'}
@@ -164,8 +216,7 @@ class NativeRuntimeLaneTests(unittest.IsolatedAsyncioTestCase):
         native_item = self.runtime.accounts[item['key']]
         self.assertTrue(native_item['text_only'])
         plugin = native_item['root'] / 'plugin'
-        self.assertEqual(json.loads((plugin / 'tools.json').read_text(encoding='utf-8')), [])
-        catalog = json.loads((plugin.with_name('plugin-catalog') / 'tools.json').read_text(encoding='utf-8'))
+        catalog = json.loads((plugin / 'tools.json').read_text(encoding='utf-8'))
         self.assertEqual([value['name'] for value in catalog], ['lighthouse_probe'])
         sent = next(call.args[1] for call in resident._request.call_args_list if call.args[0] == 'acquire')
         self.assertTrue(sent['text_only'])
@@ -237,6 +288,10 @@ class NativeRuntimeLaneTests(unittest.IsolatedAsyncioTestCase):
             for definitions in ([], payload['definitions'] * 65):
                 with self.assertRaises(ServiceError) as caught:
                     await host.acquire({**payload, 'definitions': definitions})
+                self.assertEqual(caught.exception.status, 400)
+            for selected in (None, True, 'lighthouse_probe', ['lighthouse_unknown'], ['lighthouse_probe'] * 2, [{}]):
+                with self.subTest(selected=selected), self.assertRaises(ServiceError) as caught:
+                    await host.acquire({**payload, 'tool_names': selected})
                 self.assertEqual(caught.exception.status, 400)
             acquire.assert_not_awaited()
             plugin.assert_not_called()
@@ -398,8 +453,8 @@ class NativeRuntimeLaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(text._buffered_reply)
         self.assertTrue(text_item['text_only'])
         plugin = text_item['root'] / 'plugin'
-        self.assertEqual(json.loads((plugin / 'tools.json').read_text(encoding='utf-8')), [])
-        self.assertEqual(json.loads((plugin / 'openclaw.plugin.json').read_text(encoding='utf-8'))['contracts']['tools'], [])
+        self.assertEqual([tool['name'] for tool in json.loads((plugin / 'tools.json').read_text(encoding='utf-8'))], ['lighthouse_probe'])
+        self.assertEqual(json.loads((plugin / 'openclaw.plugin.json').read_text(encoding='utf-8'))['contracts']['tools'], ['lighthouse_probe'])
         business = agent(self.engine, actor('business'))
         business_item = await business._acquire_runtime()
         warm = agent(self.engine, actor('warm'))
@@ -596,7 +651,9 @@ class NativeAgentLaneTests(unittest.IsolatedAsyncioTestCase):
                     frames.append({'event': 'agent', 'payload': {'runId': 'run-1',
                         'stream': 'lifecycle', 'data': {'phase': 'error', 'error': 'Model provider unavailable'}}})
                 client = agent_fixtures.FakeGatewayClient('ws://127.0.0.1:19999', 'synthetic', events=frames,
-                    wait={'status': 'ok', 'terminalReply': {'disposition': 'visible',
+                    wait={'status': 'error', 'error': 'Model provider unavailable'}
+                    if failure in {'provider', 'missing-receipt', 'published-tool'} else
+                    {'status': 'ok', 'terminalReply': {'disposition': 'visible',
                         'text': 'NO_REPLY' if failure == 'terminal' else 'fixture reply'}})
                 await client.__aenter__()
                 self.engine.gateway_client = AsyncMock(return_value=client)

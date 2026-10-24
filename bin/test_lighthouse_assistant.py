@@ -466,6 +466,14 @@ class SourcesAndRoutesTests(unittest.TestCase):
         self.assertEqual(summary["data"]["counts"]["test"], 1)
         self.assertEqual(summary["data"]["counts"]["off"], 0)
         self.assertTrue(any("201 / B01" in x["title"] for x in result))
+        for source in (item for item in result if item.get('source_kind') == 'local_cabinet_inventory'):
+            self.assertEqual(source['field_contract']['state_labels']['off'], '未上电/已下电')
+            self.assertEqual(source['field_contract']['count_unit'], '机柜')
+        rack = next(item for item in result if '201 / B01' in item['title'])
+        self.assertEqual(rack['source_kind'], 'local_cabinet_inventory')
+        self.assertEqual(rack['data']['state_source'], 'baseline')
+        self.assertTrue(any('不推断存在成功操作' in text for text in rack['field_contract']['limits']))
+        self.assertEqual(summary['source_kind'], 'local_cabinet_inventory')
 
     def test_general_question_does_not_query_any_business_database(self):
         reader = LocalAssistantSources(self.store)

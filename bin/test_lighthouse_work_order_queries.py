@@ -119,6 +119,23 @@ class WorkOrderQueryTests(unittest.TestCase):
                 self.records({'scope': 'A', 'group_id': 'wo-module'}, actor)
         self.assertEqual(self.records({'scope': 'A'})['total'], 1)
 
+    def test_state_filter_basis_is_returned_without_changing_record_states(self):
+        states = ('active', 'upload_pending', 'completed', 'cancelled', 'stopped')
+        seed(self.store, [group('wo-' + state, 'A', state=state) for state in states])
+        for selected in ('all', 'pending', *states):
+            with self.subTest(state=selected):
+                result = self.records({'scope': 'A', 'state': selected, 'work_type': 'polling'})
+                expected = set(states) if selected == 'all' else (
+                    {'active', 'upload_pending'} if selected == 'pending' else {selected})
+                self.assertEqual({row['state'] for row in result['items']}, expected)
+                self.assertEqual(result['total'], len(expected))
+                self.assertEqual(result['count_unit'], 'work_orders')
+                self.assertEqual(result['query'], {'state': selected, 'work_type': 'polling', 'search': '', 'group_id': ''})
+                self.assertIn('不是工单自身状态', result['state_semantics']['pending'])
+                self.assertIn('已完成', result['state_semantics']['upload_pending'])
+                self.assertIn('尚待上传', result['state_semantics']['upload_pending'])
+        self.assertEqual({doc['payload']['state'] for doc in self.store.list_documents('polling_work_order')}, set(states))
+
     # -- native completion semantics -----------------------------------------
 
     def test_native_step_done_operator_reviewer_flags(self):

@@ -74,7 +74,7 @@ class ReviewerReread(unittest.IsolatedAsyncioTestCase):
         with self.subTest(surface='emitted text'):
             self.assertFalse(any(rejected in text for text in texts))
 
-    async def test_verified_support_survives_reread_stall_without_the_rejected_statement(self):
+    async def _reread_stall_result(self, separator):
         supported, rejected = '该流程只适用于设备甲。[1]', '设备甲流程适用于设备乙。[1]'
         evidence = [{'source_number': 1, 'quote': self.first['text']}]
         verdict = {'passed': False, 'issues': ['Need the applicable equipment procedure.'],
@@ -82,16 +82,27 @@ class ReviewerReread(unittest.IsolatedAsyncioTestCase):
                        {'claim': supported, 'status': 'support', 'evidence': evidence},
                        {'claim': rejected, 'status': 'mismatch', 'evidence': evidence,
                         'issue': 'The source applies only to equipment A.'}]}
-        self.model.complete.side_effect = [fixture.candidate(supported + ' ' + rejected),
+        self.model.complete.side_effect = [fixture.candidate(supported + separator + rejected),
             json.dumps(verdict), OSError('synthetic reviewer unavailable')]
         self.kb.search.return_value = {'items': [self.first], 'warning': ''}
         result = await self.answer()
         texts = [call.args[1]['delta'] for call in self.emit.call_args_list if call.args[0] == 'text']
         self.assertEqual(self.kb.search.call_count, 2)
+        return result, supported, rejected, texts
+
+    async def test_verified_support_survives_reread_stall_without_the_rejected_statement(self):
+        result, supported, rejected, texts = await self._reread_stall_result('\n\n')
         self.assertIn(supported, result['answer'])
         self.assertNotIn(rejected, result['answer'])
         self.assertEqual(texts, [result['answer']])
         self.assertFalse(any(rejected in text for text in texts))
+
+    async def test_reread_stall_does_not_extract_fragments_from_an_unverified_paragraph(self):
+        result, supported, rejected, texts = await self._reread_stall_result(' ')
+        self.assertNotIn(supported, result['answer'])
+        self.assertNotIn(rejected, result['answer'])
+        self.assertEqual(texts, [result['answer']])
+        self.assertTrue(result['answer'].strip())
 
     async def test_permission_revoked_by_review_does_not_query_or_deliver(self):
         def complete(*args, **kwargs):

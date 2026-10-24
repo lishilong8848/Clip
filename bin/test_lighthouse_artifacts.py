@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).parent))
 from test_lighthouse_stream import Store
 from openclaw_service.assistant.lighthouse_files import LighthouseFiles
-from openclaw_service.assistant.lighthouse_artifacts import LONG_REPLY, create_document, document_bytes, package_long_reply, preview_file
+from openclaw_service.assistant.lighthouse_artifacts import LONG_REPLY, create_document, document_bytes, package_long_reply, preview_file, render_file_markers
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from lan_bitable_template_portal.feishu_assistant import FeishuMessenger, FeishuAssistant
 
@@ -80,6 +80,43 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(package_long_reply(self.files, ACTOR, {'answer': '你好'}), {'answer': '你好'})
         with self.assertRaises(AssistantError): create_document(self.files, ACTOR, '不允许.docx', {'paragraphs': ['身份证号：11010519491231002X']})
         self.assertFalse(self.files.store.docs)
+
+    def test_generated_media_marker_names_only_this_turns_real_attachment(self):
+        file = self.files.upload(ACTOR, '机柜分布.txt', b'synthetic chart data', extract=False)
+        text = '已上电8台。\r\n\r\nMEDIA:' + file['id'] + '\r\n'
+        before = json.dumps(file, ensure_ascii=False)
+        rendered = render_file_markers(text, [file])
+        self.assertEqual(rendered, '已上电8台。\r\n\r\n附件：机柜分布.txt\r\n')
+        self.assertEqual(json.dumps(file, ensure_ascii=False), before)
+        self.assertEqual(render_file_markers(rendered, [file]), rendered)
+        self.assertEqual(Path(self.files.get(ACTOR, file['id'])['path']).read_bytes(), b'synthetic chart data')
+
+    def test_media_examples_and_unknown_ids_do_not_turn_into_download_links(self):
+        file = {'id': 'a' * 32, 'name': '图表.png'}
+        marker = 'MEDIA:' + file['id']
+        for text in ('```text\n' + marker + '\n```\n', '~~~~\n' + marker + '\n~~~~\n',
+                     '    ' + marker + '\n', '`' + marker + '`', '> ' + marker,
+                     'MEDIA:' + 'b' * 32, 'MEDIA:https://untrusted.example/a.png'):
+            with self.subTest(text=text):
+                self.assertEqual(render_file_markers(text, [file]), text)
+        text = '````text\n```\n' + marker + '\n````\n' + marker
+        self.assertEqual(render_file_markers(text, [file]), '````text\n```\n' + marker + '\n````\n附件：图表.png')
+        self.assertEqual(render_file_markers(marker, []), marker)
+        self.assertEqual(render_file_markers(marker, None), marker)
+
+    def test_generated_file_name_cannot_inject_markdown(self):
+        file = {'id': 'a' * 32, 'name': '[unsafe](https://example.invalid).txt'}
+        text = render_file_markers('MEDIA:' + file['id'], [file])
+        self.assertIn(r'\[unsafe\]\(https://example.invalid\)', text)
+        self.assertNotIn('[unsafe](', text)
+
+    def test_empty_media_protocol_line_is_removed_without_inventing_a_file(self):
+        for outputs in (None, [], [{'id': 'a' * 32, 'name': 'actual.txt'}]):
+            self.assertEqual(render_file_markers('已核对。\r\n\r\nMEDIA: \t\r\n', outputs), '已核对。\r\n\r\n')
+            self.assertEqual(render_file_markers('MEDIA:', outputs), '')
+            for literal in ('```text\nMEDIA:\n```', '~~~~\nMEDIA:\n~~~~',
+                            '    MEDIA:', '> MEDIA:', '`MEDIA:`', '参数 MEDIA: 为示例'):
+                self.assertEqual(render_file_markers(literal, outputs), literal)
 
     def test_feishu_long_answer_is_a_complete_markdown_attachment(self):
         result = {'answer': '完整名单与统计。' * 900, 'sources': [{'number': 1, 'title': '学练记录'}]}

@@ -599,7 +599,17 @@ def work_order_records(store, actor, query):
         result.append(row)
     result.sort(key=lambda item: (str(item.get("created_at") or ""), item["group_id"]), reverse=True)
     return {"items": result[(page - 1) * size:page * size], "total": len(result), "page": page, "page_size": size,
-            "source": "本地工单状态", "scopes": sorted(selected), "execution_available": False}
+            "source": "本地工单状态", "scopes": sorted(selected), "execution_available": False,
+            "query": {"state": state, "work_type": work_type, "search": search, "group_id": identity},
+            "count_unit": "work_orders",
+            "state_semantics": {
+                "all": "不限状态；total为当前楼栋及其它筛选条件下的工单条数，不是人数。",
+                "pending": "合并筛选active和upload_pending，不是工单自身状态；不能与这两个子集相加。",
+                "active": "工单执行中，状态尚未转为执行完成。",
+                "upload_pending": "工单执行已完成，仅表格尚待上传。",
+                "completed": "工单执行已完成且表格已上传。",
+                "cancelled": "工单已取消，不等于正常执行完成。",
+                "stopped": "工单已停止，不等于正常执行完成。"}}
 
 
 class LocalAssistantSources:
@@ -660,7 +670,7 @@ class LocalAssistantSources:
                     warnings.append(message)
                 return []
 
-        def add(label, payload, href, authoritative=None, shared=False, priority=0, module=None):
+        def add(label, payload, href, authoritative=None, shared=False, priority=0, module=None, source_kind=''):
             if not isinstance(payload, dict):
                 return
             found = record_codes(payload) or set(authoritative or [])
@@ -682,6 +692,12 @@ class LocalAssistantSources:
             title = record_title(clean, label)
             hits.append({"title": label + " · " + title[:100], "url": href, "scopes": sorted(found),
                          "data": clean, "_score": score + priority, "_size": len(content)})
+            if source_kind:
+                from .lighthouse_queries import source_field_contract
+                contract = source_field_contract(source_kind=source_kind)
+                if contract:
+                    hits[-1].update(source_kind=source_kind, field_contract=contract)
+                    hits[-1]['_size'] += len(json.dumps(contract, ensure_ascii=False))
 
         db = Path(self.store.db_path)
         wildcard = " OR ".join("payload_json LIKE ? ESCAPE '\\'" for _ in terms) or "0"
@@ -993,8 +1009,10 @@ class LocalAssistantSources:
             # Reuse the same baseline/state derivation as the actual floor plan.
             derived = derive_records(config, operations)
             href = "/cabinet-power?scope=" + scope
-            add("机柜上下电库存汇总", {"scope": scope, "counts": derived["counts"]}, href, {scope}, priority=50)
+            add("机柜上下电库存汇总", {"scope": scope, "counts": derived["counts"]}, href, {scope}, priority=50,
+                source_kind='local_cabinet_inventory')
             for rack in derived["racks"]:
                 add("机柜", {"scope": scope, "title": rack["room"] + " / " + rack["rack"],
                     "last_successful_operation_time": rack.get("last_operation", ""),
-                    **{k: rack.get(k) for k in ("room", "rack", "rack_type", "state", "state_source", "power")}}, href, {scope}, priority=12)
+                    **{k: rack.get(k) for k in ("room", "rack", "rack_type", "state", "state_source", "power")}}, href, {scope}, priority=12,
+                    source_kind='local_cabinet_inventory')

@@ -150,6 +150,21 @@ class IndependentReviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Private details', str(packet))
         self.assertNotIn('User-controlled', str(packet))
 
+    async def test_business_only_review_excludes_old_documents_and_topic_answers(self):
+        actor = {**self.actor, 'channel': 'feishu:oc_fixture', '_feishu_topic': {
+            'id': 'oc_fixture:om_topic', 'context': 'OLD_DOCUMENT_RULE'}}
+        self.turn['_answer_goals'] = [{'description': 'OLD_DOCUMENT_RULE', 'kind': 'data', 'status': 'partial'}]
+        self.model.complete.return_value = self.passed
+        await self.reviewer.run(actor, self.turn, [{'question': '旧规定', 'answer': 'OLD_DOCUMENT_RULE',
+            'feishu_topic': 'oc_fixture:om_topic', 'scopes': ['D']}], self.result,
+            AsyncMock(return_value=actor), business_only=True)
+        packet = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertEqual(packet['history'], [])
+        self.assertEqual(packet['review_scope'], 'business_only')
+        self.assertNotIn('topic_context', packet)
+        self.assertNotIn('response_goals', packet)
+        self.assertNotIn('OLD_DOCUMENT_RULE', str(packet))
+
     async def test_small_evidence_is_not_silently_reduced_to_eight_rows(self):
         self.result['sources'][0]['data']['participants'] = [{'name': f'测试{i}'} for i in range(45)]
         self.model.complete.return_value = self.passed
@@ -166,6 +181,23 @@ class IndependentReviewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SnapshotStatisticsTests(unittest.TestCase):
+    def test_automatic_pagination_requires_a_real_supported_source_page(self):
+        from openclaw_service.assistant.lighthouse_queries import query_has_pending_pages
+        api = 'GET /api/assistant/work-orders'
+        result = {'ok': True, 'data': {'items': [{'id': 'one'}], 'total': 2, 'page': 1, 'page_size': 1}}
+        self.assertTrue(query_has_pending_pages(api, result))
+        self.assertFalse(query_has_pending_pages('GET /api/unsupported', result))
+        for key, value in (('complete', False), ('available', False), ('snapshot_only', True),
+                           ('snapshot_exists', False), ('source_snapshot_ready', False),
+                           ('warnings', ['partial']), ('schema_warnings', ['partial']), ('total', '2'), ('total', 1)):
+            with self.subTest(key=key, value=value):
+                self.assertFalse(query_has_pending_pages(api, {**result, 'data': {**result['data'], key: value}}))
+        for key, value in (('ok', False), ('available', False), ('complete', False), ('scope_warning', 'denied')):
+            self.assertFalse(query_has_pending_pages(api, {**result, key: value}))
+        self.assertTrue(query_has_pending_pages('GET /api/workbench', {'ok': True, 'data': {
+            'records': [{'record_id': 'one'}], 'records_pagination': {'page': 1, 'total': 2},
+            'ongoing': [], 'ongoing_pagination': {'page': 1, 'total': 0}}}))
+
     def test_statistics_keep_duplicates_missing_values_and_partial_scope_explicit(self):
         data = {'complete': True, 'items': [{'person': {'id': 'a'}, 'value': .1},
             {'person': {'id': 'a'}, 'value': .2}, {'person': {'id': 'b'}}]}
@@ -266,24 +298,141 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
         self.assertNotIn('output_files', result)
 
+    async def test_contextual_and_advanced_queries_do_not_shortcut_to_fixed_summaries(self):
+        for channel in ('', 'feishu:oc_evaluation'):
+            for api, noun in (('GET /api/assistant/work-orders', '工单'),
+                              ('GET /api/learning/papers', '题单')):
+                cases = [
+                    (f'其中谁的{noun}还未完成？把名称也列出来。',
+                     [{'question': f'D楼{noun}参与人员有哪些？', 'scopes': ['D']}], {}),
+                    (f'当前D楼未完成的{noun}有哪些？按人员去重并列出姓名。', [], {}),
+                ]
+                if channel:
+                    cases.append((f'其中谁的{noun}还未完成？把名称也列出来。', [],
+                                  {'_feishu_topic': {'id': 'fixture-topic', 'context': f'用户：D楼{noun}有哪些人员？'}}))
+                for question, history, actor_context in cases:
+                    with self.subTest(channel=channel, api=api, question=question, topic=bool(actor_context)):
+                        step = 0
+                        async def script(messages, info):
+                            nonlocal step
+                            step += 1
+                            if step == 1:
+                                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                                    'api_id': api, 'params': {'scope': 'D', 'state': 'active'}}}))}
+                            else:
+                                yield f'未完成的{noun}为测试事项，参与人员为测试甲。'
+                        with patch('openclaw_service.assistant.lighthouse_pending.collect_pending',
+                                   AsyncMock(side_effect=AssertionError('Must not replace a contextual query with a pending summary'))):
+                            result, calls, _ = await self.evaluate(channel, question, script,
+                                lambda *_: {'ok': True, 'data': {'items': [{'id': 'one', 'title': '测试事项',
+                                    'state': '进行中', 'person': {'id': 'a', 'name': '测试甲'}}], 'total': 1, 'complete': True}},
+                                history=history, actor_context=actor_context)
+                        self.assertIn('测试甲', result['answer'])
+                        self.assertIn('测试事项', result['answer'])
+                        self.assertEqual(len(calls), 1)
+                        self.assertGreaterEqual(step, 2)
+
+    async def test_supported_pages_auto_complete_but_explicit_single_page_stays_partial(self):
+        for channel in ('', 'feishu:oc_evaluation'):
+            for api in ('GET /api/assistant/work-orders', 'GET /api/learning/papers', 'GET /api/learning/completion'):
+                for complete in (None, False, True):
+                    with self.subTest(channel=channel, api=api, complete=complete):
+                        step = 0
+                        async def script(messages, info):
+                            nonlocal step
+                            step += 1
+                            if step == 1:
+                                args = {'operation': {'api_id': api, 'params': {'scope': 'D', 'state': 'active', 'page_size': 2}}}
+                                if complete is not None:
+                                    args['complete'] = complete
+                                yield {0: DeltaToolCall(name='query', json_args=json.dumps(args))}
+                            elif step == 2:
+                                receipt = messages[-1].parts[0].content
+                                self.assertEqual(receipt['query_state'], 'partial' if complete is False else 'found')
+                                if api == 'GET /api/learning/completion':
+                                    self.assertIn('不裁剪tasks', receipt['query_guidance'])
+                                yield {0: DeltaToolCall(name='read_query', json_args=json.dumps({
+                                    'query_ref': receipt['query_ref'], 'path': ['items']}))}
+                            else:
+                                receipt = messages[-1].parts[0].content
+                                self.assertIsNone(receipt['next_offset'])
+                                self.assertEqual(receipt['source_query_state'], 'partial' if complete is False else 'found')
+                                if api == 'GET /api/learning/completion':
+                                    self.assertIn('不裁剪tasks', receipt['source_query_guidance'])
+                                if complete is False:
+                                    self.assertFalse(receipt['data']['complete'])
+                                yield ('当前只读取了2条，完整数量尚未核对。' if complete is False else '已核对3条：测试甲、测试乙、测试丙。')
+                        def responder(scope, page, page_size):
+                            rows = [{'id': str(i), 'name': name} for i, name in enumerate(('测试甲', '测试乙', '测试丙'))]
+                            return {'ok': True, 'data': {'items': rows[(page - 1) * page_size:page * page_size],
+                                'total': 3, 'page': page, 'page_size': page_size}}
+                        result, calls, _ = await self.evaluate(channel, '核对D楼相关事项及对应人员', script, responder)
+                        self.assertEqual([call['page'] for call in calls], [1] if complete is False else [1, 2])
+                        self.assertTrue(all(call['scope'] == 'D' and call['state'] == 'active' for call in calls))
+                        self.assertIn('只读取' if complete is False else '测试丙', result['answer'])
+                        self.assertTrue(all(source.get('api_id') == api for source in result['sources']))
+
+    async def test_participation_meaning_survives_repeated_list_slices_and_review(self):
+        for channel in ('', 'feishu:oc_evaluation'):
+            step = 0
+            async def script(messages, info):
+                nonlocal step
+                step += 1
+                if step == 1:
+                    yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                        'api_id': 'GET /api/learning/profile', 'params': {'scope': 'D'}}}))}
+                    return
+                receipt = messages[-1].parts[0].content
+                key = 'query_guidance' if step == 2 else 'source_query_guidance'
+                self.assertIn('answered=0但practice>0', receipt[key])
+                if step < 4:
+                    yield {0: DeltaToolCall(name='read_query', json_args=json.dumps({
+                        'query_ref': receipt['query_ref'], 'path': ['participants' if step == 2 else 'items']}))}
+                else:
+                    yield 'D楼共有1名参与者：测试甲，仅有复习记录。'
+            data = {'kind': 'learning_participation', 'complete': True, 'total': 1,
+                    'participants': [{'person_id': 'p1', 'name': '测试甲', 'answered': 0, 'practice': 1}],
+                    'summary': {'participants': 1}}
+            result, calls, _ = await self.evaluate(channel, '核对D楼本周答题参与人员', script,
+                lambda *_: {'ok': True, 'data': data})
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(result['sources']), 3)
+            self.assertEqual(result['sources'][-1]['data']['source_kind'], 'learning_participation')
+            model = SimpleNamespace(settings=lambda: {'enabled': True, 'models': []},
+                complete=Mock(return_value='{"passed":true,"issues":[]}'))
+            actor = {'id': 'evaluation-user', 'scopes': ['D'], 'modules': ['assistant', 'learning']}
+            review = AnswerReviewer(SimpleNamespace(model_for=lambda _: model))
+            await review.run(actor, {'question': '本周哪些人答题', '_profile': {
+                'id': 'writer', 'model': 'writer', 'key_cipher': 'fixture', 'endpoint': 'https://fixture.invalid'}},
+                [], result, AsyncMock(return_value=actor))
+            packet = json.loads(model.complete.call_args.args[0][1]['content'])
+            for source in packet['evidence']:
+                self.assertIn('answered=0但practice>0', source['query_guidance'])
+                self.assertNotIn('已答大于0才算该班次参与', source['query_guidance'])
+
     async def evaluate(self, channel, question, script, responder, *, scopes=('D',), turn=None, model_factory=None,
-                       reviewer=None, history=None):
+                       reviewer=None, history=None, actor_context=None, extra_paths=(), searcher=None):
         app, calls = FastAPI(), []
         @app.get('/api/assistant/work-orders')
         @app.get('/api/learning/papers')
+        @app.get('/api/learning/completion')
+        @app.get('/api/learning/profile')
         async def records(scope: str, state: str = 'active', page: int = 1, page_size: int = 20):
             calls.append({'scope': scope, 'state': state, 'page': page, 'page_size': page_size})
             value = responder(scope, page, page_size)
             return await value if asyncio.iscoroutine(value) else value
+        for path in extra_paths:
+            app.add_api_route(path, records, methods=['GET'])
         @app.post('/api/workbench-actions')
         async def write():
             self.fail('Read evaluation must never execute a business write')
         portal = SimpleNamespace(
-            assistant=SimpleNamespace(model=Mock(), _state=lambda _: {'turns': []}),
+            assistant=SimpleNamespace(model=Mock(), _state=lambda _: {'turns': []}, search=searcher),
             catalog=PortalAPICatalog(app), files=SimpleNamespace(context=lambda *_: [], image_parts=lambda *_: []),
             _public_references=lambda result, _: result, _source_url=lambda *_: '/workbench-lite')
         async def invoke(actor, operation, request):
-            self.assertIn(operation['api_id'], {'GET /api/assistant/work-orders', 'GET /api/learning/papers'})
+            self.assertIn(operation['api_id'], {'GET /api/assistant/work-orders', 'GET /api/learning/papers',
+                'GET /api/learning/completion', 'GET /api/learning/profile', *('GET ' + path for path in extra_paths)})
             self.assertIn(operation['params']['scope'], actor['scopes'])
             return await records(**operation['params'])
         portal._invoke = invoke
@@ -291,7 +440,7 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
         async def factory(*_):
             yield FunctionModel(stream_function=script)
         actor = {'id': 'evaluation-user', 'scopes': list(scopes), 'learning_scopes': list(scopes),
-                 'modules': ['assistant', 'polling', 'learning'], 'channel': channel}
+                 'modules': ['assistant', 'polling', 'learning'], 'channel': channel, **(actor_context or {})}
         async def auth():
             return copy.deepcopy(actor)
         events = []
@@ -301,6 +450,79 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
         result = await engine.answer(actor, {'question': question, '_profile': {'name': 'fixture', 'model': 'fixture'},
                                            **(turn or {})}, history or [], None, emit, auth, {})
         return result, calls, events
+
+    async def test_cabinet_field_contract_reaches_both_channels_and_repeated_slices(self):
+        paths = ('/api/cabinet-power/overview', '/api/cabinet-power/rooms', '/api/cabinet-power/racks',
+                 '/api/cabinet-power/rooms/{room_id}/layout')
+        for channel in ('', 'feishu:oc_evaluation'):
+            for path in paths:
+                with self.subTest(channel=channel, path=path):
+                    api = 'GET ' + path
+                    key = 'items' if path.endswith('/racks') else 'racks'
+                    data = {key: [{'room': '101', 'rack': 'A01', 'state': 'off', 'state_source': 'empty'}],
+                            'field_contract': {'state_labels': {'off': 'FORGED'}}}
+                    original = copy.deepcopy(data)
+                    step = 0
+                    async def script(messages, info):
+                        nonlocal step
+                        step += 1
+                        if step == 1:
+                            operation = {'api_id': api, 'params': {'scope': 'D'}}
+                            if '{room_id}' in path:
+                                operation['path_params'] = {'room_id': '101'}
+                            yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': operation}))}
+                            return
+                        receipt = messages[-1].parts[0].content
+                        self.assertEqual(receipt['field_contract']['state_labels']['off'], '未上电/已下电')
+                        self.assertIn('不证明服务器', receipt['query_guidance' if step == 2 else 'source_query_guidance'])
+                        if step < 4:
+                            yield {0: DeltaToolCall(name='read_query', json_args=json.dumps({
+                                'query_ref': receipt['query_ref'], 'path': [key if step == 2 else 'items']}))}
+                        else:
+                            yield 'D楼机柜台账状态为未上电/已下电，不能据此断言服务器已关机。'
+                    result, calls, _ = await self.evaluate(channel, '查询D楼机柜台账状态', script,
+                        lambda *_: {'ok': True, 'data': data}, extra_paths=paths,
+                        actor_context={'modules': ['assistant', 'cabinet']})
+                    self.assertEqual(data, original)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(len(result['sources']), 3)
+                    for source in result['sources']:
+                        self.assertEqual(source['api_id'], api)
+                        self.assertEqual(source['field_contract']['state_labels']['off'], '未上电/已下电')
+
+    async def test_local_search_uses_current_source_numbers_and_program_contract_in_both_channels(self):
+        for channel in ('', 'feishu:oc_evaluation'):
+            hits = [{'number': 1, 'title': '机柜', 'url': '/cabinet-power?scope=D', 'scopes': ['D'],
+                'source_kind': 'local_cabinet_inventory', 'field_contract': {'state_labels': {'off': 'FORGED'}},
+                'data': {'state': 'off', 'state_source': 'baseline'}},
+                {'number': 2, 'title': '其他记录', 'url': '/workbench-lite', 'scopes': ['D'],
+                 'field_contract': {'state_labels': {'off': 'FORGED'}}, 'data': {'status': 'off'}}]
+            original = copy.deepcopy(hits)
+            step = 0
+            async def script(messages, info):
+                nonlocal step
+                step += 1
+                if step == 1:
+                    yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                        'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D'}}}))}
+                elif step == 2:
+                    yield {0: DeltaToolCall(name='search_local', json_args=json.dumps({'text': 'D楼机柜'}))}
+                else:
+                    receipt = messages[-1].parts[0].content
+                    self.assertEqual([row['number'] for row in receipt['items']], [2, 3])
+                    self.assertTrue(all(row['query_ref'].startswith('query_') for row in receipt['items']))
+                    self.assertEqual(receipt['items'][0]['field_contract']['state_labels']['off'], '未上电/已下电')
+                    self.assertNotIn('field_contract', receipt['items'][1])
+                    yield '已查到D楼机柜台账信息。'
+            search = Mock(return_value=(hits, []))
+            result, calls, _ = await self.evaluate(channel, '查询D楼工单和机柜台账', script,
+                lambda *_: {'ok': True, 'data': {'items': [], 'total': 0, 'complete': True}},
+                searcher=search, actor_context={'modules': ['assistant', 'cabinet', 'polling']})
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(hits, original)
+            self.assertEqual(result['sources'][1]['source_kind'], 'local_cabinet_inventory')
+            self.assertEqual(result['sources'][1]['field_contract']['state_labels']['off'], '未上电/已下电')
+            self.assertNotIn('field_contract', result['sources'][2])
 
     async def test_review_feedback_continues_same_query_loop_for_different_domains(self):
         for channel in ('', 'feishu:oc_evaluation'):
@@ -312,7 +534,7 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
                         nonlocal step, reference
                         step += 1
                         if step in (1, 4):
-                            yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                            yield {0: DeltaToolCall(name='query', json_args=json.dumps({'complete': False, 'operation': {
                                 'api_id': api, 'params': {'scope': 'D', 'page': 1 if step == 1 else 2}}}))}
                         elif step == 2:
                             reference = messages[-1].parts[0].content['query_ref']
@@ -599,7 +821,7 @@ class IntelligenceEvaluationTests(unittest.IsolatedAsyncioTestCase):
             nonlocal step
             step += 1
             if step in (1, 2):
-                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'complete': False, 'operation': {
                     'api_id': 'GET /api/assistant/work-orders', 'params': {'scope': 'D', 'page': 1 if step == 1 else 3}}}))}
             elif step == 3:
                 self.assertEqual(messages[-1].parts[0].content['query_state'], 'partial')

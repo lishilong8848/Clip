@@ -230,16 +230,20 @@ async def public_company_fallback(engine, actor, turn, reason, emit, authorize):
         except (OSError, asyncio.TimeoutError):
             answer = prefix + '公开查询暂不可用，请稍后重试或补充相关文件。'
     await emit('text', {'delta': answer})
-    return {'answer': answer, 'sources': sources}
+    return {'answer': answer, 'sources': sources, **({} if sources else {
+        'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable', 'repairs': 0}})}
 
 
 async def answer_company(engine, actor, turn, question, emit, authorize, *, business_sources=None, document_query=None):
     turn.pop('_quality_review', None)
     async def reply(text, sources=None):
         await emit('text', {'delta': text})
-        return {'answer': text, 'sources': sources or []}
+        # A source failure is not a draft for the reviewer to replace with old conversation facts.
+        return {'answer': text, 'sources': sources or [], **({} if sources else {
+            'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable', 'repairs': 0}})}
 
     business_sources = list(business_sources or [])
+    from .lighthouse_queries import QUERY_TIME_GUIDANCE
     business_public = [{**source, 'number': i, 'data': safe_data(source.get('data'))}
                        for i, source in enumerate(business_sources, 1)]
     business_review = [{**source, 'number': i, 'data': safe_data(source.get('data'), list_limit=None)}
@@ -361,10 +365,11 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         stamp = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
         sources = business_public + [{'number': i, 'kind': 'company_knowledge', 'title': f"{item['name']} · 版本{item['version']} · {item['location']}",
                     'url': item['url'], 'queried_at': stamp, 'scopes': [], 'available': True,
-                    'data': {key: item[key] for key in ('document_id', 'version', 'ordinal', 'name', 'location')}
+                    'data': {key: item[key] for key in ('document_id', 'version', 'ordinal', 'name', 'location',
+                        'source_created_at') if key in item}
                         | {'source_kind': item.get('source_kind', 'shared')}}
                    for i, item in enumerate(items, offset + 1)]
-        evidence = [{'number': i, **{key: item[key] for key in (
+        evidence = [{'number': i, 'queried_at': stamp, **{key: item[key] for key in (
                     'name', 'version', 'location', 'text', 'source_hash', 'source_created_at',
                     'coverage', 'source_version', 'visual_evidence') if key in item}}
                     for i, item in enumerate(items, offset + 1)]
@@ -389,13 +394,18 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             '若证据不适用或遗漏关键部分，在queries给出针对缺口的替代检索词（最多3项），不要重复之前查询。'
             '已得到支持的部分保留，依据不足的部分写入gaps；不要为省事声称缺资料。没有任何依据时answer为空。'
             'previous_candidate只是本轮未完成的候选，不是新证据；保留其中仍被当前文档支持的内容，引用按当前documents编号重建。'
-            'business_evidence是本轮只读业务回执；与文档分别引用，按相同日期、设备、单位及范围比较，不把规范当现场事实或把记录条数当人数。'
+            'business_evidence是本轮只读业务回执；与文档分别引用，各按用户指定的子问题条件回答。'
+            '仅比较确实共有的日期、设备、单位及范围；不得把文档特有的对象或条件反向套为业务过滤条件，也不能把业务状态或计数要求套给文档。'
+            '不把规范当现场事实或把记录条数当人数。'
             '业务回执标为节选或不可用的，不推导全量统计或现场合规结论；不能用文档检索补造业务事实。'
             'review_feedback是独立复核发现的缺口；已有证据可修正时直接修正，确需新文档时用queries补查。'
             '只输出JSON：{"answer":"带引用的答复","queries":["补查词"],"gaps":["尚缺依据的事项"]}。完整时后两项为空。'
             '不能查询实时业务、联网、执行操作，也不要把模型常识当作公司制度。'
-            '不返回身份证号、家庭住址、私密联系方式或密钥。')},
+            '不返回身份证号、家庭住址、私密联系方式或密钥。' + QUERY_TIME_GUIDANCE)},
         {'role': 'user', 'content': json.dumps({'question': question, 'topics': topic_evidence,
+                    'query_context': {'reference_time': turn.get('_reference_time')},
+                    'branch_queries': {key: (turn.get('_query_intent') or {}).get(key, '')
+                                       for key in ('business_query', 'document_query')},
                     'documents': evidence, 'previous_queries': sorted(seen_queries),
                     'business_evidence': business_context, 'review_feedback': review_feedback,
                     'previous_candidate': _previous_candidate(partial, partial_sources, sources),

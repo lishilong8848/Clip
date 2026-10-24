@@ -282,6 +282,21 @@ class AutomaticCompanyKnowledge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.status, 403)
         self.assertFalse(any(call.args[0] == 'text' for call in self.emit.call_args_list))
 
+    async def test_no_current_documents_cannot_be_recreated_from_history_by_outer_review(self):
+        self.kb.search.return_value = {'items': [], 'warning': '公司知识库中未找到相关资料。'}
+        self.model.complete.return_value = '{"keywords":[]}'
+        reviewer = SimpleNamespace(run=AsyncMock(return_value={
+            'answer': '上次的归档规定仍然有效。', 'sources': [], 'answer_review': {'status': 'corrected'}}))
+        engine = LighthouseModel(self.portal, answer_reviewer=reviewer)
+        history = [{'question': '公司归档规定', 'answer': '旧规程曾要求三人复核。', 'scopes': ['E']}]
+        result = await engine.answer(self.actor, {'question': '/公司知识库 公司归档规定', '_profile': self.profile},
+            history, None, self.emit, self.authorize, {})
+        reviewer.run.assert_not_awaited()
+        self.assertEqual(result['answer_review']['reason'], 'source_unavailable')
+        self.assertNotIn('仍然有效', result['answer'])
+        self.assertNotIn('三人复核', result['answer'])
+        self.assertEqual(result['sources'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

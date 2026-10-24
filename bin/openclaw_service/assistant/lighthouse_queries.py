@@ -17,6 +17,56 @@ from .lighthouse_pending import NOTICE_TYPES, pending_status, visible
 from .lighthouse_sources import SCOPES, record_codes, record_title
 
 TZ = dt.timezone(dt.timedelta(hours=8))
+QUERY_TIME_GUIDANCE = (
+    'reference_time仅为本轮理解今天/昨天等相对日期的北京时间基准，不是查询、统计或数据更新时间。'
+    '每条来源的queried_at仅表示该份资料快照的读取时间，不代表云端同步、数据生效或统计截止时间。'
+    '缓存与列表续读沿用原快照读取时间，不能称为刚刚重新查询。'
+    '统计日期、班次、发生时间、更新时间及同步时间分别按原字段说明；不同来源的时间不能互相替代。'
+    '未提供的时间保持未知，不从reference_time、历史回答或其他来源补造；没有必要无需附带时间。')
+LEARNING_COMPLETION_MEANING = (
+    'GET /api/learning/completion按排班日统计：total是人员日记录数，summary是整个人员日的状态分布，不是参与人数。'
+    'shift只筛选含该班次任务的人员日，不裁剪tasks；行answered和status仍可能包含其他班次，不能直接当作所选班次结果。'
+    '须按tasks中的scope、shift核对answered，已答大于0才算该班次参与，按person_id去重；仅待答、开始或已发送不算参与。'
+    '夜班跨零点仍属原排班日；自主练习按实际提交日另列，任务班次或资料未确认时说明限制，不推断为零。')
+LEARNING_PARTICIPATION_MEANING = (
+    'learning_participation是按实际提交日期的参与统计，不按班次。summary.participants及participants为已去重人数与名单；'
+    'answered是首次作答题数，practice是重复练习题次，answer_attempts是二者合计。'
+    'answered=0但practice>0的人员也参与了答题，不能排除或称其从未作答；若只问首次作答人员才按answered>0另计。'
+    '本统计不套用completion的班次任务规则；范围、完整性和姓名缺失仍按实际回执说明。')
+
+
+def source_field_contract(api_id='', source_kind=''):
+    """Program-owned field meanings, selected by source identity, never question text."""
+    if api_id is not None and not isinstance(api_id, str):
+        return None
+    paths = {
+        'GET /api/cabinet-power/overview': (['racks[].state'], ['counts', 'rooms[].counts']),
+        'GET /api/cabinet-power/rooms': (['racks[].state'], ['counts', 'rooms[].counts']),
+        'GET /api/cabinet-power/racks': (['items[].state'], []),
+        'GET /api/cabinet-power/rooms/{room_id}/layout': (['racks[].state'], ['summary']),
+    }.get(api_id)
+    if not api_id and source_kind == 'local_cabinet_inventory':
+        paths = (['state'], ['counts'])
+    if paths is None:
+        return None
+    from lan_bitable_template_portal.cabinet_power_batches import POWER_STATE_LABELS
+    return {
+        'subject': '机柜台账供电状态', 'count_unit': '机柜',
+        'state_fields': paths[0], 'count_fields': paths[1],
+        'state_labels': {**POWER_STATE_LABELS, 'unknown': '待核实'},
+        'state_source_labels': {'operation': '成功操作记录推导', 'baseline': '保存的基线',
+                                'unconfirmed': '尚未确认', 'empty': '无有效操作记录且无基线'},
+        'relations': ['已上电=正式电(formal)+测试电(test)。',
+            '上电率=已上电/机柜总数(total)，分母包含待核实；总数为0或缺失时比例未知。',
+            'powered是formal与test的合计，不能再次加到状态分类中；存量数不是操作次数、机房数或服务器台数。'],
+        'limits': ['off包含未上电和已下电，仅凭off不能推断发生过下电或其时间。',
+            'count_unit仅用于count_fields；rooms列表条数是机房数，record_count是业务记录数，不套用机柜单位。',
+            '供电台账状态不证明服务器或业务系统已关机、在运行或健康，也不是实时电力测量。',
+            'state_source为empty或baseline时不推断存在成功操作；动作和时间须核对原操作证据。',
+            '机柜列表可能仅含已定位条目，不能用样本条数替代原生概览或机房汇总的total。',
+            'unknown及未识别状态不得归入off；未配置、未就绪、缺失字段和读取失败不等于实际零。',
+            '字段路径相对每楼原响应；列表片段须结合原path定位。只解释本来源字段，不证明已读全或授予权限。'],
+    }
 COUNT = re.compile(r"多少|几(?:条|个|项|份|单|件|道|台|柜|起|宗|次)|数量|总数")
 DETAIL = re.compile(r"明细|详情|哪些|哪几(?:条|个|项)|列出|列一下|清单|列表|逐条|分别(?:是|哪些|什么)|具体(?:是|有)?什么|(?:还有|有)(?:什么|啥)(?:工作|任务|活|事)")
 PENDING = re.compile(r"未(?:结束|完成|闭环|处理|提交|开始|发|答题|作答)|待(?:完成|处理|提交|开始|发|答题|作答)|进行中|处理中|维修中|待办|没(?:做完|完成|答题)|维修.{0,16}(?:还没好|没修好|尚未修复|没有修好)")
@@ -40,7 +90,8 @@ DOMAINS = (
     ("drills", r"演练", "演练", "区分演练定义、楼栋执行任务、记录表和评估表；任务按执行状态。"),
     ("guard", r"重保", "重保", "区分重保任务和楼栋检查表；未提交检查表是待办。"),
     ("question_bank", r"题库|题目|试题|面试题|选择题", "题库资料", "仅只读查询。管理员可查完整题库；值班账号只能读取原本可见的题目和已开放答案，不自动查看答案，不办理学练操作。"),
-    ("learning", r"学练|题单|答题|错题", "画像学练", "只查询原权限内题单、进度、未答数量、历史和复习资料；未发布与已发布未答分开。答题、答案提示、编辑、发布和质疑提交走原页面，不在助手办理。"),
+    ("learning", r"学练|题单|答题|错题", "画像学练", "题单status=pending表示尚未完成答题，不是待发布；completed表示已完成答题。stats.total是有效题数，stats.answered是有效已答题数，二者差为剩余题数；题单列表total是题单条数，不是题数或参与人数。发布和消息投递须看相应回执，不能从答题状态推断。只查询题单、进度、历史和复习资料；答题、答案提示、编辑、发布和质疑提交走原页面，不在助手办理。"
+     "参与统计先区分实际提交日期与排班日/班次：前者用learning_participants或GET /api/learning/profile(view=participation)，后者用GET /api/learning/completion。不能只用completion的tasks/answered替代实际提交统计；各来源按自身query_guidance解释，不能互套口径。"),
     ("daily", r"日常|每日任务|晨会|日报|工作报告", "日常工作", "日常任务、工作报告和晨会不是事件通告，按相应日期及状态。"),
     ("convergence", r"收敛|智航|核对台|规则配置", "计划收敛审查", "规则、核对结果、告警及检修核对分开，不把命中规则数当事件数。"),
     ("people", r"人员|工号|值班账号|排班|白班|夜班|当班|上班|出勤|签名", "人员", "排班人数与名单必须读取对应日期和班次的真实资料，不等同实时签到。只提供授权姓名和工号；不提供签名图片、身份证、住址和凭证。"),
@@ -162,13 +213,20 @@ def query_result_state(result):
     if not result.get("ok") or result.get("available") is False:
         return "unavailable", "此次读取未成功，不代表没有记录；权限错误不要重试扩大范围。"
     raw = result.get("_raw", result.get("data"))
-    learning_note = (" 学练history含待答题单，total是题单条数，不是参与人数；参与名单及人数须查询GET /api/learning/profile（view=participation），不能从history推算。"
+    source_note = (" 学练history含待答题单，total是题单条数，不是参与人数；参与名单及人数须查询GET /api/learning/profile（view=participation），不能从history推算。"
                      if result.get("api_id") == "GET /api/learning/history" else "")
+    if result.get('api_id') == 'GET /api/learning/completion':
+        source_note = ' ' + LEARNING_COMPLETION_MEANING
+    elif isinstance(raw, dict) and (raw.get('source_kind') if raw.get('snapshot_only') is True else raw.get('kind')) == 'learning_participation':
+        source_note = ' ' + LEARNING_PARTICIPATION_MEANING
+    contract = source_field_contract(result.get('api_id'), result.get('source_kind'))
+    if contract:
+        source_note = ' 程序字段口径（不是当前记录或权限依据）：' + json.dumps(contract, ensure_ascii=False, separators=(',', ':'))
     if result.get("scope_warning") or result.get("complete") is False or result.get("truncated") and "_raw" not in result:
-        return "partial", "结果不完整，不能按已展示条数报全量或回答没有记录。" + learning_note
+        return "partial", "结果不完整，不能按已展示条数报全量或回答没有记录。" + source_note
     if isinstance(raw, dict):
         if raw.get("available") is False:
-            return "unavailable", "此次资料未取得，不代表没有记录。" + learning_note
+            return "unavailable", "此次资料未取得，不代表没有记录。" + source_note
         collected = raw.get("query_completeness")
         if isinstance(collected, dict):
             lists = collected.get("lists")
@@ -177,16 +235,16 @@ def query_result_state(result):
                            or type(item.get("count")) is not int or item["count"] < 0
                            or item["count"] != item.get("declared_total") or item["count"] != item.get("loaded_count")
                            or not isinstance(raw.get(key), list) or len(raw[key]) != item["count"] for key, item in lists.items())):
-                return "partial", "分页尚未完整读取，只能报告已知记录下限；完整数量未知。" + learning_note
+                return "partial", "分页尚未完整读取，只能报告已知记录下限；完整数量未知。" + source_note
             if lists and all(item.get("count") == 0 for item in lists.values()):
-                return "empty", "本次授权范围和筛选条件已完整读取，结果确认为零；不代表其他范围或日期没有记录。" + learning_note
-            return "found", "已完整读取本次筛选的记录；记录数、去重人数、作答题次和题目数量须分别报告。" + learning_note
+                return "empty", "本次授权范围和筛选条件已完整读取，结果确认为零；不代表其他范围或日期没有记录。" + source_note
+            return "found", "已完整读取本次筛选的记录；记录数、去重人数、作答题次和题目数量须分别报告。" + source_note
         if raw.get("snapshot_exists") is False or raw.get("source_snapshot_ready") is False:
-            return "unavailable", "来源快照尚未就绪，不能把资料缺失解释为零条。" + learning_note
+            return "unavailable", "来源快照尚未就绪，不能把资料缺失解释为零条。" + source_note
         if raw.get("warnings") or raw.get("schema_warnings"):
-            return "partial", "来源存在资料警告，完整数量未知；不能把缺失资料当零条。" + learning_note
+            return "partial", "来源存在资料警告，完整数量未知；不能把缺失资料当零条。" + source_note
         if raw.get("list_complete") is False:
-            return "partial", "当前名单未完整保留；统计完整性另看complete和count，不能把已展示样本当完整名单。" + learning_note
+            return "partial", "当前名单未完整保留；统计完整性另看complete和count，不能把已展示样本当完整名单。" + source_note
         for key in ("records", "ongoing"):
             rows, meta = raw.get(key), raw.get(key + "_pagination")
             if isinstance(rows, list) and isinstance(meta, dict) and (
@@ -195,19 +253,19 @@ def query_result_state(result):
                 return "partial", "当前工作台列表只是一页，请保留楼栋、类型及日期条件补读缺失页；计划与进行中通告分别计数。"
         if (raw.get("complete") is False or raw.get("truncated") or raw.get("has_more")
                 or raw.get("next_offset") is not None):
-            return "partial", "资料尚未读取完整，保留原查询条件继续读取后页；不能按当前名单或total推断完整人数。" + learning_note
+            return "partial", "资料尚未读取完整，保留原查询条件继续读取后页；不能按当前名单或total推断完整人数。" + source_note
         lists = [raw[key] for key in ("records", "items", "rows", "tasks", "pending", "ongoing", "participants") if isinstance(raw.get(key), list)]
         if lists and not any(lists):
             if raw.get("complete") is True and type(raw.get("total")) is int and raw["total"] == 0 and raw.get("page", 1) == 1:
-                return "empty", "本次条件已完整读取，结果确认为零；范围与来源日期仍以本次查询为准。" + learning_note
-            return "empty_page", "本次筛选或当前页没有记录，不等于全库没有。先检查分页、日期和业务分类；若有search/keyword可换一次核心词，必须保留用户的楼栋、日期、状态约束。不要反复调用同一查询。" + learning_note
+                return "empty", "本次条件已完整读取，结果确认为零；范围与来源日期仍以本次查询为准。" + source_note
+            return "empty_page", "本次筛选或当前页没有记录，不等于全库没有。先检查分页、日期和业务分类；若有search/keyword可换一次核心词，必须保留用户的楼栋、日期、状态约束。不要反复调用同一查询。" + source_note
         if lists:
             if (type(raw.get("total")) is int and raw["total"] > max(map(len, lists))
                     or type(raw.get("page")) is int and raw["page"] > 1
                     or type(raw.get("remaining")) is int and raw["remaining"] > 0):
-                return "partial", "当前只取得部分记录，须按原条件读取完整分页；total只代表接口声明的记录数，不是完整名单或去重人数。" + learning_note
-            return "found", "有候选记录，请核对标题和条件；完整数量以接口统计或完整分页为准。" + learning_note
-    return "read", "已取得本次接口结果；不要把资料目录、字段配置或样本长度当业务数量。"
+                return "partial", "当前只取得部分记录，须按原条件读取完整分页；total只代表接口声明的记录数，不是完整名单或去重人数。" + source_note
+            return "found", "有候选记录，请核对标题和条件；完整数量以接口统计或完整分页为准。" + source_note
+    return "read", "已取得本次接口结果；不要把资料目录、字段配置或样本长度当业务数量。" + source_note
 
 
 # Only native list contracts whose pagination has been checked here may be followed.
@@ -224,6 +282,26 @@ QUERY_PAGE_SCHEMAS = {
     "GET /api/learning/completion": (("items", "", "page", "page_size", "person_days"),),
     "GET /api/learning/papers": (("items", "", "page", "page_size", "papers"),),
 }
+
+
+def query_has_pending_pages(api_id, result):
+    """Only declared source pagination, never missing data or snapshot slices."""
+    data = result.get('_raw', result.get('data'))
+    if (not result.get('ok') or result.get('available') is False or result.get('complete') is False
+            or result.get('scope_warning') or result.get('truncated') and '_raw' not in result
+            or not isinstance(data, dict) or data.get('available') is False or data.get('complete') is False
+            or data.get('truncated') or data.get('snapshot_only') or data.get('warnings') or data.get('schema_warnings')
+            or data.get('snapshot_exists') is False or data.get('source_snapshot_ready') is False):
+        return False
+    for key, pagination, position, _, _ in QUERY_PAGE_SCHEMAS.get(api_id, ()):
+        rows, meta = data.get(key), data.get(pagination) if pagination else data
+        if not isinstance(rows, list) or not isinstance(meta, dict):
+            continue
+        total = meta.get('total')
+        cursor = meta.get(position, 0 if position == 'offset' else 1)
+        if type(total) is int and total > len(rows) and type(cursor) is int:
+            return True
+    return False
 
 
 async def collect_query_pages(operation, invoke, *, first_result=None, max_pages=20,
@@ -321,7 +399,7 @@ async def collect_query_pages(operation, invoke, *, first_result=None, max_pages
                 source = {"requested_scope": op["params"].get("scope"), **{name: data[name] for name in ("scope", "scopes", "month", "from", "to", "source",
                           "last_loaded_at", "last_refreshed_at", "updated_at", "cache_updated_at", "source_freshness",
                           "source_cache_ttl_seconds", "payload_version") if isinstance(data, dict) and name in data}}
-                source["queried_at"] = dt.datetime.now(TZ).isoformat(timespec="seconds")
+                source['queried_at'] = result.get('_queried_at')
                 if source not in freshness:
                     freshness.append(source)
                 data = raw_page(result)
@@ -719,6 +797,7 @@ async def collect_notices(actor, query: NoticeQuery, invoke):
         data = result.get("_raw", result.get("data"))
         if isinstance(data, dict):
             freshness.append({"scope": op.get("params", {}).get("scope"),
+                              'queried_at': result.get('_queried_at'),
                               **{key: data[key] for key in ("last_loaded_at", "last_refreshed_at", "source_freshness", "payload_version") if key in data}})
             if (data.get("complete") is False or data.get("available") is False or data.get("warnings")
                     or data.get("schema_warnings") or result.get("scope_warning") or result.get("complete") is False
@@ -727,6 +806,7 @@ async def collect_notices(actor, query: NoticeQuery, invoke):
         return result
 
     for kind in kinds:
+        first_read = len(freshness)
         scoped = {**actor, "scopes": grants[kind]}
         if query.status == "sent":
             data = await collect_notice_sends(scoped, query.start_date, query.end_date, read, work_types=[kind], item_limit=2000)
@@ -735,6 +815,8 @@ async def collect_notices(actor, query: NoticeQuery, invoke):
             group = "plans" if query.status == "planned" else "notices"
             data = await collect_pending(scoped, "", read, None, groups_only={group}, notice_type=kind, item_limit=2000)
             reports.append({"work_type": kind, **data["groups"][0], "list_complete": data["groups"][0]["remaining"] == 0})
+        reports[-1]['queried_at'] = max((row['queried_at'] for row in freshness[first_read:]
+            if row.get('queried_at')), default=None)
         if denied is not None:
             raise denied
     complete = all(row.get("complete", row.get("available", False)) for row in reports)
@@ -745,7 +827,8 @@ async def collect_notices(actor, query: NoticeQuery, invoke):
             "known_count": sum(row["known_count"] for row in reports), "unit": "distinct_notices",
             "date_basis": "action.time" if query.status == "sent" else "current_status",
             "send_count": sum(row["send_count"] for row in reports) if query.status == "sent" and complete else None,
-            "groups": reports, "source_freshness": freshness, "queried_at": dt.datetime.now(TZ).isoformat(timespec="seconds")}
+            "groups": reports, "source_freshness": freshness,
+            "queried_at": max((row['queried_at'] for row in freshness if row.get('queried_at')), default=None)}
 
 
 async def collect_notice_sends(actor, start_date, end_date, invoke, *, work_types=(), item_limit=20):

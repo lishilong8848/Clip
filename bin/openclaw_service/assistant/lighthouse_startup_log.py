@@ -65,6 +65,9 @@ def emit(stage, **fields):
         return
     if render(line) is None:
         return
+    if stage in {'startup_failed', 'service_failed', 'runtime_auth_failed'}:
+        from openclaw_service.diagnostics import capture
+        capture('startup', stage, category=stage)
     logging.getLogger('openclaw_service.lifecycle').info('%s', line)
     try:
         print(line, flush=True)

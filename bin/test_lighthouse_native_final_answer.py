@@ -105,6 +105,18 @@ class NativeFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assert_single_submission(client)
         self.assertFalse(getattr(self.agent, '_terminal_model_failure', False))
 
+    async def test_chat_error_waits_for_confirmed_outcome_without_publishing_preview(self):
+        self.agent._buffered_reply = True
+        client = ScriptedGateway(frames=[assistant(PROCESS),
+            {'event': 'chat', 'payload': {'runId': 'run-final', 'state': 'error'}}],
+            outcomes=[{'status': 'timeout', 'pendingError': True}, visible()])
+        events = await self.collect(client)
+        self.assertEqual(events[-1].result.output, FINAL)
+        self.assertNotIn(PROCESS, str(events))
+        self.assert_single_submission(client)
+        self.assertEqual(sum(method == 'agent.wait' for method, _ in client.calls), 2)
+        self.assertFalse(getattr(self.agent, '_terminal_model_failure', False))
+
     async def test_yielded_tool_turn_cannot_be_final(self):
         self.agent.calls = 1
         client = ScriptedGateway(frames=[assistant(PROCESS), end(), chat_final()],

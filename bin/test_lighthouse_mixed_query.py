@@ -124,6 +124,8 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         expected_receipts = copy.deepcopy(business['_query_evidence'])
         phases = []
         async def read(actor, phase, old, request, emit, authorize, context):
+            self.assertEqual(old, [])
+            self.assertEqual(context, {})
             phases.append(copy.deepcopy(phase))
             await emit('reply-mode', {'mode': 'live'})
             await emit('text', {'delta': 'HIDDEN_BUSINESS_DRAFT'})
@@ -136,8 +138,11 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(phases), 1)
         self.assertTrue(phases[0]['_read_only_phase'])
         self.assertEqual(phases[0]['question'], BUSINESS_QUERY)
+        self.assertEqual(phases[0]['prompt'], BUSINESS_QUERY)
         self.assertEqual(phases[0]['_query_intent']['kind'], 'business')
         self.assertFalse(phases[0]['_task_context'])
+        self.assertEqual(phases[0]['_query_intent']['query'], BUSINESS_QUERY)
+        self.assertEqual(phases[0]['_answer_goals'], [])
         self.assertEqual(synth.await_args.args[3], QUESTION)
         self.assertEqual(synth.await_args.kwargs['document_query'], DOCUMENT_QUERY)
         self.assertEqual(synth.await_args.kwargs['business_sources'], expected_receipts)
@@ -148,6 +153,32 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(DOCUMENT_BODY, repr(result))
         self.assertNotIn('HIDDEN_BUSINESS_DRAFT', self.texts())
         self.assertEqual(self.texts(), FINAL)
+
+    async def test_document_only_equipment_never_reenters_business_phase_in_either_channel(self):
+        question = '查询D楼未完成工单数量，同时核对设备X的任务资料归档要求'
+        business_query = '查询D楼未完成工单数量'
+        document_query = '核对设备X的任务资料归档要求'
+        for channel in ('', 'feishu:oc_fixture'):
+            with self.subTest(channel=channel):
+                self.actor['channel'] = channel
+                self.current_actor = copy.deepcopy(self.actor)
+                routing = {**resolved(question=question), 'business_query': business_query,
+                           'document_query': document_query}
+                turn = self.turn(question, _task_context={'query': '设备X的旧条件'},
+                                 _answer_goals=[{'id': 'old', 'request': document_query}])
+                async def read(actor, phase, old, request, emit, authorize, context):
+                    self.assertEqual(phase['question'], business_query)
+                    self.assertEqual(phase['_query_intent']['query'], business_query)
+                    self.assertNotIn('设备X', repr(phase['_answer_goals']))
+                    self.assertEqual(old, [])
+                    return self.business_result()
+                self.engine._answer_candidate = AsyncMock(side_effect=read)
+                with patch.object(classifier, 'resolve_query_intent', new=AsyncMock(return_value=routing)), \
+                        patch.object(documents, 'answer_company', new=AsyncMock(return_value=self.combined_result())) as synth:
+                    await self.answer(turn, [{'question': '设备X有哪些工单', 'scopes': ['D']}])
+                self.assertEqual(synth.await_args.kwargs['document_query'], document_query)
+                self.assertEqual(turn['question'], question)
+                self.assertEqual(self.fixture.writes, [])
 
     async def test_semantic_knowledge_followup_uses_resolved_query_with_actual_candidate(self):
         effective = 'D楼昨天UPS巡检规程的适用条件'
@@ -246,9 +277,71 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result['sources'])
                 self.assertNotIn('_actual_profile', result)
                 self.assertNotIn('_actual_profile', turn)
-                self.assertNotIn('answer_review', result)
+                self.assertEqual(result['answer_review']['reason'], 'source_unavailable')
                 self.assertNotIn('_task_context', result)
                 self.assertEqual(self.texts(), result['answer'])
+
+    async def test_model_requested_documents_preserve_business_when_no_document_is_available(self):
+        self.patch_intent(resolved('unknown'))
+        business = self.business_result(_requested_company_query=DOCUMENT_QUERY)
+        self.engine._answer_candidate = AsyncMock(return_value=business)
+        async def unavailable(engine, actor, turn, question, emit, authorize, **kwargs):
+            await emit('text', {'delta': '未取得适用文档。'})
+            return {'answer': '未取得适用文档。', 'sources': [],
+                    'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable'}}
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                          side_effect=unavailable):
+            result = await self.answer()
+        self.assertIn('本轮业务结果。[1]', result['answer'])
+        self.assertIn('未取得适用文档', result['answer'])
+        self.assertTrue(result['sources'])
+        self.assertEqual(result['answer_review']['reason'], 'source_unavailable')
+        self.assertEqual(self.texts(), result['answer'])
+
+    async def test_model_requested_document_denial_never_returns_the_business_draft(self):
+        self.patch_intent(resolved('unknown'))
+        self.engine._answer_candidate = AsyncMock(return_value=self.business_result(_requested_company_query=DOCUMENT_QUERY))
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                          side_effect=AssistantError('权限已撤销', 403)):
+            with self.assertRaises(AssistantError) as denied:
+                await self.answer()
+        self.assertEqual(denied.exception.status, 403)
+        self.assertEqual(self.texts(), '')
+
+    async def test_model_requested_document_fallback_rechecks_permission_before_emitting(self):
+        self.patch_intent(resolved('unknown'))
+        self.engine._answer_candidate = AsyncMock(return_value=self.business_result(_requested_company_query=DOCUMENT_QUERY))
+        async def unavailable(*args, **kwargs):
+            self.current_actor['scopes'] = []
+            return {'answer': '文档暂不可用。', 'sources': []}
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock, side_effect=unavailable):
+            with self.assertRaises(AssistantError) as denied:
+                await self.answer()
+        self.assertEqual(denied.exception.status, 403)
+        self.assertEqual(self.texts(), '')
+
+    async def test_unavailable_documents_do_not_rewrite_reviewed_business_from_old_history(self):
+        for routing in ('mixed', 'unknown'):
+            with self.subTest(routing=routing):
+                self.events.clear()
+                self.patch_intent(resolved(routing))
+                business = self.business_result(answer_review={'status': 'passed'})
+                if routing == 'unknown':
+                    business['_requested_company_query'] = DOCUMENT_QUERY
+                self.engine._answer_candidate = AsyncMock(return_value=business)
+                reviewer = SimpleNamespace(run=AsyncMock(return_value={
+                    'answer': 'OLD_RULE_MUST_NOT_RETURN', 'sources': [], 'answer_review': {'status': 'corrected'}}))
+                self.engine.answer_reviewer = reviewer
+                history = [{'question': '旧规定', 'answer': 'OLD_RULE_MUST_NOT_RETURN', 'scopes': ['D'],
+                            'sources': [{'kind': 'company_knowledge'}]}]
+                with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                        return_value={'answer': '未取得适用文档。', 'sources': []}):
+                    result = await self.answer(history=history)
+                reviewer.run.assert_not_awaited()
+                self.assertIn('本轮业务结果', result['answer'])
+                self.assertIn('未取得适用文档', result['answer'])
+                self.assertNotIn('OLD_RULE_MUST_NOT_RETURN', result['answer'])
+                self.assertEqual(result['answer_review']['reason'], 'source_unavailable')
 
     async def test_document_authorization_errors_propagate_without_emission(self):
         self.patch_intent()
@@ -351,6 +444,7 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.tool_sets)
         for tools in self.tool_sets:
             self.assertLessEqual(tools, READ_REPAIR_TOOLS)
+            self.assertNotIn('company_documents', tools)
             self.assertNotIn('prepare_business', tools)
             self.assertNotIn('create_text_file', tools)
         upload.assert_not_called()
@@ -358,6 +452,28 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.store.list_documents('lighthouse_agent_plans'), [])
         self.assertEqual(self.fixture.reads, ['D'])
         self.assertEqual(synth.await_count, 1)
+
+    async def test_business_phase_review_does_not_require_document_answer(self):
+        self.patch_intent()
+        self.steps = [
+            ('company_documents', {'query': DOCUMENT_QUERY}),
+            ('query', {'operation': {'api_id': 'GET /api/repair-management/records', 'params': {'scope': 'D'}}}),
+            '已核对业务记录。[1]']
+        reviews = []
+
+        async def review(actor, turn, history, result, authorize, **kwargs):
+            reviews.append((turn.get('_read_only_phase', False), kwargs.get('business_only', False)))
+            return {**result, 'answer_review': {'status': 'passed', 'repairs': 0}}
+
+        self.engine.answer_reviewer = SimpleNamespace(run=AsyncMock(side_effect=review))
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                          return_value=self.combined_result()) as synth:
+            await self.answer()
+        self.assertIn((True, True), reviews)
+        self.assertTrue(all(business_only for phase, business_only in reviews if phase))
+        self.assertEqual(synth.await_count, 1)
+        self.assertEqual(self.fixture.reads, ['D'])
+        self.assertEqual(self.fixture.writes, [])
 
     async def test_exhausted_classifier_keeps_metadata_document_tool_and_stateless_synthesis(self):
         self.fixture.model.complete.side_effect = [OSError('first failure'), OSError('second failure'),

@@ -457,6 +457,8 @@ class LighthouseStream:
             chunk(AbortChunk(reason="已停止当前回答"))
         except Exception as exc:
             error_code, error = failure_detail(exc)
+            from openclaw_service.diagnostics import capture
+            await asyncio.to_thread(capture, 'assistant', 'answer', run_id=run['id'], category=error_code, error=exc)
             from .lighthouse_context import reply_failure
             error = reply_failure(error, error_code, run['_turn'].get('prompt') or run['_turn']['question'])
             frames = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)[-6:]]

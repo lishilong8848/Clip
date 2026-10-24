@@ -226,22 +226,22 @@ class Host:
         names = [entry.get('name') if isinstance(entry, dict) else None for entry in definitions]
         if len(set(names)) != len(names) or any(not isinstance(name, str) or not re.fullmatch(r'lighthouse_[a-z_]{1,60}', name) for name in names):
             raise ServiceError('助手工具契约无效。', 400, 'invalid_tools')
+        selected = payload.get('tool_names', names)
+        if (not isinstance(selected, list) or any(not isinstance(name, str) or name not in names for name in selected)
+                or len(set(selected)) != len(selected)):
+            raise ServiceError('本轮助手工具范围无效。', 400, 'invalid_tools')
+        enabled = [] if text_only else [name for name in names if name in selected]
         async with self.account_locks.setdefault(key, asyncio.Lock()):
             self.current_lease(payload)
             existing = self.manager.accounts.get(key)
             if existing and existing.get('busy'):
                 raise ServiceError('当前账号已有正在处理的会话，请稍后继续。', 409, 'account_busy')
             plugin = self.manager.root / key / 'plugin' if hasattr(self.manager, 'root') else self.state / 'accounts' / key / 'plugin'
-            catalog = None
-            if text_only:
-                catalog = plugin.with_name('plugin-catalog')
-                await asyncio.to_thread(prepare_tool_plugin,
-                    self.project / 'bin/openclaw_service/assistant/openclaw/plugin', catalog, definitions)
             await asyncio.to_thread(prepare_tool_plugin,
-                self.project / 'bin/openclaw_service/assistant/openclaw/plugin', plugin, [] if text_only else definitions)
+                self.project / 'bin/openclaw_service/assistant/openclaw/plugin', plugin, definitions)
             model = type('UserModel', (), {'unprotect': staticmethod(unprotect_key)})()
             item = await self.manager.acquire(actor, model, profile, plugin=plugin,
-                **({'plugin_catalog': catalog} if text_only else {}), tool_names=[] if text_only else names,
+                plugin_catalog=plugin, tool_names=enabled,
                 bridge_token=self.bridge_key(key), bridge_url=f'http://127.0.0.1:{self.port}/bridge',
                 model_parameters=payload.get('model_parameters'))
             if self.lease is not lease:
@@ -306,6 +306,8 @@ class Host:
         item = self.manager.accounts.get(run['account'])
         if not item or item.get('blocked') or item.get('text_only'):
             raise ServiceError('助手工具调用已失效，未调用业务。', 403, 'run_expired')
+        if 'tool_names' in item and payload.get('tool') not in item['tool_names']:
+            raise ServiceError('本轮不允许此工具，未调用业务。', 403, 'invalid_tools')
         self.current_lease({'lease': lease['id']})
         import httpx
         client = await asyncio.to_thread(httpx.AsyncClient, verify=False, trust_env=False, follow_redirects=False, timeout=310)

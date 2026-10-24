@@ -169,7 +169,8 @@ def select_task_profile(assistant, actor, turn, profile, *, required=None, attem
 class ModelHealth:
     MAX_ENTRIES = 512
     TTL = 3600
-    TRANSIENT = frozenset({'model_busy', 'model_connection', 'model_validation', 'timeout'})
+    # A rejected answer is task-specific, not an outage of this shared provider.
+    TRANSIENT = frozenset({'model_busy', 'model_connection', 'timeout'})
     CONFIGURATION = frozenset({'model_auth', 'model_request'})
     QUALITY_MIN_SAMPLES = 3
     QUALITY_MAX_SAMPLES = 32

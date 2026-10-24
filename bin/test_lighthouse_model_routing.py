@@ -48,9 +48,15 @@ class ModelHealthTests(unittest.TestCase):
         self.assertEqual(self.health.snapshot(self.key)['cooldown_until'], self.now + 300)
 
     def test_business_permission_context_and_unknown_errors_do_not_poison_health(self):
-        for category in ('forbidden', 'validation', 'model_context', 'vision_unsupported', 'model_protocol'):
+        for category in ('forbidden', 'validation', 'model_validation', 'model_context', 'vision_unsupported', 'model_protocol'):
             self.health.record(self.key, category=category)
         self.assertEqual(self.health.snapshot(self.key), {})
+
+    def test_answer_quality_failure_does_not_clear_a_real_auth_outage(self):
+        self.health.record(self.key, category='model_auth')
+        before = self.health.snapshot(self.key)
+        self.health.record(self.key, category='model_validation')
+        self.assertEqual(self.health.snapshot(self.key), before)
 
     def test_tracking_is_bounded_expires_and_does_not_expose_mutable_entries(self):
         for index in range(self.health.MAX_ENTRIES + 10):

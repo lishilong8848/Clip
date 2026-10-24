@@ -75,15 +75,15 @@ def _guard(scope, allowed):
 
 
 def _cabinet_overview(scope):
-    counts = {"formal": 8, "test": 0, "off": 3, "unknown": 1}
+    counts = {"total": 12, "powered": 8, "formal": 8, "test": 0, "off": 3, "unknown": 1}
     racks = [
         {"room": "101", "rack": "A%02d" % i, "state": "formal", "rack_type": "电力机柜",
          "room_label": "E楼机房101", "rack_label": "A%02d" % i}
         for i in range(1, 9)]
     racks += [
-        {"room": "101", "rack": "C01", "state": "off", "rack_type": "电力机柜",
+        {"room": "101", "rack": "C01", "state": "off", "state_source": "baseline", "rack_type": "电力机柜",
          "room_label": "E楼机房101", "rack_label": "C01"},
-        {"room": "101", "rack": "C02", "state": "off", "rack_type": "电力机柜",
+        {"room": "101", "rack": "C02", "state": "off", "state_source": "empty", "rack_type": "电力机柜",
          "room_label": "E楼机房101", "rack_label": "C02"},
         {"room": "101", "rack": "C03", "state": "off", "rack_type": "电力机柜",
          "room_label": "E楼机房101", "rack_label": "C03"},

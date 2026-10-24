@@ -2331,11 +2331,16 @@ class FeishuAssistant:
             saved = await asyncio.shield(asyncio.to_thread(self.inbox.reply_for, message['message_id']))
             await asyncio.shield(asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', saved or uncertain))
             raise
-        except TimeoutError:
+        except TimeoutError as exc:
             logging.warning('Feishu answer deadline reached: message=%s', diagnostic)
+            from openclaw_service.diagnostics import capture
+            await asyncio.to_thread(capture, 'feishu', 'deadline', run_id=diagnostic, category='timeout', error=exc)
             return await asyncio.to_thread(self.inbox.reply_for, message['message_id']) or uncertain
         except Exception as exc:
             logging.warning('Feishu answer failed: message=%s type=%s', diagnostic, type(exc).__name__)
+            from openclaw_service.diagnostics import capture
+            await asyncio.to_thread(capture, 'feishu', 'answer', run_id=diagnostic,
+                                    category=getattr(exc, 'category', ''), error=exc)
             saved = await asyncio.to_thread(self.inbox.reply_for, message['message_id'])
             if saved and saved.get('awaiting_turn') and (not isinstance(exc, AssistantError) or exc.status >= 500):
                 return saved

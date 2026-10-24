@@ -84,7 +84,8 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
 
     def fail(self, identity='current', message='Model provider unavailable', **options):
         self.scripts[identity] = {'events': [{'event': 'agent', 'payload': {'runId': 'run-1',
-            'stream': 'lifecycle', 'data': {'phase': 'error', 'error': message}}}], **options}
+            'stream': 'lifecycle', 'data': {'phase': 'error', 'error': message}}}],
+            'wait': {'status': 'error', 'error': message}, **options}
 
     async def run_agent(self, prompt=None, history=None):
         async with self.agent.run_stream_events(prompt or ['original question'], message_history=history or []) as events:
@@ -135,7 +136,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('snapshot-1', backup['message'])
         self.assertIn(':evidence:', backup['sessionKey'])
         self.assertTrue(backup['idempotencyKey'].endswith(':fallback:1'))
-        self.assertEqual(self.agent.health.snapshot(self.agent._health_key(self.profiles[0]))['category'], 'model_validation')
+        self.assertEqual(self.agent.health.snapshot(self.agent._health_key(self.profiles[0])), {})
 
     async def test_confirmed_mutation_validation_failure_does_not_start_another_model(self):
         effects = []
@@ -234,6 +235,15 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private', message)
         self.assertEqual(self.selected, ['current', 'backup'])
 
+    async def test_unloaded_shared_tools_are_not_reported_as_four_bad_models(self):
+        self.fail(message='No callable tools remain after resolving explicit tool allowlist (private fixture)')
+        with self.assertRaises(AssistantError) as raised:
+            await self.run_agent()
+        self.assertEqual(raised.exception.category, 'runtime_tools')
+        self.assertIn('查询工具', str(raised.exception))
+        self.assertNotIn('private fixture', str(raised.exception))
+        self.assertEqual(self.selected, ['current'])
+
     async def test_tool_success_failure_and_unknown_result_never_replayed(self):
         for result in ('success', 'failure', 'unknown'):
             with self.subTest(result=result):
@@ -297,6 +307,91 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         request = next(params for method, params in self.clients[-1].calls if method == 'agent')
         self.assertIn('original-snapshot', request['message'])
         self.assertIn('Original business question', request['message'])
+
+    async def test_chat_error_observes_terminal_failure_and_reuses_read_receipts(self):
+        self.agent._auto_tools = True
+        self.agent._buffered_reply = True
+        reads = []
+        async def query():
+            reads.append('original')
+            return {'ok': True, 'query_ref': 'original-snapshot', 'data': {'total': 2}}
+        self.agent.tools['lighthouse_query'] = Tool(query)
+        async def hook(client):
+            if not reads:
+                await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
+                    'run_id': self.agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'original-read', 'params': {}})
+        self.fail(hook=hook, wait={'status': 'error', 'error': 'Model provider unavailable'})
+        self.scripts['current']['events'].insert(0, {'event': 'chat', 'payload': {
+            'runId': 'run-1', 'state': 'error', 'errorMessage': 'private provider detail'}})
+        with self.assertLogs(native.__name__, level='WARNING') as logs:
+            events = await self.run_agent(['Original business question'])
+        self.assertEqual(self.selected, ['current', 'backup'])
+        self.assertEqual(reads, ['original'])
+        self.assertEqual(events[-1].result.output, 'fixture reply')
+        self.assertTrue(any(method == 'agent.wait' for method, _ in self.clients[0].calls))
+        request = next(params for method, params in self.clients[-1].calls if method == 'agent')
+        self.assertIn('original-snapshot', request['message'])
+        self.assertIn('Original business question', request['message'])
+        self.assertNotIn('private provider detail', ''.join(logs.output))
+
+    async def test_chat_error_unknown_run_or_abort_cannot_start_backup(self):
+        for state, outcome, missing_receipt in (
+                ('error', {'status': 'in_progress'}, False),
+                ('error', {'status': 'error', 'pendingError': True}, False),
+                ('error', {'status': 'error', 'pendingToolCalls': ['pending']}, False),
+                ('error', {'status': 'error', 'aborted': True}, False),
+                ('error', {'status': 'error', 'stopReason': 'aborted'}, False),
+                ('error', {'status': 'error', 'stopReason': 'toolUse'}, False),
+                ('error', {'status': 'error', 'terminalReply': {'aborted': True}}, False),
+                ('error', {'status': 'error', 'runId': 'another-run'}, False),
+                ('error', {'status': 'error'}, True),
+                ('aborted', {'status': 'error'}, False)):
+            with self.subTest(state=state, outcome=outcome, missing_receipt=missing_receipt):
+                self.setUp()
+                if missing_receipt:
+                    self.agent.calls = 1
+                self.scripts['current'] = {'wait': outcome, 'events': [
+                    {'event': 'chat', 'payload': {'runId': 'run-1', 'state': state}},
+                    {'event': 'agent', 'payload': {'runId': 'run-1', 'stream': 'lifecycle',
+                        'data': {'phase': 'error', 'error': 'Model provider unavailable'}}}]}
+                with patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_GRACE', .02), \
+                        patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_POLL', .005):
+                    with self.assertRaises(AssistantError):
+                        await self.run_agent()
+                self.assertEqual(self.selected, ['current'])
+                self.assertEqual(sum(method == 'agent' for client in self.clients for method, _ in client.calls), 1)
+                self.assertFalse(self.engine.bridge.active)
+
+    async def test_empty_final_after_confirmed_reads_uses_backup_but_writes_do_not(self):
+        for readonly in (True, False):
+            with self.subTest(readonly=readonly):
+                self.setUp()
+                self.agent._auto_tools = True
+                self.agent._buffered_reply = True
+                effects = []
+                async def tool():
+                    effects.append('original')
+                    return {'ok': True, 'query_ref': 'original-receipt'}
+                name = 'lighthouse_query' if readonly else 'lighthouse_submit'
+                self.agent.tools[name] = Tool(tool)
+                async def hook(client):
+                    if not effects:
+                        await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
+                            'run_id': self.agent.run_id, 'tool': name, 'call_id': 'original-call', 'params': {}})
+                self.scripts['current'] = {'hook': hook, 'wait': {'status': 'ok',
+                    'terminalReply': {'disposition': 'visible', 'text': ''}}}
+                if readonly:
+                    events = await self.run_agent()
+                    self.assertEqual(events[-1].result.output, 'fixture reply')
+                    self.assertEqual(self.selected, ['current', 'backup'])
+                    request = next(params for method, params in self.clients[-1].calls if method == 'agent')
+                    self.assertIn('original-receipt', request['message'])
+                else:
+                    with self.assertRaises(AssistantError):
+                        await self.run_agent()
+                    self.assertEqual(self.selected, ['current'])
+                self.assertEqual(effects, ['original'])
+                self.assertFalse(self.engine.bridge.active)
 
     async def test_unknown_pending_or_mutating_terminal_cannot_be_replayed(self):
         for outcome, mutation in (({'status': 'in_progress'}, False),
