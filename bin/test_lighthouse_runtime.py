@@ -788,7 +788,7 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 client.send.assert_not_called()
                 client.build_request.assert_not_called()
 
-    async def test_provider_output_budget_is_bounded_before_request(self):
+    async def test_provider_default_ignores_sdk_output_budget_on_first_request(self):
         item = await self.acquire('budget', {**_profile(), 'model': 'WanWu/MiniMax-Auto', 'context_window': 200000})
         bodies = []
         async def upstream(request):
@@ -804,11 +804,62 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 'max_completion_tokens': 65536})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(bodies), 1)
-        self.assertLessEqual(bodies[0]['max_tokens'], 5000)
+        self.assertNotIn('max_tokens', bodies[0])
         self.assertNotIn('max_completion_tokens', bodies[0])
         config = lrt.build_configuration(self.runtime.root, self.runtime.accounts, item['port'],
             model_url='http://127.0.0.1/internal', plugin=Path('fixture'))
         self.assertEqual(config['models']['providers']['lighthouse']['models'][0]['contextWindow'], 149952)
+        self.assertNotIn('maxTokens', config['models']['providers']['lighthouse']['models'][0])
+
+    async def test_default_context_rejection_retries_once_with_budget_without_losing_tool_receipts(self):
+        item = await self.acquire('default-retry', {**_profile(), 'model': 'WanWu/MiniMax-Auto'})
+        item['run_id'] = 'current-run'
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(400, json={'error': {'code': 'context_length_exceeded'}}) if len(bodies) == 1 else httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        messages = [{'role': 'user', 'content': '只总结原操作结果'},
+                    {'role': 'assistant', 'tool_calls': [{'id': 'original', 'type': 'function',
+                        'function': {'name': 'submit', 'arguments': '{}'}}]},
+                    {'role': 'tool', 'tool_call_id': 'original', 'content': 'original successful receipt'}]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'],
+                'messages': messages, 'max_tokens': 8192})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(bodies), 2)
+        self.assertNotIn('max_tokens', bodies[0])
+        self.assertGreater(bodies[1]['max_tokens'], 5000)
+        self.assertLessEqual(bodies[1]['max_tokens'], 32000)
+        from openclaw_service.assistant.lighthouse_context import _model_payload_size
+        size = _model_payload_size(bodies[1])
+        self.assertLessEqual(size + (size + 9) // 10 + 1024 + bodies[1]['max_tokens'], item['profile']['context_window'])
+        self.assertEqual(bodies[0]['messages'], messages)
+        self.assertEqual(bodies[1]['messages'], messages)
+        self.assertNotIn('compaction_run_id', item)
+
+    async def test_output_recovery_budget_does_not_change_another_requests_default(self):
+        recovering = await self.acquire('recovering', {**_profile(), 'model': 'WanWu/Qwen-Auto', '_output_recovery': True})
+        normal = await self.acquire('normal', {**_profile(), 'model': 'WanWu/Qwen-Auto'})
+        bodies = []
+        async def upstream(request):
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={'ok': True})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+            for item in (recovering, normal):
+                response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id'],
+                    'messages': [{'role': 'user', 'content': 'current'}], 'max_tokens': 8192})
+                self.assertEqual(response.status_code, 200)
+        self.assertGreater(bodies[0]['max_tokens'], 5000)
+        self.assertLessEqual(bodies[0]['max_tokens'], 32000)
+        self.assertNotIn('max_tokens', bodies[1])
 
     async def test_oversized_current_request_and_tools_never_reach_provider(self):
         item = await self.acquire('huge', {**_profile(), 'model': 'WanWu/GLM-Auto', 'context_window': 200000})
@@ -910,6 +961,67 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()['error'], {'code': 'context_length_exceeded', 'message': 'Context length exceeded'})
         self.assertNotIn(item['model_key'], response.text)
         self.assertNotIn('private-record-id', response.text)
+
+    async def test_model_transport_reports_html_and_empty_responses_without_private_body(self):
+        for kind in ('html', 'empty'):
+            with self.subTest(kind=kind):
+                item = await self.acquire('transport-' + kind)
+                item['run_id'] = item['agent_id'] + ':' + '50e2175d' * 4 + ':fallback:1'
+                responses = []
+                async def upstream(request):
+                    response = httpx.Response(200, content=b'<html>private-upstream-login</html>' if kind == 'html' else b'',
+                        headers={'content-type': 'text/html' if kind == 'html' else 'text/event-stream'})
+                    responses.append(response)
+                    return response
+                self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+                app = FastAPI()
+                install_model_route(app, self.runtime)
+                with patch('openclaw_service.diagnostics.capture') as capture:
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1') as caller:
+                        response = await caller.post('/api/assistant/openclaw-models/chat/completions',
+                            headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id']})
+                    if kind == 'html':
+                        self.assertEqual(response.status_code, 502)
+                        self.assertEqual(response.json()['error']['code'], 'invalid_provider_response')
+                    self.assertEqual(capture.call_args.args, ('assistant', 'model_request'))
+                    meta = capture.call_args.kwargs
+                    self.assertEqual(meta['run_id'], '50e2175d' * 4)
+                    self.assertEqual(meta['details']['response_type'], 'html' if kind == 'html' else 'event_stream')
+                    self.assertNotIn('private-upstream-login', str(meta))
+                    self.assertNotIn(item['model_key'], str(meta))
+                self.assertTrue(responses[0].is_closed)
+                await self.runtime.http.aclose()
+                self.runtime.http = None
+
+    async def test_interrupted_stream_records_original_run_and_closes_without_raw_error(self):
+        item = await self.acquire('interrupted-stream')
+        original_run = '15c28b07' * 4
+        item['run_id'] = item['agent_id'] + ':' + original_run
+        class BrokenBody(httpx.AsyncByteStream):
+            closed = False
+            async def __aiter__(self):
+                yield b'data: {"choices":[]}\n\n'
+                item['run_id'] = item['agent_id'] + ':' + 'f' * 32
+                raise httpx.ReadError('private network error and credential')
+            async def aclose(self):
+                self.closed = True
+        body = BrokenBody()
+        async def upstream(request):
+            return httpx.Response(200, stream=body, headers={'content-type': 'text/event-stream'})
+        self.runtime.http = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        app = FastAPI()
+        install_model_route(app, self.runtime)
+        with patch('openclaw_service.diagnostics.capture') as capture:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                                         base_url='http://127.0.0.1') as caller:
+                await caller.post('/api/assistant/openclaw-models/chat/completions',
+                    headers={'Authorization': 'Bearer ' + item['token']}, json={'model': item['agent_id']})
+            meta = capture.call_args.kwargs
+            self.assertEqual(meta['run_id'], original_run)
+            self.assertEqual(meta['native'], 'Model stream interrupted')
+            self.assertGreater(meta['details']['response_bytes'], 0)
+            self.assertNotIn('private network error', str(meta))
+            self.assertTrue(body.closed)
 
     async def test_context_rejection_retries_only_model_request_with_shorter_history(self):
         item = await self.acquire('first')

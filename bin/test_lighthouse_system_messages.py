@@ -325,7 +325,8 @@ class SystemMessageTransportTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(body['messages'][0], {'role': 'system', 'content':
                                 '中文系统约束\n\n' + DEVELOPER_LABEL + '\n开发者格式'})
                             self.assertEqual(body['messages'][1:], tool_messages())
-                            self.assertEqual(body['max_tokens'], 5000)
+                            self.assertNotIn('max_tokens', body)
+                            self.assertNotIn('max_completion_tokens', body)
                             for name in ('stream', 'tools', 'tool_choice', 'parallel_tool_calls'):
                                 self.assertEqual(body[name], payload[name])
                             self.assertEqual(payload, before)

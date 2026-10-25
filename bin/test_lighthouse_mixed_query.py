@@ -13,7 +13,7 @@ from pydantic_ai import Tool
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from openclaw_service.assistant import lighthouse_knowledge_answer as documents
 from openclaw_service.assistant import lighthouse_query_intent as classifier
-from openclaw_service.assistant.lighthouse_ai import AssistantError, PRIVATE_REPLY
+from openclaw_service.assistant.lighthouse_ai import AssistantError, PRIVATE_REPLY, safe_text
 from openclaw_service.assistant.lighthouse_model import LighthouseModel
 from openclaw_service.assistant.lighthouse_openclaw import BusinessBridge
 from openclaw_service.assistant.lighthouse_review import READ_REPAIR_TOOLS
@@ -193,6 +193,53 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn['question'], '改成昨天')
         self.assertEqual(self.transcript, [])
 
+    async def test_semantic_general_intent_is_not_overridden_by_business_or_document_words(self):
+        cases = [('包间湿度从91%下降到80%，下降了几个百分点？', '按你提供的读数，下降了11个百分点。'),
+                 ('已有10条维修工单，完成了6条，完成率是多少？', '按你提供的数据，完成率为60%。'),
+                 ('机房EOP这个缩写是什么意思？', 'EOP指紧急操作程序，是对术语的一般解释。'),
+                 ('给我一个机房维修工单统计的虚拟示例', '以下仅是虚拟示例，不代表实际业务记录。')]
+        for channel in ('', 'feishu:oc_Test'):
+            self.actor['channel'] = channel
+            self.current_actor = copy.deepcopy(self.actor)
+            for question, answer in cases:
+                with self.subTest(channel=channel, question=question):
+                    self.transcript.clear()
+                    self.events.clear()
+                    self.steps = [answer]
+                    with patch.object(classifier, 'resolve_query_intent', new=AsyncMock(return_value=resolved('general', question=question))), \
+                         patch.object(documents, 'answer_company', new_callable=AsyncMock) as synthesis, \
+                         patch.object(documents, 'automatic_company_query', new_callable=AsyncMock) as legacy:
+                        result = await self.answer(self.turn(question))
+                    self.assertEqual(result['answer'], safe_text(answer))
+                    self.assertTrue(self.transcript)
+                    synthesis.assert_not_awaited()
+                    legacy.assert_not_awaited()
+                    self.fixture.portal.get_knowledge.assert_not_called()
+                    self.assertEqual(self.fixture.reads, [])
+                    self.assertEqual(self.fixture.writes, [])
+
+    async def test_observation_question_reclassified_before_any_business_model_or_tools(self):
+        question = '包间湿度现在是91%，该用哪个EOP？'
+        self.actor['modules'] = ['assistant', 'knowledge']
+        for channel in ('', 'feishu:oc_Test'):
+            with self.subTest(channel=channel):
+                self.actor['channel'] = channel
+                self.current_actor = copy.deepcopy(self.actor)
+                self.fixture.model.complete.side_effect = [
+                    json.dumps({'kind': 'mixed', 'query': question, 'continued': False,
+                                'business_query': '查询现场湿度', 'document_query': question}),
+                    json.dumps({'kind': 'knowledge', 'query': question, 'continued': False})]
+                turn = self.turn(question, execution_lane=classifier.execution_lane(self.actor))
+                with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                                  return_value={'answer': '依据已给出的情况查阅规程。', 'sources': []}) as synth:
+                    await self.answer(turn)
+                synth.assert_awaited_once()
+                self.assertEqual(synth.await_args.args[3], question)
+                self.assertEqual(turn['question'], question)
+                self.assertEqual(turn['_query_intent']['kind'], 'knowledge')
+                self.assertEqual(self.transcript, [])
+                self.assertEqual(self.fixture.writes, [])
+
     async def test_legacy_followup_keeps_current_request_once_when_classifier_skips(self):
         base = 'D楼现场巡检规程有哪些适用条件'
         history = [{'question': base, 'answer': '旧文档回答', 'scopes': ['D'],
@@ -256,6 +303,58 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.status, 403)
         self.assertEqual(self.texts(), '')
         synth.assert_not_awaited()
+
+    async def test_failed_model_read_still_looks_up_documents_with_explicit_unavailability(self):
+        self.patch_intent()
+        self.engine._answer_candidate = AsyncMock(side_effect=AssistantError('private provider error', 502, category='model_context'))
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                          return_value=self.combined_result()) as synth:
+            result = await self.answer()
+        self.assertTrue(result['answer'].endswith(FINAL))
+        self.assertIn('实时业务查询未完成', result['answer'])
+        self.assertIs(result['knowledge_retrieval']['complete'], False)
+        evidence = synth.await_args.kwargs['business_sources']
+        self.assertEqual(len(evidence), 1)
+        self.assertIs(evidence[0]['available'], False)
+        self.assertIs(evidence[0]['data']['ok'], False)
+        self.assertIs(evidence[0]['data']['complete'], False)
+        self.assertNotIn('private provider error', str(evidence))
+        self.assertEqual(synth.await_args.kwargs['document_query'], DOCUMENT_QUERY)
+
+    async def test_failed_read_document_private_reply_stays_private_without_partial_prefix(self):
+        self.patch_intent()
+        self.engine._answer_candidate = AsyncMock(side_effect=AssistantError('context failure', 502, category='model_context'))
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock,
+                          return_value={'answer': PRIVATE_REPLY, 'sources': []}):
+            result = await self.answer()
+        self.assertEqual(result['answer'], PRIVATE_REPLY)
+        self.assertNotIn('knowledge_retrieval', result)
+
+    async def test_failed_read_never_uses_document_recovery_to_bypass_permissions(self):
+        self.patch_intent()
+        for error in (AssistantError('forbidden', 403, category='model_context'),
+                      AssistantError('business validation failed', 409)):
+            self.engine._answer_candidate = AsyncMock(side_effect=error)
+            with patch.object(documents, 'answer_company', new_callable=AsyncMock) as synth:
+                with self.assertRaises(AssistantError):
+                    await self.answer()
+            synth.assert_not_awaited()
+
+    async def test_document_synthesis_receives_failed_read_as_unavailable_not_an_empty_result(self):
+        self.patch_intent()
+        self.engine._answer_candidate = AsyncMock(side_effect=AssistantError('context failure', 502, category='model_context'))
+        self.fixture.model.complete.return_value = json.dumps({
+            'answer': '实时业务尚未核实，以下仅说明文档要求。[2]', 'queries': [], 'gaps': ['实时业务未核实']})
+        result = await self.answer()
+        packet = next(value for call in self.fixture.model.complete.call_args_list
+                      if 'business_evidence' in (value := json.loads(call.args[0][1]['content'])))
+        evidence = packet['business_evidence']['evidence']
+        self.assertIs(evidence[0]['available'], False)
+        self.assertEqual(evidence[0]['state'], 'unavailable')
+        self.assertIn('现场规程', packet['documents'][0]['name'])
+        self.assertIn('未核实', result['answer'])
+        self.knowledge.search.assert_called_once()
+        self.assertEqual(self.fixture.writes, [])
 
     async def test_document_failures_preserve_business_with_limitation_without_quality_profile(self):
         self.patch_intent()

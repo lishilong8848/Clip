@@ -80,6 +80,22 @@ def _seed_lines(count, width=60):
 
 
 class GatewayLogRotationTests(unittest.TestCase):
+    def test_diagnostic_callback_receives_redacted_lines_and_cannot_stop_pipe_drain(self):
+        seen = []
+        def callback(line):
+            seen.append(line)
+            if len(seen) == 1:
+                raise RuntimeError('diagnostic unavailable')
+        with tempfile.TemporaryDirectory() as tmp:
+            log = GatewayLog(Path(tmp) / 'gateway.log', secrets={'LIGHTHOUSE_GATEWAY_TOKEN': 'private-fixture'}, on_line=callback)
+            try:
+                thread = log.attach(io.BytesIO(b'first private-fixture\nsecond\n'))
+                thread.join(timeout=5)
+                self.assertEqual(seen, ['first [REDACTED]', 'second'])
+                self.assertIsNone(log.error)
+            finally:
+                log.close()
+
     def test_default_limits_follow_resident_gateway_contract(self):
         # The shipped defaults are the required 2 MB / 3 backups contract.
         self.assertEqual(MAX_BYTES, 2_000_000)

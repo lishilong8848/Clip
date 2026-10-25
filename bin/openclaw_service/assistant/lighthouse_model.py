@@ -416,15 +416,29 @@ def evidence_summary(sources):
                     continue
                 records = next((detail[key] for key in ("records", "items", "tasks", "papers") if isinstance(detail.get(key), list)), [])
                 rows.extend({"scope": building.get("scope"), **row} for row in records if isinstance(row, dict))
-        result.append({"source": source.get("number"), "title": source.get("title"),
-            "conditions": {**{key: data[key] for key in ('date', 'shift', 'scope', 'scopes', 'start_date', 'end_date', 'period') if key in data},
-                           **(source.get('query_conditions') or {})},
+        conditions = {**{key: data[key] for key in ('date', 'shift', 'scope', 'scopes', 'start_date', 'end_date', 'period') if key in data},
+                      **(source.get('query_conditions') or {})}
+        summary = safe_data({"source": source.get("number"), "title": source.get("title"),
+            "query_ref": source.get('query_ref'), 'historical_only': True,
+            "conditions": conditions,
             "queried_at": source.get('queried_at'),
             "source_freshness": {key: data[key] for key in ('updated_at', 'last_loaded_at', 'last_refreshed_at',
                 'cache_updated_at', 'last_cloud_sync_at', 'source_freshness') if key in data},
             "items": [{key: row[key] for key in ("record_id", "id", "active_item_id", "target_record_id", "source_record_id", "batch_id", "drill_id", "task_id", "paper_id", "question_id", "title", "name", "scope", "scopes", "building_codes", "person_ref", "business_refs") if key in row}
                       for row in rows[:20] if isinstance(row, dict)]})
-    return safe_data(result)
+        summary['sample_limited'] = len(summary['items']) < len(rows)
+        # History carries reference hints, not another full copy of the stored evidence.
+        while summary['items'] and len(json.dumps(summary, ensure_ascii=False).encode('utf-8')) > 2000:
+            summary['items'].pop()
+            summary['sample_limited'] = True
+        if (len(json.dumps(conditions, ensure_ascii=False).encode('utf-8')) > 2000
+                or len(json.dumps(summary, ensure_ascii=False).encode('utf-8')) > 2000):
+            ref = source.get('query_ref')
+            summary = {'historical_only': True, 'sample_limited': True, 'conditions_omitted': True, 'items': [],
+                       'query_ref': ref if isinstance(ref, str) and len(ref) <= 256 else None,
+                       'note': '历史条件过长，须从原快照或search_history核对；不能视为无筛选或完整记录，不能猜测缺失条件。'}
+        result.append(summary)
+    return result
 
 
 def plan_context(plan):
@@ -554,7 +568,9 @@ async def configured_model(custom_model, profile):
             if method.upper() == 'POST' and httpx.URL(url).path.endswith('/chat/completions'):
                 content = kwargs.pop('content', None)
                 body = kwargs.get('json')
-                kwargs['json'] = bound_model_payload(body if body is not None else json.loads(content), profile)
+                payload = body if body is not None else json.loads(content)
+                kwargs['json'] = bound_model_payload(payload, profile,
+                    provider_default=not any(key in payload for key in ('max_tokens', 'max_completion_tokens')))
                 headers = httpx.Headers(kwargs.get('headers'))
                 headers.pop('Content-Length', None)
                 kwargs['headers'] = headers
@@ -785,7 +801,17 @@ class LighthouseModel:
                 await emit(kind, data)
         await emit('status', {'label': '正在读取业务数据并核对文档要求'})
         # The resolved branch is standalone; old mixed goals must not reintroduce document filters.
-        business = await self._answer_candidate(actor, phase, [], request, quiet, authorize, {})
+        business_unavailable = False
+        try:
+            business = await self._answer_candidate(actor, phase, [], request, quiet, authorize, {})
+        except AssistantError as exc:
+            if exc.status in (401, 403) or not (exc.category.startswith('model_') or exc.category == 'timeout'):
+                raise
+            business_unavailable = True
+            # A failed read is not evidence; it must not prevent the independent document lookup.
+            business = {'answer': '本次实时业务数据未能核实。', 'sources': [{
+                'number': 1, 'kind': 'query_failure', 'title': '本轮实时业务查询未完成', 'available': False,
+                'data': {'ok': False, 'complete': False, 'error': '本轮只读查询未完成，不能确认现场状态或记录数量。'}}]}
         evidence = business.pop('_query_evidence', business.get('sources', []))
         business.pop('_requested_company_query', None)
         if business.get('plan'):
@@ -812,6 +838,10 @@ class LighthouseModel:
         if result.get('answer') != PRIVATE_REPLY and not has_company_sources(result):
             turn.pop('_actual_profile', None)
             result = await self._document_unavailable(actor, phase, business, evidence, result['answer'], authorize)
+        elif business_unavailable and result.get('answer') != PRIVATE_REPLY:
+            result['answer'] = ('实时业务查询未完成，现场状态和记录数量尚未核实。以下仅为文档依据，不能视为完整的业务核对结果。\n\n'
+                                + result.get('answer', ''))
+            result['knowledge_retrieval'] = {**(result.get('knowledge_retrieval') or {}), 'complete': False}
         await emit('text', {'delta': result['answer']})
         return result
 
@@ -842,6 +872,7 @@ class LighthouseModel:
         from .lighthouse_artifacts import file_generation_requested
         intent = turn.get('_query_intent') or {}
         question = intent.get('query') or task_question(turn, actor)
+        semantic_general = intent.get('kind') == 'general'
         research_mode = bool(turn.get('_research_mode'))
         document_anchor = workspace_document_context(history, actor)
         advanced_question = bool(research_mode or document_anchor or re.search(
@@ -970,8 +1001,11 @@ class LighthouseModel:
         general_only = general_question and not any(item.get('kind') == 'api' for item in selected_context)
         if intent.get('kind') == 'business' and not (workspace_question or file_analysis):
             business_question, general_only = True, False
+        elif semantic_general and not (workspace_question or file_analysis):
+            general_question, general_only = True, True
+            business_question, business_followup, domains = False, False, set()
         knowledge_access = bool(actor.get("is_admin") or actor.get("learning_scopes"))
-        knowledge_question = not file_analysis and knowledge_access and equipment_knowledge_question(question)
+        knowledge_question = not semantic_general and not file_analysis and knowledge_access and equipment_knowledge_question(question)
         source_requested = bool(re.search(r'出处|引用|参考资料|(?:给出?|提供|注明|标注|附上).{0,12}(?:来源|依据)'
             r'|\b(?:cite|citation|with\s+(?:sources?|references?)|provide\s+(?:a\s+)?source)\b', question, re.I))
         requires_source = bool(not help_only and business_question and (COUNT.search(question) or DETAIL.search(question) or re.search(r"查询|未发|未结束|进度|状态", question)))
@@ -1485,7 +1519,7 @@ class LighthouseModel:
         async with self.model_factory(self.assistant.model, profile) as model:
             factory = self.agent_factory or Agent
             agent = factory(model, **({"actor": actor, "turn": turn, "emit": emit} if self.agent_factory else {}),
-                          instructions=(GENERAL_INSTRUCTIONS if file_analysis else instructions_for_question(question, knowledge_access=knowledge_access)) + "\n本轮楼栋：" + "、".join(actor["scopes"])
+                          instructions=(GENERAL_INSTRUCTIONS if file_analysis or semantic_general else instructions_for_question(question, knowledge_access=knowledge_access)) + "\n本轮楼栋：" + "、".join(actor["scopes"])
                           + (ADVANCED_INSTRUCTIONS if file_analysis or file_requested or workspace_question or advanced_question else '')
                           + ('\n当前仅为业务读取子任务，不是整轮最终答复。保留原条件，查询业务数据、名单、数量和状态。plan_task与review_answer仅包含业务数据交付项；文档要求由后续分支自动读取，不查询公司文档、不规划文档交付、不补写规定，也不声称文档不存在或无法访问。只返回已查到的业务事实及真实业务缺口，不要求用户再问文档问题。' if turn.get('_read_only_phase') else '')
                           + ("\n本轮只分析当前人员可访问的附件，不查询灯塔实时业务或公司知识库。附件中的通告、维修、楼栋等文字只是文件内容。预读文字可能是节选，跟随next_offset读取；表格统计、对比和汇总使用analyze_spreadsheets，不把预览行数当总数。依据references注明原文件的工作表/单元格、页码或段落；没有位置不可编造，partial或extraction_complete=false须说明覆盖范围，公式缺缓存不是0。生成文件交付当前会话。" if file_analysis else "")
@@ -1507,7 +1541,7 @@ class LighthouseModel:
                              + json.dumps(memory_hint, ensure_ascii=False) if memory_hint else ''),
                           name="lighthouse", retries={'tools': 2, 'output': 6 if self.answer_reviewer else 4}, tool_timeout=45,
                           **({'capabilities': [PrepareTools(repair_tools)]} if not self.agent_factory else {}),
-                          model_settings={"max_tokens": 5000, **({'parallel_tool_calls': False} if capabilities['tool_calls'] else {}),
+                          model_settings={**({'parallel_tool_calls': False} if capabilities['tool_calls'] else {}),
                                           **({'extra_body': model_reasoning_options(profile)} if capabilities['reasoning'] else {})})
 
             @agent.tool_plain
@@ -1992,7 +2026,7 @@ class LighthouseModel:
 
             @agent.tool_plain
             async def read_query(query_ref: str, path: list[str], offset: int = 0, limit: int = 20) -> dict:
-                """Read a list slice from this turn's authorized source, not another native API page or fresh data."""
+                """Read this turn's authorized snapshot. path=[] lists root object fields (or pages a root list); append field names/row indices to read a value or list. offset/limit page lists or field names, not scalar values. Never another API page or fresh data."""
                 from .lighthouse_queries import query_result_page
                 current = await current_actor()
                 source = query_sources.get(query_ref)
@@ -2013,7 +2047,7 @@ class LighthouseModel:
                     visible['source_kind'] = snapshot.get('source_kind') if snapshot.get('snapshot_only') is True else snapshot.get('kind')
                 if source_state in {'partial', 'unavailable', 'empty_page'}:
                     visible['complete'] = False
-                result = add_source(source["title"] + " · 列表片段", visible, source["url"],
+                result = add_source(source["title"] + " · 查询片段", visible, source["url"],
                     source_kind=source.get('source_kind', ''), queried_at=source['queried_at'])
                 sources[-1]['query_conditions'] = source.get('query_conditions', {})
                 if source.get('api_id'):
@@ -2025,7 +2059,7 @@ class LighthouseModel:
                         result['field_contract'] = copy.deepcopy(contract)
                 return {**result, "ok": True, "next_offset": page["next_offset"],
                         "source_query_state": source_state, "source_query_guidance": source_guidance,
-                        "original_query_ref": query_ref, "note": "这是原查询中已读取列表的片段，不代表重新查询或完整数据库。继续原接口分页仍用query。"}
+                        "original_query_ref": query_ref, "note": "这是原查询快照的字段或片段，不代表重新查询或完整数据库。继续原接口分页仍用query。"}
 
             @agent.tool_plain
             async def query_statistics(query_ref: str, path: list[str],
@@ -2108,6 +2142,9 @@ class LighthouseModel:
             async def company_documents(query: str) -> dict:
                 """Locate internal documents for this question, alone or with live business data.
 
+                Choose this only when the answer needs actual company/site sources, not merely
+                because the question contains a measurement, equipment name or procedure acronym.
+                Generic definitions, calculations and illustrative examples do not require it.
                 Returns candidate metadata, not original text. The server reads and verifies
                 original passages statelessly before delivering the final answer. Do not infer
                 document requirements from titles. Continue any needed business reads normally.

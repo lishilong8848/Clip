@@ -959,8 +959,24 @@ def query_result_page(data, path, offset=0, limit=20):
     if type(limit) is not int or not 1 <= limit <= 40:
         raise AssistantError("分页大小无效。")
     selected = _query_value(data, path)
+    if isinstance(selected, dict):
+        fields = list(safe_data(selected))
+        next_offset = offset + limit if offset + limit < len(fields) else None
+        return {'kind': 'object_fields', 'fields': fields[offset:offset + limit], 'loaded_count': len(fields), 'offset': offset,
+                'next_offset': next_offset, 'has_more': next_offset is not None,
+                'note': '这里只列可读字段名，使用原query_ref和path加字段名读取字段值。'}
     if not isinstance(selected, (list, tuple)):
-        raise AssistantError("查询结果必须是列表。")
+        if offset:
+            raise AssistantError('单个字段值不支持分页偏移。')
+        value = safe_data(selected)
+        if path:
+            parent = _query_value(data, path[:-1])
+            if isinstance(parent, dict):
+                visible = safe_data(parent, list_limit=None)
+                if path[-1] not in visible:
+                    raise AssistantError('不能读取受限字段。')
+                value = visible[path[-1]]
+        return {'value': value, 'value_limited': value != selected, 'next_offset': None, 'has_more': False}
     total = len(selected)
     page = safe_data(selected[offset:offset + limit])
     next_offset = offset + limit if offset + limit < total else None

@@ -62,7 +62,7 @@ class GatewayLog:
     """Rotating file sink plus one blocking pipe reader thread."""
 
     def __init__(self, path, *, secrets=(), max_bytes=MAX_BYTES, backup_count=BACKUP_COUNT,
-                 max_line_bytes=MAX_LINE_BYTES):
+                 max_line_bytes=MAX_LINE_BYTES, on_line=None):
         self.path = Path(path)
         self._max_bytes = int(max_bytes)
         self._backup_count = int(backup_count)
@@ -79,6 +79,7 @@ class GatewayLog:
         self._logger.setLevel(logging.INFO)
         self._logger.propagate = False
         self.error = None
+        self._on_line = on_line
         self._open_handler()
 
     @classmethod
@@ -233,6 +234,11 @@ class GatewayLog:
             text = text[:self._max_line_bytes] + " ...[truncated]"
         if text:
             self._logger.info("%s", text)
+            if self._on_line is not None:
+                try:
+                    self._on_line(text)
+                except Exception:
+                    _LOGGER.warning('Gateway diagnostic capture deferred')
 
     def _redact(self, text):
         if not self._secrets:

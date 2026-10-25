@@ -27,7 +27,7 @@ FIELDS = {
     "诊断编号": 1, "错误摘要": 1, "内容SHA256": 1, "日志附件": 17,
 }
 _EVENT_KEYS = frozenset({"module", "stage", "version", "run_id", "category", "error_type",
-    "http_status", "frames", "native_reason", "native_fingerprint", "count", "first_at", "last_at"})
+    "http_status", "frames", "native_reason", "native_fingerprint", "details", "count", "first_at", "last_at"})
 _FORMATS = {"run_id": r"(?:[0-9a-f]{8}|[0-9a-f]{32})", "category": r"[a-z][a-z_]{0,50}",
     "error_type": r"[A-Za-z_]{1,80}", "native_fingerprint": r"[0-9a-f]{64}"}
 _LABELS = {"assistant": "灯塔助手", "feishu": "飞书智能体", "startup": "程序启动",
@@ -37,7 +37,16 @@ _LABELS = {"assistant": "灯塔助手", "feishu": "飞书智能体", "startup": 
     "message_order": "模型消息顺序异常", "model_auth": "模型认证失败", "model_busy": "模型限流",
     "model_connection": "模型连接失败", "model_timeout": "模型调用超时", "image_unsupported": "模型不支持图片",
     "request_rejected": "模型请求被拒绝", "model_not_found": "模型不存在", "model_identity": "模型身份不匹配",
-    "model_invocation_expired": "模型调用已过期", "unclassified": "未分类错误"}
+    "model_invocation_expired": "模型调用已过期", "unclassified": "未分类错误",
+    "gateway": "运行层详情", "model_request": "模型接口请求", "incomplete_turn": "回答未完整结束",
+    "reasoning_only": "模型仅返回思考内容", "empty_response": "模型返回空内容",
+    "missing_response": "缺少最终回答", "invalid_provider_response": "模型接口返回格式异常",
+    "stream_interrupted": "模型传输中断", "response_limit": "模型响应超限"}
+_DETAIL_LABELS = {'stop_reason': '结束原因', 'payloads': '输出段数', 'tools': '工具数',
+    'compactions': '上下文整理次数', 'reasoning_retries': '思考续答次数', 'empty_retries': '空答重试次数',
+    'missing_retries': '缺答重试次数', 'has_assistant': '存在回答', 'has_current_assistant': '当前尝试存在回答',
+    'replay_safe': '可安全重试', 'request_bytes': '请求字节', 'response_bytes': '响应字节',
+    'response_type': '响应类型', 'model_family': '模型系列'}
 
 
 def _seconds(value):
@@ -45,7 +54,7 @@ def _seconds(value):
 
 
 def _event_bytes(events):
-    from openclaw_service.diagnostics import MODULES, STAGES, REASONS, VERSION_PATTERN
+    from openclaw_service.diagnostics import MODULES, STAGES, REASONS, VERSION_PATTERN, clean_details
 
     if not isinstance(events, list) or not events or len(events) > 10000:
         raise _error("诊断批次须包含有界的已脱敏事件。")
@@ -63,6 +72,8 @@ def _event_bytes(events):
             raise _error("诊断事件原因不是白名单代码，未上传。")
         if "http_status" in event and (type(event["http_status"]) is not int or not 100 <= event["http_status"] <= 599):
             raise _error("诊断事件状态码无效。")
+        if 'details' in event and (not isinstance(event['details'], dict) or clean_details(event['details']) != event['details']):
+            raise _error('诊断详情包含非白名单字段，未上传。')
         if "frames" in event and (not isinstance(event["frames"], list) or len(event["frames"]) > 8 or any(
                 not isinstance(frame, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}:[A-Za-z_<>]{1,100}:[1-9]\d{0,7}", frame)
                 for frame in event["frames"])):
@@ -268,6 +279,7 @@ class DiagnosticRemote:
                 "错误次数": batch["error_count"], "涉及模块": joined("module"),
                 "诊断编号": joined("run_id"), "错误摘要": "\n".join(dict.fromkeys(
                     " / ".join(_LABELS.get(event[key], event[key]) for key in ("native_reason", "category", "stage", "error_type") if event.get(key))
+                    + ('；' + '，'.join(_DETAIL_LABELS[key] + '=' + str(value) for key, value in event['details'].items()) if event.get('details') else '')
                     for event in events))[:4000],
                 "内容SHA256": batch["payload_hash"], "日志附件": [{"file_token": token}]}
             record = remote.create(fields, batch["id"])

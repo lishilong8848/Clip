@@ -251,6 +251,28 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
             business_query='A楼今天UPS状态记录', document_query='A楼今天UPS规程要求'), TimeoutError()]
         self.assert_unknown(await self.resolve(question), question, attempts=2)
 
+    async def test_mixed_audit_can_correct_a_supplied_observation_to_document_lookup(self):
+        for question in ('包间湿度现在是91%，该用哪个EOP？',
+                         '冷冻水压力已测得0.2MPa，适用哪份现场规程？',
+                         '设备已出现漏水，应参考哪个应急文件？'):
+            with self.subTest(question=question):
+                self.model.complete.side_effect = [
+                    decision(question, 'mixed', business_query='查询用户所述现场状态', document_query=question),
+                    decision(question, 'knowledge')]
+                result = await self.resolve(question)
+                self.assertEqual((result['kind'], result['task_type']), ('knowledge', 'document'))
+                self.assertEqual(result['query'], question)
+                self.assertEqual(result['business_query'], '')
+                self.assertEqual(result['document_query'], '')
+                self.assertEqual(result['attempts'], 2)
+
+    async def test_corrected_kind_cannot_change_the_user_question_or_scope(self):
+        question = 'A楼设备已告警，该参考什么规程？'
+        for replacement in ('B楼设备已告警，该参考什么规程？', 'A楼未告警，应参考什么规程？'):
+            self.model.complete.side_effect = [decision(question, 'mixed', business_query='A楼设备状态', document_query=question),
+                                               decision(replacement, 'knowledge')]
+            self.assert_unknown(await self.resolve(question), question, attempts=2)
+
     async def test_mixed_first_provider_failure_cannot_bypass_semantic_audit(self):
         question = 'A楼今天UPS状态记录及本站规程要求'
         self.model.complete.side_effect = [TimeoutError(), decision(question, 'mixed',

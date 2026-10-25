@@ -78,7 +78,8 @@ MAX_PROTOCOL = 4
 
 CONNECT_CHANNEL = "__lighthouse_connect__"
 REQ_ID_PREFIX = "lhg-"
-GENERIC_RUN_ERRORS = frozenset({'', 'failed', 'error', 'agent run failed', 'all model fallback candidates failed'})
+GENERIC_RUN_ERRORS = frozenset({'', 'failed', 'error', 'agent run failed', 'all model fallback candidates failed',
+    "agent couldn't generate a response.", "⚠️ agent couldn't generate a response. please try again."})
 
 # Error codes we are allowed to surface to callers.  Anything else coming off
 # the wire is normalized to INTERNAL_ERROR (the raw server message is dropped).

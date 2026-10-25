@@ -403,7 +403,7 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
                         await self.fixture.engine.bridge.call(agent.token, payload)
                     rejected.append(True)
 
-                self.fixture.fail(hook=first)
+                self.fixture.fail_model(hook=first)
                 self.fixture.scripts['backup'] = {'hook': backup, 'wait': {'status': 'ok', 'terminalReply': {
                     'disposition': 'visible', 'text': '操作已完成。' if unknown else '已按原回执核对，数量为1。'}}}
                 events = await self.fixture.run_agent(['原问题\n不可复制到备用模型的额外资料'])
@@ -444,7 +444,7 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
                 agent.calls = 1
                 if not missing:
                     agent.results['receipt'] = ('signature', {'ok': True, 'job_id': 'accepted'})
-                self.fixture.fail()
+                self.fixture.fail_model()
                 if not missing:
                     self.fixture.scripts['current']['events'].insert(0, {'event': 'agent', 'payload': {
                         'runId': 'run-1', 'stream': 'assistant', 'data': {'delta': '已输出的实际内容'}}})
@@ -468,7 +468,7 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
                 'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'original-read', 'params': {}})
 
         for item in profiles:
-            self.fixture.fail(item['id'])
+            self.fixture.fail_model(item['id'])
         self.fixture.scripts['current']['hook'] = hook
         with self.assertRaises(AssistantError):
             await self.fixture.run_agent()
@@ -494,7 +494,7 @@ class ModelCompletionTests(unittest.IsolatedAsyncioTestCase):
         async def stall(client):
             await asyncio.Event().wait()
 
-        self.fixture.fail(hook=first)
+        self.fixture.fail_model(hook=first)
         self.fixture.scripts['backup'] = {'hook': stall}
         original_timeout = asyncio.timeout
         with patch('openclaw_service.assistant.lighthouse_openclaw.asyncio.timeout',
@@ -575,6 +575,22 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result['answer'], '标准模式。')
                 self.assertEqual(''.join(emitted), '标准模式。')
                 self.assertEqual(len(calls), 2)
+
+    async def test_sdk_auto_model_uses_provider_default_output_budget(self):
+        budgets = []
+        async def stream(messages, info):
+            budgets.append(info.model_settings.get('max_tokens'))
+            yield '标准模式。'
+        @asynccontextmanager
+        async def model(*_):
+            yield FunctionModel(stream_function=stream)
+        engine = LighthouseModel(self.fixture.portal, model_factory=model)
+        self.addAsyncCleanup(engine.close)
+        result = await engine.answer(self.fixture.actor, {'question': '现在什么模式', 'file_ids': [],
+            '_profile': {'id': 'fixture', 'name': 'Fixture', 'model': 'WanWu/Deepseek-Auto'}}, [],
+            self.fixture.request, self.fixture.emit, self.fixture.authorize, {})
+        self.assertEqual(result['answer'], '标准模式。')
+        self.assertEqual(budgets, [None])
 
     async def test_general_chat_respects_explicit_format_without_blanket_short_reply_exemption(self):
         for question, answer, accepted in (
@@ -691,7 +707,7 @@ class ModelOutputValidationTests(unittest.IsolatedAsyncioTestCase):
                 'text': '快照中共55人，末位为' + names[-1] + '。'
                     + ('原接口仍有下一页，完整名单尚未查全。' if partial else '')}}
 
-        flow.fail(hook=first)
+        flow.fail_model(hook=first)
         flow.scripts['backup'] = {'hook': backup}
         self.fixture.emit_log.clear()
         if revoke:

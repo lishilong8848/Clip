@@ -109,7 +109,7 @@ class MixedNativeGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fallback_without_receipts_keeps_mixed_session(self):
         original = self.agent.session_key
-        self.fixture.fail()
+        self.fixture.fail_model()
         await self.fixture.run_agent()
         requests = [params for client in self.fixture.clients for method, params in client.calls if method == 'agent']
         self.assertEqual(self.fixture.selected, ['current', 'backup'])
@@ -232,7 +232,7 @@ class MixedNativeGuardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.status, 403)
             await self.call('lighthouse_query', identity + '-read')
 
-        self.fixture.fail(hook=hook)
+        self.fixture.fail_model(hook=hook)
         self.fixture.scripts['backup'] = {'hook': hook}
         original = copy.deepcopy(self.agent.turn)
         await self.fixture.run_agent()

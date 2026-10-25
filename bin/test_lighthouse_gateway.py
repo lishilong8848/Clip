@@ -588,6 +588,8 @@ class SharedEventIsolationTests(unittest.TestCase):
                 'data': {'phase': 'error', 'error': {'message': 'Model provider unavailable'}}}})
         client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': 'lifecycle',
             'data': {'phase': 'error', 'error': 'failed'}}})
+        client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': 'lifecycle',
+            'data': {'phase': 'error', 'error': "⚠️ Agent couldn't generate a response. Please try again."}}})
         errors = client.terminal_errors('own-run')
         self.assertEqual(len(errors), 2)
         self.assertEqual(errors[0]['error'], 'Model provider unavailable')

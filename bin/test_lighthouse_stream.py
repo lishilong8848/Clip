@@ -254,6 +254,23 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError):
             await self.runtime.conversation(self.actor, operation=operation)
 
+    async def test_operation_recovery_reads_its_live_progress_outside_recent_turns(self):
+        operation = 'feishu_' + 'c' * 40
+        state = self.assistant._state(self.actor)
+        turn = {'operation_id': operation, 'run_id': 'live-progress', 'status': 'pending',
+                'source_channel': 'web', 'scopes': self.actor['scopes'], 'access_scopes': self.actor['scopes'],
+                'process': [{'label': '正在连接助手'}]}
+        self.store.put_document('lighthouse_messages', state['id'] + ':' + operation, turn)
+        self.runtime.live['live-progress'] = {'process': [{'label': '正在补查缺失资料'}]}
+        try:
+            current = (await self.runtime.conversation(self.actor, operation=operation))['turns'][0]
+            self.assertEqual(current['process'], [{'label': '正在补查缺失资料'}])
+            current['process'].clear()
+            self.assertEqual(self.runtime.live['live-progress']['process'], [{'label': '正在补查缺失资料'}])
+            self.assertEqual((await self.runtime.conversation({**self.actor, 'id': 'other'}, operation=operation))['turns'], [])
+        finally:
+            self.runtime.live.pop('live-progress')
+
     async def test_generated_file_is_checkpointed_before_later_model_failure_or_stop(self):
         for outcome in ('failure', 'stop'):
             with self.subTest(outcome=outcome):

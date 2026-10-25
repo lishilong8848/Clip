@@ -156,6 +156,30 @@ class DiagnosticCloudTests(unittest.TestCase):
         self.assertEqual(self.posts("/fields"), [], "publish never creates schema")
         self.inspect.assert_not_called()
 
+    def test_native_details_share_the_existing_batch_and_summary_fields(self):
+        value = batch()
+        value['events'][0].update(stage='gateway', native_reason='incomplete_turn',
+            details={'stop_reason': 'error', 'tools': 0, 'has_assistant': True, 'model_family': 'deepseek'})
+        value['payload_hash'] = batch_digest(value)
+        self.remote.publish(value, Mock())
+        self.assertEqual(len(self.posts('/records')), 1)
+        self.assertEqual(len(self.http.uploads), 1)
+        fields = self.http.records[0]['fields']
+        self.assertEqual(set(fields), set(cloud.FIELDS))
+        self.assertIn('回答未完整结束', fields['错误摘要'])
+        self.assertIn('结束原因=error', fields['错误摘要'])
+        self.assertEqual(json.loads(self.http.uploads[0][1]), value['events'])
+
+    def test_native_details_reject_private_or_invalid_values_before_upload(self):
+        for detail in ({'prompt': 'private chat'}, {'model_family': 'private-key'}, {'tools': True},
+                       {'stop_reason': {'message': 'private error'}}, {'response_bytes': -1}):
+            with self.subTest(detail=detail):
+                value = batch()
+                value['events'][0]['details'] = detail
+                value['payload_hash'] = batch_digest(value)
+                with self.assertRaises(SafeError):
+                    self.remote.publish(value, Mock())
+                self.assertFalse(self.http.calls)
     def test_existing_batch_no_upload_or_checkpoint(self):
         value, checkpoint = batch(), Mock()
         self.http.records = [self.record(value)]

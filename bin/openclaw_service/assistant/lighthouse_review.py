@@ -600,7 +600,8 @@ class AnswerReviewer:
         topic = (actor.get('_feishu_topic') or {}).get('id', '')
         from .lighthouse_model import evidence_summary
         context = [{'question': item.get('question', '')[:1500], 'answer': item.get('answer', '')[:1500],
-                    'queries': [{key: source.get(key) for key in ('conditions', 'queried_at', 'source_freshness')}
+                    'queries': [{key: source.get(key) for key in ('conditions', 'queried_at', 'source_freshness',
+                                                                 'conditions_omitted', 'sample_limited', 'query_ref')}
                                 for source in evidence_summary(item.get('sources', []))]}
                    for item in history[-3:] if not item.get('display_only')
                    and item.get('feishu_topic', '') == topic

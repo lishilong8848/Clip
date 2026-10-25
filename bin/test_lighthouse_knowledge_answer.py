@@ -78,6 +78,18 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(topic['candidate_sources'] for topic in prompt['topics']))
         self.assertIn('逐一覆盖', self.model.complete.call_args.args[0][0]['content'])
 
+    async def test_supplied_measurement_is_preserved_for_document_applicability(self):
+        question = '包间湿度现在是91%，该用哪个EOP？'
+        response = await answer_company(self.engine, self.actor, {'_profile': self.profile}, question,
+                                        self.emit, AsyncMock(return_value=self.actor))
+        self.kb.search.assert_called_once_with(self.actor, question, profile=self.profile)
+        messages = self.model.complete.call_args.args[0]
+        packet = json.loads(messages[1]['content'])
+        self.assertEqual(packet['question'], question)
+        self.assertIsNone(packet['business_evidence'])
+        self.assertIn('用户已提供的现场情况', messages[0]['content'])
+        self.assertIn('不声称已读取或核实现场监测数据', messages[0]['content'])
+
     async def test_compound_partial_miss_is_explicit_not_replaced_by_first_topic(self):
         self.kb.search.side_effect = [{'items': rows, 'warning': ''} for rows in ([self.item], [self.item], [])]
         self.model.complete.side_effect = ['{"keywords":["变压器故障","机房高温"]}', '仅找到第一项的资料。[1]']

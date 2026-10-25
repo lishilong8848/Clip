@@ -37,7 +37,9 @@ class ManualFeishuPackagingTests(unittest.TestCase):
         for name in ("config.json", "feishu_assistant.json", "lan_portal_state.sqlite3"):
             (data / name).write_text("fixture-private-runtime-data", encoding="utf-8")
         for relative in ("document_library/files/cached-attachment", "document_library/files/unfinished.part",
-                         "lighthouse_openclaw/knowledge_base/originals/cached.txt"):
+                         "lighthouse_openclaw/knowledge_base/originals/cached.txt", "lighthouse_openclaw/assistant.sqlite3",
+                         "lighthouse_openclaw/accounts/shared-gateway/openclaw.json",
+                         "lighthouse_openclaw/accounts/fixture/sessions/topic.jsonl"):
             cached = data / relative
             cached.parent.mkdir(parents=True, exist_ok=True)
             cached.write_text("fixture-private-runtime-data", encoding="utf-8")

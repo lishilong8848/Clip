@@ -217,7 +217,7 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.profiles(fixtures.profile('reasoner', reasoning=True))
         self.agent.profile = {**self.agent.profile, '_automatic_selection': True}
         self.agent.turn['question'] = 'Analyze and compare repair trends'
-        self.fixture.fail('reasoner')
+        self.fixture.fail_model('reasoner')
         await self.fixture.run_agent()
         self.assertEqual(self.fixture.selected, ['reasoner', 'current'])
         requests = [params for client in self.fixture.clients for method, params in client.calls if method == 'agent']
@@ -227,7 +227,7 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_task_routing_uses_only_configured_reasoning_and_does_not_change_selection(self):
         self.profiles(fixtures.profile('plain'), fixtures.profile('reasoner', reasoning=True))
         self.agent.turn['question'] = 'Analyze and compare repair trends'
-        self.fixture.fail()
+        self.fixture.fail_model()
         await self.fixture.run_agent()
         self.assertEqual(self.fixture.selected, ['current', 'reasoner'])
         settings = self.fixture.model.for_actor(self.fixture.actor['id']).settings()
@@ -247,7 +247,7 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_failure_prefers_larger_existing_context_without_cooling_provider(self):
         self.profiles(fixtures.profile('small', context_window=32000),
                       fixtures.profile('large', context_window=128000))
-        self.fixture.fail(message='Context length exceeded')
+        self.fixture.fail_model(message='Context length exceeded')
         await self.fixture.run_agent()
         self.assertEqual(self.fixture.selected, ['current', 'large'])
         self.assertEqual(self.agent.health.snapshot(self.health_key('current')), {})
@@ -272,8 +272,8 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_cooling_candidates_are_skipped_and_all_cooling_ends_the_chain(self):
         self.profiles(fixtures.profile('backup'), fixtures.profile('third'))
         self.agent.health.record(self.health_key('backup'), category='model_busy')
-        self.fixture.fail()
-        self.fixture.fail('third')
+        self.fixture.fail_model()
+        self.fixture.fail_model('third')
         with self.assertRaises(AssistantError):
             await self.fixture.run_agent()
         self.assertEqual(self.fixture.selected, ['current', 'third'])
@@ -322,7 +322,7 @@ class ModelRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_visible_provider_failure_records_health_without_replaying(self):
         self.agent._live_text_only = True
-        self.fixture.fail()
+        self.fixture.fail_model()
         self.fixture.scripts['current']['events'].insert(0, {'event': 'agent', 'payload': {
             'runId': 'run-1', 'stream': 'assistant', 'data': {'delta': 'visible original answer'}}})
         with self.assertRaises(AssistantError):

@@ -83,7 +83,10 @@ class ReplyResilienceTests(unittest.TestCase):
             self.assertTrue(text)
             self.assertNotIn('答题名单', text)
             if code == 'model_context':
-                self.assertIn('上下文', text)
+                self.assertIn('模型的处理上限', text)
+                self.assertIn('原问题、聊天记录和已提交任务均已保留', text)
+                self.assertNotIn('可把长资料作为附件', text)
+                self.assertNotIn('这段对话的资料较多', text)
         for message in ('没有权限查看该楼栋', '结束通告前必须上传一张现场照片', '回答已停止，可继续或重新提问。'):
             self.assertEqual(reply_failure(message), message)
 

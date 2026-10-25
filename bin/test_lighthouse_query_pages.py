@@ -71,8 +71,7 @@ class QueryResultPageTests(unittest.TestCase):
             with self.subTest(limit=limit):
                 with self.assertRaises(AssistantError):
                     query_result_page(rows_data, ["rows"], limit=limit)
-        with self.assertRaises(AssistantError):
-            query_result_page(rows_data, ["rows", "0"])  # final item is a dict, not a list
+        self.assertEqual(query_result_page(rows_data, ["rows", "0"])["fields"], ["record_id", "title"])
         with self.assertRaises(AssistantError):
             query_result_page(rows_data, ["missing"])
         with self.assertRaises(AssistantError):
@@ -180,6 +179,36 @@ class QueryResultPageTests(unittest.TestCase):
         query_result_page(root, [], offset=0, limit=1)
         self.assertEqual(data, snapshot)
         self.assertEqual(root, root_snapshot)
+
+    def test_deferred_snapshot_fields_and_scalar_can_be_read_without_private_fields(self):
+        data = {'complete': False, 'has_more': True, 'rows': rows(45),
+                'secret': 'private-key', 'phone': '13800000000', 'signature_time': '10:30'}
+        directory = query_result_page(data, [], limit=2)
+        self.assertEqual(directory['fields'], ['complete', 'has_more'])
+        self.assertEqual(directory['next_offset'], 2)
+        self.assertEqual(directory['loaded_count'], 4)
+        tail = query_result_page(data, [], offset=2)
+        self.assertEqual(tail['fields'], ['rows', 'signature_time'])
+        self.assertFalse(query_result_page(data, ['complete'])['value'])
+        self.assertEqual(query_result_page(data, ['rows', '44', 'title'])['value'], 'topic 44')
+        self.assertEqual(query_result_page(data, ['signature_time'])['value'], '10:30')
+        self.assertNotIn('private-key', str(directory) + str(tail))
+        for key in ('secret', 'phone'):
+            with self.assertRaises(AssistantError):
+                query_result_page(data, [key])
+
+    def test_scalar_snapshot_reads_keep_privacy_context_and_mark_limited_values(self):
+        data = {'rows': [{'kind': 'signature', 'url': 'https://fixture.invalid/image.png'}],
+                'notes': '{"title":"正常记录","items":["第一项"],"phone":"13800000000","secret":"private-key"}',
+                'long_text': '设备检查' * 2000}
+        with self.assertRaises(AssistantError):
+            query_result_page(data, ['rows', '0', 'url'])
+        notes = query_result_page(data, ['notes'])
+        self.assertEqual(notes['value'], {'title': '正常记录', 'items': ['第一项']})
+        self.assertTrue(notes['value_limited'])
+        self.assertTrue(query_result_page(data, ['long_text'])['value_limited'])
+        with self.assertRaises(AssistantError):
+            query_result_page(data, ['notes'], offset=1)
 
     def test_paging_does_not_copy_unselected_deepcopy_trap_elements(self):
         class DeepCopyTrap:

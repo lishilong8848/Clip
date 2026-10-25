@@ -320,6 +320,12 @@ def model_context_limit(profile):
     return min(limit, 149952) if known else limit
 
 
+def model_output_limit(profile):
+    # Auto routes may spend completion tokens on reasoning even when no visible text is returned.
+    return 32000 if re.fullmatch(r'WanWu/(?:MiniMax|GLM|Qwen|Deepseek)-Auto',
+                                str(profile.get('model', '')).strip(), re.I) else 5000
+
+
 def _model_payload_size(value):
     """UTF-8 bytes upper-bound text tokens; reserve 16K per image, not base64 bytes."""
     size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8'))
@@ -367,12 +373,65 @@ def system_first_payload(payload):
         *[message for message in messages if message.get('role') not in {'system', 'developer'}]]}
 
 
-def bound_model_payload(payload, profile):
+def model_read_receipt(result, budget=8000):
+    """Keep large authorized snapshots addressable without resending their entire body."""
+    if (not isinstance(result, dict) or not isinstance(result.get('query_ref'), str) or not result['query_ref']
+            or len(json.dumps(result, ensure_ascii=False).encode('utf-8')) <= budget):
+        return result
+    from .lighthouse_queries import query_result_state
+    state, _ = query_result_state({'ok': True, **result})
+    excerpt = {key: result[key] for key in ('ok', 'query_ref', 'source_number', 'queried_at') if key in result}
+    excerpt.update(receipt_excerpt_only=True, source_query_state=result.get('source_query_state', state),
+                   note='大结果保留在原快照中，此回执不是完整资料。用read_query(query_ref, path=[])查看字段，'
+                        '再按字段路径读取值或分页列表；统计用query_statistics。原接口仍有后页时继续原查询，不得按节选报全量。')
+    # Preserve small state/condition fields, but never replace an omitted list with an empty list.
+    for key, value in result.items():
+        if key not in excerpt and len(json.dumps({**excerpt, key: value}, ensure_ascii=False).encode('utf-8')) <= budget:
+            excerpt[key] = value
+    return excerpt
+
+
+def compact_read_receipts(payload):
+    """Shorten older completed reads with snapshot refs; leave latest and write receipts intact."""
+    from .lighthouse_review import READ_REPAIR_TOOLS
+    messages = payload.get('messages')
+    if not isinstance(messages, list):
+        return payload
+    latest = next((i for i in range(len(messages) - 1, -1, -1)
+                   if isinstance(messages[i], dict) and messages[i].get('role') == 'tool'), -1)
+    names, replacements = {}, {}
+    allowed = set(READ_REPAIR_TOOLS) | {'lighthouse_' + name for name in READ_REPAIR_TOOLS}
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get('role') == 'assistant':
+            for call in message.get('tool_calls') or []:
+                if (isinstance(call, dict) and isinstance(call.get('id'), str) and isinstance(call.get('function'), dict)
+                        and isinstance(call['function'].get('name'), str)):
+                    names[call.get('id')] = call['function'].get('name')
+        if (index == latest or message.get('role') != 'tool'
+                or not isinstance(message.get('tool_call_id'), str)
+                or names.get(message.get('tool_call_id')) not in allowed
+                or not isinstance(message.get('content'), str)):
+            continue
+        try:
+            original = json.loads(message['content'])
+        except ValueError:
+            continue
+        excerpt = model_read_receipt(original, budget=1500)
+        if excerpt is not original:
+            content = json.dumps(excerpt, ensure_ascii=False)
+            if len(content.encode('utf-8')) < len(message['content'].encode('utf-8')):
+                replacements[index] = {**message, 'content': content}
+    return {**payload, 'messages': [replacements.get(i, message) for i, message in enumerate(messages)]} if replacements else payload
+
+
+def bound_model_payload(payload, profile, *, provider_default=False):
     """Bound a JSON Chat Completions body before transport; never mutate its data.
 
     Count the entire body at one token per UTF-8 byte, plus 10% and 1024 safety
-    tokens. Always emit max_tokens, removing max_completion_tokens; duplicate
-    output limits use the smaller value. Returned nested data is shared.
+    tokens. Provider-default requests omit output limits; explicit budgets use
+    the smaller value. Returned nested data is shared.
     """
     if not isinstance(payload, dict):
         raise _model_context_error('Invalid request body.')
@@ -382,9 +441,11 @@ def bound_model_payload(payload, profile):
     if payload.get('model'):
         limit = min(limit, model_context_limit({'model': payload['model'], 'context_window': limit}))
     fields = ('max_completion_tokens', 'max_tokens')
-    output = min([5000] + [_positive_model_limit(payload[key], key) for key in fields if key in payload])
+    output_limit = model_output_limit(profile)
+    output = 0 if provider_default else min([output_limit] + [_positive_model_limit(payload[key], key) for key in fields if key in payload])
     bounded = {key: value for key, value in payload.items() if key not in fields}
-    bounded['max_tokens'] = output
+    if not provider_default:
+        bounded['max_tokens'] = output
     try:
         size = _model_payload_size(bounded)
         byte_budget = (limit - output - 1024) * 10 // 11
@@ -392,9 +453,15 @@ def bound_model_payload(payload, profile):
             fixed = _model_payload_size({**bounded, 'messages': []}) - _model_payload_size([])
             bounded = compact_model_messages(bounded, byte_budget - fixed, measure=_model_payload_size)
             size = _model_payload_size(bounded)
+        if size > byte_budget:
+            bounded = compact_read_receipts(bounded)
+            size = _model_payload_size(bounded)
     except (ValueError, TypeError, RecursionError):
         raise _model_context_error('Request must contain finite, serializable JSON values.') from None
     estimated = size + (size + 9) // 10 + 1024
+    if output_limit > 5000 and 128 <= limit - estimated < output:
+        output = limit - estimated
+        bounded['max_tokens'] = output
     if estimated + output > limit:
         raise _model_context_error(
             f'Input estimate {estimated} + output budget {output} exceeds context limit {limit}.')
@@ -455,6 +522,6 @@ def reply_failure(detail, category='', question=''):
     generic = re.search(r'未取得可靠业务依据|模型(?:运行|未|处理)|原回答|完整终答|可见回答|查询处理遇到程序异常', detail)
     if category.startswith('model_') or category in {'timeout', 'query_adapter'} or generic:
         if category == 'model_context':
-            return '这段对话的资料较多，精简上下文后仍未能完成回答。聊天记录和已提交任务没有删除；可把长资料作为附件提供，并指出本次最需要处理的部分。'
+            return '本次检索或回答请求超过模型的处理上限，自动整理后仍未完成。原问题、聊天记录和已提交任务均已保留；这不表示你提供的问题过长或资料不存在。'
         return '这次未能完成回答，原消息已保留。可以稍后重试原消息或切换可用模型；如涉及业务提交，请先查看原任务状态，避免重复操作。'
     return detail or '本条回答未完成，原消息已保留；如已提交业务，请先查看原任务状态。'

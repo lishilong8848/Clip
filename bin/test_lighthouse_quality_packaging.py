@@ -32,22 +32,29 @@ class QualityPackaging(unittest.TestCase):
         for name in ('knowledge_repair', 'knowledge_evidence', 'claim_review', 'answer_quality_replay', 'quality_packaging',
                      'reviewer_reread', 'mixed_query', 'query_intent', 'task_model_quality', 'mixed_native_guard',
                      'live_evaluation', 'quality_integration', 'engine_evaluation', 'learning_participation',
-                     'source_contracts', 'partial_claims'):
+                     'source_contracts', 'partial_claims', 'model_failover', 'native_final_answer',
+                     'query_pages', 'reference_workflows'):
             self.assertIn('bin.test_lighthouse_' + name, strings)
             self.assertTrue((ROOT / 'bin' / ('test_lighthouse_' + name + '.py')).is_file())
         for name in ('assistant_diagnostics', 'assistant_diagnostic_store', 'assistant_diagnostics_cloud', 'lighthouse_tool_readiness'):
             self.assertIn('bin.test_' + name, strings)
             self.assertTrue((ROOT / 'bin' / ('test_' + name + '.py')).is_file())
+        for name in ('feishu_live_reply', 'lighthouse_request_budget', 'lighthouse_runtime', 'lighthouse_stream'):
+            self.assertIn('bin.test_' + name, strings)
 
     def test_runtime_helpers_not_excluded_and_user_state_remains_excluded(self):
         self.assertIn('openclaw_service.assistant.lighthouse_knowledge_evidence', package.SMOKE_IMPORT_MODULES)
         for name in ('lighthouse_knowledge_answer.py', 'lighthouse_knowledge_evidence.py', 'lighthouse_review.py',
                      'lighthouse_query_intent.py', 'lighthouse_model_health.py', 'lighthouse_sources.py',
-                     'lighthouse_artifacts.py', 'lighthouse_queries.py', 'lighthouse_model.py'):
+                     'lighthouse_artifacts.py', 'lighthouse_queries.py', 'lighthouse_model.py', 'lighthouse_openclaw.py',
+                     'lighthouse_context.py', 'lighthouse_runtime.py', 'lighthouse_stream.py'):
             path = ROOT / 'bin/openclaw_service/assistant' / name
             self.assertTrue(path.is_file())
             self.assertFalse(package._is_excluded(path, root=ROOT, exclude_venv=True,
                                                   relative_path=path.relative_to(ROOT)))
+        messenger = ROOT / 'bin/lan_bitable_template_portal/feishu_assistant.py'
+        self.assertFalse(package._is_excluded(messenger, root=ROOT, exclude_venv=True,
+                                              relative_path=messenger.relative_to(ROOT)))
         package._assert_project_iterator_excludes_runtime_data()
         for module in ('openclaw_service.diagnostics', 'openclaw_service.diagnostic_store',
                        'lan_bitable_template_portal.assistant_diagnostics_cloud'):

@@ -131,6 +131,36 @@ class ReferenceWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["sources"][2]["queried_at"], result["sources"][0]["queried_at"])
         self.assertEqual(rows[0]["secret"], "hidden-value")
 
+    async def test_read_query_root_directory_and_scalar_use_original_authorized_snapshot(self):
+        reads = []
+        @self.app.get('/api/capacity/water/records')
+        async def water(scope: str, month: str):
+            reads.append((scope, month))
+            return {'ok': True, 'data': {'records': [{'record_id': 'w0', 'meter_no': 'M0'}],
+                                        'complete': False, 'secret': 'must-not-be-returned'}}
+
+        async def stream(messages, info):
+            results = self.tools(messages)
+            if not results:
+                yield {0: DeltaToolCall(name='query', json_args=json.dumps({'operation': {
+                    'api_id': 'GET /api/capacity/water/records', 'params': {'scope': 'A', 'month': '2026-10'}}}))}
+            elif len(results) <= 3:
+                yield {0: DeltaToolCall(name='read_query', json_args=json.dumps({
+                    'query_ref': results[0]['query_ref'],
+                    'path': [[], ['records', '0', 'meter_no'], ['complete']][len(results) - 1]}))}
+            else:
+                self.assertEqual(results[1]['data']['kind'], 'object_fields')
+                self.assertNotIn('secret', results[1]['data']['fields'])
+                self.assertEqual(results[2]['data']['value'], 'M0')
+                self.assertFalse(results[3]['data']['value'])
+                self.assertEqual(results[3]['source_query_state'], 'partial')
+                self.assertNotIn('must-not-be-returned', json.dumps(results))
+                yield '已取得水表M0；来源尚未完整，不能据此报全量。[3][4]'
+        result = await self.answer(stream, '核对A楼本月水表编号和读取状态')
+        self.assertEqual(reads, [('A', '2026-10')])
+        self.assertEqual(len(result['sources']), 4)
+        self.assertEqual(result['sources'][3]['queried_at'], result['sources'][0]['queried_at'])
+
     async def test_query_slice_is_not_native_pagination_and_private_paths_are_not_readable(self):
         reads = []
         @self.app.get("/api/repair-management/records")

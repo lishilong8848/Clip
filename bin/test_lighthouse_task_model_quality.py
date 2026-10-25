@@ -456,7 +456,7 @@ class NativeQualityTests(unittest.IsolatedAsyncioTestCase):
         agent.profile['_automatic_selection'] = True
         original_turn, original_actor = copy.deepcopy(agent.turn), copy.deepcopy(agent.actor)
         session = agent.session_key
-        fixture.fail('third')
+        fixture.fail_model('third')
         await fixture.run_agent()
         self.assertEqual(fixture.selected, ['third', 'backup'])
         self.assertEqual(agent._acquire_runtime.await_count, 2)

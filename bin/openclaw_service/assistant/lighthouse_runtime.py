@@ -140,7 +140,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
         model = {
             "id": item['agent_id'], "name": 'Lighthouse account model', "reasoning": capabilities["reasoning"],
             "input": ["text", "image"] if capabilities["image_input"] else ["text"],
-            "contextWindow": model_context_limit(profile) if 'context_window' in profile else 64000, "maxTokens": 5000,
+            "contextWindow": model_context_limit(profile) if 'context_window' in profile else 64000,
             "compat": {"maxTokensField": "max_tokens", "supportsDeveloperRole": False},
         }
         if capabilities["reasoning"]:
@@ -181,7 +181,7 @@ def build_configuration(root, accounts, port, *, model_url, plugin, tool_names=(
         "skills": {"allowBundled": ["lighthouse-tools"], "load": {"watch": False}}, "cron": {"enabled": False},
         "browser": {"enabled": False},
         "update": {"checkOnStart": False, "auto": {"enabled": False}},
-        "logging": {"level": "info" if os.environ.get('OPENCLAW_GATEWAY_STARTUP_TRACE') == '1' else "error", "consoleLevel": "info" if os.environ.get('OPENCLAW_GATEWAY_STARTUP_TRACE') == '1' else "error", "file": str(root / "diagnostic.log"),
+        "logging": {"level": "info" if os.environ.get('OPENCLAW_GATEWAY_STARTUP_TRACE') == '1' else "warn", "consoleLevel": "info" if os.environ.get('OPENCLAW_GATEWAY_STARTUP_TRACE') == '1' else "warn", "file": str(root / "diagnostic.log"),
                     "maxFileBytes": 2_000_000, "audit": {"enabled": False, "messages": "off"}},
         # Retain the preceding layout while widening state ownership to accounts.
         "session": {"reset": {"mode": "none"}, "store": str(root / 'agents/{agentId}/sessions/sessions.json')},
@@ -336,6 +336,7 @@ class OpenClawRuntime:
                 from .lighthouse_ai import model_capabilities
                 from .lighthouse_context import model_context_limit
                 config_fingerprint = hashlib.sha256(json.dumps({'context': model_context_limit(profile),
+                    'output_policy': 'provider_default_v1',
                     'capabilities': model_capabilities(profile), 'plugin': plugin_hash, 'tools': list(tool_names),
                     'provider': model_provider_id(profile),
                     'parameters': model_parameters, 'text_only': text_only}, sort_keys=True).encode()).hexdigest()
@@ -431,7 +432,8 @@ class OpenClawRuntime:
                                'LIGHTHOUSE_PLUGIN_DIR': str(shared_plugin),
                                "LIGHTHOUSE_BRIDGE_URL": bridge_url, "NO_COLOR": "1", "NODE_OPTIONS": "--max-old-space-size=2048"}
                 environment.pop('LIGHTHOUSE_MODEL_KEY', None)
-                log = GatewayLog(root / 'gateway.log', secrets=environment)
+                from openclaw_service.diagnostics import capture_gateway_line
+                log = GatewayLog(root / 'gateway.log', secrets=environment, on_line=capture_gateway_line)
                 flags = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
                 try:
                     preload = Path(__file__).parent / 'openclaw/native-paths.mjs'
@@ -664,6 +666,15 @@ class OpenClawRuntime:
         item = self.accounts.get(key)
         if not item or item.get('blocked') or not item.get('busy') or alias != item['agent_id']:
             return JSONResponse({'error': {'message': 'Model identity mismatch'}}, status_code=403)
+        from openclaw_service.diagnostics import capture, native_run_id
+        diagnostic_run = native_run_id(item.get('run_id'))
+        model_name = str(item['profile'].get('model', '')).lower()
+        model_family = next((name for name in ('deepseek', 'minimax', 'glm', 'qwen') if name in model_name), 'other')
+        def report_failure(reason, status=502, *, response_bytes=0, response_type='other'):
+            capture('assistant', 'model_request', run_id=diagnostic_run, category='model_transport',
+                    error=AssistantError('Model transport failed', status), native=reason,
+                    details={'model_family': model_family, 'request_bytes': len(body),
+                             'response_bytes': response_bytes, 'response_type': response_type})
         payload['model'] = item['profile']['model']
         if unquote(urlsplit(item['profile']['endpoint']).path).rstrip('/').lower().endswith('/embeddings'):
             return JSONResponse({'error': {'code': 'embedding_unsupported',
@@ -693,14 +704,20 @@ class OpenClawRuntime:
                 message.get('role') == 'system' and isinstance(message.get('content'), str) and
                 message['content'].startswith('You are a context summarization assistant.') for message in messages):
             item['compaction_run_id'] = item['run_id']
-        from .lighthouse_context import bound_model_payload, compact_model_messages
+        from .lighthouse_context import bound_model_payload, compact_model_messages, model_output_limit
         compacted = compact_model_messages(payload)
         if compacted is not payload and item.get('run_id'):
             item['compaction_run_id'] = item['run_id']
         payload = compacted
+        recovering_output = item['profile'].get('_output_recovery') is True
+        if recovering_output:
+            payload = {key: value for key, value in payload.items() if key != 'max_completion_tokens'}
+            payload['max_tokens'] = model_output_limit(item['profile'])
         try:
-            bounded = bound_model_payload(payload, item['profile'])
+            # OpenClaw injects its own default max_tokens; the upstream service must choose the initial limit.
+            bounded = bound_model_payload(payload, item['profile'], provider_default=not recovering_output)
         except AssistantError as exc:
+            report_failure('Context length exceeded' if exc.category == 'model_context' else 'Model provider rejected request', exc.status)
             return JSONResponse({'error': {'code': 'context_length_exceeded' if exc.category == 'model_context' else 'model_request_rejected',
                 'message': 'Context length exceeded' if exc.category == 'model_context' else 'Model provider rejected request'}}, status_code=exc.status)
         if bounded.get('messages') != payload.get('messages') and item.get('run_id'):
@@ -717,6 +734,10 @@ class OpenClawRuntime:
                     headers={'Authorization': 'Bearer ' + item['model_key'], 'Cookie': ''}), stream=True)
                 if response.status_code == 200:
                     connection.push_async_callback(response.aclose)
+                    if 'text/html' in response.headers.get('content-type', '').lower():
+                        report_failure('Model provider returned invalid response', response_type='html')
+                        return JSONResponse({'error': {'code': 'invalid_provider_response',
+                            'message': 'Model provider returned invalid response'}}, status_code=502)
                     break
                 error_body = bytearray()
                 try:
@@ -733,30 +754,41 @@ class OpenClawRuntime:
                     with CancelScope(shield=True):
                         await response.aclose()
                 error = model_provider_error(response.status_code, error_body)
+                report_failure(error['message'], response.status_code, response_bytes=len(error_body))
                 # Only a rejected model request may be retried; never replay a tool or an accepted stream.
                 if attempt == 0 and error.get('code') == 'context_length_exceeded':
                     budget = max(2000, len(json.dumps(payload.get('messages', []), ensure_ascii=False)) // 2)
                     compacted = compact_model_messages(payload, budget)
-                    if compacted is not payload:
+                    if compacted is not payload or 'max_tokens' not in payload:
+                        context_changed = compacted is not payload
                         try:
-                            payload = bound_model_payload(compacted, item['profile'])
+                            payload = bound_model_payload({**compacted, 'max_tokens': model_output_limit(item['profile'])}, item['profile'])
                         except AssistantError:
                             return JSONResponse({'error': {'code': 'context_length_exceeded',
                                 'message': 'Context length exceeded'}}, status_code=413)
-                        if item.get('run_id'):
+                        if context_changed and item.get('run_id'):
                             item['compaction_run_id'] = item['run_id']
                         continue
                 return JSONResponse({'error': error}, status_code=response.status_code)
 
             async def chunks():
                 size = 0
-                async for chunk in response.aiter_bytes():
-                    if self.accounts.get(key) is not item or item.get('blocked') or not item.get('busy'):
-                        return
-                    size += len(chunk)
-                    if size > 32 * 1024 * 1024:
-                        return
-                    yield chunk
+                content_type = response.headers.get('content-type', '').lower()
+                response_type = 'event_stream' if 'text/event-stream' in content_type else 'json' if 'json' in content_type else 'other'
+                try:
+                    async for chunk in response.aiter_bytes():
+                        if self.accounts.get(key) is not item or item.get('blocked') or not item.get('busy'):
+                            return
+                        size += len(chunk)
+                        if size > 32 * 1024 * 1024:
+                            report_failure('Model response too large', response_bytes=size, response_type=response_type)
+                            return
+                        yield chunk
+                except (httpx.HTTPError, OSError):
+                    report_failure('Model stream interrupted', response_bytes=size, response_type=response_type)
+                    raise
+                if size == 0:
+                    report_failure('Model provider returned empty response', response_type=response_type)
             class ModelStream(StreamingResponse):
                 async def __call__(self, scope, receive, send):
                     try:
@@ -773,8 +805,10 @@ class OpenClawRuntime:
         except AssistantStartupError:
             return JSONResponse({'error': {'message': 'Model invocation expired'}}, status_code=403)
         except httpx.TimeoutException:
+            report_failure('Model provider timed out', 504)
             return JSONResponse({'error': model_provider_error(504)}, status_code=504)
         except (httpx.HTTPError, OSError):
+            report_failure('Model provider unavailable')
             return JSONResponse({'error': model_provider_error(502)}, status_code=502)
         finally:
             if not streaming:

@@ -76,19 +76,53 @@ def _card_text(card):
     return ''
 
 
+_LIVE_PHASE_PHRASES = {'waiting': '等待处理', 'connecting': '正在准备回答', 'query': '正在查询资料',
+                       'checking': '正在核对结果', 'thinking': '正在思考回答', 'finishing': '正在整理答复',
+                       'switching': '正在切换可用模型继续回答'}
+_LIVE_UNKNOWN_PHRASE = '正在处理你的问题'
+
+
+def _public_phase(turn):
+    # Render fixed phrases from the latest stage, never raw labels or draft content.
+    process = turn.get('process') if isinstance(turn, dict) else None
+    labels = [row.get('label') for row in process if isinstance(row, dict)] if isinstance(process, list) else []
+    label = str((labels[-1] if labels else turn.get('label')) or '').strip() if isinstance(turn, dict) else ''
+    for phase, prefixes in (
+        ('waiting', ('等待', '正在等待')),
+        ('switching', ('当前模型',)),
+        ('connecting', ('正在连接', '正在准备', '正在恢复原回答')),
+        ('query', ('正在查询', '正在检索', '正在补查', '正在读取')),
+        ('checking', ('正在核对', '正在检查', '正在验证', '正在匹配')),
+        ('finishing', ('正在整理答复', '正在生成答复')),
+        ('thinking', ('正在思考', '正在分析', '正在整理上下文', '正在自动整理上下文')),
+    ):
+        if label.startswith(prefixes):
+            return phase
+    return 'unknown'
+
+
 def _live_card(reply):
-    text = '正在整理完整回答，请稍候。' if reply.get('awaiting_turn') else _reply_text(reply.get('text'))
+    if reply.get('awaiting_turn'):
+        text = _LIVE_PHASE_PHRASES.get(reply.get('live_phase'), _LIVE_UNKNOWN_PHRASE)
+    else:
+        text = _reply_text(reply.get('text'))
     elements = [{'tag': 'markdown', 'content': chunk} for chunk in _reply_chunks(text)]
     return {'schema': '2.0', 'config': {'update_multi': True}, 'body': {'elements': elements}}
 
 
 def _live_result(previous, result, *, incomplete=False):
+    result.pop('live_phase', None)
     live = previous.get('live_reply')
     if isinstance(live, dict):
         result['live_reply'] = live
         for key in ('thread_route', 'thread_messages', 'thread_fallback', 'sent_parts'):
             if key in previous:
-                result.setdefault(key, copy.deepcopy(previous[key]))
+                value = copy.deepcopy(previous[key])
+                if key == 'sent_parts':
+                    value = [part for part in value if not part.startswith('waiting:')]
+                    if not value:
+                        continue
+                result.setdefault(key, value)
         live.pop('partial', None)
         live['notice'] = ''
     return result
@@ -669,7 +703,8 @@ class FeishuMessenger:
                 if reply.get('awaiting_turn') or not (reply.get('files') or reply.get('long_text_file_key')):
                     await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
             else:
-                placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {}}
+                placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {},
+                               'live_phase': reply.get('live_phase', 'waiting')}
                 parts.append(('live:0', 'interactive', _live_card(placeholder)))
         # A form is supplementary: it must not replace the answer or its sources.
         card_text = _card_text(card)
@@ -1415,9 +1450,11 @@ class FeishuAssistant:
             resume = candidate['run_id']
             operation = candidate['operation_id']
             question = candidate['question']
+        # Seed progress even while the submitted turn is not readable yet.
         waiting = {'awaiting_turn': operation, 'actor_id': actor['id'],
                    'conversation_id': conversation['conversation_id'], 'wait_started': time.time(),
                    'query_question': question, 'has_input_files': bool(file_ids), 'delivery_access': self._delivery_access(actor),
+                   'live_reply': {}, 'live_phase': 'waiting',
                    'text': '原回答仍在处理中，完成后会继续回复到这里，无需重复提问。'}
         if self.inbox:
             # Persist the read-back key before POST; a lost response must not replay tools.
@@ -1516,12 +1553,12 @@ class FeishuAssistant:
                 return reply
             return _live_result(reply, _uncertain_reply(message['message_id']), incomplete=True)
         if turn.get('status') in {'pending', 'queued', 'running'}:
-            if (isinstance(reply.get('live_reply'), dict) or turn.get('reply_mode') == 'live'
-                    and not reply.get('has_input_files')
-                    and not any(turn.get(key) for key in ('plan', 'sources', 'output_files', 'clarification'))):
+            # Business turns expose status only, never their unvalidated answer.
+            if reply.get('awaiting_turn'):
                 live = reply.setdefault('live_reply', {})
                 live.pop('partial', None)
                 live['notice'] = ''
+                reply['live_phase'] = _public_phase(turn)
             reply['text'] = '正在整理完整回答，请稍候。'
             return reply
         final = await self._turn_reply(message, request, actor, conversation, turn,

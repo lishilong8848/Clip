@@ -617,7 +617,8 @@ class LighthouseStream:
                 raise AssistantError('请在原对话中查看此回答。', 403)
             live = self.live.get((turn or {}).get('run_id'))
             if live and turn.get('status') == 'pending':
-                turn = {**turn, 'answer': live.get('answer', ''), 'reply_mode': live.get('reply_mode', 'validated')}
+                turn = {**turn, 'answer': live.get('answer', ''), 'reply_mode': live.get('reply_mode', 'validated'),
+                        'process': copy.deepcopy(live.get('process', []))}
             result['turns'] = [public_turn(await asyncio.to_thread(self._knowledge_turn, actor, turn))] if turn else []
         return result
 

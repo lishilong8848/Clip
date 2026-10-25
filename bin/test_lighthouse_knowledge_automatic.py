@@ -58,11 +58,19 @@ class AutomaticCompanyKnowledge(unittest.IsolatedAsyncioTestCase):
         self.kb.search.assert_not_called()
         self.engine.public_sources.search.assert_not_awaited()
 
-    async def test_explicit_company_intent_skips_classifier_but_checks_configuration(self):
+    async def test_company_words_still_require_semantic_classification(self):
         for question in ('公司报销规定是什么？', '南通知识库中交接班规范有哪些？'):
             self.assertEqual(await self.classify(question), question)
         self.model.settings.assert_called()
-        self.model.complete.assert_not_called()
+        self.assertEqual(self.model.complete.call_count, 2)
+        self.portal.get_knowledge.assert_not_called()
+
+    async def test_company_terms_in_a_general_question_do_not_force_retrieval(self):
+        self.model.complete.return_value = 'false'
+        for question in ('公司知识库这个词是什么意思？', '给我一份公司规章制度的虚拟写作示例',
+                         'EOP是什么意思？', '读数从91%降到80%变化了几个百分点？'):
+            self.assertIsNone(await self.classify(question))
+        self.assertEqual(self.model.complete.call_count, 4)
         self.portal.get_knowledge.assert_not_called()
 
     async def test_semantic_routing_does_not_spend_the_answer_reasoning_budget(self):

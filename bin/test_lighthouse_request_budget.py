@@ -1,5 +1,6 @@
 """Offline regressions for complete outbound model request budgets."""
 import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_context import (
-    _model_payload_size, bound_model_payload, model_context_limit,
+    _model_payload_size, bound_model_payload, model_context_limit, model_output_limit,
 )
 
 
@@ -25,7 +26,7 @@ class RequestBudgetTests(unittest.TestCase):
         outputs = [result[key] for key in ('max_tokens', 'max_completion_tokens') if key in result]
         self.assertEqual(len(outputs), 1)
         self.assertNotIn('max_completion_tokens', result)
-        self.assertLessEqual(outputs[0], 5000)
+        self.assertLessEqual(outputs[0], model_output_limit(profile))
         size = _model_payload_size(result)
         self.assertLessEqual(size + (size + 9) // 10 + 1024 + outputs[0], model_context_limit(profile))
         return result
@@ -79,7 +80,7 @@ class RequestBudgetTests(unittest.TestCase):
             for field in ('max_tokens', 'max_completion_tokens'):
                 with self.subTest(name=name, field=field):
                     detail = self.rejects(self.payload('x' * 150042, **{field: 65536}), profile)
-                    self.assertIn('output budget 5000', detail)
+                    self.assertIn('output budget 32000', detail)
                     self.assertIn('context limit 149952', detail)
 
     def test_output_clamp_and_duplicate_fields(self):
@@ -91,6 +92,116 @@ class RequestBudgetTests(unittest.TestCase):
                                  ({'max_tokens': 65536, 'max_completion_tokens': 900}, 900)):
             result = self.fits(self.payload(**fields), {})
             self.assertEqual(result['max_tokens'], expected)
+
+    def test_auto_models_reserve_completion_space_for_reasoning_before_visible_answer(self):
+        for name in ('Deepseek', 'MiniMax', 'GLM', 'Qwen'):
+            profile = {'model': 'WanWu/' + name + '-Auto'}
+            request = self.payload(model=profile['model'], max_tokens=32000)
+            result = bound_model_payload(request, profile)
+            self.assertEqual(result['max_tokens'], 32000)
+            self.assertEqual(result['messages'], request['messages'])
+
+    def test_reasoning_budget_shrinks_to_remaining_context_without_truncating_current_request(self):
+        profile = {'model': 'WanWu/Deepseek-Auto'}
+        request = self.payload('x' * 125000, model=profile['model'], max_tokens=32000)
+        result = bound_model_payload(request, profile)
+        self.assertGreater(result['max_tokens'], 5000)
+        self.assertLess(result['max_tokens'], 32000)
+        self.assertEqual(result['messages'], request['messages'])
+        size = _model_payload_size(result)
+        self.assertLessEqual(size + (size + 9) // 10 + 1024 + result['max_tokens'], 149952)
+
+    def test_explicit_small_completion_budget_is_not_silently_raised(self):
+        result = bound_model_payload(self.payload(max_tokens=900), {'model': 'WanWu/MiniMax-Auto'})
+        self.assertEqual(result['max_tokens'], 900)
+
+    def test_provider_default_omits_injected_output_limits_but_keeps_current_payload(self):
+        request = self.payload(max_tokens=8192, max_completion_tokens=65536, stream=True,
+                               tools=[{'type': 'function', 'function': {'name': 'read'}}])
+        before = copy.deepcopy(request)
+        result = bound_model_payload(request, {'model': 'WanWu/MiniMax-Auto'}, provider_default=True)
+        self.assertEqual(result, {key: value for key, value in request.items()
+                                  if key not in {'max_tokens', 'max_completion_tokens'}})
+        self.assertEqual(request, before)
+
+    def test_provider_default_still_rejects_oversized_input(self):
+        with self.assertRaises(AssistantError) as caught:
+            bound_model_payload(self.payload('x' * 150042), {'model': 'WanWu/Qwen-Auto'}, provider_default=True)
+        self.assertEqual(caught.exception.category, 'model_context')
+
+    def test_large_history_evidence_is_bounded_with_coverage_and_original_preserved(self):
+        from openclaw_service.assistant.lighthouse_model import evidence_summary
+        source = {'number': 1, 'title': '历史来源', 'query_ref': 'original-query',
+                  'query_conditions': {'scope': 'D', 'date': '2026-10-25'},
+                  'data': {'records': [{'record_id': str(i), 'title': '历史条目' * 2000} for i in range(40)]}}
+        original = copy.deepcopy(source)
+        summary = evidence_summary([source])
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False).encode()), 2010)
+        self.assertEqual(summary[0]['conditions'], source['query_conditions'])
+        self.assertEqual(summary[0]['query_ref'], 'original-query')
+        self.assertTrue(summary[0]['historical_only'])
+        self.assertTrue(summary[0]['sample_limited'])
+        self.assertEqual(source, original)
+
+    def test_oversized_history_conditions_are_marked_missing_not_replaced_with_empty_filters(self):
+        from openclaw_service.assistant.lighthouse_model import evidence_summary
+        source = {'query_ref': 'original-query', 'query_conditions': {'filter': 'very-long-condition' * 4000}, 'data': {}}
+        original = copy.deepcopy(source)
+        summary = evidence_summary([source])[0]
+        self.assertTrue(summary['conditions_omitted'])
+        self.assertTrue(summary['sample_limited'])
+        self.assertNotIn('conditions', summary)
+        self.assertEqual(summary['query_ref'], 'original-query')
+        self.assertEqual(source, original)
+
+    def test_current_turn_old_read_receipts_use_snapshot_refs_without_losing_current_request(self):
+        payload = self.payload('CURRENT_QUESTION 仅A楼今天夜班')
+        for i in range(8):
+            payload['messages'] += [
+                {'role': 'assistant', 'tool_calls': [{'id': str(i), 'type': 'function',
+                  'function': {'name': 'lighthouse_query', 'arguments': '{"scope":"A"}'}}]},
+                {'role': 'tool', 'tool_call_id': str(i), 'content': json.dumps({
+                    'query_ref': 'snapshot-' + str(i), 'complete': True,
+                    'data': {'rows': [{'value': '详情' * 4000}]}})}]
+        original = copy.deepcopy(payload)
+        result = bound_model_payload(payload, {'model': 'WanWu/Deepseek-Auto'}, provider_default=True)
+        self.assertEqual(result['messages'][:2], original['messages'][:2])
+        self.assertEqual(result['messages'][-2:], original['messages'][-2:])
+        for i, message in enumerate(result['messages']):
+            if message.get('role') == 'assistant':
+                self.assertEqual(message, original['messages'][i])
+            elif message.get('role') == 'tool' and message['tool_call_id'] != '7':
+                receipt = json.loads(message['content'])
+                self.assertEqual(receipt['query_ref'], 'snapshot-' + message['tool_call_id'])
+                self.assertTrue(receipt['receipt_excerpt_only'])
+        self.assertLess(_model_payload_size(result), _model_payload_size(original) // 2)
+        self.assertEqual(payload, original)
+
+    def test_tool_compaction_never_changes_write_unknown_or_unreferenced_receipts(self):
+        from openclaw_service.assistant.lighthouse_context import compact_read_receipts
+        payload = self.payload()
+        for i, name in enumerate(('lighthouse_prepare_business', 'custom_tool', 'lighthouse_query')):
+            result = {'query_ref': 'snapshot', 'data': 'x' * 10000} if i < 2 else {'data': 'x' * 10000}
+            payload['messages'] += [
+                {'role': 'assistant', 'tool_calls': [{'id': str(i), 'type': 'function',
+                  'function': {'name': name, 'arguments': '{}'}}]},
+                {'role': 'tool', 'tool_call_id': str(i), 'content': json.dumps(result)}]
+        payload['messages'].append({'role': 'tool', 'tool_call_id': 'latest', 'content': 'unchanged'})
+        original = copy.deepcopy(payload)
+        self.assertEqual(compact_read_receipts(payload), original)
+        self.assertEqual(payload, original)
+
+    def test_malformed_tool_identifiers_are_not_rewritten_or_interpreted(self):
+        from openclaw_service.assistant.lighthouse_context import compact_read_receipts
+        payload = self.payload()
+        payload['messages'] += [
+            {'role': 'assistant', 'tool_calls': [{'id': ['invalid'], 'function': {'name': 'lighthouse_query'}},
+                                                {'id': 'invalid-name', 'function': {'name': ['lighthouse_query']}}]},
+            {'role': 'tool', 'tool_call_id': ['invalid'], 'content': 'unchanged'},
+            {'role': 'tool', 'tool_call_id': 'invalid-name', 'content': 'unchanged'},
+            {'role': 'tool', 'tool_call_id': 'latest', 'content': 'latest'}]
+        original = copy.deepcopy(payload)
+        self.assertEqual(compact_read_receipts(payload), original)
 
     def test_default_and_lower_context_and_combined_output_budget(self):
         self.rejects(self.payload('x' * 64000), {})

@@ -65,6 +65,27 @@ class AssistantUpdateTests(unittest.TestCase):
         self.guard.finish(True)
         self.assertFalse(self.guard.hold.exists())
 
+    def test_assistant_query_patch_changes_code_without_replacing_user_state(self):
+        retained = {}
+        for name in ('bin/data/config.json', 'bin/data/lan_portal_state.sqlite3',
+                     'bin/data/lighthouse_openclaw/assistant.sqlite3',
+                     'bin/data/lighthouse_openclaw/accounts/shared-gateway/openclaw.json',
+                     'bin/data/lighthouse_openclaw/accounts/fixture/sessions/topic.jsonl'):
+            target = self.project / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            retained[target] = ('existing-local-state:' + name).encode('utf-8')
+            target.write_bytes(retained[target])
+        files = [self.file('bin/openclaw_service/assistant/' + name, 'old', 'updated')
+                 for name in ('lighthouse_model.py', 'lighthouse_openclaw.py', 'lighthouse_queries.py')]
+        with patch('openclaw_service.update.descriptor', return_value=None):
+            self.assertTrue(self.guard.pause(self.payload, [source for _, source in files]))
+        for target, source in files:
+            shutil.copy2(source, target)
+        self.assertEqual(self.guard.finish(True), '')
+        self.assertFalse(self.guard.hold.exists())
+        self.assertTrue(all(target.read_text(encoding='utf-8') == 'updated' for target, _ in files))
+        self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+
     def test_failed_update_resumes_only_restored_code(self):
         old, source = self.file('bin/openclaw_service/server.py', 'old', 'new')
         with patch('openclaw_service.update.descriptor', return_value=None):

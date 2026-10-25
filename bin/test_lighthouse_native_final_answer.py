@@ -152,6 +152,18 @@ class NativeFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assert_single_submission(client)
         self.assertFalse(getattr(self.agent, '_terminal_model_failure', False))
 
+    async def test_cached_completion_waits_for_original_pending_terminal_reply(self):
+        client = ScriptedGateway(outcomes=[{'status': 'ok', 'pendingError': True}, visible()])
+        original_request = client.request
+        async def request(method, params=None, timeout=None):
+            value = await original_request(method, params, timeout)
+            return {**value, 'status': 'ok'} if method == 'agent' else value
+        client.request = request
+        events = await self.collect(client)
+        self.assertEqual(events[-1].result.output, FINAL)
+        self.assert_single_submission(client)
+        self.assertEqual(sum(method == 'agent.wait' for method, _ in client.calls), 2)
+
     async def test_chat_error_waits_for_confirmed_outcome_without_publishing_preview(self):
         self.agent._buffered_reply = True
         client = ScriptedGateway(frames=[assistant(PROCESS),

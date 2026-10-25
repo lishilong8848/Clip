@@ -1,6 +1,7 @@
 """Model failover stays inside one authorized turn; all transports are fakes."""
 import asyncio
 import copy
+import json
 import sys
 import tempfile
 import unittest
@@ -82,7 +83,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.clients.append(client)
         return client
 
-    def fail(self, identity='current', message='Model provider unavailable', **options):
+    def fail_model(self, identity='current', message='Model provider unavailable', **options):
         self.scripts[identity] = {'events': [{'event': 'agent', 'payload': {'runId': 'run-1',
             'stream': 'lifecycle', 'data': {'phase': 'error', 'error': message}}}],
             'wait': {'status': 'error', 'error': message}, **options}
@@ -97,6 +98,126 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.selected, ['current'])
         self.assertFalse(self.engine.bridge.active)
         self.assertFalse(self.items[0]['busy'])
+
+    async def test_output_truncation_retries_in_fresh_session_without_replaying_tools(self):
+        self.fail_model(message='Model output token limit reached')
+        original = self.agent.session_key
+        events = await self.run_agent()
+        self.assertEqual(events[-1].result.output, 'fixture reply')
+        self.assertEqual(self.selected, ['current', 'backup'])
+        requests = [p for c in self.clients for method, p in c.calls if method == 'agent']
+        self.assertEqual(requests[0]['sessionKey'], original)
+        self.assertTrue(requests[1]['sessionKey'].startswith(original + ':output:'))
+        self.assertTrue(self.agent.profile['_output_recovery'])
+        self.assertEqual(self.agent.calls, 0)
+        self.assertEqual(self.agent.session_key, original)
+
+    def test_confirmed_length_error_is_not_an_unclassified_protocol_error(self):
+        self.agent.run_id = 'original-native-run'
+        with self.assertRaises(AssistantError) as raised:
+            self.agent._terminal_answer({'status': 'error', 'error': 'failed', 'stopReason': 'length'})
+        self.assertEqual(raised.exception.category, 'model_output')
+
+    async def test_large_read_receipts_are_bounded_without_requery_or_losing_snapshots(self):
+        from openclaw_service.assistant.lighthouse_context import bound_model_payload
+        rows = [{'title': '设备检查事项' * 8, 'state': '待核对', 'record_id': f'r{i}'} for i in range(400)]
+        receipt = {'ok': True, 'query_ref': 'query_saved', 'source_number': 1,
+                   'data': {'records': rows, 'complete': False, 'has_more': True, 'next_offset': 400}}
+        reads, replies = [], []
+        async def query():
+            reads.append('read')
+            return copy.deepcopy(receipt)
+        self.agent.tools['lighthouse_query'] = Tool(query)
+        async def hook(client):
+            if reads:
+                return
+            payload = {'session_key': self.agent.session_key, 'run_id': self.agent.run_id,
+                       'tool': 'lighthouse_query', 'call_id': 'large-read', 'params': {}}
+            replies.append(await self.engine.bridge.call(self.agent.token, payload))
+            replies.append(await self.engine.bridge.call(self.agent.token, payload))
+        self.fail_model(message='Context overflow', hook=hook)
+        self.agent._auto_tools = True
+        await self.run_agent()
+        self.assertEqual(reads, ['read'])
+        self.assertEqual(replies[0], replies[1])
+        self.assertLess(len(json.dumps(replies[0], ensure_ascii=False).encode()), 8000)
+        self.assertEqual(replies[0]['query_ref'], 'query_saved')
+        self.assertTrue(replies[0]['receipt_excerpt_only'])
+        self.assertEqual(replies[0]['source_query_state'], 'partial')
+        self.assertEqual(self.agent.results['large-read'][1], receipt)
+        # Twenty-four completed reads must not be copied wholesale into the recovery prompt.
+        self.agent.results = {f'call-{i}': ('sig', {**copy.deepcopy(receipt), 'query_ref': f'query_saved_{i}'}) for i in range(24)}
+        originals = copy.deepcopy(self.agent.results)
+        message = self.agent._complete_from_evidence('按原日期和楼栋核对资料', '补查后回答')
+        self.assertLess(len(message.encode()), 30000)
+        bound_model_payload({'model': 'WanWu/Deepseek-Auto', 'messages': [{'role': 'user', 'content': message}]},
+                            {'model': 'WanWu/Deepseek-Auto'})
+        self.assertEqual(self.agent.results, originals)
+        for i in range(24):
+            self.assertIn(f'"query_ref": "query_saved_{i}"', message)
+
+    def test_receipt_compaction_keeps_small_and_unaddressable_results_unchanged(self):
+        small = {'ok': False, 'query_ref': 'query_short', 'data': {'complete': False}, 'error': '查询未完成'}
+        large = {'ok': True, 'job_id': 'accepted-job', 'data': [{'title': '已接收事项' * 1000}] * 10}
+        for value in (small, large, {**large, 'query_ref': ''}):
+            self.assertEqual(native.model_read_receipt(value), value)
+
+    async def test_context_failure_recovers_without_reusing_overflowed_native_history(self):
+        self.fail_model(message='Context length exceeded')
+        original_session = self.agent.session_key
+        original_client = self.client_for
+        async def client_for(actor, item):
+            client = await original_client(actor, item)
+            if self.agent.session_key == original_session:
+                client.history = {'messages': [{'role': 'assistant', 'content': 'old native tool history'}]}
+                client.wait = {'status': 'error', 'error': 'Context length exceeded'}
+            return client
+        self.engine.gateway_client = client_for
+        history = [SimpleNamespace(parts=[SimpleNamespace(content='已授权范围A，2026-10-25白班', part_kind='user-prompt')])]
+        saved_history = copy.deepcopy(history)
+        events = await self.run_agent(['继续核对当前问题'], history)
+        self.assertEqual(events[-1].result.output, 'fixture reply')
+        requests = [params for client in self.clients for method, params in client.calls if method == 'agent']
+        self.assertEqual(len(requests), 2)
+        self.assertNotEqual(requests[0]['sessionKey'], requests[1]['sessionKey'])
+        self.assertIn('继续核对当前问题', requests[1]['message'])
+        self.assertIn('已授权范围A，2026-10-25白班', requests[1]['message'])
+        self.assertEqual(history, saved_history)
+        self.assertEqual(self.agent.session_key, original_session)
+        self.assertFalse(any(method in {'sessions.delete', 'chat.clear', 'sessions.reset'}
+                             for client in self.clients for method, _ in client.calls))
+
+    async def test_native_history_budget_reserves_current_request_policy_and_tool_schemas(self):
+        self.agent.profile['context_window'] = 32000
+        self.agent.instructions = 'POLICY_MUST_REMAIN ' * 500
+        history = [SimpleNamespace(parts=[SimpleNamespace(content='OLD_DETAIL ' * 2500, part_kind=kind)])
+                   for kind in ('user-prompt', 'text')]
+        original = copy.deepcopy(history)
+        question = 'CURRENT_SCOPE_D 2026-10-25 只核对此条件'
+        await self.run_agent([question], history)
+        request = next(params for client in self.clients for method, params in client.calls if method == 'agent')
+        self.assertIn(question, request['message'])
+        self.assertIn('已压缩', request['message'])
+        self.assertNotIn('OLD_DETAIL', request['message'])
+        self.assertEqual(request['extraSystemPrompt'], self.agent.instructions)
+        self.assertEqual(request['promptMode'], 'minimal')
+        self.assertEqual(history, original)
+        self.assertLess(len(request['message'].encode()), 4000)
+
+    async def test_rehydrated_history_fits_without_truncating_current_request_or_saved_history(self):
+        from openclaw_service.assistant.lighthouse_context import bound_model_payload
+        history = [SimpleNamespace(parts=[SimpleNamespace(content='历史资料' * 1000, part_kind=kind)])
+                   for _ in range(10) for kind in ('user-prompt', 'text')]
+        saved_history = copy.deepcopy(history)
+        question = '只核对A楼2026-10-25白班，保留原筛选并给出依据。'
+        await self.run_agent([question], history)
+        request = next(params for method, params in self.clients[0].calls if method == 'agent')
+        bounded = bound_model_payload({'messages': [{'role': 'user', 'content': request['message']}]},
+                                      {'context_window': 149952})
+        self.assertEqual(bounded['messages'][0]['content'], request['message'])
+        self.assertTrue(request['message'].endswith(question))
+        self.assertIn('部分历史对话已省略', request['message'])
+        self.assertEqual(history, saved_history)
 
     async def test_topic_read_validation_exhaustion_uses_backup_and_original_receipts(self):
         self.actor.update(channel='feishu:oc_fixture',
@@ -177,7 +298,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                 self.profiles = [profile('current', image_input=True), profile('backup', image_input=True)]
                 self.configure(self.actor['id'], self.profiles)
                 self.agent.profile = self.profiles[0]
-                self.fail(message=message)
+                self.fail_model(message=message)
                 prompt = ['original question', BinaryContent(data=b'fixture-image', media_type='image/png')]
                 history = [SimpleNamespace(parts=[SimpleNamespace(content='authorized prior context', part_kind='user-prompt')])]
                 original_turn = copy.deepcopy(self.agent.turn)
@@ -187,6 +308,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.selected, ['current', 'backup'])
                 requests = [params for client in self.clients for method, params in client.calls if method == 'agent']
                 self.assertEqual(len(requests), 2)
+                self.assertTrue(all(request['promptMode'] == 'minimal' for request in requests))
                 for field in ('message', 'sessionKey', 'attachments', 'extraSystemPrompt'):
                     self.assertEqual(requests[0][field], requests[1][field])
                 self.assertIn('authorized prior context', requests[1]['message'])
@@ -202,14 +324,14 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                     profile('vision-enabled', image_input=True), profile('backup')]
         self.configure(self.actor['id'], profiles)
         self.configure('person-b', [profile('other-person-private')])
-        self.fail()
+        self.fail_model()
         await self.run_agent()
         self.assertEqual(self.selected, ['current', 'backup'])
         self.assertNotIn('other-person-private', self.selected)
 
     async def test_disabled_assistant_does_not_select_a_backup(self):
         self.configure(self.actor['id'], self.profiles, enabled=False)
-        self.fail()
+        self.fail_model()
         with self.assertRaises(AssistantError):
             await self.run_agent()
         self.assertEqual(self.selected, ['current'])
@@ -219,14 +341,14 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                    *[profile('backup' + str(index)) for index in range(5)]]
         self.configure(self.actor['id'], aliases)
         for item in aliases:
-            self.fail(item['id'])
+            self.fail_model(item['id'])
         with self.assertRaises(AssistantError):
             await self.run_agent()
         self.assertEqual(self.selected, ['current', 'backup0', 'backup1', 'backup2'])
 
     async def test_all_models_failed_retains_sanitized_diagnostic_not_success(self):
         for item in self.profiles:
-            self.fail(item['id'], 'provider private secret and personal-data')
+            self.fail_model(item['id'], 'provider private secret and personal-data')
         with self.assertRaises(AssistantError) as raised:
             await self.run_agent()
         category, message = failure_detail(raised.exception)
@@ -236,7 +358,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.selected, ['current', 'backup'])
 
     async def test_unloaded_shared_tools_are_not_reported_as_four_bad_models(self):
-        self.fail(message='No callable tools remain after resolving explicit tool allowlist (private fixture)')
+        self.fail_model(message='No callable tools remain after resolving explicit tool allowlist (private fixture)')
         with self.assertRaises(AssistantError) as raised:
             await self.run_agent()
         self.assertEqual(raised.exception.category, 'runtime_tools')
@@ -245,12 +367,16 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.selected, ['current'])
 
     async def test_generic_failed_status_uses_native_cause_for_fallback_and_diagnostics(self):
-        for error, category, backups in (
-                ('Model provider unavailable: private-body', 'model_connection', ['current', 'backup']),
-                ('No callable tools remain: private-body', 'runtime_tools', ['current'])):
+        for summary, error, category, backups in (
+                ('failed', 'Model provider unavailable: private-body', 'model_connection', ['current', 'backup']),
+                ('failed', 'No callable tools remain: private-body', 'runtime_tools', ['current']),
+                ("⚠️ Agent couldn't generate a response. Please try again.",
+                 'Context overflow: private-body', 'model_context', ['current', 'backup']),
+                ("⚠️ Agent couldn't generate a response. Please try again.",
+                 'No callable tools remain: private-body', 'runtime_tools', ['current'])):
             with self.subTest(error=error):
                 self.setUp()
-                self.fail(message='failed')
+                self.fail_model(message=summary)
                 original_client = self.client_for
                 async def client_for(actor, item):
                     client = await original_client(actor, item)
@@ -281,6 +407,28 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.selected, ['current'])
         self.assertNotIn('private-body', str(raised.exception))
 
+    async def test_pending_acceptance_observes_original_run_without_starting_backup(self):
+        self.scripts['current'] = {'accept': {'status': 'error', 'summary': 'failed',
+            'result': {'meta': {'pendingError': True}}},
+            'wait': {'status': 'ok', 'terminalReply': {'disposition': 'visible', 'text': 'original completed answer'}}}
+        events = await self.run_agent()
+        self.assertEqual(events[-1].result.output, 'original completed answer')
+        self.assertEqual(self.selected, ['current'])
+        self.assertEqual(sum(method == 'agent' for client in self.clients for method, _ in client.calls), 1)
+
+    async def test_unsettled_acceptance_cannot_authorize_replay(self):
+        for flags in ({'pendingToolCalls': ['original-write']}, {'aborted': True}, {'stopReason': 'toolUse'}):
+            with self.subTest(flags=flags):
+                self.setUp()
+                self.scripts['current'] = {'accept': {'status': 'error', 'summary': 'failed', 'result': {'meta': flags}},
+                    'wait': {'status': 'error', 'error': 'failed', **flags}}
+                with patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_GRACE', .03), \
+                        patch.object(native.OpenClawToolAgent, 'FINAL_REPLY_POLL', .005):
+                    with self.assertRaises(AssistantError):
+                        await self.run_agent()
+                self.assertEqual(self.selected, ['current'])
+                self.assertEqual(sum(method == 'agent' for client in self.clients for method, _ in client.calls), 1)
+
     async def test_tool_success_failure_and_unknown_result_never_replayed(self):
         for result in ('success', 'failure', 'unknown'):
             with self.subTest(result=result):
@@ -297,7 +445,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                 async def hook(client):
                     await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
                         'run_id': self.agent.run_id, 'tool': 'lighthouse_submit', 'call_id': 'first-call', 'params': {}})
-                self.fail(hook=hook)
+                self.fail_model(hook=hook)
                 events = await self.run_agent()
                 self.assertEqual(calls, [result])
                 self.assertEqual(self.selected, ['current', 'backup'])
@@ -307,7 +455,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_reply_does_not_mix_in_another_model_answer(self):
         self.agent._live_text_only = True
-        self.fail()
+        self.fail_model()
         self.scripts['current']['events'].insert(0, {'event': 'agent', 'payload': {'runId': 'run-1',
             'stream': 'assistant', 'data': {'delta': 'partial original answer'}}})
         events = []
@@ -357,7 +505,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
             if not reads:
                 await self.engine.bridge.call(self.agent.token, {'session_key': self.agent.session_key,
                     'run_id': self.agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'original-read', 'params': {}})
-        self.fail(hook=hook, wait={'status': 'error', 'error': 'Model provider unavailable'})
+        self.fail_model(hook=hook, wait={'status': 'error', 'error': 'Model provider unavailable'})
         self.scripts['current']['events'].insert(0, {'event': 'chat', 'payload': {
             'runId': 'run-1', 'state': 'error', 'errorMessage': 'private provider detail'}})
         with self.assertLogs(native.__name__, level='WARNING') as logs:
@@ -533,7 +681,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.items[0]['busy'])
 
     async def test_late_callback_from_failed_attempt_is_rejected(self):
-        self.fail()
+        self.fail_model()
         async def late_callback(client):
             old_id = next(params['idempotencyKey'] for method, params in self.clients[0].calls if method == 'agent')
             with self.assertRaisesRegex(AssistantError, '运行编号已失效'):
@@ -547,7 +695,7 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.agent.resident = True
         self.engine.manager.begin_run = AsyncMock()
         self.engine.manager.release = AsyncMock()
-        self.fail()
+        self.fail_model()
         await self.run_agent()
         self.assertEqual(self.engine.manager.begin_run.await_count, 2)
         self.assertEqual(self.engine.manager.release.await_count, 2)
@@ -573,21 +721,23 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         for failed in (False, True):
             with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
                 self.setUp()
-                self.fail()
+                self.fail_model()
                 if failed:
-                    self.fail('backup', 'private upstream secret')
+                    self.fail_model('backup', 'private upstream secret')
                 channel, message = self.private_channel(directory)
                 await channel._drain(message['union_id'])
                 channel.messenger.react.assert_awaited_once()
                 channel.messenger.send.assert_awaited_once()
                 text = channel.messenger.send.await_args.args[1]['text']
-                self.assertIn('模型运行未完成' if failed else 'fixture reply', text)
+                self.assertIn('这次未能完成回答' if failed else 'fixture reply', text)
+                if failed:
+                    self.assertIn('诊断编号', text)
                 self.assertNotIn('private upstream secret', text)
                 self.assertEqual(channel.inbox.owners(), [])
 
     async def test_private_message_delivery_retry_never_reexecutes_model_or_tools(self):
         with tempfile.TemporaryDirectory() as directory:
-            self.fail()
+            self.fail_model()
             channel, message = self.private_channel(directory)
             channel.messenger.send.side_effect = TimeoutError()
             await channel._drain(message['union_id'])
