@@ -78,6 +78,7 @@ MAX_PROTOCOL = 4
 
 CONNECT_CHANNEL = "__lighthouse_connect__"
 REQ_ID_PREFIX = "lhg-"
+GENERIC_RUN_ERRORS = frozenset({'', 'failed', 'error', 'agent run failed', 'all model fallback candidates failed'})
 
 # Error codes we are allowed to surface to callers.  Anything else coming off
 # the wire is normalized to INTERNAL_ERROR (the raw server message is dropped).
@@ -284,6 +285,7 @@ class GatewayClient:
         "_pending",
         "_events",
         "_selected_run",
+        "_terminal_errors",
         "_event_waiters",
         "_event_bytes",
         "_event_byte_budget",
@@ -315,6 +317,7 @@ class GatewayClient:
         self._pending: Dict[str, asyncio.Future] = {}
         self._events: Deque[Tuple[Dict[str, Any], int]] = collections.deque()
         self._selected_run = None
+        self._terminal_errors = {}
         self._event_waiters: Set[asyncio.Future] = set()
         self._event_bytes = 0
         self._event_byte_budget = DEFAULT_EVENT_QUEUE_BYTES
@@ -371,7 +374,15 @@ class GatewayClient:
     def select_run(self, run_id=None):
         """Filter shared-gateway broadcasts before they enter this account's queue."""
         self.discard_events()
+        self._terminal_errors.clear()
         self._selected_run = run_id or ''
+
+    def terminal_errors(self, run_id):
+        """Keep two bounded error hints even when agent.wait wins the event-consumer race."""
+        if not run_id or run_id != self._selected_run:
+            return ()
+        return tuple(dict(value) for name in ('agent', 'chat')
+                     if (value := self._terminal_errors.get(name)) is not None)
 
     async def request(
         self,
@@ -456,6 +467,7 @@ class GatewayClient:
         if self._closed:
             return
         self._closed = True
+        self._terminal_errors.clear()
         self._disconnected = True
         self._disconnect_error = GatewayError("CLOSED")
         if self._reader is not None and not self._reader.done():
@@ -760,6 +772,25 @@ class GatewayClient:
         }
         if seq is not None:
             envelope["seq"] = seq
+
+        payload = frame.get('payload')
+        if name in {'agent', 'chat'} and self._selected_run and isinstance(payload, dict) and payload.get('runId') == self._selected_run:
+            data = payload.get('data')
+            # Compaction/end may close this same failure; only a fresh attempt or output supersedes its cause.
+            if (name == 'agent' and (payload.get('stream') in {'assistant', 'tool'}
+                    or payload.get('stream') == 'lifecycle' and isinstance(data, dict) and data.get('phase') == 'start')
+                    or name == 'chat' and payload.get('state') in {'delta', 'final', 'aborted'}):
+                self._terminal_errors.clear()
+            error = (data.get('error') if name == 'agent' and payload.get('stream') == 'lifecycle'
+                     and isinstance(data, dict) and data.get('phase') == 'error'
+                     else payload.get('errorMessage') if name == 'chat' and payload.get('state') == 'error' else None)
+            if isinstance(error, dict):
+                error = error.get('message')
+            if (isinstance(error, str) and error.strip().lower() not in GENERIC_RUN_ERRORS
+                    and all(isinstance(payload[key], str) and len(payload[key]) <= 512
+                            for key in ('runId', 'sessionKey', 'agentId') if key in payload)):
+                self._terminal_errors[name] = {key: payload[key] for key in ('runId', 'sessionKey', 'agentId') if key in payload}
+                self._terminal_errors[name]['error'] = error[:4096]
 
         if self._event_waiters:
             fut = self._event_waiters.pop()

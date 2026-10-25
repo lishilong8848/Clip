@@ -244,6 +244,43 @@ class ModelFailoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('private fixture', str(raised.exception))
         self.assertEqual(self.selected, ['current'])
 
+    async def test_generic_failed_status_uses_native_cause_for_fallback_and_diagnostics(self):
+        for error, category, backups in (
+                ('Model provider unavailable: private-body', 'model_connection', ['current', 'backup']),
+                ('No callable tools remain: private-body', 'runtime_tools', ['current'])):
+            with self.subTest(error=error):
+                self.setUp()
+                self.fail(message='failed')
+                original_client = self.client_for
+                async def client_for(actor, item):
+                    client = await original_client(actor, item)
+                    if self.agent.profile['id'] == 'current':
+                        client.terminal_errors = lambda run: ({'runId': run,
+                            'sessionKey': self.agent.session_key, 'error': error},)
+                    return client
+                self.engine.gateway_client = client_for
+                with patch('openclaw_service.diagnostics.capture') as capture:
+                    if category == 'runtime_tools':
+                        with self.assertRaises(AssistantError) as raised:
+                            await self.run_agent()
+                        self.assertEqual(raised.exception.category, category)
+                    else:
+                        events = await self.run_agent()
+                        self.assertEqual(events[-1].result.output, 'fixture reply')
+                self.assertEqual(capture.call_args.kwargs['category'], category)
+                self.assertEqual(capture.call_args.kwargs['native'], error)
+                self.assertEqual(self.selected, backups)
+                self.assertNotIn('private-body', str(self.emitted))
+
+    async def test_terminal_acceptance_preserves_result_meta_error_instead_of_failed_summary(self):
+        self.scripts['current'] = {'accept': {'status': 'error', 'summary': 'failed',
+            'result': {'meta': {'error': 'No callable tools remain: private-body'}}}}
+        with self.assertRaises(AssistantError) as raised:
+            await self.run_agent()
+        self.assertEqual(raised.exception.category, 'runtime_tools')
+        self.assertEqual(self.selected, ['current'])
+        self.assertNotIn('private-body', str(raised.exception))
+
     async def test_tool_success_failure_and_unknown_result_never_replayed(self):
         for result in ('success', 'failure', 'unknown'):
             with self.subTest(result=result):

@@ -7,6 +7,22 @@ from bin.test_mcp_packaging import package, ROOT
 
 
 class QualityPackaging(unittest.TestCase):
+    def test_knowledge_concurrency_checks_run_alone_before_heavy_shards(self):
+        tree = ast.parse((ROOT / 'package_portable.py').read_text(encoding='utf-8-sig'))
+        preflight = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                         and node.name == '_run_packaging_preflight_tests')
+        groups = []
+        for call in ast.walk(preflight):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id == '_run_preflight_check' and isinstance(call.args[0], ast.List)):
+                modules = [node.value for node in call.args[0].elts if isinstance(node, ast.Constant)
+                           and isinstance(node.value, str) and node.value.startswith('bin.test_')]
+                groups.append((call.lineno, modules))
+        name = 'bin.test_lighthouse_knowledge_stream_storage'
+        self.assertEqual([modules for _, modules in groups if name in modules], [[name]])
+        isolated = next(line for line, modules in groups if name in modules)
+        self.assertLess(isolated, next(line for line, modules in groups if 'bin.test_lighthouse_knowledge_faiss' in modules))
+
     def test_quality_regressions_are_part_of_the_default_preflight(self):
         tree = ast.parse((ROOT / 'package_portable.py').read_text(encoding='utf-8-sig'))
         preflight = next(node for node in tree.body if isinstance(node, ast.FunctionDef)

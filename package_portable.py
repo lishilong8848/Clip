@@ -1912,9 +1912,14 @@ def _run_packaging_preflight_tests() -> None:
     )
     log("通告 ID 边界测试通过。")
 
-    # Loopback streaming checks retain their strict timing budget outside CPU-heavy shards.
+    # Timing-sensitive checks retain their strict budgets outside CPU-heavy shards.
     _run_preflight_check(
         [test_python, "-m", "unittest", "bin.test_public_access"],
+        cwd=PROJECT_ROOT,
+        check=True,
+    )
+    _run_preflight_check(
+        [test_python, "-m", "unittest", "bin.test_lighthouse_knowledge_stream_storage"],
         cwd=PROJECT_ROOT,
         check=True,
     )
@@ -2003,7 +2008,7 @@ def _run_packaging_preflight_tests() -> None:
                 "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
                 "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
                 "bin.test_knowledge_document_formats", "bin.test_knowledge_document_summary", "bin.test_document_library_all_scopes",
-                "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_lighthouse_knowledge_stream_storage", "bin.test_notice_end_progress",
+                "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_notice_end_progress",
                 "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
                 "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
                 "bin.test_assistant_shared_read", "bin.test_lighthouse_shared_privacy",

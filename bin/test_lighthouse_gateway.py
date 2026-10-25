@@ -556,6 +556,80 @@ class GatewayTransportTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SharedEventIsolationTests(unittest.TestCase):
+    def test_terminal_error_is_available_before_queue_is_consumed_and_reset_for_next_run(self):
+        client = gw.GatewayClient(URL, TOKEN)
+        client.select_run('own-run')
+        frame = {'event': 'agent', 'payload': {'runId': 'own-run', 'sessionKey': 'own-session',
+            'agentId': 'own-agent', 'stream': 'lifecycle',
+            'data': {'phase': 'error', 'error': 'Context overflow'}}}
+        client._handle_event(frame)
+        self.assertEqual(client.terminal_errors('own-run'), ({'runId': 'own-run', 'sessionKey': 'own-session',
+            'agentId': 'own-agent', 'error': 'Context overflow'},))
+        self.assertEqual(client._events[0][0]['payload'], frame['payload'])
+        self.assertGreater(client._event_bytes, 0)
+        self.assertFalse(client.terminal_errors('other-run'))
+        client.select_run('next-run')
+        self.assertFalse(client.terminal_errors('next-run'))
+        self.assertFalse(client._events)
+
+    def test_error_hints_are_bounded_and_do_not_capture_assistant_or_foreign_content(self):
+        client = gw.GatewayClient(URL, TOKEN)
+        client.select_run('own-run')
+        for name, payload in (
+                ('agent', {'runId': 'foreign-run', 'stream': 'lifecycle', 'data': {'phase': 'error', 'error': 'foreign'}}),
+                ('agent', {'runId': 'own-run', 'stream': 'assistant', 'data': {'error': 'private answer'}}),
+                ('chat', {'runId': 'own-run', 'state': 'final', 'message': 'private answer'})):
+            client._handle_event({'event': name, 'payload': payload})
+        self.assertFalse(client.terminal_errors('own-run'))
+        for _ in range(3):
+            client._handle_event({'event': 'chat', 'payload': {'runId': 'own-run', 'state': 'error',
+                'errorMessage': 'x' * 9000}})
+            client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': 'lifecycle',
+                'data': {'phase': 'error', 'error': {'message': 'Model provider unavailable'}}}})
+        client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': 'lifecycle',
+            'data': {'phase': 'error', 'error': 'failed'}}})
+        errors = client.terminal_errors('own-run')
+        self.assertEqual(len(errors), 2)
+        self.assertEqual(errors[0]['error'], 'Model provider unavailable')
+        self.assertEqual(len(errors[1]['error']), 4096)
+        errors[0]['error'] = 'caller mutation'
+        self.assertEqual(client.terminal_errors('own-run')[0]['error'], 'Model provider unavailable')
+
+    def test_invalid_error_identity_and_error_body_are_not_cached(self):
+        client = gw.GatewayClient(URL, TOKEN)
+        client.select_run('own-run')
+        for fields in ({'agentId': 'x' * 513}, {'sessionKey': {}}, {'errorMessage': {'private': 'not-an-error'}}):
+            client._handle_event({'event': 'chat', 'payload': {'runId': 'own-run', 'state': 'error',
+                'errorMessage': 'Model provider unavailable', **fields}})
+        self.assertFalse(client.terminal_errors('own-run'))
+
+    def test_native_retry_or_progress_clears_errors_from_the_previous_attempt(self):
+        for event, progress in (('agent', {'stream': 'lifecycle', 'data': {'phase': 'start'}}),
+                ('agent', {'stream': 'assistant', 'data': {'delta': 'new answer'}}),
+                ('agent', {'stream': 'tool', 'data': {'phase': 'result'}}),
+                ('chat', {'state': 'final', 'message': {'text': 'new answer'}})):
+            with self.subTest(progress=progress):
+                client = gw.GatewayClient(URL, TOKEN)
+                client.select_run('own-run')
+                client._handle_event({'event': 'chat', 'payload': {'runId': 'own-run', 'state': 'error',
+                    'errorMessage': 'Context overflow'}})
+                self.assertTrue(client.terminal_errors('own-run'))
+                client._handle_event({'event': event, 'payload': {'runId': 'own-run', **progress}})
+                client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': 'lifecycle',
+                    'data': {'phase': 'error', 'error': 'Agent run failed'}}})
+                self.assertFalse(client.terminal_errors('own-run'))
+
+    def test_lifecycle_end_and_compaction_do_not_erase_the_same_attempt_error(self):
+        for stream, phase in (('lifecycle', 'end'), ('compaction', 'start'), ('compaction', 'end')):
+            with self.subTest(stream=stream, phase=phase):
+                client = gw.GatewayClient(URL, TOKEN)
+                client.select_run('own-run')
+                client._handle_event({'event': 'chat', 'payload': {'runId': 'own-run', 'state': 'error',
+                    'errorMessage': 'Context overflow'}})
+                client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': stream,
+                    'data': {'phase': phase}}})
+                self.assertEqual(client.terminal_errors('own-run')[0]['error'], 'Context overflow')
+
     def test_other_accounts_broadcasts_are_dropped_before_buffering(self):
         client = gw.GatewayClient('ws://127.0.0.1:1234', 'fixture-token')
         client.select_run('own-run')

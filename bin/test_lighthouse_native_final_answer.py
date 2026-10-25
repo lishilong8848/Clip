@@ -9,6 +9,9 @@ from pydantic_ai import Tool
 from bin.test_lighthouse_openclaw import FakeGatewayClient, _recovery_agent
 from openclaw_service.assistant import lighthouse_openclaw as native
 from openclaw_service.assistant.lighthouse_ai import AssistantError
+from openclaw_service.assistant.lighthouse_gateway import GatewayClient
+from openclaw_service.assistant.lighthouse_runtime import agent_id
+from openclaw_service.assistant.lighthouse_context import execution_key
 
 
 PROCESS = '我直接拉上周5栋的答题记录，并行发起查询。'
@@ -77,6 +80,50 @@ class NativeFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         submissions = [params for method, params in client.calls if method == 'agent']
         self.assertEqual(len(submissions), 1)
         self.assertNotIn(':validation', submissions[0]['idempotencyKey'])
+
+    async def test_generic_terminal_failure_uses_only_same_run_error_and_keeps_native_details_private(self):
+        for identity, expected in (({}, 'model_context'), ({'runId': 'foreign'}, 'model_protocol'),
+                ({'sessionKey': 'foreign'}, 'model_protocol'), ({'agentId': 'foreign'}, 'model_protocol')):
+            with self.subTest(identity=identity):
+                self.agent.run_id = 'own-run'
+                client = self.agent.client = GatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+                client.select_run('own-run')
+                client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run',
+                    'sessionKey': self.agent.session_key, 'agentId': agent_id(execution_key(self.agent.actor)),
+                    'stream': 'lifecycle', 'data': {'phase': 'error', 'error': 'Context overflow: private provider body'}, **identity}})
+                with self.assertRaises(AssistantError) as raised:
+                    self.agent._terminal_answer({'runId': 'own-run', 'status': 'error', 'error': 'failed'})
+                self.assertEqual(raised.exception.category, expected)
+                self.assertNotIn('private provider body', str(raised.exception))
+                self.assertEqual(self.agent.run_id, '')
+                await client.close()
+                self.assertFalse(client.terminal_errors('own-run'))
+
+    async def test_specific_terminal_error_wins_over_event_hint_and_pending_error_cannot_finish(self):
+        self.agent.run_id = 'own-run'
+        client = self.agent.client = GatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+        client.select_run('own-run')
+        client._handle_event({'event': 'chat', 'payload': {'runId': 'own-run', 'state': 'error',
+            'errorMessage': 'Model provider authentication failed'}})
+        self.assertIsNone(self.agent._terminal_answer({'status': 'error', 'error': 'failed', 'pendingError': True}))
+        self.assertEqual(self.agent.run_id, 'own-run')
+        with self.assertRaises(AssistantError) as raised:
+            self.agent._terminal_answer({'status': 'error', 'error': {'message': 'Model provider unavailable'}})
+        self.assertEqual(raised.exception.category, 'model_connection')
+        await client.close()
+
+    async def test_generic_native_lifecycle_summary_does_not_hide_specific_chat_error(self):
+        self.agent.run_id = 'own-run'
+        client = self.agent.client = GatewayClient('ws://127.0.0.1:19999', 'fixture-token')
+        client.select_run('own-run')
+        client._handle_event({'event': 'agent', 'payload': {'runId': 'own-run', 'stream': 'lifecycle',
+            'data': {'phase': 'error', 'error': 'All model fallback candidates failed'}}})
+        client._handle_event({'event': 'chat', 'payload': {'runId': 'own-run', 'state': 'error',
+            'errorMessage': 'Context overflow: private provider body'}})
+        with self.assertRaises(AssistantError) as raised:
+            self.agent._terminal_answer({'status': 'error', 'error': 'Agent run failed'})
+        self.assertEqual(raised.exception.category, 'model_context')
+        await client.close()
 
     async def test_process_snapshot_is_not_final_when_terminal_reply_is_suppressed(self):
         client = ScriptedGateway(frames=[assistant(PROCESS), end()],

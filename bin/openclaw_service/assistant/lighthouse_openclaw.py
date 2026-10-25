@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from .lighthouse_ai import AssistantError, safe_data, safe_text
 from .lighthouse_context import execution_key
 from .lighthouse_model_health import ModelHealth as _ModelHealth, model_health, model_health_key, profile_key, select_task_profile
-from .lighthouse_gateway import GatewayClient, GatewayError
+from .lighthouse_gateway import GENERIC_RUN_ERRORS, GatewayClient, GatewayError
 from .lighthouse_model import LighthouseModel, incomplete_reply
 from .lighthouse_review import BUSINESS_READ_TOOLS, READ_REPAIR_TOOLS
 from .lighthouse_runtime import OpenClawRuntime, account_key, agent_id
@@ -242,7 +242,7 @@ class OpenClawToolAgent:
                 or any(value.get('stopReason') in {'toolUse', 'tool_use', 'tool_calls', 'aborted'} for value in outcomes)):
             return None
         if outcome.get('status') == 'error':
-            raise self._model_failure(outcome.get('error'))
+            raise self._model_failure(self._terminal_error(outcome.get('error')))
         if outcome.get('status') != 'ok':
             return None
         if outcome.get('stopReason') in {'length', 'max_tokens', 'error'}:
@@ -253,6 +253,19 @@ class OpenClawToolAgent:
             # Suppression is explicit terminal evidence, not permission to reuse a preview.
             raise self._model_failure('')
         return self._reply_text(chat_message)
+
+    def _terminal_error(self, error):
+        text = error.get('message') if isinstance(error, dict) else error
+        if isinstance(text, str) and text.strip().lower() not in GENERIC_RUN_ERRORS:
+            return error
+        # Only a confirmed terminal failure may use a same-run diagnostic hint.
+        errors = getattr(self.client, 'terminal_errors', lambda _: ())(self.run_id)
+        for payload in errors:
+            if (payload.get('runId') == self.run_id
+                    and payload.get('sessionKey', self.session_key) == self.session_key
+                    and payload.get('agentId', agent_id(execution_key(self.actor))) == agent_id(execution_key(self.actor))):
+                return payload['error']
+        return error
 
     async def _acquire_runtime(self, *, warm_only=False):
         definitions = [{'name': name, 'label': tool.name, 'description': tool.description or '',
@@ -557,7 +570,11 @@ class OpenClawToolAgent:
             if accepted.get('runId') != self.run_id:
                 raise AssistantError('助手运行编号校验失败，未继续执行。', 502)
             if accepted.get('status') in {'error', 'timeout'}:
-                raise self._model_failure(accepted.get('summary'), timeout=accepted['status'] == 'timeout')
+                result = accepted.get('result')
+                meta = result.get('meta') if isinstance(result, dict) else None
+                error = meta.get('error') if isinstance(meta, dict) else None
+                raise self._model_failure(self._terminal_error(error or accepted.get('summary')),
+                                          timeout=accepted['status'] == 'timeout')
             if accepted.get('status') == 'ok' and not terminal_ack:
                 # A completed idempotent RPC returns its outcome, not new WS events.
                 finished = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 0}, timeout=5)
