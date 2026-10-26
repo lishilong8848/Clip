@@ -50,6 +50,7 @@ from upload_event_module.services.handlers import change_today_in_progress_value
 from upload_event_module.utils import get_data_file_path
 
 from .state_store import LanPortalStateStore
+from . import personnel_source
 from .repair_operations import RepairOperationsMixin, repair_mutation
 from . import repair_ledger
 from .identity_utils import (
@@ -476,8 +477,8 @@ REPAIR_FOLLOWUP_EVENT_EMERGENCY_FIELD_NAME = "事件应急措施"
 REPAIR_FOLLOWUP_EVENT_EMERGENCY_FIELD_ID = "virtual_event_emergency_measures"
 REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME = "流程"
 REPAIR_MANAGEMENT_WORKFLOW_STORAGE_FIELD_NAME = "流程-L"
-PERMISSION_DIRECTORY_APP_TOKEN = "F9lDbA5XKaLmyasoARRcZFpKnZd"
-PERMISSION_DIRECTORY_TABLE_ID = "tblOu75UtJTDNHIM"
+PERMISSION_DIRECTORY_APP_TOKEN = personnel_source.APP_TOKEN
+PERMISSION_DIRECTORY_TABLE_ID = personnel_source.TABLE_ID
 PERMISSION_DIRECTORY_CACHE_TTL_SECONDS = 5 * 60
 PERMISSION_DIRECTORY_SCOPE_LABELS = {
     "110站": "110",
@@ -822,8 +823,8 @@ MOP_SOURCE_TABLE_ID = "tblpqwu1kQ0bmi0i"
 MOP_SOURCE_VIEW_ID = "vewrHJHl3v"
 MOP_TITLE_FIELD_NAME = "文件名"
 MOP_ATTACHMENT_FIELD_NAME = "文件"
-SIGNATURE_APP_TOKEN = "HU38bc1vnamMK9sCeOgclUvXnFc"
-SIGNATURE_TABLE_ID = "tbluozblhRAjbljX"
+SIGNATURE_APP_TOKEN = PERMISSION_DIRECTORY_APP_TOKEN
+SIGNATURE_TABLE_ID = PERMISSION_DIRECTORY_TABLE_ID
 SIGNATURE_VIEW_ID = ""
 SIGNATURE_NAME_FIELD = "姓名"
 SIGNATURE_USER_FIELD = "员工姓名"
@@ -833,6 +834,7 @@ SIGNATURE_INACTIVE_FIELD = "离职/异动情况"
 SIGNATURE_PEOPLE_CACHE_TTL_SECONDS = 5 * 60
 SIGNATURE_LINK_TOKEN_TTL_SECONDS = 60 * 60
 TEMP_SIGNATURE_TABLE_ID = "tblC77nllNrprHBY"
+TEMP_SIGNATURE_APP_TOKEN = personnel_source.EXTERNAL_APP_TOKEN
 TEMP_SIGNATURE_NAME_FIELD = "员工姓名"
 TEMP_SIGNATURE_EMPLOYEE_NO_FIELD = "员工工号"
 TEMP_SIGNATURE_CERT_FIELD = "持证"
@@ -37306,7 +37308,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 with suppress(Exception):
                     os.remove(temp_file_path)
 
-    def _upload_encrypted_signature_file(self, *, encrypted_bytes: bytes, file_name: str) -> str:
+    def _upload_encrypted_signature_file(self, *, encrypted_bytes: bytes, file_name: str, app_token: str = SIGNATURE_APP_TOKEN) -> str:
         if not encrypted_bytes:
             raise PortalError("加密签名文件为空，无法上传。")
         upload_name = str(file_name or "").strip() or encrypted_signature_file_name("signature")
@@ -37326,7 +37328,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 file_path=temp_file_path,
                 file_name=upload_name,
                 parent_type="bitable_file",
-                parent_node=SIGNATURE_APP_TOKEN,
+                parent_node=app_token,
                 size=len(encrypted_bytes),
                 context="签名加密文件上传",
             )
@@ -37349,10 +37351,12 @@ class MaintenancePortalService(RepairOperationsMixin):
         employee_no: str = "",
         before_write: Any = None,
     ) -> tuple[str, dict[str, Any]]:
+        app_token = self._signature_table_app(table_id)
+        storage_record_id = self._signature_storage_id(table_id, record_id)
         aad = self._signature_crypto.build_aad(
-            app_token=SIGNATURE_APP_TOKEN,
+            app_token=app_token,
             table_id=table_id,
-            record_id=record_id,
+            record_id=storage_record_id,
             source=source,
             open_id=open_id,
             employee_no=employee_no,
@@ -37365,14 +37369,15 @@ class MaintenancePortalService(RepairOperationsMixin):
         file_token = self._upload_encrypted_signature_file(
             encrypted_bytes=encrypted_bytes,
             file_name=encrypted_signature_file_name(display_name),
+            app_token=app_token,
         )
         if before_write is not None:
             before_write(file_token, metadata)
         try:
             self._patch_record_fields(
-                app_token=SIGNATURE_APP_TOKEN,
+                app_token=app_token,
                 table_id=table_id,
-                record_id=record_id,
+                record_id=storage_record_id,
                 fields={
                     attachment_field: [{"file_token": file_token}],
                     key_field: self._signature_crypto.metadata_to_text(metadata),
@@ -37619,9 +37624,9 @@ class MaintenancePortalService(RepairOperationsMixin):
                     self._attachment_with_cache_context(
                         attachment,
                         category="signature" if table_id == SIGNATURE_TABLE_ID else "temporary_signature",
-                        app_token=SIGNATURE_APP_TOKEN,
+                        app_token=self._signature_table_app(table_id),
                         table_id=table_id,
-                        record_id=record_id,
+                        record_id=str(person.get("directory_record_id") or record_id),
                         latest_publish_time=str(person.get("latest_publish_time") or self._attachment_latest_publish_time(fields)),
                     )
                     for attachment in self._extract_signature_attachments(fields)
@@ -38292,6 +38297,19 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "generated_version": version,
             }
 
+    @staticmethod
+    def _signature_table_app(table_id: str) -> str:
+        if table_id == SIGNATURE_TABLE_ID:
+            return SIGNATURE_APP_TOKEN
+        if table_id == TEMP_SIGNATURE_TABLE_ID:
+            return TEMP_SIGNATURE_APP_TOKEN
+        raise PortalError("签名人员数据表无效。")
+
+    def _signature_storage_id(self, table_id: str, record_id: str) -> str:
+        if table_id != SIGNATURE_TABLE_ID:
+            return record_id
+        return personnel_source.signature_aliases().get(record_id, record_id)
+
     def _load_signature_people(self, *, force: bool = False) -> list[dict[str, Any]]:
         now = time.time()
         with self._signature_people_cache_lock:
@@ -38305,109 +38323,88 @@ class MaintenancePortalService(RepairOperationsMixin):
                 return copy.deepcopy(cached.get("people") or [])
 
         people: list[dict[str, Any]] = []
-        page_token = ""
-        seen_tokens: set[str] = set()
-        while True:
-            params = {"page_size": 500}
-            if SIGNATURE_VIEW_ID:
-                params["view_id"] = SIGNATURE_VIEW_ID
-            if page_token:
-                params["page_token"] = page_token
-            payload = self._request_json(
-                "records",
-                params=params,
-                app_token=SIGNATURE_APP_TOKEN,
-                table_id=SIGNATURE_TABLE_ID,
+        rows = personnel_source.read_records(self, fields=personnel_source.SIGNATURE_FIELDS)
+        aliases = {current: previous for previous, current in personnel_source.signature_aliases().items()}
+        for item in rows:
+            fields = {key: value for key, value in (item.get("fields") or {}).items() if key != "密码"} if isinstance(item.get("fields"), dict) else {}
+            if self._signature_person_inactive(fields.get(SIGNATURE_INACTIVE_FIELD)):
+                continue
+            user_info = self._signature_user_info(fields.get(SIGNATURE_USER_FIELD))
+            open_id = user_info.get("open_id", "") or self._signature_open_id_from_any(
+                fields.get("openid")
+                or fields.get("OpenID")
+                or fields.get("open_id")
+                or fields.get("飞书OpenID")
+                or fields.get("飞书 openid")
+                or fields.get("飞书openid")
+                or fields.get("人员openid")
             )
-            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-            for item in data.get("items") or []:
-                fields = {key: value for key, value in (item.get("fields") or {}).items() if key != "密码"} if isinstance(item.get("fields"), dict) else {}
-                if self._signature_person_inactive(fields.get(SIGNATURE_INACTIVE_FIELD)):
-                    continue
-                user_info = self._signature_user_info(fields.get(SIGNATURE_USER_FIELD))
-                open_id = user_info.get("open_id", "") or self._signature_open_id_from_any(
-                    fields.get("openid")
-                    or fields.get("OpenID")
-                    or fields.get("open_id")
-                    or fields.get("飞书OpenID")
-                    or fields.get("飞书 openid")
-                    or fields.get("飞书openid")
-                    or fields.get("人员openid")
-                )
-                name = (
-                    self._mop_field_text(fields, [SIGNATURE_NAME_FIELD])
-                    or user_info.get("name")
-                    or str(item.get("record_id") or "")
-                )
-                record_id = str(item.get("record_id") or "")
-                latest_publish_time = self._attachment_latest_publish_time(fields)
-                attachments = [
-                    self._attachment_with_cache_context(
-                        attachment,
-                        category="signature",
-                        app_token=SIGNATURE_APP_TOKEN,
-                        table_id=SIGNATURE_TABLE_ID,
-                        record_id=record_id,
-                        latest_publish_time=latest_publish_time,
-                    )
-                    for attachment in self._extract_signature_attachments(fields)
-                ]
-                first_signature = attachments[0] if attachments else None
-                signature_version = (
-                    self._signature_attachment_version(first_signature)
-                    if isinstance(first_signature, dict) and first_signature
-                    else ""
-                )
-                signature_crypto_metadata = self._signature_crypto.metadata_from_field(
-                    fields.get(SIGNATURE_KEY_FIELD)
-                )
-                signature_crypto_version = int(
-                    signature_crypto_metadata.get("version") or 0
-                )
-                portable_signature = self._signature_crypto.is_portable_metadata(
-                    signature_crypto_metadata
-                )
-                building = self._mop_field_text(fields, ["楼栋", "楼栋（用）", "机楼/专业"])
-                account_nature = self._mop_field_text(fields, ["账号性质"])
-                can_receive_message = bool(
-                    open_id and account_nature.strip().upper() == "VNET"
-                )
-                has_signature = bool(signature_version and portable_signature)
-                person = {
-                    "record_id": record_id,
-                    "name": name,
-                    "open_id": open_id,
-                    "email": user_info.get("email", ""),
-                    "employee_no": self._mop_field_text(fields, ["员工工号", "工号"]),
-                    "building": building,
-                    "scope_text": building,
-                    "position": self._mop_field_text(fields, ["体系岗位", "岗位"]),
-                    "team": self._mop_field_text(fields, ["班组"]),
-                    "shift": self._mop_field_text(fields, ["班次"]),
-                    "account_nature": account_nature,
-                    "can_receive_message": can_receive_message,
-                    "has_signature": has_signature,
-                    "signature_count": len(attachments),
-                    "signature_version": signature_version,
-                    "signature_crypto_version": signature_crypto_version,
-                    "portable_signature": portable_signature,
-                    "signature_requires_resign": bool(
-                        signature_version and not portable_signature
-                    ),
-                    "latest_publish_time": latest_publish_time,
-                    "raw_fields": fields,
-                }
-                people.append(person)
-            next_token = self._next_record_page_token(
-                data,
-                current_token=page_token,
-                seen_tokens=seen_tokens,
-                context="公司签名人员读取",
+            name = (
+                self._mop_field_text(fields, [SIGNATURE_NAME_FIELD])
+                or user_info.get("name")
+                or str(item.get("record_id") or "")
             )
-            if next_token is None:
-                break
-            page_token = next_token
-
+            directory_record_id = str(item.get("record_id") or "")
+            record_id = aliases.get(directory_record_id, directory_record_id)
+            latest_publish_time = self._attachment_latest_publish_time(fields)
+            attachments = [
+                self._attachment_with_cache_context(
+                    attachment,
+                    category="signature",
+                    app_token=SIGNATURE_APP_TOKEN,
+                    table_id=SIGNATURE_TABLE_ID,
+                    record_id=str(item.get("record_id") or ""),
+                    latest_publish_time=latest_publish_time,
+                )
+                for attachment in self._extract_signature_attachments(fields)
+            ]
+            first_signature = attachments[0] if attachments else None
+            signature_version = (
+                self._signature_attachment_version(first_signature)
+                if isinstance(first_signature, dict) and first_signature
+                else ""
+            )
+            signature_crypto_metadata = self._signature_crypto.metadata_from_field(
+                fields.get(SIGNATURE_KEY_FIELD)
+            )
+            signature_crypto_version = int(
+                signature_crypto_metadata.get("version") or 0
+            )
+            portable_signature = self._signature_crypto.is_portable_metadata(
+                signature_crypto_metadata
+            )
+            building = self._building_label_from_codes(self._building_codes_from_value(fields.get("机楼/专业")))
+            account_nature = self._mop_field_text(fields, ["账号性质"])
+            can_receive_message = bool(
+                open_id and account_nature.strip().upper() == "VNET"
+            )
+            has_signature = bool(signature_version and portable_signature)
+            person = {
+                "record_id": record_id,
+                "directory_record_id": directory_record_id,
+                "name": name,
+                "open_id": open_id,
+                "email": user_info.get("email", ""),
+                "employee_no": self._mop_field_text(fields, ["员工工号", "工号"]),
+                "building": building,
+                "scope_text": building,
+                "position": self._mop_field_text(fields, ["体系岗位", "岗位"]),
+                "team": self._mop_field_text(fields, ["班组"]),
+                "shift": personnel_source.text(fields.get("班次")),
+                "account_nature": account_nature,
+                "can_receive_message": can_receive_message,
+                "has_signature": has_signature,
+                "signature_count": len(attachments),
+                "signature_version": signature_version,
+                "signature_crypto_version": signature_crypto_version,
+                "portable_signature": portable_signature,
+                "signature_requires_resign": bool(
+                    signature_version and not portable_signature
+                ),
+                "latest_publish_time": latest_publish_time,
+                "raw_fields": fields,
+            }
+            people.append(person)
         people.sort(
             key=lambda item: (
                 0 if item.get("name") else 1,
@@ -38437,6 +38434,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope = self._normalize_scope(scope or "ALL")
         query_text = re.sub(r"\s+", "", str(query or "")).lower()
         record_id = str(record_id or "").strip()
+        record_id = personnel_source.signature_person_id(record_id)
         notice_key = str(notice_key or "").strip()
         operator_open_id = str(operator_open_id or "").strip()
         people = (self._load_signature_people(force=True) if record_id else
@@ -38546,7 +38544,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             payload = self._request_json(
                 "records",
                 params=params,
-                app_token=SIGNATURE_APP_TOKEN,
+                app_token=TEMP_SIGNATURE_APP_TOKEN,
                 table_id=TEMP_SIGNATURE_TABLE_ID,
             )
             data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
@@ -38560,7 +38558,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     self._attachment_with_cache_context(
                         attachment,
                         category="temporary_signature",
-                        app_token=SIGNATURE_APP_TOKEN,
+                        app_token=TEMP_SIGNATURE_APP_TOKEN,
                         table_id=TEMP_SIGNATURE_TABLE_ID,
                         record_id=record_id,
                         latest_publish_time=latest_publish_time,
@@ -38905,6 +38903,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     def signature_image_bytes(self, *, record_id: str, preserve_ink: bool = False) -> tuple[bytes, str]:
         record_id = str(record_id or "").strip()
+        record_id = personnel_source.signature_person_id(record_id)
         if not record_id:
             raise PortalError("缺少签名人员记录。")
         people = self._load_signature_people(force=False)
@@ -38931,7 +38930,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 category="signature",
                 app_token=SIGNATURE_APP_TOKEN,
                 table_id=SIGNATURE_TABLE_ID,
-                record_id=record_id,
+                record_id=str(person.get("directory_record_id") or record_id),
                 latest_publish_time=str(person.get("latest_publish_time") or self._attachment_latest_publish_time(fields)),
             )
             for attachment in self._extract_signature_attachments(fields)
@@ -38983,7 +38982,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             self._attachment_with_cache_context(
                 attachment,
                 category="temporary_signature",
-                app_token=SIGNATURE_APP_TOKEN,
+                app_token=TEMP_SIGNATURE_APP_TOKEN,
                 table_id=TEMP_SIGNATURE_TABLE_ID,
                 record_id=record_id,
                 latest_publish_time=str(person.get("latest_publish_time") or self._attachment_latest_publish_time(fields)),
@@ -39692,7 +39691,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         display_name = str(session.get("display_name") or "临时人员").strip()
         _metas, meta_by_name = self._load_table_fields(
-            app_token=SIGNATURE_APP_TOKEN,
+            app_token=TEMP_SIGNATURE_APP_TOKEN,
             table_id=TEMP_SIGNATURE_TABLE_ID,
         )
         attachment_meta = meta_by_name.get(TEMP_SIGNATURE_ATTACHMENT_FIELD)
@@ -39744,7 +39743,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         created_new_record = False
         if existing_record_id:
             self._patch_record_fields(
-                app_token=SIGNATURE_APP_TOKEN,
+                app_token=TEMP_SIGNATURE_APP_TOKEN,
                 table_id=TEMP_SIGNATURE_TABLE_ID,
                 record_id=existing_record_id,
                 fields=fields,
@@ -39755,7 +39754,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 temp_id=str(session["temp_id"]), status="creating",
             )
             created = self._create_record_fields(
-                app_token=SIGNATURE_APP_TOKEN,
+                app_token=TEMP_SIGNATURE_APP_TOKEN,
                 table_id=TEMP_SIGNATURE_TABLE_ID,
                 fields=fields,
             )
@@ -39795,7 +39794,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             if created_new_record and not media_prepared:
                 with suppress(Exception):
                     self._delete_record_fields(
-                        app_token=SIGNATURE_APP_TOKEN,
+                        app_token=TEMP_SIGNATURE_APP_TOKEN,
                         table_id=TEMP_SIGNATURE_TABLE_ID,
                         record_id=record_id,
                     )
@@ -39837,7 +39836,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         content, _content_type = self._download_mop_attachment(
             {"file_token": file_token},
             cache_category="temporary_signature",
-            app_token=SIGNATURE_APP_TOKEN,
+            app_token=TEMP_SIGNATURE_APP_TOKEN,
             table_id=TEMP_SIGNATURE_TABLE_ID,
             record_id=str(session.get("temporary_record_id") or session.get("temp_id") or ""),
             latest_publish_time=str(session.get("updated_at") or ""),
@@ -41019,7 +41018,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         headers = self._auth_headers() if trusted else {}
         for attempt in range(2):
             try:
-                content, content_type = self._http_client.request_bytes("GET", url, headers=headers, retries=0)
+                params = ({'extra': json.dumps({'bitablePerm': {'tableId': table_id}})}
+                          if trusted and table_id and 'extra=' not in parsed.query else None)
+                content, content_type = self._http_client.request_bytes("GET", url, headers=headers, params=params, retries=0)
                 try:
                     payload = json.loads(content) if trusted and len(content) <= 65536 else {}
                 except (ValueError, UnicodeError):
@@ -41222,7 +41223,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                                 category="signature",
                                 app_token=SIGNATURE_APP_TOKEN,
                                 table_id=SIGNATURE_TABLE_ID,
-                                record_id=str(person.get("record_id") or ""),
+                                record_id=str(person.get("directory_record_id") or person.get("record_id") or ""),
                                 latest_publish_time=str(
                                     person.get("latest_publish_time") or ""
                                 ),

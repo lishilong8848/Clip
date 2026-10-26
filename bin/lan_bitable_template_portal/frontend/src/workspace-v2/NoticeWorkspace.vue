@@ -51,7 +51,7 @@
         <div v-if="confirming" class="v2-notice-review" aria-label="发送前确认">
           <header><h2>发送前确认</h2><NTag :bordered="false" type="info">{{ actionLabel(action) }} · {{ form.values.building_codes?.join('、') }}</NTag></header>
           <NAlert v-if="form.values.sync_maintenance_target==='1'||form.values.sync_maintenance_target===true" type="warning" :bordered="false">本次变更同时写入关联的维保目标记录。</NAlert>
-          <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ sopPersonName(sop.operator_record_id) }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
+          <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ (sop.operator_record_ids??[sop.operator_record_id]).map(sopPersonName).join('、') }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
         <div class="v2-notice-context-row" :class="{'has-tags':form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired}"><div class="v2-notice-context-controls">
@@ -373,16 +373,33 @@ async function submit(){
   busy.value=true;detailError.value='';
   try{
     if(!frozen){const issue=validateNotice(form.value,action.value,sop.value,photos.value);if(issue)throw new Error(issue);if(!await saveDraft()){confirming.value=false;return {ok:false};}operationId=createRepairOperationId('v2-notice');frozen=noticeCommand(form.value,action.value,operationId,draftVersion,sop.value,photos.value,aliPhotos.value);persist();}
-    const response=await requestJson('/api/workbench-actions',{method:'POST',body:JSON.stringify(frozen)});
+    let response:Dict;
+    for(;;){
+      try{response=await requestJson('/api/workbench-actions',{method:'POST',body:JSON.stringify(frozen)});break;}
+      catch(e){
+        const payload=e instanceof ApiError?e.payload:{};
+        if(payload.error_code!=='confirmation_required'||payload.details?.kind!=='plan_convergence_unmatched')throw e;
+        if(!payload.details.confirmation)throw new Error('发送确认暂不可用，当前尚未发送，请重试。');
+        const submission:Dict|null=frozen;
+        const approved=await new Promise<boolean>(resolve=>dialog.warning({
+          title:'计划收敛核对待确认',
+          content:()=>h('div',{style:{overflowWrap:'anywhere'}},[
+            h('p',String(payload.details.reason||payload.error||'尚未取得有效匹配结果。')),
+            h('p','通告：'+String(payload.details.notice_name||form.value?.values.title||'当前通告')),
+            h('p','当前尚未发送。确认后将继续发送'+actionLabel(action.value)+'通告；返回核对会保留本次填写。')]),
+          positiveText:'仍然发送'+actionLabel(action.value),negativeText:'返回核对',maskClosable:false,closeOnEsc:false,closable:false,
+          onPositiveClick:()=>{resolve(true);},onNegativeClick:()=>{resolve(false);},onAfterLeave:()=>resolve(false)
+        }));
+        if(!approved||disposed||!editing.value||frozen!==submission){frozen=null;operationId='';confirming.value=false;persist();return {ok:false};}
+        frozen!.plan_convergence_confirmation=payload.details.confirmation;
+      }
+    }
     if(!response.job_id)throw new Error('未收到任务编号，保留原提交等待核验。');
     job.value={...response,phase:response.phase||response.initial_phase||'queued'};ambiguous.value=false;confirming.value=false;saved.value=snapshot();persist();showEventWait(job.value);void pollJob();
     rememberNoticeTask(props.user.open_id,response,form.value.values);
     return response;
   }catch(e){
-    const payload=e instanceof ApiError?e.payload:{};
-    if(payload.error_code==='confirmation_required'&&payload.details?.kind==='plan_convergence_unmatched'){
-      confirming.value=false;dialog.warning({title:'计划收敛尚未匹配',content:String(payload.error||'未匹配到计划收敛，是否仍确认发送？'),positiveText:'确认继续发送',negativeText:'返回核对',maskClosable:false,closeOnEsc:false,closable:false,onPositiveClick:()=>{if(frozen)frozen.plan_convergence_confirmation=payload.details.confirmation;void send();},onNegativeClick:()=>{frozen=null;operationId='';persist();}});
-    }else{confirming.value=false;detailError.value=e instanceof Error?e.message:'提交失败，填写已保留';ambiguous.value=!!frozen&&(!(e instanceof ApiError)||!e.status||e.status>=500);if(!ambiguous.value)frozen=null;persist();}
+    confirming.value=false;detailError.value=e instanceof Error?e.message:'提交失败，填写已保留';ambiguous.value=!!frozen&&(!(e instanceof ApiError)||!e.status||e.status>=500);if(!ambiguous.value)frozen=null;persist();
     return {ok:false};
   }finally{busy.value=false;}
 }

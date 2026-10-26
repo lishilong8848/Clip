@@ -34,7 +34,7 @@ def personnel_count_request(question: Any) -> bool:
     return bool((_IN_SERVICE.search(text) or _STAFF.search(text)) and _COUNT.search(text))
 
 
-def summarize_roster(rows, actor, *, day, shift='', observed_at, source_url):
+def summarize_roster(rows, actor, *, day, shift='', observed_at, source_url, complete_source=False):
     allowed = set(actor.get('scopes') or [])
     if not allowed or not allowed <= set(SCOPES):
         raise AssistantError('当前账号未配置可查询的楼栋范围。', 403)
@@ -49,12 +49,12 @@ def summarize_roster(rows, actor, *, day, shift='', observed_at, source_url):
         key = (scope, duty_shift, name)
         oid = row.get('open_id') or ''
         people[key] = oid if key not in people or people[key] == oid else ''
-    if not people:
+    if not people and not complete_source:
         raise AssistantError('未读取到所选日期和楼栋的排班名单，人数未知，不能按零人处理。', 503)
-    missing = [scope + '楼' + duty + '班' for scope in sorted(allowed) for duty in shifts
+    missing = [] if complete_source else [scope + '楼' + duty + '班' for scope in sorted(allowed) for duty in shifts
                if not any(key[:2] == (scope, duty) for key in people)]
     counts = [{'scope': scope, 'shift': duty, 'count': sum(key[:2] == (scope, duty) for key in people)}
-              for scope in sorted(allowed) for duty in shifts if any(key[:2] == (scope, duty) for key in people)]
+              for scope in sorted(allowed) for duty in shifts if complete_source or any(key[:2] == (scope, duty) for key in people)]
     unique = len(set(people.values())) if all(people.values()) else None
     prefix = '已读取排班' if missing else '排班'
     basis = f'{day}，' + (f'{shift}班' if shift else '白夜班') + f'{prefix}合计 **{len(people)} 个排班姓名项**'
@@ -62,9 +62,11 @@ def summarize_roster(rows, actor, *, day, shift='', observed_at, source_url):
     basis += '\n\n' + '；'.join(f"{r['scope']}楼{r['shift']}班 {r['count']} 人" for r in counts) + '。'
     if missing:
         basis += '\n\n未读到排班：' + '、'.join(missing) + '；未计作零人，以上不是全部楼栋的完整总数。'
-    basis += '\n\n口径：按排班日期和人员（文本）统计，不含长白；同一人跨班次或楼栋分别计项，重名或身份缺失时不推断总人数，不代表实时签到。'
+    basis += ('\n\n口径：按员工信息池当日班组、班次及机楼/专业统计，白班包含长白人员，班次空白表示当天不上班；不代表实时签到。'
+              if complete_source else '\n\n口径：按排班日期和人员（文本）统计，不含长白；同一人跨班次或楼栋分别计项，重名或身份缺失时不推断总人数，不代表实时签到。')
+    kinds = {(row.get('scope'), row.get('shift'), row.get('name')): row.get('duty_kind', row.get('shift')) for row in rows}
     return {'name': '值班排班人数统计', 'date': day, 'shift': shift, 'assignment_count': len(people),
-            'items': [{'scope': scope, 'shift': duty, 'name': name} for scope, duty, name in sorted(people)],
+            'items': [{'scope': scope, 'shift': duty, 'name': name, **({'duty_kind': kinds[(scope,duty,name)]} if complete_source else {})} for scope, duty, name in sorted(people)],
             'unique_people': unique, 'per_building': counts, 'complete': not missing, 'missing': missing,
             'observed_at': observed_at, 'source_url': source_url, 'basis': basis}
 

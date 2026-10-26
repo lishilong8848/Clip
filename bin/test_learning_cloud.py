@@ -803,6 +803,30 @@ class LearningCloudTests(unittest.TestCase):
         self.assertEqual(count, 3)
         self.assertTrue(all(call[0] == 'GET' for call in self.fake.calls))
 
+    def test_download_passes_bitable_context_and_keeps_it_on_auth_refresh(self):
+        count = 0
+        def response(request):
+            nonlocal count
+            count += 1
+            self.assertEqual(json.loads(request.url.params['extra']), {'bitablePerm': {'tableId': 'tblEntity'}})
+            if count == 1:
+                return httpx.Response(400, json={'code':99991663})
+            return httpx.Response(200, content=b'complete')
+        self.fake.before = response
+        self.assertEqual(self.remote.download_attachment('fileFixture', 100, table_id='tblEntity'), b'complete')
+        self.assertEqual(count, 2)
+        self.assertTrue(all(call[0] == 'GET' for call in self.fake.calls))
+
+    def test_attachment_context_comes_from_its_own_source_table_not_summary_table(self):
+        with patch.object(self.remote, '_request', return_value={'items':[{'record_id':'recSource',
+                'fields':{'答案图片':[{'file_token':'fileFromBank'}]}}], 'has_more':False}):
+            self.remote._list_all('tables/tblBank/records')
+        def response(request):
+            self.assertEqual(json.loads(request.url.params['extra'])['bitablePerm']['tableId'],'tblBank')
+            return httpx.Response(200,content=b'complete')
+        self.fake.before=response
+        self.assertEqual(self.remote.download_attachment('fileFromBank',100,table_id='tblSummary'),b'complete')
+
     def test_download_errors_distinguish_permission_size_and_network(self):
         for response, message, count in ((httpx.Response(403, json={'code': 99991672}), '访问权限', 1),
                 (httpx.Response(200, content=b'x' * 101), '下载上限', 1),

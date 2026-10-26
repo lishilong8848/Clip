@@ -48,6 +48,7 @@ class WorkbenchActionRequest(APIModel):
     polling_run_count: int = 0
     polling_runs: list[dict[str, str]] = Field(default_factory=list, max_length=6)
     polling_operator_record_id: str = Field(default="", max_length=80)
+    polling_operator_record_ids: list[str] | None = Field(default=None, max_length=100)
     polling_reviewer_record_id: str = Field(default="", max_length=80)
 
 

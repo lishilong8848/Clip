@@ -23,7 +23,7 @@ from .pre_shift_schedule import normalize_frequency, occurrences_for_date, upcom
 TZ = dt.timezone(dt.timedelta(hours=8))
 SCOPES = ('110', 'A', 'B', 'C', 'D', 'E', 'H')
 DUTY = {'operator', 'shift_leader', 'duty'}
-ROSTER_VERSION = 3
+ROSTER_VERSION = 4
 REMINDER_LEAD_SECONDS = 600
 CLOUD_DETAIL_VERSION = 1
 
@@ -436,6 +436,8 @@ class CheckService:
                 (day, current.timestamp() + REMINDER_LEAD_SECONDS, current.timestamp(),
                  REMINDER_LEAD_SECONDS, row['loaded_at'])).fetchone()
         covered = {p['scope'] for p in json.loads(row['people'] or '[]')} if row else set()
+        if row and day < current.date().isoformat() and row['version'] in {3, ROSTER_VERSION} and row['people'] and not row['retry_at']:
+            return
         if (row and row['version'] == ROSTER_VERSION and row['people'] and not row['retry_at']
                 and (day < current.date().isoformat() or configured <= covered and not due_refresh)):
             return

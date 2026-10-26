@@ -2019,8 +2019,8 @@ const navigator={},setLiteStatus=text=>message=text;
         self.assertIn("点击选择或将附件拖到这里", html)
         self.assertIn("drop.ondrop", html)
         self.assertIn("function pollingBindPersonSearch", html)
-        self.assertIn("()=>[reviewer.dataset.recordId,'h_duty_account']", html)
-        self.assertIn("()=>[operator.dataset.recordId]", html)
+        self.assertIn("()=>[reviewer.dataset.recordId,'h_duty_account',...selectedOperators]", html)
+        self.assertIn("()=>selectedOperators", html)
         self.assertIn("搜索姓名、工号、岗位或楼栋", html)
         self.assertIn("快捷选择H楼值班账号", html)
         self.assertNotIn("快捷筛选 H楼人员", html)
@@ -3715,6 +3715,46 @@ const navigator={},setLiteStatus=text=>message=text;
 
 
 class AdjustSopTypeTests(unittest.TestCase):
+    def test_multiple_operators_share_progress_and_reviewer_can_add_photo(self):
+        self.people.append({'record_id':'operator2', 'name':'Second', 'open_id':'fixture_second'})
+        sop = self.ready()
+        prepared = self.prepare(sop, polling_operator_record_ids=['operator', 'operator2'])
+        self.assertEqual(prepared['polling_operator_name'], 'Operator、Second')
+        group = self.service.create_group(prepared, target_record_id='recMany', title='fixture', public_base_url='http://localhost')
+        operator = self.service.role_token('recMany', 'operator')
+        reviewer = self.service.role_token('recMany', 'reviewer')
+        session = self.service.activate(operator, run_index=1, expected_version=group['version'])
+        session = self.service.add_step_photo(operator, step_key='1:1', expected_version=session['version'],
+            file_name='one.png', mime_type='image/png', content=_png_bytes())
+        version = session['version']
+        def confirm(oid):
+            return self.service.confirm(operator, step_key='1:1', expected_version=version, actual_open_id=oid)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(confirm, ['fixture_operator', 'fixture_second']))
+        session = self.service.session(reviewer)
+        self.assertEqual(session['version'], version + 1)
+        confirmed = self.service.get_group('recMany')['steps'][0]['operator_confirmation']
+        self.assertIn(confirmed['assigned_record_id'], ['operator', 'operator2'])
+        session = self.service.add_step_photo(reviewer, step_key='1:1', expected_version=session['version'],
+            file_name='review.png', mime_type='image/png', content=_png_bytes('#ff0000'))
+        self.assertEqual(len(session['steps'][0]['photos']), 2)
+        session = self.service.confirm(reviewer, step_key='1:1', expected_version=session['version'])
+        self.assertEqual(session['state'], 'upload_pending')
+        with patch.object(portal_server, '_send_text_to_open_ids_guarded', return_value=(True,'',[])) as send:
+            group = self.service.group_with_links(self.service.get_group('recMany'), 'http://localhost')
+            PortalRuntime._send_polling_work_order_links_locked(self.service, group)
+            self.assertEqual({call.args[1][0] for call in send.call_args_list}, {'fixture_operator','fixture_second','fixture_reviewer'})
+            group = self.service.group_with_links(self.service.get_group('recMany'), 'http://localhost')
+            PortalRuntime._send_polling_work_order_links_locked(self.service, group)
+            self.assertEqual(send.call_count, 3)
+
+    def test_reviewer_cannot_be_any_of_multiple_operators(self):
+        sop = self.ready()
+        with self.assertRaisesRegex(Exception, '同一人'):
+            self.prepare(sop, polling_operator_record_ids=['operator','reviewer'])
+        for ids in ([], 'operator', ['unknown']):
+            with self.assertRaises(Exception): self.prepare(sop, polling_operator_record_ids=ids)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="adjust-sop-")
         self.addCleanup(temporary.cleanup)

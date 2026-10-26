@@ -44,7 +44,9 @@
           <div class="lhs-people-cols">
             <div class="lhs-pick">
               <label class="lhs-label" :for="id + '-operator'">操作人<span class="lhs-req" aria-hidden="true">*</span></label>
-              <VnetSelect :input-id="id + '-operator'" :label="'操作人'" :options="operatorLabels" :model-value="operatorLabel" :disabled="disabled" placeholder="请选择操作人" :menu-z-index="10010" required @update:model-value="selectOperator" />
+              <VnetSelect :input-id="id + '-operator'" :label="'操作人'" :options="operatorLabels" :model-value="''" :disabled="disabled" placeholder="添加操作人（可多选）" :menu-z-index="10010" @update:model-value="selectOperator" />
+              <div class="lhs-operator-chips"><button v-for="rid in operatorIds" :key="rid" type="button" class="lhs-quick" :disabled="disabled" :aria-label="'移除操作人 ' + operatorName(rid)" @click="removeOperator(rid)">{{ operatorName(rid) }} ×</button></div>
+              <small>任一操作人均可拍照、确认，共用同一工单进度。</small>
             </div>
             <div class="lhs-pick">
               <div class="lhs-pick-head">
@@ -197,21 +199,22 @@ const peopleQuery = ref("");
 const peopleAll = computed(() => (directoryReady.value ? (Array.isArray(props.field?.people) ? props.field.people : []) : []));
 const hDuty = computed(() => peopleAll.value.find((p: any) => ["H楼值班账号"].includes(String(p?.label || "")) || ["H楼值班账号"].includes(String(p?.name || "")) || ["h_duty_account", "H楼值班账号"].includes(String(p?.record_id || ""))) || null);
 const labeledPeople = computed(() => { const used = new Set<string>(); const out: Array<{ value: string; label: string }> = []; for (const p of peopleAll.value) { const base = String(p?.label || p?.name || "").trim() || "未命名人员"; let label = base; let n = 1; while (used.has(label)) { n += 1; label = `${base} #${n}`; } used.add(label); const value = String(p?.record_id || "").trim(); if (value) out.push({ value, label }); } return out; });
-const operatorLabels = computed(() => labeledPeople.value.filter((o) => String(o.value) !== String(hDuty.value?.record_id || "") && String(o.value) !== String(local.value.reviewer_record_id || "")).map((o) => o.label));
-const reviewerLabels = computed(() => labeledPeople.value.filter((o) => String(o.value) !== String(local.value.operator_record_id || "")).map((o) => o.label));
-const operatorLabel = computed(() => labeledPeople.value.find((p) => p.value === String(local.value.operator_record_id || ""))?.label || "");
+const operatorIds = computed<string[]>(() => Array.isArray(local.value.operator_record_ids) ? local.value.operator_record_ids : local.value.operator_record_id ? [local.value.operator_record_id] : []);
+const operatorName = (rid: string) => labeledPeople.value.find(p => p.value === rid)?.label || '已选操作人';
+const operatorLabels = computed(() => labeledPeople.value.filter((o) => !operatorIds.value.includes(o.value) && o.value !== String(hDuty.value?.record_id || "") && o.value !== String(local.value.reviewer_record_id || "")).map((o) => o.label));
+const reviewerLabels = computed(() => labeledPeople.value.filter((o) => !operatorIds.value.includes(o.value)).map((o) => o.label));
 const reviewerLabel = computed(() => labeledPeople.value.find((p) => p.value === String(local.value.reviewer_record_id || ""))?.label || "");
 function recordIdByLabel(label: string): string { return labeledPeople.value.find((p) => p.label === label)?.value || ""; }
 function selectOperator(label: string): void {
   const rid = recordIdByLabel(label);
-  if (!rid || String(rid) === String(local.value.operator_record_id || "") || String(rid) === String(hDuty.value?.record_id || "")) return;
-  const patch: Record<string, any> = { operator_record_id: rid };
-  if (String(local.value.reviewer_record_id || "") === rid) patch.reviewer_record_id = "";
-  update(patch);
+  if (!rid || operatorIds.value.includes(rid) || rid === String(hDuty.value?.record_id || "") || rid === local.value.reviewer_record_id) return;
+  const ids = [...operatorIds.value, rid];
+  update({operator_record_ids: ids, operator_record_id: ids[0]});
 }
+function removeOperator(rid: string): void { const ids = operatorIds.value.filter(id => id !== rid); update({operator_record_ids: ids, operator_record_id: ids[0] || ''}); }
 function selectReviewer(label: string): void {
   const rid = recordIdByLabel(label);
-  if (!rid || String(rid) === String(local.value.reviewer_record_id || "") || String(rid) === String(local.value.operator_record_id || "")) return;
+  if (!rid || String(rid) === String(local.value.reviewer_record_id || "") || operatorIds.value.includes(rid)) return;
   update({ reviewer_record_id: rid });
 }
 function setHReviewer(): void {
@@ -349,6 +352,7 @@ onMounted(() => {
 .lhs-cool-block { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 .lhs-cool-row { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
 .lhs-run-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lhs-operator-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
 .lhs-inline-err { margin: 2px 0 0; font-size: 11px; color: var(--lh-danger, #d03030); min-width: 0; overflow-wrap: anywhere; }
 .lhs-pick :deep(.vnet-select-trigger), .lhs-pick :deep(.vnet-combobox-control) { font-size: 12px; }
 @media (max-width: 560px) { .lhs-cool-row { grid-template-columns: minmax(0, 1fr); } }

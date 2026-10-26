@@ -28,6 +28,11 @@ from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 
 class FakeService:
+    def _signature_storage_id(self, table_id, record_id):
+        return self.d.MaintenancePortalService._signature_storage_id(self, table_id, record_id)
+
+    def _signature_table_app(self, table_id):
+        return self.d.MaintenancePortalService._signature_table_app(table_id)
     def __init__(self, store):
         self._state_store = store
         self._signature_people_cache_lock = threading.RLock()

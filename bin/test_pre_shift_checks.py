@@ -611,33 +611,22 @@ class CheckTests(unittest.TestCase):
         self.assertIn('检查测试项二：异常；第二项测试异常', fields['检查明细'])
         self.assertEqual(fields['异常项数'], 2)
 
-    def test_roster_pagination_filters_date_long_day_and_uses_real_person_ids(self):
-        fields = {'排班日期': int(self.current.timestamp() * 1000), '班组': 'A班', '机楼': 'A楼', '班次': '白',
-                  '人员（文本）':'一、二',
-                  '人员': {'users': [{'id': 'ou_one', 'name': '一'}, {'id': 'ou_two', 'name': '二'}]}}
-        reader = SimpleNamespace(_request_json=Mock(side_effect=[
-            {'code': 0, 'data': {'items': [{'fields': {**fields, '班组': '长白'}}], 'has_more': True, 'page_token': 'p2'}},
-            {'code': 0, 'data': {'items': [{'fields': fields}], 'has_more': False}}]),
-            get_permission_directory_people=lambda:{'items':[{'record_id':oid,'name':name,'open_id':oid,'scopes':['A'],'selectable':True} for oid,name in [('ou_one','一'),('ou_two','二')]]})
-        self.assertEqual([p['open_id'] for p in read_roster(reader, DAY)['people']], ['ou_one', 'ou_two'])
-        reader._request_json = Mock(return_value={'code': 0, 'data': {'items': [{'fields': fields}], 'has_more': True, 'page_token': 'same'}})
-        with self.assertRaises(CheckError):
-            read_roster(reader, DAY)
+    def test_employee_roster_resolves_people_and_excludes_long_day(self):
+        from lan_bitable_template_portal import personnel_source
+        people=[{'name':name,'scope':'A','shift':'白','open_id':oid,'duty_kind':kind}
+                for oid,name,kind in [('ou_one','一','白'),('ou_two','二','白'),('ou_long','长白','长白')]]
+        reader=SimpleNamespace(get_permission_directory_people=lambda:{'items':[
+            {'record_id':p['open_id'],'name':p['name'],'open_id':p['open_id'],'scopes':['A'],'selectable':True} for p in people]})
+        with patch.object(personnel_source,'daily_roster',return_value={'people':people,'issues':[]}):
+            result=read_roster(reader,DAY)
+            self.assertEqual([p['open_id'] for p in result['people']],['ou_one','ou_two'])
+            self.assertEqual(result['warnings'],{})
 
-    def test_ambiguous_building_roster_does_not_block_other_buildings(self):
-        fields = {'排班日期': int(self.current.timestamp() * 1000), '班组': 'A班', '机楼': 'A楼', '班次': '白',
-                  '人员（文本）':'一、二',
-                  '人员': {'users': [{'id': 'ou_one'}, {'id': 'ou_two'}]}}
-        data = {'code': 0, 'data': {'items': [{'fields': fields}, {'fields': {**fields, '机楼': '110站', '人员（文本）':'站员', '人员': {'users': [{'id': 'ou_station','name':'站员'}]}}}], 'has_more': False}}
-        directory=[{'record_id':oid,'name':name,'open_id':oid,'scopes':[scope],'selectable':True} for oid,name,scope in [('ou_one','一','A'),('ou_two','二','A'),('ou_station','站员','110')]]
-        result = read_roster(SimpleNamespace(_request_json=lambda *a, **kw: data,get_permission_directory_people=lambda:{'items':directory}), DAY)
-        self.assertEqual(len(result['people']), 3)
-        self.assertIn('夜班排班未读取到', result['warnings']['110'])
-        self.roster.return_value = result
-        self.service.tick(self.current)
-        self.assertEqual(self.sender.call_count, 2)
-        self.assertIn('夜班排班未读取到', self.service.state(self.worker, 'A', self.current)['roster_error'])
-        self.assertEqual(self.service.state(self.admin, '110', self.current)['roster_error'], '')
+    def test_off_duty_buildings_do_not_create_false_missing_roster_warnings(self):
+        from lan_bitable_template_portal import personnel_source
+        reader=SimpleNamespace(get_permission_directory_people=lambda:{'items':[]})
+        with patch.object(personnel_source,'daily_roster',return_value={'people':[],'issues':[]}):
+            self.assertEqual(read_roster(reader,DAY),{'people':[],'warnings':{}})
 
 
 class RouteTests(unittest.TestCase):

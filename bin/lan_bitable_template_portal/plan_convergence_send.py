@@ -19,7 +19,7 @@ class NoticeConvergenceGuard:
     def check(self, payload):
         kind = payload.get('work_type') or {'设备检修': 'repair', '检修通告': 'repair', '变更通告': 'change'}.get(payload.get('notice_type'))
         action = {'upload': 'start', 'upload_replace': 'update'}.get(payload.get('action'), payload.get('action'))
-        if kind not in {'repair', 'change'} or action not in {'start', 'update'}:
+        if kind not in {'repair', 'change'} or action not in {'start', 'update', 'end'}:
             return
         source = dict(payload)
         if source.get('text'):
@@ -33,6 +33,8 @@ class NoticeConvergenceGuard:
         source.update(work_type=kind, building='、'.join(code + '楼' if code != '110' else '110站' for code in scopes),
                       record_id=source.get('target_record_id') or source.get('record_id') or 'preview',
                       title=source.get('title') or source.get('name') or '', status='开始' if action == 'start' else '更新')
+        # Even an end notice is still an unsent draft at this guard.
+        source['_has_unuploaded_changes'] = True
         record = ongoing_records([source], work_type=kind)[0]
         owner = str(payload.get('_auth_open_id') or 'qt-local')
         digest = hashlib.sha256(json.dumps([owner, action, business_fingerprint(record), source.get('text', ''),

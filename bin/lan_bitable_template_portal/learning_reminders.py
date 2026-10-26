@@ -5,12 +5,11 @@ import time
 from collections import Counter, defaultdict
 from uuid import NAMESPACE_URL, uuid5
 
-APP_TOKEN = 'KdCZbSL5CaTErKsFwFucddA5nYd'
-TABLE_ID = 'tblRV9KeWFh9xCkm'
-VIEW_ID = 'vew6jLlGzq'
+from .personnel_source import APP_TOKEN, TABLE_ID
+VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
-ROSTER_VERSION = 3
+ROSTER_VERSION = 4
 
 
 def shift_times(settings):
@@ -44,67 +43,11 @@ def duty_recipients(service):
     return targets
 
 
-def read_roster(service, day, *, scopes=tuple('ABCDEH')):
-    from .learning import text
-
-    people, cursor, seen = {}, '', set()
-    for _ in range(20):
-        result = service._request_json('records', app_token=APP_TOKEN, table_id=TABLE_ID,
-            params={'page_size': 500, 'view_id': VIEW_ID, 'user_id_type': 'open_id',
-                    **({'page_token': cursor} if cursor else {})})
-        data = result.get('data') or {}
-        if result.get('code') != 0 or not isinstance(data.get('items'), list) or type(data.get('has_more')) is not bool:
-            raise ValueError('学练排班视图读取不完整，未使用部分名单发送。')
-        for row in data['items']:
-            fields = row.get('fields') or {}
-            if (text(fields.get('班组')).strip() == '长白' or fields.get('班次') not in SHIFT_TIMES
-                    or text(fields.get('班组')).strip() == '110站' and '110' not in scopes):
-                continue
-            value = fields.get('排班日期')
-            try:
-                roster_day = dt.datetime.fromtimestamp(float(value) / 1000, TZ).date().isoformat()
-            except (TypeError, ValueError, OverflowError, OSError):
-                raise ValueError('学练排班视图中排班日期无效，未发送。') from None
-            if roster_day != day:
-                continue
-            scope = str(fields.get('机楼') or '').strip().removesuffix('楼').removesuffix('站')
-            if scope == '110' and scope not in scopes:
-                continue
-            if scope not in (*tuple('ABCDEH'), '110'):
-                raise ValueError('学练排班楼栋不明确，未使用不完整名单发送。')
-            if scope not in scopes:
-                continue
-            users = fields.get('人员') or {}
-            users = users.get('users', []) if isinstance(users, dict) else users
-            if not isinstance(users, list):
-                raise ValueError('学练排班视图中人员字段格式无效。')
-            names = list(dict.fromkeys(name for name in re.split(r'[\s,，、;；/]+', text(fields.get('人员（文本）')).strip()) if name))
-            if not names:
-                raise ValueError('学练排班缺少人员（文本）名单，未按不完整人员字段发送。')
-            linked = defaultdict(set)
-            for user in users:
-                if not isinstance(user, dict):
-                    continue
-                open_id = str(user.get('id') or user.get('open_id') or '')
-                if re.fullmatch(r'ou_[A-Za-z0-9]+', open_id):
-                    linked[str(user.get('name') or '').strip()].add(open_id)
-            for name in names:
-                shift = fields['班次']
-                ids = linked[name]
-                person = {'open_id': next(iter(ids)) if len(ids) == 1 else '',
-                          'shift': shift, 'scope': scope, 'name': name}
-                key = (shift, scope, name)
-                previous = people.get(key)
-                if previous and previous['open_id'] != person['open_id']:
-                    person['open_id'] = ''
-                people[key] = person
-        if not data['has_more']:
-            return list(people.values())
-        cursor = data.get('page_token')
-        if not isinstance(cursor, str) or not cursor or cursor in seen:
-            break
-        seen.add(cursor)
-    raise ValueError('学练排班视图分页未完成，未发送。')
+def read_roster(service, day, *, scopes=tuple('ABCDEH'), include_long_day=False):
+    from .personnel_source import daily_roster
+    snapshot = daily_roster(service, day)
+    return [dict(person) for person in snapshot['people'] if person['scope'] in scopes
+            and (include_long_day or person.get('duty_kind') != '长白')]
 
 
 def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
@@ -142,7 +85,11 @@ def roster_snapshot(service, day):
     snapshot = service._get('local', 'shift_roster') or {}
     if snapshot.get('date') != day:
         snapshot = service._get('local', 'shift_roster:' + day) or {}
-    if snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION:
+    if (snapshot.get('date') == day and day < dt.datetime.now(TZ).date().isoformat()
+            and snapshot.get('version') in {3, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
+        return snapshot
+    if (snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION
+            or time.time() - float(snapshot.get('observed_at') or 0) >= 300):
         retry = service._get('local', 'shift_roster_retry:' + day) or service._get('local', 'shift_roster_retry') or {}
         if retry.get('date') == day and retry.get('retry_at', 0) > time.time():
             return
@@ -154,7 +101,7 @@ def roster_snapshot(service, day):
                 service._put('local', 'shift_roster_retry:' + day, {'date': day, 'retry_at': time.time() + 300}, conn, False)
             service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
             return
-        snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION}
+        snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION, 'observed_at': time.time()}
         with service.transaction() as conn:
             service._put('local', 'shift_roster', snapshot, conn, False)
             service._put('local', 'shift_roster:' + day, snapshot, conn, False)

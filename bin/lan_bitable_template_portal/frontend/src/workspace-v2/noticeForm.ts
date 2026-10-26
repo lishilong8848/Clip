@@ -5,7 +5,7 @@ export type NoticeField = { key:string; label:string; group:string; type:string;
 export type NoticeForm = { values:Dict; cycleRules?:MaintenanceCycleRule[]; contextVersion?:string; fields:NoticeField[]; actions:string[]; initialAction:string; detailMode:string; canDelete:boolean; photoRequired:boolean; photos:Dict[]; aliPhotos:Dict[]; sop:boolean; groupId:string; sopLinks:{label:string;url:string}[]; sourceOptions:{label:string;value:string}[]; repairRelation?:{eventId:string;eventTitle:string;projectId:string;projectTitle:string} };
 export const endProgress = '工作已完成，设备运行正常，请知晓！';
 export function normalizePastedNotice(value:string):string {return value.replace(/\r\n?/g,'\n').split('\n').filter(line=>line.trim()).join('\n');}
-const patchKeys = new Set(`manual manual_id scope source_month action work_type notice_type operation_id manual_binding_choice manual_binding_required active_item_id source_record_id target_record_id record_id repair_management_record_id source_work_type converted_from_work_type converted_to_work_type sync_maintenance_target paired_maintenance_target_record_id paired_maintenance_original_title paired_maintenance_actual_start_time building buildings building_code building_codes title name specialty maintenance_cycle execution_party level start_time end_time actual_action_time response_time location content reason impact progress repair_device repair_fault fault_type repair_mode discovery symptom solution spare_parts fault_time expected_time cabinet quantity device status site_photo_count site_photos extra_images ali_confirmation_images polling_work_order_exempt polling_sop_id polling_sop_version polling_run_count polling_runs polling_operator_record_id polling_reviewer_record_id mop_status zhihang_record_id lan_zhihang_record_id zhihang_involved`.split(' '));
+const patchKeys = new Set(`manual manual_id scope source_month action work_type notice_type operation_id manual_binding_choice manual_binding_required active_item_id source_record_id target_record_id record_id repair_management_record_id source_work_type converted_from_work_type converted_to_work_type sync_maintenance_target paired_maintenance_target_record_id paired_maintenance_original_title paired_maintenance_actual_start_time building buildings building_code building_codes title name specialty maintenance_cycle execution_party level start_time end_time actual_action_time response_time location content reason impact progress repair_device repair_fault fault_type repair_mode discovery symptom solution spare_parts fault_time expected_time cabinet quantity device status site_photo_count site_photos extra_images ali_confirmation_images polling_work_order_exempt polling_sop_id polling_sop_version polling_run_count polling_runs polling_operator_record_id polling_operator_record_ids polling_reviewer_record_id mop_status zhihang_record_id lan_zhihang_record_id zhihang_involved`.split(' '));
 
 // The existing read-only detail endpoint remains the source of field metadata.
 // Parse inertly: no returned HTML, styles or scripts are mounted into the new page.
@@ -92,7 +92,7 @@ export function noticeCommand(form:NoticeForm,action:string,operationId:string,d
   if(raw.work_type==='repair'){values.repair_management_record_id=raw.repair_management_record_id||(String(raw.source_record_id||'').startsWith('rec')?raw.source_record_id:'');values.fault_time=raw.end_time;values.expected_time=raw.start_time;}
   if(form.sop&&action==='start'){
     values.polling_work_order_exempt=sop.exempt===true;
-    if(!sop.exempt){values.polling_sop_id=sop.sop_id;values.polling_sop_version=sop.sop_version;values.polling_operator_record_id=sop.operator_record_id;values.polling_reviewer_record_id=sop.reviewer_record_id;values.polling_runs=sop.runs||[];values.polling_run_count=sop.runs?.length||1;}
+    if(!sop.exempt){values.polling_sop_id=sop.sop_id;values.polling_sop_version=sop.sop_version;values.polling_operator_record_ids=sop.operator_record_ids??(sop.operator_record_id?[sop.operator_record_id]:[]);values.polling_operator_record_id=values.polling_operator_record_ids[0]||'';values.polling_reviewer_record_id=sop.reviewer_record_id;values.polling_runs=sop.runs||[];values.polling_run_count=sop.runs?.length||1;}
   }
   if(photos.length){values.site_photos=photos;values.extra_images=photos;}
   if(aliPhotos.length&&raw.work_type==='change')values.ali_confirmation_images=aliPhotos;
@@ -121,7 +121,7 @@ export function validateNotice(form:NoticeForm,action:string,sop:Dict,photos:Dic
     if(!values.title?.startsWith(prefix)||!values.title.endsWith('检修')||!values.title.slice(prefix.length,-2).trim())return '检修标题格式应为：'+prefix+'故障现象检修。';
   }
   if(action==='end'&&form.photoRequired&&Number(form.values.site_photo_count||0)+photos.length===0)return '结束前至少需要一张现场照片，请先添加。';
-  if(form.sop&&action==='start'&&!sop.exempt&&(!sop.sop_id||!sop.operator_record_id||!sop.reviewer_record_id))return '请完成本次工单、操作人及审核人选择，或确认本次不使用工单。';
-  if(form.sop&&action==='start'&&!sop.exempt&&sop.operator_record_id===sop.reviewer_record_id)return '操作人与现场审核人不能是同一人。';
+  if(form.sop&&action==='start'&&!sop.exempt&&(!sop.sop_id||!(sop.operator_record_ids??(sop.operator_record_id?[sop.operator_record_id]:[])).length||!sop.reviewer_record_id))return '请完成本次工单、操作人及审核人选择，或确认本次不使用工单。';
+  if(form.sop&&action==='start'&&!sop.exempt&&(sop.operator_record_ids??[sop.operator_record_id]).includes(sop.reviewer_record_id))return '操作人与现场审核人不能是同一人。';
   return '';
 }

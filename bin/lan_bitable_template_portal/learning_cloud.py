@@ -279,6 +279,7 @@ class LearningCloud:
         self._schema_ready = False
         self._sharing_schema_ready = False
         self._source_fields = {}
+        self._attachment_tables = {}
         self._entity_table_id = None
         self.completion_schema_ready = False
         self.shift_schema_ready = False
@@ -439,6 +440,14 @@ class LearningCloud:
                     or page['has_more'] and len(items) >= expected_total):
                 raise LearningCloudError("飞书分页累计条数与total不一致，未返回部分数据")
             if not page["has_more"]:
+                match = re.fullmatch(r'tables/(tbl[A-Za-z0-9]+)/records(?:/search)?', path)
+                if match:
+                    for row in items:
+                        for value in (row.get('fields') or {}).values():
+                            if isinstance(value, list):
+                                for attachment in value:
+                                    if isinstance(attachment, dict) and attachment.get('file_token'):
+                                        self._attachment_tables[attachment['file_token']] = match[1]
                 return items
             if not batch:
                 raise LearningCloudError("飞书分页未取得新记录，未返回部分数据")
@@ -806,7 +815,7 @@ class LearningCloud:
                 try:
                     original = json.loads(_text(existing["内容"]))
                     if expected_previous_sha256 is not None:
-                        previous_payload = self._load_entity_document(original)
+                        previous_payload = self._load_entity_document(original, table_id=table)
                         checksum = _payload_digest(previous_payload)
                         summary_only = (kind == 'shift_person' and isinstance(previous_payload, dict)
                                         and previous_payload.get('entities') == []
@@ -871,7 +880,7 @@ class LearningCloud:
                 raise LearningCloudConflict("历史记录身份与类别、业务键不匹配，未补列")
             if expected_payload_sha256 is not None:
                 try:
-                    payload = self._load_entity_document(json.loads(_text(actual.get("内容"))))
+                    payload = self._load_entity_document(json.loads(_text(actual.get("内容"))), table_id=table)
                 except (ValueError, TypeError, RecursionError):
                     raise LearningCloudError("历史记录内容无效，未补列") from None
                 if _payload_digest(payload) != expected_payload_sha256:
@@ -883,7 +892,7 @@ class LearningCloud:
                 return record
             return self._write_record(table, fields, "enrich", [kind, key], record_id)
 
-    def _load_entity_document(self, value):
+    def _load_entity_document(self, value, *, table_id=None):
         if isinstance(value, dict) and set(value) == {"人员班次答题情况"}:
             summary = value["人员班次答题情况"]
             names = {label: name for name, label in PERSONNEL_SUMMARY_LABELS.items()}
@@ -897,7 +906,7 @@ class LearningCloud:
         pointer = _document_pointer(value)
         if pointer is None:
             return value
-        compressed = self.download_attachment(pointer["file_token"], MAX_DOCUMENT_BYTES)
+        compressed = self.download_attachment(pointer["file_token"], MAX_DOCUMENT_BYTES, table_id=table_id or self._entity_table_id)
         try:
             with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
                 raw = stream.read(pointer["raw_bytes"] + 1)
@@ -926,7 +935,7 @@ class LearningCloud:
             if not kind.strip() or not key.strip() or (kind, key) in seen:
                 raise LearningCloudError("实体类别、业务键为空或重复，未返回部分数据")
             try:
-                payload = self._load_entity_document(json.loads(_text(fields.get("内容"))))
+                payload = self._load_entity_document(json.loads(_text(fields.get("内容"))), table_id=table)
             except (ValueError, TypeError):
                 raise LearningCloudError("云端实体内容不是有效 JSON，未返回部分数据") from None
             seen.add((kind, key))
@@ -978,7 +987,7 @@ class LearningCloud:
                     or _text(fields.get("业务键")) != row.get("key")
                     or _payload_digest(fields) != _payload_digest(row.get("fields"))):
                 raise LearningCloudConflict("历史记录已变化，未清理；等待重新备份核验")
-            payload = self._load_entity_document(json.loads(_text(fields.get("内容"))))
+            payload = self._load_entity_document(json.loads(_text(fields.get("内容"))), table_id=table)
             if _payload_digest(payload) != row["payload_sha256"]:
                 raise LearningCloudConflict("历史记录内容已变化，未清理")
             data = self._request("DELETE", f"tables/{table}/records/{record_id}")
@@ -1020,11 +1029,15 @@ class LearningCloud:
         self._check_entity_credentials()
         return {"file_token": token, "name": name, "size": size}
 
-    def download_attachment(self, token, max_bytes):
+    def download_attachment(self, token, max_bytes, *, table_id=None):
         self._check_entity_credentials()
         _identifier(token, "file_token")
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("max_bytes 必须是正整数")
+        table_id = self._attachment_tables.get(token) or table_id
+        if table_id:
+            _identifier(table_id, 'table_id', r'tbl[A-Za-z0-9]+')
+        params = {'extra': json.dumps({'bitablePerm': {'tableId': table_id}})} if table_id else None
         headers = self._headers()
         refreshed, retries = False, 0
         while True:
@@ -1033,7 +1046,7 @@ class LearningCloud:
             try:
                 content, content_type = self._http.request_bytes(
                     "GET", f"{API_ROOT}/drive/v1/medias/{token}/download",
-                    headers=headers, retries=0, max_bytes=max_bytes,
+                    headers=headers, params=params, retries=0, max_bytes=max_bytes,
                 )
                 self._check_entity_credentials()
                 if not content or len(content) > max_bytes:
@@ -1075,7 +1088,9 @@ class LearningCloud:
                 elif status == 404:
                     reason = '同步附件不存在或已失效，请核对云端原记录'
                 else:
-                    reason = '飞书拒绝同步附件下载，请核对当前应用对原附件及所属数据表的访问权限'
+                    reason = ('飞书未接受附件下载请求，请核对原附件是否仍挂在对应记录及所属数据表的访问权限'
+                              if status == 400 and code is None else
+                              '飞书拒绝同步附件下载，请核对当前应用对原附件及所属数据表的访问权限')
                 details = f"HTTP={status or '未返回'}" + (f'，code={code}' if code is not None else '')
                 raise LearningCloudError(f'{reason}（{details}）；本地数据保留，未完成同步将重试。') from None
             except (httpx.HTTPError, OSError):

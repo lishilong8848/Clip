@@ -11,8 +11,7 @@ from openclaw_service.assistant.lighthouse_sources import SCOPES, query_terms
 from .link_directory import LinkDirectory, LinkRemote, plain
 
 NS = 'assistant_table_cache'
-PERSONNEL_TABLE = 'tbluozblhRAjbljX'
-PERSONNEL_BASE = 'HU38bc1vnamMK9sCeOgclUvXnFc'
+from .personnel_source import TABLE_ID as PERSONNEL_TABLE, APP_TOKEN as PERSONNEL_BASE
 PERSONNEL_URL = f'https://vnet.feishu.cn/base/{PERSONNEL_BASE}?table={PERSONNEL_TABLE}'
 SCOPE_NAMES = {'楼栋', '所属楼栋', '机楼', '机楼/专业', '建筑名称', '楼宇', '所属机楼'}
 
@@ -80,8 +79,13 @@ class AssistantTables:
             if url.hostname != 'vnet.feishu.cn' or not re.fullmatch(r'/(base|wiki)/[A-Za-z0-9]+', url.path):
                 continue
             table = parse_qs(url.query).get('table', [''])[0]
+            if table in {'tbluozblhRAjbljX', 'tblRV9KeWFh9xCkm'}:
+                continue
             if re.fullmatch(r'tbl[A-Za-z0-9]+', table):
                 result.append({**item, 'table_id': table})
+        if not any(row['table_id'] == PERSONNEL_TABLE for row in result):
+            result.append({'table_id': PERSONNEL_TABLE, 'url': PERSONNEL_URL, 'name': '员工信息池',
+                           'category': '人员', 'purpose': '人员信息与当天班组班次', 'sort': 0})
         return result
 
     def catalog(self, keyword='', page=1):
@@ -287,7 +291,7 @@ class AssistantTables:
                     inactive = values.get('离职/异动情况', False)
                     rows.append({'record_id': record['record_id'], 'name': plain(values.get('员工姓名')),
                         'employee_no': plain(values.get('员工工号') or values.get('工号')),
-                        'building': plain(values.get('楼栋') or values.get('机楼/专业')),
+                        'building': plain(values.get('机楼/专业')),
                         'open_id': hashlib.sha256(plain(values['openid']).encode()).hexdigest() if plain(values.get('openid')) else '',
                         'inactive': inactive if type(inactive) is bool else None})
                 if not data['has_more']:
@@ -304,7 +308,7 @@ class AssistantTables:
 
     def roster_count(self, actor, day, shift=''):
         import datetime as dt
-        from .learning_reminders import read_roster, APP_TOKEN, TABLE_ID, VIEW_ID
+        from .personnel_source import daily_roster, APP_TOKEN, TABLE_ID
         from openclaw_service.assistant.lighthouse_people_stats import summarize_roster
         try:
             if not isinstance(day, str) or dt.date.fromisoformat(day).isoformat() != day or shift not in {'', '白', '夜'}:
@@ -316,9 +320,15 @@ class AssistantTables:
             raise AssistantError('当前账号未配置可查询的楼栋范围。', 403)
         def load():
             try:
-                return read_roster(self.service, day, scopes=scopes)
+                return daily_roster(self.service, day)
             except ValueError:
-                raise AssistantError('排班视图未完整读取，不能确认人数；请稍后重试。', 503) from None
+                raise AssistantError('员工信息池排班未完整读取，不能确认人数；请稍后重试。', 503) from None
         saved = self.cached('roster-count:' + day + ':' + ','.join(scopes), 60, load)
-        return summarize_roster(saved['value'], actor, day=day, shift=shift, observed_at=saved['observed_at'],
-            source_url=f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}&view={VIEW_ID}')
+        result = summarize_roster([p for p in saved['value']['people'] if p['scope'] in scopes], actor, day=day, shift=shift, observed_at=saved['observed_at'],
+            source_url=f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}', complete_source=True)
+        issues = [i for i in saved['value'].get('issues', []) if not i.get('scope') or i['scope'] in scopes]
+        if issues:
+            result['complete'] = False
+            result['missing'] = [item['reason'] for item in issues]
+            result['basis'] += '\n存在班组、班次或楼栋待核对的记录，上述人数仅为已核实部分。'
+        return result

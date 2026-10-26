@@ -59,7 +59,7 @@ class NoticeSopTests(unittest.IsolatedAsyncioTestCase):
     def select(self, plan, work="maintenance", **changes):
         field = next(field for field in plan["fields"] if field.get("native_notice_sop"))
         value = {**field["value"], "exempt": False, "scope": "A", "sop_id": self.sops[work]["sop_id"],
-                 "operator_record_id": "person-one", "reviewer_record_id": "person-two", "runs": [], **changes}
+                 "operator_record_id": "person-one", "operator_record_ids": [changes.get("operator_record_id", "person-one")], "reviewer_record_id": "person-two", "runs": [], **changes}
         return self.agent.amend(fixture.ACTOR, plan["id"], {"version": plan["version"], "values": {field["name"]: value}})
 
     async def test_three_selections_are_accepted_by_native_start_without_cloud(self):

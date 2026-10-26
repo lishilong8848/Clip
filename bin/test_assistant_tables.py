@@ -226,36 +226,32 @@ class ConsentTests(unittest.TestCase):
 
 
 class RosterCountTests(unittest.TestCase):
-    def test_reuses_reader_without_changing_learning_snapshot_or_reminders(self):
-        from bin.test_learning_roster_resolution import DAY, roster_row, users, build_reader
-        from lan_bitable_template_portal.learning_reminders import read_roster
-        rows = [roster_row('示例甲', users(('示例甲', 'ou_one'))),
-                roster_row('示例乙', users(('示例乙', 'ou_two')), shift='夜'),
-                roster_row('站值班员', users(('站值班员', 'ou_station')), group='110站', scope='110站'),
-                roster_row('长白不计', group='长白')]
-        self.assertEqual(len(read_roster(build_reader(rows), DAY)), 2, 'existing reminder defaults still exclude station and long-day rows')
-        store, service = Memory(), build_reader(rows)
-        del service.state_cache_version
-        store.put_document('local', 'shift_roster', {'original': True})
-        service._last_error = 'original'
-        tables = AssistantTables(service, store)
-        value = tables.roster_count({**ADMIN, 'scopes': ['A', '110']}, DAY)
-        self.assertEqual(value['assignment_count'], 3)
-        self.assertTrue(any(row['scope'] == '110' for row in value['per_building']))
-        self.assertNotIn('ou_', str(value))
-        self.assertEqual(store.get_document('local', 'shift_roster'), {'original': True})
-        self.assertEqual(service._last_error, 'original')
-        calls = service._request_json.call_count
-        tables.roster_count({**ADMIN, 'scopes': ['A', '110']}, DAY)
-        self.assertEqual(service._request_json.call_count, calls, 'read-only cache avoids fetching again')
+    def test_employee_snapshot_query_includes_long_day_and_preserves_reminder_state(self):
+        from lan_bitable_template_portal import personnel_source
+        store=Memory()
+        store.put_document('local','shift_roster',{'original':True})
+        service=SimpleNamespace(_last_error='original')
+        tables=AssistantTables(service,store)
+        snapshot={'people':[{'name':name,'scope':scope,'shift':shift,'duty_kind':kind,'open_id':oid}
+            for name,scope,shift,kind,oid in [('甲','A','白','白','ou_one'),('乙','A','夜','夜','ou_two'),
+                ('站员','110','白','白','ou_station'),('长白','A','白','长白','ou_day')]],'issues':[]}
+        with patch.object(personnel_source,'daily_roster',return_value=snapshot) as read:
+            value=tables.roster_count({**ADMIN,'scopes':['A','110']},'2026-10-26')
+            self.assertEqual(value['assignment_count'],4)
+            self.assertNotIn('ou_',str(value))
+            tables.roster_count({**ADMIN,'scopes':['A','110']},'2026-10-26')
+            self.assertEqual(read.call_count,1)
+        self.assertEqual(store.get_document('local','shift_roster'),{'original':True})
+        self.assertEqual(service._last_error,'original')
 
-    def test_incomplete_pages_fail_closed_and_do_not_poison_cache(self):
-        service = SimpleNamespace(_request_json=Mock(return_value={'code': 0, 'data': {'items': [], 'has_more': True}}))
-        tables = AssistantTables(service, Memory())
-        with self.assertRaisesRegex(AssistantError, '未完整读取'):
-            tables.roster_count({**ADMIN, 'scopes': ['A']}, '2026-10-22')
-        for day, shift in [('bad', ''), ('2026-10-22', '早')]:
-            with self.assertRaises(AssistantError): tables.roster_count(ADMIN, day, shift)
+    def test_incomplete_snapshot_fails_closed_and_does_not_poison_cache(self):
+        from lan_bitable_template_portal import personnel_source
+        tables=AssistantTables(SimpleNamespace(),Memory())
+        with patch.object(personnel_source,'daily_roster',side_effect=ValueError('incomplete')):
+            with self.assertRaisesRegex(AssistantError,'未完整读取'):
+                tables.roster_count({**ADMIN,'scopes':['A']},'2026-10-26')
+        for day,shift in [('bad',''),('2026-10-26','早')]:
+            with self.assertRaises(AssistantError): tables.roster_count(ADMIN,day,shift)
 
 
 class CompleteTableReadTests(TableTests):

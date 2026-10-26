@@ -1753,7 +1753,10 @@ class LearningService:
             from .learning_personnel_storage import archived_attachment
             content = archived_attachment(self, value["file_token"], MAX_FILE)
             if content is None:
-                content = self.cloud.download_attachment(value["file_token"], MAX_FILE)
+                from .learning_cloud import BANK_TABLES
+                bank = str(value.get('question_id') or '').split(':')[0]
+                table = BANK_TABLES.get(bank) or self.cloud._find_entity_table()
+                content = self.cloud.download_attachment(value["file_token"], MAX_FILE, table_id=table)
             local_name = hashlib.sha256(content).hexdigest() + Path(value["name"]).suffix.lower()
             path = self._save_file(local_name, content)
             with self.transaction() as conn:

@@ -1422,7 +1422,7 @@ function planInputIncomplete(plan: Dict): boolean {
     if (field.native_notice_sop && !value?.exempt) {
       const scope = planControl(plan, field).notice_scope;
       const sop = (field.sops || []).find((item: Dict) => item.sop_id === value?.sop_id);
-      return !scope || value?.scope !== scope || field.directory_scope !== scope || !sop || !!sop.blocked_reason || !value?.operator_record_id || !value?.reviewer_record_id;
+      return !scope || value?.scope !== scope || field.directory_scope !== scope || !sop || !!sop.blocked_reason || !(value?.operator_record_ids ?? (value?.operator_record_id ? [value.operator_record_id] : [])).length || !value?.reviewer_record_id;
     }
     return field.native_cabinet_correct && (field.directory_scope !== value?.scope || !(field.rows || []).some((row: Dict) => row.row_id === value?.row_id));
   });

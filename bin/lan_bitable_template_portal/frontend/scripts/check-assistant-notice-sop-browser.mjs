@@ -13,6 +13,7 @@ from bin.test_lighthouse_notice_sop import NoticeSopTests
 from bin.test_lighthouse_notice_workflows import ACTOR
 async def main():
     test=NoticeSopTests();test.setUp();plans={}
+    test.people.append({'record_id':'person-three','name':'第二操作人','open_id':'private-three','source':'staff'})
     try:
         for work in ('maintenance','polling','adjust'):
             plan=test.prepare(work)
@@ -24,19 +25,20 @@ asyncio.run(main())
 assert.equal(result.status, 0, result.stderr);
 const plans = JSON.parse(result.stdout);
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const server = await preview({ root: frontend, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false } });
+const server = await preview({ root: frontend, logLevel: 'error', preview: { host: '127.0.0.1', port: 19141, strictPort: true } });
 const base = `http://127.0.0.1:${server.httpServer.address().port}/assistant.html`;
 const output = path.join(root, 'output/playwright/assistant-notice-sop');
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ headless: true });
 try {
-  for (const width of [1440, 1024]) {
+  for (const width of [1440, 402, 440]) {
     const context = await browser.newContext({ viewport: { width, height: 1000 } });
     const page = await context.newPage(), errors = [], saves = [];
     page.on('pageerror', err => errors.push(err.message));
     let display, loaded, requests = 0, failFirst = false;
     await page.route('**/assistant.html*', async route => { const response = await route.fetch(); await route.fulfill({ response, body: (await response.text()).replace('id="clipflow-lighthouse-widget"', 'id="clipflow-lighthouse-widget" data-user-id="sop-fixture" data-user-name="隔离测试"') }); });
     await page.route('**/api/**', route => route.fulfill({ json: { ok: true, data: {} } }));
+    await page.route('**/api/auth/status', route => route.fulfill({json:{ok:true,data:{logged_in:true,user:{open_id:'sop-fixture',role:'admin',modules:['maintenance','polling','adjust']}}}}));
     await page.route('**/api/assistant/conversation', route => route.fulfill({ json: { ok: true, data: {
       conversation_id: 'sop-form', configured: true, enabled: true, busy: false,
       turns: [{ operation_id: 'sop-form', question: '填写通告及SOP', answer: '请核对。', status: 'completed', plan: display }],
@@ -59,7 +61,7 @@ try {
     for (const [work, data] of Object.entries(plans)) {
       display = structuredClone(data.initial); loaded = structuredClone(data.loaded); requests = 0; failFirst = work === 'maintenance';
       await page.goto(base);
-      await page.locator('.assistant-launcher').waitFor();
+      await page.locator('.assistant-launcher').waitFor({state:'attached',timeout:10000}).catch(async e=>{await page.screenshot({path:path.join(output,'failure.png')}); console.log('diagnostic',work,width,await page.locator('body').innerText(),errors);throw e;});
       const launcher = page.getByRole('button', { name: '打开灯塔助手', exact: true });
       if (await launcher.isVisible()) await launcher.click();
       if (work === 'maintenance') {
@@ -80,6 +82,8 @@ try {
       const operator = page.locator('[id$="-operator"][role="combobox"]');
       await operator.click();
       await page.getByRole('option', { name: '测试操作人', exact: true }).click();
+      await operator.click(); await page.getByRole('option', {name:'第二操作人',exact:true}).click();
+      assert.equal(await page.locator('.lhs-operator-chips button').count(),2);
       await page.locator('[id$="-reviewer"][role="combobox"]').click();
       await page.getByRole('option', { name: '测试审核人', exact: true }).click();
       if (work === 'polling') {
@@ -104,7 +108,7 @@ try {
       await page.getByRole('button', { name: '重新加载目录' }).click();
       await sop.waitFor({ state: 'visible' });
       await page.waitForFunction(() => !document.querySelector('.lhs-exempt input')?.disabled);
-      assert.match(await operator.innerText(), /测试操作人/);
+      assert.match(await page.locator('.lhs-operator-chips').innerText(), /测试操作人/);
       assert.equal(requests, work === 'maintenance' ? 3 : 2, 'mount, optional retry and one explicit reload only');
       const text = await page.locator('.plan-form').innerText();
       assert.ok(!text.includes('person-one') && !text.includes('query_form_') && !text.includes('private-one'));
@@ -117,8 +121,8 @@ try {
       await page.getByRole('button', { name: '补充并继续', exact: true }).click();
       await page.waitForFunction(() => !document.querySelector('.lhs'));
       const filled = saves.at(-1).values['step0.notice_sop'];
-      assert.deepEqual(Object.keys(filled).filter(key => key !== '$query').sort(), ['exempt', 'scope', 'sop_id', 'operator_record_id', 'reviewer_record_id', 'runs'].sort());
-      assert.equal(filled.exempt, false); assert.equal(filled.operator_record_id, 'person-one'); assert.equal(filled.reviewer_record_id, 'person-two');
+      assert.deepEqual(Object.keys(filled).filter(key => key !== '$query').sort(), ['exempt', 'scope', 'sop_id', 'operator_record_id', 'operator_record_ids', 'reviewer_record_id', 'runs'].sort());
+      assert.deepEqual(filled.operator_record_ids,['person-one','person-three']); assert.equal(filled.exempt, false); assert.equal(filled.operator_record_id, 'person-one'); assert.equal(filled.reviewer_record_id, 'person-two');
       if (work === 'adjust') assert.deepEqual(filled.runs.map(({ from_unit, to_unit, other_unit }) => ({ from_unit, to_unit, other_unit })), [{ from_unit: '2#', to_unit: '4#', other_unit: '6#' }]);
       if (work === 'polling') assert.deepEqual(filled.runs.map(({ from_unit, to_unit }) => ({ from_unit, to_unit })), [{ from_unit: '1#', to_unit: '3#' }, { from_unit: '4#', to_unit: '6#' }]);
     }

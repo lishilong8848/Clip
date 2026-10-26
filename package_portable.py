@@ -199,6 +199,8 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/lan_bitable_template_portal/feishu_identity_documents.py"),
     Path("bin/lan_bitable_template_portal/feishu_identity_manifest.py"),
     Path("bin/lan_bitable_template_portal/feishu_identity_profile.json"),
+    Path("bin/lan_bitable_template_portal/personnel_signature_ids.json"),
+    Path("bin/lan_bitable_template_portal/personnel_source.py"),
     Path("bin/openclaw_service/update.py"),
     Path("bin/openclaw_service/assistant/lighthouse_extensions.py"),
     Path("bin/openclaw_service/assistant/lighthouse_mcp_builtin.py"),
@@ -439,6 +441,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.notice_alert_tags",
     "lan_bitable_template_portal.planned_notice_deadlines",
     "lan_bitable_template_portal.signature_management",
+    "lan_bitable_template_portal.personnel_source",
     "lan_bitable_template_portal.signature_access",
     "lan_bitable_template_portal.lighthouse_routes",
     "lan_bitable_template_portal.lighthouse_appearance",
@@ -1721,7 +1724,7 @@ def _run_frontend_notice_navigation_checks() -> None:
                  "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
                  "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
                  "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs",
-                 "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs"):
+                 "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs", "check-notice-convergence-confirmation.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
@@ -1977,7 +1980,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access", "bin.test_signature_temporary_access",
          "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_location_distribution", "bin.test_pre_shift_roster", "bin.test_pre_shift_recipients", "bin.test_pre_shift_delivery", "bin.test_learning_weekly_cards",
          "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_risk_inspection_delete", "bin.test_risk_inspection_system_fields", "bin.test_risk_inspection_final_push", "bin.test_risk_inspection_assignments", "bin.test_risk_inspection_task_access", "bin.test_risk_inspection_imports", "bin.test_risk_inspection_update_compatibility", "bin.test_account_bulk_modules", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
-         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
+         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_personnel_source", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
          "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
          "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
          "bin.test_lighthouse_question_intent", "bin.test_lighthouse_read_followups", "bin.test_lighthouse_source_recovery", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",

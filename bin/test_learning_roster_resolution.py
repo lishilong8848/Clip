@@ -19,22 +19,6 @@ DAY = '2026-10-10'
 DAY_TS = int(dt.datetime(2026, 10, 10, tzinfo=learning.TZ).timestamp() * 1000)
 
 
-def roster_row(name=None, users=None, group='A班', shift='白', day=DAY_TS, scope='A楼', **extra):
-    """One synthetic list-feed item. Text is authoritative; users are the linked array."""
-    fields = {'班组': group, '班次': shift, '排班日期': day, '机楼': scope}
-    if name is not None:
-        fields['人员（文本）'] = name
-    if users is not None:
-        fields['人员'] = users
-    fields.update(extra)
-    return {'fields': fields}
-
-
-def users(*pairs):
-    """Build the '人员' users array from (name, open_id) pairs."""
-    return {'users': [{'name': n, 'id': o} for n, o in pairs]}
-
-
 def hr_row(name, scope, oid, *, selectable=True, inactive=False, position='值班员',
            scopes=None, login_ids=None):
     """One local HR directory row shaped for _hr_active/_hr_learning_scopes."""
@@ -44,161 +28,22 @@ def hr_row(name, scope, oid, *, selectable=True, inactive=False, position='值�
             'position': position}
 
 
-def build_reader(items):
-    """Return a service Mock whose _request_json feeds the given items across pages."""
-    service = Mock()
-    cur = items[:]
-    bodies = []
-    while True:
-        page = cur[:2]
-        cur = cur[2:]
-        has_more = bool(cur)
-        body = {'code': 0, 'data': {'items': page, 'has_more': has_more}}
-        if has_more:
-            body['data']['page_token'] = 'tok-%d' % len(bodies)
-        bodies.append(body)
-        if not has_more:
-            break
-    if not bodies:
-        bodies = [{'code': 0, 'data': {'items': [], 'has_more': False}}]
-    service._request_json.side_effect = bodies
-    return service
-
-
 class ReadRosterTests(TestCase):
-    def assert_request_contract(self, service):
-        params = service._request_json.call_args.kwargs['params']
-        self.assertEqual(params['view_id'], 'vew6jLlGzq')
-        self.assertEqual(params['page_size'], 500)
-        self.assertEqual(params['user_id_type'], 'open_id')
+    def test_employee_pool_snapshot_filters_reminders_but_not_queries(self):
+        from lan_bitable_template_portal import personnel_source
+        snapshot = {'people': [
+            {'record_id':'rec1', 'name':'值班甲', 'open_id':'ou_a', 'scope':'A', 'shift':'白', 'duty_kind':'白'},
+            {'record_id':'rec2', 'name':'长白乙', 'open_id':'ou_b', 'scope':'A', 'shift':'白', 'duty_kind':'长白'},
+            {'record_id':'rec3', 'name':'站员丙', 'open_id':'ou_c', 'scope':'110', 'shift':'夜', 'duty_kind':'夜'}]}
+        with patch.object(personnel_source, 'daily_roster', return_value=snapshot) as read:
+            self.assertEqual([p['name'] for p in reminders.read_roster(Mock(), DAY)], ['值班甲'])
+            self.assertEqual(len(reminders.read_roster(Mock(), DAY, scopes=['A','110'], include_long_day=True)), 3)
+            self.assertEqual(read.call_args.args[1], DAY)
 
-    def test_uses_fixed_roster_view_and_request_contract(self):
-        service = build_reader([roster_row('张三', users(('张三', 'ou_a')))])
-        result = reminders.read_roster(service, DAY)
-        self.assertEqual(result, [{'open_id': 'ou_a', 'shift': '白', 'scope': 'A', 'name': '张三'}])
-        self.assert_request_contract(service)
-
-    def test_text_names_authoritative_route_by_exact_linked_name(self):
-        items = [
-            roster_row('张三,李四', users(('张三', 'ou_a'), ('李四', 'ou_b'))),
-            roster_row('王五', users(('王五', 'ou_c')), shift='夜', scope='B楼'),
-        ]
-        result = reminders.read_roster(build_reader(items), DAY)
-        self.assertEqual(result, [
-            {'open_id': 'ou_a', 'shift': '白', 'scope': 'A', 'name': '张三'},
-            {'open_id': 'ou_b', 'shift': '白', 'scope': 'A', 'name': '李四'},
-            {'open_id': 'ou_c', 'shift': '夜', 'scope': 'B', 'name': '王五'},
-        ])
-
-    def test_longday_110_and_wrong_shift_excluded(self):
-        items = [
-            roster_row('张三', users(('张三', 'ou_a')), group='长白'),
-            roster_row('李四', users(('李四', 'ou_b')), group='110站'),
-            roster_row('王五', users(('王五', 'ou_c')), shift='休'),
-            roster_row('赵六', users(('赵六', 'ou_d')), scope='110站'),
-            roster_row('汪七', users(('汪七', 'ou_e')), scope='110楼'),
-            roster_row('真正值班', users(('真正值班', 'ou_ok'))),
-        ]
-        result = reminders.read_roster(build_reader(items), DAY)
-        self.assertEqual([p['name'] for p in result], ['真正值班'])
-        self.assertEqual(result[0]['scope'], 'A')
-
-    def test_wrong_date_excluded_and_invalid_date_raises(self):
-        service = build_reader([
-            roster_row('张三', users(('张三', 'ou_a')), day=DAY_TS - 86400000),
-            roster_row('李四', users(('李四', 'ou_b')), day='not-a-number'),
-        ])
-        with self.assertRaises(ValueError):
-            reminders.read_roster(service, DAY)
-
-    def test_rich_text_list_names_split_on_whitespace_and_punct(self):
-        # 人员（文本） is a rich-text list: whitespace is the list delimiter, and each
-        # full name is kept intact; only names with an exactly-linked user get an open_id.
-        rich = [{'text': '张三 '}, {'text': '李四\n王五、赵六;甲乙，丙丁'}]
-        result = reminders.read_roster(
-            build_reader([roster_row(rich, users(('张三', 'ou_a'), ('李四', 'ou_b'), ('王五', 'ou_c')))]),
-            DAY)
-        self.assertEqual([p['name'] for p in result],
-                         ['张三', '李四', '王五', '赵六', '甲乙', '丙丁'])
-        self.assertEqual([p['open_id'] for p in result],
-                         ['ou_a', 'ou_b', 'ou_c', '', '', ''])
-
-    def test_rich_text_name_with_middle_dot_stays_whole_and_matches(self):
-        service = build_reader([roster_row('李·白', users(('李·白', 'ou_lb')))])
-        result = reminders.read_roster(service, DAY)
-        self.assertEqual(result, [{'open_id': 'ou_lb', 'shift': '白', 'scope': 'A', 'name': '李·白'}])
-
-    def test_partial_text_list_only_resolves_present_names(self):
-        items = [roster_row('张三', users(('张三', 'ou_a'), ('李四', 'ou_b')))]
-        result = reminders.read_roster(build_reader(items), DAY)
-        self.assertEqual([p['name'] for p in result], ['张三'])
-        self.assertEqual(result[0]['open_id'], 'ou_a')
-
-    def test_empty_text_raises_even_when_linked_users_present(self):
-        service = build_reader([roster_row(users=users(('张三', 'ou_a')))])
-        with self.assertRaises(ValueError):
-            reminders.read_roster(service, DAY)
-
-    def test_mismatched_same_count_linked_users_do_not_match_text(self):
-        items = [roster_row('张三,李四', users(('zhang', 'ou_x'), ('li', 'ou_y')))]
-        result = reminders.read_roster(build_reader(items), DAY)
-        # Authoritative text names exist but no linked user matches exactly -> open_id blank.
-        self.assertEqual([p['open_id'] for p in result], ['', ''])
-        self.assertEqual([p['name'] for p in result], ['张三', '李四'])
-
-    def test_malformed_users_field_raises(self):
-        # Force an invalid (non list) 人员 payload with valid authoritative text.
-        bad = roster_row('张三', users=users(('张三', 'ou_a')))
-        bad['fields']['人员'] = 'oops'
-        service2 = Mock()
-        service2._request_json.side_effect = [
-            {'code': 0, 'data': {'items': [bad], 'has_more': False}}]
-        with self.assertRaises(ValueError):
-            reminders.read_roster(service2, DAY)
-
-    def test_duplicate_identitical_rows_collapse(self):
-        items = [roster_row('张三', users(('张三', 'ou_a'))),
-                 roster_row('张三', users(('张三', 'ou_a')))]
-        result = reminders.read_roster(build_reader(items), DAY)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]['open_id'], 'ou_a')
-
-    def test_duplicate_name_conflicting_linked_ids_blanked(self):
-        items = [roster_row('张三', users(('张三', 'ou_a'))),
-                 roster_row('张三', users(('张三', 'ou_b')))]
-        result = reminders.read_roster(build_reader(items), DAY)
-        self.assertEqual([p['open_id'] for p in result], [''])
-
-    def test_pagination_accumulates_and_dedups_across_pages(self):
-        service = build_reader([
-            roster_row('张三', users(('张三', 'ou_a'))),
-            roster_row('李四', users(('李四', 'ou_b')), shift='夜'),
-            roster_row('张三', users(('张三', 'ou_a'))),
-        ])
-        result = reminders.read_roster(service, DAY)
-        self.assertEqual(sorted(p['name'] for p in result), ['张三', '李四'])
-        self.assertEqual(service._request_json.call_count, 2)
-
-    def test_pagination_loop_detected_and_aborts(self):
-        service = Mock()
-        service._request_json.side_effect = [
-            {'code': 0, 'data': {'items': [roster_row('张三', users(('张三', 'ou_a')))],
-                                 'has_more': True, 'page_token': 'tok-x'}},
-            {'code': 0, 'data': {'items': [], 'has_more': True, 'page_token': 'tok-x'}},
-        ]
-        with self.assertRaises(ValueError):
-            reminders.read_roster(service, DAY)
-
-    def test_nonzero_code_or_missing_bools_abort(self):
-        service = Mock()
-        service._request_json.return_value = {'code': 7,
-                                              'data': {'items': [roster_row()], 'has_more': False}}
-        with self.assertRaises(ValueError):
-            reminders.read_roster(service, DAY)
-        service2 = Mock()
-        service2._request_json.return_value = {'code': 0, 'data': {'items': [], 'has_more': 'yes'}}
-        with self.assertRaises(ValueError):
-            reminders.read_roster(service2, DAY)
+    def test_incomplete_employee_pool_never_becomes_empty_roster(self):
+        from lan_bitable_template_portal import personnel_source
+        with patch.object(personnel_source, 'daily_roster', side_effect=ValueError('incomplete')):
+            with self.assertRaises(ValueError): reminders.read_roster(Mock(), DAY)
 
 
 class ResolveRosterTests(TestCase):
@@ -313,12 +158,8 @@ class ResolveRosterTests(TestCase):
         self.assertEqual(warnings, [])
 
     def test_partial_no_and_wrong_linked_rows_resolve_only_present_hr(self):
-        rows = [
-            roster_row('张三 李四', users(('张三', 'ou_l'))),      # partial link
-            roster_row('王五 赵六', users()),                     # no link
-            roster_row('甲乙 丙丁', users(('x1', 'ou_x'), ('x2', 'ou_y'))),  # wrong names
-        ]
-        people = reminders.read_roster(build_reader(rows), DAY)
+        people = [{'name': name, 'open_id': oid, 'shift': '白', 'scope': 'A'}
+                  for name, oid in [('张三','ou_l'),('李四',''),('王五',''),('赵六',''),('甲乙','ou_x'),('丙丁','ou_y')]]
         resolved, warnings = self.resolve(people, {
             'z': hr_row('张三', 'A', 'ou_z'),
             'l': hr_row('李四', 'A', 'ou_l'),

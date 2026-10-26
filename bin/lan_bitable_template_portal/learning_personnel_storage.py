@@ -105,7 +105,7 @@ def _verify_archive(service, row, app_id):
             raise core.LearningError('飞书应用已变化，暂停历史清理。', 503)
         if archived_attachment(service, token, cloud.MAX_DOCUMENT_BYTES) is not None:
             continue
-        content = service.cloud.download_attachment(token, cloud.MAX_DOCUMENT_BYTES)
+        content = service.cloud.download_attachment(token, cloud.MAX_DOCUMENT_BYTES, table_id=service.cloud._find_entity_table())
         if not isinstance(content, bytes) or not content:
             raise core.LearningError('历史附件尚未完整备份，未清理。', 503)
         if service.cloud.current_app_id() != app_id:

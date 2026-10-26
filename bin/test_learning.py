@@ -94,7 +94,10 @@ class FakeCloud:
         self.files[token] = content
         return {"file_token": token, "size": len(content)}
 
-    def download_attachment(self, token, max_bytes):
+    def _find_entity_table(self):
+        return "tblFixtureEntity"
+
+    def download_attachment(self, token, max_bytes, *, table_id=None):
         self._call("download_attachment", token, max_bytes)
         content = self.files[token]
         if len(content) > max_bytes:

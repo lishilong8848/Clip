@@ -31,7 +31,25 @@ def roster_fields(shift='白', scope='A', **extra):
 
 
 def reader(fields, directory=None):
-    return SimpleNamespace(_request_json=Mock(return_value={'code':0,'data':{'items':[{'fields':f} for f in fields],'has_more':False}}),
+    # Resolver fixtures use a dated employee-pool snapshot, not the retired roster API.
+    from lan_bitable_template_portal import personnel_source
+    from upload_event_module.config import config
+    people, issues = [], []
+    for entry in fields:
+        names = entry['人员（文本）'].split('、') if entry['人员（文本）'] else []
+        scope = entry['机楼'].removesuffix('楼')
+        if not names:
+            issues.append({'scope':scope, 'reason':'员工姓名缺失'})
+        linked = entry.get('人员') or {}
+        linked = linked.get('users', []) if isinstance(linked, dict) else linked
+        for name in names:
+            users = [u for u in linked if u['name'] == name]
+            people.append({'name':name, 'scope':scope, 'shift':entry['班次'],
+                           'duty_kind': entry['班次'], 'open_id':users[0]['id'] if len(users)==1 else ''})
+    snapshot = {'source':personnel_source.TABLE_ID,'app_id':config.app_id,'complete':True,
+                'people':people,'issues':issues}
+    return SimpleNamespace(_state_store=SimpleNamespace(get_document=Mock(return_value=snapshot)),
+        _request_json=Mock(),
         get_permission_directory_people=Mock(return_value={'items':directory if directory is not None else [person('人员一','ou_one'),person('人员二','ou_two',account_nature='外部账号')]}))
 
 
@@ -42,7 +60,7 @@ class RosterTests(unittest.TestCase):
         self.assertEqual([(p['shift'],p['open_id']) for p in result['people']], [('白','ou_one'),('白','ou_two'),('夜','ou_one'),('夜','ou_two')])
         self.assertEqual(result['warnings'],{})
         self.assertEqual(service.get_permission_directory_people.call_count,1)
-        self.assertEqual(service._request_json.call_args.kwargs['params']['view_id'],'vew6jLlGzq')
+        service._request_json.assert_not_called()
 
     def test_linked_stranger_does_not_replace_a_name_in_text(self):
         service=reader([roster_fields(人员={'users':[{'id':'ou_stranger','name':'其他人'}]})],
@@ -78,29 +96,13 @@ class RosterTests(unittest.TestCase):
         service=reader([roster_fields(**{'人员（文本）':''}),roster_fields('夜')])
         result=read_roster(service,DAY)
         self.assertEqual([p['shift'] for p in result['people']],['夜','夜'])
-        self.assertIn('人员（文本）姓名名单缺失',result['warnings']['A'])
+        self.assertIn('员工姓名缺失',result['warnings']['A'])
 
-    def test_missing_entire_configured_building_retries_until_its_roster_arrives(self):
+    def test_no_on_duty_employee_is_empty_without_false_roster_warning(self):
         source=reader([roster_fields(),roster_fields('夜')])
-        with tempfile.TemporaryDirectory() as root:
-            sender=Mock(side_effect=receipt)
-            service=CheckService(root,roster=lambda day:read_roster(source,day,scopes=['A','H']),
-                                 sender=sender,portal_url=lambda:'https://fixture.invalid')
-            with patch('lan_bitable_template_portal.pre_shift_checks.now',return_value=NOW):
-                for scope in ('A','H'):
-                    service.save_definition(ADMIN,scope,0,[{'id':'one','text':'交接检查'}])
-            service.tick(NOW)
-            self.assertEqual(sender.call_count,2)
-            self.assertIn('白班排班未读取到',service.state(ADMIN,'H',NOW)['roster_error'])
-            h_fields=roster_fields(scope='H',**{'人员（文本）':'祁金鹰、张岳军','人员':[]})
-            source._request_json.return_value['data']['items'] += [{'fields':h_fields}, {'fields':{**h_fields,'班次':'夜'}}]
-            source.get_permission_directory_people.return_value['items'] += [person('祁金鹰','ou_hone','H'),person('张岳军','ou_htwo','H')]
-            service.tick(NOW+dt.timedelta(minutes=4))
-            self.assertEqual(sender.call_count,2)
-            service.tick(NOW+dt.timedelta(minutes=5))
-            self.assertEqual([c.args[0] for c in sender.call_args_list],['ou_one','ou_two','ou_hone','ou_htwo'])
-            service.tick(NOW+dt.timedelta(minutes=6))
-            self.assertEqual(sender.call_count,4,'already acknowledged A/H messages are not repeated')
+        result=read_roster(source,DAY,scopes=['A','H'])
+        self.assertNotIn('H',result['warnings'])
+        self.assertEqual({p['scope'] for p in result['people']},{'A'})
 
 
 class RecoveryTests(unittest.TestCase):

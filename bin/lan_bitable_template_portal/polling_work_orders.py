@@ -1553,21 +1553,21 @@ class PollingWorkOrderService:
                         ),
                     }
                 )
-        operator = self._person_by_id(
-            people,
-            str(request_payload.get("polling_operator_record_id") or ""),
-        )
+        operators = self._selected_operators(people, request_payload.get('polling_operator_record_ids'),
+                                             request_payload.get('polling_operator_record_id'))
+        operator = operators[0]
         reviewer = self._person_by_id(
             people,
             str(request_payload.get("polling_reviewer_record_id") or ""),
             allow_h_duty=True,
         )
-        if (
+        if any(
             operator["record_id"] == reviewer["record_id"]
             or (
                 operator.get("open_id")
                 and operator.get("open_id") == reviewer.get("open_id")
             )
+            for operator in operators
         ):
             raise PortalError("操作人和现场审核人不能是同一人。")
         prepared_steps = self._expanded_steps(sop.get("steps") or [])
@@ -1613,13 +1613,37 @@ class PollingWorkOrderService:
                 "attachments": snapshot_attachments,
                 "runs": normalized_runs,
                 "operator": operator,
+                "operators": operators,
                 "reviewer": reviewer,
                 "initiator_open_id": str(request_payload.get("_auth_open_id") or ""),
                 "initiator_name": str(request_payload.get("_auth_user_name") or ""),
             },
-            "polling_operator_name": operator["name"],
+            "polling_operator_name": '、'.join(person['name'] for person in operators),
             "polling_reviewer_name": reviewer["name"],
         }
+
+    @staticmethod
+    def _selected_operators(people, record_ids, legacy_id=''):
+        from .portal_service import PortalError
+        ids = record_ids if record_ids is not None else [legacy_id] if legacy_id else []
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(not isinstance(rid, str) or not rid for rid in ids):
+            raise PortalError('请选择至少一位操作人。')
+        operators = [PollingWorkOrderService._person_by_id(people, rid) for rid in dict.fromkeys(ids)]
+        seen = set()
+        for person in operators:
+            identity = person.get('open_id') or person['record_id']
+            if identity in seen:
+                raise PortalError('操作人存在重复飞书身份，请核对人员。')
+            seen.add(identity)
+        return operators
+
+    @staticmethod
+    def operators(group):
+        return group.get('operators') or [group.get('operator') or {}]
+
+    @staticmethod
+    def operator_names(group):
+        return '、'.join(str(person.get('name') or '') for person in PollingWorkOrderService.operators(group))
 
     def _secret(self) -> bytes:
         with self._lock:
@@ -1727,10 +1751,10 @@ class PollingWorkOrderService:
                         continue
                     if float(reminder.get("next_retry_at_ts") or 0) > now:
                         continue
-                    operator_open_id = str((group.get("operator") or {}).get("open_id") or "").strip()
+                    operator_open_ids = [str(person.get('open_id') or '').strip() for person in self.operators(group)]
                     reviewer_open_id = str((group.get("reviewer") or {}).get("open_id") or "").strip()
                     recipients = list(dict.fromkeys(filter(None, (
-                        operator_open_id,
+                        *operator_open_ids,
                         reviewer_open_id,
                         str(BUILDING_OPEN_ID_MAP.get(str(group.get("scope") or "").upper()) or "").strip(),
                     ))))
@@ -1760,7 +1784,7 @@ class PollingWorkOrderService:
                         if open_id not in sent and open_id not in failed_ids:
                             role_link = (
                                 f"操作人工单：{group.get('operator_link') or '工单链接尚未生成。'}"
-                                if open_id == operator_open_id
+                                if open_id in operator_open_ids
                                 else f"现场审核人工单：{group.get('reviewer_link') or '工单链接尚未生成。'}"
                                 if open_id == reviewer_open_id
                                 else ""
@@ -1934,6 +1958,7 @@ class PollingWorkOrderService:
                 "steps": flattened,
                 "attachments": attachments,
                 "operator": copy.deepcopy(spec.get("operator") or {}),
+                "operators": copy.deepcopy(self.operators(spec)),
                 "reviewer": copy.deepcopy(spec.get("reviewer") or {}),
                 "initiator_open_id": str(spec.get("initiator_open_id") or ""),
                 "initiator_name": str(spec.get("initiator_name") or ""),
@@ -2106,7 +2131,7 @@ class PollingWorkOrderService:
         tail = (
             (f"-{direction}" if direction else "")
             + "-操作人-"
-            f"{_safe_file_name((group.get('operator') or {}).get('name') or '未填写')[:32]}-"
+            f"{_safe_file_name(PollingWorkOrderService.operator_names(group) or '未填写')[:32]}-"
             f"审核人-{_safe_file_name((group.get('reviewer') or {}).get('name') or '未填写')[:32]}-"
             "操作记录"
         )
@@ -2231,7 +2256,8 @@ class PollingWorkOrderService:
             "sop_name": str(group.get("sop_name") or ""),
             "role": role,
             "role_label": "操作人" if role == "operator" else "现场审核人",
-            "assigned_person": copy.deepcopy(group.get(role) or {}),
+            "assigned_person": ({'name': self.operator_names(group)} if role == 'operator' and len(self.operators(group)) > 1 else copy.deepcopy(group.get(role) or {})),
+            "operators": copy.deepcopy(self.operators(group)),
             "state": str(group.get("state") or ""),
             "version": int(group.get("version") or 0),
             "current_index": current_index,
@@ -2403,9 +2429,13 @@ class PollingWorkOrderService:
             if self._step_photo_required(step) and not self._step_has_local_photo(group, step):
                 raise PortalConflictError("请先拍摄并上传当前步骤照片。")
             if not step.get(f"{role}_confirmation"):
+                assigned = group.get(role) or {}
+                if role == 'operator' and len(self.operators(group)) > 1:
+                    assigned = next((p for p in self.operators(group) if actual_open_id and p.get('open_id') == actual_open_id),
+                                    {'name': self.operator_names(group) + '（操作组）'})
                 step[f"{role}_confirmation"] = {
-                    "assigned_record_id": str((group.get(role) or {}).get("record_id") or ""),
-                    "assigned_name": str((group.get(role) or {}).get("name") or ""),
+                    "assigned_record_id": str(assigned.get("record_id") or ""),
+                    "assigned_name": str(assigned.get("name") or ""),
                     "actual_open_id": str(actual_open_id or ""),
                     "actual_name": str(actual_name or ""),
                     "confirmed_at": self._now_text(),
@@ -2768,7 +2798,7 @@ class PollingWorkOrderService:
                 run_label = _run_label(work_type, run)
                 sheet.title = f"工单{run_index} {run_label}"[:31]
                 sheet["A1"] = None
-                sheet["C3"] = _excel_text((group.get("operator") or {}).get("name"))
+                sheet["C3"] = _excel_text(self.operator_names(group))
                 sheet["D3"] = _excel_text((group.get("reviewer") or {}).get("name"))
                 confirmed_times = [
                     str((step.get(key) or {}).get("confirmed_at") or "").strip()

@@ -274,24 +274,11 @@ class ShiftReminderTests(TestCase):
                 'night_publish_time': '25:61'}, conn, False)
         self.assertEqual(reminders.shift_times(self.service.settings()), {'白': '13:00', '夜': '20:00'})
 
-    def test_roster_view_pagination_dates_exclusions_and_external_users(self):
-        timestamp = int(dt.datetime(2026, 10, 10, tzinfo=learning.TZ).timestamp()*1000)
-        def row(group='A班', shift='夜', oid='ou_test', day=timestamp, scope='A楼'):
-            return {'fields': {'班组': group, '班次': shift, '排班日期': day, '机楼': scope,
-                               '人员（文本）': [{'text': oid}], '人员': {'users': [{'id': oid, 'name': oid}]}}}
-        service = Mock()
-        service._request_json.side_effect = [
-            {'code': 0, 'data': {'items': [row(), row('长白', oid='ou_longday'), row('110站'), row(day=timestamp-86400000), row(shift='休'), row(scope='110站', oid='ou_station')], 'has_more': True, 'page_token': 'next'}},
-            {'code': 0, 'data': {'items': [row(), row(shift='白', oid='ou_external'), row(scope='H楼', oid='ou_H')], 'has_more': False}},
-        ]
-        self.assertEqual(reminders.read_roster(service, '2026-10-10'), [
-            {'open_id': 'ou_test', 'shift': '夜', 'scope': 'A', 'name': 'ou_test'},
-            {'open_id': 'ou_external', 'shift': '白', 'scope': 'A', 'name': 'ou_external'},
-            {'open_id': 'ou_H', 'shift': '夜', 'scope': 'H', 'name': 'ou_H'}])
-        self.assertEqual(service._request_json.call_args.kwargs['params']['view_id'], reminders.VIEW_ID)
-        service._request_json.side_effect = None
-        service._request_json.return_value = {'code': 0, 'data': {'items': [row()], 'has_more': True}}
-        with self.assertRaises(ValueError): reminders.read_roster(service, '2026-10-10')
+    def test_employee_pool_read_failure_preserves_existing_notifications(self):
+        from lan_bitable_template_portal import personnel_source
+        with patch.object(personnel_source, 'daily_roster', side_effect=ValueError('source unavailable')):
+            with self.assertRaises(ValueError): reminders.read_roster(Mock(), '2026-10-10')
+        self.sender.assert_not_called()
 
     def test_sender_guard_and_retry_uuid(self):
         with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}), \

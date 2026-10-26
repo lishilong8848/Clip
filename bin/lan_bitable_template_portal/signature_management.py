@@ -188,13 +188,13 @@ class SignatureManagement:
         if resolve and f"{source}:{record_id}" in data["resolved"]:
             return data["resolved"][f"{source}:{record_id}"]
         for row in data[source]:
-            if str(row.get("record_id")) == record_id:
+            if record_id in {str(row.get("record_id")), str(row.get("directory_record_id") or "")}:
                 return public_person(row, source)
         raise SignatureManagementError("人员记录不存在，请刷新。", 404)
 
     def _fields(self, source, record_id) -> dict:
         try:
-            payload = self.s._request_json(f"records/{_id(record_id)}", app_token=self.d.SIGNATURE_APP_TOKEN,
+            payload = self.s._request_json(f"records/{_id(self.s._signature_storage_id(self.table(source), record_id))}", app_token=self.s._signature_table_app(self.table(source)),
                                            table_id=self.table(source))
         except Exception as exc:
             if any(x in str(exc) for x in ("RecordIdNotFound", "1254043", "未找到记录", "记录不存在")):
@@ -222,7 +222,7 @@ class SignatureManagement:
             if self._schema_ready:
                 return self._temporary_field_metas
             _, metas = self.s._load_table_fields(
-                app_token=self.d.SIGNATURE_APP_TOKEN,
+                app_token=self.d.TEMP_SIGNATURE_APP_TOKEN,
                 table_id=self.d.TEMP_SIGNATURE_TABLE_ID,
             )
             created = False
@@ -243,7 +243,7 @@ class SignatureManagement:
                             credentials = token_manager._credentials()
                         except Exception:
                             raise SignatureManagementError("Qt 飞书鉴权暂不可用，未发送签名字段创建。", 503) from None
-                    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.d.SIGNATURE_APP_TOKEN}/tables/{self.d.TEMP_SIGNATURE_TABLE_ID}/fields"
+                    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.d.TEMP_SIGNATURE_APP_TOKEN}/tables/{self.d.TEMP_SIGNATURE_TABLE_ID}/fields"
                     for attempt in range(2):
                         check_credentials()
                         headers = {**self.s._auth_headers(), "Content-Type": "application/json"}
@@ -263,7 +263,7 @@ class SignatureManagement:
                     created = True
             if created:
                 _, metas = self.s._load_table_fields(
-                    app_token=self.d.SIGNATURE_APP_TOKEN,
+                    app_token=self.d.TEMP_SIGNATURE_APP_TOKEN,
                     table_id=self.d.TEMP_SIGNATURE_TABLE_ID,
                 )
             for name in (ORIGIN_FIELD, ALIASES_FIELD):
@@ -418,7 +418,7 @@ class SignatureManagement:
                 fields[self.d.TEMP_SIGNATURE_SPECIALTY_FIELD] = values if values else specialty
             journal = {"status": "creating", "fingerprint": fingerprint, "created_by": actor, "created_at": time.time()}
             self.store.put_document(REQUEST_NS, key, journal)
-            result = self.s._create_record_fields(app_token=self.d.SIGNATURE_APP_TOKEN, table_id=self.d.TEMP_SIGNATURE_TABLE_ID, fields=fields)
+            result = self.s._create_record_fields(app_token=self.d.TEMP_SIGNATURE_APP_TOKEN, table_id=self.d.TEMP_SIGNATURE_TABLE_ID, fields=fields)
             result = result.get("data") or {}
             rid = (result.get("record") or result).get("record_id")
             if not rid:
@@ -615,8 +615,8 @@ class SignatureManagement:
             write = request.get("write")
             try:
                 if write:
-                    self.s._patch_record_fields(app_token=self.d.SIGNATURE_APP_TOKEN, table_id=self.table(request["source"]),
-                        record_id=request["record_id"], fields={self.d.SIGNATURE_ATTACHMENT_FIELD: [{"file_token": write["file_token"]}],
+                    self.s._patch_record_fields(app_token=self.s._signature_table_app(self.table(request["source"])), table_id=self.table(request["source"]),
+                        record_id=self.s._signature_storage_id(self.table(request["source"]), request["record_id"]), fields={self.d.SIGNATURE_ATTACHMENT_FIELD: [{"file_token": write["file_token"]}],
                         self.d.SIGNATURE_KEY_FIELD: self.s._signature_crypto.metadata_to_text(write["metadata"])})
                 else:
                     self.s._save_encrypted_signature_record(table_id=self.table(request["source"]), record_id=request["record_id"],
@@ -663,7 +663,7 @@ class SignatureManagement:
             if payload.get("expected_version") != self._identity_version(current):
                 raise SignatureManagementError("临时人员记录已变化，请刷新后重新核对。", 409)
             self.s._patch_record_fields(
-                app_token=self.d.SIGNATURE_APP_TOKEN,
+                app_token=self.d.TEMP_SIGNATURE_APP_TOKEN,
                 table_id=self.d.TEMP_SIGNATURE_TABLE_ID,
                 record_id=temporary_id,
                 fields={ORIGIN_FIELD: staff_id},
@@ -716,7 +716,7 @@ class SignatureManagement:
                             self.s._patch_record_fields(
                                 app_token=self.d.SIGNATURE_APP_TOKEN,
                                 table_id=self.d.SIGNATURE_TABLE_ID,
-                                record_id=staff_id,
+                                record_id=self.s._signature_storage_id(self.d.SIGNATURE_TABLE_ID, staff_id),
                                 fields={
                                     self.d.SIGNATURE_ATTACHMENT_FIELD: [{"file_token": write["file_token"]}],
                                     self.d.SIGNATURE_KEY_FIELD: self.s._signature_crypto.metadata_to_text(write["metadata"]),
@@ -814,7 +814,7 @@ class SignatureManagement:
                         signature_bytes=content, display_name=person["name"], source="external",
                         employee_no=person.get("employee_no") or "", before_write=persist_write)
                 write = journal["write"]
-                self.s._patch_record_fields(app_token=self.d.SIGNATURE_APP_TOKEN, table_id=self.d.TEMP_SIGNATURE_TABLE_ID, record_id=keep,
+                self.s._patch_record_fields(app_token=self.d.TEMP_SIGNATURE_APP_TOKEN, table_id=self.d.TEMP_SIGNATURE_TABLE_ID, record_id=keep,
                     fields={ALIASES_FIELD: "\n".join(journal["aliases"]), ORIGIN_FIELD: journal["origin"],
                             self.d.SIGNATURE_ATTACHMENT_FIELD: [{"file_token": write["file_token"]}],
                             self.d.SIGNATURE_KEY_FIELD: self.s._signature_crypto.metadata_to_text(write["metadata"])})
@@ -838,7 +838,7 @@ class SignatureManagement:
                     if (self._version(original) != self._version(journal["backup"][rid]["fields"])
                             or self._identity_version(original) != self._identity_version(journal["backup"][rid]["fields"])):
                         raise SignatureManagementError("待删除记录已有新签名，停止清理，请管理员核对。", 409)
-                    self.s._delete_record_fields(app_token=self.d.SIGNATURE_APP_TOKEN, table_id=self.d.TEMP_SIGNATURE_TABLE_ID, record_id=rid)
+                    self.s._delete_record_fields(app_token=self.d.TEMP_SIGNATURE_APP_TOKEN, table_id=self.d.TEMP_SIGNATURE_TABLE_ID, record_id=rid)
                 journal["deleted_ids"].append(rid)
                 self.store.put_document(MERGE_NS, operation_id, journal)
             journal["status"] = "completed"

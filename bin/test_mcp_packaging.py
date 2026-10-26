@@ -23,7 +23,7 @@ class PackagingTests(unittest.TestCase):
                     'check-document-library-all-scopes.mjs', 'check-document-library-resilience.mjs',
                     'check-learning-sharing-types.mjs', 'check-learning-sharing-resilience.mjs',
                     'check-learning-question-import.mjs', 'check-pre-shift-edits.mjs',
-                    'check-repair-plan-binding.mjs']
+                    'check-repair-plan-binding.mjs', 'check-notice-convergence-confirmation.mjs']
         frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
         with patch.object(package.shutil, 'which', return_value='fixture-node'), \
                 patch.object(package, '_run_preflight_check') as run:

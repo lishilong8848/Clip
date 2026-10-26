@@ -1628,9 +1628,11 @@ class PortalRuntime:
         initiator_open_id = str(group.get("initiator_open_id") or "").strip()
         work_order_label = cls._work_order_label(group)
         changed = False
-        for role, label in (("operator", "操作人"), ("reviewer", "现场审核人")):
-            previous = notifications.get(role) if isinstance(notifications.get(role), dict) else {}
-            person = group.get(role) if isinstance(group.get(role), dict) else {}
+        recipients = [('operator', '操作人', person, 'operator' if i == 0 else 'operator:' + person['record_id'])
+                      for i, person in enumerate(PollingWorkOrderService.operators(group))]
+        recipients.append(('reviewer', '现场审核人', group.get('reviewer') or {}, 'reviewer'))
+        for role, label, person, delivery_key in recipients:
+            previous = notifications.get(delivery_key) if isinstance(notifications.get(delivery_key), dict) else {}
             assigned_open_id = str(person.get("open_id") or "").strip()
             link = str(group.get(f"{role}_link") or "").strip()
             link_fingerprint = (
@@ -1683,7 +1685,7 @@ class PortalRuntime:
             attempts = (
                 int(previous.get("attempts") or 0) + 1 if same_link else 1
             )
-            notifications[role] = {
+            notifications[delivery_key] = {
                 "sent": bool(ok_send),
                 "recipient_open_id": recipient,
                 "fallback": fallback or not bool(assigned_open_id),

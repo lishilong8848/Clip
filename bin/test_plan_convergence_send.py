@@ -44,8 +44,8 @@ class GuardTests(unittest.TestCase):
         self.challenge({**self.payload, 'plan_convergence_confirmation': ticket})
         self.challenge({**self.payload, 'plan_convergence_confirmation': 'x' * 48})
 
-    def test_de_end_events_and_other_notices_do_not_contact_vpn(self):
-        for change in ({'building': 'D楼'}, {'building': 'E楼'}, {'building': 'D、E楼'}, {'action': 'end'},
+    def test_de_events_and_other_notices_do_not_contact_vpn(self):
+        for change in ({'building': 'D楼'}, {'building': 'E楼'}, {'building': 'D、E楼'},
                        {'work_type': 'event'}, {'work_type': 'maintenance'}):
             self.guard.check({**self.payload, **change})
         self.matcher._check_records.assert_not_called()
@@ -63,6 +63,25 @@ class GuardTests(unittest.TestCase):
         ticket = self.challenge()
         self.guard.check({**self.payload, 'plan_convergence_confirmation': ticket})
         self.assertEqual(self.matcher._check_records.call_count, 1)
+
+    def test_first_update_and_end_require_confirmation_including_raw_end_draft(self):
+        self.matcher._check_records.side_effect = TimeoutError('VPN unavailable')
+        for kind in ('change','repair'):
+            for action in ('update','end'):
+                payload={**self.payload,'work_type':kind,'action':action,'status':'结束' if action=='end' else '更新',
+                    'text':f'【变更通告】状态：{("结束" if action=="end" else "更新")}\n【名称】A楼消防维护\n【位置】A楼'}
+                before=copy.deepcopy(payload)
+                ticket=self.challenge(payload)
+                self.assertEqual(payload,before,'checking does not rewrite the submitted notice')
+                self.guard.check({**payload,'plan_convergence_confirmation':ticket})
+                other_action='end' if action=='update' else 'update'
+                other_ticket=self.challenge({**payload,'action':other_action,'plan_convergence_confirmation':ticket})
+                self.assertNotEqual(ticket,other_ticket,'update approval cannot authorize an end notice')
+
+    def test_matched_end_does_not_prompt(self):
+        self.matcher._check_records.return_value={'records':[{'hits':[{'blockId':'fixture'}]}]}
+        self.guard.check({**self.payload,'action':'end','status':'结束'})
+        self.matcher._check_records.assert_called_once()
 
     def test_qt_raw_text_parser_and_repair_change(self):
         for kind, marker in (('repair', '设备检修'), ('change', '变更通告')):

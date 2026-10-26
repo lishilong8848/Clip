@@ -21,84 +21,28 @@ SCHEMA = {'文本': 1, '检查标识': 1, '楼栋': 1, '检查日期': 5, '班�
 
 
 def read_roster(service, day, *, scopes=SCOPES):
-    from .learning_reminders import APP_TOKEN as roster_app, TABLE_ID as roster_table, VIEW_ID
     from .learning_reminders import resolve_roster
-    from .learning import text
     if not scopes:
         return {'people': [], 'warnings': {}}
-    groups, cursor, seen, issues = {}, '', set(), defaultdict(list)
-    for _ in range(20):
-        response = service._request_json('records', app_token=roster_app, table_id=roster_table,
-            params={'page_size': 500, 'view_id': VIEW_ID, 'user_id_type': 'open_id',
-                    **({'page_token': cursor} if cursor else {})})
-        data = response.get('data') or {}
-        if response.get('code') != 0 or not isinstance(data.get('items'), list) or type(data.get('has_more')) is not bool:
-            raise CheckError('排班视图内容不完整。')
-        for row in data['items']:
-            fields = row.get('fields') or {}
-            shift = fields.get('班次')
-            if shift not in {'白', '夜'} or text(fields.get('班组')).strip() == '长白':
-                continue
-            try:
-                date = dt.datetime.fromtimestamp(float(fields['排班日期']) / 1000, TZ).date().isoformat()
-            except (KeyError, TypeError, ValueError, OverflowError, OSError):
-                raise CheckError('排班日期无效。') from None
-            if date != day:
-                continue
-            building = fields.get('机楼')
-            scope = building.removesuffix('楼').removesuffix('站') if isinstance(building, str) else ''
-            if scope not in SCOPES:
-                raise CheckError('排班楼栋不明确。')
-            if scope not in scopes:
-                continue
-            users = fields.get('人员') or []
-            users = users.get('users', []) if isinstance(users, dict) else users
-            if not isinstance(users, list):
-                raise CheckError('排班人员格式无效。')
-            group = groups.setdefault((scope, shift), {})
-            names = list(dict.fromkeys(name for name in re.split(r'[\s,，、;；/|｜]+', text(fields.get('人员（文本）')).strip()) if name))
-            if not names:
-                issues[(scope, shift)].append('人员（文本）姓名名单缺失')
-                continue
-            linked = defaultdict(set)
-            for user in users:
-                if not isinstance(user, dict):
-                    continue
-                oid = user.get('id') or user.get('open_id') or ''
-                if isinstance(oid, str) and re.fullmatch(r'ou_[A-Za-z0-9]+', oid):
-                    linked[str(user.get('name') or '').strip()].add(oid)
-            for name in names:
-                ids = linked[name]
-                person = {'scope': scope, 'shift': shift, 'open_id': next(iter(ids)) if len(ids) == 1 else '', 'name': name}
-                if name in group and group[name]['open_id'] != person['open_id']:
-                    person['open_id'] = ''
-                group[name] = person
-        if not data['has_more']:
-            if not groups:
-                raise CheckError('视图中未读取到当天白夜班人员。')
-            directory = service.get_permission_directory_people()
-            if not isinstance(directory, dict) or not isinstance(directory.get('items'), list):
-                raise CheckError('人员目录尚未就绪，请稍后重试。')
-            directory = {row['record_id']: {'name': row.get('name') or '', 'scopes': row.get('scopes') or [],
-                'selectable': row.get('selectable'), 'inactive': row.get('departed', False),
-                'login_ids': [row['open_id']] if row.get('open_id') else []} for row in directory['items']}
-            warnings, result = {}, []
-            for (scope, shift), people in groups.items():
-                resolved, missing = resolve_roster(list(people.values()), directory, allowed_scopes=SCOPES)
-                if len(resolved) != len(people) or issues[(scope, shift)]:
-                    detail = '；'.join(issues[(scope, shift)] + missing)
-                    warnings[scope] = warnings.get(scope, '') + f'{shift}班已匹配{len(resolved)}/{len(people)}人：{detail}；已匹配人员正常推送，其余5分钟后重试。'
-                result.extend(resolved)
-            for scope in scopes:
-                for shift in ('白', '夜'):
-                    if (scope, shift) not in groups:
-                        warnings[scope] = warnings.get(scope, '') + f'{shift}班排班未读取到，5分钟后重试。'
-            return {'people': result, 'warnings': warnings}
-        cursor = data.get('page_token')
-        if not isinstance(cursor, str) or not cursor or cursor in seen:
-            break
-        seen.add(cursor)
-    raise CheckError('排班分页未完成。')
+    from .personnel_source import daily_roster
+    snapshot = daily_roster(service, day)
+    people = [p for p in snapshot['people'] if p['scope'] in scopes and p.get('duty_kind') != '长白']
+    issues = snapshot.get('issues', [])
+    directory = service.get_permission_directory_people()
+    if not isinstance(directory, dict) or not isinstance(directory.get('items'), list):
+        raise CheckError('人员目录尚未就绪，请稍后重试。')
+    directory = {row['record_id']: {'name': row.get('name') or '', 'scopes': row.get('scopes') or [],
+        'selectable': row.get('selectable'), 'inactive': row.get('departed', False),
+        'login_ids': [row['open_id']] if row.get('open_id') else []} for row in directory['items']}
+    result, warnings = [], {}
+    for scope in scopes:
+        group = [person for person in people if person['scope'] == scope]
+        resolved, missing = resolve_roster(group, directory, allowed_scopes=SCOPES)
+        result.extend(resolved)
+        missing.extend(str(item.get('reason') or '排班资料待核对') for item in issues if item.get('scope') == scope)
+        if missing:
+            warnings[scope] = f'已匹配{len(resolved)}/{len(group)}人：' + '；'.join(missing) + '；已匹配人员正常推送，其余5分钟后重试。'
+    return {'people': result, 'warnings': warnings}
 
 
 def fixed_recipient_options(runtime, scope):
