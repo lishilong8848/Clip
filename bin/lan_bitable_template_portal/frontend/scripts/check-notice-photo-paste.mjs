@@ -9,7 +9,7 @@ import {coreFixture} from './responsive-audit-core-fixtures.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../output/playwright/notice-photo-paste');
 await mkdir(output,{recursive:true});
-const server=await preview({root,configFile:false,build:{outDir:'dist'},logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server=await preview({root,configFile:false,build:{outDir:'dist'},logLevel:'error',preview:{host:'127.0.0.1',port:19120}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 const errors=[],uploads=[],unexpected=[];

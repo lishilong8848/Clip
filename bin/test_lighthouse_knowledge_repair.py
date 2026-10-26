@@ -67,6 +67,57 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.kb.search.call_count, 2)
         self.assertEqual(result['sources'], [])
 
+    async def test_incomplete_generation_retries_same_evidence_for_web_and_feishu(self):
+        for channel in ('', 'feishu:topic'):
+            for failed in ('{"answer":"未完成', AssistantError('output limit', 502, category='model_output')):
+                with self.subTest(channel=channel, failed=type(failed).__name__):
+                    self.actor['channel'] = channel
+                    self.model.complete.reset_mock()
+                    self.kb.search.reset_mock()
+                    self.emit.reset_mock()
+                    self.model.complete.side_effect = [failed, candidate('该流程只适用于设备甲。[1]')]
+                    result = await self.answer()
+                    self.kb.search.assert_called_once()
+                    self.assertEqual(self.model.complete.call_count, 2)
+                    self.assertTrue(result['knowledge_retrieval']['complete'])
+                    self.assertNotIn('适用对象或条件不符', result['answer'])
+                    packets = [json.loads(call.args[0][1]['content']) for call in self.model.complete.call_args_list]
+                    self.assertEqual(packets[0]['documents'][0]['text'], packets[1]['documents'][0]['text'])
+                    self.assertTrue(packets[1]['review_feedback'])
+                    self.assertIsNone(self.model.complete.call_args_list[0].kwargs['max_tokens'])
+                    texts = [call.args[1]['delta'] for call in self.emit.call_args_list if call.args[0] == 'text']
+                    self.assertEqual(texts, [result['answer']])
+
+    async def test_repeated_invalid_generation_is_not_reported_as_missing_document(self):
+        self.model.complete.return_value = '{"answer":"unfinished'
+        result = await self.answer()
+        self.assertEqual(self.model.complete.call_count, 3)
+        self.kb.search.assert_called_once()
+        self.assertIn('答复未完整生成', result['answer'])
+        self.assertNotIn('适用对象或条件不符', result['answer'])
+        self.assertNotIn('请补充文件名称', result['answer'])
+
+    async def test_visual_failures_do_not_discard_text_or_append_unrelated_document_warnings(self):
+        base = self.kb
+        class TextWithUnavailableImages:
+            search = base.search
+            evidence_current = base.evidence_current
+            def answer_evidence(self, actor, items, *, profile, model):
+                return {'items': [{**item, 'coverage': {'missing': ['visual_read_failed']},
+                                  'context': [{'kind': 'original_text', 'text': item['text']}],
+                                  'visual_evidence': []} for item in items],
+                        'warning': '无关候选文件：未获得可靠图片解释'}
+        self.kb = TextWithUnavailableImages()
+        self.model.complete.return_value = candidate('该流程只适用于设备甲。[1]')
+        result = await self.answer()
+        self.assertIn('该流程只适用于设备甲', result['answer'])
+        self.assertNotIn('无关候选文件', result['answer'])
+        packet = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertEqual(packet['documents'][0]['context'][0]['kind'], 'original_text')
+        self.assertNotIn('text', packet['documents'][0]['context'][0])
+        self.assertIn('visual_read_failed', packet['documents'][0]['coverage']['missing'])
+        self.assertIn('图片失败不否定', self.model.complete.call_args.args[0][0]['content'])
+
     async def test_repeated_queries_cannot_start_infinite_read_loop(self):
         self.model.complete.return_value = candidate(queries=['设备乙异常应如何处理？'], gaps=['条件不明'])
         await self.answer()
@@ -206,10 +257,13 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
 
     def test_protocol_parser_rejects_malformed_envelopes_and_accepts_legacy_markdown(self):
         for value in ('{"answer":1}', '{"answer":"x","queries":[{}]}', '{bad', '{"answer":"x","gaps":"wrong"}'):
-            self.assertEqual(_candidate(value), ('', [], []))
+            with self.assertRaises(AssistantError) as caught:
+                _candidate(value)
+            self.assertEqual(caught.exception.category, 'model_protocol')
         self.assertEqual(_candidate('原文说明。[1]'), ('原文说明。[1]', [], []))
         self.assertEqual(_candidate('```json\n' + candidate('说明。[1]') + '\n```'), ('说明。[1]', [], []))
-        self.assertEqual(_candidate('```json\n' + candidate('说明。[1]') + '\n```\n以上为结果'), ('', [], []))
+        with self.assertRaises(AssistantError):
+            _candidate('```json\n' + candidate('说明。[1]') + '\n```\n以上为结果')
 
     def test_previous_candidate_references_are_remapped_without_mutating_saved_partial(self):
         def source(number, identity):

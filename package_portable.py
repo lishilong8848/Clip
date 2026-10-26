@@ -400,6 +400,7 @@ SMOKE_IMPORT_MODULES = [
     "openclaw_service.assistant.routes",
     "openclaw_service.assistant.lighthouse_knowledge_summary",
     "openclaw_service.assistant.lighthouse_knowledge_evidence",
+    "lan_bitable_template_portal.sharing_question_import",
     "openclaw_service.assistant.lighthouse_query_intent",
     "openclaw_service.assistant.lighthouse_model_health",
     "openclaw_service.assistant.lighthouse_commands",
@@ -1719,8 +1720,8 @@ def _run_frontend_notice_navigation_checks() -> None:
                  "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
                  "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
                  "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
-                 "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs",
-                 "check-pre-shift-edits.mjs"):
+                 "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs",
+                 "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs"):
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
@@ -1969,7 +1970,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery", "bin.test_plan_convergence_recipients", "bin.test_planned_notice_deadlines",
          "bin.test_learning_update_flow",
          "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_document_library_resilience", "bin.test_knowledge_source_maintenance",
-         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model", "bin.test_sharing_resilience", "bin.test_sharing_material_recovery",
+         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_question_import", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model", "bin.test_sharing_resilience", "bin.test_sharing_material_recovery",
          "bin.test_signature_management_performance",
          "bin.test_workspace_layouts",
          "bin.test_workspace_extension_access",

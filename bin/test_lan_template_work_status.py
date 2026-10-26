@@ -29277,7 +29277,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )[1].split("let liteRepairEventCandidates", 1)[0]
 
         self.assertIn("/api/workbench/repair-event-prefill", handler)
-        self.assertIn("applyRepairNoticeDraft(form, draft, Boolean(form.dataset.parsedKeys))", handler)
+        self.assertIn("applyRepairNoticeDraft(form, draft, true)", handler)
         self.assertIn("'repair_management_record_id',", handler)
         self.assertIn("await confirmManualSourceCandidate()", source)
         self.assertIn("async function bindExistingOngoingSource", source)

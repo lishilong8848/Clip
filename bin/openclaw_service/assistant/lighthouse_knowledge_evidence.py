@@ -420,7 +420,11 @@ def answer_evidence(knowledge, actor, items, *, profile, model):
                         item['coverage']['missing'].append('visual_budget')
                         break
                     image_count += 1
-                    image = _jpeg(raw, image_name)
+                    try:
+                        image = _jpeg(raw, image_name)
+                    except (AssistantError, OSError, ValueError, ImportError, RuntimeError):
+                        item['coverage']['missing'].append('visual_read_failed')
+                        continue
                     observation = _observe(knowledge, actor, item, image, anchor, profile, model, visual_profile, deadline)
                     item['visual_evidence'].append(observation)
             item['coverage']['missing'].remove('visual_coverage_unknown')
@@ -447,7 +451,7 @@ def answer_evidence(knowledge, actor, items, *, profile, model):
         item['_evidence_receipt'] = _receipt(knowledge, actor, item, profile,
             visual_profile if Path(item['name']).suffix.lower() in _VISUAL_SUFFIXES else None)
         if 'visual_understanding_unavailable' in item['coverage']['missing'] or 'visual_read_failed' in item['coverage']['missing']:
-            warnings.append(f"{item['name']}：未获得可靠图片解释；原文或OCR文字不能视为视觉理解。")
+            warnings.append(f"{item['name']}：部分图片未完成核验，已读取正文仍可按适用条件引用；OCR仅作文字转录，不代表理解图片。")
     warnings = list(dict.fromkeys(warnings))
     return {'items': result, 'warning': '；'.join(warnings), 'warnings': warnings,
             'coverage': {'scope': 'bounded_answer_evidence', 'complete': False,

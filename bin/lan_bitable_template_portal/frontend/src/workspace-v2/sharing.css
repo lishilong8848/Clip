@@ -72,7 +72,7 @@
   .workspace-v2 .sharing-buttons .n-button{height:auto;min-height:40px;white-space:normal}
   .workspace-v2 .sharing-buttons .n-button__content{white-space:normal;text-align:center}
   .workspace-v2 .v2-sharing-tabs .n-tabs-tab{padding:10px 0;font-size:13px}
-  .workspace-v2 .sharing-section .sharing-editor-bar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+  .workspace-v2 :is(.sharing-section,.sharing-manual-create) .sharing-editor-bar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
   .workspace-v2 .sharing-editor-bar .n-button{width:100%;min-height:44px}
   .workspace-v2 .sharing-editor-bar>span{grid-column:1/-1}
   .workspace-v2 .sharing-section .sharing-question-tools{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}

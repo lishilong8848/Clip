@@ -438,10 +438,10 @@ function bindSource(){
   if(!form.value||!sourceChoice.value||locked.value)return;
   const current=form.value,selected=sourceChoice.value;
   if(!current.values.target_record_id){
-    if(current.values.manual!=='1'&&current.detailMode!=='manual'){
+    if(current.values.manual!=='1'&&current.detailMode!=='manual'&&current.detailMode!=='ongoing'){
       const open=()=>{saved.value=snapshot();editing.value=false;void openRecord({record_id:selected,work_type:current.values.work_type,_request_scope:current.values.scope},false,'start');};
       if(dirty.value)askLeave(open);else open();
-    }else{current.values.source_record_id=selected;current.values.manual_binding_choice='bind';formKey=cacheKey(current.values);originalFields.value={...originalFields.value,source_record_id:selected,manual_binding_choice:'bind'};persist();}
+    }else{current.values.source_record_id=selected;current.values.manual_binding_choice='bind';if(current.values.work_type==='repair')current.values.repair_management_record_id=selected;formKey=cacheKey(current.values);originalFields.value={...originalFields.value,source_record_id:selected,manual_binding_choice:'bind'};persist();}
     return;
   }
   dialog.warning({title:'确认绑定源表事项',content:'将绑定“'+(sourceOptions.value.find(o=>o.value===selected)?.label||'所选计划')+'”。只更新关联，不重复发送通告；保存后重新读取，未保存的填写将重置。',positiveText:'确认绑定',negativeText:'返回核对',onPositiveClick:async()=>{

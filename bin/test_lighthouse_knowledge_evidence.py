@@ -315,6 +315,32 @@ class EvidenceTests(unittest.TestCase):
         self.model.complete.assert_called_once()
         self.assertIn('工作表「Needle」图片行2', result['items'][0]['visual_evidence'][0]['location'])
 
+    def test_xlsx_unreadable_picture_does_not_hide_next_picture_or_cell_text(self):
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as ExcelImage
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(['检查对象', '确认事项'])
+        sheet.append(['设备甲', '先核对现场显示与独立仪表读数。'])
+        for color, cell in (('red', 'C2'), ('blue', 'D2')):
+            sheet.add_image(ExcelImage(io.BytesIO(png(color))), cell)
+        original, damaged = io.BytesIO(), io.BytesIO()
+        workbook.save(original)
+        workbook.close()
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(damaged, 'w') as target:
+            for entry in source.infolist():
+                target.writestr(entry, b'unreadable picture' if entry.filename == 'xl/media/image1.png'
+                                else source.read(entry))
+        item = self.upload('检查流程.xlsx', damaged.getvalue())
+        result = self.read([item])
+        current = result['items'][0]
+        self.assertIn('先核对现场显示与独立仪表读数。', current['text'])
+        self.model.complete.assert_called_once()
+        self.assertEqual(len(current['visual_evidence']), 1)
+        self.assertTrue(current['visual_evidence'][0]['visual_understanding'])
+        self.assertIn('visual_read_failed', current['coverage']['missing'])
+        self.assertFalse(current['coverage']['visual_complete'])
+
     def test_pdf_renders_matched_page_with_pixel_bound(self):
         item = self.upload('policy.pdf', make_pdf_text('needle page'))
         result = self.read([item])

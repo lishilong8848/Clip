@@ -24,7 +24,7 @@ from pathlib import Path
 
 import httpx
 
-from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
+from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient, classify_feishu_error
 
 
 APP_TOKEN = "GKyVb2Az6auMwvs7VzVc3GO0nob"
@@ -1026,8 +1026,10 @@ class LearningCloud:
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("max_bytes 必须是正整数")
         headers = self._headers()
-        for attempt in range(2):
+        refreshed, retries = False, 0
+        while True:
             self._check_entity_credentials()
+            code, status = None, 0
             try:
                 content, content_type = self._http.request_bytes(
                     "GET", f"{API_ROOT}/drive/v1/medias/{token}/download",
@@ -1035,32 +1037,53 @@ class LearningCloud:
                 )
                 self._check_entity_credentials()
                 if not content or len(content) > max_bytes:
-                    raise LearningCloudError("附件为空或超过 max_bytes")
+                    raise LearningCloudError(f"同步附件为空或超过下载上限（{max_bytes / 1024 / 1024:g} MiB），本地数据保留")
                 try:
                     payload = json.loads(content) if len(content) <= 65536 else {}
                 except (ValueError, UnicodeError):
                     payload = {}
-                if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] not in TOKEN_ERRORS:
-                    if ("application/json" in content_type.lower() and isinstance(payload, dict)
-                            and type(payload.get("code")) is int and payload["code"] != 0):
-                        raise LearningCloudError(f"附件下载被飞书拒绝：code={payload['code']}，未将错误响应保存为文件")
-                    return content
-                if attempt:
-                    raise LearningCloudError("附件下载授权已失效")
+                if (isinstance(payload, dict) and type(payload.get('code')) is int and payload['code']
+                        and ('application/json' in content_type.lower() or payload['code'] in TOKEN_ERRORS)):
+                    code = payload['code']
+                    raise FeishuHTTPError('Feishu rejected attachment download', category=classify_feishu_error(code=code))
+                return content
             except FeishuHTTPError as exc:
                 response = getattr(exc.__cause__, "response", None)
+                status = int(response.status_code) if response is not None else 0
                 try:
                     payload = response.json() if response is not None else {}
                 except (ValueError, UnicodeError):
                     payload = {}
-                expired = exc.category == "token" or (isinstance(payload, dict)
-                    and type(payload.get("code")) is int and payload["code"] in TOKEN_ERRORS)
-                if attempt or not expired:
-                    raise LearningCloudError("附件下载失败或超过 max_bytes") from None
+                if isinstance(payload, dict) and type(payload.get('code')) is int:
+                    code = payload['code']
+                category = classify_feishu_error(status_code=status, code=code) if status or code else exc.category
+                if category == 'token' or code in TOKEN_ERRORS:
+                    if not refreshed:
+                        self._check_entity_credentials()
+                        headers = self._headers(force_refresh=True)
+                        refreshed = True
+                        continue
+                    reason = '同步附件鉴权失败，请核对当前Qt飞书应用配置及授权'
+                elif status == 413 or category == 'business' and not status and code is None and '过大' in str(exc):
+                    reason = f'同步附件超过下载上限（{max_bytes / 1024 / 1024:g} MiB）'
+                elif code in READ_RETRY_CODES or category in {'network', 'remote', 'rate_limit'} and (code == 99991400 or not status or status in {408, 429, 500, 502, 503, 504}):
+                    if retries < 2:
+                        retries += 1
+                        time.sleep(.35 * retries)
+                        continue
+                    reason = '同步附件下载超时或连接中断' if category == 'network' else '飞书附件服务繁忙或限流'
+                elif status == 404:
+                    reason = '同步附件不存在或已失效，请核对云端原记录'
+                else:
+                    reason = '飞书拒绝同步附件下载，请核对当前应用对原附件及所属数据表的访问权限'
+                details = f"HTTP={status or '未返回'}" + (f'，code={code}' if code is not None else '')
+                raise LearningCloudError(f'{reason}（{details}）；本地数据保留，未完成同步将重试。') from None
             except (httpx.HTTPError, OSError):
-                raise LearningCloudError("附件下载失败或超过 max_bytes") from None
-            self._check_entity_credentials()
-            headers = self._headers(force_refresh=True)
+                if retries < 2:
+                    retries += 1
+                    time.sleep(.35 * retries)
+                    continue
+                raise LearningCloudError('同步附件下载连接中断；本地数据保留，未完成同步将重试。') from None
 
     def close(self):
         self._http.close()

@@ -789,6 +789,33 @@ class LearningCloudTests(unittest.TestCase):
             self.remote.download_attachment("fileToken", 100)
         self.assertTrue(all(c[3].url.host == "open.feishu.cn" for c in self.fake.calls))
 
+    def test_download_transient_failures_retry_without_writes(self):
+        count = 0
+        def response(request):
+            nonlocal count
+            count += 1
+            if count < 3:
+                raise httpx.ReadTimeout('fixture timeout', request=request)
+            return httpx.Response(200, content=b'complete')
+        self.fake.before = response
+        with patch.object(cloud.time, 'sleep'):
+            self.assertEqual(self.remote.download_attachment('fileFixture', 100), b'complete')
+        self.assertEqual(count, 3)
+        self.assertTrue(all(call[0] == 'GET' for call in self.fake.calls))
+
+    def test_download_errors_distinguish_permission_size_and_network(self):
+        for response, message, count in ((httpx.Response(403, json={'code': 99991672}), '访问权限', 1),
+                (httpx.Response(200, content=b'x' * 101), '下载上限', 1),
+                (httpx.Response(503), '繁忙', 3)):
+            with self.subTest(message=message):
+                self.fake.calls.clear()
+                self.fake.before = lambda request: response
+                with patch.object(cloud.time, 'sleep'), self.assertRaises(cloud.LearningCloudError) as caught:
+                    self.remote.download_attachment('fileFixture', 100)
+                self.assertIn(message, str(caught.exception))
+                self.assertNotIn('max_bytes', str(caught.exception))
+                self.assertEqual(len(self.fake.calls), count)
+
     def test_close_releases_shared_http_client(self):
         self.remote.fetch_questions()
         client = self.remote._http._client

@@ -6780,7 +6780,7 @@ def render_workbench_lite(
           ? result.draft
           : {{}};
         setManualBindingChoice(form, 'bind', candidate);
-        const filledCount = applyRepairNoticeDraft(form, draft, Boolean(form.dataset.parsedKeys));
+        const filledCount = applyRepairNoticeDraft(form, draft, true);
         setFormValue(
           form,
           'repair_management_record_id',

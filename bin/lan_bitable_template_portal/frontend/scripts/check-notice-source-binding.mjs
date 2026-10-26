@@ -69,6 +69,7 @@ try{
  assert.equal(await lane.locator('.v2-notice-entry').filter({hasText:'B楼已绑定计划'}).getByRole('button',{name:'绑定源表',exact:true}).count(),0);
  await manual.getByRole('button',{name:'绑定源表',exact:true}).click();
  const binding=page.locator('[data-notice-section=binding]');await binding.getByText('独立通告 · 未关联计划',{exact:true}).waitFor();
+ await binding.getByText('关联计划',{exact:true}).click();
  await binding.locator('.n-select').click();
  await page.locator('.n-base-select-option').getByText('同名过滤器检查 · 月度 · B楼 · 未开始',{exact:true}).click();
  await page.screenshot({path:path.join(screenshots,'notice-source-binding.png'),fullPage:true});

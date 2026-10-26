@@ -22,7 +22,11 @@ const rows = ref<Dict[]>([]), detail = ref<Dict | null>(null), url = ref(''), ma
 const title = ref('');
 const questionTypes = ref<string[]>(['single']);
 const autoGenerate = ref(true), includeMinutes = ref(true);
-const creationMode = ref<'materials' | 'manual'>('materials');
+const creationMode = ref<'materials' | 'manual' | 'import'>('materials');
+const importing = computed(() => creationMode.value === 'import');
+const manualQuestions = ref<Dict[]>([]);
+const filledManualQuestions = computed(() => manualQuestions.value.filter(q => q.stem?.trim() || q.explanation?.trim() || q.reference_answer?.trim() || q.options?.some((o: string) => o.trim())));
+watch(creationMode, mode => { if (mode === 'manual' && !manualQuestions.value.length) manualQuestions.value = [newQuestion('single')]; });
 const manualOnly = computed(() => creationMode.value === 'manual');
 const materialUrls = ref<string[]>([]), materialIds = ref<string[]>([]);
 const uploadedNames = ref<Record<string, string>>({});
@@ -33,8 +37,9 @@ const selectedPerson = ref('');
 const busy = ref(false), loading = ref(false), error = ref(''), message = ref(''), dirty = ref(false);
 watch(() => busy.value || uploading.value, value => emit('busy', value));
 const creating = ref(false), sectionTab = ref('questions'), personPage = ref(1), storageWarning = ref('');
+watch(() => [creating.value, creationMode.value], () => { if (creating.value) questionPage.value = 1; });
 const additionIds = ref<string[]>([]), evidenceQuestion = ref<Dict | null>(null);
-const creationDirty = computed(() => !!(title.value || url.value || materialUrl.value || materialUrls.value.length || materialIds.value.length || materialFiles.value.length || participants.value.length));
+const creationDirty = computed(() => !!(filledManualQuestions.value.length || title.value || url.value || materialUrl.value || materialUrls.value.length || materialIds.value.length || materialFiles.value.length || participants.value.length));
 const storage = resilientStorage('localStorage', () => { storageWarning.value = '浏览器暂不能保存草稿，请保持页面打开并先保存。'; });
 const creationKey = () => 'clipflow:sharing:create:v1:' + props.userId;
 const labels: Record<string, string> = { queued: '等待生成', generating: '正在生成', draft: '待核对发布', published: '答题中', closed: '已关闭', failed: '生成失败' };
@@ -51,7 +56,7 @@ const exemptedCount = computed(() => (detail.value?.participants || []).length -
 const percent = computed(() => detail.value?.total ? Math.round(detail.value.completed * 100 / detail.value.total) : 0);
 const isDraft = computed(() => ['draft', 'failed'].includes(detail.value?.status || ''));
 const editable = computed(() => props.isAdmin && isDraft.value && !busy.value);
-const canEditQuestions = editable;
+const canEditQuestions = computed(() => editable.value || (props.isAdmin && creating.value && manualOnly.value && !detail.value && !busy.value));
 const counts = computed(() => {
   const list = detail.value?.questions || [];
   const by = (origin: string) => list.filter((q: Dict) => (q.origin || 'ai') === origin).length;
@@ -69,6 +74,8 @@ const publishIssue = computed(() => {
   if (!assignedCount.value) return '请至少选择1位参加答题的参会人。';
   const unconfirmed = (detail.value?.questions || []).findIndex((q: Dict) => needsImageConfirmation(q) && q.image_confirmed !== true);
   if (unconfirmed >= 0) return `第${unconfirmed + 1}题需勾选“已对照原图核对题目与答案”后再发布。`;
+  const incomplete = (detail.value?.questions || []).map((q: Dict, i: number) => questionProblem(q, i, c.ai)).find(Boolean);
+  if (incomplete) return incomplete;
   return '';
 });
 const paperSizeHint = computed(() => counts.value.manualSized
@@ -111,7 +118,7 @@ const resultQuestions = computed(() => {
 
 /* ---------- helpers ---------- */
 function changed() { dirty.value = true; emit('dirty', true); }
-function questionChanged(q: Dict) { q.image_confirmed = false; changed(); }
+function questionChanged(q: Dict) { q.image_confirmed = false; if (detail.value) changed(); }
 function imageIds(q: Dict): string[] { return Array.isArray(q.image_ids) ? q.image_ids : (q.images || []).map((image: Dict) => image.id); }
 function questionImages(q: Dict): Dict[] {
   if (!props.isAdmin || !isDraft.value) return q.images || [];
@@ -213,9 +220,9 @@ async function uploadMaterials() {
 }
 const canCreate = computed(() => !busy.value && !uploading.value
   && (manualOnly.value ? participants.value.length > 0 : (
-  (!autoGenerate.value || !!(includeMinutes.value && url.value.trim()) || !!materialUrl.value.trim() || materialUrls.value.length > 0 || materialIds.value.length > 0)
+  (!autoGenerate.value && !importing.value || !!(includeMinutes.value && url.value.trim()) || !!materialUrl.value.trim() || materialUrls.value.length > 0 || materialIds.value.length > 0 || importing.value && materialFiles.value.length > 0)
   && (!!(includeMinutes.value && url.value.trim()) || participants.value.length > 0)
-  && (!autoGenerate.value || questionTypes.value.length > 0) && !materialFiles.value.length)));
+  && (importing.value || !autoGenerate.value || questionTypes.value.length > 0) && (importing.value || !materialFiles.value.length))));
 function toggleType(kind: string, checked: boolean) {
   questionTypes.value = checked ? TYPES.filter(item => item === kind || questionTypes.value.includes(item)) : questionTypes.value.filter(item => item !== kind);
 }
@@ -259,18 +266,21 @@ function newQuestion(type: string): Dict {
 }
 function countOf(origin: string) { return (detail.value?.questions || []).filter((q: Dict) => (q.origin || 'ai') === origin).length; }
 function addQuestion(type: string) {
-  if (!canEditQuestions.value || !detail.value) return;
+  if (!canEditQuestions.value) return;
   if (countOf('ai') > AI_MAX) { error.value = `AI生成题已超过 ${AI_MAX} 道，请先删除多余的AI题。`; return; }
-  if ((detail.value.questions || []).length >= TOTAL_MAX) { error.value = `手动与AI合计最多 ${TOTAL_MAX} 道。`; return; }
-  detail.value.questions = [...(detail.value.questions || []), newQuestion(type)];
-  questionPage.value = Math.ceil(detail.value.questions.length / PAGE_SIZE);
-  changed();
+  const target = detail.value?.questions || manualQuestions.value;
+  if (target.length >= TOTAL_MAX) { error.value = `手动与AI合计最多 ${TOTAL_MAX} 道。`; return; }
+  const next = [...target, newQuestion(type)];
+  if (detail.value) { detail.value.questions = next; changed(); }
+  else manualQuestions.value = next;
+  questionPage.value = Math.ceil(next.length / PAGE_SIZE);
 }
 function removeQuestion(q: Dict) {
-  if (!canEditQuestions.value || !detail.value) return;
-  detail.value.questions = detail.value.questions.filter((item: Dict) => item.id !== q.id);
-  questionPage.value = Math.min(questionPage.value, Math.max(1, Math.ceil(detail.value.questions.length / PAGE_SIZE)));
-  changed();
+  if (!canEditQuestions.value) return;
+  const next = (detail.value?.questions || manualQuestions.value).filter((item: Dict) => item.id !== q.id);
+  if (detail.value) { detail.value.questions = next; changed(); }
+  else manualQuestions.value = next;
+  questionPage.value = Math.min(questionPage.value, Math.max(1, Math.ceil(next.length / PAGE_SIZE)));
 }
 function switchType(q: Dict, next: string) {
   if (!canEditQuestions.value || q.type === next) return;
@@ -343,11 +353,12 @@ async function openBatch(row: Dict) {
 }
 async function mutate(action: string) {
   if (busy.value) return;
+  if (action === 'create' && importing.value && materialFiles.value.length) { await uploadMaterials(); if (materialFiles.value.length) return; }
   if (action === 'publish' && (dirty.value || publishIssue.value)) { error.value = dirty.value ? '请先保存当前修改。' : publishIssue.value; return; }
   if (action === 'create' && !canCreate.value) { error.value = manualOnly.value ? '请先选择答题人员。' : '请核对出题资料和答题名单，或选择纯手工出题。'; return; }
   if (action === 'create' && !manualOnly.value && materialUrl.value.trim()) { addMaterialUrl(); if (materialUrl.value.trim()) return; }
   busy.value = true; error.value = ''; message.value = '';
-  const generating = !manualOnly.value && autoGenerate.value;
+  const generating = !manualOnly.value && (importing.value || autoGenerate.value);
   try {
     let result: Dict;
     if (action === 'create') {
@@ -356,10 +367,11 @@ async function mutate(action: string) {
         url: minutes, title: title.value.trim(), question_types: questionTypes.value.length ? questionTypes.value : ['single'],
         operation_id: createId, material_urls: manualOnly.value ? [] : materialUrls.value, material_ids: manualOnly.value ? [] : materialIds.value,
         participant_ids: participants.value.map(p => p.person_id).filter(Boolean),
-        auto_generate: generating,
+        auto_generate: generating, import_questions: importing.value,
+        ...(manualOnly.value ? { initial_questions: filledManualQuestions.value } : {}),
       });
       createId = randomHexId(); url.value = ''; materialUrl.value = ''; title.value = ''; materialUrls.value = []; materialIds.value = []; uploadedNames.value = {};
-      participants.value = []; materialFiles.value = [];
+      participants.value = []; materialFiles.value = []; manualQuestions.value = [];
       autoGenerate.value = true; includeMinutes.value = true; creationMode.value = 'materials';
       storage.removeItem(creationKey()); creating.value = false;
     } else {
@@ -394,7 +406,7 @@ function ask(action: string) {
       : action === 'remove-participant' ? '移出后该参会人不再收到答题卡，草稿发布前可随时重新加入。'
       : '将继续失败的原任务，不重新分配题目。若上次网络中断但对方已经收到，超出飞书去重时限后可能再次收到相同卡片，请先核对。' };
 }
-function resolved(ok: boolean) { const action = confirm.value.action; confirm.value = { ...confirm.value, open: false }; if (!ok) return; if (action === 'discard-create') { url.value = ''; title.value = ''; materialUrl.value = ''; materialUrls.value = []; materialIds.value = []; participants.value = []; materialFiles.value = []; storage.removeItem(creationKey()); creating.value = false; } else if (action === 'delete') void deleteBatch(); else if (action === 'discard') { clean(); additionIds.value = []; editingAnswers.value = false; void load(); } else void mutate(action); }
+function resolved(ok: boolean) { const action = confirm.value.action; confirm.value = { ...confirm.value, open: false }; if (!ok) return; if (action === 'discard-create') { url.value = ''; title.value = ''; materialUrl.value = ''; materialUrls.value = []; materialIds.value = []; participants.value = []; materialFiles.value = []; manualQuestions.value = []; storage.removeItem(creationKey()); creating.value = false; } else if (action === 'delete') void deleteBatch(); else if (action === 'discard') { clean(); additionIds.value = []; editingAnswers.value = false; void load(); } else void mutate(action); }
 function closeCreate() { if (uploading.value || busy.value) return; if (creationDirty.value) confirm.value = { open: true, action: 'discard-create', title: '放弃新建草稿？', message: '将清空本次未创建的标题、材料和人员选择，已经发布的批次不受影响。' }; else creating.value = false; }
 function askDelete() { confirm.value = { open: true, action: 'delete', title: '删除分享会批次？', message: '删除后停止本批答题、提醒和后续同步；已上传到多维题库的题目不会删除。' }; }
 async function deleteBatch() {
@@ -494,10 +506,10 @@ watch(personSearch, () => { selectedPerson.value = ''; });
 watch(personSearch, () => { personPage.value = 1; });
 watch(() => detail.value?.id, () => { sectionTab.value = paper.value ? 'mine' : ['draft', 'failed', 'queued', 'generating'].includes(detail.value?.status) ? 'questions' : 'people'; personPage.value = 1; additionIds.value = []; });
 watch(() => [dirty.value, editingAnswers.value, creationDirty.value], () => emit('dirty', dirty.value || editingAnswers.value || creationDirty.value), { flush: 'sync' });
-watch(() => [title.value, url.value, materialUrl.value, materialUrls.value, materialIds.value, participants.value, autoGenerate.value, includeMinutes.value, questionTypes.value, creationMode.value], () => {
+watch(() => [title.value, url.value, materialUrl.value, materialUrls.value, materialIds.value, participants.value, autoGenerate.value, includeMinutes.value, questionTypes.value, creationMode.value, manualQuestions.value], () => {
   if (!props.isAdmin || !props.userId) return;
   if (!creationDirty.value) { storage.removeItem(creationKey()); return; }
-  storage.setItem(creationKey(), JSON.stringify({ schema: 1, userId: props.userId, createId, title: title.value, url: url.value, materialUrl: materialUrl.value, materialUrls: materialUrls.value, materialIds: materialIds.value, uploadedNames: uploadedNames.value, participants: participants.value, autoGenerate: autoGenerate.value, includeMinutes: includeMinutes.value, questionTypes: questionTypes.value, creationMode: creationMode.value }));
+  storage.setItem(creationKey(), JSON.stringify({ schema: 1, userId: props.userId, createId, title: title.value, url: url.value, materialUrl: materialUrl.value, materialUrls: materialUrls.value, materialIds: materialIds.value, uploadedNames: uploadedNames.value, participants: participants.value, autoGenerate: autoGenerate.value, includeMinutes: includeMinutes.value, questionTypes: questionTypes.value, creationMode: creationMode.value, manualQuestions: manualQuestions.value }));
 }, { deep: true });
 onMounted(() => {
   try {
@@ -507,7 +519,9 @@ onMounted(() => {
       materialUrls.value = Array.isArray(saved.materialUrls) ? saved.materialUrls : []; materialIds.value = Array.isArray(saved.materialIds) ? saved.materialIds : [];
       participants.value = Array.isArray(saved.participants) ? saved.participants : []; uploadedNames.value = saved.uploadedNames || {};
       autoGenerate.value = saved.autoGenerate !== false; includeMinutes.value = saved.includeMinutes !== false; questionTypes.value = Array.isArray(saved.questionTypes) ? saved.questionTypes : ['single'];
-      creationMode.value = saved.creationMode === 'manual' ? 'manual' : 'materials';
+      creationMode.value = saved.creationMode === 'import' ? 'import' : saved.creationMode === 'manual' ? 'manual' : 'materials';
+      manualQuestions.value = Array.isArray(saved.manualQuestions) ? saved.manualQuestions.slice(0, TOTAL_MAX) : [];
+      if (manualOnly.value && !manualQuestions.value.length) manualQuestions.value = [newQuestion('single')];
       if (/^[a-f0-9]{32}$/.test(saved.createId)) createId = saved.createId;
       creating.value = creationDirty.value; message.value = '已恢复本账号的新建草稿；尚未上传的文件需重新选择。';
     }
@@ -522,28 +536,50 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
 
 <template>
   <section class="sharing-exercises" :aria-busy="busy || loading">
-    <div v-if="error" role="alert" class="sharing-alert error">{{ error }}</div>
-    <div v-if="message" role="status" class="sharing-alert success">{{ message }}</div>
-    <div v-if="storageWarning" role="alert" class="sharing-alert error">{{ storageWarning }}</div>
+    <div v-if="error" role="alert" data-v2-inline-feedback class="sharing-alert error">{{ error }}</div>
+    <div v-if="message" role="status" data-v2-inline-feedback class="sharing-alert success">{{ message }}</div>
+    <div v-if="storageWarning" role="alert" data-v2-inline-feedback class="sharing-alert error">{{ storageWarning }}</div>
     <header class="sharing-toolbar" :class="{ 'sharing-creating-toolbar': creating && !detail }">
       <div class="sharing-title"><button v-if="detail" type="button" :disabled="busy" @click="back"><ArrowLeft :size="16" />批次列表</button><button v-else-if="creating" type="button" :disabled="busy || uploading" @click="closeCreate"><ArrowLeft :size="16" />返回批次列表</button><h2>{{ detail ? detail.title : '分享会练习' }}</h2></div>
       <button type="button" :disabled="busy || loading || dirty || editingAnswers" title="刷新分享会练习" @click="load()"><RefreshCw :size="16" :class="{ spin: loading }" />刷新</button>
-      <button v-if="isAdmin && !detail && !creating" type="button" class="primary" @click="creating = true"><Plus :size="16" />新建分享会练习</button>
+      <button v-if="isAdmin && !detail && !creating" type="button" class="primary" @click="creationMode = 'materials'; autoGenerate = true; creating = true"><Plus :size="16" />AI出题</button>
+      <button v-if="isAdmin && !detail && !creating" type="button" @click="creationMode = 'manual'; creating = true"><FileText :size="16" />人工出题</button>
+      <button v-if="isAdmin && !detail && !creating" type="button" @click="creationMode = 'import'; creating = true"><Upload :size="16" />导入表格/文档</button>
       <button v-if="isAdmin && detail" type="button" class="sharing-danger" :disabled="busy || uploading" @click="askDelete"><Trash2 :size="16" />删除批次</button>
     </header>
     <template v-if="!detail">
       <form v-if="isAdmin && creating" class="sharing-create" aria-label="新建分享会练习" @submit.prevent="mutate('create')">
-        <div class="sharing-create-fields">
+        <div class="sharing-create-fields" :class="{ 'sharing-import-fields': importing }">
           <fieldset class="sharing-mode" :disabled="busy || uploading">
             <legend>出题方式</legend>
             <NRadioGroup v-model:value="creationMode" name="sharing-creation-mode" aria-label="出题方式" size="large" :disabled="busy || uploading">
-              <NRadioButton value="materials">资料出题</NRadioButton><NRadioButton value="manual">纯手工出题</NRadioButton>
+              <NRadioButton value="materials">资料出题</NRadioButton><NRadioButton value="manual">纯手工出题</NRadioButton><NRadioButton v-if="importing" value="import">文件导入</NRadioButton>
             </NRadioGroup>
           </fieldset>
           <label for="sharing-title" class="sharing-create-title"><span>练习标题（可选）</span><input id="sharing-title" v-model="title" type="text" maxlength="120" :placeholder="manualOnly ? '请输入练习标题' : '留空则使用纪要或资料名称'" :disabled="busy" /></label>
         </div>
+        <section v-if="manualOnly" class="sharing-manual-create" aria-label="人工题目填写">
+          <h3>填写题目与答案</h3><p class="sharing-hint">可以先保存未填完的草稿；发布前须补齐正确答案和解析。</p>
+          <div class="sharing-editor-bar"><button v-for="(label, kind) in typeLabels" :key="kind" type="button" :disabled="busy || manualQuestions.length >= TOTAL_MAX" @click="addQuestion(kind)"><Plus :size="15" />新增{{ label }}</button></div>
+          <article v-for="(q, i) in manualQuestions.slice((questionPage - 1) * PAGE_SIZE, questionPage * PAGE_SIZE)" :key="q.id" class="sharing-question">
+            <header><strong>第 {{ (questionPage - 1) * PAGE_SIZE + i + 1 }} 题</strong><label>题型<select :value="q.type" :disabled="busy" @change="switchType(q, ($event.target as HTMLSelectElement).value)"><option v-for="(label, kind) in typeLabels" :key="kind" :value="kind">{{ label }}</option></select></label><button type="button" :disabled="busy" @click="removeQuestion(q)">删除此题</button></header>
+            <label :for="`sharing-${q.id}`">题干<textarea :id="`sharing-${q.id}`" v-model="q.stem" rows="2" maxlength="500" :disabled="busy" @input="questionChanged(q)" /></label>
+            <template v-if="q.type === 'interview'">
+              <label>参考答案（问答题不自动判分）<textarea v-model="q.reference_answer" rows="3" maxlength="1000" :disabled="busy" @input="questionChanged(q)" /></label>
+            </template>
+            <template v-else>
+              <p class="sharing-option-hint">正确选项（{{ q.type === 'single' ? '单选' : '多选' }}），选项需 {{ CHOICE_MIN }}-{{ CHOICE_MAX }} 个。</p>
+              <div v-for="(option, n) in q.options" :key="n" class="sharing-option"><input :type="q.type === 'single' ? 'radio' : 'checkbox'" :name="`sharing-answer-${q.id}`" :checked="q.correct.includes(n)" :aria-label="`第${(questionPage - 1) * PAGE_SIZE + i + 1}题选项${letters(n)}为正确答案`" :disabled="busy" @change="choose(q, Number(n), ($event.target as HTMLInputElement).checked)" /><label :for="`sharing-option-${q.id}-${n}`">{{ letters(Number(n)) }}</label><textarea :id="`sharing-option-${q.id}-${n}`" v-model="q.options[n]" rows="1" maxlength="300" :disabled="busy" @input="questionChanged(q)" /><button type="button" class="sharing-chip-x" :aria-label="`删除第${(questionPage - 1) * PAGE_SIZE + i + 1}题选项${letters(Number(n))}`" :disabled="busy || !canEditQuestions || q.options.length <= CHOICE_MIN" @click="removeOption(q, Number(n))"><X :size="14" /></button></div>
+              <button type="button" :disabled="!canEditQuestions || q.options.length >= CHOICE_MAX" @click="addOption(q)"><Plus :size="15" />增加选项</button>
+            </template>
+            <label>答案解析<textarea v-model="q.explanation" rows="2" maxlength="600" :disabled="busy" @input="questionChanged(q)" /></label>
+          </article>
+          <div class="sharing-pagination"><button type="button" :disabled="questionPage <= 1" @click="questionPage--">上一页</button><span>第 {{ questionPage }} / {{ Math.max(1, Math.ceil(manualQuestions.length / PAGE_SIZE)) }} 页 · 共 {{ manualQuestions.length }} 题</span><button type="button" :disabled="questionPage * PAGE_SIZE >= manualQuestions.length" @click="questionPage++">下一页</button></div>
+        </section>
         <fieldset v-if="!manualOnly" class="sharing-sources" :disabled="busy">
-          <legend>出题来源</legend>
+          <legend>{{ importing ? '导入含有已有题目的表格或文档' : '出题来源' }}</legend>
+          <p v-if="importing" class="sharing-hint">自动提取题干、选项、原答案和解析，不生成新题。缺项留空待补齐，导入后可编辑核对；支持XLSX、XLSM、DOCX、PDF和PPTX。</p>
+          <p class="sharing-hint">支持飞书文档、Wiki和上传材料。文档没有参会人名单时，请在下方选择答题人员。</p>
           <div class="sharing-source"><label class="sharing-check sharing-minutes-toggle"><input v-model="includeMinutes" type="checkbox" :disabled="busy" /><Link :size="16" />使用飞书纪要</label>
             <input v-model="url" type="url" aria-label="飞书纪要链接" maxlength="2048" placeholder="https://vnet.feishu.cn/docx/…" :disabled="busy || !includeMinutes" /></div>
           <div class="sharing-source"><span class="sharing-check"><FileText :size="16" />资料文档 / 知识库链接</span>
@@ -556,7 +592,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
             <ul v-if="materialIds.length" class="sharing-chips" aria-label="已上传资料"><li v-for="id in materialIds" :key="id"><span>{{ uploadedNames[id] || '已上传材料' }}</span><button type="button" class="sharing-chip-x" :aria-label="`移除已上传资料 ${uploadedNames[id] || id}`" :disabled="busy" @click="materialIds = materialIds.filter((item: string) => item !== id)"><X :size="14" /></button></li></ul>
           </div>
         </fieldset>
-        <div v-if="!manualOnly" class="sharing-generation-options">
+        <div v-if="!manualOnly && !importing" class="sharing-generation-options">
           <label class="sharing-check sharing-generate"><input v-model="autoGenerate" type="checkbox" :disabled="busy" />AI生成题目（最多40题）</label>
           <fieldset class="sharing-types" :disabled="busy || !autoGenerate">
             <legend>AI生成题型（可多选，手动录入不受限制）</legend>
@@ -570,7 +606,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
         </fieldset>
         <div class="sharing-create-actions">
           <ul class="sharing-chips" aria-label="已选答题名单"><li v-for="p in participants" :key="p.open_id"><span>{{ p.name }}</span><button type="button" :disabled="busy || uploading" :aria-label="`移除参会人：${p.name}`" @click="removeParticipant(p)"><X :size="14" /></button></li></ul>
-          <button type="submit" class="primary" :disabled="!canCreate"><Loader2 v-if="busy" :size="16" class="spin" /><FileText v-else :size="16" />{{ !manualOnly && autoGenerate ? '读取资料并生成题目' : '创建空白草稿' }}</button>
+          <button type="submit" class="primary" :disabled="!canCreate"><Loader2 v-if="busy" :size="16" class="spin" /><FileText v-else :size="16" />{{ importing ? '导入并提取题目' : manualOnly ? '保存人工题草稿' : autoGenerate ? '读取资料并生成题目' : '创建空白草稿' }}</button>
         </div>
       </form>
       <template v-if="!creating">
@@ -593,7 +629,7 @@ onBeforeUnmount(() => { disposed = true; epoch++; request?.abort(); clearTimeout
         <li v-for="(source, i) in detail.sources" :key="source.id || source.url || i"><a v-if="source.url" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }}</span><small v-if="source.low_confidence_count">OCR低置信文字 {{ source.low_confidence_count }} 处</small></li>
       </ul>
       <div class="sharing-toolbar" v-if="isAdmin">
-        <div class="sharing-buttons"><button v-if="detail.status === 'failed'" type="button" :disabled="busy || dirty" @click="mutate('retry')"><RefreshCw :size="16" />重新生成</button><button v-if="isDraft" type="button" :disabled="busy || (!dirty && detail.status !== 'failed')" @click="mutate('save')"><Save :size="16" />保存题目与名单</button><button v-if="isDraft" type="button" class="primary" :disabled="busy || dirty || detail.status === 'failed' || !!publishIssue" :title="detail.status === 'failed' ? '请先保存题目与名单为草稿' : publishIssue" @click="ask('publish')"><Send :size="16" />核对后发布给参会人</button><button v-if="['published', 'closed'].includes(detail.status)" type="button" :disabled="busy" @click="ask('retry-delivery')"><RefreshCw :size="16" />重试未完成任务</button><button v-if="detail.status === 'published'" type="button" :disabled="busy" @click="ask('close')"><Square :size="15" />关闭本批</button><span v-if="dirty">题目或答题名单有未保存修改</span><span v-if="busy" role="status"><Loader2 :size="16" class="spin" />正在保存…</span></div>
+        <div class="sharing-buttons"><button v-if="isDraft" type="button" :disabled="!canEditQuestions" @click="sectionTab = 'questions'; addQuestion('single')"><Plus :size="16" />人工出题</button><button v-if="detail.status === 'failed'" type="button" :disabled="busy || dirty" @click="mutate('retry')"><RefreshCw :size="16" />重新生成</button><button v-if="isDraft" type="button" :disabled="busy || (!dirty && detail.status !== 'failed')" @click="mutate('save')"><Save :size="16" />保存题目与名单</button><button v-if="isDraft" type="button" class="primary" :disabled="busy || dirty || detail.status === 'failed' || !!publishIssue" :title="detail.status === 'failed' ? '请先保存题目与名单为草稿' : publishIssue" @click="ask('publish')"><Send :size="16" />核对后发布给参会人</button><button v-if="['published', 'closed'].includes(detail.status)" type="button" :disabled="busy" @click="ask('retry-delivery')"><RefreshCw :size="16" />重试未完成任务</button><button v-if="detail.status === 'published'" type="button" :disabled="busy" @click="ask('close')"><Square :size="15" />关闭本批</button><span v-if="dirty">题目或答题名单有未保存修改</span><span v-if="busy" role="status"><Loader2 :size="16" class="spin" />正在保存…</span></div>
       </div>
       <p v-if="isAdmin && isDraft && publishIssue" class="sharing-hint" role="status">{{ publishIssue }}</p>
       <div v-if="detail.participants.length" class="sharing-metrics"><div><Users :size="18" /><strong>{{ assignedCount }}</strong><span>需答题人数</span></div><div><CheckCircle2 :size="18" /><strong>{{ detail.completed }}</strong><span>已完成</span></div><div><strong>{{ assignedCount - detail.completed }}</strong><span>未完成</span></div><div><strong>{{ percent }}%</strong><span>完成率</span><progress :value="percent" max="100" aria-label="分享会练习完成率" /></div></div>
@@ -719,7 +755,7 @@ small,.sharing-meta,.sharing-pagination,.sharing-hint,.sharing-counts {color:#52
 .sharing-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;padding:22px 0;border-block:1px solid #dce5ee;margin:18px 0;}.sharing-metrics>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}.sharing-metrics strong{font-size:25px;font-weight:650;}.sharing-metrics span{color:#52667d;}.sharing-metrics progress{width:100%;height:6px;accent-color:#198763;}.sharing-table{overflow-x:auto;max-width:100%;}table{border-collapse:collapse;width:100%;min-width:630px;font-size:14px;}th,td{padding:12px 14px;border-bottom:1px solid #e1e8f0;text-align:left;vertical-align:top;}th{background:#f2f6fb;color:#465e7b;font-weight:600;}td:last-child{max-width:350px;overflow-wrap:anywhere;}
 .sharing-editor-bar{gap:8px 10px;padding:10px 0 4px;font-size:13px;color:#52667d;}.sharing-editor-bar>span{line-height:1.6;}.sharing-editor-bar .sharing-paper-size{flex-basis:100%;color:#28559a;font-weight:600;}
 .sharing-question{padding:20px 0;border-top:1px solid #dce5ee;min-width:0;}.sharing-question>header{margin-bottom:14px;}.sharing-question>header span{font-size:12px;color:#5e738a;}.sharing-question label{display:grid;gap:6px;margin:10px 0;}.sharing-question p{white-space:pre-wrap;line-height:1.8;overflow-wrap:anywhere;margin:8px 0;}.sharing-question-tools{gap:8px 10px;margin-bottom:6px;}.sharing-question-tools label{display:inline-flex;align-items:center;gap:8px;margin:0;}.sharing-option-hint{font-size:13px;color:#52667d;margin:4px 0 0;}.sharing-question-error{color:#a82342;font-size:13px;margin:8px 0 0;}
-.sharing-origin{border-radius:4px;padding:3px 8px;font-size:12px;background:#eef3fa;color:#405e85;}.sharing-origin.ai{background:#f1ecff;color:#5b3fb0;}.sharing-origin.manual{background:#e9f7ef;color:#146844;}
+.sharing-import-fields>.sharing-mode,.sharing-import-fields>.sharing-create-title{grid-column:1/-1}.sharing-manual-create{margin:8px 0 18px;min-width:0}.sharing-manual-create .sharing-question{padding:12px 0}.sharing-manual-create h3{margin:8px 0}.sharing-origin{border-radius:4px;padding:3px 8px;font-size:12px;background:#eef3fa;color:#405e85;}.sharing-origin.ai{background:#f1ecff;color:#5b3fb0;}.sharing-origin.manual{background:#e9f7ef;color:#146844;}
 .sharing-option{display:grid;grid-template-columns:20px 20px minmax(0,1fr) 28px;gap:10px;align-items:center;margin:10px 0;min-width:0;}.sharing-option input{width:17px;height:17px;accent-color:#2766df;}.sharing-option label{display:block;margin:0;}.sharing-option textarea{min-width:0;}
 .sharing-choices{border:0;margin:10px 0;padding:0;display:grid;gap:8px;min-width:0;}.sharing-choices label{display:flex;gap:10px;align-items:flex-start;margin:0;padding:10px 12px;border:1px solid #d5e0ec;border-radius:8px;cursor:pointer;line-height:1.6;min-width:0;}.sharing-choices label.checked{border-color:#5e91d6;background:#edf4ff;}.sharing-choices input{width:18px;height:18px;margin:2px 0 0;accent-color:#2766df;flex:none;}.sharing-choices span{overflow-wrap:anywhere;min-width:0;}
 .sharing-answer{background:#f0f8f4;border-left:3px solid #31a67c;padding:12px 16px;margin-top:14px;min-width:0;}.sharing-answer blockquote{margin:10px 0 0;color:#4d665b;font-size:13px;line-height:1.7;overflow-wrap:anywhere;}

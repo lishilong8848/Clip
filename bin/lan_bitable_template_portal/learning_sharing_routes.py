@@ -91,7 +91,11 @@ class SharingRuntime:
             generate = getattr(self.runtime, 'generate_sharing_questions', None)
             if not callable(generate):
                 raise LearningError('模型出题服务尚未就绪，已保留核对进度。', 503)
-            questions = await generate_checked_questions(batch, source, state, generate, checkpoint)
+            if batch.get('import_questions'):
+                from .sharing_question_import import import_questions
+                questions = await import_questions(batch, source, state, generate, checkpoint)
+            else:
+                questions = await generate_checked_questions(batch, source, state, generate, checkpoint)
         else:
             questions = []
         notes = list(state['notes'])
@@ -101,6 +105,8 @@ class SharingRuntime:
             notes.append(f'已自动修订或重新生成{repaired}道问题题目，其余合格题保持不变。')
         if discarded:
             notes.append(f'{discarded}道题经自动修订仍未通过校验，未纳入发布题目，已保留其余合格题。')
+        if batch.get('import_questions'):
+            notes.append(f'已从原文件提取{len(questions)}题，未补造题目或答案。请逐题核对，缺少答案或解析的题目补齐后再发布；导入题全部必答。')
         await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'],
             status='draft', progress='', title=source['title'], source=source,
             participants=source['participants'], questions=questions, error='', generation_state={}, generation_note=' '.join(notes))
@@ -134,7 +140,11 @@ class SharingRuntime:
                 material_state[identity].update(status='ready', title=value.get('title') or label, source=value)
                 await asyncio.to_thread(self.update_batch, batch['id'], expected_version=batch['version'], material_state=material_state)
                 return value
-            minutes = await read_material('minutes', '会议纪要', lambda: asyncio.to_thread(read_source, self.runtime.service, batch['url'])) if batch.get('url') else {}
+            # Explicit recipients do not require an @attendee section in the document.
+            reader = read_material_link if batch.get('requested_participants') else read_source
+            options = {'image_store': image_store} if batch.get('requested_participants') else {}
+            minutes = await read_material('minutes', '出题文档', lambda: asyncio.to_thread(
+                reader, self.runtime.service, batch['url'], **options)) if batch.get('url') else {}
             if minutes:
                 sources.append(minutes)
             for url in batch.get('material_urls', []):
@@ -416,7 +426,8 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                         source_url(payload['url'], minutes=True)
                     data = await asyncio.to_thread(core.create, payload.get('url'), payload.get('operation_id'), actor, payload.get('question_types'),
                         material_urls=payload.get('material_urls'), material_ids=payload.get('material_ids'),
-                        participant_ids=payload.get('participant_ids'), auto_generate=payload.get('auto_generate', True), title=payload.get('title', ''))
+                        participant_ids=payload.get('participant_ids'), auto_generate=payload.get('auto_generate', True), title=payload.get('title', ''),
+                        import_questions=payload.get('import_questions', False), initial_questions=payload.get('initial_questions'))
                 elif request.method == 'POST' and request.path_params.get('action') == 'delete':
                     if feature.active_delivery_batch == bid or bid in feature.deleting_batches:
                         raise LearningError('后台正在处理发送或入库任务，请稍后再删除；已上传题目不会删除。', 409)
@@ -447,7 +458,9 @@ def install(app, controller, runtime, get_learning, identity, read_json, check_o
                                             slot.update(status='pending', attempts=0)
                                     state = batch.get('generation_state', {})
                                     valid = [slot['question'] for slot in state.get('slots', []) if slot['status'] == 'valid']
-                                    if state and (len(valid) < 5 or set(batch.get('question_types', [])) - {q['type'] for q in valid}):
+                                    if state and batch.get('import_questions'):
+                                        state['exhausted'] = False
+                                    elif state and (len(valid) < 5 or set(batch.get('question_types', [])) - {q['type'] for q in valid}):
                                         state['replenish'] = True
                                     batch.update(status='queued', error='', progress='', version=batch['version'] + 1)
                                 elif action == 'close' and batch['status'] == 'published':

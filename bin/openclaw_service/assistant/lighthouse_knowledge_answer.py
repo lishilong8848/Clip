@@ -126,25 +126,28 @@ def merge_company_hits(groups, limit=12):
 def _candidate(value):
     """Older providers may return plain Markdown instead of the requested envelope."""
     text = str(value or '').strip()
+    malformed = AssistantError('资料答复格式不完整，需重新生成后核验。', 502, category='model_protocol')
+    if not text:
+        raise malformed
     if text.startswith('```'):
         match = re.fullmatch(r'```(?:json)?\s*(\{.*\})\s*```', text, re.S)
         if not match:
-            return '', [], []
+            raise malformed
         text = match[1].strip()
     if text.startswith('{'):
         try:
             result = json.loads(text)
             if not isinstance(result.get('answer'), str):
-                return '', [], []
+                raise malformed
             queries, gaps = result.get('queries', []), result.get('gaps', [])
             if (not isinstance(queries, list) or not isinstance(gaps, list)
                     or any(not isinstance(item, str) for item in queries + gaps)):
-                return '', [], []
+                raise malformed
             return result['answer'].strip(), queries[:3], [
                 '部分资料需进一步核对' if sensitive_document(gap) else safe_text(gap, limit=200)
                 for gap in gaps[:6]]
         except (ValueError, TypeError, AttributeError):
-            return '', [], []
+            raise malformed from None
     return text, [], []
 
 
@@ -166,6 +169,12 @@ def _repair_queries(values, seen):
 
 def _evidence_signature(item):
     return (item['document_id'], item['version'], item['ordinal'], item['text'])
+
+
+def _text_context(item):
+    # Text is already in the evidence body; only carry provenance, not another full copy.
+    return [{key: part[key] for key in ('location', 'kind', 'truncated') if key in part}
+            for part in item.get('context', [])]
 
 
 def _previous_candidate(answer, previous, sources):
@@ -265,7 +274,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
 
     def review_sources(sources, items):
         return business_review + [{**source, 'data': {**source['data'], 'text': item['text'],
-            **{key: item[key] for key in ('coverage', 'source_version', 'visual_evidence') if key in item}}}
+            **{key: item[key] for key in ('coverage', 'source_version', 'visual_evidence') if key in item},
+            'context': _text_context(item)}}
             for source, item in zip(sources[offset:], items)]
 
     async def review(candidate, sources, items, *, defer):
@@ -343,7 +353,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                     *(row['query'] for row in topic_results)]}
     seen_evidence = {_evidence_signature(item) for item in items}
     gaps, partial, partial_sources, partial_items = [], '', [], []
-    repairs, invalid_answer = 0, False
+    repairs, invalid_answer, generation_problem = 0, False, ''
     # Only read repair is allowed here; no tools that send messages or mutate business records.
     for attempt in range(3):
         current = await authorize()
@@ -355,8 +365,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if callable(expand):
             expanded = await asyncio.to_thread(knowledge.answer_evidence, current, items, profile=profile, model=model)
             items = expanded['items']
-            if expanded.get('warning'):
-                found['warning'] = '；'.join(filter(None, [found.get('warning'), expanded['warning']]))
+            # Per-source visual gaps stay in coverage; unrelated images must not veto usable text.
             current = await authorize()
             if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
                     or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
@@ -370,7 +379,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                    for i, item in enumerate(items, offset + 1)]
         evidence = [{'number': i, 'queried_at': stamp, **{key: item[key] for key in (
                     'name', 'version', 'location', 'text', 'source_hash', 'source_created_at',
-                    'coverage', 'source_version', 'visual_evidence') if key in item}}
+                    'coverage', 'source_version', 'visual_evidence') if key in item}, 'context': _text_context(item)}
                     for i, item in enumerate(items, offset + 1)]
         topic_evidence = [{'topic': result['query'], 'candidate_sources': [i for i, item in enumerate(items, offset + 1)
                           if any((item['document_id'], item['version'], item['ordinal']) ==
@@ -388,6 +397,11 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             '索引版本和文件入库日期不代表业务批准或生效日期；只有原文明确的审批和替代关系可用于判断。'
             '数字、人数、阈值、操作条件逐项与引用原文核对；每个关键结论单独引用，不能用无关出处支持。'
             '图片解释不是原文保证；visual_evidence标为OCR时只能使用识别文字，不能猜测连线或场景。'
+            '分别核对文字和图片：图片失败不否定已读取的正文或单元格文字，visual_read_failed等只表示对应图片的覆盖缺口。'
+            '正文独立支持结论时直接引用正文；仅当本题的关键步骤、连线或条件确实只在未读图片中时，才将该部分列入gaps。'
+            'coverage.complete=false只描述读取范围，不能据此推断本题缺少依据，也不要假设未读图片里存在额外条件。'
+            'context中的model_summary只是索引摘要，不能当作原文；OCR转录须标明性质，不能冒充视觉理解。'
+            '不附加与本题无关文档的图片警告，不把候选命中当成适用文件；缺口必须具体说明所缺条件或步骤，不能笼统称无依据。'
             '用户同时提出多个故障或主题时逐一覆盖，分别核对各主题的文档依据，再给综合思路，不能只回答其中一项。'
             '各主题检索结果只是候选，并不保证适用；缺少依据的主题单独说明，不用其他主题的流程冒充。'
             '问题中的补充或纠正承接本次提供的前文主题，不得否认已有前文或引入无关旧话题。'
@@ -414,10 +428,20 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         try:
             turn['_actual_profile'] = dict(profile)
             raw = await asyncio.wait_for(asyncio.to_thread(model.complete, messages, profile=profile,
-                max_tokens=3500, structured=True, timeout=45), 45)
+                max_tokens=None, structured=True, timeout=45), 45)
+            answer, requested, gaps = _candidate(raw)
+            generation_problem = ''
         except (AssistantError, OSError, asyncio.TimeoutError) as exc:
             if isinstance(exc, AssistantError) and exc.status in (401, 403):
                 raise
+            if isinstance(exc, AssistantError) and exc.category in {'model_protocol', 'model_output'}:
+                generation_problem = '资料已检索到，但答复未完整生成；未将未完成内容作为结论。'
+                gaps = ['补充答复尚未完整生成和核验']
+                review_feedback = ['上次答复格式不完整，不代表资料不适用。请用相同证据重新生成简明且完整的JSON，仅保留问题所需结论与引用。']
+                if attempt < 2:
+                    await emit('status', {'label': '正在重新生成并核对资料答复'})
+                    continue
+                break
             if not partial:
                 raise
             gaps = gaps or ['补查后的资料尚未完成核验']
@@ -426,7 +450,6 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
                 or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
             return await reply('回答期间公司资料或授权已变化，旧内容未用于回答，请重新查询。')
-        answer, requested, gaps = _candidate(raw)
         if requested and not gaps:
             gaps = ['补查涉及的资料仍待核对']
         if answer in ('', '[NO_APPLICABLE_DOCUMENT]'):
@@ -504,6 +527,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         items = merge_company_hits([retained, *groups, items])
         repairs += 1
     if not partial:
+        if generation_problem:
+            return await reply(generation_problem, business_public)
         if invalid_answer:
             return await reply('本轮回答未提供有效的文档出处，未作为公司规定使用。请补充文件名称或重新查询。')
         reason = '公司知识库中尚未取得足以支持本次答复的有效依据。'

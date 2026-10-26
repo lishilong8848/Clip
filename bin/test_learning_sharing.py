@@ -336,6 +336,7 @@ class SharingTests(unittest.TestCase):
         model = Mock(); model.complete.return_value = json.dumps({'questions': questions()[:5]})
         result = generate(model, {'source': SOURCE + '\n参会人：@保密人员\n', 'previous': [], 'count': 5})
         self.assertEqual(len(result['questions']), 5)
+        self.assertIsNone(model.complete.call_args.kwargs['max_tokens'])
         self.assertNotIn('保密人员', json.dumps(model.complete.call_args.args, ensure_ascii=False))
         model.complete.return_value = '{bad json'
         with self.assertRaises(ValueError): generate(model, {'source': SOURCE, 'previous': [], 'count': 5})

@@ -163,8 +163,9 @@ class AttachmentAuthTests(unittest.TestCase):
                     read, requests, _, _ = self.reader(kind, response)
                     with self.assertRaises((FeishuHTTPError, LearningCloudError)):
                         read()
-                    expected = 2 if kind == 'polling-file' and failure == 'network' else 1
+                    expected = {'polling-file': 2, 'learning': 3}.get(kind, 1) if failure == 'network' else 1
                     self.assertEqual(len(requests), expected)
+                    self.assertTrue(all(r.method == 'GET' and r.headers['authorization'] == OLD['Authorization'] for r in requests))
                     self.refresh.assert_not_called()
                     self.assertFalse(any(c.kwargs.get('force_refresh') for c in self.qt.call_args_list))
 

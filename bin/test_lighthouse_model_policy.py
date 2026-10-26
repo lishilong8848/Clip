@@ -27,6 +27,39 @@ class ModelPolicyTests(unittest.TestCase):
                        'endpoint': ENDPOINT, 'api_key': 'fixture-key'}
         self.model.configure({'action': 'upsert', 'profile': self.fields})
 
+    def test_direct_answer_can_use_provider_default_without_changing_saved_profile(self):
+        before = copy.deepcopy(self.store.docs)
+        self.assertEqual(self.model.complete([{'role': 'user', 'content': 'fixture'}], max_tokens=None), 'ok')
+        payload = self.client.request_json.call_args.kwargs['json_payload']
+        self.assertNotIn('max_tokens', payload)
+        self.assertNotIn('max_completion_tokens', payload)
+        self.assertEqual(self.store.docs, before)
+
+    def test_truncated_completion_is_not_returned_as_valid_json_or_text(self):
+        for finish in ('length', 'max_tokens', 'max_output_tokens'):
+            self.client.request_json.return_value = {'choices': [{'finish_reason': finish,
+                'message': {'content': '{"answer":"partial'}}]}
+            with self.subTest(finish=finish):
+                with self.assertRaises(AssistantError) as caught:
+                    self.model.complete([{'role': 'user', 'content': 'fixture'}], structured=True)
+                self.assertEqual(caught.exception.category, 'model_output')
+
+    def test_oversized_structured_reply_is_not_silently_sliced(self):
+        self.client.request_json.return_value = {'choices': [{'finish_reason': 'stop',
+            'message': {'content': '{"answer":"' + 'x' * 25000 + '"}'}}]}
+        with self.assertRaises(AssistantError) as caught:
+            self.model.complete([{'role': 'user', 'content': 'fixture'}], structured=True)
+        self.assertEqual(caught.exception.category, 'model_output')
+
+    def test_missing_or_empty_choices_remain_retryable_protocol_failures(self):
+        for payload in ({'choices': []}, {'choices': [None]}, {'choices': [{'message': {'content': ''}}]},
+                        {'choices': [{'message': {'content': None, 'reasoning_content': 'not an answer'}}]}):
+            self.client.request_json.return_value = payload
+            with self.subTest(payload=payload):
+                with self.assertRaises(AssistantError) as caught:
+                    self.model.complete([{'role': 'user', 'content': 'fixture'}])
+                self.assertEqual(caught.exception.category, 'model_protocol')
+
     def test_exact_text_only_models_override_stale_opt_ins_without_mutation(self):
         for name in TEXT_ONLY:
             for value in (name, '  ' + name.swapcase() + '  '):

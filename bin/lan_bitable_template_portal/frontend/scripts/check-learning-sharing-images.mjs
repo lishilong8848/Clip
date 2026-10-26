@@ -232,6 +232,7 @@ try {
       assert.match(await page.locator('.sharing-answer-pane').innerText(), /仅提交后解析/);
       assert(!await page.locator('body').innerText().then(text => /仅管理员/.test(text)));
       const answered = fixture.answerPosts.length;
+      assert.equal(await page.locator('.sharing-alert.success[popover]').count(), 0, 'success feedback must not cover answer pagination');
       await page.getByRole('button', { name: '答题下一页', exact: true }).click();
       assert.equal(fixture.answerPosts.length, answered, 'submitted navigation never writes');
 

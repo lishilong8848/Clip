@@ -122,7 +122,7 @@ def install_lighthouse_routes(app, controller, runtime):
         result = response.json()
         if not result.get('ok'):
             raise AssistantError(str(result.get('error') or '分享会出题未完成，请核对本人模型配置及纪要内容后重试。')[:500], 503)
-        return result['data'] if mode == 'image_sources' else result['data']['questions']
+        return result['data'] if mode in {'image_sources', 'question_import'} else result['data']['questions']
 
     runtime.generate_sharing_questions = generate_sharing_questions
 

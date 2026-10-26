@@ -59,7 +59,7 @@ try {
     const page = await context.newPage(); page.on('pageerror', e => errors.push(e.message));
     try {
       await page.goto(origin + '/__sharing-audit');
-      await page.getByRole('button', { name: '新建分享会练习', exact: true }).click();
+      await page.getByRole('button', { name: 'AI出题', exact: true }).click();
       await page.getByLabel('练习标题（可选）').fill('可以恢复的新建草稿');
       await page.getByLabel('资料链接', { exact: true }).fill('https://vnet.feishu.cn/wiki/SourceFixture');
       await page.getByRole('button', { name: '添加链接', exact: true }).click();

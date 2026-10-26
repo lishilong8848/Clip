@@ -376,6 +376,33 @@ class SharingMaterialsTests(unittest.TestCase):
             self.assertEqual(batch['participants'][0]['open_id'], 'ou_current')
             generator.assert_not_called()
 
+    def test_selected_people_allow_docx_and_wiki_without_attendance_fields(self):
+        from unittest.mock import AsyncMock
+        with self.learning.transaction() as conn:
+            self.learning._put('person', 'p_current', {'id': 'p_current', 'name': 'Current', 'active': True,
+                'login_ids': ['ou_current'], 'scopes': ['A']}, conn, False)
+        for kind in ('docx', 'wiki'):
+            with self.subTest(kind=kind):
+                link = f'https://vnet.feishu.cn/{kind}/Fixture'
+                bid = self.core.create(link, 'explicit-people-doc-' + kind, ADMIN, ['single', 'multiple'],
+                                       participant_ids=['p_current'])['id']
+                responses = ([{'node': {'obj_type': 'docx', 'obj_token': 'Resolved'}}] if kind == 'wiki' else [])
+                responses += [{'document': {'title': '技术材料', 'revision_id': 2}}, {'content': SOURCE},
+                              {'items': [], 'has_more': False}, {'document': {'revision_id': 2}}]
+                request = Mock(side_effect=[{'code': 0, 'data': data} for data in responses])
+                generator = AsyncMock(side_effect=[fixtures.typed_questions(['single', 'multiple'], 5), []])
+                runtime = SharingRuntime(SimpleNamespace(service=object(), generate_sharing_questions=generator), lambda: self.learning)
+                runtime.core = self.core
+                with patch('openclaw_service.assistant.lighthouse_documents.document_reader', return_value=request), \
+                     patch('lan_bitable_template_portal.learning_sharing_routes.read_source', side_effect=AssertionError('No automatic roster')):
+                    asyncio.run(runtime.generate(self.core.batch(bid)))
+                batch = self.core.batch(bid)
+                self.assertEqual(batch['status'], 'draft', batch.get('error'))
+                self.assertEqual(len(batch['questions']), 5)
+                self.assertEqual([p['open_id'] for p in batch['participants']], ['ou_current'])
+                self.assertEqual(batch['source']['sources'][0]['url'], link)
+                self.assertEqual(self.core.attempts(bid), [], 'generation must not send or publish')
+
     def test_feishu_manual_matrix_completion_and_readonly_result_pages(self):
         template = self.core.batch(self.bid)
         for count in (0, 4, 5, 11):

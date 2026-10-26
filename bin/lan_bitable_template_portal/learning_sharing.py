@@ -116,10 +116,11 @@ def validate_questions(questions, source, types=None, *, draft=False, images=())
         if not isinstance(origin, str) or origin not in {'ai', 'manual'}:
             raise LearningError('题目来源无效。')
         permitted_types = allowed if origin == 'ai' else list(QUESTION_TYPES)
+        incomplete_draft = draft and origin == 'manual'
         values = {}
         for name, limit in (('stem', 500), ('explanation', 600)):
             value = q.get(name)
-            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+            if not isinstance(value, str) or not value.strip() and not incomplete_draft or len(value) > limit:
                 raise LearningError(f'第{index + 1}题的题干、解析或纪要依据缺失/过长。')
             values[name] = value.strip()
         evidence = q.get('evidence', '')
@@ -143,27 +144,28 @@ def validate_questions(questions, source, types=None, *, draft=False, images=())
                 raise LearningError(f'第{index + 1}题包含图片识别内容，请对照原图核对题目与答案后再发布。')
             values.update(image_ids=ids, image_confirmed=confirmed)
         identity = normalized(values['stem'])
-        if not identity or identity in seen:
+        if not identity and not incomplete_draft or identity and identity in seen:
             raise LearningError('存在重复题干，请修订；不通过改编号凑足题量。')
-        seen.add(identity)
+        if identity:
+            seen.add(identity)
         options = q.get('options')
         correct = q.get('correct')
         if q.get('type') == 'interview':
             reference = q.get('reference_answer')
-            if not isinstance(reference, str) or not reference.strip() or len(reference) > 1000 or options not in (None, []) or correct not in (None, []):
+            if not isinstance(reference, str) or not reference.strip() and not incomplete_draft or len(reference) > 1000 or options not in (None, []) or correct not in (None, []):
                 raise LearningError(f'第{index + 1}道问答题需填写参考答案（最多1000字），不能有选择题选项。')
             if 'interview' not in permitted_types:
                 raise LearningError('生成题型不符合本批选择，请重新生成或核对题目。')
             result.append({**values, 'id': f'q{index + 1}', 'type': 'interview', 'options': [], 'correct': [], 'reference_answer': reference.strip()})
             continue
         if (not isinstance(options, list) or not 2 <= len(options) <= 6
-                or any(not isinstance(o, str) or not o.strip() or len(o) > 300 for o in options)
-                or len({normalized(o) for o in options}) != len(options)):
+                or any(not isinstance(o, str) or not o.strip() and not incomplete_draft or len(o) > 300 for o in options)
+                or len({normalized(o) for o in options if o.strip()}) != len([o for o in options if o.strip()])):
             raise LearningError(f'第{index + 1}题须有2至6个不重复的非空选项。')
-        if (not isinstance(correct, list) or not correct or len(set(str(v) for v in correct)) != len(correct)
+        if (not isinstance(correct, list) or not correct and not incomplete_draft or len(set(str(v) for v in correct)) != len(correct)
                 or any(type(v) is not int or not 0 <= v < len(options) for v in correct)):
             raise LearningError(f'第{index + 1}题的正确选项无效。')
-        kind = 'single' if len(correct) == 1 else 'multiple'
+        kind = q.get('type', 'single') if incomplete_draft and not correct else 'single' if len(correct) == 1 else 'multiple'
         if kind not in permitted_types or q.get('type', kind) != kind:
             raise LearningError(f'第{index + 1}题的题型与正确选项数量或所选题型不一致。')
         result.append({**values, 'id': f'q{index + 1}', 'options': [o.strip() for o in options], 'correct': sorted(correct), 'type': kind})
@@ -331,18 +333,26 @@ class SharingExercises:
         return {'id': identity, 'deleted': True}
 
     def create(self, url, operation_id, actor, question_types=None, *, material_urls=None, material_ids=None,
-               participant_ids=None, auto_generate=True, title=''):
+               participant_ids=None, auto_generate=True, title='', import_questions=False, initial_questions=None):
         self.learning._admin(actor)
         types = selected_types(question_types if question_types is not None else ['single'])
         from .sharing_sources import source_url
         target = source_url(url) if url is not None and url != '' else ''
         links, files, selected = [value if value is not None else [] for value in (material_urls, material_ids, participant_ids)]
-        if (type(auto_generate) is not bool or not isinstance(title, str) or len(title) > 200
+        if (type(auto_generate) is not bool or type(import_questions) is not bool or not isinstance(title, str) or len(title) > 200
                 or any(not isinstance(values, list) or len(values) != len(set(str(v) for v in values)) for values in (links, files, selected))
                 or len(links) + len(files) > 10 or len(selected) > 500
                 or any(not isinstance(value, str) for values in (links, files, selected) for value in values)):
             raise LearningError('材料或名单参数无效。')
         links = [source_url(link) for link in links]
+        if import_questions and (not auto_generate or not (links or files or target)):
+            raise LearningError('文件导入需要提供含有题目的材料。')
+        initial = []
+        if initial_questions is not None:
+            if auto_generate or target or links or files or not isinstance(initial_questions, list) or any(
+                    not isinstance(q, dict) or q.get('origin') != 'manual' for q in initial_questions):
+                raise LearningError('初始题目仅用于无资料的人工出题草稿。')
+            initial = validate_questions(initial_questions, '', draft=True)
         if (auto_generate and not (target or links or files)) or not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', operation_id):
             raise LearningError('请选择出题资料，并重新提交。')
         if not target and not selected:
@@ -350,7 +360,10 @@ class SharingExercises:
         directory = {row['id']: row for row in self.people()} if selected else {}
         if any(pid not in directory for pid in selected):
             raise LearningError('所选人员不在当前有效名单中。', 403)
-        fingerprint = hashlib.sha256(json.dumps([target, types, links, files, selected, auto_generate, title], ensure_ascii=False).encode()).hexdigest()
+        request_parts = [target, types, links, files, selected, auto_generate, title]
+        if import_questions or initial:
+            request_parts += [import_questions, initial]
+        fingerprint = hashlib.sha256(json.dumps(request_parts, ensure_ascii=False).encode()).hexdigest()
         identity = key(actor['id'], operation_id)
         with self.learning.transaction() as conn:
             prior = self.learning._get('sharing_batch', identity, conn)
@@ -366,10 +379,11 @@ class SharingExercises:
             batch = {'id': identity, 'url': target, 'title': '正在读取纪要', 'status': 'queued', 'version': 1,
                      'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': [], 'participants': [], 'question_types': types}
             batch.update(material_urls=links, material_ids=files, requested_participants=[directory[pid] for pid in selected],
-                         auto_generate=auto_generate, requested_title=title.strip(), request_fingerprint=fingerprint)
+                         auto_generate=auto_generate, requested_title=title.strip(), request_fingerprint=fingerprint,
+                         import_questions=import_questions)
             batch['participants'] = copy.deepcopy(batch['requested_participants'])
             if not auto_generate and selected and not (target or links or files):
-                batch.update(status='draft', title=title.strip() or '手动录题', source={'text': '', 'sources': []})
+                batch.update(status='draft', title=title.strip() or '手动录题', questions=initial, source={'text': '', 'sources': []})
             self.learning._put('sharing_batch', identity, batch, conn)
             self.learning._put('local', 'self_practice_sync', {'enabled': True}, conn, False)
         return {'id': identity}

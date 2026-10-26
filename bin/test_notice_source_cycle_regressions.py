@@ -1,4 +1,5 @@
 """Local-only regressions for source provenance, lifecycle and cycle isolation."""
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import Mock, patch
 from bin.test_notice_memory_history import _HistoryMemoryService, _source_record
 from lan_bitable_template_portal.portal_service import (
     STATE_NS_DAILY_SUMMARY, STATE_NS_MEMORY, STATE_NS_WORK_STATUS, FieldMeta, MaintenancePortalService, NoticeSourcePending,
+    PortalError, REPAIR_SNAPSHOT_SOURCE_PROJECTS, REPAIR_SOURCE_APP_TOKEN, REPAIR_MANAGEMENT_TABLE_ID,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
@@ -34,6 +36,75 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
     def tearDown(self):
         self.service._state_store.shutdown_write_worker(timeout=2)
         self.tmp.cleanup()
+
+    def repair_binding_snapshot(self):
+        self.service._repair_snapshots_enabled = True
+        self.service.ensure_snapshot_loaded = Mock()
+        self.service._source_snapshot_records = MaintenancePortalService._source_snapshot_records.__get__(self.service)
+        records = [dict(record_id=f'rec_bind_{index:04d}', work_type='repair', notice_type='设备检修',
+            source_app_token=REPAIR_SOURCE_APP_TOKEN, source_table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            raw_fields={}, display_fields={'检修通告名称':f'EA118_C01机房D楼{index:04d}设备检修',
+                '维修名称':f'D楼{index:04d}设备检修', '所属数据中心/楼栋-使用':'D楼',
+                '故障发生时间':'2026-10-26 08:00', '期望完成时间':'2026-10-26 18:00',
+                '故障维修原因':'计划原因', '区域':'计划位置'}) for index in range(505)]
+        for suffix, fields, raw in (
+            ('ended', {'维修结束时间':'2026-10-26 19:00'}, {}),
+            ('other_building', {'所属数据中心/楼栋-使用':'E楼'}, {}),
+            ('linked', {}, {'设备检修关联-L':'rec_other_target'}),
+        ):
+            record = copy.deepcopy(records[-1])
+            record['record_id'] = 'rec_bind_' + suffix
+            record['display_fields'].update(fields)
+            record['raw_fields'].update(raw)
+            records.append(record)
+        self.service._state_store.replace_repair_snapshot(REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+            records=[self.service._repair_snapshot_record_payload(row) for row in records],
+            app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID)
+        return records[504]['record_id']
+
+    def test_binding_searched_plan_after_500_uses_all_eligible_records(self):
+        selected = self.repair_binding_snapshot()
+        candidates = self.service.list_bindable_source_items(
+            scope='D', work_type='repair', month='10月', search='0504', limit=200)
+        self.assertIn(selected, [row['source_record_id'] for row in candidates])
+        for target in ('', 'rec_uploaded_target'):
+            with self.subTest(target=target):
+                bound = self.service.validate_manual_source_binding(scope='D', work_type='repair',
+                    source_record_id=selected, month='10月', target_record_id=target)
+                self.assertEqual(bound['source_record_id'], selected)
+
+    def test_large_binding_keeps_building_type_state_and_existing_relation_checks(self):
+        selected = self.repair_binding_snapshot()
+        for source, work, ongoing in (
+            ('rec_bind_ended', 'repair', []),
+            ('rec_bind_other_building', 'repair', []),
+            ('rec_bind_linked', 'repair', []),
+            (selected, 'maintenance', []),
+            ('rec_missing', 'repair', []),
+            (selected, 'repair', [{'source_record_id':selected, 'target_record_id':'rec_busy',
+                                   'work_type':'repair', 'building_codes':['D']}]),
+        ):
+            with self.subTest(source=source, work=work, ongoing=bool(ongoing)), self.assertRaises(PortalError):
+                self.service.validate_manual_source_binding(scope='D', work_type=work,
+                    source_record_id=source, month='10月', ongoing_items=ongoing)
+
+    def test_large_repair_binding_start_preserves_submitted_fields_and_target_identity(self):
+        selected = self.repair_binding_snapshot()
+        manual = {'manual':True, 'manual_id':'manual:lite:D:repair:regression',
+            'manual_binding_required':True, 'manual_binding_choice':'bind', 'source_record_id':selected,
+            'title':'EA118_C01机房D楼手填故障检修', 'reason':'手填原因', 'location':'手填位置',
+            'start_time':'2026-10-26 20:00', 'end_time':'2026-10-26 09:00',
+            'site_photos':[{'upload_id':'fixture-local-photo'}]}
+        before = copy.deepcopy(manual)
+        expanded = self.service.expand_workbench_action_command(
+            {'command_format':'notice_command', 'action':'start', 'scope':'D', 'work_type':'repair',
+             'record_id':selected, 'source_record_id':selected, 'patch':manual}, scope='D', ongoing_items=[])
+        for key in ('title', 'reason', 'location', 'start_time', 'end_time', 'site_photos'):
+            self.assertEqual(expanded[key], manual[key])
+        self.assertEqual(expanded['source_record_id'], selected)
+        self.assertEqual(expanded['repair_management_record_id'], selected)
+        self.assertFalse(expanded.get('target_record_id'))
+        self.assertEqual(manual, before)
 
     def remember(self, cycle, content, work_type='maintenance'):
         self.service._remember_draft_fields(

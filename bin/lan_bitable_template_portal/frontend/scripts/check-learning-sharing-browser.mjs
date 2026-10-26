@@ -52,7 +52,7 @@ try {
     const entry=v2?'/assets/workspace-v2/index.html?__page=%2Flearning&tab=sharing':'/learning?tab=sharing';
     await page.goto(base+entry);
     await page.getByRole('heading',{name:'分享会练习',exact:true}).waitFor();
-    await page.getByRole('button',{name:'新建分享会练习',exact:true}).click();
+    await page.getByRole('button',{name:'AI出题',exact:true}).click();
     await page.getByLabel('飞书纪要链接',{exact:true}).fill('https://vnet.feishu.cn/docx/Fixture');
     await page.getByRole('checkbox',{name:'多选题',exact:true}).check();
     await page.getByRole('button',{name:'读取资料并生成题目',exact:true}).click();

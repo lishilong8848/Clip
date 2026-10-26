@@ -114,17 +114,23 @@ try {
         await page.screenshot({path:path.join(output,`history-${v2}-${width}.png`),fullPage:true});
       }
       await page.setViewportSize({width:1440,height:900});
-      await page.getByRole('button',{name:'新建分享会练习',exact:true}).click();
+      await page.getByRole('button',{name:'人工出题',exact:true}).click();
+      assert(await page.getByRole('radio',{name:'纯手工出题',exact:true}).isChecked());
+      assert.equal(await page.locator('.sharing-source').count(), 0);
+      await page.getByRole('button',{name:'返回批次列表',exact:true}).click();
+      await page.getByRole('button',{name:'AI出题',exact:true}).click();
+      assert(await page.getByRole('radio',{name:'资料出题',exact:true}).isChecked());
+      assert(await page.getByLabel('AI生成题目').isChecked());
       await page.getByLabel('飞书纪要链接', {exact:true}).fill('invalid-unused-url');
       await page.getByLabel('资料链接', {exact:true}).fill('unused material draft');
       await page.getByLabel('选择资料文件').setInputFiles({name:'unused.pptx',mimeType:'application/octet-stream',buffer:Buffer.from('fixture')});
       await page.getByText('纯手工出题',{exact:true}).click();
       assert.equal(await page.locator('.sharing-source').count(), 0, 'pure manual mode has no required materials');
-      assert(await page.getByRole('button',{name:'创建空白草稿',exact:true}).isDisabled(), 'explicit recipients are still required');
+      assert(await page.getByRole('button',{name:/^(创建空白草稿|保存人工题草稿)$/,exact:true}).isDisabled(), 'explicit recipients are still required');
       await page.getByRole('button',{name:'读取人员目录',exact:true}).click();
       await page.getByRole('button',{name:'添加参会人：测试人员',exact:true}).click();
       await page.getByLabel('练习标题（可选）', {exact:true}).fill('纯手工无链接练习');
-      assert(await page.getByRole('button',{name:'创建空白草稿',exact:true}).isEnabled(), 'unused pending materials must not block manual creation');
+      assert(await page.getByRole('button',{name:/^(创建空白草稿|保存人工题草稿)$/,exact:true}).isEnabled(), 'unused pending materials must not block manual creation');
       await page.getByText('资料出题',{exact:true}).click();
       assert.equal(await page.getByLabel('飞书纪要链接',{exact:true}).inputValue(), 'invalid-unused-url', 'switching modes preserves unfinished inputs');
       await page.getByText('纯手工出题',{exact:true}).click();
@@ -150,7 +156,7 @@ try {
         }), 'mode/title and people search/actions must share rows without overlap');
         await page.screenshot({path:path.join(output,`pure-manual-${v2}-${width}.png`),fullPage:true});
       }
-      await page.getByRole('button',{name:'创建空白草稿',exact:true}).click();
+      await page.getByRole('button',{name:/^(创建空白草稿|保存人工题草稿)$/,exact:true}).click();
       await page.getByRole('button',{name:'新增问答题',exact:true}).click();
       await page.getByLabel('题干',{exact:true}).fill('纯手工题目');
       await page.getByLabel('参考答案（问答题不自动判分）',{exact:true}).fill('人工参考答案');
@@ -160,7 +166,7 @@ try {
       assert.equal(manualCreates,1); assert.equal(saved.questions[0].origin,'manual'); assert.equal(saved.questions[0].evidence,'');
       await page.getByRole('button',{name:'批次列表',exact:true}).click();
       await page.setViewportSize({width:1440,height:900});
-      await page.getByRole('button',{name:'新建分享会练习',exact:true}).click();
+      await page.getByRole('button',{name:'AI出题',exact:true}).click();
       assert(await page.locator('.sharing-source').count() >= 2);
       await page.getByLabel('使用飞书纪要').uncheck();
       await page.getByLabel('AI生成题目').uncheck();
@@ -169,10 +175,10 @@ try {
       await page.getByLabel('资料链接', { exact: true }).fill('https://vnet.feishu.cn/file/FileFixture/?from=share#fragment');
       await page.getByLabel('选择资料文件').setInputFiles({ name: 'slides.pptx', mimeType: 'application/octet-stream', buffer: Buffer.from('fixture') });
       await page.getByRole('button', { name: '上传 1 份' }).click();
-      assert(await page.getByRole('button', { name: '创建空白草稿', exact: true }).isDisabled(), 'material-only roster is explicit');
+      assert(await page.getByRole('button', { name: /^(创建空白草稿|保存人工题草稿)$/, exact: true }).isDisabled(), 'material-only roster is explicit');
       await page.getByRole('button', { name: '读取人员目录' }).click();
       await page.getByRole('button', { name: '添加参会人：测试人员', exact: true }).click();
-      await page.getByRole('button', { name: '创建空白草稿', exact: true }).click();
+      await page.getByRole('button', { name: /^(创建空白草稿|保存人工题草稿)$/, exact: true }).click();
       await page.getByRole('button', { name: '新增问答题', exact: true }).click();
       await page.getByLabel('题干', { exact: true }).fill('人工经验问答题');
       await page.getByLabel('参考答案（问答题不自动判分）', { exact: true }).fill('经验参考答案');
@@ -186,6 +192,11 @@ try {
       await page.screenshot({ path: path.join(output, `manual-${v2}.png`), fullPage: true });
       batch.status='failed';batch.error='模型未返回有效回答';
       await page.reload();await page.locator('.sharing-batch').first().click();
+      const kept = structuredClone(batch.questions);
+      await page.getByRole('button',{name:'人工出题',exact:true}).click();
+      assert.equal(await page.locator('.sharing-question').count(), kept.length + 1);
+      assert.deepEqual(batch.questions, kept, 'adding a question must not overwrite the saved batch');
+      await page.getByLabel(`删除第${kept.length + 1}题`,{exact:true}).click();
       await page.getByRole('button',{name:'新增问答题',exact:true}).click();
       await page.getByLabel('题干',{exact:true}).last().fill('模型失败后补录的题目');
       await page.getByLabel('参考答案（问答题不自动判分）',{exact:true}).last().fill('人工参考答案');
@@ -197,6 +208,7 @@ try {
       role = 'member'; batch = batchFor(11); batch.status = 'closed';
       batch.paper.draft_answers = { q1: [0], q3: '此前保存的答案' };
       await page.goto(origin + '/__sharing-materials?role=member'); await page.locator('.sharing-batch').click();
+      assert.equal(await page.getByRole('button',{name:'人工出题',exact:true}).count(), 0, 'publishing permissions remain unchanged');
       await page.getByRole('heading', { name: '我的答题记录', exact: true }).waitFor();
       assert(await page.locator('.sharing-answer-pane input').first().isChecked());
       assert(await page.locator('.sharing-answer-pane input').first().isDisabled());

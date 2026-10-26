@@ -546,8 +546,13 @@ class CustomModel:
         selected = profile or self.profile()
         endpoint = self._endpoint(selected["endpoint"], custom_protocol=selected.get("custom_protocol", False))
         from .lighthouse_context import bound_model_payload
-        request = bound_model_payload({"model": selected["model"], "messages": messages, "stream": False,
-            "max_tokens": max(128, min(4000, int(max_tokens))), **model_reasoning_options(selected)}, selected)
+        request = {"model": selected["model"], "messages": messages, "stream": False,
+                   **model_reasoning_options(selected)}
+        if max_tokens is None:
+            request = bound_model_payload(request, selected, provider_default=True)
+        else:
+            request['max_tokens'] = max(128, min(4000, int(max_tokens)))
+            request = bound_model_payload(request, selected)
         try:
             key = self.unprotect(selected["key_cipher"])
         except Exception:
@@ -583,17 +588,25 @@ class CustomModel:
         if not isinstance(payload, dict) or payload.get("error"):
             raise AssistantError("模型服务未完成回答，请稍后重试。", 502)
         try:
-            answer = payload["choices"][0]["message"]["content"]
+            choice = payload["choices"][0]
+            if not isinstance(choice, dict):
+                raise TypeError('Invalid model choice')
+            if choice.get('finish_reason') in {'length', 'max_tokens', 'max_output_tokens'}:
+                raise AssistantError('模型输出尚未完成，需重新生成后核验。', 502, category='model_output')
+            answer = choice["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            raise AssistantError("模型返回内容无效，请稍后重试。", 502) from None
+            raise AssistantError("模型返回内容无效，请稍后重试。", 502, category='model_protocol') from None
         if not isinstance(answer, str) or not answer.strip():
-            raise AssistantError("模型未返回有效回答，请稍后重试。", 502)
+            raise AssistantError("模型未返回有效回答，请稍后重试。", 502, category='model_protocol')
         # Never expose reasoning blocks, credentials or personal identifiers.
         answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S | re.I).strip()
         if private_identifier(answer) or CONTACT.search(answer):
             return PRIVATE_REPLY
         if structured:
-            return API_KEY.sub("[凭证已隐藏]", answer)[:24000]
+            answer = API_KEY.sub("[凭证已隐藏]", answer)
+            if len(answer) > 24000:
+                raise AssistantError('模型结构化答复过长，需精简后重新生成。', 502, category='model_output')
+            return answer
         return safe_text(answer)[:12000]
 
     def close(self):

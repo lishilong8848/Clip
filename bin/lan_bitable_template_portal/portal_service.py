@@ -36304,7 +36304,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             work_type=work_type,
             month=month,
             ongoing_items=ongoing_items,
-            limit=500,
+            limit=None,
         )
         for item in items:
             if str(item.get("source_record_id") or "").strip() == source_record_id:
