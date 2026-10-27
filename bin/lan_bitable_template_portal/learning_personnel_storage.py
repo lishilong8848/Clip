@@ -11,6 +11,7 @@ from . import learning_shift_storage as shifts
 
 PROGRESS_KEY = 'personnel_table_v1'
 HISTORY_KINDS = {'paper', 'record', 'sharing_attempt', 'daily_progress'}
+CLEANUP_ERROR_PREFIX = '历史学练清理待重试，原数据及本地备份保留：'
 
 
 def _archive_schema(conn):
@@ -142,16 +143,19 @@ def cleanup(service, limit=8):
         return
     app_id = service.cloud.current_app_id()
     records = service.cloud.list_entity_records(include_fields=True)
+    present_ids = {row['record_id'] for row in records}
+    # A confirmed full listing also resolves stale retries after a lost delete receipt.
+    with service.transaction() as conn:
+        issues = conn.execute("SELECT key FROM documents WHERE kind='local' AND key LIKE 'shift_history_issue:%'").fetchall()
+        for issue in issues:
+            if issue[0].removeprefix('shift_history_issue:') not in present_ids:
+                conn.execute("DELETE FROM documents WHERE kind='local' AND key=?", (issue[0],))
     candidates = [row for row in records if row['kind'] != 'shift_person' and row['kind'] not in HISTORY_KINDS]
     history = [row for row in records if row['kind'] in HISTORY_KINDS
                and (service._get('local', 'personnel_history:' + row['record_id']) or {}).get('sha256') != row['payload_sha256']]
     state = shifts.Snapshot(shifts.snapshot(service), include_legacy=True)
     directory, directory_ready, _ = shifts.current_directory(service)
-    groups, errors = state.groups()
-    owners = {}
-    for owner, members in groups.items():
-        for pair in {pair for pair, _ in members} | state.dependencies[owner]:
-            owners.setdefault(pair, set()).add(owner)
+    _, history_errors = state.groups()
     ordered = sorted([*candidates, *history], key=lambda row: row['record_id'])
     cursor = progress.get('cursor', '')
     ordered = [r for r in ordered if r['record_id'] > cursor] + [r for r in ordered if r['record_id'] <= cursor]
@@ -162,9 +166,9 @@ def cleanup(service, limit=8):
         cursor = row['record_id']
         try:
             pair = (row['kind'], row['key'])
-            if pair in errors:
-                raise core.LearningError(errors[pair], 503)
             if row['kind'] in HISTORY_KINDS:
+                if pair in history_errors:
+                    raise core.LearningError(history_errors[pair], 503)
                 if not directory_ready:
                     raise core.LearningError('人员目录尚未就绪，保留历史答题记录等待补齐。', 503)
                 fields = shifts.history_fields(state, *pair, directory)
@@ -180,15 +184,8 @@ def cleanup(service, limit=8):
                     conn.execute("DELETE FROM documents WHERE kind='local' AND key=?", ('shift_history_issue:' + row['record_id'],))
                 enriched += 1
                 continue
-            if row['kind'] in shifts.KINDS:
-                identity = shifts.history_identity(state, row)
-                if identity['required'] and not owners.get(pair):
-                    raise core.LearningError('历史人员班次归属待核对，原记录保留。', 503)
-                for owner in owners.get(pair, ()):
-                    ack = state.get('local', 'shift_cloud:' + shifts.key(owner))
-                    pending = state.get('local', 'shift_summary_pending:' + shifts.key(owner)).get('pending')
-                    if not ack.get('personnel_only') or pending or any(member['dirty'] for _, member in groups[owner]):
-                        raise core.LearningError('对应人员班次汇总尚未确认成功，原记录保留。', 503)
+            # Legacy cloud transport rows can be archived independently of shift ownership.
+            # The local tasks, answer history and current personnel summaries stay intact.
             checksum = _verify_archive(service, row, app_id)
             service.cloud.delete_archived_entity(row, expected_app_id=app_id)
             with service.transaction() as conn:
@@ -205,10 +202,13 @@ def cleanup(service, limit=8):
                 }, conn, False)
     complete = (not candidates and len(history) == enriched
                 and not any(row['payload'].get('entities') for row in records if row['kind'] == 'shift_person'))
+    reasons = list(dict.fromkeys(failures))
     with service.transaction() as conn:
         service._put('local', PROGRESS_KEY, {'prepared': True, 'complete': complete,
                      'retry_at': time.time() + 60 if failures else 0,
                      'remaining': len(candidates) - removed + len(history) - enriched, 'cursor': cursor,
-                     'error': '；'.join(failures[:3])}, conn, False)
+                     'error': '；'.join(reasons[:3])}, conn, False)
     if failures:
-        service._last_error = '历史学练清理待重试，原数据及本地备份保留：' + '；'.join(failures[:3])
+        service._last_error = CLEANUP_ERROR_PREFIX + '；'.join(reasons[:3])
+    elif service._last_error.startswith(CLEANUP_ERROR_PREFIX):
+        service._last_error = ''

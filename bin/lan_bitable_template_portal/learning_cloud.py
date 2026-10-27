@@ -211,6 +211,17 @@ def _payload_digest(payload):
         raise LearningCloudError("实体内容无法生成完整摘要") from None
 
 
+def _archived_fields_digest(fields):
+    fields = copy.deepcopy(fields)
+    if isinstance(fields, dict) and isinstance(fields.get('附件'), list):
+        for item in fields['附件']:
+            if isinstance(item, dict) and item.get('file_token'):
+                # Feishu refreshes download URLs without changing the attached file.
+                item.pop('url', None)
+                item.pop('tmp_url', None)
+    return _payload_digest(fields)
+
+
 def _checked_display_fields(fields):
     if fields is None:
         return {}
@@ -985,7 +996,7 @@ class LearningCloud:
             if (not isinstance(fields, dict) or actual.get("record_id") != record_id
                     or _entity_kind(_text(fields.get("类别"))) != row.get("kind")
                     or _text(fields.get("业务键")) != row.get("key")
-                    or _payload_digest(fields) != _payload_digest(row.get("fields"))):
+                    or _archived_fields_digest(fields) != _archived_fields_digest(row.get("fields"))):
                 raise LearningCloudConflict("历史记录已变化，未清理；等待重新备份核验")
             payload = self._load_entity_document(json.loads(_text(fields.get("内容"))), table_id=table)
             if _payload_digest(payload) != row["payload_sha256"]:

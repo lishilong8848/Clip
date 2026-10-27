@@ -349,9 +349,9 @@ class SharingExercises:
             raise LearningError('文件导入需要提供含有题目的材料。')
         initial = []
         if initial_questions is not None:
-            if auto_generate or target or links or files or not isinstance(initial_questions, list) or any(
+            if auto_generate or not isinstance(initial_questions, list) or any(
                     not isinstance(q, dict) or q.get('origin') != 'manual' for q in initial_questions):
-                raise LearningError('初始题目仅用于无资料的人工出题草稿。')
+                raise LearningError('初始题目仅用于关闭AI生成后的人工出题草稿。')
             initial = validate_questions(initial_questions, '', draft=True)
         if (auto_generate and not (target or links or files)) or not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', operation_id):
             raise LearningError('请选择出题资料，并重新提交。')
@@ -377,7 +377,7 @@ class SharingExercises:
             if active >= 3 and (auto_generate or not selected):
                 raise LearningError('已有纪要正在生成，请等待完成后再提交。', 429)
             batch = {'id': identity, 'url': target, 'title': '正在读取纪要', 'status': 'queued', 'version': 1,
-                     'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': [], 'participants': [], 'question_types': types}
+                     'owner': actor['id'], 'created_at': stamp(), 'date': now().date().isoformat(), 'questions': initial, 'participants': [], 'question_types': types}
             batch.update(material_urls=links, material_ids=files, requested_participants=[directory[pid] for pid in selected],
                          auto_generate=auto_generate, requested_title=title.strip(), request_fingerprint=fingerprint,
                          import_questions=import_questions)

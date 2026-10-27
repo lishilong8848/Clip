@@ -66,10 +66,14 @@ class MaterialRecoveryTests(unittest.TestCase):
             self.learning._put('person', 'p1', {'id': 'p1', 'name': 'Recipient', 'active': True,
                 'login_ids': ['ou_one'], 'scopes': ['A']}, conn, False)
         link = 'https://vnet.feishu.cn/docx/Material'
+        initial = manual(2)
         created = self.core.create('', 'manual-keep-material-01', fixture.ADMIN,
-            participant_ids=['p1'], auto_generate=False, material_urls=[link])
+            participant_ids=['p1'], auto_generate=False, material_urls=[link], initial_questions=initial)
         self.assertEqual(self.core.batch(created['id'])['status'], 'queued')
-        runtime = SharingRuntime(SimpleNamespace(service=object()), lambda: self.learning)
+        saved = self.core.batch(created['id'])['questions']
+        self.assertEqual(len(saved), 2)
+        generate = Mock(side_effect=AssertionError('Manual questions must not call a model'))
+        runtime = SharingRuntime(SimpleNamespace(service=object(), generate_sharing_questions=generate), lambda: self.learning)
         with patch('lan_bitable_template_portal.learning_sharing_routes.read_material_link', return_value={
                 'title': 'Manual material', 'text': fixture.SOURCE, 'url': link}):
             asyncio.run(runtime.generate(self.core.batch(created['id'])))
@@ -77,6 +81,28 @@ class MaterialRecoveryTests(unittest.TestCase):
         self.assertEqual(batch['status'], 'draft', batch.get('error'))
         self.assertEqual(batch['source']['text'], fixture.SOURCE)
         self.assertEqual(batch['participants'][0]['open_id'], 'ou_one')
+        self.assertEqual(batch['questions'], saved)
+        generate.assert_not_called()
+        self.assertEqual(self.core.create('', 'manual-keep-material-01', fixture.ADMIN,
+            participant_ids=['p1'], auto_generate=False, material_urls=[link], initial_questions=initial), created)
+
+    def test_manual_questions_survive_material_failure_and_retry(self):
+        with self.learning.transaction() as conn:
+            self.learning._put('person', 'p1', {'id': 'p1', 'name': 'Recipient', 'active': True,
+                'login_ids': ['ou_one'], 'scopes': ['A']}, conn, False)
+        created = self.core.create('', 'manual-material-retry-01', fixture.ADMIN, participant_ids=['p1'],
+            auto_generate=False, material_urls=['https://vnet.feishu.cn/docx/Material'], initial_questions=manual(2))
+        original = self.core.batch(created['id'])['questions']
+        runtime = SharingRuntime(SimpleNamespace(service=object()), lambda: self.learning)
+        with patch('lan_bitable_template_portal.learning_sharing_routes.read_material_link', side_effect=LearningError('暂时无法读取资料')):
+            asyncio.run(runtime.generate(self.core.batch(created['id'])))
+        self.assertEqual(self.core.batch(created['id'])['status'], 'failed')
+        self.assertEqual(self.core.batch(created['id'])['questions'], original)
+        with patch('lan_bitable_template_portal.learning_sharing_routes.read_material_link', return_value={
+                'title': 'Manual material', 'text': fixture.SOURCE}):
+            asyncio.run(runtime.generate(self.core.batch(created['id'])))
+        self.assertEqual(self.core.batch(created['id'])['status'], 'draft')
+        self.assertEqual(self.core.batch(created['id'])['questions'], original)
 
     def test_old_failed_batch_uses_explicitly_selected_people_only(self):
         people = self.core.batch(self.bid)['participants'][:1]

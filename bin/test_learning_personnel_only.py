@@ -283,6 +283,31 @@ class PersonnelOnlyTests(unittest.TestCase):
         self.assertEqual(len(seen), 3)
         self.assertEqual(len(self.cloud.entities), 3)
 
+    def test_legacy_reminders_without_shift_owner_are_archived_without_deleting_local_tasks(self):
+        self.cloud.entities['notification','orphan']={'id':'orphan','open_id':'ou_unknown','status':'sent'}
+        self.cloud.entities['engagement','old-weekly']={'id':'old-weekly','kind':'weekly','status':'sent'}
+        storage.prepare(self.service)
+        self.service._last_error=storage.CLEANUP_ERROR_PREFIX+'旧归属错误'
+        before={key:self.service._get(*key) for key in self.cloud.entities}
+        storage.cleanup(self.service)
+        self.assertEqual(self.cloud.entities,{})
+        self.assertEqual(len(self.cloud.deleted),2)
+        self.assertEqual(self.service._last_error,'')
+        for key,value in before.items(): self.assertEqual(self.service._get(*key),value)
+        with closing(self.service._connect()) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM learning_cloud_archive WHERE removed=1 AND files_ready=1').fetchone()[0],2)
+
+    def test_legacy_cleanup_keeps_pending_local_work_and_does_not_wait_for_new_summary(self):
+        paper=self.paper()
+        self.cloud.entities['notification','pending']={'id':'pending','paper_id':paper['id'],'status':'pending','attempts':2}
+        storage.prepare(self.service)
+        storage.cleanup(self.service)
+        self.assertNotIn(('notification','pending'),self.cloud.entities)
+        self.assertEqual(self.service._get('notification','pending')['status'],'pending')
+        self.assertEqual(self.service._get('notification','pending')['attempts'],2)
+        self.assertEqual(self.service._get('paper',paper['id'])['questions'],paper['questions'])
+        self.assertEqual(self.sender.calls,[])
+
     def test_corrupt_backup_or_changed_cloud_row_is_never_deleted(self):
         for changed_cloud in (False, True):
             with self.subTest(changed_cloud=changed_cloud):
@@ -317,11 +342,17 @@ class PersonnelOnlyTests(unittest.TestCase):
         self.cloud.fail_delete_after_commit = True
         storage.cleanup(self.service)
         self.assertEqual(len(self.cloud.deleted), 1)
+        self.assertEqual(self.service.sync_status(include_history_issues=True)['history_issue_count'], 1)
+        with patch.object(self.cloud, 'list_entity_records', side_effect=OSError('offline')):
+            with patch.object(storage.time, 'time', return_value=10**12), self.assertRaises(OSError):
+                storage.cleanup(self.service)
+        self.assertEqual(self.service.sync_status(include_history_issues=True)['history_issue_count'], 1)
         self.restart()
         with patch.object(storage.time, 'time', return_value=10**12):
             storage.cleanup(self.service)
         self.assertTrue(self.service._get('local', storage.PROGRESS_KEY)['complete'])
         self.assertEqual(len(self.cloud.deleted), 1)
+        self.assertEqual(self.service.sync_status(include_history_issues=True)['history_issue_count'], 0)
 
     def test_delete_failure_preserves_original_and_retry_after_restart_works(self):
         self.cloud.entities['settings', 'main'] = {'enabled': True}
@@ -439,6 +470,27 @@ class PersonnelCloudProtocolTests(unittest.TestCase):
             self.remote.delete_archived_entity(archived, expected_app_id='cli_current')
         response['deleted'] = True
         self.assertTrue(self.remote.delete_archived_entity(archived, expected_app_id='cli_current')['deleted'])
+
+    def test_cleanup_ignores_expiring_attachment_links_but_checks_file_identity(self):
+        self.enterContext(patch('upload_event_module.services.feishu_token_manager.token_manager._credentials',
+                                return_value=('cli_current', 'synthetic-secret')))
+        for field in ('file_token', 'name', 'size', None):
+            with self.subTest(field=field):
+                original = self.row('attachment', str(field), {'id': str(field)}, fields={'附件': [{
+                    'file_token': 'fileOriginal', 'name': 'backup.json', 'size': 12,
+                    'url': 'https://example.test/old', 'tmp_url': 'https://example.test/old-temp'}]})
+                archived = next(row for row in self.remote.list_entity_records(include_fields=True) if row['key'] == str(field))
+                attachment = original['fields']['附件'][0]
+                attachment.update(url='https://example.test/new', tmp_url='https://example.test/new-temp')
+                if field:
+                    attachment[field] = 24 if field == 'size' else 'changed'
+                    with self.assertRaises(cloud.LearningCloudConflict):
+                        self.remote.delete_archived_entity(archived, expected_app_id='cli_current')
+                    self.assertFalse(any(call[0] == 'DELETE' for call in self.fake.calls))
+                else:
+                    self.fake.before = lambda request: self.fake.response({'record_id': archived['record_id'],
+                        'deleted': True}) if request.method == 'DELETE' else None
+                    self.assertTrue(self.remote.delete_archived_entity(archived, expected_app_id='cli_current')['deleted'])
 
     def test_personal_history_cannot_be_deleted_by_system_cleanup(self):
         for kind in ('paper', 'record', 'sharing_attempt', 'daily_progress', 'shift_person'):

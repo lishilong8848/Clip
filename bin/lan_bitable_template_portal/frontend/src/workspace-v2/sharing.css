@@ -27,9 +27,10 @@
 .workspace-v2 .sharing-question-tools select{min-height:34px;padding:5px 8px;max-width:100%}
 .workspace-v2 .sharing-origin{font-size:11px}
 .workspace-v2 .sharing-chips .n-button,.workspace-v2 .sharing-chip-x{min-height:26px}
-.workspace-v2 .v2-sharing-questions>.sharing-question{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 20px;padding:12px 0}
-.workspace-v2 .v2-sharing-questions>.sharing-question>.sharing-question-tools,.workspace-v2 .v2-sharing-questions>.sharing-question>header,.workspace-v2 .v2-sharing-questions>.sharing-question>label:first-of-type,.workspace-v2 .v2-sharing-questions>.sharing-question>p,.workspace-v2 .v2-sharing-questions>.sharing-question>.sharing-answer,.workspace-v2 .v2-sharing-questions>.sharing-question>.sharing-question-error{grid-column:1/-1}
+.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 20px;padding:12px 0}
+.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question>.sharing-question-tools,.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question>header,.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question>label:first-of-type,.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question>p,.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question>.sharing-answer,.workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question>.sharing-question-error{grid-column:1/-1}
 .workspace-v2 .v2-sharing-questions .sharing-option{grid-column:1/-1;margin:0}
+.workspace-v2 .sharing-option-grid .sharing-option{grid-column:auto}
 .workspace-v2 .sharing-question>header{margin:0}
 .workspace-v2 .sharing-exercises .sharing-question label,.workspace-v2 .sharing-exercises .sharing-option{margin:0;min-width:0}
 .workspace-v2 .sharing-question textarea{padding:7px 10px;min-height:42px;line-height:1.5}
@@ -65,7 +66,7 @@
   .workspace-v2 .sharing-meta{font-size:12px;gap:6px 12px}
   .workspace-v2 .sharing-counts{flex-basis:100%}
   .workspace-v2 .sharing-metrics{gap:10px}.workspace-v2 .sharing-metrics strong{font-size:18px}
-  .workspace-v2 .v2-sharing-questions>.sharing-question{grid-template-columns:minmax(0,1fr);gap:10px}
+  .workspace-v2 .v2-sharing-questions>.sharing-question-grid:not(.is-editing)>.sharing-question{grid-template-columns:minmax(0,1fr);gap:10px}
   .workspace-v2 .sharing-question>label{grid-column:1/-1}
   .workspace-v2 .sharing-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%}
   .workspace-v2 .sharing-buttons>span{grid-column:1/-1}

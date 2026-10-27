@@ -44,6 +44,7 @@ try {
               importCreates++;assert.equal(body.auto_generate,true);assert.deepEqual(body.material_ids,['file-fixture']);assert.equal(uploads,1);
             } else {
               assert.equal(body.auto_generate,false);assert.equal(body.initial_questions.length,2);
+              assert.deepEqual(body.material_urls,['https://vnet.feishu.cn/docx/ManualReference']);
               assert.equal(body.initial_questions[0].stem,'人工填写的第一题');assert.deepEqual(body.initial_questions[0].correct,[0]);
               assert.equal(body.initial_questions[1].reference_answer,'手工参考答案');
             }
@@ -62,6 +63,14 @@ try {
     const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
     async function capture(label){for(const [width,height] of [[402,874],[440,956],[1440,900]]){
       await page.setViewportSize({width,height});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),label+' overflow');
+      if(label==='manual'){
+        const cards=await page.locator('.sharing-manual-create .sharing-question').evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width};}));
+        if(width===1440){
+          assert.equal(cards.length,2);assert(Math.abs(cards[0].y-cards[1].y)<2,'Desktop questions share a row');
+          const options=await page.locator('.sharing-question').first().locator('.sharing-option').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().y));
+          assert(Math.abs(options[0]-options[1])<2,'Desktop options share a row');
+        }else{assert(cards[1].y>cards[0].y,'Phone questions stack without overlap');}
+      }
       await page.screenshot({path:path.join(output,`${label}-${v2}-${width}.png`),fullPage:true});
     }}
     try{
@@ -74,9 +83,20 @@ try {
       await page.getByRole('button',{name:'新增问答题',exact:true}).click();
       await page.getByLabel('题干',{exact:true}).last().fill('人工填写的问答题');
       await page.getByLabel('参考答案（问答题不自动判分）',{exact:true}).fill('手工参考答案');
+      await page.getByRole('button',{name:'新增单选题',exact:true}).click();
+      await page.getByLabel('第3题选项B为正确答案',{exact:true}).check();
+      assert(await page.getByLabel('第1题选项A为正确答案',{exact:true}).isChecked(),'Question answers remain independent');
+      await page.getByLabel('删除第3题选项A',{exact:true}).click();
+      assert(await page.getByLabel('第3题选项A为正确答案',{exact:true}).isChecked(),'Deleting an option adjusts the answer index');
+      await page.getByRole('button',{name:'删除此题',exact:true}).last().click();
       await page.reload();await page.getByLabel('题干',{exact:true}).first().waitFor();
       assert.equal(await page.getByLabel('题干',{exact:true}).first().inputValue(),'人工填写的第一题');
       await capture('manual');
+      await page.getByText('资料出题',{exact:true}).click();
+      await page.getByLabel('AI生成题目').uncheck();
+      assert.equal(await page.getByLabel('题干',{exact:true}).first().inputValue(),'人工填写的第一题');
+      await page.getByLabel('资料链接',{exact:true}).fill('https://vnet.feishu.cn/docx/ManualReference');
+      await page.getByRole('button',{name:'添加链接',exact:true}).click();
       await page.getByRole('button',{name:'读取人员目录',exact:true}).click();
       await page.getByRole('button',{name:'添加参会人：测试人员',exact:true}).click();
       await page.getByRole('button',{name:'保存人工题草稿',exact:true}).click();
@@ -101,5 +121,5 @@ try {
       if(process.argv.includes('--responsively')&&v2){console.log(`ISOLATED_PREVIEW=${origin}/__questions`);await new Promise(resolve=>{release=resolve;setTimeout(resolve,600000).unref();});}
     }finally{await context.close();await server.close();}
   }
-  assert.deepEqual(errors,[]);console.log('PASS: legacy/V2 manual fields, draft reload, uncertain receipt dedupe, file upload/import, editable answers and mobile/desktop layout.');
+  assert.deepEqual(errors,[]);console.log('PASS: legacy/V2 manual fields, optional materials without AI, multi-column questions/options, independent answers, draft reload, uncertain receipt dedupe, file upload/import and phone/desktop layout.');
 }finally{await browser.close();}

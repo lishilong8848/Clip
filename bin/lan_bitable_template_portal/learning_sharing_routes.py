@@ -97,7 +97,7 @@ class SharingRuntime:
             else:
                 questions = await generate_checked_questions(batch, source, state, generate, checkpoint)
         else:
-            questions = []
+            questions = batch.get('questions') or []
         notes = list(state['notes'])
         repaired = sum(bool(slot.get('repaired')) for slot in state['slots'])
         discarded = sum(slot['status'] == 'discarded' for slot in state['slots'])
